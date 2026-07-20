@@ -2,6 +2,7 @@
   "name": "codey",
   "version": "0.1.0",
   "private": true,
+  "packageManager": "pnpm@11.5.2",
   "type": "module",
   "scripts": {
     "dev": "cargo run --manifest-path Cargo.toml",

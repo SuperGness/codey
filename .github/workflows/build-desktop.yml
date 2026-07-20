@@ -34,11 +34,18 @@ jobs:
         shell: bash
         run: git clone --depth 1 --branch "$CODEX_PLUS_PLUS_REF" https://github.com/BigPizzaV3/CodexPlusPlus.git "$GITHUB_WORKSPACE/../CodexPlusPlus-main"
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11.5.2"
+          run_install: false
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -47,15 +54,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: TypeScript check
-        run: npm run check
+        run: pnpm run check
 
       - name: Build unsigned macOS app
         env:
           CODEY_SKIP_CODESIGN: "1"
-        run: npm run build
+        run: pnpm run build
 
       - name: Verify and archive macOS app
         id: package
@@ -106,11 +113,18 @@ jobs:
           $dependency = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE "..\CodexPlusPlus-main"))
           git clone --depth 1 --branch $env:CODEX_PLUS_PLUS_REF https://github.com/BigPizzaV3/CodexPlusPlus.git $dependency
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11.5.2"
+          run_install: false
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -123,13 +137,13 @@ jobs:
         run: choco install nsis --yes --no-progress
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: TypeScript check
-        run: npm run check
+        run: pnpm run check
 
       - name: Build Windows executable
-        run: npm run build
+        run: pnpm run build
 
       - name: Build Windows packages
         id: package
