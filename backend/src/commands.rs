@@ -473,7 +473,10 @@ pub async fn save_codey_config(
     config.disable_trace_log_writes = config_input.disable_trace_log_writes;
     config.slim_codex_pet = config_input.slim_codex_pet;
     config.slim_codex_voice = config_input.slim_codex_voice;
+    config.fast_context_tools = config_input.fast_context_tools;
     let config = config.normalize();
+    let restart_required = config.fast_context_tools != previous.fast_context_tools
+        && state.runtime.lock().await.is_some();
     if config.disable_trace_log_writes != previous.disable_trace_log_writes {
         let home = codex_home();
         let disable_writes = config.disable_trace_log_writes;
@@ -490,7 +493,13 @@ pub async fn save_codey_config(
     let cc_switch = cc_switch::status_from_config(&config);
     let model_state = current_model_state(&config)?;
     let public_config = redacted_config(&config);
-    Ok(json!({"status":"ok","config":public_config,"ccSwitch":cc_switch,"modelState":model_state}))
+    Ok(json!({
+        "status":"ok",
+        "config":public_config,
+        "ccSwitch":cc_switch,
+        "modelState":model_state,
+        "restartRequired":restart_required,
+    }))
 }
 
 pub async fn clear_codex_trace_logs(state: &Arc<AppState>) -> Result<Value, String> {

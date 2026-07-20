@@ -36,14 +36,27 @@ enum ShutdownReason {
 }
 
 pub async fn run() -> Result<()> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "--codey-fastctx-mcp")
+    {
+        hide_exclusive_windows_console();
+        fastctx::cli::run_server()
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::msg)?;
+        return Ok(());
+    }
+
     let state = Arc::new(AppState::default());
     if let Err(error) = launcher::restore_previous_runtime_state(&codex_config::codex_home()) {
         eprintln!("Codey 启动前恢复上次临时配置失败：{error:#}");
     }
     commands::sync_cc_switch_state(&state).await;
 
-    if let Err(error) = commands::launch_codey_runtime(&state).await {
-        eprintln!("Codey 自动启动 Codex 失败：{error:#}");
+    match commands::launch_codey_runtime(&state).await {
+        Ok(_) => hide_exclusive_windows_console(),
+        Err(error) => eprintln!("Codey 自动启动 Codex 失败：{error:#}"),
     }
 
     let shutdown_reason = tokio::select! {
@@ -69,6 +82,27 @@ pub async fn run() -> Result<()> {
         }
     }
     cleanup.map(|_| ()).map_err(anyhow::Error::msg)
+}
+
+fn hide_exclusive_windows_console() {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Console::{GetConsoleProcessList, GetConsoleWindow};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
+
+        // Explorer and shortcuts create a console exclusively for Codey. An
+        // existing CMD/PowerShell console also contains its shell process, so
+        // leave shared consoles visible instead of hiding the user's terminal.
+        let mut process_ids = [0_u32; 2];
+        let process_count =
+            GetConsoleProcessList(process_ids.as_mut_ptr(), process_ids.len() as u32);
+        if process_count == 1 {
+            let console_window = GetConsoleWindow();
+            if !console_window.is_null() {
+                let _ = ShowWindow(console_window, SW_HIDE);
+            }
+        }
+    }
 }
 
 async fn shutdown_signal() {

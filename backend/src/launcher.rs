@@ -149,6 +149,7 @@ impl CodeyRuntime {
             &current_profile,
             &original_provider,
             use_official_catalog,
+            config.fast_context_tools,
         )?;
 
         let (plugin_status, plugin_detail) = match plugin_marketplace::ensure_marketplaces(&home) {

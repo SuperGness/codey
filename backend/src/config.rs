@@ -79,6 +79,10 @@ pub struct CodeyConfig {
     pub slim_codex_pet: bool,
     #[serde(default = "default_true")]
     pub slim_codex_voice: bool,
+    /// Publishes Codey's embedded FastCtx file tools to Codex for the next
+    /// runtime. Disabled by default so existing tool behavior is unchanged.
+    #[serde(default)]
+    pub fast_context_tools: bool,
 }
 
 impl Default for CodeyConfig {
@@ -95,6 +99,7 @@ impl Default for CodeyConfig {
             disable_trace_log_writes: true,
             slim_codex_pet: true,
             slim_codex_voice: true,
+            fast_context_tools: false,
         }
     }
 }
@@ -353,5 +358,14 @@ mod tests {
         .normalize();
 
         assert!(!config.slim_codex_voice);
+    }
+
+    #[test]
+    fn fast_context_tools_default_to_disabled_for_existing_configs() {
+        let config = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
+            .unwrap()
+            .normalize();
+
+        assert!(!config.fast_context_tools);
     }
 }

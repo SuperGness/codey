@@ -12,6 +12,15 @@ use crate::provider_lease::CODEY_PROVIDER_ID;
 
 pub const GLOBAL_PROVIDER_ID: &str = "codey_global";
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const CODEY_FASTCTX_SERVER_ID: &str = "codey_fastctx";
+const CODEY_FASTCTX_NAMESPACE: &str = "mcp__codey_fastctx";
+const CODEY_FASTCTX_TOKEN_BUDGET: &str = "8500";
+const CODEY_FASTCTX_STARTUP_TIMEOUT_SECONDS: i64 = 120;
+const CODEY_FASTCTX_GUIDANCE: &str = "Codey FastCtx context tools are enabled. Prefer \
+`mcp__codey_fastctx__read`, `mcp__codey_fastctx__grep`, and \
+`mcp__codey_fastctx__glob` over shell commands for local file inspection. Use \
+`mcp__codey_fastctx__replace` only for deterministic batch replacements, and \
+follow every Complete or Partial pagination note exactly.";
 const RESERVED_PROVIDER_IDS: [&str; 6] = [
     "amazon-bedrock",
     "openai",
@@ -48,17 +57,23 @@ pub fn apply_runtime_provider_config(
     profile: &ProviderProfile,
     provider_id: &str,
     use_official_catalog: bool,
+    fast_context_tools: bool,
 ) -> Result<PathBuf> {
     let marker = lease_marker_path();
     let backup_root = marker
         .parent()
         .unwrap_or_else(|| Path::new(".codey"))
         .join("codex-backups");
+    let fastctx_command = fast_context_tools
+        .then(std::env::current_exe)
+        .transpose()
+        .context("定位 Codey 内嵌 FastCtx 服务失败")?;
     apply_runtime_provider_config_at(
         home,
         profile,
         provider_id,
         use_official_catalog,
+        fastctx_command.as_deref(),
         &marker,
         &backup_root,
     )
@@ -69,6 +84,7 @@ fn apply_runtime_provider_config_at(
     profile: &ProviderProfile,
     provider_id: &str,
     use_official_catalog: bool,
+    fastctx_command: Option<&Path>,
     marker: &Path,
     backup_root: &Path,
 ) -> Result<PathBuf> {
@@ -84,7 +100,13 @@ fn apply_runtime_provider_config_at(
     let existing = String::from_utf8(original_config.clone().unwrap_or_default())
         .context("Codex config.toml 不是 UTF-8")?;
     let provider_id = normalized_provider_id(provider_id);
-    let updated = patch_config(&existing, profile, &provider_id, use_official_catalog)?;
+    let updated = patch_config_with_fastctx(
+        &existing,
+        profile,
+        &provider_id,
+        use_official_catalog,
+        fastctx_command,
+    )?;
     let applied_base_url = provider_base_url(&updated, &provider_id);
     let state = RuntimeConfigLease {
         backup_dir: backup_dir.clone(),
@@ -206,11 +228,22 @@ pub fn ensure_global_model_provider(home: &Path) -> Result<String> {
     Ok(GLOBAL_PROVIDER_ID.to_string())
 }
 
+#[cfg(test)]
 pub fn patch_config(
     existing: &str,
     profile: &ProviderProfile,
     provider_id: &str,
     use_official_catalog: bool,
+) -> Result<String> {
+    patch_config_with_fastctx(existing, profile, provider_id, use_official_catalog, None)
+}
+
+fn patch_config_with_fastctx(
+    existing: &str,
+    profile: &ProviderProfile,
+    provider_id: &str,
+    use_official_catalog: bool,
+    fastctx_command: Option<&Path>,
 ) -> Result<String> {
     let mut doc = parse_document(existing)?;
     ensure_provider_table(&mut doc)?;
@@ -231,7 +264,69 @@ pub fn patch_config(
     }
     cap_desktop_reasoning_efforts(&mut doc)?;
     remove_model_selection(&mut doc);
+    if let Some(command) = fastctx_command {
+        enable_fast_context_tools(&mut doc, command)?;
+    }
     document_string(&doc)
+}
+
+fn enable_fast_context_tools(doc: &mut DocumentMut, command: &Path) -> Result<()> {
+    let mcp_servers = ensure_root_table(doc, "mcp_servers")?;
+    let mut server = Table::new();
+    server["command"] = value(command.to_string_lossy().to_string());
+    let mut args = Array::new();
+    args.push("--codey-fastctx-mcp");
+    server["args"] = Item::Value(toml_edit::Value::Array(args));
+    server["startup_timeout_sec"] = value(CODEY_FASTCTX_STARTUP_TIMEOUT_SECONDS);
+    server["tool_timeout_sec"] = value(120);
+    let mut env = Table::new();
+    env["FASTCTX_TOKEN_BUDGET"] = value(CODEY_FASTCTX_TOKEN_BUDGET);
+    server["env"] = Item::Table(env);
+    mcp_servers[CODEY_FASTCTX_SERVER_ID] = Item::Table(server);
+
+    let features = ensure_root_table(doc, "features")?;
+    if features.get("code_mode").is_none() {
+        features["code_mode"] = Item::Table(Table::new());
+    }
+    let code_mode = features["code_mode"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("features.code_mode 必须是 TOML table"))?;
+    if code_mode.get("direct_only_tool_namespaces").is_none() {
+        code_mode["direct_only_tool_namespaces"] =
+            Item::Value(toml_edit::Value::Array(Array::new()));
+    }
+    let namespaces = code_mode["direct_only_tool_namespaces"]
+        .as_array_mut()
+        .ok_or_else(|| {
+            anyhow::anyhow!("features.code_mode.direct_only_tool_namespaces 必须是数组")
+        })?;
+    if !namespaces
+        .iter()
+        .any(|entry| entry.as_str() == Some(CODEY_FASTCTX_NAMESPACE))
+    {
+        namespaces.push(CODEY_FASTCTX_NAMESPACE);
+    }
+
+    if doc.get("tool_output_token_limit").is_none() {
+        doc["tool_output_token_limit"] = value(10_000);
+    }
+    let existing_guidance = doc
+        .get("developer_instructions")
+        .map(|item| {
+            item.as_str()
+                .ok_or_else(|| anyhow::anyhow!("developer_instructions 必须是字符串"))
+        })
+        .transpose()?
+        .unwrap_or_default();
+    if !existing_guidance.contains(CODEY_FASTCTX_GUIDANCE) {
+        let guidance = if existing_guidance.trim().is_empty() {
+            CODEY_FASTCTX_GUIDANCE.to_string()
+        } else {
+            format!("{existing_guidance}\n\n{CODEY_FASTCTX_GUIDANCE}")
+        };
+        doc["developer_instructions"] = value(guidance);
+    }
+    Ok(())
 }
 
 fn direct_provider_table(profile: &ProviderProfile) -> Result<Table> {
@@ -284,6 +379,15 @@ fn ensure_provider_table(doc: &mut DocumentMut) -> Result<()> {
         .as_table_mut()
         .map(|_| ())
         .ok_or_else(|| anyhow::anyhow!("model_providers 必须是 TOML table"))
+}
+
+fn ensure_root_table<'a>(doc: &'a mut DocumentMut, key: &str) -> Result<&'a mut Table> {
+    if doc.get(key).is_none() {
+        doc[key] = Item::Table(Table::new());
+    }
+    doc[key]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("{key} 必须是 TOML table"))
 }
 
 fn write_global_provider_migration_if_changed(
@@ -496,6 +600,99 @@ mod tests {
     }
 
     #[test]
+    fn fast_context_tools_register_the_embedded_server_without_overwriting_user_fastctx() {
+        let existing = r#"
+developer_instructions = "Keep my guidance."
+tool_output_token_limit = 16000
+
+[mcp_servers.fastctx]
+command = "/custom/fastctx"
+args = ["serve", "--enable-shell"]
+
+[features.code_mode]
+direct_only_tool_namespaces = ["mcp__existing"]
+"#;
+        let result = patch_config_with_fastctx(
+            existing,
+            &official_profile(),
+            GLOBAL_PROVIDER_ID,
+            true,
+            Some(Path::new("/Applications/Codey.app/Contents/MacOS/codey")),
+        )
+        .unwrap();
+        let document = result.parse::<DocumentMut>().unwrap();
+
+        assert_eq!(
+            document["mcp_servers"]["fastctx"]["command"].as_str(),
+            Some("/custom/fastctx")
+        );
+        assert_eq!(
+            document["mcp_servers"][CODEY_FASTCTX_SERVER_ID]["command"].as_str(),
+            Some("/Applications/Codey.app/Contents/MacOS/codey")
+        );
+        assert_eq!(
+            document["mcp_servers"][CODEY_FASTCTX_SERVER_ID]["args"][0].as_str(),
+            Some("--codey-fastctx-mcp")
+        );
+        assert_eq!(
+            document["mcp_servers"][CODEY_FASTCTX_SERVER_ID]["env"]["FASTCTX_TOKEN_BUDGET"]
+                .as_str(),
+            Some(CODEY_FASTCTX_TOKEN_BUDGET)
+        );
+        assert_eq!(
+            document["tool_output_token_limit"].as_integer(),
+            Some(16_000)
+        );
+        let namespaces = document["features"]["code_mode"]["direct_only_tool_namespaces"]
+            .as_array()
+            .unwrap();
+        assert!(
+            namespaces
+                .iter()
+                .any(|entry| entry.as_str() == Some(CODEY_FASTCTX_NAMESPACE))
+        );
+        let guidance = document["developer_instructions"].as_str().unwrap();
+        assert!(guidance.starts_with("Keep my guidance."));
+        assert!(guidance.contains(CODEY_FASTCTX_GUIDANCE));
+    }
+
+    #[test]
+    fn fast_context_tools_are_idempotent_and_default_the_host_output_limit() {
+        let first = patch_config_with_fastctx(
+            "",
+            &official_profile(),
+            GLOBAL_PROVIDER_ID,
+            true,
+            Some(Path::new("/tmp/codey")),
+        )
+        .unwrap();
+        let second = patch_config_with_fastctx(
+            &first,
+            &official_profile(),
+            GLOBAL_PROVIDER_ID,
+            true,
+            Some(Path::new("/tmp/codey")),
+        )
+        .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.matches(CODEY_FASTCTX_GUIDANCE).count(), 1);
+        let document = first.parse::<DocumentMut>().unwrap();
+        assert_eq!(
+            document["features"]["code_mode"]["direct_only_tool_namespaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry.as_str() == Some(CODEY_FASTCTX_NAMESPACE))
+                .count(),
+            1
+        );
+        assert_eq!(
+            document["tool_output_token_limit"].as_integer(),
+            Some(10_000)
+        );
+    }
+
+    #[test]
     fn lease_restores_the_exact_original_config() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("codex-home");
@@ -510,6 +707,7 @@ mod tests {
             &direct_profile(RelayProtocol::Responses),
             GLOBAL_PROVIDER_ID,
             true,
+            None,
             &marker,
             &backup_root,
         )

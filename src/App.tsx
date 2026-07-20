@@ -61,6 +61,7 @@ type Config = {
   disableTraceLogWrites: boolean;
   slimCodexPet: boolean;
   slimCodexVoice: boolean;
+  fastContextTools: boolean;
 };
 
 type OfficialModelState = {
@@ -227,7 +228,12 @@ export function App({ embedded = false, onClose }: AppProps) {
   }
 
   async function persist(next: Config) {
-    const result = await invoke<{ config: Config; ccSwitch?: CcSwitchStatus; modelState?: ModelState }>("save_codey_config", { config: next });
+    const result = await invoke<{
+      config: Config;
+      ccSwitch?: CcSwitchStatus;
+      modelState?: ModelState;
+      restartRequired?: boolean;
+    }>("save_codey_config", { config: next });
     setConfig(result.config);
     if (result.ccSwitch) setCcSwitchStatus(result.ccSwitch);
     if (result.modelState) setModelState(result.modelState);
@@ -271,8 +277,13 @@ export function App({ embedded = false, onClose }: AppProps) {
   async function saveCurrent() {
     if (!config) return;
     await runOperation("save", async () => {
-      await persist(config);
-      setNotice({ tone: "success", text: "Codey 设置已保存" });
+      const result = await persist(config);
+      setNotice({
+        tone: result.restartRequired ? "info" : "success",
+        text: result.restartRequired
+          ? "Codey 设置已保存，FastCtx 上下文工具将在下次启动 Codex 时生效"
+          : "Codey 设置已保存",
+      });
     });
   }
 
@@ -384,7 +395,10 @@ export function App({ embedded = false, onClose }: AppProps) {
   const performanceOk = maintenance?.performanceStatus === "ready";
   const performanceError = maintenance?.performanceStatus === "error";
   const resolvedCodexPath = status.codexAppPath || "/Applications/ChatGPT.app";
-  const optimizationReady = config.slimCodexPet && config.slimCodexVoice && !performanceError;
+  const optimizationReady = config.slimCodexPet
+    && config.slimCodexVoice
+    && config.fastContextTools
+    && !performanceError;
   const statusCards: Array<{
     title: string;
     description: string;
@@ -408,7 +422,7 @@ export function App({ embedded = false, onClose }: AppProps) {
         : "部分精简策略尚未启用，保留完整功能。",
       detail: performanceError
         ? maintenance?.performanceDetail || "性能补丁加载异常"
-        : "宠物、语音与 Windows 性能策略",
+        : "FastCtx、宠物、语音与 Windows 性能策略",
       label: performanceError ? "异常" : optimizationReady ? "已优化" : "标准",
       tone: performanceError ? "destructive" : optimizationReady ? "success" : "info",
       icon: Cpu,
@@ -721,6 +735,24 @@ export function App({ embedded = false, onClose }: AppProps) {
                       checked={config.slimCodexVoice}
                       onCheckedChange={(checked) => editConfig({ ...config, slimCodexVoice: checked })}
                       aria-label="精简 Codex 语音模块"
+                    />
+                  </div>
+                  <div className="health-row">
+                    <span className={`health-icon ${config.fastContextTools ? "ready" : ""}`}>
+                      <Sparkles size={16} />
+                    </span>
+                    <div>
+                      <strong>FastCtx 上下文工具</strong>
+                      <small>
+                        {config.fastContextTools
+                          ? "下次启动提供分页读取、搜索、文件发现与批量替换"
+                          : "保持 Codex 默认文件工具，不加载额外 MCP"}
+                      </small>
+                    </div>
+                    <Switch
+                      checked={config.fastContextTools}
+                      onCheckedChange={(checked) => editConfig({ ...config, fastContextTools: checked })}
+                      aria-label="启用 FastCtx 上下文工具"
                     />
                   </div>
                   <div className="health-row">

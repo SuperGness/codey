@@ -437,7 +437,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
 
-        assert_eq!(refresh(home.path()).unwrap(), 3);
+        assert_eq!(
+            refresh_for_provider(home.path(), true, &[], &[]).unwrap(),
+            3
+        );
         let catalog: Value = serde_json::from_slice(
             &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
         )

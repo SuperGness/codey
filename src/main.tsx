@@ -42,6 +42,7 @@ if (import.meta.env.DEV) {
       disableTraceLogWrites: true,
       slimCodexPet: true,
       slimCodexVoice: true,
+      fastContextTools: false,
     };
     const previewCcSwitch = {
       available: true,

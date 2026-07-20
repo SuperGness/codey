@@ -17,6 +17,7 @@ let previewConfig = {
   disableTraceLogWrites: true,
   slimCodexPet: true,
   slimCodexVoice: true,
+  fastContextTools: false,
 };
 
 const previewCcSwitch = {
