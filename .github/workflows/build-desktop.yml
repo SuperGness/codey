@@ -1,0 +1,204 @@
+name: Build desktop packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CODEX_PLUS_PLUS_REF: v1.2.36
+
+jobs:
+  macos:
+    name: macOS ${{ matrix.arch }} unsigned
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          - arch: x64
+            runner: macos-15-intel
+
+    steps:
+      - name: Checkout Codey
+        uses: actions/checkout@v4
+
+      - name: Checkout CodexPlusPlus dependency
+        shell: bash
+        run: git clone --depth 1 --branch "$CODEX_PLUS_PLUS_REF" https://github.com/BigPizzaV3/CodexPlusPlus.git "$GITHUB_WORKSPACE/../CodexPlusPlus-main"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npm run check
+
+      - name: Build unsigned macOS app
+        env:
+          CODEY_SKIP_CODESIGN: "1"
+        run: npm run build
+
+      - name: Verify and archive macOS app
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="target/release/bundle/macos/Codey.app"
+          test -x "$APP/Contents/MacOS/codey"
+          test -f "$APP/Contents/Resources/Codey.icns"
+          plutil -lint "$APP/Contents/Info.plist"
+          if codesign --verify "$APP" >/dev/null 2>&1; then
+            echo "Expected an unsigned macOS bundle, but codesign verification succeeded." >&2
+            exit 1
+          fi
+
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            VERSION="${VERSION#V}"
+          else
+            VERSION="${VERSION}-${GITHUB_RUN_NUMBER}"
+          fi
+          VERSION="${VERSION//\//-}"
+
+          mkdir -p dist/macos
+          ARCHIVE="dist/macos/Codey-${VERSION}-macos-${{ matrix.arch }}-unsigned.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "$ARCHIVE"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v4
+        with:
+          name: codey-macos-${{ matrix.arch }}-unsigned
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Codey
+        uses: actions/checkout@v4
+
+      - name: Checkout CodexPlusPlus dependency
+        shell: pwsh
+        run: |
+          $dependency = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE "..\CodexPlusPlus-main"))
+          git clone --depth 1 --branch $env:CODEX_PLUS_PLUS_REF https://github.com/BigPizzaV3/CodexPlusPlus.git $dependency
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install NSIS
+        shell: pwsh
+        run: choco install nsis --yes --no-progress
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npm run check
+
+      - name: Build Windows executable
+        run: npm run build
+
+      - name: Build Windows packages
+        id: package
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $version = $env:GITHUB_REF_NAME.TrimStart("v", "V")
+          } else {
+            $version = "$version-$env:GITHUB_RUN_NUMBER"
+          }
+          $version = $version -replace '[\\/]', '-'
+
+          $portable = "dist\windows\portable"
+          New-Item -ItemType Directory -Force $portable | Out-Null
+          Copy-Item "target\release\codey.exe" "$portable\Codey.exe"
+          Copy-Item "README.md" "$portable\README.md"
+
+          $archive = "dist\windows\Codey-$version-windows-x64-portable.zip"
+          Compress-Archive -Path "$portable\*" -DestinationPath $archive -Force
+
+          $makensis = "${env:ProgramFiles(x86)}\NSIS\makensis.exe"
+          if (-not (Test-Path $makensis)) {
+            $makensis = "makensis"
+          }
+          & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" "scripts\installer\windows\Codey.nsi"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          $installer = "dist\windows\Codey-$version-windows-x64-setup.exe"
+          if (-not (Test-Path $installer)) {
+            throw "NSIS installer was not created: $installer"
+          }
+          "archive=$archive" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "installer=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Upload Windows portable package
+        uses: actions/upload-artifact@v4
+        with:
+          name: codey-windows-x64-portable
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: codey-windows-x64-installer
+          path: ${{ steps.package.outputs.installer }}
+          if-no-files-found: error
+
+  publish:
+    name: Attach packages to GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - macos
+      - windows
+    runs-on: macos-14
+
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: codey-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*

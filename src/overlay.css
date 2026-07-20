@@ -1,0 +1,44 @@
+:host {
+  all: initial;
+  color-scheme: dark;
+}
+
+.codey-overlay-backdrop {
+  -webkit-app-region: no-drag !important;
+  align-items: center;
+  background: rgba(2, 6, 23, 0.68);
+  backdrop-filter: blur(10px);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 22px;
+  pointer-events: auto;
+  position: fixed;
+  z-index: 2147483646;
+}
+
+.codey-overlay-dialog {
+  background: #0b1120;
+  border: 1px solid rgba(71, 85, 105, 0.68);
+  border-radius: 16px;
+  box-shadow: 0 30px 100px rgba(0, 0, 0, 0.48);
+  height: min(820px, calc(100vh - 40px));
+  max-width: 1040px;
+  overflow: hidden;
+  position: relative;
+  width: min(1040px, calc(100vw - 40px));
+}
+
+#codey-overlay-root {
+  height: 100%;
+  width: 100%;
+}
+
+@media (max-width: 760px) {
+  .codey-overlay-backdrop { padding: 8px; }
+  .codey-overlay-dialog {
+    border-radius: 12px;
+    height: calc(100vh - 16px);
+    width: calc(100vw - 16px);
+  }
+}

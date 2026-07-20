@@ -1,0 +1,97 @@
+mod cc_switch;
+mod cdp;
+mod codex_config;
+mod codex_startup_patch;
+mod commands;
+mod config;
+mod launcher;
+mod maintenance_lock;
+mod message_delete;
+mod model_catalog;
+mod pending_approval;
+mod pet_slim_patch;
+mod plugin_marketplace;
+mod process_cleanup;
+mod provider_lease;
+mod provider_models;
+mod session_delete;
+mod session_index_cleanup;
+mod session_metadata;
+mod session_transfer;
+mod startup_maintenance;
+mod trace_log_guard;
+mod trace_log_stats;
+mod webhook;
+
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+
+use commands::AppState;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShutdownReason {
+    CodexExited,
+    Signal,
+}
+
+pub async fn run() -> Result<()> {
+    let state = Arc::new(AppState::default());
+    if let Err(error) = launcher::restore_previous_runtime_state(&codex_config::codex_home()) {
+        eprintln!("Codey 启动前恢复上次临时配置失败：{error:#}");
+    }
+    commands::sync_cc_switch_state(&state).await;
+
+    if let Err(error) = commands::launch_codey_runtime(&state).await {
+        eprintln!("Codey 自动启动 Codex 失败：{error:#}");
+    }
+
+    let shutdown_reason = tokio::select! {
+        _ = state.wait_for_shutdown() => ShutdownReason::CodexExited,
+        _ = shutdown_signal() => ShutdownReason::Signal,
+    };
+
+    let cleanup = match commands::stop_codey_runtime(&state).await {
+        Ok(value) => Ok(value),
+        Err(first_error) => {
+            eprintln!("Codey 恢复 Codex 配置失败，正在重试：{first_error}");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            commands::stop_codey_runtime(&state)
+                .await
+                .map_err(|retry_error| format!("{first_error}；重试失败：{retry_error}"))
+        }
+    };
+    if shutdown_reason == ShutdownReason::CodexExited {
+        match process_cleanup::terminate_other_codey_processes().await {
+            Ok(0) => {}
+            Ok(count) => eprintln!("Codex 已退出，已终止 {count} 个其他 Codey 进程"),
+            Err(error) => eprintln!("Codex 已退出，但清理其他 Codey 进程失败：{error:#}"),
+        }
+    }
+    cleanup.map(|_| ()).map_err(anyhow::Error::msg)
+}
+
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        match signal(SignalKind::terminate()).context("监听 SIGTERM 失败") {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                eprintln!("{error:#}");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}

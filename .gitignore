@@ -1,0 +1,37 @@
+# Node.js dependencies
+/node_modules/
+
+# Rust and frontend build output
+/target/
+/target-legacy/
+/dist/
+/dist-overlay/
+/coverage/
+/.vite/
+
+# Local runtime state and environment files
+/.codey/
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# IDE metadata
+/.idea/
+/.vscode/
+*.code-workspace
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Rust formatter and compiler backups
+**/*.rs.bk

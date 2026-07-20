@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codey Overlay Preview</title>
+    <style>
+      html, body { height: 100%; margin: 0; background: #15171c; color: #e9eaee; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; }
+      .codex-mock { height: 100%; display: grid; grid-template-rows: 58px 1fr; }
+      .codex-mock header { -webkit-app-region: drag; align-items: center; border-bottom: 1px solid #2a2d34; display: flex; gap: 14px; padding: 0 22px; }
+      .codex-mock header strong { margin-right: auto; }
+      .mock-body { display: grid; grid-template-columns: 250px 1fr; }
+      .mock-sidebar { border-right: 1px solid #2a2d34; padding: 24px; }
+      .mock-content { padding: 42px; }
+      .mock-line { background: #24272e; border-radius: 8px; height: 12px; margin: 12px 0; max-width: 720px; }
+    </style>
+  </head>
+  <body>
+    <main class="codex-mock">
+      <header><strong>Codex</strong><span>工作区</span><span>设置</span></header>
+      <div class="mock-body"><aside class="mock-sidebar">任务列表</aside><section class="mock-content"><h1>Codex 客户端模拟页</h1><div class="mock-line"></div><div class="mock-line" style="width:72%"></div></section></div>
+    </main>
+    <script type="module" src="/src/overlay-preview.ts"></script>
+  </body>
+</html>
