@@ -6,7 +6,9 @@ Unicode true
   !define VERSION "0.1.0"
 !endif
 
-!define PROJECT_ROOT "${__FILEDIR__}\..\..\.."
+!ifndef PROJECT_ROOT
+  !define PROJECT_ROOT "..\..\.."
+!endif
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Codey"
 
 Name "Codey"

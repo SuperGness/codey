@@ -169,7 +169,8 @@ jobs:
           if (-not (Test-Path $makensis)) {
             $makensis = "makensis"
           }
-          & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" "scripts\installer\windows\Codey.nsi"
+          $installerScript = (Resolve-Path "scripts\installer\windows\Codey.nsi").Path
+          & $makensis "/INPUTCHARSET" "UTF8" "/DVERSION=$version" "/DPROJECT_ROOT=$env:GITHUB_WORKSPACE" $installerScript
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
