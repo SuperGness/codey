@@ -46,9 +46,11 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
     );
     Module._load("electron", undefined, false).protocol.handle(
       "app",
-      async (request) => new Response(request.fixture, {
-        headers: { "content-type": "text/javascript" },
-      }),
+      async (request) =>
+        request.response ??
+        new Response(request.fixture, {
+          headers: { "content-type": "text/javascript" },
+        }),
     );
 
     const patchAsset = async (
@@ -135,6 +137,20 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
       ),
       "const unrelatedWindowsChunk = true;",
     );
+    const unrelatedResponse = new Response(
+      "const unrelatedWindowsChunk = true;",
+      { headers: { "content-type": "text/javascript" } },
+    );
+    Object.defineProperty(unrelatedResponse, "clone", {
+      value() {
+        throw new Error("unrelated renderer assets must not be cloned");
+      },
+    });
+    const bypassedResponse = await appProtocolHandler({
+      response: unrelatedResponse,
+      url: "app://-/assets/unrelated-windows-chunk.js",
+    });
+    assert.equal(bypassedResponse, unrelatedResponse);
 
     assert.deepEqual(
       {

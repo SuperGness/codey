@@ -557,36 +557,36 @@ fn spawn_codex_exit_watcher(
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let (exit_tx, exit_rx) = oneshot::channel();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
-        let mut missing_streak = 0u8;
-        let natural_exit = loop {
+        let natural_exit = if let Some(process_id) = process_id {
             tokio::select! {
-                _ = &mut shutdown_rx => break false,
-                _ = interval.tick() => match child_process_state(&child).await {
-                    ChildProcessState::Running => missing_streak = 0,
-                    ChildProcessState::Exited => {
-                        codex_exited.store(true, Ordering::Release);
-                        break true;
-                    }
-                    ChildProcessState::Untracked => {
-                        let Some(process_id) = process_id else { break false };
-                        let running = codex_plus_core::windows_enumerate_processes()
-                            .iter()
-                            .any(|process| process.process_id == process_id);
-                        if running {
-                            missing_streak = 0;
-                        } else {
-                            missing_streak = missing_streak.saturating_add(1);
-                            if missing_streak >= 3 {
-                                codex_exited.store(true, Ordering::Release);
-                                break true;
-                            }
+                _ = &mut shutdown_rx => false,
+                result = codex_plus_core::launcher::wait_for_windows_process_id(process_id) => {
+                    match result {
+                        Ok(()) => true,
+                        Err(error) => {
+                            eprintln!("等待 Windows Codex 进程退出失败：{error:#}");
+                            !codex_plus_core::windows_enumerate_processes()
+                                .iter()
+                                .any(|process| process.process_id == process_id)
                         }
+                    }
+                }
+            }
+        } else {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break false,
+                    _ = interval.tick() => match child_process_state(&child).await {
+                        ChildProcessState::Running => {}
+                        ChildProcessState::Exited => break true,
+                        ChildProcessState::Untracked => break false,
                     }
                 }
             }
         };
         if natural_exit {
+            codex_exited.store(true, Ordering::Release);
             let _ = exit_tx.send(());
         }
     });

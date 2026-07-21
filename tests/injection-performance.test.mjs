@@ -20,6 +20,10 @@ test("renderer mutations are scanned by local roots instead of full-document res
   assert.doesNotMatch(inject, /characterData:\s*true/);
   assert.doesNotMatch(inject, /mutation\.type === "characterData"/);
   assert.match(inject, /node\?\.nodeType === Node\.TEXT_NODE/);
+  assert.match(inject, /target\?\.closest\?\.\(interactiveControlSelector\)/);
+  assert.match(inject, /const addPendingScanRoot = \(root\)/);
+  assert.match(inject, /pendingRoot\.contains\?\.\(root\)/);
+  assert.equal(inject.match(/pendingScanRoots\.add\(/g)?.length, 1);
   assert.match(inject, /const sidebarTitleCache = new Map\(\)/);
   assert.match(inject, /syncSidebarTitles\(root\)/);
   assert.match(inject, /callBridge\("\/session\/wake-watcher"\)/);

@@ -18,7 +18,8 @@ test("subagent optimization is opt-in and exposed through the settings switch", 
   assert.match(launcherSource, /config\.subagent_optimization/);
   assert.match(appSource, /checked=\{config\.subagentOptimization\}/);
   assert.match(appSource, /aria-label="启用子代理协作优化"/);
-  assert.match(appSource, /退出时自动恢复原文件/);
+  assert.match(appSource, /启用v2并行配置/);
+  assert.doesNotMatch(appSource, /下次启动启用 V2 并行配置，退出时自动恢复原文件/);
 });
 
 test("subagent optimization owns the requested V2 and default-agent settings", async () => {

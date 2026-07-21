@@ -292,38 +292,38 @@ input:focus-visible,
 }
 
 .status-overview {
-  margin-bottom: 34px;
+  margin-bottom: 30px;
 }
 
 .overview-title {
   margin-bottom: 14px;
 }
 
-.status-grid {
+.status-list {
   display: grid;
   width: min(100%, 720px);
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 14px;
 }
 
-.status-card {
-  min-height: 164px;
-  padding: 16px;
-  box-shadow: 0 14px 36px rgb(31 41 55 / 6%);
+.status-row {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  border-bottom: 1px solid #e5e9f0;
+  padding: 14px 0;
 }
 
-.status-card-head,
-.status-card-copy {
-  position: relative;
+.status-row:first-child {
+  padding-top: 0;
 }
 
-.status-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.status-row:last-child {
+  border-bottom: 0;
+  padding-bottom: 0;
 }
 
-.status-card-icon {
+.status-row-icon {
   display: grid;
   width: 38px;
   height: 38px;
@@ -334,29 +334,40 @@ input:focus-visible,
   color: #6d3ae9;
 }
 
-.status-card-success .status-card-icon {
+.status-row-success .status-row-icon {
   border-color: #ccefe3;
   background: #edfbf6;
   color: #0f9f73;
 }
 
-.status-card-warning .status-card-icon {
+.status-row-warning .status-row-icon {
   border-color: #f4e2b7;
   background: #fff9e9;
   color: #b7791f;
 }
 
-.status-card-destructive .status-card-icon {
+.status-row-destructive .status-row-icon {
   border-color: #f5d1d1;
   background: #fff2f2;
   color: #d83434;
 }
 
-.status-card-copy {
-  margin-top: 17px;
+.status-row-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
 }
 
-.status-card-copy h3 {
+.status-row-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.status-row-copy h3 {
+  min-width: 0;
   margin: 0 0 6px;
   color: #222a3c;
   font-size: 15px;
@@ -364,26 +375,24 @@ input:focus-visible,
   letter-spacing: -0.02em;
 }
 
-.status-card-copy p {
-  min-height: 38px;
+.status-row-copy p {
   margin: 0;
   color: #6d7789;
   font-size: 11px;
-  line-height: 1.65;
+  line-height: 1.55;
 }
 
-.status-card-detail {
+.status-row-detail {
   display: block;
-  margin-top: 12px;
   overflow: hidden;
   color: #929aaa;
-  font-size: 9px;
+  font-size: 10px;
   line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.status-card-detail-full {
+.status-row-detail-full {
   overflow: visible;
   overflow-wrap: anywhere;
   text-overflow: clip;
@@ -1699,14 +1708,6 @@ input:focus-visible,
 }
 
 @media (max-width: 1180px) {
-  .status-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .status-card {
-    min-height: 164px;
-  }
-
   .dashboard-grid {
     grid-template-columns: 1fr;
   }
@@ -1735,7 +1736,6 @@ input:focus-visible,
     max-width: 28vw;
   }
 
-  .status-grid,
   .model-groups,
   .provider-summary,
   .trace-detail-grid {
@@ -1807,10 +1807,6 @@ input:focus-visible,
 
   .runtime-action-copy small {
     white-space: normal;
-  }
-
-  .status-grid {
-    grid-template-columns: 1fr;
   }
 
   .provider-meta,

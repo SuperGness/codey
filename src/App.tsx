@@ -25,7 +25,6 @@ import {
 import { invoke } from "./api";
 import { formatBytes, TraceLogModule, type TraceLogStats } from "./TraceLogModule";
 import {
-  BorderBeam,
   MagicBadge as Badge,
   MagicButton as Button,
   MagicCard as Card,
@@ -614,31 +613,27 @@ export function App({ embedded = false, onClose }: AppProps) {
                 实时快照
               </Badge>
             </div>
-            <div className="status-grid">
-              {statusCards.map((item, index) => {
+            <div className="status-list" role="list">
+              {statusCards.map((item) => {
                 const Icon = item.icon;
                 return (
-                  <Card
-                    className={`status-card status-card-${item.tone}`}
+                  <div
+                    className={`status-row status-row-${item.tone}`}
                     key={item.title}
-                    gradientFrom={item.tone === "success" ? "#10b981" : "#8b5cf6"}
-                    gradientTo={item.tone === "destructive" ? "#ef4444" : "#38bdf8"}
+                    role="listitem"
                   >
-                    {index === 0 && sessionOk && (
-                      <BorderBeam colorFrom="#10b981" colorTo="#38bdf8" duration={10} />
-                    )}
-                    <div className="status-card-head">
-                      <span className="status-card-icon"><Icon size={18} /></span>
-                      <Badge variant={item.tone}>{item.label}</Badge>
-                    </div>
-                    <div className="status-card-copy">
-                      <h3>{item.title}</h3>
+                    <span className="status-row-icon"><Icon size={18} /></span>
+                    <div className="status-row-copy">
+                      <div className="status-row-heading">
+                        <h3>{item.title}</h3>
+                        <Badge variant={item.tone}>{item.label}</Badge>
+                      </div>
                       <p>{item.description}</p>
+                      <span className={`status-row-detail${item.fullDetail ? " status-row-detail-full" : ""}`}>
+                        {item.detail}
+                      </span>
                     </div>
-                    <span className={`status-card-detail${item.fullDetail ? " status-card-detail-full" : ""}`}>
-                      {item.detail}
-                    </span>
-                  </Card>
+                  </div>
                 );
               })}
             </div>
@@ -902,7 +897,7 @@ export function App({ embedded = false, onClose }: AppProps) {
                       <strong>子代理协作优化</strong>
                       <small>
                         {config.subagentOptimization
-                          ? "下次启动启用 V2 并行配置，退出时自动恢复原文件"
+                          ? "启用v2并行配置"
                           : "保持 Codex 默认子代理配置，不注入协作提示词"}
                       </small>
                     </div>

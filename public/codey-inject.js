@@ -1370,8 +1370,7 @@
     "[data-testid=conversation-turn]",
     "[data-message-id]",
   ].join(", ");
-  const relevantAddedSelector = [
-    scanBoundarySelector,
+  const interactiveControlSelector = [
     "button",
     "[role=button]",
     "[role=menuitem]",
@@ -1379,6 +1378,10 @@
     "[role=switch]",
     "input",
     "label",
+  ].join(", ");
+  const relevantAddedSelector = [
+    scanBoundarySelector,
+    interactiveControlSelector,
   ].join(", ");
   const pendingScanRoots = new Set();
 
@@ -1400,6 +1403,14 @@
     if (!(element instanceof HTMLElement)) return null;
     return element.closest?.(scanBoundarySelector) || element;
   };
+  const addPendingScanRoot = (root) => {
+    if (!(root instanceof HTMLElement)) return;
+    for (const pendingRoot of pendingScanRoots) {
+      if (pendingRoot === root || pendingRoot.contains?.(root)) return;
+      if (root.contains?.(pendingRoot)) pendingScanRoots.delete(pendingRoot);
+    }
+    pendingScanRoots.add(root);
+  };
   const flushIncrementalScans = () => {
     scanTimer = 0;
     const roots = [...pendingScanRoots];
@@ -1408,7 +1419,7 @@
     roots.forEach((root) => scan(root, true, false));
   };
   const scheduleIncrementalScan = (root) => {
-    if (root) pendingScanRoots.add(root);
+    addPendingScanRoot(root);
     window.clearTimeout(scanTimer);
     scanTimer = window.setTimeout(flushIncrementalScans, 60);
   };
@@ -1420,25 +1431,30 @@
         : mutation.target?.parentElement;
       if (mutation.type === "attributes") {
         if (target && !isCodeyOwned(target)) {
-          pendingScanRoots.add(nearestScanRoot(target));
+          addPendingScanRoot(nearestScanRoot(target));
         }
         continue;
       }
       for (const node of mutation.addedNodes || []) {
         const element = node instanceof HTMLElement ? node : null;
         if (!element) {
-          if (node?.nodeType === Node.TEXT_NODE && target && !isCodeyOwned(target)) {
-            pendingScanRoots.add(nearestScanRoot(target));
+          const interactiveRoot = target?.closest?.(interactiveControlSelector);
+          if (
+            node?.nodeType === Node.TEXT_NODE
+            && interactiveRoot
+            && !isCodeyOwned(interactiveRoot)
+          ) {
+            addPendingScanRoot(interactiveRoot);
           }
           continue;
         }
         if (isCodeyOwned(element) || !containsRelevantElement(element)) continue;
-        pendingScanRoots.add(nearestScanRoot(element));
+        addPendingScanRoot(nearestScanRoot(element));
       }
       for (const node of mutation.removedNodes || []) {
         const element = node instanceof HTMLElement ? node : null;
         if (!element || !containsRelevantElement(element)) continue;
-        if (target && !isCodeyOwned(target)) pendingScanRoots.add(nearestScanRoot(target));
+        if (target && !isCodeyOwned(target)) addPendingScanRoot(nearestScanRoot(target));
       }
     }
     if (pendingScanRoots.size) {

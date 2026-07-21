@@ -1,8 +1,10 @@
 use anyhow::{Context, bail};
 use serde::Deserialize;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 const CDP_HTTP_TIMEOUT: Duration = Duration::from_secs(3);
+static CDP_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct CdpTarget {
@@ -18,19 +20,14 @@ pub struct CdpTarget {
 }
 
 pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(CDP_HTTP_TIMEOUT)
-        .build()
-        .context("failed to build CDP HTTP client")?;
-
+    let client = cdp_http_client()?;
     let urls = [
         format!("http://127.0.0.1:{debug_port}/json"),
         format!("http://[::1]:{debug_port}/json"),
     ];
     let mut errors = Vec::new();
     for url in urls {
-        match query_targets_url(&client, &url).await {
+        match query_targets_url(client, &url).await {
             Ok(targets) => return Ok(targets),
             Err(error) => errors.push(format!("{url}: {error:#}")),
         }
@@ -40,6 +37,21 @@ pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
         "failed to query CDP targets on loopback addresses: {}",
         errors.join("; ")
     )
+}
+
+fn cdp_http_client() -> anyhow::Result<&'static reqwest::Client> {
+    if let Some(client) = CDP_HTTP_CLIENT.get() {
+        return Ok(client);
+    }
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(CDP_HTTP_TIMEOUT)
+        .build()
+        .context("failed to build CDP HTTP client")?;
+    let _ = CDP_HTTP_CLIENT.set(client);
+    Ok(CDP_HTTP_CLIENT
+        .get()
+        .expect("CDP HTTP client must be initialized"))
 }
 
 async fn query_targets_url(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<CdpTarget>> {
@@ -128,4 +140,17 @@ fn is_chatgpt_desktop_page(title: &str, url: &str) -> bool {
             || url == "https://chat.openai.com"
             || url.starts_with("https://chat.openai.com/")
             || url.starts_with("data:text/html"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cdp_http_client_is_reused() {
+        let first = cdp_http_client().unwrap();
+        let second = cdp_http_client().unwrap();
+
+        assert!(std::ptr::eq(first, second));
+    }
 }

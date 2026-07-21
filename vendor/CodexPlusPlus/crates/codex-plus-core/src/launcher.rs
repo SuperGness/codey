@@ -2286,7 +2286,7 @@ async fn run_post_launch_computer_use_guard(
 }
 
 #[cfg(windows)]
-async fn wait_for_windows_process_id(process_id: u32) -> anyhow::Result<()> {
+pub async fn wait_for_windows_process_id(process_id: u32) -> anyhow::Result<()> {
     tokio::task::spawn_blocking(move || wait_for_windows_process_id_blocking(process_id))
         .await
         .context("Windows process wait task failed")?
@@ -2346,7 +2346,7 @@ fn terminate_windows_process_id_blocking(process_id: u32) -> anyhow::Result<()> 
 }
 
 #[cfg(not(windows))]
-async fn wait_for_windows_process_id(process_id: u32) -> anyhow::Result<()> {
+pub async fn wait_for_windows_process_id(process_id: u32) -> anyhow::Result<()> {
     anyhow::bail!("cannot wait for Windows process id {process_id} on this platform")
 }
 
