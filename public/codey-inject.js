@@ -16,10 +16,6 @@
   const sessionDeleteAttribute = "data-codey-session-delete";
   const sessionDeletePopoverId = "codey-session-delete-popover";
   const sidebarActionTooltipId = "codey-sidebar-action-tooltip";
-  const threadStatusAttribute = "data-codey-thread-traffic-status";
-  const threadStatusSvgAttribute = "data-codey-thread-status-svg";
-  const threadStatusSpinnerAttribute = "data-codey-thread-status-spinner";
-  const threadStatusPlacementAttribute = "data-codey-thread-status-placement";
   const threadUpdatedAtAttribute = "data-codey-thread-updated-at";
   const threadUpdatedAtMsAttribute = "data-codey-thread-updated-at-ms";
   const settingsIcon = `
@@ -64,7 +60,6 @@
   const threadUpdatedAtRequestedAt = new Map();
   const pendingThreadUpdatedAtRefs = new Map();
   const hardDeletedMessageKeys = new Set();
-  const originalThreadStatusSvgChildren = new WeakMap();
   const queryWithin = (root, selector) => {
     const matches = [];
     if (root instanceof HTMLElement && typeof root.matches === "function" && root.matches(selector)) {
@@ -214,25 +209,7 @@
       #${toastId}[data-tone="error"] { border-color: rgba(248, 113, 113, .6); color: #fecaca; }
       [data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title],
       [data-app-action-sidebar-project-row][data-app-action-sidebar-project-id] { position: relative; }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}]:not([${threadStatusPlacementAttribute}="native"])::after { content: ""; position: absolute; top: 50%; right: 10px; z-index: 10; display: block; width: 8px; height: 8px; border-radius: 50%; transform: translateY(-50%); pointer-events: none; }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="running"]:not([${threadStatusPlacementAttribute}="native"])::after { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, .16); animation: codey-thread-status-blink 1.1s ease-in-out infinite; }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="error"]:not([${threadStatusPlacementAttribute}="native"])::after { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, .14); }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="waiting"]:not([${threadStatusPlacementAttribute}="native"])::after { background: #eab308; box-shadow: 0 0 0 3px rgba(234, 179, 8, .16); }
-      [${threadStatusSpinnerAttribute}] { animation: none !important; }
-      [${threadStatusSvgAttribute}] { overflow: visible; }
-      [${threadStatusSvgAttribute}="running"] { color: #22c55e !important; animation: codey-thread-status-blink 1.1s ease-in-out infinite; }
-      [${threadStatusSvgAttribute}="error"] { color: #ef4444 !important; }
-      [${threadStatusSvgAttribute}="waiting"] { color: #eab308 !important; }
-      [data-codey-thread-status-indicator], [data-codey-thread-status-owned-host] { display: none !important; }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}]:hover::after,
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}]:has(:focus-visible)::after { display: none !important; }
-      @keyframes codey-thread-status-blink { 0%, 100% { opacity: 1; } 50% { opacity: .24; } }
-      @media (prefers-reduced-motion: reduce) {
-        [data-app-action-sidebar-thread-row][${threadStatusAttribute}="running"]::after,
-        [${threadStatusSvgAttribute}="running"] { animation: none; }
-      }
       [data-app-action-sidebar-thread-row] [${threadUpdatedAtAttribute}] { display: block; flex: 0 0 auto; min-width: 26px; margin-inline-start: auto; color: inherit; font: 400 12px/16px system-ui, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: 0; text-align: end; opacity: .52; pointer-events: none; white-space: nowrap; }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}] [${threadUpdatedAtAttribute}],
       [data-app-action-sidebar-thread-row]:has([data-hover-card-open-immediately][class*="group-hover:hidden"]) [${threadUpdatedAtAttribute}] { display: none; }
       [data-app-action-sidebar-thread-row]:hover [${threadUpdatedAtAttribute}],
       [data-app-action-sidebar-thread-row]:has(:focus-visible) [${threadUpdatedAtAttribute}] { opacity: 0; }
@@ -678,125 +655,6 @@
       if (sessionId) return sessionId;
     }
     return rowSessionId;
-  };
-
-  const threadStatusFromRow = (row) => {
-    const sessionId = threadSessionIdFromRow(row);
-    const hostStatuses = window.__codeyHostThreadStatuses;
-    if (hostStatuses && typeof hostStatuses === "object") {
-      if (Object.prototype.hasOwnProperty.call(hostStatuses, sessionId)) {
-        const hostStatus = hostStatuses[sessionId];
-        return ["running", "error", "waiting"].includes(hostStatus) ? hostStatus : "";
-      }
-      if (window.__codeyHostThreadStatusesAuthoritative === true) return "";
-    }
-    const reactKey = Object.keys(row).find((key) => (
-      key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$")
-    ));
-    let fiber = reactKey ? row[reactKey] : null;
-    let running = false;
-    let waiting = false;
-    let hasExplicitStatus = false;
-    for (let depth = 0; fiber && depth < 14; depth += 1, fiber = fiber.return) {
-      const propsList = [fiber.memoizedProps, fiber.pendingProps];
-      for (const props of propsList) {
-        if (!props || typeof props !== "object") continue;
-        const statusType = props.statusState?.type;
-        if (typeof statusType === "string" && statusType) hasExplicitStatus = true;
-        if (statusType === "error") return "error";
-        if (statusType === "loading") running = true;
-        if (props.hasPendingChildApproval === true || props.statusPill != null) waiting = true;
-        if (Array.isArray(props.chips)
-          && props.chips.some((chip) => chip?.id === "awaiting-approval")) {
-          waiting = true;
-        }
-      }
-    }
-    if (waiting) return "waiting";
-    if (running) return "running";
-    if (hasExplicitStatus) return "";
-    if (row.querySelector(".animate-spin")) return "running";
-    const nativeStatusHost = [...row.querySelectorAll("[data-hover-card-open-immediately]")]
-      .find((node) => String(node.getAttribute("class") || "").includes("group-hover:hidden"));
-    if (nativeStatusHost?.querySelector(".text-token-error-foreground, [data-state=error], [data-status=failed]")) {
-      return "error";
-    }
-    return "";
-  };
-
-  const nativeThreadStatusSvgFromRow = (row) => {
-    const nativeHost = [...row.querySelectorAll("[data-hover-card-open-immediately]")]
-      .find((node) => String(node.getAttribute("class") || "").includes("group-hover:hidden"));
-    if (!nativeHost) return null;
-    return nativeHost.querySelector(".animate-spin svg") || nativeHost.querySelector("svg");
-  };
-
-  const restoreThreadStatusSvg = (svg) => {
-    const originalChildren = originalThreadStatusSvgChildren.get(svg);
-    if (originalChildren) {
-      svg.replaceChildren(...originalChildren);
-      originalThreadStatusSvgChildren.delete(svg);
-    }
-    svg.removeAttribute(threadStatusSvgAttribute);
-    const spinner = svg.closest(".animate-spin");
-    spinner?.removeAttribute(threadStatusSpinnerAttribute);
-  };
-
-  const createThreadStatusCircle = (radius, opacity = null) => {
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute("cx", "12");
-    circle.setAttribute("cy", "12");
-    circle.setAttribute("r", String(radius));
-    circle.setAttribute("fill", "currentColor");
-    if (opacity != null) circle.setAttribute("opacity", String(opacity));
-    return circle;
-  };
-
-  const replaceThreadStatusSvg = (svg, state) => {
-    if (!originalThreadStatusSvgChildren.has(svg)) {
-      originalThreadStatusSvgChildren.set(svg, [...svg.childNodes]);
-    }
-    svg.replaceChildren(
-      createThreadStatusCircle(9, 0.16),
-      createThreadStatusCircle(6),
-    );
-    svg.setAttribute(threadStatusSvgAttribute, state);
-    const spinner = svg.closest(".animate-spin");
-    spinner?.setAttribute(threadStatusSpinnerAttribute, "");
-  };
-
-  const clearThreadStatusIndicator = (row) => {
-    row.removeAttribute(threadStatusAttribute);
-    row.removeAttribute(threadStatusPlacementAttribute);
-    row.querySelectorAll(`[${threadStatusSvgAttribute}]`).forEach((svg) => {
-      restoreThreadStatusSvg(svg);
-    });
-  };
-
-  const setThreadStatusIndicator = (row, state) => {
-    const nativeSvg = nativeThreadStatusSvgFromRow(row);
-    row.querySelectorAll(`[${threadStatusSvgAttribute}]`).forEach((svg) => {
-      if (svg !== nativeSvg) restoreThreadStatusSvg(svg);
-    });
-    row.setAttribute(threadStatusAttribute, state);
-    if (nativeSvg) {
-      replaceThreadStatusSvg(nativeSvg, state);
-      row.setAttribute(threadStatusPlacementAttribute, "native");
-    } else {
-      row.removeAttribute(threadStatusPlacementAttribute);
-    }
-  };
-
-  const installThreadStatusIndicators = (root = document) => {
-    queryWithin(root, "[data-app-action-sidebar-thread-row]").forEach((row) => {
-      if (!(row instanceof HTMLElement)) return;
-      const state = threadStatusFromRow(row);
-      if (!state) {
-        clearThreadStatusIndicator(row);
-        return;
-      }
-      setThreadStatusIndicator(row, state);
-    });
   };
 
   const numericThreadTimestamp = (value) => {
@@ -1553,7 +1411,6 @@
     installTasksImportButton(root);
     installSessionDeleteButtons(root);
     installProjectImportButtons(root);
-    installThreadStatusIndicators(root);
     installThreadUpdatedTimes(root);
     installMessageSelection(root);
     if (syncTitles) syncSidebarTitles(root);
@@ -1565,9 +1422,6 @@
   window.__codeySyncSidebarTitles = syncSidebarTitles;
   window.__codeyGetMessageId = getMessageId;
   window.__codeyProjectPathFromRow = projectPathFromRow;
-  window.__codeyThreadSessionIdFromRow = threadSessionIdFromRow;
-  window.__codeyThreadStatusFromRow = threadStatusFromRow;
-  window.__codeyInstallThreadStatusIndicators = installThreadStatusIndicators;
   window.__codeyFormatRelativeThreadTime = formatRelativeThreadTime;
   window.__codeyThreadTimestampMsFromPayload = threadTimestampMsFromPayload;
   window.__codeyUpdateThreadUpdatedAt = updateThreadUpdatedAt;

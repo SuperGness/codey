@@ -91,6 +91,14 @@ pub struct CodeyConfig {
     /// renderer. Opt-in so the native warning remains visible by default.
     #[serde(default)]
     pub hide_full_access_warning: bool,
+    /// Public HTTPS endpoint for the version manifest published to Cloudflare R2.
+    /// This is build-time configuration, not a user setting.
+    #[serde(
+        default = "default_update_manifest_url",
+        skip_serializing,
+        skip_deserializing
+    )]
+    pub update_manifest_url: String,
 }
 
 impl Default for CodeyConfig {
@@ -110,12 +118,14 @@ impl Default for CodeyConfig {
             fast_context_tools: false,
             subagent_optimization: false,
             hide_full_access_warning: false,
+            update_manifest_url: default_update_manifest_url(),
         }
     }
 }
 
 impl CodeyConfig {
     pub fn normalize(mut self) -> Self {
+        self.update_manifest_url = default_update_manifest_url();
         self.profiles
             .retain(|profile| !profile.id.trim().is_empty());
         if self.profiles.is_empty() {
@@ -188,6 +198,21 @@ fn normalize_model_lists(lists: &mut BTreeMap<String, Vec<String>>) {
 
 pub fn default_true() -> bool {
     true
+}
+
+pub const DEFAULT_UPDATE_MANIFEST_URL: &str =
+    "https://pub-2d17a6a8bc22426a92e297a59f55ccc3.r2.dev/latest.json";
+
+pub fn default_update_manifest_url() -> String {
+    let base_url = option_env!("CODEY_UPDATE_BASE_URL")
+        .unwrap_or_default()
+        .trim()
+        .trim_end_matches('/');
+    if base_url.is_empty() {
+        DEFAULT_UPDATE_MANIFEST_URL.to_string()
+    } else {
+        format!("{base_url}/latest.json")
+    }
 }
 
 pub fn default_config_path() -> PathBuf {
@@ -328,6 +353,20 @@ mod tests {
             .normalize();
 
         assert!(config.disable_trace_log_writes);
+    }
+
+    #[test]
+    fn user_update_manifest_url_is_ignored_and_not_persisted() {
+        let config = serde_json::from_str::<CodeyConfig>(
+            r#"{"activeProfileId":"","profiles":[],"updateManifestUrl":"https://example.com/latest.json"}"#,
+        )
+        .unwrap()
+        .normalize();
+        let serialized = serde_json::to_value(&config).unwrap();
+
+        assert_eq!(config.update_manifest_url, default_update_manifest_url());
+        assert!(serialized.get("updateManifestUrl").is_none());
+        assert!(DEFAULT_UPDATE_MANIFEST_URL.starts_with("https://"));
     }
 
     #[test]

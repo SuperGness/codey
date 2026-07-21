@@ -32,7 +32,6 @@ use commands::AppState;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShutdownReason {
     CodexExited,
-    ManualClose,
     Signal,
 }
 
@@ -62,28 +61,20 @@ pub async fn run() -> Result<()> {
 
     let shutdown_reason = tokio::select! {
         _ = state.wait_for_shutdown() => {
-            if state.manual_close_requested() {
-                ShutdownReason::ManualClose
-            } else {
-                ShutdownReason::CodexExited
-            }
+            ShutdownReason::CodexExited
         },
         _ = shutdown_signal() => ShutdownReason::Signal,
     };
 
-    let cleanup = if shutdown_reason == ShutdownReason::ManualClose {
-        Ok(())
-    } else {
-        match commands::stop_codey_runtime(&state).await {
-            Ok(_) => Ok(()),
-            Err(first_error) => {
-                eprintln!("Codey 恢复 Codex 配置失败，正在重试：{first_error}");
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                commands::stop_codey_runtime(&state)
-                    .await
-                    .map(|_| ())
-                    .map_err(|retry_error| format!("{first_error}；重试失败：{retry_error}"))
-            }
+    let cleanup = match commands::stop_codey_runtime(&state).await {
+        Ok(_) => Ok(()),
+        Err(first_error) => {
+            eprintln!("Codey 恢复 Codex 配置失败，正在重试：{first_error}");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            commands::stop_codey_runtime(&state)
+                .await
+                .map(|_| ())
+                .map_err(|retry_error| format!("{first_error}；重试失败：{retry_error}"))
         }
     };
     if shutdown_reason == ShutdownReason::CodexExited {

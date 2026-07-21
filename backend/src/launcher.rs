@@ -45,12 +45,13 @@ pub struct MaintenanceStatus {
 
 pub struct CodeyRuntime {
     pub codex_app_path: PathBuf,
-    pub debug_port: u16,
     pub maintenance: MaintenanceStatus,
     pub applied_config: CodeyConfig,
     child: Arc<Mutex<Option<Child>>>,
     #[cfg(windows)]
     process_id: Option<u32>,
+    #[cfg(target_os = "macos")]
+    inspector_argument: Option<String>,
     codex_exited: Arc<AtomicBool>,
     watchdog_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     watchdog_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -218,6 +219,8 @@ impl CodeyRuntime {
             performance_status: spawned.performance_status.clone(),
             performance_detail: spawned.performance_detail.clone(),
         };
+        #[cfg(target_os = "macos")]
+        let inspector_argument = spawned.inspector_argument.clone();
         let child = Arc::new(Mutex::new(spawned.child));
         let injected_target =
             match cdp::retry_inject_with_scripts(debug_port, handler.clone(), &injection_scripts)
@@ -231,6 +234,14 @@ impl CodeyRuntime {
                     #[cfg(windows)]
                     if let Some(process_id) = spawned.process_id {
                         terminate_windows_process(process_id).await;
+                    }
+                    #[cfg(target_os = "macos")]
+                    if let Some(inspector_argument) = spawned.inspector_argument.as_deref() {
+                        if let Err(stop_error) =
+                            stop_macos_codex(inspector_argument, &app_dir).await
+                        {
+                            eprintln!("Codex 注入失败后的进程清理失败：{stop_error:#}");
+                        }
                     }
                     return Err(restore_runtime_config_after_error(&home, error));
                 }
@@ -295,12 +306,13 @@ impl CodeyRuntime {
         Ok((
             Self {
                 codex_app_path: app_dir,
-                debug_port,
                 maintenance,
                 applied_config: config.clone(),
                 child,
                 #[cfg(windows)]
                 process_id: spawned.process_id,
+                #[cfg(target_os = "macos")]
+                inspector_argument,
                 codex_exited,
                 watchdog_shutdown: Mutex::new(Some(shutdown_tx)),
                 watchdog_task: Mutex::new(Some(watchdog_task)),
@@ -324,12 +336,43 @@ impl CodeyRuntime {
             let _ = sender.send(());
         }
         if !self.codex_exited.load(Ordering::Acquire) {
+            #[cfg(target_os = "macos")]
+            let (requested_macos_stop, macos_stop_error) =
+                if let Some(inspector_argument) = self.inspector_argument.as_deref() {
+                    (
+                        true,
+                        stop_macos_codex(inspector_argument, &self.codex_app_path)
+                            .await
+                            .err(),
+                    )
+                } else {
+                    (false, None)
+                };
+            #[cfg(not(target_os = "macos"))]
+            let requested_macos_stop = false;
+
             if let Some(mut child) = self.child.lock().await.take() {
-                let _ = child.kill().await;
+                if requested_macos_stop {
+                    if tokio::time::timeout(Duration::from_secs(5), child.wait())
+                        .await
+                        .is_err()
+                    {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                    }
+                } else {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
             }
             #[cfg(windows)]
             if let Some(process_id) = self.process_id {
                 terminate_windows_process(process_id).await;
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(error) = macos_stop_error {
+                restore_runtime_config(&codex_home())?;
+                return Err(error);
             }
         }
         restore_runtime_config(&codex_home())?;
@@ -518,6 +561,8 @@ struct SpawnedCodex {
     child: Option<Child>,
     #[cfg(windows)]
     process_id: Option<u32>,
+    #[cfg(target_os = "macos")]
+    inspector_argument: Option<String>,
     performance_status: String,
     performance_detail: String,
 }
@@ -568,6 +613,7 @@ async fn spawn_codex(
             build_codex_command(app_dir, debug_port, std::slice::from_ref(&inspector_arg))
         };
         let mut spawned = spawn_command(command)?;
+        spawned.inspector_argument = Some(inspector_arg.clone());
         match crate::codex_startup_patch::install(inspector_port, patch_options).await {
             Ok(()) => {
                 spawned.performance_status = "ready".to_string();
@@ -579,7 +625,9 @@ async fn spawn_codex(
                     let _ = child.kill().await;
                     let _ = child.wait().await;
                 }
-                stop_macos_patched_codex(&inspector_arg).await;
+                if let Err(stop_error) = stop_macos_codex(&inspector_arg, app_dir).await {
+                    eprintln!("Codex 启动补丁失败后的进程清理失败：{stop_error:#}");
+                }
                 return Err(error)
                     .context("Codex 启动硬补丁未能安装；已停止 Codex，未降级为仅隐藏 UI");
             }
@@ -659,6 +707,8 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
         child: Some(child),
         #[cfg(windows)]
         process_id: None,
+        #[cfg(target_os = "macos")]
+        inspector_argument: None,
         performance_status: String::new(),
         performance_detail: String::new(),
     })
@@ -745,20 +795,41 @@ fn build_fresh_macos_open_command(
 }
 
 #[cfg(target_os = "macos")]
-async fn stop_macos_patched_codex(inspector_argument: &str) {
-    let _ = Command::new("pkill")
+async fn stop_macos_codex(inspector_argument: &str, app_dir: &std::path::Path) -> Result<()> {
+    let status = Command::new("pkill")
         .args(["-f", "--", inspector_argument])
         .status()
-        .await;
+        .await
+        .context("按本次启动参数停止 macOS Codex 失败")?;
+    if !status.success() && status.code() != Some(1) {
+        anyhow::bail!("按本次启动参数停止 macOS Codex 失败：pkill 返回 {status}");
+    }
+    if wait_for_macos_codex_exit(app_dir, Duration::from_secs(1)).await? {
+        return Ok(());
+    }
+
+    let process_ids = macos_codex_process_ids(app_dir).await?;
+    if !process_ids.is_empty() {
+        let mut command = Command::new("kill");
+        command.arg("-TERM");
+        for process_id in process_ids {
+            command.arg(process_id.to_string());
+        }
+        let _ = command.status().await;
+    }
+    if wait_for_macos_codex_exit(app_dir, Duration::from_secs(5)).await? {
+        return Ok(());
+    }
+    anyhow::bail!("停止 macOS Codex 超时，目标主进程仍在运行")
 }
 
 #[cfg(target_os = "macos")]
-async fn macos_codex_is_running(app_dir: &std::path::Path) -> Result<bool> {
+async fn macos_codex_process_ids(app_dir: &std::path::Path) -> Result<Vec<u32>> {
     let executable = codex_plus_core::app_paths::build_codex_executable(app_dir);
     let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
     let executable = executable.to_string_lossy();
     let output = Command::new("ps")
-        .args(["-axo", "command="])
+        .args(["-axo", "pid=,command="])
         .output()
         .await
         .context("检查 macOS Codex 进程失败")?;
@@ -766,13 +837,39 @@ async fn macos_codex_is_running(app_dir: &std::path::Path) -> Result<bool> {
         anyhow::bail!("检查 macOS Codex 进程失败：ps 返回 {}", output.status);
     }
     let processes = String::from_utf8_lossy(&output.stdout);
-    Ok(processes.lines().any(|line| {
-        let command = line.trim_start();
-        command == executable
-            || command
-                .strip_prefix(executable.as_ref())
-                .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace))
-    }))
+    Ok(processes
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let separator = line.find(char::is_whitespace)?;
+            let (process_id, command) = line.split_at(separator);
+            let command = command.trim_start();
+            let matches = command == executable
+                || command
+                    .strip_prefix(executable.as_ref())
+                    .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace));
+            matches.then(|| process_id.parse::<u32>().ok()).flatten()
+        })
+        .collect())
+}
+
+#[cfg(target_os = "macos")]
+async fn macos_codex_is_running(app_dir: &std::path::Path) -> Result<bool> {
+    Ok(!macos_codex_process_ids(app_dir).await?.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+async fn wait_for_macos_codex_exit(app_dir: &std::path::Path, timeout: Duration) -> Result<bool> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if !macos_codex_is_running(app_dir).await? {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 #[cfg(windows)]

@@ -267,19 +267,30 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
   }
 });
 
-test("closing Codex requires a manual Codey relaunch", async () => {
-  const [commandsSource, appSource] = await Promise.all([
+test("restarting Codex stops the current runtime and relaunches it with Codey", async () => {
+  const [commandsSource, launcherSource, appSource] = await Promise.all([
     readFile(new URL("../backend/src/commands.rs", import.meta.url), "utf8"),
+    readFile(new URL("../backend/src/launcher.rs", import.meta.url), "utf8"),
     readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
   ]);
-  const closeFlow = commandsSource.slice(
-    commandsSource.indexOf("pub async fn schedule_close_codey_runtime"),
+  const restartFlow = commandsSource.slice(
+    commandsSource.indexOf("pub async fn schedule_restart_codey_runtime"),
     commandsSource.indexOf("pub async fn stop_codey_runtime"),
   );
 
-  assert.match(closeFlow, /stop_codey_runtime\(&close_state\)/);
-  assert.match(closeFlow, /show_manual_relaunch_prompt\(\)\.await/);
-  assert.doesNotMatch(closeFlow, /launch_codey_runtime/);
-  assert.match(appSource, /await invoke\("close_codex"\)/);
-  assert.match(appSource, /请按提示手动运行 Codey 重新启动/);
+  assert.match(restartFlow, /stop_codey_runtime\(&restart_state\)/);
+  assert.match(restartFlow, /launch_codey_runtime\(&restart_state\)/);
+  assert.match(restartFlow, /runtime_generation/);
+  assert.match(
+    commandsSource,
+    /runtime_generation\.load\(Ordering::Acquire\) == runtime_generation/,
+  );
+  assert.match(launcherSource, /stop_macos_codex\(inspector_argument, &self\.codex_app_path\)/);
+  assert.match(launcherSource, /macos_codex_process_ids\(app_dir\)/);
+  assert.match(launcherSource, /wait_for_macos_codex_exit\(app_dir, Duration::from_secs\(5\)\)/);
+  assert.doesNotMatch(commandsSource, /"close_codex"/);
+  assert.doesNotMatch(commandsSource, /show_manual_relaunch_prompt/);
+  assert.match(appSource, /await invoke\("restart_codey"\)/);
+  assert.match(appSource, /Codey 将自动重新拉起客户端/);
+  assert.doesNotMatch(appSource, /关闭 Codex/);
 });

@@ -46,6 +46,26 @@ macOS 构建会同时生成无 Tauri 的 `target/release/bundle/macos/Codey.app`
 
 GitHub Actions 工作流 `.github/workflows/build-desktop.yml` 支持手动触发及推送 `v*` 标签触发。手动运行后可在 Actions 下载 macOS arm64/x64 未签名 ZIP、Windows x64 便携 ZIP 和 NSIS 安装程序；标签构建还会把这些文件附加到对应 GitHub Release。
 
+### Cloudflare R2 更新分发
+
+仓库可以保持私有，而更新二进制发布到公开的 Cloudflare R2 bucket。标签发布时，工作流会先创建 GitHub Release，再将四个安装包上传至 `releases/<tag>/`，并分别写入版本化的 `releases/<tag>/latest.json` 和固定的 `latest.json`。清单包含版本、平台、包类型、下载链接、文件大小和 SHA-256；客户端只请求公开的固定清单地址，不持有 Cloudflare 凭证。
+
+先创建 R2 bucket，并为它绑定公开的 R2.dev 或自定义 HTTPS 域名；随后在 GitHub 源码仓库设置中配置：
+
+- Actions variable `CLOUDFLARE_R2_BUCKET`：R2 bucket 名称。
+- Actions variable `CLOUDFLARE_R2_PUBLIC_BASE_URL`：不带末尾 `/` 的公开 HTTPS 域名，例如 `https://updates.example.com`。构建时会写入 `${base}/latest.json` 作为默认更新地址。
+- Actions secret `CLOUDFLARE_ACCOUNT_ID`：Cloudflare account ID。
+- Actions secret `CLOUDFLARE_API_TOKEN`：仅授予目标 bucket `Workers R2 Storage: Edit` 权限的 API Token。
+
+标签版本必须与 `package.json` 的 `version` 完全一致。例如将版本改为 `0.1.1` 后，推送 `v0.1.1`：
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+未配置上述 variable 或 secret 时，现有 GitHub Release 发布不受影响，R2 同步会被跳过。客户端只使用构建时内置的 `latest.json` 地址，配置页面不允许用户改写更新源。检查更新会经 HTTPS 拉取清单，校验版本、下载地址和 SHA-256 格式后显示是否有新版本。当前 macOS 包仍是未签名包，Windows 包也尚未进行代码签名，因此检查更新不会自动下载或静默安装。
+
 Codey 已将实际使用的 `CodexPlusPlus v1.2.36` core/data crate 固定在 `vendor/CodexPlusPlus`，生命周期和会话扫描优化也已直接合并其中。本地与 CI 构建不再需要同级外部源码目录、运行时补丁或从 GitHub 下载该依赖。上游提交、Codey 修改范围和许可证记录在 `vendor/CodexPlusPlus/UPSTREAM.md`。
 
 ## 配置与路径
@@ -57,7 +77,7 @@ Codey 已将实际使用的 `CodexPlusPlus v1.2.36` core/data crate 固定在 `v
 - Windows 卡顿补丁不设开关：Codey 在运行时识别 Windows，并在每次启动 Codex 时自动隔离 Micro 设备模块和周期性 WMI 进程采样。首次应用或版本升级后应先从系统托盘完全退出已有 Codex，确保补丁能在新主进程执行前安装。macOS 不执行 Windows 专属分支。
 - 宠物硬阉割：`slimCodexPet` 默认为 `true`，macOS / Windows 都会在下次通过 Codey 启动 Codex 时生效。启用时若主 bundle 的语义锚点因官方升级而变化，补丁会失败关闭并停止 Codex，不会降级成仅隐藏 UI；关闭后下次启动会恢复完整宠物功能。
 - FastCtx 上下文工具：`fastContextTools` 默认为 `false`。打开后下次启动 Codex 生效；Codey 仅在本次运行的临时 `config.toml` 中注册独立的 `codey_fastctx` MCP、设置 8500 token 输出预算并追加工具使用指引，退出时随 provider 配置一起恢复原文件。用户已有的 `mcp_servers.fastctx` 不会被覆盖。
-- 子代理协作优化：`subagentOptimization` 默认为 `false`。打开后下次启动 Codex 生效；`config.toml`、`AGENTS.md` 与 `agents/default.toml` 的变更纳入同一个运行时租约，退出时自动恢复。`config.toml` 使用三方合并回滚 Codey 拥有的字段，提示词只移除 Codey 注入的完整块，用户运行期间替换过的 `default.toml` 不会被覆盖。
+- 子代理协作优化：`subagentOptimization` 默认为 `false`。开启前会校验当前线路是否支持子代理固定使用的 `gpt-5.6-luna`；第三方线路会实时刷新上游模型列表，不支持或无法确认时保持关闭并提示。打开后下次启动 Codex 生效；`config.toml`、`AGENTS.md` 与 `agents/default.toml` 的变更纳入同一个运行时租约，退出时自动恢复。`config.toml` 使用三方合并回滚 Codey 拥有的字段，提示词只移除 Codey 注入的完整块，用户运行期间替换过的 `default.toml` 不会被覆盖。
 - Codex App 路径：可在 Codey 配置界面填写；留空时使用 CodexPlusPlus 的平台发现逻辑。
 - CDP 默认端口：`9229`，如 Windows 端口被占用会按 core 的逻辑选择可用回环端口。
 

@@ -44,7 +44,7 @@ window.__codeyInvokeApi = async (command, args) => {
     return {
       running: true,
       restartRequired: false,
-      closeInProgress: false,
+      restartInProgress: false,
       activeProfileId: previewConfig.activeProfileId,
       activeProfileName: "主力代理",
       traceLogStats: previewTraceLogStats,
@@ -79,7 +79,7 @@ window.__codeyInvokeApi = async (command, args) => {
       restartRequired: true,
     };
   }
-  if (command === "close_codex" || command === "restart_codey") return { status: "closing" };
+  if (command === "restart_codey") return { status: "restarting" };
   if (command === "clear_codex_trace_logs") return { status: "ok", protectionEnabled: previewConfig.disableTraceLogWrites, cleanup: { databasesFound: 2, databasesCleaned: 2, rowsDeleted: 318757, bytesBefore: 903634944, bytesAfter: 98304, bytesReclaimed: 903536640 } };
   return { status: "ok" };
 };

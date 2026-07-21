@@ -3,10 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use semver::Version;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot};
@@ -35,8 +36,8 @@ pub struct AppState {
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     pub trace_log_stats: TraceLogStatsHandle,
     pub startup_error: RwLock<Option<String>>,
-    close_in_progress: AtomicBool,
-    manual_close_requested: AtomicBool,
+    restart_in_progress: AtomicBool,
+    runtime_generation: AtomicU64,
     session_titles: RwLock<HashMap<String, String>>,
     webhook_notifications: Mutex<HashSet<String>>,
     persisted_waiting_notifications: Mutex<HashSet<String>>,
@@ -59,8 +60,8 @@ impl Default for AppState {
             runtime: Mutex::new(None),
             trace_log_stats: TraceLogStatsHandle::idle(),
             startup_error: RwLock::new(None),
-            close_in_progress: AtomicBool::new(false),
-            manual_close_requested: AtomicBool::new(false),
+            restart_in_progress: AtomicBool::new(false),
+            runtime_generation: AtomicU64::new(0),
             session_titles: RwLock::new(HashMap::new()),
             webhook_notifications: Mutex::new(persisted_waiting_notifications.clone()),
             persisted_waiting_notifications: Mutex::new(persisted_waiting_notifications),
@@ -74,6 +75,33 @@ impl Default for AppState {
             shutdown_notify: Notify::new(),
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateManifest {
+    schema_version: u32,
+    version: String,
+    tag: String,
+    assets: Vec<UpdateManifestAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateManifestAsset {
+    platform: String,
+    arch: String,
+    package_type: String,
+    file_name: String,
+    url: String,
+    sha256: String,
+    size: u64,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct UpdateCheck {
+    current_version: String,
+    latest_version: String,
+    update_available: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -417,15 +445,6 @@ impl AppState {
         }
     }
 
-    pub fn request_manual_close_shutdown(&self) {
-        self.manual_close_requested.store(true, Ordering::Release);
-        self.request_shutdown();
-    }
-
-    pub fn manual_close_requested(&self) -> bool {
-        self.manual_close_requested.load(Ordering::Acquire)
-    }
-
     pub async fn wait_for_shutdown(&self) {
         if self.shutdown_requested.load(Ordering::Acquire) {
             return;
@@ -582,9 +601,10 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         "runtime_status" => runtime_status(state).await,
         "refresh_trace_log_stats" => refresh_trace_log_stats(state).await,
         "launch_codey" => launch_codey_runtime(state).await,
-        "close_codex" | "restart_codey" => schedule_close_codey_runtime(state).await,
+        "restart_codey" => schedule_restart_codey_runtime(state).await,
         "clear_codex_trace_logs" => clear_codex_trace_logs(state).await,
         "test_webhook" => test_webhook(state).await,
+        "check_for_updates" => check_for_updates(state).await,
         "export_session" => match string_argument(&args, "sessionId") {
             Ok(session_id) => session_transfer::export_session(&codex_home(), &session_id)
                 .and_then(|result| serde_json::to_value(result).map_err(anyhow::Error::from))
@@ -935,10 +955,11 @@ pub async fn runtime_status(state: &Arc<AppState>) -> Result<Value, String> {
         .is_some_and(|runtime| config_requires_restart(&runtime.applied_config, &config));
     let mut status = json!({
         "running": runtime.is_some(),
+        "appVersion": env!("CARGO_PKG_VERSION"),
         "activeProfileId": profile.as_ref().map(|profile| profile.id.as_str()).unwrap_or_default(),
         "activeProfileName": profile.as_ref().map(|profile| profile.name.as_str()).unwrap_or_default(),
         "restartRequired": restart_required,
-        "closeInProgress": state.close_in_progress.load(Ordering::Acquire),
+        "restartInProgress": state.restart_in_progress.load(Ordering::Acquire),
     });
     drop(config);
     if let Some(error) = state.startup_error.read().await.clone()
@@ -992,14 +1013,19 @@ async fn launch_codey_inner(state: &Arc<AppState>) -> Result<Value, String> {
             return Err(error.to_string());
         }
     };
-    let debug_port = runtime.debug_port;
     *runtime_slot = Some(Arc::new(runtime));
-    start_waiting_webhook_watcher(state, initial_scan_task, debug_port).await;
+    let runtime_generation = state.runtime_generation.fetch_add(1, Ordering::AcqRel) + 1;
+    start_waiting_webhook_watcher(state, initial_scan_task).await;
     drop(runtime_slot);
     let exit_state = Arc::clone(state);
     tokio::spawn(async move {
         if codex_exit.await.is_ok() {
-            exit_state.request_shutdown();
+            while exit_state.restart_in_progress.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            if exit_state.runtime_generation.load(Ordering::Acquire) == runtime_generation {
+                exit_state.request_shutdown();
+            }
         }
     });
     Ok(json!({"status":"running"}))
@@ -1011,93 +1037,35 @@ pub async fn launch_codey_runtime(state: &Arc<AppState>) -> Result<Value, String
     result
 }
 
-pub async fn schedule_close_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
-    if state.close_in_progress.swap(true, Ordering::AcqRel) {
-        return Ok(json!({"status":"already_closing"}));
+pub async fn schedule_restart_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
+    if state.restart_in_progress.swap(true, Ordering::AcqRel) {
+        return Ok(json!({"status":"already_restarting"}));
     }
 
-    let close_state = Arc::clone(state);
+    let restart_state = Arc::clone(state);
     tokio::spawn(async move {
         // The request originates inside the Codex renderer. Let the bridge
         // deliver its response before stopping the renderer that owns it.
         tokio::time::sleep(Duration::from_millis(250)).await;
-        let result = stop_codey_runtime(&close_state).await;
-        if let Err(error) = result {
-            *close_state.startup_error.write().await = Some(error);
-            close_state
-                .close_in_progress
+        restart_state
+            .runtime_generation
+            .fetch_add(1, Ordering::AcqRel);
+        if let Err(error) = stop_codey_runtime(&restart_state).await {
+            *restart_state.startup_error.write().await = Some(error);
+            restart_state
+                .restart_in_progress
                 .store(false, Ordering::Release);
             return;
         }
-        show_manual_relaunch_prompt().await;
-        close_state.request_manual_close_shutdown();
+        if let Err(error) = launch_codey_runtime(&restart_state).await {
+            eprintln!("Codey 自动重启 Codex 失败：{error}");
+        }
+        restart_state
+            .restart_in_progress
+            .store(false, Ordering::Release);
     });
 
-    Ok(json!({"status":"closing"}))
-}
-
-#[cfg(target_os = "macos")]
-async fn show_manual_relaunch_prompt() {
-    let script = r#"display dialog "Codex 已关闭。请关闭此提示后，手动运行 Codey 重新启动 Codex。" with title "Codey" buttons {"知道了"} default button "知道了" with icon note"#;
-    match tokio::process::Command::new("osascript")
-        .args(["-e", script])
-        .status()
-        .await
-    {
-        Ok(status) if status.success() => {}
-        Ok(status) => eprintln!("Codey 手动重启提示未正常显示：osascript 返回 {status}"),
-        Err(error) => eprintln!("Codey 手动重启提示显示失败：{error}"),
-    }
-}
-
-#[cfg(windows)]
-async fn show_manual_relaunch_prompt() {
-    let result = tokio::task::spawn_blocking(|| {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{
-            MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW,
-        };
-
-        let message = "Codex 已关闭。请关闭此提示后，手动运行 Codey 重新启动 Codex。\0"
-            .encode_utf16()
-            .collect::<Vec<_>>();
-        let title = "Codey\0".encode_utf16().collect::<Vec<_>>();
-        unsafe {
-            MessageBoxW(
-                std::ptr::null_mut(),
-                message.as_ptr(),
-                title.as_ptr(),
-                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
-            )
-        };
-    })
-    .await;
-    if let Err(error) = result {
-        eprintln!("Codey 手动重启提示显示失败：{error}");
-    }
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-async fn show_manual_relaunch_prompt() {
-    const MESSAGE: &str = "Codex 已关闭。请手动运行 Codey 重新启动 Codex。";
-    match tokio::process::Command::new("zenity")
-        .arg("--info")
-        .arg("--title=Codey")
-        .arg(format!("--text={MESSAGE}"))
-        .status()
-        .await
-    {
-        Ok(status) if status.success() => return,
-        Ok(_) | Err(_) => {}
-    }
-    match tokio::process::Command::new("notify-send")
-        .args(["Codey", MESSAGE])
-        .status()
-        .await
-    {
-        Ok(status) if status.success() => {}
-        Ok(status) => eprintln!("Codey 手动重启提示未正常显示：notify-send 返回 {status}"),
-        Err(error) => eprintln!("Codey 手动重启提示显示失败：{error}"),
-    }
+    Ok(json!({"status":"restarting"}))
 }
 
 pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
@@ -1147,7 +1115,6 @@ mod restart_tests {
 async fn start_waiting_webhook_watcher(
     state: &Arc<AppState>,
     initial_scan_task: RecentSessionScanTask,
-    debug_port: u16,
 ) {
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let watcher_state = Arc::clone(state);
@@ -1162,7 +1129,6 @@ async fn start_waiting_webhook_watcher(
         }
         baseline_waiting_notifications(&watcher_state, &baseline_events.pending_approvals).await;
         let mut turn_tracker = WebhookTurnTracker::from_snapshot(&baseline_events);
-        let mut last_synced_thread_statuses = None;
         let mut previous_events = baseline_events;
         let mut scan_schedule = SessionScanSchedule::default();
         let mut next_scan_delay = ACTIVE_SESSION_SCAN_DELAY;
@@ -1182,16 +1148,6 @@ async fn start_waiting_webhook_watcher(
 
             let (next_cache, events) = scan_recent_session_events(event_cache).await;
             event_cache = next_cache;
-            if last_synced_thread_statuses.as_ref() != Some(&events.session_statuses) {
-                match cdp::sync_thread_statuses(debug_port, &events.session_statuses).await {
-                    Ok(()) => {
-                        last_synced_thread_statuses = Some(events.session_statuses.clone());
-                    }
-                    Err(error) => {
-                        eprintln!("Codey 侧边栏任务状态同步失败：{error:#}");
-                    }
-                }
-            }
             notify_pending_approvals(&watcher_state, &events).await;
             let mut completion_delivery_pending = false;
             for completed in turn_tracker.completion_candidates(&events) {
@@ -1298,6 +1254,95 @@ pub async fn test_webhook(state: &Arc<AppState>) -> Result<Value, String> {
     let dispatcher =
         WebhookDispatcher::new(config.webhook.clone()).map_err(|error| error.to_string())?;
     dispatcher.test().await.map_err(|error| error.to_string())
+}
+
+pub async fn check_for_updates(state: &Arc<AppState>) -> Result<Value, String> {
+    let manifest_url = state
+        .config
+        .read()
+        .await
+        .update_manifest_url
+        .trim()
+        .to_string();
+    if manifest_url.is_empty() {
+        return Err("内置更新地址未配置，请检查构建配置".to_string());
+    }
+
+    let url = reqwest::Url::parse(&manifest_url)
+        .map_err(|_| "更新地址必须是有效的 HTTPS URL".to_string())?;
+    if url.scheme() != "https" {
+        return Err("更新地址必须使用 HTTPS".to_string());
+    }
+
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .user_agent(format!("Codey/{} update-check", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|error| format!("初始化更新检查失败：{error}"))?
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("检查更新失败：{error}"))?
+        .error_for_status()
+        .map_err(|error| format!("更新地址返回异常：{error}"))?;
+    if response.url().scheme() != "https" {
+        return Err("更新地址重定向到了非 HTTPS 地址".to_string());
+    }
+
+    let manifest = response
+        .json::<UpdateManifest>()
+        .await
+        .map_err(|error| format!("更新清单格式无效：{error}"))?;
+    let check = assess_update_manifest(env!("CARGO_PKG_VERSION"), manifest)?;
+    serde_json::to_value(check).map_err(|error| error.to_string())
+}
+
+fn assess_update_manifest(
+    current_version: &str,
+    manifest: UpdateManifest,
+) -> Result<UpdateCheck, String> {
+    if manifest.schema_version != 1 {
+        return Err(format!("不支持的更新清单版本：{}", manifest.schema_version));
+    }
+    if manifest.tag != format!("v{}", manifest.version) {
+        return Err("更新清单的版本和标签不一致".to_string());
+    }
+    if manifest.assets.is_empty() {
+        return Err("更新清单没有可下载的安装包".to_string());
+    }
+    for asset in &manifest.assets {
+        validate_update_asset(asset)?;
+    }
+
+    let current =
+        Version::parse(current_version).map_err(|error| format!("当前版本格式无效：{error}"))?;
+    let latest = Version::parse(&manifest.version)
+        .map_err(|error| format!("更新清单版本格式无效：{error}"))?;
+    Ok(UpdateCheck {
+        current_version: current.to_string(),
+        latest_version: latest.to_string(),
+        update_available: latest > current,
+    })
+}
+
+fn validate_update_asset(asset: &UpdateManifestAsset) -> Result<(), String> {
+    if asset.platform.trim().is_empty()
+        || asset.arch.trim().is_empty()
+        || asset.package_type.trim().is_empty()
+        || asset.file_name.trim().is_empty()
+        || asset.size == 0
+    {
+        return Err("更新清单包含不完整的安装包信息".to_string());
+    }
+    let url = reqwest::Url::parse(&asset.url)
+        .map_err(|_| format!("安装包地址无效：{}", asset.file_name))?;
+    if url.scheme() != "https" {
+        return Err(format!("安装包地址必须使用 HTTPS：{}", asset.file_name));
+    }
+    if asset.sha256.len() != 64 || !asset.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("安装包 SHA-256 无效：{}", asset.file_name));
+    }
+    Ok(())
 }
 
 fn webhook_session_configuration(
@@ -1731,6 +1776,56 @@ mod tests {
     use super::*;
     use crate::pending_approval::{AbortedTurn, PendingApproval, StartedTurn};
 
+    #[test]
+    fn update_manifest_reports_a_newer_https_release() {
+        let manifest = serde_json::from_value::<UpdateManifest>(json!({
+            "schema_version": 1,
+            "version": "0.2.0",
+            "tag": "v0.2.0",
+            "assets": [{
+                "platform": "windows",
+                "arch": "x64",
+                "package_type": "nsis",
+                "file_name": "Codey-0.2.0-windows-x64-setup.exe",
+                "url": "https://updates.example.com/releases/v0.2.0/Codey-0.2.0-windows-x64-setup.exe",
+                "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "size": 1024
+            }]
+        }))
+        .unwrap();
+
+        let result = assess_update_manifest("0.1.0", manifest).unwrap();
+
+        assert_eq!(result.current_version, "0.1.0");
+        assert_eq!(result.latest_version, "0.2.0");
+        assert!(result.update_available);
+    }
+
+    #[test]
+    fn update_manifest_rejects_insecure_asset_urls() {
+        let manifest = serde_json::from_value::<UpdateManifest>(json!({
+            "schema_version": 1,
+            "version": "0.2.0",
+            "tag": "v0.2.0",
+            "assets": [{
+                "platform": "windows",
+                "arch": "x64",
+                "package_type": "nsis",
+                "file_name": "Codey-0.2.0-windows-x64-setup.exe",
+                "url": "http://updates.example.com/Codey-0.2.0-windows-x64-setup.exe",
+                "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "size": 1024
+            }]
+        }))
+        .unwrap();
+
+        assert!(
+            assess_update_manifest("0.1.0", manifest)
+                .unwrap_err()
+                .contains("必须使用 HTTPS")
+        );
+    }
+
     fn lifecycle(started: &[(&str, &str)], completed: &[(&str, &str)]) -> RecentSessionEvents {
         RecentSessionEvents {
             started_turns: started
@@ -1982,7 +2077,7 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_secs(1),
-            start_waiting_webhook_watcher(&state, initial_scan_task, 0),
+            start_waiting_webhook_watcher(&state, initial_scan_task),
         )
         .await
         .expect("watcher registration should not await the initial session scan");

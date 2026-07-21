@@ -9,7 +9,6 @@ import {
   MagicBadge as Badge,
   MagicButton as Button,
   MagicCard as Card,
-  MagicSwitch as Switch,
 } from "./components/magicui";
 
 export type TraceLogDailyStats = {
@@ -50,7 +49,6 @@ type TraceLogModuleProps = {
   clearBusy: boolean;
   refreshing: boolean;
   disabled: boolean;
-  onProtectionChange: (checked: boolean) => void;
   onClear: () => void;
   onRefresh: () => void;
 };
@@ -112,7 +110,6 @@ export function TraceLogModule({
   clearBusy,
   refreshing,
   disabled,
-  onProtectionChange,
   onClear,
   onRefresh,
 }: TraceLogModuleProps) {
@@ -127,18 +124,12 @@ export function TraceLogModule({
         <div>
           <span className="section-kicker">Diagnostics</span>
           <h2 id="trace-title">Trace 日志分析</h2>
-          <p>按需快照 · 诊断与写盘保护</p>
+          <p>按需快照 · 日志诊断</p>
         </div>
         <div className="trace-module-actions">
           <Badge variant={protectionEnabled ? "success" : "secondary"}>
             {protectionEnabled ? "写盘保护已开启" : "写盘保护关闭"}
           </Badge>
-          <Switch
-            checked={protectionEnabled}
-            disabled={disabled}
-            onCheckedChange={onProtectionChange}
-            aria-label="控制 Codex Trace 日志写盘保护"
-          />
           <Button
             className="trace-refresh-button"
             variant="ghost"

@@ -186,13 +186,9 @@ test("batches visible thread timestamps through the bridge and renders the resul
   );
 });
 
-test("injects time styles that yield to statuses and sidebar actions", () => {
+test("injects time styles that yield to native statuses and sidebar actions", () => {
   assert.match(source, /threadUpdatedAtAttribute = "data-codey-thread-updated-at"/);
   assert.match(source, /font-variant-numeric: tabular-nums/);
-  assert.match(
-    source,
-    /sidebar-thread-row\]\[\$\{threadStatusAttribute\}\] \[\$\{threadUpdatedAtAttribute\}\],/,
-  );
   assert.match(
     source,
     /sidebar-thread-row\]:has\(\[data-hover-card-open-immediately\]\[class\*="group-hover:hidden"\]\) \[\$\{threadUpdatedAtAttribute\}\] \{ display: none; \}/,

@@ -9,25 +9,19 @@ import {
   FolderOpen,
   GitBranch,
   History,
-  LayoutGrid,
   LoaderCircle,
   PlugZap,
-  Power,
   RefreshCw,
   Save,
   Search,
   Send,
   Server,
-  Settings2,
-  Sparkles,
   Trash2,
   X,
-  Zap,
 } from "lucide-react";
 import { invoke } from "./api";
 import { formatBytes, TraceLogModule, type TraceLogStats } from "./TraceLogModule";
 import {
-  BorderBeam,
   MagicBadge as Badge,
   MagicButton as Button,
   MagicCard as Card,
@@ -94,8 +88,9 @@ type Maintenance = {
 
 type RuntimeStatus = {
   running: boolean;
+  appVersion?: string;
   restartRequired?: boolean;
-  closeInProgress?: boolean;
+  restartInProgress?: boolean;
   activeProfileId?: string;
   activeProfileName?: string;
   startupError?: string;
@@ -122,7 +117,7 @@ type CcSwitchStatus = {
 type Notice = { tone: "info" | "success" | "error"; text: string };
 type InlineResult = { tone: "idle" | "pending" | "success" | "error"; text: string };
 type Confirmation = {
-  action: "clear" | "close";
+  action: "clear" | "restart";
   title: string;
   description: string;
   confirmLabel: string;
@@ -136,13 +131,22 @@ type TraceLogCleanup = {
   bytesAfter: number;
   bytesReclaimed: number;
 };
+type UpdateCheck = {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+};
 
 type AppProps = {
   embedded?: boolean;
   onClose?: () => void;
 };
 
+const SUBAGENT_MODEL = "gpt-5.6-luna";
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+const supportsModel = (models: string[], expected: string) => models.some(
+  (model) => model.trim().toLowerCase() === expected,
+);
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -174,10 +178,10 @@ export function App({ embedded = false, onClose }: AppProps) {
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [webhookResult, setWebhookResult] = useState<InlineResult>({ tone: "idle", text: "" });
+  const [updateResult, setUpdateResult] = useState<InlineResult>({ tone: "idle", text: "" });
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
   const [traceSnapshotStale, setTraceSnapshotStale] = useState(false);
-  const [activeTab, setActiveTab] = useState<"all" | "route" | "system" | "logs">("all");
 
   const provider = ccSwitchStatus?.provider;
   const officialSlugs = useMemo(
@@ -225,7 +229,7 @@ export function App({ embedded = false, onClose }: AppProps) {
   }, [status.traceLogStats?.pending]);
 
   useEffect(() => {
-    if (!status.closeInProgress) return;
+    if (!status.restartInProgress) return;
     let cancelled = false;
     let timer = 0;
     const poll = () => {
@@ -234,7 +238,7 @@ export function App({ embedded = false, onClose }: AppProps) {
           const next = await invoke<RuntimeStatus>("runtime_status");
           if (cancelled) return;
           setStatus(next);
-          if (next.closeInProgress) poll();
+          if (next.restartInProgress) poll();
         } catch {
           if (!cancelled) poll();
         }
@@ -245,7 +249,7 @@ export function App({ embedded = false, onClose }: AppProps) {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [status.closeInProgress]);
+  }, [status.restartInProgress]);
 
   async function load() {
     try {
@@ -285,6 +289,13 @@ export function App({ embedded = false, onClose }: AppProps) {
 
   function editConfig(next: Config) {
     setConfig(next);
+    setDirty(true);
+  }
+
+  function setSubagentOptimization(enabled: boolean) {
+    setConfig((current) => current
+      ? { ...current, subagentOptimization: enabled }
+      : current);
     setDirty(true);
   }
 
@@ -382,6 +393,58 @@ export function App({ embedded = false, onClose }: AppProps) {
     });
   }
 
+  async function updateSubagentOptimization(checked: boolean) {
+    if (!checked) {
+      setSubagentOptimization(false);
+      return;
+    }
+    if (!provider) {
+      setNotice({ tone: "error", text: "当前线路尚未就绪，无法校验子代理模型" });
+      return;
+    }
+    await runOperation("check-subagent-model", async () => {
+      let supported = false;
+      if (provider.official) {
+        supported = modelState.officialModels.some(
+          (model) => model.slug === SUBAGENT_MODEL && model.supported,
+        );
+      } else {
+        let result: {
+          models: string[];
+          modelState: ModelState;
+          restartRequired?: boolean;
+        };
+        try {
+          result = await withTimeout(
+            invoke("fetch_current_provider_models"),
+            15_000,
+            "获取上游模型超时，请检查当前线路",
+          );
+        } catch (error) {
+          throw new Error(`无法确认当前第三方 API 是否支持 ${SUBAGENT_MODEL}：${errorText(error)}`);
+        }
+        setModelState(result.modelState);
+        if (typeof result.restartRequired === "boolean") {
+          setStatus((current) => ({ ...current, restartRequired: result.restartRequired }));
+        }
+        supported = supportsModel(result.models, SUBAGENT_MODEL);
+      }
+
+      if (!supported) {
+        setNotice({
+          tone: "error",
+          text: `当前${provider.official ? "官方账号" : "第三方 API"}不支持 ${SUBAGENT_MODEL}，无法开启子代理协作优化`,
+        });
+        return;
+      }
+      setSubagentOptimization(true);
+      setNotice({
+        tone: "success",
+        text: `已确认当前线路支持 ${SUBAGENT_MODEL}，保存并重启 Codex 后生效`,
+      });
+    });
+  }
+
   function toggleDraftModel(model: string, checked: boolean) {
     setDraftModels((current) => checked
       ? current.includes(model) ? current : [...current, model]
@@ -434,6 +497,30 @@ export function App({ embedded = false, onClose }: AppProps) {
     }
   }
 
+  async function checkForUpdates() {
+    if (!config || isBusy) return;
+    setBusy("check-update");
+    setUpdateResult({ tone: "pending", text: "正在检查更新…" });
+    try {
+      const result = await withTimeout(
+        invoke<UpdateCheck>("check_for_updates"),
+        12_000,
+        "检查更新超时，请检查网络",
+      );
+      const text = result.updateAvailable
+        ? `发现 v${result.latestVersion} 更新（当前 v${result.currentVersion}）`
+        : `当前已是最新版本 v${result.currentVersion}`;
+      setUpdateResult({ tone: "success", text });
+      setNotice({ tone: result.updateAvailable ? "info" : "success", text });
+    } catch (error) {
+      const text = errorText(error);
+      setUpdateResult({ tone: "error", text });
+      setNotice({ tone: "error", text });
+    } finally {
+      setBusy(null);
+    }
+  }
+
   function askClearTraceLogs() {
     setConfirmation({
       action: "clear",
@@ -444,28 +531,28 @@ export function App({ embedded = false, onClose }: AppProps) {
     });
   }
 
-  function askCloseCodex() {
+  function askRestartCodex() {
     setConfirmation({
-      action: "close",
-      title: "关闭 Codex？",
-      description: "当前 Codex 将被关闭，正在执行的本地任务会被中断。关闭完成后会显示系统提示，请按提示手动运行 Codey 重新启动。",
-      confirmLabel: "关闭 Codex",
-      run: () => void closeCodex(),
+      action: "restart",
+      title: "重启 Codex？",
+      description: "当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。",
+      confirmLabel: "重启 Codex",
+      run: () => void restartCodex(),
     });
   }
 
-  async function closeCodex() {
+  async function restartCodex() {
     if (!config) return;
-    await runOperation("close", async () => {
+    await runOperation("restart", async () => {
       if (dirty) await persist(config);
       setNotice({
         tone: "info",
-        text: "正在关闭 Codex，关闭后请按系统提示手动运行 Codey…",
+        text: "正在重启 Codex，Codey 将自动重新拉起客户端…",
       });
-      await invoke("close_codex");
+      await invoke("restart_codey");
       setStatus((current) => ({
         ...current,
-        closeInProgress: true,
+        restartInProgress: true,
       }));
     });
   }
@@ -524,7 +611,6 @@ export function App({ embedded = false, onClose }: AppProps) {
   const maintenance = status.maintenance;
   const sessionOk = maintenance?.sessionStatus === "ready";
   const pluginOk = maintenance?.pluginStatus === "ready";
-  const performanceOk = maintenance?.performanceStatus === "ready";
   const performanceError = maintenance?.performanceStatus === "error";
   const resolvedCodexPath = status.codexAppPath || "/Applications/ChatGPT.app";
   const optimizationReady = config.slimCodexPet
@@ -539,7 +625,6 @@ export function App({ embedded = false, onClose }: AppProps) {
     label: string;
     tone: "success" | "warning" | "destructive" | "info";
     icon: typeof Activity;
-    fullDetail?: boolean;
   }> = [
     {
       title: "会话恢复",
@@ -548,7 +633,6 @@ export function App({ embedded = false, onClose }: AppProps) {
       label: sessionOk ? "正常" : maintenance ? "需检查" : "检查中",
       tone: sessionOk ? "success" : maintenance ? "destructive" : "warning",
       icon: History,
-      fullDetail: true,
     },
     {
       title: "系统优化",
@@ -576,127 +660,187 @@ export function App({ embedded = false, onClose }: AppProps) {
     <main className={`app-shell${embedded ? " embedded" : ""}`} ref={setPortalContainer}>
       <a className="skip-link" href="#codey-settings-content">跳至设置内容</a>
 
-      <div className="page-scroll">
-        <div className="page" id="codey-settings-content">
-          <div className="page-header-actions">
-            <div className="page-header-left">
-              <strong>Codey 配置</strong>
-              <Badge variant={provider.official ? "info" : "violet"}>
-                {provider.name}
-              </Badge>
-              <div className={`runtime-summary ${status.running ? "online" : ""}`}>
-                <span className="runtime-dot" />
-                <small>{status.running ? "Codex 在线" : "未启动"}</small>
+      <header className="config-header">
+        <div className="config-header-inner">
+          <div className="config-brand">
+            <div className="config-brand-mark">{">_"}</div>
+            <div className="config-brand-copy">
+              <div className="config-brand-title-row">
+                <h1>Codey 配置</h1>
+                <Badge variant={provider.official ? "outline" : "secondary"}>
+                  {provider.name}
+                </Badge>
               </div>
-            </div>
-            <div className="page-header-right">
-              <ShimmerButton
-                className="save-button"
-                disabled={!dirty || isBusy}
-                onClick={() => void saveCurrent()}
-              >
-                {busy === "save"
-                  ? <LoaderCircle className="spinner" aria-hidden="true" />
-                  : dirty
-                    ? <Save aria-hidden="true" />
-                    : <Check aria-hidden="true" />}
-                {dirty ? "保存更改" : "已保存"}
-              </ShimmerButton>
-              {embedded && (
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="关闭设置"
-                  onClick={onClose}
-                >
-                  <X aria-hidden="true" />
-                </Button>
-              )}
+              <p>管理线路、模型、运行策略和诊断通知</p>
             </div>
           </div>
-          {(activeTab === "all" || activeTab === "system") && (
-            <section className="status-overview" aria-labelledby="status-overview-title">
-              <div className="section-title overview-title">
-                <div>
-                  <span className="section-kicker">Live snapshot</span>
-                  <h1 id="status-overview-title">当前运行状态</h1>
-                  <p>状态来自 Codey 运行时与 Codex 客户端，本页打开时自动同步。</p>
+
+          <div className="config-header-actions">
+            <ShimmerButton
+              className="save-button"
+              disabled={!dirty || isBusy}
+              onClick={() => void saveCurrent()}
+            >
+              {busy === "save"
+                ? <LoaderCircle className="spinner" aria-hidden="true" />
+                : dirty
+                  ? <Save aria-hidden="true" />
+                  : <Check aria-hidden="true" />}
+              {dirty ? "保存更改" : "已保存"}
+            </ShimmerButton>
+            {embedded && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="关闭设置"
+                onClick={onClose}
+              >
+                <X aria-hidden="true" />
+              </Button>
+            )}
+          </div>
+        </div>
+
+      </header>
+
+      <div className="page-scroll">
+        <div className="page" id="codey-settings-content">
+          <section
+            className={`operations-hub${restartPending ? " pending" : status.running ? " running" : ""}`}
+            aria-labelledby="operations-title"
+          >
+            <Card className="operations-panel">
+              <div className="operations-header">
+                <div className="operations-heading">
+                  <span className="operations-heading-icon">
+                    <Activity size={18} aria-hidden="true" />
+                  </span>
+                  <div>
+                    <span className="section-kicker">Runtime & maintenance</span>
+                    <h1 id="operations-title">Codex 运行与维护</h1>
+                    <p aria-live="polite">
+                      {restartPending
+                        ? "配置已保存，等待重启后载入新的模型目录或启动参数。"
+                        : status.running
+                          ? "当前线路与运行参数已就绪，状态会在本页自动同步。"
+                          : "Codex 尚未启动，运行状态将在客户端启动后自动同步。"}
+                    </p>
+                  </div>
                 </div>
-                <Badge variant="outline">实时快照</Badge>
+
+                <div className="operations-actions">
+                  <Badge variant={restartPending ? "warning" : status.running ? "success" : "secondary"}>
+                    <span className="operations-status-dot" aria-hidden="true" />
+                    {restartPending ? "等待重启" : status.running ? "运行中" : "未启动"}
+                  </Badge>
+                  <Button
+                    variant={restartPending ? "default" : "outline"}
+                    size="sm"
+                    disabled={isBusy || status.restartInProgress || !status.running}
+                    onClick={askRestartCodex}
+                  >
+                    {busy === "restart" || status.restartInProgress
+                      ? <LoaderCircle className="spinner" aria-hidden="true" />
+                      : <RefreshCw aria-hidden="true" />}
+                    {status.running ? "重启 Codex" : "未运行"}
+                  </Button>
+                </div>
               </div>
-              <div className="status-grid" role="list">
+
+              <div className="operations-status-grid" role="list" aria-label="运行状态">
                 {statusCards.map((item) => {
+                  const StatusIcon = item.icon;
                   return (
-                    <Card
-                      className={`status-card status-card-${item.tone}`}
+                    <article
+                      className={`operations-status-item operations-status-${item.tone}`}
                       key={item.title}
                       role="listitem"
                     >
-                      <div className="status-card-header">
-                        <h3>{item.title}</h3>
+                      <div className="operations-status-title">
+                        <span className="operations-status-icon">
+                          <StatusIcon size={16} aria-hidden="true" />
+                        </span>
+                        <div>
+                          <h2>{item.title}</h2>
+                          <p>{item.description}</p>
+                        </div>
                         <Badge variant={item.tone}>{item.label}</Badge>
                       </div>
-                      <div className="status-card-body">
-                        <p>{item.description}</p>
-                      </div>
-                      <div className="status-card-footer">
-                        <span className={`status-card-detail${item.fullDetail ? " status-card-detail-full" : ""}`}>
-                          {item.detail}
-                        </span>
-                      </div>
-                    </Card>
+                      <div className="operations-status-detail">{item.detail}</div>
+                    </article>
                   );
                 })}
               </div>
-            </section>
-          )}
+
+              <div className="maintenance-grid">
+                <div className="maintenance-item patch-status">
+                  <div className="maintenance-item-heading">
+                    <span className="maintenance-item-icon">
+                      <Cpu size={16} aria-hidden="true" />
+                    </span>
+                    <strong>Windows 新版卡顿补丁</strong>
+                    <Badge variant={performanceError ? "destructive" : "success"}>
+                      {performanceError ? "异常" : "自动生效"}
+                    </Badge>
+                  </div>
+                  <p>
+                    {maintenance?.performanceDetail
+                      || "启动时隔离 Codex Micro，并停止周期性 WMI 进程采样。"}
+                  </p>
+                </div>
+
+                <div className="maintenance-item update-status">
+                  <div className="maintenance-item-heading">
+                    <span className="maintenance-item-icon">
+                      <RefreshCw size={16} aria-hidden="true" />
+                    </span>
+                    <strong>应用更新</strong>
+                    <span className="maintenance-heading-badges">
+                      <Badge variant="secondary">
+                        当前 {status.appVersion ? `v${status.appVersion}` : "读取中"}
+                      </Badge>
+                      <Badge variant="info">R2 内置</Badge>
+                    </span>
+                  </div>
+                  <div className="maintenance-update-row">
+                    <span className={`inline-result ${updateResult.tone}`} aria-live="polite">
+                      {updateResult.text || "从公开更新源检查最新稳定版本。"}
+                    </span>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={isBusy}
+                      onClick={() => void checkForUpdates()}
+                    >
+                      {busy === "check-update"
+                        ? <LoaderCircle className="spinner" aria-hidden="true" />
+                        : <RefreshCw aria-hidden="true" />}
+                      检查更新
+                    </Button>
+                  </div>
+                </div>
+
+                <div className="maintenance-item path-status">
+                  <div className="path-status-layout">
+                    <span className="path-status-label">Codex 应用路径</span>
+                    <div className="path-display" aria-label="Codex 应用路径">
+                      <FolderOpen size={15} aria-hidden="true" />
+                      <code>{config.codexAppPath || resolvedCodexPath}</code>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          </section>
 
           <div className="configuration-heading">
             <span className="section-kicker">Configuration</span>
-            <h2>{activeTab === "all" ? "系统配置中心" : activeTab === "route" ? "线路与模型配置" : activeTab === "system" ? "系统与精简策略" : "诊断与通知配置"}</h2>
-            <p>管理线路与模型、应用精简策略，以及通知和日志。</p>
+            <h2>配置项目</h2>
+            <p>线路、模型、客户端策略、通知和诊断日志。</p>
           </div>
 
-          <div className={`runtime-action-bar${restartPending ? " pending" : status.running ? " running" : ""}`}>
-            <div className="runtime-action-left">
-              <div className="runtime-action-copy" aria-live="polite">
-                <div className="runtime-action-title-row">
-                  <strong>
-                    {restartPending
-                      ? "配置修改等待重启生效"
-                      : status.running
-                        ? "当前配置已成功载入运行"
-                        : "Codex 尚未启动"}
-                  </strong>
-                  <Badge variant={restartPending ? "warning" : status.running ? "success" : "secondary"}>
-                    {restartPending ? "等待重启" : status.running ? "在线" : "未启动"}
-                  </Badge>
-                </div>
-                <small>
-                  {restartPending
-                    ? "模型目录或启动参数更改将在重启 Codey / Codex 后载入"
-                    : status.running
-                      ? "当前线路与运行参数已就绪"
-                      : "请手动运行 Codey 应用当前配置"}
-                </small>
-              </div>
-            </div>
-            <Button
-              variant={restartPending ? "default" : "outline"}
-              size="sm"
-              disabled={isBusy || status.closeInProgress || !status.running}
-              onClick={askCloseCodex}
-            >
-              {busy === "close" || status.closeInProgress
-                ? <LoaderCircle className="spinner" aria-hidden="true" />
-                : null}
-              {status.running ? "关闭 Codex" : "未运行"}
-            </Button>
-          </div>
-
-          <div className={`dashboard-grid tab-view-${activeTab}`}>
-            {(activeTab === "all" || activeTab === "route") && (
-              <div className="dashboard-main-column">
+          <div className="dashboard-grid">
+            <div className="dashboard-main-column">
                 <section className="route-section" aria-labelledby="route-title">
                   <div className="section-title">
                     <div>
@@ -835,16 +979,14 @@ export function App({ embedded = false, onClose }: AppProps) {
                     </div>
                   </Card>
                 </section>
-              </div>
-            )}
+            </div>
 
-            {(activeTab === "all" || activeTab === "system") && (
-              <div className="dashboard-side-column">
+            <div className="dashboard-side-column">
                 <section className="secondary-section" aria-labelledby="runtime-title">
                   <div className="section-title compact">
                     <div>
-                      <h2 id="runtime-title">系统与应用策略</h2>
-                      <p>精简策略和基础运行参数。</p>
+                      <h2 id="runtime-title">Codex 功能策略</h2>
+                      <p>按需精简客户端模块和界面行为。</p>
                     </div>
                   </div>
                   <Card className="secondary-card runtime-card">
@@ -903,18 +1045,42 @@ export function App({ embedded = false, onClose }: AppProps) {
                         </div>
                       </div>
 
+                      <div className={`feature-card ${config.disableTraceLogWrites ? "active" : ""}`}>
+                        <div className="feature-card-header">
+                          <strong>Trace 日志写盘保护</strong>
+                          <Switch
+                            checked={config.disableTraceLogWrites}
+                            onCheckedChange={(checked) => editConfig({
+                              ...config,
+                              disableTraceLogWrites: checked,
+                            })}
+                            aria-label="启用 Codex Trace 日志写盘保护"
+                          />
+                        </div>
+                        <div className="feature-card-body">
+                          <small>阻止Trace日志持续写入数据库影响硬盘寿命</small>
+                        </div>
+                      </div>
+
                       <div className={`feature-card ${config.subagentOptimization ? "active" : ""}`}>
                         <div className="feature-card-header">
-                          <strong>子代理协作优化</strong>
+                          <div className="feature-card-title">
+                            <strong>子代理协作优化</strong>
+                            <Badge variant="warning">需支持 GPT-5.6-Luna</Badge>
+                          </div>
                           <Switch
                             checked={config.subagentOptimization}
-                            onCheckedChange={(checked) => editConfig({ ...config, subagentOptimization: checked })}
+                            disabled={isBusy}
+                            aria-busy={busy === "check-subagent-model"}
+                            onCheckedChange={(checked) => void updateSubagentOptimization(checked)}
                             aria-label="启用子代理协作优化"
                           />
                         </div>
                         <div className="feature-card-body">
                           <small>
-                            {config.subagentOptimization
+                            {busy === "check-subagent-model"
+                              ? `正在校验当前线路是否支持 ${SUBAGENT_MODEL}`
+                              : config.subagentOptimization
                               ? "启用v2并行配置"
                               : "保持 Codex 默认子代理配置，不注入协作提示词"}
                           </small>
@@ -939,43 +1105,12 @@ export function App({ embedded = false, onClose }: AppProps) {
                         </div>
                       </div>
 
-                      <div className="feature-card">
-                        <div className="feature-card-header">
-                          <strong>Windows 新版卡顿补丁</strong>
-                          <Badge variant={performanceError ? "destructive" : "success"}>
-                            {performanceError ? "异常" : "自动生效"}
-                          </Badge>
-                        </div>
-                        <div className="feature-card-body">
-                          <small>
-                            {maintenance?.performanceDetail
-                              || "启动时隔离 Codex Micro，并停止每 30 秒触发的 WMI 进程采样"}
-                          </small>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="app-path-field">
-                      <label className="field">
-                        <span>Codex 应用路径</span>
-                        <div className="input-shell">
-                          <FolderOpen size={15} aria-hidden="true" />
-                          <Input
-                            value={config.codexAppPath}
-                            onChange={(event) => editConfig({ ...config, codexAppPath: event.target.value })}
-                            placeholder={resolvedCodexPath}
-                            spellCheck={false}
-                          />
-                        </div>
-                      </label>
                     </div>
                   </Card>
                 </section>
-              </div>
-            )}
+            </div>
 
-            {(activeTab === "all" || activeTab === "logs") && (
-              <div className="dashboard-side-column notification-column">
+            <div className="dashboard-side-column notification-column">
                 <section className="secondary-section" aria-labelledby="notification-title">
                   <div className="section-title compact">
                     <div>
@@ -1031,28 +1166,21 @@ export function App({ embedded = false, onClose }: AppProps) {
                     </div>
                   </Card>
                 </section>
-              </div>
-            )}
+            </div>
           </div>
 
-          {(activeTab === "all" || activeTab === "logs") && (
-            <div className="dashboard-trace-column">
-              <TraceLogModule
-                stats={status.traceLogStats}
-                snapshotStale={traceSnapshotStale}
-                protectionEnabled={config.disableTraceLogWrites}
-                clearBusy={busy === "clear-trace-logs"}
-                refreshing={busy === "refresh-trace-stats"}
-                disabled={isBusy}
-                onProtectionChange={(checked) => editConfig({
-                  ...config,
-                  disableTraceLogWrites: checked,
-                })}
-                onClear={askClearTraceLogs}
-                onRefresh={() => void refreshTraceLogStats()}
-              />
-            </div>
-          )}
+          <div className="dashboard-trace-column">
+            <TraceLogModule
+              stats={status.traceLogStats}
+              snapshotStale={traceSnapshotStale}
+              protectionEnabled={config.disableTraceLogWrites}
+              clearBusy={busy === "clear-trace-logs"}
+              refreshing={busy === "refresh-trace-stats"}
+              disabled={isBusy}
+              onClear={askClearTraceLogs}
+              onRefresh={() => void refreshTraceLogStats()}
+            />
+          </div>
         </div>
       </div>
 
@@ -1163,15 +1291,15 @@ export function App({ embedded = false, onClose }: AppProps) {
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmation(null)}>取消</Button>
             <Button
-              variant={confirmation?.action === "close" ? "default" : "destructive"}
+              variant={confirmation?.action === "restart" ? "default" : "destructive"}
               onClick={() => {
                 const pending = confirmation;
                 setConfirmation(null);
                 pending?.run();
               }}
             >
-              {confirmation?.action === "close"
-                ? <Power aria-hidden="true" />
+              {confirmation?.action === "restart"
+                ? <RefreshCw aria-hidden="true" />
                 : <Trash2 aria-hidden="true" />}
               {confirmation?.confirmLabel}
             </Button>
