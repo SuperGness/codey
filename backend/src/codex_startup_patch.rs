@@ -27,7 +27,9 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     typeof argument === "string" && /^--inspect(?:-brk)?(?:=|$)/.test(argument);
   const rendererGatePatchState = {
     modelVisibility: false,
+    serviceTierOptions: false,
     serviceTierRequest: false,
+    serviceTierSettingsUi: false,
     serviceTierUi: false,
     lastError: null,
   };
@@ -70,15 +72,56 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
           _match,
           assignment,
           _resultName,
-          chatGptAuthName,
+          _chatGptAuthName,
           loadingName,
-          requirementsName,
         ) =>
-          `${assignment}!${chatGptAuthName}||(!${loadingName}&&${requirementsName}!=null&&` +
-          `${requirementsName}?.requirements?.featureRequirements?.fast_mode!==!1)`,
+          `${assignment}!${loadingName}`,
         "service tier UI",
       );
       rendererGatePatchState.serviceTierUi = true;
+    }
+    if (
+      source.includes("serviceTier.standard.label") &&
+      source.includes("serviceTier.fast.label") &&
+      /\?\.serviceTiers\s*\?\?\s*\[\]/.test(source)
+    ) {
+      patched = replaceUniqueRendererGate(
+        patched,
+        /\b([$A-Z_a-z][$\w]*)\?\.serviceTiers\s*\?\?\s*\[\]/g,
+        (_match, modelName) =>
+          `${modelName}?.serviceTiers?.length?${modelName}.serviceTiers:` +
+          `[{id:\`priority\`,name:\`Fast\`}]`,
+        "service tier options",
+      );
+      patched = replaceUniqueRendererGate(
+        patched,
+        /function\s+([$A-Z_a-z][$\w]*)\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)\)\{return\s+([$A-Z_a-z][$\w]*)\(\2,\3\)\?\.id\s*\?\?\s*null\}/g,
+        (
+          _match,
+          functionName,
+          modelName,
+          serviceTierName,
+          lookupName,
+        ) =>
+          `function ${functionName}(${modelName},${serviceTierName}){return ` +
+          `${lookupName}(${modelName},${serviceTierName})?.id??${serviceTierName}??null}`,
+        "service tier selection",
+      );
+      rendererGatePatchState.serviceTierOptions = true;
+    }
+    if (
+      source.includes("isServiceTierAllowed") &&
+      /availableOptions\.length\s*<=\s*1/.test(source) &&
+      source.includes("selectedServiceTier")
+    ) {
+      patched = replaceUniqueRendererGate(
+        patched,
+        /if\s*\(\s*!\s*([$A-Z_a-z][$\w]*)\s*\|\|\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*<=\s*1\s*\)\s*return\s+null/g,
+        (_match, _isAllowedName, settingsName) =>
+          `if(${settingsName}.availableOptions.length===0)return null`,
+        "service tier settings UI",
+      );
+      rendererGatePatchState.serviceTierSettingsUi = true;
     }
     if (
       source.includes("Failed to read service tier for request") &&
@@ -101,7 +144,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
       return (
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
-        /\/(?:app-initial(?:[~-][^/]*)?|windows-model-controls(?:[~-][^/]*)?)\.js$/i.test(
+        /\/(?:app-initial(?:[~-][^/]*)?|general-settings(?:[~-][^/]*)?|windows-model-controls(?:[~-][^/]*)?)\.js$/i.test(
           url.pathname,
         )
       );

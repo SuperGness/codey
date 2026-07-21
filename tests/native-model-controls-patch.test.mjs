@@ -88,7 +88,7 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
     const patchedServiceTierUi = await patchAsset(serviceTierUiSource);
     assert.match(
       patchedServiceTierUi,
-      /p=!s\|\|\(!f&&u!=null&&u\?\.requirements\?\.featureRequirements\?\.fast_mode!==!1\)/,
+      /p=!f/,
     );
     const serviceTierAllowed = Function(
       `${patchedServiceTierUi};return U;`,
@@ -98,7 +98,7 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
         authMethod: "chatgpt",
         requirements: { featureRequirements: { fast_mode: false } },
       }).isServiceTierAllowed,
-      false,
+      true,
     );
     assert.equal(
       serviceTierAllowed({
@@ -106,6 +106,93 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
         requirements: { featureRequirements: { fast_mode: false } },
       }).isServiceTierAllowed,
       true,
+    );
+
+    const serviceTierOptionsSource = [
+      "const serviceTierMessageIds=[`serviceTier.standard.label`,`serviceTier.fast.label`];",
+      "const messages={fastDescription:`Fast response`,fastLabel:`Fast`};",
+      "const standard={description:`Default speed`,iconKind:null,label:`Standard`,tier:null,value:null};",
+      "function kind(e){return e===`priority`?`fast`:null}",
+      "function description(e){return e.description??messages.fastDescription}",
+      "function label(e){return e.id===`priority`?messages.fastLabel:e.name}",
+      "function options(e){return[standard,...(e?.serviceTiers??[]).map(e=>({",
+      "description:description(e),iconKind:kind(e.id),label:label(e),tier:e,value:e.id}))]}",
+      "function lookup(e,t){return e?.serviceTiers?.find(e=>e.id===t)??null}",
+      "function selected(e,t){return lookup(e,t)?.id??null}",
+    ].join("");
+    const patchedServiceTierOptions = await patchAsset(serviceTierOptionsSource);
+    assert.match(
+      patchedServiceTierOptions,
+      /e\?\.serviceTiers\?\.length\?e\.serviceTiers:\[\{id:`priority`,name:`Fast`\}\]/,
+    );
+    assert.match(
+      patchedServiceTierOptions,
+      /function selected\(e,t\)\{return lookup\(e,t\)\?\.id\?\?t\?\?null\}/,
+    );
+    const nativeServiceTierHelpers = Function(
+      `${patchedServiceTierOptions};return {options,selected};`,
+    )();
+    assert.deepEqual(
+      nativeServiceTierHelpers.options({}).map(({ iconKind, label, value }) => ({
+        iconKind,
+        label,
+        value,
+      })),
+      [
+        { iconKind: null, label: "Standard", value: null },
+        { iconKind: "fast", label: "Fast", value: "priority" },
+      ],
+    );
+    assert.deepEqual(
+      nativeServiceTierHelpers
+        .options({ serviceTiers: [] })
+        .map(({ label, value }) => ({ label, value })),
+      [
+        { label: "Standard", value: null },
+        { label: "Fast", value: "priority" },
+      ],
+    );
+    assert.equal(nativeServiceTierHelpers.selected({}, "priority"), "priority");
+    assert.deepEqual(
+      nativeServiceTierHelpers
+        .options({
+          serviceTiers: [
+            { description: "Lowest latency", id: "ultrafast", name: "Ultrafast" },
+          ],
+        })
+        .map(({ label, value }) => ({ label, value })),
+      [
+        { label: "Standard", value: null },
+        { label: "Ultrafast", value: "ultrafast" },
+      ],
+    );
+
+    const serviceTierSettingsUiSource = [
+      "function Settings(e){let {isServiceTierAllowed:n}=e,",
+      "r=e.serviceTierSettings,{selectedServiceTier:s}=r;",
+      "if(!n||r.availableOptions.length<=1)return null;",
+      "return {availableOptions:r.availableOptions,selectedServiceTier:s}}",
+    ].join("");
+    const patchedServiceTierSettingsUi = await patchAsset(
+      serviceTierSettingsUiSource,
+      "app://-/assets/general-settings-BWZCvLqI.js",
+    );
+    assert.match(
+      patchedServiceTierSettingsUi,
+      /if\(r\.availableOptions\.length===0\)return null/,
+    );
+    const nativeSettings = Function(
+      `${patchedServiceTierSettingsUi};return Settings;`,
+    )();
+    assert.deepEqual(
+      nativeSettings({
+        isServiceTierAllowed: false,
+        serviceTierSettings: {
+          availableOptions: [{ label: "Standard", value: null }],
+          selectedServiceTier: null,
+        },
+      }).availableOptions,
+      [{ label: "Standard", value: null }],
     );
 
     const serviceTierRequestSource = [
@@ -123,6 +210,7 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
       "app://-/assets/app-initial.js",
       "app://-/assets/app-initial-windows.js",
       "app://-/assets/app-initial~windows.js?build=store",
+      "app://-/assets/general-settings-BWZCvLqI.js",
       "app://-/assets/windows-model-controls-a1b2c3.js",
     ]) {
       assert.match(
@@ -155,13 +243,19 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
     assert.deepEqual(
       {
         modelVisibility: globalThis.__CODEY_RENDERER_GATE_PATCH__.modelVisibility,
+        serviceTierOptions:
+          globalThis.__CODEY_RENDERER_GATE_PATCH__.serviceTierOptions,
         serviceTierRequest:
           globalThis.__CODEY_RENDERER_GATE_PATCH__.serviceTierRequest,
+        serviceTierSettingsUi:
+          globalThis.__CODEY_RENDERER_GATE_PATCH__.serviceTierSettingsUi,
         serviceTierUi: globalThis.__CODEY_RENDERER_GATE_PATCH__.serviceTierUi,
       },
       {
         modelVisibility: true,
+        serviceTierOptions: true,
         serviceTierRequest: true,
+        serviceTierSettingsUi: true,
         serviceTierUi: true,
       },
     );
