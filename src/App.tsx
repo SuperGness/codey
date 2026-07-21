@@ -6,6 +6,7 @@ import {
   CircleAlert,
   CircleCheck,
   Cpu,
+  Download,
   FolderOpen,
   GitBranch,
   History,
@@ -117,7 +118,7 @@ type CcSwitchStatus = {
 type Notice = { tone: "info" | "success" | "error"; text: string };
 type InlineResult = { tone: "idle" | "pending" | "success" | "error"; text: string };
 type Confirmation = {
-  action: "clear" | "restart";
+  action: "clear" | "restart" | "install-update";
   title: string;
   description: string;
   confirmLabel: string;
@@ -135,6 +136,24 @@ type UpdateCheck = {
   currentVersion: string;
   latestVersion: string;
   updateAvailable: boolean;
+  selectedAsset?: UpdateAsset;
+};
+type UpdateAsset = {
+  platform: string;
+  arch: string;
+  packageType: string;
+  fileName: string;
+  url: string;
+  sha256: string;
+  size: number;
+};
+type UpdateDownload = {
+  latestVersion: string;
+  filePath: string;
+  fileName: string;
+  size: number;
+  sha256: string;
+  asset: UpdateAsset;
 };
 
 type AppProps = {
@@ -179,6 +198,8 @@ export function App({ embedded = false, onClose }: AppProps) {
   const [busy, setBusy] = useState<string | null>(null);
   const [webhookResult, setWebhookResult] = useState<InlineResult>({ tone: "idle", text: "" });
   const [updateResult, setUpdateResult] = useState<InlineResult>({ tone: "idle", text: "" });
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null);
+  const [downloadedUpdate, setDownloadedUpdate] = useState<UpdateDownload | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
   const [traceSnapshotStale, setTraceSnapshotStale] = useState(false);
@@ -501,22 +522,82 @@ export function App({ embedded = false, onClose }: AppProps) {
     if (!config || isBusy) return;
     setBusy("check-update");
     setUpdateResult({ tone: "pending", text: "正在检查更新…" });
+    setUpdateCheck(null);
+    setDownloadedUpdate(null);
     try {
       const result = await withTimeout(
         invoke<UpdateCheck>("check_for_updates"),
         12_000,
         "检查更新超时，请检查网络",
       );
+      setUpdateCheck(result);
       const text = result.updateAvailable
-        ? `发现 v${result.latestVersion} 更新（当前 v${result.currentVersion}）`
+        ? result.selectedAsset
+          ? `发现 v${result.latestVersion} 更新（当前 v${result.currentVersion}）`
+          : `发现 v${result.latestVersion} 更新，但当前系统暂无可安装包`
         : `当前已是最新版本 v${result.currentVersion}`;
-      setUpdateResult({ tone: "success", text });
-      setNotice({ tone: result.updateAvailable ? "info" : "success", text });
+      setUpdateResult({ tone: result.updateAvailable && !result.selectedAsset ? "error" : "success", text });
+      setNotice({
+        tone: result.updateAvailable && result.selectedAsset ? "info" : result.updateAvailable ? "error" : "success",
+        text,
+      });
     } catch (error) {
       const text = errorText(error);
       setUpdateResult({ tone: "error", text });
       setNotice({ tone: "error", text });
     } finally {
+      setBusy(null);
+    }
+  }
+
+  async function downloadUpdate() {
+    if (!config || isBusy || !updateCheck?.updateAvailable || !updateCheck.selectedAsset) return;
+    setBusy("download-update");
+    setDownloadedUpdate(null);
+    setUpdateResult({ tone: "pending", text: "正在下载并校验更新…" });
+    try {
+      const result = await withTimeout(
+        invoke<UpdateDownload>("download_update"),
+        300_000,
+        "下载更新超时，请稍后重试",
+      );
+      setDownloadedUpdate(result);
+      const text = `已下载 ${result.fileName}（${formatBytes(result.size)}），校验通过`;
+      setUpdateResult({ tone: "success", text });
+      setNotice({ tone: "success", text });
+    } catch (error) {
+      const text = errorText(error);
+      setUpdateResult({ tone: "error", text });
+      setNotice({ tone: "error", text });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function askInstallDownloadedUpdate() {
+    if (!downloadedUpdate || isBusy) return;
+    setConfirmation({
+      action: "install-update",
+      title: "安装更新",
+      description: `Codey 将退出当前实例，安装 ${downloadedUpdate.fileName}，然后尝试启动新版。`,
+      confirmLabel: "安装并重启",
+      run: () => void installDownloadedUpdate(),
+    });
+  }
+
+  async function installDownloadedUpdate() {
+    if (!downloadedUpdate || isBusy) return;
+    setBusy("install-update");
+    setUpdateResult({ tone: "pending", text: "正在启动安装器…" });
+    try {
+      await invoke("install_downloaded_update", { filePath: downloadedUpdate.filePath });
+      const text = "正在退出 Codey 并启动安装器…";
+      setUpdateResult({ tone: "pending", text });
+      setNotice({ tone: "info", text });
+    } catch (error) {
+      const text = errorText(error);
+      setUpdateResult({ tone: "error", text });
+      setNotice({ tone: "error", text });
       setBusy(null);
     }
   }
@@ -806,17 +887,44 @@ export function App({ embedded = false, onClose }: AppProps) {
                     <span className={`inline-result ${updateResult.tone}`} aria-live="polite">
                       {updateResult.text || "从公开更新源检查最新稳定版本。"}
                     </span>
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      disabled={isBusy}
-                      onClick={() => void checkForUpdates()}
-                    >
-                      {busy === "check-update"
-                        ? <LoaderCircle className="spinner" aria-hidden="true" />
-                        : <RefreshCw aria-hidden="true" />}
-                      检查更新
-                    </Button>
+                    <span className="maintenance-update-actions">
+                      {downloadedUpdate ? (
+                        <Button
+                          variant="default"
+                          size="sm"
+                          disabled={isBusy}
+                          onClick={askInstallDownloadedUpdate}
+                        >
+                          {busy === "install-update"
+                            ? <LoaderCircle className="spinner" aria-hidden="true" />
+                            : <Check aria-hidden="true" />}
+                          安装并重启
+                        </Button>
+                      ) : updateCheck?.updateAvailable && updateCheck.selectedAsset ? (
+                        <Button
+                          variant="default"
+                          size="sm"
+                          disabled={isBusy}
+                          onClick={() => void downloadUpdate()}
+                        >
+                          {busy === "download-update"
+                            ? <LoaderCircle className="spinner" aria-hidden="true" />
+                            : <Download aria-hidden="true" />}
+                          下载更新
+                        </Button>
+                      ) : null}
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={isBusy}
+                        onClick={() => void checkForUpdates()}
+                      >
+                        {busy === "check-update"
+                          ? <LoaderCircle className="spinner" aria-hidden="true" />
+                          : <RefreshCw aria-hidden="true" />}
+                        检查更新
+                      </Button>
+                    </span>
                   </div>
                 </div>
 
@@ -1291,16 +1399,18 @@ export function App({ embedded = false, onClose }: AppProps) {
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmation(null)}>取消</Button>
             <Button
-              variant={confirmation?.action === "restart" ? "default" : "destructive"}
+              variant={confirmation?.action === "clear" ? "destructive" : "default"}
               onClick={() => {
                 const pending = confirmation;
                 setConfirmation(null);
                 pending?.run();
               }}
             >
-              {confirmation?.action === "restart"
+              {confirmation?.action === "clear"
+                ? <Trash2 aria-hidden="true" />
+                : confirmation?.action === "restart"
                 ? <RefreshCw aria-hidden="true" />
-                : <Trash2 aria-hidden="true" />}
+                : <Check aria-hidden="true" />}
               {confirmation?.confirmLabel}
             </Button>
           </DialogFooter>

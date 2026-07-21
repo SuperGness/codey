@@ -43,6 +43,7 @@ window.__codeyInvokeApi = async (command, args) => {
   if (command === "runtime_status") {
     return {
       running: true,
+      appVersion: "0.2.0",
       restartRequired: false,
       restartInProgress: false,
       activeProfileId: previewConfig.activeProfileId,
@@ -80,6 +81,41 @@ window.__codeyInvokeApi = async (command, args) => {
     };
   }
   if (command === "restart_codey") return { status: "restarting" };
+  if (command === "check_for_updates") {
+    return {
+      currentVersion: "0.1.0",
+      latestVersion: "0.2.0",
+      updateAvailable: true,
+      selectedAsset: {
+        platform: "macos",
+        arch: "arm64",
+        packageType: "app-zip",
+        fileName: "Codey-0.2.0-macos-arm64-unsigned.zip",
+        url: "https://updates.example.com/releases/v0.2.0/Codey-0.2.0-macos-arm64-unsigned.zip",
+        sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        size: 31_911_421,
+      },
+    };
+  }
+  if (command === "download_update") {
+    return {
+      latestVersion: "0.2.0",
+      filePath: "/tmp/codey-updates/Codey-0.2.0-macos-arm64-unsigned.zip",
+      fileName: "Codey-0.2.0-macos-arm64-unsigned.zip",
+      size: 31_911_421,
+      sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      asset: {
+        platform: "macos",
+        arch: "arm64",
+        packageType: "app-zip",
+        fileName: "Codey-0.2.0-macos-arm64-unsigned.zip",
+        url: "https://updates.example.com/releases/v0.2.0/Codey-0.2.0-macos-arm64-unsigned.zip",
+        sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        size: 31_911_421,
+      },
+    };
+  }
+  if (command === "install_downloaded_update") return { status: "installing" };
   if (command === "clear_codex_trace_logs") return { status: "ok", protectionEnabled: previewConfig.disableTraceLogWrites, cleanup: { databasesFound: 2, databasesCleaned: 2, rowsDeleted: 318757, bytesBefore: 903634944, bytesAfter: 98304, bytesReclaimed: 903536640 } };
   return { status: "ok" };
 };

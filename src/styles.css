@@ -2372,7 +2372,15 @@ input:focus-visible,
   overflow-wrap: anywhere;
 }
 
-.maintenance-update-row .magic-button {
+.maintenance-update-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.maintenance-update-actions .magic-button {
   flex: 0 0 auto;
 }
 
@@ -3137,7 +3145,11 @@ input:focus-visible,
     margin-left: 0;
   }
 
-  .maintenance-update-row .magic-button {
+  .maintenance-update-actions {
+    justify-content: stretch;
+  }
+
+  .maintenance-update-actions .magic-button {
     width: 100%;
   }
 
