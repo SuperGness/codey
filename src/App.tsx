@@ -66,6 +66,7 @@ type Config = {
   slimCodexVoice: boolean;
   fastContextTools: boolean;
   subagentOptimization: boolean;
+  hideFullAccessWarning: boolean;
 };
 
 type OfficialModelState = {
@@ -301,6 +302,9 @@ export function App({ embedded = false, onClose }: AppProps) {
       restartRequired?: boolean;
     }>("save_codey_config", { config: next });
     setConfig(result.config);
+    window.dispatchEvent(new CustomEvent("codey:config-changed", {
+      detail: { config: result.config },
+    }));
     if (result.ccSwitch) setCcSwitchStatus(result.ccSwitch);
     if (result.modelState) setModelState(result.modelState);
     if (typeof result.restartRequired === "boolean") {
@@ -913,6 +917,24 @@ export function App({ embedded = false, onClose }: AppProps) {
                             {config.subagentOptimization
                               ? "启用v2并行配置"
                               : "保持 Codex 默认子代理配置，不注入协作提示词"}
+                          </small>
+                        </div>
+                      </div>
+
+                      <div className={`feature-card ${config.hideFullAccessWarning ? "active" : ""}`}>
+                        <div className="feature-card-header">
+                          <strong>屏蔽完全访问安全提示</strong>
+                          <Switch
+                            checked={config.hideFullAccessWarning}
+                            onCheckedChange={(checked) => editConfig({ ...config, hideFullAccessWarning: checked })}
+                            aria-label="屏蔽完全访问安全提示"
+                          />
+                        </div>
+                        <div className="feature-card-body">
+                          <small>
+                            {config.hideFullAccessWarning
+                              ? "自动隐藏完全访问模式的原生安全提示"
+                              : "保留 Codex 原生安全提示"}
                           </small>
                         </div>
                       </div>

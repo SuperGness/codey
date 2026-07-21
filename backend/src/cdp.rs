@@ -16,6 +16,8 @@ const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../public/codey-bridge.js");
 const RENDERER_INJECT_SCRIPT: &str = include_str!("../../public/renderer-inject.js");
 const PET_CONTROL_SHIELD_SCRIPT: &str = include_str!("../../public/pet-control-shield.js");
 const VOICE_CONTROL_SHIELD_SCRIPT: &str = include_str!("../../public/voice-control-shield.js");
+const SECURITY_WARNING_SHIELD_SCRIPT: &str =
+    include_str!("../../public/security-warning-shield.js");
 const SETTINGS_OVERLAY_SCRIPT: &str = include_str!("../../dist-overlay/codey-overlay.js");
 const CODEY_INJECT_SCRIPT: &str = include_str!("../../public/codey-inject.js");
 const FAST_MODE_FIX_SCRIPT: &str = include_str!("../../public/fast-mode-fix.js");
@@ -52,6 +54,7 @@ pub fn prepare_injection_scripts(
             + RENDERER_INJECT_SCRIPT.len()
             + PET_CONTROL_SHIELD_SCRIPT.len()
             + VOICE_CONTROL_SHIELD_SCRIPT.len()
+            + SECURITY_WARNING_SHIELD_SCRIPT.len()
             + CODEY_INJECT_SCRIPT.len()
             + FAST_MODE_FIX_SCRIPT.len()
             + PLUGIN_MARKETPLACE_FIX_SCRIPT.len()
@@ -62,6 +65,7 @@ pub fn prepare_injection_scripts(
         ("renderer marker", RENDERER_INJECT_SCRIPT),
         ("pet control shield", PET_CONTROL_SHIELD_SCRIPT),
         ("voice control shield", VOICE_CONTROL_SHIELD_SCRIPT),
+        ("security warning shield", SECURITY_WARNING_SHIELD_SCRIPT),
         (
             "settings overlay loader",
             lazy_settings_overlay_loader_script(),

@@ -44,6 +44,7 @@ if (import.meta.env.DEV) {
       slimCodexVoice: true,
       fastContextTools: false,
       subagentOptimization: false,
+      hideFullAccessWarning: false,
     };
     const previewCcSwitch = {
       available: true,

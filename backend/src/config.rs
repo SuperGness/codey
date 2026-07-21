@@ -87,6 +87,10 @@ pub struct CodeyConfig {
     /// the next runtime. Disabled by default and restored on shutdown.
     #[serde(default)]
     pub subagent_optimization: bool,
+    /// Automatically dismisses Codex's full-access safety notice in the
+    /// renderer. Opt-in so the native warning remains visible by default.
+    #[serde(default)]
+    pub hide_full_access_warning: bool,
 }
 
 impl Default for CodeyConfig {
@@ -105,6 +109,7 @@ impl Default for CodeyConfig {
             slim_codex_voice: true,
             fast_context_tools: false,
             subagent_optimization: false,
+            hide_full_access_warning: false,
         }
     }
 }
@@ -381,5 +386,14 @@ mod tests {
             .normalize();
 
         assert!(!config.subagent_optimization);
+    }
+
+    #[test]
+    fn full_access_warning_shield_defaults_to_disabled_for_existing_configs() {
+        let config = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
+            .unwrap()
+            .normalize();
+
+        assert!(!config.hide_full_access_warning);
     }
 }

@@ -664,6 +664,7 @@ pub async fn save_codey_config(
     config.slim_codex_voice = config_input.slim_codex_voice;
     config.fast_context_tools = config_input.fast_context_tools;
     config.subagent_optimization = config_input.subagent_optimization;
+    config.hide_full_access_warning = config_input.hide_full_access_warning;
     let config = config.normalize();
     let restart_required = runtime_config_requires_restart(state, &config).await;
     if config.disable_trace_log_writes != previous.disable_trace_log_writes {

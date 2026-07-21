@@ -21,6 +21,7 @@ let previewConfig = {
   slimCodexVoice: true,
   fastContextTools: false,
   subagentOptimization: false,
+  hideFullAccessWarning: false,
 };
 
 const previewCcSwitch = {
