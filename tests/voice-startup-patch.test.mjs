@@ -187,6 +187,68 @@ test("execution reaper recognizes terminal notifications and thread closure", as
   assert.equal(notificationHandler, null);
 });
 
+test("execution reaper rearms when a grace timer fires before the quiet window", async () => {
+  let notificationHandler = null;
+  let acceleratedTimer = false;
+  let now = 1000;
+  let snapshotCalls = 0;
+  const nativeDateNow = Date.now;
+  const nativeSetTimeout = globalThis.setTimeout;
+  const killed = [];
+
+  Date.now = () => now;
+  globalThis.setTimeout = (listener, milliseconds, ...args) => {
+    if (!acceleratedTimer && milliseconds === 20) {
+      acceleratedTimer = true;
+      return nativeSetTimeout(listener, 0, ...args);
+    }
+    return nativeSetTimeout(listener, milliseconds, ...args);
+  };
+
+  const dispose = globalThis.__CODEY_INSTALL_EXECUTION_REAPER__({
+    connection: {
+      registerInternalNotificationHandler(handler) {
+        notificationHandler = handler;
+        return () => { notificationHandler = null; };
+      },
+    },
+    kill: async (pid) => { killed.push(pid); },
+    snapshot: async () => {
+      snapshotCalls += 1;
+      return [
+        { command: "/Codex/Resources/cua_node/bin/node_repl", depth: 1, pid: 58 },
+      ];
+    },
+    completionGraceMs: 20,
+  });
+
+  try {
+    notificationHandler({
+      method: "turn/started",
+      params: { threadId: "early-timer", turn: { id: "first" } },
+    });
+    notificationHandler({
+      method: "turn/completed",
+      params: { threadId: "early-timer", turn: { id: "first" } },
+    });
+
+    await new Promise((resolve) => nativeSetTimeout(resolve, 10));
+    assert.equal(snapshotCalls, 0);
+    assert.deepEqual(killed, []);
+
+    now = 1020;
+    Date.now = nativeDateNow;
+    globalThis.setTimeout = nativeSetTimeout;
+    await waitFor(() => killed.length === 1);
+    assert.equal(snapshotCalls, 1);
+    assert.deepEqual(killed, [58]);
+  } finally {
+    Date.now = nativeDateNow;
+    globalThis.setTimeout = nativeSetTimeout;
+    dispose();
+  }
+});
+
 test("execution reaper ignores unknown lifecycle state until an observed turn finishes", async () => {
   let notificationHandler = null;
   let snapshotCalls = 0;

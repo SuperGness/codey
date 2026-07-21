@@ -412,7 +412,11 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     const reclaim = (reason) => {
       const expectedVersion = reclaimAuthorizedVersion;
       if (expectedVersion == null) return cleanupPromise;
-      if (!isReclaimSafe(expectedVersion) || cleanupPromise != null) return cleanupPromise;
+      if (cleanupPromise != null) return cleanupPromise;
+      if (!isReclaimSafe(expectedVersion)) {
+        if (isReclaimAuthorized(expectedVersion)) armReclaim(reason);
+        return cleanupPromise;
+      }
       clearReclaimTimer();
       let cleanupSucceeded = false;
       cleanupPromise = Promise.resolve()
