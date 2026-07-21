@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 
 pub const MODEL_CATALOG_RELATIVE_PATH: &str = "model-catalogs/codey-official.json";
 const ALLOWED_REASONING_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
+const FAST_SERVICE_TIER_ID: &str = "priority";
+const FAST_SPEED_TIER_ID: &str = "fast";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -58,7 +60,7 @@ pub fn refresh_for_provider(
     } else {
         official_models
             .iter()
-            .filter(|model| model.get("visibility").and_then(Value::as_str) == Some("list"))
+            .filter(|model| is_provider_selectable_official(model))
             .filter(|model| {
                 model
                     .get("slug")
@@ -70,8 +72,12 @@ pub fn refresh_for_provider(
     };
 
     for model in &mut catalog_models {
+        if !official_provider {
+            expose_provider_supported_official(model);
+        }
         ensure_catalog_compatibility(model);
-        clamp_reasoning_efforts(model);
+        expose_supported_model(model);
+        ensure_speed_controls(model);
     }
 
     if !official_provider {
@@ -97,6 +103,9 @@ pub fn refresh_for_provider(
         }
     }
 
+    if catalog_models.is_empty() {
+        bail!("当前 provider 没有可写入 Codex 模型目录的模型，保留上一份合法目录");
+    }
     write_catalog(home, &catalog_models)?;
     Ok(catalog_models.len())
 }
@@ -107,8 +116,8 @@ pub fn selection_state(
     upstream_models: &[String],
     selected_models: &[String],
 ) -> Result<ModelSelectionState> {
-    let official_models = visible_models(home)?;
-    let official_model_ids = read_official_entries(home)?
+    let official_entries = read_official_entries(home)?;
+    let official_model_ids = official_entries
         .iter()
         .filter_map(|model| model.get("slug").and_then(Value::as_str))
         .map(ToString::to_string)
@@ -121,15 +130,25 @@ pub fn selection_state(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let official_models = official_models
+    let official_models = official_entries
         .into_iter()
-        .map(|model| {
+        .filter(|model| {
+            model.get("visibility").and_then(Value::as_str) == Some("list")
+                || (!official_provider
+                    && is_provider_selectable_official(model)
+                    && model
+                        .get("slug")
+                        .and_then(Value::as_str)
+                        .is_some_and(|slug| upstream.contains(slug)))
+        })
+        .filter_map(|model| {
+            let model = official_model_from_value(&model)?;
             let supported = official_provider || upstream.contains(model.slug.as_str());
-            OfficialModelAvailability {
+            Some(OfficialModelAvailability {
                 slug: model.slug,
                 display_name: model.display_name,
                 supported,
-            }
+            })
         })
         .collect();
     let third_party_models = if official_provider {
@@ -173,35 +192,6 @@ pub fn is_available(home: &Path) -> bool {
         .is_some_and(|value| !catalog_models_from_value(&value).is_empty())
 }
 
-pub fn visible_models(home: &Path) -> Result<Vec<OfficialModel>> {
-    let paths = [home.join("models_cache.json"), home.join(relative_path())];
-    let mut last_error = None;
-    for path in paths {
-        let value = match fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
-                Ok(value) => value,
-                Err(error) => {
-                    last_error = Some(format!("解析 {} 失败：{error}", path.display()));
-                    continue;
-                }
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                last_error = Some(format!("读取 {} 失败：{error}", path.display()));
-                continue;
-            }
-        };
-        let models = visible_models_from_value(&value);
-        if !models.is_empty() {
-            return Ok(models);
-        }
-    }
-    bail!(
-        "{}",
-        last_error.unwrap_or_else(|| "官方账号模型目录中没有可见模型".to_string())
-    )
-}
-
 fn read_official_entries(home: &Path) -> Result<Vec<Value>> {
     let paths = [home.join("models_cache.json"), home.join(relative_path())];
     let mut last_error = None;
@@ -232,27 +222,21 @@ fn read_official_entries(home: &Path) -> Result<Vec<Value>> {
     )
 }
 
-fn visible_models_from_value(value: &Value) -> Vec<OfficialModel> {
-    official_models_from_value(value)
-        .into_iter()
-        .filter(|model| model.get("visibility").and_then(Value::as_str) == Some("list"))
-        .filter_map(|model| {
-            let slug = model.get("slug")?.as_str()?.trim();
-            if slug.is_empty() {
-                return None;
-            }
-            let display_name = model
-                .get("display_name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(slug);
-            Some(OfficialModel {
-                slug: slug.to_string(),
-                display_name: display_name.to_string(),
-            })
-        })
-        .collect()
+fn official_model_from_value(model: &Value) -> Option<OfficialModel> {
+    let slug = model.get("slug")?.as_str()?.trim();
+    if slug.is_empty() {
+        return None;
+    }
+    let display_name = model
+        .get("display_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(slug);
+    Some(OfficialModel {
+        slug: slug.to_string(),
+        display_name: display_name.to_string(),
+    })
 }
 
 fn official_models_from_value(value: &Value) -> Vec<Value> {
@@ -315,6 +299,64 @@ fn ensure_catalog_compatibility(model: &mut Value) {
     }
 }
 
+fn is_provider_selectable_official(model: &Value) -> bool {
+    model.get("visibility").and_then(Value::as_str) == Some("list")
+        || model.get("upgrade").is_some_and(Value::is_object)
+}
+
+fn expose_provider_supported_official(model: &mut Value) {
+    if model.get("visibility").and_then(Value::as_str) == Some("list") {
+        return;
+    }
+    model["visibility"] = json!("list");
+    if let Some(object) = model.as_object_mut() {
+        object.remove("availability_nux");
+        object.remove("upgrade");
+    }
+}
+
+fn expose_supported_model(model: &mut Value) {
+    if model.get("visibility").and_then(Value::as_str) == Some("list") {
+        model["supported_in_api"] = json!(true);
+    }
+}
+
+fn ensure_speed_controls(model: &mut Value) {
+    let service_tiers = model.get_mut("service_tiers").and_then(Value::as_array_mut);
+    if let Some(service_tiers) = service_tiers {
+        if !service_tiers
+            .iter()
+            .any(|tier| tier.get("id").and_then(Value::as_str) == Some(FAST_SERVICE_TIER_ID))
+        {
+            service_tiers.push(json!({
+                "id": FAST_SERVICE_TIER_ID,
+                "name": "Fast",
+                "description": "1.5x speed, increased usage"
+            }));
+        }
+    } else {
+        model["service_tiers"] = json!([{
+            "id": FAST_SERVICE_TIER_ID,
+            "name": "Fast",
+            "description": "1.5x speed, increased usage"
+        }]);
+    }
+
+    let speed_tiers = model
+        .get_mut("additional_speed_tiers")
+        .and_then(Value::as_array_mut);
+    if let Some(speed_tiers) = speed_tiers {
+        if !speed_tiers
+            .iter()
+            .any(|tier| tier.as_str() == Some(FAST_SPEED_TIER_ID))
+        {
+            speed_tiers.push(json!(FAST_SPEED_TIER_ID));
+        }
+    } else {
+        model["additional_speed_tiers"] = json!([FAST_SPEED_TIER_ID]);
+    }
+}
+
 fn synthetic_model(template: &Value, model_id: &str, index: usize) -> Value {
     let mut model = template.clone();
     model["slug"] = json!(model_id);
@@ -323,8 +365,6 @@ fn synthetic_model(template: &Value, model_id: &str, index: usize) -> Value {
     model["visibility"] = json!("list");
     model["priority"] = json!(1000 + index);
     model["supported_in_api"] = json!(true);
-    model["service_tiers"] = json!([]);
-    model["additional_speed_tiers"] = json!([]);
     model["codey_source"] = json!("third_party");
     if let Some(object) = model.as_object_mut() {
         object.remove("availability_nux");
@@ -332,6 +372,7 @@ fn synthetic_model(template: &Value, model_id: &str, index: usize) -> Value {
     }
     ensure_catalog_compatibility(&mut model);
     clamp_reasoning_efforts(&mut model);
+    ensure_speed_controls(&mut model);
     model
 }
 
@@ -419,6 +460,34 @@ mod tests {
                     "default_reasoning_level": "medium",
                     "supported_reasoning_levels": [{"effort": "low"}, {"effort": "xhigh"}]
                 },
+                {
+                    "slug": "gpt-5.4",
+                    "display_name": "GPT-5.4",
+                    "visibility": "hide",
+                    "priority": 16,
+                    "default_reasoning_level": "medium",
+                    "supported_reasoning_levels": [
+                        {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                        {"effort": "xhigh"}, {"effort": "max"}
+                    ],
+                    "service_tiers": [{"id": "priority"}],
+                    "additional_speed_tiers": ["fast"],
+                    "upgrade": {"model": "gpt-5.6-sol"}
+                },
+                {
+                    "slug": "gpt-5.3-codex-spark",
+                    "display_name": "GPT-5.3-Codex-Spark",
+                    "visibility": "list",
+                    "priority": 30,
+                    "supported_in_api": false,
+                    "default_reasoning_level": "high",
+                    "supported_reasoning_levels": [
+                        {"effort": "low"}, {"effort": "medium"},
+                        {"effort": "high"}, {"effort": "xhigh"}
+                    ],
+                    "service_tiers": [],
+                    "additional_speed_tiers": []
+                },
                 {"slug": "codex-auto-review", "visibility": "hide", "priority": 43}
             ]
         })
@@ -433,13 +502,13 @@ mod tests {
     }
 
     #[test]
-    fn official_catalog_preserves_entries_but_caps_reasoning_at_xhigh() {
+    fn official_catalog_preserves_reasoning_and_speed_metadata() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
 
         assert_eq!(
             refresh_for_provider(home.path(), true, &[], &[]).unwrap(),
-            3
+            5
         );
         let catalog: Value = serde_json::from_slice(
             &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
@@ -451,32 +520,89 @@ mod tests {
             .iter()
             .map(|level| level["effort"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(efforts, ["low", "medium", "high", "xhigh"]);
+        assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max", "ultra"]);
         assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
         assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], true);
-        assert_eq!(catalog["models"][2]["supports_reasoning_summaries"], false);
+        let spark = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["slug"] == "gpt-5.3-codex-spark")
+            .unwrap();
+        assert_eq!(spark["supported_in_api"], true);
+        assert_eq!(spark["service_tiers"][0]["id"], "priority");
+        assert_eq!(spark["additional_speed_tiers"][0], "fast");
+        assert_eq!(catalog["models"][4]["supports_reasoning_summaries"], false);
     }
 
     #[test]
-    fn third_party_catalog_contains_supported_official_and_selected_other_models() {
+    fn third_party_catalog_preserves_supported_official_capabilities() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
-        let upstream = vec!["gpt-5.6-sol".into(), "claude-sonnet".into()];
-        let selected = vec!["gpt-5.6-sol".into(), "claude-sonnet".into()];
+        let upstream = vec![
+            "gpt-5.6-sol".into(),
+            "gpt-5.4".into(),
+            "gpt-5.3-codex-spark".into(),
+            "claude-sonnet".into(),
+        ];
+        let selected = upstream.clone();
 
         assert_eq!(
             refresh_for_provider(home.path(), false, &upstream, &selected).unwrap(),
-            2
+            4
         );
         let catalog: Value = serde_json::from_slice(
             &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
         )
         .unwrap();
         assert_eq!(catalog["models"][0]["slug"], "gpt-5.6-sol");
-        assert_eq!(catalog["models"][1]["slug"], "claude-sonnet");
-        assert_eq!(catalog["models"][1]["codey_source"], "third_party");
-        assert_eq!(catalog["models"][1]["service_tiers"], json!([]));
-        assert_eq!(catalog["models"][1]["supports_reasoning_summaries"], true);
+        assert_eq!(
+            catalog["models"][0]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|level| level["effort"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(catalog["models"][1]["slug"], "gpt-5.4");
+        assert_eq!(catalog["models"][1]["visibility"], "list");
+        assert!(catalog["models"][1].get("upgrade").is_none());
+        assert_eq!(catalog["models"][1]["service_tiers"][0]["id"], "priority");
+        assert_eq!(catalog["models"][1]["additional_speed_tiers"][0], "fast");
+        assert_eq!(catalog["models"][2]["slug"], "gpt-5.3-codex-spark");
+        assert_eq!(catalog["models"][2]["supported_in_api"], true);
+        assert_eq!(catalog["models"][2]["service_tiers"][0]["id"], "priority");
+        assert_eq!(catalog["models"][2]["additional_speed_tiers"][0], "fast");
+        assert_eq!(catalog["models"][3]["slug"], "claude-sonnet");
+        assert_eq!(catalog["models"][3]["codey_source"], "third_party");
+        assert_eq!(catalog["models"][3]["service_tiers"][0]["id"], "priority");
+        assert_eq!(catalog["models"][3]["additional_speed_tiers"][0], "fast");
+        assert_eq!(
+            catalog["models"][3]["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|level| level["effort"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(catalog["models"][3]["supports_reasoning_summaries"], true);
+    }
+
+    #[test]
+    fn empty_provider_catalog_does_not_replace_the_last_valid_catalog() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let catalog_path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        let previous = br#"{"models":[{"slug":"last-known-good"}]}"#;
+        fs::write(&catalog_path, previous).unwrap();
+
+        let error = refresh_for_provider(home.path(), false, &[], &[]).unwrap_err();
+
+        assert!(error.to_string().contains("保留上一份合法目录"));
+        assert_eq!(fs::read(catalog_path).unwrap(), previous);
     }
 
     #[test]
@@ -494,5 +620,31 @@ mod tests {
         assert!(state.official_models[0].supported);
         assert!(!state.official_models[1].supported);
         assert_eq!(state.third_party_models, ["third-model"]);
+    }
+
+    #[test]
+    fn selection_state_exposes_upstream_supported_legacy_official_models() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let state = selection_state(
+            home.path(),
+            false,
+            &["gpt-5.4".into(), "codex-auto-review".into()],
+            &[],
+        )
+        .unwrap();
+
+        assert!(
+            state
+                .official_models
+                .iter()
+                .any(|model| model.slug == "gpt-5.4" && model.supported)
+        );
+        assert!(
+            !state
+                .official_models
+                .iter()
+                .any(|model| model.slug == "codex-auto-review")
+        );
     }
 }

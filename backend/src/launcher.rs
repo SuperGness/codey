@@ -27,7 +27,12 @@ use crate::provider_lease;
 use crate::session_index_cleanup::{self, SessionIndexCleanupReport};
 use crate::startup_maintenance::{self, ProviderSyncPlan};
 use crate::trace_log_guard;
-use crate::trace_log_stats::{self, TraceLogStatsSnapshot};
+use crate::trace_log_stats::{self, TraceLogStatsHandle, TraceLogStatsSnapshot};
+
+const CDP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
+const CDP_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
+const TRACE_LOG_DISCOVERY_ATTEMPTS: usize = 20;
+const TRACE_LOG_DISCOVERY_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,12 +50,14 @@ pub struct CodeyRuntime {
     pub codex_app_path: PathBuf,
     pub debug_port: u16,
     pub maintenance: MaintenanceStatus,
-    pub trace_log_stats: TraceLogStatsSnapshot,
+    pub trace_log_stats: TraceLogStatsHandle,
+    pub applied_config: CodeyConfig,
     child: Arc<Mutex<Option<Child>>>,
     #[cfg(windows)]
     process_id: Option<u32>,
     codex_exited: Arc<AtomicBool>,
     watchdog_shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    watchdog_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     exit_watchdog_shutdown: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -60,13 +67,16 @@ impl CodeyRuntime {
         handler: codex_plus_core::bridge::BridgeHandler,
     ) -> Result<(Self, oneshot::Receiver<()>)> {
         let home = codex_home();
+        let injection_scripts = cdp::prepare_injection_scripts(
+            config.slim_codex_pet,
+            config.slim_codex_voice,
+            &config.user_scripts,
+        );
         let trace_guard_home = home.clone();
         let disable_trace_log_writes = config.disable_trace_log_writes;
-        tokio::task::spawn_blocking(move || {
+        let initial_trace_guard = tokio::task::spawn_blocking(move || {
             trace_log_guard::configure(&trace_guard_home, disable_trace_log_writes)
-        })
-        .await
-        .context("Trace 日志保护切换任务异常退出")??;
+        });
         let original_provider = ensure_global_model_provider(&home)?;
 
         // Permanent maintenance runs before Codey creates the temporary
@@ -115,6 +125,9 @@ impl CodeyRuntime {
         .context("启动前会话修复任务异常退出")?;
         let (session_status, session_detail, session_threads) =
             session_maintenance_summary(&provider_sync, &index_cleanup);
+        let initial_trace_guard = initial_trace_guard
+            .await
+            .context("Trace 日志保护切换任务异常退出")??;
 
         let app_dir = resolve_codex_app_dir_with_saved(
             (!config.codex_app_path.trim().is_empty())
@@ -150,16 +163,44 @@ impl CodeyRuntime {
             &original_provider,
             use_official_catalog,
             config.fast_context_tools,
+            config.subagent_optimization,
         )?;
 
-        let (plugin_status, plugin_detail) = match plugin_marketplace::ensure_marketplaces(&home) {
-            Ok(_) => ("ready".to_string(), "插件市场已自动修复".to_string()),
-            Err(error) => ("error".to_string(), format!("插件修复失败：{error}")),
+        let marketplace_home = home.clone();
+        let marketplace_task = tokio::task::spawn_blocking(move || {
+            plugin_marketplace::ensure_marketplaces(&marketplace_home)
+        });
+        let pet_home = home.clone();
+        let slim_codex_pet = config.slim_codex_pet;
+        let pet_task = tokio::task::spawn_blocking(move || {
+            pet_slim_patch::configure(&pet_home, slim_codex_pet)
+        });
+        let (marketplace_result, pet_result) = tokio::join!(marketplace_task, pet_task);
+        let (plugin_status, plugin_detail) = match marketplace_result {
+            Ok(Ok(_)) => ("ready".to_string(), "插件市场已自动修复".to_string()),
+            Ok(Err(error)) => ("error".to_string(), format!("插件修复失败：{error}")),
+            Err(error) => (
+                "error".to_string(),
+                format!("插件修复任务异常退出：{error}"),
+            ),
         };
         let debug_port = codex_plus_core::ports::select_packaged_codex_debug_port(9229);
-        let pet_slim_report = pet_slim_patch::configure(&home, config.slim_codex_pet)
-            .context("应用 Codex 宠物精简设置失败")?;
-        let mut spawned = match spawn_codex(
+        match pet_result {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                return Err(restore_runtime_config_after_error(
+                    &home,
+                    error.context("应用 Codex 宠物精简设置失败"),
+                ));
+            }
+            Err(error) => {
+                return Err(restore_runtime_config_after_error(
+                    &home,
+                    anyhow::Error::new(error).context("Codex 宠物精简设置任务异常退出"),
+                ));
+            }
+        };
+        let spawned = match spawn_codex(
             &app_dir,
             debug_port,
             config.slim_codex_pet,
@@ -169,19 +210,8 @@ impl CodeyRuntime {
         {
             Ok(spawned) => spawned,
             Err(error) => {
-                let _ = restore_runtime_config(&home);
-                return Err(error);
+                return Err(restore_runtime_config_after_error(&home, error));
             }
-        };
-        let pet_detail = if pet_slim_report.slim_enabled {
-            "宠物精简已启用：本次启动不恢复宠物窗口及额外 Renderer"
-        } else {
-            "宠物精简已关闭：本次启动恢复 Codex 宠物"
-        };
-        spawned.performance_detail = if spawned.performance_detail.is_empty() {
-            pet_detail.to_string()
-        } else {
-            format!("{}；{pet_detail}", spawned.performance_detail)
         };
         let maintenance = MaintenanceStatus {
             session_status,
@@ -193,97 +223,78 @@ impl CodeyRuntime {
             performance_detail: spawned.performance_detail.clone(),
         };
         let child = Arc::new(Mutex::new(spawned.child));
-        // A fresh Codex home may not have a log database until app-server
-        // initialization. Retry briefly after spawn so the saved on/off state
-        // is applied before normal streaming begins.
-        for _ in 0..50 {
-            let current_home = home.clone();
-            let report = match tokio::task::spawn_blocking(move || {
-                trace_log_guard::configure(&current_home, disable_trace_log_writes)
-            })
-            .await
+        let trace_log_stats = TraceLogStatsHandle::pending();
+        spawn_startup_trace_stats_refresh(
+            home.clone(),
+            disable_trace_log_writes,
+            initial_trace_guard.log_tables_found > 0,
+            trace_log_stats.clone(),
+        );
+        let injected_target =
+            match cdp::retry_inject_with_scripts(debug_port, handler.clone(), &injection_scripts)
+                .await
             {
-                Ok(result) => result,
-                Err(error) => Err(anyhow::anyhow!("Trace 日志防护任务异常退出：{error}")),
-            };
-            match report {
-                Ok(report) if report.log_tables_found > 0 => break,
-                Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Ok(target) => target,
                 Err(error) => {
-                    if let Some(mut process) = child.lock().await.take() {
-                        let _ = process.kill().await;
+                    if let Some(mut child) = child.lock().await.take() {
+                        let _ = child.kill().await;
                     }
                     #[cfg(windows)]
                     if let Some(process_id) = spawned.process_id {
                         terminate_windows_process(process_id).await;
                     }
-                    let _ = restore_runtime_config(&home);
-                    return Err(error);
+                    return Err(restore_runtime_config_after_error(&home, error));
                 }
-            }
-        }
-        if let Err(error) = cdp::retry_inject_with_scripts(
-            debug_port,
-            handler.clone(),
-            config.slim_codex_pet,
-            config.slim_codex_voice,
-            &config.user_scripts,
-        )
-        .await
-        {
-            if let Some(mut child) = child.lock().await.take() {
-                let _ = child.kill().await;
-            }
-            #[cfg(windows)]
-            if let Some(process_id) = spawned.process_id {
-                terminate_windows_process(process_id).await;
-            }
-            let _ = restore_runtime_config(&home);
-            return Err(error);
-        }
-
-        // Capture exactly one snapshot after Codex finishes starting. The
-        // status endpoint only serves this in-memory value and never reopens
-        // the log databases during the rest of the Codey run.
-        let stats_home = home.clone();
-        let trace_log_stats = tokio::task::spawn_blocking(move || {
-            let final_guard_error =
-                trace_log_guard::configure(&stats_home, disable_trace_log_writes).err();
-            let mut snapshot = trace_log_stats::snapshot(&stats_home);
-            if let Some(error) = final_guard_error {
-                snapshot
-                    .errors
-                    .push(format!("最终 Trace 日志保护状态同步失败：{error:#}"));
-            }
-            snapshot
-        })
-        .await
-        .context("Trace 日志统计任务异常退出")?;
+            };
 
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let watchdog_handler = handler.clone();
         let watchdog_debug_port = debug_port;
-        let watchdog_slim_codex_pet = config.slim_codex_pet;
-        let watchdog_slim_codex_voice = config.slim_codex_voice;
-        let watchdog_user_scripts = config.user_scripts.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
+        let watchdog_injection_scripts = injection_scripts.clone();
+        let watchdog_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(CDP_WATCHDOG_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+            let mut target = injected_target;
+            let mut consecutive_failures = 0u8;
+            'watchdog: loop {
                 tokio::select! {
+                    biased;
                     _ = &mut shutdown_rx => break,
-                    _ = interval.tick() => {
-                        if !cdp::is_healthy(watchdog_debug_port).await.unwrap_or(false) {
-                            let _ = cdp::retry_inject_with_scripts(
-                                watchdog_debug_port,
-                                watchdog_handler.clone(),
-                                watchdog_slim_codex_pet,
-                                watchdog_slim_codex_voice,
-                                &watchdog_user_scripts,
-                            ).await;
-                        }
+                    _ = interval.tick() => {}
+                }
+                let healthy = tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => break 'watchdog,
+                    result = cdp::is_target_healthy(target.websocket_url()) => {
+                        result.unwrap_or(false)
+                    }
+                };
+                if !watchdog_should_reinject(&mut consecutive_failures, healthy) {
+                    continue;
+                }
+                let reinjection = tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => break 'watchdog,
+                    result = cdp::retry_inject_with_scripts(
+                        watchdog_debug_port,
+                        watchdog_handler.clone(),
+                        &watchdog_injection_scripts,
+                    ) => result,
+                };
+                match reinjection {
+                    Ok(reinjected) => {
+                        let previous = std::mem::replace(&mut target, reinjected);
+                        previous.close().await;
+                        consecutive_failures = 0;
+                    }
+                    Err(error) => {
+                        eprintln!("Codey CDP bridge 恢复失败：{error:#}");
+                        consecutive_failures = CDP_WATCHDOG_FAILURE_THRESHOLD.saturating_sub(1);
                     }
                 }
             }
+            target.close().await;
         });
         let codex_exited = Arc::new(AtomicBool::new(false));
         #[cfg(windows)]
@@ -298,11 +309,13 @@ impl CodeyRuntime {
                 debug_port,
                 maintenance,
                 trace_log_stats,
+                applied_config: config.clone(),
                 child,
                 #[cfg(windows)]
                 process_id: spawned.process_id,
                 codex_exited,
                 watchdog_shutdown: Mutex::new(Some(shutdown_tx)),
+                watchdog_task: Mutex::new(Some(watchdog_task)),
                 exit_watchdog_shutdown: Mutex::new(Some(exit_watchdog_shutdown)),
             },
             codex_exit,
@@ -312,6 +325,12 @@ impl CodeyRuntime {
     pub async fn stop(&self) -> Result<()> {
         if let Some(sender) = self.watchdog_shutdown.lock().await.take() {
             let _ = sender.send(());
+        }
+        let watchdog_task = self.watchdog_task.lock().await.take();
+        if let Some(task) = watchdog_task {
+            if let Err(error) = task.await {
+                eprintln!("Codey CDP watchdog 关闭失败：{error}");
+            }
         }
         if let Some(sender) = self.exit_watchdog_shutdown.lock().await.take() {
             let _ = sender.send(());
@@ -328,6 +347,82 @@ impl CodeyRuntime {
         restore_runtime_config(&codex_home())?;
         Ok(())
     }
+}
+
+fn spawn_startup_trace_stats_refresh(
+    home: PathBuf,
+    disable_trace_log_writes: bool,
+    log_tables_already_found: bool,
+    handle: TraceLogStatsHandle,
+) {
+    tokio::spawn(async move {
+        let snapshot = match collect_startup_trace_stats(
+            home,
+            disable_trace_log_writes,
+            log_tables_already_found,
+        )
+        .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let mut snapshot = TraceLogStatsSnapshot::pending();
+                snapshot.pending = false;
+                snapshot
+                    .errors
+                    .push(format!("Trace 日志统计后台刷新失败：{error:#}"));
+                snapshot
+            }
+        };
+        handle.replace(snapshot);
+    });
+}
+
+async fn collect_startup_trace_stats(
+    home: PathBuf,
+    disable_trace_log_writes: bool,
+    log_tables_already_found: bool,
+) -> Result<TraceLogStatsSnapshot> {
+    // A fresh Codex home may not have a log database until app-server
+    // initialization. Retry briefly after spawn so the saved state is applied
+    // before normal streaming begins.
+    if !log_tables_already_found {
+        for _ in 0..TRACE_LOG_DISCOVERY_ATTEMPTS {
+            let current_home = home.clone();
+            let report = tokio::task::spawn_blocking(move || {
+                trace_log_guard::configure(&current_home, disable_trace_log_writes)
+            })
+            .await
+            .context("Trace 日志防护任务异常退出")??;
+            if report.log_tables_found > 0 {
+                break;
+            }
+            tokio::time::sleep(TRACE_LOG_DISCOVERY_INTERVAL).await;
+        }
+    }
+
+    // Capture exactly one snapshot. The status endpoint serves this in-memory
+    // value and never reopens the log databases during the rest of the run.
+    tokio::task::spawn_blocking(move || {
+        let final_guard_error = trace_log_guard::configure(&home, disable_trace_log_writes).err();
+        let mut snapshot = trace_log_stats::snapshot(&home);
+        if let Some(error) = final_guard_error {
+            snapshot
+                .errors
+                .push(format!("最终 Trace 日志保护状态同步失败：{error:#}"));
+        }
+        snapshot
+    })
+    .await
+    .context("Trace 日志统计任务异常退出")
+}
+
+fn watchdog_should_reinject(consecutive_failures: &mut u8, healthy: bool) -> bool {
+    if healthy {
+        *consecutive_failures = 0;
+        return false;
+    }
+    *consecutive_failures = consecutive_failures.saturating_add(1);
+    *consecutive_failures >= CDP_WATCHDOG_FAILURE_THRESHOLD
 }
 
 fn session_maintenance_summary(
@@ -388,6 +483,18 @@ pub fn restore_runtime_config(home: &std::path::Path) -> Result<()> {
     restore_runtime_provider_config(home)
         .map(|_| ())
         .context("恢复 Codex 配置失败")
+}
+
+fn restore_runtime_config_after_error(
+    home: &std::path::Path,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match restore_runtime_config(home) {
+        Ok(()) => error,
+        Err(restore_error) => {
+            anyhow::anyhow!("{error:#}；启动失败后恢复临时 Codex 配置也失败：{restore_error:#}")
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -514,7 +621,7 @@ async fn spawn_codex(
         match crate::codex_startup_patch::install(inspector_port, patch_options).await {
             Ok(()) => {
                 spawned.performance_status = "ready".to_string();
-                spawned.performance_detail = startup_patch_detail(patch_options);
+                spawned.performance_detail = startup_patch_detail();
                 return Ok(spawned);
             }
             Err(error) => {
@@ -543,7 +650,7 @@ async fn spawn_codex(
         match crate::codex_startup_patch::install(inspector_port, patch_options).await {
             Ok(()) => {
                 spawned.performance_status = "ready".to_string();
-                spawned.performance_detail = startup_patch_detail(patch_options);
+                spawned.performance_detail = startup_patch_detail();
                 return Ok(spawned);
             }
             Err(error) => {
@@ -605,38 +712,15 @@ async fn prepare_codex_for_launch(app_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn startup_patch_detail(options: crate::codex_startup_patch::PatchOptions) -> String {
+fn startup_patch_detail() -> String {
     #[cfg(windows)]
     {
-        format!(
-            "Windows 启动补丁已启用：WMI 周期采样、临时 WebView 残留和执行环境泄漏已修复；宠物{}；语音{}",
-            if options.disable_pet {
-                "已硬阉割"
-            } else {
-                "已恢复"
-            },
-            if options.disable_voice {
-                "入口与音频资源已屏蔽"
-            } else {
-                "已恢复"
-            },
-        )
+        "Windows 启动补丁已启用：WMI 周期采样、临时 WebView 残留和执行环境泄漏已修复"
+            .to_string()
     }
     #[cfg(not(windows))]
     {
-        format!(
-            "启动补丁已启用：临时 WebView 和执行环境会自动回收；宠物{}；语音{}",
-            if options.disable_pet {
-                "已硬阉割"
-            } else {
-                "已恢复"
-            },
-            if options.disable_voice {
-                "入口与音频资源已屏蔽"
-            } else {
-                "已恢复"
-            },
-        )
+        "启动补丁已启用：临时 WebView 和执行环境会自动回收".to_string()
     }
 }
 
@@ -832,5 +916,17 @@ mod tests {
             .expect("watcher timed out")
             .expect("watcher was cancelled");
         assert!(exited.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn cdp_watchdog_requires_consecutive_failures_before_reinjecting() {
+        let mut failures = 0;
+
+        assert!(!watchdog_should_reinject(&mut failures, false));
+        assert_eq!(failures, 1);
+        assert!(!watchdog_should_reinject(&mut failures, true));
+        assert_eq!(failures, 0);
+        assert!(!watchdog_should_reinject(&mut failures, false));
+        assert!(watchdog_should_reinject(&mut failures, false));
     }
 }

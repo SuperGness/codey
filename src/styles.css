@@ -301,13 +301,14 @@ input:focus-visible,
 
 .status-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  width: min(100%, 720px);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
 }
 
 .status-card {
-  min-height: 176px;
-  padding: 18px;
+  min-height: 164px;
+  padding: 16px;
   box-shadow: 0 14px 36px rgb(31 41 55 / 6%);
 }
 
@@ -382,8 +383,81 @@ input:focus-visible,
   white-space: nowrap;
 }
 
+.status-card-detail-full {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
 .configuration-heading {
   margin-bottom: 14px;
+}
+
+.runtime-action-bar {
+  display: grid;
+  min-height: 62px;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  margin-bottom: 18px;
+  border: 1px solid #dfe5ee;
+  border-radius: 10px;
+  background: rgb(255 255 255 / 82%);
+  padding: 10px 12px;
+  box-shadow: 0 8px 24px rgb(31 41 55 / 4%);
+}
+
+.runtime-action-bar.pending {
+  border-color: #ead49d;
+  background: #fffaf0;
+}
+
+.runtime-action-icon {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid #e2ddf3;
+  border-radius: 9px;
+  background: #f5f2fd;
+  color: #6d3ae9;
+}
+
+.runtime-action-bar.pending .runtime-action-icon {
+  border-color: #edd9a9;
+  background: #fff4d8;
+  color: #9a6414;
+}
+
+.runtime-action-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.runtime-action-copy strong {
+  color: #323b4d;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.runtime-action-copy small {
+  margin-top: 3px;
+  overflow: hidden;
+  color: #858f9f;
+  font-size: 9px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-action-bar.pending .runtime-action-copy strong {
+  color: #8b5b15;
+}
+
+.runtime-action-bar.pending .runtime-action-copy small {
+  color: #a47732;
 }
 
 .dashboard-grid {
@@ -1720,6 +1794,19 @@ input:focus-visible,
 
   .save-button {
     min-width: 96px;
+  }
+
+  .runtime-action-bar {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+
+  .runtime-action-bar > .magic-button {
+    width: 100%;
+    grid-column: 1 / -1;
+  }
+
+  .runtime-action-copy small {
+    white-space: normal;
   }
 
   .status-grid {

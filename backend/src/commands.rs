@@ -19,7 +19,7 @@ use crate::launcher::{CodeyRuntime, restore_previous_runtime_state, restore_runt
 use crate::message_delete::delete_messages;
 use crate::model_catalog;
 use crate::pending_approval;
-use crate::pending_approval::{CompletedTurn, RecentSessionEvents};
+use crate::pending_approval::{CompletedTurn, RecentSessionEvents, SessionLifecycleStatus};
 use crate::plugin_marketplace;
 use crate::provider_models;
 use crate::session_delete;
@@ -33,10 +33,14 @@ pub struct AppState {
     pub config: RwLock<CodeyConfig>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     pub startup_error: RwLock<Option<String>>,
+    restart_in_progress: AtomicBool,
     session_titles: RwLock<HashMap<String, String>>,
     webhook_notifications: Mutex<HashSet<String>>,
     persisted_waiting_notifications: Mutex<HashSet<String>>,
+    recent_session_event_cache: Mutex<Option<pending_approval::RecentSessionEventCache>>,
     waiting_watcher_shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    waiting_watcher_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    session_scan_wake: Notify,
     shutdown_requested: AtomicBool,
     shutdown_notify: Notify,
 }
@@ -45,16 +49,22 @@ impl Default for AppState {
     fn default() -> Self {
         let store = ConfigStore::default();
         let config = store.load().unwrap_or_default();
-        let persisted_waiting_notifications = initial_waiting_notifications(&store);
+        let persisted_waiting_notifications = initial_waiting_notifications(&store, &[]);
         Self {
             store,
             config: RwLock::new(config),
             runtime: Mutex::new(None),
             startup_error: RwLock::new(None),
+            restart_in_progress: AtomicBool::new(false),
             session_titles: RwLock::new(HashMap::new()),
             webhook_notifications: Mutex::new(persisted_waiting_notifications.clone()),
             persisted_waiting_notifications: Mutex::new(persisted_waiting_notifications),
+            recent_session_event_cache: Mutex::new(Some(
+                pending_approval::RecentSessionEventCache::default(),
+            )),
             waiting_watcher_shutdown: Mutex::new(None),
+            waiting_watcher_task: Mutex::new(None),
+            session_scan_wake: Notify::new(),
             shutdown_requested: AtomicBool::new(false),
             shutdown_notify: Notify::new(),
         }
@@ -108,6 +118,101 @@ struct WebhookTurnTracker {
     running: HashSet<String>,
     settled: HashSet<String>,
     ignore_completed_before: i64,
+}
+
+type RecentSessionScanResult = (
+    pending_approval::RecentSessionEventCache,
+    RecentSessionEvents,
+);
+type RecentSessionScanTask = tokio::task::JoinHandle<RecentSessionScanResult>;
+
+const ACTIVE_SESSION_SCAN_DELAY: Duration = Duration::from_secs(3);
+const IDLE_SESSION_SCAN_DELAYS: [Duration; 4] = [
+    Duration::from_secs(3),
+    Duration::from_secs(6),
+    Duration::from_secs(12),
+    Duration::from_secs(30),
+];
+
+#[derive(Debug, Default)]
+struct SessionScanSchedule {
+    idle_delay_index: usize,
+}
+
+impl SessionScanSchedule {
+    fn wake(&mut self) {
+        self.idle_delay_index = 0;
+    }
+
+    fn delay_after_scan(
+        &mut self,
+        previous: &RecentSessionEvents,
+        current: &RecentSessionEvents,
+    ) -> Duration {
+        if session_events_are_active(current) || session_event_state_changed(previous, current) {
+            self.wake();
+            return ACTIVE_SESSION_SCAN_DELAY;
+        }
+
+        let delay = IDLE_SESSION_SCAN_DELAYS[self.idle_delay_index];
+        self.idle_delay_index = (self.idle_delay_index + 1).min(IDLE_SESSION_SCAN_DELAYS.len() - 1);
+        delay
+    }
+}
+
+fn session_events_are_active(events: &RecentSessionEvents) -> bool {
+    !events.pending_approvals.is_empty()
+        || events.session_statuses.values().any(|status| {
+            matches!(
+                status,
+                SessionLifecycleStatus::Running | SessionLifecycleStatus::Waiting
+            )
+        })
+}
+
+fn session_event_state_changed(
+    previous: &RecentSessionEvents,
+    current: &RecentSessionEvents,
+) -> bool {
+    previous.session_statuses != current.session_statuses
+        || previous.pending_approvals.len() != current.pending_approvals.len()
+        || previous
+            .pending_approvals
+            .iter()
+            .zip(&current.pending_approvals)
+            .any(|(left, right)| {
+                left.session_id != right.session_id
+                    || left.turn_id != right.turn_id
+                    || left.waiting_id != right.waiting_id
+            })
+        || previous.started_turns.len() != current.started_turns.len()
+        || previous
+            .started_turns
+            .iter()
+            .zip(&current.started_turns)
+            .any(|(left, right)| {
+                left.session_id != right.session_id || left.turn_id != right.turn_id
+            })
+        || previous.aborted_turns.len() != current.aborted_turns.len()
+        || previous
+            .aborted_turns
+            .iter()
+            .zip(&current.aborted_turns)
+            .any(|(left, right)| {
+                left.session_id != right.session_id || left.turn_id != right.turn_id
+            })
+        || previous.completed_turns.len() != current.completed_turns.len()
+        || previous
+            .completed_turns
+            .iter()
+            .zip(&current.completed_turns)
+            .any(|(left, right)| {
+                left.session_id != right.session_id
+                    || left.turn_id != right.turn_id
+                    || left.completed_at != right.completed_at
+                    || left.error != right.error
+                    || left.is_snapshot_replay != right.is_snapshot_replay
+            })
 }
 
 impl WebhookTurnTracker {
@@ -203,10 +308,19 @@ fn initialize_waiting_notifications(path: &Path, baseline: HashSet<String>) -> H
     initialized
 }
 
-fn initial_waiting_notifications(store: &ConfigStore) -> HashSet<String> {
+fn initial_waiting_notifications(
+    store: &ConfigStore,
+    pending_approvals: &[pending_approval::PendingApproval],
+) -> HashSet<String> {
     let path = waiting_notification_ledger_path(store);
-    let baseline = pending_approval::recent_pending_approvals(&codex_home())
-        .into_iter()
+    initialize_waiting_notifications(&path, waiting_notification_keys(pending_approvals))
+}
+
+fn waiting_notification_keys(
+    pending_approvals: &[pending_approval::PendingApproval],
+) -> HashSet<String> {
+    pending_approvals
+        .iter()
         .map(|pending| {
             waiting_notification_key(
                 pending.session_id.trim_start_matches("local:"),
@@ -214,8 +328,7 @@ fn initial_waiting_notifications(store: &ConfigStore) -> HashSet<String> {
                 &pending.waiting_id,
             )
         })
-        .collect();
-    initialize_waiting_notifications(&path, baseline)
+        .collect()
 }
 
 fn save_waiting_notification_ledger(
@@ -268,6 +381,30 @@ async fn persist_waiting_notification(
     save_waiting_notification_ledger(&waiting_notification_ledger_path(&state.store), &persisted)
 }
 
+async fn baseline_waiting_notifications(
+    state: &Arc<AppState>,
+    pending_approvals: &[pending_approval::PendingApproval],
+) {
+    let baseline = waiting_notification_keys(pending_approvals);
+    if baseline.is_empty() {
+        return;
+    }
+
+    let persisted_snapshot = {
+        let mut persisted = state.persisted_waiting_notifications.lock().await;
+        let previous_len = persisted.len();
+        persisted.extend(baseline.iter().cloned());
+        (persisted.len() != previous_len).then(|| persisted.clone())
+    };
+    state.webhook_notifications.lock().await.extend(baseline);
+    if let Some(persisted) = persisted_snapshot {
+        let _ = save_waiting_notification_ledger(
+            &waiting_notification_ledger_path(&state.store),
+            &persisted,
+        );
+    }
+}
+
 impl AppState {
     pub fn request_shutdown(&self) {
         if !self.shutdown_requested.swap(true, Ordering::AcqRel) {
@@ -295,6 +432,10 @@ impl AppState {
                     object.insert("status".into(), Value::String("ok".into()));
                 }
                 value
+            }
+            "/session/wake-watcher" => {
+                self.session_scan_wake.notify_one();
+                json!({"status":"ok"})
             }
             "/session/titles" => cache_session_titles(self, &payload).await,
             "/session/delete" => {
@@ -361,8 +502,17 @@ impl AppState {
             "/webhook/session-waiting" => notify_webhook_waiting(self, &payload)
                 .await
                 .unwrap_or_else(api_error_message),
-            "/plugins/list" => plugin_marketplace::list_plugins(&codex_home())
-                .unwrap_or_else(|error| api_error_message(error.to_string())),
+            "/plugins/list" => {
+                let home = codex_home();
+                match tokio::task::spawn_blocking(move || plugin_marketplace::list_plugins(&home))
+                    .await
+                {
+                    Ok(result) => {
+                        result.unwrap_or_else(|error| api_error_message(error.to_string()))
+                    }
+                    Err(error) => api_error_message(format!("插件列表任务异常退出：{error}")),
+                }
+            }
             "/plugins/status" => plugin_marketplace_status()
                 .await
                 .unwrap_or_else(api_error_message),
@@ -394,6 +544,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         },
         "runtime_status" => runtime_status(state).await,
         "launch_codey" => launch_codey_runtime(state).await,
+        "restart_codey" => schedule_restart_codey_runtime(state).await,
         "clear_codex_trace_logs" => clear_codex_trace_logs(state).await,
         "test_webhook" => test_webhook(state).await,
         "export_session" => match string_argument(&args, "sessionId") {
@@ -474,9 +625,9 @@ pub async fn save_codey_config(
     config.slim_codex_pet = config_input.slim_codex_pet;
     config.slim_codex_voice = config_input.slim_codex_voice;
     config.fast_context_tools = config_input.fast_context_tools;
+    config.subagent_optimization = config_input.subagent_optimization;
     let config = config.normalize();
-    let restart_required = config.fast_context_tools != previous.fast_context_tools
-        && state.runtime.lock().await.is_some();
+    let restart_required = runtime_config_requires_restart(state, &config).await;
     if config.disable_trace_log_writes != previous.disable_trace_log_writes {
         let home = codex_home();
         let disable_writes = config.disable_trace_log_writes;
@@ -520,16 +671,9 @@ pub async fn clear_codex_trace_logs(state: &Arc<AppState>) -> Result<Value, Stri
 }
 
 pub async fn sync_current_provider_command(state: &Arc<AppState>) -> Result<Value, String> {
-    let previous_id = state
-        .config
-        .read()
-        .await
-        .current_provider_id()
-        .map(ToString::to_string);
     let cc_switch = sync_cc_switch_state(state).await;
     let config = state.config.read().await.clone();
-    let changed_provider = previous_id.as_deref() != config.current_provider_id();
-    let restart_required = changed_provider && state.runtime.lock().await.is_some();
+    let restart_required = runtime_config_requires_restart(state, &config).await;
     let model_state = current_model_state(&config)?;
     let public_config = redacted_config(&config);
     Ok(json!({
@@ -589,7 +733,13 @@ pub async fn fetch_current_provider_models(state: &Arc<AppState>) -> Result<Valu
     state.store.save(&next).map_err(|error| error.to_string())?;
     *state.config.write().await = next.clone();
     let model_state = current_model_state(&next)?;
-    Ok(json!({"status":"ok","models":models,"modelState":model_state}))
+    let restart_required = runtime_config_requires_restart(state, &next).await;
+    Ok(json!({
+        "status":"ok",
+        "models":models,
+        "modelState":model_state,
+        "restartRequired":restart_required,
+    }))
 }
 
 pub async fn save_selected_models(
@@ -640,7 +790,13 @@ pub async fn save_selected_models(
     *state.config.write().await = config.clone();
     let model_state = current_model_state(&config)?;
     let public_config = redacted_config(&config);
-    Ok(json!({"status":"ok","config":public_config,"modelState":model_state}))
+    let restart_required = runtime_config_requires_restart(state, &config).await;
+    Ok(json!({
+        "status":"ok",
+        "config":public_config,
+        "modelState":model_state,
+        "restartRequired":restart_required,
+    }))
 }
 
 fn redacted_config(config: &CodeyConfig) -> CodeyConfig {
@@ -682,14 +838,40 @@ fn refresh_model_catalog(config: &CodeyConfig) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
+fn config_requires_restart(applied: &CodeyConfig, current: &CodeyConfig) -> bool {
+    applied.active_profile() != current.active_profile()
+        || applied.codex_app_path != current.codex_app_path
+        || applied.user_scripts != current.user_scripts
+        || applied.slim_codex_pet != current.slim_codex_pet
+        || applied.slim_codex_voice != current.slim_codex_voice
+        || applied.fast_context_tools != current.fast_context_tools
+        || applied.subagent_optimization != current.subagent_optimization
+        || applied.selected_models() != current.selected_models()
+        || applied.upstream_models() != current.upstream_models()
+}
+
+async fn runtime_config_requires_restart(state: &Arc<AppState>, current: &CodeyConfig) -> bool {
+    state
+        .runtime
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|runtime| config_requires_restart(&runtime.applied_config, current))
+}
+
 pub async fn runtime_status(state: &Arc<AppState>) -> Result<Value, String> {
     let runtime = state.runtime.lock().await.clone();
     let config = state.config.read().await;
     let profile = config.active_profile();
+    let restart_required = runtime
+        .as_ref()
+        .is_some_and(|runtime| config_requires_restart(&runtime.applied_config, &config));
     let mut status = json!({
         "running": runtime.is_some(),
         "activeProfileId": profile.as_ref().map(|profile| profile.id.as_str()).unwrap_or_default(),
         "activeProfileName": profile.as_ref().map(|profile| profile.name.as_str()).unwrap_or_default(),
+        "restartRequired": restart_required,
+        "restartInProgress": state.restart_in_progress.load(Ordering::Acquire),
     });
     drop(config);
     if let Some(error) = state.startup_error.read().await.clone()
@@ -721,16 +903,30 @@ async fn launch_codey_inner(state: &Arc<AppState>) -> Result<Value, String> {
     if runtime_slot.is_some() {
         return Ok(json!({"status":"already_running"}));
     }
+    stop_waiting_webhook_watcher(state).await;
     restore_previous_runtime_state(&codex_home())
         .map_err(|error| format!("恢复上次 Codey 临时 Codex 配置失败：{error}"))?;
+    let initial_event_cache = state
+        .recent_session_event_cache
+        .lock()
+        .await
+        .take()
+        .unwrap_or_default();
+    let initial_scan_task = start_recent_session_scan(initial_event_cache);
     let config = state.config.read().await.clone();
     let handler = make_bridge_handler(state);
-    let (runtime, codex_exit) = CodeyRuntime::start(&config, handler)
-        .await
-        .map_err(|error| error.to_string())?;
+    let (runtime, codex_exit) = match CodeyRuntime::start(&config, handler).await {
+        Ok(started) => started,
+        Err(error) => {
+            let (initial_event_cache, _) = await_recent_session_scan(initial_scan_task).await;
+            *state.recent_session_event_cache.lock().await = Some(initial_event_cache);
+            return Err(error.to_string());
+        }
+    };
+    let debug_port = runtime.debug_port;
     *runtime_slot = Some(Arc::new(runtime));
+    start_waiting_webhook_watcher(state, initial_scan_task, debug_port).await;
     drop(runtime_slot);
-    start_waiting_webhook_watcher(state).await;
     let exit_state = Arc::clone(state);
     tokio::spawn(async move {
         if codex_exit.await.is_ok() {
@@ -746,9 +942,36 @@ pub async fn launch_codey_runtime(state: &Arc<AppState>) -> Result<Value, String
     result
 }
 
+pub async fn schedule_restart_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
+    if state.restart_in_progress.swap(true, Ordering::AcqRel) {
+        return Ok(json!({"status":"already_restarting"}));
+    }
+
+    let restart_state = Arc::clone(state);
+    tokio::spawn(async move {
+        // The request originates inside the Codex renderer. Let the bridge
+        // deliver its response before stopping the renderer that owns it.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let result = async {
+            stop_codey_runtime(&restart_state).await?;
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            launch_codey_runtime(&restart_state).await
+        }
+        .await;
+        if let Err(error) = result {
+            *restart_state.startup_error.write().await = Some(error);
+        }
+        restart_state
+            .restart_in_progress
+            .store(false, Ordering::Release);
+    });
+
+    Ok(json!({"status":"restarting"}))
+}
+
 pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
-    stop_waiting_webhook_watcher(state).await;
     let mut runtime_slot = state.runtime.lock().await;
+    stop_waiting_webhook_watcher(state).await;
     if let Some(runtime) = runtime_slot.take() {
         runtime.stop().await.map_err(|error| error.to_string())?;
     } else {
@@ -758,78 +981,184 @@ pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> 
     Ok(json!({"status":"stopped"}))
 }
 
-async fn start_waiting_webhook_watcher(state: &Arc<AppState>) {
-    stop_waiting_webhook_watcher(state).await;
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn restart_sensitive_config_changes_are_detected() {
+        let applied = CodeyConfig::default();
+
+        let mut model_change = applied.clone();
+        let provider_id = model_change.current_provider_id().unwrap().to_string();
+        model_change
+            .selected_models_by_provider
+            .insert(provider_id, vec!["third-party-model".into()]);
+        assert!(config_requires_restart(&applied, &model_change));
+
+        let mut startup_change = applied.clone();
+        startup_change.slim_codex_voice = !startup_change.slim_codex_voice;
+        assert!(config_requires_restart(&applied, &startup_change));
+    }
+
+    #[test]
+    fn live_config_changes_do_not_require_restart() {
+        let applied = CodeyConfig::default();
+        let mut current = applied.clone();
+        current.webhook.enabled = true;
+        current.webhook.url = "https://example.test/webhook".into();
+        current.disable_trace_log_writes = !current.disable_trace_log_writes;
+
+        assert!(!config_requires_restart(&applied, &current));
+    }
+}
+
+async fn start_waiting_webhook_watcher(
+    state: &Arc<AppState>,
+    initial_scan_task: RecentSessionScanTask,
+    debug_port: u16,
+) {
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-    *state.waiting_watcher_shutdown.lock().await = Some(shutdown_tx);
-    let debug_port = state
-        .runtime
-        .lock()
-        .await
-        .as_ref()
-        .map(|runtime| runtime.debug_port);
     let watcher_state = Arc::clone(state);
-    tokio::spawn(async move {
-        let initial_events = pending_approval::recent_session_events(&codex_home());
-        let mut turn_tracker = WebhookTurnTracker::from_snapshot(&initial_events);
+    let watcher_task = tokio::spawn(async move {
+        let (mut event_cache, baseline_events) = await_recent_session_scan(initial_scan_task).await;
+        if !matches!(
+            shutdown_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ) {
+            *watcher_state.recent_session_event_cache.lock().await = Some(event_cache);
+            return;
+        }
+        baseline_waiting_notifications(&watcher_state, &baseline_events.pending_approvals).await;
+        let mut turn_tracker = WebhookTurnTracker::from_snapshot(&baseline_events);
         let mut last_synced_thread_statuses = None;
-        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        let mut previous_events = baseline_events;
+        let mut scan_schedule = SessionScanSchedule::default();
+        let mut next_scan_delay = ACTIVE_SESSION_SCAN_DELAY;
+        let mut scan_immediately = true;
         loop {
-            tokio::select! {
-                _ = &mut shutdown_rx => break,
-                _ = interval.tick() => {
-                    let events = pending_approval::recent_session_events(&codex_home());
-                    if let Some(debug_port) = debug_port
-                        && last_synced_thread_statuses.as_ref() != Some(&events.session_statuses)
-                    {
-                        match cdp::sync_thread_statuses(debug_port, &events.session_statuses).await {
-                            Ok(()) => {
-                                last_synced_thread_statuses =
-                                    Some(events.session_statuses.clone());
-                            }
-                            Err(error) => {
-                                eprintln!("Codey 侧边栏任务状态同步失败：{error:#}");
-                            }
-                        }
+            if !scan_immediately {
+                let woke = tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    _ = watcher_state.session_scan_wake.notified() => true,
+                    _ = tokio::time::sleep(next_scan_delay) => false,
+                };
+                if woke {
+                    scan_schedule.wake();
+                }
+            }
+            scan_immediately = false;
+
+            let (next_cache, events) = scan_recent_session_events(event_cache).await;
+            event_cache = next_cache;
+            if last_synced_thread_statuses.as_ref() != Some(&events.session_statuses) {
+                match cdp::sync_thread_statuses(debug_port, &events.session_statuses).await {
+                    Ok(()) => {
+                        last_synced_thread_statuses = Some(events.session_statuses.clone());
                     }
-                    for pending in &events.pending_approvals {
-                        let payload = json!({
-                            "sessionId": pending.session_id,
-                            "turnId": pending.turn_id,
-                            "waitingId": pending.waiting_id,
-                            "durationMs": pending.duration_ms,
-                            "model": "",
-                            "reasoningEffort": "",
-                        });
-                        if let Err(error) = notify_webhook_waiting(&watcher_state, &payload).await {
-                            eprintln!("Codey 飞书等待通知失败：{error}");
-                        }
-                    }
-                    for completed in turn_tracker.completion_candidates(&events) {
-                        let payload = json!({
-                            "sessionId": completed.session_id,
-                            "turnId": completed.turn_id,
-                            "durationMs": completed.duration_ms,
-                            "rolloutError": completed.error,
-                            "confirmedByRollout": true,
-                        });
-                        match notify_webhook_completion(&watcher_state, &payload).await {
-                            Ok(_) => turn_tracker.mark_settled(&completed),
-                            Err(error) => {
-                                // Keep the running edge so a transient delivery failure is retried.
-                                eprintln!("Codey 飞书完成通知失败：{error}");
-                            }
-                        }
+                    Err(error) => {
+                        eprintln!("Codey 侧边栏任务状态同步失败：{error:#}");
                     }
                 }
             }
+            notify_pending_approvals(&watcher_state, &events).await;
+            let mut completion_delivery_pending = false;
+            for completed in turn_tracker.completion_candidates(&events) {
+                let (model, reasoning_effort) =
+                    webhook_turn_configuration(&events, &completed.session_id, &completed.turn_id);
+                let payload = json!({
+                    "sessionId": completed.session_id,
+                    "turnId": completed.turn_id,
+                    "durationMs": completed.duration_ms,
+                    "rolloutError": completed.error,
+                    "confirmedByRollout": true,
+                    "model": model,
+                    "reasoningEffort": reasoning_effort,
+                });
+                match notify_webhook_completion(&watcher_state, &payload).await {
+                    Ok(_) => turn_tracker.mark_settled(&completed),
+                    Err(error) => {
+                        // Keep the running edge so a transient delivery failure is retried.
+                        completion_delivery_pending = true;
+                        eprintln!("Codey 飞书完成通知失败：{error}");
+                    }
+                }
+            }
+            next_scan_delay = if completion_delivery_pending {
+                scan_schedule.wake();
+                ACTIVE_SESSION_SCAN_DELAY
+            } else {
+                scan_schedule.delay_after_scan(&previous_events, &events)
+            };
+            previous_events = events;
         }
+        *watcher_state.recent_session_event_cache.lock().await = Some(event_cache);
     });
+    *state.waiting_watcher_shutdown.lock().await = Some(shutdown_tx);
+    *state.waiting_watcher_task.lock().await = Some(watcher_task);
+}
+
+async fn notify_pending_approvals(state: &Arc<AppState>, events: &RecentSessionEvents) {
+    for pending in &events.pending_approvals {
+        let (model, reasoning_effort) =
+            webhook_turn_configuration(events, &pending.session_id, &pending.turn_id);
+        let payload = json!({
+            "sessionId": pending.session_id,
+            "turnId": pending.turn_id,
+            "waitingId": pending.waiting_id,
+            "durationMs": pending.duration_ms,
+            "model": model,
+            "reasoningEffort": reasoning_effort,
+        });
+        if let Err(error) = notify_webhook_waiting(state, &payload).await {
+            eprintln!("Codey 飞书等待通知失败：{error}");
+        }
+    }
+}
+
+async fn scan_recent_session_events(
+    cache: pending_approval::RecentSessionEventCache,
+) -> RecentSessionScanResult {
+    await_recent_session_scan(start_recent_session_scan(cache)).await
+}
+
+fn start_recent_session_scan(
+    mut cache: pending_approval::RecentSessionEventCache,
+) -> RecentSessionScanTask {
+    let home = codex_home();
+    tokio::task::spawn_blocking(move || {
+        let events = cache.refresh(&home);
+        (cache, events)
+    })
+}
+
+async fn await_recent_session_scan(scan_task: RecentSessionScanTask) -> RecentSessionScanResult {
+    match scan_task.await {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("Codey 会话状态扫描任务异常退出：{error}");
+            (
+                pending_approval::RecentSessionEventCache::default(),
+                RecentSessionEvents::default(),
+            )
+        }
+    }
 }
 
 async fn stop_waiting_webhook_watcher(state: &Arc<AppState>) {
-    if let Some(shutdown) = state.waiting_watcher_shutdown.lock().await.take() {
+    let shutdown = state.waiting_watcher_shutdown.lock().await.take();
+    if let Some(shutdown) = shutdown {
         let _ = shutdown.send(());
+    }
+    let watcher_task = state.waiting_watcher_task.lock().await.take();
+    if let Some(watcher_task) = watcher_task
+        && let Err(error) = watcher_task.await
+    {
+        eprintln!("Codey 会话状态 watcher 异常退出：{error}");
+    }
+    let mut event_cache = state.recent_session_event_cache.lock().await;
+    if event_cache.is_none() {
+        *event_cache = Some(pending_approval::RecentSessionEventCache::default());
     }
 }
 
@@ -855,6 +1184,21 @@ fn webhook_session_configuration(
         requested_reasoning_effort.trim().to_string()
     };
     (model, reasoning_effort)
+}
+
+fn webhook_turn_configuration(
+    events: &RecentSessionEvents,
+    session_id: &str,
+    turn_id: &str,
+) -> (String, String) {
+    let Some(configuration) = events
+        .turn_configurations
+        .get(session_id)
+        .and_then(|turns| turns.get(turn_id))
+    else {
+        return webhook_session_configuration("", "");
+    };
+    webhook_session_configuration(&configuration.model, &configuration.reasoning_effort)
 }
 
 async fn cache_session_titles(state: &Arc<AppState>, payload: &Value) -> Value {
@@ -1025,7 +1369,17 @@ async fn notify_webhook_completion(
     if !webhook.enabled || webhook.url.trim().is_empty() {
         return Ok(json!({"status":"skipped","reason":"disabled"}));
     }
-    let (model, reasoning_effort) = webhook_session_configuration("", "");
+    let requested_model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let requested_reasoning_effort = payload
+        .get("reasoningEffort")
+        .or_else(|| payload.get("reasoning_effort"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let (model, reasoning_effort) =
+        webhook_session_configuration(requested_model, requested_reasoning_effort);
     if let Some(error) = rollout_error {
         return dispatch_settled_webhook_failure(
             state,
@@ -1244,7 +1598,7 @@ fn api_error_message(error: impl ToString) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pending_approval::{AbortedTurn, StartedTurn};
+    use crate::pending_approval::{AbortedTurn, PendingApproval, StartedTurn};
 
     fn lifecycle(started: &[(&str, &str)], completed: &[(&str, &str)]) -> RecentSessionEvents {
         RecentSessionEvents {
@@ -1268,6 +1622,119 @@ mod tests {
                 .collect(),
             ..RecentSessionEvents::default()
         }
+    }
+
+    #[test]
+    fn webhook_notifications_use_the_matching_turn_configuration() {
+        let events = RecentSessionEvents {
+            turn_configurations: HashMap::from([(
+                "session-1".to_string(),
+                HashMap::from([(
+                    "turn-1".to_string(),
+                    pending_approval::TurnConfiguration {
+                        model: "gpt-5.6-luna".to_string(),
+                        reasoning_effort: "xhigh".to_string(),
+                    },
+                )]),
+            )]),
+            ..RecentSessionEvents::default()
+        };
+
+        assert_eq!(
+            webhook_turn_configuration(&events, "session-1", "turn-1"),
+            ("gpt-5.6-luna".to_string(), "xhigh".to_string())
+        );
+        assert_eq!(
+            webhook_turn_configuration(&events, "session-1", "missing"),
+            ("Codex".to_string(), "默认".to_string())
+        );
+    }
+
+    #[test]
+    fn idle_session_scans_back_off_gradually_to_thirty_seconds() {
+        let events = RecentSessionEvents::default();
+        let mut schedule = SessionScanSchedule::default();
+
+        let delays = (0..5)
+            .map(|_| schedule.delay_after_scan(&events, &events))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            delays,
+            [
+                Duration::from_secs(3),
+                Duration::from_secs(6),
+                Duration::from_secs(12),
+                Duration::from_secs(30),
+                Duration::from_secs(30),
+            ]
+        );
+    }
+
+    #[test]
+    fn active_or_changed_sessions_keep_the_fast_scan_period() {
+        let idle = RecentSessionEvents::default();
+        let running = RecentSessionEvents {
+            session_statuses: HashMap::from([(
+                "session-1".to_string(),
+                SessionLifecycleStatus::Running,
+            )]),
+            ..RecentSessionEvents::default()
+        };
+        let mut schedule = SessionScanSchedule::default();
+        for _ in 0..4 {
+            schedule.delay_after_scan(&idle, &idle);
+        }
+
+        assert_eq!(
+            schedule.delay_after_scan(&idle, &running),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            schedule.delay_after_scan(&running, &running),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn waking_an_idle_session_scanner_restores_the_fast_period() {
+        let events = RecentSessionEvents::default();
+        let mut schedule = SessionScanSchedule::default();
+        for _ in 0..4 {
+            schedule.delay_after_scan(&events, &events);
+        }
+
+        schedule.wake();
+
+        assert_eq!(
+            schedule.delay_after_scan(&events, &events),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn changing_wait_duration_is_not_treated_as_a_state_change() {
+        let waiting_at_first_scan = RecentSessionEvents {
+            pending_approvals: vec![PendingApproval {
+                session_id: "session-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                waiting_id: "approval-1".to_string(),
+                duration_ms: 1_000,
+            }],
+            ..RecentSessionEvents::default()
+        };
+        let waiting_later = RecentSessionEvents {
+            pending_approvals: vec![PendingApproval {
+                duration_ms: 30_000,
+                ..waiting_at_first_scan.pending_approvals[0].clone()
+            }],
+            ..RecentSessionEvents::default()
+        };
+        assert!(!session_event_state_changed(
+            &waiting_at_first_scan,
+            &waiting_later
+        ));
+        assert!(session_events_are_active(&waiting_later));
     }
 
     #[test]
@@ -1331,6 +1798,112 @@ mod tests {
             .collect::<HashSet<_>>();
         assert_eq!(loaded, expected);
         assert_eq!(load_waiting_notification_ledger(&path), expected);
+    }
+
+    #[tokio::test]
+    async fn startup_baseline_only_suppresses_waits_seen_before_runtime_start() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut state = AppState::default();
+        state.store = ConfigStore::new(directory.path().join("config.json"));
+        state.webhook_notifications = Mutex::new(HashSet::new());
+        state.persisted_waiting_notifications = Mutex::new(HashSet::new());
+        let state = Arc::new(state);
+        let before_start = PendingApproval {
+            session_id: "session-old".to_string(),
+            turn_id: "turn-old".to_string(),
+            waiting_id: "approval-old".to_string(),
+            duration_ms: 1_000,
+        };
+        let during_start = PendingApproval {
+            session_id: "session-new".to_string(),
+            turn_id: "turn-new".to_string(),
+            waiting_id: "approval-new".to_string(),
+            duration_ms: 100,
+        };
+
+        baseline_waiting_notifications(&state, std::slice::from_ref(&before_start)).await;
+
+        let baseline = state.webhook_notifications.lock().await;
+        assert!(baseline.contains(&waiting_notification_key(
+            &before_start.session_id,
+            &before_start.turn_id,
+            &before_start.waiting_id,
+        )));
+        assert!(!baseline.contains(&waiting_notification_key(
+            &during_start.session_id,
+            &during_start.turn_id,
+            &during_start.waiting_id,
+        )));
+    }
+
+    #[tokio::test]
+    async fn watcher_registration_does_not_wait_for_initial_session_scan() {
+        let state = Arc::new(AppState::default());
+        *state.recent_session_event_cache.lock().await = None;
+        let (release_scan_tx, release_scan_rx) = oneshot::channel();
+        let initial_scan_task = tokio::spawn(async move {
+            let _ = release_scan_rx.await;
+            (
+                pending_approval::RecentSessionEventCache::default(),
+                RecentSessionEvents::default(),
+            )
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            start_waiting_webhook_watcher(&state, initial_scan_task, 0),
+        )
+        .await
+        .expect("watcher registration should not await the initial session scan");
+        assert!(state.waiting_watcher_task.lock().await.is_some());
+
+        let stop_state = Arc::clone(&state);
+        let stop_task =
+            tokio::spawn(async move { stop_waiting_webhook_watcher(&stop_state).await });
+        tokio::task::yield_now().await;
+        assert!(!stop_task.is_finished());
+        release_scan_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), stop_task)
+            .await
+            .expect("watcher stop should finish after the initial scan")
+            .unwrap();
+
+        assert!(state.recent_session_event_cache.lock().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn stopping_waiting_watcher_waits_for_task_and_cache_handoff() {
+        let state = Arc::new(AppState::default());
+        *state.recent_session_event_cache.lock().await = None;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (shutdown_seen_tx, shutdown_seen_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let task_completed = Arc::new(AtomicBool::new(false));
+        let watcher_state = Arc::clone(&state);
+        let watcher_completed = Arc::clone(&task_completed);
+        let watcher_task = tokio::spawn(async move {
+            let _ = shutdown_rx.await;
+            let _ = shutdown_seen_tx.send(());
+            let _ = release_rx.await;
+            watcher_completed.store(true, Ordering::Release);
+            *watcher_state.recent_session_event_cache.lock().await =
+                Some(pending_approval::RecentSessionEventCache::default());
+        });
+        *state.waiting_watcher_shutdown.lock().await = Some(shutdown_tx);
+        *state.waiting_watcher_task.lock().await = Some(watcher_task);
+
+        let stop_state = Arc::clone(&state);
+        let stop_task =
+            tokio::spawn(async move { stop_waiting_webhook_watcher(&stop_state).await });
+        shutdown_seen_rx.await.unwrap();
+        assert!(!stop_task.is_finished());
+        release_tx.send(()).unwrap();
+        stop_task.await.unwrap();
+
+        assert!(task_completed.load(Ordering::Acquire));
+        assert!(state.waiting_watcher_shutdown.lock().await.is_none());
+        assert!(state.waiting_watcher_task.lock().await.is_none());
+        assert!(state.recent_session_event_cache.lock().await.is_some());
     }
 
     #[test]

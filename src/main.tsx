@@ -43,6 +43,7 @@ if (import.meta.env.DEV) {
       slimCodexPet: true,
       slimCodexVoice: true,
       fastContextTools: false,
+      subagentOptimization: false,
     };
     const previewCcSwitch = {
       available: true,
@@ -75,12 +76,14 @@ if (import.meta.env.DEV) {
       if (command === "runtime_status") {
         return {
           running: true,
+          restartRequired: false,
+          restartInProgress: false,
           activeProfileId: previewConfig.activeProfileId,
           activeProfileName: previewConfig.profiles.find((p) => p.id === previewConfig.activeProfileId)?.name || "未命名代理",
           codexAppPath: previewConfig.codexAppPath,
           maintenance: {
             sessionStatus: "ready",
-            sessionDetail: "会话索引与回复链路正常 (18 线程活跃)",
+            sessionDetail: "会话索引与恢复链路正常 (18 线程活跃)",
             pluginStatus: "ready",
             pluginDetail: "Codex 插件已注入，且会话生命周期托管中",
           },
@@ -89,7 +92,12 @@ if (import.meta.env.DEV) {
       }
       if (command === "save_codey_config") {
         previewConfig = args.config as typeof previewConfig;
-        return { config: previewConfig, modelState: previewModelState, ccSwitch: previewCcSwitch };
+        return {
+          config: previewConfig,
+          modelState: previewModelState,
+          ccSwitch: previewCcSwitch,
+          restartRequired: false,
+        };
       }
       if (command === "sync_current_provider") {
         return { config: previewConfig, modelState: previewModelState, ccSwitch: previewCcSwitch, restartRequired: false };
@@ -109,7 +117,12 @@ if (import.meta.env.DEV) {
         };
       }
       if (command === "fetch_current_provider_models") {
-        return { status: "ok", models: previewUpstreamModels, modelState: previewModelState };
+        return {
+          status: "ok",
+          models: previewUpstreamModels,
+          modelState: previewModelState,
+          restartRequired: false,
+        };
       }
       if (command === "save_selected_models") {
         const requested = new Set(args.models as string[]);
@@ -117,7 +130,15 @@ if (import.meta.env.DEV) {
           ...previewModelState,
           thirdPartyModels: previewUpstreamModels.filter((model) => requested.has(model) && !previewOfficialModels.some((official) => official.slug === model)),
         };
-        return { status: "ok", config: previewConfig, modelState: previewModelState };
+        return {
+          status: "ok",
+          config: previewConfig,
+          modelState: previewModelState,
+          restartRequired: true,
+        };
+      }
+      if (command === "restart_codey") {
+        return { status: "restarting" };
       }
       if (command === "test_webhook") {
         return { status: 200 };

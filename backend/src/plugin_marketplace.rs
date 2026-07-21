@@ -42,10 +42,10 @@ pub fn list_plugins(home: &Path) -> Result<Value> {
     let installed = installed_plugins(home)?;
     let mut plugins = Vec::new();
     for marketplace_path in marketplace_paths(home) {
-        let Ok(text) = fs::read_to_string(&marketplace_path) else {
+        let Ok(bytes) = fs::read(&marketplace_path) else {
             continue;
         };
-        let Ok(mut marketplace) = serde_json::from_str::<Value>(&text) else {
+        let Ok(mut marketplace) = serde_json::from_slice::<Value>(&bytes) else {
             continue;
         };
         let marketplace_name = marketplace
@@ -59,11 +59,15 @@ pub fn list_plugins(home: &Path) -> Result<Value> {
             .and_then(Path::parent)
             .map(Path::to_path_buf)
             .unwrap_or_else(|| home.join(".tmp").join("plugins"));
-        let Some(entries) = marketplace.get_mut("plugins").and_then(Value::as_array_mut) else {
+        let Some(entries) = marketplace
+            .get_mut("plugins")
+            .and_then(Value::as_array_mut)
+            .map(std::mem::take)
+        else {
             continue;
         };
-        for entry in entries.iter_mut() {
-            let Some(object) = entry.as_object_mut() else {
+        for entry in entries {
+            let Value::Object(mut object) = entry else {
                 continue;
             };
             let name = object
@@ -98,16 +102,16 @@ pub fn list_plugins(home: &Path) -> Result<Value> {
                 Value::String(plugin_root.to_string_lossy().to_string()),
             );
             object.insert("installed".into(), Value::Bool(installed.contains(&id)));
-            merge_manifest(object, &plugin_root);
-            plugins.push(Value::Object(object.clone()));
+            merge_manifest(&mut object, &plugin_root);
+            plugins.push(Value::Object(object));
         }
     }
     let count = plugins.len();
     Ok(json!({"plugins": plugins, "count": count}))
 }
 
-fn marketplace_paths(home: &Path) -> Vec<PathBuf> {
-    vec![
+fn marketplace_paths(home: &Path) -> [PathBuf; 4] {
+    [
         home.join(".tmp/plugins/.agents/plugins/marketplace.json"),
         home.join(".tmp/plugins/.agents/plugins/api_marketplace.json"),
         home.join(".tmp/plugins-remote/.agents/plugins/marketplace.json"),
@@ -117,10 +121,10 @@ fn marketplace_paths(home: &Path) -> Vec<PathBuf> {
 
 fn merge_manifest(plugin: &mut Map<String, Value>, plugin_root: &Path) {
     let manifest_path = plugin_root.join(".codex-plugin/plugin.json");
-    let Ok(text) = fs::read_to_string(manifest_path) else {
+    let Ok(bytes) = fs::read(manifest_path) else {
         return;
     };
-    let Ok(manifest) = serde_json::from_str::<Value>(&text) else {
+    let Ok(manifest) = serde_json::from_slice::<Value>(&bytes) else {
         return;
     };
     let Some(manifest) = manifest.as_object() else {

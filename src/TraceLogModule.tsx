@@ -20,6 +20,7 @@ export type TraceLogGroupStats = {
 };
 
 export type TraceLogStats = {
+  pending: boolean;
   capturedAt: number;
   recentDaysWindow: number;
   databasesFound: number;
@@ -141,10 +142,12 @@ export function TraceLogModule({
       </div>
 
       <Card className="trace-card">
-        {!stats ? (
+        {!stats || stats.pending ? (
           <div className="trace-empty">
-            <ShieldCheck size={30} />
-            <strong>本次启动尚无统计快照</strong>
+            {stats?.pending
+              ? <LoaderCircle className="spinner" size={30} />
+              : <ShieldCheck size={30} />}
+            <strong>{stats?.pending ? "正在后台统计日志库" : "本次启动尚无统计快照"}</strong>
           </div>
         ) : (
           <>

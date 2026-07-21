@@ -2,6 +2,19 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+const delay = (milliseconds) =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function waitFor(predicate, timeoutMs = 500) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      assert.fail(`condition was not met within ${timeoutMs}ms`);
+    }
+    await delay(5);
+  }
+}
+
 async function loadVoicePatchExpression() {
   const source = await readFile(
     new URL("../backend/src/codex_startup_patch.rs", import.meta.url),
@@ -43,7 +56,7 @@ test("voice startup patch blocks native listeners and Dictation windows", async 
   };
 
   try {
-    assert.equal((0, eval)(await loadVoicePatchExpression()), "codey-startup-patch-installed-v4");
+    assert.equal((0, eval)(await loadVoicePatchExpression()), "codey-startup-patch-installed-v5");
 
     const childProcess = Module._load("node:child_process", undefined, false);
     const bareMonitor = childProcess.spawn(
@@ -105,14 +118,343 @@ test("startup lifecycle patch closes temporary WebViews and waits for all turns 
       { command: "/Codex/Resources/cua_node/bin/node_repl", depth: 2, pid: 42 },
       { command: "npm run vite:dev", depth: 2, kind: "other", pid: 43 },
     ],
+    completionGraceMs: 10,
   });
   notificationHandler({ method: "turn/started", params: { threadId: "a", turn: { id: "1" } } });
   notificationHandler({ method: "turn/started", params: { threadId: "b", turn: { id: "2" } } });
   notificationHandler({ method: "turn/completed", params: { threadId: "a", turn: { id: "1" } } });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await delay(20);
   assert.deepEqual(killed, []);
   notificationHandler({ method: "turn/completed", params: { threadId: "b", turn: { id: "2" } } });
-  await new Promise((resolve) => setTimeout(resolve, 1100));
+  await waitFor(() => killed.length === 2);
   assert.deepEqual(killed, [41, 42]);
+  dispose();
+});
+
+test("execution reaper recognizes terminal notifications and thread closure", async () => {
+  let notificationHandler = null;
+  const killed = [];
+  const dispose = globalThis.__CODEY_INSTALL_EXECUTION_REAPER__({
+    connection: {
+      registerInternalNotificationHandler(handler) {
+        notificationHandler = handler;
+        return () => { notificationHandler = null; };
+      },
+    },
+    kill: async (pid) => { killed.push(pid); },
+    snapshot: async () => [
+      { command: "/Codex/Resources/cua_node/bin/node_repl", depth: 1, pid: 51 },
+    ],
+    completionGraceMs: 5,
+  });
+
+  const terminalStates = [
+    "completed",
+    "aborted",
+    "cancelled",
+    "canceled",
+    "failed",
+    "error",
+    "errored",
+    "closed",
+    "stopped",
+    "interrupted",
+  ];
+  for (const [index, state] of terminalStates.entries()) {
+    const id = String(index);
+    notificationHandler({
+      method: "turn/started",
+      params: { threadId: "terminal-events", turn: { id } },
+    });
+    notificationHandler({
+      method: `turn/${state}`,
+      params: { thread_id: "terminal-events", turn_id: id },
+    });
+  }
+  notificationHandler({
+    method: "turn/started",
+    params: { threadId: "closed-thread", turn: { id: "remaining" } },
+  });
+  notificationHandler({
+    method: "thread/closed",
+    params: { threadId: "closed-thread" },
+  });
+
+  await waitFor(() => killed.length === 1);
+  assert.deepEqual(killed, [51]);
+  dispose();
+  assert.equal(notificationHandler, null);
+});
+
+test("execution reaper ignores unknown lifecycle state until an observed turn finishes", async () => {
+  let notificationHandler = null;
+  let snapshotCalls = 0;
+  const killed = [];
+  const dispose = globalThis.__CODEY_INSTALL_EXECUTION_REAPER__({
+    connection: {
+      registerInternalNotificationHandler(handler) {
+        notificationHandler = handler;
+        return () => { notificationHandler = null; };
+      },
+    },
+    kill: async (pid) => { killed.push(pid); },
+    snapshot: async () => {
+      snapshotCalls += 1;
+      return [
+        { command: "/Codex/Resources/cua_node/bin/node_repl", depth: 1, pid: 52 },
+      ];
+    },
+    completionGraceMs: 5,
+  });
+
+  await delay(30);
+  notificationHandler({
+    method: "turn/completed",
+    params: { threadId: "preexisting", turn: { id: "unknown" } },
+  });
+  await delay(30);
+  assert.equal(snapshotCalls, 0);
+  assert.deepEqual(killed, []);
+
+  notificationHandler({
+    method: "turn/started",
+    params: { threadId: "observed", turn: { id: "known" } },
+  });
+  notificationHandler({
+    method: "turn/completed",
+    params: { threadId: "observed", turn: { id: "known" } },
+  });
+  await waitFor(() => killed.length === 1);
+  assert.equal(snapshotCalls, 1);
+  assert.deepEqual(killed, [52]);
+  dispose();
+});
+
+test("execution reaper never evicts a silent long-running turn", async () => {
+  let notificationHandler = null;
+  const killed = [];
+  const dispose = globalThis.__CODEY_INSTALL_EXECUTION_REAPER__({
+    connection: {
+      registerInternalNotificationHandler(handler) {
+        notificationHandler = handler;
+        return () => { notificationHandler = null; };
+      },
+    },
+    kill: async (pid) => { killed.push(pid); },
+    snapshot: async () => [
+      { command: "node ./mcp/server.mjs", depth: 1, kind: "mcp", pid: 53 },
+    ],
+    completionGraceMs: 5,
+  });
+
+  notificationHandler({
+    method: "turn/started",
+    params: { threadId: "active", turn: { id: "silent" } },
+  });
+  await delay(80);
+  assert.deepEqual(killed, []);
+  notificationHandler({
+    method: "turn/completed",
+    params: { threadId: "active", turn: { id: "silent" } },
+  });
+  await waitFor(() => killed.length === 1);
+  assert.deepEqual(killed, [53]);
+  dispose();
+});
+
+test("execution reaper rechecks turn state after its process snapshot", async () => {
+  let notificationHandler = null;
+  let releaseFirstSnapshot = null;
+  let snapshotCalls = 0;
+  const killed = [];
+  const candidates = [
+    { command: "/Codex/Resources/cua_node/bin/node_repl", depth: 1, pid: 54 },
+  ];
+  const dispose = globalThis.__CODEY_INSTALL_EXECUTION_REAPER__({
+    connection: {
+      registerInternalNotificationHandler(handler) {
+        notificationHandler = handler;
+        return () => { notificationHandler = null; };
+      },
+    },
+    kill: async (pid) => { killed.push(pid); },
+    snapshot: async () => {
+      snapshotCalls += 1;
+      if (snapshotCalls !== 1) return candidates;
+      return new Promise((resolve) => { releaseFirstSnapshot = () => resolve(candidates); });
+    },
+    completionGraceMs: 5,
+  });
+
+  notificationHandler({
+    method: "turn/started",
+    params: { threadId: "race", turn: { id: "first" } },
+  });
+  notificationHandler({
+    method: "turn/completed",
+    params: { threadId: "race", turn: { id: "first" } },
+  });
+  await waitFor(() => snapshotCalls === 1);
+  notificationHandler({
+    method: "turn/started",
+    params: { threadId: "race", turn: { id: "second" } },
+  });
+  releaseFirstSnapshot();
+  await delay(20);
+  assert.deepEqual(killed, []);
+
+  notificationHandler({
+    method: "turn/completed",
+    params: { threadId: "race", turn: { id: "second" } },
+  });
+  await waitFor(() => killed.length === 1);
+  assert.ok(snapshotCalls >= 2);
+  assert.deepEqual(killed, [54]);
+  dispose();
+});
+
+test("execution reaper cancels cleanup when a turn starts after the snapshot", async () => {
+  let notificationHandler = null;
+  let snapshotCalls = 0;
+  const killed = [];
+  const candidates = [
+    { command: "/Codex/Resources/cua_node/bin/node_repl", depth: 1, pid: 55 },
+  ];
+  const dispose = globalThis.__CODEY_INSTALL_EXECUTION_REAPER__({
+    connection: {
+      registerInternalNotificationHandler(handler) {
+        notificationHandler = handler;
+        return () => { notificationHandler = null; };
+      },
+    },
+    kill: async (pid) => { killed.push(pid); },
+    snapshot: async () => {
+      snapshotCalls += 1;
+      if (snapshotCalls === 1) {
+        setTimeout(() => {
+          notificationHandler({
+            method: "turn/started",
+            params: { threadId: "snapshot-race", turn: { id: "second" } },
+          });
+        }, 0);
+      }
+      return candidates;
+    },
+    completionGraceMs: 20,
+  });
+
+  notificationHandler({
+    method: "turn/started",
+    params: { threadId: "snapshot-race", turn: { id: "first" } },
+  });
+  notificationHandler({
+    method: "turn/completed",
+    params: { threadId: "snapshot-race", turn: { id: "first" } },
+  });
+  await waitFor(() => snapshotCalls === 1);
+  await delay(40);
+  assert.deepEqual(killed, []);
+
+  notificationHandler({
+    method: "turn/completed",
+    params: { threadId: "snapshot-race", turn: { id: "second" } },
+  });
+  await waitFor(() => killed.length === 1);
+  assert.ok(snapshotCalls >= 2);
+  assert.deepEqual(killed, [55]);
+  dispose();
+});
+
+test("execution reaper retries after snapshot failure when a newer turn finished", async () => {
+  let notificationHandler = null;
+  let rejectFirstSnapshot = null;
+  let snapshotCalls = 0;
+  const killed = [];
+  const candidates = [
+    { command: "/Codex/Resources/cua_node/bin/node_repl", depth: 1, pid: 56 },
+  ];
+  const dispose = globalThis.__CODEY_INSTALL_EXECUTION_REAPER__({
+    connection: {
+      registerInternalNotificationHandler(handler) {
+        notificationHandler = handler;
+        return () => { notificationHandler = null; };
+      },
+    },
+    kill: async (pid) => { killed.push(pid); },
+    snapshot: async () => {
+      snapshotCalls += 1;
+      if (snapshotCalls !== 1) return candidates;
+      return new Promise((_resolve, reject) => {
+        rejectFirstSnapshot = () => reject(new Error("snapshot unavailable"));
+      });
+    },
+    completionGraceMs: 25,
+  });
+
+  notificationHandler({
+    method: "turn/started",
+    params: { threadId: "retry", turn: { id: "first" } },
+  });
+  notificationHandler({
+    method: "turn/completed",
+    params: { threadId: "retry", turn: { id: "first" } },
+  });
+  await waitFor(() => snapshotCalls === 1);
+  notificationHandler({
+    method: "turn/started",
+    params: { threadId: "retry", turn: { id: "newer" } },
+  });
+  notificationHandler({
+    method: "turn/failed",
+    params: { threadId: "retry", turn: { id: "newer" } },
+  });
+  rejectFirstSnapshot();
+  await delay(10);
+  assert.deepEqual(killed, []);
+
+  await waitFor(() => killed.length === 1);
+  assert.ok(snapshotCalls >= 2);
+  assert.deepEqual(killed, [56]);
+  dispose();
+});
+
+test("disposing execution reaper cancels pending cleanup", async () => {
+  let notificationHandler = null;
+  let releaseSnapshot = null;
+  let snapshotCalls = 0;
+  const killed = [];
+  const dispose = globalThis.__CODEY_INSTALL_EXECUTION_REAPER__({
+    connection: {
+      registerInternalNotificationHandler(handler) {
+        notificationHandler = handler;
+        return () => { notificationHandler = null; };
+      },
+    },
+    kill: async (pid) => { killed.push(pid); },
+    snapshot: async () => {
+      snapshotCalls += 1;
+      return new Promise((resolve) => {
+        releaseSnapshot = () => resolve([
+          { command: "node ./mcp/server.mjs", depth: 1, kind: "mcp", pid: 57 },
+        ]);
+      });
+    },
+    completionGraceMs: 5,
+  });
+
+  notificationHandler({
+    method: "turn/started",
+    params: { threadId: "dispose", turn: { id: "pending" } },
+  });
+  notificationHandler({
+    method: "turn/completed",
+    params: { threadId: "dispose", turn: { id: "pending" } },
+  });
+  await waitFor(() => snapshotCalls === 1);
+  dispose();
+  assert.equal(notificationHandler, null);
+  releaseSnapshot();
+  await delay(20);
+  assert.deepEqual(killed, []);
   dispose();
 });

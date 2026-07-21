@@ -11,7 +11,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  CODEX_PLUS_PLUS_REF: v1.2.36
+  CARGO_BUILD_BUILD_DIR: target
 
 jobs:
   macos:
@@ -29,10 +29,6 @@ jobs:
     steps:
       - name: Checkout Codey
         uses: actions/checkout@v4
-
-      - name: Checkout CodexPlusPlus dependency
-        shell: bash
-        run: git clone --depth 1 --branch "$CODEX_PLUS_PLUS_REF" https://github.com/BigPizzaV3/CodexPlusPlus.git "$GITHUB_WORKSPACE/../CodexPlusPlus-main"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -106,12 +102,6 @@ jobs:
     steps:
       - name: Checkout Codey
         uses: actions/checkout@v4
-
-      - name: Checkout CodexPlusPlus dependency
-        shell: pwsh
-        run: |
-          $dependency = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE "..\CodexPlusPlus-main"))
-          git clone --depth 1 --branch $env:CODEX_PLUS_PLUS_REF https://github.com/BigPizzaV3/CodexPlusPlus.git $dependency
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4

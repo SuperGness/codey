@@ -1,5 +1,6 @@
 [workspace]
 members = ["backend"]
+exclude = ["vendor/CodexPlusPlus"]
 resolver = "2"
 
 [workspace.package]

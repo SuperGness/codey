@@ -149,7 +149,33 @@ fn provider_state_matches(home: &Path, target_provider: &str) -> Result<bool> {
 }
 
 fn rollout_headers_match(home: &Path, target_provider: &str) -> Result<bool> {
-    for path in rollout_files(home)? {
+    for dirname in SESSION_DIRS {
+        let root = home.join(dirname);
+        if root.exists() && !rollout_directory_headers_match(&root, target_provider)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn rollout_directory_headers_match(root: &Path, target_provider: &str) -> Result<bool> {
+    for entry in
+        fs::read_dir(root).with_context(|| format!("扫描会话目录失败：{}", root.display()))?
+    {
+        let path = entry?.path();
+        if path.is_dir() {
+            if !rollout_directory_headers_match(&path, target_provider)? {
+                return Ok(false);
+            }
+            continue;
+        }
+        if !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+        {
+            continue;
+        }
         let file =
             fs::File::open(&path).with_context(|| format!("读取会话头失败：{}", path.display()))?;
         let reader = BufReader::new(file).take(MAX_ROLLOUT_HEADER_BYTES);
@@ -172,42 +198,15 @@ fn rollout_headers_match(home: &Path, target_provider: &str) -> Result<bool> {
             if provider != Some(target_provider) {
                 return Ok(false);
             }
+            // `session_meta` is the rollout header. Once its provider is
+            // validated, do not stream another 256 KiB of conversation data.
+            break;
         }
         if !found_session_meta {
             return Ok(false);
         }
     }
     Ok(true)
-}
-
-fn rollout_files(home: &Path) -> Result<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    for dirname in SESSION_DIRS {
-        let root = home.join(dirname);
-        if root.exists() {
-            collect_rollout_files(&root, &mut files)?;
-        }
-    }
-    files.sort();
-    Ok(files)
-}
-
-fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-    for entry in
-        fs::read_dir(root).with_context(|| format!("扫描会话目录失败：{}", root.display()))?
-    {
-        let path = entry?.path();
-        if path.is_dir() {
-            collect_rollout_files(&path, files)?;
-        } else if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
-        {
-            files.push(path);
-        }
-    }
-    Ok(())
 }
 
 fn sqlite_providers_match(home: &Path, target_provider: &str) -> Result<bool> {
@@ -326,5 +325,53 @@ mod tests {
         let plan = provider_sync_plan_at(temp.path(), "codey_global", &marker).unwrap();
 
         assert_eq!(plan, ProviderSyncPlan::Full);
+    }
+
+    #[test]
+    fn cached_validation_does_not_read_conversation_bytes_after_session_meta() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions/2026/07/20");
+        fs::create_dir_all(&sessions).unwrap();
+        let mut rollout = serde_json::to_vec(&json!({
+            "type": "session_meta",
+            "payload": {"id": "thread-1", "model_provider": "codey_global"}
+        }))
+        .unwrap();
+        rollout.extend_from_slice(b"\n\xff\xfeconversation-body");
+        fs::write(sessions.join("rollout-thread-1.jsonl"), rollout).unwrap();
+        let marker = temp.path().join("codey/provider-sync.json");
+        write_marker(&marker, "codey_global").unwrap();
+
+        let plan = provider_sync_plan_at(temp.path(), "codey_global", &marker).unwrap();
+
+        assert_eq!(plan, ProviderSyncPlan::Cached);
+    }
+
+    #[test]
+    fn cached_validation_uses_the_first_session_meta_as_the_rollout_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions/2026/07/20");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            sessions.join("rollout-thread-1.jsonl"),
+            format!(
+                "{}\n{}\n",
+                json!({
+                    "type": "session_meta",
+                    "payload": {"id": "thread-1", "model_provider": "codey_global"}
+                }),
+                json!({
+                    "type": "session_meta",
+                    "payload": {"id": "thread-1", "model_provider": "openai"}
+                }),
+            ),
+        )
+        .unwrap();
+        let marker = temp.path().join("codey/provider-sync.json");
+        write_marker(&marker, "codey_global").unwrap();
+
+        let plan = provider_sync_plan_at(temp.path(), "codey_global", &marker).unwrap();
+
+        assert_eq!(plan, ProviderSyncPlan::Cached);
     }
 }

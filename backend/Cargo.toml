@@ -15,8 +15,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
-codex-plus-core = { path = "../../CodexPlusPlus-main/crates/codex-plus-core" }
-codex-plus-data = { path = "../../CodexPlusPlus-main/crates/codex-plus-data" }
+codex-plus-core = { path = "../vendor/CodexPlusPlus/crates/codex-plus-core" }
+codex-plus-data = { path = "../vendor/CodexPlusPlus/crates/codex-plus-data" }
 directories = "6"
 fastctx = { git = "https://github.com/yc-duan/fastctx", rev = "64a6a45f88e65a2c0305e36673fa5e3f99d95384", default-features = false }
 futures-util = "0.3"

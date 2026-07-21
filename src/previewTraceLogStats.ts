@@ -13,6 +13,7 @@ function dateKey(daysAgo: number): string {
 }
 
 export const previewTraceLogStats: TraceLogStats = {
+  pending: false,
   capturedAt,
   recentDaysWindow: 7,
   databasesFound: 2,

@@ -47,11 +47,22 @@
   `;
   let lastSelectedRow = null;
   let scanTimer = 0;
-  let sidebarTitleSignature = "";
+  const sidebarTitleCache = new Map();
+  let watcherWakeTimer = 0;
   let deletePopoverCleanup = null;
   let codexSignalDispatcherPromise = null;
   let sidebarActionTooltipTimer = 0;
   let sidebarActionTooltipAnchor = null;
+  const queryWithin = (root, selector) => {
+    const matches = [];
+    if (root instanceof HTMLElement && typeof root.matches === "function" && root.matches(selector)) {
+      matches.push(root);
+    }
+    if (root && typeof root.querySelectorAll === "function") {
+      matches.push(...root.querySelectorAll(selector));
+    }
+    return matches;
+  };
 
   const callBridge = (path, payload = {}) => {
     if (typeof window.__codexSessionDeleteBridge === "function") {
@@ -81,29 +92,57 @@
     return new URLSearchParams(location.search).get("conversation_id") || new URLSearchParams(location.search).get("session_id") || "";
   };
 
-  const sidebarTitles = () => [...document.querySelectorAll(
+  const sidebarTitles = (root = document) => queryWithin(root,
     "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
-  )].map((thread) => ({
+  ).map((thread) => ({
     sessionId: String(thread.getAttribute("data-app-action-sidebar-thread-id") || "").replace(/^local:/, "").trim(),
     title: String(thread.getAttribute("data-app-action-sidebar-thread-title") || "").trim(),
   })).filter(({ sessionId, title }) => sessionId && title);
 
-  const getSessionTitle = (sessionId) => sidebarTitles()
-    .find((thread) => thread.sessionId === String(sessionId || "").replace(/^local:/, ""))?.title || "";
+  const getSessionTitle = (sessionId) => {
+    const normalizedSessionId = String(sessionId || "").replace(/^local:/, "");
+    return sidebarTitleCache.get(normalizedSessionId)
+      || sidebarTitles().find((thread) => thread.sessionId === normalizedSessionId)?.title
+      || "";
+  };
 
-  const syncSidebarTitles = () => {
-    const titles = sidebarTitles();
+  const syncSidebarTitles = (root = document) => {
+    const titles = sidebarTitles(root).filter(({ sessionId, title }) => (
+      sidebarTitleCache.get(sessionId) !== title
+    ));
     if (!titles.length) return;
-    const signature = JSON.stringify(titles);
-    if (signature === sidebarTitleSignature) return;
-    sidebarTitleSignature = signature;
+    const previousTitles = titles.map(({ sessionId }) => (
+      [sessionId, sidebarTitleCache.get(sessionId)]
+    ));
+    titles.forEach(({ sessionId, title }) => sidebarTitleCache.set(sessionId, title));
     void callBridge("/session/titles", { titles })
       .then((result) => {
-        if (result?.status === "failed") sidebarTitleSignature = "";
+        if (result?.status !== "failed") return;
+        previousTitles.forEach(([sessionId, previousTitle], index) => {
+          if (sidebarTitleCache.get(sessionId) !== titles[index].title) return;
+          if (previousTitle === undefined) sidebarTitleCache.delete(sessionId);
+          else sidebarTitleCache.set(sessionId, previousTitle);
+        });
       })
       .catch(() => {
-        sidebarTitleSignature = "";
+        previousTitles.forEach(([sessionId, previousTitle], index) => {
+          if (sidebarTitleCache.get(sessionId) !== titles[index].title) return;
+          if (previousTitle === undefined) sidebarTitleCache.delete(sessionId);
+          else sidebarTitleCache.set(sessionId, previousTitle);
+        });
       });
+  };
+
+  const wakeSessionWatcher = () => {
+    if (document.visibilityState === "hidden" || watcherWakeTimer) return;
+    void callBridge("/session/wake-watcher").catch(() => {});
+    watcherWakeTimer = window.setTimeout(() => {
+      watcherWakeTimer = 0;
+    }, 3_000);
+  };
+
+  const wakeSessionWatcherFromKey = (event) => {
+    if (event.key === "Enter" && !event.isComposing) wakeSessionWatcher();
   };
 
   const getMessageId = (row) => {
@@ -427,8 +466,8 @@
     }
   };
 
-  const installSessionExportButtons = () => {
-    document.querySelectorAll(
+  const installSessionExportButtons = (root = document) => {
+    queryWithin(root,
       "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
     ).forEach((thread) => {
       if (!(thread instanceof HTMLElement) || thread.querySelector(`[${sessionExportAttribute}]`)) return;
@@ -458,8 +497,8 @@
     });
   };
 
-  const installTasksImportButton = () => {
-    document.querySelectorAll("[data-app-action-sidebar-section]").forEach((section) => {
+  const installTasksImportButton = (root = document) => {
+    queryWithin(root, "[data-app-action-sidebar-section]").forEach((section) => {
       if (!(section instanceof HTMLElement) || section.querySelector(`[${tasksImportAttribute}]`)) return;
       const heading = String(
         section.getAttribute("data-app-action-sidebar-section-heading") || "",
@@ -646,8 +685,8 @@
     row.removeAttribute(threadStatusAttribute);
   };
 
-  const installThreadStatusIndicators = () => {
-    document.querySelectorAll("[data-app-action-sidebar-thread-row]").forEach((row) => {
+  const installThreadStatusIndicators = (root = document) => {
+    queryWithin(root, "[data-app-action-sidebar-thread-row]").forEach((row) => {
       if (!(row instanceof HTMLElement)) return;
       const state = threadStatusFromRow(row);
       if (!state) {
@@ -809,8 +848,8 @@
     }, 60_000);
   };
 
-  const installProjectImportButtons = () => {
-    document.querySelectorAll(
+  const installProjectImportButtons = (root = document) => {
+    queryWithin(root,
       "[data-app-action-sidebar-project-row][data-app-action-sidebar-project-id]",
     ).forEach((project) => {
       if (!(project instanceof HTMLElement) || project.querySelector(`[${projectImportAttribute}]`)) return;
@@ -1063,8 +1102,8 @@
     }, 0);
   };
 
-  const installSessionDeleteButtons = () => {
-    document.querySelectorAll(
+  const installSessionDeleteButtons = (root = document) => {
+    queryWithin(root,
       "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
     ).forEach((thread) => {
       if (!(thread instanceof HTMLElement) || thread.querySelector(`[${sessionDeleteAttribute}]`)) return;
@@ -1201,12 +1240,13 @@
     document.body.appendChild(toolbar);
   };
 
-  const installMessageSelection = () => {
+  const installMessageSelection = (root = document) => {
     mountToolbar();
-    const currentTurnRows = [...document.querySelectorAll("[data-turn-key]")];
+    const currentTurnRows = queryWithin(root, "[data-turn-key]");
     const rows = currentTurnRows.length
       ? currentTurnRows
-      : [...document.querySelectorAll("[data-message-author-role], [data-testid=conversation-turn], [data-message-id]")];
+      : queryWithin(root, "[data-message-author-role], [data-testid=conversation-turn], [data-message-id]");
+    let installed = false;
     rows.forEach((row) => {
       if (!(row instanceof HTMLElement) || row.querySelector("[data-codey-message-select]")) return;
       const messageId = getMessageId(row);
@@ -1226,22 +1266,25 @@
       });
       if (getComputedStyle(row).position === "static") row.style.position = "relative";
       row.appendChild(button);
+      installed = true;
     });
-    syncSelectionGroups();
-    updateToolbar();
+    if (installed) {
+      syncSelectionGroups();
+      updateToolbar();
+    }
   };
 
-  const scan = () => {
-    window.__codeyBlockNativePetControls?.();
-    window.__codeyBlockNativeVoiceControls?.();
-    mountButton();
-    installSessionExportButtons();
-    installTasksImportButton();
-    installSessionDeleteButtons();
-    installProjectImportButtons();
-    installThreadStatusIndicators();
-    installMessageSelection();
-    syncSidebarTitles();
+  const scan = (root = document, syncTitles = true, mountSettings = true) => {
+    window.__codeyBlockNativePetControls?.(root);
+    window.__codeyBlockNativeVoiceControls?.(root);
+    if (mountSettings) mountButton();
+    installSessionExportButtons(root);
+    installTasksImportButton(root);
+    installSessionDeleteButtons(root);
+    installProjectImportButtons(root);
+    installThreadStatusIndicators(root);
+    installMessageSelection(root);
+    if (syncTitles) syncSidebarTitles(root);
   };
 
   window.__codeyBridge = callBridge;
@@ -1262,11 +1305,104 @@
   window.__codeyDeleteSelectedMessages = deleteSelected;
   window.__codeyReloadConversationAfterHardDelete = reloadConversationAfterHardDelete;
   scan();
-  new MutationObserver(() => {
+
+  const codeyOwnedSelector = [
+    `#${buttonId}`,
+    `#${toolbarId}`,
+    `#${toastId}`,
+    `#${sessionDeletePopoverId}`,
+    `#${sidebarActionTooltipId}`,
+    `[${sessionExportAttribute}]`,
+    `[${tasksImportAttribute}]`,
+    `[${projectImportAttribute}]`,
+    `[${sessionDeleteAttribute}]`,
+    "[data-codey-message-select]",
+  ].join(", ");
+  const scanBoundarySelector = [
+    "header",
+    "nav",
+    "[data-app-action-sidebar-section]",
+    "[data-app-action-sidebar-thread-row]",
+    "[data-app-action-sidebar-project-row]",
+    "[data-turn-key]",
+    "[data-message-author-role]",
+    "[data-testid=conversation-turn]",
+    "[data-message-id]",
+  ].join(", ");
+  const relevantAddedSelector = [
+    scanBoundarySelector,
+    "button",
+    "[role=button]",
+    "[role=menuitem]",
+    "[role=option]",
+    "[role=switch]",
+    "input",
+    "label",
+  ].join(", ");
+  const pendingScanRoots = new Set();
+
+  const isCodeyOwned = (element) => (
+    element instanceof HTMLElement
+    && (
+      element.matches?.(codeyOwnedSelector)
+      || element.closest?.(codeyOwnedSelector)
+    )
+  );
+  const containsRelevantElement = (element) => (
+    element instanceof HTMLElement
+    && (
+      element.matches?.(relevantAddedSelector)
+      || element.querySelector?.(relevantAddedSelector)
+    )
+  );
+  const nearestScanRoot = (element) => {
+    if (!(element instanceof HTMLElement)) return null;
+    return element.closest?.(scanBoundarySelector) || element;
+  };
+  const flushIncrementalScans = () => {
+    scanTimer = 0;
+    const roots = [...pendingScanRoots];
+    pendingScanRoots.clear();
+    mountButton();
+    roots.forEach((root) => scan(root, true, false));
+  };
+  const scheduleIncrementalScan = (root) => {
+    if (root) pendingScanRoots.add(root);
     window.clearTimeout(scanTimer);
-    // requestAnimationFrame is paused when Codex is minimized; a timer keeps
-    // message controls working in the background.
-    scanTimer = window.setTimeout(scan, 60);
+    scanTimer = window.setTimeout(flushIncrementalScans, 60);
+  };
+
+  new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      const target = mutation.target instanceof HTMLElement
+        ? mutation.target
+        : mutation.target?.parentElement;
+      if (mutation.type === "attributes") {
+        if (target && !isCodeyOwned(target)) {
+          pendingScanRoots.add(nearestScanRoot(target));
+        }
+        continue;
+      }
+      for (const node of mutation.addedNodes || []) {
+        const element = node instanceof HTMLElement ? node : null;
+        if (!element) {
+          if (node?.nodeType === Node.TEXT_NODE && target && !isCodeyOwned(target)) {
+            pendingScanRoots.add(nearestScanRoot(target));
+          }
+          continue;
+        }
+        if (isCodeyOwned(element) || !containsRelevantElement(element)) continue;
+        pendingScanRoots.add(nearestScanRoot(element));
+      }
+      for (const node of mutation.removedNodes || []) {
+        const element = node instanceof HTMLElement ? node : null;
+        if (!element || !containsRelevantElement(element)) continue;
+        if (target && !isCodeyOwned(target)) pendingScanRoots.add(nearestScanRoot(target));
+      }
+    }
+    if (pendingScanRoots.size) {
+      scheduleIncrementalScan(null);
+    }
   }).observe(document.documentElement, {
     attributes: true,
     attributeFilter: [
@@ -1281,7 +1417,15 @@
       "disabled",
     ],
     childList: true,
-    characterData: true,
     subtree: true,
   });
+  if (typeof document.addEventListener === "function") {
+    document.addEventListener("visibilitychange", wakeSessionWatcher);
+    document.addEventListener("pointerdown", wakeSessionWatcher, { capture: true, passive: true });
+    document.addEventListener("keydown", wakeSessionWatcherFromKey, true);
+  }
+  if (typeof window.addEventListener === "function") {
+    window.addEventListener("focus", wakeSessionWatcher);
+    window.addEventListener("pageshow", wakeSessionWatcher);
+  }
 })();

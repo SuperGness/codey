@@ -130,19 +130,37 @@
       });
   };
 
-  const block = () => {
+  const controlsWithin = (root, selector) => {
+    const controls = [];
+    if (root instanceof HTMLElement && root.matches?.(selector)) controls.push(root);
+    if (root && typeof root.querySelectorAll === "function") {
+      controls.push(...root.querySelectorAll(selector));
+    }
+    return controls;
+  };
+
+  const block = (root = document) => {
     if (!enabled) return 0;
     let blocked = 0;
-    document.querySelectorAll(
+    controlsWithin(
+      root,
       "button, [role=button], [role=menuitem], [role=option], [role=switch], input, label",
     ).forEach((control) => {
       if (!isVoiceControl(control)) return;
-      control.setAttribute("data-codey-voice-control-blocked", "true");
-      control.setAttribute("aria-hidden", "true");
-      control.setAttribute("tabindex", "-1");
-      control.setAttribute("inert", "");
-      control.style.setProperty("display", "none", "important");
-      if ("disabled" in control) control.disabled = true;
+      const fullyBlocked = control.getAttribute("data-codey-voice-control-blocked") === "true"
+        && control.getAttribute("aria-hidden") === "true"
+        && control.getAttribute("tabindex") === "-1"
+        && control.getAttribute("inert") !== null
+        && String(control.style.display || "").startsWith("none")
+        && (!("disabled" in control) || control.disabled);
+      if (!fullyBlocked) {
+        control.setAttribute("data-codey-voice-control-blocked", "true");
+        control.setAttribute("aria-hidden", "true");
+        control.setAttribute("tabindex", "-1");
+        control.setAttribute("inert", "");
+        control.style.setProperty("display", "none", "important");
+        if ("disabled" in control && !control.disabled) control.disabled = true;
+      }
       blocked += 1;
     });
     return blocked;

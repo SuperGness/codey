@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 
 use crate::trace_log_guard;
 
@@ -14,6 +15,7 @@ const TOP_TARGETS: usize = 8;
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TraceLogStatsSnapshot {
+    pub pending: bool,
     pub captured_at: u64,
     pub recent_days_window: u8,
     pub databases_found: usize,
@@ -29,6 +31,55 @@ pub struct TraceLogStatsSnapshot {
     pub levels: Vec<TraceLogGroupStats>,
     pub top_targets: Vec<TraceLogGroupStats>,
     pub errors: Vec<String>,
+}
+
+impl TraceLogStatsSnapshot {
+    pub fn pending() -> Self {
+        Self {
+            pending: true,
+            captured_at: timestamp_seconds(),
+            recent_days_window: RECENT_DAYS,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TraceLogStatsHandle {
+    snapshot: Arc<RwLock<TraceLogStatsSnapshot>>,
+}
+
+impl TraceLogStatsHandle {
+    pub fn pending() -> Self {
+        Self {
+            snapshot: Arc::new(RwLock::new(TraceLogStatsSnapshot::pending())),
+        }
+    }
+
+    pub fn replace(&self, snapshot: TraceLogStatsSnapshot) {
+        match self.snapshot.write() {
+            Ok(mut current) => *current = snapshot,
+            Err(poisoned) => *poisoned.into_inner() = snapshot,
+        }
+    }
+}
+
+impl Default for TraceLogStatsHandle {
+    fn default() -> Self {
+        Self::pending()
+    }
+}
+
+impl Serialize for TraceLogStatsHandle {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self.snapshot.read() {
+            Ok(snapshot) => snapshot.serialize(serializer),
+            Err(poisoned) => poisoned.into_inner().serialize(serializer),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -421,5 +472,30 @@ mod tests {
         assert_eq!(snapshot.databases_found, 1);
         assert_eq!(snapshot.databases_scanned, 0);
         assert_eq!(snapshot.errors.len(), 1);
+    }
+
+    #[test]
+    fn shared_handle_serializes_the_latest_snapshot_without_changing_the_wire_shape() {
+        let handle = TraceLogStatsHandle::pending();
+        let mut updated = TraceLogStatsSnapshot::default();
+        updated.databases_found = 3;
+        updated.row_count = 42;
+        handle.replace(updated);
+
+        let value = serde_json::to_value(&handle).unwrap();
+
+        assert_eq!(value["pending"], false);
+        assert_eq!(value["databasesFound"], 3);
+        assert_eq!(value["rowCount"], 42);
+        assert!(value.get("snapshot").is_none());
+    }
+
+    #[test]
+    fn pending_handle_is_distinct_from_a_completed_empty_snapshot() {
+        let pending = serde_json::to_value(TraceLogStatsHandle::pending()).unwrap();
+        let completed = serde_json::to_value(TraceLogStatsSnapshot::default()).unwrap();
+
+        assert_eq!(pending["pending"], true);
+        assert_eq!(completed["pending"], false);
     }
 }

@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-pub const PATCH_RESULT: &str = "codey-startup-patch-installed-v4";
+pub const PATCH_RESULT: &str = "codey-startup-patch-installed-v5";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchOptions {
@@ -25,6 +25,113 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   const originalLoad = Module._load;
   const isInspectorArgument = (argument) =>
     typeof argument === "string" && /^--inspect(?:-brk)?(?:=|$)/.test(argument);
+  const rendererGatePatchState = {
+    modelVisibility: false,
+    serviceTierRequest: false,
+    serviceTierUi: false,
+    lastError: null,
+  };
+  const replaceUniqueRendererGate = (source, pattern, replacement, name) => {
+    let count = 0;
+    const patched = source.replace(pattern, (...args) => {
+      count += 1;
+      return typeof replacement === "function" ? replacement(...args) : replacement;
+    });
+    if (count !== 1) {
+      throw new Error(`Codey ${name} renderer gate matched ${count} times`);
+    }
+    return patched;
+  };
+  const patchCodexRendererAsset = (source) => {
+    let patched = source;
+    if (
+      source.includes("useHiddenModels:") &&
+      source.includes("includeUltraReasoningEffort") &&
+      source.includes("amazonBedrock")
+    ) {
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\b[$A-Z_a-z][$\w]*\s*=\s*[$A-Z_a-z][$\w]*\s*&&\s*[$A-Z_a-z][$\w]*\s*)!==\s*`amazonBedrock`/g,
+        (_match, visibilityExpression) =>
+          `${visibilityExpression}=== \`chatgpt\``,
+        "model visibility",
+      );
+      rendererGatePatchState.modelVisibility = true;
+    }
+    if (
+      source.includes("isServiceTierAllowed") &&
+      source.includes("featureRequirements?.fast_mode") &&
+      source.includes("authMethod:")
+    ) {
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\b([$A-Z_a-z][$\w]*)\s*=\s*)([$A-Z_a-z][$\w]*)\s*&&\s*!([$A-Z_a-z][$\w]*)\s*&&\s*([$A-Z_a-z][$\w]*)\s*!=\s*null\s*&&\s*\5\?\.requirements\?\.featureRequirements\?\.fast_mode\s*!==\s*!1/g,
+        (
+          _match,
+          assignment,
+          _resultName,
+          chatGptAuthName,
+          loadingName,
+          requirementsName,
+        ) =>
+          `${assignment}!${chatGptAuthName}||(!${loadingName}&&${requirementsName}!=null&&` +
+          `${requirementsName}?.requirements?.featureRequirements?.fast_mode!==!1)`,
+        "service tier UI",
+      );
+      rendererGatePatchState.serviceTierUi = true;
+    }
+    if (
+      source.includes("Failed to read service tier for request") &&
+      source.includes("featureRequirements?.fast_mode")
+    ) {
+      patched = replaceUniqueRendererGate(
+        patched,
+        /if\s*\(\s*([$A-Z_a-z][$\w]*)\s*!==\s*`chatgpt`\s*\)\s*return\s*!1/g,
+        (_match, authMethodName) =>
+          `if(${authMethodName}!==\`chatgpt\`)return!0`,
+        "service tier request",
+      );
+      rendererGatePatchState.serviceTierRequest = true;
+    }
+    return patched;
+  };
+  const isCodexRendererAssetRequest = (request) => {
+    try {
+      const url = new URL(request?.url);
+      return (
+        url.protocol === "app:" &&
+        url.pathname.includes("/assets/") &&
+        /\/app-initial~[^/]+\.js$/i.test(url.pathname)
+      );
+    } catch {
+      return false;
+    }
+  };
+  const patchCodexRendererResponse = async (request, response) => {
+    if (!isCodexRendererAssetRequest(request) || response?.ok !== true) return response;
+    const source = await response.clone().text();
+    let patched;
+    try {
+      patched = patchCodexRendererAsset(source);
+    } catch (error) {
+      rendererGatePatchState.lastError =
+        error instanceof Error ? error.message : String(error);
+      throw error;
+    }
+    if (patched === source) return response;
+    const headers = new Headers(response.headers);
+    headers.delete("content-length");
+    return new Response(patched, {
+      headers,
+      status: response.status,
+      statusText: response.statusText,
+    });
+  };
+  Object.defineProperty(globalThis, "__CODEY_RENDERER_GATE_PATCH__", {
+    configurable: false,
+    value: rendererGatePatchState,
+    writable: false,
+  });
 
   // The inspector is only a startup injection mechanism. Do not pass its
   // pause state or command-line flags to Codex workers.
@@ -156,12 +263,39 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     writable: false,
   });
 
-  const installExecutionReaper = ({ connection, kill, snapshot }) => {
-    const activeTurns = new Set();
-    const idleTimeoutMs = 5 * 60 * 1000;
+  const installExecutionReaper = ({
+    connection,
+    kill,
+    snapshot,
+    completionGraceMs: configuredCompletionGraceMs,
+  }) => {
+    const activeTurns = new Map();
+    const completionGraceMs = configuredCompletionGraceMs ?? 1000;
+    const reclaimRetryMs = 60 * 1000;
+    const terminalTurnStates = new Set([
+      "completed",
+      "aborted",
+      "cancelled",
+      "canceled",
+      "failed",
+      "error",
+      "errored",
+      "closed",
+      "stopped",
+      "interrupted",
+    ]);
+    const terminalThreadMethods = new Set([
+      "thread/archived",
+      "thread/closed",
+      "thread/deleted",
+    ]);
     let cleanupPromise = null;
-    let idleTimer = null;
+    let reclaimTimer = null;
+    let reclaimBarrier = null;
+    let reclaimAuthorizedVersion = null;
     let disposed = false;
+    let lastTurnActivityAt = Date.now();
+    let turnStateVersion = 0;
 
     const isReclaimable = (processInfo) => {
       const command = String(processInfo?.command ?? "");
@@ -173,58 +307,198 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
       );
     };
 
+    const clearReclaimTimer = () => {
+      if (reclaimTimer == null) return;
+      clearTimeout(reclaimTimer);
+      reclaimTimer = null;
+    };
+
+    const cancelReclaimBarrier = () => {
+      if (reclaimBarrier == null) return;
+      const barrier = reclaimBarrier;
+      reclaimBarrier = null;
+      clearTimeout(barrier.timer);
+      barrier.resolve(false);
+    };
+
+    const isReclaimAuthorized = (expectedVersion) =>
+      !disposed &&
+      activeTurns.size === 0 &&
+      reclaimAuthorizedVersion === expectedVersion &&
+      turnStateVersion === expectedVersion;
+
+    const isReclaimSafe = (expectedVersion, now = Date.now()) =>
+      isReclaimAuthorized(expectedVersion) &&
+      now - lastTurnActivityAt >= completionGraceMs;
+
+    const waitForReclaimBarrier = (expectedVersion, delayMs) => {
+      if (!isReclaimSafe(expectedVersion)) return Promise.resolve(false);
+      cancelReclaimBarrier();
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          if (reclaimBarrier?.timer === timer) reclaimBarrier = null;
+          resolve(isReclaimSafe(expectedVersion));
+        }, Math.max(0, delayMs));
+        timer.unref?.();
+        reclaimBarrier = { resolve, timer };
+      });
+    };
+
+    const armReclaim = (reason, minimumDelayMs = 0) => {
+      clearReclaimTimer();
+      const expectedVersion = reclaimAuthorizedVersion;
+      if (expectedVersion == null || !isReclaimAuthorized(expectedVersion)) return;
+      const graceRemaining = completionGraceMs - (Date.now() - lastTurnActivityAt);
+      reclaimTimer = setTimeout(() => {
+        reclaimTimer = null;
+        void reclaim(reason);
+      }, Math.max(1, graceRemaining, minimumDelayMs));
+      reclaimTimer.unref?.();
+    };
+
+    const recordTurnStateChange = (now) => {
+      lastTurnActivityAt = now;
+      turnStateVersion += 1;
+      reclaimAuthorizedVersion = null;
+      clearReclaimTimer();
+      cancelReclaimBarrier();
+    };
+
     const reclaim = (reason) => {
-      if (disposed || activeTurns.size > 0 || cleanupPromise != null) return cleanupPromise;
+      const expectedVersion = reclaimAuthorizedVersion;
+      if (expectedVersion == null) return cleanupPromise;
+      if (!isReclaimSafe(expectedVersion) || cleanupPromise != null) return cleanupPromise;
+      clearReclaimTimer();
+      let cleanupSucceeded = false;
       cleanupPromise = Promise.resolve()
         .then(snapshot)
         .then(async (processes) => {
+          // A fresh quiet window after the process snapshot lets queued turn
+          // notifications invalidate this cleanup before the first kill.
+          if (!await waitForReclaimBarrier(expectedVersion, completionGraceMs)) {
+            return { reason, reclaimed: 0 };
+          }
           const candidates = processes
             .filter(isReclaimable)
             .sort((left, right) => (right.depth ?? 0) - (left.depth ?? 0));
+          let reclaimed = 0;
+          let allKillsSucceeded = true;
           for (const processInfo of candidates) {
-            if (disposed || activeTurns.size > 0) break;
-            try { await kill(processInfo.pid); } catch {}
+            // Yield once more immediately before each irreversible operation.
+            if (!await waitForReclaimBarrier(expectedVersion, 0)) {
+              break;
+            }
+            try {
+              if (await kill(processInfo.pid) !== false) reclaimed += 1;
+              else allKillsSucceeded = false;
+            } catch {
+              allKillsSucceeded = false;
+            }
+            if (!isReclaimSafe(expectedVersion)) break;
           }
-          return { reason, reclaimed: candidates.length };
+          cleanupSucceeded =
+            allKillsSucceeded &&
+            reclaimed === candidates.length &&
+            isReclaimSafe(expectedVersion);
+          return { reason, reclaimed };
         })
         .catch(() => ({ reason, reclaimed: 0 }))
-        .finally(() => { cleanupPromise = null; });
+        .finally(() => {
+          cleanupPromise = null;
+          cancelReclaimBarrier();
+          if (disposed) return;
+          if (cleanupSucceeded && isReclaimSafe(expectedVersion)) {
+            reclaimAuthorizedVersion = null;
+            return;
+          }
+          if (reclaimAuthorizedVersion != null) {
+            armReclaim(
+              "turn-state-changed",
+              reclaimAuthorizedVersion === expectedVersion ? reclaimRetryMs : 0,
+            );
+          }
+        });
       return cleanupPromise;
     };
 
-    const armIdleTimeout = () => {
-      if (idleTimer != null) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => {
-        idleTimer = null;
-        if (activeTurns.size === 0) void reclaim("idle-timeout");
-      }, idleTimeoutMs);
-      idleTimer.unref?.();
+    const normalizedId = (value) =>
+      typeof value === "string" && value.length > 0 ? value : null;
+    const turnKey = (threadId, turnId) => `${threadId}\u0000${turnId}`;
+    const markTurnActivity = (threadId, turnId, now) => {
+      const key = turnKey(threadId, turnId);
+      const turn = activeTurns.get(key);
+      if (turn == null) return false;
+      activeTurns.set(key, { ...turn, lastSeen: now });
+      return true;
+    };
+    const removeThreadTurns = (threadId) => {
+      let changed = false;
+      for (const [key, turn] of activeTurns) {
+        if (turn.threadId !== threadId) continue;
+        activeTurns.delete(key);
+        changed = true;
+      }
+      return changed;
     };
 
-    const unsubscribe = connection.registerInternalNotificationHandler((notification) => {
-      const threadId = notification?.params?.threadId;
-      const turnId = notification?.params?.turn?.id;
-      if (typeof threadId !== "string" || typeof turnId !== "string") return;
-      const key = `${threadId}:${turnId}`;
-      if (notification.method === "turn/started") {
-        activeTurns.add(key);
-        armIdleTimeout();
+    let unsubscribe = connection.registerInternalNotificationHandler((notification) => {
+      if (disposed) return;
+      const method =
+        typeof notification?.method === "string"
+          ? notification.method.toLowerCase()
+          : "";
+      const params = notification?.params;
+      const threadId = normalizedId(
+        params?.threadId ?? params?.thread_id ?? params?.thread?.id,
+      );
+      const turnId = normalizedId(
+        params?.turn?.id ?? params?.turnId ?? params?.turn_id,
+      );
+      const now = Date.now();
+      const terminalTurnState =
+        method.startsWith("turn/") && terminalTurnStates.has(method.slice(5));
+      const terminalThread = terminalThreadMethods.has(method);
+
+      if (method === "turn/started" && threadId != null && turnId != null) {
+        recordTurnStateChange(now);
+        activeTurns.set(turnKey(threadId, turnId), { threadId, turnId, lastSeen: now });
         return;
       }
-      if (notification.method !== "turn/completed") return;
-      activeTurns.delete(key);
-      armIdleTimeout();
-      if (activeTurns.size === 0) {
-        const timer = setTimeout(() => void reclaim("task-completed"), 1000);
-        timer.unref?.();
+
+      if (terminalTurnState || terminalThread) {
+        let changed = false;
+        if (terminalThread && threadId != null) {
+          changed = removeThreadTurns(threadId);
+        } else if (threadId != null && turnId != null) {
+          changed = activeTurns.delete(turnKey(threadId, turnId));
+        } else if (threadId != null) {
+          changed = removeThreadTurns(threadId);
+        }
+        // A terminal event that does not match a turn observed by this
+        // subscription cannot prove that the connection is globally idle.
+        if (!changed) return;
+        recordTurnStateChange(now);
+        if (activeTurns.size > 0) return;
+        reclaimAuthorizedVersion = turnStateVersion;
+        armReclaim(`task-${method.slice(method.lastIndexOf("/") + 1)}`);
+        return;
       }
+
+      if (threadId == null || turnId == null) return;
+      if (!markTurnActivity(threadId, turnId, now)) return;
+      recordTurnStateChange(now);
     });
-    armIdleTimeout();
     return () => {
+      if (disposed) return;
       disposed = true;
-      if (idleTimer != null) clearTimeout(idleTimer);
+      turnStateVersion += 1;
+      reclaimAuthorizedVersion = null;
+      clearReclaimTimer();
+      cancelReclaimBarrier();
       activeTurns.clear();
-      unsubscribe();
+      const disposeNotifications = unsubscribe;
+      unsubscribe = null;
+      try { disposeNotifications?.(); } catch {}
     };
   };
   Object.defineProperty(globalThis, "__CODEY_INSTALL_EXECUTION_REAPER__", {
@@ -411,6 +685,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   };
 
   let electronProxy = null;
+  let electronProtocolProxy = null;
   Module._load = function codeyStartupPatchLoader(request, parent, isMain) {
     if (disableMicro && request === "@worklouder/device-kit-oai") return microStub;
     if (
@@ -424,11 +699,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     }
 
     const loaded = Reflect.apply(originalLoad, this, arguments);
-    if (
-      (!disablePet && !disableVoice) ||
-      request !== "electron" ||
-      !loaded?.BrowserWindow
-    ) return loaded;
+    if (request !== "electron" || !loaded?.BrowserWindow) return loaded;
     if (electronProxy) return electronProxy;
 
     const NativeBrowserWindow = loaded.BrowserWindow;
@@ -471,11 +742,29 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
+    if (loaded.protocol) {
+      electronProtocolProxy = new Proxy(loaded.protocol, {
+        get(target, property, receiver) {
+          if (property === "handle") {
+            return (scheme, handler) => {
+              const effectiveHandler =
+                scheme === "app" && typeof handler === "function"
+                  ? async (request) =>
+                      patchCodexRendererResponse(request, await handler(request))
+                  : handler;
+              return target.handle(scheme, effectiveHandler);
+            };
+          }
+          const value = Reflect.get(target, property, receiver);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    }
     electronProxy = new Proxy(loaded, {
       get(target, property, receiver) {
-        return property === "BrowserWindow"
-          ? CodeyPetBlockedBrowserWindow
-          : Reflect.get(target, property, receiver);
+        if (property === "BrowserWindow") return CodeyPetBlockedBrowserWindow;
+        if (property === "protocol" && electronProtocolProxy) return electronProtocolProxy;
+        return Reflect.get(target, property, receiver);
       },
     });
     return electronProxy;
@@ -486,13 +775,14 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     disablePet,
     disableVoice,
     reclaimExecutionEnvironments: true,
+    restoreNativeModelAndSpeedControls: true,
     destroyTemporaryWebViews: true,
     disableWindowsWmiSampler,
   });
   setImmediate(() => {
     try { process.getBuiltinModule("inspector").close(); } catch {}
   });
-  return "codey-startup-patch-installed-v4";
+  return "codey-startup-patch-installed-v5";
 })()
 "#;
 
@@ -537,6 +827,7 @@ async fn wait_for_inspector(port: u16) -> Result<String> {
     let endpoint = format!("http://127.0.0.1:{port}/json/list");
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
     let mut last_error = "调试端口尚未响应".to_string();
+    let mut retry_delay = std::time::Duration::from_millis(20);
 
     while tokio::time::Instant::now() < deadline {
         match client.get(&endpoint).send().await {
@@ -558,7 +849,11 @@ async fn wait_for_inspector(port: u16) -> Result<String> {
             Ok(response) => last_error = format!("调试端口返回 HTTP {}", response.status()),
             Err(error) => last_error = error.to_string(),
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(retry_delay).await;
+        retry_delay = std::cmp::min(
+            retry_delay.saturating_mul(2),
+            std::time::Duration::from_millis(100),
+        );
     }
 
     anyhow::bail!("等待 Codex 启动补丁超时：{last_error}")
@@ -597,6 +892,9 @@ async fn install_over_websocket(websocket_url: &str, expression: &str) -> Result
                 ensure_protocol_success(&payload, "Debugger.enable")?;
                 debugger_enabled = true;
             }
+            Some(3) => {
+                ensure_protocol_success(&payload, "Runtime.runIfWaitingForDebugger")?;
+            }
             Some(4) => {
                 ensure_protocol_success(&payload, "Debugger.evaluateOnCallFrame")?;
                 if let Some(exception) = payload
@@ -612,7 +910,9 @@ async fn install_over_websocket(websocket_url: &str, expression: &str) -> Result
                     anyhow::bail!("Codex 启动补丁未返回预期状态");
                 }
                 send_command(&mut socket, 5, "Debugger.resume", serde_json::json!({})).await?;
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Some(5) => {
+                ensure_protocol_success(&payload, "Debugger.resume")?;
                 let _ = socket.close(None).await;
                 return Ok(());
             }
@@ -697,7 +997,7 @@ mod tests {
 
     #[test]
     fn patch_result_is_stable_for_launch_status_validation() {
-        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v4");
+        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v5");
     }
 
     #[test]
@@ -714,6 +1014,9 @@ mod tests {
         );
         assert!(expression.contains("const disableMicro = disableWindowsOptimizations"));
         assert!(expression.contains("CodeyPetBlockedBrowserWindow"));
+        assert!(expression.contains("__CODEY_RENDERER_GATE_PATCH__"));
+        assert!(expression.contains("patchCodexRendererResponse"));
+        assert!(expression.contains("restoreNativeModelAndSpeedControls: true"));
         assert!(expression.contains("avatar-overlay-composition-surface-preload"));
         assert!(expression.contains("avatar(?:-|_)overlay"));
         assert!(expression.contains("__CODEY_DISABLED_PET_MANAGER__"));
@@ -761,8 +1064,13 @@ mod tests {
         assert!(expression.contains("__CODEY_TEMP_WEBVIEW_LIFECYCLE__.track"));
         assert!(expression.contains("checkout-webview-presentation-changed"));
         assert!(expression.contains("__CODEY_INSTALL_EXECUTION_REAPER__"));
-        assert!(expression.contains("turn/completed"));
-        assert!(expression.contains("idleTimeoutMs = 5 * 60 * 1000"));
+        assert!(expression.contains("const activeTurns = new Map()"));
+        assert!(expression.contains("\"completed\""));
+        assert!(expression.contains("\"aborted\""));
+        assert!(expression.contains("reclaimAuthorizedVersion"));
+        assert!(expression.contains("waitForReclaimBarrier"));
+        assert!(!expression.contains("evictStaleTurns"));
+        assert!(expression.contains("turnStateVersion"));
         assert!(expression.contains("codegraph\\.js\\s+serve"));
         assert!(expression.contains("node_repl"));
         assert!(expression.contains("handlers[\"child-process-kill\"]"));
@@ -859,6 +1167,14 @@ mod tests {
             };
             let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
             assert_eq!(command["method"], "Debugger.resume");
+            socket
+                .send(Message::Text(
+                    serde_json::json!({"id": 5, "result": {}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
         });
 
         let expression = patch_expression(PatchOptions {
@@ -868,6 +1184,76 @@ mod tests {
         install_over_websocket(&format!("ws://{address}"), &expression)
             .await
             .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inspector_protocol_fails_immediately_when_continue_is_rejected() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            for expected_id in [1_u64, 2] {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    panic!("expected inspector command");
+                };
+                let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+                assert_eq!(command["id"], expected_id);
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({"id": expected_id, "result": {}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+
+            let message = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected runIfWaitingForDebugger");
+            };
+            let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(command["id"], 3);
+            assert_eq!(command["method"], "Runtime.runIfWaitingForDebugger");
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "id": 3,
+                        "error": { "code": -32000, "message": "not waiting" }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let expression = patch_expression(PatchOptions {
+            disable_pet: true,
+            disable_voice: false,
+        });
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            install_over_websocket(&format!("ws://{address}"), &expression),
+        )
+        .await
+        .expect("protocol error should not wait for the outer startup timeout")
+        .expect_err("runIfWaitingForDebugger error should fail installation");
+        let message = error.to_string();
+        assert!(
+            message.contains("Runtime.runIfWaitingForDebugger"),
+            "{message}"
+        );
+        assert!(message.contains("not waiting"), "{message}");
         server.await.unwrap();
     }
 }

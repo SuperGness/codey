@@ -198,6 +198,13 @@ test("syncs Codex sidebar titles to the notification backend", async () => {
   assert.deepEqual(JSON.parse(JSON.stringify(titleSync?.payload)), {
     titles: [{ sessionId: "session-1", title: "修复飞书会话标题" }],
   });
+
+  runtime.window.__codeySyncSidebarTitles();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    runtime.bridgeCalls.filter((call) => call.path === "/session/titles").length,
+    1,
+  );
 });
 
 test("resolves a local project path from the current opaque project row id", () => {

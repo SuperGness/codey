@@ -1,0 +1,37 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+const root = new URL("../", import.meta.url);
+
+test("subagent optimization is opt-in and exposed through the settings switch", async () => {
+  const [appSource, configSource, commandSource, launcherSource] = await Promise.all([
+    readFile(new URL("src/App.tsx", root), "utf8"),
+    readFile(new URL("backend/src/config.rs", root), "utf8"),
+    readFile(new URL("backend/src/commands.rs", root), "utf8"),
+    readFile(new URL("backend/src/launcher.rs", root), "utf8"),
+  ]);
+
+  assert.match(configSource, /pub subagent_optimization: bool/);
+  assert.match(configSource, /subagent_optimization: false/);
+  assert.match(commandSource, /config\.subagent_optimization = config_input\.subagent_optimization/);
+  assert.match(launcherSource, /config\.subagent_optimization/);
+  assert.match(appSource, /checked=\{config\.subagentOptimization\}/);
+  assert.match(appSource, /aria-label="启用子代理协作优化"/);
+  assert.match(appSource, /退出时自动恢复原文件/);
+});
+
+test("subagent optimization owns the requested V2 and default-agent settings", async () => {
+  const source = await readFile(new URL("backend/src/codex_config.rs", root), "utf8");
+
+  assert.match(source, /multi_agent\["enabled"\] = value\(true\)/);
+  assert.match(source, /multi_agent\["hide_spawn_agent_metadata"\] = value\(true\)/);
+  assert.match(source, /multi_agent\["tool_namespace"\] = value\("agents"\)/);
+  assert.match(source, /multi_agent\["max_concurrent_threads_per_session"\] = value\(7\)/);
+  assert.match(source, /multi_agent\["max_wait_timeout_ms"\] = value\(120_000\)/);
+  assert.match(source, /doc\.as_table_mut\(\)\.remove\("agents"\)/);
+  assert.match(source, /model = "gpt-5\.6-luna"/);
+  assert.match(source, /model_reasoning_effort = "low"/);
+  assert.match(source, /image_generation = false/);
+  assert.match(source, /const SUBAGENT_GUIDANCE: &str/);
+});

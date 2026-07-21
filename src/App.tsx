@@ -7,8 +7,8 @@ import {
   CircleCheck,
   Cpu,
   GitBranch,
+  History,
   LoaderCircle,
-  MessageSquareReply,
   PlugZap,
   RefreshCw,
   Save,
@@ -62,6 +62,7 @@ type Config = {
   slimCodexPet: boolean;
   slimCodexVoice: boolean;
   fastContextTools: boolean;
+  subagentOptimization: boolean;
 };
 
 type OfficialModelState = {
@@ -89,6 +90,8 @@ type Maintenance = {
 
 type RuntimeStatus = {
   running: boolean;
+  restartRequired?: boolean;
+  restartInProgress?: boolean;
   activeProfileId?: string;
   activeProfileName?: string;
   startupError?: string;
@@ -114,7 +117,13 @@ type CcSwitchStatus = {
 
 type Notice = { tone: "info" | "success" | "error"; text: string };
 type InlineResult = { tone: "idle" | "pending" | "success" | "error"; text: string };
-type Confirmation = { title: string; description: string; run: () => void };
+type Confirmation = {
+  action: "clear" | "restart";
+  title: string;
+  description: string;
+  confirmLabel: string;
+  run: () => void;
+};
 type TraceLogCleanup = {
   databasesFound: number;
   databasesCleaned: number;
@@ -182,6 +191,34 @@ export function App({ embedded = false, onClose }: AppProps) {
     void load();
   }, []);
 
+  useEffect(() => {
+    if (!status.traceLogStats?.pending) return;
+    const delays = [250, 500, 1_000, 2_000, 5_000];
+    let cancelled = false;
+    let timer = 0;
+    let delayIndex = 0;
+    const poll = () => {
+      if (cancelled) return;
+      const delay = delays[delayIndex];
+      delayIndex = Math.min(delayIndex + 1, delays.length - 1);
+      timer = window.setTimeout(async () => {
+        try {
+          const next = await invoke<RuntimeStatus>("runtime_status");
+          if (cancelled) return;
+          setStatus(next);
+          if (next.traceLogStats?.pending) poll();
+        } catch {
+          poll();
+        }
+      }, delay);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [status.traceLogStats?.pending]);
+
   async function load() {
     try {
       const result = await invoke<{
@@ -197,6 +234,8 @@ export function App({ embedded = false, onClose }: AppProps) {
       const startupError = next.startupError || result.startupError;
       if (startupError) {
         setNotice({ tone: "error", text: `自动启动失败：${startupError}` });
+      } else if (next.restartRequired) {
+        setNotice({ tone: "info", text: "已保存的配置需重启 Codex 后生效" });
       } else {
         setNotice({
           tone: next.running ? "success" : "info",
@@ -237,6 +276,9 @@ export function App({ embedded = false, onClose }: AppProps) {
     setConfig(result.config);
     if (result.ccSwitch) setCcSwitchStatus(result.ccSwitch);
     if (result.modelState) setModelState(result.modelState);
+    if (typeof result.restartRequired === "boolean") {
+      setStatus((current) => ({ ...current, restartRequired: result.restartRequired }));
+    }
     setDirty(false);
     return result;
   }
@@ -253,10 +295,14 @@ export function App({ embedded = false, onClose }: AppProps) {
       setConfig(result.config);
       setCcSwitchStatus(result.ccSwitch);
       setModelState(result.modelState);
+      setStatus((current) => ({
+        ...current,
+        restartRequired: result.restartRequired ?? current.restartRequired,
+      }));
       setNotice({
         tone: result.restartRequired ? "info" : "success",
         text: result.restartRequired
-          ? `已读取「${result.ccSwitch.provider.name}」，下次启动应用线路`
+          ? `已读取「${result.ccSwitch.provider.name}」，重启 Codex 后应用线路`
           : `已同步「${result.ccSwitch.provider.name}」`,
       });
     });
@@ -281,7 +327,7 @@ export function App({ embedded = false, onClose }: AppProps) {
       setNotice({
         tone: result.restartRequired ? "info" : "success",
         text: result.restartRequired
-          ? "Codey 设置已保存，FastCtx 上下文工具将在下次启动 Codex 时生效"
+          ? "Codey 设置已保存，启动参数将在重启 Codex 后生效"
           : "Codey 设置已保存",
       });
     });
@@ -291,11 +337,14 @@ export function App({ embedded = false, onClose }: AppProps) {
     if (!provider || provider.official) return;
     await runOperation("fetch-models", async () => {
       const result = await withTimeout(
-        invoke<{ modelState: ModelState }>("fetch_current_provider_models"),
+        invoke<{ modelState: ModelState; restartRequired?: boolean }>("fetch_current_provider_models"),
         15_000,
         "获取上游模型超时，请检查当前线路",
       );
       setModelState(result.modelState);
+      if (typeof result.restartRequired === "boolean") {
+        setStatus((current) => ({ ...current, restartRequired: result.restartRequired }));
+      }
       setDraftModels(result.modelState.thirdPartyModels);
       setModelQuery("");
       setModelPickerVisible(true);
@@ -310,15 +359,23 @@ export function App({ embedded = false, onClose }: AppProps) {
 
   async function saveModelSelection() {
     await runOperation("save-models", async () => {
-      const result = await invoke<{ config: Config; modelState: ModelState }>("save_selected_models", {
-        models: draftModels,
-      });
+      const result = await invoke<{
+        config: Config;
+        modelState: ModelState;
+        restartRequired?: boolean;
+      }>("save_selected_models", { models: draftModels });
       setConfig(result.config);
       setModelState(result.modelState);
+      setStatus((current) => ({
+        ...current,
+        restartRequired: result.restartRequired ?? current.restartRequired,
+      }));
       setModelPickerVisible(false);
       setNotice({
-        tone: "success",
-        text: `已更新模型列表，共 ${result.modelState.thirdPartyModels.length} 个三方模型`,
+        tone: result.restartRequired ? "info" : "success",
+        text: result.restartRequired
+          ? `已更新模型列表，共 ${result.modelState.thirdPartyModels.length} 个三方模型；重启 Codex 后生效`
+          : `已更新模型列表，共 ${result.modelState.thirdPartyModels.length} 个三方模型`,
       });
     });
   }
@@ -348,9 +405,40 @@ export function App({ embedded = false, onClose }: AppProps) {
 
   function askClearTraceLogs() {
     setConfirmation({
+      action: "clear",
       title: "清理 Codex 日志库？",
       description: "将清空并压缩 logs_*.sqlite，只删除本地诊断/Trace 日志，不影响聊天历史、账号、配置或插件。清理后的诊断记录无法恢复。",
+      confirmLabel: "确认清理",
       run: () => void clearTraceLogs(),
+    });
+  }
+
+  function askRestartCodex() {
+    const launching = !status.running;
+    setConfirmation({
+      action: "restart",
+      title: launching ? "启动 Codex？" : "重启 Codex？",
+      description: launching
+        ? "Codey 将使用当前已保存配置启动 Codex。"
+        : "当前 Codex 将关闭并由 Codey 重新拉起，正在执行的本地任务会被中断。",
+      confirmLabel: launching ? "启动 Codex" : "重启 Codex",
+      run: () => void restartCodex(),
+    });
+  }
+
+  async function restartCodex() {
+    if (!config) return;
+    await runOperation("restart", async () => {
+      if (dirty) await persist(config);
+      setNotice({
+        tone: "info",
+        text: status.running ? "正在重启 Codex…" : "正在启动 Codex…",
+      });
+      await invoke("restart_codey");
+      setStatus((current) => ({
+        ...current,
+        restartInProgress: true,
+      }));
     });
   }
 
@@ -399,6 +487,7 @@ export function App({ embedded = false, onClose }: AppProps) {
     && config.slimCodexVoice
     && config.fastContextTools
     && !performanceError;
+  const restartPending = Boolean(status.restartRequired);
   const statusCards: Array<{
     title: string;
     description: string;
@@ -406,14 +495,16 @@ export function App({ embedded = false, onClose }: AppProps) {
     label: string;
     tone: "success" | "warning" | "destructive" | "info";
     icon: typeof Activity;
+    fullDetail?: boolean;
   }> = [
     {
-      title: "会话回复",
-      description: sessionOk ? "会话索引与回复链路工作正常。" : "正在确认会话索引与回复链路。",
+      title: "会话恢复",
+      description: sessionOk ? "会话索引与恢复链路工作正常。" : "正在确认会话索引与恢复链路。",
       detail: maintenance?.sessionDetail || "等待 Codey 返回会话状态",
       label: sessionOk ? "正常" : maintenance ? "需检查" : "检查中",
       tone: sessionOk ? "success" : maintenance ? "destructive" : "warning",
-      icon: MessageSquareReply,
+      icon: History,
+      fullDetail: true,
     },
     {
       title: "系统优化",
@@ -434,18 +525,6 @@ export function App({ embedded = false, onClose }: AppProps) {
       label: pluginOk ? "已连接" : maintenance ? "需检查" : "检查中",
       tone: pluginOk ? "success" : maintenance ? "destructive" : "warning",
       icon: PlugZap,
-    },
-    {
-      title: "Codex 运行时",
-      description: status.running
-        ? "当前线路已直接应用到 Codex。"
-        : "Codex 尚未由 Codey 启动。",
-      detail: status.running
-        ? `${provider.name} · 直接连接`
-        : `${provider.name} · 等待启动`,
-      label: status.running ? "运行中" : "未运行",
-      tone: status.running ? "success" : "warning",
-      icon: Server,
     },
   ];
 
@@ -535,7 +614,9 @@ export function App({ embedded = false, onClose }: AppProps) {
                       <h3>{item.title}</h3>
                       <p>{item.description}</p>
                     </div>
-                    <span className="status-card-detail">{item.detail}</span>
+                    <span className={`status-card-detail${item.fullDetail ? " status-card-detail-full" : ""}`}>
+                      {item.detail}
+                    </span>
                   </Card>
                 );
               })}
@@ -546,6 +627,43 @@ export function App({ embedded = false, onClose }: AppProps) {
             <span className="section-kicker">Configuration</span>
             <h2>其他配置</h2>
             <p>管理线路与模型、应用精简策略，以及通知和日志。</p>
+          </div>
+
+          <div className={`runtime-action-bar${restartPending ? " pending" : ""}`}>
+            <span className="runtime-action-icon">
+              <RefreshCw
+                className={busy === "restart" || status.restartInProgress ? "spinner" : ""}
+                size={17}
+                aria-hidden="true"
+              />
+            </span>
+            <div className="runtime-action-copy" aria-live="polite">
+              <strong>
+                {restartPending
+                  ? "配置等待重启"
+                  : status.running
+                    ? "当前配置已应用"
+                    : "Codex 尚未启动"}
+              </strong>
+              <small>
+                {restartPending
+                  ? "模型目录或启动参数将在重启后生效"
+                  : status.running
+                    ? "当前线路与运行参数已载入"
+                    : "使用 Codey 应用当前配置"}
+              </small>
+            </div>
+            <Button
+              variant={restartPending ? "default" : "outline"}
+              size="sm"
+              disabled={isBusy || status.restartInProgress}
+              onClick={askRestartCodex}
+            >
+              {busy === "restart" || status.restartInProgress
+                ? <LoaderCircle className="spinner" aria-hidden="true" />
+                : <RefreshCw aria-hidden="true" />}
+              {status.running ? "重启 Codex" : "启动 Codex"}
+            </Button>
           </div>
 
           <div className="dashboard-grid">
@@ -745,7 +863,7 @@ export function App({ embedded = false, onClose }: AppProps) {
                       <strong>FastCtx 上下文工具</strong>
                       <small>
                         {config.fastContextTools
-                          ? "下次启动提供分页读取、搜索、文件发现与批量替换"
+                          ? "可显著提高模型完成任务速度和准确性"
                           : "保持 Codex 默认文件工具，不加载额外 MCP"}
                       </small>
                     </div>
@@ -753,6 +871,24 @@ export function App({ embedded = false, onClose }: AppProps) {
                       checked={config.fastContextTools}
                       onCheckedChange={(checked) => editConfig({ ...config, fastContextTools: checked })}
                       aria-label="启用 FastCtx 上下文工具"
+                    />
+                  </div>
+                  <div className="health-row">
+                    <span className={`health-icon ${config.subagentOptimization ? "ready" : ""}`}>
+                      <GitBranch size={16} />
+                    </span>
+                    <div>
+                      <strong>子代理协作优化</strong>
+                      <small>
+                        {config.subagentOptimization
+                          ? "下次启动启用 V2 并行配置，退出时自动恢复原文件"
+                          : "保持 Codex 默认子代理配置，不注入协作提示词"}
+                      </small>
+                    </div>
+                    <Switch
+                      checked={config.subagentOptimization}
+                      onCheckedChange={(checked) => editConfig({ ...config, subagentOptimization: checked })}
+                      aria-label="启用子代理协作优化"
                     />
                   </div>
                   <div className="health-row">
@@ -971,15 +1107,17 @@ export function App({ embedded = false, onClose }: AppProps) {
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmation(null)}>取消</Button>
             <Button
-              variant="destructive"
+              variant={confirmation?.action === "restart" ? "default" : "destructive"}
               onClick={() => {
                 const pending = confirmation;
                 setConfirmation(null);
                 pending?.run();
               }}
             >
-              <Trash2 aria-hidden="true" />
-              确认清理
+              {confirmation?.action === "restart"
+                ? <RefreshCw aria-hidden="true" />
+                : <Trash2 aria-hidden="true" />}
+              {confirmation?.confirmLabel}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -18,6 +18,7 @@ let previewConfig = {
   slimCodexPet: true,
   slimCodexVoice: true,
   fastContextTools: false,
+  subagentOptimization: false,
 };
 
 const previewCcSwitch = {
@@ -36,18 +37,45 @@ let previewModelState = {
 window.__codexSessionDeleteBridge = async (path, payload) => {
   const command = path.replace(/^\/api\//, "");
   if (command === "load_codey_config") return { config: previewConfig, modelState: previewModelState, ccSwitch: previewCcSwitch, path: "~/Library/Application Support/com.Codey.Codey/config.json" };
-  if (command === "runtime_status") return { running: true, activeProfileId: previewConfig.activeProfileId, traceLogStats: previewTraceLogStats };
+  if (command === "runtime_status") {
+    return {
+      running: true,
+      restartRequired: false,
+      restartInProgress: false,
+      activeProfileId: previewConfig.activeProfileId,
+      traceLogStats: previewTraceLogStats,
+    };
+  }
   if (command === "save_codey_config") {
     previewConfig = (payload as { config: typeof previewConfig }).config;
-    return { status: "ok", config: previewConfig, modelState: previewModelState, ccSwitch: previewCcSwitch };
+    return {
+      status: "ok",
+      config: previewConfig,
+      modelState: previewModelState,
+      ccSwitch: previewCcSwitch,
+      restartRequired: false,
+    };
   }
   if (command === "sync_current_provider") return { status: "ok", config: previewConfig, modelState: previewModelState, ccSwitch: previewCcSwitch };
-  if (command === "fetch_current_provider_models") return { status: "ok", models: previewUpstreamModels, modelState: previewModelState };
+  if (command === "fetch_current_provider_models") {
+    return {
+      status: "ok",
+      models: previewUpstreamModels,
+      modelState: previewModelState,
+      restartRequired: false,
+    };
+  }
   if (command === "save_selected_models") {
     const selected = new Set((payload as { models: string[] }).models);
     previewModelState = { ...previewModelState, thirdPartyModels: previewUpstreamModels.filter((model) => selected.has(model) && !previewOfficialModels.some((official) => official.slug === model)) };
-    return { status: "ok", config: previewConfig, modelState: previewModelState };
+    return {
+      status: "ok",
+      config: previewConfig,
+      modelState: previewModelState,
+      restartRequired: true,
+    };
   }
+  if (command === "restart_codey") return { status: "restarting" };
   if (command === "clear_codex_trace_logs") return { status: "ok", protectionEnabled: previewConfig.disableTraceLogWrites, cleanup: { databasesFound: 2, databasesCleaned: 2, rowsDeleted: 318757, bytesBefore: 903634944, bytesAfter: 98304, bytesReclaimed: 903536640 } };
   return { status: "ok" };
 };

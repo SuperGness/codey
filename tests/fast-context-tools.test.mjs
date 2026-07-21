@@ -16,7 +16,8 @@ test("FastCtx optimization is opt-in and exposed through the settings switch", a
   assert.match(commandSource, /config\.fast_context_tools = config_input\.fast_context_tools/);
   assert.match(appSource, /checked=\{config\.fastContextTools\}/);
   assert.match(appSource, /aria-label="启用 FastCtx 上下文工具"/);
-  assert.match(appSource, /下次启动提供分页读取、搜索、文件发现与批量替换/);
+  assert.match(appSource, /可显著提高模型完成任务速度和准确性/);
+  assert.doesNotMatch(appSource, /下次启动提供分页读取、搜索、文件发现与批量替换/);
 });
 
 test("Codey embeds FastCtx and only dispatches it through the dedicated MCP mode", async () => {

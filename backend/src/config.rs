@@ -83,6 +83,10 @@ pub struct CodeyConfig {
     /// runtime. Disabled by default so existing tool behavior is unchanged.
     #[serde(default)]
     pub fast_context_tools: bool,
+    /// Temporarily enables Codey's opinionated Codex multi-agent V2 setup for
+    /// the next runtime. Disabled by default and restored on shutdown.
+    #[serde(default)]
+    pub subagent_optimization: bool,
 }
 
 impl Default for CodeyConfig {
@@ -100,6 +104,7 @@ impl Default for CodeyConfig {
             slim_codex_pet: true,
             slim_codex_voice: true,
             fast_context_tools: false,
+            subagent_optimization: false,
         }
     }
 }
@@ -367,5 +372,14 @@ mod tests {
             .normalize();
 
         assert!(!config.fast_context_tools);
+    }
+
+    #[test]
+    fn subagent_optimization_defaults_to_disabled_for_existing_configs() {
+        let config = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
+            .unwrap()
+            .normalize();
+
+        assert!(!config.subagent_optimization);
     }
 }

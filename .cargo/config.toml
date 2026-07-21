@@ -1,0 +1,4 @@
+[build]
+# Keep Cargo's high-churn intermediate artifacts outside the workspace so
+# desktop file watchers and repository indexing do not traverse them.
+build-dir = "{cargo-cache-home}/build/codey/{workspace-path-hash}"
