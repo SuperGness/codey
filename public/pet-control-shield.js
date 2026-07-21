@@ -82,8 +82,19 @@
     return blocked;
   };
 
+  if (!enabled) {
+    window.__codeyBlockNativePetControls = () => 0;
+    window.__codeyPetControlShield = Object.freeze({ enabled, block: () => 0, isPetControl });
+    window.__codeyPetControlShieldCleanup = () => {
+      delete window.__codeyBlockNativePetControls;
+      delete window.__codeyPetControlShield;
+      delete window.__codeyPetControlShieldCleanup;
+    };
+    return;
+  }
+
   let controlObserver = null;
-  if (enabled && typeof MutationObserver === "function" && document.documentElement) {
+  if (typeof MutationObserver === "function" && document.documentElement) {
     const mutationRoot = (node) => {
       if (node instanceof HTMLElement) return node;
       return node?.parentElement instanceof HTMLElement ? node.parentElement : null;
@@ -110,7 +121,6 @@
   }
 
   const stopPetControlEvent = (event) => {
-    if (!enabled) return;
     const control = event.target instanceof Element
       ? event.target.closest(controlSelector)
       : null;

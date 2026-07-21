@@ -166,8 +166,23 @@
     return blocked;
   };
 
+  if (!enabled) {
+    window.__codeyBlockNativeVoiceControls = () => 0;
+    window.__codeyVoiceControlShield = Object.freeze({
+      enabled,
+      block: () => 0,
+      isVoiceControl,
+      resourceGuardsInstalled: 0,
+    });
+    window.__codeyVoiceControlShieldCleanup = () => {
+      delete window.__codeyBlockNativeVoiceControls;
+      delete window.__codeyVoiceControlShield;
+      delete window.__codeyVoiceControlShieldCleanup;
+    };
+    return;
+  }
+
   const stopVoiceControlEvent = (event) => {
-    if (!enabled) return;
     const control = event.target instanceof Element
       ? event.target.closest(
           "button, [role=button], [role=menuitem], [role=option], [role=switch], input, label",

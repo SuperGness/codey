@@ -743,6 +743,7 @@ pub async fn save_codey_config(
         .save(&config)
         .map_err(|error| error.to_string())?;
     *state.config.write().await = config.clone();
+    sync_waiting_webhook_watcher(state, &config).await;
     let cc_switch = cc_switch::status_from_config(&config);
     let model_state = current_model_state(&config)?;
     let public_config = redacted_config(&config);
@@ -1086,26 +1087,34 @@ async fn launch_codey_inner(state: &Arc<AppState>) -> Result<Value, String> {
     stop_waiting_webhook_watcher(state).await;
     restore_previous_runtime_state(&codex_home())
         .map_err(|error| format!("恢复上次 Codey 临时 Codex 配置失败：{error}"))?;
-    let initial_event_cache = state
-        .recent_session_event_cache
-        .lock()
-        .await
-        .take()
-        .unwrap_or_default();
-    let initial_scan_task = start_recent_session_scan(initial_event_cache);
     let config = state.config.read().await.clone();
+    let initial_scan_task = if webhook_watcher_should_run(&config) {
+        let initial_event_cache = state
+            .recent_session_event_cache
+            .lock()
+            .await
+            .take()
+            .unwrap_or_default();
+        Some(start_recent_session_scan(initial_event_cache))
+    } else {
+        None
+    };
     let handler = make_bridge_handler(state);
     let (runtime, codex_exit) = match CodeyRuntime::start(&config, handler).await {
         Ok(started) => started,
         Err(error) => {
-            let (initial_event_cache, _) = await_recent_session_scan(initial_scan_task).await;
-            *state.recent_session_event_cache.lock().await = Some(initial_event_cache);
+            if let Some(initial_scan_task) = initial_scan_task {
+                let (initial_event_cache, _) = await_recent_session_scan(initial_scan_task).await;
+                *state.recent_session_event_cache.lock().await = Some(initial_event_cache);
+            }
             return Err(error.to_string());
         }
     };
     *runtime_slot = Some(Arc::new(runtime));
     let runtime_generation = state.runtime_generation.fetch_add(1, Ordering::AcqRel) + 1;
-    start_waiting_webhook_watcher(state, initial_scan_task).await;
+    if let Some(initial_scan_task) = initial_scan_task {
+        start_waiting_webhook_watcher(state, initial_scan_task).await;
+    }
     drop(runtime_slot);
     let exit_state = Arc::clone(state);
     tokio::spawn(async move {
@@ -1200,6 +1209,33 @@ mod restart_tests {
 
         assert!(!config_requires_restart(&applied, &current));
     }
+}
+
+fn webhook_watcher_should_run(config: &CodeyConfig) -> bool {
+    config.webhook.enabled && !config.webhook.url.trim().is_empty()
+}
+
+async fn sync_waiting_webhook_watcher(state: &Arc<AppState>, config: &CodeyConfig) {
+    let runtime_running = state.runtime.lock().await.is_some();
+    if runtime_running && webhook_watcher_should_run(config) {
+        start_waiting_webhook_watcher_from_cache(state).await;
+    } else {
+        stop_waiting_webhook_watcher(state).await;
+    }
+}
+
+async fn start_waiting_webhook_watcher_from_cache(state: &Arc<AppState>) {
+    if state.waiting_watcher_task.lock().await.is_some() {
+        return;
+    }
+    let initial_event_cache = state
+        .recent_session_event_cache
+        .lock()
+        .await
+        .take()
+        .unwrap_or_default();
+    let initial_scan_task = start_recent_session_scan(initial_event_cache);
+    start_waiting_webhook_watcher(state, initial_scan_task).await;
 }
 
 async fn start_waiting_webhook_watcher(

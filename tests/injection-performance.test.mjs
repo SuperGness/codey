@@ -5,34 +5,37 @@ import vm from "node:vm";
 
 const root = new URL("../", import.meta.url);
 
-test("renderer mutations are scanned by local roots instead of full-document rescans", async () => {
-  const [inject, petShield, voiceShield] = await Promise.all([
+test("renderer core lazy-loads session tools only after sidebar detection", async () => {
+  const [inject, sessionTools, petShield, voiceShield] = await Promise.all([
     readFile(new URL("public/renderer-inject.js", root), "utf8"),
+    readFile(new URL("public/codey-inject.js", root), "utf8"),
     readFile(new URL("public/pet-control-shield.js", root), "utf8"),
     readFile(new URL("public/voice-control-shield.js", root), "utf8"),
   ]);
 
   assert.match(inject, /const queryWithin = \(root, selector\)/);
-  assert.match(inject, /const scan = \(root = document, syncTitles = true/);
+  assert.match(inject, /const sessionToolsLoadPath = "\/internal\/codey\/session-tools\/load"/);
+  assert.match(inject, /const sidebarSelector = \[/);
+  assert.match(inject, /const loadSessionTools = \(\) =>/);
+  assert.match(inject, /sidebarDetected\(root\)\) void loadSessionTools\(\)/);
   assert.match(inject, /new MutationObserver\(\(mutations\) =>/);
-  assert.match(inject, /roots\.forEach\(\(root\) => scan\(root, true, false\)\)/);
+  assert.match(inject, /scheduleScan\(element\)/);
   assert.doesNotMatch(inject, /new MutationObserver\(\(\) => \{[\s\S]*setTimeout\(scan,/);
   assert.doesNotMatch(inject, /characterData:\s*true/);
   assert.doesNotMatch(inject, /mutation\.type === "characterData"/);
-  assert.match(inject, /node\?\.nodeType === Node\.TEXT_NODE/);
-  assert.match(inject, /target\?\.closest\?\.\(interactiveControlSelector\)/);
-  assert.match(inject, /const addPendingScanRoot = \(root\)/);
-  assert.match(inject, /pendingRoot\.contains\?\.\(root\)/);
-  assert.equal(inject.match(/pendingScanRoots\.add\(/g)?.length, 1);
-  assert.match(inject, /const sidebarTitleCache = new Map\(\)/);
-  assert.match(inject, /syncSidebarTitles\(root\)/);
-  assert.match(inject, /callBridge\("\/session\/wake-watcher"\)/);
-  assert.match(inject, /document\.addEventListener\("pointerdown", wakeSessionWatcher/);
-  assert.match(inject, /document\.addEventListener\("keydown", wakeSessionWatcherFromKey/);
+  assert.doesNotMatch(inject, /const sidebarTitleCache = new Map\(\)/);
+  assert.doesNotMatch(inject, /callBridge\("\/session\/wake-watcher"\)/);
+  assert.match(sessionTools, /const sidebarTitleCache = new Map\(\)/);
+  assert.match(sessionTools, /syncSidebarTitles\(root\)/);
+  assert.match(sessionTools, /callBridge\("\/session\/wake-watcher"\)/);
+  assert.match(sessionTools, /document\.addEventListener\("pointerdown", wakeSessionWatcher/);
+  assert.match(sessionTools, /document\.addEventListener\("keydown", wakeSessionWatcherFromKey/);
   assert.doesNotMatch(inject, /__codeyBlockNativePetControls/);
   assert.match(petShield, /const block = \(root = document\)/);
+  assert.match(petShield, /if \(!enabled\) \{/);
   assert.match(petShield, /controlObserver = new MutationObserver/);
   assert.match(voiceShield, /const block = \(root = document\)/);
+  assert.match(voiceShield, /if \(!enabled\) \{/);
 });
 
 test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", async () => {

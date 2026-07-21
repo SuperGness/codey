@@ -1,8 +1,9 @@
-// Backwards-compatible mirror for older Codey builds and manual CDP testing.
-// The launcher injects public/renderer-inject.js as the main renderer controls
-// module, alongside the smaller shield/fix modules.
+// Sidebar/session tools loaded by renderer-inject.js after Codex's sidebar is
+// present. This file also remains useful as a backwards-compatible manual CDP
+// testing entry point.
 (() => {
-  if (window.__codeyRendererInjectLoaded) return;
+  if (window.__codeySessionToolsInjectLoaded) return;
+  window.__codeySessionToolsInjectLoaded = true;
   window.__codeyRendererInjectLoaded = true;
   const buttonId = "codey-settings-button";
   const toolbarId = "codey-message-toolbar";

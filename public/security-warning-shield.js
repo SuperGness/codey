@@ -21,6 +21,7 @@
   ];
   let enabled = false;
   let scanTimer = 0;
+  let observer = null;
 
   const normalizedText = (element) => String(
     element?.innerText || element?.textContent || "",
@@ -78,7 +79,17 @@
 
   const setEnabled = (next) => {
     enabled = next === true;
-    if (enabled) dismissWarnings();
+    if (enabled) {
+      ensureObserver();
+      dismissWarnings();
+    } else {
+      if (scanTimer) {
+        window.clearTimeout?.(scanTimer);
+        scanTimer = 0;
+      }
+      observer?.disconnect?.();
+      observer = null;
+    }
     return enabled;
   };
 
@@ -102,13 +113,16 @@
     }, 40);
   };
 
-  const observer = new MutationObserver((mutations) => {
-    if (!enabled) return;
-    if (mutations.some((mutation) => (mutation.addedNodes?.length || 0) > 0)) {
-      scheduleScan();
-    }
-  });
-  observer.observe(document.documentElement, { childList: true, subtree: true });
+  const ensureObserver = () => {
+    if (observer || typeof MutationObserver !== "function" || !document.documentElement) return;
+    observer = new MutationObserver((mutations) => {
+      if (!enabled) return;
+      if (mutations.some((mutation) => (mutation.addedNodes?.length || 0) > 0)) {
+        scheduleScan();
+      }
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  };
 
   window.addEventListener?.(configEventName, (event) => {
     const config = event?.detail?.config || event?.detail;
@@ -118,9 +132,6 @@
       void refreshConfig();
     }
   });
-  window.addEventListener?.("focus", refreshConfig);
-  window.addEventListener?.("pageshow", refreshConfig);
-
   window.__codeySecurityWarningShield = {
     get enabled() {
       return enabled;

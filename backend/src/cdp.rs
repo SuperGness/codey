@@ -9,8 +9,10 @@ use codex_plus_core::bridge::{
 use codex_plus_core::cdp::{list_targets, pick_injectable_codex_page_target};
 
 const SETTINGS_OVERLAY_LOAD_PATH: &str = "/internal/codey/settings-overlay/load";
+const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../public/codey-bridge.js");
 const RENDERER_INJECT_SCRIPT: &str = include_str!("../../public/renderer-inject.js");
+const CODEY_SESSION_TOOLS_SCRIPT: &str = include_str!("../../public/codey-inject.js");
 const PET_CONTROL_SHIELD_SCRIPT: &str = include_str!("../../public/pet-control-shield.js");
 const VOICE_CONTROL_SHIELD_SCRIPT: &str = include_str!("../../public/voice-control-shield.js");
 const SECURITY_WARNING_SHIELD_SCRIPT: &str =
@@ -19,6 +21,7 @@ const SETTINGS_OVERLAY_SCRIPT: &str = include_str!("../../dist-overlay/codey-ove
 const FAST_MODE_FIX_SCRIPT: &str = include_str!("../../public/fast-mode-fix.js");
 const PLUGIN_MARKETPLACE_FIX_SCRIPT: &str = include_str!("../../public/plugin-marketplace-fix.js");
 static SETTINGS_OVERLAY_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
+static SESSION_TOOLS_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct PreparedInjectionScripts {
@@ -144,7 +147,7 @@ async fn inject_with_scripts(
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("Codex 页面没有 CDP WebSocket 地址"))?,
     );
-    let handler = with_settings_overlay_loader(handler, websocket_url.clone());
+    let handler = with_lazy_loaders(handler, websocket_url.clone());
     let pump = install_bridge(
         &websocket_url,
         codex_plus_core::bridge::BRIDGE_BINDING_NAME,
@@ -159,35 +162,61 @@ async fn inject_with_scripts(
     })
 }
 
-fn with_settings_overlay_loader(handler: BridgeHandler, websocket_url: Arc<str>) -> BridgeHandler {
+fn with_lazy_loaders(handler: BridgeHandler, websocket_url: Arc<str>) -> BridgeHandler {
     Arc::new(move |path, payload| {
-        if path != SETTINGS_OVERLAY_LOAD_PATH {
-            return handler(path, payload);
+        if path == SETTINGS_OVERLAY_LOAD_PATH {
+            let websocket_url = websocket_url.clone();
+            return Box::pin(async move {
+                let settings_overlay_load_script = prepared_settings_overlay_load_script();
+                let response = codex_plus_core::bridge::evaluate_script(
+                    &websocket_url,
+                    &settings_overlay_load_script,
+                )
+                .await
+                .context("按需加载 Codey 内嵌配置面板失败")?;
+                let message = runtime_value(&response)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("配置面板加载脚本未返回状态");
+                if !message.is_empty() {
+                    anyhow::bail!("Codey 内嵌配置面板加载失败：{message}");
+                }
+                Ok(serde_json::json!({ "status": "ok" }))
+            });
         }
 
-        let websocket_url = websocket_url.clone();
-        Box::pin(async move {
-            let settings_overlay_load_script = prepared_settings_overlay_load_script();
-            let response = codex_plus_core::bridge::evaluate_script(
-                &websocket_url,
-                &settings_overlay_load_script,
-            )
-            .await
-            .context("按需加载 Codey 内嵌配置面板失败")?;
-            let message = runtime_value(&response)
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("配置面板加载脚本未返回状态");
-            if !message.is_empty() {
-                anyhow::bail!("Codey 内嵌配置面板加载失败：{message}");
-            }
-            Ok(serde_json::json!({ "status": "ok" }))
-        })
+        if path == SESSION_TOOLS_LOAD_PATH {
+            let websocket_url = websocket_url.clone();
+            return Box::pin(async move {
+                let session_tools_load_script = prepared_session_tools_load_script();
+                let response = codex_plus_core::bridge::evaluate_script(
+                    &websocket_url,
+                    &session_tools_load_script,
+                )
+                .await
+                .context("按需加载 Codey 会话工具失败")?;
+                let message = runtime_value(&response)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("会话工具加载脚本未返回状态");
+                if !message.is_empty() {
+                    anyhow::bail!("Codey 会话工具加载失败：{message}");
+                }
+                Ok(serde_json::json!({ "status": "ok" }))
+            });
+        }
+
+        handler(path, payload)
     })
 }
 
 fn prepared_settings_overlay_load_script() -> Arc<str> {
     SETTINGS_OVERLAY_LOAD_SCRIPT
         .get_or_init(|| Arc::from(settings_overlay_load_script(SETTINGS_OVERLAY_SCRIPT)))
+        .clone()
+}
+
+fn prepared_session_tools_load_script() -> Arc<str> {
+    SESSION_TOOLS_LOAD_SCRIPT
+        .get_or_init(|| Arc::from(session_tools_load_script(CODEY_SESSION_TOOLS_SCRIPT)))
         .clone()
 }
 
@@ -288,6 +317,27 @@ fn wrap_settings_overlay(script: &str) -> String {
 "#,
     );
     wrapped
+}
+
+fn session_tools_load_script(script: &str) -> String {
+    format!(
+        r#"(() => {{
+  if (window.__codeySessionToolsInjectLoaded === true) return "";
+  window.__codeySessionToolsError = "";
+  try {{
+{script}
+  }} catch (error) {{
+    const message = error instanceof Error
+      ? `${{error.name}}: ${{error.message}}${{error.stack ? `\n${{error.stack}}` : ""}}`
+      : String(error);
+    window.__codeySessionToolsError = message;
+    console.error("[Codey] session tools failed to load", error);
+  }}
+  return window.__codeySessionToolsInjectLoaded === true
+    ? ""
+    : String(window.__codeySessionToolsError || "未生成会话工具控制器");
+}})()"#
+    )
 }
 
 async fn ensure_settings_overlay_ready(websocket_url: &str) -> Result<()> {
@@ -396,12 +446,14 @@ mod tests {
         assert_eq!(prepared.scripts.len(), 2);
         let core = &prepared.scripts[0];
         assert!(core.contains("window.__codeyBridgeHelpersInstalled"));
-        assert!(core.contains("window.__codeyRendererInjectLoaded"));
+        assert!(core.contains("window.__codeyRendererCoreLoaded"));
         assert!(core.contains(r#"const enabled = "true" === "true""#));
         assert!(core.contains(r#"const enabled = "false" === "true""#));
         assert!(core.contains(SETTINGS_OVERLAY_LOAD_PATH));
+        assert!(core.contains(SESSION_TOOLS_LOAD_PATH));
         assert!(core.contains("__codeyLazyLoader"));
         assert!(!core.contains("codey-settings-overlay-host"));
+        assert!(!core.contains("hardDeletedMessageKeys"));
         assert!(core.len() < SETTINGS_OVERLAY_SCRIPT.len());
         assert!(core.contains("plugin marketplace compatibility injection failed"));
         assert_eq!(prepared.scripts[1], "window.userScriptRan = true;");
@@ -412,6 +464,9 @@ mod tests {
             overlay_load_script.contains("window.__codeySettingsOverlay = current"),
             "a failed bundle evaluation must restore the lazy loader for retry"
         );
+        let session_tools_load_script = prepared_session_tools_load_script();
+        assert!(session_tools_load_script.contains("window.__codeySessionToolsInjectLoaded"));
+        assert!(session_tools_load_script.contains("hardDeletedMessageKeys"));
     }
 
     #[test]
