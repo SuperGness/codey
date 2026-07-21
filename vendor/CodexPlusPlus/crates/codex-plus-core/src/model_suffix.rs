@@ -192,8 +192,16 @@ pub fn build_model_catalog_json_with_template(
     serde_json::to_string_pretty(&json!({ "models": models })).unwrap_or_default()
 }
 
+/// Loads the complete model catalog bundled with CodexPlusPlus.
+///
+/// Callers should prefer a live Codex cache and use this only as a cold-start
+/// fallback when an API-only installation has not created models_cache.json.
+pub fn bundled_model_catalog() -> Option<Value> {
+    serde_json::from_str(BUNDLED_TEMPLATE_JSON).ok()
+}
+
 /// 加载内置 bundled catalog 模板的第一条 model entry。
 fn load_bundled_template_entry() -> Option<Value> {
-    let catalog: Value = serde_json::from_str(BUNDLED_TEMPLATE_JSON).ok()?;
+    let catalog = bundled_model_catalog()?;
     catalog.get("models")?.as_array()?.first().cloned()
 }

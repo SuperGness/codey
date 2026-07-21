@@ -216,9 +216,15 @@ fn read_official_entries(home: &Path) -> Result<Vec<Value>> {
             return Ok(models);
         }
     }
+    if let Some(value) = codex_plus_core::model_suffix::bundled_model_catalog() {
+        let models = official_models_from_value(&value);
+        if !models.is_empty() {
+            return Ok(models);
+        }
+    }
     bail!(
         "{}",
-        last_error.unwrap_or_else(|| "找不到官方账号模型缓存，请先使用官方账号启动一次 Codex".to_string())
+        last_error.unwrap_or_else(|| "找不到可用的 Codex 模型模板".to_string())
     )
 }
 
@@ -588,6 +594,57 @@ mod tests {
             ["low", "medium", "high", "xhigh"]
         );
         assert_eq!(catalog["models"][3]["supports_reasoning_summaries"], true);
+    }
+
+    #[test]
+    fn api_only_cold_start_builds_third_party_catalog_from_bundled_template() {
+        let home = tempfile::tempdir().unwrap();
+        let upstream = vec!["provider-fast-coder".into()];
+        let selected = upstream.clone();
+
+        assert_eq!(
+            refresh_for_provider(home.path(), false, &upstream, &selected).unwrap(),
+            1
+        );
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
+        )
+        .unwrap();
+        let model = &catalog["models"][0];
+        assert_eq!(model["slug"], "provider-fast-coder");
+        assert_eq!(model["codey_source"], "third_party");
+        assert_eq!(model["visibility"], "list");
+        assert_eq!(model["supported_in_api"], true);
+        assert_eq!(model["service_tiers"][0]["id"], "priority");
+        assert_eq!(model["additional_speed_tiers"][0], "fast");
+        assert!(
+            !model["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn official_cold_start_uses_the_bundled_catalog() {
+        let home = tempfile::tempdir().unwrap();
+
+        let count = refresh_for_provider(home.path(), true, &[], &[]).unwrap();
+        assert!(count > 0);
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
+        )
+        .unwrap();
+        assert!(catalog["models"].as_array().is_some_and(|models| {
+            models.iter().all(|model| {
+                model["service_tiers"]
+                    .as_array()
+                    .is_some_and(|tiers| !tiers.is_empty())
+                    && model["additional_speed_tiers"]
+                        .as_array()
+                        .is_some_and(|tiers| !tiers.is_empty())
+            })
+        }));
     }
 
     #[test]

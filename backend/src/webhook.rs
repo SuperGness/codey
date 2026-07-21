@@ -1,13 +1,15 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use chrono::Local;
+use chrono::{DateTime, Local, TimeZone};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::config::WebhookConfig;
+
+const FEISHU_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -164,7 +166,7 @@ fn feishu_body(event: &WebhookEvent) -> Result<Value> {
     let session_name = feishu_markdown_value(&event.session_name, "未命名会话");
     let model = feishu_markdown_value(&event.model, "Codex");
     let reasoning_effort = feishu_markdown_value(&event.reasoning_effort, "默认");
-    let sent_at = feishu_markdown_value(&event.timestamp, "未知");
+    let sent_at = feishu_markdown_value(&format_feishu_timestamp(&event.timestamp), "未知");
     let body = json!({
         "msg_type": "interactive",
         "card": {
@@ -281,7 +283,25 @@ fn feishu_response_error(body: &str) -> Option<String> {
 }
 
 fn local_timestamp_now() -> String {
-    Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string()
+    Local::now().format(FEISHU_TIMESTAMP_FORMAT).to_string()
+}
+
+fn format_feishu_timestamp(timestamp: &str) -> String {
+    let timestamp = timestamp.trim();
+    if let Some(datetime) = timestamp
+        .strip_prefix("unix-ms:")
+        .and_then(|millis| millis.trim().parse::<i64>().ok())
+        .and_then(|millis| Local.timestamp_millis_opt(millis).single())
+    {
+        return datetime.format(FEISHU_TIMESTAMP_FORMAT).to_string();
+    }
+    if let Ok(datetime) = DateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S %:z") {
+        return datetime.format(FEISHU_TIMESTAMP_FORMAT).to_string();
+    }
+    if let Ok(datetime) = DateTime::parse_from_rfc3339(timestamp) {
+        return datetime.format(FEISHU_TIMESTAMP_FORMAT).to_string();
+    }
+    timestamp.to_string()
 }
 
 #[cfg(test)]
@@ -304,7 +324,7 @@ mod tests {
             WebhookEvent::new("session.completed", "s1", "p1", "gpt-5.4", 192_300, None)
                 .with_session_name("发布 Codey 版本")
                 .with_reasoning_effort("xhigh");
-        event.timestamp = "2026-07-21 20:30:00 +08:00".to_string();
+        event.timestamp = "2026-07-21 20:30:00".to_string();
         let body = feishu_body(&event).unwrap();
         assert_eq!(body["msg_type"], "interactive");
         assert_eq!(body["card"]["header"]["title"]["content"], "Codex会话完成");
@@ -345,7 +365,7 @@ mod tests {
             fields[3]["text"]["content"]
                 .as_str()
                 .unwrap()
-                .contains("2026-07-21 20:30:00 +08:00")
+                .contains("2026-07-21 20:30:00")
         );
         assert!(
             fields[4]["text"]["content"]
@@ -359,6 +379,24 @@ mod tests {
         assert!(!serialized.contains("\"profile_id\""));
         assert!(!serialized.contains("\"error\""));
         assert!(body.get("sign").is_none());
+    }
+
+    #[test]
+    fn feishu_timestamp_is_normalized_for_display() {
+        assert_eq!(
+            format_feishu_timestamp("2026-07-21 20:30:00 +08:00"),
+            "2026-07-21 20:30:00"
+        );
+        assert_eq!(
+            format_feishu_timestamp("2026-07-21T20:30:00+08:00"),
+            "2026-07-21 20:30:00"
+        );
+        let legacy = format_feishu_timestamp("unix-ms:1784646600000");
+        assert_eq!(legacy.len(), 19);
+        assert!(!legacy.contains("unix-ms"));
+        assert_eq!(&legacy[4..5], "-");
+        assert_eq!(&legacy[7..8], "-");
+        assert_eq!(&legacy[10..11], " ");
     }
 
     #[test]

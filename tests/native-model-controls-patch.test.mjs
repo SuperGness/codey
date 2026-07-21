@@ -51,10 +51,13 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
       }),
     );
 
-    const patchAsset = async (fixture) => {
+    const patchAsset = async (
+      fixture,
+      url = "app://-/assets/app-initial~native-controls-fixture.js",
+    ) => {
       const response = await appProtocolHandler({
         fixture,
-        url: "app://-/assets/app-initial~native-controls-fixture.js",
+        url,
       });
       return response.text();
     };
@@ -113,6 +116,24 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
     assert.match(
       patchedServiceTierRequest,
       /if\(n!==`chatgpt`\)return!0/,
+    );
+    for (const url of [
+      "app://-/assets/app-initial.js",
+      "app://-/assets/app-initial-windows.js",
+      "app://-/assets/app-initial~windows.js?build=store",
+      "app://-/assets/windows-model-controls-a1b2c3.js",
+    ]) {
+      assert.match(
+        await patchAsset(serviceTierRequestSource, url),
+        /if\(n!==`chatgpt`\)return!0/,
+      );
+    }
+    assert.equal(
+      await patchAsset(
+        "const unrelatedWindowsChunk = true;",
+        "app://-/assets/unrelated-windows-chunk.js",
+      ),
+      "const unrelatedWindowsChunk = true;",
     );
 
     assert.deepEqual(

@@ -101,7 +101,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
       return (
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
-        /\/app-initial~[^/]+\.js$/i.test(url.pathname)
+        /\.js$/i.test(url.pathname)
       );
     } catch {
       return false;
