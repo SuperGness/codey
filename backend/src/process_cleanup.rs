@@ -106,8 +106,11 @@ async fn terminate_other_windows_codey_processes() -> Result<usize> {
         .collect::<Vec<_>>();
 
     for process_id in &targets {
-        let status = tokio::process::Command::new("taskkill")
+        let mut command = tokio::process::Command::new("taskkill");
+        command
             .args(["/PID", &process_id.to_string(), "/T", "/F"])
+            .creation_flags(codex_plus_core::windows_create_no_window());
+        let status = command
             .status()
             .await
             .with_context(|| format!("终止 Codey 进程 {process_id} 失败"))?;

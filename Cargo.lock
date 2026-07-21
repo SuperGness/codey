@@ -454,7 +454,6 @@ dependencies = [
  "tokio-tungstenite",
  "toml_edit",
  "uuid",
- "windows-sys 0.61.2",
  "winres",
 ]
 

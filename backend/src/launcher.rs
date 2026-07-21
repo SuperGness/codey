@@ -708,7 +708,10 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
     let mut child_command = Command::new(executable);
     child_command.args(&command[1..]);
     #[cfg(windows)]
-    child_command.env_remove("WSL_DISTRO_NAME");
+    {
+        child_command.env_remove("WSL_DISTRO_NAME");
+        child_command.creation_flags(codex_plus_core::windows_create_no_window());
+    }
     let child = child_command
         .spawn()
         .with_context(|| format!("启动 Codex 失败：{executable}"))?;
@@ -765,6 +768,7 @@ async fn spawn_windows_codex(
     // A stale WSL_DISTRO_NAME inherited by the native Windows app makes
     // current Codex builds synchronously probe wsl.exe during startup.
     child_command.env_remove("WSL_DISTRO_NAME");
+    child_command.creation_flags(codex_plus_core::windows_create_no_window());
     let child = child_command
         .spawn()
         .with_context(|| format!("启动 Codex 失败：{executable}"))?;
@@ -883,10 +887,11 @@ async fn wait_for_macos_codex_exit(app_dir: &std::path::Path, timeout: Duration)
 
 #[cfg(windows)]
 async fn terminate_windows_process(process_id: u32) {
-    let _ = Command::new("taskkill")
+    let mut command = Command::new("taskkill");
+    command
         .args(["/PID", &process_id.to_string(), "/T", "/F"])
-        .status()
-        .await;
+        .creation_flags(codex_plus_core::windows_create_no_window());
+    let _ = command.status().await;
 }
 
 #[cfg(all(test, unix))]
