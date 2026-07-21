@@ -17,7 +17,8 @@
   const sessionDeletePopoverId = "codey-session-delete-popover";
   const sidebarActionTooltipId = "codey-sidebar-action-tooltip";
   const threadStatusAttribute = "data-codey-thread-traffic-status";
-  const threadStatusHostAttribute = "data-codey-thread-status-host";
+  const threadStatusSvgAttribute = "data-codey-thread-status-svg";
+  const threadStatusSpinnerAttribute = "data-codey-thread-status-spinner";
   const threadStatusPlacementAttribute = "data-codey-thread-status-placement";
   const threadUpdatedAtAttribute = "data-codey-thread-updated-at";
   const threadUpdatedAtMsAttribute = "data-codey-thread-updated-at-ms";
@@ -63,6 +64,7 @@
   const threadUpdatedAtRequestedAt = new Map();
   const pendingThreadUpdatedAtRefs = new Map();
   const hardDeletedMessageKeys = new Set();
+  const originalThreadStatusSvgChildren = new WeakMap();
   const queryWithin = (root, selector) => {
     const matches = [];
     if (root instanceof HTMLElement && typeof root.matches === "function" && root.matches(selector)) {
@@ -213,22 +215,21 @@
       [data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title],
       [data-app-action-sidebar-project-row][data-app-action-sidebar-project-id] { position: relative; }
       [data-app-action-sidebar-thread-row][${threadStatusAttribute}]:not([${threadStatusPlacementAttribute}="native"])::after { content: ""; position: absolute; top: 50%; right: 10px; z-index: 10; display: block; width: 8px; height: 8px; border-radius: 50%; transform: translateY(-50%); pointer-events: none; }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="running"]:not([${threadStatusPlacementAttribute}="native"])::after,
-      [${threadStatusHostAttribute}="running"]::after { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, .16); animation: codey-thread-status-blink 1.1s ease-in-out infinite; }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="error"]:not([${threadStatusPlacementAttribute}="native"])::after,
-      [${threadStatusHostAttribute}="error"]::after { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, .14); }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="waiting"]:not([${threadStatusPlacementAttribute}="native"])::after,
-      [${threadStatusHostAttribute}="waiting"]::after { background: #eab308; box-shadow: 0 0 0 3px rgba(234, 179, 8, .16); }
-      [${threadStatusHostAttribute}] { position: relative !important; }
-      [${threadStatusHostAttribute}] > * { visibility: hidden !important; }
-      [${threadStatusHostAttribute}]::after { content: ""; position: absolute; top: 50%; left: 50%; z-index: 1; display: block; width: 8px; height: 8px; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="running"]:not([${threadStatusPlacementAttribute}="native"])::after { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, .16); animation: codey-thread-status-blink 1.1s ease-in-out infinite; }
+      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="error"]:not([${threadStatusPlacementAttribute}="native"])::after { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, .14); }
+      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="waiting"]:not([${threadStatusPlacementAttribute}="native"])::after { background: #eab308; box-shadow: 0 0 0 3px rgba(234, 179, 8, .16); }
+      [${threadStatusSpinnerAttribute}] { animation: none !important; }
+      [${threadStatusSvgAttribute}] { overflow: visible; }
+      [${threadStatusSvgAttribute}="running"] { color: #22c55e !important; animation: codey-thread-status-blink 1.1s ease-in-out infinite; }
+      [${threadStatusSvgAttribute}="error"] { color: #ef4444 !important; }
+      [${threadStatusSvgAttribute}="waiting"] { color: #eab308 !important; }
       [data-codey-thread-status-indicator], [data-codey-thread-status-owned-host] { display: none !important; }
       [data-app-action-sidebar-thread-row][${threadStatusAttribute}]:hover::after,
       [data-app-action-sidebar-thread-row][${threadStatusAttribute}]:has(:focus-visible)::after { display: none !important; }
       @keyframes codey-thread-status-blink { 0%, 100% { opacity: 1; } 50% { opacity: .24; } }
       @media (prefers-reduced-motion: reduce) {
         [data-app-action-sidebar-thread-row][${threadStatusAttribute}="running"]::after,
-        [${threadStatusHostAttribute}="running"]::after { animation: none; }
+        [${threadStatusSvgAttribute}="running"] { animation: none; }
       }
       [data-app-action-sidebar-thread-row] [${threadUpdatedAtAttribute}] { display: block; flex: 0 0 auto; min-width: 26px; margin-inline-start: auto; color: inherit; font: 400 12px/16px system-ui, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: 0; text-align: end; opacity: .52; pointer-events: none; white-space: nowrap; }
       [data-app-action-sidebar-thread-row][${threadStatusAttribute}] [${threadUpdatedAtAttribute}],
@@ -723,28 +724,63 @@
     return "";
   };
 
-  const nativeThreadStatusHostFromRow = (row) => (
-    [...row.querySelectorAll("[data-hover-card-open-immediately]")]
-      .find((node) => String(node.getAttribute("class") || "").includes("group-hover:hidden"))
-    || null
-  );
+  const nativeThreadStatusSvgFromRow = (row) => {
+    const nativeHost = [...row.querySelectorAll("[data-hover-card-open-immediately]")]
+      .find((node) => String(node.getAttribute("class") || "").includes("group-hover:hidden"));
+    if (!nativeHost) return null;
+    return nativeHost.querySelector(".animate-spin svg") || nativeHost.querySelector("svg");
+  };
+
+  const restoreThreadStatusSvg = (svg) => {
+    const originalChildren = originalThreadStatusSvgChildren.get(svg);
+    if (originalChildren) {
+      svg.replaceChildren(...originalChildren);
+      originalThreadStatusSvgChildren.delete(svg);
+    }
+    svg.removeAttribute(threadStatusSvgAttribute);
+    const spinner = svg.closest(".animate-spin");
+    spinner?.removeAttribute(threadStatusSpinnerAttribute);
+  };
+
+  const createThreadStatusCircle = (radius, opacity = null) => {
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", "12");
+    circle.setAttribute("cy", "12");
+    circle.setAttribute("r", String(radius));
+    circle.setAttribute("fill", "currentColor");
+    if (opacity != null) circle.setAttribute("opacity", String(opacity));
+    return circle;
+  };
+
+  const replaceThreadStatusSvg = (svg, state) => {
+    if (!originalThreadStatusSvgChildren.has(svg)) {
+      originalThreadStatusSvgChildren.set(svg, [...svg.childNodes]);
+    }
+    svg.replaceChildren(
+      createThreadStatusCircle(9, 0.16),
+      createThreadStatusCircle(6),
+    );
+    svg.setAttribute(threadStatusSvgAttribute, state);
+    const spinner = svg.closest(".animate-spin");
+    spinner?.setAttribute(threadStatusSpinnerAttribute, "");
+  };
 
   const clearThreadStatusIndicator = (row) => {
     row.removeAttribute(threadStatusAttribute);
     row.removeAttribute(threadStatusPlacementAttribute);
-    row.querySelectorAll(`[${threadStatusHostAttribute}]`).forEach((host) => {
-      host.removeAttribute(threadStatusHostAttribute);
+    row.querySelectorAll(`[${threadStatusSvgAttribute}]`).forEach((svg) => {
+      restoreThreadStatusSvg(svg);
     });
   };
 
   const setThreadStatusIndicator = (row, state) => {
-    row.querySelectorAll(`[${threadStatusHostAttribute}]`).forEach((host) => {
-      host.removeAttribute(threadStatusHostAttribute);
+    const nativeSvg = nativeThreadStatusSvgFromRow(row);
+    row.querySelectorAll(`[${threadStatusSvgAttribute}]`).forEach((svg) => {
+      if (svg !== nativeSvg) restoreThreadStatusSvg(svg);
     });
-    const nativeHost = nativeThreadStatusHostFromRow(row);
     row.setAttribute(threadStatusAttribute, state);
-    if (nativeHost) {
-      nativeHost.setAttribute(threadStatusHostAttribute, state);
+    if (nativeSvg) {
+      replaceThreadStatusSvg(nativeSvg, state);
       row.setAttribute(threadStatusPlacementAttribute, "native");
     } else {
       row.removeAttribute(threadStatusPlacementAttribute);

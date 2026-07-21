@@ -8,6 +8,7 @@ const source = readFileSync(new URL("../public/codey-inject.js", import.meta.url
 class FakeElement {
   constructor() {
     this.attributes = new Map();
+    this.childNodes = [];
     this.dataset = {};
     this.parentElement = null;
     this.textContent = "";
@@ -25,6 +26,10 @@ class FakeElement {
 
   removeAttribute(name) {
     this.attributes.delete(name);
+  }
+
+  replaceChildren(...children) {
+    this.childNodes = children;
   }
 
   querySelector(selector) {
@@ -58,6 +63,7 @@ function loadInjection() {
     body: new FakeElement(),
     documentElement: new FakeElement(),
     createElement: () => new FakeElement(),
+    createElementNS: () => new FakeElement(),
     getElementById: () => placeholder,
     querySelector: () => null,
     querySelectorAll: () => [],
@@ -191,15 +197,23 @@ test("keeps explicit idle authoritative after the status slot was managed", () =
   assert.equal(runtime.__codeyThreadStatusFromRow(row), "");
 });
 
-test("replaces the native spinner host in place when the status slot exists", () => {
+test("replaces the native spinner SVG contents in place when the status slot exists", () => {
   const runtime = loadInjection();
   const row = rowWithProps({ statusState: { type: "loading" } });
   const nativeHost = new FakeElement();
+  const nativeSpinner = new FakeElement();
+  const nativeSvg = new FakeElement();
+  const originalPath = new FakeElement();
+  nativeSvg.childNodes = [originalPath];
+  nativeSvg.closest = (selector) => (selector === ".animate-spin" ? nativeSpinner : null);
   nativeHost.attributes.set("class", "flex group-hover:hidden");
+  nativeHost.querySelector = (selector) => (
+    selector === ".animate-spin svg" || selector === "svg" ? nativeSvg : null
+  );
   row.querySelectorAll = (selector) => {
     if (selector === "[data-hover-card-open-immediately]") return [nativeHost];
-    if (selector === "[data-codey-thread-status-host]") {
-      return nativeHost.getAttribute("data-codey-thread-status-host") ? [nativeHost] : [];
+    if (selector === "[data-codey-thread-status-svg]") {
+      return nativeSvg.getAttribute("data-codey-thread-status-svg") ? [nativeSvg] : [];
     }
     return [];
   };
@@ -212,17 +226,27 @@ test("replaces the native spinner host in place when the status slot exists", ()
 
   assert.equal(row.getAttribute("data-codey-thread-traffic-status"), "running");
   assert.equal(row.getAttribute("data-codey-thread-status-placement"), "native");
-  assert.equal(nativeHost.getAttribute("data-codey-thread-status-host"), "running");
+  assert.equal(nativeSvg.getAttribute("data-codey-thread-status-svg"), "running");
+  assert.equal(nativeSpinner.getAttribute("data-codey-thread-status-spinner"), "");
+  assert.equal(nativeSvg.childNodes.length, 2);
+
+  row.__reactFiber$test.memoizedProps = { statusState: { type: "idle" } };
+  runtime.__codeyInstallThreadStatusIndicators(root);
+
+  assert.equal(nativeSvg.getAttribute("data-codey-thread-status-svg"), null);
+  assert.equal(nativeSpinner.getAttribute("data-codey-thread-status-spinner"), null);
+  assert.deepEqual(nativeSvg.childNodes, [originalPath]);
 });
 
 test("injects blinking green and steady red/yellow status styles", () => {
   assert.match(source, /threadStatusAttribute = "data-codey-thread-traffic-status"/);
-  assert.match(source, /threadStatusHostAttribute = "data-codey-thread-status-host"/);
+  assert.match(source, /threadStatusSvgAttribute = "data-codey-thread-status-svg"/);
   assert.match(source, /threadStatusPlacementAttribute = "data-codey-thread-status-placement"/);
-  assert.match(source, /threadStatusHostAttribute}="running"\]::after.*animation: codey-thread-status-blink/s);
-  assert.match(source, /threadStatusHostAttribute}="error"\]::after.*background: #ef4444/s);
-  assert.match(source, /threadStatusHostAttribute}="waiting"\]::after.*background: #eab308/s);
-  assert.match(source, /threadStatusHostAttribute}\] > \* \{ visibility: hidden !important;/);
+  assert.match(source, /threadStatusSvgAttribute}="running"\].*color: #22c55e/s);
+  assert.match(source, /threadStatusSvgAttribute}="error"\].*color: #ef4444/s);
+  assert.match(source, /threadStatusSvgAttribute}="waiting"\].*color: #eab308/s);
+  assert.match(source, /nativeHost\.querySelector\("\.animate-spin svg"\)/);
+  assert.match(source, /svg\.replaceChildren\(/);
   assert.match(source, /threadStatusPlacementAttribute}="native"\]\)::after/);
   assert.match(source, /data-codey-thread-status-indicator.*display: none !important/);
 });
