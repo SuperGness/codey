@@ -11,8 +11,8 @@ struct AppPackageSpec {
     priority: u8,
 }
 
-const CODEX_PACKAGE_EXECUTABLES: &[&str] = &["ChatGPT.exe", "Codex.exe", "codex.exe"];
-const STANDALONE_CODEX_EXECUTABLES: &[&str] = &["ChatGPT.exe", "Codex.exe", "codex.exe"];
+const CODEX_PACKAGE_EXECUTABLES: &[&str] = &["ChatGPT.exe", "Codex.exe"];
+const STANDALONE_CODEX_EXECUTABLES: &[&str] = &["ChatGPT.exe", "Codex.exe"];
 
 const APP_PACKAGE_SPECS: &[AppPackageSpec] = &[
     AppPackageSpec {
@@ -218,7 +218,8 @@ pub fn normalize_codex_app_path(path: &Path) -> Option<PathBuf> {
 
     let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
     if is_supported_app_executable_name(file_name) {
-        return path.parent().map(Path::to_path_buf);
+        let parent = path.parent()?;
+        return executable_in_dir(parent).map(|_| parent.to_path_buf());
     }
 
     if path.extension() == Some(OsStr::new("app")) {
@@ -240,6 +241,7 @@ pub fn normalize_codex_app_path(path: &Path) -> Option<PathBuf> {
         }
     }
 
+    #[cfg(not(windows))]
     if path.is_dir() {
         return Some(path.to_path_buf());
     }
@@ -475,9 +477,12 @@ fn executable_in_dir(dir: &Path) -> Option<PathBuf> {
         .map(|spec| spec.executable_names)
         .unwrap_or(STANDALONE_CODEX_EXECUTABLES);
     for name in names {
-        let candidate = dir.join(name);
-        if candidate.exists() {
-            return Some(candidate);
+        let entry = std::fs::read_dir(dir)
+            .ok()?
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name() == OsStr::new(name) && entry.path().is_file());
+        if let Some(entry) = entry {
+            return Some(entry.path());
         }
     }
     None

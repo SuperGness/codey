@@ -347,6 +347,15 @@ fn app_paths_prefers_chatgpt_entrypoint_when_portable_bundle_contains_codex_shim
 }
 
 #[test]
+fn app_paths_rejects_lowercase_codex_cli_as_desktop_executable() {
+    let temp = tempfile::tempdir().unwrap();
+    let cli = temp.path().join("codex.exe");
+    std::fs::write(&cli, "").unwrap();
+
+    assert_eq!(normalize_codex_app_path(&cli), None);
+}
+
+#[test]
 fn app_paths_normalizes_chatgpt_desktop_executable_and_builds_it() {
     let temp = tempfile::tempdir().unwrap();
     let app = temp

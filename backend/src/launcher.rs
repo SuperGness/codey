@@ -126,13 +126,22 @@ impl CodeyRuntime {
             .await
             .context("Trace 日志保护切换任务异常退出")??;
 
+        let configured_app_path = config.codex_app_path.trim();
         let app_dir = resolve_codex_app_dir_with_saved(
-            (!config.codex_app_path.trim().is_empty())
-                .then(|| PathBuf::from(config.codex_app_path.trim()))
+            (!configured_app_path.is_empty())
+                .then(|| PathBuf::from(configured_app_path))
                 .as_deref(),
             None,
         )
-        .ok_or_else(|| anyhow::anyhow!("找不到 Codex App，请在 Codey 配置中填写路径"))?;
+        .ok_or_else(|| {
+            if configured_app_path.is_empty() {
+                anyhow::anyhow!("找不到 Codex App，请在 Codey 配置中填写路径")
+            } else {
+                anyhow::anyhow!(
+                    "配置的 Codex App 路径无效或指向了 Codex CLI；请选择 Codex 桌面 App，不要选择 codex.exe 命令行程序"
+                )
+            }
+        })?;
         prepare_codex_for_launch(&app_dir).await?;
         let current_profile = config
             .active_profile()
