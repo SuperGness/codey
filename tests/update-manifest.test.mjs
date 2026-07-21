@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("..", import.meta.url);
-const manifestScript = new URL("../scripts/generate-update-manifest.mjs", import.meta.url);
+const root = fileURLToPath(new URL("..", import.meta.url));
+const manifestScript = fileURLToPath(new URL("../scripts/generate-update-manifest.mjs", import.meta.url));
 
 const artifacts = [
   ["Codey-1.2.3-macos-arm64-unsigned.zip", "macos-arm64"],
@@ -29,14 +30,14 @@ test("generates a public update manifest with checksummed platform assets", asyn
   const result = spawnSync(
     process.execPath,
     [
-      manifestScript.pathname,
+      manifestScript,
       "--version", "1.2.3",
       "--tag", "v1.2.3",
       "--download-base-url", "https://updates.example.com/releases/v1.2.3",
       "--output", output,
       ...paths,
     ],
-    { cwd: root.pathname, encoding: "utf8" },
+    { cwd: root, encoding: "utf8" },
   );
 
   assert.equal(result.status, 0, result.stderr);
@@ -66,14 +67,14 @@ test("rejects a release whose tag does not match its version", async () => {
   const result = spawnSync(
     process.execPath,
     [
-      manifestScript.pathname,
+      manifestScript,
       "--version", "1.2.3",
       "--tag", "v1.2.4",
       "--download-base-url", "https://example.invalid/releases/download/v1.2.4",
       "--output", join(directory, "latest.json"),
       join(directory, "placeholder"),
     ],
-    { cwd: root.pathname, encoding: "utf8" },
+    { cwd: root, encoding: "utf8" },
   );
 
   assert.notEqual(result.status, 0);
