@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
+
 test("Windows hides Codey's exclusive console only after Codex starts", async () => {
-  const source = await readFile(
+  const source = normalizeLineEndings(await readFile(
     new URL("../backend/src/lib.rs", import.meta.url),
     "utf8",
-  );
+  ));
 
   assert.match(
     source,
@@ -19,14 +21,15 @@ test("Windows hides Codey's exclusive console only after Codex starts", async ()
 
 test("Windows packaged Codex exit uses an OS process wait instead of polling snapshots", async () => {
   const [launcher, coreLauncher] = await Promise.all([
-    readFile(new URL("../backend/src/launcher.rs", import.meta.url), "utf8"),
+    readFile(new URL("../backend/src/launcher.rs", import.meta.url), "utf8")
+      .then(normalizeLineEndings),
     readFile(
       new URL(
         "../vendor/CodexPlusPlus/crates/codex-plus-core/src/launcher.rs",
         import.meta.url,
       ),
       "utf8",
-    ),
+    ).then(normalizeLineEndings),
   ]);
   const watcher = launcher.slice(
     launcher.indexOf("#[cfg(windows)]\nfn spawn_codex_exit_watcher"),

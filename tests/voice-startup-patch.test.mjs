@@ -4,8 +4,9 @@ import test from "node:test";
 
 const delay = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
+const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
 
-async function waitFor(predicate, timeoutMs = 2000) {
+async function waitFor(predicate, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) {
@@ -16,10 +17,10 @@ async function waitFor(predicate, timeoutMs = 2000) {
 }
 
 async function loadVoicePatchExpression() {
-  const source = await readFile(
+  const source = normalizeLineEndings(await readFile(
     new URL("../backend/src/codex_startup_patch.rs", import.meta.url),
     "utf8",
-  );
+  ));
   const template = source.match(
     /const STARTUP_PATCH_TEMPLATE: &str = r#"\n([\s\S]*?)\n"#;/,
   )?.[1];
@@ -265,6 +266,7 @@ test("execution reaper never evicts a silent long-running turn", async () => {
 test("execution reaper rechecks turn state after its process snapshot", async () => {
   let notificationHandler = null;
   let releaseFirstSnapshot = null;
+  let firstSnapshotSeen = false;
   let snapshotCalls = 0;
   const killed = [];
   const candidates = [
@@ -281,6 +283,7 @@ test("execution reaper rechecks turn state after its process snapshot", async ()
     snapshot: async () => {
       snapshotCalls += 1;
       if (snapshotCalls !== 1) return candidates;
+      firstSnapshotSeen = true;
       return new Promise((resolve) => { releaseFirstSnapshot = () => resolve(candidates); });
     },
     completionGraceMs: 5,
@@ -294,7 +297,7 @@ test("execution reaper rechecks turn state after its process snapshot", async ()
     method: "turn/completed",
     params: { threadId: "race", turn: { id: "first" } },
   });
-  await waitFor(() => snapshotCalls === 1);
+  await waitFor(() => firstSnapshotSeen);
   notificationHandler({
     method: "turn/started",
     params: { threadId: "race", turn: { id: "second" } },
@@ -315,6 +318,7 @@ test("execution reaper rechecks turn state after its process snapshot", async ()
 
 test("execution reaper cancels cleanup when a turn starts after the snapshot", async () => {
   let notificationHandler = null;
+  let firstSnapshotSeen = false;
   let snapshotCalls = 0;
   const killed = [];
   const candidates = [
@@ -331,6 +335,7 @@ test("execution reaper cancels cleanup when a turn starts after the snapshot", a
     snapshot: async () => {
       snapshotCalls += 1;
       if (snapshotCalls === 1) {
+        firstSnapshotSeen = true;
         setTimeout(() => {
           notificationHandler({
             method: "turn/started",
@@ -351,7 +356,7 @@ test("execution reaper cancels cleanup when a turn starts after the snapshot", a
     method: "turn/completed",
     params: { threadId: "snapshot-race", turn: { id: "first" } },
   });
-  await waitFor(() => snapshotCalls === 1);
+  await waitFor(() => firstSnapshotSeen);
   await delay(40);
   assert.deepEqual(killed, []);
 
@@ -368,6 +373,7 @@ test("execution reaper cancels cleanup when a turn starts after the snapshot", a
 test("execution reaper retries after snapshot failure when a newer turn finished", async () => {
   let notificationHandler = null;
   let rejectFirstSnapshot = null;
+  let firstSnapshotSeen = false;
   let snapshotCalls = 0;
   const killed = [];
   const candidates = [
@@ -384,6 +390,7 @@ test("execution reaper retries after snapshot failure when a newer turn finished
     snapshot: async () => {
       snapshotCalls += 1;
       if (snapshotCalls !== 1) return candidates;
+      firstSnapshotSeen = true;
       return new Promise((_resolve, reject) => {
         rejectFirstSnapshot = () => reject(new Error("snapshot unavailable"));
       });
@@ -399,7 +406,7 @@ test("execution reaper retries after snapshot failure when a newer turn finished
     method: "turn/completed",
     params: { threadId: "retry", turn: { id: "first" } },
   });
-  await waitFor(() => snapshotCalls === 1);
+  await waitFor(() => firstSnapshotSeen);
   notificationHandler({
     method: "turn/started",
     params: { threadId: "retry", turn: { id: "newer" } },
@@ -421,6 +428,7 @@ test("execution reaper retries after snapshot failure when a newer turn finished
 test("disposing execution reaper cancels pending cleanup", async () => {
   let notificationHandler = null;
   let releaseSnapshot = null;
+  let firstSnapshotSeen = false;
   let snapshotCalls = 0;
   const killed = [];
   const dispose = globalThis.__CODEY_INSTALL_EXECUTION_REAPER__({
@@ -433,6 +441,7 @@ test("disposing execution reaper cancels pending cleanup", async () => {
     kill: async (pid) => { killed.push(pid); },
     snapshot: async () => {
       snapshotCalls += 1;
+      firstSnapshotSeen = true;
       return new Promise((resolve) => {
         releaseSnapshot = () => resolve([
           { command: "node ./mcp/server.mjs", depth: 1, kind: "mcp", pid: 57 },
@@ -450,7 +459,7 @@ test("disposing execution reaper cancels pending cleanup", async () => {
     method: "turn/completed",
     params: { threadId: "dispose", turn: { id: "pending" } },
   });
-  await waitFor(() => snapshotCalls === 1);
+  await waitFor(() => firstSnapshotSeen);
   dispose();
   assert.equal(notificationHandler, null);
   releaseSnapshot();

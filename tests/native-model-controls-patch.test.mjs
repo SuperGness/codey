@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
+
 async function loadPatchExpression() {
-  const source = await readFile(
+  const source = normalizeLineEndings(await readFile(
     new URL("../backend/src/codex_startup_patch.rs", import.meta.url),
     "utf8",
-  );
+  ));
   const template = source.match(
     /const STARTUP_PATCH_TEMPLATE: &str = r#"\n([\s\S]*?)\n"#;/,
   )?.[1];
@@ -269,8 +271,10 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
 
 test("restarting Codex stops the current runtime and relaunches it with Codey", async () => {
   const [commandsSource, launcherSource, appSource] = await Promise.all([
-    readFile(new URL("../backend/src/commands.rs", import.meta.url), "utf8"),
-    readFile(new URL("../backend/src/launcher.rs", import.meta.url), "utf8"),
+    readFile(new URL("../backend/src/commands.rs", import.meta.url), "utf8")
+      .then(normalizeLineEndings),
+    readFile(new URL("../backend/src/launcher.rs", import.meta.url), "utf8")
+      .then(normalizeLineEndings),
     readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
   ]);
   const restartFlow = commandsSource.slice(
