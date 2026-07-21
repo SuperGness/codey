@@ -15,7 +15,7 @@ Codey 是一个无界面的 Rust 桌面辅助进程，通过 CDP 连接官方 Co
 - Codey 的受控基础脚本会预构建为单个 CDP 文档注入包并在健康恢复时复用，默认注入从 16 次脚本往返降为 2 次；约 456 KB 的 React 设置浮层只在首次点击 Codey 按钮时按需注入，用户脚本仍保持独立且最后执行。
 - Renderer 观察器按新增控件最近的会话行、项目行、侧边栏分区或消息轮次增量修复，不监听流式正文的 `characterData`；插件 bridge 使用有界指数退避等待宿主接口，也不会再序列化无关 IPC 的完整参数。
 - 后台会话状态轮询对每个变更的 rollout 只解析一次，并按文件大小和修改时间缓存紧凑事件结果；活跃任务保持 3 秒检测，稳定空闲时按 3/6/12/30 秒退避，窗口恢复或用户交互会立即唤醒。
-- Codex Trace 写盘防护在 macOS / Windows 运行时自动启用，通过 SQLite `block_log_inserts` trigger 阻止 `logs_*.sqlite` 持续写入高频诊断日志；不设置开关，已有日志和会话数据不会被删除。
+- Codex Trace 写盘防护通过 SQLite `block_log_inserts` trigger 阻止 `logs_*.sqlite` 持续写入高频诊断日志；设置开关，已有日志和会话数据不会被删除。
 - Windows 默认开启新版卡顿补丁：Codey 在 Codex 主进程执行前通过仅绑定 `127.0.0.1` 的临时 Inspector，把会反复触发原生 DLL 加载失败的 `@worklouder/device-kit-oai` 替换为无设备桩，并精确断路每 30 秒启动一次的 `child-process-snapshot-worker.js`。断路后直接返回合法空快照，不再启动 PowerShell，也不会执行 `Get-CimInstance Win32_Process` 和 `Win32_PerfFormattedData_PerfProc_Process` 两次 CIM/WMI 全量查询；普通 Worker 不受影响。Inspector 随后立即关闭，不修改 Microsoft Store 安装目录。
 - macOS / Windows 默认开启宠物硬阉割：Codey 先把 Codex 自带的 `electron-avatar-overlay-open` 启动状态设为关闭，再在主进程执行前安装仅存在于本次进程内的断路补丁。补丁在 V8 编译 Codex 主 bundle 前把宠物 manager 构造替换成无状态桩，并拒绝创建 356×320 宠物 BrowserWindow、`Pet Surface`、专用 preload 和 macOS 原生 `avatar-overlay.node`；因此不会注册宠物生命周期、计时器、原生合成或额外 Renderer。Codex 设置页、个人菜单和命令菜单中的唤醒宠物控件也会按稳定语义 ID 屏蔽。关闭开关后会在下一次由 Codey 启动 Codex 时撤掉断路补丁并恢复宠物及其控件，不改写 `app.asar`。
 - 可选的 FastCtx 上下文优化默认关闭。打开后，Codey 会在下次启动 Codex 时把内嵌的 FastCtx 作为本地 STDIO MCP 临时注册，提供带分页和输出预算的 `read`、`grep`、`glob` 与 `replace` 工具，减少文件读取、搜索和机械替换产生的命令拼装与冗余上下文；无需另外安装 FastCtx、npm 包或 Node.js。

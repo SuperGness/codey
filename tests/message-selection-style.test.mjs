@@ -27,9 +27,13 @@ test("selection changes resynchronize adjacent-turn grouping", () => {
   assert.match(source, /row\.dataset\.codeySelectedNext = "true"/);
 });
 
-test("message deletion does not use UI tombstones or hidden rows", () => {
+test("hard-deleted messages are removed while Codex rebuilds its active history", () => {
   assert.doesNotMatch(source, /codey-deleted-turns/);
   assert.doesNotMatch(source, /data-codey-message-deleted/);
-  assert.match(source, /method: "thread\/unsubscribe"/);
+  assert.match(source, /dispatcher\("unsubscribe-thread-for-host"/);
+  assert.match(source, /dispatcher\("maybe-resume-conversation"/);
+  assert.match(source, /hardDeletedMessageKeys/);
+  assert.match(source, /rows\.forEach\(\(row\) => row\.remove\(\)\)/);
   assert.doesNotMatch(source, /dispatcher\("discard-conversation-from-cache"/);
+  assert.match(source, /showRuntimeToast\(`已永久删除 \$\{deleted\} 轮对话`\);\s*};/);
 });

@@ -53,6 +53,7 @@
   let codexSignalDispatcherPromise = null;
   let sidebarActionTooltipTimer = 0;
   let sidebarActionTooltipAnchor = null;
+  const hardDeletedMessageKeys = new Set();
   const queryWithin = (root, selector) => {
     const matches = [];
     if (root instanceof HTMLElement && typeof root.matches === "function" && root.matches(selector)) {
@@ -152,6 +153,25 @@
     const child = row.querySelector("[data-turn-key], [data-message-id], [data-item-id], [data-id]");
     return child?.getAttribute("data-turn-key") || child?.getAttribute("data-message-id") || child?.getAttribute("data-item-id") || child?.getAttribute("data-id") || "";
   };
+
+  const hardDeletedMessageKey = (sessionId, messageId) => {
+    const normalizedSessionId = String(sessionId || "").replace(/^local:/, "").trim();
+    const normalizedMessageId = String(messageId || "").trim();
+    return normalizedSessionId && normalizedMessageId
+      ? `${normalizedSessionId}\u0000${normalizedMessageId}`
+      : "";
+  };
+
+  const rememberHardDeletedMessages = (sessionId, messageIds) => {
+    messageIds.forEach((messageId) => {
+      const key = hardDeletedMessageKey(sessionId, messageId);
+      if (key) hardDeletedMessageKeys.add(key);
+    });
+  };
+
+  const isHardDeletedMessage = (sessionId, messageId) => (
+    hardDeletedMessageKeys.has(hardDeletedMessageKey(sessionId, messageId))
+  );
 
   const addStyle = () => {
     if (document.getElementById(styleId)) return;
@@ -779,12 +799,11 @@
     });
     const dispatcher = await codexSignalDispatcherPromise;
 
-    // Unload app-server memory without removing the active conversation from
-    // React's thread store, so reloading keeps the current route selected.
-    await dispatcher("send-cli-request-for-host", {
+    // This native path unsubscribes app-server memory while preserving the
+    // active route and marking the React conversation as needing a resume.
+    await dispatcher("unsubscribe-thread-for-host", {
       hostId: "local",
-      method: "thread/unsubscribe",
-      params: { threadId: normalizedSessionId },
+      threadId: normalizedSessionId,
     });
 
     // Closing a loaded thread may flush a final record. Reapply the hard delete
@@ -796,6 +815,15 @@
     if (cleanup?.status === "failed") {
       throw new Error(cleanup.message || "卸载会话后的持久化清理失败");
     }
+    await dispatcher("maybe-resume-conversation", {
+      hostId: "local",
+      conversationId: normalizedSessionId,
+      model: null,
+      serviceTier: null,
+      reasoningEffort: null,
+      workspaceRoots: [],
+      collaborationMode: null,
+    });
     await dispatcher("refresh-recent-conversations-for-host", {
       hostId: "local",
       sortKey: "updated_at",
@@ -1211,6 +1239,11 @@
       window.alert("没有在当前会话记录中找到所选轮次；会话文件未被修改");
       return;
     }
+    rememberHardDeletedMessages(sessionId, messageIds);
+    rows.forEach((row) => row.remove());
+    lastSelectedRow = null;
+    syncSelectionGroups();
+    updateToolbar();
     try {
       await reloadConversationAfterHardDelete(sessionId, messageIds);
     } catch (error) {
@@ -1219,8 +1252,7 @@
       return;
     }
     window.dispatchEvent(new CustomEvent("codey-session-refresh", { detail: { sessionId, messageIds } }));
-    showRuntimeToast(`已永久删除 ${deleted} 轮对话，正在重新加载会话`);
-    window.setTimeout(() => location.reload(), 350);
+    showRuntimeToast(`已永久删除 ${deleted} 轮对话`);
   };
 
   const mountToolbar = () => {
@@ -1248,10 +1280,17 @@
       ? currentTurnRows
       : queryWithin(root, "[data-message-author-role], [data-testid=conversation-turn], [data-message-id]");
     let installed = false;
+    const sessionId = getSessionId();
     rows.forEach((row) => {
-      if (!(row instanceof HTMLElement) || row.querySelector("[data-codey-message-select]")) return;
+      if (!(row instanceof HTMLElement)) return;
       const messageId = getMessageId(row);
       if (!messageId) return;
+      if (isHardDeletedMessage(sessionId, messageId)) {
+        row.remove();
+        installed = true;
+        return;
+      }
+      if (row.querySelector("[data-codey-message-select]")) return;
       row.dataset.codeyMessageId = messageId;
       const button = document.createElement("button");
       button.type = "button";
@@ -1305,6 +1344,7 @@
   window.__codeySyncSelectionGroups = syncSelectionGroups;
   window.__codeyDeleteSelectedMessages = deleteSelected;
   window.__codeyReloadConversationAfterHardDelete = reloadConversationAfterHardDelete;
+  window.__codeyInstallMessageSelection = installMessageSelection;
   scan();
 
   const codeyOwnedSelector = [

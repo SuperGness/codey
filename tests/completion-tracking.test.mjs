@@ -11,7 +11,17 @@ class FakeElement {
     this.dataset = {};
     this.disabled = false;
     this.parentElement = null;
+    this.removed = false;
     this.textContent = "";
+    const classes = new Set();
+    this.classList = {
+      add: (className) => classes.add(className),
+      contains: (className) => classes.has(className),
+      remove: (className) => classes.delete(className),
+      toggle: (className) => (
+        classes.has(className) ? (classes.delete(className), false) : (classes.add(className), true)
+      ),
+    };
   }
 
   getAttribute(name) {
@@ -51,7 +61,9 @@ class FakeElement {
 
   addEventListener() {}
 
-  remove() {}
+  remove() {
+    this.removed = true;
+  }
 }
 
 function loadInjection({
@@ -60,8 +72,15 @@ function loadInjection({
   sessionTitle = "排查飞书通知",
   bridgeHandler = null,
   codexSignalDispatcher = null,
+  selectedTurnIds = [],
 } = {}) {
   const rows = turnIds.map((turnId) => new FakeElement({ "data-turn-key": turnId }));
+  rows.forEach((row) => {
+    row.dataset.codeyMessageId = row.getAttribute("data-turn-key");
+    if (selectedTurnIds.includes(row.dataset.codeyMessageId)) {
+      row.classList.add("codey-message-selected");
+    }
+  });
   const sidebarThread = new FakeElement({
     "data-app-action-sidebar-thread-id": "local:session-1",
     "data-app-action-sidebar-thread-title": sessionTitle,
@@ -89,7 +108,17 @@ function loadInjection({
       return null;
     },
     querySelectorAll(selector) {
-      if (selector === "[data-turn-key]") return rows;
+      if (selector === "[data-turn-key]") return rows.filter((row) => !row.removed);
+      if (selector === "[data-codey-message-id]") {
+        return rows.filter((row) => !row.removed && row.dataset.codeyMessageId);
+      }
+      if (selector === ".codey-message-selected[data-codey-message-id]") {
+        return rows.filter((row) => (
+          !row.removed
+          && row.dataset.codeyMessageId
+          && row.classList.contains("codey-message-selected")
+        ));
+      }
       if (selector === "button[aria-label]") return running ? [stopButton] : [];
       if (selector === "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]") {
         return [sidebarThread];
@@ -108,7 +137,9 @@ function loadInjection({
     },
     __codeyCodexSignalDispatcher: codexSignalDispatcher,
     addEventListener: () => {},
+    alert: () => {},
     clearTimeout: () => {},
+    confirm: () => true,
     dispatchEvent: () => true,
     getComputedStyle: () => ({ display: "block", visibility: "visible" }),
     setTimeout: (callback) => {
@@ -149,25 +180,36 @@ function loadInjection({
   });
   return {
     appendTurn: (turnId) => {
-      rows.push(new FakeElement({ "data-turn-key": turnId }));
+      const row = new FakeElement({ "data-turn-key": turnId });
+      rows.push(row);
+      return row;
     },
     bridgeCalls,
     getReloadCount: () => reloadCount,
+    getVisibleTurnIds: () => rows
+      .filter((row) => !row.removed)
+      .map((row) => row.getAttribute("data-turn-key")),
     window,
   };
 }
 
 test("unloads Codex memory without discarding the active conversation", async () => {
   const dispatcherCalls = [];
+  const events = [];
   const runtime = loadInjection({
     initialRunning: false,
     codexSignalDispatcher: async (signal, payload) => {
       dispatcherCalls.push({ signal, payload });
+      events.push(`signal:${signal}`);
     },
-    bridgeHandler: async (path) => path === "/session/delete-messages"
-      ? { status: "ok", deleted: 0 }
-      : { status: "ok" },
+    bridgeHandler: async (path) => {
+      events.push(`bridge:${path}`);
+      return path === "/session/delete-messages"
+        ? { status: "ok", deleted: 0 }
+        : { status: "ok" };
+    },
   });
+  events.length = 0;
 
   await runtime.window.__codeyReloadConversationAfterHardDelete(
     "local:session-1",
@@ -175,11 +217,21 @@ test("unloads Codex memory without discarding the active conversation", async ()
   );
 
   assert.deepEqual(JSON.parse(JSON.stringify(dispatcherCalls)), [{
-    signal: "send-cli-request-for-host",
+    signal: "unsubscribe-thread-for-host",
     payload: {
       hostId: "local",
-      method: "thread/unsubscribe",
-      params: { threadId: "session-1" },
+      threadId: "session-1",
+    },
+  }, {
+    signal: "maybe-resume-conversation",
+    payload: {
+      hostId: "local",
+      conversationId: "session-1",
+      model: null,
+      serviceTier: null,
+      reasoningEffort: null,
+      workspaceRoots: [],
+      collaborationMode: null,
     },
   }, {
     signal: "refresh-recent-conversations-for-host",
@@ -189,6 +241,12 @@ test("unloads Codex memory without discarding the active conversation", async ()
     dispatcherCalls.some(({ signal }) => signal === "discard-conversation-from-cache"),
     false,
   );
+  assert.deepEqual(events, [
+    "signal:unsubscribe-thread-for-host",
+    "bridge:/session/delete-messages",
+    "signal:maybe-resume-conversation",
+    "signal:refresh-recent-conversations-for-host",
+  ]);
   const cleanup = runtime.bridgeCalls.find(
     (call) => call.path === "/session/delete-messages",
   );
@@ -196,6 +254,30 @@ test("unloads Codex memory without discarding the active conversation", async ()
     sessionId: "session-1",
     messageIds: ["turn-deleted"],
   });
+});
+
+test("removes a hard-deleted turn and rejects a stale React rerender", async () => {
+  let deleteCalls = 0;
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: ["turn-1", "turn-2"],
+    selectedTurnIds: ["turn-1"],
+    codexSignalDispatcher: async () => {},
+    bridgeHandler: async (path) => {
+      if (path !== "/session/delete-messages") return { status: "ok" };
+      deleteCalls += 1;
+      return { status: "ok", deleted: deleteCalls === 1 ? 1 : 0 };
+    },
+  });
+
+  await runtime.window.__codeyDeleteSelectedMessages();
+
+  assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-2"]);
+  assert.equal(runtime.getReloadCount(), 0);
+
+  runtime.appendTurn("turn-1");
+  runtime.window.__codeyInstallMessageSelection();
+  assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-2"]);
 });
 
 test("syncs Codex sidebar titles to the notification backend", async () => {
