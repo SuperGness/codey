@@ -26,12 +26,14 @@ use crate::session_delete;
 use crate::session_metadata;
 use crate::session_transfer;
 use crate::trace_log_guard;
+use crate::trace_log_stats::{self, TraceLogStatsHandle, TraceLogStatsSnapshot};
 use crate::webhook::{WebhookDispatcher, WebhookEvent};
 
 pub struct AppState {
     pub store: ConfigStore,
     pub config: RwLock<CodeyConfig>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
+    pub trace_log_stats: TraceLogStatsHandle,
     pub startup_error: RwLock<Option<String>>,
     close_in_progress: AtomicBool,
     manual_close_requested: AtomicBool,
@@ -55,6 +57,7 @@ impl Default for AppState {
             store,
             config: RwLock::new(config),
             runtime: Mutex::new(None),
+            trace_log_stats: TraceLogStatsHandle::idle(),
             startup_error: RwLock::new(None),
             close_in_progress: AtomicBool::new(false),
             manual_close_requested: AtomicBool::new(false),
@@ -577,6 +580,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             Err(error) => Err(error),
         },
         "runtime_status" => runtime_status(state).await,
+        "refresh_trace_log_stats" => refresh_trace_log_stats(state).await,
         "launch_codey" => launch_codey_runtime(state).await,
         "close_codex" | "restart_codey" => schedule_close_codey_runtime(state).await,
         "clear_codex_trace_logs" => clear_codex_trace_logs(state).await,
@@ -701,6 +705,34 @@ pub async fn clear_codex_trace_logs(state: &Arc<AppState>) -> Result<Value, Stri
         "status":"ok",
         "cleanup":report,
         "protectionEnabled":disable_writes,
+    }))
+}
+
+pub async fn refresh_trace_log_stats(state: &Arc<AppState>) -> Result<Value, String> {
+    if !state.trace_log_stats.begin_refresh() {
+        return Ok(json!({
+            "status": "pending",
+            "traceLogStats": &state.trace_log_stats,
+        }));
+    }
+
+    let home = codex_home();
+    let snapshot = match tokio::task::spawn_blocking(move || trace_log_stats::snapshot(&home)).await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let mut snapshot = TraceLogStatsSnapshot::idle();
+            snapshot
+                .errors
+                .push(format!("Trace 日志统计任务异常退出：{error}"));
+            snapshot
+        }
+    };
+    state.trace_log_stats.replace(snapshot);
+
+    Ok(json!({
+        "status": "ok",
+        "traceLogStats": &state.trace_log_stats,
     }))
 }
 
@@ -924,9 +956,11 @@ pub async fn runtime_status(state: &Arc<AppState>) -> Result<Value, String> {
             "maintenance".into(),
             serde_json::to_value(&runtime.maintenance).unwrap_or_else(|_| json!({})),
         );
+    }
+    if let Some(object) = status.as_object_mut() {
         object.insert(
             "traceLogStats".into(),
-            serde_json::to_value(&runtime.trace_log_stats).unwrap_or_else(|_| json!({})),
+            serde_json::to_value(&state.trace_log_stats).unwrap_or_else(|_| json!({})),
         );
     }
     Ok(status)

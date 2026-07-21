@@ -59,11 +59,13 @@ test("Windows lag patch bypasses only the recurring WMI snapshot worker", async 
   });
 });
 
-test("trace guard, pet, and voice remain user-configurable", async () => {
-  const [appSource, configSource, traceSource] = await Promise.all([
+test("trace guard, stats, pet, and voice remain user-configurable", async () => {
+  const [appSource, configSource, traceSource, launcherSource, commandsSource] = await Promise.all([
     readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
     readFile(new URL("../backend/src/config.rs", import.meta.url), "utf8"),
     readFile(new URL("../src/TraceLogModule.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../backend/src/launcher.rs", import.meta.url), "utf8"),
+    readFile(new URL("../backend/src/commands.rs", import.meta.url), "utf8"),
   ]);
 
   assert.doesNotMatch(appSource, /disableCodexMicro/);
@@ -71,6 +73,10 @@ test("trace guard, pet, and voice remain user-configurable", async () => {
   assert.match(appSource, /disableTraceLogWrites/);
   assert.match(configSource, /pub disable_trace_log_writes: bool/);
   assert.match(traceSource, /onProtectionChange|protectionEnabled/);
+  assert.match(traceSource, /刷新统计/);
+  assert.match(appSource, /refresh_trace_log_stats/);
+  assert.match(commandsSource, /"refresh_trace_log_stats"/);
+  assert.doesNotMatch(launcherSource, /spawn_startup_trace_stats_refresh/);
   assert.match(appSource, /slimCodexPet/);
   assert.match(appSource, /slimCodexVoice/);
   assert.match(configSource, /pub slim_codex_voice: bool/);

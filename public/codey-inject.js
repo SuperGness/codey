@@ -17,6 +17,8 @@
   const sessionDeletePopoverId = "codey-session-delete-popover";
   const sidebarActionTooltipId = "codey-sidebar-action-tooltip";
   const threadStatusAttribute = "data-codey-thread-traffic-status";
+  const threadStatusHostAttribute = "data-codey-thread-status-host";
+  const threadStatusPlacementAttribute = "data-codey-thread-status-placement";
   const threadUpdatedAtAttribute = "data-codey-thread-updated-at";
   const threadUpdatedAtMsAttribute = "data-codey-thread-updated-at-ms";
   const settingsIcon = `
@@ -210,18 +212,27 @@
       #${toastId}[data-tone="error"] { border-color: rgba(248, 113, 113, .6); color: #fecaca; }
       [data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title],
       [data-app-action-sidebar-project-row][data-app-action-sidebar-project-id] { position: relative; }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}]::after { content: ""; position: absolute; top: 50%; right: 10px; z-index: 10; display: block; width: 8px; height: 8px; border-radius: 50%; transform: translateY(-50%); pointer-events: none; }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="running"]::after { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, .16); animation: codey-thread-status-blink 1.1s ease-in-out infinite; }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="error"]::after { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, .14); }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="waiting"]::after { background: #eab308; box-shadow: 0 0 0 3px rgba(234, 179, 8, .16); }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}] [data-hover-card-open-immediately][class*="group-hover:hidden"] { visibility: hidden !important; }
+      [data-app-action-sidebar-thread-row][${threadStatusAttribute}]:not([${threadStatusPlacementAttribute}="native"])::after { content: ""; position: absolute; top: 50%; right: 10px; z-index: 10; display: block; width: 8px; height: 8px; border-radius: 50%; transform: translateY(-50%); pointer-events: none; }
+      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="running"]:not([${threadStatusPlacementAttribute}="native"])::after,
+      [${threadStatusHostAttribute}="running"]::after { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, .16); animation: codey-thread-status-blink 1.1s ease-in-out infinite; }
+      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="error"]:not([${threadStatusPlacementAttribute}="native"])::after,
+      [${threadStatusHostAttribute}="error"]::after { background: #ef4444; box-shadow: 0 0 0 3px rgba(239, 68, 68, .14); }
+      [data-app-action-sidebar-thread-row][${threadStatusAttribute}="waiting"]:not([${threadStatusPlacementAttribute}="native"])::after,
+      [${threadStatusHostAttribute}="waiting"]::after { background: #eab308; box-shadow: 0 0 0 3px rgba(234, 179, 8, .16); }
+      [${threadStatusHostAttribute}] { position: relative !important; }
+      [${threadStatusHostAttribute}] > * { visibility: hidden !important; }
+      [${threadStatusHostAttribute}]::after { content: ""; position: absolute; top: 50%; left: 50%; z-index: 1; display: block; width: 8px; height: 8px; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
       [data-codey-thread-status-indicator], [data-codey-thread-status-owned-host] { display: none !important; }
       [data-app-action-sidebar-thread-row][${threadStatusAttribute}]:hover::after,
       [data-app-action-sidebar-thread-row][${threadStatusAttribute}]:has(:focus-visible)::after { display: none !important; }
       @keyframes codey-thread-status-blink { 0%, 100% { opacity: 1; } 50% { opacity: .24; } }
-      @media (prefers-reduced-motion: reduce) { [data-app-action-sidebar-thread-row][${threadStatusAttribute}="running"]::after { animation: none; } }
+      @media (prefers-reduced-motion: reduce) {
+        [data-app-action-sidebar-thread-row][${threadStatusAttribute}="running"]::after,
+        [${threadStatusHostAttribute}="running"]::after { animation: none; }
+      }
       [data-app-action-sidebar-thread-row] [${threadUpdatedAtAttribute}] { display: block; flex: 0 0 auto; min-width: 26px; margin-inline-start: auto; color: inherit; font: 400 12px/16px system-ui, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: 0; text-align: end; opacity: .52; pointer-events: none; white-space: nowrap; }
-      [data-app-action-sidebar-thread-row][${threadStatusAttribute}] [${threadUpdatedAtAttribute}] { display: none; }
+      [data-app-action-sidebar-thread-row][${threadStatusAttribute}] [${threadUpdatedAtAttribute}],
+      [data-app-action-sidebar-thread-row]:has([data-hover-card-open-immediately][class*="group-hover:hidden"]) [${threadUpdatedAtAttribute}] { display: none; }
       [data-app-action-sidebar-thread-row]:hover [${threadUpdatedAtAttribute}],
       [data-app-action-sidebar-thread-row]:has(:focus-visible) [${threadUpdatedAtAttribute}] { opacity: 0; }
       [${sessionExportAttribute}], [${tasksImportAttribute}], [${sessionDeleteAttribute}] { -webkit-app-region: no-drag !important; flex: 0 0 auto; pointer-events: auto !important; }
@@ -712,8 +723,32 @@
     return "";
   };
 
+  const nativeThreadStatusHostFromRow = (row) => (
+    [...row.querySelectorAll("[data-hover-card-open-immediately]")]
+      .find((node) => String(node.getAttribute("class") || "").includes("group-hover:hidden"))
+    || null
+  );
+
   const clearThreadStatusIndicator = (row) => {
     row.removeAttribute(threadStatusAttribute);
+    row.removeAttribute(threadStatusPlacementAttribute);
+    row.querySelectorAll(`[${threadStatusHostAttribute}]`).forEach((host) => {
+      host.removeAttribute(threadStatusHostAttribute);
+    });
+  };
+
+  const setThreadStatusIndicator = (row, state) => {
+    row.querySelectorAll(`[${threadStatusHostAttribute}]`).forEach((host) => {
+      host.removeAttribute(threadStatusHostAttribute);
+    });
+    const nativeHost = nativeThreadStatusHostFromRow(row);
+    row.setAttribute(threadStatusAttribute, state);
+    if (nativeHost) {
+      nativeHost.setAttribute(threadStatusHostAttribute, state);
+      row.setAttribute(threadStatusPlacementAttribute, "native");
+    } else {
+      row.removeAttribute(threadStatusPlacementAttribute);
+    }
   };
 
   const installThreadStatusIndicators = (root = document) => {
@@ -724,7 +759,7 @@
         clearThreadStatusIndicator(row);
         return;
       }
-      row.setAttribute(threadStatusAttribute, state);
+      setThreadStatusIndicator(row, state);
     });
   };
 
@@ -1178,14 +1213,11 @@
   };
 
   const deleteSidebarSession = async (thread, anchor, confirmButton) => {
-    const rawSessionId = String(
-      thread.getAttribute("data-app-action-sidebar-thread-id") || "",
-    ).trim();
-    const sessionId = rawSessionId.replace(/^local:/, "");
+    const sessionId = threadSessionIdFromRow(thread);
     const title = String(
       thread.getAttribute("data-app-action-sidebar-thread-title") || "",
     ).trim();
-    if (!sessionId) {
+    if (!sessionId || sessionId.startsWith("client-new-thread:")) {
       closeSessionDeletePopover();
       showRuntimeToast("无法识别要删除的会话", "error");
       return;

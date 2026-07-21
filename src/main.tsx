@@ -64,6 +64,7 @@ if (import.meta.env.DEV) {
       thirdPartyModels: ["provider-fast-coder", "claude-sonnet-4-5"],
       upstreamModels: previewUpstreamModels,
     };
+    let previewTraceStats: typeof previewTraceLogStats | undefined;
 
     window.__codeyInvokeApi = async (command, args) => {
       console.log(`[Mock API Call] ${command}`, args);
@@ -87,8 +88,12 @@ if (import.meta.env.DEV) {
             pluginStatus: "ready",
             pluginDetail: "Codex 插件已注入，且会话生命周期托管中",
           },
-          traceLogStats: previewTraceLogStats,
+          ...(previewTraceStats ? { traceLogStats: previewTraceStats } : {}),
         };
+      }
+      if (command === "refresh_trace_log_stats") {
+        previewTraceStats = previewTraceLogStats;
+        return { status: "ok", traceLogStats: previewTraceStats };
       }
       if (command === "save_codey_config") {
         previewConfig = args.config as typeof previewConfig;

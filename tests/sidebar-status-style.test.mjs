@@ -19,6 +19,14 @@ class FakeElement {
     return this.attributes.get(name) ?? null;
   }
 
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
+  }
+
+  removeAttribute(name) {
+    this.attributes.delete(name);
+  }
+
   querySelector(selector) {
     if (selector === ".animate-spin") return this.spinner ? this.spinnerElement() : null;
     return null;
@@ -183,12 +191,38 @@ test("keeps explicit idle authoritative after the status slot was managed", () =
   assert.equal(runtime.__codeyThreadStatusFromRow(row), "");
 });
 
+test("replaces the native spinner host in place when the status slot exists", () => {
+  const runtime = loadInjection();
+  const row = rowWithProps({ statusState: { type: "loading" } });
+  const nativeHost = new FakeElement();
+  nativeHost.attributes.set("class", "flex group-hover:hidden");
+  row.querySelectorAll = (selector) => {
+    if (selector === "[data-hover-card-open-immediately]") return [nativeHost];
+    if (selector === "[data-codey-thread-status-host]") {
+      return nativeHost.getAttribute("data-codey-thread-status-host") ? [nativeHost] : [];
+    }
+    return [];
+  };
+  const root = new FakeElement();
+  root.querySelectorAll = (selector) => (
+    selector === "[data-app-action-sidebar-thread-row]" ? [row] : []
+  );
+
+  runtime.__codeyInstallThreadStatusIndicators(root);
+
+  assert.equal(row.getAttribute("data-codey-thread-traffic-status"), "running");
+  assert.equal(row.getAttribute("data-codey-thread-status-placement"), "native");
+  assert.equal(nativeHost.getAttribute("data-codey-thread-status-host"), "running");
+});
+
 test("injects blinking green and steady red/yellow status styles", () => {
   assert.match(source, /threadStatusAttribute = "data-codey-thread-traffic-status"/);
-  assert.match(source, /threadStatusAttribute}\]::after \{[^}]*right: 10px;/);
-  assert.match(source, /threadStatusAttribute}="running"\]::after.*animation: codey-thread-status-blink/s);
-  assert.match(source, /threadStatusAttribute}="error"\]::after.*background: #ef4444/s);
-  assert.match(source, /threadStatusAttribute}="waiting"\]::after.*background: #eab308/s);
-  assert.match(source, /threadStatusAttribute}\].*group-hover:hidden.*visibility: hidden !important/s);
+  assert.match(source, /threadStatusHostAttribute = "data-codey-thread-status-host"/);
+  assert.match(source, /threadStatusPlacementAttribute = "data-codey-thread-status-placement"/);
+  assert.match(source, /threadStatusHostAttribute}="running"\]::after.*animation: codey-thread-status-blink/s);
+  assert.match(source, /threadStatusHostAttribute}="error"\]::after.*background: #ef4444/s);
+  assert.match(source, /threadStatusHostAttribute}="waiting"\]::after.*background: #eab308/s);
+  assert.match(source, /threadStatusHostAttribute}\] > \* \{ visibility: hidden !important;/);
+  assert.match(source, /threadStatusPlacementAttribute}="native"\]\)::after/);
   assert.match(source, /data-codey-thread-status-indicator.*display: none !important/);
 });

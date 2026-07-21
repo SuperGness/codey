@@ -34,6 +34,13 @@ pub struct TraceLogStatsSnapshot {
 }
 
 impl TraceLogStatsSnapshot {
+    pub fn idle() -> Self {
+        Self {
+            recent_days_window: RECENT_DAYS,
+            ..Self::default()
+        }
+    }
+
     pub fn pending() -> Self {
         Self {
             pending: true,
@@ -50,10 +57,22 @@ pub struct TraceLogStatsHandle {
 }
 
 impl TraceLogStatsHandle {
-    pub fn pending() -> Self {
+    pub fn idle() -> Self {
         Self {
-            snapshot: Arc::new(RwLock::new(TraceLogStatsSnapshot::pending())),
+            snapshot: Arc::new(RwLock::new(TraceLogStatsSnapshot::idle())),
         }
+    }
+
+    pub fn begin_refresh(&self) -> bool {
+        let mut current = match self.snapshot.write() {
+            Ok(current) => current,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if current.pending {
+            return false;
+        }
+        *current = TraceLogStatsSnapshot::pending();
+        true
     }
 
     pub fn replace(&self, snapshot: TraceLogStatsSnapshot) {
@@ -66,7 +85,7 @@ impl TraceLogStatsHandle {
 
 impl Default for TraceLogStatsHandle {
     fn default() -> Self {
-        Self::pending()
+        Self::idle()
     }
 }
 
@@ -476,7 +495,7 @@ mod tests {
 
     #[test]
     fn shared_handle_serializes_the_latest_snapshot_without_changing_the_wire_shape() {
-        let handle = TraceLogStatsHandle::pending();
+        let handle = TraceLogStatsHandle::idle();
         let mut updated = TraceLogStatsSnapshot::default();
         updated.databases_found = 3;
         updated.row_count = 42;
@@ -492,10 +511,27 @@ mod tests {
 
     #[test]
     fn pending_handle_is_distinct_from_a_completed_empty_snapshot() {
-        let pending = serde_json::to_value(TraceLogStatsHandle::pending()).unwrap();
-        let completed = serde_json::to_value(TraceLogStatsSnapshot::default()).unwrap();
+        let pending_handle = TraceLogStatsHandle::idle();
+        assert!(pending_handle.begin_refresh());
+        let pending = serde_json::to_value(pending_handle).unwrap();
+        let idle = serde_json::to_value(TraceLogStatsHandle::idle()).unwrap();
+        let completed = serde_json::to_value(TraceLogStatsSnapshot::idle()).unwrap();
 
         assert_eq!(pending["pending"], true);
+        assert_eq!(idle["pending"], false);
+        assert_eq!(idle["capturedAt"], 0);
+        assert_eq!(idle["recentDaysWindow"], RECENT_DAYS);
         assert_eq!(completed["pending"], false);
+    }
+
+    #[test]
+    fn refresh_can_only_begin_once_until_the_snapshot_is_replaced() {
+        let handle = TraceLogStatsHandle::idle();
+
+        assert!(handle.begin_refresh());
+        assert!(!handle.begin_refresh());
+
+        handle.replace(TraceLogStatsSnapshot::idle());
+        assert!(handle.begin_refresh());
     }
 }

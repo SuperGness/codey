@@ -191,7 +191,11 @@ test("injects time styles that yield to statuses and sidebar actions", () => {
   assert.match(source, /font-variant-numeric: tabular-nums/);
   assert.match(
     source,
-    /sidebar-thread-row\]\[\$\{threadStatusAttribute\}\] \[\$\{threadUpdatedAtAttribute\}\] \{ display: none; \}/,
+    /sidebar-thread-row\]\[\$\{threadStatusAttribute\}\] \[\$\{threadUpdatedAtAttribute\}\],/,
+  );
+  assert.match(
+    source,
+    /sidebar-thread-row\]:has\(\[data-hover-card-open-immediately\]\[class\*="group-hover:hidden"\]\) \[\$\{threadUpdatedAtAttribute\}\] \{ display: none; \}/,
   );
   assert.match(source, /sidebar-thread-row\]:hover \[\$\{threadUpdatedAtAttribute\}\].*opacity: 0/s);
 });

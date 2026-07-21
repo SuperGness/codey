@@ -365,3 +365,32 @@ test("matches native sidebar actions and deletes after popover confirmation", as
   });
   assert.equal(runtime.thread.parentElement, null);
 });
+
+test("deletes a newly created sidebar session by its canonical conversation id", async () => {
+  const runtime = loadInjection();
+  const conversationId = "019f8339-ddc1-7652-8922-13e2b52d0d00";
+  runtime.thread.setAttribute(
+    "data-app-action-sidebar-thread-id",
+    "local:client-new-thread:temporary-id",
+  );
+  runtime.thread.__reactFiber$test = {
+    memoizedProps: {
+      entry: { conversationId },
+    },
+    pendingProps: null,
+    return: null,
+  };
+
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.document.body
+    .querySelector("[data-codey-session-delete-confirm]")
+    .click();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const deletion = runtime.bridgeCalls.find((call) => call.path === "/session/delete");
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: conversationId,
+    title: "待删除会话",
+  });
+  assert.equal(runtime.thread.parentElement, null);
+});

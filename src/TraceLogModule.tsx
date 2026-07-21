@@ -1,11 +1,7 @@
 import {
-  Activity,
   CircleAlert,
-  Database,
-  FileText,
-  HardDrive,
   LoaderCircle,
-  ShieldCheck,
+  RefreshCw,
   Trash2,
 } from "lucide-react";
 
@@ -51,10 +47,12 @@ type TraceLogModuleProps = {
   stats?: TraceLogStats;
   snapshotStale: boolean;
   protectionEnabled: boolean;
-  busy: boolean;
+  clearBusy: boolean;
+  refreshing: boolean;
   disabled: boolean;
   onProtectionChange: (checked: boolean) => void;
   onClear: () => void;
+  onRefresh: () => void;
 };
 
 export function formatBytes(bytes: number): string {
@@ -111,12 +109,16 @@ export function TraceLogModule({
   stats,
   snapshotStale,
   protectionEnabled,
-  busy,
+  clearBusy,
+  refreshing,
   disabled,
   onProtectionChange,
   onClear,
+  onRefresh,
 }: TraceLogModuleProps) {
-  const daily = stats ? normalizedDailyStats(stats) : [];
+  const loading = refreshing || Boolean(stats?.pending);
+  const snapshot = stats && stats.capturedAt > 0 && !stats.pending ? stats : undefined;
+  const daily = snapshot ? normalizedDailyStats(snapshot) : [];
   const maxDailyBytes = Math.max(0, ...daily.map((item) => item.estimatedBytes));
 
   return (
@@ -125,7 +127,7 @@ export function TraceLogModule({
         <div>
           <span className="section-kicker">Diagnostics</span>
           <h2 id="trace-title">Trace 日志分析</h2>
-          <p>启动时快照 · 诊断与写盘保护</p>
+          <p>按需快照 · 诊断与写盘保护</p>
         </div>
         <div className="trace-module-actions">
           <Badge variant={protectionEnabled ? "success" : "secondary"}>
@@ -138,12 +140,23 @@ export function TraceLogModule({
             aria-label="控制 Codex Trace 日志写盘保护"
           />
           <Button
+            className="trace-refresh-button"
+            variant="ghost"
+            size="sm"
+            disabled={disabled}
+            onClick={onRefresh}
+          >
+            <RefreshCw className={loading ? "spinner" : ""} aria-hidden="true" />
+            刷新统计
+          </Button>
+          <Button
+            className="trace-clear-button"
             variant="ghost"
             size="sm"
             disabled={disabled}
             onClick={onClear}
           >
-            {busy
+            {clearBusy
               ? <LoaderCircle className="spinner" aria-hidden="true" />
               : <Trash2 aria-hidden="true" />}
             清理日志库
@@ -151,13 +164,29 @@ export function TraceLogModule({
         </div>
       </div>
 
-      <Card className="trace-card">
-        {!stats || stats.pending ? (
-          <div className="trace-empty">
-            {stats?.pending
-              ? <LoaderCircle className="spinner" size={32} />
-              : <ShieldCheck size={32} />}
-            <strong>{stats?.pending ? "正在后台统计日志库…" : "本次启动尚无统计快照"}</strong>
+      <Card className={`trace-card${snapshot ? "" : " trace-card-empty"}`} aria-busy={loading}>
+        {!snapshot ? (
+          <div className="trace-empty" role="status" aria-live="polite">
+            <span className="trace-empty-icon">
+              {loading
+                ? <LoaderCircle className="spinner" size={24} aria-hidden="true" />
+                : <RefreshCw size={24} aria-hidden="true" />}
+            </span>
+            <div className="trace-empty-copy">
+              <strong>{loading ? "正在统计 Trace 日志" : "刷新后查看日志统计"}</strong>
+              <span>{loading ? "正在读取本地日志库，请稍候" : "点击刷新按钮获取最新统计信息"}</span>
+            </div>
+            {!loading && (
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={disabled}
+                onClick={onRefresh}
+              >
+                <RefreshCw aria-hidden="true" />
+                刷新统计
+              </Button>
+            )}
           </div>
         ) : (
           <>
@@ -165,10 +194,10 @@ export function TraceLogModule({
               <div className="trace-snapshot-info">
                 <span className={`trace-status-dot ${protectionEnabled ? "active" : ""}`} />
                 <strong>{protectionEnabled ? "保护状态正常" : "写盘保护未开启"}</strong>
-                <span>{stats.databasesScanned}/{stats.databasesFound} 个日志数据库已完成扫描</span>
+                <span>{snapshot.databasesScanned}/{snapshot.databasesFound} 个日志数据库已完成扫描</span>
               </div>
-              <Badge variant={stats.errors.length || snapshotStale ? "warning" : "secondary"}>
-                {snapshotStale ? "清理前快照 · " : ""}{formatSnapshotTime(stats.capturedAt)}
+              <Badge variant={snapshot.errors.length || snapshotStale ? "warning" : "secondary"}>
+                {snapshotStale ? "清理前快照 · " : ""}{formatSnapshotTime(snapshot.capturedAt)}
               </Badge>
             </div>
 
@@ -176,28 +205,28 @@ export function TraceLogModule({
               <div className="trace-metric-card">
                 <div className="trace-metric-content">
                   <span>日志总条数</span>
-                  <strong>{formatCount(stats.rowCount)}</strong>
-                  <small>{formatRange(stats)}</small>
+                  <strong>{formatCount(snapshot.rowCount)}</strong>
+                  <small>{formatRange(snapshot)}</small>
                 </div>
               </div>
               <div className="trace-metric-card">
                 <div className="trace-metric-content">
                   <span>磁盘占用空间</span>
-                  <strong>{formatBytes(stats.databaseBytes)}</strong>
+                  <strong>{formatBytes(snapshot.databaseBytes)}</strong>
                   <small>主数据库及 WAL/SHM</small>
                 </div>
               </div>
               <div className="trace-metric-card">
                 <div className="trace-metric-content">
                   <span>近 7 天写入</span>
-                  <strong>{formatBytes(stats.recentEstimatedBytes)}</strong>
-                  <small>{formatCount(stats.recentRowCount)} 条增量日志</small>
+                  <strong>{formatBytes(snapshot.recentEstimatedBytes)}</strong>
+                  <small>{formatCount(snapshot.recentRowCount)} 条增量日志</small>
                 </div>
               </div>
               <div className="trace-metric-card">
                 <div className="trace-metric-content">
                   <span>内容字节估算</span>
-                  <strong>{formatBytes(stats.estimatedLogBytes)}</strong>
+                  <strong>{formatBytes(snapshot.estimatedLogBytes)}</strong>
                   <small>按 estimated_bytes 汇总</small>
                 </div>
               </div>
@@ -245,7 +274,7 @@ export function TraceLogModule({
                   <span>按容量降序</span>
                 </div>
                 <div className="trace-levels">
-                  {stats.levels.length ? stats.levels.map((item) => (
+                  {snapshot.levels.length ? snapshot.levels.map((item) => (
                     <div className="trace-level-pill" key={item.name}>
                       <span className="trace-level-name">{item.name}</span>
                       <div className="trace-level-values">
@@ -258,10 +287,10 @@ export function TraceLogModule({
 
                 <div className="trace-subheading trace-target-heading">
                   <strong>高占用 Targets</strong>
-                  <span>Top {stats.topTargets.length}</span>
+                  <span>Top {snapshot.topTargets.length}</span>
                 </div>
                 <div className="trace-targets">
-                  {stats.topTargets.length ? stats.topTargets.map((item) => (
+                  {snapshot.topTargets.length ? snapshot.topTargets.map((item) => (
                     <div className="trace-target-pill" key={item.name} title={item.name}>
                       <span className="trace-target-name">{item.name}</span>
                       <div className="trace-target-values">
@@ -274,10 +303,10 @@ export function TraceLogModule({
               </section>
             </div>
 
-            {stats.errors.length > 0 && (
-              <div className="trace-warning" title={stats.errors.join("\n")}>
+            {snapshot.errors.length > 0 && (
+              <div className="trace-warning" title={snapshot.errors.join("\n")}>
                 <CircleAlert size={15} />
-                <span>{stats.errors.length} 个日志库统计异常，已保留其余快照数据</span>
+                <span>{snapshot.errors.length} 个日志库统计异常，已保留其余快照数据</span>
               </div>
             )}
           </>
@@ -286,4 +315,3 @@ export function TraceLogModule({
     </section>
   );
 }
-

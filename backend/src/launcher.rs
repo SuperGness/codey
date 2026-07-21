@@ -27,12 +27,9 @@ use crate::provider_lease;
 use crate::session_index_cleanup::{self, SessionIndexCleanupReport};
 use crate::startup_maintenance::{self, ProviderSyncPlan};
 use crate::trace_log_guard;
-use crate::trace_log_stats::{self, TraceLogStatsHandle, TraceLogStatsSnapshot};
 
 const CDP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
 const CDP_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
-const TRACE_LOG_DISCOVERY_ATTEMPTS: usize = 20;
-const TRACE_LOG_DISCOVERY_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,7 +47,6 @@ pub struct CodeyRuntime {
     pub codex_app_path: PathBuf,
     pub debug_port: u16,
     pub maintenance: MaintenanceStatus,
-    pub trace_log_stats: TraceLogStatsHandle,
     pub applied_config: CodeyConfig,
     child: Arc<Mutex<Option<Child>>>,
     #[cfg(windows)]
@@ -125,7 +121,7 @@ impl CodeyRuntime {
         .context("启动前会话修复任务异常退出")?;
         let (session_status, session_detail, session_threads) =
             session_maintenance_summary(&provider_sync, &index_cleanup);
-        let initial_trace_guard = initial_trace_guard
+        initial_trace_guard
             .await
             .context("Trace 日志保护切换任务异常退出")??;
 
@@ -223,13 +219,6 @@ impl CodeyRuntime {
             performance_detail: spawned.performance_detail.clone(),
         };
         let child = Arc::new(Mutex::new(spawned.child));
-        let trace_log_stats = TraceLogStatsHandle::pending();
-        spawn_startup_trace_stats_refresh(
-            home.clone(),
-            disable_trace_log_writes,
-            initial_trace_guard.log_tables_found > 0,
-            trace_log_stats.clone(),
-        );
         let injected_target =
             match cdp::retry_inject_with_scripts(debug_port, handler.clone(), &injection_scripts)
                 .await
@@ -308,7 +297,6 @@ impl CodeyRuntime {
                 codex_app_path: app_dir,
                 debug_port,
                 maintenance,
-                trace_log_stats,
                 applied_config: config.clone(),
                 child,
                 #[cfg(windows)]
@@ -347,73 +335,6 @@ impl CodeyRuntime {
         restore_runtime_config(&codex_home())?;
         Ok(())
     }
-}
-
-fn spawn_startup_trace_stats_refresh(
-    home: PathBuf,
-    disable_trace_log_writes: bool,
-    log_tables_already_found: bool,
-    handle: TraceLogStatsHandle,
-) {
-    tokio::spawn(async move {
-        let snapshot = match collect_startup_trace_stats(
-            home,
-            disable_trace_log_writes,
-            log_tables_already_found,
-        )
-        .await
-        {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                let mut snapshot = TraceLogStatsSnapshot::pending();
-                snapshot.pending = false;
-                snapshot
-                    .errors
-                    .push(format!("Trace 日志统计后台刷新失败：{error:#}"));
-                snapshot
-            }
-        };
-        handle.replace(snapshot);
-    });
-}
-
-async fn collect_startup_trace_stats(
-    home: PathBuf,
-    disable_trace_log_writes: bool,
-    log_tables_already_found: bool,
-) -> Result<TraceLogStatsSnapshot> {
-    // A fresh Codex home may not have a log database until app-server
-    // initialization. Retry briefly after spawn so the saved state is applied
-    // before normal streaming begins.
-    if !log_tables_already_found {
-        for _ in 0..TRACE_LOG_DISCOVERY_ATTEMPTS {
-            let current_home = home.clone();
-            let report = tokio::task::spawn_blocking(move || {
-                trace_log_guard::configure(&current_home, disable_trace_log_writes)
-            })
-            .await
-            .context("Trace 日志防护任务异常退出")??;
-            if report.log_tables_found > 0 {
-                break;
-            }
-            tokio::time::sleep(TRACE_LOG_DISCOVERY_INTERVAL).await;
-        }
-    }
-
-    // Capture exactly one snapshot. The status endpoint serves this in-memory
-    // value and never reopens the log databases during the rest of the run.
-    tokio::task::spawn_blocking(move || {
-        let final_guard_error = trace_log_guard::configure(&home, disable_trace_log_writes).err();
-        let mut snapshot = trace_log_stats::snapshot(&home);
-        if let Some(error) = final_guard_error {
-            snapshot
-                .errors
-                .push(format!("最终 Trace 日志保护状态同步失败：{error:#}"));
-        }
-        snapshot
-    })
-    .await
-    .context("Trace 日志统计任务异常退出")
 }
 
 fn watchdog_should_reinject(consecutive_failures: &mut u8, healthy: bool) -> bool {

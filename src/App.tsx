@@ -483,8 +483,24 @@ export function App({ embedded = false, onClose }: AppProps) {
         : "Trace 写盘保护保持关闭";
       setNotice({
         tone: "success",
-        text: `已清理 ${cleanup.databasesCleaned} 个日志库、${cleanup.rowsDeleted} 条记录，释放 ${formatBytes(cleanup.bytesReclaimed)}；${protectionDetail}，统计将在下次 Codey 启动时更新`,
+        text: `已清理 ${cleanup.databasesCleaned} 个日志库、${cleanup.rowsDeleted} 条记录，释放 ${formatBytes(cleanup.bytesReclaimed)}；${protectionDetail}，可手动刷新统计`,
       });
+    });
+  }
+
+  async function refreshTraceLogStats() {
+    await runOperation("refresh-trace-stats", async () => {
+      const result = await invoke<{
+        status: "ok" | "pending";
+        traceLogStats: TraceLogStats;
+      }>("refresh_trace_log_stats");
+      setStatus((current) => ({ ...current, traceLogStats: result.traceLogStats }));
+      if (result.status === "pending") {
+        setNotice({ tone: "info", text: "Trace 日志正在统计，请稍候" });
+        return;
+      }
+      setTraceSnapshotStale(false);
+      setNotice({ tone: "success", text: "Trace 日志统计已更新" });
     });
   }
 
@@ -909,7 +925,6 @@ export function App({ embedded = false, onClose }: AppProps) {
                           </Badge>
                         </div>
                         <div className="feature-card-body">
-                          <strong>Windows 新版卡顿补丁</strong>
                           <small>
                             {maintenance?.performanceDetail
                               || "启动时隔离 Codex Micro，并停止每 30 秒触发的 WMI 进程采样"}
@@ -1004,13 +1019,15 @@ export function App({ embedded = false, onClose }: AppProps) {
                 stats={status.traceLogStats}
                 snapshotStale={traceSnapshotStale}
                 protectionEnabled={config.disableTraceLogWrites}
-                busy={busy === "clear-trace-logs"}
+                clearBusy={busy === "clear-trace-logs"}
+                refreshing={busy === "refresh-trace-stats"}
                 disabled={isBusy}
                 onProtectionChange={(checked) => editConfig({
                   ...config,
                   disableTraceLogWrites: checked,
                 })}
                 onClear={askClearTraceLogs}
+                onRefresh={() => void refreshTraceLogStats()}
               />
             </div>
           )}
