@@ -630,20 +630,41 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
 
         let count = refresh_for_provider(home.path(), true, &[], &[]).unwrap();
-        assert!(count > 0);
+        assert_eq!(count, 8);
         let catalog: Value = serde_json::from_slice(
             &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
         )
         .unwrap();
-        assert!(catalog["models"].as_array().is_some_and(|models| {
-            models.iter().all(|model| {
-                model["service_tiers"]
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["slug"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex-spark",
+                "codex-auto-review",
+            ]
+        );
+        assert!(
+            models[..7]
+                .iter()
+                .all(|model| model["visibility"] == "list")
+        );
+        assert_eq!(models[7]["visibility"], "hide");
+        assert!(models.iter().all(|model| {
+            model["service_tiers"]
+                .as_array()
+                .is_some_and(|tiers| !tiers.is_empty())
+                && model["additional_speed_tiers"]
                     .as_array()
                     .is_some_and(|tiers| !tiers.is_empty())
-                    && model["additional_speed_tiers"]
-                        .as_array()
-                        .is_some_and(|tiers| !tiers.is_empty())
-            })
         }));
     }
 
