@@ -29,7 +29,9 @@ test("renderer mutations are scanned by local roots instead of full-document res
   assert.match(inject, /callBridge\("\/session\/wake-watcher"\)/);
   assert.match(inject, /document\.addEventListener\("pointerdown", wakeSessionWatcher/);
   assert.match(inject, /document\.addEventListener\("keydown", wakeSessionWatcherFromKey/);
+  assert.doesNotMatch(inject, /__codeyBlockNativePetControls/);
   assert.match(petShield, /const block = \(root = document\)/);
+  assert.match(petShield, /controlObserver = new MutationObserver/);
   assert.match(voiceShield, /const block = \(root = document\)/);
 });
 

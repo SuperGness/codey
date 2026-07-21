@@ -1547,7 +1547,6 @@
   };
 
   const scan = (root = document, syncTitles = true, mountSettings = true) => {
-    window.__codeyBlockNativePetControls?.(root);
     window.__codeyBlockNativeVoiceControls?.(root);
     if (mountSettings) mountButton();
     installSessionExportButtons(root);

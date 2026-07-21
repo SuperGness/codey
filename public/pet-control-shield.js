@@ -15,6 +15,7 @@
   ]);
   const fallbackLabelPattern = /^(?:wake pet|show pet|tuck away pet|hide pet|唤醒宠物|显示宠物|收起宠物|隐藏宠物|喚醒寵物|顯示寵物|收起寵物|隱藏寵物)$/i;
   const reactInternalKeyPattern = /^__(?:reactProps|reactFiber|reactInternalInstance)\$.*/;
+  const controlSelector = "button, [role=button], [role=menuitem]";
 
   const containsPetControlId = (value, depth = 0, seen = new WeakSet()) => {
     if (typeof value === "string") return petControlIds.has(value);
@@ -60,7 +61,7 @@
   const block = (root = document) => {
     if (!enabled) return 0;
     let blocked = 0;
-    controlsWithin(root, "button, [role=button], [role=menuitem]").forEach((control) => {
+    controlsWithin(root, controlSelector).forEach((control) => {
       if (!isPetControl(control)) return;
       const fullyBlocked = control.getAttribute("data-codey-pet-control-blocked") === "true"
         && control.getAttribute("aria-hidden") === "true"
@@ -81,10 +82,37 @@
     return blocked;
   };
 
+  let controlObserver = null;
+  if (enabled && typeof MutationObserver === "function" && document.documentElement) {
+    const mutationRoot = (node) => {
+      if (node instanceof HTMLElement) return node;
+      return node?.parentElement instanceof HTMLElement ? node.parentElement : null;
+    };
+    controlObserver = new MutationObserver((mutations) => {
+      const roots = new Set();
+      mutations.forEach((mutation) => {
+        const target = mutationRoot(mutation.target);
+        const containingControl = target?.closest?.(controlSelector);
+        if (containingControl) roots.add(containingControl);
+        for (const node of mutation.addedNodes || []) {
+          const root = mutationRoot(node);
+          if (root instanceof HTMLElement) roots.add(root);
+        }
+      });
+      roots.forEach((root) => block(root));
+    });
+    controlObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["aria-label", "role", "title"],
+      childList: true,
+      subtree: true,
+    });
+  }
+
   const stopPetControlEvent = (event) => {
     if (!enabled) return;
     const control = event.target instanceof Element
-      ? event.target.closest("button, [role=button], [role=menuitem]")
+      ? event.target.closest(controlSelector)
       : null;
     if (!isPetControl(control)) return;
     event.preventDefault();
@@ -99,6 +127,7 @@
   window.__codeyBlockNativePetControls = block;
   window.__codeyPetControlShield = Object.freeze({ enabled, block, isPetControl });
   window.__codeyPetControlShieldCleanup = () => {
+    controlObserver?.disconnect();
     eventNames.forEach((eventName) => {
       document.removeEventListener(eventName, stopPetControlEvent, true);
     });
