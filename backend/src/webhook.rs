@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+#[cfg(test)]
+use anyhow::Context;
+use anyhow::Result;
 use chrono::{DateTime, Local, TimeZone};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -77,16 +79,19 @@ pub struct WebhookDispatcher {
 }
 
 impl WebhookDispatcher {
+    #[cfg(test)]
     pub fn new(config: WebhookConfig) -> Result<Self> {
-        Ok(Self {
-            client: Client::builder()
-                .user_agent("Codey/0.1")
-                .connect_timeout(Duration::from_secs(3))
-                .timeout(Duration::from_secs(8))
-                .build()
-                .context("创建 Webhook HTTP 客户端失败")?,
-            config,
-        })
+        let client = Client::builder()
+            .user_agent("Codey/0.1")
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(8))
+            .build()
+            .context("创建 Webhook HTTP 客户端失败")?;
+        Ok(Self::with_client(client, config))
+    }
+
+    pub fn with_client(client: Client, config: WebhookConfig) -> Self {
+        Self { client, config }
     }
 
     pub async fn send(&self, event: &WebhookEvent) -> Result<()> {

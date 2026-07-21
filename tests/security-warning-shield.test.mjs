@@ -99,8 +99,8 @@ function appendEnglishWarning(body) {
 }
 
 test("full-access warning shield is opt-in and persisted by Codey settings", async () => {
-  const [appSource, configSource, commandSource, cdpSource] = await Promise.all([
-    readFile(new URL("src/App.tsx", root), "utf8"),
+  const [sectionsSource, configSource, commandSource, cdpSource] = await Promise.all([
+    readFile(new URL("src/AppSections.tsx", root), "utf8"),
     readFile(new URL("backend/src/config.rs", root), "utf8"),
     readFile(new URL("backend/src/commands.rs", root), "utf8"),
     readFile(new URL("backend/src/cdp.rs", root), "utf8"),
@@ -109,8 +109,8 @@ test("full-access warning shield is opt-in and persisted by Codey settings", asy
   assert.match(configSource, /pub hide_full_access_warning: bool/);
   assert.match(configSource, /hide_full_access_warning: false/);
   assert.match(commandSource, /config\.hide_full_access_warning = config_input\.hide_full_access_warning/);
-  assert.match(appSource, /checked=\{config\.hideFullAccessWarning\}/);
-  assert.match(appSource, /aria-label="屏蔽完全访问安全提示"/);
+  assert.match(sectionsSource, /checked=\{config\.hideFullAccessWarning\}/);
+  assert.match(sectionsSource, /aria-label="屏蔽完全访问安全提示"/);
   assert.match(cdpSource, /public\/security-warning-shield\.js/);
 });
 

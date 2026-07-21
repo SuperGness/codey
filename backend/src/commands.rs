@@ -8,6 +8,7 @@ use std::sync::{
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::StreamExt;
+use reqwest::header::USER_AGENT;
 use semver::Version;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -36,6 +37,7 @@ use crate::webhook::{WebhookDispatcher, WebhookEvent};
 pub struct AppState {
     pub store: ConfigStore,
     pub config: RwLock<CodeyConfig>,
+    pub http_client: reqwest::Client,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     pub trace_log_stats: TraceLogStatsHandle,
     pub startup_error: RwLock<Option<String>>,
@@ -60,6 +62,11 @@ impl Default for AppState {
         Self {
             store,
             config: RwLock::new(config),
+            http_client: reqwest::Client::builder()
+                .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
+                .connect_timeout(Duration::from_secs(5))
+                .build()
+                .expect("shared Codey HTTP client should be constructible"),
             runtime: Mutex::new(None),
             trace_log_stats: TraceLogStatsHandle::idle(),
             startup_error: RwLock::new(None),
@@ -625,6 +632,10 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             Ok(models) => save_selected_models(state, models).await,
             Err(error) => Err(error),
         },
+        "save_default_model" => match string_argument(&args, "model") {
+            Ok(model) => save_default_model(state, model).await,
+            Err(error) => Err(error),
+        },
         "runtime_status" => runtime_status(state).await,
         "refresh_trace_log_stats" => refresh_trace_log_stats(state).await,
         "launch_codey" => launch_codey_runtime(state).await,
@@ -837,7 +848,7 @@ pub async fn fetch_current_provider_models(state: &Arc<AppState>) -> Result<Valu
     if profile.cc_switch_read_only {
         return Err("官方线路使用官方模型目录，无需同步第三方模型".to_string());
     }
-    let models = provider_models::fetch(&profile)
+    let models = provider_models::fetch(&profile, &state.http_client)
         .await
         .map_err(|error| error.to_string())?;
     let provider_id = config
@@ -918,6 +929,51 @@ pub async fn save_selected_models(
     }))
 }
 
+pub async fn save_default_model(
+    state: &Arc<AppState>,
+    requested_model: String,
+) -> Result<Value, String> {
+    let mut config = state.config.read().await.clone();
+    let requested_model = requested_model.trim();
+    if requested_model.is_empty() {
+        return Err("默认模型不能为空".to_string());
+    }
+    let model_state = current_model_state(&config)?;
+    let supported = model_state
+        .official_models
+        .iter()
+        .any(|model| model.supported && model.slug == requested_model)
+        || model_state
+            .third_party_models
+            .iter()
+            .any(|model| model == requested_model);
+    if !supported {
+        return Err(format!("模型 {requested_model} 当前不可用，无法设为默认"));
+    }
+    let provider_id = config
+        .current_provider_id()
+        .ok_or_else(|| "当前线路缺少标识".to_string())?
+        .to_string();
+    config
+        .default_model_by_provider
+        .insert(provider_id, requested_model.to_string());
+    config = config.normalize();
+    let restart_required = runtime_config_requires_restart(state, &config).await;
+    state
+        .store
+        .save(&config)
+        .map_err(|error| error.to_string())?;
+    *state.config.write().await = config.clone();
+    let model_state = current_model_state(&config)?;
+    let public_config = redacted_config(&config);
+    Ok(json!({
+        "status":"ok",
+        "config":public_config,
+        "modelState":model_state,
+        "restartRequired":restart_required,
+    }))
+}
+
 fn redacted_config(config: &CodeyConfig) -> CodeyConfig {
     let mut public = config.clone();
     for profile in &mut public.profiles {
@@ -937,6 +993,7 @@ fn current_model_state(config: &CodeyConfig) -> Result<model_catalog::ModelSelec
         official,
         config.upstream_models(),
         config.selected_models(),
+        config.default_model(),
     )
     .unwrap_or_default())
 }
@@ -967,6 +1024,7 @@ fn config_requires_restart(applied: &CodeyConfig, current: &CodeyConfig) -> bool
         || applied.subagent_optimization != current.subagent_optimization
         || applied.selected_models() != current.selected_models()
         || applied.upstream_models() != current.upstream_models()
+        || applied.default_model() != current.default_model()
 }
 
 async fn runtime_config_requires_restart(state: &Arc<AppState>, current: &CodeyConfig) -> bool {
@@ -1282,9 +1340,8 @@ async fn stop_waiting_webhook_watcher(state: &Arc<AppState>) {
 }
 
 pub async fn test_webhook(state: &Arc<AppState>) -> Result<Value, String> {
-    let config = state.config.read().await;
-    let dispatcher =
-        WebhookDispatcher::new(config.webhook.clone()).map_err(|error| error.to_string())?;
+    let webhook = state.config.read().await.webhook.clone();
+    let dispatcher = WebhookDispatcher::with_client(state.http_client.clone(), webhook);
     dispatcher.test().await.map_err(|error| error.to_string())
 }
 
@@ -1302,7 +1359,8 @@ pub async fn download_update(state: &Arc<AppState>) -> Result<Value, String> {
     }
     let asset = selected_update_asset(&manifest.assets)
         .ok_or_else(|| "没有适用于当前系统的可安装更新包".to_string())?;
-    let file_path = download_update_asset(&state.store, &manifest.version, &asset).await?;
+    let file_path =
+        download_update_asset(&state.http_client, &state.store, &manifest.version, &asset).await?;
     let download = UpdateDownload {
         latest_version: manifest.version,
         file_path: file_path.to_string_lossy().to_string(),
@@ -1348,12 +1406,14 @@ async fn fetch_configured_update_manifest(state: &Arc<AppState>) -> Result<Updat
         return Err("更新地址必须使用 HTTPS".to_string());
     }
 
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .user_agent(format!("Codey/{} update-check", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|error| format!("初始化更新检查失败：{error}"))?
+    let response = state
+        .http_client
         .get(url)
+        .header(
+            USER_AGENT,
+            format!("Codey/{} update-check", env!("CARGO_PKG_VERSION")),
+        )
+        .timeout(Duration::from_secs(10))
         .send()
         .await
         .map_err(|error| format!("检查更新失败：{error}"))?
@@ -1490,6 +1550,7 @@ fn update_download_dir(store: &ConfigStore) -> Result<PathBuf, String> {
 }
 
 async fn download_update_asset(
+    client: &reqwest::Client,
     store: &ConfigStore,
     version: &str,
     asset: &UpdateManifestAsset,
@@ -1505,15 +1566,13 @@ async fn download_update_asset(
     let temporary = directory.join(format!(".{}.download", asset.file_name));
     let _ = tokio::fs::remove_file(&temporary).await;
 
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
-        .user_agent(format!(
-            "Codey/{} update-download",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .build()
-        .map_err(|error| format!("初始化更新下载失败：{error}"))?
+    let response = client
         .get(url)
+        .header(
+            USER_AGENT,
+            format!("Codey/{} update-download", env!("CARGO_PKG_VERSION")),
+        )
+        .timeout(Duration::from_secs(300))
         .send()
         .await
         .map_err(|error| format!("下载更新失败：{error}"))?
@@ -1823,7 +1882,7 @@ async fn dispatch_settled_webhook_failure(
         }
         sent.insert(failed_key.clone());
     }
-    let dispatcher = WebhookDispatcher::new(webhook).map_err(|error| error.to_string())?;
+    let dispatcher = WebhookDispatcher::with_client(state.http_client.clone(), webhook);
     let session_name = webhook_session_name(state, payload, &session_id).await;
     let event = WebhookEvent::new(
         "session.failed",
@@ -1936,7 +1995,7 @@ async fn notify_webhook_completion(
         }
         sent.insert(notification_key.clone());
     }
-    let dispatcher = WebhookDispatcher::new(webhook).map_err(|error| error.to_string())?;
+    let dispatcher = WebhookDispatcher::with_client(state.http_client.clone(), webhook);
     let session_name = webhook_session_name(state, payload, &session_id).await;
     let event = WebhookEvent::new(
         "session.completed",
@@ -2028,7 +2087,7 @@ async fn notify_webhook_waiting(state: &Arc<AppState>, payload: &Value) -> Resul
         }
         sent.insert(notification_key.clone());
     }
-    let dispatcher = WebhookDispatcher::new(webhook).map_err(|error| error.to_string())?;
+    let dispatcher = WebhookDispatcher::with_client(state.http_client.clone(), webhook);
     let session_name = webhook_session_name(state, payload, &session_id).await;
     let event = WebhookEvent::new(
         "session.waiting",
@@ -2057,8 +2116,12 @@ pub async fn delete_selected_messages(
     session_id: String,
     message_ids: Vec<String>,
 ) -> Result<Value, String> {
-    let result = delete_messages(&codex_home(), &session_id, &message_ids)
-        .map_err(|error| error.to_string())?;
+    let home = codex_home();
+    let result =
+        tokio::task::spawn_blocking(move || delete_messages(&home, &session_id, &message_ids))
+            .await
+            .map_err(|error| format!("消息删除任务异常退出：{error}"))?
+            .map_err(|error| error.to_string())?;
     serde_json::to_value(result).map_err(|error| error.to_string())
 }
 
@@ -2073,8 +2136,13 @@ pub async fn delete_session_record(
         .parent()
         .map(|parent| parent.join("session-backups"))
         .unwrap_or_else(|| PathBuf::from(".codey/session-backups"));
-    let result = session_delete::delete_session(&codex_home(), &backup_root, &session_id, &title)
-        .map_err(|error| error.to_string())?;
+    let home = codex_home();
+    let result = tokio::task::spawn_blocking(move || {
+        session_delete::delete_session(&home, &backup_root, &session_id, &title)
+    })
+    .await
+    .map_err(|error| format!("会话删除任务异常退出：{error}"))?
+    .map_err(|error| error.to_string())?;
     let normalized_session_id = result.session_id.trim_start_matches("local:").to_string();
     state
         .session_titles
@@ -2091,8 +2159,13 @@ pub async fn delete_session_record(
 
 pub async fn plugin_marketplace_status() -> Result<Value, String> {
     let home = codex_home();
-    let mut status =
-        plugin_marketplace::ensure_marketplaces(&home).map_err(|error| error.to_string())?;
+    let marketplace_home = home.clone();
+    let mut status = tokio::task::spawn_blocking(move || {
+        plugin_marketplace::ensure_marketplaces(&marketplace_home)
+    })
+    .await
+    .map_err(|error| format!("插件市场状态任务异常退出：{error}"))?
+    .map_err(|error| error.to_string())?;
     if let Some(object) = status.as_object_mut() {
         object.insert("status".into(), Value::String("ready".into()));
         object.insert(

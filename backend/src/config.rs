@@ -73,6 +73,10 @@ pub struct CodeyConfig {
     /// official models disabled between launches.
     #[serde(default)]
     pub upstream_models_by_provider: BTreeMap<String, Vec<String>>,
+    /// Codey-owned default model selection per provider. Empty or unavailable
+    /// values fall back to the first selectable official model.
+    #[serde(default)]
+    pub default_model_by_provider: BTreeMap<String, String>,
     #[serde(default = "default_true")]
     pub disable_trace_log_writes: bool,
     #[serde(default = "default_true")]
@@ -112,6 +116,7 @@ impl Default for CodeyConfig {
             user_scripts: Vec::new(),
             selected_models_by_provider: BTreeMap::new(),
             upstream_models_by_provider: BTreeMap::new(),
+            default_model_by_provider: BTreeMap::new(),
             disable_trace_log_writes: true,
             slim_codex_pet: true,
             slim_codex_voice: true,
@@ -142,6 +147,7 @@ impl CodeyConfig {
         }
         normalize_model_lists(&mut self.selected_models_by_provider);
         normalize_model_lists(&mut self.upstream_models_by_provider);
+        normalize_model_map(&mut self.default_model_by_provider);
         self
     }
 
@@ -178,6 +184,12 @@ impl CodeyConfig {
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
+
+    pub fn default_model(&self) -> Option<&str> {
+        self.current_provider_id()
+            .and_then(|provider_id| self.default_model_by_provider.get(provider_id))
+            .map(String::as_str)
+    }
 }
 
 fn normalize_model_lists(lists: &mut BTreeMap<String, Vec<String>>) {
@@ -193,6 +205,13 @@ fn normalize_model_lists(lists: &mut BTreeMap<String, Vec<String>>) {
                 unique
             });
         !provider_id.trim().is_empty() && !models.is_empty()
+    });
+}
+
+fn normalize_model_map(models_by_provider: &mut BTreeMap<String, String>) {
+    models_by_provider.retain(|provider_id, model| {
+        *model = model.trim().to_string();
+        !provider_id.trim().is_empty() && !model.is_empty()
     });
 }
 

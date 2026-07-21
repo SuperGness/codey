@@ -7,7 +7,7 @@ const root = new URL("../", import.meta.url);
 
 test("renderer mutations are scanned by local roots instead of full-document rescans", async () => {
   const [inject, petShield, voiceShield] = await Promise.all([
-    readFile(new URL("public/codey-inject.js", root), "utf8"),
+    readFile(new URL("public/renderer-inject.js", root), "utf8"),
     readFile(new URL("public/pet-control-shield.js", root), "utf8"),
     readFile(new URL("public/voice-control-shield.js", root), "utf8"),
   ]);

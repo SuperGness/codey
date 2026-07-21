@@ -163,11 +163,21 @@ impl CodeyRuntime {
                 false
             }
         };
+        let default_model = model_catalog::selection_state(
+            &home,
+            official_provider,
+            config.upstream_models(),
+            config.selected_models(),
+            config.default_model(),
+        )
+        .unwrap_or_default()
+        .default_model;
         apply_runtime_provider_config(
             &home,
             &current_profile,
             &original_provider,
             use_official_catalog,
+            (!default_model.is_empty()).then_some(default_model.as_str()),
             config.fast_context_tools,
             config.subagent_optimization,
         )?;

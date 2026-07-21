@@ -39,6 +39,7 @@ if (import.meta.env.DEV) {
       userScripts: [],
       selectedModelsByProvider: { primary: ["provider-fast-coder", "claude-sonnet-4-5"] },
       upstreamModelsByProvider: { primary: previewUpstreamModels },
+      defaultModelByProvider: {},
       disableTraceLogWrites: true,
       slimCodexPet: true,
       slimCodexVoice: true,
@@ -64,6 +65,7 @@ if (import.meta.env.DEV) {
       officialModelIds: previewOfficialModels.map((model) => model.slug),
       thirdPartyModels: ["provider-fast-coder", "claude-sonnet-4-5"],
       upstreamModels: previewUpstreamModels,
+      defaultModel: "gpt-5.6-sol",
     };
     let previewTraceStats: typeof previewTraceLogStats | undefined;
 
@@ -137,6 +139,23 @@ if (import.meta.env.DEV) {
           ...previewModelState,
           thirdPartyModels: previewUpstreamModels.filter((model) => requested.has(model) && !previewOfficialModels.some((official) => official.slug === model)),
         };
+        return {
+          status: "ok",
+          config: previewConfig,
+          modelState: previewModelState,
+          restartRequired: true,
+        };
+      }
+      if (command === "save_default_model") {
+        const model = String(args.model || "");
+        previewConfig = {
+          ...previewConfig,
+          defaultModelByProvider: {
+            ...previewConfig.defaultModelByProvider,
+            primary: model,
+          },
+        };
+        previewModelState = { ...previewModelState, defaultModel: model };
         return {
           status: "ok",
           config: previewConfig,

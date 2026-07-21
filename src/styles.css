@@ -605,7 +605,7 @@ input:focus-visible,
 .provider-meta {
   display: grid;
   min-width: 0;
-  grid-template-columns: 0.75fr 1fr minmax(0, 1.65fr) 0.6fr;
+  grid-template-columns: 0.75fr 1fr minmax(0, 1.65fr) 0.6fr minmax(0, 1fr);
   gap: 14px;
 }
 
@@ -707,6 +707,10 @@ input:focus-visible,
   background: #f1f5f9;
 }
 
+.catalog-model-row.default-model {
+  background: #f5f3ff;
+}
+
 .catalog-model-row.unsupported {
   opacity: 0.45;
 }
@@ -729,6 +733,15 @@ input:focus-visible,
 .catalog-model-row small {
   color: #64748b;
   font-size: 10px;
+}
+
+.catalog-model-row > .catalog-model-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-direction: row;
+  gap: 6px;
+  min-width: max-content;
 }
 
 .model-availability {
@@ -2573,10 +2586,19 @@ input:focus-visible,
   background: var(--muted);
 }
 
+.catalog-model-row.default-model {
+  background: color-mix(in srgb, #8b5cf6 10%, var(--background));
+}
+
 .catalog-model-row strong {
   color: var(--foreground);
   font-size: 13px;
   font-weight: 500;
+}
+
+.catalog-model-row > .catalog-model-actions {
+  flex-direction: row;
+  gap: 8px;
 }
 
 .model-availability {

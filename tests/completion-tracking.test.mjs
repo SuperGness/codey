@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-const source = readFileSync(new URL("../public/codey-inject.js", import.meta.url), "utf8");
+const source = readFileSync(new URL("../public/renderer-inject.js", import.meta.url), "utf8");
 
 class FakeElement {
   constructor(attributes = {}) {

@@ -33,6 +33,7 @@ pub struct ModelSelectionState {
     pub official_model_ids: Vec<String>,
     pub third_party_models: Vec<String>,
     pub upstream_models: Vec<String>,
+    pub default_model: String,
 }
 
 pub fn relative_path() -> &'static str {
@@ -115,6 +116,7 @@ pub fn selection_state(
     official_provider: bool,
     upstream_models: &[String],
     selected_models: &[String],
+    requested_default_model: Option<&str>,
 ) -> Result<ModelSelectionState> {
     let official_entries = read_official_entries(home)?;
     let official_model_ids = official_entries
@@ -130,7 +132,7 @@ pub fn selection_state(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let official_models = official_entries
+    let official_models: Vec<OfficialModelAvailability> = official_entries
         .into_iter()
         .filter(|model| {
             model.get("visibility").and_then(Value::as_str) == Some("list")
@@ -167,6 +169,11 @@ pub fn selection_state(
                 models
             })
     };
+    let default_model = effective_default_model(
+        &official_models,
+        &third_party_models,
+        requested_default_model,
+    );
     Ok(ModelSelectionState {
         official_models,
         official_model_ids,
@@ -176,7 +183,32 @@ pub fn selection_state(
         } else {
             upstream_models.to_vec()
         },
+        default_model,
     })
+}
+
+pub fn effective_default_model(
+    official_models: &[OfficialModelAvailability],
+    third_party_models: &[String],
+    requested_default_model: Option<&str>,
+) -> String {
+    let requested = requested_default_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty());
+    if let Some(requested) = requested
+        && (official_models
+            .iter()
+            .any(|model| model.supported && model.slug == requested)
+            || third_party_models.iter().any(|model| model == requested))
+    {
+        return requested.to_string();
+    }
+    official_models
+        .iter()
+        .find(|model| model.supported)
+        .map(|model| model.slug.clone())
+        .or_else(|| third_party_models.first().cloned())
+        .unwrap_or_default()
 }
 
 pub fn official_model_slugs(home: &Path) -> Result<HashSet<String>> {
@@ -692,12 +724,14 @@ mod tests {
             false,
             &["gpt-5.6-sol".into(), "third-model".into()],
             &["gpt-5.6-sol".into(), "third-model".into()],
+            None,
         )
         .unwrap();
 
         assert!(state.official_models[0].supported);
         assert!(!state.official_models[1].supported);
         assert_eq!(state.third_party_models, ["third-model"]);
+        assert_eq!(state.default_model, "gpt-5.6-sol");
     }
 
     #[test]
@@ -709,6 +743,7 @@ mod tests {
             false,
             &["gpt-5.4".into(), "codex-auto-review".into()],
             &[],
+            None,
         )
         .unwrap();
 
@@ -724,5 +759,38 @@ mod tests {
                 .iter()
                 .any(|model| model.slug == "codex-auto-review")
         );
+        assert_eq!(state.default_model, "gpt-5.4");
+    }
+
+    #[test]
+    fn selection_state_uses_requested_default_when_available() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let state = selection_state(
+            home.path(),
+            false,
+            &["gpt-5.6-sol".into(), "third-model".into()],
+            &["third-model".into()],
+            Some("third-model"),
+        )
+        .unwrap();
+
+        assert_eq!(state.default_model, "third-model");
+    }
+
+    #[test]
+    fn selection_state_falls_back_from_unavailable_default_to_first_official() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let state = selection_state(
+            home.path(),
+            false,
+            &["gpt-5.6-sol".into(), "third-model".into()],
+            &["third-model".into()],
+            Some("missing-model"),
+        )
+        .unwrap();
+
+        assert_eq!(state.default_model, "gpt-5.6-sol");
     }
 }

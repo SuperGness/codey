@@ -53,6 +53,20 @@ type TraceLogModuleProps = {
   onRefresh: () => void;
 };
 
+const countFormatter = new Intl.NumberFormat("zh-CN");
+const snapshotTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+  hour12: false,
+});
+const rangeDateFormatter = new Intl.DateTimeFormat("zh-CN", {
+  month: "2-digit",
+  day: "2-digit",
+});
+
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -62,25 +76,17 @@ export function formatBytes(bytes: number): string {
 }
 
 function formatCount(value: number): string {
-  return new Intl.NumberFormat("zh-CN").format(Number.isFinite(value) ? value : 0);
+  return countFormatter.format(Number.isFinite(value) ? value : 0);
 }
 
 function formatSnapshotTime(timestamp: number): string {
   if (!timestamp) return "本次启动";
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(new Date(timestamp * 1000));
+  return snapshotTimeFormatter.format(new Date(timestamp * 1000));
 }
 
 function formatRange(stats: TraceLogStats): string {
   if (!stats.oldestTimestamp || !stats.newestTimestamp) return "暂无日志时间范围";
-  const formatter = new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit" });
-  return `${formatter.format(new Date(stats.oldestTimestamp * 1000))} - ${formatter.format(new Date(stats.newestTimestamp * 1000))}`;
+  return `${rangeDateFormatter.format(new Date(stats.oldestTimestamp * 1000))} - ${rangeDateFormatter.format(new Date(stats.newestTimestamp * 1000))}`;
 }
 
 function localDateKey(date: Date): string {

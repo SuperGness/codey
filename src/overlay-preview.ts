@@ -14,6 +14,7 @@ let previewConfig = {
   userScripts: [],
   selectedModelsByProvider: { primary: ["provider-fast-coder", "claude-sonnet-4-5"] },
   upstreamModelsByProvider: { primary: previewUpstreamModels },
+  defaultModelByProvider: {},
   disableTraceLogWrites: true,
   slimCodexPet: true,
   slimCodexVoice: true,
@@ -33,6 +34,7 @@ let previewModelState = {
   officialModelIds: previewOfficialModels.map((model) => model.slug),
   thirdPartyModels: ["provider-fast-coder", "claude-sonnet-4-5"],
   upstreamModels: previewUpstreamModels,
+  defaultModel: "gpt-5.6-sol",
 };
 
 window.__codexSessionDeleteBridge = async (path, payload) => {
@@ -76,6 +78,17 @@ window.__codexSessionDeleteBridge = async (path, payload) => {
       restartRequired: true,
     };
   }
+  if (command === "save_default_model") {
+    const model = String((payload as { model?: string }).model || "");
+    previewConfig = { ...previewConfig, defaultModelByProvider: { ...previewConfig.defaultModelByProvider, primary: model } };
+    previewModelState = { ...previewModelState, defaultModel: model };
+    return {
+      status: "ok",
+      config: previewConfig,
+      modelState: previewModelState,
+      restartRequired: true,
+    };
+  }
   if (command === "restart_codey") return { status: "restarting" };
   if (command === "clear_codex_trace_logs") return { status: "ok", protectionEnabled: previewConfig.disableTraceLogWrites, cleanup: { databasesFound: 2, databasesCleaned: 2, rowsDeleted: 318757, bytesBefore: 903634944, bytesAfter: 98304, bytesReclaimed: 903536640 } };
   return { status: "ok" };
@@ -92,4 +105,4 @@ function loadScript(source: string) {
 }
 
 await loadScript("/dist-overlay/codey-overlay.js");
-await loadScript("/codey-inject.js");
+await loadScript("/renderer-inject.js");

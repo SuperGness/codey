@@ -1,19 +1,17 @@
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
-use reqwest::header::ACCEPT;
+use reqwest::{Client, header::ACCEPT};
 use serde_json::Value;
 
 use crate::config::ProviderProfile;
 
-pub async fn fetch(profile: &ProviderProfile) -> Result<Vec<String>> {
+pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<String>> {
     let base = profile.normalized_base_url();
     if base.is_empty() {
         anyhow::bail!("API 地址不能为空");
     }
     let endpoints = model_endpoints(&base)?;
-    let client = reqwest::Client::builder().user_agent("Codey/0.1").build()?;
-
     for (index, endpoint) in endpoints.iter().enumerate() {
         let mut request = client.get(endpoint).header(ACCEPT, "application/json");
         if !profile.api_key.trim().is_empty() {

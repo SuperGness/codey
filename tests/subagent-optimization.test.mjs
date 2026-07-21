@@ -5,28 +5,30 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 test("subagent optimization is opt-in and exposed through the settings switch", async () => {
-  const [appSource, configSource, commandSource, launcherSource] = await Promise.all([
+  const [appSource, sectionsSource, configSource, commandSource, launcherSource] = await Promise.all([
     readFile(new URL("src/App.tsx", root), "utf8"),
+    readFile(new URL("src/AppSections.tsx", root), "utf8"),
     readFile(new URL("backend/src/config.rs", root), "utf8"),
     readFile(new URL("backend/src/commands.rs", root), "utf8"),
     readFile(new URL("backend/src/launcher.rs", root), "utf8"),
   ]);
+  const uiSource = `${appSource}\n${sectionsSource}`;
 
   assert.match(configSource, /pub subagent_optimization: bool/);
   assert.match(configSource, /subagent_optimization: false/);
   assert.match(commandSource, /config\.subagent_optimization = config_input\.subagent_optimization/);
   assert.match(launcherSource, /config\.subagent_optimization/);
   assert.match(appSource, /const SUBAGENT_MODEL = "gpt-5\.6-luna"/);
-  assert.match(appSource, /checked=\{config\.subagentOptimization\}/);
-  assert.match(appSource, /onCheckedChange=\{\(checked\) => void updateSubagentOptimization\(checked\)\}/);
-  assert.match(appSource, /aria-label="启用子代理协作优化"/);
-  assert.match(appSource, /<Badge variant="warning">需支持 GPT-5\.6-Luna<\/Badge>/);
+  assert.match(uiSource, /checked=\{config\.subagentOptimization\}/);
+  assert.match(uiSource, /onCheckedChange=\{\(checked\) => onSubagentOptimizationChange\(checked\)\}/);
+  assert.match(uiSource, /aria-label="启用子代理协作优化"/);
+  assert.match(uiSource, /<Badge variant="warning">需支持 GPT-5\.6-Luna<\/Badge>/);
   assert.match(appSource, /invoke\("fetch_current_provider_models"\)/);
   assert.match(appSource, /supportsModel\(result\.models, SUBAGENT_MODEL\)/);
   assert.match(appSource, /provider\.official \? "官方账号" : "第三方 API"/);
   assert.match(appSource, /不支持 \$\{SUBAGENT_MODEL\}，无法开启子代理协作优化/);
-  assert.match(appSource, /启用v2并行配置/);
-  assert.doesNotMatch(appSource, /下次启动启用 V2 并行配置，退出时自动恢复原文件/);
+  assert.match(uiSource, /启用v2并行配置/);
+  assert.doesNotMatch(uiSource, /下次启动启用 V2 并行配置，退出时自动恢复原文件/);
 });
 
 test("subagent optimization owns the requested V2 and default-agent settings", async () => {

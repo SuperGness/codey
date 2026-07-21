@@ -16,6 +16,7 @@ let previewConfig = {
   userScripts: [],
   selectedModelsByProvider: { primary: ["provider-fast-coder", "claude-sonnet-4-5"] },
   upstreamModelsByProvider: { primary: previewUpstreamModels },
+  defaultModelByProvider: {},
   disableTraceLogWrites: true,
   slimCodexPet: true,
   slimCodexVoice: true,
@@ -36,6 +37,7 @@ let previewModelState = {
   officialModelIds: previewOfficialModels.map((model) => model.slug),
   thirdPartyModels: ["provider-fast-coder", "claude-sonnet-4-5"],
   upstreamModels: previewUpstreamModels,
+  defaultModel: "gpt-5.6-sol",
 };
 
 window.__codeyInvokeApi = async (command, args) => {
@@ -73,6 +75,17 @@ window.__codeyInvokeApi = async (command, args) => {
   if (command === "save_selected_models") {
     const selected = new Set(args.models as string[]);
     previewModelState = { ...previewModelState, thirdPartyModels: previewUpstreamModels.filter((model) => selected.has(model) && !previewOfficialModels.some((official) => official.slug === model)) };
+    return {
+      status: "ok",
+      config: previewConfig,
+      modelState: previewModelState,
+      restartRequired: true,
+    };
+  }
+  if (command === "save_default_model") {
+    const model = String(args.model || "");
+    previewConfig = { ...previewConfig, defaultModelByProvider: { ...previewConfig.defaultModelByProvider, primary: model } };
+    previewModelState = { ...previewModelState, defaultModel: model };
     return {
       status: "ok",
       config: previewConfig,

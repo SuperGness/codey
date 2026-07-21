@@ -148,6 +148,7 @@ pub fn apply_runtime_provider_config(
     profile: &ProviderProfile,
     provider_id: &str,
     use_official_catalog: bool,
+    default_model: Option<&str>,
     fast_context_tools: bool,
     subagent_optimization: bool,
 ) -> Result<PathBuf> {
@@ -165,6 +166,7 @@ pub fn apply_runtime_provider_config(
         profile,
         provider_id,
         use_official_catalog,
+        default_model,
         fastctx_command.as_deref(),
         subagent_optimization,
         &marker,
@@ -177,6 +179,7 @@ fn apply_runtime_provider_config_at(
     profile: &ProviderProfile,
     provider_id: &str,
     use_official_catalog: bool,
+    default_model: Option<&str>,
     fastctx_command: Option<&Path>,
     subagent_optimization: bool,
     marker: &Path,
@@ -221,6 +224,7 @@ fn apply_runtime_provider_config_at(
         profile,
         &provider_id,
         use_official_catalog,
+        default_model,
         fastctx_command,
         subagent_optimization,
     )?;
@@ -775,6 +779,7 @@ pub fn patch_config(
         provider_id,
         use_official_catalog,
         None,
+        None,
         false,
     )
 }
@@ -784,6 +789,7 @@ fn patch_config_with_fastctx(
     profile: &ProviderProfile,
     provider_id: &str,
     use_official_catalog: bool,
+    default_model: Option<&str>,
     fastctx_command: Option<&Path>,
     subagent_optimization: bool,
 ) -> Result<String> {
@@ -806,7 +812,7 @@ fn patch_config_with_fastctx(
     }
     enable_desktop_reasoning_efforts(&mut doc)?;
     ensure_default_service_tier(&mut doc);
-    remove_model_selection(&mut doc);
+    set_model_selection(&mut doc, default_model);
     if let Some(command) = fastctx_command {
         enable_fast_context_tools(&mut doc, command)?;
     }
@@ -1001,22 +1007,25 @@ fn ensure_default_service_tier(doc: &mut DocumentMut) {
 
 fn remove_model_selection(doc: &mut DocumentMut) {
     doc.as_table_mut().remove("model");
-    let Some(active_profile) = doc
-        .get("profile")
-        .and_then(Item::as_str)
-        .map(ToString::to_string)
-    else {
-        return;
-    };
     let Some(profiles) = doc.get_mut("profiles").and_then(Item::as_table_mut) else {
         return;
     };
-    if let Some(profile) = profiles
-        .get_mut(&active_profile)
-        .and_then(Item::as_table_mut)
-    {
-        profile.remove("model");
+    for (_, profile) in profiles.iter_mut() {
+        if let Some(profile) = profile.as_table_mut() {
+            profile.remove("model");
+        }
     }
+}
+
+fn set_model_selection(doc: &mut DocumentMut, default_model: Option<&str>) {
+    remove_model_selection(doc);
+    let Some(default_model) = default_model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    else {
+        return;
+    };
+    doc["model"] = value(default_model);
 }
 
 fn root_key_string(contents: &str, key: &str) -> Option<String> {
@@ -1223,6 +1232,28 @@ enabled-reasoning-efforts = ["low", "medium", "high", "xhigh"]
     }
 
     #[test]
+    fn provider_patch_sets_the_requested_default_model() {
+        let result = patch_config_with_fastctx(
+            "model = \"old-model\"\n\n[profiles.work]\nmodel = \"profile-model\"\n",
+            &official_profile(),
+            GLOBAL_PROVIDER_ID,
+            true,
+            Some("gpt-5.6-sol"),
+            None,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            root_key_string(&result, "model").as_deref(),
+            Some("gpt-5.6-sol")
+        );
+        let document = result.parse::<DocumentMut>().unwrap();
+        let work_profile = document["profiles"]["work"].as_table().unwrap();
+        assert!(work_profile.get("model").is_none());
+    }
+
+    #[test]
     fn direct_patch_configures_the_provider_without_a_loopback_endpoint() {
         let result = patch_config(
             "model_provider = \"openai\"\n",
@@ -1259,6 +1290,7 @@ direct_only_tool_namespaces = ["mcp__existing"]
             &official_profile(),
             GLOBAL_PROVIDER_ID,
             true,
+            None,
             Some(Path::new("/Applications/Codey.app/Contents/MacOS/codey")),
             false,
         )
@@ -1309,6 +1341,7 @@ direct_only_tool_namespaces = ["mcp__existing"]
             &official_profile(),
             GLOBAL_PROVIDER_ID,
             true,
+            None,
             Some(Path::new("/tmp/codey")),
             false,
         )
@@ -1318,6 +1351,7 @@ direct_only_tool_namespaces = ["mcp__existing"]
             &official_profile(),
             GLOBAL_PROVIDER_ID,
             true,
+            None,
             Some(Path::new("/tmp/codey")),
             false,
         )
@@ -1357,6 +1391,7 @@ custom_setting = "preserved"
             &official_profile(),
             GLOBAL_PROVIDER_ID,
             true,
+            None,
             None,
             true,
         )
@@ -1409,6 +1444,7 @@ custom_setting = "preserved"
             &direct_profile(RelayProtocol::Responses),
             GLOBAL_PROVIDER_ID,
             true,
+            None,
             None,
             true,
             &marker,
@@ -1466,6 +1502,7 @@ custom_setting = "preserved"
             GLOBAL_PROVIDER_ID,
             true,
             None,
+            None,
             true,
             &marker,
             &backup_root,
@@ -1510,6 +1547,7 @@ custom_setting = "preserved"
             GLOBAL_PROVIDER_ID,
             true,
             None,
+            None,
             true,
             &marker,
             &backup_root,
@@ -1544,6 +1582,7 @@ custom_setting = "preserved"
             &direct_profile(RelayProtocol::Responses),
             GLOBAL_PROVIDER_ID,
             true,
+            None,
             None,
             true,
             &marker,
@@ -1582,6 +1621,7 @@ custom_setting = "preserved"
             GLOBAL_PROVIDER_ID,
             true,
             None,
+            None,
             false,
             &marker,
             &backup_root,
@@ -1618,6 +1658,7 @@ custom_setting = "preserved"
             &direct_profile(RelayProtocol::Responses),
             GLOBAL_PROVIDER_ID,
             true,
+            None,
             None,
             false,
             &marker,
@@ -1675,6 +1716,7 @@ last_updated = "old"
             &direct_profile(RelayProtocol::Responses),
             GLOBAL_PROVIDER_ID,
             true,
+            None,
             Some(Path::new("/tmp/codey")),
             false,
             &marker,
@@ -1812,6 +1854,7 @@ note = "user replacement"
             GLOBAL_PROVIDER_ID,
             true,
             None,
+            None,
             false,
             &marker,
             &backup_root,
@@ -1848,6 +1891,7 @@ note = "user replacement"
             &direct_profile(RelayProtocol::Responses),
             GLOBAL_PROVIDER_ID,
             true,
+            None,
             None,
             false,
             &marker,

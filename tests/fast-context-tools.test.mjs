@@ -5,19 +5,21 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 test("FastCtx optimization is opt-in and exposed through the settings switch", async () => {
-  const [appSource, configSource, commandSource] = await Promise.all([
+  const [appSource, sectionsSource, configSource, commandSource] = await Promise.all([
     readFile(new URL("src/App.tsx", root), "utf8"),
+    readFile(new URL("src/AppSections.tsx", root), "utf8"),
     readFile(new URL("backend/src/config.rs", root), "utf8"),
     readFile(new URL("backend/src/commands.rs", root), "utf8"),
   ]);
+  const uiSource = `${appSource}\n${sectionsSource}`;
 
   assert.match(configSource, /pub fast_context_tools: bool/);
   assert.match(configSource, /fast_context_tools: false/);
   assert.match(commandSource, /config\.fast_context_tools = config_input\.fast_context_tools/);
-  assert.match(appSource, /checked=\{config\.fastContextTools\}/);
-  assert.match(appSource, /aria-label="启用 FastCtx 上下文工具"/);
-  assert.match(appSource, /可显著提高模型完成任务速度和准确性/);
-  assert.doesNotMatch(appSource, /下次启动提供分页读取、搜索、文件发现与批量替换/);
+  assert.match(uiSource, /checked=\{config\.fastContextTools\}/);
+  assert.match(uiSource, /aria-label="启用 FastCtx 上下文工具"/);
+  assert.match(uiSource, /可显著提高模型完成任务速度和准确性/);
+  assert.doesNotMatch(uiSource, /下次启动提供分页读取、搜索、文件发现与批量替换/);
 });
 
 test("Codey embeds FastCtx and only dispatches it through the dedicated MCP mode", async () => {

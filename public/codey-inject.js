@@ -1,7 +1,6 @@
-// Backwards-compatible entry point for older Codey builds. The launcher now
-// injects the smaller renderer-inject.js/fast-mode-fix.js/plugin-marketplace-fix.js
-// modules separately, but keeping this file useful makes manual CDP testing
-// straightforward.
+// Backwards-compatible mirror for older Codey builds and manual CDP testing.
+// The launcher injects public/renderer-inject.js as the main renderer controls
+// module, alongside the smaller shield/fix modules.
 (() => {
   if (window.__codeyRendererInjectLoaded) return;
   window.__codeyRendererInjectLoaded = true;
