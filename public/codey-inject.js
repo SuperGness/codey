@@ -1325,15 +1325,16 @@
       return;
     }
     const deleted = Number(result?.deleted || 0);
-    if (!deleted) {
-      window.alert("没有在当前会话记录中找到所选轮次；会话文件未被修改");
-      return;
-    }
     rememberHardDeletedMessages(sessionId, messageIds);
     rows.forEach((row) => row.remove());
     lastSelectedRow = null;
     syncSelectionGroups();
     updateToolbar();
+    const locallyRemoved = Math.max(0, messageIds.length - deleted);
+    if (!deleted) {
+      showRuntimeToast(`已移除 ${locallyRemoved} 条未写入会话的消息`);
+      return;
+    }
     try {
       await reloadConversationAfterHardDelete(sessionId, messageIds);
     } catch (error) {
@@ -1342,7 +1343,11 @@
       return;
     }
     window.dispatchEvent(new CustomEvent("codey-session-refresh", { detail: { sessionId, messageIds } }));
-    showRuntimeToast(`已永久删除 ${deleted} 轮对话`);
+    showRuntimeToast(
+      locallyRemoved
+        ? `已永久删除 ${deleted} 轮对话，并移除 ${locallyRemoved} 条未写入会话的消息`
+        : `已永久删除 ${deleted} 轮对话`,
+    );
   };
 
   const mountToolbar = () => {

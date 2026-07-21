@@ -35,5 +35,6 @@ test("hard-deleted messages are removed while Codex rebuilds its active history"
   assert.match(source, /hardDeletedMessageKeys/);
   assert.match(source, /rows\.forEach\(\(row\) => row\.remove\(\)\)/);
   assert.doesNotMatch(source, /dispatcher\("discard-conversation-from-cache"/);
-  assert.match(source, /showRuntimeToast\(`已永久删除 \$\{deleted\} 轮对话`\);\s*};/);
+  assert.match(source, /已移除 \$\{locallyRemoved\} 条未写入会话的消息/);
+  assert.match(source, /已永久删除 \$\{deleted\} 轮对话/);
 });

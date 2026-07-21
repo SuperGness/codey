@@ -280,6 +280,34 @@ test("removes a hard-deleted turn and rejects a stale React rerender", async () 
   assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-2"]);
 });
 
+test("removes a failed message that was never written to the session", async () => {
+  let deleteCalls = 0;
+  let dispatcherCalls = 0;
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: ["failed-turn"],
+    selectedTurnIds: ["failed-turn"],
+    codexSignalDispatcher: async () => {
+      dispatcherCalls += 1;
+    },
+    bridgeHandler: async (path) => {
+      if (path !== "/session/delete-messages") return { status: "ok" };
+      deleteCalls += 1;
+      return { status: "ok", deleted: 0 };
+    },
+  });
+
+  await runtime.window.__codeyDeleteSelectedMessages();
+
+  assert.equal(deleteCalls, 1);
+  assert.equal(dispatcherCalls, 0);
+  assert.deepEqual(runtime.getVisibleTurnIds(), []);
+
+  runtime.appendTurn("failed-turn");
+  runtime.window.__codeyInstallMessageSelection();
+  assert.deepEqual(runtime.getVisibleTurnIds(), []);
+});
+
 test("syncs Codex sidebar titles to the notification backend", async () => {
   const runtime = loadInjection({ sessionTitle: "修复飞书会话标题" });
   await new Promise((resolve) => setImmediate(resolve));
