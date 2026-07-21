@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 codex-plus-core = { path = "../vendor/CodexPlusPlus/crates/codex-plus-core" }
 codex-plus-data = { path = "../vendor/CodexPlusPlus/crates/codex-plus-data" }
 directories = "6"

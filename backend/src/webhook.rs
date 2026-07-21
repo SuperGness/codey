@@ -1,6 +1,7 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+use chrono::Local;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -35,7 +36,7 @@ impl WebhookEvent {
         Self {
             event_id: Uuid::new_v4().to_string(),
             event: event.into(),
-            timestamp: chrono_like_now(),
+            timestamp: local_timestamp_now(),
             session_id: session_id.into(),
             session_name: "未命名会话".to_string(),
             profile_id: profile_id.into(),
@@ -163,6 +164,7 @@ fn feishu_body(event: &WebhookEvent) -> Result<Value> {
     let session_name = feishu_markdown_value(&event.session_name, "未命名会话");
     let model = feishu_markdown_value(&event.model, "Codex");
     let reasoning_effort = feishu_markdown_value(&event.reasoning_effort, "默认");
+    let sent_at = feishu_markdown_value(&event.timestamp, "未知");
     let body = json!({
         "msg_type": "interactive",
         "card": {
@@ -196,6 +198,13 @@ fn feishu_body(event: &WebhookEvent) -> Result<Value> {
                         "text": {
                             "tag": "lark_md",
                             "content": format!("**推理深度**\n{reasoning_effort}"),
+                        },
+                    },
+                    {
+                        "is_short": false,
+                        "text": {
+                            "tag": "lark_md",
+                            "content": format!("**发送时间**\n{sent_at}"),
                         },
                     },
                     {
@@ -271,12 +280,8 @@ fn feishu_response_error(body: &str) -> Option<String> {
     Some(format!("飞书机器人返回错误 {code}：{message}"))
 }
 
-fn chrono_like_now() -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("unix-ms:{millis}")
+fn local_timestamp_now() -> String {
+    Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string()
 }
 
 #[cfg(test)]
@@ -295,15 +300,17 @@ mod tests {
 
     #[test]
     fn feishu_card_body_uses_custom_bot_schema() {
-        let event = WebhookEvent::new("session.completed", "s1", "p1", "gpt-5.4", 192_300, None)
-            .with_session_name("发布 Codey 版本")
-            .with_reasoning_effort("xhigh");
+        let mut event =
+            WebhookEvent::new("session.completed", "s1", "p1", "gpt-5.4", 192_300, None)
+                .with_session_name("发布 Codey 版本")
+                .with_reasoning_effort("xhigh");
+        event.timestamp = "2026-07-21 20:30:00 +08:00".to_string();
         let body = feishu_body(&event).unwrap();
         assert_eq!(body["msg_type"], "interactive");
         assert_eq!(body["card"]["header"]["title"]["content"], "Codex会话完成");
         assert_eq!(body["card"]["header"]["template"], "green");
         let fields = body["card"]["elements"][0]["fields"].as_array().unwrap();
-        assert_eq!(fields.len(), 4);
+        assert_eq!(fields.len(), 5);
         assert!(
             fields[0]["text"]["content"]
                 .as_str()
@@ -330,6 +337,18 @@ mod tests {
         );
         assert!(
             fields[3]["text"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("发送时间")
+        );
+        assert!(
+            fields[3]["text"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("2026-07-21 20:30:00 +08:00")
+        );
+        assert!(
+            fields[4]["text"]["content"]
                 .as_str()
                 .unwrap()
                 .contains("3 分 12 秒")

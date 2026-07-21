@@ -33,7 +33,8 @@ pub struct AppState {
     pub config: RwLock<CodeyConfig>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     pub startup_error: RwLock<Option<String>>,
-    restart_in_progress: AtomicBool,
+    close_in_progress: AtomicBool,
+    manual_close_requested: AtomicBool,
     session_titles: RwLock<HashMap<String, String>>,
     webhook_notifications: Mutex<HashSet<String>>,
     persisted_waiting_notifications: Mutex<HashSet<String>>,
@@ -55,7 +56,8 @@ impl Default for AppState {
             config: RwLock::new(config),
             runtime: Mutex::new(None),
             startup_error: RwLock::new(None),
-            restart_in_progress: AtomicBool::new(false),
+            close_in_progress: AtomicBool::new(false),
+            manual_close_requested: AtomicBool::new(false),
             session_titles: RwLock::new(HashMap::new()),
             webhook_notifications: Mutex::new(persisted_waiting_notifications.clone()),
             persisted_waiting_notifications: Mutex::new(persisted_waiting_notifications),
@@ -412,6 +414,15 @@ impl AppState {
         }
     }
 
+    pub fn request_manual_close_shutdown(&self) {
+        self.manual_close_requested.store(true, Ordering::Release);
+        self.request_shutdown();
+    }
+
+    pub fn manual_close_requested(&self) -> bool {
+        self.manual_close_requested.load(Ordering::Acquire)
+    }
+
     pub async fn wait_for_shutdown(&self) {
         if self.shutdown_requested.load(Ordering::Acquire) {
             return;
@@ -544,7 +555,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         },
         "runtime_status" => runtime_status(state).await,
         "launch_codey" => launch_codey_runtime(state).await,
-        "restart_codey" => schedule_restart_codey_runtime(state).await,
+        "close_codex" | "restart_codey" => schedule_close_codey_runtime(state).await,
         "clear_codex_trace_logs" => clear_codex_trace_logs(state).await,
         "test_webhook" => test_webhook(state).await,
         "export_session" => match string_argument(&args, "sessionId") {
@@ -871,7 +882,7 @@ pub async fn runtime_status(state: &Arc<AppState>) -> Result<Value, String> {
         "activeProfileId": profile.as_ref().map(|profile| profile.id.as_str()).unwrap_or_default(),
         "activeProfileName": profile.as_ref().map(|profile| profile.name.as_str()).unwrap_or_default(),
         "restartRequired": restart_required,
-        "restartInProgress": state.restart_in_progress.load(Ordering::Acquire),
+        "closeInProgress": state.close_in_progress.load(Ordering::Acquire),
     });
     drop(config);
     if let Some(error) = state.startup_error.read().await.clone()
@@ -942,31 +953,93 @@ pub async fn launch_codey_runtime(state: &Arc<AppState>) -> Result<Value, String
     result
 }
 
-pub async fn schedule_restart_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
-    if state.restart_in_progress.swap(true, Ordering::AcqRel) {
-        return Ok(json!({"status":"already_restarting"}));
+pub async fn schedule_close_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
+    if state.close_in_progress.swap(true, Ordering::AcqRel) {
+        return Ok(json!({"status":"already_closing"}));
     }
 
-    let restart_state = Arc::clone(state);
+    let close_state = Arc::clone(state);
     tokio::spawn(async move {
         // The request originates inside the Codex renderer. Let the bridge
         // deliver its response before stopping the renderer that owns it.
         tokio::time::sleep(Duration::from_millis(250)).await;
-        let result = async {
-            stop_codey_runtime(&restart_state).await?;
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            launch_codey_runtime(&restart_state).await
-        }
-        .await;
+        let result = stop_codey_runtime(&close_state).await;
         if let Err(error) = result {
-            *restart_state.startup_error.write().await = Some(error);
+            *close_state.startup_error.write().await = Some(error);
+            close_state
+                .close_in_progress
+                .store(false, Ordering::Release);
+            return;
         }
-        restart_state
-            .restart_in_progress
-            .store(false, Ordering::Release);
+        show_manual_relaunch_prompt().await;
+        close_state.request_manual_close_shutdown();
     });
 
-    Ok(json!({"status":"restarting"}))
+    Ok(json!({"status":"closing"}))
+}
+
+#[cfg(target_os = "macos")]
+async fn show_manual_relaunch_prompt() {
+    let script = r#"display dialog "Codex 已关闭。请关闭此提示后，手动运行 Codey 重新启动 Codex。" with title "Codey" buttons {"知道了"} default button "知道了" with icon note"#;
+    match tokio::process::Command::new("osascript")
+        .args(["-e", script])
+        .status()
+        .await
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("Codey 手动重启提示未正常显示：osascript 返回 {status}"),
+        Err(error) => eprintln!("Codey 手动重启提示显示失败：{error}"),
+    }
+}
+
+#[cfg(windows)]
+async fn show_manual_relaunch_prompt() {
+    let result = tokio::task::spawn_blocking(|| {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MessageBoxW,
+        };
+
+        let message = "Codex 已关闭。请关闭此提示后，手动运行 Codey 重新启动 Codex。\0"
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        let title = "Codey\0".encode_utf16().collect::<Vec<_>>();
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                message.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+            )
+        };
+    })
+    .await;
+    if let Err(error) = result {
+        eprintln!("Codey 手动重启提示显示失败：{error}");
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+async fn show_manual_relaunch_prompt() {
+    const MESSAGE: &str = "Codex 已关闭。请手动运行 Codey 重新启动 Codex。";
+    match tokio::process::Command::new("zenity")
+        .arg("--info")
+        .arg("--title=Codey")
+        .arg(format!("--text={MESSAGE}"))
+        .status()
+        .await
+    {
+        Ok(status) if status.success() => return,
+        Ok(_) | Err(_) => {}
+    }
+    match tokio::process::Command::new("notify-send")
+        .args(["Codey", MESSAGE])
+        .status()
+        .await
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => eprintln!("Codey 手动重启提示未正常显示：notify-send 返回 {status}"),
+        Err(error) => eprintln!("Codey 手动重启提示显示失败：{error}"),
+    }
 }
 
 pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {

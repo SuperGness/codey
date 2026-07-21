@@ -30,5 +30,6 @@ test("selection changes resynchronize adjacent-turn grouping", () => {
 test("message deletion does not use UI tombstones or hidden rows", () => {
   assert.doesNotMatch(source, /codey-deleted-turns/);
   assert.doesNotMatch(source, /data-codey-message-deleted/);
-  assert.match(source, /discard-conversation-from-cache/);
+  assert.match(source, /method: "thread\/unsubscribe"/);
+  assert.doesNotMatch(source, /dispatcher\("discard-conversation-from-cache"/);
 });

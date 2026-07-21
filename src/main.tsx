@@ -77,7 +77,7 @@ if (import.meta.env.DEV) {
         return {
           running: true,
           restartRequired: false,
-          restartInProgress: false,
+          closeInProgress: false,
           activeProfileId: previewConfig.activeProfileId,
           activeProfileName: previewConfig.profiles.find((p) => p.id === previewConfig.activeProfileId)?.name || "未命名代理",
           codexAppPath: previewConfig.codexAppPath,
@@ -137,8 +137,8 @@ if (import.meta.env.DEV) {
           restartRequired: true,
         };
       }
-      if (command === "restart_codey") {
-        return { status: "restarting" };
+      if (command === "close_codex" || command === "restart_codey") {
+        return { status: "closing" };
       }
       if (command === "test_webhook") {
         return { status: 200 };

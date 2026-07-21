@@ -10,6 +10,7 @@ import {
   History,
   LoaderCircle,
   PlugZap,
+  Power,
   RefreshCw,
   Save,
   Search,
@@ -91,7 +92,7 @@ type Maintenance = {
 type RuntimeStatus = {
   running: boolean;
   restartRequired?: boolean;
-  restartInProgress?: boolean;
+  closeInProgress?: boolean;
   activeProfileId?: string;
   activeProfileName?: string;
   startupError?: string;
@@ -118,7 +119,7 @@ type CcSwitchStatus = {
 type Notice = { tone: "info" | "success" | "error"; text: string };
 type InlineResult = { tone: "idle" | "pending" | "success" | "error"; text: string };
 type Confirmation = {
-  action: "clear" | "restart";
+  action: "clear" | "close";
   title: string;
   description: string;
   confirmLabel: string;
@@ -218,6 +219,29 @@ export function App({ embedded = false, onClose }: AppProps) {
       window.clearTimeout(timer);
     };
   }, [status.traceLogStats?.pending]);
+
+  useEffect(() => {
+    if (!status.closeInProgress) return;
+    let cancelled = false;
+    let timer = 0;
+    const poll = () => {
+      timer = window.setTimeout(async () => {
+        try {
+          const next = await invoke<RuntimeStatus>("runtime_status");
+          if (cancelled) return;
+          setStatus(next);
+          if (next.closeInProgress) poll();
+        } catch {
+          if (!cancelled) poll();
+        }
+      }, 500);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [status.closeInProgress]);
 
   async function load() {
     try {
@@ -413,31 +437,28 @@ export function App({ embedded = false, onClose }: AppProps) {
     });
   }
 
-  function askRestartCodex() {
-    const launching = !status.running;
+  function askCloseCodex() {
     setConfirmation({
-      action: "restart",
-      title: launching ? "启动 Codex？" : "重启 Codex？",
-      description: launching
-        ? "Codey 将使用当前已保存配置启动 Codex。"
-        : "当前 Codex 将关闭并由 Codey 重新拉起，正在执行的本地任务会被中断。",
-      confirmLabel: launching ? "启动 Codex" : "重启 Codex",
-      run: () => void restartCodex(),
+      action: "close",
+      title: "关闭 Codex？",
+      description: "当前 Codex 将被关闭，正在执行的本地任务会被中断。关闭完成后会显示系统提示，请按提示手动运行 Codey 重新启动。",
+      confirmLabel: "关闭 Codex",
+      run: () => void closeCodex(),
     });
   }
 
-  async function restartCodex() {
+  async function closeCodex() {
     if (!config) return;
-    await runOperation("restart", async () => {
+    await runOperation("close", async () => {
       if (dirty) await persist(config);
       setNotice({
         tone: "info",
-        text: status.running ? "正在重启 Codex…" : "正在启动 Codex…",
+        text: "正在关闭 Codex，关闭后请按系统提示手动运行 Codey…",
       });
-      await invoke("restart_codey");
+      await invoke("close_codex");
       setStatus((current) => ({
         ...current,
-        restartInProgress: true,
+        closeInProgress: true,
       }));
     });
   }
@@ -632,7 +653,7 @@ export function App({ embedded = false, onClose }: AppProps) {
           <div className={`runtime-action-bar${restartPending ? " pending" : ""}`}>
             <span className="runtime-action-icon">
               <RefreshCw
-                className={busy === "restart" || status.restartInProgress ? "spinner" : ""}
+                className={busy === "close" || status.closeInProgress ? "spinner" : ""}
                 size={17}
                 aria-hidden="true"
               />
@@ -650,19 +671,19 @@ export function App({ embedded = false, onClose }: AppProps) {
                   ? "模型目录或启动参数将在重启后生效"
                   : status.running
                     ? "当前线路与运行参数已载入"
-                    : "使用 Codey 应用当前配置"}
+                    : "请手动运行 Codey 应用当前配置"}
               </small>
             </div>
             <Button
               variant={restartPending ? "default" : "outline"}
               size="sm"
-              disabled={isBusy || status.restartInProgress}
-              onClick={askRestartCodex}
+              disabled={isBusy || status.closeInProgress || !status.running}
+              onClick={askCloseCodex}
             >
-              {busy === "restart" || status.restartInProgress
+              {busy === "close" || status.closeInProgress
                 ? <LoaderCircle className="spinner" aria-hidden="true" />
-                : <RefreshCw aria-hidden="true" />}
-              {status.running ? "重启 Codex" : "启动 Codex"}
+                : <Power aria-hidden="true" />}
+              {status.running ? "关闭 Codex" : "请手动启动 Codey"}
             </Button>
           </div>
 
@@ -1107,15 +1128,15 @@ export function App({ embedded = false, onClose }: AppProps) {
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmation(null)}>取消</Button>
             <Button
-              variant={confirmation?.action === "restart" ? "default" : "destructive"}
+              variant={confirmation?.action === "close" ? "default" : "destructive"}
               onClick={() => {
                 const pending = confirmation;
                 setConfirmation(null);
                 pending?.run();
               }}
             >
-              {confirmation?.action === "restart"
-                ? <RefreshCw aria-hidden="true" />
+              {confirmation?.action === "close"
+                ? <Power aria-hidden="true" />
                 : <Trash2 aria-hidden="true" />}
               {confirmation?.confirmLabel}
             </Button>

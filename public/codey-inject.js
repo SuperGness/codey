@@ -779,11 +779,12 @@
     });
     const dispatcher = await codexSignalDispatcherPromise;
 
-    // This invokes thread/unsubscribe inside Codex before removing the React
-    // conversation cache. The next resume must therefore rebuild from rollout.
-    await dispatcher("discard-conversation-from-cache", {
+    // Unload app-server memory without removing the active conversation from
+    // React's thread store, so reloading keeps the current route selected.
+    await dispatcher("send-cli-request-for-host", {
       hostId: "local",
-      conversationId: normalizedSessionId,
+      method: "thread/unsubscribe",
+      params: { threadId: normalizedSessionId },
     });
 
     // Closing a loaded thread may flush a final record. Reapply the hard delete

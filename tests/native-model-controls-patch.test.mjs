@@ -135,3 +135,20 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
     Module._extensions[".js"] = nativeJsExtension;
   }
 });
+
+test("closing Codex requires a manual Codey relaunch", async () => {
+  const [commandsSource, appSource] = await Promise.all([
+    readFile(new URL("../backend/src/commands.rs", import.meta.url), "utf8"),
+    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
+  ]);
+  const closeFlow = commandsSource.slice(
+    commandsSource.indexOf("pub async fn schedule_close_codey_runtime"),
+    commandsSource.indexOf("pub async fn stop_codey_runtime"),
+  );
+
+  assert.match(closeFlow, /stop_codey_runtime\(&close_state\)/);
+  assert.match(closeFlow, /show_manual_relaunch_prompt\(\)\.await/);
+  assert.doesNotMatch(closeFlow, /launch_codey_runtime/);
+  assert.match(appSource, /await invoke\("close_codex"\)/);
+  assert.match(appSource, /请按提示手动运行 Codey 重新启动/);
+});

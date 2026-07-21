@@ -32,6 +32,7 @@ use commands::AppState;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShutdownReason {
     CodexExited,
+    ManualClose,
     Signal,
 }
 
@@ -60,18 +61,29 @@ pub async fn run() -> Result<()> {
     }
 
     let shutdown_reason = tokio::select! {
-        _ = state.wait_for_shutdown() => ShutdownReason::CodexExited,
+        _ = state.wait_for_shutdown() => {
+            if state.manual_close_requested() {
+                ShutdownReason::ManualClose
+            } else {
+                ShutdownReason::CodexExited
+            }
+        },
         _ = shutdown_signal() => ShutdownReason::Signal,
     };
 
-    let cleanup = match commands::stop_codey_runtime(&state).await {
-        Ok(value) => Ok(value),
-        Err(first_error) => {
-            eprintln!("Codey 恢复 Codex 配置失败，正在重试：{first_error}");
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            commands::stop_codey_runtime(&state)
-                .await
-                .map_err(|retry_error| format!("{first_error}；重试失败：{retry_error}"))
+    let cleanup = if shutdown_reason == ShutdownReason::ManualClose {
+        Ok(())
+    } else {
+        match commands::stop_codey_runtime(&state).await {
+            Ok(_) => Ok(()),
+            Err(first_error) => {
+                eprintln!("Codey 恢复 Codex 配置失败，正在重试：{first_error}");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                commands::stop_codey_runtime(&state)
+                    .await
+                    .map(|_| ())
+                    .map_err(|retry_error| format!("{first_error}；重试失败：{retry_error}"))
+            }
         }
     };
     if shutdown_reason == ShutdownReason::CodexExited {
@@ -81,7 +93,7 @@ pub async fn run() -> Result<()> {
             Err(error) => eprintln!("Codex 已退出，但清理其他 Codey 进程失败：{error:#}"),
         }
     }
-    cleanup.map(|_| ()).map_err(anyhow::Error::msg)
+    cleanup.map_err(anyhow::Error::msg)
 }
 
 fn hide_exclusive_windows_console() {

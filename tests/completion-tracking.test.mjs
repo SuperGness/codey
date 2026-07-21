@@ -157,7 +157,7 @@ function loadInjection({
   };
 }
 
-test("unloads Codex memory before reapplying a permanent message deletion", async () => {
+test("unloads Codex memory without discarding the active conversation", async () => {
   const dispatcherCalls = [];
   const runtime = loadInjection({
     initialRunning: false,
@@ -175,12 +175,20 @@ test("unloads Codex memory before reapplying a permanent message deletion", asyn
   );
 
   assert.deepEqual(JSON.parse(JSON.stringify(dispatcherCalls)), [{
-    signal: "discard-conversation-from-cache",
-    payload: { hostId: "local", conversationId: "session-1" },
+    signal: "send-cli-request-for-host",
+    payload: {
+      hostId: "local",
+      method: "thread/unsubscribe",
+      params: { threadId: "session-1" },
+    },
   }, {
     signal: "refresh-recent-conversations-for-host",
     payload: { hostId: "local", sortKey: "updated_at" },
   }]);
+  assert.equal(
+    dispatcherCalls.some(({ signal }) => signal === "discard-conversation-from-cache"),
+    false,
+  );
   const cleanup = runtime.bridgeCalls.find(
     (call) => call.path === "/session/delete-messages",
   );
