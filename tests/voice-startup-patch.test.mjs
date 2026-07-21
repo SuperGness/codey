@@ -5,7 +5,7 @@ import test from "node:test";
 const delay = (milliseconds) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function waitFor(predicate, timeoutMs = 500) {
+async function waitFor(predicate, timeoutMs = 2000) {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) {

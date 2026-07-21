@@ -144,6 +144,11 @@ function assertTagDoesNotExist(tag, remote, shouldCheckRemote) {
   });
   if (remoteTag.status !== 0) {
     if (remoteTag.stderr) process.stderr.write(remoteTag.stderr);
+    if (/Authentication failed|Invalid username or token|Password authentication is not supported/i.test(remoteTag.stderr)) {
+      fail(
+        `GitHub authentication failed for ${remote}. Log in to Git over HTTPS or switch the remote to SSH, then rerun this release command.`,
+      );
+    }
     fail(`Could not check remote tag ${remote}/${tag}`);
   }
   if (remoteTag.stdout.trim()) fail(`Remote tag already exists: ${tag}`);
