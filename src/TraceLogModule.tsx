@@ -1,4 +1,13 @@
-import { CircleAlert, LoaderCircle, ShieldCheck, Trash2 } from "lucide-react";
+import {
+  Activity,
+  CircleAlert,
+  Database,
+  FileText,
+  HardDrive,
+  LoaderCircle,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
 
 import {
   MagicBadge as Badge,
@@ -114,12 +123,13 @@ export function TraceLogModule({
     <section className="trace-section" aria-labelledby="trace-title">
       <div className="section-title compact trace-section-title">
         <div>
-          <h2 id="trace-title">Trace 日志</h2>
-          <p>启动时快照 · 运行期间不重复扫描</p>
+          <span className="section-kicker">Diagnostics</span>
+          <h2 id="trace-title">Trace 日志分析</h2>
+          <p>启动时快照 · 诊断与写盘保护</p>
         </div>
         <div className="trace-module-actions">
           <Badge variant={protectionEnabled ? "success" : "secondary"}>
-            {protectionEnabled ? "写盘保护开启" : "写盘保护关闭"}
+            {protectionEnabled ? "写盘保护已开启" : "写盘保护关闭"}
           </Badge>
           <Switch
             checked={protectionEnabled}
@@ -145,51 +155,59 @@ export function TraceLogModule({
         {!stats || stats.pending ? (
           <div className="trace-empty">
             {stats?.pending
-              ? <LoaderCircle className="spinner" size={30} />
-              : <ShieldCheck size={30} />}
-            <strong>{stats?.pending ? "正在后台统计日志库" : "本次启动尚无统计快照"}</strong>
+              ? <LoaderCircle className="spinner" size={32} />
+              : <ShieldCheck size={32} />}
+            <strong>{stats?.pending ? "正在后台统计日志库…" : "本次启动尚无统计快照"}</strong>
           </div>
         ) : (
           <>
             <div className="trace-snapshot-row">
-              <div>
-                <ShieldCheck size={16} />
-                <strong>{protectionEnabled ? "保护已启用" : "保护已关闭"}</strong>
-                <span>{stats.databasesScanned}/{stats.databasesFound} 个日志库已统计</span>
+              <div className="trace-snapshot-info">
+                <span className={`trace-status-dot ${protectionEnabled ? "active" : ""}`} />
+                <strong>{protectionEnabled ? "保护状态正常" : "写盘保护未开启"}</strong>
+                <span>{stats.databasesScanned}/{stats.databasesFound} 个日志数据库已完成扫描</span>
               </div>
               <Badge variant={stats.errors.length || snapshotStale ? "warning" : "secondary"}>
                 {snapshotStale ? "清理前快照 · " : ""}{formatSnapshotTime(stats.capturedAt)}
               </Badge>
             </div>
 
-            <div className="trace-metrics">
-              <div className="trace-metric">
-                <span>日志条数</span>
-                <strong>{formatCount(stats.rowCount)}</strong>
-                <small>{formatRange(stats)}</small>
+            <div className="trace-metrics-grid">
+              <div className="trace-metric-card">
+                <div className="trace-metric-content">
+                  <span>日志总条数</span>
+                  <strong>{formatCount(stats.rowCount)}</strong>
+                  <small>{formatRange(stats)}</small>
+                </div>
               </div>
-              <div className="trace-metric">
-                <span>磁盘占用</span>
-                <strong>{formatBytes(stats.databaseBytes)}</strong>
-                <small>主库及 WAL/SHM</small>
+              <div className="trace-metric-card">
+                <div className="trace-metric-content">
+                  <span>磁盘占用空间</span>
+                  <strong>{formatBytes(stats.databaseBytes)}</strong>
+                  <small>主数据库及 WAL/SHM</small>
+                </div>
               </div>
-              <div className="trace-metric">
-                <span>近 7 天写入估算</span>
-                <strong>{formatBytes(stats.recentEstimatedBytes)}</strong>
-                <small>{formatCount(stats.recentRowCount)} 条日志</small>
+              <div className="trace-metric-card">
+                <div className="trace-metric-content">
+                  <span>近 7 天写入</span>
+                  <strong>{formatBytes(stats.recentEstimatedBytes)}</strong>
+                  <small>{formatCount(stats.recentRowCount)} 条增量日志</small>
+                </div>
               </div>
-              <div className="trace-metric">
-                <span>日志内容估算</span>
-                <strong>{formatBytes(stats.estimatedLogBytes)}</strong>
-                <small>按 estimated_bytes 汇总</small>
+              <div className="trace-metric-card">
+                <div className="trace-metric-content">
+                  <span>内容字节估算</span>
+                  <strong>{formatBytes(stats.estimatedLogBytes)}</strong>
+                  <small>按 estimated_bytes 汇总</small>
+                </div>
               </div>
             </div>
 
             <div className="trace-detail-grid">
               <section className="trace-daily">
                 <div className="trace-subheading">
-                  <strong>近 7 天写入</strong>
-                  <span>内容估算 / 条数</span>
+                  <strong>近 7 天写入走势</strong>
+                  <span>估算容量 / 日志条数</span>
                 </div>
                 <div
                   className="trace-bars"
@@ -204,12 +222,17 @@ export function TraceLogModule({
                         key={item.date}
                         aria-label={`${item.date}，${formatBytes(item.estimatedBytes)}，${formatCount(item.rows)} 条`}
                       >
-                        <span>{item.date.slice(5).replace("-", "/")}</span>
+                        <span className="trace-bar-date">{item.date.slice(5).replace("-", "/")}</span>
                         <div className="trace-bar-track">
-                          <span style={{ width: `${width}%` }} />
+                          <div
+                            className="trace-bar-fill"
+                            style={{ width: `${Math.max(width, 3)}%` }}
+                          />
                         </div>
-                        <strong>{formatBytes(item.estimatedBytes)}</strong>
-                        <small>{formatCount(item.rows)} 条</small>
+                        <div className="trace-bar-meta">
+                          <strong>{formatBytes(item.estimatedBytes)}</strong>
+                          <small>{formatCount(item.rows)} 条</small>
+                        </div>
                       </div>
                     );
                   })}
@@ -218,29 +241,33 @@ export function TraceLogModule({
 
               <section className="trace-breakdown">
                 <div className="trace-subheading">
-                  <strong>级别分布</strong>
-                  <span>按内容估算排序</span>
+                  <strong>级别分布 (Levels)</strong>
+                  <span>按容量降序</span>
                 </div>
                 <div className="trace-levels">
                   {stats.levels.length ? stats.levels.map((item) => (
-                    <div className="trace-level" key={item.name}>
-                      <span>{item.name}</span>
-                      <strong>{formatCount(item.rows)}</strong>
-                      <small>{formatBytes(item.estimatedBytes)}</small>
+                    <div className="trace-level-pill" key={item.name}>
+                      <span className="trace-level-name">{item.name}</span>
+                      <div className="trace-level-values">
+                        <strong>{formatCount(item.rows)}</strong>
+                        <small>{formatBytes(item.estimatedBytes)}</small>
+                      </div>
                     </div>
                   )) : <span className="trace-none">暂无级别数据</span>}
                 </div>
 
                 <div className="trace-subheading trace-target-heading">
-                  <strong>高占用 Target</strong>
+                  <strong>高占用 Targets</strong>
                   <span>Top {stats.topTargets.length}</span>
                 </div>
                 <div className="trace-targets">
                   {stats.topTargets.length ? stats.topTargets.map((item) => (
-                    <div className="trace-target" key={item.name} title={item.name}>
-                      <span>{item.name}</span>
-                      <strong>{formatBytes(item.estimatedBytes)}</strong>
-                      <small>{formatCount(item.rows)} 条</small>
+                    <div className="trace-target-pill" key={item.name} title={item.name}>
+                      <span className="trace-target-name">{item.name}</span>
+                      <div className="trace-target-values">
+                        <strong>{formatBytes(item.estimatedBytes)}</strong>
+                        <small>{formatCount(item.rows)} 条</small>
+                      </div>
                     </div>
                   )) : <span className="trace-none">暂无 Target 数据</span>}
                 </div>
@@ -250,7 +277,7 @@ export function TraceLogModule({
             {stats.errors.length > 0 && (
               <div className="trace-warning" title={stats.errors.join("\n")}>
                 <CircleAlert size={15} />
-                <span>{stats.errors.length} 个日志库统计异常，已保留其余快照</span>
+                <span>{stats.errors.length} 个日志库统计异常，已保留其余快照数据</span>
               </div>
             )}
           </>
@@ -259,3 +286,4 @@ export function TraceLogModule({
     </section>
   );
 }
+

@@ -1,10 +1,84 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use codex_plus_core::codex_sqlite::codex_session_db_paths_from_home;
+use codex_plus_core::models::SessionRef;
+use codex_plus_data::{BackupStore, SQLiteStorageAdapter};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use serde_json::{Value, json};
 
 const FALLBACK_SESSION_NAME: &str = "未命名会话";
 const MAX_SESSION_NAME_CHARS: usize = 80;
+const MAX_THREAD_SORT_KEYS: usize = 200;
+
+pub fn thread_sort_keys(home: &Path, sessions: &[SessionRef]) -> Value {
+    let sessions = sessions
+        .iter()
+        .filter(|session| !session.session_id.trim().is_empty())
+        .take(MAX_THREAD_SORT_KEYS)
+        .cloned()
+        .collect::<Vec<_>>();
+    if sessions.is_empty() {
+        return json!({"status": "ok", "sort_keys": []});
+    }
+
+    let backup_store = BackupStore::new(home.join("backups_state/codey-thread-sort"));
+    let mut latest_by_session = HashMap::<String, Value>::new();
+    for path in codex_session_db_paths_from_home(home) {
+        if !path.exists() {
+            continue;
+        }
+        let result =
+            SQLiteStorageAdapter::new(path, backup_store.clone()).codex_thread_sort_keys(&sessions);
+        let Some(sort_keys) = result.get("sort_keys").and_then(Value::as_array) else {
+            continue;
+        };
+        for sort_key in sort_keys {
+            let Some(session_id) = sort_key.get("session_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let should_replace = latest_by_session
+                .get(session_id)
+                .is_none_or(|current| timestamp_ms(sort_key) > timestamp_ms(current));
+            if should_replace {
+                latest_by_session.insert(session_id.to_string(), sort_key.clone());
+            }
+        }
+    }
+
+    let sort_keys = sessions
+        .iter()
+        .filter_map(|session| {
+            let session_id = session
+                .session_id
+                .strip_prefix("local:")
+                .unwrap_or(&session.session_id);
+            latest_by_session.remove(session_id)
+        })
+        .collect::<Vec<_>>();
+    json!({"status": "ok", "sort_keys": sort_keys})
+}
+
+fn timestamp_ms(payload: &Value) -> i64 {
+    payload
+        .get("updated_at_ms")
+        .and_then(json_i64)
+        .or_else(|| {
+            payload
+                .get("updated_at")
+                .and_then(json_i64)
+                .map(|seconds| seconds.saturating_mul(1_000))
+        })
+        .or_else(|| payload.get("created_at_ms").and_then(json_i64))
+        .unwrap_or_default()
+}
+
+fn json_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
 
 pub fn resolve_session_name_with_preferred(
     home: &Path,
@@ -96,8 +170,86 @@ fn clean_session_name(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_plus_core::models::SessionRef;
     use rusqlite::params;
     use tempfile::tempdir;
+
+    fn create_thread_database(path: &Path, timestamp_column: &str, rows: &[(&str, i64)]) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let connection = Connection::open(path).unwrap();
+        connection
+            .execute(
+                &format!(
+                    "CREATE TABLE threads (
+                        id TEXT PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        rollout_path TEXT NOT NULL,
+                        {timestamp_column} INTEGER
+                    )"
+                ),
+                [],
+            )
+            .unwrap();
+        for (id, timestamp) in rows {
+            connection
+                .execute(
+                    &format!(
+                        "INSERT INTO threads (id, title, rollout_path, {timestamp_column})
+                         VALUES (?1, ?2, ?3, ?4)"
+                    ),
+                    params![
+                        id,
+                        format!("Title {id}"),
+                        format!("/tmp/{id}.jsonl"),
+                        timestamp
+                    ],
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn returns_latest_thread_sort_keys_across_codex_databases() {
+        let home = tempdir().unwrap();
+        create_thread_database(
+            &home.path().join("sqlite/codex-dev.db"),
+            "updated_at_ms",
+            &[("thread-1", 3_600_000), ("thread-2", 7_200_000)],
+        );
+        create_thread_database(
+            &home.path().join("state_5.sqlite"),
+            "updated_at",
+            &[("thread-1", 10_800)],
+        );
+        let sessions = vec![
+            SessionRef::new("local:thread-1", "One").unwrap(),
+            SessionRef::new("thread-2", "Two").unwrap(),
+            SessionRef::new("missing", "Missing").unwrap(),
+        ];
+
+        assert_eq!(
+            thread_sort_keys(home.path(), &sessions),
+            json!({
+                "status": "ok",
+                "sort_keys": [
+                    {
+                        "session_id": "thread-1",
+                        "updated_at": 10_800,
+                        "updated_at_ms": null,
+                        "created_at_ms": null
+                    },
+                    {
+                        "session_id": "thread-2",
+                        "updated_at": null,
+                        "updated_at_ms": 7_200_000,
+                        "created_at_ms": null
+                    }
+                ]
+            })
+        );
+    }
 
     #[test]
     fn resolves_the_saved_thread_title() {

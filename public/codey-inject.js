@@ -17,6 +17,8 @@
   const sessionDeletePopoverId = "codey-session-delete-popover";
   const sidebarActionTooltipId = "codey-sidebar-action-tooltip";
   const threadStatusAttribute = "data-codey-thread-traffic-status";
+  const threadUpdatedAtAttribute = "data-codey-thread-updated-at";
+  const threadUpdatedAtMsAttribute = "data-codey-thread-updated-at-ms";
   const settingsIcon = `
     <svg viewBox="0 0 350 350" aria-hidden="true" focusable="false">
       <path d="M70 301c-16 0-24-18-13-30l73-77c8-8 8-20 0-28L65 101C50 86 57 61 78 57c9-2 18 1 25 8l91 91c18 18 18 46 0 64l-66 66c-6 6-2 15 7 15h183" />
@@ -53,6 +55,11 @@
   let codexSignalDispatcherPromise = null;
   let sidebarActionTooltipTimer = 0;
   let sidebarActionTooltipAnchor = null;
+  let threadUpdatedAtFetchTimer = 0;
+  let threadUpdatedAtFetchInFlight = false;
+  const threadUpdatedAtCache = new Map();
+  const threadUpdatedAtRequestedAt = new Map();
+  const pendingThreadUpdatedAtRefs = new Map();
   const hardDeletedMessageKeys = new Set();
   const queryWithin = (root, selector) => {
     const matches = [];
@@ -213,6 +220,10 @@
       [data-app-action-sidebar-thread-row][${threadStatusAttribute}]:has(:focus-visible)::after { display: none !important; }
       @keyframes codey-thread-status-blink { 0%, 100% { opacity: 1; } 50% { opacity: .24; } }
       @media (prefers-reduced-motion: reduce) { [data-app-action-sidebar-thread-row][${threadStatusAttribute}="running"]::after { animation: none; } }
+      [data-app-action-sidebar-thread-row] [${threadUpdatedAtAttribute}] { display: block; flex: 0 0 auto; min-width: 26px; margin-inline-start: auto; color: inherit; font: 400 12px/16px system-ui, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: 0; text-align: end; opacity: .52; pointer-events: none; white-space: nowrap; }
+      [data-app-action-sidebar-thread-row][${threadStatusAttribute}] [${threadUpdatedAtAttribute}] { display: none; }
+      [data-app-action-sidebar-thread-row]:hover [${threadUpdatedAtAttribute}],
+      [data-app-action-sidebar-thread-row]:has(:focus-visible) [${threadUpdatedAtAttribute}] { opacity: 0; }
       [${sessionExportAttribute}], [${tasksImportAttribute}], [${sessionDeleteAttribute}] { -webkit-app-region: no-drag !important; flex: 0 0 auto; pointer-events: auto !important; }
       [${projectImportAttribute}] { -webkit-app-region: no-drag !important; position: absolute; top: 50%; right: 62px; z-index: 35; flex: 0 0 auto; transform: translateY(-50%); opacity: 0; pointer-events: auto !important; transition: opacity .15s ease; }
       [data-app-action-sidebar-project-row][data-app-action-sidebar-project-id]:hover > [${projectImportAttribute}],
@@ -715,6 +726,159 @@
       }
       row.setAttribute(threadStatusAttribute, state);
     });
+  };
+
+  const numericThreadTimestamp = (value) => {
+    const timestamp = Number(value);
+    return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
+  };
+
+  const threadTimestampMsFromPayload = (payload) => (
+    numericThreadTimestamp(payload?.updated_at_ms ?? payload?.updatedAtMs)
+    || numericThreadTimestamp(payload?.updated_at ?? payload?.updatedAt) * 1_000
+    || numericThreadTimestamp(payload?.created_at_ms ?? payload?.createdAtMs)
+  );
+
+  const formatRelativeThreadTime = (timestampMs, nowMs = Date.now()) => {
+    const timestamp = numericThreadTimestamp(timestampMs);
+    if (!timestamp) return "";
+    const elapsedSeconds = Math.max(0, Math.floor((nowMs - timestamp) / 1_000));
+    if (elapsedSeconds < 60) return "刚刚";
+    const minutes = Math.floor(elapsedSeconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h`;
+    const days = Math.floor(hours / 24);
+    if (days < 30) return `${days}d`;
+    const months = Math.floor(days / 30);
+    if (days < 365) return `${months}mo`;
+    return `${Math.floor(days / 365)}y`;
+  };
+
+  const threadIdentityNode = (row) => (
+    row.hasAttribute?.("data-app-action-sidebar-thread-id")
+      ? row
+      : row.querySelector?.("[data-app-action-sidebar-thread-id]")
+  );
+
+  const threadUpdatedAtMount = (row) => {
+    const contentRoot = [...(row.children || [])].find((child) => (
+      String(child.className || "").includes("h-full w-full items-center")
+    ));
+    if (contentRoot) return contentRoot;
+    const titleNode = row.querySelector?.(
+      "[data-thread-title], [data-app-action-sidebar-thread-title], .truncate.select-none, .truncate.text-base",
+    );
+    return titleNode?.parentElement || row;
+  };
+
+  const updateThreadUpdatedAt = (row, timestampMs) => {
+    if (!(row instanceof HTMLElement)) return;
+    const timestamp = numericThreadTimestamp(timestampMs);
+    let label = row.querySelector?.(`[${threadUpdatedAtAttribute}]`);
+    if (!timestamp) {
+      label?.remove();
+      return;
+    }
+    if (!(label instanceof HTMLElement)) {
+      label = document.createElement("time");
+      label.setAttribute(threadUpdatedAtAttribute, "true");
+      threadUpdatedAtMount(row)?.appendChild(label);
+    }
+    const relative = formatRelativeThreadTime(timestamp);
+    const date = new Date(timestamp);
+    const fullTime = Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+    label.setAttribute(threadUpdatedAtMsAttribute, String(timestamp));
+    label.setAttribute("datetime", Number.isNaN(date.getTime()) ? "" : date.toISOString());
+    label.setAttribute("aria-label", `最后消息：${relative}${fullTime ? `（${fullTime}）` : ""}`);
+    label.title = fullTime ? `最后消息：${fullTime}` : "最后消息时间";
+    label.textContent = relative;
+  };
+
+  const renderCachedThreadUpdatedAt = (row) => {
+    const identity = threadIdentityNode(row);
+    if (!(identity instanceof HTMLElement)) return "";
+    const sessionId = threadSessionIdFromRow(identity);
+    const timestamp = threadUpdatedAtCache.get(sessionId);
+    updateThreadUpdatedAt(row, timestamp || 0);
+    return sessionId;
+  };
+
+  const flushThreadUpdatedAtFetch = async () => {
+    if (threadUpdatedAtFetchInFlight || !pendingThreadUpdatedAtRefs.size) return;
+    const refs = [...pendingThreadUpdatedAtRefs.values()].slice(0, 200);
+    refs.forEach(({ session_id: sessionId }) => pendingThreadUpdatedAtRefs.delete(sessionId));
+    threadUpdatedAtFetchInFlight = true;
+    try {
+      const result = await callBridge("/thread-sort-keys", { sessions: refs });
+      if (result?.status !== "ok" || !Array.isArray(result.sort_keys)) {
+        refs.forEach(({ session_id: sessionId }) => threadUpdatedAtRequestedAt.delete(sessionId));
+        return;
+      }
+      const returnedSessionIds = new Set();
+      result.sort_keys.forEach((item) => {
+        const sessionId = normalizeThreadSessionId(item?.session_id);
+        const timestamp = threadTimestampMsFromPayload(item);
+        if (!sessionId) return;
+        returnedSessionIds.add(sessionId);
+        if (timestamp) threadUpdatedAtCache.set(sessionId, timestamp);
+        else threadUpdatedAtCache.delete(sessionId);
+      });
+      refs.forEach(({ session_id: sessionId }) => {
+        if (!returnedSessionIds.has(sessionId)) threadUpdatedAtCache.delete(sessionId);
+      });
+      queryWithin(document, "[data-app-action-sidebar-thread-row]").forEach((row) => {
+        if (row instanceof HTMLElement) renderCachedThreadUpdatedAt(row);
+      });
+    } catch {
+      refs.forEach(({ session_id: sessionId }) => threadUpdatedAtRequestedAt.delete(sessionId));
+    } finally {
+      threadUpdatedAtFetchInFlight = false;
+      if (pendingThreadUpdatedAtRefs.size) {
+        threadUpdatedAtFetchTimer = window.setTimeout(() => {
+          threadUpdatedAtFetchTimer = 0;
+          void flushThreadUpdatedAtFetch();
+        }, 40);
+      }
+    }
+  };
+
+  const scheduleThreadUpdatedAtFetch = () => {
+    if (threadUpdatedAtFetchTimer || threadUpdatedAtFetchInFlight || !pendingThreadUpdatedAtRefs.size) return;
+    threadUpdatedAtFetchTimer = window.setTimeout(() => {
+      threadUpdatedAtFetchTimer = 0;
+      void flushThreadUpdatedAtFetch();
+    }, 40);
+  };
+
+  const installThreadUpdatedTimes = (root = document, forceRefresh = false) => {
+    const now = Date.now();
+    queryWithin(root, "[data-app-action-sidebar-thread-row]").forEach((row) => {
+      if (!(row instanceof HTMLElement)) return;
+      const sessionId = renderCachedThreadUpdatedAt(row);
+      if (!sessionId || sessionId.startsWith("client-new-thread:")) return;
+      if (!forceRefresh && now - (threadUpdatedAtRequestedAt.get(sessionId) || 0) < 30_000) return;
+      const identity = threadIdentityNode(row);
+      pendingThreadUpdatedAtRefs.set(sessionId, {
+        session_id: sessionId,
+        title: String(
+          identity?.getAttribute("data-app-action-sidebar-thread-title") || "",
+        ).trim(),
+      });
+      threadUpdatedAtRequestedAt.set(sessionId, now);
+    });
+    scheduleThreadUpdatedAtFetch();
+  };
+
+  const renderThreadUpdatedTimeLabels = () => {
+    queryWithin(document, "[data-app-action-sidebar-thread-row]").forEach((row) => {
+      if (row instanceof HTMLElement) renderCachedThreadUpdatedAt(row);
+    });
+  };
+
+  const refreshThreadUpdatedTimes = (forceRefresh = false) => {
+    renderThreadUpdatedTimeLabels();
+    installThreadUpdatedTimes(document, forceRefresh);
   };
 
   const codexAppAssetUrls = () => [...new Set([
@@ -1323,6 +1487,7 @@
     installSessionDeleteButtons(root);
     installProjectImportButtons(root);
     installThreadStatusIndicators(root);
+    installThreadUpdatedTimes(root);
     installMessageSelection(root);
     if (syncTitles) syncSidebarTitles(root);
   };
@@ -1336,6 +1501,10 @@
   window.__codeyThreadSessionIdFromRow = threadSessionIdFromRow;
   window.__codeyThreadStatusFromRow = threadStatusFromRow;
   window.__codeyInstallThreadStatusIndicators = installThreadStatusIndicators;
+  window.__codeyFormatRelativeThreadTime = formatRelativeThreadTime;
+  window.__codeyThreadTimestampMsFromPayload = threadTimestampMsFromPayload;
+  window.__codeyUpdateThreadUpdatedAt = updateThreadUpdatedAt;
+  window.__codeyInstallThreadUpdatedTimes = installThreadUpdatedTimes;
   window.__codeyRefreshRecentLocalSessions = refreshRecentLocalSessions;
   window.__codeyExportSession = exportSession;
   window.__codeyImportSessionFile = importSessionFile;
@@ -1357,6 +1526,7 @@
     `[${tasksImportAttribute}]`,
     `[${projectImportAttribute}]`,
     `[${sessionDeleteAttribute}]`,
+    `[${threadUpdatedAtAttribute}]`,
     "[data-codey-message-select]",
   ].join(", ");
   const scanBoundarySelector = [
@@ -1478,11 +1648,21 @@
   });
   if (typeof document.addEventListener === "function") {
     document.addEventListener("visibilitychange", wakeSessionWatcher);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState !== "hidden") refreshThreadUpdatedTimes(true);
+    });
     document.addEventListener("pointerdown", wakeSessionWatcher, { capture: true, passive: true });
     document.addEventListener("keydown", wakeSessionWatcherFromKey, true);
   }
   if (typeof window.addEventListener === "function") {
     window.addEventListener("focus", wakeSessionWatcher);
+    window.addEventListener("focus", () => refreshThreadUpdatedTimes(true));
     window.addEventListener("pageshow", wakeSessionWatcher);
+    window.addEventListener("pageshow", () => refreshThreadUpdatedTimes(true));
+  }
+  if (typeof window.setInterval === "function") {
+    window.setInterval(() => {
+      if (document.visibilityState !== "hidden") renderThreadUpdatedTimeLabels();
+    }, 60_000);
   }
 })();

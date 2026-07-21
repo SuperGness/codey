@@ -6,8 +6,10 @@ import {
   CircleAlert,
   CircleCheck,
   Cpu,
+  FolderOpen,
   GitBranch,
   History,
+  LayoutGrid,
   LoaderCircle,
   PlugZap,
   Power,
@@ -25,6 +27,7 @@ import {
 import { invoke } from "./api";
 import { formatBytes, TraceLogModule, type TraceLogStats } from "./TraceLogModule";
 import {
+  BorderBeam,
   MagicBadge as Badge,
   MagicButton as Button,
   MagicCard as Card,
@@ -173,6 +176,7 @@ export function App({ embedded = false, onClose }: AppProps) {
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
   const [traceSnapshotStale, setTraceSnapshotStale] = useState(false);
+  const [activeTab, setActiveTab] = useState<"all" | "route" | "system" | "logs">("all");
 
   const provider = ccSwitchStatus?.provider;
   const officialSlugs = useMemo(
@@ -551,123 +555,111 @@ export function App({ embedded = false, onClose }: AppProps) {
   return (
     <main className={`app-shell${embedded ? " embedded" : ""}`} ref={setPortalContainer}>
       <a className="skip-link" href="#codey-settings-content">跳至设置内容</a>
-      <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark"><Sparkles size={17} /></span>
-          <div>
-            <strong>Codey</strong>
-            <span>AI 控制中心</span>
-          </div>
-        </div>
-        <div className="topbar-actions">
-          <Badge
-            className="header-route-tag"
-            variant={provider.official ? "info" : "violet"}
-          >
-            <Zap size={13} aria-hidden="true" />
-            当前线路 · {provider.name}
-          </Badge>
-          <div className={`runtime-summary ${status.running ? "online" : ""}`}>
-            <span className="runtime-dot" />
-            <div>
-              <strong>{status.running ? "服务运行中" : "服务未运行"}</strong>
-              <small>{status.running ? "Codex 已连接" : "等待启动"}</small>
-            </div>
-          </div>
-          <ShimmerButton
-            className="save-button"
-            disabled={!dirty || isBusy}
-            onClick={() => void saveCurrent()}
-          >
-            {busy === "save"
-              ? <LoaderCircle className="spinner" aria-hidden="true" />
-              : dirty
-                ? <Save aria-hidden="true" />
-                : <Check aria-hidden="true" />}
-            {dirty ? "保存更改" : "已保存"}
-          </ShimmerButton>
-          {embedded && (
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label="关闭设置"
-              onClick={onClose}
-            >
-              <X aria-hidden="true" />
-            </Button>
-          )}
-        </div>
-      </header>
 
       <div className="page-scroll">
         <div className="page" id="codey-settings-content">
-          <section className="status-overview" aria-labelledby="status-overview-title">
-            <div className="section-title overview-title">
-              <div>
-                <span className="section-kicker">Live overview</span>
-                <h1 id="status-overview-title">当前运行状态</h1>
-                <p>状态来自 Codey 运行时与 Codex 客户端，本页打开时自动同步。</p>
-              </div>
-              <Badge variant="outline">
-                <Activity size={12} aria-hidden="true" />
-                实时快照
+          <div className="page-header-actions">
+            <div className="page-header-left">
+              <strong>Codey 配置</strong>
+              <Badge variant={provider.official ? "info" : "violet"}>
+                {provider.name}
               </Badge>
+              <div className={`runtime-summary ${status.running ? "online" : ""}`}>
+                <span className="runtime-dot" />
+                <small>{status.running ? "Codex 在线" : "未启动"}</small>
+              </div>
             </div>
-            <div className="status-list" role="list">
-              {statusCards.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <div
-                    className={`status-row status-row-${item.tone}`}
-                    key={item.title}
-                    role="listitem"
-                  >
-                    <span className="status-row-icon"><Icon size={18} /></span>
-                    <div className="status-row-copy">
-                      <div className="status-row-heading">
+            <div className="page-header-right">
+              <ShimmerButton
+                className="save-button"
+                disabled={!dirty || isBusy}
+                onClick={() => void saveCurrent()}
+              >
+                {busy === "save"
+                  ? <LoaderCircle className="spinner" aria-hidden="true" />
+                  : dirty
+                    ? <Save aria-hidden="true" />
+                    : <Check aria-hidden="true" />}
+                {dirty ? "保存更改" : "已保存"}
+              </ShimmerButton>
+              {embedded && (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="关闭设置"
+                  onClick={onClose}
+                >
+                  <X aria-hidden="true" />
+                </Button>
+              )}
+            </div>
+          </div>
+          {(activeTab === "all" || activeTab === "system") && (
+            <section className="status-overview" aria-labelledby="status-overview-title">
+              <div className="section-title overview-title">
+                <div>
+                  <span className="section-kicker">Live snapshot</span>
+                  <h1 id="status-overview-title">当前运行状态</h1>
+                  <p>状态来自 Codey 运行时与 Codex 客户端，本页打开时自动同步。</p>
+                </div>
+                <Badge variant="outline">实时快照</Badge>
+              </div>
+              <div className="status-grid" role="list">
+                {statusCards.map((item) => {
+                  return (
+                    <Card
+                      className={`status-card status-card-${item.tone}`}
+                      key={item.title}
+                      role="listitem"
+                    >
+                      <div className="status-card-header">
                         <h3>{item.title}</h3>
                         <Badge variant={item.tone}>{item.label}</Badge>
                       </div>
-                      <p>{item.description}</p>
-                      <span className={`status-row-detail${item.fullDetail ? " status-row-detail-full" : ""}`}>
-                        {item.detail}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </section>
+                      <div className="status-card-body">
+                        <p>{item.description}</p>
+                      </div>
+                      <div className="status-card-footer">
+                        <span className={`status-card-detail${item.fullDetail ? " status-card-detail-full" : ""}`}>
+                          {item.detail}
+                        </span>
+                      </div>
+                    </Card>
+                  );
+                })}
+              </div>
+            </section>
+          )}
 
           <div className="configuration-heading">
             <span className="section-kicker">Configuration</span>
-            <h2>其他配置</h2>
+            <h2>{activeTab === "all" ? "系统配置中心" : activeTab === "route" ? "线路与模型配置" : activeTab === "system" ? "系统与精简策略" : "诊断与通知配置"}</h2>
             <p>管理线路与模型、应用精简策略，以及通知和日志。</p>
           </div>
 
-          <div className={`runtime-action-bar${restartPending ? " pending" : ""}`}>
-            <span className="runtime-action-icon">
-              <RefreshCw
-                className={busy === "close" || status.closeInProgress ? "spinner" : ""}
-                size={17}
-                aria-hidden="true"
-              />
-            </span>
-            <div className="runtime-action-copy" aria-live="polite">
-              <strong>
-                {restartPending
-                  ? "配置等待重启"
-                  : status.running
-                    ? "当前配置已应用"
-                    : "Codex 尚未启动"}
-              </strong>
-              <small>
-                {restartPending
-                  ? "模型目录或启动参数将在重启后生效"
-                  : status.running
-                    ? "当前线路与运行参数已载入"
-                    : "请手动运行 Codey 应用当前配置"}
-              </small>
+          <div className={`runtime-action-bar${restartPending ? " pending" : status.running ? " running" : ""}`}>
+            <div className="runtime-action-left">
+              <div className="runtime-action-copy" aria-live="polite">
+                <div className="runtime-action-title-row">
+                  <strong>
+                    {restartPending
+                      ? "配置修改等待重启生效"
+                      : status.running
+                        ? "当前配置已成功载入运行"
+                        : "Codex 尚未启动"}
+                  </strong>
+                  <Badge variant={restartPending ? "warning" : status.running ? "success" : "secondary"}>
+                    {restartPending ? "等待重启" : status.running ? "在线" : "未启动"}
+                  </Badge>
+                </div>
+                <small>
+                  {restartPending
+                    ? "模型目录或启动参数更改将在重启 Codey / Codex 后载入"
+                    : status.running
+                      ? "当前线路与运行参数已就绪"
+                      : "请手动运行 Codey 应用当前配置"}
+                </small>
+              </div>
             </div>
             <Button
               variant={restartPending ? "default" : "outline"}
@@ -677,342 +669,351 @@ export function App({ embedded = false, onClose }: AppProps) {
             >
               {busy === "close" || status.closeInProgress
                 ? <LoaderCircle className="spinner" aria-hidden="true" />
-                : <Power aria-hidden="true" />}
-              {status.running ? "关闭 Codex" : "请手动启动 Codey"}
+                : null}
+              {status.running ? "关闭 Codex" : "未运行"}
             </Button>
           </div>
 
-          <div className="dashboard-grid">
-            <div className="dashboard-main-column">
-              <section className="route-section" aria-labelledby="route-title">
-            <div className="section-title">
-              <div>
-                <h2 id="route-title">线路与模型</h2>
-                <p>{ccSwitchStatus.available ? "cc-switch 当前配置" : "本地 Codex 直登配置"}</p>
-              </div>
-              <div className="route-heading-actions">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  disabled={dirty || isBusy}
-                  onClick={() => void syncCurrentProvider()}
-                >
-                  <RefreshCw className={busy === "sync-provider" ? "spinner" : ""} aria-hidden="true" />
-                  同步当前线路
-                </Button>
-              </div>
-            </div>
-
-            <Card className="route-card">
-              <div className="provider-summary">
-                <div className="provider-identity">
-                  <span className="column-icon"><Server size={16} /></span>
-                  <div>
-                    <strong>{provider.name}</strong>
-                    <small>{provider.id}</small>
-                  </div>
-                </div>
-                <div className="provider-meta">
-                  <div>
-                    <span>类型</span>
-                    <strong>{provider.official ? "OpenAI 官方" : "第三方 API"}</strong>
-                  </div>
-                  <div>
-                    <span>协议</span>
-                    <strong>{provider.protocol === "responses" ? "Responses" : "Chat Completions"}</strong>
-                  </div>
-                  <div className="provider-endpoint">
-                    <span>地址</span>
-                    <strong>{provider.official ? "ChatGPT 登录" : provider.baseUrl}</strong>
-                  </div>
-                  <div>
-                    <span>推理上限</span>
-                    <strong>极高</strong>
-                  </div>
-                </div>
-              </div>
-
-              <div className="catalog-workspace">
-                <div className="catalog-heading">
-                  <div className="column-heading">
-                    <span className="column-icon"><GitBranch size={16} /></span>
+          <div className={`dashboard-grid tab-view-${activeTab}`}>
+            {(activeTab === "all" || activeTab === "route") && (
+              <div className="dashboard-main-column">
+                <section className="route-section" aria-labelledby="route-title">
+                  <div className="section-title">
                     <div>
-                      <strong>模型列表</strong>
-                      <small>{provider.official ? "官方目录" : `已发现 ${modelState.upstreamModels.length} 个上游模型`}</small>
+                      <h2 id="route-title">线路与模型</h2>
+                      <p>{ccSwitchStatus.available ? "cc-switch 当前配置" : "本地 Codex 直登配置"}</p>
+                    </div>
+                    <div className="route-heading-actions">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={dirty || isBusy}
+                        onClick={() => void syncCurrentProvider()}
+                      >
+                        <RefreshCw className={busy === "sync-provider" ? "spinner" : ""} aria-hidden="true" />
+                        同步当前线路
+                      </Button>
                     </div>
                   </div>
-                  {!provider.official && (
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      disabled={isBusy}
-                      onClick={() => void fetchCurrentModels()}
-                    >
-                      <RefreshCw className={busy === "fetch-models" ? "spinner" : ""} aria-hidden="true" />
-                      同步模型
-                    </Button>
-                  )}
-                </div>
 
-                <div className="model-groups">
-                  <section className="model-group">
-                    <div className="model-group-title">
+                  <Card className="route-card">
+                    <div className="provider-summary">
+                      <div className="provider-identity">
+                        <span className="column-icon"><Server size={16} /></span>
                         <div>
-                          <strong>官方模型</strong>
-                          <small>{modelState.officialModels.filter((model) => model.supported).length} / {modelState.officialModels.length}</small>
+                          <strong>{provider.name}</strong>
+                          <small>{provider.id}</small>
                         </div>
-                      <Badge variant="info">OpenAI</Badge>
+                      </div>
+                      <div className="provider-meta">
+                        <div>
+                          <span>类型</span>
+                          <strong>{provider.official ? "OpenAI 官方" : "第三方 API"}</strong>
+                        </div>
+                        <div>
+                          <span>协议</span>
+                          <strong>{provider.protocol === "responses" ? "Responses" : "Chat Completions"}</strong>
+                        </div>
+                        <div className="provider-endpoint">
+                          <span>地址</span>
+                          <strong>{provider.official ? "ChatGPT 登录" : provider.baseUrl}</strong>
+                        </div>
+                        <div>
+                          <span>推理上限</span>
+                          <strong>极高</strong>
+                        </div>
+                      </div>
                     </div>
-                    <div className="catalog-model-list">
-                      {modelState.officialModels.map((model) => (
-                        <div
-                          className={`catalog-model-row${model.supported ? "" : " unsupported"}`}
-                          key={model.slug}
-                          aria-disabled={!model.supported}
-                        >
-                          <span className="model-availability"><Check size={12} /></span>
+
+                    <div className="catalog-workspace">
+                      <div className="catalog-heading">
+                        <div className="column-heading">
+                          <span className="column-icon"><GitBranch size={16} /></span>
                           <div>
-                            <strong>{model.displayName}</strong>
-                            <small>{model.slug}</small>
+                            <strong>模型列表</strong>
+                            <small>{provider.official ? "官方目录" : `已发现 ${modelState.upstreamModels.length} 个上游模型`}</small>
                           </div>
-                          <Badge variant={model.supported ? "success" : "secondary"}>
-                            {model.supported ? "支持" : "不可用"}
+                        </div>
+                        {!provider.official && (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            disabled={isBusy}
+                            onClick={() => void fetchCurrentModels()}
+                          >
+                            <RefreshCw className={busy === "fetch-models" ? "spinner" : ""} aria-hidden="true" />
+                            同步模型
+                          </Button>
+                        )}
+                      </div>
+
+                      <div className="model-groups">
+                        <section className="model-group">
+                          <div className="model-group-title">
+                            <div>
+                              <strong>官方模型</strong>
+                              <small>{modelState.officialModels.filter((model) => model.supported).length} / {modelState.officialModels.length}</small>
+                            </div>
+                            <Badge variant="info">OpenAI</Badge>
+                          </div>
+                          <div className="catalog-model-list">
+                            {modelState.officialModels.map((model) => (
+                              <div
+                                className={`catalog-model-row${model.supported ? "" : " unsupported"}`}
+                                key={model.slug}
+                                aria-disabled={!model.supported}
+                              >
+                                <span className="model-availability"><Check size={12} /></span>
+                                <div>
+                                  <strong>{model.displayName}</strong>
+                                  <small>{model.slug}</small>
+                                </div>
+                                <Badge variant={model.supported ? "success" : "secondary"}>
+                                  {model.supported ? "支持" : "不可用"}
+                                </Badge>
+                              </div>
+                            ))}
+                            {modelState.officialModels.length === 0 && <div className="empty-state">暂未读取到官方模型</div>}
+                          </div>
+                        </section>
+
+                        {!provider.official && (
+                          <section className="model-group">
+                            <div className="model-group-title">
+                              <div>
+                                <strong>三方模型</strong>
+                                <small>{modelState.thirdPartyModels.length}</small>
+                              </div>
+                              <Badge variant="violet">API</Badge>
+                            </div>
+                            <div className="catalog-model-list">
+                              {modelState.thirdPartyModels.map((model) => (
+                                <div className="catalog-model-row third-party" key={model}>
+                                  <span className="model-availability"><Check size={12} /></span>
+                                  <div>
+                                    <strong>{model}</strong>
+                                    <small>第三方模型</small>
+                                  </div>
+                                  <Badge variant="success">已添加</Badge>
+                                </div>
+                              ))}
+                              {modelState.thirdPartyModels.length === 0 && <div className="empty-state">尚未添加三方模型</div>}
+                            </div>
+                          </section>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="readonly-note">
+                      <Server size={14} />
+                      <span>
+                        {ccSwitchStatus.available
+                          ? "线路配置由 cc-switch 管理，Codey 仅在启动时读取当前线路"
+                          : "未安装 cc-switch，Codey 读取本地 Codex 登录与 API 配置"}
+                      </span>
+                      <Badge variant="secondary">只读</Badge>
+                    </div>
+                  </Card>
+                </section>
+              </div>
+            )}
+
+            {(activeTab === "all" || activeTab === "system") && (
+              <div className="dashboard-side-column">
+                <section className="secondary-section" aria-labelledby="runtime-title">
+                  <div className="section-title compact">
+                    <div>
+                      <h2 id="runtime-title">系统与应用策略</h2>
+                      <p>精简策略和基础运行参数。</p>
+                    </div>
+                  </div>
+                  <Card className="secondary-card runtime-card">
+                    <div className="feature-grid">
+                      <div className={`feature-card ${config.slimCodexPet ? "active" : ""}`}>
+                        <div className="feature-card-header">
+                          <strong>精简 Codex 宠物模块</strong>
+                          <Switch
+                            checked={config.slimCodexPet}
+                            onCheckedChange={(checked) => editConfig({ ...config, slimCodexPet: checked })}
+                            aria-label="精简 Codex 宠物模块"
+                          />
+                        </div>
+                        <div className="feature-card-body">
+                          <small>
+                            {config.slimCodexPet
+                              ? "已停止宠物窗口和相关运行时模块"
+                              : "保留 Codex 宠物的完整功能"}
+                          </small>
+                        </div>
+                      </div>
+
+                      <div className={`feature-card ${config.slimCodexVoice ? "active" : ""}`}>
+                        <div className="feature-card-header">
+                          <strong>精简 Codex 语音模块</strong>
+                          <Switch
+                            checked={config.slimCodexVoice}
+                            onCheckedChange={(checked) => editConfig({ ...config, slimCodexVoice: checked })}
+                            aria-label="精简 Codex 语音模块"
+                          />
+                        </div>
+                        <div className="feature-card-body">
+                          <small>
+                            {config.slimCodexVoice
+                              ? "已停止听写、快捷键与音频初始化"
+                              : "保留 Codex 语音的完整功能"}
+                          </small>
+                        </div>
+                      </div>
+
+                      <div className={`feature-card ${config.fastContextTools ? "active" : ""}`}>
+                        <div className="feature-card-header">
+                          <strong>FastCtx 上下文工具</strong>
+                          <Switch
+                            checked={config.fastContextTools}
+                            onCheckedChange={(checked) => editConfig({ ...config, fastContextTools: checked })}
+                            aria-label="启用 FastCtx 上下文工具"
+                          />
+                        </div>
+                        <div className="feature-card-body">
+                          <small>
+                            {config.fastContextTools
+                              ? "可显著提高模型完成任务速度和准确性"
+                              : "保持 Codex 默认文件工具，不加载额外 MCP"}
+                          </small>
+                        </div>
+                      </div>
+
+                      <div className={`feature-card ${config.subagentOptimization ? "active" : ""}`}>
+                        <div className="feature-card-header">
+                          <strong>子代理协作优化</strong>
+                          <Switch
+                            checked={config.subagentOptimization}
+                            onCheckedChange={(checked) => editConfig({ ...config, subagentOptimization: checked })}
+                            aria-label="启用子代理协作优化"
+                          />
+                        </div>
+                        <div className="feature-card-body">
+                          <small>
+                            {config.subagentOptimization
+                              ? "启用v2并行配置"
+                              : "保持 Codex 默认子代理配置，不注入协作提示词"}
+                          </small>
+                        </div>
+                      </div>
+
+                      <div className="feature-card">
+                        <div className="feature-card-header">
+                          <strong>Windows 新版卡顿补丁</strong>
+                          <Badge variant={performanceError ? "destructive" : "success"}>
+                            {performanceError ? "异常" : "自动生效"}
                           </Badge>
                         </div>
-                      ))}
-                      {modelState.officialModels.length === 0 && <div className="empty-state">暂未读取到官方模型</div>}
-                    </div>
-                  </section>
-
-                  {!provider.official && (
-                    <section className="model-group">
-                      <div className="model-group-title">
-                        <div>
-                          <strong>三方模型</strong>
-                          <small>{modelState.thirdPartyModels.length}</small>
+                        <div className="feature-card-body">
+                          <strong>Windows 新版卡顿补丁</strong>
+                          <small>
+                            {maintenance?.performanceDetail
+                              || "启动时隔离 Codex Micro，并停止每 30 秒触发的 WMI 进程采样"}
+                          </small>
                         </div>
-                        <Badge variant="violet">API</Badge>
                       </div>
-                      <div className="catalog-model-list">
-                        {modelState.thirdPartyModels.map((model) => (
-                          <div className="catalog-model-row third-party" key={model}>
-                            <span className="model-availability"><Check size={12} /></span>
-                            <div>
-                              <strong>{model}</strong>
-                              <small>第三方模型</small>
-                            </div>
-                            <Badge variant="success">已添加</Badge>
-                          </div>
-                        ))}
-                        {modelState.thirdPartyModels.length === 0 && <div className="empty-state">尚未添加三方模型</div>}
-                      </div>
-                    </section>
-                  )}
-                </div>
-              </div>
-
-              <div className="readonly-note">
-                <Server size={14} />
-                <span>
-                  {ccSwitchStatus.available
-                    ? "线路配置由 cc-switch 管理，Codey 仅在启动时读取当前线路"
-                    : "未安装 cc-switch，Codey 读取本地 Codex 登录与 API 配置"}
-                </span>
-                <Badge variant="secondary">只读</Badge>
-              </div>
-            </Card>
-          </section>
-
-            </div>
-            
-            <div className="dashboard-side-column">
-            <section className="secondary-section" aria-labelledby="runtime-title">
-              <div className="section-title compact">
-                <div>
-                  <h2 id="runtime-title">系统与应用</h2>
-                  <p>精简策略和基础运行参数。</p>
-                </div>
-              </div>
-              <Card className="secondary-card runtime-card">
-                <div className="health-list">
-                  <div className="health-row">
-                    <span className={`health-icon ${config.slimCodexPet ? "ready" : ""}`}>
-                      <Zap size={16} />
-                    </span>
-                  <div>
-                      <strong>精简 Codex 宠物模块</strong>
-                      <small>
-                        {config.slimCodexPet
-                          ? "已停止宠物窗口和相关运行时模块"
-                          : "保留 Codex 宠物的完整功能"}
-                      </small>
                     </div>
-                    <Switch
-                      checked={config.slimCodexPet}
-                      onCheckedChange={(checked) => editConfig({ ...config, slimCodexPet: checked })}
-                      aria-label="精简 Codex 宠物模块"
-                    />
-                  </div>
-                  <div className="health-row">
-                    <span className={`health-icon ${config.slimCodexVoice ? "ready" : ""}`}>
-                      <Zap size={16} />
-                    </span>
-                  <div>
-                      <strong>精简 Codex 语音模块</strong>
-                      <small>
-                        {config.slimCodexVoice
-                          ? "已停止听写、快捷键与音频初始化"
-                          : "保留 Codex 语音的完整功能"}
-                      </small>
+
+                    <div className="app-path-field">
+                      <label className="field">
+                        <span>Codex 应用路径</span>
+                        <div className="input-shell">
+                          <FolderOpen size={15} aria-hidden="true" />
+                          <Input
+                            value={config.codexAppPath}
+                            onChange={(event) => editConfig({ ...config, codexAppPath: event.target.value })}
+                            placeholder={resolvedCodexPath}
+                            spellCheck={false}
+                          />
+                        </div>
+                      </label>
                     </div>
-                    <Switch
-                      checked={config.slimCodexVoice}
-                      onCheckedChange={(checked) => editConfig({ ...config, slimCodexVoice: checked })}
-                      aria-label="精简 Codex 语音模块"
-                    />
-                  </div>
-                  <div className="health-row">
-                    <span className={`health-icon ${config.fastContextTools ? "ready" : ""}`}>
-                      <Sparkles size={16} />
-                    </span>
+                  </Card>
+                </section>
+              </div>
+            )}
+
+            {(activeTab === "all" || activeTab === "logs") && (
+              <div className="dashboard-side-column notification-column">
+                <section className="secondary-section" aria-labelledby="notification-title">
+                  <div className="section-title compact">
                     <div>
-                      <strong>FastCtx 上下文工具</strong>
-                      <small>
-                        {config.fastContextTools
-                          ? "可显著提高模型完成任务速度和准确性"
-                          : "保持 Codex 默认文件工具，不加载额外 MCP"}
-                      </small>
+                      <h2 id="notification-title">飞书通知</h2>
+                      <p>使用 Webhook 发送运行与会话提醒。</p>
                     </div>
-                    <Switch
-                      checked={config.fastContextTools}
-                      onCheckedChange={(checked) => editConfig({ ...config, fastContextTools: checked })}
-                      aria-label="启用 FastCtx 上下文工具"
-                    />
-                  </div>
-                  <div className="health-row">
-                    <span className={`health-icon ${config.subagentOptimization ? "ready" : ""}`}>
-                      <GitBranch size={16} />
-                    </span>
-                    <div>
-                      <strong>子代理协作优化</strong>
-                      <small>
-                        {config.subagentOptimization
-                          ? "启用v2并行配置"
-                          : "保持 Codex 默认子代理配置，不注入协作提示词"}
-                      </small>
-                    </div>
-                    <Switch
-                      checked={config.subagentOptimization}
-                      onCheckedChange={(checked) => editConfig({ ...config, subagentOptimization: checked })}
-                      aria-label="启用子代理协作优化"
-                    />
-                  </div>
-                  <div className="health-row">
-                    <span className={`health-icon ${performanceOk ? "ready" : performanceError ? "error" : ""}`}>
-                      <Zap size={16} />
-                    </span>
-                    <div>
-                      <strong>Windows 新版卡顿补丁</strong>
-                      <small>
-                        {maintenance?.performanceDetail
-                          || "启动时隔离 Codex Micro，并停止每 30 秒触发的 WMI 进程采样"}
-                      </small>
-                    </div>
-                    <Badge
-                      variant={performanceError ? "destructive" : "success"}
-                    >
-                      {performanceError ? "异常" : "自动"}
-                    </Badge>
-                  </div>
-                </div>
-
-                <div className="runtime-fields">
-                  <label className="field">
-                    <span>Codex 应用路径</span>
-                    <Input
-                      value={config.codexAppPath}
-                      onChange={(event) => editConfig({ ...config, codexAppPath: event.target.value })}
-                      placeholder={resolvedCodexPath}
-                      spellCheck={false}
-                    />
-                  </label>
-                </div>
-              </Card>
-            </section>
-
-            <section className="secondary-section" aria-labelledby="notification-title">
-              <div className="section-title compact">
-                <div>
-                  <h2 id="notification-title">飞书通知</h2>
-                  <p>仅使用 Webhook 地址发送会话状态。</p>
-                </div>
-                <div className="enable-control">
-                  <span>{config.webhook.enabled ? "已开启" : "已关闭"}</span>
-                  <Switch
-                    checked={config.webhook.enabled}
-                    onCheckedChange={(checked) => updateWebhook({ enabled: checked })}
-                    aria-label="启用飞书通知"
-                  />
-                </div>
-              </div>
-              <Card className="secondary-card notification-card">
-                <div className="notification-title">
-                  <span><BellRing size={16} /></span>
-                  <div>
-                    <strong>飞书机器人</strong>
-                    <small>发送完成、失败和等待介入提醒</small>
-                  </div>
-                </div>
-                <div className="notification-fields">
-                  <label className="field">
-                    <span>Webhook 地址</span>
-                    <div className="input-shell">
-                      <Send size={15} aria-hidden="true" />
-                      <Input
-                        value={config.webhook.url}
-                        onChange={(event) => updateWebhook({ url: event.target.value })}
-                        placeholder="https://open.feishu.cn/..."
-                        spellCheck={false}
+                    <div className="enable-control">
+                      <span>{config.webhook.enabled ? "已开启" : "已关闭"}</span>
+                      <Switch
+                        checked={config.webhook.enabled}
+                        onCheckedChange={(checked) => updateWebhook({ enabled: checked })}
+                        aria-label="启用飞书通知"
                       />
                     </div>
-                  </label>
-                </div>
-                <div className="notification-action">
-                  <span className={`inline-result ${webhookResult.tone}`}>
-                    {webhookResult.text || "不再保存或发送机器人签名密钥"}
-                  </span>
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={isBusy || !config.webhook.url.trim()}
-                    onClick={() => void testWebhook()}
-                  >
-                    {busy === "test-webhook"
-                      ? <LoaderCircle className="spinner" aria-hidden="true" />
-                      : <Send aria-hidden="true" />}
-                    测试通知
-                  </Button>
-                </div>
-              </Card>
-            </section>
+                  </div>
+                  <Card className="secondary-card notification-card">
+                    <div className="notification-title">
+                      <span><BellRing size={16} /></span>
+                      <div>
+                        <strong>飞书机器人 Webhook</strong>
+                        <small>发送完成、失败和等待介入提醒</small>
+                      </div>
+                    </div>
+                    <div className="notification-fields">
+                      <label className="field">
+                        <span>Webhook 地址</span>
+                        <div className="input-shell">
+                          <Send size={15} aria-hidden="true" />
+                          <Input
+                            value={config.webhook.url}
+                            onChange={(event) => updateWebhook({ url: event.target.value })}
+                            placeholder="https://open.feishu.cn/..."
+                            spellCheck={false}
+                          />
+                        </div>
+                      </label>
+                    </div>
+                    <div className="notification-action">
+                      <span className={`inline-result ${webhookResult.tone}`}>
+                        {webhookResult.text || "不再保存或发送机器人签名密钥"}
+                      </span>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={isBusy || !config.webhook.url.trim()}
+                        onClick={() => void testWebhook()}
+                      >
+                        {busy === "test-webhook"
+                          ? <LoaderCircle className="spinner" aria-hidden="true" />
+                          : <Send aria-hidden="true" />}
+                        测试通知
+                      </Button>
+                    </div>
+                  </Card>
+                </section>
+              </div>
+            )}
           </div>
 
-          </div>
-
-          <div className="dashboard-trace-column">
-            <TraceLogModule
-              stats={status.traceLogStats}
-              snapshotStale={traceSnapshotStale}
-              protectionEnabled={config.disableTraceLogWrites}
-              busy={busy === "clear-trace-logs"}
-              disabled={isBusy}
-              onProtectionChange={(checked) => editConfig({
-                ...config,
-                disableTraceLogWrites: checked,
-              })}
-              onClear={askClearTraceLogs}
-            />
-          </div>
+          {(activeTab === "all" || activeTab === "logs") && (
+            <div className="dashboard-trace-column">
+              <TraceLogModule
+                stats={status.traceLogStats}
+                snapshotStale={traceSnapshotStale}
+                protectionEnabled={config.disableTraceLogWrites}
+                busy={busy === "clear-trace-logs"}
+                disabled={isBusy}
+                onProtectionChange={(checked) => editConfig({
+                  ...config,
+                  disableTraceLogWrites: checked,
+                })}
+                onClear={askClearTraceLogs}
+              />
+            </div>
+          )}
         </div>
       </div>
 

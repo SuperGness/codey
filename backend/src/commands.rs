@@ -449,6 +449,29 @@ impl AppState {
                 json!({"status":"ok"})
             }
             "/session/titles" => cache_session_titles(self, &payload).await,
+            "/thread-sort-keys" => {
+                let sessions = payload
+                    .get("sessions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|session| {
+                        let session_id = session.get("session_id")?.as_str()?.trim();
+                        if session_id.is_empty() {
+                            return None;
+                        }
+                        Some(codex_plus_core::models::SessionRef {
+                            session_id: session_id.to_string(),
+                            title: session
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                session_metadata::thread_sort_keys(&codex_home(), &sessions)
+            }
             "/session/delete" => {
                 let session_id = payload
                     .get("sessionId")
