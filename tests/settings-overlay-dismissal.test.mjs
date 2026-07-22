@@ -16,7 +16,7 @@ test("settings overlay only closes explicitly and restores unsaved config", asyn
     /function closeSettings\(\) \{[\s\S]*setConfig\(persistedConfigRef\.current\)[\s\S]*setDirty\(false\)[\s\S]*onClose\?\.\(\)/,
   );
   assert.match(appSource, /onClick=\{embedded \? closeSettings : undefined\}/);
-  assert.match(appSource, /onClick=\{closeSettings\}/);
+  assert.doesNotMatch(appSource, /aria-label="关闭设置"/);
 
   assert.doesNotMatch(overlaySource, /backdrop\.addEventListener\("click"/);
   assert.doesNotMatch(overlaySource, /addEventListener\("keydown"/);

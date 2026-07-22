@@ -740,9 +740,6 @@ export function App({ embedded = false, onClose }: AppProps) {
             <div className="config-brand-copy">
               <div className="config-brand-title-row">
                 <h1>Codey 控制台</h1>
-                <Badge variant={provider.official ? "outline" : "secondary"}>
-                  {provider.name}
-                </Badge>
                 {dirty && (
                   <Badge variant="warning" className="unsaved-badge">
                     未保存更改
@@ -767,16 +764,6 @@ export function App({ embedded = false, onClose }: AppProps) {
                     : <Check aria-hidden="true" />}
                 {dirty ? "保存更改" : "已保存"}
               </SaveButton>
-              {embedded && (
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="关闭设置"
-                  onClick={closeSettings}
-                >
-                  <X aria-hidden="true" />
-                </Button>
-              )}
             </div>
           </div>
         </div>

@@ -649,6 +649,10 @@ input:focus-visible,
   border-top: 1px dashed rgba(0, 0, 0, 0.06);
 }
 
+.operations-status-footer.action-only {
+  justify-content: flex-end;
+}
+
 .operations-status-detail {
   min-width: 0;
   flex: 1;
@@ -1832,6 +1836,12 @@ input:focus-visible,
   color: #1d1d1f;
   transition: all 140ms ease;
   user-select: none;
+}
+
+.app-shell .ui-button svg {
+  max-width: 16px;
+  max-height: 16px;
+  flex: 0 0 auto;
 }
 
 .ui-button:hover:not(:disabled) {

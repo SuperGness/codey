@@ -181,7 +181,7 @@ export function TraceLogModule({
           </Badge>
           <Button
             className="trace-refresh-button"
-            variant="ghost"
+            variant="outline"
             size="sm"
             disabled={disabled}
             onClick={onRefresh}
@@ -191,7 +191,7 @@ export function TraceLogModule({
           </Button>
           <Button
             className="trace-clear-button"
-            variant="ghost"
+            variant="destructive"
             size="sm"
             disabled={disabled}
             onClick={onClear}

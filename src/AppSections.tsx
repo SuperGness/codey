@@ -109,7 +109,7 @@ export function OperationsPanel({
   const pluginDetail = pluginStatusError
     ? pluginMarketplaceStatus?.message || "插件市场状态读取失败"
     : pluginOk
-      ? "官方与远程插件市场均已注册；手动修复后无需重启 Codex"
+      ? undefined
       : pluginIssues.length > 0
         ? pluginIssues.join("；")
         : "正在读取插件市场状态";
@@ -117,7 +117,7 @@ export function OperationsPanel({
   const statusCards: Array<{
     title: string;
     description: string;
-    detail: string;
+    detail?: string;
     label: string;
     tone: "success" | "warning" | "destructive" | "info";
     icon: typeof Activity;
@@ -251,8 +251,8 @@ export function OperationsPanel({
                   </div>
                   <Badge variant={item.tone}>{item.label}</Badge>
                 </div>
-                <div className="operations-status-footer">
-                  <div className="operations-status-detail">{item.detail}</div>
+                <div className={`operations-status-footer${item.detail ? "" : " action-only"}`}>
+                  {item.detail && <div className="operations-status-detail">{item.detail}</div>}
                   {item.action && (
                     <Button
                       className="operations-status-action"
@@ -405,7 +405,7 @@ export function ModelSection({
         </div>
         <div className="route-heading-actions">
           <Button
-            variant="ghost"
+            variant="outline"
             size="sm"
             disabled={dirty || isBusy}
             onClick={onSyncCurrentProvider}
