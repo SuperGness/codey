@@ -32,6 +32,22 @@ import {
   ShimmerButton,
 } from "./components/magicui";
 
+function CodeyBrandMark() {
+  return (
+    <svg className="config-brand-mark" viewBox="0 0 350 350" aria-hidden="true" focusable="false">
+      <rect x="0" y="0" width="350" height="350" rx="34" fill="#fff" />
+      <path
+        d="M70 301c-16 0-24-18-13-30l73-77c8-8 8-20 0-28L65 101C50 86 57 61 78 57c9-2 18 1 25 8l91 91c18 18 18 46 0 64l-66 66c-6 6-2 15 7 15h183"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="22"
+      />
+    </svg>
+  );
+}
+
 const SUBAGENT_MODEL = "gpt-5.6-luna";
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 const supportsModel = (models: string[], expected: string) => models.some(
@@ -594,7 +610,7 @@ export function App({ embedded = false, onClose }: AppProps) {
       <header className="config-header">
         <div className="config-header-inner">
           <div className="config-brand">
-            <img className="config-brand-mark" src="/codey-icon.png" alt="" aria-hidden="true" />
+            <CodeyBrandMark />
             <div className="config-brand-copy">
               <div className="config-brand-title-row">
                 <h1>Codey 配置</h1>
