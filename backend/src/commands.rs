@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -51,8 +51,35 @@ pub struct AppState {
     waiting_watcher_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     waiting_watcher_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     session_scan_wake: Notify,
-    shutdown_requested: AtomicBool,
+    shutdown_reason: AtomicU8,
     shutdown_notify: Notify,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppShutdownReason {
+    CodexExited,
+    InstallUpdate,
+}
+
+impl AppShutdownReason {
+    const NONE: u8 = 0;
+    const CODEX_EXITED: u8 = 1;
+    const INSTALL_UPDATE: u8 = 2;
+
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::CodexExited => Self::CODEX_EXITED,
+            Self::InstallUpdate => Self::INSTALL_UPDATE,
+        }
+    }
+
+    fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            Self::CODEX_EXITED => Some(Self::CodexExited),
+            Self::INSTALL_UPDATE => Some(Self::InstallUpdate),
+            _ => None,
+        }
+    }
 }
 
 impl Default for AppState {
@@ -82,7 +109,7 @@ impl Default for AppState {
             waiting_watcher_shutdown: Mutex::new(None),
             waiting_watcher_task: Mutex::new(None),
             session_scan_wake: Notify::new(),
-            shutdown_requested: AtomicBool::new(false),
+            shutdown_reason: AtomicU8::new(AppShutdownReason::NONE),
             shutdown_notify: Notify::new(),
         }
     }
@@ -475,16 +502,37 @@ async fn baseline_waiting_notifications(
 
 impl AppState {
     pub fn request_shutdown(&self) {
-        if !self.shutdown_requested.swap(true, Ordering::AcqRel) {
+        self.request_shutdown_with_reason(AppShutdownReason::CodexExited);
+    }
+
+    pub fn request_update_shutdown(&self) {
+        self.request_shutdown_with_reason(AppShutdownReason::InstallUpdate);
+    }
+
+    fn request_shutdown_with_reason(&self, reason: AppShutdownReason) {
+        if self
+            .shutdown_reason
+            .compare_exchange(
+                AppShutdownReason::NONE,
+                reason.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
             self.shutdown_notify.notify_waiters();
         }
     }
 
-    pub async fn wait_for_shutdown(&self) {
-        if self.shutdown_requested.load(Ordering::Acquire) {
-            return;
+    pub async fn wait_for_shutdown(&self) -> AppShutdownReason {
+        if let Some(reason) =
+            AppShutdownReason::from_u8(self.shutdown_reason.load(Ordering::Acquire))
+        {
+            return reason;
         }
         self.shutdown_notify.notified().await;
+        AppShutdownReason::from_u8(self.shutdown_reason.load(Ordering::Acquire))
+            .unwrap_or(AppShutdownReason::CodexExited)
     }
 
     pub async fn bridge_request(self: &Arc<Self>, path: String, payload: Value) -> Value {
@@ -1488,7 +1536,7 @@ pub async fn install_downloaded_update(
         // Let the bridge deliver the response before Codex/Codey starts
         // normal shutdown and releases the executable for replacement.
         tokio::time::sleep(Duration::from_millis(250)).await;
-        shutdown_state.request_shutdown();
+        shutdown_state.request_update_shutdown();
     });
     Ok(json!({"status":"installing"}))
 }
@@ -1752,6 +1800,7 @@ fn validate_downloaded_update_path(
 #[cfg(target_os = "windows")]
 fn spawn_update_installer(update_path: &Path) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
 
     if !update_path
         .extension()
@@ -1762,24 +1811,17 @@ fn spawn_update_installer(update_path: &Path) -> Result<(), String> {
     }
     let executable =
         std::env::current_exe().map_err(|error| format!("读取当前 Codey 路径失败：{error}"))?;
+    let install_dir = executable
+        .parent()
+        .ok_or_else(|| "当前 Codey 路径无父目录".to_string())?;
     let script_path = update_path
         .parent()
         .ok_or_else(|| "更新安装包路径无父目录".to_string())?
         .join("install-codey-update.ps1");
-    fs::write(
-        &script_path,
-        r#"$ErrorActionPreference = "Stop"
-$ParentPid = [int]$args[0]
-$Installer = [string]$args[1]
-$Executable = [string]$args[2]
-try { Wait-Process -Id $ParentPid -ErrorAction SilentlyContinue } catch {}
-Start-Sleep -Milliseconds 500
-$process = Start-Process -FilePath $Installer -ArgumentList "/S" -Wait -PassThru
-if ($null -ne $process.ExitCode -and $process.ExitCode -ne 0) { exit $process.ExitCode }
-Start-Process -FilePath $Executable
-"#,
-    )
-    .map_err(|error| format!("写入更新安装脚本失败：{error}"))?;
+    fs::write(&script_path, windows_update_installer_script())
+        .map_err(|error| format!("写入更新安装脚本失败：{error}"))?;
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
     std::process::Command::new("powershell.exe")
         .arg("-NoProfile")
         .arg("-ExecutionPolicy")
@@ -1788,11 +1830,95 @@ Start-Process -FilePath $Executable
         .arg(&script_path)
         .arg(std::process::id().to_string())
         .arg(update_path)
-        .arg(executable)
-        .creation_flags(codex_plus_core::windows_create_no_window())
+        .arg(&executable)
+        .arg(install_dir)
+        .creation_flags(
+            codex_plus_core::windows_create_no_window()
+                | DETACHED_PROCESS
+                | CREATE_NEW_PROCESS_GROUP,
+        )
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("启动更新安装器失败：{error}"))?;
     Ok(())
+}
+
+#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
+fn windows_update_installer_script() -> &'static str {
+    r#"$ErrorActionPreference = "Stop"
+$ParentPid = [int]$args[0]
+$Installer = [string]$args[1]
+$Executable = [string]$args[2]
+$InstallDir = [string]$args[3]
+$ScriptDir = Split-Path -Parent $PSCommandPath
+$LogPath = Join-Path $ScriptDir "install-codey-update.log"
+
+function Write-Log([string]$Message) {
+  $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+  Add-Content -LiteralPath $LogPath -Value "[$timestamp] $Message" -Encoding UTF8
+}
+
+function Wait-ParentExit([int]$ProcessId) {
+  Write-Log "Waiting for Codey pid=$ProcessId to exit"
+  $deadline = (Get-Date).AddSeconds(180)
+  while ((Get-Date) -lt $deadline) {
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+      Write-Log "Codey pid=$ProcessId exited"
+      return
+    }
+    Start-Sleep -Milliseconds 500
+  }
+  throw "Timed out waiting for Codey pid=$ProcessId to exit"
+}
+
+function Wait-ExecutableUnlock([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path)) {
+    Write-Log "Executable path does not exist before install: $Path"
+    return
+  }
+  Write-Log "Waiting for executable lock to release: $Path"
+  $deadline = (Get-Date).AddSeconds(60)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $stream = [System.IO.File]::Open($Path, "Open", "ReadWrite", "None")
+      $stream.Close()
+      Write-Log "Executable lock released"
+      return
+    } catch {
+      Start-Sleep -Milliseconds 500
+    }
+  }
+  throw "Timed out waiting for executable lock to release: $Path"
+}
+
+try {
+  Write-Log "Starting Codey update. Installer=$Installer Executable=$Executable InstallDir=$InstallDir"
+  Wait-ParentExit $ParentPid
+  Wait-ExecutableUnlock $Executable
+  $installerArgs = @("/S")
+  if (-not [string]::IsNullOrWhiteSpace($InstallDir)) {
+    $installerArgs += "/D=$InstallDir"
+  }
+  Write-Log "Running installer"
+  $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Wait -PassThru
+  $exitCode = $process.ExitCode
+  Write-Log "Installer exited with code $exitCode"
+  if ($null -ne $exitCode -and $exitCode -ne 0) {
+    exit $exitCode
+  }
+  $installedExecutable = Join-Path $InstallDir "Codey.exe"
+  $restartTarget = if (Test-Path -LiteralPath $installedExecutable) { $installedExecutable } else { $Executable }
+  Write-Log "Restarting Codey: $restartTarget"
+  Start-Process -FilePath $restartTarget
+  Write-Log "Update finished"
+} catch {
+  Write-Log "Update failed: $($_.Exception.Message)"
+  exit 1
+}
+"#
 }
 
 #[cfg(target_os = "macos")]
@@ -2439,6 +2565,30 @@ mod tests {
                 .as_ref()
                 .map(|asset| asset.arch.as_str()),
             Some(arch)
+        );
+    }
+
+    #[test]
+    fn windows_update_installer_script_logs_and_waits_for_install_safety() {
+        let script = windows_update_installer_script();
+
+        assert!(script.contains("install-codey-update.log"));
+        assert!(script.contains("Wait-ParentExit $ParentPid"));
+        assert!(script.contains("Wait-ExecutableUnlock $Executable"));
+        assert!(script.contains("Start-Process -FilePath $Installer"));
+        assert!(script.contains("$installerArgs += \"/D=$InstallDir\""));
+        assert!(script.contains("Start-Process -FilePath $restartTarget"));
+    }
+
+    #[tokio::test]
+    async fn app_state_preserves_update_shutdown_reason() {
+        let state = AppState::default();
+
+        state.request_update_shutdown();
+
+        assert_eq!(
+            state.wait_for_shutdown().await,
+            AppShutdownReason::InstallUpdate
         );
     }
 

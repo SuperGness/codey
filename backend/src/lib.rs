@@ -27,11 +27,12 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use commands::AppState;
+use commands::{AppShutdownReason, AppState};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShutdownReason {
     CodexExited,
+    InstallUpdate,
     Signal,
 }
 
@@ -58,8 +59,9 @@ pub async fn run() -> Result<()> {
     }
 
     let shutdown_reason = tokio::select! {
-        _ = state.wait_for_shutdown() => {
-            ShutdownReason::CodexExited
+        reason = state.wait_for_shutdown() => match reason {
+            AppShutdownReason::CodexExited => ShutdownReason::CodexExited,
+            AppShutdownReason::InstallUpdate => ShutdownReason::InstallUpdate,
         },
         _ = shutdown_signal() => ShutdownReason::Signal,
     };
