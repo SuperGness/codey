@@ -1047,6 +1047,7 @@ pub async fn runtime_status(state: &Arc<AppState>) -> Result<Value, String> {
     let mut status = json!({
         "running": runtime.is_some(),
         "appVersion": env!("CARGO_PKG_VERSION"),
+        "clientPlatform": current_update_platform(),
         "activeProfileId": profile.as_ref().map(|profile| profile.id.as_str()).unwrap_or_default(),
         "activeProfileName": profile.as_ref().map(|profile| profile.name.as_str()).unwrap_or_default(),
         "restartRequired": restart_required,

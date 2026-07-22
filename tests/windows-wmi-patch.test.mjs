@@ -61,6 +61,23 @@ test("Windows lag patch bypasses only the recurring WMI snapshot worker", async 
   });
 });
 
+test("settings exposes the Windows optimization patch status only on Windows clients", async () => {
+  const [sectionsSource, typesSource, commandsSource] = await Promise.all([
+    readFile(new URL("../src/AppSections.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/App.types.ts", import.meta.url), "utf8"),
+    readFile(new URL("../backend/src/commands.rs", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(commandsSource, /"clientPlatform": current_update_platform\(\)/);
+  assert.match(typesSource, /clientPlatform\?: string/);
+  assert.match(sectionsSource, /status\.clientPlatform === "windows"/);
+  assert.match(sectionsSource, /\{isWindowsClient && \(/);
+  assert.match(sectionsSource, /Windows 优化补丁/);
+  assert.match(sectionsSource, /maintenance\?\.performanceStatus === "ready"/);
+  assert.match(sectionsSource, /windowsPatchReady[\s\S]*?"已启用"/);
+  assert.match(sectionsSource, /windowsPatchFailed[\s\S]*?"未生效"/);
+});
+
 test("trace guard, stats, pet, and voice remain user-configurable", async () => {
   const [appSource, sectionsSource, configSource, traceSource, launcherSource, commandsSource] = await Promise.all([
     readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),

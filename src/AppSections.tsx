@@ -62,6 +62,29 @@ export function OperationsPanel({
   const sessionOk = maintenance?.sessionStatus === "ready";
   const pluginOk = maintenance?.pluginStatus === "ready";
   const performanceError = maintenance?.performanceStatus === "error";
+  const isWindowsClient = status.clientPlatform === "windows";
+  const windowsPatchReady = maintenance?.performanceStatus === "ready";
+  const windowsPatchFailed = performanceError || Boolean(status.startupError);
+  const windowsPatchTone = windowsPatchReady
+    ? "success"
+    : windowsPatchFailed
+      ? "destructive"
+      : "warning";
+  const windowsPatchLabel = windowsPatchReady
+    ? "已启用"
+    : windowsPatchFailed
+      ? "未生效"
+      : "待检测";
+  const windowsPatchDetail = windowsPatchReady
+    ? maintenance?.performanceDetail
+      || "WMI 周期采样、临时 WebView 残留与执行环境泄漏修复已生效。"
+    : windowsPatchFailed
+      ? maintenance?.performanceDetail
+        || status.startupError
+        || "Windows 优化补丁加载异常。"
+      : status.running
+        ? "正在确认 Windows 优化补丁状态。"
+        : "将在 Codex 启动时自动安装并校验 Windows 优化补丁。";
   const resolvedCodexPath = status.codexAppPath || "/Applications/ChatGPT.app";
   const optimizationReady = config.slimCodexPet
     && config.slimCodexVoice
@@ -149,6 +172,25 @@ export function OperationsPanel({
           </div>
         </div>
 
+        {isWindowsClient && (
+          <div
+            className={`windows-patch-status windows-patch-status-${windowsPatchTone}`}
+            role="status"
+            aria-live="polite"
+          >
+            <span className="windows-patch-icon">
+              <Cpu size={18} aria-hidden="true" />
+            </span>
+            <div className="windows-patch-copy">
+              <div className="windows-patch-heading">
+                <strong>Windows 优化补丁</strong>
+                <Badge variant={windowsPatchTone}>{windowsPatchLabel}</Badge>
+              </div>
+              <p>{windowsPatchDetail}</p>
+            </div>
+          </div>
+        )}
+
         <div className="operations-status-grid" role="list" aria-label="运行状态">
           {statusCards.map((item) => {
             const StatusIcon = item.icon;
@@ -175,22 +217,6 @@ export function OperationsPanel({
         </div>
 
         <div className="maintenance-grid">
-          <div className="maintenance-item patch-status">
-            <div className="maintenance-item-heading">
-              <span className="maintenance-item-icon">
-                <Cpu size={16} aria-hidden="true" />
-              </span>
-              <strong>Windows 新版卡顿补丁</strong>
-              <Badge variant={performanceError ? "destructive" : "success"}>
-                {performanceError ? "异常" : "自动生效"}
-              </Badge>
-            </div>
-            <p>
-              {maintenance?.performanceDetail
-                || "启动时隔离 Codex Micro，并停止周期性 WMI 进程采样。"}
-            </p>
-          </div>
-
           <div className="maintenance-item update-status">
             <div className="maintenance-item-heading">
               <span className="maintenance-item-icon">
