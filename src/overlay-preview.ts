@@ -18,6 +18,7 @@ let previewConfig = {
   disableTraceLogWrites: true,
   slimCodexPet: true,
   slimCodexVoice: true,
+  gpuLaunchMode: "off" as const,
   fastContextTools: false,
   subagentOptimization: false,
   hideFullAccessWarning: false,
@@ -43,6 +44,7 @@ window.__codexSessionDeleteBridge = async (path, payload) => {
   if (command === "runtime_status") {
     return {
       running: true,
+      clientPlatform: "macos",
       restartRequired: false,
       restartInProgress: false,
       activeProfileId: previewConfig.activeProfileId,

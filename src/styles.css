@@ -1143,6 +1143,105 @@ input:focus-visible,
   line-height: 1.4;
 }
 
+.gpu-mode-card-body {
+  margin-top: 10px;
+}
+
+.gpu-mode-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.gpu-mode-slider {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  padding: 3px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 9px;
+  background: #ececf0;
+  transition: box-shadow 150ms ease;
+}
+
+.gpu-mode-slider:focus-within {
+  box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.18);
+}
+
+.gpu-mode-slider-thumb {
+  position: absolute;
+  z-index: 0;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / 3);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 6px;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  transform: translateX(var(--gpu-mode-offset));
+  transition: transform 160ms ease;
+}
+
+.gpu-mode-option {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 5px;
+  color: #6e6e73;
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: center;
+  cursor: pointer;
+  user-select: none;
+  transition: color 150ms ease;
+}
+
+.gpu-mode-option input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.gpu-mode-option span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gpu-mode-option.selected {
+  color: #007aff;
+  font-weight: 600;
+}
+
+.gpu-mode-fieldset:disabled .gpu-mode-slider {
+  opacity: 0.55;
+}
+
+.gpu-mode-fieldset:disabled .gpu-mode-option {
+  cursor: not-allowed;
+}
+
+.gpu-mode-card-body > small {
+  display: block;
+  margin-top: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gpu-mode-slider,
+  .gpu-mode-slider-thumb,
+  .gpu-mode-option {
+    transition: none;
+  }
+}
+
 .notification-card {
   display: flex;
   flex-direction: column;

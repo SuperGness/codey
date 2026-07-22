@@ -825,6 +825,7 @@ export function App({ embedded = false, onClose }: AppProps) {
             <div className="dashboard-column upper-right-column">
               <FeaturePolicyCard
                 config={config}
+                status={status}
                 busy={busy}
                 isBusy={isBusy}
                 subagentModel={SUBAGENT_MODEL}

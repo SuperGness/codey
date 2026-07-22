@@ -46,6 +46,7 @@ if (import.meta.env.DEV) {
       disableTraceLogWrites: true,
       slimCodexPet: true,
       slimCodexVoice: true,
+      gpuLaunchMode: "off" as const,
       fastContextTools: false,
       subagentOptimization: false,
       hideFullAccessWarning: false,

@@ -52,6 +52,15 @@ pub struct WebhookConfig {
     pub url: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum GpuLaunchMode {
+    #[default]
+    Off,
+    DisableGpu,
+    DisableGpuRasterization,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeyConfig {
@@ -83,6 +92,10 @@ pub struct CodeyConfig {
     pub slim_codex_pet: bool,
     #[serde(default = "default_true")]
     pub slim_codex_voice: bool,
+    /// Selects at most one Chromium GPU diagnostic argument for the next
+    /// Codey-managed Codex launch. Disabled by default and ignored on macOS.
+    #[serde(default)]
+    pub gpu_launch_mode: GpuLaunchMode,
     /// Publishes Codey's embedded FastCtx file tools to Codex for the next
     /// runtime. Disabled by default so existing tool behavior is unchanged.
     #[serde(default)]
@@ -120,6 +133,7 @@ impl Default for CodeyConfig {
             disable_trace_log_writes: true,
             slim_codex_pet: true,
             slim_codex_voice: true,
+            gpu_launch_mode: GpuLaunchMode::Off,
             fast_context_tools: false,
             subagent_optimization: false,
             hide_full_access_warning: false,
@@ -426,6 +440,47 @@ mod tests {
         .normalize();
 
         assert!(!config.slim_codex_voice);
+    }
+
+    #[test]
+    fn gpu_launch_mode_defaults_to_off_and_ignores_retired_switches() {
+        let config = serde_json::from_str::<CodeyConfig>(
+            r#"{"activeProfileId":"","profiles":[],"disableGpuSandbox":true,"disableHardwareAcceleration":true}"#,
+        )
+        .unwrap()
+        .normalize();
+        let serialized = serde_json::to_value(&config).unwrap();
+
+        assert_eq!(config.gpu_launch_mode, GpuLaunchMode::Off);
+        assert_eq!(serialized["gpuLaunchMode"], "off");
+        assert!(serialized.get("disableGpuSandbox").is_none());
+        assert!(serialized.get("disableHardwareAcceleration").is_none());
+    }
+
+    #[test]
+    fn gpu_launch_modes_round_trip_as_mutually_exclusive_values() {
+        for (wire_value, expected) in [
+            ("off", GpuLaunchMode::Off),
+            ("disableGpu", GpuLaunchMode::DisableGpu),
+            (
+                "disableGpuRasterization",
+                GpuLaunchMode::DisableGpuRasterization,
+            ),
+        ] {
+            let config = serde_json::from_value::<CodeyConfig>(serde_json::json!({
+                "activeProfileId": "",
+                "profiles": [],
+                "gpuLaunchMode": wire_value,
+            }))
+            .unwrap()
+            .normalize();
+
+            assert_eq!(config.gpu_launch_mode, expected);
+            assert_eq!(
+                serde_json::to_value(&config).unwrap()["gpuLaunchMode"],
+                wire_value
+            );
+        }
     }
 
     #[test]

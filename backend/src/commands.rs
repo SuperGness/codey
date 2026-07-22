@@ -841,6 +841,7 @@ pub async fn save_codey_config(
     config.disable_trace_log_writes = config_input.disable_trace_log_writes;
     config.slim_codex_pet = config_input.slim_codex_pet;
     config.slim_codex_voice = config_input.slim_codex_voice;
+    config.gpu_launch_mode = config_input.gpu_launch_mode;
     config.fast_context_tools = config_input.fast_context_tools;
     config.subagent_optimization = config_input.subagent_optimization;
     config.hide_full_access_warning = config_input.hide_full_access_warning;
@@ -1137,6 +1138,7 @@ fn config_requires_restart(applied: &CodeyConfig, current: &CodeyConfig) -> bool
         || applied.user_scripts != current.user_scripts
         || applied.slim_codex_pet != current.slim_codex_pet
         || applied.slim_codex_voice != current.slim_codex_voice
+        || applied.gpu_launch_mode != current.gpu_launch_mode
         || applied.fast_context_tools != current.fast_context_tools
         || applied.subagent_optimization != current.subagent_optimization
         || applied.selected_models() != current.selected_models()
@@ -1314,6 +1316,10 @@ mod restart_tests {
         let mut startup_change = applied.clone();
         startup_change.slim_codex_voice = !startup_change.slim_codex_voice;
         assert!(config_requires_restart(&applied, &startup_change));
+
+        let mut gpu_mode_change = applied.clone();
+        gpu_mode_change.gpu_launch_mode = crate::config::GpuLaunchMode::DisableGpuRasterization;
+        assert!(config_requires_restart(&applied, &gpu_mode_change));
     }
 
     #[test]

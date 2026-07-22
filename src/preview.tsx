@@ -20,6 +20,7 @@ let previewConfig = {
   disableTraceLogWrites: true,
   slimCodexPet: true,
   slimCodexVoice: true,
+  gpuLaunchMode: "off" as const,
   fastContextTools: false,
   subagentOptimization: false,
   hideFullAccessWarning: false,
@@ -46,6 +47,7 @@ window.__codeyInvokeApi = async (command, args) => {
     return {
       running: true,
       appVersion: "0.2.0",
+      clientPlatform: "macos",
       restartRequired: false,
       restartInProgress: false,
       activeProfileId: previewConfig.activeProfileId,

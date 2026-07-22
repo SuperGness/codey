@@ -22,6 +22,7 @@ export type Config = {
   disableTraceLogWrites: boolean;
   slimCodexPet: boolean;
   slimCodexVoice: boolean;
+  gpuLaunchMode: "off" | "disableGpu" | "disableGpuRasterization";
   fastContextTools: boolean;
   subagentOptimization: boolean;
   hideFullAccessWarning: boolean;
