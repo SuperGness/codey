@@ -359,7 +359,33 @@ fn expose_supported_model(model: &mut Value) {
     }
 }
 
+fn declares_fast_speed(model: &Value) -> bool {
+    model
+        .get("service_tiers")
+        .and_then(Value::as_array)
+        .is_some_and(|tiers| {
+            tiers
+                .iter()
+                .any(|tier| tier.get("id").and_then(Value::as_str) == Some(FAST_SERVICE_TIER_ID))
+        })
+        || model
+            .get("additional_speed_tiers")
+            .and_then(Value::as_array)
+            .is_some_and(|tiers| {
+                tiers
+                    .iter()
+                    .any(|tier| tier.as_str() == Some(FAST_SPEED_TIER_ID))
+            })
+}
+
 fn ensure_speed_controls(model: &mut Value) {
+    if !declares_fast_speed(model) {
+        return;
+    }
+    add_fast_speed_controls(model);
+}
+
+fn add_fast_speed_controls(model: &mut Value) {
     let service_tiers = model.get_mut("service_tiers").and_then(Value::as_array_mut);
     if let Some(service_tiers) = service_tiers {
         if !service_tiers
@@ -410,7 +436,7 @@ fn synthetic_model(template: &Value, model_id: &str, index: usize) -> Value {
     }
     ensure_catalog_compatibility(&mut model);
     clamp_reasoning_efforts(&mut model);
-    ensure_speed_controls(&mut model);
+    add_fast_speed_controls(&mut model);
     model
 }
 
@@ -500,7 +526,8 @@ mod tests {
                     "visibility": "list",
                     "priority": 7,
                     "default_reasoning_level": "medium",
-                    "supported_reasoning_levels": [{"effort": "low"}, {"effort": "xhigh"}]
+                    "supported_reasoning_levels": [{"effort": "low"}, {"effort": "xhigh"}],
+                    "additional_speed_tiers": ["fast"]
                 },
                 {
                     "slug": "gpt-5.4",
@@ -564,6 +591,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max", "ultra"]);
         assert_eq!(catalog["models"][0]["service_tiers"][0]["id"], "priority");
+        assert_eq!(catalog["models"][1]["service_tiers"][0]["id"], "priority");
         assert_eq!(catalog["models"][0]["supports_reasoning_summaries"], true);
         let spark = catalog["models"]
             .as_array()
@@ -572,8 +600,8 @@ mod tests {
             .find(|model| model["slug"] == "gpt-5.3-codex-spark")
             .unwrap();
         assert_eq!(spark["supported_in_api"], true);
-        assert_eq!(spark["service_tiers"][0]["id"], "priority");
-        assert_eq!(spark["additional_speed_tiers"][0], "fast");
+        assert_eq!(spark["service_tiers"], json!([]));
+        assert_eq!(spark["additional_speed_tiers"], json!([]));
         assert_eq!(catalog["models"][4]["supports_reasoning_summaries"], false);
     }
 
@@ -614,8 +642,8 @@ mod tests {
         assert_eq!(catalog["models"][1]["additional_speed_tiers"][0], "fast");
         assert_eq!(catalog["models"][2]["slug"], "gpt-5.3-codex-spark");
         assert_eq!(catalog["models"][2]["supported_in_api"], true);
-        assert_eq!(catalog["models"][2]["service_tiers"][0]["id"], "priority");
-        assert_eq!(catalog["models"][2]["additional_speed_tiers"][0], "fast");
+        assert_eq!(catalog["models"][2]["service_tiers"], json!([]));
+        assert_eq!(catalog["models"][2]["additional_speed_tiers"], json!([]));
         assert_eq!(catalog["models"][3]["slug"], "claude-sonnet");
         assert_eq!(catalog["models"][3]["codey_source"], "third_party");
         assert_eq!(catalog["models"][3]["service_tiers"][0]["id"], "priority");
@@ -694,13 +722,23 @@ mod tests {
                 .all(|model| model["visibility"] == "list")
         );
         assert_eq!(models[7]["visibility"], "hide");
-        assert!(models.iter().all(|model| {
+        assert!(models[..5].iter().all(|model| {
             model["service_tiers"]
                 .as_array()
                 .is_some_and(|tiers| !tiers.is_empty())
                 && model["additional_speed_tiers"]
                     .as_array()
                     .is_some_and(|tiers| !tiers.is_empty())
+        }));
+        assert!(models[5..].iter().all(|model| {
+            model
+                .get("service_tiers")
+                .and_then(Value::as_array)
+                .is_none_or(Vec::is_empty)
+                && model
+                    .get("additional_speed_tiers")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty)
         }));
     }
 

@@ -18,7 +18,7 @@ async function loadPatchExpression() {
     .replaceAll("__DISABLE_VOICE__", "false");
 }
 
-test("API auth uses Codex's native Spark and service-tier paths", async () => {
+test("API and ChatGPT auth share model-aware native service-tier controls", async () => {
   const Module = process.getBuiltinModule("module");
   const workerThreads = process.getBuiltinModule("worker_threads");
   const nativeLoad = Module._load;
@@ -123,13 +123,10 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
       "function selected(e,t){return lookup(e,t)?.id??null}",
     ].join("");
     const patchedServiceTierOptions = await patchAsset(serviceTierOptionsSource);
-    assert.match(
+    assert.equal(patchedServiceTierOptions, serviceTierOptionsSource);
+    assert.doesNotMatch(
       patchedServiceTierOptions,
-      /e\?\.serviceTiers\?\.length\?e\.serviceTiers:\[\{id:`priority`,name:`Fast`\}\]/,
-    );
-    assert.match(
-      patchedServiceTierOptions,
-      /function selected\(e,t\)\{return lookup\(e,t\)\?\.id\?\?t\?\?null\}/,
+      /serviceTiers\?\.length\?.*priority/,
     );
     const nativeServiceTierHelpers = Function(
       `${patchedServiceTierOptions};return {options,selected};`,
@@ -142,7 +139,6 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
       })),
       [
         { iconKind: null, label: "Standard", value: null },
-        { iconKind: "fast", label: "Fast", value: "priority" },
       ],
     );
     assert.deepEqual(
@@ -151,10 +147,33 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
         .map(({ label, value }) => ({ label, value })),
       [
         { label: "Standard", value: null },
-        { label: "Fast", value: "priority" },
       ],
     );
-    assert.equal(nativeServiceTierHelpers.selected({}, "priority"), "priority");
+    assert.equal(nativeServiceTierHelpers.selected({}, "priority"), null);
+    const fastServiceTier = {
+      description: "1.5x speed",
+      id: "priority",
+      name: "Fast",
+    };
+    assert.deepEqual(
+      nativeServiceTierHelpers
+        .options({ serviceTiers: [fastServiceTier] })
+        .map(({ iconKind, label, value }) => ({ iconKind, label, value })),
+      [
+        { iconKind: null, label: "Standard", value: null },
+        { iconKind: "fast", label: "Fast", value: "priority" },
+      ],
+    );
+    const speedControlVisible = (authMethod, serviceTiers) =>
+      serviceTierAllowed({
+        authMethod,
+        requirements: { featureRequirements: { fast_mode: false } },
+      }).isServiceTierAllowed &&
+      nativeServiceTierHelpers.options({ serviceTiers }).length > 1;
+    assert.equal(speedControlVisible("chatgpt", [fastServiceTier]), true);
+    assert.equal(speedControlVisible("apikey", [fastServiceTier]), true);
+    assert.equal(speedControlVisible("chatgpt", []), false);
+    assert.equal(speedControlVisible("apikey", []), false);
     assert.deepEqual(
       nativeServiceTierHelpers
         .options({
@@ -181,8 +200,9 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
     );
     assert.match(
       patchedServiceTierSettingsUi,
-      /if\(r\.availableOptions\.length===0\)return null/,
+      /if\(r\.availableOptions\.length<=1\)return null/,
     );
+    assert.doesNotMatch(patchedServiceTierSettingsUi, /if\(!n\|\|/);
     const nativeSettings = Function(
       `${patchedServiceTierSettingsUi};return Settings;`,
     )();
@@ -190,11 +210,27 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
       nativeSettings({
         isServiceTierAllowed: false,
         serviceTierSettings: {
+          availableOptions: [
+            { label: "Standard", value: null },
+            { label: "Fast", value: "priority" },
+          ],
+          selectedServiceTier: "priority",
+        },
+      }).availableOptions,
+      [
+        { label: "Standard", value: null },
+        { label: "Fast", value: "priority" },
+      ],
+    );
+    assert.equal(
+      nativeSettings({
+        isServiceTierAllowed: true,
+        serviceTierSettings: {
           availableOptions: [{ label: "Standard", value: null }],
           selectedServiceTier: null,
         },
-      }).availableOptions,
-      [{ label: "Standard", value: null }],
+      }),
+      null,
     );
 
     const serviceTierRequestSource = [
@@ -241,27 +277,6 @@ test("API auth uses Codex's native Spark and service-tier paths", async () => {
       url: "app://-/assets/unrelated-windows-chunk.js",
     });
     assert.equal(bypassedResponse, unrelatedResponse);
-
-    assert.deepEqual(
-      {
-        modelVisibility: globalThis.__CODEY_RENDERER_GATE_PATCH__.modelVisibility,
-        serviceTierOptions:
-          globalThis.__CODEY_RENDERER_GATE_PATCH__.serviceTierOptions,
-        serviceTierRequest:
-          globalThis.__CODEY_RENDERER_GATE_PATCH__.serviceTierRequest,
-        serviceTierSettingsUi:
-          globalThis.__CODEY_RENDERER_GATE_PATCH__.serviceTierSettingsUi,
-        serviceTierUi: globalThis.__CODEY_RENDERER_GATE_PATCH__.serviceTierUi,
-      },
-      {
-        modelVisibility: true,
-        serviceTierOptions: true,
-        serviceTierRequest: true,
-        serviceTierSettingsUi: true,
-        serviceTierUi: true,
-      },
-    );
-    assert.equal(globalThis.__CODEY_RENDERER_GATE_PATCH__.lastError, null);
   } finally {
     workerThreads.Worker = NativeWorker;
     Module._load = nativeLoad;

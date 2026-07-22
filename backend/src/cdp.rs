@@ -18,7 +18,6 @@ const VOICE_CONTROL_SHIELD_SCRIPT: &str = include_str!("../../public/voice-contr
 const SECURITY_WARNING_SHIELD_SCRIPT: &str =
     include_str!("../../public/security-warning-shield.js");
 const SETTINGS_OVERLAY_SCRIPT: &str = include_str!("../../dist-overlay/codey-overlay.js");
-const FAST_MODE_FIX_SCRIPT: &str = include_str!("../../public/fast-mode-fix.js");
 const PLUGIN_MARKETPLACE_FIX_SCRIPT: &str = include_str!("../../public/plugin-marketplace-fix.js");
 static SETTINGS_OVERLAY_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
 static SESSION_TOOLS_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
@@ -54,7 +53,6 @@ pub fn prepare_injection_scripts(
             + PET_CONTROL_SHIELD_SCRIPT.len()
             + VOICE_CONTROL_SHIELD_SCRIPT.len()
             + SECURITY_WARNING_SHIELD_SCRIPT.len()
-            + FAST_MODE_FIX_SCRIPT.len()
             + PLUGIN_MARKETPLACE_FIX_SCRIPT.len()
             + 4096,
     );
@@ -68,7 +66,6 @@ pub fn prepare_injection_scripts(
             lazy_settings_overlay_loader_script(),
         ),
         ("renderer controls", RENDERER_INJECT_SCRIPT),
-        ("legacy fast control cleanup", FAST_MODE_FIX_SCRIPT),
         (
             "plugin marketplace compatibility",
             PLUGIN_MARKETPLACE_FIX_SCRIPT,

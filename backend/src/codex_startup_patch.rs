@@ -25,14 +25,6 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   const originalLoad = Module._load;
   const isInspectorArgument = (argument) =>
     typeof argument === "string" && /^--inspect(?:-brk)?(?:=|$)/.test(argument);
-  const rendererGatePatchState = {
-    modelVisibility: false,
-    serviceTierOptions: false,
-    serviceTierRequest: false,
-    serviceTierSettingsUi: false,
-    serviceTierUi: false,
-    lastError: null,
-  };
   const replaceUniqueRendererGate = (source, pattern, replacement, name) => {
     let count = 0;
     const patched = source.replace(pattern, (...args) => {
@@ -58,7 +50,6 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
           `${visibilityExpression}=== \`chatgpt\``,
         "model visibility",
       );
-      rendererGatePatchState.modelVisibility = true;
     }
     if (
       source.includes("isServiceTierAllowed") &&
@@ -78,36 +69,6 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
           `${assignment}!${loadingName}`,
         "service tier UI",
       );
-      rendererGatePatchState.serviceTierUi = true;
-    }
-    if (
-      source.includes("serviceTier.standard.label") &&
-      source.includes("serviceTier.fast.label") &&
-      /\?\.serviceTiers\s*\?\?\s*\[\]/.test(source)
-    ) {
-      patched = replaceUniqueRendererGate(
-        patched,
-        /\b([$A-Z_a-z][$\w]*)\?\.serviceTiers\s*\?\?\s*\[\]/g,
-        (_match, modelName) =>
-          `${modelName}?.serviceTiers?.length?${modelName}.serviceTiers:` +
-          `[{id:\`priority\`,name:\`Fast\`}]`,
-        "service tier options",
-      );
-      patched = replaceUniqueRendererGate(
-        patched,
-        /function\s+([$A-Z_a-z][$\w]*)\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)\)\{return\s+([$A-Z_a-z][$\w]*)\(\2,\3\)\?\.id\s*\?\?\s*null\}/g,
-        (
-          _match,
-          functionName,
-          modelName,
-          serviceTierName,
-          lookupName,
-        ) =>
-          `function ${functionName}(${modelName},${serviceTierName}){return ` +
-          `${lookupName}(${modelName},${serviceTierName})?.id??${serviceTierName}??null}`,
-        "service tier selection",
-      );
-      rendererGatePatchState.serviceTierOptions = true;
     }
     if (
       source.includes("isServiceTierAllowed") &&
@@ -118,10 +79,9 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
         patched,
         /if\s*\(\s*!\s*([$A-Z_a-z][$\w]*)\s*\|\|\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*<=\s*1\s*\)\s*return\s+null/g,
         (_match, _isAllowedName, settingsName) =>
-          `if(${settingsName}.availableOptions.length===0)return null`,
+          `if(${settingsName}.availableOptions.length<=1)return null`,
         "service tier settings UI",
       );
-      rendererGatePatchState.serviceTierSettingsUi = true;
     }
     if (
       source.includes("Failed to read service tier for request") &&
@@ -134,7 +94,6 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
           `if(${authMethodName}!==\`chatgpt\`)return!0`,
         "service tier request",
       );
-      rendererGatePatchState.serviceTierRequest = true;
     }
     return patched;
   };
@@ -155,14 +114,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   const patchCodexRendererResponse = async (request, response) => {
     if (!isCodexRendererAssetRequest(request) || response?.ok !== true) return response;
     const source = await response.clone().text();
-    let patched;
-    try {
-      patched = patchCodexRendererAsset(source);
-    } catch (error) {
-      rendererGatePatchState.lastError =
-        error instanceof Error ? error.message : String(error);
-      throw error;
-    }
+    const patched = patchCodexRendererAsset(source);
     if (patched === source) return response;
     const headers = new Headers(response.headers);
     headers.delete("content-length");
@@ -172,11 +124,6 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
       statusText: response.statusText,
     });
   };
-  Object.defineProperty(globalThis, "__CODEY_RENDERER_GATE_PATCH__", {
-    configurable: false,
-    value: rendererGatePatchState,
-    writable: false,
-  });
 
   // The inspector is only a startup injection mechanism. Do not pass its
   // pause state or command-line flags to Codex workers.
@@ -1063,7 +1010,6 @@ mod tests {
         );
         assert!(expression.contains("const disableMicro = disableWindowsOptimizations"));
         assert!(expression.contains("CodeyPetBlockedBrowserWindow"));
-        assert!(expression.contains("__CODEY_RENDERER_GATE_PATCH__"));
         assert!(expression.contains("patchCodexRendererResponse"));
         assert!(expression.contains("restoreNativeModelAndSpeedControls: true"));
         assert!(expression.contains("avatar-overlay-composition-surface-preload"));
