@@ -35,7 +35,9 @@ const previewCcSwitch = {
 };
 
 let previewModelState = {
-  officialModels: previewOfficialModels.map((model, index) => ({ ...model, supported: index < 3 })),
+  officialModels: previewOfficialModels
+    .filter((model) => previewUpstreamModels.includes(model.slug))
+    .map((model) => ({ ...model, supported: true })),
   officialModelIds: previewOfficialModels.map((model) => model.slug),
   thirdPartyModels: ["provider-fast-coder", "claude-sonnet-4-5"],
   upstreamModels: previewUpstreamModels,

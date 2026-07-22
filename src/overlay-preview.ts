@@ -31,7 +31,9 @@ const previewCcSwitch = {
   provider: { id: "primary", name: "主力代理", official: false, baseUrl: "https://api.example.com/v1", protocol: "responses", source: "cc-switch" },
 };
 let previewModelState = {
-  officialModels: previewOfficialModels.map((model, index) => ({ ...model, supported: index < 3 })),
+  officialModels: previewOfficialModels
+    .filter((model) => previewUpstreamModels.includes(model.slug))
+    .map((model) => ({ ...model, supported: true })),
   officialModelIds: previewOfficialModels.map((model) => model.slug),
   thirdPartyModels: ["provider-fast-coder", "claude-sonnet-4-5"],
   upstreamModels: previewUpstreamModels,

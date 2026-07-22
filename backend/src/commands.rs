@@ -977,10 +977,12 @@ pub async fn fetch_current_provider_models(state: &Arc<AppState>) -> Result<Valu
     next.upstream_models_by_provider
         .insert(provider_id, models.clone());
     next = next.normalize();
-    refresh_model_catalog(&next)?;
+    let model_state = current_model_state(&next)?;
+    if should_refresh_model_catalog(&model_state) {
+        refresh_model_catalog(&next)?;
+    }
     state.store.save(&next).map_err(|error| error.to_string())?;
     *state.config.write().await = next.clone();
-    let model_state = current_model_state(&next)?;
     let restart_required = runtime_config_requires_restart(state, &next).await;
     Ok(json!({
         "status":"ok",
@@ -1109,11 +1111,15 @@ fn current_model_state(config: &CodeyConfig) -> Result<model_catalog::ModelSelec
     Ok(model_catalog::selection_state(
         &codex_home(),
         official,
-        config.upstream_models(),
+        config.upstream_models_snapshot(),
         config.selected_models(),
         config.default_model(),
     )
     .unwrap_or_default())
+}
+
+fn should_refresh_model_catalog(model_state: &model_catalog::ModelSelectionState) -> bool {
+    !model_state.official_models.is_empty() || !model_state.third_party_models.is_empty()
 }
 
 fn refresh_model_catalog(config: &CodeyConfig) -> Result<(), String> {
@@ -2476,6 +2482,17 @@ fn api_error_message(error: impl ToString) -> Value {
 mod tests {
     use super::*;
     use crate::pending_approval::{AbortedTurn, PendingApproval, StartedTurn};
+
+    #[test]
+    fn model_sync_can_defer_catalog_refresh_until_a_model_is_selectable() {
+        assert!(!should_refresh_model_catalog(
+            &model_catalog::ModelSelectionState::default()
+        ));
+
+        let mut state = model_catalog::ModelSelectionState::default();
+        state.third_party_models.push("provider-model".to_string());
+        assert!(should_refresh_model_catalog(&state));
+    }
 
     #[test]
     fn selected_codex_app_path_requires_a_desktop_executable() {

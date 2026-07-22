@@ -44,7 +44,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
   try {
     assert.equal(
       (0, eval)(await loadPatchExpression()),
-      "codey-startup-patch-installed-v6",
+      "codey-startup-patch-installed-v7",
     );
     Module._load("electron", undefined, false).protocol.handle(
       "app",
@@ -80,6 +80,50 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
     )();
     assert.equal(modelGate("chatgpt"), true);
     assert.equal(modelGate("apikey"), false);
+
+    const modelListFilterSource = [
+      "function filter({authMethod:e,availableModels:n,includeUltraReasoningEffort:a,models:o,useHiddenModels:s}){",
+      "let c=[],l=null,u=s&&e!==`amazonBedrock`;",
+      "o.forEach(r=>{if(u?n.has(r.model):!r.hidden){c.push(r.model);r.isDefault&&(l=r.model)}});",
+      "return {models:c,defaultModel:l,includeUltraReasoningEffort:a}}",
+    ].join("");
+    const patchedModelListFilter = await patchAsset(
+      modelListFilterSource,
+      "app://-/assets/model-list-filter-lLUu6272.js",
+    );
+    assert.match(
+      patchedModelListFilter,
+      /if\(u\?\(n\.has\(r\.model\)\|\|!r\.hidden\):!r\.hidden\)/,
+    );
+    assert.match(patchedModelListFilter, /u=s&&e=== `chatgpt`/);
+    const filterModels = Function(
+      `${patchedModelListFilter};return filter;`,
+    )();
+    const models = [
+      { hidden: false, isDefault: true, model: "gpt-5.6-sol" },
+      { hidden: false, isDefault: false, model: "gpt-5.3-codex-spark" },
+      { hidden: true, isDefault: false, model: "hidden-preview" },
+    ];
+    assert.deepEqual(
+      filterModels({
+        authMethod: "chatgpt",
+        availableModels: new Set(["gpt-5.6-sol", "hidden-preview"]),
+        includeUltraReasoningEffort: true,
+        models,
+        useHiddenModels: true,
+      }).models,
+      ["gpt-5.6-sol", "gpt-5.3-codex-spark", "hidden-preview"],
+    );
+    assert.deepEqual(
+      filterModels({
+        authMethod: "apikey",
+        availableModels: new Set(["gpt-5.6-sol"]),
+        includeUltraReasoningEffort: true,
+        models,
+        useHiddenModels: true,
+      }).models,
+      ["gpt-5.6-sol", "gpt-5.3-codex-spark"],
+    );
 
     const serviceTierUiSource = [
       "function U(e){let o=e,s=o?.authMethod===`chatgpt`,c=o?.authMethod??null,l;",
@@ -255,6 +299,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       "app://-/assets/app-initial-windows.js",
       "app://-/assets/app-initial~windows.js?build=store",
       "app://-/assets/general-settings-BWZCvLqI.js",
+      "app://-/assets/model-list-filter-lLUu6272.js",
       "app://-/assets/windows-model-controls-a1b2c3.js",
       "app://-/assets/use-service-tier-settings-XUBE8MwV.js",
       "app://-/assets/read-service-tier-for-request-BJ4fBpQe.js",

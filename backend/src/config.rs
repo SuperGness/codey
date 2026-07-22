@@ -160,7 +160,7 @@ impl CodeyConfig {
             self.active_profile_id = self.profiles[0].id.clone();
         }
         normalize_model_lists(&mut self.selected_models_by_provider);
-        normalize_model_lists(&mut self.upstream_models_by_provider);
+        normalize_upstream_model_lists(&mut self.upstream_models_by_provider);
         normalize_model_map(&mut self.default_model_by_provider);
         self
     }
@@ -193,10 +193,13 @@ impl CodeyConfig {
     }
 
     pub fn upstream_models(&self) -> &[String] {
+        self.upstream_models_snapshot().unwrap_or_default()
+    }
+
+    pub fn upstream_models_snapshot(&self) -> Option<&[String]> {
         self.current_provider_id()
             .and_then(|provider_id| self.upstream_models_by_provider.get(provider_id))
             .map(Vec::as_slice)
-            .unwrap_or_default()
     }
 
     pub fn default_model(&self) -> Option<&str> {
@@ -208,18 +211,29 @@ impl CodeyConfig {
 
 fn normalize_model_lists(lists: &mut BTreeMap<String, Vec<String>>) {
     lists.retain(|provider_id, models| {
-        *models = models
-            .iter()
-            .map(|model| model.trim())
-            .filter(|model| !model.is_empty())
-            .fold(Vec::<String>::new(), |mut unique, model| {
-                if !unique.iter().any(|existing| existing == model) {
-                    unique.push(model.to_string());
-                }
-                unique
-            });
+        normalize_model_list(models);
         !provider_id.trim().is_empty() && !models.is_empty()
     });
+}
+
+fn normalize_upstream_model_lists(lists: &mut BTreeMap<String, Vec<String>>) {
+    lists.retain(|provider_id, models| {
+        normalize_model_list(models);
+        !provider_id.trim().is_empty()
+    });
+}
+
+fn normalize_model_list(models: &mut Vec<String>) {
+    *models = models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .fold(Vec::<String>::new(), |mut unique, model| {
+            if !unique.iter().any(|existing| existing == model) {
+                unique.push(model.to_string());
+            }
+            unique
+        });
 }
 
 fn normalize_model_map(models_by_provider: &mut BTreeMap<String, String>) {
@@ -344,6 +358,19 @@ mod tests {
         config.active_profile_id = "missing".to_string();
         let normalized = config.normalize();
         assert_eq!(normalized.active_profile_id, normalized.profiles[0].id);
+    }
+
+    #[test]
+    fn preserves_an_empty_upstream_snapshot_as_a_successful_sync() {
+        let mut config = CodeyConfig::default();
+        let provider_id = config.current_provider_id().unwrap().to_string();
+        config
+            .upstream_models_by_provider
+            .insert(provider_id, Vec::new());
+
+        let normalized = config.normalize();
+
+        assert_eq!(normalized.upstream_models_snapshot(), Some([].as_slice()));
     }
 
     #[test]

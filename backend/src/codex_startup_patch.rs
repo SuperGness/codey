@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-pub const PATCH_RESULT: &str = "codey-startup-patch-installed-v6";
+pub const PATCH_RESULT: &str = "codey-startup-patch-installed-v7";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchOptions {
@@ -38,6 +38,20 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   };
   const patchCodexRendererAsset = (source) => {
     let patched = source;
+    if (
+      source.includes("useHiddenModels:") &&
+      source.includes("availableModels:") &&
+      source.includes("includeUltraReasoningEffort") &&
+      source.includes("amazonBedrock")
+    ) {
+      patched = replaceUniqueRendererGate(
+        patched,
+        /if\s*\(\s*([$A-Z_a-z][$\w]*)\s*\?\s*([$A-Z_a-z][$\w]*)\.has\(\s*([$A-Z_a-z][$\w]*)\.model\s*\)\s*:\s*!\s*\3\.hidden\s*\)/g,
+        (_match, useAllowlistName, allowlistName, modelName) =>
+          `if(${useAllowlistName}?(${allowlistName}.has(${modelName}.model)||!${modelName}.hidden):!${modelName}.hidden)`,
+        "model allowlist",
+      );
+    }
     if (
       source.includes("useHiddenModels:") &&
       source.includes("includeUltraReasoningEffort") &&
@@ -103,7 +117,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
       return (
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
-        /\/(?:(?:app-initial|general-settings|windows-model-controls|use-service-tier-settings|read-service-tier-for-request)(?:[~-][^/]*)?)\.js$/i.test(
+        /\/(?:(?:app-initial|general-settings|model-list-filter|windows-model-controls|use-service-tier-settings|read-service-tier-for-request)(?:[~-][^/]*)?)\.js$/i.test(
           url.pathname,
         )
       );
@@ -778,7 +792,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   setImmediate(() => {
     try { process.getBuiltinModule("inspector").close(); } catch {}
   });
-  return "codey-startup-patch-installed-v6";
+  return "codey-startup-patch-installed-v7";
 })()
 "#;
 
@@ -993,7 +1007,7 @@ mod tests {
 
     #[test]
     fn patch_result_is_stable_for_launch_status_validation() {
-        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v6");
+        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v7");
     }
 
     #[test]

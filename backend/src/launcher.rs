@@ -192,7 +192,7 @@ impl CodeyRuntime {
         let default_model = model_catalog::selection_state(
             &home,
             official_provider,
-            config.upstream_models(),
+            config.upstream_models_snapshot(),
             config.selected_models(),
             config.default_model(),
         )
