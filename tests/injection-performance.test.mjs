@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const root = new URL("../", import.meta.url);
 
-test("renderer core lazy-loads session tools only after sidebar detection", async () => {
+test("renderer core waits for sidebar interaction before loading session tools", async () => {
   const [inject, sessionTools, petShield, voiceShield] = await Promise.all([
     readFile(new URL("public/renderer-inject.js", root), "utf8"),
     readFile(new URL("public/codey-inject.js", root), "utf8"),
@@ -17,7 +17,10 @@ test("renderer core lazy-loads session tools only after sidebar detection", asyn
   assert.match(inject, /const sessionToolsLoadPath = "\/internal\/codey\/session-tools\/load"/);
   assert.match(inject, /const sidebarSelector = \[/);
   assert.match(inject, /const loadSessionTools = \(\) =>/);
-  assert.match(inject, /sidebarDetected\(root\)\) void loadSessionTools\(\)/);
+  assert.match(inject, /sidebarDetected\(root\)\) armSessionToolsInteraction\(\)/);
+  assert.match(inject, /document\.addEventListener\("pointerover", loadSessionToolsFromInteraction/);
+  assert.match(inject, /document\.addEventListener\("focusin", loadSessionToolsFromInteraction/);
+  assert.match(inject, /bootstrapObserver\?\.disconnect\(\)/);
   assert.match(inject, /new MutationObserver\(\(mutations\) =>/);
   assert.match(inject, /scheduleScan\(element\)/);
   assert.doesNotMatch(inject, /new MutationObserver\(\(\) => \{[\s\S]*setTimeout\(scan,/);

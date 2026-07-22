@@ -1,18 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Activity,
-  Check,
-  CircleAlert,
-  CircleCheck,
-  GitBranch,
-  LoaderCircle,
-  Save,
-  X,
-} from "lucide-react";
+  IconActivity as Activity,
+  IconAlertCircle as CircleAlert,
+  IconCheck,
+  IconCircleCheck as CircleCheck,
+  IconDeviceFloppy as Save,
+  IconGitBranch as GitBranch,
+  IconLoader2 as LoaderCircle,
+  IconX,
+} from "@tabler/icons-react";
 import { invoke } from "./api";
 import { formatBytes, TraceLogModule, type TraceLogStats } from "./TraceLogModule";
 import { ConfirmationDialog, ModelPickerDialog } from "./AppDialogs";
-import { FeaturePolicyCard, ModelSection, OperationsPanel, WebhookCard } from "./AppSections";
+import { AppUpdateCard, FeaturePolicyCard, ModelSection, OperationsPanel, WebhookCard } from "./AppSections";
 import type {
   AppProps,
   CcSwitchStatus,
@@ -26,11 +26,10 @@ import type {
   UpdateCheck,
   UpdateDownload,
 } from "./App.types";
-import {
-  MagicBadge as Badge,
-  MagicButton as Button,
-  ShimmerButton,
-} from "./components/magicui";
+import { Badge, Button, Button as SaveButton } from "./components/ui";
+
+const Check = IconCheck;
+const X = IconX;
 
 function CodeyBrandMark() {
   return (
@@ -69,6 +68,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 
 export function App({ embedded = false, onClose }: AppProps) {
   const [config, setConfig] = useState<Config | null>(null);
+  const persistedConfigRef = useRef<Config | null>(null);
   const [status, setStatus] = useState<RuntimeStatus>({ running: false });
   const [ccSwitchStatus, setCcSwitchStatus] = useState<CcSwitchStatus | null>(null);
   const [modelState, setModelState] = useState<ModelState>({
@@ -172,7 +172,7 @@ export function App({ embedded = false, onClose }: AppProps) {
         startupError?: string;
         ccSwitch?: CcSwitchStatus;
       }>("load_codey_config");
-      setConfig(result.config);
+      setPersistedConfig(result.config);
       setCcSwitchStatus(result.ccSwitch ?? null);
       if (result.modelState) setModelState(result.modelState);
       const next = await refreshStatus();
@@ -200,6 +200,11 @@ export function App({ embedded = false, onClose }: AppProps) {
     return next;
   }
 
+  function setPersistedConfig(next: Config) {
+    persistedConfigRef.current = next;
+    setConfig(next);
+  }
+
   function editConfig(next: Config) {
     setConfig(next);
     setDirty(true);
@@ -225,7 +230,7 @@ export function App({ embedded = false, onClose }: AppProps) {
       modelState?: ModelState;
       restartRequired?: boolean;
     }>("save_codey_config", { config: next });
-    setConfig(result.config);
+    setPersistedConfig(result.config);
     window.dispatchEvent(new CustomEvent("codey:config-changed", {
       detail: { config: result.config },
     }));
@@ -247,7 +252,7 @@ export function App({ embedded = false, onClose }: AppProps) {
         modelState: ModelState;
         restartRequired?: boolean;
       }>("sync_current_provider");
-      setConfig(result.config);
+      setPersistedConfig(result.config);
       setCcSwitchStatus(result.ccSwitch);
       setModelState(result.modelState);
       setStatus((current) => ({
@@ -286,6 +291,16 @@ export function App({ embedded = false, onClose }: AppProps) {
           : "Codey 设置已保存",
       });
     });
+  }
+
+  function closeSettings() {
+    if (persistedConfigRef.current) {
+      setConfig(persistedConfigRef.current);
+    }
+    setDirty(false);
+    setModelPickerVisible(false);
+    setConfirmation(null);
+    onClose?.();
   }
 
   async function fetchCurrentModels() {
@@ -371,7 +386,7 @@ export function App({ embedded = false, onClose }: AppProps) {
         modelState: ModelState;
         restartRequired?: boolean;
       }>("save_selected_models", { models: draftModels });
-      setConfig(result.config);
+      setPersistedConfig(result.config);
       setModelState(result.modelState);
       setStatus((current) => ({
         ...current,
@@ -394,7 +409,7 @@ export function App({ embedded = false, onClose }: AppProps) {
         modelState: ModelState;
         restartRequired?: boolean;
       }>("save_default_model", { model });
-      setConfig(result.config);
+      setPersistedConfig(result.config);
       setModelState(result.modelState);
       setStatus((current) => ({
         ...current,
@@ -607,98 +622,100 @@ export function App({ embedded = false, onClose }: AppProps) {
     <main className={`app-shell${embedded ? " embedded" : ""}`} ref={setPortalContainer}>
       <a className="skip-link" href="#codey-settings-content">跳至设置内容</a>
 
+      <div className="macos-titlebar">
+        <div className="macos-traffic-lights">
+          <button className="traffic-light close" title="关闭" onClick={embedded ? closeSettings : undefined} aria-label="关闭窗口" />
+          <button className="traffic-light minimize" title="最小化" aria-label="最小化窗口" />
+          <button className="traffic-light zoom" title="缩放" aria-label="全屏缩放" />
+        </div>
+        <div className="macos-titlebar-title">
+          <span className="app-title-text">Codey Control Panel</span>
+          <span className="app-version-tag">v{status.appVersion || "0.2.0"}</span>
+        </div>
+        <div className="macos-titlebar-right">
+          <span className={`status-pill ${status.running ? "online" : "offline"}`}>
+            <span className="status-pill-dot" />
+            {status.running ? (status.activeProfileName || "已就绪") : "未启动"}
+          </span>
+        </div>
+      </div>
+
       <header className="config-header">
         <div className="config-header-inner">
           <div className="config-brand">
             <CodeyBrandMark />
             <div className="config-brand-copy">
               <div className="config-brand-title-row">
-                <h1>Codey 配置</h1>
+                <h1>Codey 控制台</h1>
                 <Badge variant={provider.official ? "outline" : "secondary"}>
                   {provider.name}
                 </Badge>
+                {dirty && (
+                  <Badge variant="warning" className="unsaved-badge">
+                    未保存更改
+                  </Badge>
+                )}
               </div>
-              <p>管理线路、模型、运行策略和诊断通知</p>
+              <p>管理 Codex 线路、模型服务、运行策略与诊断日志</p>
             </div>
           </div>
 
-          <div className="config-header-actions">
-            <ShimmerButton
-              className="save-button"
-              disabled={!dirty || isBusy}
-              onClick={() => void saveCurrent()}
-            >
-              {busy === "save"
-                ? <LoaderCircle className="spinner" aria-hidden="true" />
-                : dirty
-                  ? <Save aria-hidden="true" />
-                  : <Check aria-hidden="true" />}
-              {dirty ? "保存更改" : "已保存"}
-            </ShimmerButton>
-            {embedded && (
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                aria-label="关闭设置"
-                onClick={onClose}
+          <div className="config-header-right">
+            <div className="config-header-actions">
+              <SaveButton
+                className={`save-button${dirty ? " dirty" : ""}`}
+                disabled={!dirty || isBusy}
+                onClick={() => void saveCurrent()}
               >
-                <X aria-hidden="true" />
-              </Button>
-            )}
+                {busy === "save"
+                  ? <LoaderCircle className="spinner" aria-hidden="true" />
+                  : dirty
+                    ? <Save aria-hidden="true" />
+                    : <Check aria-hidden="true" />}
+                {dirty ? "保存更改" : "已保存"}
+              </SaveButton>
+              {embedded && (
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="关闭设置"
+                  onClick={closeSettings}
+                >
+                  <X aria-hidden="true" />
+                </Button>
+              )}
+            </div>
           </div>
         </div>
-
       </header>
 
       <div className="page-scroll">
         <div className="page" id="codey-settings-content">
+          {/* 最上方：运行状态 (Codex 运行与维护，含 Codex 应用路径) */}
           <OperationsPanel
             config={config}
             status={status}
-            updateResult={updateResult}
-            updateCheck={updateCheck}
-            downloadedUpdate={downloadedUpdate}
             busy={busy}
             isBusy={isBusy}
             onRestart={askRestartCodex}
-            onCheckUpdates={() => void checkForUpdates()}
-            onDownloadUpdate={() => void downloadUpdate()}
-            onInstallUpdate={askInstallDownloadedUpdate}
           />
 
-          <div className="configuration-heading">
-            <span className="section-kicker">Configuration</span>
-            <h2>配置项目</h2>
-            <p>线路、模型、客户端策略、通知和诊断日志。</p>
-          </div>
-
-          <div className="dashboard-grid">
-            <div className="dashboard-main-column">
-              <ModelSection
-                ccSwitchStatus={ccSwitchStatus}
-                provider={provider}
-                modelState={modelState}
-                dirty={dirty}
-                isBusy={isBusy}
-                busy={busy}
-                onSyncCurrentProvider={() => void syncCurrentProvider()}
-                onFetchCurrentModels={() => void fetchCurrentModels()}
-                onSetDefaultModel={(model) => void setDefaultModel(model)}
-              />
-            </div>
-
-            <div className="dashboard-side-column">
-              <FeaturePolicyCard
-                config={config}
+          {/* 中间区域：分左右两栏 (左侧: 上方应用更新, 下方飞书通知; 右侧: 功能策略) */}
+          <div className="upper-dashboard-grid">
+            {/* 左侧栏：上方应用更新，下方飞书通知 */}
+            <div className="dashboard-column upper-left-column">
+              <AppUpdateCard
+                status={status}
+                updateResult={updateResult}
+                updateCheck={updateCheck}
+                downloadedUpdate={downloadedUpdate}
                 busy={busy}
                 isBusy={isBusy}
-                subagentModel={SUBAGENT_MODEL}
-                onConfigChange={editConfig}
-                onSubagentOptimizationChange={(checked) => void updateSubagentOptimization(checked)}
+                onCheckUpdates={() => void checkForUpdates()}
+                onDownloadUpdate={() => void downloadUpdate()}
+                onInstallUpdate={askInstallDownloadedUpdate}
               />
-            </div>
 
-            <div className="dashboard-side-column notification-column">
               <WebhookCard
                 config={config}
                 busy={busy}
@@ -708,9 +725,37 @@ export function App({ embedded = false, onClose }: AppProps) {
                 onTestWebhook={() => void testWebhook()}
               />
             </div>
+
+            {/* 右侧栏：Codey 功能策略 */}
+            <div className="dashboard-column upper-right-column">
+              <FeaturePolicyCard
+                config={config}
+                busy={busy}
+                isBusy={isBusy}
+                subagentModel={SUBAGENT_MODEL}
+                onConfigChange={editConfig}
+                onSubagentOptimizationChange={(checked) => void updateSubagentOptimization(checked)}
+              />
+            </div>
           </div>
 
-          <div className="dashboard-trace-column">
+          {/* 线路与模型：整行独占排布 */}
+          <div className="full-row-section model-full-section">
+            <ModelSection
+              ccSwitchStatus={ccSwitchStatus}
+              provider={provider}
+              modelState={modelState}
+              dirty={dirty}
+              isBusy={isBusy}
+              busy={busy}
+              onSyncCurrentProvider={() => void syncCurrentProvider()}
+              onFetchCurrentModels={() => void fetchCurrentModels()}
+              onSetDefaultModel={(model) => void setDefaultModel(model)}
+            />
+          </div>
+
+          {/* Trace 日志分析：整行独占排布 */}
+          <div className="full-row-section trace-full-section">
             <TraceLogModule
               stats={status.traceLogStats}
               snapshotStale={traceSnapshotStale}

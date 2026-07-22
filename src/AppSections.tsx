@@ -1,18 +1,20 @@
 import {
-  Activity,
-  BellRing,
-  Check,
-  Cpu,
-  Download,
-  FolderOpen,
-  GitBranch,
-  History,
-  LoaderCircle,
-  PlugZap,
-  RefreshCw,
-  Send,
-  Server,
-} from "lucide-react";
+  IconActivity as Activity,
+  IconBell as BellRing,
+  IconBrandWindows,
+  IconCheck as Check,
+  IconCpu,
+  IconDownload,
+  IconFolderOpen,
+  IconGitBranch,
+  IconHistory,
+  IconLoader2 as LoaderCircle,
+  IconPlugConnected as PlugZap,
+  IconRefresh as RefreshCw,
+  IconSend,
+  IconServer,
+  IconX as X,
+} from "@tabler/icons-react";
 
 import type {
   CcSwitchStatus,
@@ -23,51 +25,61 @@ import type {
   UpdateCheck,
   UpdateDownload,
 } from "./App.types";
-import {
-  MagicBadge as Badge,
-  MagicButton as Button,
-  MagicCard as Card,
-  MagicInput as Input,
-  MagicSwitch as Switch,
-} from "./components/magicui";
+import { Badge, Button, Card, Input, Switch } from "./components/ui";
+
+const Cpu = IconCpu;
+const Download = IconDownload;
+const FolderOpen = IconFolderOpen;
+const GitBranch = IconGitBranch;
+const History = IconHistory;
+const Send = IconSend;
+const Server = IconServer;
 
 type OperationsPanelProps = {
   config: Config;
   status: RuntimeStatus;
-  updateResult: InlineResult;
-  updateCheck: UpdateCheck | null;
-  downloadedUpdate: UpdateDownload | null;
   busy: string | null;
   isBusy: boolean;
   onRestart: () => void;
-  onCheckUpdates: () => void;
-  onDownloadUpdate: () => void;
-  onInstallUpdate: () => void;
 };
 
 export function OperationsPanel({
   config,
   status,
-  updateResult,
-  updateCheck,
-  downloadedUpdate,
   busy,
   isBusy,
   onRestart,
-  onCheckUpdates,
-  onDownloadUpdate,
-  onInstallUpdate,
 }: OperationsPanelProps) {
   const maintenance = status.maintenance;
   const sessionOk = maintenance?.sessionStatus === "ready";
   const pluginOk = maintenance?.pluginStatus === "ready";
   const performanceError = maintenance?.performanceStatus === "error";
+  const isWindowsClient = status.clientPlatform === "windows";
+  const windowsPatchReady = maintenance?.performanceStatus === "ready";
+  const windowsPatchFailed = performanceError || Boolean(status.startupError);
+  const windowsPatchTone = windowsPatchReady
+    ? "success"
+    : windowsPatchFailed
+      ? "destructive"
+      : "warning";
+  const windowsPatchLabel = windowsPatchReady
+    ? "已启用"
+    : windowsPatchFailed
+      ? "未生效"
+      : "待检测";
+  const windowsPatchDetail = windowsPatchReady
+    ? maintenance?.performanceDetail
+      || "WMI 周期采样、临时 WebView 残留与执行环境泄漏修复已生效。"
+    : windowsPatchFailed
+      ? maintenance?.performanceDetail
+        || status.startupError
+        || "Windows 优化补丁加载异常。"
+      : status.running
+        ? "正在确认 Windows 优化补丁状态。"
+        : "将在 Codex 启动时自动安装并校验 Windows 优化补丁。";
   const resolvedCodexPath = status.codexAppPath || "/Applications/ChatGPT.app";
-  const optimizationReady = config.slimCodexPet
-    && config.slimCodexVoice
-    && config.fastContextTools
-    && !performanceError;
   const restartPending = Boolean(status.restartRequired);
+
   const statusCards: Array<{
     title: string;
     description: string;
@@ -86,14 +98,14 @@ export function OperationsPanel({
     },
     {
       title: "系统优化",
-      description: optimizationReady
+      description: !performanceError
         ? "精简策略与性能补丁已按当前配置启用。"
         : "部分精简策略尚未启用，保留完整功能。",
       detail: performanceError
         ? maintenance?.performanceDetail || "性能补丁加载异常"
         : "FastCtx、宠物、语音与 Windows 性能策略",
-      label: performanceError ? "异常" : optimizationReady ? "已优化" : "标准",
-      tone: performanceError ? "destructive" : optimizationReady ? "success" : "info",
+      label: performanceError ? "异常" : "已优化",
+      tone: performanceError ? "destructive" : "success",
       icon: Cpu,
     },
     {
@@ -118,15 +130,11 @@ export function OperationsPanel({
               <Activity size={18} aria-hidden="true" />
             </span>
             <div>
-              <span className="section-kicker">Runtime & maintenance</span>
-              <h1 id="operations-title">Codex 运行与维护</h1>
-              <p aria-live="polite">
-                {restartPending
-                  ? "配置已保存，等待重启后载入新的模型目录或启动参数。"
-                  : status.running
-                    ? "当前线路与运行参数已就绪，状态会在本页自动同步。"
-                    : "Codex 尚未启动，运行状态将在客户端启动后自动同步。"}
-              </p>
+              <h1 id="operations-title">Codex 运行状态</h1>
+              <div className="path-display header-path-display" aria-label="Codex 应用路径">
+                <FolderOpen size={14} aria-hidden="true" />
+                <code>{config.codexAppPath || resolvedCodexPath}</code>
+              </div>
             </div>
           </div>
 
@@ -136,7 +144,7 @@ export function OperationsPanel({
               {restartPending ? "等待重启" : status.running ? "运行中" : "未启动"}
             </Badge>
             <Button
-              variant={restartPending ? "default" : "outline"}
+              variant="warning"
               size="sm"
               disabled={isBusy || status.restartInProgress || !status.running}
               onClick={onRestart}
@@ -148,6 +156,25 @@ export function OperationsPanel({
             </Button>
           </div>
         </div>
+
+        {isWindowsClient && (
+          <div
+            className={`windows-patch-status windows-patch-status-${windowsPatchTone}`}
+            role="status"
+            aria-live="polite"
+          >
+            <span className="windows-patch-icon">
+              <IconBrandWindows size={18} aria-hidden="true" />
+            </span>
+            <div className="windows-patch-copy">
+              <div className="windows-patch-heading">
+                <strong>Windows 优化补丁</strong>
+                <Badge variant={windowsPatchTone}>{windowsPatchLabel}</Badge>
+              </div>
+              <p>{windowsPatchDetail}</p>
+            </div>
+          </div>
+        )}
 
         <div className="operations-status-grid" role="list" aria-label="运行状态">
           {statusCards.map((item) => {
@@ -173,90 +200,99 @@ export function OperationsPanel({
             );
           })}
         </div>
+      </Card>
+    </section>
+  );
+}
 
-        <div className="maintenance-grid">
-          <div className="maintenance-item patch-status">
-            <div className="maintenance-item-heading">
-              <span className="maintenance-item-icon">
-                <Cpu size={16} aria-hidden="true" />
-              </span>
-              <strong>Windows 新版卡顿补丁</strong>
-              <Badge variant={performanceError ? "destructive" : "success"}>
-                {performanceError ? "异常" : "自动生效"}
-              </Badge>
-            </div>
-            <p>
-              {maintenance?.performanceDetail
-                || "启动时隔离 Codex Micro，并停止周期性 WMI 进程采样。"}
-            </p>
-          </div>
+type AppUpdateCardProps = {
+  status: RuntimeStatus;
+  updateResult: InlineResult;
+  updateCheck: UpdateCheck | null;
+  downloadedUpdate: UpdateDownload | null;
+  busy: string | null;
+  isBusy: boolean;
+  onCheckUpdates: () => void;
+  onDownloadUpdate: () => void;
+  onInstallUpdate: () => void;
+};
 
-          <div className="maintenance-item update-status">
-            <div className="maintenance-item-heading">
-              <span className="maintenance-item-icon">
-                <RefreshCw size={16} aria-hidden="true" />
-              </span>
+export function AppUpdateCard({
+  status,
+  updateResult,
+  updateCheck,
+  downloadedUpdate,
+  busy,
+  isBusy,
+  onCheckUpdates,
+  onDownloadUpdate,
+  onInstallUpdate,
+}: AppUpdateCardProps) {
+  return (
+    <section className="secondary-section" aria-labelledby="update-title">
+      <div className="section-title compact">
+        <div>
+          <h2 id="update-title">应用更新</h2>
+          <p>检查软件版本与在线更新</p>
+        </div>
+      </div>
+      <Card className="secondary-card update-card">
+        <div className="update-card-header">
+          <div className="update-card-title">
+            <span className="column-icon"><RefreshCw size={16} /></span>
+            <div>
               <strong>应用更新</strong>
-              <span className="maintenance-heading-badges">
-                <Badge variant="secondary">
-                  当前 {status.appVersion ? `v${status.appVersion}` : "读取中"}
-                </Badge>
-                <Badge variant="info">R2 内置</Badge>
-              </span>
-            </div>
-            <div className="maintenance-update-row">
-              <span className={`inline-result ${updateResult.tone}`} aria-live="polite">
-                {updateResult.text || "从公开更新源检查最新稳定版本。"}
-              </span>
-              <span className="maintenance-update-actions">
-                {downloadedUpdate ? (
-                  <Button
-                    variant="default"
-                    size="sm"
-                    disabled={isBusy}
-                    onClick={onInstallUpdate}
-                  >
-                    {busy === "install-update"
-                      ? <LoaderCircle className="spinner" aria-hidden="true" />
-                      : <Check aria-hidden="true" />}
-                    安装并重启
-                  </Button>
-                ) : updateCheck?.updateAvailable && updateCheck.selectedAsset ? (
-                  <Button
-                    variant="default"
-                    size="sm"
-                    disabled={isBusy}
-                    onClick={onDownloadUpdate}
-                  >
-                    {busy === "download-update"
-                      ? <LoaderCircle className="spinner" aria-hidden="true" />
-                      : <Download aria-hidden="true" />}
-                    下载更新
-                  </Button>
-                ) : null}
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={isBusy}
-                  onClick={onCheckUpdates}
-                >
-                  {busy === "check-update"
-                    ? <LoaderCircle className="spinner" aria-hidden="true" />
-                    : <RefreshCw aria-hidden="true" />}
-                  检查更新
-                </Button>
-              </span>
+              <small>当前版本 {status.appVersion ? `v${status.appVersion}` : "读取中"}</small>
             </div>
           </div>
+          <Badge variant={updateCheck?.updateAvailable ? "warning" : "secondary"}>
+            {updateCheck?.updateAvailable ? "发现新版本" : "已是最新"}
+          </Badge>
+        </div>
 
-          <div className="maintenance-item path-status">
-            <div className="path-status-layout">
-              <span className="path-status-label">Codex 应用路径</span>
-              <div className="path-display" aria-label="Codex 应用路径">
-                <FolderOpen size={15} aria-hidden="true" />
-                <code>{config.codexAppPath || resolvedCodexPath}</code>
-              </div>
-            </div>
+        <div className="update-card-content">
+          <div className="update-status-msg">
+            <span className={`inline-result ${updateResult.tone}`} aria-live="polite">
+              {updateResult.text || "从公开更新源检查最新稳定版本。"}
+            </span>
+          </div>
+          <div className="update-actions-row">
+            {downloadedUpdate ? (
+              <Button
+                variant="default"
+                size="sm"
+                disabled={isBusy}
+                onClick={onInstallUpdate}
+              >
+                {busy === "install-update"
+                  ? <LoaderCircle className="spinner" aria-hidden="true" />
+                  : <Check aria-hidden="true" />}
+                安装并重启
+              </Button>
+            ) : updateCheck?.updateAvailable && updateCheck.selectedAsset ? (
+              <Button
+                variant="default"
+                size="xs"
+                disabled={isBusy}
+                onClick={onDownloadUpdate}
+              >
+                {busy === "download-update"
+                  ? <LoaderCircle className="spinner" aria-hidden="true" />
+                  : <Download aria-hidden="true" />}
+                下载更新
+              </Button>
+            ) : null}
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={isBusy}
+              onClick={onCheckUpdates}
+            >
+              {busy === "check-update"
+                ? <LoaderCircle className="spinner" aria-hidden="true" />
+                : <RefreshCw aria-hidden="true" />}
+              检查更新
+            </Button>
           </div>
         </div>
       </Card>
@@ -312,7 +348,7 @@ export function ModelSection({
         <div className="provider-summary">
           <div className="provider-identity">
             <span className="column-icon"><Server size={16} /></span>
-            <div>
+            <div className="provider-name-box">
               <strong>{provider.name}</strong>
               <small>{provider.id}</small>
             </div>
@@ -322,17 +358,9 @@ export function ModelSection({
               <span>类型</span>
               <strong>{provider.official ? "OpenAI 官方" : "第三方 API"}</strong>
             </div>
-            <div>
-              <span>协议</span>
-              <strong>{provider.protocol === "responses" ? "Responses" : "Chat Completions"}</strong>
-            </div>
             <div className="provider-endpoint">
               <span>地址</span>
               <strong>{provider.official ? "ChatGPT 登录" : provider.baseUrl}</strong>
-            </div>
-            <div>
-              <span>推理上限</span>
-              <strong>极高</strong>
             </div>
             <div>
               <span>默认模型</span>
@@ -381,20 +409,19 @@ export function ModelSection({
                       key={model.slug}
                       aria-disabled={!model.supported}
                     >
-                      <span className="model-availability"><Check size={12} /></span>
+                      <span className="model-availability">
+                        {model.supported ? <Check size={12} /> : <X size={12} />}
+                      </span>
                       <div>
                         <strong>{model.displayName}</strong>
                         <small>{model.slug}</small>
                       </div>
                       <div className="catalog-model-actions">
-                        {isDefault && <Badge variant="violet">默认</Badge>}
-                        <Badge variant={model.supported ? "success" : "secondary"}>
-                          {model.supported ? "支持" : "不可用"}
-                        </Badge>
+                        {isDefault && <Badge variant="brand">默认</Badge>}
                         {model.supported && !isDefault && (
                           <Button
                             variant="ghost"
-                            size="sm"
+                            size="xs"
                             disabled={isBusy}
                             onClick={() => onSetDefaultModel(model.slug)}
                           >
@@ -416,7 +443,7 @@ export function ModelSection({
                     <strong>三方模型</strong>
                     <small>{modelState.thirdPartyModels.length}</small>
                   </div>
-                  <Badge variant="violet">API</Badge>
+                  <Badge variant="brand">API</Badge>
                 </div>
                 <div className="catalog-model-list">
                   {modelState.thirdPartyModels.map((model) => {
@@ -429,12 +456,11 @@ export function ModelSection({
                           <small>第三方模型</small>
                         </div>
                         <div className="catalog-model-actions">
-                          {isDefault && <Badge variant="violet">默认</Badge>}
-                          <Badge variant="success">已添加</Badge>
+                          {isDefault && <Badge variant="brand">默认</Badge>}
                           {!isDefault && (
                             <Button
                               variant="ghost"
-                              size="sm"
+                              size="xs"
                               disabled={isBusy}
                               onClick={() => onSetDefaultModel(model)}
                             >
@@ -669,7 +695,7 @@ export function WebhookCard({
         </div>
         <div className="notification-action">
           <span className={`inline-result ${webhookResult.tone}`}>
-            {webhookResult.text || "不再保存或发送机器人签名密钥"}
+            {webhookResult.text || ""}
           </span>
           <Button
             variant="secondary"

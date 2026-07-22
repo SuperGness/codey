@@ -11,11 +11,8 @@
   "aliases": {
     "components": "@/components",
     "utils": "@/lib/utils",
-    "ui": "@/components/magicui",
+    "ui": "@/components/ui",
     "lib": "@/lib"
   },
-  "iconLibrary": "lucide",
-  "registries": {
-    "@magicui": "https://magicui.design/r/{name}.json"
-  }
+  "iconLibrary": "tabler"
 }

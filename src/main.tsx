@@ -9,6 +9,9 @@ import "./styles.css";
 if (import.meta.env.DEV) {
   if (!window.__codeyInvokeApi) {
     console.log("[Dev Mode] Auto-injecting Codey Mock API");
+    const previewClientPlatform = new URLSearchParams(window.location.search).get("platform") === "windows"
+      ? "windows"
+      : "macos";
     let previewConfig = {
       activeProfileId: "primary",
       profiles: [
@@ -81,6 +84,7 @@ if (import.meta.env.DEV) {
         return {
           running: true,
           appVersion: "0.2.0",
+          clientPlatform: previewClientPlatform,
           restartRequired: false,
           restartInProgress: false,
           activeProfileId: previewConfig.activeProfileId,
@@ -91,6 +95,10 @@ if (import.meta.env.DEV) {
             sessionDetail: "会话索引与恢复链路正常 (18 线程活跃)",
             pluginStatus: "ready",
             pluginDetail: "Codex 插件已注入，且会话生命周期托管中",
+            performanceStatus: "ready",
+            performanceDetail: previewClientPlatform === "windows"
+              ? "Windows 启动补丁已启用：WMI 周期采样、临时 WebView 残留和执行环境泄漏已修复"
+              : "启动补丁已启用：临时 WebView 和执行环境会自动回收",
           },
           ...(previewTraceStats ? { traceLogStats: previewTraceStats } : {}),
         };

@@ -1,24 +1,24 @@
 import {
-  Check,
-  LoaderCircle,
-  RefreshCw,
-  Search,
-  Trash2,
-} from "lucide-react";
+  IconCheck as Check,
+  IconLoader2 as LoaderCircle,
+  IconRefresh as RefreshCw,
+  IconSearch as Search,
+  IconTrash as Trash2,
+} from "@tabler/icons-react";
 
 import type { Confirmation, ModelState } from "./App.types";
 import {
-  MagicBadge as Badge,
-  MagicButton as Button,
-  MagicCheckbox as Checkbox,
-  MagicDialog as Dialog,
-  MagicDialogContent as DialogContent,
-  MagicDialogDescription as DialogDescription,
-  MagicDialogFooter as DialogFooter,
-  MagicDialogHeader as DialogHeader,
-  MagicDialogTitle as DialogTitle,
-  MagicInput as Input,
-} from "./components/magicui";
+  Badge,
+  Button,
+  Checkbox,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Input,
+} from "./components/ui";
 
 type ModelPickerDialogProps = {
   open: boolean;
@@ -99,7 +99,7 @@ export function ModelPickerDialog({
           {filteredUpstreamModels.map((model) => {
             const officialModel = officialSlugs.has(model);
             return (
-              <label className={`model-picker-row${officialModel ? " official" : ""}`} key={model}>
+              <div className={`model-picker-row${officialModel ? " official" : ""}`} key={model}>
                 <Checkbox
                   checked={officialModel || draftModelSet.has(model)}
                   disabled={officialModel}
@@ -108,7 +108,7 @@ export function ModelPickerDialog({
                 />
                 <span>{model}</span>
                 {officialModel && <Badge variant="info">官方模型</Badge>}
-              </label>
+              </div>
             );
           })}
           {filteredUpstreamModels.length === 0 && <div className="empty-state">没有匹配的模型</div>}
@@ -155,7 +155,13 @@ export function ConfirmationDialog({
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>取消</Button>
           <Button
-            variant={confirmation?.action === "clear" ? "destructive" : "default"}
+            variant={
+              confirmation?.action === "clear"
+                ? "destructive"
+                : confirmation?.action === "restart"
+                  ? "warning"
+                  : "default"
+            }
             onClick={() => {
               if (confirmation) onConfirm(confirmation);
             }}

@@ -418,7 +418,11 @@ fn write_catalog(home: &Path, models: &[Value]) -> Result<()> {
     let mut catalog = serde_json::to_vec_pretty(&json!({ "models": models }))
         .context("序列化 Codey 模型目录失败")?;
     catalog.push(b'\n');
-    atomic_write(&home.join(relative_path()), &catalog)
+    let path = home.join(relative_path());
+    if fs::read(&path).is_ok_and(|current| current == catalog) {
+        return Ok(());
+    }
+    atomic_write(&path, &catalog)
 }
 
 fn read_catalog_value(path: &Path) -> Option<Value> {

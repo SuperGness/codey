@@ -59,21 +59,11 @@ if (!window.__codeySettingsOverlay) {
   };
   const isOpen = () => host.style.display !== "none";
 
-  backdrop.addEventListener("click", (event) => {
-    if (event.target === backdrop) close();
-  });
-  window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && isOpen()) {
-      event.preventDefault();
-      close();
-    }
-  }, true);
-
   ReactDOM.createRoot(rootElement).render(<App embedded onClose={close} />);
   window.__codeySettingsOverlay = {
     open,
     close,
     isOpen,
-    toggle: () => isOpen() ? close() : open(),
+    toggle: open,
   };
 }

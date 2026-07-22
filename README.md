@@ -13,7 +13,7 @@ Codey 是一个无界面的 Rust 桌面辅助进程，通过 CDP 连接官方 Co
 - 启动器对 `sessions` 与 `archived_sessions` 的 rollout 采用逐行流式检查；只有确实需要改写 provider 的文件才会载入全文，避免长会话历史在启动时形成多份大字符串并把内存峰值长期留在分配器中。
 - 启动器只读取 rollout 的首个 `session_meta` 头并流式遍历目录，不再为校验构建全量路径列表；Trace 防护、插件维护和宠物状态会在依赖关系允许时并行执行，一次性日志统计则在 Codex 可用后后台完成。
 - Codey 的受控基础脚本会预构建为单个 CDP 文档注入包并在健康恢复时复用，默认注入从 16 次脚本往返降为 2 次；约 456 KB 的 React 设置浮层只在首次点击 Codey 按钮时按需注入，用户脚本仍保持独立且最后执行。
-- Renderer 观察器按新增控件最近的会话行、项目行、侧边栏分区或消息轮次增量修复，不监听流式正文的 `characterData`；插件 bridge 使用有界指数退避等待宿主接口，也不会再序列化无关 IPC 的完整参数。
+- Renderer 启动时只保留设置按钮与轻量侧边栏探测；导入、导出、删除、相对时间和消息选择等会话工具要等用户首次悬停、点击或键盘聚焦侧边栏后才加载，加载完成后会撤掉启动探测观察器。增量观察器按新增控件最近的会话行、项目行、侧边栏分区或消息轮次修复，不监听流式正文的 `characterData`；插件 bridge 使用有界指数退避等待宿主接口，也不会再序列化无关 IPC 的完整参数。
 - 后台会话状态轮询对每个变更的 rollout 只解析一次，并按文件大小和修改时间缓存紧凑事件结果；活跃任务保持 3 秒检测，稳定空闲时按 3/6/12/30 秒退避，窗口恢复或用户交互会立即唤醒。
 - Codex Trace 写盘防护通过 SQLite `block_log_inserts` trigger 阻止 `logs_*.sqlite` 持续写入高频诊断日志；设置开关，已有日志和会话数据不会被删除。
 - Windows 默认开启新版卡顿补丁：Codey 在 Codex 主进程执行前通过仅绑定 `127.0.0.1` 的临时 Inspector，把会反复触发原生 DLL 加载失败的 `@worklouder/device-kit-oai` 替换为无设备桩，并精确断路每 30 秒启动一次的 `child-process-snapshot-worker.js`。断路后直接返回合法空快照，不再启动 PowerShell，也不会执行 `Get-CimInstance Win32_Process` 和 `Win32_PerfFormattedData_PerfProc_Process` 两次 CIM/WMI 全量查询；普通 Worker 不受影响。Inspector 随后立即关闭，不修改 Microsoft Store 安装目录。

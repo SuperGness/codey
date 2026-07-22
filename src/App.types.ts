@@ -54,6 +54,7 @@ export type Maintenance = {
 export type RuntimeStatus = {
   running: boolean;
   appVersion?: string;
+  clientPlatform?: string;
   restartRequired?: boolean;
   restartInProgress?: boolean;
   activeProfileId?: string;

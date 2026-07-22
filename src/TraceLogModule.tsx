@@ -1,15 +1,12 @@
 import {
-  CircleAlert,
-  LoaderCircle,
-  RefreshCw,
-  Trash2,
-} from "lucide-react";
+  IconAlertCircle as CircleAlert,
+  IconInfoCircle as InfoCircle,
+  IconLoader2 as LoaderCircle,
+  IconRefresh as RefreshCw,
+  IconTrash as Trash2,
+} from "@tabler/icons-react";
 
-import {
-  MagicBadge as Badge,
-  MagicButton as Button,
-  MagicCard as Card,
-} from "./components/magicui";
+import { Badge, Button, Card } from "./components/ui";
 
 export type TraceLogDailyStats = {
   date: string;
@@ -66,6 +63,16 @@ const rangeDateFormatter = new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
   day: "2-digit",
 });
+const REFERENCE_SSD_TBW_BYTES = 300 * 1_000_000_000_000;
+const MAX_WRITE_AMPLIFICATION = 4;
+
+export type TraceDiskWearEstimate = {
+  observedBytes: number;
+  lowerWriteBytes: number;
+  upperWriteBytes: number;
+  lowerWearPercent: number;
+  upperWearPercent: number;
+};
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -77,6 +84,41 @@ export function formatBytes(bytes: number): string {
 
 function formatCount(value: number): string {
   return countFormatter.format(Number.isFinite(value) ? value : 0);
+}
+
+function finiteNonNegative(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+export function estimateTraceDiskWear(
+  stats: Pick<TraceLogStats, "databaseBytes" | "estimatedLogBytes">,
+): TraceDiskWearEstimate {
+  const observedBytes = Math.max(
+    finiteNonNegative(stats.databaseBytes),
+    finiteNonNegative(stats.estimatedLogBytes),
+  );
+  const lowerWriteBytes = observedBytes;
+  const upperWriteBytes = observedBytes * MAX_WRITE_AMPLIFICATION;
+  return {
+    observedBytes,
+    lowerWriteBytes,
+    upperWriteBytes,
+    lowerWearPercent: (lowerWriteBytes / REFERENCE_SSD_TBW_BYTES) * 100,
+    upperWearPercent: (upperWriteBytes / REFERENCE_SSD_TBW_BYTES) * 100,
+  };
+}
+
+function formatWearPercent(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "0%";
+  if (value < 0.000001) return "<0.000001%";
+  const decimals = Math.min(6, Math.max(2, Math.ceil(-Math.log10(value)) + 1));
+  return `${value.toFixed(decimals)}%`;
+}
+
+function formatWearPercentRange(lower: number, upper: number): string {
+  const lowerText = formatWearPercent(lower);
+  const upperText = formatWearPercent(upper);
+  return lowerText === upperText ? upperText : `${lowerText}–${upperText}`;
 }
 
 function formatSnapshotTime(timestamp: number): string {
@@ -123,6 +165,7 @@ export function TraceLogModule({
   const snapshot = stats && stats.capturedAt > 0 && !stats.pending ? stats : undefined;
   const daily = snapshot ? normalizedDailyStats(snapshot) : [];
   const maxDailyBytes = Math.max(0, ...daily.map((item) => item.estimatedBytes));
+  const diskWear = snapshot ? estimateTraceDiskWear(snapshot) : undefined;
 
   return (
     <section className="trace-section" aria-labelledby="trace-title">
@@ -163,27 +206,52 @@ export function TraceLogModule({
 
       <Card className={`trace-card${snapshot ? "" : " trace-card-empty"}`} aria-busy={loading}>
         {!snapshot ? (
-          <div className="trace-empty" role="status" aria-live="polite">
-            <span className="trace-empty-icon">
-              {loading
-                ? <LoaderCircle className="spinner" size={24} aria-hidden="true" />
-                : <RefreshCw size={24} aria-hidden="true" />}
-            </span>
-            <div className="trace-empty-copy">
-              <strong>{loading ? "正在统计 Trace 日志" : "刷新后查看日志统计"}</strong>
-              <span>{loading ? "正在读取本地日志库，请稍候" : "点击刷新按钮获取最新统计信息"}</span>
+          <div className="trace-empty-container">
+            <div className="trace-empty" role="status" aria-live="polite">
+              <div className="trace-empty-badge">
+                <span className="trace-empty-icon">
+                  {loading
+                    ? <LoaderCircle className="spinner" size={28} aria-hidden="true" />
+                    : <RefreshCw size={26} aria-hidden="true" />}
+                </span>
+              </div>
+              <div className="trace-empty-copy">
+                <h3>{loading ? "正在统计 Trace 日志" : "未获取 Diagnostic/Trace 诊断快照"}</h3>
+                <p>
+                  {loading
+                    ? "正在扫描本地 Codex 日志库及数据库索引，请稍候…"
+                    : "一键扫描本地 logs_*.sqlite 日志数据库，分析磁盘占用、写入条数与高频 Target。"}
+                </p>
+              </div>
+              <div className="trace-empty-action">
+                <Button
+                  variant="default"
+                  size="default"
+                  disabled={disabled}
+                  onClick={onRefresh}
+                  className="trace-start-btn"
+                >
+                  {loading ? (
+                    <>
+                      <LoaderCircle className="spinner" aria-hidden="true" />
+                      扫描分析中…
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCw aria-hidden="true" />
+                      立即生成诊断快照
+                    </>
+                  )}
+                </Button>
+              </div>
             </div>
-            {!loading && (
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={disabled}
-                onClick={onRefresh}
-              >
-                <RefreshCw aria-hidden="true" />
-                刷新统计
-              </Button>
-            )}
+
+            <div className="trace-skeleton-preview" aria-hidden="true">
+              <div className="skeleton-card"><div className="skeleton-line short" /><div className="skeleton-line long" /></div>
+              <div className="skeleton-card"><div className="skeleton-line short" /><div className="skeleton-line long" /></div>
+              <div className="skeleton-card"><div className="skeleton-line short" /><div className="skeleton-line long" /></div>
+              <div className="skeleton-card"><div className="skeleton-line short" /><div className="skeleton-line long" /></div>
+            </div>
           </div>
         ) : (
           <>
@@ -226,6 +294,42 @@ export function TraceLogModule({
                   <strong>{formatBytes(snapshot.estimatedLogBytes)}</strong>
                   <small>按 estimated_bytes 汇总</small>
                 </div>
+              </div>
+            </div>
+
+            <div className="trace-wear-note" role="note" aria-label="SSD 写入寿命粗略估算">
+              <span className="trace-wear-icon" aria-hidden="true">
+                <InfoCircle size={18} />
+              </span>
+              <div className="trace-wear-copy">
+                <div className="trace-wear-heading">
+                  <strong>SSD 写入寿命粗略估算</strong>
+                  <Badge variant="secondary">300 TBW 参考</Badge>
+                </div>
+                {diskWear && diskWear.observedBytes > 0 ? (
+                  <p>
+                    按当前快照，折算写入约{" "}
+                    <strong>
+                      {formatBytes(diskWear.lowerWriteBytes)}–{formatBytes(diskWear.upperWriteBytes)}
+                    </strong>
+                    ，约占标称写入寿命的{" "}
+                    <strong>
+                      {formatWearPercentRange(diskWear.lowerWearPercent, diskWear.upperWearPercent)}
+                    </strong>
+                    。
+                  </p>
+                ) : (
+                  <p>当前快照未观察到可估算的 Trace 写入损耗。</p>
+                )}
+                <p className="trace-wear-scope">
+                  <strong>统计范围：</strong>
+                  仅包含当前 logs_*.sqlite 中仍保留的日志行；
+                  不包含已清理、轮转或覆盖的历史记录。
+                </p>
+                <small>
+                  损耗口径按当前数据库/内容体量与 1–4× SQLite、文件系统及 SSD 写放大粗估，
+                  不是 SSD 实际物理写入监测值；实际值取决于硬盘型号与标称 TBW。
+                </small>
               </div>
             </div>
 
@@ -272,14 +376,19 @@ export function TraceLogModule({
                 </div>
                 <div className="trace-levels">
                   {snapshot.levels.length ? snapshot.levels.map((item) => (
-                    <div className="trace-level-pill" key={item.name}>
+                    <div className={`trace-level-pill level-${item.name.toLowerCase()}`} key={item.name}>
                       <span className="trace-level-name">{item.name}</span>
                       <div className="trace-level-values">
                         <strong>{formatCount(item.rows)}</strong>
                         <small>{formatBytes(item.estimatedBytes)}</small>
                       </div>
                     </div>
-                  )) : <span className="trace-none">暂无级别数据</span>}
+                  )) : (
+                    <div className="trace-none-pill">
+                      <span className="trace-none-dot" />
+                      <span>暂无级别分布数据</span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="trace-subheading trace-target-heading">
@@ -295,7 +404,12 @@ export function TraceLogModule({
                         <small>{formatCount(item.rows)} 条</small>
                       </div>
                     </div>
-                  )) : <span className="trace-none">暂无 Target 数据</span>}
+                  )) : (
+                    <div className="trace-none-pill">
+                      <span className="trace-none-dot" />
+                      <span>暂无 Target 模块数据</span>
+                    </div>
+                  )}
                 </div>
               </section>
             </div>

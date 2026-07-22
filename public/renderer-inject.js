@@ -25,6 +25,8 @@
 
   let sessionToolsLoadPromise = null;
   let scanTimer = 0;
+  let sessionToolsInteractionArmed = false;
+  let bootstrapObserver = null;
 
   const queryWithin = (root, selector) => {
     const matches = [];
@@ -160,6 +162,9 @@
         if (window.__codeySessionToolsInjectLoaded !== true) {
           throw new Error(window.__codeySessionToolsError || "会话工具未完成初始化");
         }
+        disarmSessionToolsInteraction();
+        bootstrapObserver?.disconnect();
+        bootstrapObserver = null;
         return true;
       })
       .catch((error) => {
@@ -170,9 +175,43 @@
     return sessionToolsLoadPromise;
   };
 
+  const loadSessionToolsFromInteraction = (event) => {
+    const target = event?.target instanceof Element
+      ? event.target
+      : event?.target?.parentElement;
+    if (!target?.closest?.(sidebarSelector)) return;
+    void loadSessionTools();
+  };
+
+  const armSessionToolsInteraction = () => {
+    if (
+      sessionToolsInteractionArmed
+      || sessionToolsLoadPromise
+      || window.__codeySessionToolsInjectLoaded === true
+    ) return;
+    sessionToolsInteractionArmed = true;
+    document.addEventListener("pointerover", loadSessionToolsFromInteraction, {
+      capture: true,
+      passive: true,
+    });
+    document.addEventListener("pointerdown", loadSessionToolsFromInteraction, {
+      capture: true,
+      passive: true,
+    });
+    document.addEventListener("focusin", loadSessionToolsFromInteraction, true);
+  };
+
+  const disarmSessionToolsInteraction = () => {
+    if (!sessionToolsInteractionArmed) return;
+    sessionToolsInteractionArmed = false;
+    document.removeEventListener("pointerover", loadSessionToolsFromInteraction, true);
+    document.removeEventListener("pointerdown", loadSessionToolsFromInteraction, true);
+    document.removeEventListener("focusin", loadSessionToolsFromInteraction, true);
+  };
+
   const scan = (root = document) => {
     mountButton();
-    if (sidebarDetected(root)) void loadSessionTools();
+    if (sidebarDetected(root)) armSessionToolsInteraction();
   };
 
   const scheduleScan = (root = document) => {
@@ -185,7 +224,7 @@
 
   scan();
 
-  new MutationObserver((mutations) => {
+  bootstrapObserver = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
       const target = mutation.target instanceof HTMLElement
         ? mutation.target
@@ -211,7 +250,8 @@
         }
       }
     }
-  }).observe(document.documentElement, {
+  });
+  bootstrapObserver.observe(document.documentElement, {
     attributes: true,
     attributeFilter: [
       "data-app-action-sidebar-section",

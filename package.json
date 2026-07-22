@@ -14,9 +14,14 @@
     "vite:build": "node scripts/build-web.mjs"
   },
   "dependencies": {
+    "@radix-ui/react-checkbox": "^1.3.8",
+    "@radix-ui/react-dialog": "^1.1.20",
+    "@radix-ui/react-slot": "^1.3.0",
+    "@radix-ui/react-switch": "^1.3.4",
+    "@tabler/icons-react": "^3.45.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^0.468.0",
     "motion": "^12.42.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
