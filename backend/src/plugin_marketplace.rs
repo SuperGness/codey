@@ -38,6 +38,30 @@ pub fn ensure_marketplaces(home: &Path) -> Result<Value> {
     }))
 }
 
+/// Reads marketplace availability and registration without creating files or
+/// changing Codex configuration. Repairs are deliberately kept in
+/// `ensure_marketplaces` so opening Codey settings remains side-effect free.
+pub fn marketplaces_status(home: &Path) -> Value {
+    let official = codex_plus_core::plugin_marketplace::openai_curated_marketplace_status(home);
+    let remote =
+        codex_plus_core::plugin_marketplace::openai_curated_remote_marketplace_status(home);
+    let official_marketplace = official.marketplace_root.is_some();
+    let remote_marketplace = remote.marketplace_root.is_some();
+    let needs_repair = !official_marketplace
+        || !official.config_registered
+        || !remote_marketplace
+        || !remote.config_registered;
+    json!({
+        "officialMarketplace": official_marketplace,
+        "officialRegistered": official.config_registered,
+        "officialPath": official.marketplace_root,
+        "remoteMarketplace": remote_marketplace,
+        "remoteRegistered": remote.config_registered,
+        "remotePath": remote.marketplace_root,
+        "needsRepair": needs_repair,
+    })
+}
+
 pub fn list_plugins(home: &Path) -> Result<Value> {
     let installed = installed_plugins(home)?;
     let mut plugins = Vec::new();
@@ -170,4 +194,26 @@ fn installed_plugins(home: &Path) -> Result<HashSet<String>> {
         })
         .map(|(key, _)| key.to_string())
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn marketplace_status_is_read_only_when_repair_is_needed() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let config_path = home.join("config.toml");
+        let original = b"model_provider = \"openai\"\n";
+        fs::write(&config_path, original).unwrap();
+
+        let status = marketplaces_status(home);
+
+        assert_eq!(status["needsRepair"], true);
+        assert_eq!(status["officialMarketplace"], false);
+        assert_eq!(status["remoteMarketplace"], false);
+        assert_eq!(fs::read(&config_path).unwrap(), original);
+        assert!(!home.join(".tmp").exists());
+    }
 }

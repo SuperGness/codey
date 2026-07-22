@@ -21,6 +21,7 @@ import type {
   Config,
   InlineResult,
   ModelState,
+  PluginMarketplaceStatus,
   RuntimeStatus,
   UpdateCheck,
   UpdateDownload,
@@ -40,6 +41,8 @@ type OperationsPanelProps = {
   status: RuntimeStatus;
   busy: string | null;
   isBusy: boolean;
+  pluginMarketplaceStatus: PluginMarketplaceStatus | null;
+  onRepairPluginMarketplace: () => void;
   onRestart: () => void;
 };
 
@@ -48,11 +51,15 @@ export function OperationsPanel({
   status,
   busy,
   isBusy,
+  pluginMarketplaceStatus,
+  onRepairPluginMarketplace,
   onRestart,
 }: OperationsPanelProps) {
   const maintenance = status.maintenance;
   const sessionOk = maintenance?.sessionStatus === "ready";
-  const pluginOk = maintenance?.pluginStatus === "ready";
+  const pluginOk = pluginMarketplaceStatus?.status === "ready";
+  const pluginStatusError = pluginMarketplaceStatus?.status === "error";
+  const pluginRepairing = busy === "repair-plugin-marketplace";
   const performanceError = maintenance?.performanceStatus === "error";
   const isWindowsClient = status.clientPlatform === "windows";
   const windowsPatchReady = maintenance?.performanceStatus === "ready";
@@ -79,6 +86,23 @@ export function OperationsPanel({
         : "将在 Codex 启动时自动安装并校验 Windows 优化补丁。";
   const resolvedCodexPath = status.codexAppPath || "/Applications/ChatGPT.app";
   const restartPending = Boolean(status.restartRequired);
+  const pluginIssues = [
+    pluginMarketplaceStatus?.officialMarketplace === false ? "官方市场快照缺失" : "",
+    pluginMarketplaceStatus?.officialMarketplace && pluginMarketplaceStatus.officialRegistered === false
+      ? "官方市场尚未注册"
+      : "",
+    pluginMarketplaceStatus?.remoteMarketplace === false ? "远程市场快照缺失" : "",
+    pluginMarketplaceStatus?.remoteMarketplace && pluginMarketplaceStatus.remoteRegistered === false
+      ? "远程市场尚未注册"
+      : "",
+  ].filter(Boolean);
+  const pluginDetail = pluginStatusError
+    ? pluginMarketplaceStatus?.message || "插件市场状态读取失败"
+    : pluginOk
+      ? "官方与远程插件市场均已注册；手动修复后无需重启 Codex"
+      : pluginIssues.length > 0
+        ? pluginIssues.join("；")
+        : "正在读取插件市场状态";
 
   const statusCards: Array<{
     title: string;
@@ -87,6 +111,12 @@ export function OperationsPanel({
     label: string;
     tone: "success" | "warning" | "destructive" | "info";
     icon: typeof Activity;
+    action?: {
+      label: string;
+      disabled: boolean;
+      loading: boolean;
+      onClick: () => void;
+    };
   }> = [
     {
       title: "会话恢复",
@@ -109,12 +139,28 @@ export function OperationsPanel({
       icon: Cpu,
     },
     {
-      title: "插件服务",
-      description: pluginOk ? "Codex 插件已注入并接管会话生命周期。" : "正在检测客户端插件与注入状态。",
-      detail: maintenance?.pluginDetail || "等待插件服务状态",
-      label: pluginOk ? "已连接" : maintenance ? "需检查" : "检查中",
-      tone: pluginOk ? "success" : maintenance ? "destructive" : "warning",
+      title: "插件市场",
+      description: pluginOk
+        ? "插件市场配置完整，可正常发现和管理插件。"
+        : "仅检查当前状态，不会在打开配置页时自动修复。",
+      detail: pluginDetail,
+      label: pluginRepairing
+        ? "修复中"
+        : pluginOk
+          ? "正常"
+          : pluginStatusError
+            ? "读取失败"
+            : pluginMarketplaceStatus
+              ? "需修复"
+              : "检查中",
+      tone: pluginOk ? "success" : pluginStatusError ? "destructive" : "warning",
       icon: PlugZap,
+      action: {
+        label: pluginOk ? "重新检查并修复" : "手动修复",
+        disabled: isBusy,
+        loading: pluginRepairing,
+        onClick: onRepairPluginMarketplace,
+      },
     },
   ];
 
@@ -195,7 +241,23 @@ export function OperationsPanel({
                   </div>
                   <Badge variant={item.tone}>{item.label}</Badge>
                 </div>
-                <div className="operations-status-detail">{item.detail}</div>
+                <div className="operations-status-footer">
+                  <div className="operations-status-detail">{item.detail}</div>
+                  {item.action && (
+                    <Button
+                      className="operations-status-action"
+                      variant="outline"
+                      size="xs"
+                      disabled={item.action.disabled}
+                      onClick={item.action.onClick}
+                    >
+                      {item.action.loading
+                        ? <LoaderCircle className="spinner" aria-hidden="true" />
+                        : <RefreshCw aria-hidden="true" />}
+                      {item.action.label}
+                    </Button>
+                  )}
+                </div>
               </article>
             );
           })}

@@ -607,6 +607,9 @@ impl AppState {
             "/plugins/status" => plugin_marketplace_status()
                 .await
                 .unwrap_or_else(api_error_message),
+            "/plugins/repair" => repair_plugin_marketplace()
+                .await
+                .unwrap_or_else(api_error_message),
             _ => json!({"status":"failed","message":format!("未知 Codey 路由：{path}")}),
         }
     }
@@ -697,6 +700,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             }
         }
         "plugin_marketplace_status" => plugin_marketplace_status().await,
+        "repair_plugin_marketplace" => repair_plugin_marketplace().await,
         _ => Err(format!("未知 Codey API 命令：{command}")),
     };
     result.unwrap_or_else(api_error_message)
@@ -2262,19 +2266,57 @@ pub async fn plugin_marketplace_status() -> Result<Value, String> {
     let home = codex_home();
     let marketplace_home = home.clone();
     let mut status = tokio::task::spawn_blocking(move || {
+        plugin_marketplace::marketplaces_status(&marketplace_home)
+    })
+    .await
+    .map_err(|error| format!("插件市场状态任务异常退出：{error}"))?;
+    decorate_plugin_marketplace_status(&home, &mut status);
+    Ok(status)
+}
+
+pub async fn repair_plugin_marketplace() -> Result<Value, String> {
+    let home = codex_home();
+    let marketplace_home = home.clone();
+    let repair = tokio::task::spawn_blocking(move || {
         plugin_marketplace::ensure_marketplaces(&marketplace_home)
     })
     .await
-    .map_err(|error| format!("插件市场状态任务异常退出：{error}"))?
+    .map_err(|error| format!("插件市场修复任务异常退出：{error}"))?
     .map_err(|error| error.to_string())?;
+    let mut status = plugin_marketplace::marketplaces_status(&home);
     if let Some(object) = status.as_object_mut() {
-        object.insert("status".into(), Value::String("ready".into()));
+        for key in ["initializedRemote", "configuredRemote", "configChanged"] {
+            if let Some(value) = repair.get(key) {
+                object.insert(key.into(), value.clone());
+            }
+        }
+    }
+    decorate_plugin_marketplace_status(&home, &mut status);
+    Ok(status)
+}
+
+fn decorate_plugin_marketplace_status(home: &Path, status: &mut Value) {
+    let needs_repair = status
+        .get("needsRepair")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if let Some(object) = status.as_object_mut() {
+        object.insert(
+            "status".into(),
+            Value::String(
+                if needs_repair {
+                    "needs_repair"
+                } else {
+                    "ready"
+                }
+                .into(),
+            ),
+        );
         object.insert(
             "localMarketplacePath".into(),
             Value::String(home.join(".tmp/plugins").to_string_lossy().to_string()),
         );
     }
-    Ok(status)
 }
 
 fn argument<T: DeserializeOwned>(args: &Value, name: &str) -> Result<T, String> {

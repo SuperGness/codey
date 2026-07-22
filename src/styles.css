@@ -641,12 +641,24 @@ input:focus-visible,
   flex-shrink: 0;
 }
 
-.operations-status-detail {
-  font-size: 11px;
-  color: #8e8e93;
+.operations-status-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding-top: 8px;
   border-top: 1px dashed rgba(0, 0, 0, 0.06);
+}
+
+.operations-status-detail {
+  min-width: 0;
+  flex: 1;
+  font-size: 11px;
+  color: #8e8e93;
   line-height: 1.35;
+}
+
+.operations-status-action {
+  flex-shrink: 0;
 }
 
 /* Tone accents for status items */

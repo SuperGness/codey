@@ -65,6 +65,22 @@ export type RuntimeStatus = {
   traceLogStats?: TraceLogStats;
 };
 
+export type PluginMarketplaceStatus = {
+  status: "ready" | "needs_repair" | "error";
+  needsRepair?: boolean;
+  officialMarketplace?: boolean;
+  officialRegistered?: boolean;
+  officialPath?: string | null;
+  remoteMarketplace?: boolean;
+  remoteRegistered?: boolean;
+  remotePath?: string | null;
+  localMarketplacePath?: string;
+  initializedRemote?: boolean;
+  configuredRemote?: boolean;
+  configChanged?: boolean;
+  message?: string;
+};
+
 export type CodexAppDirectorySelection = {
   status: "selected" | "cancelled";
   path?: string;

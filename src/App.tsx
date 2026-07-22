@@ -22,6 +22,7 @@ import type {
   InlineResult,
   ModelState,
   Notice,
+  PluginMarketplaceStatus,
   RuntimeStatus,
   TraceLogCleanup,
   UpdateCheck,
@@ -71,6 +72,8 @@ export function App({ embedded = false, onClose }: AppProps) {
   const [config, setConfig] = useState<Config | null>(null);
   const persistedConfigRef = useRef<Config | null>(null);
   const [status, setStatus] = useState<RuntimeStatus>({ running: false });
+  const [pluginMarketplaceStatus, setPluginMarketplaceStatus] =
+    useState<PluginMarketplaceStatus | null>(null);
   const [ccSwitchStatus, setCcSwitchStatus] = useState<CcSwitchStatus | null>(null);
   const [modelState, setModelState] = useState<ModelState>({
     officialModels: [],
@@ -180,7 +183,10 @@ export function App({ embedded = false, onClose }: AppProps) {
       setPersistedConfig(result.config);
       setCcSwitchStatus(result.ccSwitch ?? null);
       if (result.modelState) setModelState(result.modelState);
-      const next = await refreshStatus();
+      const [next] = await Promise.all([
+        refreshStatus(),
+        refreshPluginMarketplaceStatus(),
+      ]);
       const startupError = next.startupError || result.startupError;
       setCodexAppPathDialogVisible(Boolean(result.codexAppPathSelectionRequired));
       if (startupError) {
@@ -204,6 +210,22 @@ export function App({ embedded = false, onClose }: AppProps) {
     const next = await invoke<RuntimeStatus>("runtime_status");
     setStatus(next);
     return next;
+  }
+
+  async function refreshPluginMarketplaceStatus() {
+    try {
+      const next = await invoke<PluginMarketplaceStatus>("plugin_marketplace_status");
+      setPluginMarketplaceStatus(next);
+      return next;
+    } catch (error) {
+      const next: PluginMarketplaceStatus = {
+        status: "error",
+        needsRepair: true,
+        message: errorText(error),
+      };
+      setPluginMarketplaceStatus(next);
+      return next;
+    }
   }
 
   function setPersistedConfig(next: Config) {
@@ -614,6 +636,30 @@ export function App({ embedded = false, onClose }: AppProps) {
     });
   }
 
+  async function repairPluginMarketplace() {
+    await runOperation("repair-plugin-marketplace", async () => {
+      const result = await withTimeout(
+        invoke<PluginMarketplaceStatus>("repair_plugin_marketplace"),
+        30_000,
+        "插件市场修复超时，请稍后重试",
+      );
+      setPluginMarketplaceStatus(result);
+      if (result.status === "ready") {
+        setNotice({
+          tone: "success",
+          text: result.configChanged || result.initializedRemote
+            ? "插件市场已修复并立即生效，无需重启 Codex"
+            : "插件市场状态正常，无需修改",
+        });
+        return;
+      }
+      setNotice({
+        tone: "error",
+        text: "插件市场仍有缺失项，请检查本地市场文件后重试",
+      });
+    });
+  }
+
   async function clearTraceLogs() {
     await runOperation("clear-trace-logs", async () => {
       const result = await invoke<{
@@ -744,6 +790,8 @@ export function App({ embedded = false, onClose }: AppProps) {
             status={status}
             busy={busy}
             isBusy={isBusy}
+            pluginMarketplaceStatus={pluginMarketplaceStatus}
+            onRepairPluginMarketplace={() => void repairPluginMarketplace()}
             onRestart={askRestartCodex}
           />
 

@@ -208,7 +208,7 @@ impl CodeyRuntime {
 
         let marketplace_home = home.clone();
         let marketplace_task = tokio::task::spawn_blocking(move || {
-            plugin_marketplace::ensure_marketplaces(&marketplace_home)
+            plugin_marketplace::marketplaces_status(&marketplace_home)
         });
         let pet_home = home.clone();
         let slim_codex_pet = config.slim_codex_pet;
@@ -217,11 +217,24 @@ impl CodeyRuntime {
         });
         let (marketplace_result, pet_result) = tokio::join!(marketplace_task, pet_task);
         let (plugin_status, plugin_detail) = match marketplace_result {
-            Ok(Ok(_)) => ("ready".to_string(), "插件市场已自动修复".to_string()),
-            Ok(Err(error)) => ("error".to_string(), format!("插件修复失败：{error}")),
+            Ok(status)
+                if !status
+                    .get("needsRepair")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(true) =>
+            {
+                (
+                    "ready".to_string(),
+                    "插件市场状态正常；启动时未执行修复".to_string(),
+                )
+            }
+            Ok(_) => (
+                "needs_repair".to_string(),
+                "插件市场需要修复；可在 Codey 配置页手动处理".to_string(),
+            ),
             Err(error) => (
                 "error".to_string(),
-                format!("插件修复任务异常退出：{error}"),
+                format!("插件市场状态任务异常退出：{error}"),
             ),
         };
         let debug_port = codex_plus_core::ports::select_packaged_codex_debug_port(9229);
