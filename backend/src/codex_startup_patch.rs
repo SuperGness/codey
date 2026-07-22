@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-pub const PATCH_RESULT: &str = "codey-startup-patch-installed-v5";
+pub const PATCH_RESULT: &str = "codey-startup-patch-installed-v6";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchOptions {
@@ -103,7 +103,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
       return (
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
-        /\/(?:app-initial(?:[~-][^/]*)?|general-settings(?:[~-][^/]*)?|windows-model-controls(?:[~-][^/]*)?)\.js$/i.test(
+        /\/(?:(?:app-initial|general-settings|windows-model-controls|use-service-tier-settings|read-service-tier-for-request)(?:[~-][^/]*)?)\.js$/i.test(
           url.pathname,
         )
       );
@@ -778,7 +778,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   setImmediate(() => {
     try { process.getBuiltinModule("inspector").close(); } catch {}
   });
-  return "codey-startup-patch-installed-v5";
+  return "codey-startup-patch-installed-v6";
 })()
 "#;
 
@@ -993,7 +993,7 @@ mod tests {
 
     #[test]
     fn patch_result_is_stable_for_launch_status_validation() {
-        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v5");
+        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v6");
     }
 
     #[test]

@@ -19,7 +19,7 @@ import {
   DialogHeader,
   DialogTitle,
   Input,
-} from "./components/ui";
+} from "./components/semi";
 
 type ModelPickerDialogProps = {
   open: boolean;

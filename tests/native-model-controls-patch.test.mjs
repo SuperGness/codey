@@ -44,7 +44,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
   try {
     assert.equal(
       (0, eval)(await loadPatchExpression()),
-      "codey-startup-patch-installed-v5",
+      "codey-startup-patch-installed-v6",
     );
     Module._load("electron", undefined, false).protocol.handle(
       "app",
@@ -87,7 +87,10 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       "u?.requirements?.featureRequirements?.fast_mode!==!1,m;",
       "return {authMethod:c,isServiceTierAllowed:p}}",
     ].join("");
-    const patchedServiceTierUi = await patchAsset(serviceTierUiSource);
+    const patchedServiceTierUi = await patchAsset(
+      serviceTierUiSource,
+      "app://-/assets/use-service-tier-settings-XUBE8MwV.js",
+    );
     assert.match(
       patchedServiceTierUi,
       /p=!f/,
@@ -239,7 +242,10 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       "let r=await rt(t);return r.requirements?.featureRequirements?.fast_mode!==!1}",
       "function Zs(){throw Error(`Failed to read service tier for request`)}",
     ].join("");
-    const patchedServiceTierRequest = await patchAsset(serviceTierRequestSource);
+    const patchedServiceTierRequest = await patchAsset(
+      serviceTierRequestSource,
+      "app://-/assets/read-service-tier-for-request-BJ4fBpQe.js",
+    );
     assert.match(
       patchedServiceTierRequest,
       /if\(n!==`chatgpt`\)return!0/,
@@ -250,6 +256,8 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       "app://-/assets/app-initial~windows.js?build=store",
       "app://-/assets/general-settings-BWZCvLqI.js",
       "app://-/assets/windows-model-controls-a1b2c3.js",
+      "app://-/assets/use-service-tier-settings-XUBE8MwV.js",
+      "app://-/assets/read-service-tier-for-request-BJ4fBpQe.js",
     ]) {
       assert.match(
         await patchAsset(serviceTierRequestSource, url),

@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import semiStyles from "../node_modules/@douyinfe/semi-ui/dist/css/semi.min.css?inline";
 import { App } from "./App";
 import appStyles from "./styles.css?inline";
 import overlayStyles from "./overlay.css?inline";
@@ -32,7 +33,7 @@ if (!window.__codeySettingsOverlay) {
   host.setAttribute("aria-hidden", "true");
   const shadow = host.attachShadow({ mode: "open" });
   const style = document.createElement("style");
-  style.textContent = `${overlayStyles}\n${appStyles}`;
+  style.textContent = `${semiStyles}\n${overlayStyles}\n${appStyles}`;
   const backdrop = document.createElement("div");
   backdrop.className = "codey-overlay-backdrop";
   const dialog = document.createElement("section");

@@ -6,7 +6,7 @@ import {
   IconTrash as Trash2,
 } from "@tabler/icons-react";
 
-import { Badge, Button, Card } from "./components/ui";
+import { Badge, Button, Card } from "./components/semi";
 
 export type TraceLogDailyStats = {
   date: string;

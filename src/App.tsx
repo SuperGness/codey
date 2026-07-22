@@ -28,7 +28,7 @@ import type {
   UpdateCheck,
   UpdateDownload,
 } from "./App.types";
-import { Badge, Button, Button as SaveButton } from "./components/ui";
+import { Badge, Button, Button as SaveButton } from "./components/semi";
 
 const Check = IconCheck;
 const X = IconX;

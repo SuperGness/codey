@@ -27,7 +27,7 @@ import type {
   UpdateCheck,
   UpdateDownload,
 } from "./App.types";
-import { Badge, Button, Card, Input, Switch } from "./components/ui";
+import { Badge, Button, Card, Input, Switch } from "./components/semi";
 
 const Cpu = IconCpu;
 const Download = IconDownload;

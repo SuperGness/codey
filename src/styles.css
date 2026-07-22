@@ -1,24 +1,3 @@
-@import "tailwindcss";
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-}
-
 :root {
   color-scheme: light;
   font-family:
@@ -1790,56 +1769,13 @@ input:focus-visible,
 }
 
 /* ==========================================================================
-   UI Components (Button, Switch, Badge, Dialog, Toast)
+   Semi Design integration
    ========================================================================== */
 
-.ui-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: #f2f2f7;
-  color: #1d1d1f;
-  transition: all 140ms ease;
-  user-select: none;
-}
-
-.app-shell .ui-button svg {
+.app-shell .semi-button svg {
   max-width: 16px;
   max-height: 16px;
   flex: 0 0 auto;
-}
-
-.ui-button:hover:not(:disabled) {
-  background: #e5e5ea;
-  border-color: rgba(0, 0, 0, 0.12);
-}
-
-.ui-button:active:not(:disabled) {
-  transform: scale(0.98);
-}
-
-.ui-button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.ui-button-default,
-.ui-primary-button {
-  background: #1c1c1e !important;
-  color: #ffffff !important;
-  border-color: #1c1c1e !important;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
-}
-
-.ui-button-default:hover:not(:disabled),
-.ui-primary-button:hover:not(:disabled) {
-  background: #2c2c2e !important;
 }
 
 .save-button {
@@ -1878,182 +1814,105 @@ input:focus-visible,
   border-color: #0062cc !important;
 }
 
-.ui-button-warning {
-  background: #ff9500 !important;
-  color: #ffffff !important;
-  border-color: #ff9500 !important;
-}
-
-.ui-button-warning:hover:not(:disabled) {
-  background: #e08400 !important;
-}
-
-.ui-button-destructive {
-  background: #ff3b30 !important;
-  color: #ffffff !important;
-  border-color: #ff3b30 !important;
-}
-
-.ui-button-destructive:hover:not(:disabled) {
-  background: #d70015 !important;
-}
-
-.ui-button-secondary,
-.ui-button-outline {
-  background: #ffffff;
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  color: #1d1d1f;
-}
-
-.ui-button-secondary:hover:not(:disabled),
-.ui-button-outline:hover:not(:disabled) {
-  background: #f2f2f7;
-}
-
-.ui-button-ghost {
-  background: transparent;
-  border-color: transparent;
-  color: #6e6e73;
-}
-
-.ui-button-ghost:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.05);
-  color: #1d1d1f;
-}
-
-.ui-button-size-default {
-  min-height: 36px;
+.codey-button--size-default {
+  height: 36px;
   padding: 0 14px;
 }
 
-.ui-button-size-sm {
-  min-height: 30px;
+.codey-button--size-sm {
+  height: 30px;
   padding: 0 10px;
   font-size: 12px;
 }
 
-.ui-button-size-xs {
-  min-height: 26px;
+.codey-button--size-xs {
+  height: 26px;
   padding: 0 8px;
   font-size: 11px;
 }
 
-.ui-button-size-icon-sm {
-  width: 30px;
-  height: 30px;
+.codey-button--size-lg {
+  height: 40px;
+}
+
+.codey-button--size-icon,
+.codey-button--size-icon-sm {
   padding: 0;
 }
 
-/* macOS Switch Toggle */
-.ui-switch {
-  width: 38px;
-  height: 22px;
-  border-radius: 999px;
-  background: #e9e9ea;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  position: relative;
-  cursor: pointer;
-  transition: background-color 180ms ease, border-color 180ms ease;
-  flex-shrink: 0;
+.codey-button--size-icon-sm {
+  width: 30px;
+  height: 30px;
 }
 
-.ui-switch[aria-checked="true"] {
-  background: #34c759;
-  border-color: #2eaf4e;
-}
-
-.ui-switch-thumb {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
-  position: absolute;
-  top: 1px;
-  left: 1px;
-  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.ui-switch[aria-checked="true"] .ui-switch-thumb {
-  transform: translateX(16px);
-}
-
-/* macOS Capsule Badge */
-.ui-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border-radius: 999px;
-  padding: 2px 8px;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.2;
-  border: 1px solid transparent;
-}
-
-.ui-badge-default,
-.ui-badge-secondary,
-.ui-badge-outline {
-  background: rgba(0, 0, 0, 0.05);
-  color: #3a3a3c;
-  border-color: rgba(0, 0, 0, 0.06);
-}
-
-.ui-badge-success {
-  background: rgba(52, 199, 89, 0.12);
-  color: #248a3d;
-  border-color: rgba(52, 199, 89, 0.25);
-}
-
-.ui-badge-warning {
-  background: rgba(255, 149, 0, 0.12);
-  color: #c26d00;
-  border-color: rgba(255, 149, 0, 0.25);
-}
-
-.ui-badge-destructive {
-  background: rgba(255, 59, 48, 0.12);
-  color: #d70015;
-  border-color: rgba(255, 59, 48, 0.25);
-}
-
-.ui-badge-info,
-.ui-badge-brand {
-  background: rgba(0, 122, 255, 0.1);
-  color: #007aff;
-  border-color: rgba(0, 122, 255, 0.2);
-}
-
-/* Checkbox */
-.ui-checkbox-box {
-  width: 16px;
-  height: 16px;
-  border-radius: 4px;
-  border: 1px solid rgba(0, 0, 0, 0.2);
-  background: #ffffff;
-  display: grid;
-  place-items: center;
-}
-
-.ui-checkbox[aria-checked="true"] .ui-checkbox-box {
-  background: var(--mac-blue);
-  border-color: var(--mac-blue);
-  color: #ffffff;
-}
-
-/* Dialog & Toast */
-.ui-dialog-layer {
+.codey-dialog-layer .semi-modal-mask {
   background: rgba(0, 0, 0, 0.25);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
 }
 
-.ui-dialog-content {
+.codey-dialog-layer .semi-modal-wrap {
+  padding: 24px;
+}
+
+.codey-dialog-layer .semi-modal {
+  max-width: calc(100% - 32px);
+}
+
+.codey-dialog-content {
   border: 1px solid rgba(0, 0, 0, 0.1);
   border-radius: 16px;
   background: #ffffff;
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.18);
   padding: 24px;
+}
+
+.codey-dialog-content .semi-modal-body-wrapper {
+  width: 100%;
+  margin: 0;
+}
+
+.codey-dialog-content .semi-modal-body {
+  overflow: visible;
+}
+
+.codey-dialog-close {
+  position: absolute;
+  z-index: 1;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+}
+
+.codey-dialog-header {
+  display: grid;
+  gap: 6px;
+  padding-right: 36px;
+}
+
+.codey-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.codey-dialog-title {
+  margin: 0;
+  color: #1d1d1f;
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.codey-dialog-description {
+  margin: 0;
+  color: #6e6e73;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .model-picker-list {
