@@ -44,14 +44,18 @@ test("renderer core waits for sidebar interaction before loading session tools",
 test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", async () => {
   const source = await readFile(new URL("public/plugin-marketplace-fix.js", root), "utf8");
   const nativeCalls = [];
+  const localCalls = [];
   const window = {
-    __codeyCall: async () => ({
-      plugins: [{
-        id: "local-tool@local",
-        marketplaceName: "local",
-        name: "local-tool",
-      }],
-    }),
+    __codeyCall: async (...args) => {
+      localCalls.push(args);
+      return {
+        plugins: [{
+          id: "local-tool@local",
+          marketplaceName: "local",
+          name: "local-tool",
+        }],
+      };
+    },
     clearTimeout() {},
     dispatchEvent() {},
     electronBridge: {
@@ -83,16 +87,21 @@ test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", a
     window,
   });
   await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(localCalls.length, 0);
 
   const cyclicPayload = { channel: "thread-update" };
   cyclicPayload.self = cyclicPayload;
   await window.electronBridge.sendMessageFromView(cyclicPayload);
   assert.equal(nativeCalls[0][0], cyclicPayload);
+  assert.equal(localCalls.length, 0);
 
   const response = await window.electronBridge.sendMessageFromView({
     channel: "list-plugins",
     options: { includeHidden: false, includeRemote: false },
   });
+  assert.equal(localCalls.length, 1);
+  assert.equal(localCalls[0][0], "/plugins/list");
   assert.equal(nativeCalls[1][0].options.includeHidden, true);
   assert.equal(nativeCalls[1][0].options.includeRemote, true);
   assert.equal(response.plugins[0].hidden, false);
@@ -105,6 +114,7 @@ test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", a
       options: { includeHidden: false, includeRemote: false },
     },
   });
+  assert.equal(localCalls.length, 2);
   assert.equal(nativeCalls[2][0].payload.options.includeHidden, true);
   assert.equal(nativeCalls[2][0].payload.options.includeRemote, true);
 
@@ -117,6 +127,7 @@ test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", a
       },
     },
   });
+  assert.equal(localCalls.length, 3);
   assert.equal(nativeCalls[3][0].payload.request.options.includeHidden, true);
   assert.equal(nativeCalls[3][0].payload.request.options.includeRemote, true);
 
@@ -126,6 +137,7 @@ test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", a
   };
   cyclicPluginPayload.self = cyclicPluginPayload;
   await window.electronBridge.sendMessageFromView(cyclicPluginPayload);
+  assert.equal(localCalls.length, 4);
   assert.equal(nativeCalls[4][0].options.includeHidden, true);
   assert.equal(nativeCalls[4][0].self, nativeCalls[4][0]);
 
@@ -138,6 +150,7 @@ test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", a
   });
   await window.electronBridge.sendMessageFromView(throwingPayload);
   assert.equal(nativeCalls[5][0], throwingPayload);
+  assert.equal(localCalls.length, 4);
 
   assert.doesNotMatch(source, /JSON\.stringify\(args\)/);
   assert.doesNotMatch(source, /new MutationObserver/);
@@ -159,7 +172,86 @@ test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", a
     channel: "list-plugins",
     options: { includeHidden: false },
   });
+  assert.equal(localCalls.length, 5);
   assert.equal(replacementCalls[0][0].options.includeHidden, true);
+});
+
+test("a stalled local plugin refresh cannot block the native marketplace list", async () => {
+  const source = await readFile(new URL("public/plugin-marketplace-fix.js", root), "utf8");
+  let timeoutCallback;
+  const window = {
+    __codeyCall() {
+      return new Promise(() => {});
+    },
+    clearTimeout() {},
+    dispatchEvent() {},
+    electronBridge: {
+      sendMessageFromView() {
+        return Promise.resolve({ plugins: [{ id: "native-tool", hidden: true }] });
+      },
+    },
+    setTimeout(callback) {
+      timeoutCallback = callback;
+      return 1;
+    },
+  };
+  window.window = window;
+  vm.runInNewContext(source, {
+    CustomEvent: class {},
+    console,
+    window,
+  });
+
+  const responsePromise = window.electronBridge.sendMessageFromView({
+    channel: "list-plugins",
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(typeof timeoutCallback, "function");
+  timeoutCallback();
+  const response = await responsePromise;
+  assert.equal(response.plugins[0].hidden, false);
+});
+
+test("ordinary conversation app requests do not refresh the local plugin marketplace", async () => {
+  const source = await readFile(new URL("public/plugin-marketplace-fix.js", root), "utf8");
+  const localCalls = [];
+  const window = {
+    __codeyCall(...args) {
+      localCalls.push(args);
+      return Promise.resolve({ plugins: [] });
+    },
+    clearTimeout() {},
+    dispatchEvent() {},
+    electronBridge: {
+      sendMessageFromView() {
+        return Promise.resolve({ status: "ok" });
+      },
+    },
+    setTimeout() {
+      return 1;
+    },
+  };
+  window.window = window;
+  vm.runInNewContext(source, {
+    CustomEvent: class {},
+    console,
+    window,
+  });
+
+  await window.electronBridge.sendMessageFromView({
+    type: "mcp-request",
+    request: {
+      id: "tool-call-1",
+      method: "tools/call",
+      params: { name: "calendar_lookup" },
+    },
+  });
+  await window.electronBridge.sendMessageFromView({
+    channel: "thread-update",
+    payload: { text: "please use the installed app" },
+  });
+  assert.equal(localCalls.length, 0);
 });
 
 test("plugin mutations queue one trailing list refresh while a refresh is in flight", async () => {
@@ -191,9 +283,10 @@ test("plugin mutations queue one trailing list refresh while a refresh is in fli
 
   await window.electronBridge.sendMessageFromView({ method: "install-plugin" });
   assert.equal(listCalls, 1);
+  await window.electronBridge.sendMessageFromView({ method: "uninstall-plugin" });
+  assert.equal(listCalls, 1);
   listResolvers.shift()({ plugins: [] });
-  await Promise.resolve();
-  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(listCalls, 2);
 
   listResolvers.shift()({ plugins: [] });

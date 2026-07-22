@@ -19,18 +19,36 @@
       if (queueAfterInflight) pluginRefreshQueued = true;
       return pluginRefreshPromise;
     }
-    pluginRefreshPromise = bridge("/plugins/list", {}).then((result) => {
-      if (result?.status === "failed") return;
-      window.__codeyLocalPlugins = Array.isArray(result?.plugins) ? result.plugins : [];
-      window.dispatchEvent(new CustomEvent("codey-plugin-marketplace-refresh", { detail: result }));
-    }).finally(() => {
-      pluginRefreshPromise = null;
-      if (pluginRefreshQueued) {
-        pluginRefreshQueued = false;
-        void refreshLocalPlugins();
-      }
-    });
+    pluginRefreshPromise = Promise.resolve()
+      .then(() => bridge("/plugins/list", {}))
+      .then((result) => {
+        if (result?.status === "failed") return;
+        window.__codeyLocalPlugins = Array.isArray(result?.plugins) ? result.plugins : [];
+        window.dispatchEvent(new CustomEvent("codey-plugin-marketplace-refresh", { detail: result }));
+      })
+      .catch(() => {})
+      .finally(() => {
+        pluginRefreshPromise = null;
+        if (pluginRefreshQueued) {
+          pluginRefreshQueued = false;
+          void refreshLocalPlugins();
+        }
+      });
     return pluginRefreshPromise;
+  };
+  const waitForLocalPlugins = () => {
+    const refresh = refreshLocalPlugins();
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve();
+      };
+      const timer = window.setTimeout(finish, 2_000);
+      Promise.resolve(refresh).then(finish, finish);
+    });
   };
   const pluginLike = (value) => value && typeof value === "object" && ("name" in value || "id" in value) && ("marketplace" in value || "marketplaceName" in value || "marketplacePath" in value || "hidden" in value);
   const normalizePlugin = (plugin) => {
@@ -101,6 +119,56 @@
   const pluginRequestPattern = /plugin|marketplace|list-plugins|install-plugin|uninstall-plugin/i;
   const pluginMutationPattern = /install-plugin|uninstall-plugin/i;
   const directRequestKeys = ["channel", "command", "method", "action", "type", "path", "topic", "url"];
+  const requestValueMatchesMethod = (value, method) => {
+    if (typeof value !== "string") return false;
+    const normalized = value.trim().toLowerCase().split(/[?#]/, 1)[0];
+    const expected = method.toLowerCase();
+    return normalized === expected
+      || normalized.endsWith(`/${expected}`)
+      || normalized.endsWith(`:${expected}`)
+      || normalized.endsWith(`.${expected}`);
+  };
+  const requestHasMethod = (
+    value,
+    method,
+    depth = 0,
+    seen = new WeakSet(),
+    budget = { remaining: 24 },
+  ) => {
+    if (!value || typeof value !== "object" || depth >= 4 || seen.has(value) || budget.remaining <= 0) {
+      return false;
+    }
+    seen.add(value);
+    for (const key of directRequestKeys) {
+      let marker;
+      try {
+        marker = value[key];
+      } catch {
+        continue;
+      }
+      if (requestValueMatchesMethod(marker, method)) return true;
+    }
+    let entries;
+    try {
+      entries = Object.entries(value);
+    } catch {
+      return false;
+    }
+    for (const [key, child] of entries) {
+      budget.remaining -= 1;
+      if (child && typeof child === "object" && requestHasMethod(child, method, depth + 1, seen, budget)) {
+        return true;
+      }
+      if (key === "body" && typeof child === "string") {
+        try {
+          if (requestHasMethod(JSON.parse(child), method, depth + 1, seen, budget)) return true;
+        } catch {}
+      }
+      if (budget.remaining <= 0) break;
+    }
+    return false;
+  };
+  const argsHaveRequestMethod = (args, method) => args.some((value) => requestHasMethod(value, method));
   const requestHasMarker = (value, pattern, depth = 0, seen = new WeakSet(), budget = { remaining: 24 }) => {
     if (typeof value === "string") return pattern.test(value);
     if (!value || typeof value !== "object" || depth >= 3 || seen.has(value) || budget.remaining <= 0) {
@@ -156,13 +224,16 @@
     const original = electronBridge.sendMessageFromView;
     const wrapped = function (...args) {
       let isPluginRequest = false;
+      let isPluginListRequest = false;
       try {
         isPluginRequest = argsMatch(args, pluginRequestPattern);
+        isPluginListRequest = argsHaveRequestMethod(args, "list-plugins");
       } catch {}
       const normalizedArgs = isPluginRequest ? args.map(normalizeRequestArg) : args;
       const result = original.apply(this, normalizedArgs);
       if (!result || typeof result.then !== "function") return result;
-      return result.then((response) => {
+      const localRefresh = isPluginListRequest ? waitForLocalPlugins() : Promise.resolve();
+      return Promise.all([result, localRefresh]).then(([response]) => {
         if (!isPluginRequest) return response;
         let patched = response;
         try {
@@ -199,8 +270,20 @@
   const originalFetch = window.fetch;
   if (typeof originalFetch === "function") {
     window.fetch = async (...args) => {
-      const response = await originalFetch(...args);
       const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
+      const body = args[1]?.body;
+      let isPluginListRequest = requestValueMatchesMethod(url, "list-plugins");
+      if (!isPluginListRequest && body && typeof body === "object") {
+        isPluginListRequest = requestHasMethod(body, "list-plugins");
+      } else if (!isPluginListRequest && typeof body === "string") {
+        try {
+          isPluginListRequest = requestHasMethod(JSON.parse(body), "list-plugins");
+        } catch {}
+      }
+      const [response] = await Promise.all([
+        originalFetch(...args),
+        isPluginListRequest ? waitForLocalPlugins() : Promise.resolve(),
+      ]);
       const contentType = response.headers.get("content-type") || "";
       if (!/plugin|marketplace/i.test(url) || !contentType.includes("application/json")) return response;
       try {
@@ -214,7 +297,6 @@
     };
   }
   const bridgePatched = patchElectronBridge();
-  refreshLocalPlugins();
   if (!bridgePatched) {
     bridgeRetryTimer = window.setTimeout(retryPatchElectronBridge, bridgeRetryDelay);
   }
