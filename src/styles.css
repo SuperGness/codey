@@ -1994,6 +1994,34 @@ input:focus-visible,
   margin-top: 14px;
 }
 
+.codex-app-path-selection {
+  display: grid;
+  gap: 6px;
+  margin-top: 16px;
+  color: #6e6e73;
+  font-size: 12px;
+}
+
+.codex-app-path-selection code {
+  min-height: 36px;
+  overflow-wrap: anywhere;
+  padding: 9px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  background: #f5f5f7;
+  color: #1d1d1f;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.codex-app-path-error {
+  margin: 12px 0 0;
+  color: #d70015;
+  font-size: 12px;
+  line-height: 18px;
+}
+
 .notice-toast {
   position: fixed;
   bottom: 24px;

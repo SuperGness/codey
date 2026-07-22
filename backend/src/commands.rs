@@ -7,6 +7,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use codex_plus_core::app_paths::{build_codex_executable, normalize_codex_app_path};
 use futures_util::StreamExt;
 use reqwest::header::USER_AGENT;
 use semver::Version;
@@ -626,6 +627,11 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             Ok(config) => save_codey_config(state, config).await,
             Err(error) => Err(error),
         },
+        "pick_codex_app_directory" => pick_codex_app_directory().await,
+        "set_codex_app_path" => match string_argument(&args, "path") {
+            Ok(path) => set_codex_app_path(state, path).await,
+            Err(error) => Err(error),
+        },
         "sync_current_provider" => sync_current_provider_command(state).await,
         "fetch_current_provider_models" => fetch_current_provider_models(state).await,
         "save_selected_models" => match argument::<Vec<String>>(&args, "models") {
@@ -699,6 +705,11 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
 pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
     let config = state.config.read().await.clone();
     let startup_error = state.startup_error.read().await.clone();
+    #[cfg(windows)]
+    let codex_app_path_selection_required =
+        crate::launcher::needs_codex_app_path_selection(startup_error.as_deref());
+    #[cfg(not(windows))]
+    let codex_app_path_selection_required = false;
     let cc_switch = cc_switch::status_from_config(&config);
     let model_state = current_model_state(&config)?;
     let public_config = redacted_config(&config);
@@ -706,9 +717,62 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
         "config": public_config,
         "path": state.store.path().to_string_lossy(),
         "startupError": startup_error,
+        "codexAppPathSelectionRequired": codex_app_path_selection_required,
         "ccSwitch": cc_switch,
         "modelState": model_state,
     }))
+}
+
+async fn pick_codex_app_directory() -> Result<Value, String> {
+    #[cfg(windows)]
+    {
+        let selected = tokio::task::spawn_blocking(|| {
+            rfd::FileDialog::new()
+                .set_title("选择 Codex 桌面应用所在目录")
+                .pick_folder()
+        })
+        .await
+        .map_err(|error| format!("打开 Codex 目录选择器失败：{error}"))?;
+
+        Ok(match selected {
+            Some(path) => json!({
+                "status": "selected",
+                "path": path.to_string_lossy(),
+            }),
+            None => json!({"status": "cancelled"}),
+        })
+    }
+
+    #[cfg(not(windows))]
+    {
+        Err("Codex 应用目录选择仅在 Windows 上提供".to_string())
+    }
+}
+
+fn validate_codex_app_path(path: &str) -> Result<PathBuf, String> {
+    let selected = path.trim();
+    if selected.is_empty() {
+        return Err("请先选择 Codex 桌面应用所在目录".to_string());
+    }
+
+    let app_dir = normalize_codex_app_path(Path::new(selected)).ok_or_else(|| {
+        "所选目录不是可启动的 Codex 桌面应用。请选择包含 ChatGPT.exe 或 Codex.exe 的目录，不要选择 codex.exe 命令行程序".to_string()
+    })?;
+    let executable = build_codex_executable(&app_dir);
+    if !executable.is_file() {
+        return Err(format!(
+            "所选目录中没有可启动的 Codex 桌面应用（未找到 {}）",
+            executable.display()
+        ));
+    }
+    Ok(app_dir)
+}
+
+async fn set_codex_app_path(state: &Arc<AppState>, path: String) -> Result<Value, String> {
+    let app_dir = validate_codex_app_path(&path)?;
+    let mut config = state.config.read().await.clone();
+    config.codex_app_path = app_dir.to_string_lossy().to_string();
+    save_codey_config(state, config).await
 }
 
 pub async fn save_codey_config(
@@ -2238,6 +2302,19 @@ fn api_error_message(error: impl ToString) -> Value {
 mod tests {
     use super::*;
     use crate::pending_approval::{AbortedTurn, PendingApproval, StartedTurn};
+
+    #[test]
+    fn selected_codex_app_path_requires_a_desktop_executable() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(validate_codex_app_path(directory.path().to_str().unwrap()).is_err());
+
+        let executable = directory.path().join("Codex.exe");
+        fs::write(&executable, []).unwrap();
+        assert_eq!(
+            validate_codex_app_path(directory.path().to_str().unwrap()).unwrap(),
+            directory.path()
+        );
+    }
 
     #[test]
     fn update_manifest_reports_a_newer_https_release() {

@@ -30,6 +30,32 @@ use crate::trace_log_guard;
 
 const CDP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
 const CDP_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
+pub const CODEX_APP_NOT_FOUND_ERROR: &str = "找不到 Codex App，请在 Codey 配置中填写路径";
+pub const CODEX_APP_PATH_INVALID_ERROR: &str = "配置的 Codex App 路径无效或指向了 Codex CLI；请选择 Codex 桌面 App，不要选择 codex.exe 命令行程序";
+
+#[cfg(windows)]
+pub fn needs_codex_app_path_selection(startup_error: Option<&str>) -> bool {
+    startup_error.is_some_and(|error| {
+        error.contains(CODEX_APP_NOT_FOUND_ERROR) || error.contains(CODEX_APP_PATH_INVALID_ERROR)
+    })
+}
+
+#[cfg(all(test, windows))]
+mod app_path_selection_tests {
+    use super::*;
+
+    #[test]
+    fn path_selection_is_requested_only_for_app_path_failures() {
+        assert!(needs_codex_app_path_selection(Some(
+            CODEX_APP_NOT_FOUND_ERROR
+        )));
+        assert!(needs_codex_app_path_selection(Some(
+            CODEX_APP_PATH_INVALID_ERROR
+        )));
+        assert!(!needs_codex_app_path_selection(Some("网络不可用")));
+        assert!(!needs_codex_app_path_selection(None));
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -135,11 +161,9 @@ impl CodeyRuntime {
         )
         .ok_or_else(|| {
             if configured_app_path.is_empty() {
-                anyhow::anyhow!("找不到 Codex App，请在 Codey 配置中填写路径")
+                anyhow::anyhow!(CODEX_APP_NOT_FOUND_ERROR)
             } else {
-                anyhow::anyhow!(
-                    "配置的 Codex App 路径无效或指向了 Codex CLI；请选择 Codex 桌面 App，不要选择 codex.exe 命令行程序"
-                )
+                anyhow::anyhow!(CODEX_APP_PATH_INVALID_ERROR)
             }
         })?;
         prepare_codex_for_launch(&app_dir).await?;

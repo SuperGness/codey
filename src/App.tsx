@@ -11,11 +11,12 @@ import {
 } from "@tabler/icons-react";
 import { invoke } from "./api";
 import { formatBytes, TraceLogModule, type TraceLogStats } from "./TraceLogModule";
-import { ConfirmationDialog, ModelPickerDialog } from "./AppDialogs";
+import { CodexAppPathDialog, ConfirmationDialog, ModelPickerDialog } from "./AppDialogs";
 import { AppUpdateCard, FeaturePolicyCard, ModelSection, OperationsPanel, WebhookCard } from "./AppSections";
 import type {
   AppProps,
   CcSwitchStatus,
+  CodexAppDirectorySelection,
   Config,
   Confirmation,
   InlineResult,
@@ -89,6 +90,9 @@ export function App({ embedded = false, onClose }: AppProps) {
   const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null);
   const [downloadedUpdate, setDownloadedUpdate] = useState<UpdateDownload | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [codexAppPathDialogVisible, setCodexAppPathDialogVisible] = useState(false);
+  const [selectedCodexAppPath, setSelectedCodexAppPath] = useState("");
+  const [codexAppPathError, setCodexAppPathError] = useState("");
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
   const [traceSnapshotStale, setTraceSnapshotStale] = useState(false);
 
@@ -170,6 +174,7 @@ export function App({ embedded = false, onClose }: AppProps) {
         config: Config;
         modelState?: ModelState;
         startupError?: string;
+        codexAppPathSelectionRequired?: boolean;
         ccSwitch?: CcSwitchStatus;
       }>("load_codey_config");
       setPersistedConfig(result.config);
@@ -177,6 +182,7 @@ export function App({ embedded = false, onClose }: AppProps) {
       if (result.modelState) setModelState(result.modelState);
       const next = await refreshStatus();
       const startupError = next.startupError || result.startupError;
+      setCodexAppPathDialogVisible(Boolean(result.codexAppPathSelectionRequired));
       if (startupError) {
         setNotice({ tone: "error", text: `自动启动失败：${startupError}` });
       } else if (next.restartRequired) {
@@ -241,6 +247,47 @@ export function App({ embedded = false, onClose }: AppProps) {
     }
     setDirty(false);
     return result;
+  }
+
+  async function chooseCodexAppDirectory() {
+    if (isBusy) return;
+    setBusy("pick-codex-app-directory");
+    setCodexAppPathError("");
+    try {
+      const result = await invoke<CodexAppDirectorySelection>("pick_codex_app_directory");
+      if (result.status === "selected" && result.path) {
+        setSelectedCodexAppPath(result.path);
+      }
+    } catch (error) {
+      setCodexAppPathError(errorText(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function confirmCodexAppPath() {
+    if (!selectedCodexAppPath || isBusy) return;
+    setBusy("set-codex-app-path");
+    setCodexAppPathError("");
+    try {
+      const result = await invoke<{
+        config: Config;
+        ccSwitch?: CcSwitchStatus;
+        modelState?: ModelState;
+      }>("set_codex_app_path", { path: selectedCodexAppPath });
+      setPersistedConfig(result.config);
+      if (result.ccSwitch) setCcSwitchStatus(result.ccSwitch);
+      if (result.modelState) setModelState(result.modelState);
+      await invoke("launch_codey");
+      await refreshStatus();
+      setCodexAppPathDialogVisible(false);
+      setSelectedCodexAppPath("");
+      setNotice({ tone: "success", text: "Codex 应用路径已校验并保存，客户端已启动" });
+    } catch (error) {
+      setCodexAppPathError(errorText(error));
+    } finally {
+      setBusy(null);
+    }
   }
 
   async function syncCurrentProvider() {
@@ -817,6 +864,22 @@ export function App({ embedded = false, onClose }: AppProps) {
           pending.run();
         }}
       />
+
+      {status.clientPlatform === "windows" && (
+        <CodexAppPathDialog
+          open={codexAppPathDialogVisible}
+          selectedPath={selectedCodexAppPath}
+          error={codexAppPathError}
+          isBusy={isBusy}
+          busy={busy}
+          container={portalContainer}
+          onOpenChange={(open) => {
+            if (!isBusy) setCodexAppPathDialogVisible(open);
+          }}
+          onChooseDirectory={() => void chooseCodexAppDirectory()}
+          onConfirm={() => void confirmCodexAppPath()}
+        />
+      )}
     </main>
   );
 }

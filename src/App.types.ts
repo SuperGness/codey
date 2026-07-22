@@ -65,6 +65,11 @@ export type RuntimeStatus = {
   traceLogStats?: TraceLogStats;
 };
 
+export type CodexAppDirectorySelection = {
+  status: "selected" | "cancelled";
+  path?: string;
+};
+
 export type CcSwitchStatus = {
   available: boolean;
   path: string;

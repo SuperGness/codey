@@ -1,5 +1,6 @@
 import {
   IconCheck as Check,
+  IconFolderOpen as FolderOpen,
   IconLoader2 as LoaderCircle,
   IconRefresh as RefreshCw,
   IconSearch as Search,
@@ -172,6 +173,73 @@ export function ConfirmationDialog({
               ? <RefreshCw aria-hidden="true" />
               : <Check aria-hidden="true" />}
             {confirmation?.confirmLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+type CodexAppPathDialogProps = {
+  open: boolean;
+  selectedPath: string;
+  error: string;
+  isBusy: boolean;
+  busy: string | null;
+  container: HTMLElement | null;
+  onOpenChange: (open: boolean) => void;
+  onChooseDirectory: () => void;
+  onConfirm: () => void;
+};
+
+export function CodexAppPathDialog({
+  open,
+  selectedPath,
+  error,
+  isBusy,
+  busy,
+  container,
+  onOpenChange,
+  onChooseDirectory,
+  onConfirm,
+}: CodexAppPathDialogProps) {
+  const choosing = busy === "pick-codex-app-directory";
+  const confirming = busy === "set-codex-app-path";
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        className="codex-app-path-dialog"
+        container={container}
+        onEscapeKeyDown={(event) => {
+          if (isBusy) event.preventDefault();
+        }}
+        onPointerDownOutside={(event) => {
+          if (isBusy) event.preventDefault();
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle>未找到 Codex 桌面应用</DialogTitle>
+          <DialogDescription>
+            自动扫描没有发现 Codex。请选择 Codex 桌面应用所在的目录；确认时会校验目录及可执行文件。
+          </DialogDescription>
+        </DialogHeader>
+        <div className="codex-app-path-selection">
+          <span>所选目录</span>
+          <code>{selectedPath || "尚未选择"}</code>
+        </div>
+        {error && <p className="codex-app-path-error" role="alert">{error}</p>}
+        <DialogFooter>
+          <Button variant="outline" disabled={isBusy} onClick={onChooseDirectory}>
+            {choosing
+              ? <LoaderCircle className="spinner" aria-hidden="true" />
+              : <FolderOpen aria-hidden="true" />}
+            选择目录
+          </Button>
+          <Button disabled={isBusy || !selectedPath} onClick={onConfirm}>
+            {confirming
+              ? <LoaderCircle className="spinner" aria-hidden="true" />
+              : <Check aria-hidden="true" />}
+            确认并启动
           </Button>
         </DialogFooter>
       </DialogContent>
