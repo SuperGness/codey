@@ -3,15 +3,21 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const root = new URL("../", import.meta.url);
+const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
 
 test("plugin marketplace repair is explicit and status checks stay read-only", async () => {
   const [marketplaceSource, commandSource, launcherSource, appSource, sectionsSource] =
     await Promise.all([
-      readFile(new URL("backend/src/plugin_marketplace.rs", root), "utf8"),
-      readFile(new URL("backend/src/commands.rs", root), "utf8"),
-      readFile(new URL("backend/src/launcher.rs", root), "utf8"),
-      readFile(new URL("src/App.tsx", root), "utf8"),
-      readFile(new URL("src/AppSections.tsx", root), "utf8"),
+      readFile(new URL("backend/src/plugin_marketplace.rs", root), "utf8")
+        .then(normalizeLineEndings),
+      readFile(new URL("backend/src/commands.rs", root), "utf8")
+        .then(normalizeLineEndings),
+      readFile(new URL("backend/src/launcher.rs", root), "utf8")
+        .then(normalizeLineEndings),
+      readFile(new URL("src/App.tsx", root), "utf8")
+        .then(normalizeLineEndings),
+      readFile(new URL("src/AppSections.tsx", root), "utf8")
+        .then(normalizeLineEndings),
     ]);
 
   const statusFunction = commandSource.match(
