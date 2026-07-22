@@ -2085,17 +2085,13 @@ input:focus-visible,
 }
 
 .config-brand-mark {
-  display: grid;
   width: 36px;
   height: 36px;
   flex: 0 0 auto;
-  place-items: center;
-  border-radius: 6px;
-  background: var(--foreground);
-  color: var(--background);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 14px;
-  font-weight: 700;
+  display: block;
+  border-radius: 9px;
+  object-fit: cover;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
 }
 
 .config-brand-copy {

@@ -594,7 +594,7 @@ export function App({ embedded = false, onClose }: AppProps) {
       <header className="config-header">
         <div className="config-header-inner">
           <div className="config-brand">
-            <div className="config-brand-mark">{">_"}</div>
+            <img className="config-brand-mark" src="/codey-icon.png" alt="" aria-hidden="true" />
             <div className="config-brand-copy">
               <div className="config-brand-title-row">
                 <h1>Codey 配置</h1>
