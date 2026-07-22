@@ -215,35 +215,6 @@ input:focus-visible,
   width: 140px;
 }
 
-.status-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  font-weight: 500;
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: rgba(0, 0, 0, 0.04);
-  color: #3a3a3c;
-}
-
-.status-pill.online {
-  background: rgba(52, 199, 89, 0.12);
-  color: #248a3d;
-}
-
-.status-pill-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #8e8e93;
-}
-
-.status-pill.online .status-pill-dot {
-  background: #34c759;
-  box-shadow: 0 0 6px rgba(52, 199, 89, 0.5);
-}
-
 .config-header {
   z-index: 30;
   display: flex;

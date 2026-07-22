@@ -725,12 +725,7 @@ export function App({ embedded = false, onClose }: AppProps) {
           <span className="app-title-text">Codey Control Panel</span>
           <span className="app-version-tag">v{status.appVersion || "0.2.0"}</span>
         </div>
-        <div className="macos-titlebar-right">
-          <span className={`status-pill ${status.running ? "online" : "offline"}`}>
-            <span className="status-pill-dot" />
-            {status.running ? (status.activeProfileName || "已就绪") : "未启动"}
-          </span>
-        </div>
+        <div className="macos-titlebar-right" aria-hidden="true" />
       </div>
 
       <header className="config-header">
