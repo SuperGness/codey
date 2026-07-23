@@ -106,10 +106,20 @@ export function OperationsPanel({
       ? "远程市场尚未注册"
       : "",
   ].filter(Boolean);
+  const rawSessionDetail = maintenance?.sessionDetail || "等待 Codey 返回会话状态";
+  const formattedSessionDetail = rawSessionDetail.includes(
+    "修复 0 个会话文件，更新 0 行数据库索引，清理 0 条幽灵任务",
+  )
+    ? rawSessionDetail.replace(
+        "已同步到 codey_global: 修复 0 个会话文件，更新 0 行数据库索引，清理 0 条幽灵任务",
+        "已同步至 codey_global（索引与状态良好）",
+      )
+    : rawSessionDetail.replace(/^已同步到\s+/, "已同步至 ");
+
   const pluginDetail = pluginStatusError
     ? pluginMarketplaceStatus?.message || "插件市场状态读取失败"
     : pluginOk
-      ? undefined
+      ? "官方与远程市场已就绪"
       : pluginIssues.length > 0
         ? pluginIssues.join("；")
         : "正在读取插件市场状态";
@@ -130,8 +140,8 @@ export function OperationsPanel({
   }> = [
     {
       title: "会话恢复",
-      description: sessionOk ? "会话索引与恢复链路工作正常。" : "正在确认会话索引与恢复链路。",
-      detail: maintenance?.sessionDetail || "等待 Codey 返回会话状态",
+      description: sessionOk ? "索引与恢复链路运行正常，上下文恢复就绪。" : "正在确认会话索引与恢复链路。",
+      detail: formattedSessionDetail,
       label: sessionOk ? "正常" : maintenance ? "需检查" : "检查中",
       tone: sessionOk ? "success" : maintenance ? "destructive" : "warning",
       icon: History,
@@ -139,11 +149,11 @@ export function OperationsPanel({
     {
       title: "系统优化",
       description: !performanceError
-        ? "精简策略与性能补丁已按当前配置启用。"
+        ? "精简策略与性能补丁均已成功加载。"
         : "部分精简策略尚未启用，保留完整功能。",
       detail: performanceError
         ? maintenance?.performanceDetail || "性能补丁加载异常"
-        : "FastCtx、宠物、语音与 Windows 性能策略",
+        : "FastCtx · 模块精简 · 性能策略已生效",
       label: performanceError ? "异常" : "已优化",
       tone: performanceError ? "destructive" : "success",
       icon: Cpu,
@@ -151,8 +161,8 @@ export function OperationsPanel({
     {
       title: "插件市场",
       description: pluginOk
-        ? "插件市场配置完整，可正常发现和管理插件。"
-        : "仅检查当前状态，不会在打开配置页时自动修复。",
+        ? "配置状态完整，可正常发现与管理插件。"
+        : "仅检查当前状态，打开配置页时不自动修复。",
       detail: pluginDetail,
       label: pluginRepairing
         ? "修复中"
@@ -241,18 +251,27 @@ export function OperationsPanel({
                 key={item.title}
                 role="listitem"
               >
-                <div className="operations-status-title">
-                  <span className="operations-status-icon">
-                    <StatusIcon size={16} aria-hidden="true" />
-                  </span>
-                  <div>
+                <div className="operations-status-content">
+                  <div className="operations-status-title-row">
+                    <span className="operations-status-icon">
+                      <StatusIcon size={16} aria-hidden="true" />
+                    </span>
                     <h2>{item.title}</h2>
-                    <p>{item.description}</p>
+                    <Badge variant={item.tone}>{item.label}</Badge>
                   </div>
-                  <Badge variant={item.tone}>{item.label}</Badge>
+                  <p className="operations-status-desc">{item.description}</p>
                 </div>
-                <div className={`operations-status-footer${item.detail ? "" : " action-only"}`}>
-                  {item.detail && <div className="operations-status-detail">{item.detail}</div>}
+                <div className="operations-status-footer">
+                  <div className="operations-status-detail" title={item.detail}>
+                    {item.detail ? (
+                      <>
+                        <span className="operations-detail-dot" aria-hidden="true" />
+                        <span className="operations-detail-text">{item.detail}</span>
+                      </>
+                    ) : (
+                      <span className="operations-detail-text text-muted">状态正常</span>
+                    )}
+                  </div>
                   {item.action && (
                     <Button
                       className="operations-status-action"

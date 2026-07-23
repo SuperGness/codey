@@ -736,17 +736,27 @@ pub fn ensure_global_model_provider(home: &Path) -> Result<String> {
         .context("Codex config.toml 不是 UTF-8")?;
     let mut doc = parse_document(&existing)?;
 
-    if let Some(providers) = doc.get_mut("model_providers").and_then(Item::as_table_mut) {
-        for provider in RESERVED_PROVIDER_IDS {
-            providers.remove(provider);
-        }
-    }
     let current_provider = doc
         .get("model_provider")
         .and_then(Item::as_str)
         .map(str::trim)
         .filter(|provider| !provider.is_empty())
         .map(ToString::to_string);
+    let current_provider_config = current_provider
+        .as_deref()
+        .and_then(|provider| {
+            doc.get("model_providers")
+                .and_then(Item::as_table)
+                .and_then(|providers| providers.get(provider))
+        })
+        .filter(|provider| provider.as_table_like().is_some())
+        .cloned();
+
+    if let Some(providers) = doc.get_mut("model_providers").and_then(Item::as_table_mut) {
+        for provider in RESERVED_PROVIDER_IDS {
+            providers.remove(provider);
+        }
+    }
     if let Some(provider) = current_provider.as_deref()
         && !is_reserved_provider(provider)
         && provider != CODEY_PROVIDER_ID
@@ -760,7 +770,7 @@ pub fn ensure_global_model_provider(home: &Path) -> Result<String> {
     doc["model_providers"]
         .as_table_mut()
         .expect("model_providers was initialized")[GLOBAL_PROVIDER_ID] =
-        Item::Table(official_provider_table());
+        current_provider_config.unwrap_or_else(|| Item::Table(official_provider_table()));
     doc["model_provider"] = value(GLOBAL_PROVIDER_ID);
     write_global_provider_migration_if_changed(home, &config_path, &existing, &doc, original)?;
     Ok(GLOBAL_PROVIDER_ID.to_string())
@@ -1939,6 +1949,84 @@ note = "user replacement"
             Some(CHATGPT_CODEX_BASE_URL)
         );
         assert!(!config.contains("[model_providers.openai]"));
+    }
+
+    #[test]
+    fn migrates_a_reserved_custom_provider_without_changing_its_api_address() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(
+            home.join("config.toml"),
+            r#"model_provider = "openai"
+
+[model_providers.openai]
+name = "Private Relay"
+base_url = "https://relay.example/v1"
+wire_api = "chat"
+requires_openai_auth = true
+experimental_bearer_token = "sk-existing"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            ensure_global_model_provider(&home).unwrap(),
+            GLOBAL_PROVIDER_ID
+        );
+        let config = fs::read_to_string(home.join("config.toml")).unwrap();
+        let document = config.parse::<DocumentMut>().unwrap();
+        let provider = document["model_providers"][GLOBAL_PROVIDER_ID]
+            .as_table_like()
+            .unwrap();
+
+        assert_eq!(
+            provider.get("base_url").and_then(Item::as_str),
+            Some("https://relay.example/v1")
+        );
+        assert_eq!(
+            provider.get("wire_api").and_then(Item::as_str),
+            Some("chat")
+        );
+        assert_eq!(
+            provider
+                .get("experimental_bearer_token")
+                .and_then(Item::as_str),
+            Some("sk-existing")
+        );
+        assert!(
+            document["model_providers"]
+                .as_table()
+                .unwrap()
+                .get("openai")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn preserves_an_existing_global_provider_api_address() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        fs::create_dir_all(&home).unwrap();
+        let original = r#"model_provider = "codey_global"
+
+[model_providers.codey_global]
+name = "Private Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "sk-existing"
+"#;
+        fs::write(home.join("config.toml"), original).unwrap();
+
+        assert_eq!(
+            ensure_global_model_provider(&home).unwrap(),
+            GLOBAL_PROVIDER_ID
+        );
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            original
+        );
     }
 
     #[test]
