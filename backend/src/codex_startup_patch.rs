@@ -36,6 +36,17 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     }
     return patched;
   };
+  const replaceRendererGates = (source, pattern, replacement, name) => {
+    let count = 0;
+    const patched = source.replace(pattern, (...args) => {
+      count += 1;
+      return typeof replacement === "function" ? replacement(...args) : replacement;
+    });
+    if (count === 0) {
+      throw new Error(`Codey ${name} renderer gate matched 0 times`);
+    }
+    return patched;
+  };
   const patchCodexRendererAsset = (source) => {
     let patched = source;
     if (
@@ -128,9 +139,9 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
         ) => `${assignment}!${hideLabelName}${followingAssignment}`,
         "fast model trigger availability",
       );
-      patched = replaceUniqueRendererGate(
+      patched = replaceRendererGates(
         patched,
-        /(\b[$A-Z_a-z][$\w]*\s*=\s*)!\s*[$A-Z_a-z][$\w]*\s*&&\s*[$A-Z_a-z][$\w]*\s*!=\s*null\s*&&\s*[$A-Z_a-z][$\w]*\s*\(\s*[$A-Z_a-z][$\w]*\s*,\s*[$A-Z_a-z][$\w]*\s*\)\s*\?\s*[$A-Z_a-z][$\w]*\s*:\s*null/g,
+        /(\b[$A-Z_a-z][$\w]*\s*=\s*)(?:!\s*[$A-Z_a-z][$\w]*\s*&&\s*)?([$A-Z_a-z][$\w]*)\s*!==?\s*null\s*&&\s*[$A-Z_a-z][$\w]*\s*\(\s*[$A-Z_a-z][$\w]*\s*,\s*[$A-Z_a-z][$\w]*\s*\)\s*\?\s*\2\s*:\s*null/g,
         (_match, assignment) => `${assignment}null`,
         "model row fast icon",
       );

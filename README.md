@@ -8,7 +8,7 @@ Codey 是一个无界面的 Rust 桌面辅助进程，通过 CDP 连接官方 Co
 - Windows 通过 EXE 或快捷方式启动时，Codey 会在 Codex 成功启动并完成注入后隐藏自己的专属命令行窗口，继续在后台维护连接；启动失败时保留窗口以显示错误，从已有 CMD / PowerShell 手动运行时也不会隐藏用户的终端。
 - 线路采用自动双模式：检测到 `~/.cc-switch/cc-switch.db` 时只读同步当前 Codex provider；没有 cc-switch 时读取本地 Codex 直登配置。线路变化需要重启由 Codey 启动的 Codex 后生效。
 - 官方线路沿用 ChatGPT 登录；第三方线路把 API 地址、原生 `wire_api` 协议和临时 bearer token 直接交给 Codex，不经过 Codey 转发或协议转换。
-- 配置页以官方账号可见模型为固定左列，第三方模型发现会直接请求当前 provider 的 `/v1/models` 或 `/models`，候选不会进入 Codex 官方模型菜单。
+- 配置页以官方账号可见模型为固定左列；每次拉起第三方线路前会在 5 秒上限内直接请求当前 provider 的 `/v1/models` 或 `/models`，同步成功后仅向 Codex 展示上游支持的模型，无需再手动同步并重启。请求失败、超时或返回空列表时使用固定 7 模型回退且继续启动，配置页的同步按钮仍可用于手动重试。
 - 启动前备份 Codex `config.toml`，退出时按 lease marker 原子恢复，`auth.json` 和官方登录状态保持不变。
 - 启动器对 `sessions` 与 `archived_sessions` 的 rollout 采用逐行流式检查；只有确实需要改写 provider 的文件才会载入全文，避免长会话历史在启动时形成多份大字符串并把内存峰值长期留在分配器中。
 - 启动器只读取 rollout 的首个 `session_meta` 头并流式遍历目录，不再为校验构建全量路径列表；Trace 防护、插件维护和宠物状态会在依赖关系允许时并行执行，一次性日志统计则在 Codex 可用后后台完成。

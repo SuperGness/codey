@@ -222,6 +222,7 @@ type RecentSessionScanResult = (
 type RecentSessionScanTask = tokio::task::JoinHandle<RecentSessionScanResult>;
 
 const ACTIVE_SESSION_SCAN_DELAY: Duration = Duration::from_secs(3);
+const STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_SESSION_SCAN_DELAYS: [Duration; 4] = [
     Duration::from_secs(3),
     Duration::from_secs(6),
@@ -959,6 +960,85 @@ pub async fn sync_cc_switch_state(state: &Arc<AppState>) -> cc_switch::CcSwitchS
     }
 }
 
+fn config_with_current_provider_models(config: &CodeyConfig, models: Vec<String>) -> CodeyConfig {
+    let Some(provider_id) = config.current_provider_id().map(ToString::to_string) else {
+        return config.clone();
+    };
+    let mut next = config.clone();
+    next.upstream_models_by_provider.insert(provider_id, models);
+    next.normalize()
+}
+
+fn startup_model_sync_models_or_default(models: Vec<String>) -> (Vec<String>, bool) {
+    if models.is_empty() {
+        (model_catalog::default_official_model_slugs(), false)
+    } else {
+        (models, true)
+    }
+}
+
+async fn sync_provider_models_for_launch(state: &Arc<AppState>) -> CodeyConfig {
+    let config = state.config.read().await.clone();
+    let Some(profile) = config.active_profile() else {
+        return config;
+    };
+    if profile.cc_switch_read_only {
+        return config;
+    }
+    let Some(provider_id) = config.current_provider_id().map(ToString::to_string) else {
+        return config;
+    };
+
+    let (models, synced) = match tokio::time::timeout(
+        STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT,
+        provider_models::fetch(&profile, &state.http_client),
+    )
+    .await
+    {
+        Ok(Ok(models)) => {
+            let (models, synced) = startup_model_sync_models_or_default(models);
+            if synced {
+                eprintln!(
+                    "启动时已从「{}」同步 {} 个上游模型",
+                    profile.name,
+                    models.len()
+                );
+            } else {
+                eprintln!(
+                    "启动时「{}」返回空模型列表，使用默认 7 个模型",
+                    profile.name
+                );
+            }
+            (models, synced)
+        }
+        Ok(Err(error)) => {
+            eprintln!(
+                "启动时同步「{}」上游模型失败，使用默认 7 个模型：{error:#}",
+                profile.name
+            );
+            (model_catalog::default_official_model_slugs(), false)
+        }
+        Err(_) => {
+            eprintln!(
+                "启动时同步「{}」上游模型超时，使用默认 7 个模型",
+                profile.name
+            );
+            (model_catalog::default_official_model_slugs(), false)
+        }
+    };
+    let latest = state.config.read().await.clone();
+    if latest.current_provider_id() != Some(provider_id.as_str()) {
+        eprintln!("启动时同步模型期间当前线路已变化，忽略旧线路的同步结果");
+        return latest;
+    }
+    let next = config_with_current_provider_models(&latest, models);
+    if synced && let Err(error) = state.store.save(&next) {
+        eprintln!("保存启动时模型同步结果失败，本次启动仍使用最新模型：{error:#}");
+    }
+    *state.config.write().await = next.clone();
+    next
+}
+
 pub async fn fetch_current_provider_models(state: &Arc<AppState>) -> Result<Value, String> {
     let config = state.config.read().await.clone();
     let profile = config
@@ -1256,7 +1336,7 @@ async fn launch_codey_inner(state: &Arc<AppState>) -> Result<Value, String> {
     stop_waiting_webhook_watcher(state).await;
     restore_previous_runtime_state(&codex_home())
         .map_err(|error| format!("恢复上次 Codey 临时 Codex 配置失败：{error}"))?;
-    let config = state.config.read().await.clone();
+    let config = sync_provider_models_for_launch(state).await;
     let initial_scan_task = if webhook_watcher_should_run(&config) {
         let initial_event_cache = state
             .recent_session_event_cache
@@ -1431,6 +1511,80 @@ mod restart_tests {
         current.disable_trace_log_writes = !current.disable_trace_log_writes;
 
         assert!(!config_requires_restart(&applied, &current));
+    }
+
+    #[test]
+    fn successful_startup_model_sync_filters_unsupported_models() {
+        let mut config = CodeyConfig::default();
+        let provider_id = config.current_provider_id().unwrap().to_string();
+        config.selected_models_by_provider.insert(
+            provider_id,
+            vec!["provider-fast-coder".into(), "provider-missing".into()],
+        );
+        let synced = config_with_current_provider_models(
+            &config,
+            vec!["gpt-5.6-sol".into(), "provider-fast-coder".into()],
+        );
+        let home = tempfile::tempdir().unwrap();
+
+        let state = model_catalog::selection_state(
+            home.path(),
+            false,
+            synced.upstream_models_snapshot(),
+            synced.selected_models(),
+            synced.default_model(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            state
+                .official_models
+                .iter()
+                .filter(|model| model.supported)
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>(),
+            ["gpt-5.6-sol"]
+        );
+        assert_eq!(state.third_party_models, ["provider-fast-coder"]);
+    }
+
+    #[test]
+    fn failed_startup_model_sync_falls_back_to_exactly_seven_models() {
+        let mut config = CodeyConfig::default();
+        let provider_id = config.current_provider_id().unwrap().to_string();
+        config
+            .selected_models_by_provider
+            .insert(provider_id.clone(), vec!["provider-fast-coder".into()]);
+        config
+            .default_model_by_provider
+            .insert(provider_id, "provider-fast-coder".into());
+        let expected = model_catalog::default_official_model_slugs();
+        let (fallback_models, synced) = startup_model_sync_models_or_default(Vec::new());
+        assert!(!synced);
+        assert_eq!(fallback_models, expected);
+        let fallback = config_with_current_provider_models(&config, fallback_models);
+        let home = tempfile::tempdir().unwrap();
+
+        let state = model_catalog::selection_state(
+            home.path(),
+            false,
+            fallback.upstream_models_snapshot(),
+            fallback.selected_models(),
+            fallback.default_model(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            state
+                .official_models
+                .iter()
+                .filter(|model| model.supported)
+                .map(|model| model.slug.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(state.third_party_models.is_empty());
+        assert_eq!(state.default_model, "gpt-5.6-sol");
     }
 }
 

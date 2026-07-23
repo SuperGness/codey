@@ -49,6 +49,13 @@ pub fn relative_path() -> &'static str {
     MODEL_CATALOG_RELATIVE_PATH
 }
 
+pub fn default_official_model_slugs() -> Vec<String> {
+    OFFICIAL_MODELS
+        .iter()
+        .map(|(slug, _)| (*slug).to_string())
+        .collect()
+}
+
 pub fn refresh_for_provider(
     home: &Path,
     official_provider: bool,

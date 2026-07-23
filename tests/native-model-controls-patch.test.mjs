@@ -295,7 +295,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       /if\(n!==`chatgpt`\)return!0/,
     );
 
-    const fastModelPresentationSource = [
+    const fastModelPresentationSource = (rowIconExpression) => [
       "const nativeModelPickerMarkers=[",
       "`composer.intelligenceDropdown.model.title`,",
       "`composer.intelligenceDropdown.model.rowLabel`];",
@@ -309,39 +309,48 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       "function nativePicker(modelPickerTriggerConfig,powerSelections,selectedServiceTierIconKind){",
       "let workMode=true,modelOptionsDisabled=false,reasoningEffortDisabled=false,",
       "compact=workMode&&powerSelections.length>=4&&!modelOptionsDisabled&&!reasoningEffortDisabled,",
-      "useCompact=compact,selectedModel={},selectedServiceTier=`priority`,",
-      "rowIcon=!useCompact&&selectedServiceTierIconKind!=null&&supports(selectedModel,selectedServiceTier)?selectedServiceTierIconKind:null;",
+      "useCompact=compact,selectedModel={},selectedServiceTier=`priority`;",
+      "let selectedIcon=selectedServiceTierIconKind!==null&&supports(selectedModel,selectedServiceTier)?selectedServiceTierIconKind:null;",
+      `let rowIcon=${rowIconExpression};`,
       "let options=[`gpt-5.5`,`claude-opus-4-8`].map(model=>({",
       "model,selectedServiceTierIconKind:useCompact?null:selectedServiceTierIconKind,stripGptPrefix:useCompact}));",
       "if(compact&&modelPickerTriggerConfig!=null)return {kind:`solid`,options,rowIcon};",
-      "return {kind:`outline`,options,rowIcon}}",
+      "return {kind:`outline`,options,rowIcon,selectedIcon}}",
       "function supports(){return true}",
     ].join("");
-    const patchedFastModelPresentation = await patchAsset(fastModelPresentationSource);
-    assert.match(patchedFastModelPresentation, /configEnabled=!hideLabel/);
-    assert.match(patchedFastModelPresentation, /rowIcon=null/);
-    assert.match(
-      patchedFastModelPresentation,
-      /selectedServiceTierIconKind:null,stripGptPrefix:/,
-    );
-    assert.match(
-      patchedFastModelPresentation,
-      /if\(modelPickerTriggerConfig!=null\)/,
-    );
-    const nativeModelPicker = Function(
-      `${patchedFastModelPresentation};return {nativePicker,triggerConfig};`,
-    )();
-    const thirdPartyTrigger = nativeModelPicker.triggerConfig(false, []);
-    const thirdPartyPresentation = nativeModelPicker.nativePicker(
-      thirdPartyTrigger.modelPickerTriggerConfig,
-      [],
-      "fast",
-    );
-    assert.equal(thirdPartyPresentation.kind, "solid");
-    assert.equal(thirdPartyPresentation.rowIcon, null);
-    assert.ok(thirdPartyPresentation.options.every(
-      (option) => option.selectedServiceTierIconKind === null,
-    ));
+    for (const rowIconExpression of [
+      "!useCompact&&selectedServiceTierIconKind!=null&&supports(selectedModel,selectedServiceTier)?selectedServiceTierIconKind:null",
+      "selectedServiceTierIconKind!==null&&supports(selectedModel,selectedServiceTier)?selectedServiceTierIconKind:null",
+    ]) {
+      const patchedFastModelPresentation = await patchAsset(
+        fastModelPresentationSource(rowIconExpression),
+      );
+      assert.match(patchedFastModelPresentation, /configEnabled=!hideLabel/);
+      assert.match(patchedFastModelPresentation, /selectedIcon=null/);
+      assert.match(patchedFastModelPresentation, /rowIcon=null/);
+      assert.match(
+        patchedFastModelPresentation,
+        /selectedServiceTierIconKind:null,stripGptPrefix:/,
+      );
+      assert.match(
+        patchedFastModelPresentation,
+        /if\(modelPickerTriggerConfig!=null\)/,
+      );
+      const nativeModelPicker = Function(
+        `${patchedFastModelPresentation};return {nativePicker,triggerConfig};`,
+      )();
+      const thirdPartyTrigger = nativeModelPicker.triggerConfig(false, []);
+      const thirdPartyPresentation = nativeModelPicker.nativePicker(
+        thirdPartyTrigger.modelPickerTriggerConfig,
+        [],
+        "fast",
+      );
+      assert.equal(thirdPartyPresentation.kind, "solid");
+      assert.equal(thirdPartyPresentation.rowIcon, null);
+      assert.ok(thirdPartyPresentation.options.every(
+        (option) => option.selectedServiceTierIconKind === null,
+      ));
+    }
 
     for (const url of [
       "app://-/assets/app-initial.js",
