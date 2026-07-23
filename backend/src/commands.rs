@@ -40,6 +40,7 @@ pub struct AppState {
     pub config: RwLock<CodeyConfig>,
     pub http_client: reqwest::Client,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
+    runtime_operation: Mutex<()>,
     pub trace_log_stats: TraceLogStatsHandle,
     pub startup_error: RwLock<Option<String>>,
     restart_in_progress: AtomicBool,
@@ -96,6 +97,7 @@ impl Default for AppState {
                 .build()
                 .expect("shared Codey HTTP client should be constructible"),
             runtime: Mutex::new(None),
+            runtime_operation: Mutex::new(()),
             trace_log_stats: TraceLogStatsHandle::idle(),
             startup_error: RwLock::new(None),
             restart_in_progress: AtomicBool::new(false),
@@ -601,23 +603,132 @@ impl AppState {
                 let session_id = payload
                     .get("sessionId")
                     .and_then(Value::as_str)
-                    .unwrap_or_default();
-                session_transfer::export_session(&codex_home(), session_id)
-                    .and_then(|result| serde_json::to_value(result).map_err(anyhow::Error::from))
-                    .unwrap_or_else(|error| api_error_message(error.to_string()))
+                    .unwrap_or_default()
+                    .to_string();
+                let home = codex_home();
+                blocking_value("导出会话", move || {
+                    session_transfer::export_session(&home, &session_id)
+                })
+                .await
+            }
+            "/session/export/start" => {
+                let session_id = payload
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let home = codex_home();
+                blocking_value("准备会话导出", move || {
+                    session_transfer::start_export_transfer(&home, &session_id)
+                })
+                .await
+            }
+            "/session/export/chunk" => {
+                let transfer_id = payload
+                    .get("transferId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let Some(offset) = payload.get("offset").and_then(Value::as_u64) else {
+                    return api_error_message("缺少会话导出分块偏移");
+                };
+                let home = codex_home();
+                blocking_value("读取会话导出分块", move || {
+                    session_transfer::read_export_transfer_chunk(&home, &transfer_id, offset)
+                })
+                .await
+            }
+            "/session/export/finish" | "/session/export/abort" => {
+                let transfer_id = payload
+                    .get("transferId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let home = codex_home();
+                blocking_value("清理会话导出", move || {
+                    session_transfer::finish_export_transfer(&home, &transfer_id)?;
+                    Ok(json!({"status": "ok"}))
+                })
+                .await
             }
             "/session/import" => {
                 let project_path = payload
                     .get("projectPath")
                     .and_then(Value::as_str)
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+                    .to_string();
                 let data = payload
                     .get("data")
                     .and_then(Value::as_str)
-                    .unwrap_or_default();
-                session_transfer::import_session(&codex_home(), project_path, data)
-                    .and_then(|result| serde_json::to_value(result).map_err(anyhow::Error::from))
-                    .unwrap_or_else(|error| api_error_message(error.to_string()))
+                    .unwrap_or_default()
+                    .to_string();
+                let home = codex_home();
+                blocking_value("导入会话", move || {
+                    session_transfer::import_session(&home, &project_path, &data)
+                })
+                .await
+            }
+            "/session/import/start" => {
+                let home = codex_home();
+                blocking_value("准备会话导入", move || {
+                    session_transfer::start_import_transfer(&home)
+                })
+                .await
+            }
+            "/session/import/chunk" => {
+                let transfer_id = payload
+                    .get("transferId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let data = payload
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let Some(offset) = payload.get("offset").and_then(Value::as_u64) else {
+                    return api_error_message("缺少会话导入分块偏移");
+                };
+                let home = codex_home();
+                blocking_value("写入会话导入分块", move || {
+                    session_transfer::append_import_transfer_chunk(
+                        &home,
+                        &transfer_id,
+                        offset,
+                        &data,
+                    )
+                })
+                .await
+            }
+            "/session/import/finish" => {
+                let transfer_id = payload
+                    .get("transferId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let project_path = payload
+                    .get("projectPath")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let home = codex_home();
+                blocking_value("完成会话导入", move || {
+                    session_transfer::finish_import_transfer(&home, &project_path, &transfer_id)
+                })
+                .await
+            }
+            "/session/import/abort" => {
+                let transfer_id = payload
+                    .get("transferId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let home = codex_home();
+                blocking_value("清理会话导入", move || {
+                    session_transfer::abort_import_transfer(&home, &transfer_id)?;
+                    Ok(json!({"status": "ok"}))
+                })
+                .await
             }
             "/session/delete-messages" => {
                 let session_id = payload
@@ -711,9 +822,13 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             Err(error) => Err(error),
         },
         "export_session" => match string_argument(&args, "sessionId") {
-            Ok(session_id) => session_transfer::export_session(&codex_home(), &session_id)
-                .and_then(|result| serde_json::to_value(result).map_err(anyhow::Error::from))
-                .map_err(|error| error.to_string()),
+            Ok(session_id) => {
+                let home = codex_home();
+                blocking_result("导出会话", move || {
+                    session_transfer::export_session(&home, &session_id)
+                })
+                .await
+            }
             Err(error) => Err(error),
         },
         "import_session" => {
@@ -721,11 +836,11 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             let data = string_argument(&args, "data");
             match (project_path, data) {
                 (Ok(project_path), Ok(data)) => {
-                    session_transfer::import_session(&codex_home(), &project_path, &data)
-                        .and_then(|result| {
-                            serde_json::to_value(result).map_err(anyhow::Error::from)
-                        })
-                        .map_err(|error| error.to_string())
+                    let home = codex_home();
+                    blocking_result("导入会话", move || {
+                        session_transfer::import_session(&home, &project_path, &data)
+                    })
+                    .await
                 }
                 (Err(error), _) | (_, Err(error)) => Err(error),
             }
@@ -1328,9 +1443,8 @@ pub async fn runtime_status(state: &Arc<AppState>) -> Result<Value, String> {
     Ok(status)
 }
 
-async fn launch_codey_inner(state: &Arc<AppState>) -> Result<Value, String> {
-    let mut runtime_slot = state.runtime.lock().await;
-    if runtime_slot.is_some() {
+async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, String> {
+    if state.runtime.lock().await.is_some() {
         return Ok(json!({"status":"already_running"}));
     }
     stop_waiting_webhook_watcher(state).await;
@@ -1359,12 +1473,11 @@ async fn launch_codey_inner(state: &Arc<AppState>) -> Result<Value, String> {
             return Err(error.to_string());
         }
     };
-    *runtime_slot = Some(Arc::new(runtime));
+    *state.runtime.lock().await = Some(Arc::new(runtime));
     let runtime_generation = state.runtime_generation.fetch_add(1, Ordering::AcqRel) + 1;
     if let Some(initial_scan_task) = initial_scan_task {
         start_waiting_webhook_watcher(state, initial_scan_task).await;
     }
-    drop(runtime_slot);
     let exit_state = Arc::clone(state);
     tokio::spawn(async move {
         if codex_exit.await.is_ok() {
@@ -1377,6 +1490,11 @@ async fn launch_codey_inner(state: &Arc<AppState>) -> Result<Value, String> {
         }
     });
     Ok(json!({"status":"running"}))
+}
+
+async fn launch_codey_inner(state: &Arc<AppState>) -> Result<Value, String> {
+    let _operation = state.runtime_operation.lock().await;
+    launch_codey_inner_locked(state).await
 }
 
 pub async fn launch_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
@@ -1395,17 +1513,20 @@ pub async fn schedule_restart_codey_runtime(state: &Arc<AppState>) -> Result<Val
         // The request originates inside the Codex renderer. Let the bridge
         // deliver its response before stopping the renderer that owns it.
         tokio::time::sleep(Duration::from_millis(250)).await;
+        let _operation = restart_state.runtime_operation.lock().await;
         restart_state
             .runtime_generation
             .fetch_add(1, Ordering::AcqRel);
-        if let Err(error) = stop_codey_runtime(&restart_state).await {
+        if let Err(error) = stop_codey_runtime_locked(&restart_state).await {
             *restart_state.startup_error.write().await = Some(error);
             restart_state
                 .restart_in_progress
                 .store(false, Ordering::Release);
             return;
         }
-        if let Err(error) = launch_codey_runtime(&restart_state).await {
+        let launch = launch_codey_inner_locked(&restart_state).await;
+        *restart_state.startup_error.write().await = launch.as_ref().err().cloned();
+        if let Err(error) = launch {
             eprintln!("Codey 自动重启 Codex 失败：{error}");
         }
         restart_state
@@ -1416,12 +1537,12 @@ pub async fn schedule_restart_codey_runtime(state: &Arc<AppState>) -> Result<Val
     Ok(json!({"status":"restarting"}))
 }
 
-pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
-    let mut runtime_slot = state.runtime.lock().await;
+async fn stop_codey_runtime_locked(state: &Arc<AppState>) -> Result<Value, String> {
     stop_waiting_webhook_watcher(state).await;
-    if let Some(runtime) = runtime_slot.take() {
+    let runtime = state.runtime.lock().await.take();
+    if let Some(runtime) = runtime {
         if let Err(error) = runtime.stop().await {
-            *runtime_slot = Some(runtime);
+            *state.runtime.lock().await = Some(runtime);
             return Err(error.to_string());
         }
     } else {
@@ -1429,6 +1550,11 @@ pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> 
     }
     *state.startup_error.write().await = None;
     Ok(json!({"status":"stopped"}))
+}
+
+pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
+    let _operation = state.runtime_operation.lock().await;
+    stop_codey_runtime_locked(state).await
 }
 
 #[cfg(test)]
@@ -1514,6 +1640,19 @@ mod restart_tests {
         current.disable_trace_log_writes = !current.disable_trace_log_writes;
 
         assert!(!config_requires_restart(&applied, &current));
+    }
+
+    #[tokio::test]
+    async fn runtime_status_does_not_wait_for_a_lifecycle_operation() {
+        let state = Arc::new(AppState::default());
+        let _operation = state.runtime_operation.lock().await;
+
+        let status = tokio::time::timeout(Duration::from_millis(100), runtime_status(&state))
+            .await
+            .expect("runtime status should not wait for the lifecycle operation lock")
+            .unwrap();
+
+        assert_eq!(status["running"], false);
     }
 
     #[test]
@@ -2608,6 +2747,48 @@ fn string_argument(args: &Value, name: &str) -> Result<String, String> {
 
 fn api_error_message(error: impl ToString) -> Value {
     json!({"status":"failed","message":error.to_string()})
+}
+
+async fn blocking_value<T, F>(operation: &str, task: F) -> Value
+where
+    T: Serialize + Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let operation = operation.to_string();
+    let task_operation = operation.clone();
+    match tokio::task::spawn_blocking(move || {
+        task().and_then(|result| {
+            serde_json::to_value(result)
+                .map_err(|error| anyhow::anyhow!("{task_operation}结果序列化失败：{error}"))
+        })
+    })
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => api_error_message(error),
+        Err(error) => api_error_message(format!("{operation}任务异常退出：{error}")),
+    }
+}
+
+async fn blocking_result<T, F>(operation: &str, task: F) -> Result<Value, String>
+where
+    T: Serialize + Send + 'static,
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+{
+    let operation = operation.to_string();
+    let task_operation = operation.clone();
+    match tokio::task::spawn_blocking(move || {
+        task().and_then(|result| {
+            serde_json::to_value(result)
+                .map_err(|error| anyhow::anyhow!("{task_operation}结果序列化失败：{error}"))
+        })
+    })
+    .await
+    {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(error) => Err(format!("{operation}任务异常退出：{error}")),
+    }
 }
 
 #[cfg(test)]

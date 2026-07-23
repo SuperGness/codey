@@ -567,8 +567,9 @@ async fn child_process_state(child: &Arc<Mutex<Option<Child>>>) -> ChildProcessS
     let mut slot = child.lock().await;
     let state = match slot.as_mut() {
         Some(process) => match process.try_wait() {
-            Ok(Some(_)) | Err(_) => ChildProcessState::Exited,
+            Ok(Some(_)) => ChildProcessState::Exited,
             Ok(None) => ChildProcessState::Running,
+            Err(_) => ChildProcessState::Running,
         },
         None => ChildProcessState::Untracked,
     };

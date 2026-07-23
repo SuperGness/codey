@@ -17,9 +17,17 @@ class FakeElement {
     this.style = {};
     this.textContent = "";
     this.visible = visible;
+    this.isConnected = false;
+    this.rectReads = 0;
   }
 
   addEventListener() {}
+
+  get nextElementSibling() {
+    if (!this.parentElement) return null;
+    const index = this.parentElement.children.indexOf(this);
+    return index >= 0 ? this.parentElement.children[index + 1] || null : null;
+  }
 
   appendChild(child) {
     child.remove();
@@ -42,6 +50,7 @@ class FakeElement {
   }
 
   getBoundingClientRect() {
+    this.rectReads += 1;
     return this.visible
       ? { bottom: 46, height: 46, left: this.right - this.width, right: this.right, top: 0, width: this.width }
       : { bottom: 0, height: 0, left: 0, right: 0, top: 0, width: 0 };
@@ -66,6 +75,12 @@ class FakeElement {
     };
     visit(this);
     return controls;
+  }
+
+  matches(selector) {
+    return selector
+      .split(",")
+      .some((part) => part.trim().toUpperCase() === this.tagName);
   }
 
   remove() {
@@ -135,4 +150,90 @@ test("moves the Codey button beside the visible header's trailing action region"
   assert.equal(codeyButton.dataset.codeyHeaderActions, "true");
   assert.equal(hiddenHeader.children.includes(codeyButton), false);
   assert.deepEqual(visibleHeader.children, [codeyButton, rightRegion]);
+});
+
+test("repeated scans fast-path an already mounted button without layout reads", () => {
+  const visibleHeader = new FakeElement("header", { right: 1200 });
+  const rightRegion = new FakeElement("div", { right: 1200, width: 70 });
+  const nativeButton = new FakeElement("button", { right: 1192, width: 28 });
+  const codeyButton = new FakeElement("button", { right: 1120, width: 28 });
+  codeyButton.id = "codey-settings-button";
+  codeyButton.dataset.codeyHeaderActions = "true";
+  codeyButton.isConnected = true;
+  visibleHeader.appendChild(codeyButton);
+  visibleHeader.appendChild(rightRegion);
+  rightRegion.appendChild(nativeButton);
+
+  const placeholders = {
+    "codey-core-injected-style": new FakeElement("style"),
+    "codey-settings-button": codeyButton,
+  };
+  let headerQueries = 0;
+  const document = {
+    body: new FakeElement("body"),
+    documentElement: new FakeElement("html"),
+    createElement: (tagName) => new FakeElement(tagName),
+    getElementById: (id) => placeholders[id] || null,
+    querySelector: () => null,
+    querySelectorAll: (selector) => {
+      if (selector === "header" || selector === "nav") headerQueries += 1;
+      return selector === "header" ? [visibleHeader] : [];
+    },
+  };
+  const window = {
+    addEventListener() {},
+    alert() {},
+    clearTimeout() {},
+    getComputedStyle: () => ({ display: "flex", visibility: "visible" }),
+    setTimeout: () => 1,
+  };
+  window.window = window;
+  let observerCallback = null;
+
+  vm.runInNewContext(source, {
+    console,
+    document,
+    HTMLElement: FakeElement,
+    location: { pathname: "/", search: "" },
+    MutationObserver: class {
+      constructor(callback) {
+        observerCallback = callback;
+      }
+
+      observe() {}
+    },
+    URLSearchParams,
+    window,
+  });
+
+  headerQueries = 0;
+  for (const element of [visibleHeader, rightRegion, nativeButton, codeyButton]) {
+    element.rectReads = 0;
+  }
+  for (let scan = 0; scan < 10; scan += 1) {
+    window.__codeyRendererScan();
+  }
+  assert.equal(headerQueries, 0);
+  assert.equal(visibleHeader.rectReads, 0);
+  assert.equal(rightRegion.rectReads, 0);
+  assert.equal(nativeButton.rectReads, 0);
+  assert.equal(codeyButton.rectReads, 0);
+  assert.deepEqual(visibleHeader.children, [codeyButton, rightRegion]);
+
+  const newRightRegion = new FakeElement("div", { right: 1200, width: 50 });
+  const newRightButton = new FakeElement("button", { right: 1200, width: 28 });
+  newRightRegion.appendChild(newRightButton);
+  visibleHeader.appendChild(newRightRegion);
+  observerCallback([{
+    type: "childList",
+    target: visibleHeader,
+    addedNodes: [newRightRegion],
+    removedNodes: [],
+  }]);
+  window.__codeyRendererScan();
+
+  assert.ok(headerQueries > 0);
+  assert.equal(codeyButton.__codeyHeaderAnchor, newRightRegion);
+  assert.equal(codeyButton.dataset.codeyHeaderActions, "true");
+  assert.deepEqual(visibleHeader.children, [rightRegion, codeyButton, newRightRegion]);
 });

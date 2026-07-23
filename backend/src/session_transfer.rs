@@ -1,8 +1,9 @@
 use std::collections::HashMap;
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -18,6 +19,11 @@ use crate::codex_config::ensure_global_model_provider;
 const SESSION_BUNDLE_FORMAT: &str = "codey.session";
 const SESSION_BUNDLE_VERSION: u32 = 1;
 const BINARY_VALUE_KEY: &str = "$codeyBase64";
+const SESSION_TRANSFER_DIR: &str = "tmp/codey-session-transfers";
+const SESSION_TRANSFER_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const SESSION_TRANSFER_MAX_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+pub const SESSION_TRANSFER_CHUNK_BYTES: usize = 256 * 1024;
+static IMPORT_TRANSFER_LOCKS: OnceLock<Mutex<HashMap<Uuid, Weak<Mutex<()>>>>> = OnceLock::new();
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,7 +56,265 @@ pub struct SessionImportResult {
     pub message: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExportStartResult {
+    pub status: &'static str,
+    pub transfer_id: String,
+    pub session_id: String,
+    pub filename: String,
+    pub size: u64,
+    pub chunk_size: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionImportStartResult {
+    pub status: &'static str,
+    pub transfer_id: String,
+    pub chunk_size: usize,
+    pub max_bytes: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTransferChunkResult {
+    pub status: &'static str,
+    pub transfer_id: String,
+    pub offset: u64,
+    pub next_offset: u64,
+    pub data: String,
+    pub done: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTransferProgress {
+    pub status: &'static str,
+    pub transfer_id: String,
+    pub next_offset: u64,
+}
+
+struct SessionExportSource {
+    session_id: String,
+    filename: String,
+    thread: Map<String, Value>,
+    rollout_path: PathBuf,
+}
+
 pub fn export_session(home: &Path, session_id: &str) -> Result<SessionExportResult> {
+    let source = session_export_source(home, session_id)?;
+    let capacity = fs::metadata(&source.rollout_path)
+        .ok()
+        .and_then(|metadata| usize::try_from(metadata.len()).ok())
+        .unwrap_or_default()
+        .saturating_add(4096);
+    let mut output = Vec::with_capacity(capacity);
+    write_session_bundle(&mut output, &source.thread, &source.rollout_path)?;
+    let data = String::from_utf8(output).context("序列化会话数据失败")?;
+    Ok(SessionExportResult {
+        status: "exported",
+        session_id: source.session_id,
+        filename: source.filename.clone(),
+        data,
+        message: format!("已导出会话：{}", source.filename),
+    })
+}
+
+pub fn start_export_transfer(home: &Path, session_id: &str) -> Result<SessionExportStartResult> {
+    prepare_transfer_directory(home)?;
+    let source = session_export_source(home, session_id)?;
+    let source_bytes = fs::metadata(&source.rollout_path)
+        .with_context(|| format!("读取会话数据大小失败：{}", source.rollout_path.display()))?
+        .len();
+    if source_bytes > SESSION_TRANSFER_MAX_BYTES {
+        anyhow::bail!(
+            "会话数据超过导出上限（{} MB）",
+            SESSION_TRANSFER_MAX_BYTES / 1024 / 1024
+        );
+    }
+
+    let transfer_id = Uuid::new_v4().to_string();
+    let path = transfer_path(home, TransferKind::Export, &transfer_id)?;
+    let result = (|| -> Result<u64> {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("创建会话导出临时文件失败：{}", path.display()))?;
+        write_session_bundle(&mut file, &source.thread, &source.rollout_path)?;
+        file.flush()
+            .with_context(|| format!("刷新会话导出临时文件失败：{}", path.display()))?;
+        let size = file
+            .metadata()
+            .with_context(|| format!("读取会话导出大小失败：{}", path.display()))?
+            .len();
+        if size > SESSION_TRANSFER_MAX_BYTES {
+            anyhow::bail!(
+                "导出文件超过传输上限（{} MB）",
+                SESSION_TRANSFER_MAX_BYTES / 1024 / 1024
+            );
+        }
+        Ok(size)
+    })();
+    let size = match result {
+        Ok(size) => size,
+        Err(error) => {
+            let _ = fs::remove_file(&path);
+            return Err(error);
+        }
+    };
+
+    Ok(SessionExportStartResult {
+        status: "ready",
+        transfer_id,
+        session_id: source.session_id,
+        filename: source.filename,
+        size,
+        chunk_size: SESSION_TRANSFER_CHUNK_BYTES,
+    })
+}
+
+pub fn read_export_transfer_chunk(
+    home: &Path,
+    transfer_id: &str,
+    offset: u64,
+) -> Result<SessionTransferChunkResult> {
+    let path = transfer_path(home, TransferKind::Export, transfer_id)?;
+    let mut file =
+        File::open(&path).with_context(|| format!("找不到会话导出传输：{}", path.display()))?;
+    let size = file.metadata()?.len();
+    if offset > size {
+        anyhow::bail!("会话导出分块偏移无效");
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    let remaining = size.saturating_sub(offset);
+    let requested = remaining.min(SESSION_TRANSFER_CHUNK_BYTES as u64) as usize;
+    let mut bytes = vec![0u8; requested];
+    file.read_exact(&mut bytes)?;
+    let next_offset = offset.saturating_add(bytes.len() as u64);
+    Ok(SessionTransferChunkResult {
+        status: "ok",
+        transfer_id: transfer_id.to_string(),
+        offset,
+        next_offset,
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        done: next_offset >= size,
+    })
+}
+
+pub fn finish_export_transfer(home: &Path, transfer_id: &str) -> Result<()> {
+    remove_transfer_file(home, TransferKind::Export, transfer_id)
+}
+
+pub fn start_import_transfer(home: &Path) -> Result<SessionImportStartResult> {
+    prepare_transfer_directory(home)?;
+    let transfer_id = Uuid::new_v4().to_string();
+    let path = transfer_path(home, TransferKind::Import, &transfer_id)?;
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("创建会话导入临时文件失败：{}", path.display()))?;
+    Ok(SessionImportStartResult {
+        status: "ready",
+        transfer_id,
+        chunk_size: SESSION_TRANSFER_CHUNK_BYTES,
+        max_bytes: SESSION_TRANSFER_MAX_BYTES,
+    })
+}
+
+pub fn append_import_transfer_chunk(
+    home: &Path,
+    transfer_id: &str,
+    offset: u64,
+    encoded: &str,
+) -> Result<SessionTransferProgress> {
+    let max_encoded = SESSION_TRANSFER_CHUNK_BYTES.div_ceil(3) * 4 + 4;
+    if encoded.len() > max_encoded {
+        anyhow::bail!("会话导入分块超过大小限制");
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .context("会话导入分块不是有效的 Base64")?;
+    if bytes.len() > SESSION_TRANSFER_CHUNK_BYTES {
+        anyhow::bail!("会话导入分块超过大小限制");
+    }
+    let next_offset = offset
+        .checked_add(bytes.len() as u64)
+        .ok_or_else(|| anyhow::anyhow!("会话导入大小溢出"))?;
+    if next_offset > SESSION_TRANSFER_MAX_BYTES {
+        anyhow::bail!(
+            "导入文件超过传输上限（{} MB）",
+            SESSION_TRANSFER_MAX_BYTES / 1024 / 1024
+        );
+    }
+
+    let transfer_lock = import_transfer_lock(transfer_id)?;
+    let _transfer_guard = transfer_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = transfer_path(home, TransferKind::Import, transfer_id)?;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("找不到会话导入传输：{}", path.display()))?;
+    if file.metadata()?.len() != offset {
+        anyhow::bail!("会话导入分块顺序不一致，请重新选择文件");
+    }
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(&bytes)
+        .with_context(|| format!("写入会话导入分块失败：{}", path.display()))?;
+    Ok(SessionTransferProgress {
+        status: "ok",
+        transfer_id: transfer_id.to_string(),
+        next_offset,
+    })
+}
+
+pub fn finish_import_transfer(
+    home: &Path,
+    project_path: &str,
+    transfer_id: &str,
+) -> Result<SessionImportResult> {
+    let transfer_lock = import_transfer_lock(transfer_id)?;
+    let _transfer_guard = transfer_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let path = transfer_path(home, TransferKind::Import, transfer_id)?;
+    let result = (|| -> Result<SessionImportResult> {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("找不到会话导入传输：{}", path.display()))?;
+        let size = file.metadata()?.len();
+        if size == 0 {
+            anyhow::bail!("会话导入文件为空");
+        }
+        if size > SESSION_TRANSFER_MAX_BYTES {
+            anyhow::bail!("会话导入文件超过大小限制");
+        }
+        file.sync_all()
+            .with_context(|| format!("保存会话导入临时文件失败：{}", path.display()))?;
+        let bundle: SessionBundle = serde_json::from_reader(BufReader::new(file))
+            .context("数据文件不是有效的 Codey 会话 JSON")?;
+        import_session_bundle(home, project_path, bundle)
+    })();
+    let _ = fs::remove_file(&path);
+    result
+}
+
+pub fn abort_import_transfer(home: &Path, transfer_id: &str) -> Result<()> {
+    let transfer_lock = import_transfer_lock(transfer_id)?;
+    let _transfer_guard = transfer_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    remove_transfer_file(home, TransferKind::Import, transfer_id)
+}
+
+fn session_export_source(home: &Path, session_id: &str) -> Result<SessionExportSource> {
     let session_id = normalize_session_id(session_id);
     if session_id.is_empty() {
         anyhow::bail!("无法识别要导出的会话");
@@ -69,10 +333,6 @@ pub fn export_session(home: &Path, session_id: &str) -> Result<SessionExportResu
         home.join(rollout_path)
     };
     let rollout_path = checked_rollout_path(home, &rollout_path)?;
-    let rollout = fs::read_to_string(&rollout_path)
-        .with_context(|| format!("读取会话数据失败：{}", rollout_path.display()))?;
-    validate_rollout(&rollout)?;
-
     let title = thread
         .get("title")
         .and_then(Value::as_str)
@@ -84,26 +344,28 @@ pub fn export_session(home: &Path, session_id: &str) -> Result<SessionExportResu
         safe_filename(title),
         short_session_id(session_id)
     );
-    let bundle = SessionBundle {
-        format: SESSION_BUNDLE_FORMAT.to_string(),
-        version: SESSION_BUNDLE_VERSION,
-        exported_at_ms: timestamp_millis(),
-        thread,
-        rollout,
-    };
-    let data = serde_json::to_string_pretty(&bundle).context("序列化会话数据失败")?;
-    Ok(SessionExportResult {
-        status: "exported",
+    Ok(SessionExportSource {
         session_id: session_id.to_string(),
-        filename: filename.clone(),
-        data,
-        message: format!("已导出会话：{filename}"),
+        filename,
+        thread,
+        rollout_path,
     })
 }
 
 pub fn import_session(home: &Path, project_path: &str, data: &str) -> Result<SessionImportResult> {
+    if data.len() as u64 > SESSION_TRANSFER_MAX_BYTES {
+        anyhow::bail!("会话导入文件超过大小限制");
+    }
     let bundle: SessionBundle =
         serde_json::from_str(data).context("数据文件不是有效的 Codey 会话 JSON")?;
+    import_session_bundle(home, project_path, bundle)
+}
+
+fn import_session_bundle(
+    home: &Path,
+    project_path: &str,
+    bundle: SessionBundle,
+) -> Result<SessionImportResult> {
     if bundle.format != SESSION_BUNDLE_FORMAT {
         anyhow::bail!("不支持的数据文件：缺少 Codey 会话格式标记");
     }
@@ -114,7 +376,6 @@ pub fn import_session(home: &Path, project_path: &str, data: &str) -> Result<Ses
             SESSION_BUNDLE_VERSION
         );
     }
-    validate_rollout(&bundle.rollout)?;
     let project_path = if project_path.trim().is_empty() {
         bundle
             .thread
@@ -144,13 +405,6 @@ pub fn import_session(home: &Path, project_path: &str, data: &str) -> Result<Ses
     } else {
         original_id.to_string()
     };
-    let rollout = rewrite_rollout(
-        &bundle.rollout,
-        original_id,
-        &session_id,
-        &project.to_string_lossy(),
-        &provider_id,
-    )?;
     let rollout_path = imported_rollout_path(home, &session_id);
     let title = bundle
         .thread
@@ -165,17 +419,28 @@ pub fn import_session(home: &Path, project_path: &str, data: &str) -> Result<Ses
         fs::create_dir_all(parent)
             .with_context(|| format!("创建导入会话目录失败：{}", parent.display()))?;
     }
-    let mut rollout_file = fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&rollout_path)
-        .with_context(|| format!("创建导入会话文件失败：{}", rollout_path.display()))?;
-    rollout_file
-        .write_all(rollout.as_bytes())
-        .with_context(|| format!("写入导入会话文件失败：{}", rollout_path.display()))?;
-    rollout_file
-        .sync_all()
-        .with_context(|| format!("保存导入会话文件失败：{}", rollout_path.display()))?;
+    let write_result = (|| -> Result<()> {
+        let mut rollout_file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&rollout_path)
+            .with_context(|| format!("创建导入会话文件失败：{}", rollout_path.display()))?;
+        rewrite_rollout_to(
+            &mut rollout_file,
+            &bundle.rollout,
+            original_id,
+            &session_id,
+            &project.to_string_lossy(),
+            &provider_id,
+        )?;
+        rollout_file
+            .sync_all()
+            .with_context(|| format!("保存导入会话文件失败：{}", rollout_path.display()))
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&rollout_path);
+        return Err(error);
+    }
 
     let insert_result = insert_thread(
         &db_path,
@@ -429,14 +694,60 @@ fn insert_thread(
     Ok(())
 }
 
-fn rewrite_rollout(
+fn write_session_bundle(
+    writer: &mut impl Write,
+    thread: &Map<String, Value>,
+    rollout_path: &Path,
+) -> Result<()> {
+    writer.write_all(b"{\"format\":")?;
+    serde_json::to_writer(&mut *writer, SESSION_BUNDLE_FORMAT)?;
+    write!(
+        writer,
+        ",\"version\":{SESSION_BUNDLE_VERSION},\"exportedAtMs\":{},\"thread\":",
+        timestamp_millis()
+    )?;
+    serde_json::to_writer(&mut *writer, thread)?;
+    writer.write_all(b",\"rollout\":\"")?;
+
+    let file = File::open(rollout_path)
+        .with_context(|| format!("读取会话数据失败：{}", rollout_path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    let mut found_session_meta = false;
+    let mut records = 0usize;
+    loop {
+        line.clear();
+        if reader
+            .read_line(&mut line)
+            .with_context(|| format!("读取会话数据失败：{}", rollout_path.display()))?
+            == 0
+        {
+            break;
+        }
+        if !line.trim().is_empty() {
+            let value: Value =
+                serde_json::from_str(&line).context("会话 rollout 包含无效的 JSONL 记录")?;
+            found_session_meta |= value.get("type").and_then(Value::as_str) == Some("session_meta");
+            records += 1;
+        }
+        let escaped = serde_json::to_string(&line)?;
+        writer.write_all(&escaped.as_bytes()[1..escaped.len().saturating_sub(1)])?;
+    }
+    validate_rollout_summary(records, found_session_meta)?;
+    writer.write_all(b"\"}")?;
+    Ok(())
+}
+
+fn rewrite_rollout_to(
+    writer: &mut impl Write,
     rollout: &str,
     original_id: &str,
     session_id: &str,
     project_path: &str,
     provider_id: &str,
-) -> Result<String> {
-    let mut output = String::with_capacity(rollout.len());
+) -> Result<()> {
+    let mut found_session_meta = false;
+    let mut records = 0usize;
     for line in rollout.lines() {
         if line.trim().is_empty() {
             continue;
@@ -444,19 +755,21 @@ fn rewrite_rollout(
         let mut value: Value =
             serde_json::from_str(line).context("会话 rollout 包含无效的 JSONL 记录")?;
         replace_exact_string(&mut value, original_id, session_id);
-        if value.get("type").and_then(Value::as_str) == Some("session_meta")
-            && let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut)
-        {
-            payload.insert("cwd".to_string(), Value::String(project_path.to_string()));
-            payload.insert(
-                "model_provider".to_string(),
-                Value::String(provider_id.to_string()),
-            );
+        if value.get("type").and_then(Value::as_str) == Some("session_meta") {
+            found_session_meta = true;
+            if let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) {
+                payload.insert("cwd".to_string(), Value::String(project_path.to_string()));
+                payload.insert(
+                    "model_provider".to_string(),
+                    Value::String(provider_id.to_string()),
+                );
+            }
         }
-        output.push_str(&serde_json::to_string(&value)?);
-        output.push('\n');
+        records += 1;
+        serde_json::to_writer(&mut *writer, &value)?;
+        writer.write_all(b"\n")?;
     }
-    Ok(output)
+    validate_rollout_summary(records, found_session_meta)
 }
 
 fn replace_exact_string(value: &mut Value, old: &str, new: &str) {
@@ -476,18 +789,7 @@ fn replace_exact_string(value: &mut Value, old: &str, new: &str) {
     }
 }
 
-fn validate_rollout(rollout: &str) -> Result<()> {
-    let mut found_session_meta = false;
-    let mut records = 0usize;
-    for line in rollout.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: Value =
-            serde_json::from_str(line).context("会话 rollout 包含无效的 JSONL 记录")?;
-        found_session_meta |= value.get("type").and_then(Value::as_str) == Some("session_meta");
-        records += 1;
-    }
+fn validate_rollout_summary(records: usize, found_session_meta: bool) -> Result<()> {
     if records == 0 {
         anyhow::bail!("会话数据为空");
     }
@@ -495,6 +797,82 @@ fn validate_rollout(rollout: &str) -> Result<()> {
         anyhow::bail!("会话数据缺少 session_meta 记录");
     }
     Ok(())
+}
+
+fn import_transfer_lock(transfer_id: &str) -> Result<Arc<Mutex<()>>> {
+    let transfer_id = Uuid::parse_str(transfer_id.trim()).context("会话传输 ID 无效")?;
+    let locks = IMPORT_TRANSFER_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&transfer_id).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(transfer_id, Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+#[derive(Clone, Copy)]
+enum TransferKind {
+    Export,
+    Import,
+}
+
+impl TransferKind {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Export => "export",
+            Self::Import => "import",
+        }
+    }
+}
+
+fn prepare_transfer_directory(home: &Path) -> Result<PathBuf> {
+    let directory = home.join(SESSION_TRANSFER_DIR);
+    fs::create_dir_all(&directory)
+        .with_context(|| format!("创建会话传输目录失败：{}", directory.display()))?;
+    let now = SystemTime::now();
+    for entry in fs::read_dir(&directory)
+        .with_context(|| format!("扫描会话传输目录失败：{}", directory.display()))?
+        .filter_map(Result::ok)
+    {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= SESSION_TRANSFER_MAX_AGE);
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    Ok(directory)
+}
+
+fn transfer_path(home: &Path, kind: TransferKind, transfer_id: &str) -> Result<PathBuf> {
+    let transfer_id = Uuid::parse_str(transfer_id.trim()).context("会话传输 ID 无效")?;
+    Ok(home
+        .join(SESSION_TRANSFER_DIR)
+        .join(format!("{}-{}.part", kind.prefix(), transfer_id)))
+}
+
+fn remove_transfer_file(home: &Path, kind: TransferKind, transfer_id: &str) -> Result<()> {
+    let path = transfer_path(home, kind, transfer_id)?;
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("清理会话传输临时文件失败：{}", path.display()))
+        }
+    }
 }
 
 fn checked_rollout_path(home: &Path, rollout_path: &Path) -> Result<PathBuf> {
@@ -782,6 +1160,168 @@ mod tests {
         assert_eq!(
             PathBuf::from(cwd),
             source_project.path().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn chunked_transfer_round_trips_a_multi_chunk_session_and_cleans_up() {
+        let source = tempdir().unwrap();
+        let source_project = tempdir().unwrap();
+        let source_id = "01900000-0000-7000-8000-000000000006";
+        create_thread_db(
+            source.path(),
+            source_id,
+            source_project.path(),
+            "分块传输会话",
+        );
+        let source_rollout = source
+            .path()
+            .join("sessions")
+            .join(format!("rollout-{source_id}.jsonl"));
+        let mut rollout = fs::OpenOptions::new()
+            .append(true)
+            .open(&source_rollout)
+            .unwrap();
+        serde_json::to_writer(
+            &mut rollout,
+            &json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "text": "x".repeat(SESSION_TRANSFER_CHUNK_BYTES * 3),
+                },
+            }),
+        )
+        .unwrap();
+        rollout.write_all(b"\n").unwrap();
+        rollout.sync_all().unwrap();
+
+        let target = tempdir().unwrap();
+        let seed_project = tempdir().unwrap();
+        create_thread_db(
+            target.path(),
+            "01900000-0000-7000-8000-000000000007",
+            seed_project.path(),
+            "已有会话",
+        );
+        let imported_project = tempdir().unwrap();
+
+        let export = start_export_transfer(source.path(), source_id).unwrap();
+        let import = start_import_transfer(target.path()).unwrap();
+        let export_path =
+            transfer_path(source.path(), TransferKind::Export, &export.transfer_id).unwrap();
+        let import_path =
+            transfer_path(target.path(), TransferKind::Import, &import.transfer_id).unwrap();
+        assert!(export_path.exists());
+        assert!(import_path.exists());
+
+        let mut offset = 0;
+        let mut chunks = 0;
+        while offset < export.size {
+            let chunk =
+                read_export_transfer_chunk(source.path(), &export.transfer_id, offset).unwrap();
+            assert_eq!(chunk.offset, offset);
+            let progress = append_import_transfer_chunk(
+                target.path(),
+                &import.transfer_id,
+                offset,
+                &chunk.data,
+            )
+            .unwrap();
+            assert_eq!(progress.next_offset, chunk.next_offset);
+            offset = chunk.next_offset;
+            chunks += 1;
+            assert_eq!(chunk.done, offset == export.size);
+        }
+        assert!(chunks >= 3);
+
+        finish_export_transfer(source.path(), &export.transfer_id).unwrap();
+        assert!(!export_path.exists());
+        let imported = finish_import_transfer(
+            target.path(),
+            imported_project.path().to_str().unwrap(),
+            &import.transfer_id,
+        )
+        .unwrap();
+        assert_eq!(imported.session_id, source_id);
+        assert!(!imported.duplicated);
+        assert!(!import_path.exists());
+
+        let db = Connection::open(target.path().join("state_5.sqlite")).unwrap();
+        let rollout_path = db
+            .query_row(
+                "SELECT rollout_path FROM threads WHERE id=?1",
+                params![source_id],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let imported_rollout = fs::read_to_string(rollout_path).unwrap();
+        assert!(imported_rollout.contains(&"x".repeat(SESSION_TRANSFER_CHUNK_BYTES)));
+    }
+
+    #[test]
+    fn import_transfer_rejects_out_of_order_chunks_and_abort_removes_the_file() {
+        let home = tempdir().unwrap();
+        let transfer = start_import_transfer(home.path()).unwrap();
+        let path = transfer_path(home.path(), TransferKind::Import, &transfer.transfer_id).unwrap();
+        assert!(path.exists());
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"chunk");
+        let error = append_import_transfer_chunk(home.path(), &transfer.transfer_id, 1, &encoded)
+            .unwrap_err();
+        assert!(error.to_string().contains("会话导入分块顺序不一致"));
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+
+        abort_import_transfer(home.path(), &transfer.transfer_id).unwrap();
+        assert!(!path.exists());
+        abort_import_transfer(home.path(), &transfer.transfer_id).unwrap();
+    }
+
+    #[test]
+    fn concurrent_import_chunks_with_the_same_offset_cannot_both_commit() {
+        let home = tempdir().unwrap();
+        let transfer = start_import_transfer(home.path()).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"chunk");
+        let mut uploads = Vec::new();
+        for _ in 0..2 {
+            let home = home.path().to_path_buf();
+            let transfer_id = transfer.transfer_id.clone();
+            let encoded = encoded.clone();
+            let barrier = Arc::clone(&barrier);
+            uploads.push(std::thread::spawn(move || {
+                barrier.wait();
+                append_import_transfer_chunk(&home, &transfer_id, 0, &encoded)
+            }));
+        }
+        barrier.wait();
+        let results = uploads
+            .into_iter()
+            .map(|upload| upload.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+
+        let path = transfer_path(home.path(), TransferKind::Import, &transfer.transfer_id).unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"chunk");
+        abort_import_transfer(home.path(), &transfer.transfer_id).unwrap();
+    }
+
+    #[test]
+    fn session_meta_record_with_a_non_object_payload_remains_valid() {
+        let mut output = Vec::new();
+        rewrite_rollout_to(
+            &mut output,
+            "{\"type\":\"session_meta\",\"payload\":null}\n",
+            "old-session",
+            "new-session",
+            "/tmp/project",
+            "provider",
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "{\"type\":\"session_meta\",\"payload\":null}\n"
         );
     }
 }

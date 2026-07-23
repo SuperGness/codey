@@ -23,6 +23,10 @@ test("renderer core waits for sidebar interaction before loading session tools",
   assert.match(inject, /bootstrapObserver\?\.disconnect\(\)/);
   assert.match(inject, /new MutationObserver\(\(mutations\) =>/);
   assert.match(inject, /scheduleScan\(element\)/);
+  assert.match(inject, /const mountedButtonIsUsable = \(button\) =>/);
+  assert.match(inject, /if \(mountedButtonIsUsable\(existingButton\)\) return;/);
+  assert.match(inject, /button\.nextElementSibling === button\.__codeyHeaderAnchor/);
+  assert.match(inject, /headerMountDirty = true/);
   assert.doesNotMatch(inject, /new MutationObserver\(\(\) => \{[\s\S]*setTimeout\(scan,/);
   assert.doesNotMatch(inject, /characterData:\s*true/);
   assert.doesNotMatch(inject, /mutation\.type === "characterData"/);
@@ -33,6 +37,12 @@ test("renderer core waits for sidebar interaction before loading session tools",
   assert.match(sessionTools, /callBridge\("\/session\/wake-watcher"\)/);
   assert.match(sessionTools, /document\.addEventListener\("pointerdown", wakeSessionWatcher/);
   assert.match(sessionTools, /document\.addEventListener\("keydown", wakeSessionWatcherFromKey/);
+  assert.match(sessionTools, /const mountedButtonIsUsable = \(button\) =>/);
+  assert.match(sessionTools, /if \(mountedButtonIsUsable\(existingButton\)\) return;/);
+  assert.match(sessionTools, /button\.nextElementSibling === button\.__codeyHeaderAnchor/);
+  assert.match(sessionTools, /fallbackSessionExportMaxBytes = 64 \* 1024 \* 1024/);
+  assert.match(sessionTools, /exportSize > fallbackSessionExportMaxBytes/);
+  assert.match(sessionTools, /watcherWakeTimer = window\.setTimeout\(\(\) => \{[\s\S]*\}, 30_000\)/);
   assert.doesNotMatch(inject, /__codeyBlockNativePetControls/);
   assert.match(petShield, /const block = \(root = document\)/);
   assert.match(petShield, /if \(!enabled\) \{/);

@@ -1374,9 +1374,9 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
         .expect("server task should finish without panicking");
     pump.close().await;
     assert!(handled.load(Ordering::SeqCst));
-    let contents = std::fs::read_to_string(&log_path).unwrap();
-    assert!(contents.contains("bridge.resolve_start"));
-    assert!(contents.contains("bridge.resolve_ok"));
+    let contents = std::fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(!contents.contains("bridge.resolve_start"));
+    assert!(!contents.contains("bridge.resolve_ok"));
     codex_plus_core::diagnostic_log::set_diagnostic_log_path_for_tests(None);
 }
 

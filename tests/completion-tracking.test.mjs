@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { TextEncoder } from "node:util";
 import vm from "node:vm";
 
 const source = readFileSync(new URL("../public/codey-inject.js", import.meta.url), "utf8");
@@ -158,6 +159,8 @@ function loadInjection({
     observe() {}
   };
   vm.runInNewContext(source, {
+    atob: (value) => Buffer.from(value, "base64").toString("binary"),
+    btoa: (value) => Buffer.from(value, "binary").toString("base64"),
     console,
     CustomEvent: class {
       constructor(type, options = {}) {
@@ -175,6 +178,7 @@ function loadInjection({
       },
     },
     MutationObserver,
+    TextEncoder,
     URLSearchParams,
     window,
   });
@@ -352,11 +356,85 @@ test("resolves a local project path from the current opaque project row id", () 
   );
 });
 
+test("exports a session through ordered chunks and finalizes the transfer", async () => {
+  const exported = Buffer.from("{\"format\":\"codey.session\",\"version\":1}");
+  const chunkBytes = 11;
+  const written = [];
+  const runtime = loadInjection({
+    bridgeHandler: async (path, payload) => {
+      if (path === "/session/export/start") {
+        return {
+          status: "ready",
+          transferId: "export-transfer",
+          filename: "session.codey-session.json",
+          size: exported.length,
+        };
+      }
+      if (path === "/session/export/chunk") {
+        const bytes = exported.subarray(payload.offset, payload.offset + chunkBytes);
+        const nextOffset = payload.offset + bytes.length;
+        return {
+          status: "ok",
+          offset: payload.offset,
+          nextOffset,
+          data: bytes.toString("base64"),
+          done: nextOffset === exported.length,
+        };
+      }
+      if (path === "/session/export/finish") return { status: "ok" };
+      return { status: "failed", message: `unexpected path: ${path}` };
+    },
+  });
+  runtime.window.showSaveFilePicker = async () => ({
+    createWritable: async () => ({
+      abort: async () => {},
+      close: async () => {},
+      write: async (bytes) => written.push(Buffer.from(bytes)),
+    }),
+  });
+  const thread = new FakeElement({
+    "data-app-action-sidebar-thread-id": "local:session-1",
+  });
+  const button = new FakeElement();
+
+  await runtime.window.__codeyExportSession(thread, button);
+
+  assert.equal(Buffer.concat(written).toString("utf8"), exported.toString("utf8"));
+  assert.deepEqual(
+    runtime.bridgeCalls
+      .map((call) => call.path)
+      .filter((path) => path.startsWith("/session/export/")),
+    [
+      "/session/export/start",
+      "/session/export/chunk",
+      "/session/export/chunk",
+      "/session/export/chunk",
+      "/session/export/chunk",
+      "/session/export/finish",
+    ],
+  );
+  assert.equal(button.disabled, false);
+});
+
 test("refreshes Codex recent sessions after importing instead of reloading", async () => {
   const signalCalls = [];
   const runtime = loadInjection({
-    bridgeHandler: async (path) => {
-      if (path === "/session/import") {
+    bridgeHandler: async (path, payload) => {
+      if (path === "/session/import/start") {
+        return {
+          status: "ready",
+          transferId: "transfer-1",
+          chunkSize: 1024,
+          maxBytes: 1024 * 1024,
+        };
+      }
+      if (path === "/session/import/chunk") {
+        return {
+          status: "ok",
+          nextOffset: payload.offset + Buffer.from(payload.data, "base64").length,
+        };
+      }
+      if (path === "/session/import/finish") {
         return {
           status: "imported",
           sessionId: "imported-session",
@@ -381,10 +459,12 @@ test("refreshes Codex recent sessions after importing instead of reloading", asy
     name: "refresh-recent-conversations-for-host",
     payload: { hostId: "local", sortKey: "updated_at" },
   }]);
-  const importCall = runtime.bridgeCalls.find((call) => call.path === "/session/import");
-  assert.deepEqual(JSON.parse(JSON.stringify(importCall?.payload)), {
+  const chunkCall = runtime.bridgeCalls.find((call) => call.path === "/session/import/chunk");
+  assert.equal(Buffer.from(chunkCall?.payload.data, "base64").toString("utf8"), "{\"format\":\"codey.session\"}");
+  const finishCall = runtime.bridgeCalls.find((call) => call.path === "/session/import/finish");
+  assert.deepEqual(JSON.parse(JSON.stringify(finishCall?.payload)), {
+    transferId: "transfer-1",
     projectPath: "/Users/test/workspace",
-    data: "{\"format\":\"codey.session\"}",
   });
   assert.equal(runtime.getReloadCount(), 0);
   assert.equal(button.disabled, false);
@@ -392,8 +472,22 @@ test("refreshes Codex recent sessions after importing instead of reloading", asy
 
 test("imports from the tasks header using the project stored in the file", async () => {
   const runtime = loadInjection({
-    bridgeHandler: async (path) => {
-      if (path === "/session/import") {
+    bridgeHandler: async (path, payload) => {
+      if (path === "/session/import/start") {
+        return {
+          status: "ready",
+          transferId: "transfer-2",
+          chunkSize: 1024,
+          maxBytes: 1024 * 1024,
+        };
+      }
+      if (path === "/session/import/chunk") {
+        return {
+          status: "ok",
+          nextOffset: payload.offset + Buffer.from(payload.data, "base64").length,
+        };
+      }
+      if (path === "/session/import/finish") {
         return {
           status: "imported",
           sessionId: "imported-session",
@@ -413,10 +507,10 @@ test("imports from the tasks header using the project stored in the file", async
     button,
   );
 
-  const importCall = runtime.bridgeCalls.find((call) => call.path === "/session/import");
-  assert.deepEqual(JSON.parse(JSON.stringify(importCall?.payload)), {
+  const finishCall = runtime.bridgeCalls.find((call) => call.path === "/session/import/finish");
+  assert.deepEqual(JSON.parse(JSON.stringify(finishCall?.payload)), {
+    transferId: "transfer-2",
     projectPath: "",
-    data: "{\"format\":\"codey.session\"}",
   });
   assert.equal(button.disabled, false);
 });

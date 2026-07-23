@@ -408,8 +408,9 @@ test("restarting Codex stops the current runtime and relaunches it with Codey", 
     commandsSource.indexOf("pub async fn stop_codey_runtime"),
   );
 
-  assert.match(restartFlow, /stop_codey_runtime\(&restart_state\)/);
-  assert.match(restartFlow, /launch_codey_runtime\(&restart_state\)/);
+  assert.match(restartFlow, /runtime_operation\.lock\(\)\.await/);
+  assert.match(restartFlow, /stop_codey_runtime_locked\(&restart_state\)/);
+  assert.match(restartFlow, /launch_codey_inner_locked\(&restart_state\)/);
   assert.match(restartFlow, /runtime_generation/);
   assert.match(
     commandsSource,

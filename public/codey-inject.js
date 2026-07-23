@@ -57,12 +57,14 @@
   let sidebarActionTooltipAnchor = null;
   let threadUpdatedAtFetchTimer = 0;
   let threadUpdatedAtFetchInFlight = false;
+  let headerMountDirty = true;
   const threadUpdatedAtCache = new Map();
   const threadUpdatedAtRequestedAt = new Map();
   const pendingThreadUpdatedAtRefs = new Map();
   const deletedSidebarSessionIds = new Map();
   const hardDeletedMessageKeys = new Set();
   const deletedSidebarSessionTtlMs = 10 * 60 * 1000;
+  const fallbackSessionExportMaxBytes = 64 * 1024 * 1024;
   const queryWithin = (root, selector) => {
     const matches = [];
     if (root instanceof HTMLElement && typeof root.matches === "function" && root.matches(selector)) {
@@ -148,7 +150,7 @@
     void callBridge("/session/wake-watcher").catch(() => {});
     watcherWakeTimer = window.setTimeout(() => {
       watcherWakeTimer = 0;
-    }, 3_000);
+    }, 30_000);
   };
 
   const wakeSessionWatcherFromKey = (event) => {
@@ -296,11 +298,31 @@
     };
   };
 
+  const mountedButtonIsUsable = (button) => {
+    if (headerMountDirty || !(button instanceof HTMLElement) || button.isConnected !== true) {
+      return false;
+    }
+    const parent = button.parentElement;
+    if (!(parent instanceof HTMLElement) || button.closest("[hidden], [aria-hidden=true]")) {
+      return false;
+    }
+    const mainRoot = document.querySelector("main")?.firstElementChild;
+    const validParent = parent.matches?.("header, nav") || parent === mainRoot;
+    const anchored = button.dataset.codeyHeaderActions !== "true"
+      || (
+        !!button.nextElementSibling
+        && button.nextElementSibling === button.__codeyHeaderAnchor
+      );
+    return !!validParent && anchored;
+  };
+
   const mountButton = () => {
     addStyle();
+    const existingButton = document.getElementById(buttonId);
+    if (mountedButtonIsUsable(existingButton)) return;
     const mount = findHeaderMount();
     if (!mount) return;
-    let button = document.getElementById(buttonId);
+    let button = existingButton;
     if (!button) {
       button = document.createElement("button");
       button.id = buttonId;
@@ -326,6 +348,8 @@
     } else if (button.parentElement !== mount.target) {
       mount.target.appendChild(button);
     }
+    button.__codeyHeaderAnchor = mount.before || null;
+    headerMountDirty = false;
   };
 
   const selectedRows = () => [...document.querySelectorAll(`.${selectedClass}[data-codey-message-id]`)];
@@ -425,8 +449,25 @@
     button.addEventListener("click", hideSidebarActionTooltip);
   };
 
-  const downloadSessionFallback = (filename, data) => {
-    const blob = new Blob([data], { type: "application/json;charset=utf-8" });
+  const encodeBase64Bytes = (bytes) => {
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary);
+  };
+
+  const decodeBase64Bytes = (encoded) => {
+    const binary = atob(String(encoded || ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  };
+
+  const downloadSessionFallback = (filename, chunks) => {
+    const blob = new Blob(chunks, { type: "application/json;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -437,28 +478,16 @@
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
-  const saveSessionData = async (filename, data) => {
-    if (!filename || typeof data !== "string") throw new Error("导出结果不完整");
-    if (typeof window.showSaveFilePicker !== "function") {
-      downloadSessionFallback(filename, data);
-      return "saved";
-    }
-    try {
-      const handle = await window.showSaveFilePicker({
-        suggestedName: filename,
-        types: [{
-          description: "Codey 会话数据",
-          accept: { "application/json": [".json"] },
-        }],
-      });
-      const writable = await handle.createWritable();
-      await writable.write(data);
-      await writable.close();
-      return "saved";
-    } catch (error) {
-      if (error?.name === "AbortError") return "cancelled";
-      throw error;
-    }
+  const openSessionExportWriter = async (filename) => {
+    if (typeof window.showSaveFilePicker !== "function") return null;
+    const handle = await window.showSaveFilePicker({
+      suggestedName: filename,
+      types: [{
+        description: "Codey 会话数据",
+        accept: { "application/json": [".json"] },
+      }],
+    });
+    return handle.createWritable();
   };
 
   const exportSession = async (thread, button) => {
@@ -471,19 +500,80 @@
     }
     button.disabled = true;
     button.dataset.busy = "true";
+    let transferId = "";
+    let writable = null;
     try {
-      const result = await callBridge("/session/export", { sessionId });
-      if (result?.status === "failed") {
-        throw new Error(result.message || "未知错误");
+      const start = await callBridge("/session/export/start", { sessionId });
+      if (start?.status === "failed") {
+        throw new Error(start.message || "未知错误");
       }
-      if (result?.status !== "exported" || !result.filename || typeof result.data !== "string") {
-        throw new Error("导出结果不完整");
+      if (start?.status !== "ready" || !start.transferId || !start.filename) {
+        throw new Error("导出准备结果不完整");
       }
-      const saved = await saveSessionData(result.filename, result.data);
-      if (saved === "saved") showRuntimeToast(result.message || "会话数据已导出");
+      transferId = start.transferId;
+      try {
+        writable = await openSessionExportWriter(start.filename);
+      } catch (error) {
+        if (error?.name === "AbortError") return;
+        throw error;
+      }
+      const exportSize = Number(start.size);
+      if (!Number.isSafeInteger(exportSize) || exportSize < 0) {
+        throw new Error("导出文件大小无效");
+      }
+      if (!writable && exportSize > fallbackSessionExportMaxBytes) {
+        throw new Error("当前环境不支持大文件流式保存，请升级 Codex 后重试");
+      }
+
+      const fallbackChunks = [];
+      let offset = 0;
+      while (true) {
+        const chunk = await callBridge("/session/export/chunk", {
+          transferId,
+          offset,
+        });
+        if (chunk?.status === "failed") {
+          throw new Error(chunk.message || "读取导出分块失败");
+        }
+        if (chunk?.status !== "ok" || chunk.offset !== offset || typeof chunk.data !== "string") {
+          throw new Error("导出分块结果不完整");
+        }
+        const bytes = decodeBase64Bytes(chunk.data);
+        if (writable) await writable.write(bytes);
+        else fallbackChunks.push(bytes);
+        const nextOffset = Number(chunk.nextOffset);
+        if (
+          !Number.isSafeInteger(nextOffset)
+          || nextOffset !== offset + bytes.length
+          || nextOffset > exportSize
+          || Boolean(chunk.done) !== (nextOffset === exportSize)
+        ) {
+          throw new Error("导出分块偏移无效");
+        }
+        offset = nextOffset;
+        if (chunk.done) break;
+      }
+      if (writable) {
+        await writable.close();
+        writable = null;
+      } else {
+        downloadSessionFallback(start.filename, fallbackChunks);
+      }
+      const finish = await callBridge("/session/export/finish", { transferId });
+      if (finish?.status !== "ok") {
+        throw new Error(finish?.message || "清理导出临时文件失败");
+      }
+      transferId = "";
+      showRuntimeToast(`已导出会话：${start.filename}`);
     } catch (error) {
+      try {
+        await writable?.abort?.();
+      } catch {}
       showRuntimeToast(`导出失败：${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
+      if (transferId) {
+        void callBridge("/session/export/abort", { transferId }).catch(() => {});
+      }
       button.disabled = false;
       delete button.dataset.busy;
     }
@@ -987,11 +1077,76 @@
   const importSessionFile = async (projectPath, file, button) => {
     button.disabled = true;
     button.dataset.busy = "true";
+    let transferId = "";
     try {
-      const data = await file.text();
-      const result = await callBridge("/session/import", {
+      const start = await callBridge("/session/import/start", {});
+      if (start?.status === "failed") {
+        throw new Error(start.message || "无法准备会话导入");
+      }
+      if (start?.status !== "ready" || !start.transferId || !start.chunkSize) {
+        throw new Error("导入准备结果不完整");
+      }
+      transferId = start.transferId;
+      const chunkSize = Number(start.chunkSize);
+      if (!Number.isSafeInteger(chunkSize) || chunkSize <= 0) {
+        throw new Error("导入分块大小无效");
+      }
+      const fileSize = Number(file?.size);
+      if (
+        Number.isFinite(fileSize)
+        && Number.isFinite(Number(start.maxBytes))
+        && fileSize > Number(start.maxBytes)
+      ) {
+        throw new Error(`导入文件超过 ${Math.floor(Number(start.maxBytes) / 1024 / 1024)} MB`);
+      }
+
+      let offset = 0;
+      if (
+        typeof file?.slice === "function"
+        && Number.isSafeInteger(fileSize)
+        && fileSize >= 0
+      ) {
+        while (offset < fileSize) {
+          const bytes = new Uint8Array(
+            await file.slice(offset, Math.min(offset + chunkSize, fileSize)).arrayBuffer(),
+          );
+          const progress = await callBridge("/session/import/chunk", {
+            transferId,
+            offset,
+            data: encodeBase64Bytes(bytes),
+          });
+          if (progress?.status === "failed") {
+            throw new Error(progress.message || "写入导入分块失败");
+          }
+          if (progress?.status !== "ok" || progress.nextOffset !== offset + bytes.length) {
+            throw new Error("导入分块进度不一致");
+          }
+          offset = progress.nextOffset;
+        }
+      } else {
+        const bytes = typeof file?.arrayBuffer === "function"
+          ? new Uint8Array(await file.arrayBuffer())
+          : new TextEncoder().encode(await file.text());
+        while (offset < bytes.length) {
+          const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+          const progress = await callBridge("/session/import/chunk", {
+            transferId,
+            offset,
+            data: encodeBase64Bytes(chunk),
+          });
+          if (progress?.status === "failed") {
+            throw new Error(progress.message || "写入导入分块失败");
+          }
+          if (progress?.status !== "ok" || progress.nextOffset !== offset + chunk.length) {
+            throw new Error("导入分块进度不一致");
+          }
+          offset = progress.nextOffset;
+        }
+      }
+
+      const result = await callBridge("/session/import/finish", {
+        transferId,
         projectPath,
-        data,
       });
       if (result?.status === "failed") {
         throw new Error(result.message || "未知错误");
@@ -999,6 +1154,7 @@
       if (result?.status !== "imported" || !result.sessionId) {
         throw new Error("导入结果不完整");
       }
+      transferId = "";
       deletedSidebarSessionIds.delete(normalizeThreadSessionId(result.sessionId));
       const refreshed = await refreshRecentLocalSessions();
       showRuntimeToast(result.message || "会话数据已导入");
@@ -1010,6 +1166,9 @@
     } catch (error) {
       showRuntimeToast(`导入失败：${error instanceof Error ? error.message : String(error)}`, "error");
     } finally {
+      if (transferId) {
+        void callBridge("/session/import/abort", { transferId }).catch(() => {});
+      }
       button.disabled = false;
       delete button.dataset.busy;
     }
@@ -1589,6 +1748,7 @@
   };
   const addPendingScanRoot = (root) => {
     if (!(root instanceof HTMLElement)) return;
+    if (root.matches?.("header, nav")) headerMountDirty = true;
     for (const pendingRoot of pendingScanRoots) {
       if (pendingRoot === root || pendingRoot.contains?.(root)) return;
       if (root.contains?.(pendingRoot)) pendingScanRoots.delete(pendingRoot);

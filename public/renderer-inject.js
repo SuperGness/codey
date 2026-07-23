@@ -27,6 +27,7 @@
   let scanTimer = 0;
   let sessionToolsInteractionArmed = false;
   let bootstrapObserver = null;
+  let headerMountDirty = true;
 
   const queryWithin = (root, selector) => {
     const matches = [];
@@ -117,11 +118,31 @@
     };
   };
 
+  const mountedButtonIsUsable = (button) => {
+    if (headerMountDirty || !(button instanceof HTMLElement) || button.isConnected !== true) {
+      return false;
+    }
+    const parent = button.parentElement;
+    if (!(parent instanceof HTMLElement) || button.closest("[hidden], [aria-hidden=true]")) {
+      return false;
+    }
+    const mainRoot = document.querySelector("main")?.firstElementChild;
+    const validParent = parent.matches?.(headerSelector) || parent === mainRoot;
+    const anchored = button.dataset.codeyHeaderActions !== "true"
+      || (
+        !!button.nextElementSibling
+        && button.nextElementSibling === button.__codeyHeaderAnchor
+      );
+    return !!validParent && anchored;
+  };
+
   const mountButton = () => {
     addStyle();
+    const existingButton = document.getElementById(buttonId);
+    if (mountedButtonIsUsable(existingButton)) return;
     const mount = findHeaderMount();
     if (!mount) return;
-    let button = document.getElementById(buttonId);
+    let button = existingButton;
     if (!button) {
       button = document.createElement("button");
       button.id = buttonId;
@@ -147,6 +168,8 @@
     } else if (button.parentElement !== mount.target) {
       mount.target.appendChild(button);
     }
+    button.__codeyHeaderAnchor = mount.before || null;
+    headerMountDirty = false;
   };
 
   const sidebarDetected = (root = document) => queryWithin(root, sidebarSelector).length > 0;
@@ -231,10 +254,23 @@
         : mutation.target?.parentElement;
       if (mutation.type === "attributes") {
         if (target?.matches?.(headerSelector) || target?.matches?.(sidebarSelector)) {
+          if (target.matches?.(headerSelector)) headerMountDirty = true;
           scheduleScan(target);
           return;
         }
         continue;
+      }
+      const targetHeader = target?.matches?.(headerSelector)
+        ? target
+        : target?.closest?.(headerSelector);
+      const headerChildrenChanged = targetHeader && [
+        ...(mutation.addedNodes || []),
+        ...(mutation.removedNodes || []),
+      ].some((node) => node instanceof HTMLElement && node.id !== buttonId);
+      if (headerChildrenChanged) {
+        headerMountDirty = true;
+        scheduleScan(targetHeader);
+        return;
       }
       for (const node of mutation.addedNodes || []) {
         const element = node instanceof HTMLElement ? node : null;
@@ -245,6 +281,9 @@
           || element.matches?.(sidebarSelector)
           || element.querySelector?.(sidebarSelector)
         ) {
+          if (element.matches?.(headerSelector) || element.querySelector?.(headerSelector)) {
+            headerMountDirty = true;
+          }
           scheduleScan(element);
           return;
         }
