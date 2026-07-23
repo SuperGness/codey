@@ -8,6 +8,10 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
+    if codey_lib::run_update_helper_if_requested()? {
+        return Ok(());
+    }
+
     let fastctx_server = std::env::args_os()
         .nth(1)
         .is_some_and(|argument| argument == "--codey-fastctx-mcp");

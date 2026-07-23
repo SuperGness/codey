@@ -1811,126 +1811,7 @@ fn validate_downloaded_update_path(
 
 #[cfg(target_os = "windows")]
 fn spawn_update_installer(update_path: &Path) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Stdio;
-
-    if !update_path
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
-    {
-        return Err("Windows 更新安装包必须是 .exe".to_string());
-    }
-    let executable =
-        std::env::current_exe().map_err(|error| format!("读取当前 Codey 路径失败：{error}"))?;
-    let install_dir = executable
-        .parent()
-        .ok_or_else(|| "当前 Codey 路径无父目录".to_string())?;
-    let script_path = update_path
-        .parent()
-        .ok_or_else(|| "更新安装包路径无父目录".to_string())?
-        .join("install-codey-update.ps1");
-    fs::write(&script_path, windows_update_installer_script())
-        .map_err(|error| format!("写入更新安装脚本失败：{error}"))?;
-    const DETACHED_PROCESS: u32 = 0x00000008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-    std::process::Command::new("powershell.exe")
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-File")
-        .arg(&script_path)
-        .arg(std::process::id().to_string())
-        .arg(update_path)
-        .arg(&executable)
-        .arg(install_dir)
-        .creation_flags(
-            codex_plus_core::windows_create_no_window()
-                | DETACHED_PROCESS
-                | CREATE_NEW_PROCESS_GROUP,
-        )
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("启动更新安装器失败：{error}"))?;
-    Ok(())
-}
-
-#[cfg_attr(not(any(test, target_os = "windows")), allow(dead_code))]
-fn windows_update_installer_script() -> &'static str {
-    r#"$ErrorActionPreference = "Stop"
-$ParentPid = [int]$args[0]
-$Installer = [string]$args[1]
-$Executable = [string]$args[2]
-$InstallDir = [string]$args[3]
-$ScriptDir = Split-Path -Parent $PSCommandPath
-$LogPath = Join-Path $ScriptDir "install-codey-update.log"
-
-function Write-Log([string]$Message) {
-  $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
-  Add-Content -LiteralPath $LogPath -Value "[$timestamp] $Message" -Encoding UTF8
-}
-
-function Wait-ParentExit([int]$ProcessId) {
-  Write-Log "Waiting for Codey pid=$ProcessId to exit"
-  $deadline = (Get-Date).AddSeconds(180)
-  while ((Get-Date) -lt $deadline) {
-    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-    if ($null -eq $process) {
-      Write-Log "Codey pid=$ProcessId exited"
-      return
-    }
-    Start-Sleep -Milliseconds 500
-  }
-  throw "Timed out waiting for Codey pid=$ProcessId to exit"
-}
-
-function Wait-ExecutableUnlock([string]$Path) {
-  if (-not (Test-Path -LiteralPath $Path)) {
-    Write-Log "Executable path does not exist before install: $Path"
-    return
-  }
-  Write-Log "Waiting for executable lock to release: $Path"
-  $deadline = (Get-Date).AddSeconds(60)
-  while ((Get-Date) -lt $deadline) {
-    try {
-      $stream = [System.IO.File]::Open($Path, "Open", "ReadWrite", "None")
-      $stream.Close()
-      Write-Log "Executable lock released"
-      return
-    } catch {
-      Start-Sleep -Milliseconds 500
-    }
-  }
-  throw "Timed out waiting for executable lock to release: $Path"
-}
-
-try {
-  Write-Log "Starting Codey update. Installer=$Installer Executable=$Executable InstallDir=$InstallDir"
-  Wait-ParentExit $ParentPid
-  Wait-ExecutableUnlock $Executable
-  $installerArgs = @("/S")
-  if (-not [string]::IsNullOrWhiteSpace($InstallDir)) {
-    $installerArgs += "/D=$InstallDir"
-  }
-  Write-Log "Running installer"
-  $process = Start-Process -FilePath $Installer -ArgumentList $installerArgs -Wait -PassThru
-  $exitCode = $process.ExitCode
-  Write-Log "Installer exited with code $exitCode"
-  if ($null -ne $exitCode -and $exitCode -ne 0) {
-    exit $exitCode
-  }
-  $installedExecutable = Join-Path $InstallDir "Codey.exe"
-  $restartTarget = if (Test-Path -LiteralPath $installedExecutable) { $installedExecutable } else { $Executable }
-  Write-Log "Restarting Codey: $restartTarget"
-  Start-Process -FilePath $restartTarget
-  Write-Log "Update finished"
-} catch {
-  Write-Log "Update failed: $($_.Exception.Message)"
-  exit 1
-}
-"#
+    crate::update_helper::spawn_update_installer(update_path)
 }
 
 #[cfg(target_os = "macos")]
@@ -2589,18 +2470,6 @@ mod tests {
                 .map(|asset| asset.arch.as_str()),
             Some(arch)
         );
-    }
-
-    #[test]
-    fn windows_update_installer_script_logs_and_waits_for_install_safety() {
-        let script = windows_update_installer_script();
-
-        assert!(script.contains("install-codey-update.log"));
-        assert!(script.contains("Wait-ParentExit $ParentPid"));
-        assert!(script.contains("Wait-ExecutableUnlock $Executable"));
-        assert!(script.contains("Start-Process -FilePath $Installer"));
-        assert!(script.contains("$installerArgs += \"/D=$InstallDir\""));
-        assert!(script.contains("Start-Process -FilePath $restartTarget"));
     }
 
     #[tokio::test]

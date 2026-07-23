@@ -21,6 +21,7 @@ mod session_transfer;
 mod startup_maintenance;
 mod trace_log_guard;
 mod trace_log_stats;
+mod update_helper;
 mod webhook;
 
 use std::sync::Arc;
@@ -34,6 +35,10 @@ enum ShutdownReason {
     CodexExited,
     InstallUpdate,
     Signal,
+}
+
+pub fn run_update_helper_if_requested() -> Result<bool> {
+    update_helper::run_if_requested().map_err(anyhow::Error::msg)
 }
 
 pub async fn run() -> Result<()> {
