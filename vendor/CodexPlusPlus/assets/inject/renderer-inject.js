@@ -3901,6 +3901,22 @@
     return Array.from(new Set(values.filter((value) => typeof value === "string" && value.trim().length > 0)));
   }
 
+  const codexPlusDefaultModels = Object.freeze([
+    Object.freeze({ model: "gpt-5.6-sol", displayName: "GPT-5.6-Sol" }),
+    Object.freeze({ model: "gpt-5.6-terra", displayName: "GPT-5.6-Terra" }),
+    Object.freeze({ model: "gpt-5.6-luna", displayName: "GPT-5.6-Luna" }),
+    Object.freeze({ model: "gpt-5.5", displayName: "GPT-5.5" }),
+    Object.freeze({ model: "gpt-5.4", displayName: "GPT-5.4" }),
+    Object.freeze({ model: "gpt-5.4-mini", displayName: "GPT-5.4-Mini" }),
+    Object.freeze({ model: "gpt-5.3-codex-spark", displayName: "GPT-5.3-Codex-Spark" }),
+  ]);
+  const codexPlusDefaultModelNames = codexPlusDefaultModels.map(({ model }) => model);
+  const codexPlusDefaultModelDisplayNames = new Map(
+    codexPlusDefaultModels.map(({ model, displayName }) => [model, displayName]),
+  );
+  const codexPlusFastServiceTierId = "priority";
+  const codexPlusFastSpeedTierId = "fast";
+
   let codexModelCatalog = { status: "loading", model: "", default_model: "", model_provider: "", provider_name: "", models: [], sources: [], responses_api: { status: "unknown", message: "" } };
   let codexModelCatalogLoadedAt = 0;
   let codexModelCatalogPromise = null;
@@ -3913,11 +3929,18 @@
   }
 
   function codexPlusModelNames() {
-    return uniqueValues([
-      codexModelCatalog.default_model,
-      codexModelCatalog.model,
-      ...(Array.isArray(codexModelCatalog.models) ? codexModelCatalog.models : []),
-    ]);
+    const catalogModels = uniqueValues(
+      Array.isArray(codexModelCatalog.models) ? codexModelCatalog.models : [],
+    );
+    return codexModelCatalog.status === "loading" && catalogModels.length === 0
+      ? [...codexPlusDefaultModelNames]
+      : catalogModels;
+  }
+
+  function codexPlusDefaultModelName() {
+    const names = codexPlusModelNames();
+    return [codexModelCatalog.default_model, codexModelCatalog.model]
+      .find((name) => names.includes(name)) || names[0] || "";
   }
 
   async function loadCodexModelCatalog(force = false) {
@@ -3967,18 +3990,59 @@
     return ["minimal", "low", "medium", "high", "xhigh"].map((reasoningEffort) => ({ reasoningEffort, description: `${reasoningEffort} effort` }));
   }
 
+  function codexPlusFastServiceTier() {
+    return {
+      id: codexPlusFastServiceTierId,
+      name: "Fast",
+      description: "1.5x speed, increased usage",
+    };
+  }
+
+  function ensureCodexPlusNativeFast(model) {
+    if (!model || typeof model !== "object") return false;
+    let changed = false;
+    if (!Array.isArray(model.serviceTiers)) {
+      model.serviceTiers = [];
+      changed = true;
+    }
+    const fastTierIndex = model.serviceTiers.findIndex(
+      (tier) => tier?.id === codexPlusFastServiceTierId,
+    );
+    if (fastTierIndex < 0) {
+      model.serviceTiers.push(codexPlusFastServiceTier());
+      changed = true;
+    } else if (Object.hasOwn(model.serviceTiers[fastTierIndex], "iconKind")) {
+      const nativeFastTier = { ...model.serviceTiers[fastTierIndex] };
+      delete nativeFastTier.iconKind;
+      model.serviceTiers[fastTierIndex] = nativeFastTier;
+      changed = true;
+    }
+    if (!Array.isArray(model.additionalSpeedTiers)) {
+      model.additionalSpeedTiers = [];
+      changed = true;
+    }
+    if (!model.additionalSpeedTiers.includes(codexPlusFastSpeedTierId)) {
+      model.additionalSpeedTiers.push(codexPlusFastSpeedTierId);
+      changed = true;
+    }
+    return changed;
+  }
+
   function codexPlusModelDescriptor(modelName) {
     return {
       model: modelName,
       id: modelName,
       slug: modelName,
       name: modelName,
-      displayName: modelName,
+      displayName: codexPlusDefaultModelDisplayNames.get(modelName) || modelName,
       description: codexModelCatalog.provider_name || codexModelCatalog.model_provider || "Custom model",
       hidden: false,
-      isDefault: (codexModelCatalog.default_model || codexModelCatalog.model) === modelName,
+      isDefault: codexPlusDefaultModelName() === modelName,
       defaultReasoningEffort: "medium",
       supportedReasoningEfforts: modelReasoningEfforts(),
+      serviceTiers: [codexPlusFastServiceTier()],
+      additionalSpeedTiers: [codexPlusFastSpeedTierId],
+      defaultServiceTier: null,
     };
   }
 
@@ -3992,18 +4056,31 @@
     return Array.isArray(value) && value.every((item) => typeof item === "string");
   }
 
+  function sameStringValues(values, expected) {
+    return values.length === expected.length
+      && values.every((value, index) => value === expected[index]);
+  }
+
+  function replaceStringArray(values, expected) {
+    if (!stringArrayLooksPatchable(values)) return false;
+    if (sameStringValues(values, expected)) return false;
+    values.splice(0, values.length, ...expected);
+    return true;
+  }
+
+  function replaceStringSet(values, expected) {
+    if (!(values instanceof Set)) return false;
+    if (sameStringValues(Array.from(values), expected)) return false;
+    values.clear();
+    expected.forEach((value) => values.add(value));
+    return true;
+  }
+
   function patchModelNameArray(models) {
     if (!stringArrayLooksPatchable(models)) return false;
     const customModels = codexPlusModelNames();
     if (!customModels.length) return false;
-    let changed = false;
-    customModels.forEach((modelName) => {
-      if (!models.includes(modelName)) {
-        models.push(modelName);
-        changed = true;
-      }
-    });
-    return changed;
+    return replaceStringArray(models, customModels);
   }
 
   function patchModelArray(models, allowEmpty = false) {
@@ -4012,18 +4089,30 @@
     if (!customModels.length) return false;
     let changed = false;
     const existing = new Map(models.map((item) => [item.model, item]));
-    models.forEach((item) => {
-      if (customModels.includes(item.model) && item.hidden !== false) {
+    const defaultModel = codexPlusDefaultModelName();
+    const filteredModels = customModels.map((modelName) => {
+      const item = existing.get(modelName);
+      if (!item) {
+        changed = true;
+        return codexPlusModelDescriptor(modelName);
+      }
+      if (item.hidden !== false) {
         item.hidden = false;
         changed = true;
       }
-    });
-    customModels.forEach((modelName) => {
-      if (!existing.has(modelName)) {
-        models.push(codexPlusModelDescriptor(modelName));
+      if (ensureCodexPlusNativeFast(item)) changed = true;
+      const isDefault = modelName === defaultModel;
+      if (item.isDefault !== isDefault) {
+        item.isDefault = isDefault;
         changed = true;
       }
+      return item;
     });
+    if (models.length !== filteredModels.length
+      || models.some((item, index) => item !== filteredModels[index])) {
+      changed = true;
+    }
+    if (changed) models.splice(0, models.length, ...filteredModels);
     return changed;
   }
 
@@ -4040,38 +4129,10 @@
     if (patchModelArray(value.message?.result?.data)) changed = true;
     if (patchModelArray(value.message?.result?.models)) changed = true;
     const names = codexPlusModelNames();
-    if (value.availableModels instanceof Set) {
-      names.forEach((name) => {
-        if (!value.availableModels.has(name)) {
-          value.availableModels.add(name);
-          changed = true;
-        }
-      });
-    }
-    if (value.available_models instanceof Set) {
-      names.forEach((name) => {
-        if (!value.available_models.has(name)) {
-          value.available_models.add(name);
-          changed = true;
-        }
-      });
-    }
-    if (Array.isArray(value.availableModels)) {
-      names.forEach((name) => {
-        if (!value.availableModels.includes(name)) {
-          value.availableModels.push(name);
-          changed = true;
-        }
-      });
-    }
-    if (Array.isArray(value.available_models)) {
-      names.forEach((name) => {
-        if (!value.available_models.includes(name)) {
-          value.available_models.push(name);
-          changed = true;
-        }
-      });
-    }
+    if (replaceStringSet(value.availableModels, names)) changed = true;
+    if (replaceStringSet(value.available_models, names)) changed = true;
+    if (replaceStringArray(value.availableModels, names)) changed = true;
+    if (replaceStringArray(value.available_models, names)) changed = true;
     if (Array.isArray(value.hiddenModels)) {
       const before = value.hiddenModels.length;
       value.hiddenModels = value.hiddenModels.filter((name) => !names.includes(name));
@@ -4082,10 +4143,24 @@
       value.hidden_models = value.hidden_models.filter((name) => !names.includes(name));
       if (value.hidden_models.length !== before) changed = true;
     }
-    if (value.defaultModel == null && names.length > 0) {
-      value.defaultModel = codexPlusModelDescriptor(names[0]);
+    const defaultModel = codexPlusDefaultModelName();
+    const isModelContainer = "defaultModel" in value
+      || "models" in value
+      || "availableModels" in value
+      || "available_models" in value;
+    if (isModelContainer && defaultModel && typeof value.defaultModel === "string" && value.defaultModel !== defaultModel) {
+      value.defaultModel = defaultModel;
       changed = true;
-    } else if (typeof value.defaultModel === "string" && names.includes(value.defaultModel) && value.model == null) {
+    } else if (isModelContainer && defaultModel && value.defaultModel && typeof value.defaultModel === "object" && value.defaultModel.model !== defaultModel) {
+      value.defaultModel = Array.isArray(value.models)
+        ? value.models.find((model) => model?.model === defaultModel) || codexPlusModelDescriptor(defaultModel)
+        : codexPlusModelDescriptor(defaultModel);
+      changed = true;
+    } else if (isModelContainer && defaultModel && value.defaultModel == null) {
+      value.defaultModel = codexPlusModelDescriptor(defaultModel);
+      changed = true;
+    }
+    if (typeof value.defaultModel === "string" && names.includes(value.defaultModel) && value.model == null) {
       value.model = value.defaultModel;
       changed = true;
     }
@@ -4094,7 +4169,7 @@
 
   async function patchModelJsonResponse(payload) {
     if (!codexPlusModelUnlockEnabled()) return payload;
-    if (!codexPlusModelNames().length) await loadCodexModelCatalog();
+    if (!codexModelCatalogLoadedAt) await loadCodexModelCatalog();
     if (!payload || typeof payload !== "object") return payload;
     try {
       patchModelContainer(payload);
@@ -4123,20 +4198,17 @@
     const names = codexPlusModelNames();
     const value = config?.value;
     if (!names.length || !value || typeof value !== "object") return config;
-    const availableModels = Array.isArray(value.available_models) ? [...value.available_models] : [];
-    let changed = false;
-    names.forEach((name) => {
-      if (!availableModels.includes(name)) {
-        availableModels.push(name);
-        changed = true;
-      }
-    });
+    const availableModels = [...names];
+    const defaultModel = codexPlusDefaultModelName();
+    const changed = !Array.isArray(value.available_models)
+      || !sameStringValues(value.available_models, availableModels)
+      || value.default_model !== defaultModel;
     const nextValue = {
       ...value,
       available_models: availableModels,
-      default_model: names[0] || value.default_model,
+      default_model: defaultModel,
     };
-    if (!changed && nextValue.default_model === value.default_model) return config;
+    if (!changed) return config;
     try {
       config.value = nextValue;
     } catch {
@@ -4316,7 +4388,7 @@
     client.sendRequest = async function codexPlusModelPatchedSendRequest(method, params, options) {
       const result = await originalSendRequest(method, params, options);
       if (!codexPlusModelUnlockEnabled()) return result;
-      if (!codexPlusModelNames().length) await loadCodexModelCatalog();
+      if (!codexModelCatalogLoadedAt) await loadCodexModelCatalog();
       return patchAppServerModelResult(appServerModelRequestMethod(String(method || ""), params), result);
     };
     client.__codexPlusModelRequestPatch = codexAppServerModelRequestPatchVersion;
@@ -4428,19 +4500,13 @@
 
   function patchCodexModelWhitelist() {
     ensureCodexModelWhitelistInstalls();
-    if (!codexPlusModelNames().length) {
-      loadCodexModelCatalog();
-      return;
-    }
+    if (!codexModelCatalogLoadedAt) loadCodexModelCatalog();
     runCodexModelWhitelistRefreshPass();
   }
 
   function refreshCodexModelWhitelistFromScan(mutations) {
     ensureCodexModelWhitelistInstalls();
-    if (!codexPlusModelNames().length) {
-      loadCodexModelCatalog();
-      return;
-    }
+    if (!codexModelCatalogLoadedAt) loadCodexModelCatalog();
     if (shouldScheduleReactModelStatePatch(mutations)) {
       scheduleCodexModelWhitelistRefresh();
     } else {

@@ -1140,17 +1140,6 @@ input:focus-visible,
   line-height: 1.3;
 }
 
-.provider-name-box small {
-  display: block;
-  font-size: 11px;
-  color: #6e6e73;
-  line-height: 1.3;
-  margin-top: 2px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .provider-meta {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1247,6 +1236,55 @@ input:focus-visible,
   padding: 6px;
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 0, 0, 0.15) transparent;
+}
+
+.catalog-model-list-empty {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+  overflow: hidden;
+  padding: 24px;
+  background: #fcfcfd;
+}
+
+.catalog-empty-state {
+  display: flex;
+  width: min(100%, 280px);
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.catalog-empty-icon {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  margin-bottom: 12px;
+  place-items: center;
+  border: 1px solid rgba(0, 122, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(0, 122, 255, 0.07);
+  color: var(--mac-blue);
+}
+
+.catalog-empty-copy strong {
+  display: block;
+  color: var(--mac-text-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.catalog-empty-copy p {
+  margin: 4px 0 0;
+  color: var(--mac-text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.catalog-empty-state .codey-button {
+  margin-top: 14px;
 }
 
 .catalog-model-row {

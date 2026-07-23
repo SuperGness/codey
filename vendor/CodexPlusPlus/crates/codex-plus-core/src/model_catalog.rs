@@ -175,7 +175,11 @@ pub async fn read_codex_model_catalog_from_home(
         source_statuses.push(source_status);
     }
     let (catalog_models, catalog_status) = models_from_config_model_catalog_json(home, &effective);
-    models.extend(catalog_models);
+    if catalog_status.is_some() {
+        models = catalog_models;
+    } else {
+        models.extend(catalog_models);
+    }
     if let Some(status) = catalog_status {
         source_statuses.push(status);
     }

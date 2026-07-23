@@ -11,6 +11,7 @@ use codex_plus_core::cdp::{list_targets, pick_injectable_codex_page_target};
 const SETTINGS_OVERLAY_LOAD_PATH: &str = "/internal/codey/settings-overlay/load";
 const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../public/codey-bridge.js");
+const MODEL_WHITELIST_INJECT_SCRIPT: &str = include_str!("../../public/model-whitelist-inject.js");
 const RENDERER_INJECT_SCRIPT: &str = include_str!("../../public/renderer-inject.js");
 const CODEY_SESSION_TOOLS_SCRIPT: &str = include_str!("../../public/codey-inject.js");
 const PET_CONTROL_SHIELD_SCRIPT: &str = include_str!("../../public/pet-control-shield.js");
@@ -49,6 +50,7 @@ pub fn prepare_injection_scripts(
 ) -> PreparedInjectionScripts {
     let mut core_bundle = String::with_capacity(
         CODEY_BRIDGE_SCRIPT.len()
+            + MODEL_WHITELIST_INJECT_SCRIPT.len()
             + RENDERER_INJECT_SCRIPT.len()
             + PET_CONTROL_SHIELD_SCRIPT.len()
             + VOICE_CONTROL_SHIELD_SCRIPT.len()
@@ -58,6 +60,7 @@ pub fn prepare_injection_scripts(
     );
     for (name, script) in [
         ("bridge helpers", CODEY_BRIDGE_SCRIPT),
+        ("model whitelist", MODEL_WHITELIST_INJECT_SCRIPT),
         ("pet control shield", PET_CONTROL_SHIELD_SCRIPT),
         ("voice control shield", VOICE_CONTROL_SHIELD_SCRIPT),
         ("security warning shield", SECURITY_WARNING_SHIELD_SCRIPT),
@@ -443,6 +446,8 @@ mod tests {
         assert_eq!(prepared.scripts.len(), 2);
         let core = &prepared.scripts[0];
         assert!(core.contains("window.__codeyBridgeHelpersInstalled"));
+        assert!(core.contains("window.__codeyModelWhitelistPatch"));
+        assert!(core.contains("/codex-model-catalog"));
         assert!(core.contains("window.__codeyRendererCoreLoaded"));
         assert!(core.contains(r#"const enabled = "true" === "true""#));
         assert!(core.contains(r#"const enabled = "false" === "true""#));

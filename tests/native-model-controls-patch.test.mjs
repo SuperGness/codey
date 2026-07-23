@@ -93,7 +93,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
     );
     assert.match(
       patchedModelListFilter,
-      /if\(u\?\(n\.has\(r\.model\)\|\|!r\.hidden\):!r\.hidden\)/,
+      /if\(n\.has\(r\.model\)\)/,
     );
     assert.match(patchedModelListFilter, /u=s&&e=== `chatgpt`/);
     const filterModels = Function(
@@ -112,7 +112,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
         models,
         useHiddenModels: true,
       }).models,
-      ["gpt-5.6-sol", "gpt-5.3-codex-spark", "hidden-preview"],
+      ["gpt-5.6-sol", "hidden-preview"],
     );
     assert.deepEqual(
       filterModels({
@@ -122,7 +122,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
         models,
         useHiddenModels: true,
       }).models,
-      ["gpt-5.6-sol", "gpt-5.3-codex-spark"],
+      ["gpt-5.6-sol"],
     );
 
     const serviceTierUiSource = [

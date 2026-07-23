@@ -176,7 +176,7 @@ impl CodeyRuntime {
         let use_official_catalog = match model_catalog::refresh_for_provider(
             &home,
             official_provider,
-            config.upstream_models(),
+            config.upstream_models_snapshot(),
             config.selected_models(),
         ) {
             Ok(_) => true,

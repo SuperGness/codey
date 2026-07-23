@@ -564,7 +564,6 @@ export function ModelSection({
             <span className="column-icon"><Server size={16} /></span>
             <div className="provider-name-box">
               <strong>{provider.name}</strong>
-              <small>{provider.id}</small>
             </div>
           </div>
           <div className="provider-meta">
@@ -659,7 +658,11 @@ export function ModelSection({
                   </div>
                   <Badge variant="brand">API</Badge>
                 </div>
-                <div className="catalog-model-list">
+                <div
+                  className={modelState.thirdPartyModels.length === 0
+                    ? "catalog-model-list catalog-model-list-empty"
+                    : "catalog-model-list"}
+                >
                   {modelState.thirdPartyModels.map((model) => {
                     const isDefault = defaultModel === model;
                     return (
@@ -685,7 +688,33 @@ export function ModelSection({
                       </div>
                     );
                   })}
-                  {modelState.thirdPartyModels.length === 0 && <div className="empty-state">尚未添加三方模型</div>}
+                  {modelState.thirdPartyModels.length === 0 && (
+                    <div
+                      className="catalog-empty-state"
+                      role="region"
+                      aria-labelledby="third-party-empty-title"
+                      aria-busy={busy === "fetch-models"}
+                    >
+                      <span className="catalog-empty-icon" aria-hidden="true">
+                        <PlugZap size={22} />
+                      </span>
+                      <div className="catalog-empty-copy">
+                        <strong id="third-party-empty-title">尚未添加三方模型</strong>
+                        <p>当前线路还没有已选模型。</p>
+                      </div>
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        disabled={isBusy}
+                        onClick={onFetchCurrentModels}
+                      >
+                        {busy === "fetch-models"
+                          ? <LoaderCircle className="spinner" aria-hidden="true" />
+                          : <RefreshCw aria-hidden="true" />}
+                        {busy === "fetch-models" ? "同步中" : "同步并选择模型"}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </section>
             )}

@@ -47,8 +47,8 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
       patched = replaceUniqueRendererGate(
         patched,
         /if\s*\(\s*([$A-Z_a-z][$\w]*)\s*\?\s*([$A-Z_a-z][$\w]*)\.has\(\s*([$A-Z_a-z][$\w]*)\.model\s*\)\s*:\s*!\s*\3\.hidden\s*\)/g,
-        (_match, useAllowlistName, allowlistName, modelName) =>
-          `if(${useAllowlistName}?(${allowlistName}.has(${modelName}.model)||!${modelName}.hidden):!${modelName}.hidden)`,
+        (_match, _useAllowlistName, allowlistName, modelName) =>
+          `if(${allowlistName}.has(${modelName}.model))`,
         "model allowlist",
       );
     }

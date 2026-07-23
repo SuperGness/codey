@@ -542,6 +542,10 @@ impl AppState {
         match path.as_str() {
             "/settings/get" => serde_json::to_value(self.config.read().await.clone())
                 .unwrap_or_else(|_| json!({"status":"failed"})),
+            "/codex-model-catalog" | "/codex-config-model" => {
+                let config = self.config.read().await.clone();
+                current_renderer_model_catalog(&config).unwrap_or_else(api_error_message)
+            }
             "/runtime/status" | "/backend/status" => {
                 let mut value = runtime_status(self).await.unwrap_or_else(api_error_message);
                 if let Some(object) = value.as_object_mut() {
@@ -1108,14 +1112,54 @@ fn current_model_state(config: &CodeyConfig) -> Result<model_catalog::ModelSelec
         .iter()
         .find(|profile| profile.id == config.active_profile_id)
         .is_none_or(|profile| profile.cc_switch_read_only);
-    Ok(model_catalog::selection_state(
+    model_catalog::selection_state(
         &codex_home(),
         official,
         config.upstream_models_snapshot(),
         config.selected_models(),
         config.default_model(),
     )
-    .unwrap_or_default())
+    .map_err(|error| error.to_string())
+}
+
+fn current_renderer_model_catalog(config: &CodeyConfig) -> Result<Value, String> {
+    let model_state = current_model_state(config)?;
+    Ok(renderer_model_catalog_value(config, &model_state))
+}
+
+fn renderer_model_catalog_value(
+    config: &CodeyConfig,
+    model_state: &model_catalog::ModelSelectionState,
+) -> Value {
+    let models = model_state
+        .official_models
+        .iter()
+        .filter(|model| model.supported)
+        .map(|model| model.slug.clone())
+        .chain(model_state.third_party_models.iter().cloned())
+        .collect::<Vec<_>>();
+    let active_profile = config
+        .profiles
+        .iter()
+        .find(|profile| profile.id == config.active_profile_id);
+    let provider_id = config.current_provider_id().unwrap_or_default().trim();
+    let provider_name = active_profile
+        .map(|profile| profile.name.trim())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(provider_id);
+    json!({
+        "status": if models.is_empty() { "not_configured" } else { "ok" },
+        "model": model_state.default_model,
+        "default_model": model_state.default_model,
+        "model_provider": provider_id,
+        "provider_name": provider_name,
+        "models": models,
+        "sources": [],
+        "responses_api": {
+            "status": "unknown",
+            "message": ""
+        }
+    })
 }
 
 fn should_refresh_model_catalog(model_state: &model_catalog::ModelSelectionState) -> bool {
@@ -1131,7 +1175,7 @@ fn refresh_model_catalog(config: &CodeyConfig) -> Result<(), String> {
     model_catalog::refresh_for_provider(
         &codex_home(),
         official,
-        config.upstream_models(),
+        config.upstream_models_snapshot(),
         config.selected_models(),
     )
     .map(|_| ())
@@ -1307,6 +1351,56 @@ pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> 
 #[cfg(test)]
 mod restart_tests {
     use super::*;
+
+    #[test]
+    fn renderer_model_catalog_keeps_supported_models_before_configured_models() {
+        let mut config = CodeyConfig::default();
+        config.profiles[0].cc_switch_provider_id = Some("cc-switch-provider".into());
+        let official_models = [
+            ("gpt-5.6-sol", "GPT-5.6-Sol"),
+            ("gpt-5.6-terra", "GPT-5.6-Terra"),
+            ("gpt-5.6-luna", "GPT-5.6-Luna"),
+            ("gpt-5.5", "GPT-5.5"),
+            ("gpt-5.4", "GPT-5.4"),
+            ("gpt-5.4-mini", "GPT-5.4-Mini"),
+            ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"),
+        ]
+        .into_iter()
+        .map(
+            |(slug, display_name)| model_catalog::OfficialModelAvailability {
+                slug: slug.into(),
+                display_name: display_name.into(),
+                supported: !matches!(slug, "gpt-5.6-terra" | "gpt-5.4-mini"),
+            },
+        )
+        .collect::<Vec<_>>();
+        let model_state = model_catalog::ModelSelectionState {
+            official_model_ids: official_models
+                .iter()
+                .map(|model| model.slug.clone())
+                .collect(),
+            official_models,
+            third_party_models: vec!["provider-fast-coder".into()],
+            upstream_models: vec!["provider-fast-coder".into()],
+            default_model: "gpt-5.6-sol".into(),
+        };
+
+        let catalog = renderer_model_catalog_value(&config, &model_state);
+
+        assert_eq!(
+            catalog["models"],
+            json!([
+                "gpt-5.6-sol",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.3-codex-spark",
+                "provider-fast-coder"
+            ])
+        );
+        assert_eq!(catalog["default_model"], "gpt-5.6-sol");
+        assert_eq!(catalog["model_provider"], "cc-switch-provider");
+    }
 
     #[test]
     fn restart_sensitive_config_changes_are_detected() {

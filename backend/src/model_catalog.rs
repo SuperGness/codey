@@ -52,7 +52,7 @@ pub fn relative_path() -> &'static str {
 pub fn refresh_for_provider(
     home: &Path,
     official_provider: bool,
-    upstream_models: &[String],
+    upstream_models: Option<&[String]>,
     selected_models: &[String],
 ) -> Result<usize> {
     let official_models = read_official_entries(home)?;
@@ -61,33 +61,29 @@ pub fn refresh_for_provider(
         .filter_map(|model| model.get("slug").and_then(Value::as_str))
         .map(ToString::to_string)
         .collect::<HashSet<_>>();
+    let provider_models_synced = official_provider || upstream_models.is_some();
     let upstream = upstream_models
+        .unwrap_or_default()
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let mut catalog_models = if official_provider {
-        official_models.clone()
-    } else {
-        official_models
-            .iter()
-            .filter(|model| is_provider_selectable_official(model))
-            .filter(|model| {
-                model
+    let mut catalog_models = official_models
+        .iter()
+        .filter(|model| {
+            official_provider
+                || !provider_models_synced
+                || model
                     .get("slug")
                     .and_then(Value::as_str)
                     .is_some_and(|slug| upstream.contains(slug))
-            })
-            .cloned()
-            .collect::<Vec<_>>()
-    };
+        })
+        .cloned()
+        .collect::<Vec<_>>();
 
     for model in &mut catalog_models {
-        if !official_provider {
-            expose_provider_supported_official(model);
-        }
         ensure_catalog_compatibility(model);
         expose_supported_model(model);
-        ensure_speed_controls(model);
+        add_fast_speed_controls(model);
     }
 
     if !official_provider {
@@ -104,7 +100,7 @@ pub fn refresh_for_provider(
             let model_id = model_id.trim();
             if model_id.is_empty()
                 || official_slugs.contains(model_id)
-                || !upstream.contains(model_id)
+                || (provider_models_synced && !upstream.contains(model_id))
                 || !seen.insert(model_id.to_string())
             {
                 continue;
@@ -113,9 +109,6 @@ pub fn refresh_for_provider(
         }
     }
 
-    if catalog_models.is_empty() {
-        bail!("当前 provider 没有可写入 Codex 模型目录的模型，保留上一份合法目录");
-    }
     write_catalog(home, &catalog_models)?;
     Ok(catalog_models.len())
 }
@@ -145,14 +138,6 @@ pub fn selection_state(
         .collect::<HashSet<_>>();
     let official_models: Vec<OfficialModelAvailability> = official_entries
         .into_iter()
-        .filter(|model| {
-            official_provider
-                || !provider_models_synced
-                || model
-                    .get("slug")
-                    .and_then(Value::as_str)
-                    .is_some_and(|slug| upstream.contains(slug))
-        })
         .filter_map(|model| {
             let model = official_model_from_value(&model)?;
             let supported = official_provider
@@ -172,7 +157,9 @@ pub fn selection_state(
             .iter()
             .map(|model| model.trim())
             .filter(|model| {
-                !model.is_empty() && upstream.contains(*model) && !official_slugs.contains(*model)
+                !model.is_empty()
+                    && !official_slugs.contains(*model)
+                    && (!provider_models_synced || upstream.contains(*model))
             })
             .fold(Vec::<String>::new(), |mut models, model| {
                 if !models.iter().any(|existing| existing == model) {
@@ -379,52 +366,10 @@ fn ensure_catalog_compatibility(model: &mut Value) {
     }
 }
 
-fn is_provider_selectable_official(model: &Value) -> bool {
-    model.get("visibility").and_then(Value::as_str) == Some("list")
-        || model.get("upgrade").is_some_and(Value::is_object)
-}
-
-fn expose_provider_supported_official(model: &mut Value) {
-    if model.get("visibility").and_then(Value::as_str) == Some("list") {
-        return;
-    }
-    model["visibility"] = json!("list");
-    if let Some(object) = model.as_object_mut() {
-        object.remove("availability_nux");
-        object.remove("upgrade");
-    }
-}
-
 fn expose_supported_model(model: &mut Value) {
     if model.get("visibility").and_then(Value::as_str) == Some("list") {
         model["supported_in_api"] = json!(true);
     }
-}
-
-fn declares_fast_speed(model: &Value) -> bool {
-    model
-        .get("service_tiers")
-        .and_then(Value::as_array)
-        .is_some_and(|tiers| {
-            tiers
-                .iter()
-                .any(|tier| tier.get("id").and_then(Value::as_str) == Some(FAST_SERVICE_TIER_ID))
-        })
-        || model
-            .get("additional_speed_tiers")
-            .and_then(Value::as_array)
-            .is_some_and(|tiers| {
-                tiers
-                    .iter()
-                    .any(|tier| tier.as_str() == Some(FAST_SPEED_TIER_ID))
-            })
-}
-
-fn ensure_speed_controls(model: &mut Value) {
-    if !declares_fast_speed(model) {
-        return;
-    }
-    add_fast_speed_controls(model);
 }
 
 fn add_fast_speed_controls(model: &mut Value) {
@@ -475,7 +420,10 @@ fn synthetic_model(template: &Value, model_id: &str, index: usize) -> Value {
     if let Some(object) = model.as_object_mut() {
         object.remove("availability_nux");
         object.remove("upgrade");
+        object.remove("default_service_tier");
     }
+    model["service_tiers"] = json!([]);
+    model["additional_speed_tiers"] = json!([]);
     ensure_catalog_compatibility(&mut model);
     clamp_reasoning_efforts(&mut model);
     add_fast_speed_controls(&mut model);
@@ -612,13 +560,26 @@ mod tests {
         .unwrap();
     }
 
+    fn assert_native_fast(model: &Value) {
+        assert!(
+            model["service_tiers"]
+                .as_array()
+                .is_some_and(|tiers| tiers.iter().any(|tier| tier["id"] == FAST_SERVICE_TIER_ID))
+        );
+        assert!(
+            model["additional_speed_tiers"]
+                .as_array()
+                .is_some_and(|tiers| tiers.iter().any(|tier| tier == FAST_SPEED_TIER_ID))
+        );
+    }
+
     #[test]
-    fn official_catalog_preserves_reasoning_and_speed_metadata() {
+    fn official_catalog_keeps_the_fixed_order_and_native_fast_metadata() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
 
         assert_eq!(
-            refresh_for_provider(home.path(), true, &[], &[]).unwrap(),
+            refresh_for_provider(home.path(), true, None, &[]).unwrap(),
             OFFICIAL_MODELS.len()
         );
         let catalog: Value = serde_json::from_slice(
@@ -660,13 +621,15 @@ mod tests {
             .find(|model| model["slug"] == "gpt-5.3-codex-spark")
             .unwrap();
         assert_eq!(spark["supported_in_api"], true);
-        assert_eq!(spark["service_tiers"], json!([]));
-        assert_eq!(spark["additional_speed_tiers"], json!([]));
         assert_eq!(spark["supports_reasoning_summaries"], true);
+        assert!(models.iter().all(|model| {
+            assert_native_fast(model);
+            true
+        }));
     }
 
     #[test]
-    fn third_party_catalog_preserves_supported_official_capabilities() {
+    fn third_party_catalog_keeps_supported_official_models_before_configured_models() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
         let upstream = vec![
@@ -678,16 +641,28 @@ mod tests {
         let selected = upstream.clone();
 
         assert_eq!(
-            refresh_for_provider(home.path(), false, &upstream, &selected).unwrap(),
+            refresh_for_provider(home.path(), false, Some(&upstream), &selected).unwrap(),
             4
         );
         let catalog: Value = serde_json::from_slice(
             &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
         )
         .unwrap();
-        assert_eq!(catalog["models"][0]["slug"], "gpt-5.6-sol");
+        let models = catalog["models"].as_array().unwrap();
         assert_eq!(
-            catalog["models"][0]["supported_reasoning_levels"]
+            models
+                .iter()
+                .map(|model| model["slug"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "gpt-5.6-sol",
+                "gpt-5.4",
+                "gpt-5.3-codex-spark",
+                "claude-sonnet",
+            ]
+        );
+        assert_eq!(
+            models[0]["supported_reasoning_levels"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -695,21 +670,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["low", "medium", "high", "xhigh", "max", "ultra"]
         );
-        assert_eq!(catalog["models"][1]["slug"], "gpt-5.4");
-        assert_eq!(catalog["models"][1]["visibility"], "list");
-        assert!(catalog["models"][1].get("upgrade").is_none());
-        assert_eq!(catalog["models"][1]["service_tiers"][0]["id"], "priority");
-        assert_eq!(catalog["models"][1]["additional_speed_tiers"][0], "fast");
-        assert_eq!(catalog["models"][2]["slug"], "gpt-5.3-codex-spark");
-        assert_eq!(catalog["models"][2]["supported_in_api"], true);
-        assert_eq!(catalog["models"][2]["service_tiers"], json!([]));
-        assert_eq!(catalog["models"][2]["additional_speed_tiers"], json!([]));
-        assert_eq!(catalog["models"][3]["slug"], "claude-sonnet");
-        assert_eq!(catalog["models"][3]["codey_source"], "third_party");
-        assert_eq!(catalog["models"][3]["service_tiers"][0]["id"], "priority");
-        assert_eq!(catalog["models"][3]["additional_speed_tiers"][0], "fast");
+        let gpt_54 = models
+            .iter()
+            .find(|model| model["slug"] == "gpt-5.4")
+            .unwrap();
+        assert_eq!(gpt_54["visibility"], "list");
+        assert!(gpt_54.get("upgrade").is_none());
+        let spark = models
+            .iter()
+            .find(|model| model["slug"] == "gpt-5.3-codex-spark")
+            .unwrap();
+        assert_eq!(spark["supported_in_api"], true);
+        let custom = models.last().unwrap();
+        assert_eq!(custom["slug"], "claude-sonnet");
+        assert_eq!(custom["codey_source"], "third_party");
         assert_eq!(
-            catalog["models"][3]["supported_reasoning_levels"]
+            custom["supported_reasoning_levels"]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -717,30 +693,33 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["low", "medium", "high", "xhigh"]
         );
-        assert_eq!(catalog["models"][3]["supports_reasoning_summaries"], true);
+        assert_eq!(custom["supports_reasoning_summaries"], true);
+        assert!(models.iter().all(|model| {
+            assert_native_fast(model);
+            true
+        }));
     }
 
     #[test]
-    fn api_only_cold_start_builds_third_party_catalog_from_bundled_template() {
+    fn configured_provider_model_survives_a_missing_upstream_snapshot() {
         let home = tempfile::tempdir().unwrap();
-        let upstream = vec!["provider-fast-coder".into()];
-        let selected = upstream.clone();
+        let selected = vec!["provider-fast-coder".into()];
 
         assert_eq!(
-            refresh_for_provider(home.path(), false, &upstream, &selected).unwrap(),
-            1
+            refresh_for_provider(home.path(), false, None, &selected).unwrap(),
+            OFFICIAL_MODELS.len() + 1
         );
         let catalog: Value = serde_json::from_slice(
             &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
         )
         .unwrap();
-        let model = &catalog["models"][0];
+        let models = catalog["models"].as_array().unwrap();
+        let model = models.last().unwrap();
         assert_eq!(model["slug"], "provider-fast-coder");
         assert_eq!(model["codey_source"], "third_party");
         assert_eq!(model["visibility"], "list");
         assert_eq!(model["supported_in_api"], true);
-        assert_eq!(model["service_tiers"][0]["id"], "priority");
-        assert_eq!(model["additional_speed_tiers"][0], "fast");
+        assert_native_fast(model);
         assert!(
             !model["supported_reasoning_levels"]
                 .as_array()
@@ -753,7 +732,7 @@ mod tests {
     fn official_cold_start_uses_the_bundled_catalog() {
         let home = tempfile::tempdir().unwrap();
 
-        let count = refresh_for_provider(home.path(), true, &[], &[]).unwrap();
+        let count = refresh_for_provider(home.path(), true, None, &[]).unwrap();
         assert_eq!(count, OFFICIAL_MODELS.len());
         let catalog: Value = serde_json::from_slice(
             &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
@@ -771,39 +750,26 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(models.iter().all(|model| model["visibility"] == "list"));
-        assert!(models[..5].iter().all(|model| {
-            model["service_tiers"]
-                .as_array()
-                .is_some_and(|tiers| !tiers.is_empty())
-                && model["additional_speed_tiers"]
-                    .as_array()
-                    .is_some_and(|tiers| !tiers.is_empty())
-        }));
-        assert!(models[5..].iter().all(|model| {
-            model
-                .get("service_tiers")
-                .and_then(Value::as_array)
-                .is_none_or(Vec::is_empty)
-                && model
-                    .get("additional_speed_tiers")
-                    .and_then(Value::as_array)
-                    .is_none_or(Vec::is_empty)
+        assert!(models.iter().all(|model| {
+            assert_native_fast(model);
+            true
         }));
     }
 
     #[test]
-    fn empty_provider_catalog_does_not_replace_the_last_valid_catalog() {
+    fn synced_empty_provider_catalog_hides_every_model() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
-        let catalog_path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
-        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
-        let previous = br#"{"models":[{"slug":"last-known-good"}]}"#;
-        fs::write(&catalog_path, previous).unwrap();
-
-        let error = refresh_for_provider(home.path(), false, &[], &[]).unwrap_err();
-
-        assert!(error.to_string().contains("保留上一份合法目录"));
-        assert_eq!(fs::read(catalog_path).unwrap(), previous);
+        let upstream = Vec::<String>::new();
+        assert_eq!(
+            refresh_for_provider(home.path(), false, Some(&upstream), &[]).unwrap(),
+            0
+        );
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 0);
     }
 
     #[test]
@@ -829,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn synced_third_party_provider_hides_unsupported_official_models() {
+    fn synced_third_party_provider_marks_unsupported_official_models() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
         let upstream = vec!["gpt-5.6-sol".into(), "third-model".into()];
@@ -842,34 +808,62 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.official_models.len(), 1);
-        assert_eq!(state.official_models[0].slug, "gpt-5.6-sol");
-        assert!(state.official_models[0].supported);
+        assert_eq!(
+            state
+                .official_models
+                .iter()
+                .map(|model| model.slug.as_str())
+                .collect::<Vec<_>>(),
+            OFFICIAL_MODELS
+                .iter()
+                .map(|(slug, _)| *slug)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            state
+                .official_models
+                .iter()
+                .map(|model| (model.slug.as_str(), model.supported))
+                .collect::<Vec<_>>(),
+            OFFICIAL_MODELS
+                .iter()
+                .map(|(slug, _)| (*slug, *slug == "gpt-5.6-sol"))
+                .collect::<Vec<_>>()
+        );
         assert_eq!(state.third_party_models, ["third-model"]);
         assert_eq!(state.default_model, "gpt-5.6-sol");
     }
 
     #[test]
-    fn synced_empty_third_party_provider_hides_all_fixed_official_models() {
+    fn synced_empty_provider_marks_official_models_and_configured_models_unavailable() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
         let upstream = Vec::new();
 
-        let state = selection_state(home.path(), false, Some(&upstream), &[], None).unwrap();
+        let state = selection_state(
+            home.path(),
+            false,
+            Some(&upstream),
+            &["provider-fast-coder".into()],
+            None,
+        )
+        .unwrap();
 
-        assert!(state.official_models.is_empty());
+        assert_eq!(state.official_models.len(), OFFICIAL_MODELS.len());
+        assert!(!state.official_models.iter().any(|model| model.supported));
         assert!(state.third_party_models.is_empty());
         assert!(state.upstream_models.is_empty());
         assert!(state.default_model.is_empty());
     }
 
     #[test]
-    fn selection_state_exposes_only_upstream_supported_fixed_official_models() {
+    fn selection_state_does_not_add_hidden_upstream_models_to_the_fixed_list() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
         let upstream = vec!["gpt-5.4".into(), "codex-auto-review".into()];
         let state = selection_state(home.path(), false, Some(&upstream), &[], None).unwrap();
 
+        assert_eq!(state.official_models.len(), OFFICIAL_MODELS.len());
         assert!(
             state
                 .official_models
@@ -883,6 +877,23 @@ mod tests {
                 .any(|model| model.slug == "codex-auto-review")
         );
         assert_eq!(state.default_model, "gpt-5.4");
+    }
+
+    #[test]
+    fn synced_provider_keeps_spark_when_the_channel_supports_it() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let upstream = vec!["gpt-5.3-codex-spark".into()];
+
+        let state = selection_state(home.path(), false, Some(&upstream), &[], None).unwrap();
+
+        assert!(
+            state
+                .official_models
+                .iter()
+                .any(|model| model.slug == "gpt-5.3-codex-spark" && model.supported)
+        );
+        assert_eq!(state.default_model, "gpt-5.3-codex-spark");
     }
 
     #[test]

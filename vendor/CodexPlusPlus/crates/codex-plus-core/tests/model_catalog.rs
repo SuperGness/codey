@@ -203,7 +203,7 @@ base_url = "{}/v1"
 }
 
 #[tokio::test]
-async fn model_catalog_merges_models_from_config_model_catalog_json() {
+async fn model_catalog_uses_config_model_catalog_json_as_authoritative_list() {
     let temp = tempfile::tempdir().unwrap();
     let server = spawn_models_server(json!({
         "data": [
@@ -253,7 +253,14 @@ experimental_bearer_token = "relay-key"
 
     assert_eq!(result["status"], "ok");
     assert_eq!(result["default_model"], "gpt-5.6");
-    assert_eq!(result["models"], json!(["qwen3-coder", "gpt-5.6"]));
+    assert_eq!(result["models"], json!(["gpt-5.6"]));
+    assert!(
+        !result["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model == "qwen3-coder")
+    );
     server.finish();
 }
 

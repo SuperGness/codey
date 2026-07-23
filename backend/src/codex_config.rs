@@ -219,11 +219,15 @@ fn apply_runtime_provider_config_at(
         None
     };
     let provider_id = normalized_provider_id(provider_id);
+    // Codex resolves this path from the app-server working directory, which is
+    // `/` for the packaged macOS app, rather than from CODEX_HOME.
+    let model_catalog_path =
+        use_official_catalog.then(|| home.join(crate::model_catalog::relative_path()));
     let updated = patch_config_with_fastctx(
         &existing,
         profile,
         &provider_id,
-        use_official_catalog,
+        model_catalog_path.as_deref(),
         default_model,
         fastctx_command,
         subagent_optimization,
@@ -783,11 +787,13 @@ pub fn patch_config(
     provider_id: &str,
     use_official_catalog: bool,
 ) -> Result<String> {
+    let model_catalog_path =
+        use_official_catalog.then(|| Path::new(crate::model_catalog::relative_path()));
     patch_config_with_fastctx(
         existing,
         profile,
         provider_id,
-        use_official_catalog,
+        model_catalog_path,
         None,
         None,
         false,
@@ -798,7 +804,7 @@ fn patch_config_with_fastctx(
     existing: &str,
     profile: &ProviderProfile,
     provider_id: &str,
-    use_official_catalog: bool,
+    model_catalog_path: Option<&Path>,
     default_model: Option<&str>,
     fastctx_command: Option<&Path>,
     subagent_optimization: bool,
@@ -815,8 +821,8 @@ fn patch_config_with_fastctx(
         .as_table_mut()
         .expect("model_providers was initialized")[&provider_id] = Item::Table(provider);
     doc["model_provider"] = value(provider_id);
-    if use_official_catalog {
-        doc["model_catalog_json"] = value(crate::model_catalog::relative_path());
+    if let Some(model_catalog_path) = model_catalog_path {
+        doc["model_catalog_json"] = value(model_catalog_path.to_string_lossy().into_owned());
     } else {
         doc.as_table_mut().remove("model_catalog_json");
     }
@@ -1177,6 +1183,10 @@ mod tests {
         profile
     }
 
+    fn relative_model_catalog_path() -> Option<&'static Path> {
+        Some(Path::new(crate::model_catalog::relative_path()))
+    }
+
     #[test]
     fn official_patch_uses_the_official_endpoint_and_catalog() {
         let result = patch_config(
@@ -1247,7 +1257,7 @@ enabled-reasoning-efforts = ["low", "medium", "high", "xhigh"]
             "model = \"old-model\"\n\n[profiles.work]\nmodel = \"profile-model\"\n",
             &official_profile(),
             GLOBAL_PROVIDER_ID,
-            true,
+            relative_model_catalog_path(),
             Some("gpt-5.6-sol"),
             None,
             false,
@@ -1299,7 +1309,7 @@ direct_only_tool_namespaces = ["mcp__existing"]
             existing,
             &official_profile(),
             GLOBAL_PROVIDER_ID,
-            true,
+            relative_model_catalog_path(),
             None,
             Some(Path::new("/Applications/Codey.app/Contents/MacOS/codey")),
             false,
@@ -1350,7 +1360,7 @@ direct_only_tool_namespaces = ["mcp__existing"]
             "",
             &official_profile(),
             GLOBAL_PROVIDER_ID,
-            true,
+            relative_model_catalog_path(),
             None,
             Some(Path::new("/tmp/codey")),
             false,
@@ -1360,7 +1370,7 @@ direct_only_tool_namespaces = ["mcp__existing"]
             &first,
             &official_profile(),
             GLOBAL_PROVIDER_ID,
-            true,
+            relative_model_catalog_path(),
             None,
             Some(Path::new("/tmp/codey")),
             false,
@@ -1400,7 +1410,7 @@ custom_setting = "preserved"
             existing,
             &official_profile(),
             GLOBAL_PROVIDER_ID,
-            true,
+            relative_model_catalog_path(),
             None,
             None,
             true,
@@ -1465,6 +1475,14 @@ custom_setting = "preserved"
         let temporary_config = fs::read_to_string(home.join("config.toml")).unwrap();
         let document = temporary_config.parse::<DocumentMut>().unwrap();
         assert!(document.get("agents").is_none());
+        assert_eq!(
+            document["model_catalog_json"].as_str(),
+            Some(
+                home.join(crate::model_catalog::relative_path())
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
         assert_eq!(
             document["features"]["multi_agent_v2"]["tool_namespace"].as_str(),
             Some("agents")
