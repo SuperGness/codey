@@ -26,6 +26,8 @@ test("renderer core waits for sidebar interaction before loading session tools",
   assert.match(inject, /const mountedButtonIsUsable = \(button\) =>/);
   assert.match(inject, /if \(mountedButtonIsUsable\(existingButton\)\) return;/);
   assert.match(inject, /button\.nextElementSibling === button\.__codeyHeaderAnchor/);
+  assert.match(inject, /const isTopChromeMountTarget = \(element\) =>/);
+  assert.doesNotMatch(inject, /querySelector\("main"\)/);
   assert.match(inject, /headerMountDirty = true/);
   assert.doesNotMatch(inject, /new MutationObserver\(\(\) => \{[\s\S]*setTimeout\(scan,/);
   assert.doesNotMatch(inject, /characterData:\s*true/);
@@ -40,6 +42,8 @@ test("renderer core waits for sidebar interaction before loading session tools",
   assert.match(sessionTools, /const mountedButtonIsUsable = \(button\) =>/);
   assert.match(sessionTools, /if \(mountedButtonIsUsable\(existingButton\)\) return;/);
   assert.match(sessionTools, /button\.nextElementSibling === button\.__codeyHeaderAnchor/);
+  assert.match(sessionTools, /const isTopChromeMountTarget = \(element\) =>/);
+  assert.doesNotMatch(sessionTools, /querySelector\("main"\)/);
   assert.match(sessionTools, /fallbackSessionExportMaxBytes = 64 \* 1024 \* 1024/);
   assert.match(sessionTools, /exportSize > fallbackSessionExportMaxBytes/);
   assert.match(sessionTools, /watcherWakeTimer = window\.setTimeout\(\(\) => \{[\s\S]*\}, 30_000\)/);

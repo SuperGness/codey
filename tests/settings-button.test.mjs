@@ -6,7 +6,7 @@ import vm from "node:vm";
 const source = readFileSync(new URL("../public/renderer-inject.js", import.meta.url), "utf8");
 
 class FakeElement {
-  constructor(tagName = "div", { visible = true, right = 100, width = right } = {}) {
+  constructor(tagName = "div", { visible = true, right = 100, width = right, height = 46, top = 0 } = {}) {
     this.tagName = tagName.toUpperCase();
     this.children = [];
     this.dataset = {};
@@ -14,6 +14,8 @@ class FakeElement {
     this.parentElement = null;
     this.right = right;
     this.width = width;
+    this.height = height;
+    this.top = top;
     this.style = {};
     this.textContent = "";
     this.visible = visible;
@@ -32,6 +34,7 @@ class FakeElement {
   appendChild(child) {
     child.remove();
     child.parentElement = this;
+    child.isConnected = true;
     this.children.push(child);
     return child;
   }
@@ -41,6 +44,7 @@ class FakeElement {
     const index = this.children.indexOf(before);
     assert.notEqual(index, -1);
     child.parentElement = this;
+    child.isConnected = true;
     this.children.splice(index, 0, child);
     return child;
   }
@@ -52,7 +56,14 @@ class FakeElement {
   getBoundingClientRect() {
     this.rectReads += 1;
     return this.visible
-      ? { bottom: 46, height: 46, left: this.right - this.width, right: this.right, top: 0, width: this.width }
+      ? {
+          bottom: this.top + this.height,
+          height: this.height,
+          left: this.right - this.width,
+          right: this.right,
+          top: this.top,
+          width: this.width,
+        }
       : { bottom: 0, height: 0, left: 0, right: 0, top: 0, width: 0 };
   }
 
@@ -88,6 +99,7 @@ class FakeElement {
     const index = this.parentElement.children.indexOf(this);
     if (index >= 0) this.parentElement.children.splice(index, 1);
     this.parentElement = null;
+    this.isConnected = false;
   }
 
   setAttribute() {}
@@ -150,6 +162,68 @@ test("moves the Codey button beside the visible header's trailing action region"
   assert.equal(codeyButton.dataset.codeyHeaderActions, "true");
   assert.equal(hiddenHeader.children.includes(codeyButton), false);
   assert.deepEqual(visibleHeader.children, [codeyButton, rightRegion]);
+});
+
+test("ignores sidebar nav and main content until top chrome is available", () => {
+  const sidebarNav = new FakeElement("nav", { right: 84, width: 84, height: 720 });
+  const main = new FakeElement("main", { right: 1200, width: 1200, height: 640, top: 80 });
+  const mainContent = new FakeElement("div", { right: 1080, width: 960, height: 640, top: 80 });
+  const staleButton = new FakeElement("button", { right: 60, width: 28 });
+  staleButton.id = "codey-settings-button";
+  sidebarNav.appendChild(staleButton);
+  main.appendChild(mainContent);
+
+  let topNav = null;
+  const placeholders = {
+    "codey-core-injected-style": new FakeElement("style"),
+    "codey-settings-button": staleButton,
+  };
+  const document = {
+    body: new FakeElement("body"),
+    documentElement: new FakeElement("html", { right: 1200, width: 1200, height: 800 }),
+    createElement: (tagName) => new FakeElement(tagName),
+    getElementById: (id) => placeholders[id] || null,
+    querySelector: (selector) => (selector === "main" ? main : null),
+    querySelectorAll: (selector) => {
+      if (selector === "header") return [];
+      if (selector === "nav") return topNav ? [sidebarNav, topNav] : [sidebarNav];
+      return [];
+    },
+  };
+  const window = {
+    addEventListener() {},
+    alert() {},
+    clearTimeout() {},
+    getComputedStyle: (element) => ({
+      display: element.visible ? "flex" : "none",
+      visibility: element.visible ? "visible" : "hidden",
+    }),
+    innerWidth: 1200,
+    setTimeout: () => 1,
+  };
+  window.window = window;
+
+  vm.runInNewContext(source, {
+    console,
+    document,
+    HTMLElement: FakeElement,
+    location: { pathname: "/", search: "" },
+    MutationObserver: class {
+      observe() {}
+    },
+    URLSearchParams,
+    window,
+  });
+
+  assert.equal(staleButton.parentElement, null);
+  assert.equal(sidebarNav.children.includes(staleButton), false);
+  assert.equal(mainContent.children.length, 0);
+
+  topNav = new FakeElement("nav", { right: 1200, width: 96, height: 46 });
+  window.__codeyRendererScan();
+
+  assert.equal(staleButton.parentElement, topNav);
+  assert.deepEqual(topNav.children, [staleButton]);
 });
 
 test("repeated scans fast-path an already mounted button without layout reads", () => {

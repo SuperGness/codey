@@ -85,12 +85,24 @@
       && rect.height > 0;
   };
 
+  const isTopChromeMountTarget = (element) => {
+    if (!isVisibleMountTarget(element)) return false;
+    const rect = element.getBoundingClientRect();
+    const viewportWidth = Math.max(
+      window.innerWidth || 0,
+      document.documentElement?.clientWidth || 0,
+      document.documentElement?.getBoundingClientRect?.().width || 0,
+      rect.right,
+    );
+    return rect.top <= 96
+      && rect.height <= 120
+      && rect.width >= 48
+      && rect.right >= viewportWidth - 48;
+  };
+
   const findHeaderMount = () => {
-    const header = [...document.querySelectorAll("header")].find(isVisibleMountTarget)
-      || [...document.querySelectorAll("nav")].find(isVisibleMountTarget)
-      || (isVisibleMountTarget(document.querySelector("main")?.firstElementChild)
-        ? document.querySelector("main").firstElementChild
-        : null);
+    const header = [...document.querySelectorAll("header")].find(isTopChromeMountTarget)
+      || [...document.querySelectorAll("nav")].find(isTopChromeMountTarget);
     if (!header) return null;
 
     const controls = [...header.querySelectorAll("button, [role=button], a[href]")]
@@ -126,8 +138,7 @@
     if (!(parent instanceof HTMLElement) || button.closest("[hidden], [aria-hidden=true]")) {
       return false;
     }
-    const mainRoot = document.querySelector("main")?.firstElementChild;
-    const validParent = parent.matches?.(headerSelector) || parent === mainRoot;
+    const validParent = parent.matches?.(headerSelector);
     const anchored = button.dataset.codeyHeaderActions !== "true"
       || (
         !!button.nextElementSibling
@@ -141,7 +152,10 @@
     const existingButton = document.getElementById(buttonId);
     if (mountedButtonIsUsable(existingButton)) return;
     const mount = findHeaderMount();
-    if (!mount) return;
+    if (!mount) {
+      existingButton?.remove?.();
+      return;
+    }
     let button = existingButton;
     if (!button) {
       button = document.createElement("button");
