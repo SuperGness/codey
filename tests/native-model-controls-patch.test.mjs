@@ -44,7 +44,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
   try {
     assert.equal(
       (0, eval)(await loadPatchExpression()),
-      "codey-startup-patch-installed-v7",
+      "codey-startup-patch-installed-v8",
     );
     Module._load("electron", undefined, false).protocol.handle(
       "app",
@@ -324,6 +324,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
     ]) {
       const patchedFastModelPresentation = await patchAsset(
         fastModelPresentationSource(rowIconExpression),
+        "app://-/assets/codex-composer-adapter-DDUHejoe.js",
       );
       assert.match(patchedFastModelPresentation, /configEnabled=!hideLabel/);
       assert.match(patchedFastModelPresentation, /selectedIcon=null/);
@@ -356,6 +357,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       "app://-/assets/app-initial.js",
       "app://-/assets/app-initial-windows.js",
       "app://-/assets/app-initial~windows.js?build=store",
+      "app://-/assets/codex-composer-adapter-DDUHejoe.js",
       "app://-/assets/general-settings-BWZCvLqI.js",
       "app://-/assets/model-list-filter-lLUu6272.js",
       "app://-/assets/windows-model-controls-a1b2c3.js",
