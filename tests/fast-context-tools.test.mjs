@@ -29,7 +29,7 @@ test("Codey embeds FastCtx and only dispatches it through the dedicated MCP mode
     readFile(new URL("backend/src/codex_config.rs", root), "utf8"),
   ]);
 
-  assert.match(manifest, /fastctx = \{ git = "https:\/\/github\.com\/yc-duan\/fastctx", rev = "64a6a45f88e65a2c0305e36673fa5e3f99d95384", default-features = false \}/);
+  assert.match(manifest, /fastctx = \{ git = "https:\/\/github\.com\/yc-duan\/fastctx", rev = "9bbd954eadf028e9b30cf69dc75a312cef3c8f5c", default-features = false \}/);
   assert.match(runtimeSource, /--codey-fastctx-mcp/);
   assert.match(runtimeSource, /fastctx::cli::run_server/);
   assert.match(configPatchSource, /CODEY_FASTCTX_SERVER_ID: &str = "codey_fastctx"/);

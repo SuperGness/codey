@@ -19,7 +19,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 codex-plus-core = { path = "../vendor/CodexPlusPlus/crates/codex-plus-core" }
 codex-plus-data = { path = "../vendor/CodexPlusPlus/crates/codex-plus-data" }
 directories = "6"
-fastctx = { git = "https://github.com/yc-duan/fastctx", rev = "64a6a45f88e65a2c0305e36673fa5e3f99d95384", default-features = false }
+fastctx = { git = "https://github.com/yc-duan/fastctx", rev = "9bbd954eadf028e9b30cf69dc75a312cef3c8f5c", default-features = false }
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 rusqlite = { version = "0.32", features = ["bundled"] }
