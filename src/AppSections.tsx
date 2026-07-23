@@ -1,11 +1,15 @@
-import type { CSSProperties } from "react";
+import { type CSSProperties, useState } from "react";
 import {
   IconActivity as Activity,
+  IconAdjustmentsHorizontal,
   IconBell as BellRing,
   IconBrandWindows,
   IconCheck as Check,
+  IconCloudCheck,
   IconCpu,
+  IconDatabase,
   IconDownload,
+  IconFileCheck,
   IconFolderOpen,
   IconGitBranch,
   IconHistory,
@@ -14,7 +18,10 @@ import {
   IconRefresh as RefreshCw,
   IconSend,
   IconServer,
+  IconShieldCheck,
+  IconShoppingBag,
   IconX as X,
+  IconBolt as Zap,
 } from "@tabler/icons-react";
 
 import type {
@@ -27,7 +34,7 @@ import type {
   UpdateCheck,
   UpdateDownload,
 } from "./App.types";
-import { Badge, Button, Card, Input, Switch } from "./components/semi";
+import { Badge, Button, Card, Input, Switch, Tooltip } from "./components/semi";
 
 const Cpu = IconCpu;
 const Download = IconDownload;
@@ -65,6 +72,12 @@ export function OperationsPanel({
   onRepairPluginMarketplace,
   onRestart,
 }: OperationsPanelProps) {
+  const [activeCardTitle, setActiveCardTitle] = useState<string | null>(null);
+
+  const toggleCard = (title: string) => {
+    setActiveCardTitle((prev) => (prev === title ? null : title));
+  };
+
   const maintenance = status.maintenance;
   const sessionOk = maintenance?.sessionStatus === "ready";
   const pluginOk = pluginMarketplaceStatus?.status === "ready";
@@ -106,28 +119,105 @@ export function OperationsPanel({
       ? "远程市场尚未注册"
       : "",
   ].filter(Boolean);
-  const rawSessionDetail = maintenance?.sessionDetail || "等待 Codey 返回会话状态";
-  const formattedSessionDetail = rawSessionDetail.includes(
-    "修复 0 个会话文件，更新 0 行数据库索引，清理 0 条幽灵任务",
-  )
-    ? rawSessionDetail.replace(
-        "已同步到 codey_global: 修复 0 个会话文件，更新 0 行数据库索引，清理 0 条幽灵任务",
-        "已同步至 codey_global（索引与状态良好）",
-      )
-    : rawSessionDetail.replace(/^已同步到\s+/, "已同步至 ");
 
-  const pluginDetail = pluginStatusError
-    ? pluginMarketplaceStatus?.message || "插件市场状态读取失败"
-    : pluginOk
-      ? "官方与远程市场已就绪"
-      : pluginIssues.length > 0
-        ? pluginIssues.join("；")
-        : "正在读取插件市场状态";
+  type MetricItem = {
+    id: string;
+    icon: typeof Activity;
+    tooltip: string;
+    tone?: "success" | "warning" | "destructive" | "info";
+  };
+
+  // Session Recovery Metrics
+  const sessionDetailStr = maintenance?.sessionDetail || "";
+  const filesMatch = sessionDetailStr.match(/修复 (\d+) 个会话文件/);
+  const rowsMatch = sessionDetailStr.match(/更新 (\d+) 行数据库索引/);
+  const ghostMatch = sessionDetailStr.match(/清理 (\d+) 条幽灵任务/);
+
+  const filesCount = filesMatch ? filesMatch[1] : "0";
+  const rowsCount = rowsMatch ? rowsMatch[1] : "0";
+  const ghostCount = ghostMatch ? ghostMatch[1] : "0";
+
+  const sessionMetrics: MetricItem[] = [
+    {
+      id: "session-files",
+      icon: IconFileCheck,
+      tooltip: `会话文件：已修复 ${filesCount} 个会话文件`,
+      tone: sessionOk ? "success" : "warning",
+    },
+    {
+      id: "session-db",
+      icon: IconDatabase,
+      tooltip: `数据库索引：已更新 ${rowsCount} 行数据库索引`,
+      tone: sessionOk ? "success" : "warning",
+    },
+    {
+      id: "session-ghost",
+      icon: IconShieldCheck,
+      tooltip: `幽灵任务：已清理 ${ghostCount} 条幽灵任务`,
+      tone: sessionOk ? "success" : "warning",
+    },
+  ];
+
+  // System Optimization Metrics
+  const optimizationMetrics: MetricItem[] = [
+    {
+      id: "opt-fastctx",
+      icon: Zap,
+      tooltip: config.fastContextTools
+        ? "FastCtx 上下文加速：已按当前配置启用"
+        : "FastCtx 上下文加速：未启用",
+      tone: config.fastContextTools ? "success" : "info",
+    },
+    {
+      id: "opt-slim",
+      icon: IconAdjustmentsHorizontal,
+      tooltip: (config.slimCodexPet || config.slimCodexVoice)
+        ? `客户端精简：已开启${config.slimCodexPet ? "宠物" : ""}${config.slimCodexVoice ? "/语音" : ""}精简`
+        : "客户端精简：保留完整功能",
+      tone: (config.slimCodexPet || config.slimCodexVoice) ? "success" : "info",
+    },
+    {
+      id: "opt-patch",
+      icon: isWindowsClient ? IconBrandWindows : IconCpu,
+      tooltip: windowsPatchReady
+        ? "性能策略：采样与 WebView/执行环境泄漏修复已生效"
+        : "性能策略：运行确认中",
+      tone: windowsPatchReady ? "success" : "warning",
+    },
+  ];
+
+  // Plugin Marketplace Metrics
+  const pluginMetrics: MetricItem[] = [
+    {
+      id: "plugin-official",
+      icon: IconShoppingBag,
+      tooltip: pluginMarketplaceStatus?.officialMarketplace !== false
+        ? "官方市场：快照与注册完整"
+        : "官方市场：快照缺失或尚未注册",
+      tone: pluginMarketplaceStatus?.officialMarketplace !== false ? "success" : "warning",
+    },
+    {
+      id: "plugin-remote",
+      icon: IconCloudCheck,
+      tooltip: pluginMarketplaceStatus?.remoteMarketplace !== false
+        ? "远程市场：快照与注册完整"
+        : "远程市场：快照缺失或尚未注册",
+      tone: pluginMarketplaceStatus?.remoteMarketplace !== false ? "success" : "warning",
+    },
+    {
+      id: "plugin-host",
+      icon: PlugZap,
+      tooltip: pluginOk
+        ? "插件托管：插件服务正常且链路已就绪"
+        : "插件托管：正在检查或等待修复",
+      tone: pluginOk ? "success" : "warning",
+    },
+  ];
 
   const statusCards: Array<{
     title: string;
     description: string;
-    detail?: string;
+    metrics: MetricItem[];
     label: string;
     tone: "success" | "warning" | "destructive" | "info";
     icon: typeof Activity;
@@ -141,7 +231,7 @@ export function OperationsPanel({
     {
       title: "会话恢复",
       description: sessionOk ? "索引与恢复链路运行正常，上下文恢复就绪。" : "正在确认会话索引与恢复链路。",
-      detail: formattedSessionDetail,
+      metrics: sessionMetrics,
       label: sessionOk ? "正常" : maintenance ? "需检查" : "检查中",
       tone: sessionOk ? "success" : maintenance ? "destructive" : "warning",
       icon: History,
@@ -151,9 +241,7 @@ export function OperationsPanel({
       description: !performanceError
         ? "精简策略与性能补丁均已成功加载。"
         : "部分精简策略尚未启用，保留完整功能。",
-      detail: performanceError
-        ? maintenance?.performanceDetail || "性能补丁加载异常"
-        : "FastCtx · 模块精简 · 性能策略已生效",
+      metrics: optimizationMetrics,
       label: performanceError ? "异常" : "已优化",
       tone: performanceError ? "destructive" : "success",
       icon: Cpu,
@@ -163,7 +251,7 @@ export function OperationsPanel({
       description: pluginOk
         ? "配置状态完整，可正常发现与管理插件。"
         : "仅检查当前状态，打开配置页时不自动修复。",
-      detail: pluginDetail,
+      metrics: pluginMetrics,
       label: pluginRepairing
         ? "修复中"
         : pluginOk
@@ -205,6 +293,31 @@ export function OperationsPanel({
           </div>
 
           <div className="operations-actions">
+            <div className="operations-status-icons" role="list" aria-label="核心服务状态">
+              {statusCards.map((item) => {
+                const StatusIcon = item.icon;
+                const isExpanded = activeCardTitle === item.title;
+                return (
+                  <Tooltip
+                    key={item.title}
+                    content={isExpanded ? `收起“${item.title}”` : `点击展开“${item.title}”详情`}
+                    position="top"
+                  >
+                    <button
+                      type="button"
+                      className={`operations-icon-badge tone-${item.tone}${isExpanded ? " active" : ""}`}
+                      onClick={() => toggleCard(item.title)}
+                      aria-expanded={isExpanded}
+                      aria-label={`${item.title}（${item.label}），点击${isExpanded ? "收起" : "展开"}`}
+                    >
+                      <StatusIcon size={16} aria-hidden="true" />
+                      <span className="operations-icon-dot" aria-hidden="true" />
+                    </button>
+                  </Tooltip>
+                );
+              })}
+            </div>
+
             <Badge variant={restartPending ? "warning" : status.running ? "success" : "secondary"}>
               <span className="operations-status-dot" aria-hidden="true" />
               {restartPending ? "等待重启" : status.running ? "运行中" : "未启动"}
@@ -222,6 +335,66 @@ export function OperationsPanel({
             </Button>
           </div>
         </div>
+
+        {activeCardTitle && (
+          <div className="operations-expanded-grid" role="region" aria-label="展开的系统详情">
+            {statusCards
+              .filter((item) => item.title === activeCardTitle)
+              .map((item) => {
+                const StatusIcon = item.icon;
+                return (
+                  <article key={item.title} className={`operations-expanded-card tone-${item.tone}`}>
+                    <div className="expanded-card-header">
+                      <div className="expanded-card-title">
+                        <span className={`expanded-card-icon tone-${item.tone}`}>
+                          <StatusIcon size={18} aria-hidden="true" />
+                        </span>
+                        <div>
+                          <h3>{item.title}</h3>
+                          <p>{item.description}</p>
+                        </div>
+                      </div>
+                      <div className="expanded-card-actions">
+                        <Badge variant={item.tone}>{item.label}</Badge>
+                      </div>
+                    </div>
+
+                    <div className="expanded-card-body">
+                      <div className="expanded-card-metrics">
+                        {item.metrics.map((metric) => {
+                          const MetricIcon = metric.icon;
+                          return (
+                            <div key={metric.id} className="expanded-metric-item">
+                              <span className={`expanded-metric-icon tone-${metric.tone || "info"}`}>
+                                <MetricIcon size={14} aria-hidden="true" />
+                              </span>
+                              <span className="expanded-metric-text">{metric.tooltip}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {item.action && (
+                        <div className="expanded-card-footer">
+                          <Button
+                            variant="outline"
+                            size="xs"
+                            disabled={item.action.disabled}
+                            onClick={item.action.onClick}
+                          >
+                            {item.action.loading
+                              ? <LoaderCircle className="spinner" aria-hidden="true" />
+                              : <RefreshCw aria-hidden="true" />}
+                            {item.action.label}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+          </div>
+        )}
 
         {isWindowsClient && (
           <div
@@ -241,56 +414,6 @@ export function OperationsPanel({
             </div>
           </div>
         )}
-
-        <div className="operations-status-grid" role="list" aria-label="运行状态">
-          {statusCards.map((item) => {
-            const StatusIcon = item.icon;
-            return (
-              <article
-                className={`operations-status-item operations-status-${item.tone}`}
-                key={item.title}
-                role="listitem"
-              >
-                <div className="operations-status-content">
-                  <div className="operations-status-title-row">
-                    <span className="operations-status-icon">
-                      <StatusIcon size={16} aria-hidden="true" />
-                    </span>
-                    <h2>{item.title}</h2>
-                    <Badge variant={item.tone}>{item.label}</Badge>
-                  </div>
-                  <p className="operations-status-desc">{item.description}</p>
-                </div>
-                <div className="operations-status-footer">
-                  <div className="operations-status-detail" title={item.detail}>
-                    {item.detail ? (
-                      <>
-                        <span className="operations-detail-dot" aria-hidden="true" />
-                        <span className="operations-detail-text">{item.detail}</span>
-                      </>
-                    ) : (
-                      <span className="operations-detail-text text-muted">状态正常</span>
-                    )}
-                  </div>
-                  {item.action && (
-                    <Button
-                      className="operations-status-action"
-                      variant="outline"
-                      size="xs"
-                      disabled={item.action.disabled}
-                      onClick={item.action.onClick}
-                    >
-                      {item.action.loading
-                        ? <LoaderCircle className="spinner" aria-hidden="true" />
-                        : <RefreshCw aria-hidden="true" />}
-                      {item.action.label}
-                    </Button>
-                  )}
-                </div>
-              </article>
-            );
-          })}
-        </div>
       </Card>
     </section>
   );

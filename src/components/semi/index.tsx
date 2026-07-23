@@ -5,8 +5,12 @@ import SemiCard from "@douyinfe/semi-ui/lib/es/card";
 import SemiCheckbox from "@douyinfe/semi-ui/lib/es/checkbox";
 import SemiInput from "@douyinfe/semi-ui/lib/es/input";
 import Modal from "@douyinfe/semi-ui/lib/es/modal";
+import Popover from "@douyinfe/semi-ui/lib/es/popover";
 import SemiSwitch from "@douyinfe/semi-ui/lib/es/switch";
 import Tag from "@douyinfe/semi-ui/lib/es/tag";
+import Tooltip from "@douyinfe/semi-ui/lib/es/tooltip";
+
+export { Popover, Tooltip };
 
 type ButtonVariant = "default" | "warning" | "destructive" | "outline" | "secondary" | "ghost";
 type ButtonSize = "default" | "sm" | "xs" | "lg" | "icon" | "icon-sm";
