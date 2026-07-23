@@ -250,7 +250,7 @@ export function OperationsPanel({
       title: "插件市场",
       description: pluginOk
         ? "配置状态完整，可正常发现与管理插件。"
-        : "仅检查当前状态，打开配置页时不自动修复。",
+        : "仅检查当前状态，不会在打开配置页时自动修复。",
       metrics: pluginMetrics,
       label: pluginRepairing
         ? "修复中"
