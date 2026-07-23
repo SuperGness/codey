@@ -925,6 +925,25 @@
     }
   };
 
+  const unsubscribeNativeSidebarSession = async (sessionId) => {
+    const normalizedSessionId = normalizeThreadSessionId(sessionId);
+    if (!normalizedSessionId || normalizedSessionId.startsWith("client-new-thread:")) return false;
+    try {
+      codexSignalDispatcherPromise ||= loadCodexSignalDispatcher().catch((error) => {
+        codexSignalDispatcherPromise = null;
+        throw error;
+      });
+      const dispatcher = await codexSignalDispatcherPromise;
+      await dispatcher("unsubscribe-thread-for-host", {
+        hostId: "local",
+        threadId: normalizedSessionId,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const reloadConversationAfterHardDelete = async (sessionId, messageIds) => {
     const normalizedSessionId = String(sessionId || "").replace(/^local:/, "").trim();
     if (!normalizedSessionId || !messageIds.length) throw new Error("缺少会话或轮次 ID");
@@ -1161,7 +1180,6 @@
       if (!navigated) window.setTimeout(() => location.reload(), 180);
     }
     thread.remove();
-    void refreshRecentLocalSessions();
     window.dispatchEvent(new CustomEvent("codey-session-deleted", {
       detail: { sessionId: normalizedSessionId, title, alreadyDeleted },
     }));
@@ -1170,6 +1188,7 @@
         ? `会话${title ? `“${title}”` : ""}已不存在，已从列表移除`
         : `已删除会话${title ? `“${title}”` : ""}`,
     );
+    void refreshRecentLocalSessions();
   };
 
   const deleteSidebarSession = async (thread, anchor, confirmButton) => {
@@ -1193,6 +1212,7 @@
     confirmButton.textContent = "删除中…";
     anchor.setAttribute("aria-busy", "true");
     try {
+      await unsubscribeNativeSidebarSession(sessionId);
       const result = await callBridge("/session/delete", { sessionId, title });
       const alreadyDeleted = isSessionAlreadyDeletedMessage(result?.message);
       if (

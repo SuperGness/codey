@@ -57,6 +57,7 @@ class FakeElement {
   focus() {}
 
   getAttribute(name) {
+    if (name === "id" && this.id) return this.id;
     return this.attributes.get(name) ?? null;
   }
 
@@ -78,6 +79,7 @@ class FakeElement {
   }
 
   hasAttribute(name) {
+    if (name === "id" && this.id) return true;
     return this.attributes.has(name);
   }
 
@@ -140,7 +142,7 @@ class FakeElement {
   }
 }
 
-function loadInjection({ bridge } = {}) {
+function loadInjection({ bridge, dispatcher } = {}) {
   const body = new FakeElement("body");
   const documentElement = new FakeElement("html");
   const thread = new FakeElement("div", {
@@ -196,6 +198,7 @@ function loadInjection({ bridge } = {}) {
 
   const placeholder = new FakeElement();
   const bridgeCalls = [];
+  const dispatcherCalls = [];
   const documentListeners = new Map();
   const document = {
     body,
@@ -259,11 +262,18 @@ function loadInjection({ bridge } = {}) {
       setItem: () => {},
     },
     removeEventListener() {},
-    setTimeout(callback) {
+    setTimeout(callback, delay = 0) {
+      if (delay > 1000) return 1;
       callback();
       return 1;
     },
   };
+  if (dispatcher) {
+    window.__codeyCodexSignalDispatcher = async (signal, payload) => {
+      dispatcherCalls.push({ signal, payload });
+      return dispatcher(signal, payload);
+    };
+  }
   window.window = window;
   const MutationObserver = class {
     observe() {}
@@ -293,6 +303,7 @@ function loadInjection({ bridge } = {}) {
     archiveButton,
     archiveTooltip,
     bridgeCalls,
+    dispatcherCalls,
     document,
     project,
     projectActionButton,
@@ -306,7 +317,21 @@ function loadInjection({ bridge } = {}) {
 }
 
 test("matches native sidebar actions and deletes after popover confirmation", async () => {
-  const runtime = loadInjection();
+  const events = [];
+  const runtime = loadInjection({
+    bridge: async (path) => {
+      events.push(`bridge:${path}`);
+      if (path === "/session/delete") return { status: "ok", deleted: true };
+      return { status: "ok" };
+    },
+    dispatcher: async (signal) => {
+      events.push(`signal:${signal}`);
+      if (signal === "refresh-recent-conversations-for-host") {
+        return new Promise(() => {});
+      }
+    },
+  });
+  events.length = 0;
   const exportButton = runtime.thread.querySelector("[data-codey-session-export]");
   const sessionImportButton = runtime.thread.querySelector("[data-codey-session-import]");
   const tasksImportButton = runtime.tasksSection.querySelector("[data-codey-tasks-import]");
@@ -373,6 +398,25 @@ test("matches native sidebar actions and deletes after popover confirmation", as
     sessionId: "thread-1",
     title: "待删除会话",
   });
+  assert.deepEqual(JSON.parse(JSON.stringify(runtime.dispatcherCalls)), [{
+    signal: "unsubscribe-thread-for-host",
+    payload: {
+      hostId: "local",
+      threadId: "thread-1",
+    },
+  }, {
+    signal: "refresh-recent-conversations-for-host",
+    payload: { hostId: "local", sortKey: "updated_at" },
+  }]);
+  assert.deepEqual(events, [
+    "signal:unsubscribe-thread-for-host",
+    "bridge:/session/delete",
+    "signal:refresh-recent-conversations-for-host",
+  ]);
+  assert.equal(
+    runtime.document.getElementById("codey-runtime-toast")?.textContent,
+    "已删除会话“待删除会话”",
+  );
   assert.equal(runtime.thread.parentElement, null);
 });
 
