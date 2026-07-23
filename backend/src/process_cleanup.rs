@@ -1,13 +1,15 @@
 use anyhow::{Context, Result};
 
 #[cfg(unix)]
+use std::collections::HashSet;
+#[cfg(unix)]
 use std::time::Duration;
 #[cfg(unix)]
 use tokio::process::Command;
 
-/// Stops every other Codey instance after the Codex instance owned by this
-/// process exits. The caller remains alive long enough to restore Codex's
-/// temporary configuration before invoking this function.
+/// Stops every other Codey process and its descendants during final shutdown.
+/// The caller remains alive long enough to stop its owned Codex tree and
+/// restore temporary configuration before invoking this function.
 pub async fn terminate_other_codey_processes() -> Result<usize> {
     #[cfg(unix)]
     {
@@ -30,17 +32,43 @@ async fn terminate_other_unix_codey_processes() -> Result<usize> {
         .unwrap_or("codey")
         .to_string();
     let current_pid = std::process::id();
-    let targets = other_process_ids(&process_name, current_pid).await?;
-    if targets.is_empty() {
+    let roots = other_process_ids(&process_name, current_pid).await?;
+    if roots.is_empty() {
         return Ok(0);
     }
+    let initial_snapshot = crate::process_tree::unix_process_snapshot().await?;
+    let initial_targets =
+        crate::process_tree::process_ids_with_descendants(&initial_snapshot, roots, current_pid);
+    let mut targets =
+        crate::process_tree::identities_for_process_ids(&initial_snapshot, &initial_targets);
 
-    signal_processes("-TERM", &targets).await?;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    crate::process_tree::signal_processes(&targets.keys().copied().collect(), libc::SIGTERM)?;
 
-    let remaining = other_process_ids(&process_name, current_pid).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let remaining = loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let snapshot = crate::process_tree::unix_process_snapshot().await?;
+        let roots = other_process_ids(&process_name, current_pid).await?;
+        let discovered =
+            crate::process_tree::process_ids_with_descendants(&snapshot, roots, current_pid);
+        let new_process_ids = discovered
+            .into_iter()
+            .filter(|process_id| !targets.contains_key(process_id))
+            .collect::<HashSet<_>>();
+        if !new_process_ids.is_empty() {
+            crate::process_tree::signal_processes(&new_process_ids, libc::SIGTERM)?;
+            targets.extend(crate::process_tree::identities_for_process_ids(
+                &snapshot,
+                &new_process_ids,
+            ));
+        }
+        let remaining = crate::process_tree::matching_process_ids(&snapshot, &targets);
+        if remaining.is_empty() || tokio::time::Instant::now() >= deadline {
+            break remaining;
+        }
+    };
     if !remaining.is_empty() {
-        signal_processes("-KILL", &remaining).await?;
+        crate::process_tree::signal_processes(&remaining, libc::SIGKILL)?;
     }
     Ok(targets.len())
 }
@@ -68,22 +96,6 @@ fn parse_other_process_ids(output: &[u8], current_pid: u32) -> Vec<u32> {
         .filter_map(|value| value.parse::<u32>().ok())
         .filter(|process_id| *process_id != current_pid)
         .collect()
-}
-
-#[cfg(unix)]
-async fn signal_processes(signal: &str, process_ids: &[u32]) -> Result<()> {
-    let mut command = Command::new("kill");
-    command.arg(signal);
-    for process_id in process_ids {
-        command.arg(process_id.to_string());
-    }
-    let status = command.status().await.context("终止 Codey 进程失败")?;
-    // A target can finish between pgrep and kill. Re-enumeration below decides
-    // whether a forceful second pass is necessary.
-    if !status.success() {
-        eprintln!("部分 Codey 进程在收到 {signal} 前已经退出：{status}");
-    }
-    Ok(())
 }
 
 #[cfg(windows)]

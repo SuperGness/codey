@@ -12,6 +12,7 @@ mod pending_approval;
 mod pet_slim_patch;
 mod plugin_marketplace;
 mod process_cleanup;
+mod process_tree;
 mod provider_lease;
 mod provider_models;
 mod session_delete;
@@ -82,12 +83,15 @@ pub async fn run() -> Result<()> {
                 .map_err(|retry_error| format!("{first_error}；重试失败：{retry_error}"))
         }
     };
-    if shutdown_reason == ShutdownReason::CodexExited {
-        match process_cleanup::terminate_other_codey_processes().await {
-            Ok(0) => {}
-            Ok(count) => eprintln!("Codex 已退出，已终止 {count} 个其他 Codey 进程"),
-            Err(error) => eprintln!("Codex 已退出，但清理其他 Codey 进程失败：{error:#}"),
-        }
+    let shutdown_context = match shutdown_reason {
+        ShutdownReason::CodexExited => "Codex 已退出",
+        ShutdownReason::InstallUpdate => "Codey 正在安装更新",
+        ShutdownReason::Signal => "Codey 收到退出信号",
+    };
+    match process_cleanup::terminate_other_codey_processes().await {
+        Ok(0) => {}
+        Ok(count) => eprintln!("{shutdown_context}，已终止 {count} 个遗留 Codey 进程"),
+        Err(error) => eprintln!("{shutdown_context}，但清理遗留 Codey 进程失败：{error:#}"),
     }
     cleanup.map_err(anyhow::Error::msg)
 }

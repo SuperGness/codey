@@ -1420,7 +1420,10 @@ pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> 
     let mut runtime_slot = state.runtime.lock().await;
     stop_waiting_webhook_watcher(state).await;
     if let Some(runtime) = runtime_slot.take() {
-        runtime.stop().await.map_err(|error| error.to_string())?;
+        if let Err(error) = runtime.stop().await {
+            *runtime_slot = Some(runtime);
+            return Err(error.to_string());
+        }
     } else {
         restore_runtime_config(&codex_home()).map_err(|error| error.to_string())?;
     }

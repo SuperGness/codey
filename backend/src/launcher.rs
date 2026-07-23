@@ -1,9 +1,13 @@
+#[cfg(unix)]
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
+#[cfg(any(unix, windows))]
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use codex_plus_core::app_paths::resolve_codex_app_dir_with_saved;
@@ -76,11 +80,11 @@ pub struct CodeyRuntime {
     pub maintenance: MaintenanceStatus,
     pub applied_config: CodeyConfig,
     child: Arc<Mutex<Option<Child>>>,
-    #[cfg(windows)]
     process_id: Option<u32>,
+    #[cfg(unix)]
+    process_group_id: Option<u32>,
     #[cfg(target_os = "macos")]
     inspector_argument: Option<String>,
-    codex_exited: Arc<AtomicBool>,
     watchdog_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     watchdog_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     exit_watchdog_shutdown: Mutex<Option<oneshot::Sender<()>>>,
@@ -287,20 +291,43 @@ impl CodeyRuntime {
             {
                 Ok(target) => target,
                 Err(error) => {
-                    if let Some(mut child) = child.lock().await.take() {
-                        let _ = child.kill().await;
-                    }
                     #[cfg(windows)]
-                    if let Some(process_id) = spawned.process_id {
-                        terminate_windows_process(process_id).await;
+                    if let Err(stop_error) =
+                        terminate_windows_codex_processes(&app_dir, spawned.process_id).await
+                    {
+                        eprintln!("Codex 注入失败后的进程清理失败：{stop_error:#}");
                     }
                     #[cfg(target_os = "macos")]
                     if let Some(inspector_argument) = spawned.inspector_argument.as_deref() {
-                        if let Err(stop_error) =
-                            stop_macos_codex(inspector_argument, &app_dir).await
+                        if let Err(stop_error) = stop_macos_codex(
+                            inspector_argument,
+                            &app_dir,
+                            spawned.process_id,
+                            spawned.process_group_id,
+                        )
+                        .await
                         {
                             eprintln!("Codex 注入失败后的进程清理失败：{stop_error:#}");
                         }
+                    }
+                    #[cfg(all(unix, not(target_os = "macos")))]
+                    if let Err(stop_error) = terminate_unix_codex_processes(
+                        &app_dir,
+                        spawned.process_id,
+                        spawned.process_group_id,
+                        None,
+                    )
+                    .await
+                    {
+                        eprintln!("Codex 注入失败后的进程清理失败：{stop_error:#}");
+                    }
+                    if let Some(mut child) = child.lock().await.take()
+                        && tokio::time::timeout(Duration::from_secs(2), child.wait())
+                            .await
+                            .is_err()
+                    {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
                     }
                     return Err(restore_runtime_config_after_error(&home, error));
                 }
@@ -368,11 +395,11 @@ impl CodeyRuntime {
                 maintenance,
                 applied_config: config.clone(),
                 child,
-                #[cfg(windows)]
                 process_id: spawned.process_id,
+                #[cfg(unix)]
+                process_group_id: spawned.process_group_id,
                 #[cfg(target_os = "macos")]
                 inspector_argument,
-                codex_exited,
                 watchdog_shutdown: Mutex::new(Some(shutdown_tx)),
                 watchdog_task: Mutex::new(Some(watchdog_task)),
                 exit_watchdog_shutdown: Mutex::new(Some(exit_watchdog_shutdown)),
@@ -394,48 +421,57 @@ impl CodeyRuntime {
         if let Some(sender) = self.exit_watchdog_shutdown.lock().await.take() {
             let _ = sender.send(());
         }
-        if !self.codex_exited.load(Ordering::Acquire) {
-            #[cfg(target_os = "macos")]
-            let (requested_macos_stop, macos_stop_error) =
-                if let Some(inspector_argument) = self.inspector_argument.as_deref() {
-                    (
-                        true,
-                        stop_macos_codex(inspector_argument, &self.codex_app_path)
-                            .await
-                            .err(),
-                    )
-                } else {
-                    (false, None)
-                };
-            #[cfg(not(target_os = "macos"))]
-            let requested_macos_stop = false;
+        #[cfg(target_os = "macos")]
+        let process_stop = if let Some(inspector_argument) = self.inspector_argument.as_deref() {
+            stop_macos_codex(
+                inspector_argument,
+                &self.codex_app_path,
+                self.process_id,
+                self.process_group_id,
+            )
+            .await
+        } else {
+            terminate_unix_codex_processes(
+                &self.codex_app_path,
+                self.process_id,
+                self.process_group_id,
+                None,
+            )
+            .await
+            .map(|_| ())
+        };
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let process_stop = terminate_unix_codex_processes(
+            &self.codex_app_path,
+            self.process_id,
+            self.process_group_id,
+            None,
+        )
+        .await
+        .map(|_| ());
+        #[cfg(windows)]
+        let process_stop =
+            terminate_windows_codex_processes(&self.codex_app_path, self.process_id).await;
+        #[cfg(not(any(unix, windows)))]
+        let process_stop: Result<()> = Ok(());
 
-            if let Some(mut child) = self.child.lock().await.take() {
-                if requested_macos_stop {
-                    if tokio::time::timeout(Duration::from_secs(5), child.wait())
-                        .await
-                        .is_err()
-                    {
-                        let _ = child.kill().await;
-                        let _ = child.wait().await;
-                    }
-                } else {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                }
-            }
-            #[cfg(windows)]
-            if let Some(process_id) = self.process_id {
-                terminate_windows_process(process_id).await;
-            }
-            #[cfg(target_os = "macos")]
-            if let Some(error) = macos_stop_error {
-                restore_runtime_config(&codex_home())?;
-                return Err(error);
-            }
+        if let Some(mut child) = self.child.lock().await.take()
+            && tokio::time::timeout(Duration::from_secs(2), child.wait())
+                .await
+                .is_err()
+        {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
         }
-        restore_runtime_config(&codex_home())?;
-        Ok(())
+        let config_restore = restore_runtime_config(&codex_home());
+        match (process_stop, config_restore) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(process_error), Ok(())) => Err(process_error),
+            (Ok(()), Err(config_error)) => Err(config_error),
+            (Err(process_error), Err(config_error)) => anyhow::bail!(
+                "清理 Codex 遗留进程失败：{process_error:#}；恢复 Codex 配置也失败：{config_error:#}"
+            ),
+        }
     }
 }
 
@@ -618,8 +654,9 @@ fn spawn_codex_exit_watcher(
 
 struct SpawnedCodex {
     child: Option<Child>,
-    #[cfg(windows)]
     process_id: Option<u32>,
+    #[cfg(unix)]
+    process_group_id: Option<u32>,
     #[cfg(target_os = "macos")]
     inspector_argument: Option<String>,
     performance_status: String,
@@ -682,12 +719,23 @@ async fn spawn_codex(
                 return Ok(spawned);
             }
             Err(error) => {
-                if let Some(mut child) = spawned.child.take() {
+                if let Err(stop_error) = stop_macos_codex(
+                    &inspector_arg,
+                    app_dir,
+                    spawned.process_id,
+                    spawned.process_group_id,
+                )
+                .await
+                {
+                    eprintln!("Codex 启动补丁失败后的进程清理失败：{stop_error:#}");
+                }
+                if let Some(mut child) = spawned.child.take()
+                    && tokio::time::timeout(Duration::from_secs(2), child.wait())
+                        .await
+                        .is_err()
+                {
                     let _ = child.kill().await;
                     let _ = child.wait().await;
-                }
-                if let Err(stop_error) = stop_macos_codex(&inspector_arg, app_dir).await {
-                    eprintln!("Codex 启动补丁失败后的进程清理失败：{stop_error:#}");
                 }
                 return Err(error)
                     .context("Codex 启动硬补丁未能安装；已停止 Codex，未降级为仅隐藏 UI");
@@ -773,6 +821,8 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
         .ok_or_else(|| anyhow::anyhow!("Codex 启动命令为空"))?;
     let mut child_command = Command::new(executable);
     child_command.args(&command[1..]);
+    #[cfg(unix)]
+    child_command.process_group(0);
     #[cfg(windows)]
     {
         child_command.env_remove("WSL_DISTRO_NAME");
@@ -781,10 +831,12 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
     let child = child_command
         .spawn()
         .with_context(|| format!("启动 Codex 失败：{executable}"))?;
+    let process_id = child.id();
     Ok(SpawnedCodex {
         child: Some(child),
-        #[cfg(windows)]
-        process_id: None,
+        process_id,
+        #[cfg(unix)]
+        process_group_id: process_id,
         #[cfg(target_os = "macos")]
         inspector_argument: None,
         performance_status: String::new(),
@@ -838,9 +890,10 @@ async fn spawn_windows_codex(
     let child = child_command
         .spawn()
         .with_context(|| format!("启动 Codex 失败：{executable}"))?;
+    let process_id = child.id();
     Ok(SpawnedCodex {
         child: Some(child),
-        process_id: None,
+        process_id,
         performance_status: String::new(),
         performance_detail: String::new(),
     })
@@ -848,12 +901,18 @@ async fn spawn_windows_codex(
 
 #[cfg(windows)]
 async fn stop_windows_spawned_codex(spawned: &mut SpawnedCodex) {
-    if let Some(mut child) = spawned.child.take() {
+    if let Some(process_id) = spawned.process_id.take() {
+        if let Err(error) = terminate_windows_process(process_id).await {
+            eprintln!("Codex 启动失败后的进程清理失败：{error:#}");
+        }
+    }
+    if let Some(mut child) = spawned.child.take()
+        && tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .is_err()
+    {
         let _ = child.kill().await;
         let _ = child.wait().await;
-    }
-    if let Some(process_id) = spawned.process_id.take() {
-        terminate_windows_process(process_id).await;
     }
 }
 
@@ -874,62 +933,174 @@ fn build_fresh_macos_open_command(
 }
 
 #[cfg(target_os = "macos")]
-async fn stop_macos_codex(inspector_argument: &str, app_dir: &std::path::Path) -> Result<()> {
-    let status = Command::new("pkill")
-        .args(["-f", "--", inspector_argument])
-        .status()
-        .await
-        .context("按本次启动参数停止 macOS Codex 失败")?;
-    if !status.success() && status.code() != Some(1) {
-        anyhow::bail!("按本次启动参数停止 macOS Codex 失败：pkill 返回 {status}");
-    }
-    if wait_for_macos_codex_exit(app_dir, Duration::from_secs(1)).await? {
-        return Ok(());
-    }
+async fn stop_macos_codex(
+    inspector_argument: &str,
+    app_dir: &std::path::Path,
+    process_id: Option<u32>,
+    process_group_id: Option<u32>,
+) -> Result<()> {
+    terminate_unix_codex_processes(
+        app_dir,
+        process_id,
+        process_group_id,
+        Some(inspector_argument),
+    )
+    .await
+    .map(|_| ())
+}
 
-    let process_ids = macos_codex_process_ids(app_dir).await?;
-    if !process_ids.is_empty() {
-        let mut command = Command::new("kill");
-        command.arg("-TERM");
-        for process_id in process_ids {
-            command.arg(process_id.to_string());
+#[cfg(unix)]
+fn owned_unix_codex_process_ids(
+    processes: &[crate::process_tree::UnixProcessInfo],
+    app_dir: &Path,
+    process_id: Option<u32>,
+    process_group_id: Option<u32>,
+    launch_marker: Option<&str>,
+) -> HashSet<u32> {
+    let current_process_id = std::process::id();
+    let roots = processes.iter().filter_map(|process| {
+        let matches_root = Some(process.process_id) == process_id
+            || Some(process.process_group_id) == process_group_id
+            || crate::process_tree::command_uses_path(&process.command, app_dir)
+            || launch_marker.is_some_and(|marker| {
+                crate::process_tree::command_has_argument(&process.command, marker)
+            });
+        matches_root.then_some(process.process_id)
+    });
+    crate::process_tree::process_ids_with_descendants(processes, roots, current_process_id)
+}
+
+#[cfg(unix)]
+fn owned_unix_process_group(
+    processes: &[crate::process_tree::UnixProcessInfo],
+    app_dir: &Path,
+    process_id: Option<u32>,
+    process_group_id: Option<u32>,
+    launch_marker: Option<&str>,
+) -> Option<u32> {
+    let process_group_id = process_group_id?;
+    processes
+        .iter()
+        .any(|process| {
+            process.process_group_id == process_group_id
+                && (Some(process.process_id) == process_id
+                    || crate::process_tree::command_uses_path(&process.command, app_dir)
+                    || launch_marker.is_some_and(|marker| {
+                        crate::process_tree::command_has_argument(&process.command, marker)
+                    }))
+        })
+        .then_some(process_group_id)
+}
+
+#[cfg(unix)]
+async fn terminate_unix_codex_processes(
+    app_dir: &Path,
+    process_id: Option<u32>,
+    process_group_id: Option<u32>,
+    launch_marker: Option<&str>,
+) -> Result<usize> {
+    let mut known_processes = HashMap::new();
+    let mut processes = crate::process_tree::unix_process_snapshot().await?;
+    let initially_owned = owned_unix_codex_process_ids(
+        &processes,
+        app_dir,
+        process_id,
+        process_group_id,
+        launch_marker,
+    );
+    known_processes.extend(crate::process_tree::identities_for_process_ids(
+        &processes,
+        &initially_owned,
+    ));
+
+    let owned_process_group = owned_unix_process_group(
+        &processes,
+        app_dir,
+        process_id,
+        process_group_id,
+        launch_marker,
+    );
+    crate::process_tree::signal_process_group(owned_process_group, libc::SIGTERM)?;
+    crate::process_tree::signal_processes(
+        &known_processes.keys().copied().collect(),
+        libc::SIGTERM,
+    )?;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let poll_delays = [
+        Duration::from_millis(100),
+        Duration::from_millis(200),
+        Duration::from_millis(350),
+        Duration::from_millis(550),
+        Duration::from_millis(800),
+    ];
+    let mut poll_index = 0usize;
+    let remaining = loop {
+        let currently_owned = owned_unix_codex_process_ids(
+            &processes,
+            app_dir,
+            process_id,
+            process_group_id,
+            launch_marker,
+        );
+        let newly_discovered = currently_owned
+            .into_iter()
+            .filter(|process_id| !known_processes.contains_key(process_id))
+            .collect::<HashSet<_>>();
+        if !newly_discovered.is_empty() {
+            crate::process_tree::signal_processes(&newly_discovered, libc::SIGTERM)?;
+            known_processes.extend(crate::process_tree::identities_for_process_ids(
+                &processes,
+                &newly_discovered,
+            ));
         }
-        let _ = command.status().await;
+        let remaining = crate::process_tree::matching_process_ids(&processes, &known_processes);
+        if remaining.is_empty() || tokio::time::Instant::now() >= deadline {
+            break remaining;
+        }
+        let remaining_time = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let delay = poll_delays
+            .get(poll_index)
+            .copied()
+            .unwrap_or(Duration::from_millis(800))
+            .min(remaining_time);
+        poll_index = poll_index.saturating_add(1);
+        tokio::time::sleep(delay).await;
+        processes = crate::process_tree::unix_process_snapshot().await?;
+    };
+
+    if !remaining.is_empty() {
+        let owned_process_group = process_group_id.filter(|process_group_id| {
+            processes.iter().any(|process| {
+                process.process_group_id == *process_group_id
+                    && remaining.contains(&process.process_id)
+            })
+        });
+        crate::process_tree::signal_process_group(owned_process_group, libc::SIGKILL)?;
+        crate::process_tree::signal_processes(&remaining, libc::SIGKILL)?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let final_snapshot = crate::process_tree::unix_process_snapshot().await?;
+        let live_process_ids =
+            crate::process_tree::matching_process_ids(&final_snapshot, &known_processes);
+        let stubborn_processes = remaining
+            .intersection(&live_process_ids)
+            .copied()
+            .collect::<Vec<_>>();
+        if !stubborn_processes.is_empty() {
+            anyhow::bail!("强制停止 Codex 进程超时：{stubborn_processes:?}");
+        }
     }
-    if wait_for_macos_codex_exit(app_dir, Duration::from_secs(5)).await? {
-        return Ok(());
-    }
-    anyhow::bail!("停止 macOS Codex 超时，目标主进程仍在运行")
+    Ok(known_processes.len())
 }
 
 #[cfg(target_os = "macos")]
 async fn macos_codex_process_ids(app_dir: &std::path::Path) -> Result<Vec<u32>> {
-    let executable = codex_plus_core::app_paths::build_codex_executable(app_dir);
-    let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
-    let executable = executable.to_string_lossy();
-    let output = Command::new("ps")
-        .args(["-axo", "pid=,command="])
-        .output()
-        .await
-        .context("检查 macOS Codex 进程失败")?;
-    if !output.status.success() {
-        anyhow::bail!("检查 macOS Codex 进程失败：ps 返回 {}", output.status);
-    }
-    let processes = String::from_utf8_lossy(&output.stdout);
-    Ok(processes
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim_start();
-            let separator = line.find(char::is_whitespace)?;
-            let (process_id, command) = line.split_at(separator);
-            let command = command.trim_start();
-            let matches = command == executable
-                || command
-                    .strip_prefix(executable.as_ref())
-                    .is_some_and(|rest| rest.chars().next().is_some_and(char::is_whitespace));
-            matches.then(|| process_id.parse::<u32>().ok()).flatten()
-        })
-        .collect())
+    let processes = crate::process_tree::unix_process_snapshot().await?;
+    Ok(
+        owned_unix_codex_process_ids(&processes, app_dir, None, None, None)
+            .into_iter()
+            .collect(),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -937,27 +1108,74 @@ async fn macos_codex_is_running(app_dir: &std::path::Path) -> Result<bool> {
     Ok(!macos_codex_process_ids(app_dir).await?.is_empty())
 }
 
-#[cfg(target_os = "macos")]
-async fn wait_for_macos_codex_exit(app_dir: &std::path::Path, timeout: Duration) -> Result<bool> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if !macos_codex_is_running(app_dir).await? {
-            return Ok(true);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Ok(false);
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+#[cfg(windows)]
+fn windows_path_is_within(path: &Path, directory: &Path) -> bool {
+    let path = normalized_windows_path(path);
+    let directory = normalized_windows_path(directory);
+    path == directory
+        || path
+            .strip_prefix(&directory)
+            .is_some_and(|rest| rest.starts_with('\\'))
 }
 
 #[cfg(windows)]
-async fn terminate_windows_process(process_id: u32) {
+async fn terminate_windows_codex_processes(app_dir: &Path, process_id: Option<u32>) -> Result<()> {
+    let processes = codex_plus_core::windows_enumerate_processes();
+    let mut process_ids = processes
+        .iter()
+        .filter(|process| {
+            Some(process.process_id) == process_id
+                || process
+                    .executable_path
+                    .as_deref()
+                    .is_some_and(|path| windows_path_is_within(path, app_dir))
+        })
+        .map(|process| process.process_id)
+        .collect::<HashSet<_>>();
+    loop {
+        let previous_len = process_ids.len();
+        for process in &processes {
+            if process_ids.contains(&process.parent_process_id) {
+                process_ids.insert(process.process_id);
+            }
+        }
+        if process_ids.len() == previous_len {
+            break;
+        }
+    }
+    process_ids.remove(&std::process::id());
+    for process_id in &process_ids {
+        terminate_windows_process(*process_id).await?;
+    }
+    let remaining = codex_plus_core::windows_enumerate_processes()
+        .into_iter()
+        .filter(|process| process_ids.contains(&process.process_id))
+        .map(|process| process.process_id)
+        .collect::<Vec<_>>();
+    if !remaining.is_empty() {
+        anyhow::bail!("强制停止 Windows Codex 进程超时：{remaining:?}");
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn terminate_windows_process(process_id: u32) -> Result<()> {
     let mut command = Command::new("taskkill");
     command
         .args(["/PID", &process_id.to_string(), "/T", "/F"])
         .creation_flags(codex_plus_core::windows_create_no_window());
-    let _ = command.status().await;
+    let status = command
+        .status()
+        .await
+        .with_context(|| format!("终止 Windows Codex 进程 {process_id} 失败"))?;
+    if !status.success()
+        && codex_plus_core::windows_enumerate_processes()
+            .iter()
+            .any(|process| process.process_id == process_id)
+    {
+        anyhow::bail!("终止 Windows Codex 进程 {process_id} 失败：taskkill 返回 {status}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1016,6 +1234,50 @@ mod tests {
         .await
         .unwrap();
         assert!(!running);
+    }
+
+    #[test]
+    fn owned_codex_tree_includes_bundle_helpers_and_external_descendants() {
+        let processes = crate::process_tree::parse_unix_process_snapshot(
+            b"100 1 100 Thu Jul 23 19:23:12 2026 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT --inspect\n\
+              101 100 100 Thu Jul 23 19:23:13 2026 /Applications/ChatGPT.app/Contents/Resources/codex app-server\n\
+              102 101 102 Thu Jul 23 19:23:14 2026 node ./mcp/server.mjs\n\
+              103 1 103 Thu Jul 23 19:23:15 2026 /Applications/ChatGPT.app/Contents/Frameworks/browser_crashpad_handler\n\
+              200 1 200 Thu Jul 23 19:23:16 2026 unrelated\n",
+        );
+        assert_eq!(
+            owned_unix_codex_process_ids(
+                &processes,
+                Path::new("/Applications/ChatGPT.app"),
+                None,
+                None,
+                Some("--inspect"),
+            ),
+            HashSet::from([100, 101, 102, 103])
+        );
+    }
+
+    #[tokio::test]
+    async fn unix_shutdown_terminates_the_spawned_process_group() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        command.process_group(0);
+        let mut child = command.spawn().expect("spawn process tree");
+        let process_id = child.id().expect("child process id");
+
+        terminate_unix_codex_processes(
+            Path::new("/definitely-not-a-real-codex-app"),
+            Some(process_id),
+            Some(process_id),
+            None,
+        )
+        .await
+        .expect("terminate process tree");
+
+        tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .expect("root process was left running")
+            .expect("wait for root process");
     }
 
     #[tokio::test]

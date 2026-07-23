@@ -90,7 +90,7 @@ Codey 已将实际使用的 `CodexPlusPlus v1.2.36` core/data crate 固定在 `v
 
 ## 启动与恢复
 
-打开 Codey 后不会创建原生配置窗口；Codey 会先迁移非法的内置 provider 覆盖、永久同步 rollout 与 SQLite、清理幽灵任务索引，再备份并临时应用当前 provider、修复插件市场、启动 Codex，最后通过 CDP 注入轻量控制脚本。Windows 上必须先从系统托盘完全退出已有 Codex，自动性能补丁才能在新主进程执行前安装；macOS 上启用宠物硬阉割时也必须先完全退出已有 Codex。首次点击 Codex header 中的 “Codey” 按钮时才会加载紧凑 React 浮层，配置操作通过本次 CDP bridge 发送给 Rust 进程。遮罩空白处、右上角关闭按钮和 `Esc` 都能关闭浮层。关闭这次由 Codey 拉起的 Codex 后，Codey 会恢复临时配置，再终止其他仍在运行的 Codey 进程并自行退出；会话 JSONL、数据库与索引清理结果不回滚。若 CDP 注入失败，Codey 会停止本次启动并输出错误，不会另起本地 Web 服务。
+打开 Codey 后不会创建原生配置窗口；Codey 会先迁移非法的内置 provider 覆盖、永久同步 rollout 与 SQLite、清理幽灵任务索引，再备份并临时应用当前 provider、修复插件市场、启动 Codex，最后通过 CDP 注入轻量控制脚本。Windows 上必须先从系统托盘完全退出已有 Codex，自动性能补丁才能在新主进程执行前安装；macOS 上启用宠物硬阉割时也必须先完全退出已有 Codex。首次点击 Codex header 中的 “Codey” 按钮时才会加载紧凑 React 浮层，配置操作通过本次 CDP bridge 发送给 Rust 进程。遮罩空白处、右上角关闭按钮和 `Esc` 都能关闭浮层。关闭这次由 Codey 拉起的 Codex 后，Codey 会终止该 Codex 的主进程、Helper、app-server 及后代进程树，恢复临时配置，再清理其他遗留 Codey 进程并自行退出；收到系统退出信号和安装更新时也执行同一套清理。会话 JSONL、数据库与索引清理结果不回滚。若 CDP 注入失败，Codey 会停止本次启动并输出错误，不会另起本地 Web 服务。
 
 Codey 不改写 `auth.json`，因此 Codex 的账号栏仍会显示原来的官方登录账号；这只代表客户端登录会话，不代表第三方 provider 仍走官方接口。运行期间全局 provider ID 保持不变，但第三方 API 地址、协议和 bearer token 会直接写入该 provider 的临时配置。
 
