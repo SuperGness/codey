@@ -92,12 +92,18 @@ class FakeElement {
   }
 
   matches(selector) {
-    if (selector === "button") return this.tagName === "BUTTON";
-    if (selector === "[role=button]") return this.getAttribute("role") === "button";
-    if (selector === "a") return this.tagName === "A";
-    if (selector === "a[href]") return this.tagName === "A" && this.hasAttribute("href");
-    const attribute = selector.match(/^\[([^\]=]+)(?:=[^\]]+)?\]$/)?.[1];
-    return attribute ? this.hasAttribute(attribute) : false;
+    const tag = selector.match(/^[a-z]+/i)?.[0];
+    if (tag && this.tagName !== tag.toUpperCase()) return false;
+    const attributes = [...selector.matchAll(/\[([^\]=\]]+)(?:=(?:"([^"]*)"|'([^']*)'|([^\]]+)))?\]/g)];
+    if (attributes.length) {
+      return attributes.every((match) => {
+        if (!this.hasAttribute(match[1])) return false;
+        const expected = match[2] ?? match[3] ?? match[4];
+        return expected === undefined || this.getAttribute(match[1]) === expected;
+      });
+    }
+    if (tag) return true;
+    return false;
   }
 
   querySelector(selector) {
@@ -134,7 +140,7 @@ class FakeElement {
   }
 }
 
-function loadInjection() {
+function loadInjection({ bridge } = {}) {
   const body = new FakeElement("body");
   const documentElement = new FakeElement("html");
   const thread = new FakeElement("div", {
@@ -212,7 +218,9 @@ function loadInjection() {
     },
     querySelectorAll(selector) {
       if (selector === "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]") {
-        return thread.parentElement ? [thread] : [];
+        return body
+          .querySelectorAll("[data-app-action-sidebar-thread-id]")
+          .filter((element) => element.hasAttribute("data-app-action-sidebar-thread-title"));
       }
       if (selector === "[data-app-action-sidebar-project-row][data-app-action-sidebar-project-id]") {
         return project.parentElement ? [project] : [];
@@ -235,6 +243,7 @@ function loadInjection() {
   const window = {
     __codexSessionDeleteBridge: async (path, payload) => {
       bridgeCalls.push({ path, payload });
+      if (bridge) return bridge(path, payload);
       if (path === "/session/delete") return { status: "ok", deleted: true };
       return { status: "ok" };
     },
@@ -292,6 +301,7 @@ function loadInjection() {
     tasksSection,
     newTaskButton,
     thread,
+    window,
   };
 }
 
@@ -392,5 +402,33 @@ test("deletes a newly created sidebar session by its canonical conversation id",
     sessionId: conversationId,
     title: "待删除会话",
   });
+  assert.equal(runtime.thread.parentElement, null);
+});
+
+test("treats an already missing local thread as deleted and prunes stale sidebar rows", async () => {
+  const runtime = loadInjection({
+    bridge: async (path) => {
+      if (path === "/session/delete") {
+        return { status: "failed", message: "Thread not found in local storage" };
+      }
+      return { status: "ok" };
+    },
+  });
+
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.document.body
+    .querySelector("[data-codey-session-delete-confirm]")
+    .click();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const deletion = runtime.bridgeCalls.find((call) => call.path === "/session/delete");
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: "thread-1",
+    title: "待删除会话",
+  });
+  assert.equal(runtime.thread.parentElement, null);
+
+  runtime.document.body.appendChild(runtime.thread);
+  runtime.window.__codeyPruneDeletedSidebarSessions(runtime.document);
   assert.equal(runtime.thread.parentElement, null);
 });

@@ -60,7 +60,9 @@
   const threadUpdatedAtCache = new Map();
   const threadUpdatedAtRequestedAt = new Map();
   const pendingThreadUpdatedAtRefs = new Map();
+  const deletedSidebarSessionIds = new Map();
   const hardDeletedMessageKeys = new Set();
+  const deletedSidebarSessionTtlMs = 10 * 60 * 1000;
   const queryWithin = (root, selector) => {
     const matches = [];
     if (root instanceof HTMLElement && typeof root.matches === "function" && root.matches(selector)) {
@@ -658,6 +660,45 @@
     return rowSessionId;
   };
 
+  const rememberDeletedSidebarSession = (sessionId) => {
+    const normalizedSessionId = normalizeThreadSessionId(sessionId);
+    if (!normalizedSessionId || normalizedSessionId.startsWith("client-new-thread:")) return "";
+    deletedSidebarSessionIds.set(
+      normalizedSessionId,
+      Date.now() + deletedSidebarSessionTtlMs,
+    );
+    sidebarTitleCache.delete(normalizedSessionId);
+    threadUpdatedAtCache.delete(normalizedSessionId);
+    threadUpdatedAtRequestedAt.delete(normalizedSessionId);
+    pendingThreadUpdatedAtRefs.delete(normalizedSessionId);
+    return normalizedSessionId;
+  };
+
+  const isDeletedSidebarSession = (sessionId) => {
+    const normalizedSessionId = normalizeThreadSessionId(sessionId);
+    const expiresAt = deletedSidebarSessionIds.get(normalizedSessionId);
+    if (!expiresAt) return false;
+    if (expiresAt <= Date.now()) {
+      deletedSidebarSessionIds.delete(normalizedSessionId);
+      return false;
+    }
+    return true;
+  };
+
+  const pruneDeletedSidebarSessions = (root = document) => {
+    let removedRoot = false;
+    queryWithin(root,
+      "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
+    ).forEach((thread) => {
+      if (!(thread instanceof HTMLElement)) return;
+      const sessionId = threadSessionIdFromRow(thread);
+      if (!isDeletedSidebarSession(sessionId)) return;
+      if (thread === root) removedRoot = true;
+      thread.remove();
+    });
+    return removedRoot;
+  };
+
   const numericThreadTimestamp = (value) => {
     const timestamp = Number(value);
     return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
@@ -939,6 +980,7 @@
       if (result?.status !== "imported" || !result.sessionId) {
         throw new Error("导入结果不完整");
       }
+      deletedSidebarSessionIds.delete(normalizeThreadSessionId(result.sessionId));
       const refreshed = await refreshRecentLocalSessions();
       showRuntimeToast(result.message || "会话数据已导入");
       const importedProjectPath = result.projectPath || projectPath;
@@ -1107,6 +1149,29 @@
     return false;
   };
 
+  const isSessionAlreadyDeletedMessage = (value) => (
+    /Thread not found in local storage/i.test(String(value || ""))
+  );
+
+  const completeSidebarSessionDelete = (thread, sessionId, title, isActive, alreadyDeleted) => {
+    const normalizedSessionId = rememberDeletedSidebarSession(sessionId) || sessionId;
+    closeSessionDeletePopover();
+    if (isActive) {
+      const navigated = navigateAwayFromDeletedThread(thread);
+      if (!navigated) window.setTimeout(() => location.reload(), 180);
+    }
+    thread.remove();
+    void refreshRecentLocalSessions();
+    window.dispatchEvent(new CustomEvent("codey-session-deleted", {
+      detail: { sessionId: normalizedSessionId, title, alreadyDeleted },
+    }));
+    showRuntimeToast(
+      alreadyDeleted
+        ? `会话${title ? `“${title}”` : ""}已不存在，已从列表移除`
+        : `已删除会话${title ? `“${title}”` : ""}`,
+    );
+  };
+
   const deleteSidebarSession = async (thread, anchor, confirmButton) => {
     const sessionId = threadSessionIdFromRow(thread);
     const title = String(
@@ -1129,20 +1194,19 @@
     anchor.setAttribute("aria-busy", "true");
     try {
       const result = await callBridge("/session/delete", { sessionId, title });
-      if (result?.status !== "ok" || result?.deleted !== true) {
+      const alreadyDeleted = isSessionAlreadyDeletedMessage(result?.message);
+      if (
+        (result?.status !== "ok" || result?.deleted !== true)
+        && !alreadyDeleted
+      ) {
         throw new Error(result?.message || "未知错误");
       }
-      closeSessionDeletePopover();
-      if (isActive) {
-        const navigated = navigateAwayFromDeletedThread(thread);
-        if (!navigated) window.setTimeout(() => location.reload(), 180);
-      }
-      thread.remove();
-      window.dispatchEvent(new CustomEvent("codey-session-deleted", {
-        detail: { sessionId, title },
-      }));
-      showRuntimeToast(`已删除会话${title ? `“${title}”` : ""}`);
+      completeSidebarSessionDelete(thread, sessionId, title, isActive, alreadyDeleted);
     } catch (error) {
+      if (isSessionAlreadyDeletedMessage(error instanceof Error ? error.message : error)) {
+        completeSidebarSessionDelete(thread, sessionId, title, isActive, true);
+        return;
+      }
       confirmButton.disabled = false;
       confirmButton.textContent = "删除";
       showRuntimeToast(
@@ -1223,6 +1287,7 @@
   };
 
   const installSessionDeleteButtons = (root = document) => {
+    if (pruneDeletedSidebarSessions(root)) return;
     queryWithin(root,
       "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
     ).forEach((thread) => {
@@ -1412,6 +1477,7 @@
 
   const scan = (root = document, syncTitles = true, mountSettings = true) => {
     window.__codeyBlockNativeVoiceControls?.(root);
+    if (pruneDeletedSidebarSessions(root)) return;
     if (mountSettings) mountButton();
     installSessionExportButtons(root);
     installTasksImportButton(root);
@@ -1437,6 +1503,7 @@
   window.__codeyImportSessionFile = importSessionFile;
   window.__codeyInstallSessionDeleteButtons = installSessionDeleteButtons;
   window.__codeyOpenSessionDeletePopover = openSessionDeletePopover;
+  window.__codeyPruneDeletedSidebarSessions = pruneDeletedSidebarSessions;
   window.__codeySyncSelectionGroups = syncSelectionGroups;
   window.__codeyDeleteSelectedMessages = deleteSelected;
   window.__codeyReloadConversationAfterHardDelete = reloadConversationAfterHardDelete;
