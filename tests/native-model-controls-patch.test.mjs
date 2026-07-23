@@ -294,6 +294,55 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       patchedServiceTierRequest,
       /if\(n!==`chatgpt`\)return!0/,
     );
+
+    const fastModelPresentationSource = [
+      "const nativeModelPickerMarkers=[",
+      "`composer.intelligenceDropdown.model.title`,",
+      "`composer.intelligenceDropdown.model.rowLabel`];",
+      "function triggerConfig(hideLabel,powerSelections){",
+      "let workMode=true,copilot=false,status=`ok`,selection=null,view=`advanced`,fallbackView=`advanced`,",
+      "compact=workMode&&powerSelections.length>=4&&!copilot&&status!==`error`,",
+      "menu=compact&&selection==null?`advanced`:view??fallbackView,",
+      "configEnabled=compact&&!hideLabel,focusTarget=compact?`simple`:`advanced`;",
+      "return {menu,focusTarget,powerSelections,modelPickerTriggerConfig:configEnabled?",
+      "{showFastServiceTierIndicator:true}:void 0}}",
+      "function nativePicker(modelPickerTriggerConfig,powerSelections,selectedServiceTierIconKind){",
+      "let workMode=true,modelOptionsDisabled=false,reasoningEffortDisabled=false,",
+      "compact=workMode&&powerSelections.length>=4&&!modelOptionsDisabled&&!reasoningEffortDisabled,",
+      "useCompact=compact,selectedModel={},selectedServiceTier=`priority`,",
+      "rowIcon=!useCompact&&selectedServiceTierIconKind!=null&&supports(selectedModel,selectedServiceTier)?selectedServiceTierIconKind:null;",
+      "let options=[`gpt-5.5`,`claude-opus-4-8`].map(model=>({",
+      "model,selectedServiceTierIconKind:useCompact?null:selectedServiceTierIconKind,stripGptPrefix:useCompact}));",
+      "if(compact&&modelPickerTriggerConfig!=null)return {kind:`solid`,options,rowIcon};",
+      "return {kind:`outline`,options,rowIcon}}",
+      "function supports(){return true}",
+    ].join("");
+    const patchedFastModelPresentation = await patchAsset(fastModelPresentationSource);
+    assert.match(patchedFastModelPresentation, /configEnabled=!hideLabel/);
+    assert.match(patchedFastModelPresentation, /rowIcon=null/);
+    assert.match(
+      patchedFastModelPresentation,
+      /selectedServiceTierIconKind:null,stripGptPrefix:/,
+    );
+    assert.match(
+      patchedFastModelPresentation,
+      /if\(modelPickerTriggerConfig!=null\)/,
+    );
+    const nativeModelPicker = Function(
+      `${patchedFastModelPresentation};return {nativePicker,triggerConfig};`,
+    )();
+    const thirdPartyTrigger = nativeModelPicker.triggerConfig(false, []);
+    const thirdPartyPresentation = nativeModelPicker.nativePicker(
+      thirdPartyTrigger.modelPickerTriggerConfig,
+      [],
+      "fast",
+    );
+    assert.equal(thirdPartyPresentation.kind, "solid");
+    assert.equal(thirdPartyPresentation.rowIcon, null);
+    assert.ok(thirdPartyPresentation.options.every(
+      (option) => option.selectedServiceTierIconKind === null,
+    ));
+
     for (const url of [
       "app://-/assets/app-initial.js",
       "app://-/assets/app-initial-windows.js",

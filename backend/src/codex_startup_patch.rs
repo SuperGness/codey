@@ -109,6 +109,44 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
         "service tier request",
       );
     }
+    if (
+      source.includes("composer.intelligenceDropdown.model.title") &&
+      source.includes("composer.intelligenceDropdown.model.rowLabel") &&
+      source.includes("modelPickerTriggerConfig:") &&
+      source.includes("selectedServiceTierIconKind:") &&
+      source.includes("showFastServiceTierIndicator:")
+    ) {
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*!\s*([$A-Z_a-z][$\w]*)(\s*,\s*[$A-Z_a-z][$\w]*\s*=\s*[$A-Z_a-z][$\w]*\s*\?)/g,
+        (
+          _match,
+          assignment,
+          _triggerConfigName,
+          hideLabelName,
+          followingAssignment,
+        ) => `${assignment}!${hideLabelName}${followingAssignment}`,
+        "fast model trigger availability",
+      );
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\b[$A-Z_a-z][$\w]*\s*=\s*)!\s*[$A-Z_a-z][$\w]*\s*&&\s*[$A-Z_a-z][$\w]*\s*!=\s*null\s*&&\s*[$A-Z_a-z][$\w]*\s*\(\s*[$A-Z_a-z][$\w]*\s*,\s*[$A-Z_a-z][$\w]*\s*\)\s*\?\s*[$A-Z_a-z][$\w]*\s*:\s*null/g,
+        (_match, assignment) => `${assignment}null`,
+        "model row fast icon",
+      );
+      patched = replaceUniqueRendererGate(
+        patched,
+        /selectedServiceTierIconKind\s*:\s*[$A-Z_a-z][$\w]*\s*\?\s*null\s*:\s*[$A-Z_a-z][$\w]*\s*,\s*stripGptPrefix\s*:/g,
+        "selectedServiceTierIconKind:null,stripGptPrefix:",
+        "model list fast icons",
+      );
+      patched = replaceUniqueRendererGate(
+        patched,
+        /if\s*\(\s*[$A-Z_a-z][$\w]*\s*&&\s*([$A-Z_a-z][$\w]*)\s*!=\s*null\s*\)/g,
+        (_match, triggerConfigName) => `if(${triggerConfigName}!=null)`,
+        "fast model trigger fallback",
+      );
+    }
     return patched;
   };
   const isCodexRendererAssetRequest = (request) => {
