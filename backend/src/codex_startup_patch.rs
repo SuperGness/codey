@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-pub const PATCH_RESULT: &str = "codey-startup-patch-installed-v10";
+pub const PATCH_RESULT: &str = "codey-startup-patch-installed-v11";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchOptions {
@@ -58,8 +58,8 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
       patched = replaceUniqueRendererGate(
         patched,
         /if\s*\(\s*(?:[$A-Z_a-z][$\w]*\?\.\s*has\(\s*[$A-Z_a-z][$\w]*\.model\s*\)\s*===\s*!0\s*\|\|\s*)?\(?\s*([$A-Z_a-z][$\w]*)\s*\?\s*([$A-Z_a-z][$\w]*)\.has\(\s*([$A-Z_a-z][$\w]*)\.model\s*\)\s*:\s*!\s*\3\.hidden\s*\)?\s*\)/g,
-        (_match, _useAllowlistName, allowlistName, modelName) =>
-          `if(${allowlistName}.has(${modelName}.model))`,
+        (_match, useAllowlistName, allowlistName, modelName) =>
+          `if(${useAllowlistName}?(${allowlistName}.has(${modelName}.model)||!${modelName}.hidden):!${modelName}.hidden)`,
         "model allowlist",
       );
     }
@@ -127,17 +127,6 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
       source.includes("selectedServiceTierIconKind:") &&
       source.includes("showFastServiceTierIndicator:")
     ) {
-      patched = replaceUniqueRendererGate(
-        patched,
-        /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*!\s*([$A-Z_a-z][$\w]*)(?=\s*,[\s\S]{0,8192}?modelPickerTriggerConfig\s*:\s*\2\s*\?)/g,
-        (
-          _match,
-          assignment,
-          _triggerConfigName,
-          hideLabelName,
-        ) => `${assignment}!${hideLabelName}`,
-        "fast model trigger availability",
-      );
       patched = replaceRendererGates(
         patched,
         /(\b[$A-Z_a-z][$\w]*\s*=\s*)(?:!\s*[$A-Z_a-z][$\w]*\s*&&\s*)?([$A-Z_a-z][$\w]*)\s*!==?\s*null\s*&&\s*[$A-Z_a-z][$\w]*\s*\(\s*[$A-Z_a-z][$\w]*\s*,\s*[$A-Z_a-z][$\w]*\s*\)\s*\?\s*\2\s*:\s*null/g,
@@ -149,15 +138,6 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
         /selectedServiceTierIconKind\s*:\s*[$A-Z_a-z][$\w]*\s*\?\s*null\s*:\s*[$A-Z_a-z][$\w]*\s*,\s*stripGptPrefix\s*:/g,
         "selectedServiceTierIconKind:null,stripGptPrefix:",
         "model list fast icons",
-      );
-      patched = replaceUniqueRendererGate(
-        patched,
-        /(modelPickerTriggerConfig\s*:\s*([$A-Z_a-z][$\w]*)\s*[,}][\s\S]{0,16384}?)if\s*\(\s*[$A-Z_a-z][$\w]*\s*&&\s*\2\s*!=\s*null\s*\)|if\s*\(\s*[$A-Z_a-z][$\w]*\s*&&\s*modelPickerTriggerConfig\s*!=\s*null\s*\)/g,
-        (_match, aliasedPrefix, triggerConfigName) =>
-          aliasedPrefix == null
-            ? "if(modelPickerTriggerConfig!=null)"
-            : `${aliasedPrefix}if(${triggerConfigName}!=null)`,
-        "fast model trigger fallback",
       );
     }
     return patched;
@@ -473,12 +453,6 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   // later startup-config update explicitly so no events queue while app-server
   // configuration is still resolving.
   const patchCodexMainDesktopAnalytics = (source) => {
-    if (
-      !source.includes("worker-analytics-enabled-update") ||
-      !/source:(`codex-desktop`|"codex-desktop"|'codex-desktop')/.test(source)
-    ) {
-      throw new Error("Codey desktop analytics anchors not found");
-    }
     let workerBootstrapCount = 0;
     let workerUpdateCount = 0;
     let mainTransportCount = 0;
@@ -924,6 +898,44 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     writable: false,
   });
 
+  const optionalMainBundlePatchFailures = [];
+  const hasOptionalMainBundlePatchFailure = (name) =>
+    optionalMainBundlePatchFailures.some((failure) => failure.name === name);
+  const applyOptionalMainBundlePatch = (name, patch, source) => {
+    try {
+      const patched = patch(source);
+      const failureIndex = optionalMainBundlePatchFailures.findIndex(
+        (failure) => failure.name === name,
+      );
+      if (failureIndex >= 0) {
+        optionalMainBundlePatchFailures.splice(failureIndex, 1);
+      }
+      return patched;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failure = { name, message };
+      const failureIndex = optionalMainBundlePatchFailures.findIndex(
+        (entry) => entry.name === name,
+      );
+      if (failureIndex >= 0) {
+        optionalMainBundlePatchFailures[failureIndex] = failure;
+      } else {
+        optionalMainBundlePatchFailures.push(failure);
+      }
+      console.warn(`[Codey] skipped incompatible ${name} patch: ${message}`);
+      return source;
+    }
+  };
+  Object.defineProperty(
+    globalThis,
+    "__CODEY_APPLY_OPTIONAL_MAIN_BUNDLE_PATCH__",
+    {
+      configurable: false,
+      value: applyOptionalMainBundlePatch,
+      writable: false,
+    },
+  );
+
   // The pet manager and macOS native composition bridge live inside the
   // monolithic main bundle. Replace the pet manager construction before V8
   // compiles that bundle so the feature owns no timers, windows, native
@@ -942,9 +954,21 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
 
       const fs = process.getBuiltinModule("fs");
       let source = fs.readFileSync(filename, "utf8");
-      source = patchCodexMainDesktopAnalytics(source);
-      source = patchCodexMainFocusReconcile(source);
-      source = patchCodexMainAppStateHeartbeat(source);
+      source = applyOptionalMainBundlePatch(
+        "desktopCesAnalytics",
+        patchCodexMainDesktopAnalytics,
+        source,
+      );
+      source = applyOptionalMainBundlePatch(
+        "externalPluginFocusReconcile",
+        patchCodexMainFocusReconcile,
+        source,
+      );
+      source = applyOptionalMainBundlePatch(
+        "appStateHeartbeat",
+        patchCodexMainAppStateHeartbeat,
+        source,
+      );
       if (disablePet) {
       if (
         !source.includes("electron-avatar-overlay-open") ||
@@ -1074,9 +1098,12 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
 
       globalThis.__CODEY_TEMP_WEBVIEW_SOURCE_PATCHED__ = true;
       globalThis.__CODEY_EXECUTION_REAPER_SOURCE_PATCHED__ = true;
-      globalThis.__CODEY_EXTERNAL_PLUGIN_FOCUS_RECONCILE_SOURCE_PATCHED__ = true;
-      globalThis.__CODEY_DESKTOP_ANALYTICS_SOURCE_PATCHED__ = true;
-      globalThis.__CODEY_APP_STATE_HEARTBEAT_SOURCE_PATCHED__ = true;
+      globalThis.__CODEY_EXTERNAL_PLUGIN_FOCUS_RECONCILE_SOURCE_PATCHED__ =
+        !hasOptionalMainBundlePatchFailure("externalPluginFocusReconcile");
+      globalThis.__CODEY_DESKTOP_ANALYTICS_SOURCE_PATCHED__ =
+        !hasOptionalMainBundlePatchFailure("desktopCesAnalytics");
+      globalThis.__CODEY_APP_STATE_HEARTBEAT_SOURCE_PATCHED__ =
+        !hasOptionalMainBundlePatchFailure("appStateHeartbeat");
       module._compile(source, filename);
     };
   }
@@ -1198,15 +1225,26 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     disablePet,
     disableVoice,
     disableAppServerAnalytics: true,
-    disableDesktopCesAnalytics: true,
+    get disableDesktopCesAnalytics() {
+      return !hasOptionalMainBundlePatchFailure("desktopCesAnalytics");
+    },
     get appServerAnalyticsPatchCount() {
       return appServerAnalyticsPatchCount;
     },
-    throttleExternalPluginFocusReconcile: true,
+    get throttleExternalPluginFocusReconcile() {
+      return !hasOptionalMainBundlePatchFailure(
+        "externalPluginFocusReconcile",
+      );
+    },
     get externalPluginFocusReconcileSuppressedCount() {
       return externalPluginFocusReconcileSuppressedCount;
     },
-    disableAppStateHeartbeat: true,
+    get disableAppStateHeartbeat() {
+      return !hasOptionalMainBundlePatchFailure("appStateHeartbeat");
+    },
+    get optionalMainBundlePatchFailures() {
+      return optionalMainBundlePatchFailures.map((failure) => ({ ...failure }));
+    },
     reclaimExecutionEnvironments: true,
     restoreNativeModelAndSpeedControls: true,
     destroyTemporaryWebViews: true,
@@ -1215,7 +1253,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   setImmediate(() => {
     try { process.getBuiltinModule("inspector").close(); } catch {}
   });
-  return "codey-startup-patch-installed-v10";
+  return "codey-startup-patch-installed-v11";
 })()
 "#;
 
@@ -1430,7 +1468,7 @@ mod tests {
 
     #[test]
     fn patch_result_is_stable_for_launch_status_validation() {
-        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v10");
+        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v11");
     }
 
     #[test]
@@ -1454,11 +1492,12 @@ mod tests {
         assert!(expression.contains("__CODEY_DISABLED_PET_MANAGER__"));
         assert!(expression.contains("getVisibleNativePetWebContents"));
         assert!(expression.contains("disableAppServerAnalytics: true"));
-        assert!(expression.contains("disableDesktopCesAnalytics: true"));
+        assert!(expression.contains("get disableDesktopCesAnalytics()"));
         assert!(expression.contains("analytics.enabled=false"));
         assert!(expression.contains("reconcileExternalPluginState"));
-        assert!(expression.contains("throttleExternalPluginFocusReconcile: true"));
-        assert!(expression.contains("disableAppStateHeartbeat: true"));
+        assert!(expression.contains("get throttleExternalPluginFocusReconcile()"));
+        assert!(expression.contains("get disableAppStateHeartbeat()"));
+        assert!(expression.contains("get optionalMainBundlePatchFailures()"));
         assert!(expression.contains("module._compile(source, filename)"));
     }
 

@@ -44,7 +44,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
   try {
     assert.equal(
       (0, eval)(await loadPatchExpression()),
-      "codey-startup-patch-installed-v10",
+      "codey-startup-patch-installed-v11",
     );
     Module._load("electron", undefined, false).protocol.handle(
       "app",
@@ -93,7 +93,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
     );
     assert.match(
       patchedModelListFilter,
-      /if\(n\.has\(r\.model\)\)/,
+      /if\(u\?\(n\.has\(r\.model\)\|\|!r\.hidden\):!r\.hidden\)/,
     );
     assert.match(patchedModelListFilter, /u=s&&e=== `chatgpt`/);
     const filterModels = Function(
@@ -112,7 +112,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
         models,
         useHiddenModels: true,
       }).models,
-      ["gpt-5.6-sol", "hidden-preview"],
+      ["gpt-5.6-sol", "gpt-5.3-codex-spark", "hidden-preview"],
     );
     assert.deepEqual(
       filterModels({
@@ -122,7 +122,17 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
         models,
         useHiddenModels: true,
       }).models,
-      ["gpt-5.6-sol"],
+      ["gpt-5.6-sol", "gpt-5.3-codex-spark"],
+    );
+    assert.deepEqual(
+      filterModels({
+        authMethod: "chatgpt",
+        availableModels: new Set(["hidden-preview"]),
+        includeUltraReasoningEffort: true,
+        models,
+        useHiddenModels: false,
+      }).models,
+      ["gpt-5.6-sol", "gpt-5.3-codex-spark"],
     );
 
     const consolidatedModelListFilterSource = [
@@ -138,11 +148,11 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
     );
     assert.match(
       patchedConsolidatedModelListFilter,
-      /if\(n\.has\(r\.model\)\)/,
+      /if\(u\?\(n\.has\(r\.model\)\|\|!r\.hidden\):!r\.hidden\)/,
     );
     assert.doesNotMatch(
       patchedConsolidatedModelListFilter,
-      /additionalAvailableModels.*\|\|/,
+      /e\?\.has\(r\.model\)===!0\|\|/,
     );
     const filterModelsV2 = Function(
       `${patchedConsolidatedModelListFilter};return filterV2;`,
@@ -156,7 +166,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
         models,
         useHiddenModels: true,
       }).models,
-      ["gpt-5.6-sol"],
+      ["gpt-5.6-sol", "gpt-5.3-codex-spark"],
     );
 
     const serviceTierUiSource = [
@@ -360,7 +370,10 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
         fastModelPresentationSource(rowIconExpression),
         "app://-/assets/codex-composer-adapter-DDUHejoe.js",
       );
-      assert.match(patchedFastModelPresentation, /configEnabled=!hideLabel/);
+      assert.match(
+        patchedFastModelPresentation,
+        /configEnabled=compact&&!hideLabel/,
+      );
       assert.match(patchedFastModelPresentation, /selectedIcon=null/);
       assert.match(patchedFastModelPresentation, /rowIcon=null/);
       assert.match(
@@ -369,7 +382,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       );
       assert.match(
         patchedFastModelPresentation,
-        /if\(modelPickerTriggerConfig!=null\)/,
+        /if\(compact&&modelPickerTriggerConfig!=null\)/,
       );
       const nativeModelPicker = Function(
         `${patchedFastModelPresentation};return {nativePicker,triggerConfig};`,
@@ -380,11 +393,26 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
         [],
         "fast",
       );
-      assert.equal(thirdPartyPresentation.kind, "solid");
+      assert.equal(thirdPartyTrigger.modelPickerTriggerConfig, undefined);
+      assert.equal(thirdPartyPresentation.kind, "outline");
       assert.equal(thirdPartyPresentation.rowIcon, null);
       assert.ok(thirdPartyPresentation.options.every(
         (option) => option.selectedServiceTierIconKind === null,
       ));
+
+      const compactSelections = ["one", "two", "three", "four"];
+      const compactTrigger = nativeModelPicker.triggerConfig(
+        false,
+        compactSelections,
+      );
+      const compactPresentation = nativeModelPicker.nativePicker(
+        compactTrigger.modelPickerTriggerConfig,
+        compactSelections,
+        "fast",
+      );
+      assert.ok(compactTrigger.modelPickerTriggerConfig);
+      assert.equal(compactPresentation.kind, "solid");
+      assert.equal(compactPresentation.rowIcon, null);
     }
 
     const consolidatedFastModelPresentationSource = [
@@ -421,7 +449,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
     );
     assert.match(
       patchedConsolidatedFastPresentation,
-      /configEnabled=!hideLabel/,
+      /configEnabled=compact&&!hideLabel/,
     );
     assert.match(
       patchedConsolidatedFastPresentation,
@@ -437,7 +465,10 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       patchedConsolidatedFastPresentation,
       /selectedServiceTierIconKind:null,stripGptPrefix:/,
     );
-    assert.match(patchedConsolidatedFastPresentation, /if\(config!=null\)/);
+    assert.match(
+      patchedConsolidatedFastPresentation,
+      /if\(compact&&config!=null\)/,
+    );
     const nativeModelPickerV2 = Function(
       `${patchedConsolidatedFastPresentation};` +
         "return {nativePickerV2,triggerConfigV2};",
@@ -451,12 +482,30 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       [],
       "fast",
     );
-    assert.equal(thirdPartyPresentationV2.kind, "solid");
+    assert.equal(
+      thirdPartyTriggerV2.modelPickerTriggerConfig,
+      undefined,
+    );
+    assert.equal(thirdPartyPresentationV2.kind, "outline");
     assert.equal(thirdPartyPresentationV2.rowIcon, null);
     assert.equal(thirdPartyPresentationV2.selectedIcon, null);
     assert.ok(thirdPartyPresentationV2.options.every(
       (option) => option.selectedServiceTierIconKind === null,
     ));
+
+    const compactSelectionsV2 = ["one", "two", "three", "four"];
+    const compactTriggerV2 = nativeModelPickerV2.triggerConfigV2(
+      false,
+      compactSelectionsV2,
+    );
+    const compactPresentationV2 = nativeModelPickerV2.nativePickerV2(
+      { modelPickerTriggerConfig: compactTriggerV2.modelPickerTriggerConfig },
+      compactSelectionsV2,
+      "fast",
+    );
+    assert.ok(compactTriggerV2.modelPickerTriggerConfig);
+    assert.equal(compactPresentationV2.kind, "solid");
+    assert.equal(compactPresentationV2.rowIcon, null);
 
     for (const url of [
       "app://-/assets/app-initial.js",

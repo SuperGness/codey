@@ -45,7 +45,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
   try {
     assert.equal(
       (0, eval)(await loadStartupPatchExpression()),
-      "codey-startup-patch-installed-v10",
+      "codey-startup-patch-installed-v11",
     );
     const electron = Module._load("electron", undefined, false);
     const upstreamHandler = async () => new Response([

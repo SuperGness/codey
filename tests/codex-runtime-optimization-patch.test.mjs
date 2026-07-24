@@ -34,7 +34,7 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
 
   try {
     const expression = await loadPatchExpression();
-    assert.equal((0, eval)(expression), "codey-startup-patch-installed-v10");
+    assert.equal((0, eval)(expression), "codey-startup-patch-installed-v11");
 
     const directArgs = [
       "-c",
@@ -183,6 +183,63 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
     assert.doesNotMatch(
       patchedDoubleQuotedDesktopAnalytics,
       /analytics\?\.enabled!==!1/,
+    );
+
+    const desktopAnalyticsWithoutReporterFixture =
+      desktopAnalyticsFixture.replace(
+        "E=new Reporter({source:`codex-desktop`,transport:T});",
+        "",
+      );
+    const patchedDesktopAnalyticsWithoutReporter =
+      globalThis.__CODEY_PATCH_CODEX_MAIN_DESKTOP_ANALYTICS__(
+        desktopAnalyticsWithoutReporterFixture,
+      );
+    assert.equal(
+      patchedDesktopAnalyticsWithoutReporter.match(/analyticsEnabled:!1/g)
+        ?.length,
+      2,
+    );
+    assert.doesNotMatch(
+      patchedDesktopAnalyticsWithoutReporter,
+      /analytics\?\.enabled!==!1/,
+    );
+
+    const incompatibleDesktopAnalyticsFixture =
+      "const analyticsEnabledFromNewBundleShape = true;";
+    const degradedDesktopAnalytics =
+      globalThis.__CODEY_APPLY_OPTIONAL_MAIN_BUNDLE_PATCH__(
+        "desktopCesAnalytics",
+        globalThis.__CODEY_PATCH_CODEX_MAIN_DESKTOP_ANALYTICS__,
+        incompatibleDesktopAnalyticsFixture,
+      );
+    assert.equal(
+      degradedDesktopAnalytics,
+      incompatibleDesktopAnalyticsFixture,
+    );
+    assert.equal(
+      globalThis.__CODEY_CODEX_STARTUP_PATCH__.disableDesktopCesAnalytics,
+      false,
+    );
+    assert.deepEqual(
+      globalThis.__CODEY_CODEX_STARTUP_PATCH__.optionalMainBundlePatchFailures,
+      [{
+        name: "desktopCesAnalytics",
+        message: "Codey desktop analytics matches 0/0/0",
+      }],
+    );
+
+    globalThis.__CODEY_APPLY_OPTIONAL_MAIN_BUNDLE_PATCH__(
+      "desktopCesAnalytics",
+      globalThis.__CODEY_PATCH_CODEX_MAIN_DESKTOP_ANALYTICS__,
+      desktopAnalyticsFixture,
+    );
+    assert.equal(
+      globalThis.__CODEY_CODEX_STARTUP_PATCH__.disableDesktopCesAnalytics,
+      true,
+    );
+    assert.deepEqual(
+      globalThis.__CODEY_CODEX_STARTUP_PATCH__.optionalMainBundlePatchFailures,
+      [],
     );
 
     const fixture = [
