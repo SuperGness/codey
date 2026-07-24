@@ -98,6 +98,15 @@ function appendEnglishWarning(body) {
   return { button, warning };
 }
 
+function appendPersistentEnglishWarning(body) {
+  const warning = body.appendChild(new FakeElement(
+    "section",
+    "Full access is on ChatGPT can edit any file and run commands with internet access without your approval. This increases the risk of data loss, exposed information, and unexpected changes.",
+  ));
+  const button = warning.appendChild(new FakeElement("button", "Don’t show again"));
+  return { button, warning };
+}
+
 test("full-access warning shield is opt-in and persisted by Codey settings", async () => {
   const [sectionsSource, configSource, commandSource, cdpSource] = await Promise.all([
     readFile(new URL("src/AppSections.tsx", root), "utf8"),
@@ -134,6 +143,16 @@ test("enabled shield dismisses a verified full-access warning once", async () =>
   assert.equal(warning.style.display, "none:important");
   assert.equal(runtime.window.__codeySecurityWarningShield.dismissWarnings(), 0);
   assert.equal(button.clicks, 1);
+});
+
+test("enabled shield dismisses the persistent full-access warning", async () => {
+  const runtime = createRuntime({ hideFullAccessWarning: true });
+  const { button, warning } = appendPersistentEnglishWarning(runtime.body);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(button.clicks, 1);
+  assert.equal(warning.style.display, "none:important");
+  assert.equal(runtime.window.__codeySecurityWarningShield.dismissWarnings(), 0);
 });
 
 test("unrelated session controls are never clicked", async () => {

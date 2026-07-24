@@ -6,6 +6,7 @@
   const dismissedAttribute = "data-codey-security-warning-dismissed";
   const actionPatterns = [
     /^hide from this session$/i,
+    /^don['’]t show again$/i,
     /^(?:在|于)?本次会话(?:中)?(?:隐藏|不再显示)$/,
     /^(?:隐藏|不再显示)(?:本次会话)?$/,
   ];
@@ -15,6 +16,8 @@
   ];
   const riskPatterns = [
     /without your permission/i,
+    /without your approval/i,
+    /risk of data loss/i,
     /prompt injection/i,
     /未经(?:你|您)的许可/,
     /提示词?注入/,
