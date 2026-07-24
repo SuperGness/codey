@@ -166,6 +166,25 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
       /analytics\?\.enabled!==!1/,
     );
 
+    const doubleQuotedDesktopAnalyticsFixture =
+      desktopAnalyticsFixture.replaceAll("`", '"');
+    const patchedDoubleQuotedDesktopAnalytics =
+      globalThis.__CODEY_PATCH_CODEX_MAIN_DESKTOP_ANALYTICS__(
+        doubleQuotedDesktopAnalyticsFixture,
+      );
+    assert.equal(
+      patchedDoubleQuotedDesktopAnalytics.match(/analyticsEnabled:!1/g)?.length,
+      2,
+    );
+    assert.match(
+      patchedDoubleQuotedDesktopAnalytics,
+      /worker-analytics-enabled-update",enabled:!1/,
+    );
+    assert.doesNotMatch(
+      patchedDoubleQuotedDesktopAnalytics,
+      /analytics\?\.enabled!==!1/,
+    );
+
     const fixture = [
       "let Oe={},",
       "ke=()=>{Oe.reconcileExternalPluginState(`focus`)};",

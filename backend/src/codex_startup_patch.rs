@@ -475,7 +475,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   const patchCodexMainDesktopAnalytics = (source) => {
     if (
       !source.includes("worker-analytics-enabled-update") ||
-      !source.includes("source:`codex-desktop`")
+      !/source:(`codex-desktop`|"codex-desktop"|'codex-desktop')/.test(source)
     ) {
       throw new Error("Codey desktop analytics anchors not found");
     }
