@@ -426,6 +426,79 @@ fn delete_codex_thread_schema_removes_related_rows_file_and_undo_restores_everyt
 }
 
 #[test]
+fn delete_local_from_paths_permanently_deletes_generic_session_without_backup() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("generic.sqlite");
+    create_supported_db(&db_path);
+
+    let result = delete_local_from_paths(vec![db_path.clone()], &session("s1", "First"));
+
+    assert_eq!(result.status, DeleteStatus::LocalDeleted);
+    assert!(result.undo_token.is_none());
+    assert!(result.backup_path.is_none());
+    assert!(!tmp.path().join("backups").exists());
+    let db = Connection::open(db_path).unwrap();
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM sessions", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM messages", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn delete_local_from_paths_permanently_deletes_automation_rows_without_backup() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("automation.db");
+    let db = Connection::open(&db_path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE automation_runs (
+            thread_id TEXT PRIMARY KEY,
+            thread_title TEXT
+        );
+        CREATE TABLE inbox_items (
+            id TEXT PRIMARY KEY,
+            thread_id TEXT,
+            title TEXT
+        );
+        INSERT INTO automation_runs VALUES ('t1', 'First');
+        INSERT INTO inbox_items VALUES ('i1', 't1', 'Inbox');",
+    )
+    .unwrap();
+    drop(db);
+
+    let result = delete_local_from_paths(vec![db_path.clone()], &session("local:t1", "First"));
+
+    assert_eq!(result.status, DeleteStatus::LocalDeleted);
+    assert!(result.undo_token.is_none());
+    assert!(result.backup_path.is_none());
+    assert!(!tmp.path().join("backups").exists());
+    let db = Connection::open(db_path).unwrap();
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM automation_runs", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM inbox_items", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn delete_local_from_paths_removes_duplicate_threads_from_all_databases() {
     let tmp = tempdir().unwrap();
     let first_db = tmp.path().join("first.sqlite");
@@ -439,16 +512,171 @@ fn delete_local_from_paths_removes_duplicate_threads_from_all_databases() {
 
     let result = delete_local_from_paths(
         vec![first_db.clone(), second_db.clone()],
-        BackupStore::new(tmp.path().join("backups")),
         &session("t1", "Codex Thread"),
     );
 
     assert_eq!(result.status, DeleteStatus::LocalDeleted);
     assert_eq!(result.message, "已从 2 个本地存储删除");
+    assert!(result.undo_token.is_none());
+    assert!(result.backup_path.is_none());
+    assert!(!tmp.path().join("backups").exists());
     assert_eq!(thread_count(&first_db, "t1"), 0);
     assert_eq!(thread_count(&second_db, "t1"), 0);
     assert!(!first_rollout.exists());
     assert!(!second_rollout.exists());
+}
+
+#[test]
+fn delete_local_from_paths_surfaces_catalog_failure_after_thread_deletion() {
+    let tmp = tempdir().unwrap();
+    let thread_db_path = tmp.path().join("threads.db");
+    let rollout_path = tmp.path().join("t1.jsonl");
+    fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
+    create_codex_thread_db(&thread_db_path, &rollout_path);
+
+    let catalog_db_path = tmp.path().join("catalog.db");
+    let catalog = Connection::open(&catalog_db_path).unwrap();
+    catalog
+        .execute_batch(
+            "CREATE TABLE local_thread_catalog (
+                host_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                display_title TEXT NOT NULL,
+                PRIMARY KEY (host_id, thread_id)
+            );
+            INSERT INTO local_thread_catalog
+                (host_id, thread_id, display_title)
+            VALUES ('local', 't1', 'Codex Thread');
+            CREATE TRIGGER prevent_catalog_delete
+            BEFORE DELETE ON local_thread_catalog
+            BEGIN
+                SELECT RAISE(ABORT, 'catalog delete blocked');
+            END;",
+        )
+        .unwrap();
+    drop(catalog);
+
+    let result = delete_local_from_paths(
+        vec![thread_db_path.clone(), catalog_db_path.clone()],
+        &session("local:t1", "Codex Thread"),
+    );
+
+    assert_eq!(result.status, DeleteStatus::Partial);
+    assert!(result.message.contains("catalog delete blocked"));
+    assert!(result.undo_token.is_none());
+    assert!(result.backup_path.is_none());
+    assert!(!tmp.path().join("backups").exists());
+    assert_eq!(
+        Connection::open(thread_db_path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM threads WHERE id='t1'", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        Connection::open(catalog_db_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM local_thread_catalog WHERE thread_id='t1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn delete_catalog_only_thread_and_undo_restore_its_sidebar_record() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("catalog.db");
+    let db = Connection::open(&db_path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE local_thread_catalog (
+            host_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            display_title TEXT NOT NULL,
+            PRIMARY KEY (host_id, thread_id)
+        );
+        INSERT INTO local_thread_catalog
+            (host_id, thread_id, display_title)
+        VALUES ('local', 't1', 'Codex Thread');",
+    )
+    .unwrap();
+    drop(db);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+
+    let deleted = adapter.delete_local(&session("local:t1", "Codex Thread"));
+
+    assert_eq!(deleted.status, DeleteStatus::LocalDeleted);
+    assert_eq!(
+        Connection::open(&db_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM local_thread_catalog WHERE thread_id='t1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+
+    let restored = adapter.undo(deleted.undo_token.as_deref().unwrap());
+    assert_eq!(restored.status, DeleteStatus::Undone);
+    assert_eq!(
+        Connection::open(db_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM local_thread_catalog WHERE thread_id='t1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn delete_catalog_record_when_the_thread_table_is_already_missing_it() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("mixed.db");
+    let db = Connection::open(&db_path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            rollout_path TEXT NOT NULL
+        );
+        CREATE TABLE local_thread_catalog (
+            host_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            display_title TEXT NOT NULL,
+            PRIMARY KEY (host_id, thread_id)
+        );
+        INSERT INTO local_thread_catalog
+            (host_id, thread_id, display_title)
+        VALUES ('local', 't1', 'Codex Thread');",
+    )
+    .unwrap();
+    drop(db);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+
+    let deleted = adapter.delete_local(&session("local:t1", "Codex Thread"));
+
+    assert_eq!(deleted.status, DeleteStatus::LocalDeleted);
+    assert_eq!(
+        Connection::open(db_path)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM local_thread_catalog WHERE thread_id='t1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
 }
 
 #[test]

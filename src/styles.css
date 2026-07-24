@@ -750,7 +750,7 @@ input:focus-visible,
 
 .expanded-card-metrics {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   gap: 10px;
 }
 
@@ -792,8 +792,140 @@ input:focus-visible,
 }
 
 .expanded-metric-text {
+  min-width: 0;
   line-height: 1.35;
-  word-break: break-word;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+  word-break: normal;
+}
+
+.injection-status-section {
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  padding-top: 12px;
+}
+
+.injection-status-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.injection-status-header h4 {
+  margin: 0;
+  color: #1d1d1f;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.injection-status-summary {
+  flex-shrink: 0;
+  color: #6e6e73;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.injection-status-list {
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.injection-status-row {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 7px 4px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.injection-script-icon {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 6px;
+  background: #f2f2f7;
+  color: #6e6e73;
+}
+
+.injection-script-copy {
+  min-width: 0;
+}
+
+.injection-script-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: #1d1d1f;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.injection-script-source {
+  flex-shrink: 0;
+  color: #86868b;
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.injection-script-error {
+  display: block;
+  max-width: 100%;
+  margin-top: 3px;
+  overflow: hidden;
+  color: #b42318;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.injection-script-detail {
+  display: block;
+  margin-top: 3px;
+  color: #6e6e73;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.injection-script-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #248a3d;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.injection-script-state.failed {
+  color: #d70015;
+}
+
+.injection-script-state.unverified {
+  color: #c26d00;
+}
+
+.injection-status-row.failed .injection-script-icon {
+  background: rgba(255, 59, 48, 0.1);
+  color: #d70015;
+}
+
+.injection-status-row.unverified .injection-script-icon {
+  background: rgba(255, 149, 0, 0.1);
+  color: #c26d00;
+}
+
+.injection-status-empty {
+  padding: 14px 4px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  color: #86868b;
+  font-size: 12px;
 }
 
 .expanded-card-footer {

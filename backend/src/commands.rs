@@ -810,6 +810,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             Err(error) => Err(error),
         },
         "runtime_status" => runtime_status(state).await,
+        "refresh_injection_status" => refresh_injection_status(state).await,
         "refresh_trace_log_stats" => refresh_trace_log_stats(state).await,
         "launch_codey" => launch_codey_runtime(state).await,
         "restart_codey" => schedule_restart_codey_runtime(state).await,
@@ -1433,6 +1434,11 @@ pub async fn runtime_status(state: &Arc<AppState>) -> Result<Value, String> {
             "maintenance".into(),
             serde_json::to_value(&runtime.maintenance).unwrap_or_else(|_| json!({})),
         );
+        let injection_statuses = runtime.injection_statuses.read().await.clone();
+        object.insert(
+            "injectionScripts".into(),
+            serde_json::to_value(injection_statuses.as_ref()).unwrap_or_else(|_| json!([])),
+        );
     }
     if let Some(object) = status.as_object_mut() {
         object.insert(
@@ -1441,6 +1447,15 @@ pub async fn runtime_status(state: &Arc<AppState>) -> Result<Value, String> {
         );
     }
     Ok(status)
+}
+
+async fn refresh_injection_status(state: &Arc<AppState>) -> Result<Value, String> {
+    let runtime = state.runtime.lock().await.clone();
+    let Some(runtime) = runtime else {
+        return Ok(json!([]));
+    };
+    let statuses = runtime.refresh_injection_statuses().await;
+    serde_json::to_value(statuses.as_ref()).map_err(|error| error.to_string())
 }
 
 async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, String> {
@@ -2646,15 +2661,9 @@ pub async fn delete_session_record(
     session_id: String,
     title: String,
 ) -> Result<Value, String> {
-    let backup_root = state
-        .store
-        .path()
-        .parent()
-        .map(|parent| parent.join("session-backups"))
-        .unwrap_or_else(|| PathBuf::from(".codey/session-backups"));
     let home = codex_home();
     let result = tokio::task::spawn_blocking(move || {
-        session_delete::delete_session(&home, &backup_root, &session_id, &title)
+        session_delete::delete_session(&home, &session_id, &title)
     })
     .await
     .map_err(|error| format!("会话删除任务异常退出：{error}"))?

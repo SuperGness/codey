@@ -214,11 +214,25 @@
   let bridgeRetryTimer = 0;
   let bridgeRetryDelay = 50;
   let bridgeRetryDeadline = Date.now() + 30_000;
+  const markPluginBridgeEffective = () => {
+    const entry = window.__codeyInjectionStatus?.["plugin-marketplace-compatibility"];
+    if (!entry || entry.status === "failed") return;
+    const changed = entry.status !== "effective" || entry.detail !== "插件市场桥接已接管";
+    entry.status = "effective";
+    entry.detail = "插件市场桥接已接管";
+    entry.error = null;
+    if (changed) {
+      window.dispatchEvent(new CustomEvent("codey-injection-status-changed", {
+        detail: { id: "plugin-marketplace-compatibility", status: "effective" },
+      }));
+    }
+  };
   const patchElectronBridge = () => {
     const electronBridge = window.electronBridge;
     if (!electronBridge || typeof electronBridge.sendMessageFromView !== "function") return false;
     if (electronBridge.sendMessageFromView.__codeyPatched) {
       window.clearTimeout(bridgeRetryTimer);
+      markPluginBridgeEffective();
       return true;
     }
     const original = electronBridge.sendMessageFromView;
@@ -249,6 +263,7 @@
     wrapped.__codeyPatched = true;
     electronBridge.sendMessageFromView = wrapped;
     window.clearTimeout(bridgeRetryTimer);
+    markPluginBridgeEffective();
     return true;
   };
   const retryPatchElectronBridge = () => {

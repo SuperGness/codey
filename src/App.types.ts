@@ -52,6 +52,15 @@ export type Maintenance = {
   performanceDetail?: string;
 };
 
+export type InjectionScriptStatus = {
+  id: string;
+  name: string;
+  source: "builtin" | "user";
+  status: "effective" | "executed" | "failed" | "unknown";
+  detail?: string;
+  error?: string;
+};
+
 export type RuntimeStatus = {
   running: boolean;
   appVersion?: string;
@@ -63,6 +72,7 @@ export type RuntimeStatus = {
   startupError?: string;
   codexAppPath?: string;
   maintenance?: Maintenance;
+  injectionScripts?: InjectionScriptStatus[];
   traceLogStats?: TraceLogStats;
 };
 

@@ -196,6 +196,53 @@ test("plugin bridge fast-paths unrelated IPC payloads without a DOM observer", a
   assert.equal(replacementCalls[0][0].options.includeHidden, true);
 });
 
+test("plugin bridge reports effective only after the runtime method is patched", async () => {
+  const source = await readFile(new URL("public/plugin-marketplace-fix.js", root), "utf8");
+  const events = [];
+  const window = {
+    __codeyInjectionStatus: {
+      "plugin-marketplace-compatibility": {
+        status: "pending",
+        detail: null,
+        error: null,
+      },
+    },
+    clearTimeout() {},
+    dispatchEvent(event) {
+      events.push(event);
+    },
+    electronBridge: {
+      sendMessageFromView() {
+        return Promise.resolve({ status: "ok" });
+      },
+    },
+    setTimeout() {
+      return 1;
+    },
+  };
+  window.window = window;
+
+  vm.runInNewContext(source, {
+    CustomEvent: class {
+      constructor(type, options = {}) {
+        this.type = type;
+        this.detail = options.detail;
+      }
+    },
+    console,
+    window,
+  });
+
+  const status = window.__codeyInjectionStatus["plugin-marketplace-compatibility"];
+  assert.equal(window.electronBridge.sendMessageFromView.__codeyPatched, true);
+  assert.equal(status.status, "effective");
+  assert.equal(status.detail, "插件市场桥接已接管");
+  assert.equal(status.error, null);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].type, "codey-injection-status-changed");
+  assert.equal(events[0].detail.status, "effective");
+});
+
 test("a stalled local plugin refresh cannot block the native marketplace list", async () => {
   const source = await readFile(new URL("public/plugin-marketplace-fix.js", root), "utf8");
   let timeoutCallback;

@@ -22,3 +22,17 @@ test("settings overlay only closes explicitly and restores unsaved config", asyn
   assert.doesNotMatch(overlaySource, /addEventListener\("keydown"/);
   assert.match(overlaySource, /toggle: open/);
 });
+
+test("operations tooltips stay inside the settings overlay", async () => {
+  const appSectionsSource = await readFile(
+    new URL("src/AppSections.tsx", root),
+    "utf8",
+  );
+  assert.match(appSectionsSource, /const operationsHubRef = useRef<HTMLElement>\(null\)/);
+  assert.match(
+    appSectionsSource,
+    /operationsHubRef\.current\?\.closest<HTMLElement>\("\.app-shell"\) \?\? document\.body/,
+  );
+  assert.match(appSectionsSource, /ref=\{operationsHubRef\}/);
+  assert.match(appSectionsSource, /getPopupContainer=\{getTooltipContainer\}/);
+});

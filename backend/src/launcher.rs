@@ -15,7 +15,7 @@ use codex_plus_core::launcher::build_codex_command;
 use codex_plus_data::{ProviderSyncResult, ProviderSyncStatus};
 use serde::Serialize;
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, RwLock, oneshot};
 
 use crate::cdp;
 use crate::codex_config::{
@@ -79,6 +79,9 @@ pub struct CodeyRuntime {
     pub codex_app_path: PathBuf,
     pub maintenance: MaintenanceStatus,
     pub applied_config: CodeyConfig,
+    pub injection_statuses: Arc<RwLock<Arc<[cdp::InjectionScriptStatus]>>>,
+    injection_scripts: cdp::PreparedInjectionScripts,
+    injection_websocket_url: Arc<RwLock<Arc<str>>>,
     child: Arc<Mutex<Option<Child>>>,
     process_id: Option<u32>,
     #[cfg(unix)]
@@ -91,6 +94,21 @@ pub struct CodeyRuntime {
 }
 
 impl CodeyRuntime {
+    pub async fn refresh_injection_statuses(&self) -> Arc<[cdp::InjectionScriptStatus]> {
+        let websocket_url = self.injection_websocket_url.read().await.clone();
+        let statuses = cdp::read_injection_statuses(&websocket_url, &self.injection_scripts)
+            .await
+            .unwrap_or_else(|error| {
+                self.injection_scripts
+                    .statuses_with_error(format!("实时生效自检失败：{error:#}"))
+            });
+        if self.injection_websocket_url.read().await.as_ref() != websocket_url.as_ref() {
+            return self.injection_statuses.read().await.clone();
+        }
+        *self.injection_statuses.write().await = statuses.clone();
+        statuses
+    }
+
     pub async fn start(
         config: &CodeyConfig,
         handler: codex_plus_core::bridge::BridgeHandler,
@@ -99,6 +117,7 @@ impl CodeyRuntime {
         let injection_scripts = cdp::prepare_injection_scripts(
             config.slim_codex_pet,
             config.slim_codex_voice,
+            config.hide_full_access_warning,
             &config.user_scripts,
         );
         let trace_guard_home = home.clone();
@@ -333,10 +352,14 @@ impl CodeyRuntime {
                 }
             };
 
+        let injection_statuses = Arc::new(RwLock::new(injected_target.injection_statuses()));
+        let injection_websocket_url = Arc::new(RwLock::new(injected_target.websocket_url_arc()));
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let watchdog_handler = handler.clone();
         let watchdog_debug_port = debug_port;
         let watchdog_injection_scripts = injection_scripts.clone();
+        let watchdog_injection_statuses = injection_statuses.clone();
+        let watchdog_injection_websocket_url = injection_websocket_url.clone();
         let watchdog_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(CDP_WATCHDOG_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -370,11 +393,17 @@ impl CodeyRuntime {
                 };
                 match reinjection {
                     Ok(reinjected) => {
+                        let next_statuses = reinjected.injection_statuses();
+                        let next_websocket_url = reinjected.websocket_url_arc();
                         let previous = std::mem::replace(&mut target, reinjected);
+                        *watchdog_injection_statuses.write().await = next_statuses;
+                        *watchdog_injection_websocket_url.write().await = next_websocket_url;
                         previous.close().await;
                         consecutive_failures = 0;
                     }
                     Err(error) => {
+                        *watchdog_injection_statuses.write().await = watchdog_injection_scripts
+                            .statuses_with_error(format!("脚本重新注入失败：{error:#}"));
                         eprintln!("Codey CDP bridge 恢复失败：{error:#}");
                         consecutive_failures = CDP_WATCHDOG_FAILURE_THRESHOLD.saturating_sub(1);
                     }
@@ -394,6 +423,9 @@ impl CodeyRuntime {
                 codex_app_path: app_dir,
                 maintenance,
                 applied_config: config.clone(),
+                injection_statuses,
+                injection_scripts,
+                injection_websocket_url,
                 child,
                 process_id: spawned.process_id,
                 #[cfg(unix)]

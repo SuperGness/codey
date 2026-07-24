@@ -87,9 +87,14 @@ fn is_sqlite_candidate(path: &Path) -> bool {
 }
 
 fn has_session_table(path: &Path) -> bool {
-    ["threads", "automation_runs", "inbox_items"]
-        .iter()
-        .any(|table| sqlite_has_table(path, table))
+    [
+        "threads",
+        "automation_runs",
+        "inbox_items",
+        "local_thread_catalog",
+    ]
+    .iter()
+    .any(|table| sqlite_has_table(path, table))
 }
 
 fn sqlite_has_table(path: &Path, table: &str) -> bool {
@@ -284,7 +289,31 @@ fn is_model_id_char(c: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_model_suffixes_in_text;
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+
+    use super::{codex_session_db_paths_from_home, sanitize_model_suffixes_in_text};
+
+    #[test]
+    fn discovers_catalog_only_session_databases() {
+        let home = tempdir().unwrap();
+        let sqlite = home.path().join("sqlite");
+        std::fs::create_dir_all(&sqlite).unwrap();
+        let catalog = sqlite.join("catalog.db");
+        Connection::open(&catalog)
+            .unwrap()
+            .execute(
+                "CREATE TABLE local_thread_catalog (thread_id TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+
+        assert!(
+            codex_session_db_paths_from_home(home.path())
+                .iter()
+                .any(|path| path == &catalog)
+        );
+    }
 
     #[test]
     fn strips_trailing_suffix_from_model_names() {

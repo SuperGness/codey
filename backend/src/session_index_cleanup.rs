@@ -87,10 +87,40 @@ pub fn cleanup(home: &Path) -> Result<SessionIndexCleanupReport> {
             ..SessionIndexCleanupReport::default()
         });
     };
+    apply_cleanup_plan(home, plan, live_thread_ids.len(), true)
+}
+
+/// Removes one known thread from the legacy index as part of an explicit
+/// deletion, regardless of stale catalog references that are being deleted in
+/// the same operation.
+pub fn remove_thread(home: &Path, thread_id: &str) -> Result<SessionIndexCleanupReport> {
+    let thread_id = thread_id
+        .trim()
+        .strip_prefix("local:")
+        .unwrap_or(thread_id.trim());
+    if !home.exists() || thread_id.is_empty() {
+        return Ok(SessionIndexCleanupReport::default());
+    }
+    let _lock = CleanupLock::acquire(home)?;
+    let Some(plan) = plan_cleanup_matching(&home.join("session_index.jsonl"), |candidate| {
+        candidate.id == thread_id
+    })?
+    else {
+        return Ok(SessionIndexCleanupReport::default());
+    };
+    apply_cleanup_plan(home, plan, 0, false)
+}
+
+fn apply_cleanup_plan(
+    home: &Path,
+    plan: CleanupPlan,
+    live_threads: usize,
+    backup_original: bool,
+) -> Result<SessionIndexCleanupReport> {
     if plan.candidates.is_empty() {
         return Ok(SessionIndexCleanupReport {
             scanned_entries: plan.scanned_entries,
-            live_threads: live_thread_ids.len(),
+            live_threads,
             ..SessionIndexCleanupReport::default()
         });
     }
@@ -101,25 +131,34 @@ pub fn cleanup(home: &Path) -> Result<SessionIndexCleanupReport> {
         .map(|candidate| candidate.id.clone())
         .collect::<HashSet<_>>();
     let (next_text, pruned_entries) = filtered_index_text(&plan, &selected_ids);
-    let backup_dir = create_backup(home, &plan, pruned_entries)?;
+    let backup_dir = backup_original
+        .then(|| create_backup(home, &plan, pruned_entries))
+        .transpose()?;
 
     let current_bytes = fs::read(&plan.path)
         .with_context(|| format!("重新读取会话索引失败：{}", plan.path.display()))?;
     if current_bytes != plan.original_bytes {
+        if let Some(backup_dir) = &backup_dir {
+            anyhow::bail!(
+                "session_index.jsonl 在扫描后发生变化；为避免覆盖 Codex 新内容，本次清理已中止，备份位于 {}",
+                backup_dir.display()
+            );
+        }
         anyhow::bail!(
-            "session_index.jsonl 在扫描后发生变化；为避免覆盖 Codex 新内容，本次清理已中止，备份位于 {}",
-            backup_dir.display()
+            "session_index.jsonl 在扫描后发生变化；为避免覆盖 Codex 新内容，本次删除已中止"
         );
     }
 
     atomic_write(&plan.path, next_text.as_bytes())
         .with_context(|| format!("原子写入会话索引失败：{}", plan.path.display()))?;
-    prune_backups(home)?;
+    if backup_original {
+        prune_backups(home)?;
+    }
     Ok(SessionIndexCleanupReport {
         scanned_entries: plan.scanned_entries,
-        live_threads: live_thread_ids.len(),
+        live_threads,
         pruned_entries,
-        backup_dir: Some(backup_dir.to_string_lossy().to_string()),
+        backup_dir: backup_dir.map(|path| path.to_string_lossy().to_string()),
     })
 }
 
@@ -281,6 +320,13 @@ fn table_columns(db: &Connection, table: &str) -> Result<HashSet<String>> {
 }
 
 fn plan_cleanup(path: &Path, live_thread_ids: &HashSet<String>) -> Result<Option<CleanupPlan>> {
+    plan_cleanup_matching(path, |candidate| !live_thread_ids.contains(&candidate.id))
+}
+
+fn plan_cleanup_matching(
+    path: &Path,
+    mut should_remove: impl FnMut(&CleanupCandidate) -> bool,
+) -> Result<Option<CleanupPlan>> {
     if !path.exists() {
         return Ok(None);
     }
@@ -294,7 +340,7 @@ fn plan_cleanup(path: &Path, live_thread_ids: &HashSet<String>) -> Result<Option
         let (line, _) = split_line_ending(segment);
         if let Some(candidate) = known_candidate(line) {
             scanned_entries += 1;
-            if !live_thread_ids.contains(&candidate.id) {
+            if should_remove(&candidate) {
                 candidates.push(candidate);
             }
         }
@@ -543,6 +589,31 @@ mod tests {
         let second = cleanup(home).unwrap();
         assert_eq!(second.pruned_entries, 0);
         assert!(second.backup_dir.is_none());
+    }
+
+    #[test]
+    fn explicit_delete_removes_the_selected_index_entry_despite_catalog_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        fs::write(
+            home.join("session_index.jsonl"),
+            [
+                index_line("deleted-thread", "deleted"),
+                index_line("kept-thread", "kept"),
+            ]
+            .join("\n")
+                + "\n",
+        )
+        .unwrap();
+
+        let report = remove_thread(home, "local:deleted-thread").unwrap();
+
+        assert_eq!(report.pruned_entries, 1);
+        let updated = fs::read_to_string(home.join("session_index.jsonl")).unwrap();
+        assert!(!updated.contains("\"id\":\"deleted-thread\""));
+        assert!(updated.contains("\"id\":\"kept-thread\""));
+        assert!(report.backup_dir.is_none());
+        assert!(!home.join("backups_state").exists());
     }
 
     #[test]

@@ -104,12 +104,31 @@ if (import.meta.env.DEV) {
               ? "Windows 启动补丁已启用：WMI 周期采样、临时 WebView 残留和执行环境泄漏已修复"
               : "启动补丁已启用：临时 WebView 和执行环境会自动回收",
           },
+          injectionScripts: [
+            { id: "bridge-helpers", name: "桥接辅助", source: "builtin", status: "effective", detail: "桥接函数可调用" },
+            { id: "model-whitelist", name: "模型白名单", source: "builtin", status: "effective", detail: "模型目录已加载（5 个模型）" },
+            { id: "pet-control-shield", name: "宠物控制精简", source: "builtin", status: "effective", detail: "宠物控制精简已启用" },
+            { id: "voice-control-shield", name: "语音控制精简", source: "builtin", status: "effective", detail: "语音 UI 与资源拦截已启用" },
+            { id: "security-warning-shield", name: "安全提示控制", source: "builtin", status: "effective", detail: "控制器已就绪，当前屏蔽策略关闭" },
+            { id: "settings-overlay-loader", name: "配置面板加载器", source: "builtin", status: "effective", detail: "配置面板按需加载器可用" },
+            { id: "renderer-controls", name: "渲染器控制", source: "builtin", status: "effective", detail: "渲染器控制与按需加载 API 可用" },
+            {
+              id: "plugin-marketplace-compatibility",
+              name: "插件市场兼容",
+              source: "builtin",
+              status: "effective",
+              detail: "插件市场桥接已接管",
+            },
+          ],
           ...(previewTraceStats ? { traceLogStats: previewTraceStats } : {}),
         };
       }
       if (command === "refresh_trace_log_stats") {
         previewTraceStats = previewTraceLogStats;
         return { status: "ok", traceLogStats: previewTraceStats };
+      }
+      if (command === "refresh_injection_status") {
+        return { status: "ok" };
       }
       if (command === "save_codey_config") {
         previewConfig = args.config as typeof previewConfig;

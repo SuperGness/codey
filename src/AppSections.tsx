@@ -1,9 +1,11 @@
-import { type CSSProperties, useState } from "react";
+import { type CSSProperties, useRef, useState } from "react";
 import {
   IconActivity as Activity,
   IconAdjustmentsHorizontal,
   IconBell as BellRing,
   IconBrandWindows,
+  IconClock,
+  IconCode as Code,
   IconCheck as Check,
   IconCloudCheck,
   IconCpu,
@@ -72,7 +74,11 @@ export function OperationsPanel({
   onRepairPluginMarketplace,
   onRestart,
 }: OperationsPanelProps) {
+  const operationsHubRef = useRef<HTMLElement>(null);
   const [activeCardTitle, setActiveCardTitle] = useState<string | null>(null);
+
+  const getTooltipContainer = () =>
+    operationsHubRef.current?.closest<HTMLElement>(".app-shell") ?? document.body;
 
   const toggleCard = (title: string) => {
     setActiveCardTitle((prev) => (prev === title ? null : title));
@@ -84,6 +90,18 @@ export function OperationsPanel({
   const pluginStatusError = pluginMarketplaceStatus?.status === "error";
   const pluginRepairing = busy === "repair-plugin-marketplace";
   const performanceError = maintenance?.performanceStatus === "error";
+  const injectionScripts = status.injectionScripts ?? [];
+  const effectiveScriptCount = injectionScripts.filter(
+    (script) => script.status === "effective",
+  ).length;
+  const unverifiedInjectionScripts = injectionScripts.filter(
+    (script) => script.status === "executed",
+  );
+  const failedInjectionScripts = injectionScripts.filter(
+    (script) => script.status === "failed" || script.status === "unknown",
+  );
+  const injectionStatusPending = injectionScripts.length === 0;
+  const injectionError = failedInjectionScripts.length > 0;
   const isWindowsClient = status.clientPlatform === "windows";
   const windowsPatchReady = maintenance?.performanceStatus === "ready";
   const windowsPatchFailed = performanceError || Boolean(status.startupError);
@@ -180,9 +198,27 @@ export function OperationsPanel({
       id: "opt-patch",
       icon: isWindowsClient ? IconBrandWindows : IconCpu,
       tooltip: windowsPatchReady
-        ? "性能策略：采样与 WebView/执行环境泄漏修复已生效"
+        ? "性能策略已生效：采样与泄漏修复"
         : "性能策略：运行确认中",
       tone: windowsPatchReady ? "success" : "warning",
+    },
+    {
+      id: "opt-injection",
+      icon: Code,
+      tooltip: injectionError
+        ? `脚本注入：${failedInjectionScripts.length} 个异常`
+        : unverifiedInjectionScripts.length > 0
+          ? `脚本注入：${unverifiedInjectionScripts.length} 个未验证生效`
+          : injectionScripts.length > 0
+            ? `脚本注入：${effectiveScriptCount}/${injectionScripts.length} 已生效`
+            : "脚本注入：等待 Codex 启动后检测",
+      tone: injectionError
+        ? "destructive"
+        : unverifiedInjectionScripts.length > 0
+          ? "warning"
+          : injectionScripts.length > 0
+            ? "success"
+            : "warning",
     },
   ];
 
@@ -227,6 +263,7 @@ export function OperationsPanel({
       loading: boolean;
       onClick: () => void;
     };
+    showInjectionScripts?: boolean;
   }> = [
     {
       title: "会话恢复",
@@ -238,13 +275,36 @@ export function OperationsPanel({
     },
     {
       title: "系统优化",
-      description: !performanceError
-        ? "精简策略与性能补丁均已成功加载。"
-        : "部分精简策略尚未启用，保留完整功能。",
+      description: injectionError
+        ? `${failedInjectionScripts.length} 个脚本注入异常，可展开查看错误。`
+        : unverifiedInjectionScripts.length > 0
+          ? `${unverifiedInjectionScripts.length} 个脚本已执行，但未验证实际效果。`
+          : injectionStatusPending
+            ? status.running
+              ? "正在读取最近一次脚本注入结果。"
+              : "Codex 启动后将记录每个脚本的注入结果。"
+            : !performanceError
+              ? "精简策略、性能补丁与脚本生效自检均已通过。"
+              : "部分精简策略尚未启用，保留完整功能。",
       metrics: optimizationMetrics,
-      label: performanceError ? "异常" : "已优化",
-      tone: performanceError ? "destructive" : "success",
+      label: injectionError
+        ? `${failedInjectionScripts.length} 个异常`
+        : unverifiedInjectionScripts.length > 0
+          ? `${unverifiedInjectionScripts.length} 个未验证`
+          : injectionStatusPending
+            ? status.running
+              ? "检测中"
+              : "待启动"
+            : performanceError
+              ? "异常"
+              : "已优化",
+      tone: injectionError || performanceError
+        ? "destructive"
+        : injectionStatusPending || unverifiedInjectionScripts.length > 0
+          ? "warning"
+          : "success",
       icon: Cpu,
+      showInjectionScripts: true,
     },
     {
       title: "插件市场",
@@ -274,6 +334,7 @@ export function OperationsPanel({
 
   return (
     <section
+      ref={operationsHubRef}
       className={`operations-hub${restartPending ? " pending" : status.running ? " running" : ""}`}
       aria-labelledby="operations-title"
     >
@@ -301,6 +362,7 @@ export function OperationsPanel({
                   <Tooltip
                     key={item.title}
                     content={isExpanded ? `收起“${item.title}”` : `点击展开“${item.title}”详情`}
+                    getPopupContainer={getTooltipContainer}
                     position="top"
                   >
                     <button
@@ -373,6 +435,85 @@ export function OperationsPanel({
                           );
                         })}
                       </div>
+
+                      {item.showInjectionScripts && (
+                        <section className="injection-status-section" aria-labelledby="injection-status-title">
+                          <div className="injection-status-header">
+                            <h4 id="injection-status-title">脚本生效状态</h4>
+                            <span className="injection-status-summary">
+                              {injectionScripts.length > 0
+                                ? `${effectiveScriptCount}/${injectionScripts.length} 已生效`
+                                : "暂无结果"}
+                            </span>
+                          </div>
+
+                          {injectionScripts.length > 0 ? (
+                            <div className="injection-status-list" role="list">
+                              {injectionScripts.map((script) => {
+                                const scriptEffective = script.status === "effective";
+                                const scriptUnverified = script.status === "executed";
+                                const scriptFailed = !scriptEffective && !scriptUnverified;
+                                const ScriptStatusIcon = scriptEffective
+                                  ? Check
+                                  : scriptUnverified
+                                    ? IconClock
+                                    : X;
+                                const stateClass = scriptFailed
+                                  ? " failed"
+                                  : scriptUnverified
+                                    ? " unverified"
+                                    : "";
+                                return (
+                                  <div
+                                    key={script.id}
+                                    className={`injection-status-row${stateClass}`}
+                                    role="listitem"
+                                  >
+                                    <span className="injection-script-icon" aria-hidden="true">
+                                      <Code size={15} />
+                                    </span>
+                                    <div className="injection-script-copy">
+                                      <div className="injection-script-title">
+                                        <span>{script.name}</span>
+                                        <span className="injection-script-source">
+                                          {script.source === "user" ? "用户脚本" : "内置"}
+                                        </span>
+                                      </div>
+                                      {script.error && (
+                                        <code className="injection-script-error">{script.error}</code>
+                                      )}
+                                      {!script.error && script.detail && (
+                                        <span className="injection-script-detail">{script.detail}</span>
+                                      )}
+                                    </div>
+                                    <span
+                                      className={`injection-script-state${stateClass}`}
+                                      title={scriptEffective
+                                        ? "生效探针通过"
+                                        : scriptUnverified
+                                          ? "脚本已执行，但没有生效证据"
+                                          : "脚本异常"}
+                                    >
+                                      <ScriptStatusIcon size={14} aria-hidden="true" />
+                                      {scriptEffective
+                                        ? "已生效"
+                                        : scriptUnverified
+                                          ? "未验证"
+                                          : "异常"}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <div className="injection-status-empty">
+                              {status.running
+                                ? "正在等待最近一次脚本注入结果"
+                                : "Codex 启动后将在这里显示每个脚本的注入状态"}
+                            </div>
+                          )}
+                        </section>
+                      )}
 
                       {item.action && (
                         <div className="expanded-card-footer">

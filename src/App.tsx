@@ -32,6 +32,7 @@ import { Badge, Button, Button as SaveButton } from "./components/semi";
 
 const Check = IconCheck;
 const X = IconX;
+const INJECTION_STATUS_CHANGED_EVENT = "codey-injection-status-changed";
 
 function CodeyBrandMark() {
   return (
@@ -98,6 +99,7 @@ export function App({ embedded = false, onClose }: AppProps) {
   const [codexAppPathError, setCodexAppPathError] = useState("");
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(null);
   const [traceSnapshotStale, setTraceSnapshotStale] = useState(false);
+  const injectionStatusRefreshRef = useRef<Promise<RuntimeStatus> | null>(null);
 
   const provider = ccSwitchStatus?.provider;
   const officialSlugs = useMemo(
@@ -115,6 +117,16 @@ export function App({ embedded = false, onClose }: AppProps) {
       : modelState.upstreamModels;
   }, [modelQuery, modelState.upstreamModels]);
   const isBusy = busy !== null;
+
+  useEffect(() => {
+    const handleInjectionStatusChanged = () => {
+      void refreshInjectionStatus().catch(() => {});
+    };
+    window.addEventListener(INJECTION_STATUS_CHANGED_EVENT, handleInjectionStatusChanged);
+    return () => {
+      window.removeEventListener(INJECTION_STATUS_CHANGED_EVENT, handleInjectionStatusChanged);
+    };
+  }, []);
 
   useEffect(() => {
     void load();
@@ -184,7 +196,7 @@ export function App({ embedded = false, onClose }: AppProps) {
       setCcSwitchStatus(result.ccSwitch ?? null);
       if (result.modelState) setModelState(result.modelState);
       const [next] = await Promise.all([
-        refreshStatus(),
+        refreshInjectionStatus(),
         refreshPluginMarketplaceStatus(),
       ]);
       const startupError = next.startupError || result.startupError;
@@ -210,6 +222,19 @@ export function App({ embedded = false, onClose }: AppProps) {
     const next = await invoke<RuntimeStatus>("runtime_status");
     setStatus(next);
     return next;
+  }
+
+  function refreshInjectionStatus() {
+    if (injectionStatusRefreshRef.current) return injectionStatusRefreshRef.current;
+    const refresh = invoke("refresh_injection_status")
+      .then(() => refreshStatus())
+      .finally(() => {
+        if (injectionStatusRefreshRef.current === refresh) {
+          injectionStatusRefreshRef.current = null;
+        }
+      });
+    injectionStatusRefreshRef.current = refresh;
+    return refresh;
   }
 
   async function refreshPluginMarketplaceStatus() {
