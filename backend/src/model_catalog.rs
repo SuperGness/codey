@@ -88,9 +88,12 @@ pub fn refresh_for_provider(
         .collect::<Vec<_>>();
 
     for model in &mut catalog_models {
+        let declares_fast_support = declares_fast_speed_support(model);
         ensure_catalog_compatibility(model);
         expose_supported_model(model);
-        add_fast_speed_controls(model);
+        if declares_fast_support {
+            add_fast_speed_controls(model);
+        }
     }
 
     if !official_provider {
@@ -233,8 +236,9 @@ pub fn is_available(home: &Path) -> bool {
 fn read_official_entries(home: &Path) -> Result<Vec<Value>> {
     let paths = [home.join("models_cache.json"), home.join(relative_path())];
     let mut catalogs = Vec::new();
+    let mut has_native_cache = false;
     let mut last_error = None;
-    for path in paths {
+    for (index, path) in paths.into_iter().enumerate() {
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -252,13 +256,14 @@ fn read_official_entries(home: &Path) -> Result<Vec<Value>> {
         };
         let models = official_models_from_value(&value);
         if !models.is_empty() {
+            has_native_cache |= index == 0;
             catalogs.push(models);
         }
     }
     if let Some(value) = codex_plus_core::model_suffix::bundled_model_catalog() {
         let models = official_models_from_value(&value);
         if !models.is_empty() {
-            catalogs.insert(catalogs.len().min(1), models);
+            catalogs.insert(if has_native_cache { 1 } else { 0 }, models);
         }
     }
     if catalogs.is_empty() {
@@ -377,6 +382,25 @@ fn expose_supported_model(model: &mut Value) {
     if model.get("visibility").and_then(Value::as_str) == Some("list") {
         model["supported_in_api"] = json!(true);
     }
+}
+
+fn declares_fast_speed_support(model: &Value) -> bool {
+    model
+        .get("service_tiers")
+        .and_then(Value::as_array)
+        .is_some_and(|tiers| {
+            tiers
+                .iter()
+                .any(|tier| tier.get("id").and_then(Value::as_str) == Some(FAST_SERVICE_TIER_ID))
+        })
+        || model
+            .get("additional_speed_tiers")
+            .and_then(Value::as_array)
+            .is_some_and(|tiers| {
+                tiers
+                    .iter()
+                    .any(|tier| tier.as_str() == Some(FAST_SPEED_TIER_ID))
+            })
 }
 
 fn add_fast_speed_controls(model: &mut Value) {
@@ -580,6 +604,10 @@ mod tests {
         );
     }
 
+    fn assert_no_native_fast(model: &Value) {
+        assert!(!declares_fast_speed_support(model));
+    }
+
     #[test]
     fn official_catalog_keeps_the_fixed_order_and_native_fast_metadata() {
         let home = tempfile::tempdir().unwrap();
@@ -629,10 +657,26 @@ mod tests {
             .unwrap();
         assert_eq!(spark["supported_in_api"], true);
         assert_eq!(spark["supports_reasoning_summaries"], true);
-        assert!(models.iter().all(|model| {
-            assert_native_fast(model);
-            true
-        }));
+        assert_no_native_fast(spark);
+        let mini = models
+            .iter()
+            .find(|model| model["slug"] == "gpt-5.4-mini")
+            .unwrap();
+        assert_no_native_fast(mini);
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| declares_fast_speed_support(model))
+                .map(|model| model["slug"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+            ]
+        );
     }
 
     #[test]
@@ -688,6 +732,7 @@ mod tests {
             .find(|model| model["slug"] == "gpt-5.3-codex-spark")
             .unwrap();
         assert_eq!(spark["supported_in_api"], true);
+        assert_no_native_fast(spark);
         let custom = models.last().unwrap();
         assert_eq!(custom["slug"], "claude-sonnet");
         assert_eq!(custom["codey_source"], "third_party");
@@ -701,10 +746,19 @@ mod tests {
             ["low", "medium", "high", "xhigh"]
         );
         assert_eq!(custom["supports_reasoning_summaries"], true);
-        assert!(models.iter().all(|model| {
-            assert_native_fast(model);
-            true
-        }));
+        assert_native_fast(custom);
+        assert_native_fast(
+            models
+                .iter()
+                .find(|model| model["slug"] == "gpt-5.6-sol")
+                .unwrap(),
+        );
+        assert_native_fast(
+            models
+                .iter()
+                .find(|model| model["slug"] == "gpt-5.4")
+                .unwrap(),
+        );
     }
 
     #[test]
@@ -757,10 +811,45 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(models.iter().all(|model| model["visibility"] == "list"));
-        assert!(models.iter().all(|model| {
-            assert_native_fast(model);
-            true
-        }));
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| declares_fast_speed_support(model))
+                .map(|model| model["slug"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+            ]
+        );
+    }
+
+    #[test]
+    fn cold_start_replaces_stale_codey_fast_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        let mut stale_catalog = official_cache();
+        for model in stale_catalog["models"].as_array_mut().unwrap() {
+            add_fast_speed_controls(model);
+        }
+        let catalog_path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
+        fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        fs::write(&catalog_path, serde_json::to_vec(&stale_catalog).unwrap()).unwrap();
+
+        refresh_for_provider(home.path(), true, None, &[]).unwrap();
+
+        let catalog: Value = serde_json::from_slice(&fs::read(catalog_path).unwrap()).unwrap();
+        for slug in ["gpt-5.4-mini", "gpt-5.3-codex-spark"] {
+            let model = catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|model| model["slug"] == slug)
+                .unwrap();
+            assert_no_native_fast(model);
+        }
     }
 
     #[test]
