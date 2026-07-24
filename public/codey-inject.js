@@ -107,7 +107,7 @@
 
   const sidebarTitles = (root = document) => queryWithin(root,
     "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
-  ).map((thread) => ({
+  ).filter((thread) => !isDeletedSidebarThread(thread)).map((thread) => ({
     sessionId: String(thread.getAttribute("data-app-action-sidebar-thread-id") || "").replace(/^local:/, "").trim(),
     title: String(thread.getAttribute("data-app-action-sidebar-thread-title") || "").trim(),
   })).filter(({ sessionId, title }) => sessionId && title);
@@ -598,7 +598,11 @@
     queryWithin(root,
       "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
     ).forEach((thread) => {
-      if (!(thread instanceof HTMLElement) || thread.querySelector(`[${sessionExportAttribute}]`)) return;
+      if (
+        !(thread instanceof HTMLElement)
+        || isDeletedSidebarThread(thread)
+        || thread.querySelector(`[${sessionExportAttribute}]`)
+      ) return;
       const sessionId = String(thread.getAttribute("data-app-action-sidebar-thread-id") || "").trim();
       if (!sessionId) return;
       const archiveControl = findArchiveControl(thread);
@@ -765,6 +769,12 @@
     return rowSessionId;
   };
 
+  const threadIdentityNode = (row) => (
+    row?.hasAttribute?.("data-app-action-sidebar-thread-id")
+      ? row
+      : row?.querySelector?.("[data-app-action-sidebar-thread-id]")
+  );
+
   const rememberDeletedSidebarSession = (sessionId) => {
     const normalizedSessionId = normalizeThreadSessionId(sessionId);
     if (!normalizedSessionId || normalizedSessionId.startsWith("client-new-thread:")) return "";
@@ -790,19 +800,17 @@
     return true;
   };
 
-  const pruneDeletedSidebarSessions = (root = document) => {
-    let removedRoot = false;
-    queryWithin(root,
-      "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
-    ).forEach((thread) => {
-      if (!(thread instanceof HTMLElement)) return;
-      const sessionId = threadSessionIdFromRow(thread);
-      if (!isDeletedSidebarSession(sessionId)) return;
-      if (thread === root) removedRoot = true;
-      thread.remove();
-    });
-    return removedRoot;
+  const isDeletedSidebarThread = (row) => {
+    const identity = threadIdentityNode(row);
+    return identity instanceof HTMLElement
+      && isDeletedSidebarSession(threadSessionIdFromRow(identity));
   };
+
+  // Codex owns and virtualizes sidebar rows. Removing one behind React's back
+  // leaves its measured spacer behind and compounds the gap on every remount.
+  const shouldIgnoreDeletedSidebarSessionRoot = (root = document) => (
+    root instanceof HTMLElement && isDeletedSidebarThread(root)
+  );
 
   const numericThreadTimestamp = (value) => {
     const timestamp = Number(value);
@@ -830,12 +838,6 @@
     if (days < 365) return `${months}mo`;
     return `${Math.floor(days / 365)}y`;
   };
-
-  const threadIdentityNode = (row) => (
-    row.hasAttribute?.("data-app-action-sidebar-thread-id")
-      ? row
-      : row.querySelector?.("[data-app-action-sidebar-thread-id]")
-  );
 
   const threadUpdatedAtMount = (row) => {
     const contentRoot = [...(row.children || [])].find((child) => (
@@ -953,7 +955,7 @@
   const installThreadUpdatedTimes = (root = document, forceRefresh = false) => {
     const now = Date.now();
     queryWithin(root, "[data-app-action-sidebar-thread-row]").forEach((row) => {
-      if (!(row instanceof HTMLElement)) return;
+      if (!(row instanceof HTMLElement) || isDeletedSidebarThread(row)) return;
       const sessionId = renderCachedThreadUpdatedAt(row);
       if (!sessionId || sessionId.startsWith("client-new-thread:")) return;
       if (!forceRefresh && now - (threadUpdatedAtRequestedAt.get(sessionId) || 0) < 30_000) return;
@@ -1062,6 +1064,28 @@
       await dispatcher("unsubscribe-thread-for-host", {
         hostId: "local",
         threadId: normalizedSessionId,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const notifyNativeSidebarSessionDeleted = async (sessionId) => {
+    const normalizedSessionId = normalizeThreadSessionId(sessionId);
+    if (!normalizedSessionId || normalizedSessionId.startsWith("client-new-thread:")) return false;
+    try {
+      codexSignalDispatcherPromise ||= loadCodexSignalDispatcher().catch((error) => {
+        codexSignalDispatcherPromise = null;
+        throw error;
+      });
+      const dispatcher = await codexSignalDispatcherPromise;
+      await dispatcher("handle-app-server-notification-for-host", {
+        hostId: "local",
+        notification: {
+          method: "thread/deleted",
+          params: { threadId: normalizedSessionId },
+        },
       });
       return true;
     } catch {
@@ -1342,6 +1366,7 @@
     )].find((thread) => (
       thread !== deletedThread
       && thread instanceof HTMLElement
+      && !isDeletedSidebarThread(thread)
       && thread.getClientRects().length > 0
     ));
     if (replacement instanceof HTMLElement) {
@@ -1366,14 +1391,20 @@
     /Thread not found in local storage/i.test(String(value || ""))
   );
 
-  const completeSidebarSessionDelete = (thread, sessionId, title, isActive, alreadyDeleted) => {
+  const completeSidebarSessionDelete = (
+    thread,
+    sessionId,
+    title,
+    isActive,
+    alreadyDeleted,
+    nativeDeletionNotified,
+  ) => {
     const normalizedSessionId = rememberDeletedSidebarSession(sessionId) || sessionId;
     closeSessionDeletePopover();
     if (isActive) {
       const navigated = navigateAwayFromDeletedThread(thread);
       if (!navigated) window.setTimeout(() => location.reload(), 180);
     }
-    thread.remove();
     window.dispatchEvent(new CustomEvent("codey-session-deleted", {
       detail: { sessionId: normalizedSessionId, title, alreadyDeleted },
     }));
@@ -1382,7 +1413,11 @@
         ? `会话${title ? `“${title}”` : ""}已不存在，已从列表移除`
         : `已删除会话${title ? `“${title}”` : ""}`,
     );
-    void refreshRecentLocalSessions();
+    void refreshRecentLocalSessions().then((refreshed) => {
+      if (!nativeDeletionNotified || !refreshed) {
+        window.setTimeout(() => location.reload(), 700);
+      }
+    });
   };
 
   const deleteSidebarSession = async (thread, anchor, confirmButton) => {
@@ -1415,10 +1450,26 @@
       ) {
         throw new Error(result?.message || "未知错误");
       }
-      completeSidebarSessionDelete(thread, sessionId, title, isActive, alreadyDeleted);
+      const nativeDeletionNotified = await notifyNativeSidebarSessionDeleted(sessionId);
+      completeSidebarSessionDelete(
+        thread,
+        sessionId,
+        title,
+        isActive,
+        alreadyDeleted,
+        nativeDeletionNotified,
+      );
     } catch (error) {
       if (isSessionAlreadyDeletedMessage(error instanceof Error ? error.message : error)) {
-        completeSidebarSessionDelete(thread, sessionId, title, isActive, true);
+        const nativeDeletionNotified = await notifyNativeSidebarSessionDeleted(sessionId);
+        completeSidebarSessionDelete(
+          thread,
+          sessionId,
+          title,
+          isActive,
+          true,
+          nativeDeletionNotified,
+        );
         return;
       }
       confirmButton.disabled = false;
@@ -1501,11 +1552,15 @@
   };
 
   const installSessionDeleteButtons = (root = document) => {
-    if (pruneDeletedSidebarSessions(root)) return;
+    if (shouldIgnoreDeletedSidebarSessionRoot(root)) return;
     queryWithin(root,
       "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
     ).forEach((thread) => {
-      if (!(thread instanceof HTMLElement) || thread.querySelector(`[${sessionDeleteAttribute}]`)) return;
+      if (
+        !(thread instanceof HTMLElement)
+        || isDeletedSidebarThread(thread)
+        || thread.querySelector(`[${sessionDeleteAttribute}]`)
+      ) return;
       const archiveControl = findArchiveControl(thread);
       if (!(archiveControl instanceof HTMLElement)) return;
       const placementTarget = archivePlacementTarget(thread, archiveControl);
@@ -1691,7 +1746,7 @@
 
   const scan = (root = document, syncTitles = true, mountSettings = true) => {
     window.__codeyBlockNativeVoiceControls?.(root);
-    if (pruneDeletedSidebarSessions(root)) return;
+    if (shouldIgnoreDeletedSidebarSessionRoot(root)) return;
     if (mountSettings) mountButton();
     installSessionExportButtons(root);
     installTasksImportButton(root);
@@ -1717,7 +1772,7 @@
   window.__codeyImportSessionFile = importSessionFile;
   window.__codeyInstallSessionDeleteButtons = installSessionDeleteButtons;
   window.__codeyOpenSessionDeletePopover = openSessionDeletePopover;
-  window.__codeyPruneDeletedSidebarSessions = pruneDeletedSidebarSessions;
+  window.__codeyPruneDeletedSidebarSessions = shouldIgnoreDeletedSidebarSessionRoot;
   window.__codeySyncSelectionGroups = syncSelectionGroups;
   window.__codeyDeleteSelectedMessages = deleteSelected;
   window.__codeyReloadConversationAfterHardDelete = reloadConversationAfterHardDelete;

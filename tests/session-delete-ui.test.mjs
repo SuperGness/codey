@@ -405,19 +405,29 @@ test("matches native sidebar actions and deletes after popover confirmation", as
       threadId: "thread-1",
     },
   }, {
+    signal: "handle-app-server-notification-for-host",
+    payload: {
+      hostId: "local",
+      notification: {
+        method: "thread/deleted",
+        params: { threadId: "thread-1" },
+      },
+    },
+  }, {
     signal: "refresh-recent-conversations-for-host",
     payload: { hostId: "local", sortKey: "updated_at" },
   }]);
   assert.deepEqual(events, [
     "signal:unsubscribe-thread-for-host",
     "bridge:/session/delete",
+    "signal:handle-app-server-notification-for-host",
     "signal:refresh-recent-conversations-for-host",
   ]);
   assert.equal(
     runtime.document.getElementById("codey-runtime-toast")?.textContent,
     "已删除会话“待删除会话”",
   );
-  assert.equal(runtime.thread.parentElement, null);
+  assert.equal(runtime.thread.parentElement, runtime.document.body);
 });
 
 test("deletes a newly created sidebar session by its canonical conversation id", async () => {
@@ -446,10 +456,10 @@ test("deletes a newly created sidebar session by its canonical conversation id",
     sessionId: conversationId,
     title: "待删除会话",
   });
-  assert.equal(runtime.thread.parentElement, null);
+  assert.equal(runtime.thread.parentElement, runtime.document.body);
 });
 
-test("treats an already missing local thread as deleted and prunes stale sidebar rows", async () => {
+test("treats an already missing local thread as deleted without detaching virtualized rows", async () => {
   const runtime = loadInjection({
     bridge: async (path) => {
       if (path === "/session/delete") {
@@ -457,6 +467,7 @@ test("treats an already missing local thread as deleted and prunes stale sidebar
       }
       return { status: "ok" };
     },
+    dispatcher: async () => {},
   });
 
   runtime.thread.querySelector("[data-codey-session-delete]").click();
@@ -470,9 +481,17 @@ test("treats an already missing local thread as deleted and prunes stale sidebar
     sessionId: "thread-1",
     title: "待删除会话",
   });
-  assert.equal(runtime.thread.parentElement, null);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(runtime.dispatcherCalls.map(({ signal }) => signal))),
+    [
+      "unsubscribe-thread-for-host",
+      "handle-app-server-notification-for-host",
+      "refresh-recent-conversations-for-host",
+    ],
+  );
+  assert.equal(runtime.thread.parentElement, runtime.document.body);
 
   runtime.document.body.appendChild(runtime.thread);
-  runtime.window.__codeyPruneDeletedSidebarSessions(runtime.document);
-  assert.equal(runtime.thread.parentElement, null);
+  assert.equal(runtime.window.__codeyPruneDeletedSidebarSessions(runtime.thread), true);
+  assert.equal(runtime.thread.parentElement, runtime.document.body);
 });
