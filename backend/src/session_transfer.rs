@@ -25,6 +25,45 @@ const SESSION_TRANSFER_MAX_AGE: Duration = Duration::from_secs(6 * 60 * 60);
 pub const SESSION_TRANSFER_CHUNK_BYTES: usize = 256 * 1024;
 static IMPORT_TRANSFER_LOCKS: OnceLock<Mutex<HashMap<Uuid, Weak<Mutex<()>>>>> = OnceLock::new();
 
+struct LimitedWriter<W> {
+    inner: W,
+    written: u64,
+    max_bytes: u64,
+}
+
+impl<W> LimitedWriter<W> {
+    fn new(inner: W, max_bytes: u64) -> Self {
+        Self {
+            inner,
+            written: 0,
+            max_bytes,
+        }
+    }
+
+    fn written(&self) -> u64 {
+        self.written
+    }
+}
+
+impl<W: Write> Write for LimitedWriter<W> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        let requested = u64::try_from(buffer.len()).unwrap_or(u64::MAX);
+        if requested > self.max_bytes.saturating_sub(self.written) {
+            return Err(std::io::Error::other(format!(
+                "会话传输数据超过上限（{} MB）",
+                self.max_bytes / 1024 / 1024
+            )));
+        }
+        let written = self.inner.write(buffer)?;
+        self.written = self.written.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionBundle {
@@ -104,13 +143,16 @@ struct SessionExportSource {
 
 pub fn export_session(home: &Path, session_id: &str) -> Result<SessionExportResult> {
     let source = session_export_source(home, session_id)?;
-    let capacity = fs::metadata(&source.rollout_path)
-        .ok()
-        .and_then(|metadata| usize::try_from(metadata.len()).ok())
+    let source_bytes = rollout_transfer_size(&source.rollout_path)?;
+    let capacity = usize::try_from(source_bytes)
         .unwrap_or_default()
-        .saturating_add(4096);
+        .saturating_add(4096)
+        .min(SESSION_TRANSFER_MAX_BYTES as usize);
     let mut output = Vec::with_capacity(capacity);
-    write_session_bundle(&mut output, &source.thread, &source.rollout_path)?;
+    {
+        let mut writer = LimitedWriter::new(&mut output, SESSION_TRANSFER_MAX_BYTES);
+        write_session_bundle(&mut writer, &source.thread, &source.rollout_path)?;
+    }
     let data = String::from_utf8(output).context("序列化会话数据失败")?;
     Ok(SessionExportResult {
         status: "exported",
@@ -124,15 +166,7 @@ pub fn export_session(home: &Path, session_id: &str) -> Result<SessionExportResu
 pub fn start_export_transfer(home: &Path, session_id: &str) -> Result<SessionExportStartResult> {
     prepare_transfer_directory(home)?;
     let source = session_export_source(home, session_id)?;
-    let source_bytes = fs::metadata(&source.rollout_path)
-        .with_context(|| format!("读取会话数据大小失败：{}", source.rollout_path.display()))?
-        .len();
-    if source_bytes > SESSION_TRANSFER_MAX_BYTES {
-        anyhow::bail!(
-            "会话数据超过导出上限（{} MB）",
-            SESSION_TRANSFER_MAX_BYTES / 1024 / 1024
-        );
-    }
+    rollout_transfer_size(&source.rollout_path)?;
 
     let transfer_id = Uuid::new_v4().to_string();
     let path = transfer_path(home, TransferKind::Export, &transfer_id)?;
@@ -142,19 +176,14 @@ pub fn start_export_transfer(home: &Path, session_id: &str) -> Result<SessionExp
             .write(true)
             .open(&path)
             .with_context(|| format!("创建会话导出临时文件失败：{}", path.display()))?;
-        write_session_bundle(&mut file, &source.thread, &source.rollout_path)?;
-        file.flush()
-            .with_context(|| format!("刷新会话导出临时文件失败：{}", path.display()))?;
-        let size = file
-            .metadata()
-            .with_context(|| format!("读取会话导出大小失败：{}", path.display()))?
-            .len();
-        if size > SESSION_TRANSFER_MAX_BYTES {
-            anyhow::bail!(
-                "导出文件超过传输上限（{} MB）",
-                SESSION_TRANSFER_MAX_BYTES / 1024 / 1024
-            );
-        }
+        let size = {
+            let mut writer = LimitedWriter::new(&mut file, SESSION_TRANSFER_MAX_BYTES);
+            write_session_bundle(&mut writer, &source.thread, &source.rollout_path)?;
+            writer
+                .flush()
+                .with_context(|| format!("刷新会话导出临时文件失败：{}", path.display()))?;
+            writer.written()
+        };
         Ok(size)
     })();
     let size = match result {
@@ -730,12 +759,60 @@ fn write_session_bundle(
             found_session_meta |= value.get("type").and_then(Value::as_str) == Some("session_meta");
             records += 1;
         }
-        let escaped = serde_json::to_string(&line)?;
-        writer.write_all(&escaped.as_bytes()[1..escaped.len().saturating_sub(1)])?;
+        write_json_string_content(writer, &line)?;
     }
     validate_rollout_summary(records, found_session_meta)?;
     writer.write_all(b"\"}")?;
     Ok(())
+}
+
+fn write_json_string_content(writer: &mut impl Write, value: &str) -> std::io::Result<()> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let bytes = value.as_bytes();
+    let mut chunk_start = 0;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        let escaped = match byte {
+            b'"' => Some(br#"\""#.as_slice()),
+            b'\\' => Some(br#"\\"#.as_slice()),
+            b'\x08' => Some(br#"\b"#.as_slice()),
+            b'\x0c' => Some(br#"\f"#.as_slice()),
+            b'\n' => Some(br#"\n"#.as_slice()),
+            b'\r' => Some(br#"\r"#.as_slice()),
+            b'\t' => Some(br#"\t"#.as_slice()),
+            _ => None,
+        };
+        if let Some(escaped) = escaped {
+            writer.write_all(&bytes[chunk_start..index])?;
+            writer.write_all(escaped)?;
+            chunk_start = index + 1;
+        } else if byte < b' ' {
+            writer.write_all(&bytes[chunk_start..index])?;
+            writer.write_all(&[
+                b'\\',
+                b'u',
+                b'0',
+                b'0',
+                HEX[(byte >> 4) as usize],
+                HEX[(byte & 0x0f) as usize],
+            ])?;
+            chunk_start = index + 1;
+        }
+    }
+    writer.write_all(&bytes[chunk_start..])
+}
+
+fn rollout_transfer_size(rollout_path: &Path) -> Result<u64> {
+    let source_bytes = fs::metadata(rollout_path)
+        .with_context(|| format!("读取会话数据大小失败：{}", rollout_path.display()))?
+        .len();
+    if source_bytes > SESSION_TRANSFER_MAX_BYTES {
+        anyhow::bail!(
+            "会话数据超过导出上限（{} MB）",
+            SESSION_TRANSFER_MAX_BYTES / 1024 / 1024
+        );
+    }
+    Ok(source_bytes)
 }
 
 fn rewrite_rollout_to(
@@ -1322,6 +1399,32 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).unwrap(),
             "{\"type\":\"session_meta\",\"payload\":null}\n"
+        );
+    }
+
+    #[test]
+    fn limited_writer_never_crosses_its_byte_budget() {
+        let mut output = Vec::new();
+        {
+            let mut writer = LimitedWriter::new(&mut output, 4);
+            writer.write_all(b"1234").unwrap();
+            assert_eq!(writer.written(), 4);
+            assert!(writer.write_all(b"5").is_err());
+            assert_eq!(writer.written(), 4);
+        }
+        assert_eq!(output, b"1234");
+    }
+
+    #[test]
+    fn streams_json_string_escaping_without_changing_the_bundle_format() {
+        let value = "\"\\\u{0000}\u{0008}\u{000c}\n\r\t\u{001f}中文";
+        let mut output = Vec::new();
+        output.push(b'"');
+        write_json_string_content(&mut output, value).unwrap();
+        output.push(b'"');
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            serde_json::to_string(value).unwrap()
         );
     }
 }

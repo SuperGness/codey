@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-pub const PATCH_RESULT: &str = "codey-startup-patch-installed-v8";
+pub const PATCH_RESULT: &str = "codey-startup-patch-installed-v10";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchOptions {
@@ -199,6 +199,350 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     0,
     process.argv.length,
     ...process.argv.filter((argument) => !isInspectorArgument(argument)),
+  );
+
+  // The desktop client explicitly opts the bundled app-server into analytics.
+  // Remove that opt-in and add a command-local config override without touching
+  // the user's persistent Codex configuration.
+  const appServerAnalyticsConfig = "analytics.enabled=false";
+  const rewriteCodexAppServerArgs = (args) => {
+    if (!Array.isArray(args)) return args;
+    const appServerIndexes = args
+      .map((argument, index) => argument === "app-server" ? index : -1)
+      .filter((index) => index >= 0);
+    const analyticsFlagCount = args
+      .filter((argument) => argument === "--analytics-default-enabled")
+      .length;
+    if (appServerIndexes.length !== 1 || analyticsFlagCount !== 1) return args;
+
+    const rewritten = args.filter(
+      (argument) => argument !== "--analytics-default-enabled",
+    );
+    let hasAnalyticsConfig = false;
+    for (let index = 0; index < rewritten.length; index += 1) {
+      const argument = rewritten[index];
+      if (
+        (argument === "-c" || argument === "--config") &&
+        /^analytics\.enabled=/.test(String(rewritten[index + 1] ?? ""))
+      ) {
+        rewritten[index + 1] = appServerAnalyticsConfig;
+        hasAnalyticsConfig = true;
+      } else if (/^--config=analytics\.enabled=/.test(String(argument))) {
+        rewritten[index] = `--config=${appServerAnalyticsConfig}`;
+        hasAnalyticsConfig = true;
+      }
+    }
+    if (!hasAnalyticsConfig) {
+      const appServerIndex = rewritten.indexOf("app-server");
+      rewritten.splice(appServerIndex, 0, "-c", appServerAnalyticsConfig);
+    }
+    return rewritten;
+  };
+  const rewriteCodexAppServerShellCommand = (command) => {
+    if (typeof command !== "string") return command;
+    const execMatches = [...command.matchAll(/(?:^|;)\s*exec\s+/g)];
+    if (execMatches.length !== 1) return command;
+    const execMatch = execMatches[0];
+    const execCommandOffset = execMatch.index + execMatch[0].length;
+    const execCommand = command.slice(execCommandOffset);
+    const executableToken = /^(?:"[^"]+"|'[^']+'|(?:\\.|[^\s;&|])+)/.exec(
+      execCommand,
+    )?.[0];
+    if (executableToken == null) return command;
+    const normalizedExecutable = executableToken
+      .replace(/^(["'])|(["'])$/g, "")
+      .replace(/\\ /g, " ");
+    if (!/(?:^|[/\\])codex(?:\.exe)?$/i.test(normalizedExecutable)) {
+      return command;
+    }
+
+    const appServerMatches = execCommand.match(/\bapp-server\b/g);
+    const analyticsFlagMatches = execCommand.match(
+      /(?:^|[\s;])--analytics-default-enabled(?=$|[\s;&|])/g,
+    );
+    if (appServerMatches?.length !== 1 || analyticsFlagMatches?.length !== 1) {
+      return command;
+    }
+
+    let hasAnalyticsConfig = false;
+    let rewritten = execCommand.replace(
+      /(^|[\s;])(-c|--config)\s+analytics\.enabled=[^\s;&|]+(?=$|[\s;&|])/g,
+      (_match, prefix, configFlag) => {
+        hasAnalyticsConfig = true;
+        return `${prefix}${configFlag} ${appServerAnalyticsConfig}`;
+      },
+    );
+    rewritten = rewritten.replace(
+      /(^|[\s;])--config=analytics\.enabled=[^\s;&|]+(?=$|[\s;&|])/g,
+      (_match, prefix) => {
+        hasAnalyticsConfig = true;
+        return `${prefix}--config=${appServerAnalyticsConfig}`;
+      },
+    );
+    rewritten = rewritten.replace(
+      /(^|[\s;])--analytics-default-enabled(?=$|[\s;&|])/g,
+      (_match, prefix) => prefix,
+    );
+    if (!hasAnalyticsConfig) {
+      rewritten = rewritten.replace(
+        /\bapp-server\b/,
+        `-c ${appServerAnalyticsConfig} app-server`,
+      );
+    }
+    return command.slice(0, execCommandOffset) + rewritten;
+  };
+  const rewriteCodexAppServerSpawnArgs = (command, args) => {
+    if (!Array.isArray(args)) return args;
+    const commandName = String(command ?? "");
+    if (/(?:^|[/\\])codex(?:\.exe)?$/i.test(commandName)) {
+      return rewriteCodexAppServerArgs(args);
+    }
+    if (!/(?:^|[/\\])wsl(?:\.exe)?$/i.test(commandName)) return args;
+
+    const shellFlagIndexes = args
+      .map((argument, index) => argument === "-lc" ? index : -1)
+      .filter((index) => index >= 0);
+    if (shellFlagIndexes.length !== 1) return args;
+    const shellFlagIndex = shellFlagIndexes[0];
+    if (
+      !/(?:^|[/\\])bash$/i.test(String(args[shellFlagIndex - 1] ?? "")) ||
+      typeof args[shellFlagIndex + 1] !== "string"
+    ) {
+      return args;
+    }
+    const rewrittenCommand = rewriteCodexAppServerShellCommand(
+      args[shellFlagIndex + 1],
+    );
+    if (rewrittenCommand === args[shellFlagIndex + 1]) return args;
+    const rewritten = [...args];
+    rewritten[shellFlagIndex + 1] = rewrittenCommand;
+    return rewritten;
+  };
+  Object.defineProperty(globalThis, "__CODEY_REWRITE_CODEX_APP_SERVER_ARGS__", {
+    configurable: false,
+    value: rewriteCodexAppServerSpawnArgs,
+    writable: false,
+  });
+
+  let appServerAnalyticsPatchCount = 0;
+  const childProcess = process.getBuiltinModule("child_process");
+  const NativeSpawn = childProcess.spawn;
+  if (!NativeSpawn.__codeyAppServerAnalyticsDisabled) {
+    const codeyAnalyticsDisabledSpawn = function (command, args, ...rest) {
+      const rewritten = rewriteCodexAppServerSpawnArgs(command, args);
+      if (rewritten === args) {
+        return Reflect.apply(NativeSpawn, this, arguments);
+      }
+      if (rewritten !== args) appServerAnalyticsPatchCount += 1;
+      return Reflect.apply(NativeSpawn, this, [command, rewritten, ...rest]);
+    };
+    Object.defineProperty(
+      codeyAnalyticsDisabledSpawn,
+      "__codeyAppServerAnalyticsDisabled",
+      { value: true },
+    );
+    childProcess.spawn = codeyAnalyticsDisabledSpawn;
+  }
+
+  const externalPluginFocusReconcileMinIntervalMs = 30_000;
+  let externalPluginFocusReconcileSuppressedCount = 0;
+  const throttleExternalPluginFocusReconcile = (
+    listener,
+    minimumIntervalMs = externalPluginFocusReconcileMinIntervalMs,
+  ) => {
+    const monotonicNow = () => globalThis.performance?.now?.() ?? Date.now();
+    let lastRunAt = Number.NEGATIVE_INFINITY;
+    let trailingTimer = null;
+    let trailingThis = null;
+    let trailingArgs = null;
+    const invoke = (receiver, args) => {
+      lastRunAt = monotonicNow();
+      trailingThis = null;
+      trailingArgs = null;
+      return Reflect.apply(listener, receiver, args);
+    };
+    const wrapped = function (...args) {
+      const elapsed = monotonicNow() - lastRunAt;
+      if (trailingTimer == null && elapsed >= minimumIntervalMs) {
+        return invoke(this, args);
+      }
+      externalPluginFocusReconcileSuppressedCount += 1;
+      trailingThis = this;
+      trailingArgs = args;
+      if (trailingTimer == null) {
+        trailingTimer = setTimeout(() => {
+          trailingTimer = null;
+          invoke(trailingThis, trailingArgs ?? []);
+        }, Math.max(1, minimumIntervalMs - elapsed));
+        trailingTimer.unref?.();
+      }
+      return undefined;
+    };
+    Object.defineProperty(wrapped, "cancel", {
+      configurable: false,
+      value: () => {
+        if (trailingTimer != null) clearTimeout(trailingTimer);
+        trailingTimer = null;
+        trailingThis = null;
+        trailingArgs = null;
+      },
+      writable: false,
+    });
+    return wrapped;
+  };
+  Object.defineProperty(
+    globalThis,
+    "__CODEY_THROTTLE_EXTERNAL_PLUGIN_FOCUS_RECONCILE__",
+    {
+      configurable: false,
+      value: throttleExternalPluginFocusReconcile,
+      writable: false,
+    },
+  );
+  const patchCodexMainFocusReconcile = (source) => {
+    if (
+      !source.includes("browser-window-focus") ||
+      !source.includes("reconcileExternalPluginState")
+    ) {
+      throw new Error("Codey external plugin focus reconcile anchors not found");
+    }
+    let listenerName = null;
+    let count = 0;
+    let patched = source.replace(
+      /(\b[$A-Z_a-z][$\w]*)=\(\)=>\{([$A-Z_a-z][$\w]*)\.reconcileExternalPluginState\((`focus`|"focus"|'focus')\)\}/g,
+      (_match, matchedListenerName, coordinatorName, focusLiteral) => {
+        count += 1;
+        listenerName = matchedListenerName;
+        return (
+          `${matchedListenerName}=globalThis.` +
+          `__CODEY_THROTTLE_EXTERNAL_PLUGIN_FOCUS_RECONCILE__(` +
+          `()=>{${coordinatorName}.reconcileExternalPluginState(${focusLiteral})})`
+        );
+      },
+    );
+    if (count !== 1) {
+      throw new Error(
+        `Codey external plugin focus reconcile matched ${count} times`,
+      );
+    }
+    let cleanupCount = 0;
+    patched = patched.replace(
+      /(\b[$A-Z_a-z][$\w]*)\.add\(\(\)=>\{([$A-Z_a-z][$\w]*)\.app\.off\((`browser-window-focus`|"browser-window-focus"|'browser-window-focus'),([$A-Z_a-z][$\w]*)\)\}\)/g,
+      (match, disposerName, appName, eventLiteral, cleanupListenerName) => {
+        if (cleanupListenerName !== listenerName) return match;
+        cleanupCount += 1;
+        return (
+          `${disposerName}.add(()=>{${appName}.app.off(` +
+          `${eventLiteral},${cleanupListenerName}),${cleanupListenerName}.cancel?.()})`
+        );
+      },
+    );
+    if (cleanupCount !== 1) {
+      throw new Error(
+        `Codey external plugin focus reconcile cleanup matched ${cleanupCount} times`,
+      );
+    }
+    return patched;
+  };
+  Object.defineProperty(
+    globalThis,
+    "__CODEY_PATCH_CODEX_MAIN_FOCUS_RECONCILE__",
+    {
+      configurable: false,
+      value: patchCodexMainFocusReconcile,
+      writable: false,
+    },
+  );
+
+  // Desktop CES telemetry has its own main-process transport and worker
+  // transport. Disable the transport promise, worker bootstrap value, and the
+  // later startup-config update explicitly so no events queue while app-server
+  // configuration is still resolving.
+  const patchCodexMainDesktopAnalytics = (source) => {
+    if (
+      !source.includes("worker-analytics-enabled-update") ||
+      !source.includes("source:`codex-desktop`")
+    ) {
+      throw new Error("Codey desktop analytics anchors not found");
+    }
+    let workerBootstrapCount = 0;
+    let workerUpdateCount = 0;
+    let mainTransportCount = 0;
+    let patched = source.replace(
+      /analyticsEnabled:([$A-Z_a-z][$\w]*)!=null&&\1\.analytics\?\.enabled!==!1/g,
+      () => {
+        workerBootstrapCount += 1;
+        return "analyticsEnabled:!1";
+      },
+    );
+    patched = patched.replace(
+      /postMessage\(\{type:(`worker-analytics-enabled-update`|"worker-analytics-enabled-update"|'worker-analytics-enabled-update'),enabled:([$A-Z_a-z][$\w]*)\.analytics\?\.enabled!==!1\}\)/g,
+      (_match, messageLiteral) => {
+        workerUpdateCount += 1;
+        return `postMessage({type:${messageLiteral},enabled:!1})`;
+      },
+    );
+    patched = patched.replace(
+      /analyticsEnabled:([$A-Z_a-z][$\w]*)\.get\(\)\.then\(([$A-Z_a-z][$\w]*)=>\2\.analytics\?\.enabled!==!1\)/g,
+      () => {
+        mainTransportCount += 1;
+        return "analyticsEnabled:!1";
+      },
+    );
+    if (
+      workerBootstrapCount !== 1 ||
+      workerUpdateCount !== 1 ||
+      mainTransportCount !== 1
+    ) {
+      throw new Error(
+        "Codey desktop analytics matches " +
+        `${workerBootstrapCount}/${workerUpdateCount}/${mainTransportCount}`,
+      );
+    }
+    return patched;
+  };
+  Object.defineProperty(
+    globalThis,
+    "__CODEY_PATCH_CODEX_MAIN_DESKTOP_ANALYTICS__",
+    {
+      configurable: false,
+      value: patchCodexMainDesktopAnalytics,
+      writable: false,
+    },
+  );
+
+  // Codex's sampler manager asks the focused renderer for a full diagnostic
+  // app-state snapshot every 30 seconds, then only records it as a debug log and
+  // Sentry breadcrumb. Keep renderer-ready and explicit trigger snapshots, but
+  // remove the periodic diagnostic heartbeat.
+  const patchCodexMainAppStateHeartbeat = (source) => {
+    if (
+      !source.includes("appStateHeartbeat") ||
+      !source.includes("electron-app-state-snapshot-request")
+    ) {
+      throw new Error("Codey app-state heartbeat anchors not found");
+    }
+    let count = 0;
+    const patched = source.replace(
+      /this\.appStateHeartbeat=setInterval\(\(\)=>\{this\.requestAppStateSnapshot\((`heartbeat`|"heartbeat"|'heartbeat')\)\},[$A-Z_a-z][$\w]*\),this\.appStateHeartbeat\.unref\(\)/g,
+      () => {
+        count += 1;
+        return "this.appStateHeartbeat=null";
+      },
+    );
+    if (count !== 1) {
+      throw new Error(`Codey app-state heartbeat matched ${count} times`);
+    }
+    return patched;
+  };
+  Object.defineProperty(
+    globalThis,
+    "__CODEY_PATCH_CODEX_MAIN_APP_STATE_HEARTBEAT__",
+    {
+      configurable: false,
+      value: patchCodexMainAppStateHeartbeat,
+      writable: false,
+    },
   );
 
   const workerThreads = process.getBuiltinModule("worker_threads");
@@ -584,6 +928,9 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
 
       const fs = process.getBuiltinModule("fs");
       let source = fs.readFileSync(filename, "utf8");
+      source = patchCodexMainDesktopAnalytics(source);
+      source = patchCodexMainFocusReconcile(source);
+      source = patchCodexMainAppStateHeartbeat(source);
       if (disablePet) {
       if (
         !source.includes("electron-avatar-overlay-open") ||
@@ -713,6 +1060,9 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
 
       globalThis.__CODEY_TEMP_WEBVIEW_SOURCE_PATCHED__ = true;
       globalThis.__CODEY_EXECUTION_REAPER_SOURCE_PATCHED__ = true;
+      globalThis.__CODEY_EXTERNAL_PLUGIN_FOCUS_RECONCILE_SOURCE_PATCHED__ = true;
+      globalThis.__CODEY_DESKTOP_ANALYTICS_SOURCE_PATCHED__ = true;
+      globalThis.__CODEY_APP_STATE_HEARTBEAT_SOURCE_PATCHED__ = true;
       module._compile(source, filename);
     };
   }
@@ -833,6 +1183,16 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     disableMicro,
     disablePet,
     disableVoice,
+    disableAppServerAnalytics: true,
+    disableDesktopCesAnalytics: true,
+    get appServerAnalyticsPatchCount() {
+      return appServerAnalyticsPatchCount;
+    },
+    throttleExternalPluginFocusReconcile: true,
+    get externalPluginFocusReconcileSuppressedCount() {
+      return externalPluginFocusReconcileSuppressedCount;
+    },
+    disableAppStateHeartbeat: true,
     reclaimExecutionEnvironments: true,
     restoreNativeModelAndSpeedControls: true,
     destroyTemporaryWebViews: true,
@@ -841,7 +1201,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   setImmediate(() => {
     try { process.getBuiltinModule("inspector").close(); } catch {}
   });
-  return "codey-startup-patch-installed-v8";
+  return "codey-startup-patch-installed-v10";
 })()
 "#;
 
@@ -1056,7 +1416,7 @@ mod tests {
 
     #[test]
     fn patch_result_is_stable_for_launch_status_validation() {
-        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v8");
+        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v10");
     }
 
     #[test]
@@ -1079,6 +1439,12 @@ mod tests {
         assert!(expression.contains("avatar(?:-|_)overlay"));
         assert!(expression.contains("__CODEY_DISABLED_PET_MANAGER__"));
         assert!(expression.contains("getVisibleNativePetWebContents"));
+        assert!(expression.contains("disableAppServerAnalytics: true"));
+        assert!(expression.contains("disableDesktopCesAnalytics: true"));
+        assert!(expression.contains("analytics.enabled=false"));
+        assert!(expression.contains("reconcileExternalPluginState"));
+        assert!(expression.contains("throttleExternalPluginFocusReconcile: true"));
+        assert!(expression.contains("disableAppStateHeartbeat: true"));
         assert!(expression.contains("module._compile(source, filename)"));
     }
 

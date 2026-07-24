@@ -90,11 +90,20 @@ struct CachedRolloutEvents {
     parsed: Option<ParsedRolloutEvents>,
 }
 
+#[derive(Debug)]
+struct CachedDatabaseConnection {
+    signature: RolloutSignature,
+    connection: Connection,
+}
+
 #[derive(Debug, Default)]
 pub struct RecentSessionEventCache {
     rollouts: HashMap<PathBuf, CachedRolloutEvents>,
+    database_connections: HashMap<PathBuf, CachedDatabaseConnection>,
     #[cfg(test)]
     parse_count: usize,
+    #[cfg(test)]
+    database_open_count: usize,
 }
 
 impl RecentSessionEventCache {
@@ -106,7 +115,74 @@ impl RecentSessionEventCache {
             .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
             .map(|duration| duration.as_secs() as i64)
             .unwrap_or_default();
-        self.refresh_rollouts(recent_codey_rollouts(home, recent_after))
+        let rollouts = self.recent_codey_rollouts(home, recent_after);
+        self.refresh_rollouts(rollouts)
+    }
+
+    pub(crate) fn release_database_connections(&mut self) {
+        self.database_connections.clear();
+    }
+
+    fn recent_codey_rollouts(&mut self, home: &Path, recent_after: i64) -> Vec<(String, PathBuf)> {
+        let database_paths = codex_session_db_paths_from_home(home);
+        let active_database_paths = database_paths.iter().cloned().collect::<HashSet<_>>();
+        self.database_connections
+            .retain(|path, _| active_database_paths.contains(path));
+
+        let mut rollouts = Vec::new();
+        for database_path in database_paths {
+            let Ok(metadata) = fs::metadata(&database_path) else {
+                self.database_connections.remove(&database_path);
+                continue;
+            };
+            let signature = RolloutSignature {
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+            };
+            let connection_is_current = self
+                .database_connections
+                .get(&database_path)
+                .is_some_and(|cached| cached.signature == signature);
+            if !connection_is_current {
+                self.database_connections.remove(&database_path);
+            }
+            if !self.database_connections.contains_key(&database_path) {
+                let Ok(connection) = Connection::open_with_flags(
+                    &database_path,
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                ) else {
+                    continue;
+                };
+                #[cfg(test)]
+                {
+                    self.database_open_count += 1;
+                }
+                self.database_connections.insert(
+                    database_path.clone(),
+                    CachedDatabaseConnection {
+                        signature,
+                        connection,
+                    },
+                );
+            }
+
+            let query_result = self
+                .database_connections
+                .get(&database_path)
+                .map(|cached| query_recent_codey_rollouts(&cached.connection, home, recent_after));
+            match query_result {
+                Some(Ok(rows)) => rollouts.extend(rows),
+                Some(Err(_)) => {
+                    // A replaced database or schema migration can leave a cached
+                    // read handle stale. Reopen it on the next polling cycle.
+                    self.database_connections.remove(&database_path);
+                }
+                None => {}
+            }
+        }
+        rollouts.sort();
+        rollouts.dedup();
+        rollouts
     }
 
     fn refresh_rollouts(&mut self, rollouts: Vec<(String, PathBuf)>) -> RecentSessionEvents {
@@ -375,42 +451,32 @@ fn rollout_is_subagent(contents: &str) -> bool {
     parse_rollout_events(contents).is_none()
 }
 
-fn recent_codey_rollouts(home: &Path, recent_after: i64) -> Vec<(String, PathBuf)> {
+fn query_recent_codey_rollouts(
+    connection: &Connection,
+    home: &Path,
+    recent_after: i64,
+) -> rusqlite::Result<Vec<(String, PathBuf)>> {
     let mut rollouts = Vec::new();
-    for database_path in codex_session_db_paths_from_home(home) {
-        let Ok(connection) = Connection::open_with_flags(
-            database_path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        ) else {
-            continue;
-        };
-        let Ok(mut statement) = connection.prepare(
-            "SELECT id, rollout_path FROM threads \
-             WHERE archived=0 AND updated_at >= ?1 \
-             ORDER BY updated_at DESC LIMIT ?2",
-        ) else {
-            continue;
-        };
-        let Ok(rows) = statement.query_map(params![recent_after, MAX_RECENT_SESSIONS], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        }) else {
-            continue;
-        };
-        for row in rows.filter_map(Result::ok) {
-            let path = PathBuf::from(&row.1);
-            rollouts.push((
-                row.0,
-                if path.is_absolute() {
-                    path
-                } else {
-                    home.join(path)
-                },
-            ));
-        }
+    let mut statement = connection.prepare(
+        "SELECT id, rollout_path FROM threads \
+         WHERE archived=0 AND updated_at >= ?1 \
+         ORDER BY updated_at DESC LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![recent_after, MAX_RECENT_SESSIONS], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows.filter_map(Result::ok) {
+        let path = PathBuf::from(&row.1);
+        rollouts.push((
+            row.0,
+            if path.is_absolute() {
+                path
+            } else {
+                home.join(path)
+            },
+        ));
     }
-    rollouts.sort();
-    rollouts.dedup();
-    rollouts
+    Ok(rollouts)
 }
 
 #[cfg(test)]
@@ -651,5 +717,54 @@ mod tests {
             updated.session_statuses.get("thread-1"),
             Some(&SessionLifecycleStatus::Idle)
         );
+    }
+
+    #[test]
+    fn unchanged_database_files_reuse_read_connections() {
+        let temp = tempfile::tempdir().unwrap();
+        let rollout_path = temp.path().join("rollout-thread-1.jsonl");
+        fs::write(
+            &rollout_path,
+            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-1"}}"#,
+        )
+        .unwrap();
+        let database_path = temp.path().join("state_5.sqlite");
+        let database = Connection::open(&database_path).unwrap();
+        database
+            .execute_batch(
+                "CREATE TABLE threads (
+                    id TEXT PRIMARY KEY,
+                    rollout_path TEXT NOT NULL,
+                    archived INTEGER NOT NULL DEFAULT 0,
+                    updated_at INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+        let updated_at = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        database
+            .execute(
+                "INSERT INTO threads (id, rollout_path, archived, updated_at)
+                 VALUES (?1, ?2, 0, ?3)",
+                params!["thread-1", rollout_path.to_string_lossy(), updated_at],
+            )
+            .unwrap();
+        drop(database);
+
+        let mut cache = RecentSessionEventCache::default();
+        let first = cache.refresh(temp.path());
+        let second = cache.refresh(temp.path());
+
+        assert_eq!(cache.database_open_count, 1);
+        assert_eq!(
+            first.session_statuses.get("thread-1"),
+            Some(&SessionLifecycleStatus::Running)
+        );
+        assert_eq!(second.started_turns, first.started_turns);
+
+        cache.release_database_connections();
+        assert!(cache.database_connections.is_empty());
     }
 }

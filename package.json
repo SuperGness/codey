@@ -17,7 +17,6 @@
     "@douyinfe/semi-ui": "2.101.1",
     "@tabler/icons-react": "^3.45.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "motion": "^12.42.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "typescript": "^5.8.0",

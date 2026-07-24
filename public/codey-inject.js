@@ -61,6 +61,7 @@
   const threadUpdatedAtCache = new Map();
   const threadUpdatedAtRequestedAt = new Map();
   const pendingThreadUpdatedAtRefs = new Map();
+  const threadUpdatedAtRows = new Set();
   const deletedSidebarSessionIds = new Map();
   const hardDeletedMessageKeys = new Set();
   const deletedSidebarSessionTtlMs = 10 * 60 * 1000;
@@ -861,12 +862,20 @@
       threadUpdatedAtMount(row)?.appendChild(label);
     }
     const relative = formatRelativeThreadTime(timestamp);
+    const timestampText = String(timestamp);
+    if (
+      label.getAttribute(threadUpdatedAtMsAttribute) === timestampText
+      && label.textContent === relative
+    ) return;
     const date = new Date(timestamp);
     const fullTime = Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
-    label.setAttribute(threadUpdatedAtMsAttribute, String(timestamp));
-    label.setAttribute("datetime", Number.isNaN(date.getTime()) ? "" : date.toISOString());
-    label.setAttribute("aria-label", `最后消息：${relative}${fullTime ? `（${fullTime}）` : ""}`);
-    label.title = fullTime ? `最后消息：${fullTime}` : "最后消息时间";
+    const datetime = Number.isNaN(date.getTime()) ? "" : date.toISOString();
+    const ariaLabel = `最后消息：${relative}${fullTime ? `（${fullTime}）` : ""}`;
+    const title = fullTime ? `最后消息：${fullTime}` : "最后消息时间";
+    label.setAttribute(threadUpdatedAtMsAttribute, timestampText);
+    label.setAttribute("datetime", datetime);
+    label.setAttribute("aria-label", ariaLabel);
+    label.title = title;
     label.textContent = relative;
   };
 
@@ -874,9 +883,21 @@
     const identity = threadIdentityNode(row);
     if (!(identity instanceof HTMLElement)) return "";
     const sessionId = threadSessionIdFromRow(identity);
+    if (!sessionId) return "";
+    threadUpdatedAtRows.add(row);
     const timestamp = threadUpdatedAtCache.get(sessionId);
     updateThreadUpdatedAt(row, timestamp || 0);
     return sessionId;
+  };
+
+  const forEachTrackedThreadRow = (callback) => {
+    threadUpdatedAtRows.forEach((row) => {
+      if (!(row instanceof HTMLElement) || row.isConnected === false) {
+        threadUpdatedAtRows.delete(row);
+        return;
+      }
+      callback(row);
+    });
   };
 
   const flushThreadUpdatedAtFetch = async () => {
@@ -902,8 +923,11 @@
       refs.forEach(({ session_id: sessionId }) => {
         if (!returnedSessionIds.has(sessionId)) threadUpdatedAtCache.delete(sessionId);
       });
-      queryWithin(document, "[data-app-action-sidebar-thread-row]").forEach((row) => {
-        if (row instanceof HTMLElement) renderCachedThreadUpdatedAt(row);
+      const refreshedSessionIds = new Set(refs.map(({ session_id: sessionId }) => sessionId));
+      forEachTrackedThreadRow((row) => {
+        const identity = threadIdentityNode(row);
+        const sessionId = identity instanceof HTMLElement ? threadSessionIdFromRow(identity) : "";
+        if (refreshedSessionIds.has(sessionId)) renderCachedThreadUpdatedAt(row);
       });
     } catch {
       refs.forEach(({ session_id: sessionId }) => threadUpdatedAtRequestedAt.delete(sessionId));
@@ -946,13 +970,10 @@
   };
 
   const renderThreadUpdatedTimeLabels = () => {
-    queryWithin(document, "[data-app-action-sidebar-thread-row]").forEach((row) => {
-      if (row instanceof HTMLElement) renderCachedThreadUpdatedAt(row);
-    });
+    forEachTrackedThreadRow(renderCachedThreadUpdatedAt);
   };
 
   const refreshThreadUpdatedTimes = (forceRefresh = false) => {
-    renderThreadUpdatedTimeLabels();
     installThreadUpdatedTimes(document, forceRefresh);
   };
 
@@ -1771,9 +1792,14 @@
   };
   const flushIncrementalScans = () => {
     scanTimer = 0;
-    const roots = [...pendingScanRoots];
+    const roots = [...pendingScanRoots]
+      .filter((root) => root.isConnected !== false)
+      .filter((root, index, candidates) => !candidates.some((
+        candidate,
+        candidateIndex,
+      ) => candidateIndex !== index && candidate.contains?.(root)));
     pendingScanRoots.clear();
-    mountButton();
+    if (headerMountDirty) mountButton();
     roots.forEach((root) => scan(root, true, false));
   };
   const scheduleIncrementalScan = (root) => {

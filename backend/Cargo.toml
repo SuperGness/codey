@@ -6,7 +6,7 @@ license.workspace = true
 
 [lib]
 name = "codey_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [[bin]]
 name = "codey"

@@ -1769,6 +1769,7 @@ async fn start_waiting_webhook_watcher(
             shutdown_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ) {
+            event_cache.release_database_connections();
             *watcher_state.recent_session_event_cache.lock().await = Some(event_cache);
             return;
         }
@@ -1824,6 +1825,7 @@ async fn start_waiting_webhook_watcher(
             };
             previous_events = events;
         }
+        event_cache.release_database_connections();
         *watcher_state.recent_session_event_cache.lock().await = Some(event_cache);
     });
     *state.waiting_watcher_shutdown.lock().await = Some(shutdown_tx);

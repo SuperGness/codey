@@ -13,6 +13,7 @@ class FakeElement {
     this.parentElement = null;
     this.textContent = "";
     this.title = "";
+    this.attributeWrites = 0;
   }
 
   appendChild(child) {
@@ -62,6 +63,7 @@ class FakeElement {
   }
 
   setAttribute(name, value) {
+    this.attributeWrites += 1;
     this.attributes.set(name, String(value));
   }
 }
@@ -76,9 +78,12 @@ function loadInjection({ rows = [], bridgeHandler } = {}) {
     createElement: (tagName) => new FakeElement(tagName),
     getElementById: () => placeholder,
     querySelector: () => null,
-    querySelectorAll: (selector) => (
-      selector === "[data-app-action-sidebar-thread-row]" ? rows : []
-    ),
+    threadRowQueries: 0,
+    querySelectorAll(selector) {
+      if (selector !== "[data-app-action-sidebar-thread-row]") return [];
+      this.threadRowQueries += 1;
+      return rows;
+    },
   };
   const window = {
     __codexSessionDeleteBridge: bridgeHandler,
@@ -148,6 +153,10 @@ test("renders an accessible time element in the thread row content", () => {
   assert.match(label.getAttribute("aria-label"), /^最后消息：2d/);
   assert.match(label.title, /^最后消息：/);
 
+  const attributeWrites = label.attributeWrites;
+  window.__codeyUpdateThreadUpdatedAt(row, timestamp);
+  assert.equal(label.attributeWrites, attributeWrites);
+
   window.__codeyUpdateThreadUpdatedAt(row, 0);
   assert.equal(content.querySelector("[data-codey-thread-updated-at]"), null);
 });
@@ -163,7 +172,7 @@ test("batches visible thread timestamps through the bridge and renders the resul
   const calls = [];
   const timestamp = Date.now() - 3 * 60 * 60_000;
 
-  loadInjection({
+  const { document } = loadInjection({
     rows: [row],
     bridgeHandler: async (path, payload) => {
       calls.push({ path, payload });
@@ -184,6 +193,7 @@ test("batches visible thread timestamps through the bridge and renders the resul
     content.querySelector("[data-codey-thread-updated-at]")?.textContent,
     "3h",
   );
+  assert.equal(document.threadRowQueries, 1);
 });
 
 test("injects time styles that yield to native statuses and sidebar actions", () => {

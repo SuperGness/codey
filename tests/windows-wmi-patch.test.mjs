@@ -39,7 +39,7 @@ test("Windows lag patch bypasses only the recurring WMI snapshot worker", async 
 
     try {
       const expression = await loadPatchExpression();
-      assert.equal((0, eval)(expression), "codey-startup-patch-installed-v8");
+      assert.equal((0, eval)(expression), "codey-startup-patch-installed-v10");
 
       const blocked = new workerThreads.Worker(
         "C:\\Codex\\resources\\app\\.vite\\build\\child-process-snapshot-worker.js",
