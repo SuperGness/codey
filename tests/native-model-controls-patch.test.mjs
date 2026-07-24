@@ -125,6 +125,40 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       ["gpt-5.6-sol"],
     );
 
+    const consolidatedModelListFilterSource = [
+      "function filterV2({additionalAvailableModels:e,authMethod:t,availableModels:n,",
+      "includeUltraReasoningEffort:a,models:o,useHiddenModels:s}){",
+      "let c=[],u=s&&t!==`amazonBedrock`;",
+      "o.forEach(r=>{if(e?.has(r.model)===!0||(u?n.has(r.model):!r.hidden)){c.push(r.model)}});",
+      "return {models:c,includeUltraReasoningEffort:a}}",
+    ].join("");
+    const patchedConsolidatedModelListFilter = await patchAsset(
+      consolidatedModelListFilterSource,
+      "app://-/assets/app-initial-BTphDPeq.js",
+    );
+    assert.match(
+      patchedConsolidatedModelListFilter,
+      /if\(n\.has\(r\.model\)\)/,
+    );
+    assert.doesNotMatch(
+      patchedConsolidatedModelListFilter,
+      /additionalAvailableModels.*\|\|/,
+    );
+    const filterModelsV2 = Function(
+      `${patchedConsolidatedModelListFilter};return filterV2;`,
+    )();
+    assert.deepEqual(
+      filterModelsV2({
+        additionalAvailableModels: new Set(["gpt-5.3-codex-spark"]),
+        authMethod: "apikey",
+        availableModels: new Set(["gpt-5.6-sol"]),
+        includeUltraReasoningEffort: true,
+        models,
+        useHiddenModels: true,
+      }).models,
+      ["gpt-5.6-sol"],
+    );
+
     const serviceTierUiSource = [
       "function U(e){let o=e,s=o?.authMethod===`chatgpt`,c=o?.authMethod??null,l;",
       "let u=o,f=false,p=s&&!f&&u!=null&&",
@@ -352,6 +386,77 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
         (option) => option.selectedServiceTierIconKind === null,
       ));
     }
+
+    const consolidatedFastModelPresentationSource = [
+      "const consolidatedPickerMarkers=[",
+      "`composer.intelligenceDropdown.model.title`,",
+      "`composer.intelligenceDropdown.model.rowLabel`];",
+      "function triggerConfigV2(hideLabel,powerSelections){",
+      "let workMode=true,compact=workMode&&powerSelections.length>=4,",
+      "configEnabled=compact&&!hideLabel,focusTarget=compact?`simple`:`advanced`;",
+      "return {focusTarget,modelPickerTriggerConfig:configEnabled?",
+      "{showFastServiceTierIndicator:true}:void 0}}",
+      "function unrelatedFastShapes(workMode,hideDecoy,enabled,compact,otherConfig){",
+      "let decoyEnabled=workMode&&!hideDecoy,next=enabled?`a`:`b`;",
+      "if(compact&&otherConfig!=null)return {decoyEnabled,next};return null}",
+      "function nativePickerV2(input,powerSelections,selectedServiceTierIconKind){",
+      "let {modelPickerTriggerConfig:config}=input,workMode=true,",
+      "compact=workMode&&powerSelections.length>=4,useCompact=compact,",
+      "selectedModel={},selectedServiceTier=`priority`,otherConfig=null;",
+      "let selectedIcon=!useCompact&&selectedServiceTierIconKind!=null&&",
+      "supports(selectedModel,selectedServiceTier)?selectedServiceTierIconKind:null;",
+      "let rowIcon=selectedServiceTierIconKind!==null&&",
+      "supports(selectedModel,selectedServiceTier)?selectedServiceTierIconKind:null;",
+      "let options=[`gpt-5.5`,`claude-opus-4-8`].map(model=>({",
+      "model,selectedServiceTierIconKind:useCompact?null:selectedServiceTierIconKind,",
+      "stripGptPrefix:useCompact}));",
+      "if(compact&&otherConfig!=null)return {kind:`decoy`};",
+      "if(compact&&config!=null)return {kind:`solid`,options,rowIcon,selectedIcon};",
+      "return {kind:`outline`,options,rowIcon,selectedIcon}}",
+      "function supports(){return true}",
+    ].join("");
+    const patchedConsolidatedFastPresentation = await patchAsset(
+      consolidatedFastModelPresentationSource,
+      "app://-/assets/app-initial-BTphDPeq.js",
+    );
+    assert.match(
+      patchedConsolidatedFastPresentation,
+      /configEnabled=!hideLabel/,
+    );
+    assert.match(
+      patchedConsolidatedFastPresentation,
+      /decoyEnabled=workMode&&!hideDecoy/,
+    );
+    assert.match(
+      patchedConsolidatedFastPresentation,
+      /if\(compact&&otherConfig!=null\)/,
+    );
+    assert.match(patchedConsolidatedFastPresentation, /selectedIcon=null/);
+    assert.match(patchedConsolidatedFastPresentation, /rowIcon=null/);
+    assert.match(
+      patchedConsolidatedFastPresentation,
+      /selectedServiceTierIconKind:null,stripGptPrefix:/,
+    );
+    assert.match(patchedConsolidatedFastPresentation, /if\(config!=null\)/);
+    const nativeModelPickerV2 = Function(
+      `${patchedConsolidatedFastPresentation};` +
+        "return {nativePickerV2,triggerConfigV2};",
+    )();
+    const thirdPartyTriggerV2 = nativeModelPickerV2.triggerConfigV2(false, []);
+    const thirdPartyPresentationV2 = nativeModelPickerV2.nativePickerV2(
+      {
+        modelPickerTriggerConfig:
+          thirdPartyTriggerV2.modelPickerTriggerConfig,
+      },
+      [],
+      "fast",
+    );
+    assert.equal(thirdPartyPresentationV2.kind, "solid");
+    assert.equal(thirdPartyPresentationV2.rowIcon, null);
+    assert.equal(thirdPartyPresentationV2.selectedIcon, null);
+    assert.ok(thirdPartyPresentationV2.options.every(
+      (option) => option.selectedServiceTierIconKind === null,
+    ));
 
     for (const url of [
       "app://-/assets/app-initial.js",

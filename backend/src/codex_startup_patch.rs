@@ -57,7 +57,7 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     ) {
       patched = replaceUniqueRendererGate(
         patched,
-        /if\s*\(\s*([$A-Z_a-z][$\w]*)\s*\?\s*([$A-Z_a-z][$\w]*)\.has\(\s*([$A-Z_a-z][$\w]*)\.model\s*\)\s*:\s*!\s*\3\.hidden\s*\)/g,
+        /if\s*\(\s*(?:[$A-Z_a-z][$\w]*\?\.\s*has\(\s*[$A-Z_a-z][$\w]*\.model\s*\)\s*===\s*!0\s*\|\|\s*)?\(?\s*([$A-Z_a-z][$\w]*)\s*\?\s*([$A-Z_a-z][$\w]*)\.has\(\s*([$A-Z_a-z][$\w]*)\.model\s*\)\s*:\s*!\s*\3\.hidden\s*\)?\s*\)/g,
         (_match, _useAllowlistName, allowlistName, modelName) =>
           `if(${allowlistName}.has(${modelName}.model))`,
         "model allowlist",
@@ -129,14 +129,13 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
     ) {
       patched = replaceUniqueRendererGate(
         patched,
-        /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*!\s*([$A-Z_a-z][$\w]*)(\s*,\s*[$A-Z_a-z][$\w]*\s*=\s*[$A-Z_a-z][$\w]*\s*\?)/g,
+        /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*!\s*([$A-Z_a-z][$\w]*)(?=\s*,[\s\S]{0,8192}?modelPickerTriggerConfig\s*:\s*\2\s*\?)/g,
         (
           _match,
           assignment,
           _triggerConfigName,
           hideLabelName,
-          followingAssignment,
-        ) => `${assignment}!${hideLabelName}${followingAssignment}`,
+        ) => `${assignment}!${hideLabelName}`,
         "fast model trigger availability",
       );
       patched = replaceRendererGates(
@@ -153,8 +152,11 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
       );
       patched = replaceUniqueRendererGate(
         patched,
-        /if\s*\(\s*[$A-Z_a-z][$\w]*\s*&&\s*([$A-Z_a-z][$\w]*)\s*!=\s*null\s*\)/g,
-        (_match, triggerConfigName) => `if(${triggerConfigName}!=null)`,
+        /(modelPickerTriggerConfig\s*:\s*([$A-Z_a-z][$\w]*)\s*[,}][\s\S]{0,16384}?)if\s*\(\s*[$A-Z_a-z][$\w]*\s*&&\s*\2\s*!=\s*null\s*\)|if\s*\(\s*[$A-Z_a-z][$\w]*\s*&&\s*modelPickerTriggerConfig\s*!=\s*null\s*\)/g,
+        (_match, aliasedPrefix, triggerConfigName) =>
+          aliasedPrefix == null
+            ? "if(modelPickerTriggerConfig!=null)"
+            : `${aliasedPrefix}if(${triggerConfigName}!=null)`,
         "fast model trigger fallback",
       );
     }
@@ -177,7 +179,19 @@ const STARTUP_PATCH_TEMPLATE: &str = r#"
   const patchCodexRendererResponse = async (request, response) => {
     if (!isCodexRendererAssetRequest(request) || response?.ok !== true) return response;
     const source = await response.clone().text();
-    const patched = patchCodexRendererAsset(source);
+    let patched;
+    try {
+      patched = patchCodexRendererAsset(source);
+    } catch (error) {
+      // Codex renderer bundles are minified implementation details and their
+      // shapes change between releases. These UI restorations are optional:
+      // never turn a stale patch anchor into a failed app:// module request,
+      // otherwise Codex remains on its static startup loader forever.
+      try {
+        console.error("Codey skipped an incompatible Codex renderer patch", error);
+      } catch {}
+      return response;
+    }
     if (patched === source) return response;
     const headers = new Headers(response.headers);
     headers.delete("content-length");
