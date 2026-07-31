@@ -24,18 +24,22 @@ test("renderer core waits for sidebar interaction before loading session tools",
   assert.match(inject, /new MutationObserver\(\(mutations\) =>/);
   assert.match(inject, /scheduleScan\(element\)/);
   assert.match(inject, /const mountedButtonIsUsable = \(button\) =>/);
-  assert.match(inject, /if \(mountedButtonIsUsable\(existingButton\)\) return;/);
-  assert.match(inject, /button\.nextElementSibling === button\.__codeyHeaderAnchor/);
-  assert.match(inject, /const isTopChromeMountTarget = \(element\) =>/);
-  assert.match(inject, /const visibleMountRect = \(element\) =>/);
-  assert.match(inject, /return \{ control, right: rect\.right \};/);
+  assert.match(inject, /if \(mountedButtonIsUsable\(button\)\)/);
+  assert.match(inject, /dataset\.codeyWindowChrome/);
+  assert.match(inject, /windowControlsReservePx = 138/);
+  assert.match(inject, /position: fixed !important/);
+  assert.match(inject, /titlebar-area-width/);
+  assert.doesNotMatch(inject, /findHeaderMount/);
+  assert.doesNotMatch(inject, /isTopChromeMountTarget/);
+  assert.doesNotMatch(inject, /visibleMountRect/);
+  assert.doesNotMatch(inject, /__codeyHeaderAnchor/);
   assert.doesNotMatch(
     inject,
     /control\.getBoundingClientRect\(\)\.right > rightmost\.getBoundingClientRect\(\)\.right/,
   );
   assert.doesNotMatch(inject, /querySelector\("main"\)/);
-  assert.match(inject, /headerMountDirty = true/);
   assert.match(inject, /window\.__codeyRendererInvalidateHeaderMount = invalidateHeaderMount/);
+  assert.doesNotMatch(inject, /headerMountDirty/);
   assert.doesNotMatch(inject, /new MutationObserver\(\(\) => \{[\s\S]*setTimeout\(scan,/);
   assert.doesNotMatch(inject, /characterData:\s*true/);
   assert.doesNotMatch(inject, /mutation\.type === "characterData"/);

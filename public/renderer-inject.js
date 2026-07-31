@@ -19,8 +19,8 @@
     "[data-app-action-sidebar-project-row]",
     "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
   ].join(", ");
-  const headerSelector = "header, nav";
-  const bootstrapProbeSelector = `${headerSelector}, ${sidebarSelector}`;
+  /** Typical Windows caption cluster (min / max / close). */
+  const windowControlsReservePx = 138;
   const settingsIcon = `
     <svg viewBox="0 0 350 350" aria-hidden="true" focusable="false">
       <rect x="0" y="0" width="350" height="350" rx="34" fill="#fff" stroke="none"></rect>
@@ -38,7 +38,6 @@
   let updateCheckInFlight = false;
   let sessionToolsInteractionArmed = false;
   let bootstrapObserver = null;
-  let headerMountDirty = true;
 
   const queryWithin = (root, selector) => {
     const matches = [];
@@ -62,17 +61,41 @@
     if (document.getElementById(styleId)) return;
     const style = document.createElement("style");
     style.id = styleId;
+    // Sit just left of the window min/max/close cluster (titlebar overlay or
+    // a Windows-sized reserve), not inside the Codex sidebar/header.
     style.textContent = `
-      #${buttonId} { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; z-index: 2147483641; display: inline-grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 8px; padding: 0; margin-inline-start: 8px; margin-inline-end: 18px; background: transparent; color: inherit; cursor: pointer; opacity: .86; user-select: none; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
-      #${buttonId}[data-codey-header-actions="true"] { width: 28px; height: 28px; margin-inline-start: 0; margin-inline-end: 6px; }
-      #${buttonId}:hover { background: rgba(127, 127, 127, .14); opacity: 1; }
+      #${buttonId} {
+        -webkit-app-region: no-drag !important;
+        pointer-events: auto !important;
+        position: fixed !important;
+        z-index: 2147483646 !important;
+        top: max(4px, env(titlebar-area-y, 4px));
+        right: max(
+          ${windowControlsReservePx}px,
+          calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw))
+        );
+        display: inline-grid;
+        place-items: center;
+        width: 28px;
+        height: 28px;
+        margin: 0;
+        border: 0;
+        border-radius: 8px;
+        padding: 0;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        opacity: .9;
+        user-select: none;
+        transition: background .15s ease, opacity .15s ease, transform .15s ease;
+      }
+      #${buttonId}:hover { background: rgba(127, 127, 127, .16); opacity: 1; }
       #${buttonId}:active { transform: translateY(1px); }
       #${buttonId}:focus-visible { outline: 2px solid rgba(139, 151, 255, .72); outline-offset: 2px; }
-      #${buttonId} svg { display: block; width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
+      #${buttonId} svg { display: block; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
       #${buttonId} .codey-settings-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
-      #${buttonId}::after { content: ""; position: absolute; top: 5px; right: 5px; width: 7px; height: 7px; border-radius: 999px; background: #ff3b30; box-shadow: 0 0 0 2px Canvas; opacity: 0; transform: scale(.7); transition: opacity .15s ease, transform .15s ease; pointer-events: none; }
+      #${buttonId}::after { content: ""; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 999px; background: #ff3b30; box-shadow: 0 0 0 2px Canvas; opacity: 0; transform: scale(.7); transition: opacity .15s ease, transform .15s ease; pointer-events: none; }
       #${buttonId}[data-codey-update-available="true"]::after { opacity: 1; transform: scale(1); }
-      #${buttonId}[data-codey-header-actions="true"]::after { top: 4px; right: 4px; }
     `;
     document.documentElement.appendChild(style);
   };
@@ -532,91 +555,21 @@
     window.setTimeout?.(scanStatsigUntilReady, 50);
   };
 
-  const visibleMountRect = (element) => {
-    if (!(element instanceof HTMLElement)) return null;
-    if (element.closest("[hidden], [aria-hidden=true]")) return null;
-    const style = window.getComputedStyle(element);
-    const rect = element.getBoundingClientRect();
-    return style.display !== "none"
-      && style.visibility !== "hidden"
-      && rect.width > 0
-      && rect.height > 0
-      ? rect
-      : null;
-  };
-
-  const isTopChromeMountTarget = (element) => {
-    const rect = visibleMountRect(element);
-    if (!rect) return false;
-    const viewportWidth = Math.max(
-      window.innerWidth || 0,
-      document.documentElement?.clientWidth || 0,
-      document.documentElement?.getBoundingClientRect?.().width || 0,
-      rect.right,
-    );
-    return rect.top <= 96
-      && rect.height <= 120
-      && rect.width >= 48
-      && rect.right >= viewportWidth - 48;
-  };
-
-  const findHeaderMount = () => {
-    const header = [...document.querySelectorAll("header")].find(isTopChromeMountTarget)
-      || [...document.querySelectorAll("nav")].find(isTopChromeMountTarget);
-    if (!header) return null;
-
-    const rightmostControl = [...header.querySelectorAll("button, [role=button], a[href]")]
-      .reduce((rightmost, control) => {
-        if (control.id === buttonId) return rightmost;
-        const rect = visibleMountRect(control);
-        if (!rect || (rightmost && rect.right <= rightmost.right)) return rightmost;
-        return { control, right: rect.right };
-      }, null)?.control || null;
-    if (!rightmostControl) return { header, target: header };
-
-    let headerChild = rightmostControl;
-    while (headerChild.parentElement && headerChild.parentElement !== header) {
-      headerChild = headerChild.parentElement;
-    }
-    const headerRect = header.getBoundingClientRect();
-    const childRect = headerChild.getBoundingClientRect();
-    const hasTrailingActionRegion = headerChild !== rightmostControl
-      && childRect.width <= 240
-      && childRect.right >= headerRect.right - 24;
-    return {
-      header,
-      target: header,
-      before: hasTrailingActionRegion ? headerChild : null,
-    };
-  };
-
-  const mountedButtonIsUsable = (button) => {
-    if (headerMountDirty || !(button instanceof HTMLElement) || button.isConnected !== true) {
-      return false;
-    }
-    const parent = button.parentElement;
-    if (!(parent instanceof HTMLElement) || button.closest("[hidden], [aria-hidden=true]")) {
-      return false;
-    }
-    const validParent = parent.matches?.(headerSelector);
-    const anchored = button.dataset.codeyHeaderActions !== "true"
-      || (
-        !!button.nextElementSibling
-        && button.nextElementSibling === button.__codeyHeaderAnchor
-      );
-    return !!validParent && anchored;
-  };
+  const mountedButtonIsUsable = (button) => (
+    button instanceof HTMLElement
+    && button.isConnected === true
+    && button.dataset.codeyWindowChrome === "true"
+    && button.parentElement === document.documentElement
+    && !button.closest?.("[hidden], [aria-hidden=true]")
+  );
 
   const mountButton = () => {
     addStyle();
-    const existingButton = document.getElementById(buttonId);
-    if (mountedButtonIsUsable(existingButton)) return;
-    const mount = findHeaderMount();
-    if (!mount) {
-      existingButton?.remove?.();
+    let button = document.getElementById(buttonId);
+    if (mountedButtonIsUsable(button)) {
+      applyUpdateBadge(button);
       return;
     }
-    let button = existingButton;
     if (!button) {
       button = document.createElement("button");
       button.id = buttonId;
@@ -630,21 +583,12 @@
         openSettings();
       }, true);
     }
-    if (mount.before) {
-      button.dataset.codeyHeaderActions = "true";
-    } else {
-      delete button.dataset.codeyHeaderActions;
+    button.dataset.codeyWindowChrome = "true";
+    delete button.dataset.codeyHeaderActions;
+    if (button.parentElement !== document.documentElement) {
+      document.documentElement.appendChild(button);
     }
-    if (mount.before) {
-      if (button.parentElement !== mount.target || button.nextElementSibling !== mount.before) {
-        mount.target.insertBefore(button, mount.before);
-      }
-    } else if (button.parentElement !== mount.target) {
-      mount.target.appendChild(button);
-    }
-    button.__codeyHeaderAnchor = mount.before || null;
     applyUpdateBadge(button);
-    headerMountDirty = false;
   };
 
   const sidebarDetected = (root = document) => queryWithin(root, sidebarSelector).length > 0;
@@ -721,7 +665,7 @@
   };
 
   const invalidateHeaderMount = (root = document) => {
-    headerMountDirty = true;
+    // Kept for session-tools callers; button no longer depends on header layout.
     scheduleScan(root || document);
   };
 
@@ -743,37 +687,19 @@
         ? mutation.target
         : mutation.target?.parentElement;
       if (mutation.type === "attributes") {
-        if (target?.matches?.(headerSelector) || target?.matches?.(sidebarSelector)) {
-          if (target.matches?.(headerSelector)) headerMountDirty = true;
+        if (target?.matches?.(sidebarSelector)) {
           scheduleScan(target);
           return;
         }
         continue;
       }
-      const targetHeader = target?.matches?.(headerSelector)
-        ? target
-        : target?.closest?.(headerSelector);
-      const headerChildrenChanged = targetHeader && [
-        ...(mutation.addedNodes || []),
-        ...(mutation.removedNodes || []),
-      ].some((node) => node instanceof HTMLElement && node.id !== buttonId);
-      if (headerChildrenChanged) {
-        headerMountDirty = true;
-        scheduleScan(targetHeader);
-        return;
-      }
       for (const node of mutation.addedNodes || []) {
         const element = node instanceof HTMLElement ? node : null;
         if (!element) continue;
-        // One combined probe rejects the overwhelmingly common streaming case
-        // in two subtree walks instead of four.
-        const matched = element.matches?.(bootstrapProbeSelector)
+        const matched = element.matches?.(sidebarSelector)
           ? element
-          : element.querySelector?.(bootstrapProbeSelector);
+          : element.querySelector?.(sidebarSelector);
         if (!matched) continue;
-        if (element.matches?.(headerSelector) || element.querySelector?.(headerSelector)) {
-          headerMountDirty = true;
-        }
         scheduleScan(element);
         return;
       }
