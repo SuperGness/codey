@@ -69,6 +69,146 @@ pub fn ensure_openai_curated_remote_marketplace_available(
     })
 }
 
+/// Creates a local `openai-curated-remote` marketplace snapshot when missing.
+///
+/// Newer Codex installs often only materialize the official curated marketplace
+/// under `.tmp/plugins`. Codey still expects a sibling remote marketplace for
+/// its plugin-host bridge. When the curated snapshot is present, this rebuilds
+/// `.tmp/plugins-remote` by rewriting the marketplace name and linking the
+/// shared plugin tree so repair can finish without a second GitHub download.
+pub fn materialize_openai_curated_remote_marketplace(
+    home: &Path,
+) -> anyhow::Result<bool> {
+    if local_openai_curated_remote_marketplace_root(home)?.is_some() {
+        return Ok(false);
+    }
+    let Some(curated_root) = local_openai_curated_marketplace_root(home)? else {
+        return Ok(false);
+    };
+
+    let remote_root = home.join(".tmp").join("plugins-remote");
+    let remote_agents = remote_root.join(".agents").join("plugins");
+    let remote_plugins = remote_root.join("plugins");
+    let curated_marketplace = curated_root
+        .join(".agents")
+        .join("plugins")
+        .join("marketplace.json");
+    let curated_plugins = curated_root.join("plugins");
+
+    std::fs::create_dir_all(&remote_agents).with_context(|| {
+        format!("failed to create {}", remote_agents.display())
+    })?;
+
+    let text = std::fs::read_to_string(&curated_marketplace)
+        .with_context(|| format!("failed to read {}", curated_marketplace.display()))?;
+    let mut marketplace: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("failed to parse {}", curated_marketplace.display()))?;
+    if let Some(object) = marketplace.as_object_mut() {
+        object.insert(
+            "name".to_string(),
+            serde_json::Value::String(OPENAI_CURATED_REMOTE_MARKETPLACE.to_string()),
+        );
+        if let Some(interface) = object
+            .get_mut("interface")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            interface.insert(
+                "displayName".to_string(),
+                serde_json::Value::String("OpenAI remote (Codey)".to_string()),
+            );
+        } else {
+            object.insert(
+                "interface".to_string(),
+                serde_json::json!({ "displayName": "OpenAI remote (Codey)" }),
+            );
+        }
+    }
+
+    let remote_marketplace = remote_agents.join("marketplace.json");
+    std::fs::write(
+        &remote_marketplace,
+        serde_json::to_vec_pretty(&marketplace)
+            .context("failed to serialize openai-curated-remote marketplace")?,
+    )
+    .with_context(|| format!("failed to write {}", remote_marketplace.display()))?;
+
+    // Share plugin files with the curated snapshot to avoid a second full copy.
+    link_or_mirror_directory(&curated_plugins, &remote_plugins).with_context(|| {
+        format!(
+            "failed to link remote plugins from {} to {}",
+            curated_plugins.display(),
+            remote_plugins.display()
+        )
+    })?;
+
+    if local_openai_curated_remote_marketplace_root(home)?.is_none() {
+        anyhow::bail!(
+            "materialized openai-curated-remote marketplace at {} is still invalid",
+            remote_root.display()
+        );
+    }
+    Ok(true)
+}
+
+fn link_or_mirror_directory(source: &Path, dest: &Path) -> anyhow::Result<()> {
+    if dest.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    #[cfg(windows)]
+    {
+        // Directory junctions do not require elevated privileges on Windows.
+        let junction = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(dest.as_os_str())
+            .arg(source.as_os_str())
+            .status();
+        if matches!(junction, Ok(status) if status.success()) {
+            return Ok(());
+        }
+        if std::os::windows::fs::symlink_dir(source, dest).is_ok() {
+            return Ok(());
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        if std::os::unix::fs::symlink(source, dest).is_ok() {
+            return Ok(());
+        }
+    }
+
+    // Last resort: full copy. Rare, but keeps repair usable when linking fails.
+    copy_dir_recursive(source, dest)
+}
+
+fn copy_dir_recursive(source: &Path, dest: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("failed to create {}", dest.display()))?;
+    for entry in std::fs::read_dir(source)
+        .with_context(|| format!("failed to read {}", source.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&from, &to).with_context(|| {
+                format!("failed to copy {} to {}", from.display(), to.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
 pub fn preserve_openai_curated_remote_marketplace_config(
     home: &Path,
     config_text: &str,
@@ -900,6 +1040,55 @@ mod tests {
         let root = home.join(".tmp").join("plugins-remote");
         assert!(!root.exists());
         assert!(!home.join("config.toml").exists());
+    }
+
+    #[test]
+    fn materialize_openai_curated_remote_marketplace_builds_from_curated_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let curated = home.join(".tmp").join("plugins");
+        let curated_agents = curated.join(".agents").join("plugins");
+        let curated_plugin = curated.join("plugins").join("gmail");
+        std::fs::create_dir_all(&curated_agents).unwrap();
+        std::fs::create_dir_all(curated_plugin.join(".codex-plugin")).unwrap();
+        std::fs::write(
+            curated_agents.join("marketplace.json"),
+            r#"{"name":"openai-curated","interface":{"displayName":"Codex official"},"plugins":[{"name":"gmail","source":{"source":"local","path":"./plugins/gmail"}}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            curated_plugin.join(".codex-plugin").join("plugin.json"),
+            r#"{"name":"gmail"}"#,
+        )
+        .unwrap();
+
+        let created = materialize_openai_curated_remote_marketplace(home).unwrap();
+        let again = materialize_openai_curated_remote_marketplace(home).unwrap();
+        let status = openai_curated_remote_marketplace_status(home);
+        let configured = ensure_openai_curated_remote_marketplace_config(home).unwrap();
+
+        assert!(created);
+        assert!(!again);
+        assert_eq!(
+            status.marketplace_root,
+            Some(home.join(".tmp").join("plugins-remote"))
+        );
+        assert!(status.config_registered || configured);
+        assert!(
+            home.join(".tmp/plugins-remote/plugins/gmail/.codex-plugin/plugin.json")
+                .is_file()
+        );
+        let remote_marketplace: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                home.join(".tmp/plugins-remote/.agents/plugins/marketplace.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            remote_marketplace["name"].as_str(),
+            Some("openai-curated-remote")
+        );
     }
 
     #[test]

@@ -28,6 +28,11 @@ test("plugin marketplace repair is explicit and status checks stay read-only", a
   )?.[0] || "";
 
   assert.match(marketplaceSource, /pub fn marketplaces_status\(home: &Path\) -> Value/);
+  // Repair must materialize the missing remote snapshot before registering it.
+  assert.match(
+    marketplaceSource,
+    /materialize_openai_curated_remote_marketplace/,
+  );
   assert.doesNotMatch(statusFunction, /ensure_marketplaces/);
   assert.match(statusFunction, /marketplaces_status/);
   assert.match(repairFunction, /ensure_marketplaces/);

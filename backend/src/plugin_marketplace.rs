@@ -13,6 +13,13 @@ use crate::error_log;
 /// config format and local remote marketplace; Codey only exposes a small,
 /// renderer-friendly status/list API around it.
 pub fn ensure_marketplaces(home: &Path) -> Result<Value> {
+    // Official curated snapshots no longer always ship a sibling remote market.
+    // Repair materializes it from the local curated tree before registration.
+    let initialized_remote =
+        codey_runtime_core::plugin_marketplace::materialize_openai_curated_remote_marketplace(
+            home,
+        )
+        .context("物化官方远程插件市场失败")?;
     let remote =
         codey_runtime_core::plugin_marketplace::ensure_openai_curated_remote_marketplace_available(
             home,
@@ -36,9 +43,9 @@ pub fn ensure_marketplaces(home: &Path) -> Result<Value> {
         "remoteMarketplace": remote_status.marketplace_root.is_some(),
         "remoteRegistered": remote_status.config_registered,
         "remotePath": remote_status.marketplace_root,
-        "initializedRemote": remote.initialized,
+        "initializedRemote": initialized_remote || remote.initialized,
         "configuredRemote": remote.configured,
-        "configChanged": curated_changed || role_changed,
+        "configChanged": curated_changed || role_changed || remote.configured || initialized_remote,
     }))
 }
 
@@ -242,5 +249,43 @@ mod tests {
         assert_eq!(status["remoteMarketplace"], false);
         assert_eq!(fs::read(&config_path).unwrap(), original);
         assert!(!home.join(".tmp").exists());
+    }
+
+    #[test]
+    fn ensure_marketplaces_materializes_remote_from_official_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let curated = home.join(".tmp").join("plugins");
+        let curated_agents = curated.join(".agents").join("plugins");
+        let curated_plugin = curated.join("plugins").join("gmail");
+        fs::create_dir_all(&curated_agents).unwrap();
+        fs::create_dir_all(curated_plugin.join(".codex-plugin")).unwrap();
+        fs::write(
+            curated_agents.join("marketplace.json"),
+            r#"{"name":"openai-curated","plugins":[{"name":"gmail","source":{"source":"local","path":"./plugins/gmail"}}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            curated_plugin.join(".codex-plugin").join("plugin.json"),
+            r#"{"name":"gmail"}"#,
+        )
+        .unwrap();
+
+        let before = marketplaces_status(home);
+        let repair = ensure_marketplaces(home).unwrap();
+        let after = marketplaces_status(home);
+
+        assert_eq!(before["remoteMarketplace"], false);
+        assert_eq!(before["needsRepair"], true);
+        assert_eq!(repair["initializedRemote"], true);
+        assert_eq!(repair["remoteMarketplace"], true);
+        assert_eq!(repair["remoteRegistered"], true);
+        assert_eq!(after["needsRepair"], false);
+        assert_eq!(after["remoteMarketplace"], true);
+        assert_eq!(after["remoteRegistered"], true);
+        assert!(
+            home.join(".tmp/plugins-remote/.agents/plugins/marketplace.json")
+                .is_file()
+        );
     }
 }
