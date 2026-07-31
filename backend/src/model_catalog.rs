@@ -63,7 +63,6 @@ pub fn refresh_for_provider(
     selected_models: &[String],
 ) -> Result<usize> {
     let official_models = read_official_entries(home)?;
-    ensure_runtime_compatible_models(&official_models)?;
     let official_slugs = official_models
         .iter()
         .filter_map(|model| model.get("slug").and_then(Value::as_str))
@@ -230,10 +229,8 @@ pub fn official_model_slugs(home: &Path) -> Result<HashSet<String>> {
 }
 
 pub fn is_available(home: &Path) -> bool {
-    read_catalog_value(&home.join(relative_path())).is_some_and(|value| {
-        let models = catalog_models_from_value(&value);
-        runtime_compatible_models(&models)
-    })
+    read_catalog_value(&home.join(relative_path()))
+        .is_some_and(|value| !catalog_models_from_value(&value).is_empty())
 }
 
 /// Signature of the catalog source files, used to reuse a parse across the
@@ -276,8 +273,9 @@ fn read_official_entries(home: &Path) -> Result<Vec<Value>> {
 fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
     let mut catalogs = Vec::new();
     let mut bundled_fast_model_slugs = HashSet::new();
+    let mut has_native_cache = false;
     let mut last_error = None;
-    for path in paths {
+    for (index, path) in paths.iter().enumerate() {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -295,6 +293,7 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
         };
         let models = official_models_from_value(&value);
         if !models.is_empty() {
+            has_native_cache |= index == 0;
             catalogs.push(models);
         }
     }
@@ -307,7 +306,7 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
                     .flatten()
                     .map(ToString::to_string)
             }));
-            catalogs.push(models);
+            catalogs.insert(if has_native_cache { 1 } else { 0 }, models);
         }
     }
     if catalogs.is_empty() {
@@ -328,7 +327,6 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
                 .cloned()
                 .ok_or_else(|| anyhow::anyhow!("Codex 模型模板缺少固定官方模型 {slug}"))?;
             normalize_official_model(&mut model, slug, display_name, priority);
-            remove_fast_speed_controls(&mut model);
             if bundled_fast_model_slugs.contains(*slug) {
                 add_fast_speed_controls(&mut model);
             }
@@ -386,27 +384,11 @@ fn catalog_models_from_value(value: &Value) -> Vec<Value> {
                 return None;
             }
             let mut model = model.clone();
+            codey_runtime_core::model_suffix::remove_model_prompt_fields(&mut model);
             model["slug"] = json!(slug);
             Some(model)
         })
         .collect()
-}
-
-fn ensure_runtime_compatible_models(models: &[Value]) -> Result<()> {
-    if runtime_compatible_models(models) {
-        return Ok(());
-    }
-    bail!("本机 Codex 模型缓存缺少运行时必需字段；请先直接启动官方 Codex 完成模型缓存刷新")
-}
-
-fn runtime_compatible_models(models: &[Value]) -> bool {
-    !models.is_empty()
-        && models.iter().all(|model| {
-            model
-                .get("base_instructions")
-                .and_then(Value::as_str)
-                .is_some()
-        })
 }
 
 fn clamp_reasoning_efforts(model: &mut Value) {
@@ -504,19 +486,6 @@ fn add_fast_speed_controls(model: &mut Value) {
     }
 }
 
-fn remove_fast_speed_controls(model: &mut Value) {
-    if let Some(service_tiers) = model.get_mut("service_tiers").and_then(Value::as_array_mut) {
-        service_tiers
-            .retain(|tier| tier.get("id").and_then(Value::as_str) != Some(FAST_SERVICE_TIER_ID));
-    }
-    if let Some(speed_tiers) = model
-        .get_mut("additional_speed_tiers")
-        .and_then(Value::as_array_mut)
-    {
-        speed_tiers.retain(|tier| tier.as_str() != Some(FAST_SPEED_TIER_ID));
-    }
-}
-
 fn synthetic_model(template: &Value, model_id: &str, index: usize) -> Value {
     let mut model = template.clone();
     model["slug"] = json!(model_id);
@@ -540,12 +509,12 @@ fn synthetic_model(template: &Value, model_id: &str, index: usize) -> Value {
 }
 
 fn write_catalog(home: &Path, models: &[Value]) -> Result<()> {
-    let mut catalog = serde_json::to_vec_pretty(&json!({ "models": models }))
-        .context("序列化 Codey 模型目录失败")?;
+    let mut value = json!({ "models": models });
+    codey_runtime_core::model_suffix::remove_model_prompt_fields(&mut value);
+    let mut catalog = serde_json::to_vec_pretty(&value).context("序列化 Codey 模型目录失败")?;
     catalog.push(b'\n');
     let path = home.join(relative_path());
     if fs::read(&path).is_ok_and(|current| current == catalog) {
-        protect_catalog_file(&path)?;
         return Ok(());
     }
     atomic_write(&path, &catalog)
@@ -569,26 +538,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         return Err(error)
             .with_context(|| format!("写入临时模型目录失败：{}", temp_path.display()));
     }
-    if let Err(error) = protect_catalog_file(&temp_path) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(error);
-    }
     if let Err(error) = replace_file(&temp_path, path) {
         let _ = fs::remove_file(&temp_path);
         return Err(error).with_context(|| format!("替换模型目录失败：{}", path.display()));
     }
-    protect_catalog_file(path)
-}
-
-fn protect_catalog_file(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("保护本地模型目录失败：{}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
     Ok(())
 }
 
@@ -621,7 +574,7 @@ mod tests {
     use super::*;
 
     fn official_cache() -> Value {
-        let mut cache = json!({
+        json!({
             "models": [
                 {
                     "slug": "gpt-5.6-sol",
@@ -675,34 +628,7 @@ mod tests {
                 },
                 {"slug": "codex-auto-review", "visibility": "hide", "priority": 43}
             ]
-        });
-        let bundled = codey_runtime_core::model_suffix::bundled_model_catalog().unwrap();
-        for (slug, _) in OFFICIAL_MODELS {
-            let exists = cache["models"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|model| model["slug"] == slug);
-            if exists {
-                continue;
-            }
-            let model = bundled["models"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|model| model["slug"] == slug)
-                .unwrap()
-                .clone();
-            cache["models"].as_array_mut().unwrap().push(model);
-        }
-        for model in cache["models"].as_array_mut().unwrap() {
-            let slug = model["slug"].as_str().unwrap_or("test-model");
-            model["base_instructions"] = json!(format!("test-only instructions for {slug}"));
-            model["model_messages"] = json!({
-                "instructions_template": "test-only template"
-            });
-        }
-        cache
+        })
     }
 
     fn write_cache(home: &Path) {
@@ -730,17 +656,17 @@ mod tests {
     fn write_cache_with_prompt_fields(home: &Path) {
         let mut cache = official_cache();
         let model = &mut cache["models"][0];
-        model["base_instructions"] = json!("runtime-cache-only base instructions");
+        model["base_instructions"] = json!("DO NOT COPY THIS BASE PROMPT");
         model["model_messages"] = json!({
-            "instructions_template": "runtime-cache-only template",
+            "instructions_template": "DO NOT COPY THIS TEMPLATE",
             "instructions_variables": {
-                "developer": "runtime-cache-only variable"
+                "developer": "DO NOT COPY THIS VARIABLE"
             }
         });
         model["compatibility"] = json!({
-            "instructions_template": "runtime-cache-only nested template",
+            "instructions_template": "DO NOT COPY THIS NESTED TEMPLATE",
             "instructions_variables": {
-                "nested": "runtime-cache-only nested variable"
+                "nested": "DO NOT COPY THIS NESTED VARIABLE"
             }
         });
         fs::write(
@@ -839,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_catalog_preserves_required_fields_from_the_local_native_cache() {
+    fn generated_catalog_never_copies_prompt_fields_from_the_native_cache() {
         let home = tempfile::tempdir().unwrap();
         write_cache_with_prompt_fields(home.path());
 
@@ -849,38 +775,25 @@ mod tests {
             &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
         )
         .unwrap();
-        let model = &catalog["models"][0];
-        assert_eq!(
-            model["base_instructions"],
-            "runtime-cache-only base instructions"
-        );
-        assert_eq!(
-            model["model_messages"]["instructions_template"],
-            "runtime-cache-only template"
-        );
-        assert_eq!(
-            model["compatibility"]["instructions_variables"]["nested"],
-            "runtime-cache-only nested variable"
-        );
-        assert!(is_available(home.path()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn generated_catalog_is_private_on_unix() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let home = tempfile::tempdir().unwrap();
-        write_cache(home.path());
-
-        refresh_for_provider(home.path(), true, None, &[]).unwrap();
-
-        let mode = fs::metadata(home.path().join(MODEL_CATALOG_RELATIVE_PATH))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
+        let serialized = serde_json::to_string(&catalog).unwrap();
+        for forbidden in [
+            "instructions_template",
+            "model_messages",
+            "instructions_variables",
+            "personality_default",
+            "personality_friendly",
+            "personality_pragmatic",
+            "DO NOT COPY",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "generated catalog leaked {forbidden}"
+            );
+        }
+        // Newer Codex requires the key; content must stay empty.
+        for model in catalog["models"].as_array().unwrap() {
+            assert_eq!(model["base_instructions"], json!(""));
+        }
     }
 
     #[test]
@@ -1000,7 +913,6 @@ mod tests {
     #[test]
     fn configured_provider_model_survives_a_missing_upstream_snapshot() {
         let home = tempfile::tempdir().unwrap();
-        write_cache(home.path());
         let selected = vec!["provider-fast-coder".into()];
 
         assert_eq!(
@@ -1027,31 +939,41 @@ mod tests {
     }
 
     #[test]
-    fn prompt_free_cold_start_falls_back_instead_of_writing_an_invalid_catalog() {
+    fn official_cold_start_uses_the_bundled_catalog() {
         let home = tempfile::tempdir().unwrap();
 
-        let error = refresh_for_provider(home.path(), true, None, &[]).unwrap_err();
-
-        assert!(error.to_string().contains("模型缓存缺少运行时必需字段"));
-        assert!(!home.path().join(MODEL_CATALOG_RELATIVE_PATH).exists());
-        assert!(!is_available(home.path()));
-        let state = selection_state(home.path(), true, None, &[], None).unwrap();
-        assert_eq!(state.official_models.len(), OFFICIAL_MODELS.len());
-    }
-
-    #[test]
-    fn prompt_free_existing_catalog_is_not_reused_as_a_runtime_fallback() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            serde_json::to_vec(&codey_runtime_core::model_suffix::bundled_model_catalog().unwrap())
-                .unwrap(),
+        let count = refresh_for_provider(home.path(), true, None, &[]).unwrap();
+        assert_eq!(count, OFFICIAL_MODELS.len());
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
         )
         .unwrap();
-
-        assert!(!is_available(home.path()));
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["slug"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            OFFICIAL_MODELS
+                .iter()
+                .map(|(slug, _)| *slug)
+                .collect::<Vec<_>>()
+        );
+        assert!(models.iter().all(|model| model["visibility"] == "list"));
+        assert_eq!(
+            models
+                .iter()
+                .filter(|model| declares_fast_speed_support(model))
+                .map(|model| model["slug"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+            ]
+        );
     }
 
     #[test]

@@ -104,7 +104,7 @@ fn build_catalog_json_uses_fallback_for_no_suffix_entries() {
 #[test]
 fn bundled_catalog_contains_compatibility_metadata_without_prompt_assets() {
     let catalog = bundled_model_catalog().expect("bundled model metadata");
-    assert_prompt_fields_absent(&catalog);
+    assert_prompt_assets_sanitized(&catalog);
     assert!(
         catalog["models"]
             .as_array()
@@ -133,9 +133,14 @@ fn build_catalog_strips_prompt_fields_from_an_external_template() {
 
     let catalog = build_model_catalog_json_with_template(&entries, None, Some(&template));
     let catalog: Value = serde_json::from_str(&catalog).unwrap();
-    assert_prompt_fields_absent(&catalog);
+    assert_prompt_assets_sanitized(&catalog);
     let serialized = serde_json::to_string(&catalog).unwrap();
     assert!(!serialized.contains("private"));
+    assert_eq!(
+        catalog["models"][0]["base_instructions"],
+        json!(""),
+        "Codex requires base_instructions on model_catalog_json entries"
+    );
 }
 
 #[test]
@@ -197,11 +202,23 @@ fn migrate_model_list_with_suffixes_splits_slug_and_window() {
     assert_eq!(windows.get("nvidia/...:free"), Some(&"200000".to_string()));
 }
 
-fn assert_prompt_fields_absent(value: &Value) {
+fn assert_prompt_assets_sanitized(value: &Value) {
     match value {
         Value::Object(object) => {
+            let is_model_entry = object.contains_key("slug");
+            if is_model_entry {
+                assert_eq!(
+                    object.get("base_instructions"),
+                    Some(&json!("")),
+                    "model entries must keep empty base_instructions for Codex schema"
+                );
+            } else {
+                assert!(
+                    !object.contains_key("base_instructions"),
+                    "non-model objects must not keep base_instructions"
+                );
+            }
             for field in [
-                "base_instructions",
                 "instructions_template",
                 "model_messages",
                 "instructions_variables",
@@ -209,15 +226,18 @@ fn assert_prompt_fields_absent(value: &Value) {
                 "personality_friendly",
                 "personality_pragmatic",
             ] {
-                assert!(!object.contains_key(field), "found prompt field {field}");
+                assert!(
+                    !object.contains_key(field),
+                    "found non-empty prompt asset field {field}"
+                );
             }
             for child in object.values() {
-                assert_prompt_fields_absent(child);
+                assert_prompt_assets_sanitized(child);
             }
         }
         Value::Array(values) => {
             for child in values {
-                assert_prompt_fields_absent(child);
+                assert_prompt_assets_sanitized(child);
             }
         }
         _ => {}

@@ -6,7 +6,7 @@ Codey 是一个无界面的 Rust 桌面辅助进程，通过 CDP 连接官方 Co
 
 ## 当前能力
 
-- 打开 Codey 时自动启动 Codex，并通过 CDP 注入 Codey 设置按钮、Fast 模式展示修复、插件市场修复和消息选择工具；设置按钮在 Codex 客户端内部打开 Shadow DOM 隔离的 Semi Modal 配置浮层，不跳转外部浏览器。
+- 打开 Codey 时自动启动 Codex，并通过 CDP 注入 Codey 设置按钮、Fast 模式展示修复、插件市场修复和消息选择工具；设置按钮在 Codex 客户端内部打开 Shadow DOM 隔离浮层，不跳转外部浏览器。
 - Windows 通过 EXE 或快捷方式启动时，Codey 会在 Codex 成功启动并完成注入后隐藏自己的专属命令行窗口，继续在后台维护连接；启动失败时保留窗口以显示错误，从已有 CMD / PowerShell 手动运行时也不会隐藏用户的终端。
 - 线路采用自动双模式：检测到 `~/.cc-switch/cc-switch.db` 时只读同步当前 Codex provider；没有 cc-switch 时读取本地 Codex 直登配置。线路变化需要重启由 Codey 启动的 Codex 后生效。
 - 官方线路沿用 ChatGPT 登录；第三方线路把 API 地址、原生 `wire_api` 协议和临时 bearer token 直接交给 Codex，不经过 Codey 转发或协议转换。
@@ -48,13 +48,15 @@ cargo test --manifest-path Cargo.toml
 npm run build
 ```
 
+本地开发用 `npm run dev`（或 `pnpm run dev`）：会先结束本仓库 `target/debug|release/codey.exe` 的残留进程再 `cargo run`。Windows 会锁定正在运行的 EXE，若直接 `cargo run` / `cargo build` 而 Codey 未退出，会报 `failed to remove file ... codey.exe`（拒绝访问 / os error 5）；手动处理可用 `Stop-Process -Name codey -Force`。
+
 macOS 构建会同时生成无 Tauri 的 `target/release/bundle/macos/Codey.app`；直接打开该 App 即可启动 Codey。构建脚本会用最新 release 二进制重建并进行本地 ad-hoc 签名，避免继续运行旧包内的程序。
 
 GitHub Actions 工作流 `.github/workflows/build-desktop.yml` 支持手动触发及推送 `v*` 标签触发。手动运行后可在 Actions 下载 macOS arm64/x64 未签名 ZIP、Windows x64 便携 ZIP 和 NSIS 安装程序；标签构建还会把这些文件附加到对应 GitHub Release。
 
 ### Cloudflare R2 更新分发
 
-更新二进制可以发布到公开的 Cloudflare R2 bucket。标签发布时，工作流会先创建 GitHub Release，再将四个安装包上传至 `releases/<tag>/`，并分别写入版本化的 `releases/<tag>/latest.json` 和固定的 `latest.json`。清单包含版本、平台、包类型、下载链接、文件大小和 SHA-256；客户端默认使用项目公开的 R2 更新源，本地构建无需额外环境变量，发布构建仍可覆盖更新源。
+更新二进制可以发布到公开的 Cloudflare R2 bucket。标签发布时，工作流会先创建 GitHub Release，再将四个安装包上传至 `releases/<tag>/`，并分别写入版本化的 `releases/<tag>/latest.json` 和固定的 `latest.json`。清单包含版本、平台、包类型、下载链接、文件大小和 SHA-256；客户端只有在构建时配置更新清单地址后才会请求它。
 
 先创建 R2 bucket，并为它绑定公开的 R2.dev 或自定义 HTTPS 域名；随后在 GitHub 源码仓库设置中配置：
 
@@ -77,11 +79,11 @@ pnpm run release -- 0.2.1 --include-existing-changes
 
 可选参数：`--skip-checks` 跳过本地检查，`--no-push` 只创建本地提交和 tag，`--remote <name>` 指定推送远端。
 
-未配置上述 variable 或 secret 时，现有 GitHub Release 发布不受影响，R2 同步会被跳过。默认构建使用项目公开的 R2 更新源；设置 `CODEY_UPDATE_BASE_URL` 可以在编译时覆盖该地址。配置页面不允许用户改写更新源。检查更新会经 HTTPS 拉取清单，校验版本、下载地址和 SHA-256 格式后显示是否有新版本。当前 macOS 包仍是未签名包，Windows 包也尚未进行代码签名，因此检查更新不会自动下载或静默安装。
+未配置上述 variable 或 secret 时，现有 GitHub Release 发布不受影响，R2 同步会被跳过。默认构建不内置任何更新源；只有设置 `CODEY_UPDATE_BASE_URL` 后才会启用检查更新。配置页面不允许用户改写更新源。检查更新会经 HTTPS 拉取清单，校验版本、下载地址和 SHA-256 格式后显示是否有新版本。当前 macOS 包仍是未签名包，Windows 包也尚未进行代码签名，因此检查更新不会自动下载或静默安装。
 
 Codey 将运行时 core/data crate 固定在 `vendor/CodeyRuntime`，生命周期和会话扫描优化也已直接合并其中。本地与 CI 构建不需要额外的运行时源码目录或补丁。PR 与桌面发布质量门会分别对根 workspace 和 CodeyRuntime workspace 执行格式检查、完整测试及零警告 Clippy。
 
-运行时只内置不含提示词的 Codex 模型兼容元数据，完整 system/developer prompt 不进入仓库资产或 CodeyRuntime 二进制。Codex 当前要求自定义模型目录的每个条目都保留 `base_instructions`；因此 Codey 只从用户本机已有的官方 `models_cache.json` 派生运行目录，原样保留本机缓存中的必需字段，并把生成文件权限收紧为仅当前用户可读写。缺少兼容的本机缓存时不生成不完整目录，官方线路回退 Codex 内置目录；这类本机派生内容不得写入日志、测试夹具、发布包或版本库。
+运行时只内置不含提示词的 Codex 模型兼容元数据。上游模型缓存中的消息模板、模板变量和人格提示字段会在克隆模板及写入 `model-catalogs/codey-official.json` 前递归删除；模型条目会保留空的 `base_instructions`（新版 Codex 在配置了 `model_catalog_json` 时要求该字段存在，缺失会导致配置加载与 Windows 沙箱设置失败），完整 system/developer prompt 不进入仓库资产、CodeyRuntime 二进制或 Codey 生成目录。
 
 ## 配置与路径
 
@@ -102,7 +104,7 @@ Codey 将运行时 core/data crate 固定在 `vendor/CodeyRuntime`，生命周�
 
 通知实现按“公共调度 + 渠道适配”拆分。后端 `backend/src/notifications/` 中的配置、事件、格式化和调度器不依赖具体渠道；每个发送渠道放在 `channels/` 的独立文件中，实现 `NotificationChannelAdapter`，并在 `channels/mod.rs` 注册。新增渠道时需要同时补齐渠道枚举与配置字段、请求构造、明确的成功响应校验、传输与响应错误脱敏及对应单元测试；HTTP 成功但响应损坏或缺少渠道成功字段仍按发送失败处理。
 
-前端 `src/notifications/` 以 `channelRegistry.tsx` 为唯一渠道注册入口，每个渠道使用独立编辑器组件；注册项负责显示信息、默认配置和完整性判断，公共列表只负责展示、编辑和删除，启用状态与测试发送都在渠道编辑弹窗内配置。新增和编辑必须先完成渠道配置，并经不落盘的 `test_notification_channel` 测试成功后才能保存；每次修改草稿都会要求重新测试。外部配置结构继续使用 `webhook.channels`，既有 `test_webhook` 仍保留以兼容已有渲染层调用和持久化数据。涉及凭据的渠道必须保持普通配置返回渲染层前脱敏、留空保存时回填旧值、显式清除时不回填；仅在用户主动打开某一渠道编辑弹窗时，可经 `reveal_notification_channel` 按需返回该渠道凭据，弹窗关闭后立即清空本地草稿。
+前端 `src/notifications/` 以 `channelRegistry.tsx` 为唯一渠道注册入口，每个渠道使用独立编辑器组件；注册项负责显示信息、默认配置和完整性判断，公共列表只负责增删、启停和测试交互。外部配置结构继续使用 `webhook.channels`，测试命令继续使用 `test_webhook`，以兼容既有渲染层调用和持久化数据。涉及凭据的渠道还必须保持返回渲染层前脱敏、留空保存时回填旧值、显式清除时不回填。
 
 ## 启动与恢复
 
@@ -120,7 +122,7 @@ Codey 不改写 `auth.json`，因此 Codex 的账号栏仍会显示原来的官�
 - 内嵌 FastCtx 当前只发布文件读取、搜索、发现与批量替换工具，不发布其可选 Bash/后台任务组；PDF 引擎未编入 Codey，PDF 应继续使用 Codex 自带的 PDF 能力。
 - 第三方线路依赖 Codex 原生支持对应的 `wire_api`；Codey 不再提供 Responses/Chat Completions 协议转换。
 - 页面注入使用稳定的 `data-*`/`electronBridge.sendMessageFromView` 探测，Codex bundle 大幅改版时可能需要更新选择器适配层。
-- 消息通知按渠道列表保存，支持同时配置多个飞书 Webhook 与 Telegram Bot；旧版单飞书配置在读取时自动迁移。飞书接受官方或企业内网主机名的 HTTPS 机器人地址，仍要求 443 端口、标准 `/open-apis/bot/v2/hook/...` 路径且禁止 URL 用户信息、查询参数和片段；通知专用 HTTP 客户端不跟随重定向。`session.completed` 由真实 Codex turn 的完成状态触发，不再把单次模型 HTTP 响应误判为任务结束；失败、等待介入与手动测试仍保留。自动通知会并发投递到所有已启用且配置完整的渠道，并汇总失败；只有连接拒绝或渠道明确返回失败等确定结果才会自动重试，HTTP 超时、响应读取中断及其他没有明确失败响应的传输错误一律视为远端可能已经接收，停止重试并保留本次去重记录。等待介入通知采用写前持久化去重：先原子记录预留再请求渠道，确定失败时回滚；因为飞书与 Telegram Webhook 都没有可依赖的幂等键，进程在预留后、确认响应前崩溃时会保守地抑制重发，边界为 at-most-once。完成/失败通知使用当前进程内的有界去重历史，不承诺跨进程 exactly-once。飞书不保存或发送签名密钥；飞书 Webhook 地址与 Telegram Bot Token 默认不会返回渲染层，并通过配置状态保留已有凭据。用户主动打开单一渠道编辑弹窗时，后端才会临时回显该渠道凭据，弹窗关闭即清空本地草稿。所有通知消息都不包含 prompt、正文、内部会话 ID、线路 ID 或 API Key。
+- 消息通知按渠道列表保存，支持同时配置多个飞书 Webhook 与 Telegram Bot；旧版单飞书配置在读取时自动迁移。飞书只接受 `open.feishu.cn` 或 `open.larksuite.com` 的官方 HTTPS 机器人地址，通知专用 HTTP 客户端不跟随重定向。`session.completed` 由真实 Codex turn 的完成状态触发，不再把单次模型 HTTP 响应误判为任务结束；失败、等待介入与手动测试仍保留。自动通知会并发投递到所有已启用且配置完整的渠道，并汇总失败；只有连接拒绝或渠道明确返回失败等确定结果才会自动重试，HTTP 超时、响应读取中断及其他没有明确失败响应的传输错误一律视为远端可能已经接收，停止重试并保留本次去重记录。等待介入通知采用写前持久化去重：先原子记录预留再请求渠道，确定失败时回滚；因为飞书与 Telegram Webhook 都没有可依赖的幂等键，进程在预留后、确认响应前崩溃时会保守地抑制重发，边界为 at-most-once。完成/失败通知使用当前进程内的有界去重历史，不承诺跨进程 exactly-once。飞书不保存或发送签名密钥；飞书 Webhook 地址与 Telegram Bot Token 返回渲染层前都会清空，并通过配置状态保留已有凭据。所有通知消息都不包含 prompt、正文、内部会话 ID、线路 ID 或 API Key。
 - 首版明文 API Key、飞书 Webhook 地址与 Telegram Bot Token 仅依赖配置文件权限保护，后续可把 `ConfigStore` 的 secret 存取替换为 macOS Keychain/Windows Credential Manager。
 
 FastCtx 集成基于 [yc-duan/fastctx](https://github.com/yc-duan/fastctx) `0.2.3` 的固定提交 `8056641`（MIT OR Apache-2.0）。

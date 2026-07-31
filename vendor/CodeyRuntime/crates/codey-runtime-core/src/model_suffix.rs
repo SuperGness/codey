@@ -221,16 +221,29 @@ fn load_bundled_template_entry() -> Option<Value> {
     catalog.get("models")?.as_array()?.first().cloned()
 }
 
-/// Recursively removes Codex prompt-bearing fields from model catalog values.
+/// Recursively clears Codex prompt-bearing fields from model catalog values.
 ///
 /// Live `models_cache.json` entries can contain the same fields as the bundled
 /// upstream catalog. Callers must sanitize cloned entries before writing a
 /// Codey-owned catalog.
+///
+/// Newer Codex desktop builds require each model entry to expose
+/// `base_instructions` when `model_catalog_json` is set. Missing that key makes
+/// config load fail (including `windowsSandbox/setupStart`), so model entries
+/// keep an empty string instead of dropping the field. Other prompt assets are
+/// still removed so private system/developer content never ships.
 pub fn remove_model_prompt_fields(value: &mut Value) {
     match value {
         Value::Object(object) => {
+            // Model entries are identified by slug; only those need the schema
+            // key. Nested compatibility blobs must not keep real prompts.
+            let is_model_entry = object.contains_key("slug");
             for field in MODEL_PROMPT_FIELDS {
-                object.remove(field);
+                if field == "base_instructions" && is_model_entry {
+                    object.insert(field.to_string(), Value::String(String::new()));
+                } else {
+                    object.remove(field);
+                }
             }
             for child in object.values_mut() {
                 remove_model_prompt_fields(child);
