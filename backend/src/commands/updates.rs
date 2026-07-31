@@ -1,5 +1,3 @@
-#[cfg(target_os = "macos")]
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -372,6 +370,7 @@ fn spawn_update_installer(update_path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn spawn_update_installer(update_path: &Path) -> Result<(), String> {
+    use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
     if !update_path

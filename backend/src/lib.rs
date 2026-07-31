@@ -28,7 +28,9 @@ mod update_helper;
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+#[cfg(unix)]
+use anyhow::Context;
 
 use commands::{AppShutdownReason, AppState};
 
