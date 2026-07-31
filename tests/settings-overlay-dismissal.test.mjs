@@ -4,10 +4,11 @@ import test from "node:test";
 
 const root = new URL("../", import.meta.url);
 
-test("settings Semi modal dismissal restores unsaved config", async () => {
-  const [appSource, overlaySource] = await Promise.all([
+test("settings overlay covers the page and closes from the mask", async () => {
+  const [appSource, overlaySource, overlayCss] = await Promise.all([
     readFile(new URL("src/App.tsx", root), "utf8"),
     readFile(new URL("src/overlay.tsx", root), "utf8"),
+    readFile(new URL("src/overlay.css", root), "utf8"),
   ]);
 
   assert.match(
@@ -20,45 +21,65 @@ test("settings Semi modal dismissal restores unsaved config", async () => {
   );
   assert.match(
     appSource,
-    /import SemiModal from "@douyinfe\/semi-ui\/lib\/es\/modal"/,
+    /className="panel-titlebar-close"/,
   );
+  assert.match(appSource, /onClick=\{handleCloseSettings\}/);
+  assert.doesNotMatch(appSource, /traffic-light/);
+  assert.doesNotMatch(appSource, /macos-titlebar/);
+  assert.match(appSource, /codey-settings-request-close/);
   assert.match(
     appSource,
-    /<SemiModal[\s\S]*closeOnEsc[\s\S]*closable[\s\S]*maskClosable[\s\S]*onCancel=\{onCancel\}/,
+    /window\.addEventListener\(SETTINGS_REQUEST_CLOSE_EVENT/,
   );
-  assert.match(appSource, /onCancel=\{handleCloseSettings\}/);
-  assert.match(
-    appSource,
-    /header=\{\([\s\S]*codey-settings-modal-header[\s\S]*configHeaderContent/,
-  );
-  assert.match(appSource, /aria-label="关闭配置"/);
-  assert.match(
-    appSource,
-    /\{!embedded && \(\s*<header className="config-header">\{configHeaderContent\}<\/header>/,
-  );
-  assert.match(appSource, /\{!embedded && \(/);
+  assert.doesNotMatch(appSource, /aria-label="关闭设置"/);
 
-  assert.doesNotMatch(overlaySource, /codey-overlay-backdrop/);
-  assert.doesNotMatch(overlaySource, /codey-overlay-dialog/);
-  assert.match(overlaySource, /modalVisible=\{visible\}/);
-  assert.match(overlaySource, /onClose=\{close\}/);
+  // Full-viewport mask with uniform 36px dialog inset.
+  assert.match(overlayCss, /:host\(\[data-open\]\)/);
+  assert.match(overlayCss, /:host\(\[data-closing\]\)/);
+  assert.match(overlayCss, /pointer-events:\s*auto/);
+  assert.match(overlayCss, /inset:\s*0/);
+  assert.match(overlayCss, /--codey-overlay-inset:\s*36px/);
+  assert.match(overlayCss, /padding:\s*var\(--codey-overlay-inset\)/);
+  assert.match(overlayCss, /display:\s*grid/);
+  assert.match(overlayCss, /height:\s*100%/);
+  assert.match(overlayCss, /--codey-overlay-motion:\s*200ms/);
+  assert.match(overlayCss, /transition:\s*opacity var\(--codey-overlay-motion\)/);
+  assert.match(overlaySource, /inset:\s*"0px"/);
+
+  // Freeze Codex page input while open (menu bar is usually under body).
+  assert.match(overlaySource, /codey-settings-overlay-open/);
+  assert.match(overlaySource, /setAttribute\("inert"/);
+  assert.match(overlaySource, /lockPageInteraction/);
+  assert.match(overlaySource, /addEventListener\(type, lockPageInteraction, true\)/);
+  assert.match(overlaySource, /data-closing/);
+  assert.match(overlaySource, /OVERLAY_MOTION_MS/);
+  assert.match(overlaySource, /transitionend/);
+
   assert.match(overlaySource, /codey-settings-opened/);
-  assert.match(overlaySource, /toggle: open/);
+  assert.match(overlaySource, /codey-settings-request-close/);
+  assert.match(overlaySource, /backdrop\.addEventListener\("click"/);
+  assert.match(overlaySource, /event\.target === backdrop/);
+  assert.match(overlaySource, /host\.setAttribute\("data-open"/);
+  assert.match(overlaySource, /position:\s*"fixed"/);
+  assert.match(overlaySource, /zIndex:\s*"2147483647"/);
+  // Toggle closes an already-open panel instead of only opening.
+  assert.match(
+    overlaySource,
+    /toggle:\s*\(\)\s*=>\s*\{[\s\S]*if \(host\.hasAttribute\("data-open"\)\) requestClose\(\)/,
+  );
 });
 
 test("operations tooltips stay inside the settings overlay", async () => {
-  const appSectionsSource = await readFile(
-    new URL("src/OperationsPanel.tsx", root),
-    "utf8",
-  );
+  const [panelSource, stylesSource] = await Promise.all([
+    readFile(new URL("src/OperationsPanel.tsx", root), "utf8"),
+    readFile(new URL("src/styles.css", root), "utf8"),
+  ]);
+  // CSS ::after tips avoid Semi Tooltip portals escaping the Shadow DOM.
+  assert.match(panelSource, /data-codey-tip=\{tip\}/);
+  assert.match(stylesSource, /\[data-codey-tip\]::after/);
+  assert.match(stylesSource, /pointer-events:\s*none/);
   assert.match(
-    appSectionsSource,
-    /const operationsHubRef = useRef<HTMLElement>\(null\)/,
+    stylesSource,
+    /\.operations-icon-badge\[data-codey-tip\]::after/,
   );
-  assert.match(
-    appSectionsSource,
-    /operationsHubRef\.current\?\s*\.closest<HTMLElement>\("\.app-shell"\)\s*\?\?\s*document\.body/,
-  );
-  assert.match(appSectionsSource, /ref=\{operationsHubRef\}/);
-  assert.match(appSectionsSource, /getPopupContainer=\{getTooltipContainer\}/);
 });

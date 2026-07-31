@@ -15,7 +15,6 @@ import {
   IconLoader2 as LoaderCircle,
   IconX,
 } from "@tabler/icons-react";
-import SemiModal from "@douyinfe/semi-ui/lib/es/modal";
 import { invoke } from "./api";
 import {
   formatBytes,
@@ -35,7 +34,6 @@ import {
   OperationsPanel,
 } from "./AppSections";
 import { NotificationChannelsCard } from "./notifications";
-import type { NotificationChannel } from "./notifications";
 import { errorText, withTimeout } from "./appUtils";
 import { useModelSelection } from "./useModelSelection";
 import { useNotifications } from "./useNotifications";
@@ -56,6 +54,8 @@ import { Badge, Button, Button as SaveButton } from "./components/semi";
 
 const Check = IconCheck;
 const X = IconX;
+/** Fired by the Shadow overlay mask / toggle so App can discard dirty state first. */
+const SETTINGS_REQUEST_CLOSE_EVENT = "codey-settings-request-close";
 
 function CodeyBrandMark() {
   return (
@@ -78,49 +78,6 @@ function CodeyBrandMark() {
   );
 }
 
-type SettingsModalShellProps = {
-  afterClose?: () => void;
-  children: React.ReactNode;
-  container?: HTMLElement | null;
-  header?: React.ReactNode;
-  onCancel: () => void;
-  title?: React.ReactNode;
-  visible: boolean;
-};
-
-function SettingsModalShell({
-  afterClose,
-  children,
-  container,
-  header,
-  onCancel,
-  title,
-  visible,
-}: SettingsModalShellProps) {
-  const headingProps = header === undefined ? { title } : { header };
-  return (
-    <SemiModal
-      {...headingProps}
-      afterClose={afterClose}
-      centered
-      className="codey-settings-modal-layer"
-      closeOnEsc
-      closable={header === undefined}
-      footer={null}
-      getPopupContainer={container ? () => container : undefined}
-      mask
-      maskClosable
-      modalContentClass="codey-settings-modal-content"
-      onCancel={onCancel}
-      visible={visible}
-      width={1040}
-      zIndex={2147483646}
-    >
-      {children}
-    </SemiModal>
-  );
-}
-
 function useStableEvent<Args extends unknown[], Result>(
   callback: (...args: Args) => Result,
 ): (...args: Args) => Result {
@@ -128,19 +85,10 @@ function useStableEvent<Args extends unknown[], Result>(
   useLayoutEffect(() => {
     callbackRef.current = callback;
   }, [callback]);
-  return useCallback(
-    (...args: Args) => callbackRef.current(...args),
-    [],
-  );
+  return useCallback((...args: Args) => callbackRef.current(...args), []);
 }
 
-export function App({
-  embedded = false,
-  modalContainer,
-  modalVisible = true,
-  onAfterClose,
-  onClose,
-}: AppProps) {
+export function App({ embedded = false, onClose }: AppProps) {
   const [config, setConfig] = useState<Config | null>(null);
   const persistedConfigRef = useRef<Config | null>(null);
   const { status, setStatus, refreshStatus, refreshStatusForLoad } =
@@ -165,6 +113,19 @@ export function App({
     null,
   );
   const [traceSnapshotStale, setTraceSnapshotStale] = useState(false);
+
+  // Toast lives in the main shell only; keep loading copy until config arrives.
+  useEffect(() => {
+    if (!config || !notice.text) return;
+    const timeoutMs = notice.tone === "error" ? 7000 : 4000;
+    const token = notice.text;
+    const timer = window.setTimeout(() => {
+      setNotice((current) =>
+        current.text === token ? { tone: "info", text: "" } : current,
+      );
+    }, timeoutMs);
+    return () => window.clearTimeout(timer);
+  }, [config, notice.text, notice.tone]);
 
   const provider = ccSwitchStatus?.provider;
   const isBusy = busy !== null;
@@ -195,12 +156,19 @@ export function App({
     setSubagentOptimization,
   });
   const {
+    webhookResults,
     addNotificationChannel,
     updateNotificationChannel,
     removeNotificationChannel,
+    testWebhook,
   } = useNotifications({
+    config,
+    isBusy,
     setConfig,
     setDirty,
+    setBusy,
+    setNotice,
+    persist,
   });
   const {
     updateResult,
@@ -442,6 +410,17 @@ export function App({
     onClose?.();
   }
 
+  const handleCloseSettings = useStableEvent(closeSettings);
+
+  useEffect(() => {
+    if (!embedded && !onClose) return;
+    const onRequestClose = () => handleCloseSettings();
+    window.addEventListener(SETTINGS_REQUEST_CLOSE_EVENT, onRequestClose);
+    return () => {
+      window.removeEventListener(SETTINGS_REQUEST_CLOSE_EVENT, onRequestClose);
+    };
+  }, [embedded, onClose, handleCloseSettings]);
+
   function askClearTraceLogs() {
     setConfirmation({
       action: "clear",
@@ -461,18 +440,6 @@ export function App({
         "当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。",
       confirmLabel: "重启 Codex",
       run: () => void restartCodex(),
-    });
-  }
-
-  function askRemoveNotificationChannel(channel: NotificationChannel) {
-    const channelName = channel.kind === "telegram" ? "Telegram" : "飞书";
-    setConfirmation({
-      action: "delete-notification-channel",
-      title: `删除${channelName}通知渠道？`,
-      description:
-        "将从当前设置中移除这个通知渠道。删除后不会再接收自动通知；如果尚未保存，可关闭设置页面撤销本次更改。",
-      confirmLabel: "删除渠道",
-      run: () => removeNotificationChannel(channel.id),
     });
   }
 
@@ -558,18 +525,13 @@ export function App({
     });
   }
 
-  const handleCloseSettings = useStableEvent(closeSettings);
   const handleSaveCurrent = useStableEvent(() => void saveCurrent());
   const handleRepairPluginMarketplace = useStableEvent(
     () => void repairPluginMarketplace(),
   );
   const handleRestartCodex = useStableEvent(askRestartCodex);
-  const handleCheckForUpdates = useStableEvent(
-    () => void checkForUpdates(),
-  );
-  const handleDownloadUpdate = useStableEvent(
-    () => void downloadUpdate(),
-  );
+  const handleCheckForUpdates = useStableEvent(() => void checkForUpdates());
+  const handleDownloadUpdate = useStableEvent(() => void downloadUpdate());
   const handleInstallDownloadedUpdate = useStableEvent(
     askInstallDownloadedUpdate,
   );
@@ -581,8 +543,11 @@ export function App({
   const handleNotificationChannelChange = useStableEvent(
     updateNotificationChannel,
   );
-  const handleRequestRemoveNotificationChannel = useStableEvent(
-    askRemoveNotificationChannel,
+  const handleRemoveNotificationChannel = useStableEvent(
+    removeNotificationChannel,
+  );
+  const handleTestWebhook = useStableEvent(
+    (channelId: string) => void testWebhook(channelId),
   );
   const handleSubagentOptimizationChange = useStableEvent(
     (checked: boolean) => void updateSubagentOptimization(checked),
@@ -607,9 +572,7 @@ export function App({
   const handleSaveModelSelection = useStableEvent(
     () => void saveModelSelection(),
   );
-  const handleConfirmationClose = useStableEvent(
-    () => setConfirmation(null),
-  );
+  const handleConfirmationClose = useStableEvent(() => setConfirmation(null));
   const handleConfirmationConfirm = useStableEvent((pending: Confirmation) => {
     setConfirmation(null);
     pending.run();
@@ -625,7 +588,7 @@ export function App({
   );
 
   if (!config || !provider) {
-    const loadingContent = (
+    return (
       <main className="app-shell loading-shell">
         <div className="loading-mark">
           <GitBranch size={17} />
@@ -641,72 +604,9 @@ export function App({
         />
       </main>
     );
-    return embedded ? (
-      <SettingsModalShell
-        afterClose={onAfterClose}
-        container={modalContainer}
-        onCancel={handleCloseSettings}
-        title="Codey 配置"
-        visible={modalVisible}
-      >
-        {loadingContent}
-      </SettingsModalShell>
-    ) : loadingContent;
   }
 
-  const configHeaderContent = (
-    <div className="config-header-inner">
-      <div className="config-brand">
-        <CodeyBrandMark />
-        <div className="config-brand-copy">
-          <div className="config-brand-title-row">
-            <h1 id={embedded ? "semi-modal-title" : undefined}>Codey 控制台</h1>
-            <span className="app-version-tag">
-              v{status.appVersion || "0.2.0"}
-            </span>
-            {dirty && (
-              <Badge variant="warning" className="unsaved-badge">
-                未保存更改
-              </Badge>
-            )}
-          </div>
-          <p>管理 Codex 线路、模型服务、运行策略与诊断日志</p>
-        </div>
-      </div>
-
-      <div className="config-header-right">
-        <div className="config-header-actions">
-          <SaveButton
-            className={`save-button${dirty ? " dirty" : ""}`}
-            disabled={!dirty || isBusy}
-            onClick={handleSaveCurrent}
-          >
-            {busy === "save" ? (
-              <LoaderCircle className="spinner" aria-hidden="true" />
-            ) : dirty ? (
-              <Save aria-hidden="true" />
-            ) : (
-              <Check aria-hidden="true" />
-            )}
-            {dirty ? "保存更改" : "已保存"}
-          </SaveButton>
-          {embedded && (
-            <Button
-              aria-label="关闭配置"
-              className="codey-settings-modal-close"
-              onClick={handleCloseSettings}
-              size="icon-sm"
-              variant="ghost"
-            >
-              <X aria-hidden="true" />
-            </Button>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-
-  const appContent = (
+  return (
     <main
       className={`app-shell${embedded ? " embedded" : ""}`}
       ref={setPortalContainer}
@@ -715,38 +615,66 @@ export function App({
         跳至设置内容
       </a>
 
-      {!embedded && (
-        <div className="macos-titlebar">
-          <div className="macos-traffic-lights">
-            <button
-              className="traffic-light close"
-              title="关闭"
-              aria-label="关闭窗口"
-            />
-            <button
-              className="traffic-light minimize"
-              title="最小化"
-              aria-label="最小化窗口"
-            />
-            <button
-              className="traffic-light zoom"
-              title="缩放"
-              aria-label="全屏缩放"
-            />
-          </div>
-          <div className="macos-titlebar-title">
-            <span className="app-title-text">Codey Control Panel</span>
-            <span className="app-version-tag">
-              v{status.appVersion || "0.2.0"}
-            </span>
-          </div>
-          <div className="macos-titlebar-right" aria-hidden="true" />
+      <div className="panel-titlebar">
+        <div className="panel-titlebar-side" aria-hidden="true" />
+        <div className="panel-titlebar-title">
+          <span className="app-title-text">Codey Control Panel</span>
+          <span className="app-version-tag">
+            v{status.appVersion || "0.2.0"}
+          </span>
         </div>
-      )}
+        <div className="panel-titlebar-side panel-titlebar-side-end">
+          {(embedded || onClose) && (
+            <button
+              type="button"
+              className="panel-titlebar-close"
+              data-codey-tip="关闭"
+              onClick={handleCloseSettings}
+              aria-label="关闭"
+            >
+              <X size={16} aria-hidden="true" />
+            </button>
+          )}
+        </div>
+      </div>
 
-      {!embedded && (
-        <header className="config-header">{configHeaderContent}</header>
-      )}
+      <header className="config-header">
+        <div className="config-header-inner">
+          <div className="config-brand">
+            <CodeyBrandMark />
+            <div className="config-brand-copy">
+              <div className="config-brand-title-row">
+                <h1>Codey 控制台</h1>
+                {dirty && (
+                  <Badge variant="warning" className="unsaved-badge">
+                    未保存更改
+                  </Badge>
+                )}
+              </div>
+              <p>管理 Codex 线路、模型服务、运行策略与诊断日志</p>
+            </div>
+          </div>
+
+          <div className="config-header-right">
+            <div className="config-header-actions">
+              <SaveButton
+                className={`save-button${dirty ? " dirty" : ""}`}
+                disabled={!dirty || isBusy}
+                onClick={handleSaveCurrent}
+              >
+                {busy === "save" ? (
+                  <LoaderCircle className="spinner" aria-hidden="true" />
+                ) : dirty ? (
+                  <Save aria-hidden="true" />
+                ) : (
+                  <Check aria-hidden="true" />
+                )}
+                {dirty ? "保存更改" : "已保存"}
+              </SaveButton>
+            </div>
+          </div>
+        </div>
+      </header>
 
       <div className="page-scroll">
         <div className="page" id="codey-settings-content">
@@ -791,11 +719,13 @@ export function App({
             <div className="dashboard-column upper-right-column">
               <NotificationChannelsCard
                 config={config}
-                container={portalContainer}
+                busy={busy}
                 isBusy={isBusy}
+                webhookResults={webhookResults}
                 onAddChannel={handleAddNotificationChannel}
                 onChannelChange={handleNotificationChannelChange}
-                onRequestRemoveChannel={handleRequestRemoveNotificationChannel}
+                onRemoveChannel={handleRemoveNotificationChannel}
+                onTestWebhook={handleTestWebhook}
               />
 
               <FeaturePolicyCard
@@ -905,19 +835,4 @@ export function App({
       )}
     </main>
   );
-  return embedded ? (
-    <SettingsModalShell
-      afterClose={onAfterClose}
-      container={modalContainer}
-      header={(
-        <div className="semi-modal-header codey-settings-modal-header">
-          {configHeaderContent}
-        </div>
-      )}
-      onCancel={handleCloseSettings}
-      visible={modalVisible}
-    >
-      {appContent}
-    </SettingsModalShell>
-  ) : appContent;
 }

@@ -1,102 +1,106 @@
+/* Full-viewport host + mask. Dialog uses uniform 36px inset on all sides. */
 :host {
   all: initial;
-  color-scheme: light;
+  color-scheme: dark;
+  box-sizing: border-box;
+  display: none;
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  z-index: 2147483647;
+  pointer-events: none;
+  opacity: 0;
+  -webkit-app-region: no-drag !important;
+  --codey-overlay-inset: 36px;
+  --codey-overlay-motion: 200ms;
 }
 
-#codey-overlay-root,
-#codey-overlay-modal-container {
+:host([data-open]),
+:host([data-closing]) {
+  display: block;
+}
+
+:host([data-open]) {
+  pointer-events: auto;
+  opacity: 1;
+  transition: opacity var(--codey-overlay-motion) ease;
+}
+
+:host([data-closing]) {
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--codey-overlay-motion) ease;
+}
+
+.codey-overlay-backdrop {
+  -webkit-app-region: no-drag !important;
+  background: rgba(2, 6, 23, 0.72);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-sizing: border-box;
+  display: grid;
   inset: 0;
-  position: fixed;
+  justify-items: center;
+  align-items: stretch;
+  padding: var(--codey-overlay-inset);
+  pointer-events: auto;
+  position: absolute;
   width: 100%;
+  height: 100%;
+  z-index: 1;
+  cursor: default;
+}
+
+.codey-overlay-dialog {
+  -webkit-app-region: no-drag !important;
+  background: #0b1120;
+  border: 1px solid rgba(71, 85, 105, 0.68);
+  border-radius: 16px;
+  box-shadow: 0 30px 100px rgba(0, 0, 0, 0.48);
+  box-sizing: border-box;
+  height: 100%;
+  max-height: 100%;
+  max-width: 1040px;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+  width: min(1040px, 100%);
+  pointer-events: auto;
+  z-index: 2;
+  opacity: 0.96;
+  transform: translateY(12px) scale(0.98);
+  transition:
+    transform var(--codey-overlay-motion) ease,
+    opacity var(--codey-overlay-motion) ease;
+}
+
+:host([data-open]) .codey-overlay-dialog {
+  opacity: 1;
+  transform: none;
+}
+
+:host([data-closing]) .codey-overlay-dialog {
+  opacity: 0;
+  transform: translateY(10px) scale(0.98);
 }
 
 #codey-overlay-root {
-  pointer-events: none;
-}
-
-.codey-settings-modal-layer {
-  -webkit-app-region: no-drag !important;
-}
-
-.codey-settings-modal-layer .semi-modal-wrap {
-  padding: 22px;
-}
-
-.codey-settings-modal-layer .semi-modal {
-  height: min(820px, calc(100vh - 40px));
-  max-width: calc(100vw - 40px);
-}
-
-.codey-settings-modal-content {
   height: 100%;
-  overflow: hidden;
-  padding: 0;
-}
-
-.codey-settings-modal-content .semi-modal-header {
-  flex: 0 0 auto;
-  margin: 0;
-  border-bottom: 1px solid var(--semi-color-border);
-  padding: 18px 24px;
-}
-
-.codey-settings-modal-content .semi-modal-body {
-  min-height: 0;
-  flex: 1 1 auto;
-  overflow: hidden;
-  margin: 0;
-  padding: 0;
-}
-
-.codey-settings-modal-header {
-  align-items: center;
-}
-
-.codey-settings-modal-header .config-header-inner {
   width: 100%;
-  min-width: 0;
-}
-
-.codey-settings-modal-close {
-  flex: 0 0 auto;
+  min-height: 0;
 }
 
 @media (max-width: 760px) {
-  .codey-settings-modal-layer .semi-modal-wrap {
-    padding: 8px;
+  :host {
+    --codey-overlay-inset: 36px;
   }
 
-  .codey-settings-modal-layer .semi-modal {
-    height: calc(100vh - 16px);
-    max-width: calc(100vw - 16px);
-  }
-
-  .codey-settings-modal-content .codey-settings-modal-header {
-    padding: 12px 14px;
-  }
-
-  .codey-settings-modal-header .config-header-inner {
-    flex-direction: row;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .codey-settings-modal-header .config-brand {
-    min-width: 0;
-    gap: 8px;
-  }
-
-  .codey-settings-modal-header .config-brand-mark {
-    width: 32px;
-    height: 32px;
-  }
-
-  .codey-settings-modal-header .config-brand-copy p {
-    display: none;
-  }
-
-  .codey-settings-modal-header .config-header-right {
-    width: auto;
-    flex-direction: row;
+  .codey-overlay-dialog {
+    border-radius: 12px;
   }
 }

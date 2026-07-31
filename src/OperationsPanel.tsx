@@ -1,4 +1,4 @@
-import { memo, useRef, useState } from "react";
+import { memo, useState } from "react";
 import {
   IconActivity as Activity,
   IconAdjustmentsHorizontal,
@@ -21,8 +21,12 @@ import {
   IconBolt as Zap,
 } from "@tabler/icons-react";
 
-import type { Config, PluginMarketplaceStatus, RuntimeStatus } from "./App.types";
-import { Badge, Button, Card, Tooltip } from "./components/semi";
+import type {
+  Config,
+  PluginMarketplaceStatus,
+  RuntimeStatus,
+} from "./App.types";
+import { Badge, Button, Card } from "./components/semi";
 
 const Cpu = IconCpu;
 const FolderOpen = IconFolderOpen;
@@ -47,12 +51,7 @@ function OperationsPanelComponent({
   onRepairPluginMarketplace,
   onRestart,
 }: OperationsPanelProps) {
-  const operationsHubRef = useRef<HTMLElement>(null);
   const [activeCardTitle, setActiveCardTitle] = useState<string | null>(null);
-
-  const getTooltipContainer = () =>
-    operationsHubRef.current?.closest<HTMLElement>(".app-shell") ??
-    document.body;
 
   const toggleCard = (title: string) => {
     setActiveCardTitle((prev) => (prev === title ? null : title));
@@ -304,7 +303,6 @@ function OperationsPanelComponent({
 
   return (
     <section
-      ref={operationsHubRef}
       className={`operations-hub${restartPending ? " pending" : status.running ? " running" : ""}`}
       aria-labelledby="operations-title"
     >
@@ -335,31 +333,23 @@ function OperationsPanelComponent({
               {statusCards.map((item) => {
                 const StatusIcon = item.icon;
                 const isExpanded = activeCardTitle === item.title;
+                const tip = isExpanded
+                  ? `收起“${item.title}”`
+                  : `点击展开“${item.title}”详情`;
                 return (
-                  <Tooltip
+                  <button
                     key={item.title}
-                    content={
-                      isExpanded
-                        ? `收起“${item.title}”`
-                        : `点击展开“${item.title}”详情`
-                    }
-                    getPopupContainer={getTooltipContainer}
-                    position="top"
+                    type="button"
+                    role="listitem"
+                    className={`operations-icon-badge tone-${item.tone}${isExpanded ? " active" : ""}`}
+                    data-codey-tip={tip}
+                    onClick={() => toggleCard(item.title)}
+                    aria-expanded={isExpanded}
+                    aria-label={`${item.title}（${item.label}），点击${isExpanded ? "收起" : "展开"}`}
                   >
-                    <button
-                      type="button"
-                      className={`operations-icon-badge tone-${item.tone}${isExpanded ? " active" : ""}`}
-                      onClick={() => toggleCard(item.title)}
-                      aria-expanded={isExpanded}
-                      aria-label={`${item.title}（${item.label}），点击${isExpanded ? "收起" : "展开"}`}
-                    >
-                      <StatusIcon size={16} aria-hidden="true" />
-                      <span
-                        className="operations-icon-dot"
-                        aria-hidden="true"
-                      />
-                    </button>
-                  </Tooltip>
+                    <StatusIcon size={16} aria-hidden="true" />
+                    <span className="operations-icon-dot" aria-hidden="true" />
+                  </button>
                 );
               })}
             </div>

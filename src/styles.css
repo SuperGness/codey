@@ -89,6 +89,53 @@ input:focus-visible,
   isolation: isolate;
 }
 
+/* Anchored tips inside the overlay (avoids Semi portal offset in Shadow DOM). */
+[data-codey-tip] {
+  position: relative;
+}
+
+[data-codey-tip]::after {
+  content: attr(data-codey-tip);
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 8px);
+  left: 50%;
+  width: max-content;
+  max-width: min(280px, 70vw);
+  padding: 5px 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(29, 29, 31, 0.94);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.35;
+  letter-spacing: 0;
+  text-align: center;
+  white-space: nowrap;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(-2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+[data-codey-tip]:hover::after,
+[data-codey-tip]:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* Titlebar tips open downward so they stay inside the panel. */
+.panel-titlebar [data-codey-tip]::after {
+  top: calc(100% + 10px);
+}
+
+/* Status icons also open downward; keep clear of the hover lift. */
+.operations-icon-badge[data-codey-tip]::after {
+  top: calc(100% + 10px);
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -125,16 +172,17 @@ input:focus-visible,
 }
 
 /* ==========================================================================
-   macOS Window Titlebar & Header
+   Panel Titlebar & Header
    ========================================================================== */
 
-.macos-titlebar {
+.panel-titlebar {
   display: flex;
   height: 38px;
   flex: 0 0 38px;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  gap: 12px;
+  padding: 0 12px 0 16px;
   background: rgba(246, 246, 248, 0.85);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
@@ -143,42 +191,23 @@ input:focus-visible,
   z-index: 40;
 }
 
-.macos-traffic-lights {
+.panel-titlebar-side {
   display: flex;
+  width: 40px;
+  flex: 0 0 40px;
   align-items: center;
-  gap: 8px;
-  width: 140px;
 }
 
-.traffic-light {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 1px solid rgba(0, 0, 0, 0.12);
-  padding: 0;
-  cursor: pointer;
-  transition: opacity 120ms ease;
+.panel-titlebar-side-end {
+  justify-content: flex-end;
 }
 
-.traffic-light:hover {
-  opacity: 0.85;
-}
-
-.traffic-light.close {
-  background: #ff5f56;
-}
-
-.traffic-light.minimize {
-  background: #ffbd2e;
-}
-
-.traffic-light.zoom {
-  background: #27c93f;
-}
-
-.macos-titlebar-title {
+.panel-titlebar-title {
   display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   font-size: 12px;
   font-weight: 600;
@@ -199,11 +228,35 @@ input:focus-visible,
   border-radius: 999px;
 }
 
-.macos-titlebar-right {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  width: 140px;
+.panel-titlebar-close {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  border: 0;
+  border-radius: 8px;
+  padding: 0;
+  background: transparent;
+  color: #6e6e73;
+  cursor: pointer;
+  appearance: none;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.panel-titlebar-close:hover {
+  background: rgba(255, 59, 48, 0.12);
+  color: #d70015;
+}
+
+.panel-titlebar-close:focus-visible {
+  outline: 2px solid rgba(0, 122, 255, 0.72);
+  outline-offset: 1px;
+}
+
+.panel-titlebar-close:active {
+  background: rgba(255, 59, 48, 0.18);
 }
 
 .config-header {
@@ -371,15 +424,16 @@ input:focus-visible,
   background: var(--mac-card-bg);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
   transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.route-card,
+.secondary-card,
+.trace-card {
   overflow: hidden;
 }
 
-.operations-panel:hover,
-.route-card:hover,
-.secondary-card:hover,
-.trace-card:hover {
-  border-color: rgba(0, 0, 0, 0.12);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+.operations-panel {
+  overflow: visible;
 }
 
 .operations-header {
@@ -390,6 +444,27 @@ input:focus-visible,
   padding: 18px 22px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   background: linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
+  overflow: visible;
+}
+
+.operations-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  overflow: visible;
+}
+
+.operations-status-icons {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  padding-right: 12px;
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+  margin-right: 4px;
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  overflow: visible;
 }
 
 .operations-heading {
@@ -420,12 +495,6 @@ input:focus-visible,
   margin: 0;
   font-size: 12px;
   color: #6e6e73;
-}
-
-.operations-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
 }
 
 .windows-patch-status {
@@ -505,18 +574,6 @@ input:focus-visible,
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-.operations-status-icons {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  padding-right: 12px;
-  border-right: 1px solid rgba(0, 0, 0, 0.08);
-  margin-right: 4px;
-  flex-shrink: 0;
-  flex-wrap: nowrap;
 }
 
 .operations-icon-badge.active {
@@ -820,11 +877,10 @@ input:focus-visible,
   color: #3a3a3c;
   cursor: pointer;
   padding: 0;
-  transition: all 160ms ease;
+  transition: box-shadow 160ms ease, border-color 160ms ease, background 160ms ease;
 }
 
 .operations-icon-badge:hover {
-  transform: translateY(-1px);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
 }
 
@@ -1479,12 +1535,13 @@ input:focus-visible,
   cursor: not-allowed;
 }
 
-.gpu-mode-card-body > small {
+.gpu-mode-card-body>small {
   display: block;
   margin-top: 8px;
 }
 
 @media (prefers-reduced-motion: reduce) {
+
   .gpu-mode-slider,
   .gpu-mode-slider-thumb,
   .gpu-mode-option {
@@ -1502,13 +1559,6 @@ input:focus-visible,
   display: flex;
   flex-direction: column;
   gap: 12px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.notification-channel-list > li {
-  min-width: 0;
 }
 
 .notification-add-actions,
@@ -1517,8 +1567,6 @@ input:focus-visible,
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
-  flex-wrap: wrap;
-  justify-content: flex-end;
 }
 
 .notification-add-actions {
@@ -1530,11 +1578,6 @@ input:focus-visible,
   border-color: rgba(0, 122, 255, 0.2);
 }
 
-.notification-card.inactive {
-  border-color: rgba(0, 0, 0, 0.08);
-  background: #fbfbfc;
-}
-
 .notification-card-header {
   display: flex;
   align-items: center;
@@ -1542,8 +1585,11 @@ input:focus-visible,
   gap: 12px;
 }
 
-.notification-edit-button {
-  color: #4d4d52;
+.notification-channel-controls>span {
+  color: #6e6e73;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .notification-remove-button {
@@ -1580,7 +1626,7 @@ input:focus-visible,
   gap: 12px;
 }
 
-.notification-title > div {
+.notification-title>div {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -1635,190 +1681,6 @@ input:focus-visible,
   color: #6e6e73;
 }
 
-.notification-dialog-channel {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 20px;
-}
-
-.notification-dialog-fields {
-  margin-top: 18px;
-}
-
-.notification-dialog-actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
-  margin-top: 16px;
-  overflow: hidden;
-  border: 1px solid rgba(0, 0, 0, 0.09);
-  border-radius: 10px;
-  background: #fafbfc;
-}
-
-.notification-enabled-control {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 68px;
-  padding: 12px 14px;
-}
-
-.notification-enabled-control > div {
-  display: grid;
-  gap: 2px;
-}
-
-.notification-enabled-control strong {
-  color: #3a3a3c;
-  font-size: 12px;
-}
-
-.notification-enabled-control small {
-  color: #6e6e73;
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-.notification-dialog-test {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 68px;
-  border-left: 1px solid rgba(0, 0, 0, 0.08);
-  padding: 12px 14px;
-}
-
-.notification-dialog-test > div {
-  display: grid;
-  min-width: 0;
-  gap: 3px;
-}
-
-.notification-dialog-test strong {
-  color: #3a3a3c;
-  font-size: 12px;
-}
-
-.notification-dialog-test small {
-  color: #6e6e73;
-  font-size: 11px;
-  line-height: 1.4;
-}
-
-.notification-dialog-test .inline-result {
-  overflow: hidden;
-  min-height: 15px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.notification-dialog-test .codey-button {
-  flex-shrink: 0;
-}
-
-.notification-test-error {
-  margin: 8px 0 0;
-  color: #d70015;
-  font-size: 11px;
-  line-height: 1.45;
-}
-
-.notification-reveal-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 100px;
-  margin-top: 16px;
-  border: 1px dashed rgba(0, 0, 0, 0.14);
-  border-radius: 10px;
-  color: #6e6e73;
-  font-size: 12px;
-}
-
-.notification-reveal-error {
-  margin: 12px 0 0;
-  color: #d70015;
-  font-size: 11px;
-  line-height: 1.5;
-}
-
-.notification-channel-picker {
-  display: grid;
-  gap: 8px;
-  margin-top: 20px;
-}
-
-.notification-channel-picker-item {
-  display: block !important;
-  width: 100%;
-  min-height: 72px;
-  height: auto !important;
-  padding: 0 !important;
-  border-color: rgba(0, 0, 0, 0.1) !important;
-  background: #fbfbfc !important;
-  color: #1d1d1f !important;
-  text-align: left;
-}
-
-.notification-channel-picker-item:hover:not(:disabled) {
-  border-color: rgba(0, 122, 255, 0.35) !important;
-  background: #f4f8ff !important;
-}
-
-.notification-channel-picker-item .semi-button-content {
-  display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) 16px;
-  width: 100%;
-  min-width: 0;
-  align-items: center;
-  gap: 12px;
-  padding: 12px;
-}
-
-.notification-channel-picker-item .semi-button-content > span:first-child {
-  display: grid;
-  width: 36px;
-  height: 36px;
-  place-items: center;
-  border-radius: 9px;
-  background: rgba(0, 122, 255, 0.1);
-  color: var(--mac-blue);
-}
-
-.notification-channel-picker-item .semi-button-content > span.telegram {
-  background: rgba(34, 158, 217, 0.12);
-  color: #229ed9;
-}
-
-.notification-channel-picker-copy {
-  display: grid;
-  min-width: 0;
-  gap: 2px;
-}
-
-.notification-channel-picker-copy strong {
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.notification-channel-picker-copy small {
-  overflow: hidden;
-  color: #6e6e73;
-  font-size: 11px;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.notification-channel-picker-item .semi-button-content > svg {
-  color: #8e8e93;
-}
-
 .notification-secret-action {
   display: flex;
   justify-content: flex-end;
@@ -1831,6 +1693,15 @@ input:focus-visible,
 
 .notification-secret-action .codey-button:hover {
   color: var(--mac-red);
+}
+
+.notification-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
 }
 
 .inline-result {
@@ -2052,7 +1923,7 @@ input:focus-visible,
   margin-bottom: 4px;
 }
 
-.trace-wear-heading > strong {
+.trace-wear-heading>strong {
   color: #1d1d1f;
   font-size: 12px;
   font-weight: 600;
@@ -2394,8 +2265,15 @@ input:focus-visible,
 }
 
 @keyframes pulse-shimmer {
-  0%, 100% { opacity: 0.4; }
-  50% { opacity: 0.8; }
+
+  0%,
+  100% {
+    opacity: 0.4;
+  }
+
+  50% {
+    opacity: 0.8;
+  }
 }
 
 /* ==========================================================================
@@ -2608,7 +2486,7 @@ input:focus-visible,
   max-width: 310px;
 }
 
-.model-picker-toolbar > div:last-child {
+.model-picker-toolbar>div:last-child {
   display: flex;
   align-items: center;
   gap: 2px;
@@ -2643,13 +2521,16 @@ input:focus-visible,
 }
 
 .notice-toast {
-  position: fixed;
-  bottom: 24px;
-  right: 24px;
+  /* Stay inside .app-shell (position: relative), not the Codex viewport.
+   * fixed + outer overlay inset made the toast hang outside the dialog. */
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
   z-index: 90;
   display: flex;
   align-items: center;
   gap: 10px;
+  max-width: min(360px, calc(100% - 32px));
   padding: 12px 16px;
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.92);
@@ -2659,6 +2540,15 @@ input:focus-visible,
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.14);
   font-size: 12px;
   color: #1d1d1f;
+  box-sizing: border-box;
+  pointer-events: auto;
+}
+
+.notice-toast > span {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
 }
 
 .notice-toast.success {
@@ -2678,8 +2568,13 @@ input:focus-visible,
 }
 
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ==========================================================================
@@ -2687,6 +2582,7 @@ input:focus-visible,
    ========================================================================== */
 
 @media (max-width: 900px) {
+
   .upper-dashboard-grid,
   .provider-summary,
   .trace-detail-grid {
@@ -2723,7 +2619,7 @@ input:focus-visible,
     min-width: 0;
   }
 
-  .operations-heading > div {
+  .operations-heading>div {
     min-width: 0;
   }
 
@@ -2757,15 +2653,6 @@ input:focus-visible,
 
   .notification-channel-controls {
     justify-content: flex-end;
-  }
-
-  .notification-dialog-actions {
-    grid-template-columns: 1fr;
-  }
-
-  .notification-dialog-test {
-    border-top: 1px solid rgba(0, 0, 0, 0.08);
-    border-left: 0;
   }
 
   .trace-module-actions {
