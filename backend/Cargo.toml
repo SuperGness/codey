@@ -3,7 +3,6 @@ name = "codey"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-default-run = "codey"
 
 [lib]
 name = "codey_lib"
@@ -12,10 +11,6 @@ crate-type = ["rlib"]
 [[bin]]
 name = "codey"
 path = "src/main.rs"
-
-[[bin]]
-name = "codey-fastctx"
-path = "src/bin/codey-fastctx.rs"
 
 [dependencies]
 anyhow = "1"

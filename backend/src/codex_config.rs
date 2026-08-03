@@ -176,7 +176,10 @@ pub fn apply_runtime_provider_config(
         .parent()
         .unwrap_or_else(|| Path::new(".codey"))
         .join("codex-backups");
-    let fastctx_command = resolve_fastctx_command(fast_context_tools);
+    let fastctx_command = fast_context_tools
+        .then(std::env::current_exe)
+        .transpose()
+        .context("定位 Codey 内嵌 FastCtx 服务失败")?;
     apply_runtime_provider_config_at_mode(
         home,
         profile,
@@ -207,7 +210,10 @@ pub fn apply_runtime_provider_config_preserving_route(
         .parent()
         .unwrap_or_else(|| Path::new(".codey"))
         .join("codex-backups");
-    let fastctx_command = resolve_fastctx_command(fast_context_tools);
+    let fastctx_command = fast_context_tools
+        .then(std::env::current_exe)
+        .transpose()
+        .context("定位 Codey 内嵌 FastCtx 服务失败")?;
     apply_runtime_provider_config_at_mode(
         home,
         profile,
@@ -222,46 +228,6 @@ pub fn apply_runtime_provider_config_preserving_route(
         &backup_root,
         true,
     )
-}
-
-const FASTCTX_SERVER_BINARY: &str = if cfg!(windows) {
-    "codey-fastctx.exe"
-} else {
-    "codey-fastctx"
-};
-
-/// FastCtx 以 sidecar 程序随 Codey 一起分发，主程序因此不携带内嵌分词器
-/// 常量。启用了 FastCtx 但 sidecar 缺失时降级为本次不注册该工具：损失的是
-/// 可选增强，而中止启动会让 Codex 完全用不了；缺失会记入错误日志便于定位
-/// 打包问题。
-fn resolve_fastctx_command(fast_context_tools: bool) -> Option<PathBuf> {
-    if !fast_context_tools {
-        return None;
-    }
-    match fastctx_server_command() {
-        Ok(command) => Some(command),
-        Err(error) => {
-            eprintln!("Codey 本次未启用 FastCtx：{error:#}");
-            crate::error_log::record_failure(
-                "fastctx_sidecar_missing",
-                "resolve_fastctx_command",
-                format!("{error:#}"),
-                serde_json::json!({}),
-            );
-            None
-        }
-    }
-}
-
-fn fastctx_server_command() -> Result<PathBuf> {
-    let current = std::env::current_exe().context("定位 Codey FastCtx 服务失败")?;
-    current
-        .parent()
-        .map(|dir| dir.join(FASTCTX_SERVER_BINARY))
-        .filter(|path| path.is_file())
-        .ok_or_else(|| {
-            anyhow::anyhow!("未在 Codey 程序目录找到 FastCtx 服务程序 {FASTCTX_SERVER_BINARY}")
-        })
 }
 
 #[cfg(test)]
@@ -2421,10 +2387,10 @@ direct_only_tool_namespaces = ["mcp__existing", "mcp__fastctx"]
     }
 
     #[test]
-    fn fast_context_tools_migrate_the_owned_main_executable_proxy_to_the_sidecar() {
+    fn fast_context_tools_migrate_the_owned_sidecar_to_the_main_executable() {
         let existing = r#"
 [mcp_servers.codey_fastctx]
-command = "/Applications/Codey.app/Contents/MacOS/codey"
+command = "/Applications/Codey.app/Contents/MacOS/codey-fastctx"
 args = ["--codey-fastctx-mcp"]
 startup_timeout_sec = 15
 runtime_note = "preserve"
@@ -2438,9 +2404,7 @@ CONCURRENT = "preserve"
             GLOBAL_PROVIDER_ID,
             relative_model_catalog_path(),
             None,
-            Some(Path::new(
-                "/Applications/Codey.app/Contents/MacOS/codey-fastctx",
-            )),
+            Some(Path::new("/Applications/Codey.app/Contents/MacOS/codey")),
             false,
         )
         .unwrap();
@@ -2451,7 +2415,7 @@ CONCURRENT = "preserve"
 
         assert_eq!(
             server["command"].as_str(),
-            Some("/Applications/Codey.app/Contents/MacOS/codey-fastctx")
+            Some("/Applications/Codey.app/Contents/MacOS/codey")
         );
         assert_eq!(
             server["args"]

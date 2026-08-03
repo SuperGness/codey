@@ -89,7 +89,6 @@ jobs:
           set -euo pipefail
           APP="target/release/bundle/macos/Codey.app"
           test -x "$APP/Contents/MacOS/codey"
-          test -x "$APP/Contents/MacOS/codey-fastctx"
           test -f "$APP/Contents/Resources/Codey.icns"
           test -f "$APP/Contents/Resources/README.md"
           test -f "$APP/Contents/Resources/LICENSE"

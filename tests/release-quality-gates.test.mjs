@@ -97,6 +97,9 @@ test("desktop packages include FastCtx license and notice files", () => {
   assert.match(workflow, /Contents\/Resources\/licenses\/FastCtx\/NOTICE/);
   assert.match(windowsInstallerScript, /licenses\\FastCtx\\LICENSE-APACHE/);
   assert.match(windowsInstallerScript, /licenses\\FastCtx\\NOTICE/);
+  assert.doesNotMatch(macBuildScript, /codey-fastctx/);
+  assert.doesNotMatch(workflow, /Contents\/MacOS\/codey-fastctx/);
+  assert.doesNotMatch(windowsInstallerScript, /codey-fastctx/);
 });
 
 test("Windows release publishes the installer without a portable zip", () => {

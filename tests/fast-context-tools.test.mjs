@@ -22,23 +22,20 @@ test("FastCtx optimization is opt-in and exposed through the settings switch", a
   assert.doesNotMatch(uiSource, /下次启动提供分页读取、搜索、文件发现与批量替换/);
 });
 
-test("Codey keeps FastCtx in the dedicated sidecar", async () => {
-  const [manifest, sidecarSource, mainSource, libSource, configPatchSource] = await Promise.all([
+test("Codey embeds FastCtx and dispatches it through the dedicated MCP mode", async () => {
+  const [manifest, mainSource, libSource, configPatchSource] = await Promise.all([
     readFile(new URL("backend/Cargo.toml", root), "utf8"),
-    readFile(new URL("backend/src/bin/codey-fastctx.rs", root), "utf8"),
     readFile(new URL("backend/src/main.rs", root), "utf8"),
     readFile(new URL("backend/src/lib.rs", root), "utf8"),
     readFile(new URL("backend/src/codex_config.rs", root), "utf8"),
   ]);
 
   assert.match(manifest, /fastctx = \{ git = "https:\/\/github\.com\/yc-duan\/fastctx", rev = "86dac0c99efae7859ed2be468f68c16e58f5e16a", default-features = false \}/);
-  assert.match(manifest, /name = "codey-fastctx"/);
-  assert.match(sidecarSource, /fastctx::cli::run_server/);
-  // 主程序既不链接 FastCtx，也不再充当启动 sidecar 的兼容代理。
-  assert.doesNotMatch(mainSource, /fastctx::/);
-  assert.doesNotMatch(libSource, /fastctx::/);
-  assert.doesNotMatch(mainSource, /--codey-fastctx-mcp/);
-  assert.doesNotMatch(mainSource, /codey-fastctx(?:\.exe)?/);
+  assert.doesNotMatch(manifest, /name = "codey-fastctx"/);
+  assert.match(mainSource, /--codey-fastctx-mcp/);
+  assert.match(libSource, /--codey-fastctx-mcp/);
+  assert.match(libSource, /fastctx::cli::run_server/);
+  assert.match(configPatchSource, /\.then\(std::env::current_exe\)/);
   assert.match(configPatchSource, /--codey-fastctx-mcp/);
   assert.match(configPatchSource, /CODEY_FASTCTX_SERVER_ID: &str = "codey_fastctx"/);
   assert.match(configPatchSource, /CODEY_FASTCTX_NAMESPACE: &str = "mcp__codey_fastctx"/);

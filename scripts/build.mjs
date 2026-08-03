@@ -16,19 +16,16 @@ if (cargo.status !== 0) process.exit(cargo.status ?? 1);
 if (process.platform !== "darwin") process.exit(0);
 
 const binary = join(root, "target", "release", "codey");
-const fastctxBinary = join(root, "target", "release", "codey-fastctx");
 const app = join(root, "target", "release", "bundle", "macos", "Codey.app");
 const contents = join(app, "Contents");
 const macos = join(contents, "MacOS");
 const resources = join(contents, "Resources");
 const bundledBinary = join(macos, "codey");
-const bundledFastctxBinary = join(macos, "codey-fastctx");
 
 rmSync(app, { recursive: true, force: true });
 mkdirSync(macos, { recursive: true });
 mkdirSync(resources, { recursive: true });
 copyFileSync(binary, bundledBinary);
-copyFileSync(fastctxBinary, bundledFastctxBinary);
 copyFileSync(join(root, "backend", "icons", "Codey.icns"), join(resources, "Codey.icns"));
 for (const [source, destination] of [
   ["README.md", "README.md"],
@@ -42,7 +39,6 @@ for (const [source, destination] of [
   copyFileSync(join(root, ...source.split("/")), bundledDestination);
 }
 chmodSync(bundledBinary, 0o755);
-chmodSync(bundledFastctxBinary, 0o755);
 writeFileSync(
   join(contents, "Info.plist"),
   `<?xml version="1.0" encoding="UTF-8"?>

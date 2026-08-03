@@ -53,6 +53,17 @@ pub fn run_error_log_helper_if_requested() -> Result<bool> {
 }
 
 pub async fn run() -> Result<()> {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|argument| argument == "--codey-fastctx-mcp")
+    {
+        fastctx::cli::run_server()
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::msg)?;
+        return Ok(());
+    }
+
     error_log::initialize();
     let state = Arc::new(AppState::default());
     let restore_started_at = std::time::Instant::now();
