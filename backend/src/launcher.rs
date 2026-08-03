@@ -35,7 +35,9 @@ use crate::session_index_cleanup::{self, SessionIndexCleanupReport};
 use crate::startup_maintenance::{self, ProviderSyncPlan};
 use crate::trace_log_guard;
 
-const CDP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
+// Codex 渲染进程导航（自动恢复 reload、ChatGPT 内部跳转等）会使桥接丢失，
+// 缩短巡检周期让注入在 10 秒内自动重建，避免长时间失去 Codey 按钮与桥。
+const CDP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(5);
 const CDP_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
 const ROUTE_OVERLAY_WATCH_INTERVAL: Duration = Duration::from_secs(1);
 pub const CODEX_APP_NOT_FOUND_ERROR: &str = "找不到 Codex App，请在 Codey 配置中填写路径";
@@ -143,12 +145,46 @@ pub struct CodeyRuntime {
     route_overlay_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     route_overlay_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     exit_watchdog_shutdown: Mutex<Option<oneshot::Sender<()>>>,
+    // 启动卡死自动恢复只执行一次，避免 reload 循环。
+    startup_recovery_attempted: AtomicBool,
 }
 
 impl CodeyRuntime {
     pub async fn renderer_websocket_url(&self) -> Arc<str> {
         self.injection_websocket_url.read().await.clone()
     }
+
+    /// Codex 主界面在启动超时（startup_stalled）后执行一次自动恢复：
+    /// 重新加载渲染进程页面。页面 reload 后 Codey 的桥接会短暂丢失，
+    /// 由 CDP watchdog 在数秒内自动重建注入；同时已注册的
+    /// Page.addScriptToEvaluateOnNewDocument 会让新文档在 document_start
+    /// 阶段提前安装 fast-startup-shield，覆盖启动阶段的 Statsig 初始化。
+    pub async fn maybe_recover_startup_stall(&self) {
+        if self.startup_recovery_attempted.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let websocket_url = self.injection_websocket_url.read().await.clone();
+        error_log::record_failure(
+            "startup_recovery",
+            "reload_codex_after_startup_stall",
+            "Codex 主界面在启动时限内未就绪，Codey 已自动重新加载页面一次以尝试恢复渲染",
+            serde_json::json!({}),
+        );
+        if let Err(error) = codey_runtime_core::bridge::evaluate_script(
+            &websocket_url,
+            "window.location.reload()",
+        )
+        .await
+        {
+            error_log::record_failure(
+                "startup_recovery_failed",
+                "reload_codex_after_startup_stall",
+                format!("自动重新加载 Codex 页面失败：{error:#}"),
+                serde_json::json!({}),
+            );
+        }
+    }
+
 
     pub async fn applied_model_config(&self) -> RuntimeModelConfig {
         self.applied_model_config.read().await.clone()
@@ -857,6 +893,7 @@ impl CodeyRuntime {
                 route_overlay_shutdown: Mutex::new(route_overlay_shutdown),
                 route_overlay_task: Mutex::new(route_overlay_task),
                 exit_watchdog_shutdown: Mutex::new(Some(exit_watchdog_shutdown)),
+                startup_recovery_attempted: AtomicBool::new(false),
             },
             codex_exit,
         ))

@@ -222,13 +222,28 @@ impl AppState {
             return invoke_api(self, command, payload).await;
         }
         match path.as_str() {
-            "/diagnostics/error" => match error_log::record_renderer_failure(&payload) {
-                Ok(()) => json!({
-                    "status": "ok",
-                    "message": "Renderer 错误诊断已记录",
-                }),
-                Err(error) => api_error_message(error),
-            },
+            "/diagnostics/error" => {
+                let recorded = error_log::record_renderer_failure(&payload);
+                // 启动卡死自动恢复：渲染进程上报 host shell 启动超时后，
+                // 由 Codey 主动 reload 页面一次（全程仅一次），watchdog 会在
+                // 数秒内重建桥接；网络抖动等临时故障恢复后主界面即可自愈。
+                if payload
+                    .get("operation")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("wait_for_codex_host_shell")
+                {
+                    if let Some(runtime) = self.runtime.lock().await.as_ref() {
+                        runtime.maybe_recover_startup_stall().await;
+                    }
+                }
+                match recorded {
+                    Ok(()) => json!({
+                        "status": "ok",
+                        "message": "Renderer 错误诊断已记录",
+                    }),
+                    Err(error) => api_error_message(error),
+                }
+            }
             "/settings/get" => {
                 let config = self.config.read().await;
                 serde_json::to_value(redacted_config(&config))
