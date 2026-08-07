@@ -99,7 +99,7 @@ pub struct CodeyConfig {
     /// budget. The guard only manages validated report files on macOS.
     #[serde(default = "default_true")]
     pub protect_crashpad_pending: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub slim_codex_pet: bool,
     #[serde(default)]
     pub slim_codex_voice: bool,
@@ -160,7 +160,10 @@ impl Default for CodeyConfig {
             default_model_by_provider: BTreeMap::new(),
             disable_trace_log_writes: true,
             protect_crashpad_pending: true,
-            slim_codex_pet: true,
+            // Newer Codex builds initialize the avatar-overlay voice controller
+            // during startup; blocking the native pet surface breaks that
+            // required registration path. Keep the compatibility patch opt-in.
+            slim_codex_pet: false,
             slim_codex_voice: false,
             gpu_launch_mode: GpuLaunchMode::Off,
             fast_context_tools: false,
@@ -359,8 +362,14 @@ impl ConfigStore {
     pub fn load(&self) -> Result<CodeyConfig> {
         match fs::read_to_string(&self.path) {
             Ok(contents) => {
-                let config = serde_json::from_str::<CodeyConfig>(&contents)
+                let mut config = serde_json::from_str::<CodeyConfig>(&contents)
                     .with_context(|| format!("解析 Codey 配置失败：{}", self.path.display()))?;
+                // Codex now requires the avatar-overlay controller during startup.
+                // Migrate persisted legacy pet-slim settings before launching it.
+                if config.slim_codex_pet {
+                    config.slim_codex_pet = false;
+                    self.save(&config)?;
+                }
                 Ok(config.normalize())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -562,12 +571,12 @@ mod tests {
     }
 
     #[test]
-    fn pet_slim_mode_defaults_to_enabled_for_existing_configs() {
+    fn pet_slim_mode_defaults_to_disabled_for_existing_configs() {
         let config = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
             .unwrap()
             .normalize();
 
-        assert!(config.slim_codex_pet);
+        assert!(!config.slim_codex_pet);
     }
 
     #[test]
@@ -579,6 +588,24 @@ mod tests {
         .normalize();
 
         assert!(!config.slim_codex_pet);
+    }
+
+    #[test]
+    fn legacy_pet_slim_mode_is_migrated_when_loading() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        fs::write(
+            &path,
+            br#"{"activeProfileId":"","profiles":[],"slimCodexPet":true}"#,
+        )
+        .unwrap();
+
+        let store = ConfigStore::new(&path);
+        let config = store.load().unwrap();
+        assert!(!config.slim_codex_pet);
+
+        let saved = serde_json::from_slice::<serde_json::Value>(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["slimCodexPet"], false);
     }
 
     #[test]

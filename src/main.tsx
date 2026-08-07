@@ -81,7 +81,7 @@ if (import.meta.env.DEV) {
       defaultModelByProvider: {},
       disableTraceLogWrites: true,
       protectCrashpadPending: true,
-      slimCodexPet: true,
+      slimCodexPet: false,
       slimCodexVoice: false,
       gpuLaunchMode: "off" as const,
       fastContextTools: false,

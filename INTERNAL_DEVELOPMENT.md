@@ -102,7 +102,7 @@ Codey 将运行时 core/data crate 固定在 `vendor/CodeyRuntime`，生命周�
 - Codex 配置：使用 Codex 默认 `CODEX_HOME`（通常是 `~/.codex`）。
 - Trace 写盘防护由 `disableTraceLogWrites` 控制，默认开启；macOS / Windows 使用相同启动时机更新 Codex 根目录及旧版 `sqlite/` 目录中现有的 `logs_*.sqlite`，不会创建、清空或压缩日志库。macOS Crashpad 容量保护由独立的 `protectCrashpadPending` 控制，默认开启且保存后热切换；Windows 保留兼容配置字段但不扫描 Crashpad 目录。
 - Windows 卡顿补丁不设开关：Codey 在运行时识别 Windows，并在每次启动 Codex 时自动隔离 Micro 设备模块和周期性 WMI 进程采样。启动 Codey 时若目标 Codex 主进程已在运行，会先终止该安装目录下的 Codex 进程树，确认退出后再拉起新主进程，确保补丁能在主进程执行前安装；清理失败会中止启动。macOS 不执行 Windows 专属分支。
-- 宠物硬阉割：`slimCodexPet` 默认为 `true`，macOS / Windows 都会在下次通过 Codey 启动 Codex 时生效。启用时若主 bundle 的语义锚点因官方升级而变化，Windows 会清理暂停实例后以兼容模式启动，并将宠物精简状态显示为失败；macOS 则停止启动。关闭后下次启动会恢复完整宠物功能。
+- 宠物硬阉割：`slimCodexPet` 默认为 `false`。为兼容需要 Avatar Overlay 控制器的新 Codex 启动流程，读取到旧配置中的 `true` 时会自动迁移为 `false`；关闭后下次启动会恢复完整宠物功能。
 - 语音精简：`slimCodexVoice` 默认为 `false`，macOS / Windows 都会在下次通过 Codey 启动 Codex 时生效。开启后同时覆盖旧听写和新版 GPT Voice / Realtime Voice；关闭时保留完整语音功能。
 - 浮动额度：`showAccountUsageInHeader` 默认为 `true`，保存后立即生效且不要求重启。只有活动线路被识别为官方账号登录时才请求并展示，切到第三方线路后保留开关值但停止请求和显示；用户手动关闭后的持久化值不会被默认值覆盖。
 - Codex 慢启动保护：`fastCodexStartup` 默认为 `true`。Codey 会在 Electron 主进程仍处于启动暂停阶段时，为登录后的 Statsig bootstrap 设置 1.5 秒上限，并保留 renderer 保护作为兼容兜底；正常响应保持原流程，慢请求或失败请求会让 Codex 使用自身错误降级路径继续挂载主界面。原始初始化仍可在后续刷新中恢复；关闭后下次启动完全使用 Codex 原生等待策略。
