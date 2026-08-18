@@ -697,6 +697,28 @@
     return "";
   };
 
+  const workflowWorkspaceCwd = () => {
+    const activeThread = document.querySelector(
+      '[data-app-action-sidebar-thread-active="true"]',
+    );
+    const projects = queryWithin(
+      document,
+      "[data-app-action-sidebar-project-id]",
+    ).filter((project) => project instanceof HTMLElement);
+    const containingProject = activeThread
+      ? projects.find((project) => project.contains(activeThread))
+      : null;
+    const ordered = containingProject
+      ? [containingProject, ...projects.filter((project) => project !== containingProject)]
+      : projects;
+    for (const project of ordered) {
+      const path = projectPathFromRow(project);
+      if (isLocalProjectPath(path)) return path;
+    }
+    return "";
+  };
+  window.__codeyWorkflowWorkspaceCwd = workflowWorkspaceCwd;
+
   const normalizeThreadSessionId = (value) => (
     String(value || "").trim().replace(/^local:/, "")
   );
@@ -1769,6 +1791,46 @@
       throw error;
     });
     return codexSignalDispatcherPromise;
+  };
+
+  window.__codeyBindWorkflowThread = async (threadId) => {
+    const normalizedThreadId = normalizeThreadSessionId(threadId);
+    if (!isCanonicalThreadSessionId(normalizedThreadId)) return false;
+    const dispatcher = await getCodexSignalDispatcher();
+    const cwd = workflowWorkspaceCwd();
+    const nextPath = `/local/${encodeURIComponent(normalizedThreadId)}`;
+    if (location.pathname !== nextPath) {
+      history.pushState({ codeyWorkflowThreadId: normalizedThreadId }, "", nextPath);
+      window.dispatchEvent(new PopStateEvent("popstate", { state: history.state }));
+    }
+    await dispatcher("maybe-resume-conversation", {
+      hostId: "local",
+      conversationId: normalizedThreadId,
+      model: null,
+      serviceTier: null,
+      reasoningEffort: null,
+      workspaceRoots: cwd ? [cwd] : [],
+      collaborationMode: null,
+    });
+    await dispatcher("refresh-recent-conversations-for-host", {
+      hostId: "local",
+    });
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      const composerThreadId = normalizeThreadSessionId(
+        document
+          .querySelector("[data-above-composer-conversation-id]")
+          ?.getAttribute("data-above-composer-conversation-id"),
+      );
+      const routeThreadId = normalizeThreadSessionId(
+        decodeURIComponent(location.pathname.match(/\/local\/([^/]+)/)?.[1] || ""),
+      );
+      if (
+        composerThreadId === normalizedThreadId ||
+        routeThreadId === normalizedThreadId
+      ) return true;
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+    return false;
   };
 
   const refreshRecentLocalSessions = async () => {

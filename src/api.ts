@@ -26,6 +26,19 @@ export const CODEY_API_COMMANDS = [
   "install_downloaded_update",
   "plugin_marketplace_status",
   "repair_plugin_marketplace",
+  "workflow_capabilities",
+  "workflow_start",
+  "workflow_steer",
+  "workflow_list",
+  "workflow_get",
+  "workflow_events",
+  "workflow_artifact",
+  "workflow_pause",
+  "workflow_resume",
+  "workflow_cancel",
+  "workflow_retry_node",
+  "workflow_reply_interaction",
+  "workflow_bypass_audit",
 ] as const;
 
 export type CodeyApiCommand = (typeof CODEY_API_COMMANDS)[number];

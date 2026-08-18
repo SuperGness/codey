@@ -32,6 +32,7 @@ fastctx = { git = "https://github.com/yc-duan/fastctx", rev = "774704a0173397dfc
 fs2 = "0.4"
 futures-util.workspace = true
 reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls", "rustls-tls-native-roots", "system-proxy"], default-features = false }
+regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }

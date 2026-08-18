@@ -139,6 +139,9 @@ pub(super) struct SpawnedCodex {
     pub(super) performance_detail: String,
 }
 
+// Launch inputs intentionally mirror the independently validated runtime
+// settings; keeping them explicit prevents a partially populated option bag.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_codex(
     app_dir: &std::path::Path,
     debug_port: u16,
@@ -147,6 +150,7 @@ pub(super) async fn spawn_codex(
     subagent_gate_active: bool,
     gpu_launch_mode: GpuLaunchMode,
     runtime_config_overrides: &[String],
+    workflow_proxy: Option<&crate::codex_startup_patch::WorkflowProxyLaunchConfig>,
 ) -> Result<SpawnedCodex> {
     #[cfg(any(windows, target_os = "macos"))]
     let patch_options = crate::codex_startup_patch::PatchOptions {
@@ -160,6 +164,7 @@ pub(super) async fn spawn_codex(
         fast_codex_startup,
         subagent_gate_active,
         runtime_config_overrides,
+        workflow_proxy,
     );
     let runtime_arguments = codex_runtime_arguments(gpu_launch_mode, !cfg!(target_os = "macos"));
 
@@ -182,10 +187,11 @@ pub(super) async fn spawn_codex(
         let mut launch_arguments = vec![inspector_arg];
         launch_arguments.extend(runtime_arguments.iter().cloned());
         let mut spawned = spawn_windows_codex(app_dir, debug_port, &launch_arguments).await?;
-        match crate::codex_startup_patch::install(
+        match crate::codex_startup_patch::install_with_workflow_proxy(
             inspector_port,
             patch_options,
             runtime_config_overrides,
+            workflow_proxy,
         )
         .await
         {
@@ -269,10 +275,11 @@ pub(super) async fn spawn_codex(
         };
         let mut spawned = spawn_command(command)?;
         spawned.inspector_argument = Some(inspector_arg.clone());
-        match crate::codex_startup_patch::install(
+        match crate::codex_startup_patch::install_with_workflow_proxy(
             inspector_port,
             patch_options,
             runtime_config_overrides,
+            workflow_proxy,
         )
         .await
         {

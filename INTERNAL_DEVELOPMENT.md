@@ -51,6 +51,618 @@ Codey 是一个无界面的 Rust 桌面辅助进程，通过 CDP 连接官方 Co
 - 官方 curated 和本地工具插件市场通过 CodeyRuntime core 的兼容逻辑注册；`openai-curated-remote` 仅作为外部流程产生的可选本地缓存，缺失时不判为故障，存在时必须注册到其精确缓存路径。页面层合并可用的本地插件并清理隐藏/远程路径字段。
 - 配置面板可保存用户脚本；脚本作为独立 CDP 文档脚本在内置修复脚本之后执行。
 
+## Codey Workflow Engine 实施 RFC
+
+> 状态：V1 opt-in preview 已落地，默认关闭；本节同时保留后续生产化目标，未标记为已实现的验收项不得视为已交付。
+>
+> 目标读者：Codey 维护者、测试人员和发布负责人。
+>
+> 产品优先级：准确性与端到端效率为一级目标，稳定性是不可牺牲的底线；Token 成本是重要约束，但不允许通过跳过必要验证来降低成本。
+
+当前实现已经包含透明 App Server proxy、origin task 绑定、Direct/Guarded/Parallel/Expert DAG、SQLite Journal、幂等命令、租约与恢复、权限交集、最小上下文 worker、强制 FinalDelivery 写回、全局 composer 接管、可见原生回退和工作流控制台。首次启用需要重启以安装 proxy；全局普通文本接管可热切换。当前实现边界如下，所有缺口均失败关闭：
+
+- Direct origin turn 的审批继续交给 Codex 原生界面；隔离 worker 使用 App Server `auto_review`。Codey 控制台尚未实现可持久停放并恢复的 server-initiated 审批交互闭环，因此 capability 仍明确报告不支持；auto-review 无法裁决时失败关闭。
+- 自动 worktree 创建、合并与冲突处理尚未落地；脏工作区或高风险写入在接纳前拒绝工作流并允许可见原生回退，不执行自动 stash、reset、clean 或覆盖。
+- Reviewer 使用显式 `PASS / CHANGES_REQUIRED / INCONCLUSIVE` 门禁；普通写入独立 Review，高风险 Expert 路径双 Reviewer，驳回后最多两轮 Builder 修复并使 Validator/Reviewer 证据整体失效重跑。修复耗尽、双 Reviewer 冲突或结论不明确时进入 NeedsAttention；尚未实现运行中的事后 Expert 升级，detached `review/start` 仍只是可选优化。
+- outbox schema 与事务写入已存在，控制台当前通过 Journal 增量轮询读取；真实 Codex DOM/App Server E2E、跨平台故障矩阵、72 小时 soak 和 Token/准确率评测尚未完成。
+- `reviewerCount` 与 `retentionDays` 已进入独立配置，但尚未接入 DAG 编译和自动保留期清理；普通/Expert 路径当前仍固定为一名/两名 Reviewer。V1 全局 writer 配额固定为 1，等待按仓库键隔离和 worktree 合并落地后才开放更高值。
+- 当前接纳门禁验证 Journal、proxy 健康与 V1 所需协议形状；逐方法的运行时 capability 协商和跨 Codex 版本降级矩阵仍需在 canary 前补齐，能力不确定时必须关闭接管并显示原生回退。
+- 已绑定 origin task 的 composer 预检通过 `thread/resume` 的 `excludeTurns` 只读取 cwd、权限、模型和线程状态，不得为了冻结权限快照装载完整历史；proxy 控制帧继续保留 1 MiB 防护。首次恢复若 legacy `sandbox` 投影暂时为空，会在短延迟后再做一次 metadata-only resume；仍为空时只接受 App Server 明确返回的 `:read-only`、`:workspace` 或 `:danger-full-access` 内置权限 profile，未知或自定义 profile 继续失败关闭。原生回退提示会展示后端原因，但在渲染前移除控制字符并限制长度，审计事件仍不保存请求正文或错误详情。
+
+因此 V1 只能作为开发者 opt-in 预览，不得默认开启，也不得宣称已经达到本 RFC 后续列出的生产 SLO。
+
+### 决策摘要
+
+Codey 已参照 pi-shadow-mind、pi-dynamic-workflows 和 pi-maestro-flow 的架构思想实现原生、默认关闭的 Workflow Engine，但没有直接移植任一项目。Codex App Server 是首选执行适配层，现有单代理路径继续作为接纳前的兼容与回滚通道。
+
+核心决策如下：
+
+- 使用受版本控制的类型化 DAG 表达工作流，不执行任意 JavaScript 工作流代码。
+- 使用 SQLite WAL 事件日志作为唯一权威状态；UI 状态、临时 marker、进程内存和 Hook 输出均不是事实来源。
+- 采用至少一次事件投递、幂等键、事务 outbox、租约 epoch 和副作用栅栏，不宣称无法兑现的端到端 exactly-once。
+- 原始用户请求不可变且优先级最高。Preflight 产物只能补充约束，不能覆盖、缩窄或改写用户目标。
+- 角色、任务类型、模型路由和权限配置相互独立；权限必须由运行时强制执行，不能依赖角色名称或提示词。
+- 接纳阶段把请求意图区分为 read-only、write 和 ambiguous。当前 Codex 权限快照始终是不可扩大的上限；只有明确咨询、审查或调研才收紧 write paths，无法确定的自然表达保留原上限并进入 Guarded，禁止因固定关键词漏判而永久降级为只读。
+- Codex 页面中的工作流入口按当前 origin thread 精确查询：只有该任务存在至少一条关联运行时才挂载会话级按钮，切换任务时先隐藏旧入口再查询新任务。入口携带 thread ID 与 run ID 打开控制台，并把运行列表限制在该任务；终态运行仍可追溯，无关联任务不展示占位按钮。
+- 所有非机械性写入默认经过独立 Reviewer；高风险写入使用双 Reviewer 或人工确认。
+- 只读探索可以并行，仓库写入默认单写者。需要并行写入时必须使用隔离 worktree 和显式合并节点。
+- Shadow reviewer 只作为可选的旁路建议器，不参与心跳、不成为正确性依赖，也不能阻止主流程恢复。
+- 新引擎拥有独立角色配置并默认关闭；为避免二次调度，运行配置禁止与现有 subagent_optimization 同时启用，发布仍按观察、试用、灰度、默认候选四个阶段推进。
+- 一旦工作流已接纳并可能产生副作用，不允许静默回退到旧路径；只能恢复、明确失败或进入 UnknownOutcome。
+
+这不是对 Codex 核心的侵入式重写。Codey 负责计划编译、持久化、调度、权限、恢复和验收；Codex 仍负责模型推理、工具执行、审批交互和流式事件。
+
+### 目标与非目标
+
+必须达到的目标：
+
+- 应用或后端重启后可以确定性恢复，不重复已经确认的写入。
+- 网络超时、模型失败、工具挂起、审批中断、磁盘满、数据库异常、进程崩溃和取消竞态都有明确状态与处置。
+- 对多文件检索、独立核验和测试任务自动并行，对写入冲突和上下文膨胀主动限流。
+- 每个成功结论都有可追溯证据：输入、变更、测试、Reviewer 判定和最终交付彼此可关联。
+- 任务使用最小必要上下文，不默认复制完整聊天历史或完整日志。
+- 用户能够查看阶段、节点、阻塞原因、审批请求、重试、取消、恢复和最终证据。
+- 未启用该功能时，当前 Codey/Codex 行为完全不变。
+
+首版明确不做：
+
+- 不建设跨机器的通用分布式任务平台。
+- 不允许用户上传或执行任意工作流脚本。
+- 不自动 stash、reset、clean、commit 或覆盖用户已有改动。
+- 不把随机心跳、模型自评或提示词承诺当作安全边界。
+- 不在一个版本内同时维护 App Server 与 SDK 两套完整执行栈。
+- 不自动重放结果未知的写操作。
+- 不保存模型隐藏推理；只保存结构化结论、必要证据和审计事件。
+
+### 工作流模式与自动路由
+
+工作流模式不是让用户每次手工选择的固定模板，而是由风险、并行收益和可验证性共同决定。
+
+| 模式 | 适用条件 | 执行结构 | 质量要求 |
+| --- | --- | --- | --- |
+| Direct | 单一事实、明确位置、只读或完全可确定的机械操作 | 主代理内联 Preflight 后直接执行 | 必须有确定性检查；任何不确定性立即升级 |
+| Guarded | 默认写入模式、单分支诊断、一般修复 | 独立 Preflight → Builder → 确定性验证 → 独立 Reviewer | 非机械写入必须 Reviewer 通过 |
+| Parallel | 两个以上互不依赖的探索、核验或测试分支 | 并行只读 Scouts → 汇总 → 单 Builder → 验证 → Reviewer | 每个分支有独立证据和超时，写入仍串行 |
+| Expert | 高风险、Reviewer 不一致、两轮修复后仍不确定 | Guarded/Parallel → Expert 针对单一争议给建议 → 人或主流程裁决 | Expert 不直接写入，不以建议替代测试 |
+
+默认路由规则：
+
+1. 任何非机械性仓库写入至少进入 Guarded。
+2. 未知实现位置、跨目录检索或存在两个独立问题时，Preflight 使用 Parallel。
+3. 涉及权限、安全、数据迁移、删除、发布、并发状态机或不可逆外部副作用时，进入高风险策略。
+4. 高风险策略要求双 Reviewer；两者不一致时进入 NeedsAttention 或 Expert，不做多数投票式自动通过。
+5. Direct 运行中一旦发现隐含依赖、工作区脏状态、测试失败或输出不可验证，重新编译为 Guarded，而不是继续冒险。
+6. 机械格式化、生成文件刷新等操作只有在命令和预期输出完全确定时才可用确定性验证替代模型 Reviewer。
+
+标准质量优先流程：
+
+    OriginalRequest
+      → Admission 与风险分类
+      → Preflight / 并行 Scouts
+      → WorkflowSpec 编译与策略校验
+      → Builder
+      → 确定性验证
+      → 独立 Reviewer
+      → PASS / CHANGES_REQUIRED / INCONCLUSIVE
+      → 最多两轮修复，之后 Expert 或 NeedsAttention
+      → FinalDelivery
+
+### 总体架构
+
+数据流：
+
+    Codey React UI
+      ↕ CDP bridge / Rust commands 与增量事件查询
+    WorkflowService
+      ├─ Admission / Planner / DAG Compiler
+      ├─ Scheduler / Lease Manager / Policy Engine
+      ├─ Artifact Store / Context Builder / Review Gates
+      ├─ Recovery / Watchdog / Reconciler
+      └─ Codex App Server Adapter
+             ↕ 能力握手、任务、审批、取消、事件
+          Codex runtime
+
+    WorkflowService
+      ↕ 单事务
+    SQLite WAL Journal
+      ├─ 状态快照
+      ├─ 追加事件
+      ├─ Transactional Outbox
+      ├─ 幂等键与租约
+      └─ Artifact manifest
+
+组件职责：
+
+- Admission：校验功能开关、输入、工作区、数据库、运行时能力和幂等键，失败时不创建半成品运行。
+- Planner：把原始请求和只读 Preflight 编译为类型化 DAG；不直接执行副作用。
+- Scheduler：只调度依赖满足的节点，控制读写并发、租约、公平性、重试和取消。
+- Policy Engine：根据节点能力而非角色名称决定文件、命令、网络、审批和外部副作用权限。
+- App Server Adapter：隔离协议差异，完成能力握手、事件标准化、去重、取消和恢复。
+- Journal：所有已确认状态的唯一来源，支持确定性 replay 和版本迁移。
+- Artifact Store：保存结构化产物及其 hash、敏感级别、来源和保留策略；大日志不进入调度上下文。
+- Review Gates：把确定性测试证据和独立 Reviewer 判定组合成最终门禁。
+- Reconciler：重启或连接中断后查询事实、回收租约，并把无法证明的副作用标为 UnknownOutcome。
+- UI/API：只展示服务端权威状态，不自行推导成功。
+
+### 类型化工作流 IR
+
+WorkflowSpec 必须有版本号并在执行前冻结。首版至少包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| workflow_version | IR schema 版本；未知未来版本只能只读 |
+| workflow_id / run_generation | 稳定运行标识和显式重跑代次 |
+| original_request_ref | 指向不可变 OriginalRequest artifact |
+| profile | direct、quality_first、high_risk 等策略配置 |
+| workspace | 仓库、基线 revision、脏状态摘要和隔离策略 |
+| nodes | 类型化节点集合 |
+| edges | 显式依赖，不允许隐藏的字符串求值依赖 |
+| acceptance | 最终测试、Reviewer 和人工门禁 |
+| policy_snapshot | 接纳时冻结的模型、权限、重试和保留策略 |
+
+NodeSpec 至少包含：
+
+- node_id、task_type、depends_on 和 input_bindings。
+- role、model_route、permission_profile、workspace_policy，四者分别配置。
+- output_schema、artifact_outputs 和完成条件。
+- timeout、retry_policy、criticality、cache_policy 和 side_effect_class。
+- required_capabilities、approval_policy 和 cancellation_policy。
+- 可选的 compensation 节点，但补偿不等于回滚成功。
+
+输入绑定只允许引用已完成依赖的结构化字段，例如 node_name.output_field。禁止在模板中执行 JavaScript、Shell 或动态网络请求。DAG 编译阶段必须检查循环、缺失引用、权限矛盾、不可达节点和没有最终门禁的写入路径。
+
+### Artifact 契约
+
+所有跨节点信息使用 artifact，不默认传递完整会话历史。标准 artifact：
+
+- OriginalRequest：原始用户请求、附件引用和接纳时上下文；不可变且优先级最高。
+- PreflightBrief：范围、风险、未知项、建议验证和不应做的事情。
+- ExecutionPlan：冻结后的 DAG 和策略快照。
+- ChangeSet：修改文件、基线、diff hash、工具副作用和工作区状态。
+- ValidationReport：命令、退出码、摘要、原始日志引用和可复现性。
+- ReviewVerdict：PASS、CHANGES_REQUIRED 或 INCONCLUSIVE，附逐条验收映射。
+- ExpertQuestion / ExpertAdvice：只包含一个明确争议和建议，不授予写权限。
+- AdoptionDecision：主流程采用或拒绝建议的理由。
+- FinalDelivery：面向用户的结果、证据、限制和剩余风险。
+
+Artifact manifest 字段：
+
+    artifact_id, kind, schema_version, content_hash, byte_size,
+    producer_workflow_id, producer_node_id, producer_attempt_id,
+    sensitivity, retention_class, created_at, storage_ref
+
+敏感 artifact 默认不进入 Reviewer 或 Scout 上下文。任何摘要都必须保留来源引用；摘要不能覆盖原始 artifact，连续摘要最多三代。
+
+### 状态机与事件模型
+
+工作流状态：
+
+    Created → Queued → Running → Succeeded
+                              ↘ Failed
+                              ↘ NeedsAttention
+    Running → Pausing → Paused → Running
+    Queued | Running | Paused → Canceling → Canceled
+
+节点状态：
+
+    Pending, Ready, Leased, Running, WaitingApproval,
+    Pausing, Paused, Succeeded, Failed, Canceled, Skipped,
+    UnknownOutcome, Compensating, Compensated
+
+必须遵守的语义：
+
+- CancelRequested 不等于 Canceled；只有执行侧确认停止且状态事务提交后才是 Canceled。
+- Pausing 不等于 Paused；只有到达安全点并释放或冻结租约后才是 Paused。
+- 传输错误不等于任务失败；执行结果未知时进入 UnknownOutcome。
+- worker 消失不表示可以安全重试；必须先根据副作用栅栏和外部事实 reconcile。
+- 终态吸收同一 generation 的迟到事件；用户显式重跑创建新的 run_generation。
+- 每次重试创建新的 attempt_id，不覆盖旧 attempt。
+- Reviewer 失败、超时或格式错误永远不能解释为 PASS。
+
+每个持久事件至少包含：
+
+    workflow_id, run_generation, node_id, attempt_id,
+    event_id, workflow_seq, expected_version,
+    causation_id, correlation_id, lease_epoch,
+    payload_schema_version, actor, created_at, payload_hash
+
+数据库唯一约束：
+
+- workflow_id + workflow_seq 唯一，保证单运行内顺序。
+- source + event_id 唯一，去除重复上游事件。
+- workflow_id + node_id + attempt_id 唯一。
+- lease 更新必须比较 lease_epoch，旧 worker 无法提交新结果。
+- 状态转换、事件追加和 outbox 写入在同一事务中完成。
+
+建议表：
+
+- workflow_runs：运行快照、version、generation、策略快照和终态。
+- workflow_nodes：节点定义、当前状态、依赖计数和最后 attempt。
+- node_attempts：租约、心跳、执行句柄、结果、错误分类和副作用状态。
+- workflow_events：不可变追加日志。
+- workflow_outbox：待投递动作及其幂等键。
+- artifacts：manifest 和存储引用。
+- approvals：审批请求、响应、过期和关联 attempt。
+- idempotency_keys：接纳、分发和外部副作用去重。
+
+首版 SQLite 设置：
+
+- WAL、foreign_keys=ON、synchronous=FULL、busy_timeout=5000ms。
+- 每次启动先校验 schema、完整性和磁盘可写性；数据库损坏或磁盘满时停止接纳与写入，不自动创建一个空数据库冒充恢复成功。
+- 未知未来 schema 进入只读安全模式，允许导出诊断，不允许变更状态。
+- 活跃运行不自动清理；完成运行日志默认保留 30 天，去重与 tombstone 默认 90 天，详细工具日志默认 7 天，均可配置。
+
+### 调度、租约和并发
+
+质量优先默认值：
+
+- 全局只读节点并发 4，同一模型提供方并发 2。
+- 同一仓库写节点并发 1；并行写仅在独立 worktree 中开放。
+- 子代理嵌套深度 1；首版不允许子代理继续派生子代理。
+- 租约 30 秒，心跳 10 秒；45 秒无有效心跳后才允许带新 epoch 回收。
+- 临时错误在 2 分钟窗口内最多重试 3 次，使用带抖动的指数退避。
+- 逻辑失败和确定性测试失败不做基础设施式自动重试，而是进入修复或 Reviewer 流程。
+- 写入、审批和最终 Review 默认禁止跨提供方自动 fallback，避免语义漂移；只读 Scout 可在策略明确时 fallback。
+- 单一工作流最多两轮 Builder 修复和一个 Expert 节点，之后进入 NeedsAttention。
+
+调度器使用 ready queue，只在全部依赖成功并通过输入 schema 校验后租赁节点。公平性至少按工作流轮转，避免一个大型 DAG 饿死短任务。高风险写节点在租赁前再次检查基线 revision、工作区锁和审批状态。
+
+已有等价 artifact 且输入 hash、策略版本、模型路由和工具能力均一致时，可以复用只读节点结果。写节点不做结果缓存。预算耗尽只能暂停、降级非关键探索或请求用户选择，不能把未验证结果标为成功。
+
+### 上下文与 Token 策略
+
+省 Token 的主要手段是减少重复上下文，而不是减少必要角色：
+
+- 每个节点只接收 OriginalRequest、直接依赖 artifact、当前策略和必要代码片段。
+- Preflight、Reviewer 和 Expert 不接收 Builder 的完整聊天历史；Reviewer 接收原始请求、diff、验证证据和已知风险，以保持独立性。
+- 搜索输出先结构化为 file:line、符号、结论和置信度；原始大输出存为 artifact，不重复注入。
+- 相同静态前缀按 hash 复用；DAG 分支共享 artifact 引用，不复制正文。
+- 上下文达到模型窗口约 70% 时生成一次带来源的压缩包，最迟 90% 前开启新 capsule；最多三代摘要。
+- 每类节点设置输出上限和日志截断策略，但错误、权限请求、测试失败和 Reviewer 证据不得因截断消失。
+- 并行只用于确有独立收益的分支；重复探索在证据已充分且结果等价时提前停止。
+- Token 估算使用供应方 usage 或本地计量，只作为调度指标；不得用结果字符串长度冒充准确 Token。
+
+模型不按角色固定写死。model_route 根据任务难度、风险、上下文长度、工具需求和当前可用能力解析为具体模型。质量优先配置下，Preflight、Builder 和 Reviewer 可以使用同等级高能力模型；低风险定位 Scout 才优先使用低延迟路由。
+
+### 权限、审批和工作区隔离
+
+默认权限矩阵：
+
+| 角色 | 仓库读取 | 仓库写入 | 命令 | 网络/外部副作用 |
+| --- | --- | --- | --- | --- |
+| Coordinator | 元数据 | 否 | 否 | 仅调度协议 |
+| Preflight / Scout | 是 | 否 | 只读白名单 | 默认否 |
+| Builder | 是 | 按声明路径 | 按策略 | 逐能力审批 |
+| Validator | 是 | 仅临时构建目录 | 测试白名单 | 默认否 |
+| Reviewer | 是 | 否 | 只读或验证白名单 | 默认否 |
+| Expert | 仅 artifact | 否 | 否 | 否 |
+
+运行时必须依据 permission_profile 拒绝不允许的工具和路径。提示词中的“不要写文件”只是辅助，不是安全控制。Hook 只用于补充审计、脱敏和通知；由于并非所有执行路径都保证经过 Hook，不能把 Hook 当成完整权限边界。
+
+工作区规则：
+
+- 接纳时记录基线 revision、未跟踪文件摘要和已有修改 hash。
+- 检测到脏工作区时不自动 stash、reset、clean 或 commit。
+- 默认让用户已有修改留在原位，并用路径锁避免覆盖；高风险或并行写要求隔离 worktree。
+- 合并前再次校验基线和目标文件 hash；冲突进入 NeedsAttention，不做模型猜测式覆盖。
+- 外部副作用必须带幂等键；无法查询结果的非幂等副作用在断线后进入 UnknownOutcome。
+- 破坏性动作、权限升级、发布和数据迁移必须走可恢复的显式审批。
+
+### Codex 集成策略
+
+MVP 首选 Codex App Server，因为它提供面向深度客户端集成的认证、历史、审批和流式事件接口。Codey 在启动工作流前执行能力握手，记录 App Server 版本和支持的方法；协议差异由 adapter 层处理，不能散落在调度器中。
+
+能力握手至少确认：
+
+- 创建或继续执行上下文。
+- 发送任务和接收带稳定标识的事件。
+- 工具审批与用户输入转发。
+- 取消或中断执行。
+- 查询运行状态，或在缺少查询能力时给出明确的恢复限制。
+- usage、模型和上下文能力元数据。
+
+如果必需能力缺失：
+
+- 工作流接纳前可以明确回退到现有原生路径，并记录原因。
+- 工作流接纳后不得静默换执行栈；进入 NeedsAttention 或兼容适配器的显式降级状态。
+- 任何无法证明是否发生过写入的请求进入 UnknownOutcome。
+
+Codex SDK 适合未来独立服务或自定义工具宿主，但 MVP 不并行建设第二套完整协议。Hook 用于观测和辅助策略，不能替代 App Server 事件协议和 Workflow Journal。
+
+### 已落地的后端与前端模块
+
+后端核心模块：
+
+    backend/src/workflow/mod.rs
+    backend/src/workflow/domain.rs
+    backend/src/workflow/journal.rs
+    backend/src/workflow/engine.rs
+    backend/src/workflow/scheduler.rs
+    backend/src/workflow/recovery.rs
+    backend/src/workflow/policy.rs
+    backend/src/workflow/artifacts.rs
+    backend/src/workflow/app_server.rs
+    backend/src/app_server_proxy.rs
+    backend/src/commands/workflows.rs
+
+需要集成的现有后端文件：
+
+- backend/src/lib.rs 和 backend/src/main.rs：注册服务、生命周期和恢复入口。
+- backend/src/commands.rs 与 backend/src/commands/runtime.rs：暴露命令并转发审批/用户输入。
+- backend/src/launcher.rs：App Server 进程所有权与关闭语义。
+- backend/src/config.rs：新增独立 workflow 配置及 revision/CAS 更新。
+- backend/src/subagent_policy.rs：复用角色策略概念，但不把现有 subagent gate 当作权威状态。
+- backend/src/codex_config.rs：只注入必要兼容配置，不把业务状态写入 Codex 配置。
+
+前端与 composer 模块：
+
+    src/workflows/types.ts
+    src/workflows/api.ts
+    src/workflows/snapshot.ts
+    src/workflows/useWorkflowRuns.ts
+    src/workflows/WorkflowConsole.tsx
+    src/workflows/index.ts
+    src/styles.workflows.css
+    public/workflow-mode.js
+
+需要集成的现有前端文件：
+
+- src/api.ts：统一 API 封装。
+- src/App.types.ts、src/App.tsx、src/main.tsx：页面入口和应用状态。
+- src/overlay.tsx：只显示摘要，不复制完整控制台。
+
+现有 marker 型 subagent gate 继续服务旧路径，但新引擎不得依赖它判断节点真相。迁移完成后再根据遥测决定是否删除旧 gate。
+
+### Commands 与 UI 契约
+
+当前 commands：
+
+- workflow_capabilities：返回功能开关、协议能力、schema 版本和不可用原因。
+- workflow_start：带 commandId 与 expectedRevision 接纳请求，返回 runId、engineEpoch、revision 和 durable ACK。
+- workflow_steer：把当前任务的新消息转入活动 Builder；无法转发时写入带 commandId 的持久事件，并使受影响的 Builder 下游失效后重编译剩余 DAG。
+- workflow_list：分页列出运行摘要。
+- workflow_get：返回运行、节点、门禁和待处理交互。
+- workflow_events：按 afterSequence 增量返回事件。
+- workflow_artifact：按需读取脱敏并限长的 artifact。
+- workflow_pause：持久化暂停意图。
+- workflow_cancel：持久化取消意图，不虚报已取消。
+- workflow_resume：只恢复 Paused 或可恢复的 NeedsAttention。
+- workflow_retry_node：创建新 attempt；UnknownOutcome 默认不允许直接重试。
+- workflow_reply_interaction：提交审批或用户输入，带 request version 防止重复响应。
+- workflow_bypass_audit：只记录不含请求正文的原生绕过原因。
+
+MVP 可用增量轮询：活跃运行约 1 秒、空闲 5 到 10 秒、页面隐藏时停止；后续若桥接层支持可靠推送，再替换为事件订阅。UI 必须显示：
+
+- 当前模式、阶段、节点依赖和执行者。
+- 运行中、等待审批、暂停中、取消中、UnknownOutcome 等真实状态。
+- 最近事件、重试次数、租约/恢复提示和明确的阻塞原因。
+- Token、耗时和并行度摘要，不用它们替代质量证据。
+- 变更、验证和 Review artifact。
+- 暂停、恢复、取消、重试和人工裁决按钮，并在危险操作前说明后果。
+
+只有最终 acceptance gate 提交成功后才能显示 Succeeded。前端断线、轮询超时或 Reviewer 消失都不能显示成功。
+
+### 初始配置
+
+建议新增独立配置组，默认值如下：
+
+| 配置 | 默认值 |
+| --- | --- |
+| workflow.enabled | false |
+| workflow.globalMode | true |
+| workflow.profile | qualityFirst |
+| workflow.maxReadOnlyConcurrency | 4 |
+| workflow.maxProviderConcurrency | 2 |
+| workflow.maxRepoWriters | 1 |
+| workflow.maxDelegationDepth | 1 |
+| workflow.leaseSeconds | 60 |
+| workflow.infrastructureRetryLimit | 3 |
+| workflow.builderRepairLimit | 2（已接入自动修复循环，耗尽后进入 NeedsAttention） |
+| workflow.reviewerCount | 1 |
+| workflow.retentionDays | 30 |
+| workflow.roles | 首次从现有角色配置复制，之后独立保存 |
+
+配置更新沿用现有 revision/CAS 和原子写模式。运行接纳后冻结策略快照，配置热更新只影响新运行，避免一半节点使用新策略、一半节点使用旧策略。
+
+workflow.enabled 与 subagent_optimization 的配置存储独立，但运行时互斥：
+
+- 只启用 subagent_optimization：保持当前原生增强行为。
+- 只启用 workflow.enabled：使用 Workflow Engine 自己的角色和调度策略。
+- UI 开启任一能力时会关闭另一项；手工配置同时开启时，规范化阶段关闭 workflow.enabled，避免两个调度器递归派生。
+
+### 异常分类与处置
+
+| 异常 | 状态与动作 | 禁止行为 |
+| --- | --- | --- |
+| 接纳请求超时、无 ACK | 用 idempotency_key 查询 Journal；不存在才可重发 | 直接创建第二个运行 |
+| 分发后连接中断 | 查询 App Server 和副作用栅栏；不能证明时 UnknownOutcome | 盲目重放写节点 |
+| worker 崩溃或租约过期 | 新 epoch 回收；旧 epoch 结果只记审计不提交 | 接受迟到成功覆盖新 attempt |
+| Codey/应用重启 | replay Journal、恢复 outbox、reconcile 执行句柄 | 依赖内存或 marker 猜状态 |
+| 重复或乱序事件 | event_id 去重、workflow_seq 排序、version CAS | 重复推进状态机 |
+| 取消与成功竞态 | 同一事务 CAS；已提交终态吸收迟到事件 | 把 CancelRequested 当 Canceled |
+| 暂停遇到不可中断工具 | 等安全点；30 秒后 NeedsAttention 并说明仍可能运行 | 假装已经暂停 |
+| Provider 限流/5xx | 退避重试；只读节点可按策略 fallback | 写节点跨模型静默重放 |
+| 输出 schema 无效 | 一次结构修复；仍失败则节点 Failed/NeedsAttention | 把自由文本当结构化 PASS |
+| Reviewer 超时或冲突 | INCONCLUSIVE；重试一次或进入 Expert/人工 | 默认通过 |
+| 测试挂起 | 超时、中断、保存日志；副作用未知则 reconcile | 丢弃测试证据 |
+| 脏工作区或基线漂移 | 停止写入、展示差异、隔离 worktree 或请求选择 | reset、stash、clean 用户文件 |
+| 合并冲突 | NeedsAttention，保留双方 artifact | 自动覆盖冲突 |
+| 数据库忙 | busy timeout 后退避；保持接纳幂等 | 绕过 Journal 执行 |
+| 数据库损坏/磁盘满 | 停止新运行与状态写入，切只读诊断并备份 | 新建空库继续 |
+| 未知 schema | 只读安全模式 | 降级写旧 schema |
+| Artifact hash 不符 | 隔离 artifact，运行进入 NeedsAttention | 使用损坏内容 |
+| 权限请求无人响应 | WaitingApproval；到期后 Paused/NeedsAttention | 自动同意 |
+| 上下文接近上限 | 生成有来源 capsule 或拆分新节点 | 截掉错误与验收条件 |
+| Secret canary 命中 | 立即停止外发、标记安全事件并清理派生上下文 | 继续 Reviewer/Scout 广播 |
+
+取消要求：
+
+- 取消意图持久化 p99 小于 500ms。
+- 本地可控执行给予 10 秒协作退出，再给予 5 秒终止窗口。
+- 终止后仍无法确认远程或外部副作用时进入 UnknownOutcome，不显示 Canceled。
+
+### 验证、测试与评测
+
+单元与属性测试：
+
+- 状态 reducer 对所有合法和非法转换进行表驱动测试。
+- 任意事件重复、乱序、进程中断后 replay 得到同一快照。
+- 租约 epoch、CAS、终态吸收和 run_generation 的性质测试。
+- DAG 循环、缺失依赖、schema、权限和最终门禁编译检查。
+- Context capsule 的来源完整性、敏感级别和 Token 上限测试。
+
+集成与故障注入：
+
+- 在事务提交前后、outbox 投递前后、工具调用前后和结果 ACK 前后设置 kill point。
+- 模拟数据库 busy、磁盘满、损坏、迁移中断和未来 schema。
+- 用 mock App Server 覆盖超时、重复事件、迟到事件、审批、限流、断线、取消和结果未知矩阵。
+- 用临时 Git fixture 覆盖脏工作区、未跟踪文件、基线漂移、worktree、冲突和部分写入。
+- 覆盖 Reviewer 两轮震荡、双 Reviewer 冲突、Expert 不可用和人工接管。
+- E2E 覆盖应用重启、活动运行恢复、暂停、取消、权限交互和 UI 断线重连。
+- 发布候选至少执行 72 小时混沌与 soak 测试，并完成一次实际回滚演练。
+
+质量评测集：
+
+- 单一事实查找和简单只读诊断。
+- 已知位置的小修改、跨文件重构和测试补全。
+- 需求含糊、附件含伪指令、Preflight 与原请求冲突。
+- 测试本身失败或 flaky、工具挂起、模型输出 schema 错误。
+- 高风险权限、安全、迁移和不可逆外部副作用。
+- 并行探索有收益与无收益的对照任务。
+- 中途取消、应用重启、Provider 故障和脏工作区。
+
+每个样本记录：任务成功、关键遗漏、错误成功、耗时、模型等待、工具时间、Token、重复上下文、重试、人工介入和恢复结果。必须与当前原生路径做盲评对照，不能只看模型自评。
+
+### SLO 与发布门槛
+
+稳定性门槛：
+
+- 已 ACK 状态 RPO 为 0；replay 后状态确定一致。
+- 不发生旧 lease 提交、重复破坏性副作用或用户工作区自动销毁。
+- 协调层成功率至少 99.9%。
+- durable ACK p99 小于 200ms，ready 到 leased p95 小于 1 秒，事件可见 p99 小于 2 秒。
+- 重启恢复 p95 小于 10 秒、p99 小于 30 秒。
+- UnknownOutcome 在无法确认后 60 秒内明确展示。
+
+质量门槛：
+
+- 关键评测集错误成功为 0。
+- 成功的代码写入包含可追溯测试与 Review 证据比例至少 99.9%。
+- Reviewer 不可用、测试缺失或 artifact 损坏时错误放行为 0。
+- Secret canary 泄漏为 0。
+- 相比当前原生路径，准确率不得下降；高风险任务必须有统计显著改善后才能进入默认候选。
+
+效率与 Token 门槛：
+
+- 调度层自身开销不含模型时间时，普通任务 p95 小于 2 秒。
+- Parallel 模式在适合并行的评测集上显著降低端到端耗时；无并行收益时不得盲目扩散节点。
+- Direct 任务总 Token 中位数不超过原生路径 1.1 倍。
+- Guarded/Parallel 在同等或更高成功率下总 Token 中位数目标不超过原生路径 1.5 倍；若超过，必须能证明准确率收益并给出优化项。
+- 重复上下文 Token 占比应持续下降，作为比“少派一个 Reviewer”更优先的成本优化指标。
+
+### 分阶段实施
+
+以下是原 RFC 估算，适用于从预览实现推进到生产验收的一名熟悉 Rust/CDP/React 的工程师；应在当前实现基线上重新校准。Journal、恢复语义和最终验收仍在关键路径上。
+
+#### P0：协议与风险验证，3 到 5 天
+
+- 固定三方项目参考 commit，完成许可证检查；默认只借鉴概念，不复制源码。
+- 编写 ADR：App Server 优先、SQLite Journal、类型化 DAG、单写者和权限边界。
+- 做 App Server capability probe，验证事件稳定标识、审批、取消、恢复和 usage。
+- 对当前 subagent gate、配置 CAS、运行时进程和前端桥接建立基线测试。
+
+完成标准：所有关键能力有实测证据；缺失能力有兼容设计；状态机、错误分类和 MVP 边界冻结。
+
+#### P1：领域模型与持久化核心，7 到 10 天
+
+- 实现 WorkflowSpec、NodeSpec、artifact 和事件 schema。
+- 实现 SQLite migrations、WAL、append-only Journal、状态 reducer 和 transactional outbox。
+- 实现幂等接纳、version CAS、lease epoch、generation 和 replay。
+- 建立属性测试、迁移测试和 kill-point 基础设施。
+
+完成标准：任意注入点崩溃后 replay 一致；重复/乱序事件不会重复推进；未来 schema 只读失败关闭。
+
+#### P2：App Server Adapter 与恢复，7 到 10 天
+
+- 实现进程监督、能力握手、协议兼容层、事件标准化和 dedupe。
+- 实现审批、用户输入、取消、usage 和执行句柄持久化。
+- 实现 Reconciler、租约回收、UnknownOutcome 和启动恢复。
+
+完成标准：mock 故障矩阵全部通过；真实 App Server 上可完成只读节点、写节点、审批、取消和重启恢复。
+
+#### P3：DAG、权限和质量优先流程，8 到 12 天
+
+- 实现 Planner/Compiler、ready queue、读写并发和 worktree 策略。
+- 实现 Preflight、Scout、Builder、Validator、Reviewer、Expert artifact 契约。
+- 实现运行时 permission_profile、路径锁、副作用栅栏和最小上下文构建。
+- 实现两轮修复、双 Reviewer、冲突和人工接管。
+
+完成标准：Direct、Guarded、Parallel、Expert 四种模式均有 E2E；Reviewer 与 Builder 上下文独立；任何写入路径都不能绕过门禁。
+
+#### P4：Commands、UI 与配置，5 到 8 天
+
+- 实现 commands、after_seq 增量事件、审批和控制动作。
+- 实现运行列表、DAG/阶段、证据、阻塞、恢复和 UnknownOutcome UI。
+- 实现独立 workflow 配置、revision/CAS、默认关闭和运行策略快照。
+- 补充诊断导出、只读安全模式和 kill switch。
+
+完成标准：UI 与 Journal 状态一致；断线重连不丢事件；所有危险动作有明确语义和确认。
+
+#### P5：评测、混沌和性能优化，7 到 10 天
+
+- 建立原生路径对照评测集和自动报告。
+- 完成数据库、进程、网络、工具、Git、审批和上下文故障注入。
+- 优化 artifact 复用、上下文 capsule、批量事件提交和轮询。
+- 运行 72 小时 soak、恢复演练和回滚演练。
+
+完成标准：达到本 RFC 的稳定性、质量和 Token 门槛；没有未解释的错误成功。
+
+#### P6：渐进发布，至少 1 到 2 周观察
+
+1. Observe：只编译计划和记录路由决策，不执行工作流，不影响用户。
+2. Opt-in：仅开发者和明确开启的用户；默认仍走原生路径。
+3. Canary：按任务类型逐步扩大，先只读，再低风险写入，最后高风险门禁。
+4. Default candidate：只有全部 SLO 连续满足且回滚演练通过后，才讨论默认开启。
+
+每阶段都保留一个即时 kill switch。回滚只停止新接纳并让已接纳运行安全结束、暂停或进入 NeedsAttention；不得删除 Journal 或伪造终态。
+
+### 交付清单
+
+- ADR 与协议 capability matrix。
+- Workflow IR、artifact、事件和权限 schema。
+- Journal migrations、恢复 runbook 和诊断导出格式。
+- App Server mock、故障注入库和对照评测集。
+- 后端 Engine、adapter、commands 与前端运行控制界面。
+- 配置迁移、kill switch、灰度指标和回滚手册。
+- 面向维护者的故障处理文档。
+- README 只以非技术语言描述已经可见的 opt-in preview，并明确失败关闭的用户边界；尚未交付的生产能力只记录在本文档。
+
+### 首版待验证问题与默认取舍
+
+| 问题 | 首版默认 | P0 验证点 |
+| --- | --- | --- |
+| Codey 页面关闭后谁拥有运行时 | MVP 要求 Codey runtime 活跃 | App Server 是否能被可靠重连和接管 |
+| App Server 能否查询未知执行结果 | 不能确认即 UnknownOutcome | 执行句柄和状态查询能力 |
+| 多窗口是否共享全局 writer lock | 共享同一 Journal 锁 | 进程间锁和崩溃释放 |
+| 高风险写入是否自动创建 worktree | 默认提示并显式创建 | 用户体验、磁盘和 Git 兼容 |
+| Artifact 是否需要静态加密 | 敏感内容最小化并按系统权限存储 | 威胁模型和密钥来源 |
+| Provider fallback | 只读可选，写入默认关闭 | 语义一致性和 usage 统计 |
+| Shadow reviewer | 默认关闭 | 是否带来独立质量收益而非噪声 |
+
+这些问题不应通过提示词假设解决。P0 实测结果与本 RFC 不一致时，先更新 ADR 和验收标准，再开始 P1。
+
+### 参考项目与采纳边界
+
+- pi-dynamic-workflows 提供 phase、parallel、pipeline 和结构化终止输出的简洁思路；不采纳任意 JavaScript 执行、进程内状态、失败转 null 和字符串长度 Token 估算。[README](https://github.com/Michaelliv/pi-dynamic-workflows/blob/31b2aca0f1cb195aafbfc5e3ee2b8c83ad3f21a2/README.md) / [workflow.ts](https://github.com/Michaelliv/pi-dynamic-workflows/blob/31b2aca0f1cb195aafbfc5e3ee2b8c83ad3f21a2/src/workflow.ts)
+- pi-maestro-flow 提供类型化 DAG、dependsOn、结构化输出、durable mailbox、retry classifier、circuit breaker、replay fence、context spill 和独立 verifier 的参考；不采纳全历史反复 fork、超时仅 detach 和强 Pi 耦合。[schemas.ts](https://github.com/catlog22/pi-maestro-flow/blob/30b9cccd780192e67fa44ddf348ace40a3ceefcc/packages/pi-maestro-teammate/src/extension/schemas.ts) / [retry.ts](https://github.com/catlog22/pi-maestro-flow/blob/30b9cccd780192e67fa44ddf348ace40a3ceefcc/packages/pi-maestro-teammate/src/runs/retry.ts) / [goal-verification.ts](https://github.com/catlog22/pi-maestro-flow/blob/30b9cccd780192e67fa44ddf348ace40a3ceefcc/packages/pi-maestro-flow/src/tools/goal-verification.ts)
+- pi-shadow-mind 提供持久 Reviewer 角色、epoch 防迟到结果、净化 trajectory 和批量报告的参考；不采纳随机心跳、工具名 allowlist 安全边界和无工作区隔离的写入方式。[DESIGN.md](https://github.com/liuzhengdongfortest/pi-shadow-mind/blob/0fc4726aa9ca54fc7a25a3f4efa8114b4af29931/DESIGN.md) / [runtime.ts](https://github.com/liuzhengdongfortest/pi-shadow-mind/blob/0fc4726aa9ca54fc7a25a3f4efa8114b4af29931/src/runtime.ts) / [trajectory.ts](https://github.com/liuzhengdongfortest/pi-shadow-mind/blob/0fc4726aa9ca54fc7a25a3f4efa8114b4af29931/src/trajectory.ts)
+- Codex App Server 是首选深度集成接口：[App Server](https://learn.chatgpt.com/docs/app-server)。
+- Codex 子代理适合并行只读探索，但会增加 Token，写入并发需要谨慎：[Subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents)。
+- Hook 适合做 guardrail 和观测，但不是完整边界：[Hooks](https://learn.chatgpt.com/docs/hooks)。
+- Codex SDK 保留给未来独立宿主场景：[Codex SDK](https://learn.chatgpt.com/docs/codex-sdk)。
+
+引用第三方项目时固定到已审阅 commit。没有完成许可证核验前只借鉴协议和架构思想，不复制源代码、提示词或文档。
+
 ## 运行时性能约束
 
 - 后台会话扫描每轮仍枚举 `CODEX_HOME/sqlite` 以发现新增和删除，但会按数据库、WAL 元数据及 Unix 文件身份缓存 schema 探测结果；未变化候选不再重复打开 SQLite 查询 `sqlite_master`。已确认的会话库继续复用只读连接，近期会话查询使用连接级 prepared statement cache；数据库或 WAL 变化、同路径替换和 legacy `state_5.sqlite` 仍保持原有发现语义。
@@ -141,7 +753,7 @@ Codey 将运行时 core/data crate 固定在 `vendor/CodeyRuntime`，生命周�
 
 设置保存接口按 JSON 请求中字段是否真实出现来合并子代理配置：缺少或传入空的 `subagentRoles` 时保留已有逐角色选择；旧版 `subagentModel` / `subagentReasoningEffort` 只更新 `default` 兼容角色；非空的部分角色 map 只覆盖请求中给出的角色。完整新客户端仍可一次更新全部六类。`default` 探索角色与三个探索/分析角色一样显式使用 `sandbox_mode = "read-only"`，只有两个实施角色使用 `workspace-write`。
 
-打开 Codey 后不会创建常驻原生配置窗口；仅当 Windows 无法解析 Codex 应用路径时，启动阶段会显示一次系统目录选择器。Codey 会先恢复上次租约并同步当前线路；CC Switch Live 模式随后建立并校验不可混配的路由快照，普通模式则只读取得 Codex 当前活动 provider。只有目标 provider 验证完成后才永久同步 rollout 与 SQLite、清理幽灵任务索引，接着备份并临时应用运行时配置、修复插件市场、启动 Codex，最后通过 CDP 注入轻量控制脚本；会话修复本身不会改写活动 provider。Windows 和 macOS 启动时会按目标主可执行文件判断 Codex 是否正在运行；命中后先终止同一安装目录下的主进程、Helper、app-server 及后代进程树，确认退出后再由 Codey 拉起，清理失败则中止启动。首次 Codex 启动失败时，Codey 会调用与正常退出相同的运行时停止和配置恢复逻辑，失败后等待 100 毫秒重试一次；Windows 随后通过阻塞任务显示原生错误对话框，用户关闭对话框后当前 Codey 进程返回错误并退出，不进入常驻关闭等待。首次点击 Codex header 中的 “Codey” 按钮时才会加载紧凑 React 浮层，配置操作通过本次 CDP bridge 发送给 Rust 进程。遮罩空白处、右上角关闭按钮和 `Esc` 都能关闭浮层。关闭这次由 Codey 拉起的 Codex 后，Codey 会先标记退出、取消并等待尚未执行完的延迟重启任务，再停止路由 watcher，终止该 Codex 的主进程、Helper、app-server 及后代进程树，恢复临时配置，最后清理其他遗留 Codey 进程并自行退出；收到系统退出信号和安装更新时也执行同一套清理。遗留 Codey 清理只接受与当前程序完整路径一致的首次进程快照，并在每次终止前复核 PID 的启动身份；轮询期间不会吸收新进程，避免同名程序或 PID 复用导致误杀。会话 JSONL、数据库与索引清理结果不回滚。若 CDP 注入失败，Codey 会停止本次启动、显示原始错误并退出，不会另起本地 Web 服务。
+打开 Codey 后不会创建常驻原生配置窗口；仅当 Windows 无法解析 Codex 应用路径时，启动阶段会显示一次系统目录选择器。Codey 会先恢复上次租约并同步当前线路；CC Switch Live 模式随后建立并校验不可混配的路由快照，普通模式则只读取得 Codex 当前活动 provider。只有目标 provider 验证完成后才永久同步 rollout 与 SQLite、清理幽灵任务索引，接着备份并临时应用运行时配置、修复插件市场、启动 Codex，最后通过 CDP 注入轻量控制脚本；会话修复本身不会改写活动 provider。Windows 和 macOS 启动时会按目标主可执行文件判断 Codex 是否正在运行；命中后先终止同一安装目录下的主进程、Helper、app-server 及后代进程树，确认退出后再由 Codey 拉起，清理失败则中止启动。首次 Codex 启动失败时，Codey 会调用与正常退出相同的运行时停止和配置恢复逻辑，失败后等待 100 毫秒重试一次；Windows 随后通过阻塞任务显示原生错误对话框，用户关闭对话框后当前 Codey 进程返回错误并退出，不进入常驻关闭等待。首次点击 Codex header 中的 “Codey” 按钮时才会加载紧凑 React 浮层，配置操作通过本次 CDP bridge 发送给 Rust 进程。遮罩空白处、右上角关闭按钮和 `Esc` 都能关闭浮层。关闭这次由 Codey 拉起的 Codex 后，Codey 会先标记退出、取消并等待尚未执行完的延迟重启任务，再停止路由 watcher，终止该实例拥有的 Codex 主进程、Helper、app-server 及后代进程树，恢复临时配置并自行退出；收到系统退出信号和安装更新时也执行同一套清理。退出阶段不再按 Codey 可执行文件路径扫描或终止其他实例，进程所有权以当前 runtime 保存的 PID、进程组和启动身份约束。会话 JSONL、数据库与索引清理结果不回滚。若 CDP 注入失败，Codey 会停止本次启动、显示原始错误并退出，不会另起本地 Web 服务。
 
 Codey 不改写 `auth.json`，因此 Codex 的账号栏仍会显示原来的官方登录账号；这只代表客户端登录会话，不代表第三方 provider 仍走官方接口。读取 Codex 活动线路时，provider 范围内的 `experimental_bearer_token` 优先于 `auth.json` 中的 API Key。非路由模式运行期间当前 provider ID 保持不变，第三方 API 地址、协议和 bearer token 会在 Codex 启动窗口内写入该 provider 的临时配置；对于由 cc-switch 协议提示识别的 Chat Completions 线路，首屏就绪后磁盘 provider 表恢复为启动前真实地址，运行中的 Codex 与本地协议代理继续使用已加载快照。内置 `openai` 官方线路继续使用 Codex 自身的 provider 定义，不写入无效的保留 ID 覆盖。第三方线路若错误使用 Codex 保留 provider ID 会在启动前被拒绝并提示改用非保留自定义 ID；路由模式则完整保留 CC Switch Live provider 表与接管 token。
 

@@ -19,6 +19,7 @@ const CDP_INJECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const FAST_STARTUP_SHIELD_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/fast-startup-shield.js");
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-bridge.js");
+const WORKFLOW_MODE_SCRIPT: &str = include_str!("../../dist-overlay/inject/workflow-mode.js");
 const GIT_REQUEST_GUARD_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/git-request-guard.js");
 const WINDOWS_WMI_SAMPLER_GUARD_SCRIPT: &str =
@@ -128,6 +129,14 @@ pub fn prepare_injection_scripts(
             r#"typeof window.__codexSessionDeleteBridge === "function"
               && typeof window.__codeyCall === "function"
               ? "桥接函数可调用" : """#
+                .to_string(),
+        ),
+        (
+            "workflow-mode",
+            "Codey 工作流接管",
+            WORKFLOW_MODE_SCRIPT,
+            r#"window.__codeyWorkflowModeRuntime?.version === 1
+              ? "工作流 Composer 门禁已加载" : """#
                 .to_string(),
         ),
         (
@@ -336,6 +345,7 @@ pub fn prepare_injection_scripts(
     let mut core_bundle = String::with_capacity(
         FAST_STARTUP_SHIELD_SCRIPT.len()
             + CODEY_BRIDGE_SCRIPT.len()
+            + WORKFLOW_MODE_SCRIPT.len()
             + GIT_REQUEST_GUARD_SCRIPT.len()
             + WINDOWS_WMI_SAMPLER_GUARD_SCRIPT.len()
             + MODEL_WHITELIST_INJECT_SCRIPT.len()
@@ -948,6 +958,22 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
     open() {
       this.toggle();
     },
+    openWorkflow(request) {
+      void this.load().then((overlay) => {
+        if (typeof overlay.openWorkflow === "function") {
+          overlay.openWorkflow(request);
+        } else if (typeof overlay.open === "function") {
+          overlay.open();
+        } else {
+          overlay.toggle();
+        }
+      }).catch((error) => {
+        const message = formatError(error);
+        window.__codeyOverlayError = message;
+        loading = null;
+        window.alert(`Codey 内嵌配置面板加载失败：${message}`);
+      });
+    },
     toggle() {
       if (loading) return;
       void this.load().then((overlay) => {
@@ -1198,9 +1224,9 @@ mod tests {
         assert!(prepared.scripts[1].contains("window.userScriptRan = true;"));
         assert!(prepared.scripts[1].contains(r#"status = "executed""#));
         assert!(prepared.scripts[1].contains("用户脚本 1 injection failed"));
-        assert_eq!(prepared.descriptors.len(), 12);
-        assert_eq!(prepared.descriptors[11].id, "user-script-1");
-        assert_eq!(prepared.descriptors[11].source, "user");
+        assert_eq!(prepared.descriptors.len(), 13);
+        assert_eq!(prepared.descriptors[12].id, "user-script-1");
+        assert_eq!(prepared.descriptors[12].source, "user");
         let snapshot_script = injection_status_snapshot_script(&prepared.descriptors);
         assert!(snapshot_script.contains("bridge-helpers"));
         assert!(snapshot_script.contains("Windows Git 请求限流已由主进程接管"));
@@ -1259,14 +1285,16 @@ mod tests {
         assert_eq!(statuses[0].id, "bridge-helpers");
         assert_eq!(statuses[0].status, "effective");
         assert_eq!(statuses[0].detail.as_deref(), Some("桥接函数可调用"));
-        assert_eq!(statuses[1].id, "fast-startup-shield");
+        assert_eq!(statuses[1].id, "workflow-mode");
         assert_eq!(statuses[1].status, "unknown");
-        assert_eq!(statuses[2].id, "git-request-guard");
+        assert_eq!(statuses[2].id, "fast-startup-shield");
         assert_eq!(statuses[2].status, "unknown");
-        assert_eq!(statuses[3].id, "windows-wmi-sampler");
+        assert_eq!(statuses[3].id, "git-request-guard");
         assert_eq!(statuses[3].status, "unknown");
-        assert_eq!(statuses[4].id, "model-whitelist");
+        assert_eq!(statuses[4].id, "windows-wmi-sampler");
         assert_eq!(statuses[4].status, "unknown");
+        assert_eq!(statuses[5].id, "model-whitelist");
+        assert_eq!(statuses[5].status, "unknown");
         assert_eq!(
             statuses.last().map(|status| status.id.as_str()),
             Some("user-script-1")

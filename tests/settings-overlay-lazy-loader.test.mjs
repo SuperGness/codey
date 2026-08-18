@@ -99,3 +99,33 @@ test("settings overlay loader reports a failure and permits a retry", async () =
   assert.equal(window.__codeySettingsOverlay, realOverlay);
   assert.equal(realOverlay.opened, 1);
 });
+
+test("workflow entry survives lazy loading and opens the requested thread", async () => {
+  const opened = [];
+  const realOverlay = {
+    toggle() {},
+    openWorkflow(request) {
+      opened.push(request);
+    },
+  };
+  const window = {
+    alert() {},
+    async __codexSessionDeleteBridge(path) {
+      assert.equal(path, "/internal/codey/settings-overlay/load");
+      window.__codeySettingsOverlay = realOverlay;
+      return { status: "ok" };
+    },
+  };
+
+  vm.runInNewContext(loaderScript, { Error, Promise, String, window });
+  window.__codeySettingsOverlay.openWorkflow({
+    threadId: "thread-1",
+    runId: "run-1",
+  });
+  await flushPromises();
+
+  assert.deepEqual(
+    opened.map((request) => ({ ...request })),
+    [{ threadId: "thread-1", runId: "run-1" }],
+  );
+});

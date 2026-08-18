@@ -1098,9 +1098,9 @@
       button = document.createElement("button");
       button.id = buttonId;
       button.type = "button";
-      button.setAttribute("aria-label", "打开 Codey 配置");
+      button.setAttribute("aria-label", "打开 Codey 控制台");
       button.innerHTML = `${settingsIcon}<span class="codey-settings-label">Codey</span>`;
-      button.title = "打开 Codey 配置";
+      button.title = "打开 Codey 控制台";
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();

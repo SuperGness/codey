@@ -137,6 +137,57 @@ function FeaturePolicyCardComponent({
       <Card className="secondary-card runtime-card">
         <div className="feature-grid">
           <div
+            className={`feature-card workflow-policy-card ${config.workflow.enabled ? "active" : ""}`}
+          >
+            <div className="feature-card-header">
+              <div className="feature-card-title">
+                <strong>Codey 工作流引擎</strong>
+                <Badge variant="brand">品质优先</Badge>
+              </div>
+              <Switch
+                checked={config.workflow.enabled}
+                disabled={isBusy}
+                onCheckedChange={(checked) =>
+                  onConfigChange({
+                    ...config,
+                    subagentOptimization: checked
+                      ? false
+                      : config.subagentOptimization,
+                    workflow: { ...config.workflow, enabled: checked },
+                  })
+                }
+                aria-label="启用 Codey 工作流引擎"
+              />
+            </div>
+            <div className="feature-card-body workflow-policy-body">
+              <small>
+                {config.workflow.enabled
+                  ? "使用当前 Codex 任务承载请求与最终答复；状态机、隔离执行、验证和审查由 Codey 监督。首次开启需重启 Codex"
+                  : "默认关闭。开启后支持 Direct、Guarded、Parallel 与 Expert 四种路由，并严格继承当前任务权限上限"}
+              </small>
+              {config.workflow.enabled && (
+                <label className="workflow-global-mode-control">
+                  <span>
+                    <strong>全局接管普通文本</strong>
+                    <small>附件、语音、Slash 命令或能力异常会明确走原生 Codex</small>
+                  </span>
+                  <Switch
+                    checked={config.workflow.globalMode}
+                    disabled={isBusy}
+                    onCheckedChange={(checked) =>
+                      onConfigChange({
+                        ...config,
+                        workflow: { ...config.workflow, globalMode: checked },
+                      })
+                    }
+                    aria-label="全局接管支持的普通文本请求"
+                  />
+                </label>
+              )}
+            </div>
+          </div>
+
+          <div
             className={`feature-card gpu-mode-card ${!isMacClient && gpuLaunchMode.value !== "off" ? "active" : ""}`}
           >
             <div className="feature-card-header">

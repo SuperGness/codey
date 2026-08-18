@@ -1291,6 +1291,9 @@ async fn prepare_startup_patches_and_overlay(
     })
 }
 
+// This boundary receives already-resolved launch components from the lifecycle
+// coordinator. Explicit parameters keep ownership and cleanup responsibilities visible.
+#[allow(clippy::too_many_arguments)]
 async fn spawn_and_inject_runtime(
     home: &std::path::Path,
     config: &CodeyConfig,
@@ -1299,6 +1302,7 @@ async fn spawn_and_inject_runtime(
     storage: StartupStorageState,
     patch: &StartupPatchState,
     runtime_config_overrides: &[String],
+    workflow_proxy: Option<&crate::codex_startup_patch::WorkflowProxyLaunchConfig>,
 ) -> Result<SpawnedRenderer> {
     let mut spawned = match spawn_codex(
         &storage.app_dir,
@@ -1308,6 +1312,7 @@ async fn spawn_and_inject_runtime(
         config.subagent_optimization,
         config.gpu_launch_mode,
         runtime_config_overrides,
+        workflow_proxy,
     )
     .await
     {
@@ -1448,6 +1453,7 @@ impl CodeyRuntime {
         config: &CodeyConfig,
         handler: codey_runtime_core::bridge::BridgeHandler,
         crashpad_pending_stats: CrashpadPendingStatsHandle,
+        workflow_proxy: Option<&crate::codex_startup_patch::WorkflowProxyLaunchConfig>,
     ) -> Result<(Self, oneshot::Receiver<()>, Option<oneshot::Receiver<()>>)> {
         let home = codex_home();
         let injection_scripts = cdp::prepare_injection_scripts(
@@ -1489,6 +1495,7 @@ impl CodeyRuntime {
             storage,
             &patch,
             &runtime_config_overrides,
+            workflow_proxy,
         )
         .await?;
         restore_cc_switch_provider_after_startup(&home, &route).await;

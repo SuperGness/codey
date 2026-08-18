@@ -11,6 +11,14 @@ pub struct PatchOptions {
     pub subagent_gate_active: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowProxyLaunchConfig {
+    pub executable: String,
+    pub control_address: String,
+    pub capability_token: String,
+}
+
 pub fn inspector_argument(port: u16) -> String {
     format!("--inspect-brk=127.0.0.1:{port}")
 }
@@ -22,9 +30,18 @@ fn patch_expression(options: PatchOptions) -> String {
     patch_expression_with_runtime_overrides(options, &[])
 }
 
+#[cfg(test)]
 fn patch_expression_with_runtime_overrides(
     options: PatchOptions,
     runtime_config_overrides: &[String],
+) -> String {
+    patch_expression_with_workflow_proxy(options, runtime_config_overrides, None)
+}
+
+fn patch_expression_with_workflow_proxy(
+    options: PatchOptions,
+    runtime_config_overrides: &[String],
+    workflow_proxy: Option<&WorkflowProxyLaunchConfig>,
 ) -> String {
     let error_logger_executable = match std::env::current_exe() {
         Ok(path) => serde_json::to_string(&path.to_string_lossy().to_string())
@@ -40,6 +57,11 @@ fn patch_expression_with_runtime_overrides(
         }
     };
     STARTUP_PATCH_TEMPLATE
+        .replace(
+            "\"__CODEY_WORKFLOW_PROXY_LAUNCH_CONFIG__\"",
+            &serde_json::to_string(&workflow_proxy)
+                .expect("workflow proxy launch config should serialize"),
+        )
         .replace(
             "\"__CODEY_RUNTIME_CONFIG_OVERRIDES__\"",
             &serde_json::to_string(runtime_config_overrides)
@@ -76,13 +98,15 @@ pub fn reserve_loopback_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-pub async fn install(
+pub async fn install_with_workflow_proxy(
     port: u16,
     options: PatchOptions,
     runtime_config_overrides: &[String],
+    workflow_proxy: Option<&WorkflowProxyLaunchConfig>,
 ) -> Result<()> {
     let websocket_url = wait_for_inspector(port).await?;
-    let expression = patch_expression_with_runtime_overrides(options, runtime_config_overrides);
+    let expression =
+        patch_expression_with_workflow_proxy(options, runtime_config_overrides, workflow_proxy);
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         install_over_websocket(&websocket_url, &expression),

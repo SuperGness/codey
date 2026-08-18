@@ -157,6 +157,60 @@ pub struct SubagentRoleConfig {
     pub reasoning_effort: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub global_mode: bool,
+    #[serde(default = "default_workflow_profile")]
+    pub profile: String,
+    #[serde(default = "default_workflow_read_concurrency")]
+    pub max_read_only_concurrency: u16,
+    #[serde(default = "default_workflow_provider_concurrency")]
+    pub max_provider_concurrency: u16,
+    #[serde(default = "default_workflow_repo_writers")]
+    pub max_repo_writers: u16,
+    #[serde(default = "default_workflow_delegation_depth")]
+    pub max_delegation_depth: u8,
+    #[serde(default = "default_workflow_lease_seconds")]
+    pub lease_seconds: u64,
+    #[serde(default = "default_workflow_infrastructure_retries")]
+    pub infrastructure_retry_limit: u8,
+    #[serde(default = "default_workflow_builder_repairs")]
+    pub builder_repair_limit: u8,
+    #[serde(default = "default_workflow_reviewer_count")]
+    pub reviewer_count: u8,
+    #[serde(default = "default_workflow_retention_days")]
+    pub retention_days: u16,
+    #[serde(default)]
+    pub roles: BTreeMap<String, SubagentRoleConfig>,
+}
+
+impl Default for WorkflowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            global_mode: true,
+            profile: default_workflow_profile(),
+            max_read_only_concurrency: default_workflow_read_concurrency(),
+            max_provider_concurrency: default_workflow_provider_concurrency(),
+            max_repo_writers: default_workflow_repo_writers(),
+            max_delegation_depth: default_workflow_delegation_depth(),
+            lease_seconds: default_workflow_lease_seconds(),
+            infrastructure_retry_limit: default_workflow_infrastructure_retries(),
+            builder_repair_limit: default_workflow_builder_repairs(),
+            reviewer_count: default_workflow_reviewer_count(),
+            retention_days: default_workflow_retention_days(),
+            // An empty initial map is intentional: normalize() copies the
+            // user's current subagent role selections exactly once. Persisted
+            // workflow roles are non-empty afterwards and remain independent.
+            roles: BTreeMap::new(),
+        }
+    }
+}
+
 impl SubagentRoleConfig {
     pub fn new(model: impl Into<String>, reasoning_effort: impl Into<String>) -> Self {
         Self {
@@ -240,6 +294,10 @@ pub struct CodeyConfig {
     /// `default` role so older Codey stores and Codex builds remain readable.
     #[serde(default)]
     pub subagent_roles: BTreeMap<String, SubagentRoleConfig>,
+    /// Durable workflow orchestration. It is independent from Codex's native
+    /// subagent optimization and is disabled until the user explicitly opts in.
+    #[serde(default)]
+    pub workflow: WorkflowConfig,
     /// Automatically dismisses Codex's full-access safety notice in the
     /// renderer. Opt-in so the native warning remains visible by default.
     #[serde(default)]
@@ -284,6 +342,7 @@ impl Default for CodeyConfig {
             subagent_model: default_subagent_model(),
             subagent_reasoning_effort: default_subagent_reasoning_effort(),
             subagent_roles: default_subagent_roles(),
+            workflow: WorkflowConfig::default(),
             hide_full_access_warning: false,
             show_account_usage_in_header: true,
             update_manifest_url: default_update_manifest_url(),
@@ -352,6 +411,12 @@ impl CodeyConfig {
             self.subagent_reasoning_effort
                 .clone_from(&default_role.reasoning_effort);
         }
+        self.workflow.normalize(&self.subagent_roles);
+        if self.workflow.enabled && self.subagent_optimization {
+            // Never permit two independent schedulers to recursively dispatch
+            // the same Codex request after a manual config edit.
+            self.workflow.enabled = false;
+        }
         self.webhook.normalize();
         self.prompt_optimization.normalize();
         self
@@ -413,6 +478,139 @@ impl CodeyConfig {
             .and_then(|provider_id| self.default_model_by_provider.get(provider_id))
             .map(String::as_str)
     }
+}
+
+fn default_workflow_profile() -> String {
+    "qualityFirst".to_string()
+}
+
+const fn default_workflow_read_concurrency() -> u16 {
+    4
+}
+
+const fn default_workflow_provider_concurrency() -> u16 {
+    2
+}
+
+const fn default_workflow_repo_writers() -> u16 {
+    1
+}
+
+const fn default_workflow_delegation_depth() -> u8 {
+    1
+}
+
+const fn default_workflow_lease_seconds() -> u64 {
+    60
+}
+
+const fn default_workflow_infrastructure_retries() -> u8 {
+    3
+}
+
+const fn default_workflow_builder_repairs() -> u8 {
+    2
+}
+
+const fn default_workflow_reviewer_count() -> u8 {
+    1
+}
+
+const fn default_workflow_retention_days() -> u16 {
+    30
+}
+
+pub const WORKFLOW_ROLE_PREFLIGHT: &str = "preflight";
+pub const WORKFLOW_ROLE_SCOUT: &str = "scout";
+pub const WORKFLOW_ROLE_BUILDER: &str = "builder";
+pub const WORKFLOW_ROLE_VALIDATOR: &str = "validator";
+pub const WORKFLOW_ROLE_REVIEWER: &str = "reviewer";
+pub const WORKFLOW_ROLE_EXPERT: &str = "expert";
+pub const WORKFLOW_ROLE_IDS: [&str; 6] = [
+    WORKFLOW_ROLE_PREFLIGHT,
+    WORKFLOW_ROLE_SCOUT,
+    WORKFLOW_ROLE_BUILDER,
+    WORKFLOW_ROLE_VALIDATOR,
+    WORKFLOW_ROLE_REVIEWER,
+    WORKFLOW_ROLE_EXPERT,
+];
+
+impl WorkflowConfig {
+    fn normalize(&mut self, subagent_roles: &BTreeMap<String, SubagentRoleConfig>) {
+        if self.profile.trim().is_empty() {
+            self.profile = default_workflow_profile();
+        } else {
+            self.profile = self.profile.trim().to_string();
+        }
+        self.max_read_only_concurrency = self.max_read_only_concurrency.clamp(1, 16);
+        self.max_provider_concurrency = self.max_provider_concurrency.clamp(1, 8);
+        // V1 has a process-wide writer reservation rather than repository-keyed
+        // reservations. Keep it at one so two runs can never write the same
+        // working tree concurrently until isolated worktree merging lands.
+        self.max_repo_writers = 1;
+        self.max_delegation_depth = self.max_delegation_depth.clamp(1, 2);
+        self.lease_seconds = self.lease_seconds.clamp(15, 600);
+        self.infrastructure_retry_limit = self.infrastructure_retry_limit.min(5);
+        self.builder_repair_limit = self.builder_repair_limit.min(4);
+        self.reviewer_count = self.reviewer_count.clamp(1, 2);
+        self.retention_days = self.retention_days.clamp(1, 365);
+        self.roles
+            .retain(|role, _| WORKFLOW_ROLE_IDS.contains(&role.as_str()));
+        if self.roles.is_empty() {
+            self.roles = workflow_roles_from_subagents(subagent_roles);
+        }
+        let fallback = self
+            .roles
+            .get(WORKFLOW_ROLE_EXPERT)
+            .cloned()
+            .or_else(|| subagent_roles.get(SUBAGENT_ROLE_DEFAULT).cloned())
+            .unwrap_or_else(|| {
+                SubagentRoleConfig::new(
+                    default_subagent_model(),
+                    default_subagent_reasoning_effort(),
+                )
+            });
+        for role in WORKFLOW_ROLE_IDS {
+            let selection = self
+                .roles
+                .entry(role.to_string())
+                .or_insert_with(|| fallback.clone());
+            normalize_subagent_selection(&mut selection.model, &mut selection.reasoning_effort);
+        }
+    }
+}
+
+fn workflow_roles_from_subagents(
+    subagent_roles: &BTreeMap<String, SubagentRoleConfig>,
+) -> BTreeMap<String, SubagentRoleConfig> {
+    let fallback = subagent_roles
+        .get(SUBAGENT_ROLE_DEFAULT)
+        .cloned()
+        .unwrap_or_else(|| {
+            SubagentRoleConfig::new(
+                default_subagent_model(),
+                default_subagent_reasoning_effort(),
+            )
+        });
+    [
+        (WORKFLOW_ROLE_PREFLIGHT, SUBAGENT_ROLE_DEEP_RESEARCH),
+        (WORKFLOW_ROLE_SCOUT, SUBAGENT_ROLE_QUICK_SCAN),
+        (WORKFLOW_ROLE_BUILDER, SUBAGENT_ROLE_WORKER),
+        (WORKFLOW_ROLE_VALIDATOR, SUBAGENT_ROLE_DEEP_RESEARCH),
+        (WORKFLOW_ROLE_REVIEWER, SUBAGENT_ROLE_DEEP_RESEARCH),
+        (WORKFLOW_ROLE_EXPERT, SUBAGENT_ROLE_DEFAULT),
+    ]
+    .into_iter()
+    .map(|(workflow_role, subagent_role)| {
+        (
+            workflow_role.to_string(),
+            subagent_roles
+                .get(subagent_role)
+                .cloned()
+                .unwrap_or_else(|| fallback.clone()),
+        )
+    })
+    .collect()
 }
 
 fn normalize_model_lists(lists: &mut BTreeMap<String, Vec<String>>) {
@@ -565,7 +763,7 @@ impl ConfigStore {
                 Ok(config.normalize())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(CodeyConfig::default())
+                Ok(CodeyConfig::default().normalize())
             }
             Err(error) => {
                 Err(error).with_context(|| format!("读取 Codey 配置失败：{}", self.path.display()))
@@ -656,6 +854,20 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         assert_eq!(names, [std::ffi::OsString::from("config.json")]);
+    }
+
+    #[test]
+    fn missing_config_initializes_independent_workflow_roles() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path().join("missing.json"));
+
+        let config = store.load().unwrap();
+
+        assert_eq!(config.workflow.roles.len(), WORKFLOW_ROLE_IDS.len());
+        assert_eq!(
+            config.workflow.roles[WORKFLOW_ROLE_BUILDER],
+            config.subagent_roles[SUBAGENT_ROLE_WORKER]
+        );
     }
 
     #[test]
@@ -966,6 +1178,34 @@ mod tests {
             config.subagent_roles[SUBAGENT_ROLE_WORKER],
             SubagentRoleConfig::new("fallback-model", "high")
         );
+    }
+
+    #[test]
+    fn new_workflow_roles_copy_existing_subagent_roles_once_and_keep_one_writer() {
+        let config = serde_json::from_str::<CodeyConfig>(
+            r#"{
+                "activeProfileId":"",
+                "profiles":[],
+                "subagentRoles":{
+                    "codey_worker":{"model":"builder-model","reasoningEffort":"high"},
+                    "codey_deep_research":{"model":"review-model","reasoningEffort":"medium"},
+                    "default":{"model":"fallback-model","reasoningEffort":"high"}
+                },
+                "workflow":{"maxRepoWriters":2}
+            }"#,
+        )
+        .unwrap()
+        .normalize();
+
+        assert_eq!(
+            config.workflow.roles[WORKFLOW_ROLE_BUILDER],
+            SubagentRoleConfig::new("builder-model", "high")
+        );
+        assert_eq!(
+            config.workflow.roles[WORKFLOW_ROLE_REVIEWER],
+            SubagentRoleConfig::new("review-model", "medium")
+        );
+        assert_eq!(config.workflow.max_repo_writers, 1);
     }
 
     #[test]

@@ -10,6 +10,7 @@ mod crashpad_pending_guard;
 mod error_log;
 mod fastctx_route_gate;
 mod fs_util;
+mod instance_lock;
 mod launcher;
 mod maintenance_lock;
 mod message_delete;
@@ -21,6 +22,7 @@ mod notifications;
 mod pending_approval;
 mod pet_slim_patch;
 mod plugin_marketplace;
+#[cfg(test)]
 mod process_cleanup;
 mod process_tree;
 mod prompt_optimization;
@@ -38,6 +40,7 @@ mod subagent_policy;
 mod trace_log_guard;
 mod trace_log_stats;
 mod update_helper;
+mod workflow;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -127,6 +130,9 @@ fn build_async_runtime() -> Result<tokio::runtime::Runtime> {
 
 async fn run(ui: NativeUpdateUi) -> Result<()> {
     error_log::initialize();
+    let instance_store = config::ConfigStore::default();
+    let instance_lock = instance_lock::InstanceLock::acquire(instance_store.path())?;
+    let _ = instance_lock.path();
     let state = Arc::new(AppState::default());
     let codex_home = codex_config::codex_home();
     if let Err(error) = launcher::restore_previous_runtime_state(&codex_home).await {
@@ -231,26 +237,7 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
             serde_json::json!({}),
         );
     }
-    let shutdown_context = match shutdown_reason {
-        ShutdownReason::CodexExited => "Codex 已退出",
-        ShutdownReason::InstallUpdate => "Codey 正在安装更新",
-        ShutdownReason::Signal => "Codey 收到退出信号",
-    };
-    match process_cleanup::terminate_other_codey_processes().await {
-        Ok(0) => {}
-        Ok(count) => eprintln!("{shutdown_context}，已终止 {count} 个遗留 Codey 进程"),
-        Err(error) => {
-            error_log::record_failure(
-                "cleanup_failed",
-                "terminate_other_codey_processes",
-                format!("{error:#}"),
-                serde_json::json!({
-                    "shutdownContext": shutdown_context,
-                }),
-            );
-            eprintln!("{shutdown_context}，但清理遗留 Codey 进程失败：{error:#}");
-        }
-    }
+    let _ = shutdown_reason;
     cleanup.map_err(anyhow::Error::msg)
 }
 

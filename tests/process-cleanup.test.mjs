@@ -4,8 +4,8 @@ import test from "node:test";
 
 const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
 
-test("every shutdown path reaps Codex and Codey process trees", async () => {
-  const [library, launcher, launcherProcess, launcherPlatform, commands, cleanup, processTree] =
+test("shutdown reaps only the runtime-owned Codex process tree", async () => {
+  const [library, launcher, launcherProcess, launcherPlatform, commands] =
     await Promise.all([
     readFile(new URL("../backend/src/lib.rs", import.meta.url), "utf8").then(
       normalizeLineEndings,
@@ -26,14 +26,6 @@ test("every shutdown path reaps Codex and Codey process trees", async () => {
       new URL("../backend/src/commands/runtime.rs", import.meta.url),
       "utf8",
     ).then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/process_cleanup.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/process_tree.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
     ]);
   const launcherModules = `${launcher}\n${launcherProcess}\n${launcherPlatform}`;
 
@@ -42,7 +34,8 @@ test("every shutdown path reaps Codex and Codey process trees", async () => {
     library.indexOf("cleanup.map_err"),
   );
   assert.match(finalShutdown, /stop_runtime_with_retry\(&state\)\.await/);
-  assert.match(finalShutdown, /terminate_other_codey_processes\(\)\.await/);
+  assert.doesNotMatch(finalShutdown, /terminate_other_codey_processes/);
+  assert.match(library, /#\[cfg\(test\)\]\s*mod process_cleanup;/);
   assert.doesNotMatch(
     finalShutdown,
     /if shutdown_reason == ShutdownReason::CodexExited/,
@@ -70,12 +63,10 @@ test("every shutdown path reaps Codex and Codey process trees", async () => {
     launcherModules,
     /let poll_delays = \[\s*Duration::from_millis\(100\),\s*Duration::from_millis\(200\),\s*Duration::from_millis\(350\),\s*Duration::from_millis\(550\),\s*Duration::from_millis\(800\),\s*\]/,
   );
-  assert.match(cleanup, /process_ids_with_descendants/);
-  assert.match(processTree, /matching_process_ids/);
-  assert.match(cleanup, /windows_process_paths_equal/);
-  assert.match(cleanup, /windows_terminate_process_if_matches/);
-  assert.doesNotMatch(cleanup, /pgrep|taskkill/);
-  assert.match(processTree, /identity\.start_time == process\.start_time/);
+  assert.match(
+    runtimeStop,
+    /stop_codex_processes\(\s*&self\.codex_app_path,\s*self\.process_id,[\s\S]*?self\.process_group_id/,
+  );
 
   const stopCommand = commands.slice(
     commands.indexOf("async fn stop_codey_runtime_locked"),

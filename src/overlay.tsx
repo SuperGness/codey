@@ -8,6 +8,7 @@ import featureStyles from "./styles.features.css?inline";
 import diagnosticStyles from "./styles.diagnostics.css?inline";
 import componentStyles from "./styles.components.css?inline";
 import responsiveStyles from "./styles.responsive.css?inline";
+import workflowStyles from "./styles.workflows.css?inline";
 import overlayStyles from "./overlay.css?inline";
 import { codeyApiPath } from "./api";
 import { SETTINGS_OVERLAY_Z_INDEX_CSS } from "./overlay.constants";
@@ -15,9 +16,17 @@ import { SETTINGS_OPENED_EVENT } from "./useRuntimeStatus";
 
 type OverlayController = {
   open: () => void;
+  openWorkflow: (request: { threadId: string; runId?: string }) => void;
   close: () => void;
   toggle: () => void;
   isOpen: () => boolean;
+};
+
+type OverlayViewRequest = {
+  view: "settings" | "workflows";
+  revision: number;
+  threadId?: string;
+  runId?: string;
 };
 
 declare global {
@@ -68,6 +77,7 @@ if (!window.__codeySettingsOverlay) {
     diagnosticStyles,
     componentStyles,
     responsiveStyles,
+    workflowStyles,
   ].join("\n");
   const rootElement = document.createElement("div");
   rootElement.id = "codey-overlay-root";
@@ -77,6 +87,7 @@ if (!window.__codeySettingsOverlay) {
   document.documentElement.appendChild(host);
 
   let hideTimer: number | undefined;
+  let viewRequest: OverlayViewRequest = { view: "settings", revision: 0 };
   const hide = () => {
     window.clearTimeout(hideTimer);
     hideTimer = undefined;
@@ -90,6 +101,10 @@ if (!window.__codeySettingsOverlay) {
         embedded
         modalContainer={modalContainer}
         modalVisible={visible}
+        requestedView={viewRequest.view}
+        viewRequestRevision={viewRequest.revision}
+        workflowThreadId={viewRequest.threadId}
+        workflowRunId={viewRequest.runId}
         onAfterClose={hide}
         onClose={close}
       />,
@@ -100,7 +115,7 @@ if (!window.__codeySettingsOverlay) {
     window.clearTimeout(hideTimer);
     hideTimer = window.setTimeout(hide, 250);
   };
-  const open = () => {
+  const show = () => {
     window.clearTimeout(hideTimer);
     hideTimer = undefined;
     document.documentElement.appendChild(host);
@@ -109,11 +124,31 @@ if (!window.__codeySettingsOverlay) {
     render(true);
     window.dispatchEvent(new CustomEvent(SETTINGS_OPENED_EVENT));
   };
+  const open = () => {
+    viewRequest = {
+      view: "settings",
+      revision: viewRequest.revision + 1,
+    };
+    show();
+  };
+  const openWorkflow = (request: { threadId: string; runId?: string }) => {
+    const threadId = request.threadId.trim();
+    if (!threadId) return;
+    const runId = request.runId?.trim() || undefined;
+    viewRequest = {
+      view: "workflows",
+      revision: viewRequest.revision + 1,
+      threadId,
+      runId,
+    };
+    show();
+  };
   const isOpen = () => host.style.display !== "none";
 
   render(false);
   window.__codeySettingsOverlay = {
     open,
+    openWorkflow,
     close,
     isOpen,
     toggle: open,

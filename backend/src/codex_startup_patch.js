@@ -1219,15 +1219,159 @@
     writable: false,
   });
 
+  // Workflow Engine V1 is deliberately opt-in. The launcher/WorkflowService
+  // injects a per-launch loopback endpoint and random capability token. Keep the
+  // token in the environment only; neither helper arguments nor status objects
+  // contain it.
+  const workflowProxyEnvironment = Object.freeze({
+    enabled: "CODEY_WORKFLOW_PROXY_ENABLED",
+    executable: "CODEY_WORKFLOW_PROXY_EXECUTABLE",
+    controlAddress: "CODEY_WORKFLOW_PROXY_CONTROL_ADDR",
+    capabilityToken: "CODEY_WORKFLOW_PROXY_TOKEN",
+    bypass: "CODEY_WORKFLOW_PROXY_BYPASS",
+  });
+  const embeddedWorkflowProxyLaunchConfig = "__CODEY_WORKFLOW_PROXY_LAUNCH_CONFIG__";
+  const isExactDirectCodexAppServerSpawn = (command, args) => {
+    if (
+      !/(?:^|[/\\])codex(?:\.exe)?$/i.test(String(command ?? "")) ||
+      !Array.isArray(args)
+    ) return false;
+    const appServerIndexes = args
+      .map((argument, index) => argument === "app-server" ? index : -1)
+      .filter((index) => index >= 0);
+    if (appServerIndexes.length !== 1) return false;
+
+    // The desktop's direct invocation has only global config overrides before
+    // the app-server subcommand. Reject lookalikes such as `codex exec
+    // app-server`; trailing values belong to app-server itself and stay opaque.
+    const appServerIndex = appServerIndexes[0];
+    for (let index = 0; index < appServerIndex; index += 1) {
+      const argument = args[index];
+      if (argument === "-c" || argument === "--config") {
+        if (
+          index + 1 >= appServerIndex ||
+          typeof args[index + 1] !== "string" ||
+          args[index + 1].length === 0
+        ) return false;
+        index += 1;
+        continue;
+      }
+      if (typeof argument === "string" && /^--config=.+/s.test(argument)) {
+        continue;
+      }
+      return false;
+    }
+    return true;
+  };
+  const isLoopbackWorkflowControlAddress = (address) => {
+    if (typeof address !== "string") return false;
+    const match = /^(127(?:\.\d{1,3}){3}|\[::1\]):([1-9]\d{0,4})$/.exec(address);
+    if (match == null) return false;
+    const port = Number(match[2]);
+    if (!Number.isSafeInteger(port) || port > 65535) return false;
+    if (match[1] === "[::1]") return true;
+    return match[1]
+      .split(".")
+      .every((part) => Number(part) >= 0 && Number(part) <= 255);
+  };
+  const spawnEnvironment = (rest) => {
+    const options = rest[0];
+    return options && typeof options === "object" && !Array.isArray(options)
+      && options.env && typeof options.env === "object"
+      ? options.env
+      : process.env;
+  };
+  const workflowProxyConfigForSpawn = (command, args, rest) => {
+    if (!isExactDirectCodexAppServerSpawn(command, args)) return null;
+    const environment = spawnEnvironment(rest);
+    const embedded = embeddedWorkflowProxyLaunchConfig
+      && typeof embeddedWorkflowProxyLaunchConfig === "object"
+      && !Array.isArray(embeddedWorkflowProxyLaunchConfig)
+      ? embeddedWorkflowProxyLaunchConfig
+      : null;
+    if (
+      (embedded == null && environment[workflowProxyEnvironment.enabled] !== "1") ||
+      environment[workflowProxyEnvironment.bypass] === "1"
+    ) return null;
+    const executable = embedded?.executable
+      ?? environment[workflowProxyEnvironment.executable];
+    const controlAddress = embedded?.controlAddress
+      ?? environment[workflowProxyEnvironment.controlAddress];
+    const capabilityToken = embedded?.capabilityToken
+      ?? environment[workflowProxyEnvironment.capabilityToken];
+    if (
+      typeof executable !== "string" ||
+      executable.length === 0 ||
+      !process.getBuiltinModule("path").isAbsolute(executable) ||
+      !process.getBuiltinModule("fs").existsSync(executable) ||
+      !isLoopbackWorkflowControlAddress(controlAddress) ||
+      typeof capabilityToken !== "string" ||
+      !/^[A-Za-z0-9_-]{32,512}$/.test(capabilityToken)
+    ) return null;
+    const normalizeExecutable = (value) => {
+      const resolved = process.getBuiltinModule("path").resolve(value);
+      return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    };
+    if (normalizeExecutable(executable) === normalizeExecutable(String(command))) {
+      return null;
+    }
+    return { capabilityToken, controlAddress, environment, executable };
+  };
+  const withWorkflowProxyEnvironment = (rest, config) => {
+    const options = rest[0];
+    const inheritedEnvironment = options && typeof options === "object"
+      && !Array.isArray(options) && options.env && typeof options.env === "object"
+      ? options.env
+      : process.env;
+    const nextOptions = {
+      ...(options && typeof options === "object" && !Array.isArray(options)
+        ? options
+        : {}),
+      env: {
+        ...inheritedEnvironment,
+        [workflowProxyEnvironment.enabled]: "1",
+        [workflowProxyEnvironment.executable]: config.executable,
+        [workflowProxyEnvironment.controlAddress]: config.controlAddress,
+        [workflowProxyEnvironment.capabilityToken]: config.capabilityToken,
+      },
+    };
+    return options == null
+      ? [nextOptions]
+      : [nextOptions, ...rest.slice(1)];
+  };
+  const rewriteCodexAppServerProxySpawn = (command, args, rest = []) => {
+    const config = workflowProxyConfigForSpawn(command, args, rest);
+    if (config == null) return null;
+    return {
+      command: config.executable,
+      args: [
+        "--codey-app-server-proxy",
+        "--codex-executable",
+        String(command),
+        "--",
+        ...args,
+      ],
+      rest: withWorkflowProxyEnvironment(rest, config),
+    };
+  };
+  Object.defineProperty(
+    globalThis,
+    "__CODEY_REWRITE_CODEX_APP_SERVER_PROXY_SPAWN__",
+    {
+      configurable: false,
+      value: rewriteCodexAppServerProxySpawn,
+      writable: false,
+    },
+  );
+
   let appServerAnalyticsPatchCount = 0;
+  let appServerWorkflowProxySpawnCount = 0;
   const childProcess = process.getBuiltinModule("child_process");
   const NativeSpawn = childProcess.spawn;
   if (!NativeSpawn.__codeyAppServerAnalyticsDisabled) {
     const isDirectCodexAppServerSpawn = (command, args) =>
       subagentGateRuntimeActive &&
-      /(?:^|[/\\])codex(?:\.exe)?$/i.test(String(command ?? "")) &&
-      Array.isArray(args) &&
-      args.filter((argument) => argument === "app-server").length === 1;
+      isExactDirectCodexAppServerSpawn(command, args);
     const withSubagentGateEnvironment = (rest) => {
       const options = rest[0];
       if (options == null) {
@@ -1253,14 +1397,22 @@
       const rewrittenRest = isDirectCodexAppServerSpawn(command, rewritten)
         ? withSubagentGateEnvironment(rest)
         : rest;
-      if (rewritten === args && rewrittenRest === rest) {
-        return Reflect.apply(NativeSpawn, this, arguments);
-      }
-      if (rewritten !== args) appServerAnalyticsPatchCount += 1;
-      return Reflect.apply(NativeSpawn, this, [
+      const workflowProxySpawn = rewriteCodexAppServerProxySpawn(
         command,
         rewritten,
-        ...rewrittenRest,
+        rewrittenRest,
+      );
+      if (rewritten === args && rewrittenRest === rest) {
+        if (workflowProxySpawn == null) {
+          return Reflect.apply(NativeSpawn, this, arguments);
+        }
+      }
+      if (rewritten !== args) appServerAnalyticsPatchCount += 1;
+      if (workflowProxySpawn != null) appServerWorkflowProxySpawnCount += 1;
+      return Reflect.apply(NativeSpawn, this, [
+        workflowProxySpawn?.command ?? command,
+        workflowProxySpawn?.args ?? rewritten,
+        ...(workflowProxySpawn?.rest ?? rewrittenRest),
       ]);
     };
     Object.defineProperty(
@@ -2376,6 +2528,11 @@
     },
     get appServerAnalyticsPatchCount() {
       return appServerAnalyticsPatchCount;
+    },
+    workflowProxyConfigured:
+      process.env[workflowProxyEnvironment.enabled] === "1",
+    get appServerWorkflowProxySpawnCount() {
+      return appServerWorkflowProxySpawnCount;
     },
     get throttleExternalPluginFocusReconcile() {
       return !hasOptionalMainBundlePatchFailure(

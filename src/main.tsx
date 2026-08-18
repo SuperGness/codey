@@ -20,6 +20,7 @@ import "./styles.features.css";
 import "./styles.diagnostics.css";
 import "./styles.components.css";
 import "./styles.responsive.css";
+import "./styles.workflows.css";
 
 // 在 Vite 开发模式下，若未通过 Codey Bridge/Token 访问，自动注入 Mock 接口方便 UI 调试
 if (import.meta.env.DEV) {
@@ -119,6 +120,28 @@ if (import.meta.env.DEV) {
         codey_worker: { model: "provider-fast-coder", reasoningEffort: "medium" },
         codey_visual_worker: { model: "gpt-5.6-sol", reasoningEffort: "high" },
         default: { model: "gpt-5.6-sol", reasoningEffort: "medium" },
+      },
+      workflow: {
+        enabled: false,
+        globalMode: true,
+        profile: "qualityFirst",
+        maxReadOnlyConcurrency: 4,
+        maxProviderConcurrency: 2,
+        maxRepoWriters: 1,
+        maxDelegationDepth: 1,
+        leaseSeconds: 60,
+        infrastructureRetryLimit: 3,
+        builderRepairLimit: 2,
+        reviewerCount: 1,
+        retentionDays: 30,
+        roles: {
+          preflight: { model: "gpt-5.6-sol", reasoningEffort: "high" },
+          scout: { model: "gpt-5.6-sol", reasoningEffort: "medium" },
+          builder: { model: "provider-fast-coder", reasoningEffort: "high" },
+          validator: { model: "gpt-5.6-sol", reasoningEffort: "medium" },
+          reviewer: { model: "gpt-5.6-sol", reasoningEffort: "high" },
+          expert: { model: "gpt-5.6-terra", reasoningEffort: "high" },
+        },
       },
       hideFullAccessWarning: false,
       showAccountUsageInHeader: true,

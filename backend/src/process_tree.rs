@@ -175,17 +175,6 @@ pub fn command_has_argument(command: &str, argument: &str) -> bool {
     })
 }
 
-/// 仅探测进程是否存活（`kill(pid, 0)`）。EPERM 说明进程存在但无权限，
-/// 同样视为存活。
-#[cfg(unix)]
-pub fn unix_process_alive(process_id: u32) -> bool {
-    let Ok(process_id) = libc::pid_t::try_from(process_id) else {
-        return false;
-    };
-    let result = unsafe { libc::kill(process_id, 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
-}
-
 #[cfg(unix)]
 pub fn signal_processes(process_ids: &HashSet<u32>, signal: libc::c_int) -> Result<()> {
     let mut first_error = None;

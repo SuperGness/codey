@@ -68,13 +68,11 @@ test("Windows keeps route transitions resident but shows fatal startup failures"
 });
 
 test("Windows background helpers never create console windows", async () => {
-  const [launcherPlatform, processCleanup, runtimeAppPaths] = await Promise.all([
+  const [launcherPlatform, runtimeAppPaths] = await Promise.all([
     readFile(
       new URL("../backend/src/launcher/platform.rs", import.meta.url),
       "utf8",
     ).then(normalizeLineEndings),
-    readFile(new URL("../backend/src/process_cleanup.rs", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
     readFile(
       new URL(
         "../vendor/CodeyRuntime/crates/codey-runtime-core/src/app_paths.rs",
@@ -90,10 +88,13 @@ test("Windows background helpers never create console windows", async () => {
     )?.length,
     2,
   );
-  assert.doesNotMatch(processCleanup, /Command::new\("taskkill"\)/);
   assert.match(
-    processCleanup,
+    launcherPlatform,
     /codey_runtime_core::windows_terminate_process_if_matches/,
+  );
+  assert.match(
+    launcherPlatform,
+    /Command::new\("taskkill"\)[\s\S]*?creation_flags\(codey_runtime_core::windows_create_no_window\(\)\)/,
   );
   assert.match(
     runtimeAppPaths,

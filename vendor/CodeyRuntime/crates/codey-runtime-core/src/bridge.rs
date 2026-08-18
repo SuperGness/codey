@@ -519,6 +519,11 @@ fn bridge_path_can_run_concurrently(path: &str) -> bool {
             | "/api/check_for_updates"
             | "/session/wake-watcher"
             | "/plugins/list"
+            | "/api/workflow_capabilities"
+            | "/api/workflow_list"
+            | "/api/workflow_get"
+            | "/api/workflow_events"
+            | "/api/workflow_artifact"
     )
 }
 

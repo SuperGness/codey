@@ -17,6 +17,7 @@ mod prompt_optimization;
 mod runtime;
 mod updates;
 mod webhooks;
+mod workflows;
 
 #[cfg(windows)]
 use codey_runtime_core::app_paths::{
@@ -104,12 +105,14 @@ use crate::session_transfer;
 use crate::subagent_policy;
 use crate::trace_log_guard;
 use crate::trace_log_stats::TraceLogStatsHandle;
+use crate::workflow::WorkflowHost;
 
 const STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct AppState {
     pub store: ConfigStore,
     pub config: RwLock<CodeyConfig>,
+    pub workflow: Arc<WorkflowHost>,
     config_write_lock: Mutex<()>,
     provider_model_sync_lock: Mutex<()>,
     pub http_client: reqwest::Client,
@@ -169,12 +172,14 @@ impl Default for AppState {
     fn default() -> Self {
         let store = ConfigStore::default();
         let config = store.load().unwrap_or_default();
+        let workflow = WorkflowHost::from_config(&config, store.path());
         let protect_crashpad_pending = config.protect_crashpad_pending;
         let persisted_waiting_notifications = initial_waiting_notifications(&store, &[]);
         let (shutdown_reason, _) = watch::channel(None);
         Self {
             store,
             config: RwLock::new(config),
+            workflow,
             config_write_lock: Mutex::new(()),
             provider_model_sync_lock: Mutex::new(()),
             http_client: reqwest::Client::builder()
@@ -586,6 +591,19 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         },
         "plugin_marketplace_status" => plugin_marketplace_status().await,
         "repair_plugin_marketplace" => repair_plugin_marketplace().await,
+        "workflow_capabilities" => workflows::capabilities(state, args).await,
+        "workflow_start" => workflows::start(state, args).await,
+        "workflow_steer" => workflows::steer(state, args).await,
+        "workflow_list" => workflows::list(state, args).await,
+        "workflow_get" => workflows::get(state, args).await,
+        "workflow_events" => workflows::events(state, args).await,
+        "workflow_artifact" => workflows::artifact(state, args).await,
+        "workflow_pause" => workflows::mutate(state, "pause", args).await,
+        "workflow_resume" => workflows::mutate(state, "resume", args).await,
+        "workflow_cancel" => workflows::mutate(state, "cancel", args).await,
+        "workflow_retry_node" => workflows::retry_node(state, args).await,
+        "workflow_reply_interaction" => workflows::reply_interaction(state, args).await,
+        "workflow_bypass_audit" => workflows::bypass_audit(state, args).await,
         _ => Err(format!("未知 Codey API 命令：{command}")),
     };
     result.unwrap_or_else(api_error_message)
@@ -815,6 +833,12 @@ async fn save_codey_config_locked(
     );
     config.fast_codex_startup = config_input.fast_codex_startup;
     config.subagent_optimization = config_input.subagent_optimization;
+    config.workflow = config_input.workflow;
+    if config.subagent_optimization && config.workflow.enabled {
+        return Err(
+            "Codey 工作流与原生子代理调度增强不能同时启用，请只选择一种调度模式".to_string(),
+        );
+    }
     let default_role_supplied = subagent_roles_present
         && !config_input.subagent_roles.is_empty()
         && config_input
@@ -897,6 +921,7 @@ async fn save_codey_config_locked(
         return Err(error);
     }
     *state.config.write().await = config.clone();
+    state.workflow.apply_config(config.workflow.clone());
     Ok(SavedCodeyConfig {
         config,
         restart_required,
@@ -1224,6 +1249,7 @@ fn config_requires_restart(
         || applied.fast_context_tools != current.fast_context_tools
         || applied.fast_codex_startup != current.fast_codex_startup
         || applied.subagent_optimization != current.subagent_optimization
+        || applied.workflow.enabled != current.workflow.enabled
         || applied_models != &RuntimeModelConfig::from_config(current)
         || ((applied.subagent_optimization || current.subagent_optimization)
             && applied_subagent != &RuntimeSubagentConfig::from_config(current))

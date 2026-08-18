@@ -304,14 +304,20 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
         return Err(error);
     }
     let handler = make_bridge_handler(state);
-    let (runtime, codex_exit, route_changed) =
-        match CodeyRuntime::start(&config, handler, state.crashpad_pending_stats.clone()).await {
-            Ok(started) => started,
-            Err(error) => {
-                reclaim_initial_session_scan(state, initial_scan_task).await;
-                return Err(error.to_string());
-            }
-        };
+    let (runtime, codex_exit, route_changed) = match CodeyRuntime::start(
+        &config,
+        handler,
+        state.crashpad_pending_stats.clone(),
+        state.workflow.proxy_launch_config(),
+    )
+    .await
+    {
+        Ok(started) => started,
+        Err(error) => {
+            reclaim_initial_session_scan(state, initial_scan_task).await;
+            return Err(error.to_string());
+        }
+    };
     if state.is_shutting_down() {
         let stop_error = runtime.stop().await.err();
         reclaim_initial_session_scan(state, initial_scan_task).await;
@@ -321,6 +327,7 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
         ));
     }
     *state.runtime.lock().await = Some(Arc::new(runtime));
+    state.workflow.recover_when_ready().await;
     let runtime_generation = state.runtime_generation.fetch_add(1, Ordering::AcqRel) + 1;
     if let Some(initial_scan_task) = initial_scan_task {
         start_waiting_webhook_watcher(state, initial_scan_task).await;
@@ -517,6 +524,17 @@ pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> 
 
 pub async fn begin_shutdown(state: &Arc<AppState>) {
     state.shutting_down.store(true, Ordering::Release);
+    if tokio::time::timeout(Duration::from_secs(10), state.workflow.shutdown())
+        .await
+        .is_err()
+    {
+        error_log::record_failure(
+            "workflow_shutdown_timed_out",
+            "pause_workflows_during_shutdown",
+            "workflow shutdown exceeded ten seconds",
+            json!({}),
+        );
+    }
     let restart = state.restart_task.lock().await.take();
     if let Some(ScheduledRestart { cancel, task }) = restart {
         let _ = cancel.send(());
