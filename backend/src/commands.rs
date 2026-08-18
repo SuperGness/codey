@@ -102,6 +102,7 @@ use crate::session_delete;
 use crate::session_metadata;
 use crate::session_transfer;
 use crate::subagent_policy;
+use crate::token_stats;
 use crate::trace_log_guard;
 use crate::trace_log_stats::TraceLogStatsHandle;
 
@@ -297,6 +298,7 @@ impl AppState {
                 value
             }
             "/account/usage" => account_usage_snapshot(self).await,
+            "/token-stats" => token_stats::token_stats_snapshot(self, &payload).await,
             "/session/wake-watcher" => {
                 self.session_scan_wake.notify_one();
                 json!({"status":"ok"})
@@ -843,6 +845,7 @@ async fn save_codey_config_locked(
     }
     config.hide_full_access_warning = config_input.hide_full_access_warning;
     config.show_account_usage_in_header = config_input.show_account_usage_in_header;
+    config.show_token_stats_card = config_input.show_token_stats_card;
     let mut config = config.normalize();
     if config.subagent_optimization
         && let Ok(model_state) = current_model_state_async(&config).await

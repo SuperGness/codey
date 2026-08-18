@@ -516,6 +516,7 @@ fn bridge_path_can_run_concurrently(path: &str) -> bool {
             | "/codex-model-catalog"
             | "/backend/status"
             | "/account/usage"
+            | "/token-stats"
             | "/api/check_for_updates"
             | "/session/wake-watcher"
             | "/plugins/list"
