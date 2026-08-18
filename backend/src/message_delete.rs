@@ -446,7 +446,7 @@ fn resolve_persistent_message_ids(
     Ok((resolved, vec![(tail_message_id.clone(), stable_turn_id)]))
 }
 
-fn find_rollout_path(home: &Path, session_id: &str) -> Result<Option<PathBuf>> {
+pub(crate) fn find_rollout_path(home: &Path, session_id: &str) -> Result<Option<PathBuf>> {
     for db_path in codex_session_db_paths_from_home(home) {
         if !db_path.exists() {
             continue;
@@ -535,7 +535,7 @@ fn canonical_rollout_path(home: &Path, rollout_path: &Path) -> Result<PathBuf> {
     Ok(canonical_rollout)
 }
 
-fn last_stable_rollout_turn_id(rollout: &str) -> Option<String> {
+pub(crate) fn last_stable_rollout_turn_id(rollout: &str) -> Option<String> {
     let mut last_boundary = None;
     let mut last_terminal = None;
     for line in rollout.lines() {
@@ -552,7 +552,7 @@ fn last_stable_rollout_turn_id(rollout: &str) -> Option<String> {
     }
 }
 
-fn terminal_turn_id(line: &str) -> Option<String> {
+pub(crate) fn terminal_turn_id(line: &str) -> Option<String> {
     let value = serde_json::from_str::<Value>(line).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("event_msg") {
         return None;
@@ -587,7 +587,7 @@ fn is_compacted_summary(line: &str) -> bool {
         })
 }
 
-fn turn_boundary_id(line: &str) -> Option<String> {
+pub(crate) fn turn_boundary_id(line: &str) -> Option<String> {
     let value = serde_json::from_str::<Value>(line).ok()?;
     let payload = value.get("payload")?;
     let record_type = value.get("type").and_then(Value::as_str);

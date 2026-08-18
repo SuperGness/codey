@@ -122,6 +122,7 @@ if (import.meta.env.DEV) {
       },
       hideFullAccessWarning: false,
       showAccountUsageInHeader: true,
+      showTokenStatsCard: true,
     };
     const previewCcSwitch = {
       changed: false,

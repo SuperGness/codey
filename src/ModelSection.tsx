@@ -26,12 +26,14 @@ type ModelSectionProps = {
   isBusy: boolean;
   busy: string | null;
   showAccountUsageInHeader: boolean;
+  showTokenStatsCard: boolean;
   manualThirdPartyModelKeys: Set<string>;
   onSyncCurrentProvider: () => void;
   onFetchCurrentModels: () => void;
   onSetDefaultModel: (model: string) => void;
   onDeleteThirdPartyModel: (model: string) => void;
   onShowAccountUsageInHeaderChange: (checked: boolean) => void;
+  onShowTokenStatsCardChange: (checked: boolean) => void;
 };
 
 function ModelSectionComponent({
@@ -41,12 +43,14 @@ function ModelSectionComponent({
   isBusy,
   busy,
   showAccountUsageInHeader,
+  showTokenStatsCard,
   manualThirdPartyModelKeys,
   onSyncCurrentProvider,
   onFetchCurrentModels,
   onSetDefaultModel,
   onDeleteThirdPartyModel,
   onShowAccountUsageInHeaderChange,
+  onShowTokenStatsCardChange,
 }: ModelSectionProps) {
   const defaultModel = modelState.defaultModel;
   const supportedOfficialModelCount = modelState.officialModels.reduce(
@@ -88,6 +92,17 @@ function ModelSectionComponent({
               />
             </div>
           )}
+          <div
+            className={`header-usage-toggle${showTokenStatsCard ? " active" : ""}`}
+          >
+            <span>显示性能统计</span>
+            <Switch
+              checked={showTokenStatsCard}
+              disabled={isBusy}
+              onCheckedChange={onShowTokenStatsCardChange}
+              aria-label="在每条回复下方显示性能与 Token 统计"
+            />
+          </div>
           <Button
             variant="outline"
             size="sm"

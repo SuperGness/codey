@@ -248,6 +248,11 @@ pub struct CodeyConfig {
     /// header. The renderer only activates this for an official login route.
     #[serde(default = "default_true")]
     pub show_account_usage_in_header: bool,
+    /// Shows an inline performance/token footer below each Codex assistant
+    /// reply. Timings and token counts are read from the local session rollout
+    /// where available and degrade to dashes otherwise.
+    #[serde(default = "default_true")]
+    pub show_token_stats_card: bool,
     /// Public HTTPS endpoint for the version manifest published to Cloudflare R2.
     /// This is build-time configuration, not a user setting.
     #[serde(
@@ -286,6 +291,7 @@ impl Default for CodeyConfig {
             subagent_roles: default_subagent_roles(),
             hide_full_access_warning: false,
             show_account_usage_in_header: true,
+            show_token_stats_card: true,
             update_manifest_url: default_update_manifest_url(),
         }
     }
@@ -984,6 +990,22 @@ mod tests {
             .normalize();
 
         assert!(config.show_account_usage_in_header);
+    }
+
+    #[test]
+    fn token_stats_card_defaults_to_enabled_and_round_trips() {
+        let config = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
+            .unwrap()
+            .normalize();
+
+        assert!(config.show_token_stats_card);
+
+        let disabled = serde_json::from_str::<CodeyConfig>(
+            r#"{"activeProfileId":"","profiles":[],"showTokenStatsCard":false}"#,
+        )
+        .unwrap()
+        .normalize();
+        assert!(!disabled.show_token_stats_card);
     }
 
     #[test]

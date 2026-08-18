@@ -36,6 +36,7 @@ const SETTINGS_OVERLAY_STYLES: &str = include_str!("../../dist-overlay/codey.css
 const PLUGIN_MARKETPLACE_FIX_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/plugin-marketplace-fix.js");
 const PROMPT_OPTIMIZE_SCRIPT: &str = include_str!("../../dist-overlay/inject/prompt-optimize.js");
+const TOKEN_STATS_SCRIPT: &str = include_str!("../../dist-overlay/inject/token-stats.js");
 const MAX_INJECTION_ERROR_CHARS: usize = 500;
 static SETTINGS_OVERLAY_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
 static SESSION_TOOLS_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
@@ -332,6 +333,35 @@ pub fn prepare_injection_scripts(
             })()"#
                 .to_string(),
         ),
+        (
+            "token-stats",
+            "性能与 Token 统计",
+            TOKEN_STATS_SCRIPT,
+            r#"(() => {
+              const stats = window.__codeyTokenStats;
+              if (!stats || typeof stats.snapshot !== "function") return "";
+              const snapshot = stats.snapshot();
+              if (snapshot.enabled === false) return "性能与 Token 统计已关闭";
+              if (snapshot.observedTurns > 0) {
+                const last = snapshot.lastTurn;
+                const summary = last
+                  ? `最近一轮：TTFT ${last.ttftMs != null ? last.ttftMs + "ms" : "—"}，输入 ${last.inputTokens ?? "—"} / 输出 ${last.outputTokens ?? "—"} tokens` +
+                    (last.subagentCount != null && last.subagentCount > 0
+                      ? `，子代理 ${last.subagentCount} 轮`
+                      : "") +
+                    (last.reasonCode ? `（${last.reasonCode}，turn=${last.turnKey || "—"}，session=${last.sessionId || "—"}）` : "")
+                  : "";
+                return `已观测 ${snapshot.observedTurns} 轮对话${summary ? "；" + summary : ""}`;
+              }
+              if (snapshot.installed === true) {
+                return snapshot.observedMessages > 0
+                  ? `已观测 ${snapshot.observedMessages} 轮对话，尚未完成统计`
+                  : "性能统计已就绪，等待首轮对话";
+              }
+              return "";
+            })()"#
+                .to_string(),
+        ),
     ];
     let mut core_bundle = String::with_capacity(
         FAST_STARTUP_SHIELD_SCRIPT.len()
@@ -344,6 +374,7 @@ pub fn prepare_injection_scripts(
             + SECURITY_WARNING_SHIELD_SCRIPT.len()
             + PLUGIN_MARKETPLACE_FIX_SCRIPT.len()
             + PROMPT_OPTIMIZE_SCRIPT.len()
+            + TOKEN_STATS_SCRIPT.len()
             + 4096,
     );
     let mut descriptors = Vec::with_capacity(builtin_scripts.len() + user_scripts.len());
@@ -1195,12 +1226,13 @@ mod tests {
         assert!(core.len() < SETTINGS_OVERLAY_SCRIPT.len());
         assert!(core.contains("插件市场兼容 injection failed"));
         assert!(core.contains("window.__codeyInjectionStatus"));
+        assert!(core.contains("__codeyTokenStats"));
         assert!(prepared.scripts[1].contains("window.userScriptRan = true;"));
         assert!(prepared.scripts[1].contains(r#"status = "executed""#));
         assert!(prepared.scripts[1].contains("用户脚本 1 injection failed"));
-        assert_eq!(prepared.descriptors.len(), 12);
-        assert_eq!(prepared.descriptors[11].id, "user-script-1");
-        assert_eq!(prepared.descriptors[11].source, "user");
+        assert_eq!(prepared.descriptors.len(), 13);
+        assert_eq!(prepared.descriptors[12].id, "user-script-1");
+        assert_eq!(prepared.descriptors[12].source, "user");
         let snapshot_script = injection_status_snapshot_script(&prepared.descriptors);
         assert!(snapshot_script.contains("bridge-helpers"));
         assert!(snapshot_script.contains("Windows Git 请求限流已由主进程接管"));

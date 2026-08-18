@@ -651,6 +651,13 @@ export function App({
       }
     },
   );
+  const handleShowTokenStatsCardChange = useStableEvent(
+    (checked: boolean) => {
+      if (config) {
+        editConfig({ ...config, showTokenStatsCard: checked });
+      }
+    },
+  );
   const handleClearTraceLogs = useStableEvent(askClearTraceLogs);
   const handleRefreshTraceLogStats = useStableEvent(
     () => void refreshTraceLogStats(),
@@ -917,6 +924,7 @@ export function App({
               isBusy={isBusy}
               busy={busy}
               showAccountUsageInHeader={config.showAccountUsageInHeader}
+              showTokenStatsCard={config.showTokenStatsCard}
               onSyncCurrentProvider={handleSyncCurrentProvider}
               onFetchCurrentModels={fetchCurrentModels}
               onSetDefaultModel={setDefaultModel}
@@ -925,6 +933,7 @@ export function App({
               onShowAccountUsageInHeaderChange={
                 handleShowAccountUsageInHeaderChange
               }
+              onShowTokenStatsCardChange={handleShowTokenStatsCardChange}
             />
           </div>
 
