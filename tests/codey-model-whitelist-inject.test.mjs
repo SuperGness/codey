@@ -9,7 +9,7 @@ const MODEL_CONFIG_ID = "107580212";
 async function loadPatch(
   catalogResponse,
   clients,
-  { bridgeReady = true, queryClient = null, documentBody = null, storage = null } = {},
+  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false } = {},
 ) {
   const [bridgeSource, source] = await Promise.all([
     readFile(new URL("../public/codey-bridge.js", import.meta.url), "utf8"),
@@ -27,6 +27,7 @@ async function loadPatch(
     body.__reactFiber$codeyTest = {
       memoizedProps: {
         queryClient,
+        reactModelState,
       },
     };
   }
@@ -65,6 +66,7 @@ async function loadPatch(
       : catalogResponse;
   };
   const window = {
+    __codeyNativeModelSelectionOnly: nativeSelectionOnly,
     CustomEvent: class CustomEvent {
       constructor(type, init = {}) {
         this.type = type;
@@ -126,6 +128,7 @@ async function loadPatch(
     window,
     { warn() {} },
   );
+  const originalDispatchEvent = window.dispatchEvent;
   Function("window", "document", "globalThis", "console", source)(
     window,
     document,
@@ -136,6 +139,7 @@ async function loadPatch(
   if (bridgeReady) await patch.refresh();
   return {
     patch,
+    dispatchWasWrapped() { return window.dispatchEvent !== originalDispatchEvent; },
     connectBridge() {
       window.__codexSessionDeleteBridge = bridge;
     },
@@ -271,6 +275,7 @@ function activeModelQueryClient(initialModels) {
     },
   ]]);
   let invalidations = 0;
+  const listeners = new Set();
   return {
     get invalidations() {
       return invalidations;
@@ -284,6 +289,7 @@ function activeModelQueryClient(initialModels) {
       const entry = entries.get(JSON.stringify(queryKeyValue));
       assert.ok(entry, "the active model query should exist");
       entry.data = typeof value === "function" ? value(entry.data) : value;
+      for (const listener of listeners) listener(entry.data);
     },
     async invalidateQueries({ queryKey: prefix }) {
       assert.deepEqual(prefix, ["models", "list"]);
@@ -291,6 +297,13 @@ function activeModelQueryClient(initialModels) {
     },
     models() {
       return entries.get(JSON.stringify(queryKey)).data.data.map((model) => model.model);
+    },
+    result() {
+      return entries.get(JSON.stringify(queryKey)).data;
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
     },
     model(modelName) {
       return entries
@@ -301,6 +314,109 @@ function activeModelQueryClient(initialModels) {
     },
   };
 }
+
+test("native third-party selection notifies mounted pickers without mutating shared React query results", async () => {
+  const upstreamModels = [
+    "MiniMax-M2.7-highspeed", "claude-haiku-4-5", "claude-haiku-4-5-20251001",
+    "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
+    "claude-sonnet-4-5", "claude-sonnet-4-6", "gpt-5.3-codex", "gpt-5.3-codex-spark",
+    "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "kimi-k2.5", "kimi-k2.6",
+  ];
+  const selectedModels = ["claude-opus-4-8", "claude-opus-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"];
+  const queryClient = activeModelQueryClient(upstreamModels);
+  const sharedReactResult = queryClient.result();
+  let renderedModels = sharedReactResult.data.map(model => model.model);
+  let notifications = 0;
+  queryClient.subscribe(result => {
+    notifications++;
+    renderedModels = result.data.map(model => model.model);
+  });
+  const runtime = await loadPatch({
+    status: "ok", native_selection_only: true,
+    models: selectedModels, default_model: "gpt-5.5",
+  }, [statsigClient()], {
+    queryClient, reactModelState: sharedReactResult, nativeSelectionOnly: true,
+  });
+  assert.equal(notifications, 1, "the mounted picker must receive a cache update notification");
+  assert.deepEqual(renderedModels, selectedModels);
+  assert.deepEqual(sharedReactResult.data.map(model => model.model), upstreamModels);
+  assert.notEqual(queryClient.result(), sharedReactResult);
+  assert.equal(runtime.patch.delivery().reactContainers, 0);
+  runtime.patch.dispose();
+});
+
+test("native selection filters seven models to the five checked without changing requests or native settings", async () => {
+  const originalModels = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
+  const selectedModels = originalModels.filter(model => !["gpt-5.4", "gpt-5.3-codex-spark"].includes(model));
+  const client = statsigClient(originalModels);
+  const queryClient = activeModelQueryClient(originalModels);
+  const originalDescriptor = queryClient.model("gpt-5.6-sol");
+  originalDescriptor.serviceTiers = ["default"];
+  let storageAccesses = 0;
+  const runtime = await loadPatch({
+    status: "ok", native_selection_only: true,
+    models: selectedModels, default_model: "gpt-5.5",
+  }, [client], {
+    queryClient, nativeSelectionOnly: true,
+    storage: { getItem() { storageAccesses++; return null; }, setItem() { storageAccesses++; } },
+  });
+  assert.deepEqual(queryClient.models(), selectedModels);
+  assert.deepEqual(client.external.value.available_models, selectedModels);
+  assert.equal(client.external.value.default_model, "gpt-5.4");
+  assert.equal(queryClient.model("gpt-5.6-sol"), originalDescriptor);
+  assert.deepEqual(queryClient.model("gpt-5.6-sol").serviceTiers, ["default"]);
+  assert.equal(runtime.dispatchWasWrapped(), false);
+  for (const method of ["thread/start", "thread/resume", "thread/fork", "thread/settings/update", "turn/start"]) {
+    const request = { type: "mcp-request", request: { method, params: { model: "gpt-5.4", modelProvider: "openai", threadId: "native-thread" } } };
+    const before = structuredClone(request);
+    assert.equal(runtime.patch.rewriteOutgoingMessage(request), request);
+    runtime.patch.trackOutgoingMessage(request);
+    runtime.dispatchWindowEvent("codex-message-from-view", { detail: request });
+    assert.deepEqual(request, before);
+  }
+  assert.equal(storageAccesses, 0);
+  runtime.patch.dispose();
+});
+
+test("native selection hot updates and filters later model replies while preserving raw slash model IDs", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol", "gpt-5.5", "org/model-a"]);
+  const runtime = await loadPatch({
+    status: "ok", native_selection_only: true,
+    models: ["gpt-5.6-sol", "gpt-5.5"], default_model: "gpt-5.6-sol",
+  }, [client], { queryClient, nativeSelectionOnly: true });
+  assert.equal(await runtime.patch.setCatalog({
+    status: "ok", native_selection_only: true,
+    models: ["gpt-5.5", "org/model-a"], default_model: "gpt-5.5",
+  }), true);
+  assert.deepEqual(queryClient.models(), ["gpt-5.5", "org/model-a"]);
+  assert.equal(queryClient.model("org/model-a").providerId, undefined);
+  const modelRequest = { type: "mcp-request", request: { id: "native-model-list", method: "model/list", params: {} } };
+  runtime.patch.trackOutgoingMessage(modelRequest);
+  const reply = { type: "mcp-response", message: { id: "native-model-list", result: {
+    data: [modelDescriptor("gpt-5.6-sol"), modelDescriptor("gpt-5.5"), modelDescriptor("org/model-a")], nextCursor: null,
+  } } };
+  runtime.dispatchWindowEvent("message", { data: reply });
+  assert.deepEqual(reply.message.result.data.map(model => model.model), ["gpt-5.5", "org/model-a"]);
+  const turn = { type: "mcp-request", request: { method: "turn/start", params: { model: "org/model-a", modelProvider: "my-native-provider" } } };
+  const before = structuredClone(turn);
+  assert.equal(runtime.patch.rewriteOutgoingMessage(turn), turn);
+  assert.deepEqual(turn, before);
+  runtime.patch.dispose();
+});
+
+test("native selection leaves Codex unchanged until a usable native catalog is available", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol", "gpt-5.5"]);
+  const runtime = await loadPatch({
+    status: "not_configured", native_selection_only: true, models: [], default_model: "",
+  }, [client], { queryClient, nativeSelectionOnly: true });
+  assert.equal(runtime.patch.snapshot().loaded, false);
+  assert.deepEqual(queryClient.models(), ["gpt-5.6-sol", "gpt-5.5"]);
+  assert.equal(await runtime.patch.setCatalog({ status: "ok", models: ["route/model"], default_model: "route/model" }), false);
+  assert.deepEqual(queryClient.models(), ["gpt-5.6-sol", "gpt-5.5"]);
+  runtime.patch.dispose();
+});
 
 test("runtime whitelist keeps Spark and removes unsupported channel models", async () => {
   const firstClient = statsigClient();
@@ -379,7 +495,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "40");
+  assert.equal(patch.version, "42");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],

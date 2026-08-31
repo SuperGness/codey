@@ -416,14 +416,43 @@ struct PreparedCodexStartupState {
     runtime_config_overrides: Vec<String>,
 }
 
-fn route_subagent_model(route_provider: &str, model: &str, route_aliases: &[String]) -> String {
-    if let Some(alias) = route_aliases
+fn route_subagent_model(
+    route_provider: &str,
+    model: &str,
+    targets: &[RuntimeModelTarget],
+    builtin_official_catalog: bool,
+) -> String {
+    let requested = model.trim();
+    let target = targets
         .iter()
-        .find(|alias| model_id::equal(alias, model.trim()))
-    {
-        return alias.clone();
+        .find(|target| model_id::equal(&target.alias, requested))
+        .or_else(|| {
+            let mut matches = targets
+                .iter()
+                .filter(|target| model_id::equal(&target.upstream_model, requested));
+            let target = matches.next()?;
+            matches.next().is_none().then_some(target)
+        })
+        .or_else(|| {
+            targets.iter().find(|target| {
+                target.provider_id == route_provider
+                    && model_id::equal(&target.upstream_model, requested)
+            })
+        });
+    if let Some(target) = target {
+        // The built-in official catalog has native slugs. Synthetic aliases
+        // would lose its model metadata, including prefer_websockets.
+        return if builtin_official_catalog && target.official {
+            target.upstream_model.clone()
+        } else {
+            target.alias.clone()
+        };
     }
-    local_router::model_alias(route_provider, model)
+    if builtin_official_catalog {
+        requested.to_string()
+    } else {
+        local_router::model_alias(route_provider, requested)
+    }
 }
 
 fn should_install_codey_model_catalog(official_only: bool, catalog_available: bool) -> bool {
@@ -601,16 +630,15 @@ async fn prepare_codex_startup_state(
     let mut runtime_subagent_config = config.clone();
     runtime_subagent_config.active_profile_id = current_profile.id.clone();
     subagent_policy::reconcile_with_model_state(&mut runtime_subagent_config, Some(&model_state));
-    let route_model_aliases = runtime_subagent_config
-        .runtime_model_targets()
-        .into_iter()
-        .map(|target| target.alias)
-        .collect::<Vec<_>>();
+    let route_model_targets = runtime_subagent_config.runtime_model_targets();
+    let builtin_official_catalog =
+        !use_official_catalog && !runtime_subagent_config.has_third_party_route();
     let subagent_optimization = runtime_subagent_config.subagent_optimization;
     let subagent_model = route_subagent_model(
         &router_route_provider,
         &runtime_subagent_config.subagent_model,
-        &route_model_aliases,
+        &route_model_targets,
+        builtin_official_catalog,
     );
     let subagent_reasoning_effort = runtime_subagent_config.subagent_reasoning_effort.clone();
     let mut subagent_roles = runtime_subagent_config.subagent_roles.clone();
@@ -618,7 +646,8 @@ async fn prepare_codex_startup_state(
         selection.model = route_subagent_model(
             &router_route_provider,
             &selection.model,
-            &route_model_aliases,
+            &route_model_targets,
+            builtin_official_catalog,
         );
     }
     let runtime_config = tokio::task::spawn_blocking(move || {

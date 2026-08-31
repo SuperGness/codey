@@ -654,12 +654,14 @@ impl CodeyConfig {
         normalize_model_lists(&mut self.selected_models_by_provider);
         normalize_model_lists(&mut self.manual_third_party_models_by_provider);
         normalize_model_lists(&mut self.declared_official_models_by_provider);
-        migrate_legacy_official_model_selections(
-            &mut self.selected_models_by_provider,
-            &mut self.manual_third_party_models_by_provider,
-            &mut self.declared_official_models_by_provider,
-            &official_provider_ids,
-        );
+        if self.local_router_enabled {
+            migrate_legacy_official_model_selections(
+                &mut self.selected_models_by_provider,
+                &mut self.manual_third_party_models_by_provider,
+                &mut self.declared_official_models_by_provider,
+                &official_provider_ids,
+            );
+        }
         normalize_upstream_model_lists(&mut self.upstream_models_by_provider);
         merge_declared_official_models_into_upstream(
             &self.declared_official_models_by_provider,
@@ -1253,12 +1255,27 @@ impl CodeyConfig {
             .iter()
             .map(|profile| local_router::model_alias(profile.provider_id(), ""))
             .collect::<Vec<_>>();
+        let qualify_unique_models = self.local_router_enabled;
         for selection in self.subagent_roles.values_mut() {
             let requested = selection.model.trim();
             let canonical = targets
                 .iter()
                 .find(|target| model_id::equal(&target.alias, requested))
                 .map(|target| target.alias.clone())
+                .or_else(|| {
+                    if !qualify_unique_models {
+                        return None;
+                    }
+                    // Preserve the model's route identity for subagents. The
+                    // router selects their isolated HTTP/SSE transport per
+                    // request, so catalog identity does not grant upstream WS.
+                    // Never guess a route when the upstream model is ambiguous.
+                    let mut matches = targets
+                        .iter()
+                        .filter(|target| model_id::equal(&target.upstream_model, requested));
+                    let target = matches.next()?;
+                    matches.next().is_none().then(|| target.alias.clone())
+                })
                 .unwrap_or_else(|| {
                     if provider_prefixes.iter().any(|prefix| {
                         requested
@@ -3098,6 +3115,63 @@ mod tests {
         assert!(!config.subagent_roles[SUBAGENT_ROLE_WORKER].enabled);
         assert!(config.subagent_roles[SUBAGENT_ROLE_QUICK_SCAN].enabled);
         assert!(config.subagent_roles[SUBAGENT_ROLE_DEFAULT].enabled);
+    }
+
+    #[test]
+    fn subagent_models_use_unique_router_aliases_without_changing_explicit_routes() {
+        for (router_enabled, duplicate, requested, expected) in [
+            (true, false, " worker-model ", "route-ws/worker-model"),
+            (true, false, "WORKER-MODEL", "route-ws/worker-model"),
+            (false, false, "worker-model", "worker-model"),
+            (true, true, "worker-model", "worker-model"),
+            (
+                true,
+                true,
+                "route-http/worker-model",
+                "route-http/worker-model",
+            ),
+            (true, false, "unknown-model", "unknown-model"),
+            (true, false, "vendor/model", "route-ws/vendor/model"),
+        ] {
+            let mut websocket_route = ProviderProfile::new("WS Route");
+            websocket_route.id = "route-ws".into();
+            websocket_route.supports_websockets = true;
+            let mut http_route = ProviderProfile::new("HTTP Route");
+            http_route.id = "route-http".into();
+            let config = CodeyConfig {
+                local_router_enabled: router_enabled,
+                active_profile_id: http_route.id.clone(),
+                profiles: vec![websocket_route, http_route],
+                selected_models_by_provider: BTreeMap::from([
+                    (
+                        "route-ws".into(),
+                        vec!["worker-model".into(), "vendor/model".into()],
+                    ),
+                    (
+                        "route-http".into(),
+                        vec![
+                            if duplicate {
+                                "worker-model"
+                            } else {
+                                "main-model"
+                            }
+                            .into(),
+                        ],
+                    ),
+                ]),
+                default_model: "route-http/main-model".into(),
+                subagent_model: requested.into(),
+                subagent_roles: uniform_subagent_roles(requested, "high"),
+                ..CodeyConfig::default()
+            }
+            .normalize();
+
+            assert_eq!(config.subagent_model, expected, "requested: {requested}");
+            assert!(config.subagent_roles.values().all(|selection| {
+                selection.model == expected && selection.reasoning_effort == "high"
+            }));
+            assert_eq!(config.clone().normalize(), config);
+        }
     }
 
     #[test]

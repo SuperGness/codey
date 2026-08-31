@@ -242,10 +242,7 @@ function ModelSectionComponent({
                   ? nativeOfficialModels
                   : modelState.officialModelIds,
               )
-            : uniqueModelIds([
-                ...modelState.thirdPartyModels,
-                ...modelState.upstreamModels,
-              ])
+            : modelState.thirdPartyModels
           : official
             ? configuredModels.length > 0
               ? configuredModels
@@ -718,7 +715,7 @@ function ModelSectionComponent({
                     {group.models.length > 0 ? (
                       <div className="provider-model-tags">
                         {group.models.map((model) => {
-                          const isDefault = modelIdsEqual(group.defaultModel, model);
+                          const isDefault = !routeConfigReadOnly && modelIdsEqual(group.defaultModel, model);
                           const displayName = group.official
                             ? officialDisplayNames.get(modelKey(model)) || model
                             : model;

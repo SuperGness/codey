@@ -34,22 +34,13 @@ pub(crate) fn unique_temp_path(path: &Path) -> PathBuf {
     parent.join(format!(".{file_name}.codey-{}.tmp", uuid::Uuid::new_v4()))
 }
 
-/// 把写好的临时文件原子替换到目标位置。`std::fs::rename` 在部分 Windows
-/// 版本无法替换被打开的目标文件，此时保持同目录先删后移；失败路径总是清理
-/// 临时文件。此前七个模块各自实现这段回退且互有漂移。
+/// 把写好的同目录临时文件替换到目标位置。Windows 文件占用导致替换失败时，
+/// 必须保留原目标；不能先删除目标再重试，否则重试失败会让两份文件同时丢失。
+/// 失败路径只清理本次写入的临时文件。
 pub(crate) fn persist_temp_file(temp: &Path, destination: &Path) -> std::io::Result<()> {
     match fs::rename(temp, destination) {
         Ok(()) => Ok(()),
         Err(error) => {
-            #[cfg(windows)]
-            if destination.exists() {
-                let result =
-                    fs::remove_file(destination).and_then(|_| fs::rename(temp, destination));
-                if result.is_err() {
-                    let _ = fs::remove_file(temp);
-                }
-                return result;
-            }
             let _ = fs::remove_file(temp);
             Err(error)
         }
@@ -158,6 +149,42 @@ mod tests {
         assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
         assert!(!temp.exists());
         assert!(!destination.exists());
+    }
+
+    #[test]
+    fn failed_persist_preserves_existing_destination_when_temp_is_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("session_index.jsonl");
+        let temp = unique_temp_path(&destination);
+        fs::write(&destination, b"history-one\nhistory-two\n").unwrap();
+
+        assert!(persist_temp_file(&temp, &destination).is_err());
+
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"history-one\nhistory-two\n"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_temp_never_removes_existing_destination() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("session_index.jsonl");
+        let temp = unique_temp_path(&destination);
+        fs::write(&destination, b"original history").unwrap();
+        fs::write(&temp, b"updated history").unwrap();
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&temp)
+            .unwrap();
+
+        assert!(persist_temp_file(&temp, &destination).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"original history");
+        drop(locked);
     }
 
     #[test]

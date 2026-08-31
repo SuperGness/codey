@@ -2067,10 +2067,21 @@
     }
   };
 
+  const waitForNativeSessionOperation = (operation) => new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error("Codex 会话接口响应超时")), 5_000);
+    Promise.resolve().then(operation).then(resolve, reject).finally(() => window.clearTimeout(timer));
+  });
+
+  const callNativeSessionOperation = async (operation) => {
+    // Bound discovery separately: a late import must not start a destructive
+    // native operation after the caller has already reported a timeout.
+    const controller = await waitForNativeSessionOperation(getCodexSessionController);
+    return waitForNativeSessionOperation(() => operation(controller));
+  };
+
   const refreshRecentLocalSessions = async () => {
     try {
-      const controller = await getCodexSessionController();
-      await controller.refreshRecentConversations();
+      await callNativeSessionOperation((controller) => controller.refreshRecentConversations());
       return true;
     } catch {
       return false;
@@ -2081,8 +2092,12 @@
     const normalizedSessionId = normalizeThreadSessionId(sessionId);
     if (!normalizedSessionId || normalizedSessionId.startsWith("client-new-thread:")) return false;
     try {
-      const controller = await getCodexSessionController();
-      await controller.discardConversation(normalizedSessionId);
+      await callNativeSessionOperation((controller) => {
+        if (isSidebarSessionActive(normalizedSessionId)) {
+          throw new Error("请先切离要删除的会话");
+        }
+        return controller.discardConversation(normalizedSessionId);
+      });
       return true;
     } catch {
       return false;
@@ -2093,8 +2108,14 @@
     const normalizedSessionId = normalizeThreadSessionId(sessionId);
     if (!normalizedSessionId || normalizedSessionId.startsWith("client-new-thread:")) return false;
     try {
-      const controller = await getCodexSessionController();
-      await controller.notifyConversationDeleted(normalizedSessionId);
+      await callNativeSessionOperation((controller) => {
+        // The user can navigate back while the backend deletion is in flight.
+        // Do not evict a conversation that became active again in that window.
+        if (isSidebarSessionActive(normalizedSessionId)) {
+          throw new Error("会话已重新打开，暂不清理当前页面缓存");
+        }
+        return controller.notifyConversationDeleted(normalizedSessionId);
+      });
       return true;
     } catch {
       return false;
@@ -2359,12 +2380,30 @@
     popover.dataset.placement = fitsBelow ? "bottom" : "top";
   };
 
-  const navigateAwayFromDeletedThread = (deletedThread) => {
+  const isSidebarSessionActive = (sessionId) => {
+    // Sidebar selection can update before the routed conversation unmounts.
+    // Check the URL independently instead of letting getSessionId's DOM
+    // fallback hide a route that still points at the deletion target.
+    const routeSessionId = location.pathname.match(/(?:\/c\/|\/conversation\/|\/session\/)([A-Za-z0-9_-]+)/)?.[1]
+      || new URLSearchParams(location.search).get("conversation_id")
+      || new URLSearchParams(location.search).get("session_id");
+    return normalizeThreadSessionId(getSessionId()) === sessionId
+      || normalizeThreadSessionId(routeSessionId) === sessionId
+      || [...document.querySelectorAll(
+        "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
+      )].some((thread) => (
+        thread.getAttribute("data-app-action-sidebar-thread-active") === "true"
+        && threadSessionIdFromRow(thread) === sessionId
+      ));
+  };
+
+  const navigateAwayFromDeletedThread = (deletedThread, sessionId) => {
     const replacement = [...document.querySelectorAll(
       "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
     )].find((thread) => (
       thread !== deletedThread
       && thread instanceof HTMLElement
+      && threadSessionIdFromRow(thread) !== sessionId
       && !isDeletedSidebarThread(thread)
       && thread.getClientRects().length > 0
     ));
@@ -2377,13 +2416,27 @@
       .find((control) => {
         if (!(control instanceof HTMLElement) || control.getClientRects().length === 0) return false;
         const label = `${control.getAttribute("aria-label") || ""} ${control.textContent || ""}`;
-        return /新任务|新对话|\bnew task\b|\bnew chat\b/i.test(label);
+        return /新(?:建)?任务|新(?:建)?对话|\bnew task\b|\bnew chat\b/i.test(label);
       });
     if (newThreadAction instanceof HTMLElement) {
       newThreadAction.click();
       return true;
     }
     return false;
+  };
+
+  const leaveSidebarSessionBeforeDelete = async (thread, sessionId) => {
+    if (!isSidebarSessionActive(sessionId)) return;
+    if (!navigateAwayFromDeletedThread(thread, sessionId)) {
+      throw new Error("无法切离当前会话，请先打开其他会话后再删除");
+    }
+    // A click can start an asynchronous React navigation. Never evict the
+    // conversation snapshot until both the page and sidebar have left it.
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      if (!isSidebarSessionActive(sessionId)) return;
+      await new Promise((resolve) => window.setTimeout(resolve, 50));
+    }
+    throw new Error("切换会话尚未完成，未执行删除，请稍后重试");
   };
 
   const isSessionAlreadyDeletedMessage = (value) => (
@@ -2394,17 +2447,12 @@
     thread,
     sessionId,
     title,
-    isActive,
     alreadyDeleted,
     nativeDeletionNotified,
   ) => {
     const normalizedSessionId = rememberDeletedSidebarSession(sessionId) || sessionId;
     isDeletedSidebarThread(thread);
     closeSessionDeletePopover();
-    if (isActive) {
-      const navigated = navigateAwayFromDeletedThread(thread);
-      if (!navigated) window.setTimeout(() => location.reload(), 180);
-    }
     window.dispatchEvent(new CustomEvent("codey-session-deleted", {
       detail: { sessionId: normalizedSessionId, title, alreadyDeleted },
     }));
@@ -2415,22 +2463,27 @@
     );
     void refreshRecentLocalSessions().then((refreshed) => {
       if (!nativeDeletionNotified || !refreshed) {
-        window.setTimeout(() => location.reload(), 700);
+        showRuntimeToast("会话已删除，列表同步暂未完成；可稍后手动刷新");
       }
     });
   };
 
-  const deleteSidebarSession = async (thread, anchor, confirmButton) => {
-    const sessionId = threadSessionIdFromRow(thread);
-    const title = String(
-      thread.getAttribute("data-app-action-sidebar-thread-title") || "",
-    ).trim();
+  const deleteSidebarSession = async (thread, anchor, confirmButton, target) => {
+    const { sessionId, title } = target;
     if (!sessionId || sessionId.startsWith("client-new-thread:")) {
       closeSessionDeletePopover();
       showRuntimeToast("无法识别要删除的会话", "error");
       return;
     }
-    const isActive = thread.getAttribute("data-app-action-sidebar-thread-active") === "true";
+    // Virtualized rows may be reused while the confirmation remains open.
+    // The confirmed identity must never be read again from a reused row.
+    if (threadSessionIdFromRow(thread) !== sessionId) {
+      closeSessionDeletePopover();
+      showRuntimeToast("会话列表已更新，请重新确认要删除的会话", "error");
+      return;
+    }
+    if (pendingSidebarSessionDeleteIds.has(sessionId) || isDeletedSidebarSession(sessionId)) return;
+    const isActive = isSidebarSessionActive(sessionId);
     if (isActive && isTaskRunning()) {
       closeSessionDeletePopover();
       showRuntimeToast("当前会话仍在运行，请停止任务后再删除", "error");
@@ -2443,7 +2496,13 @@
     beginSidebarSessionDelete(thread, sessionId);
     closeSessionDeletePopover();
     try {
-      await unsubscribeNativeSidebarSession(sessionId);
+      await leaveSidebarSessionBeforeDelete(thread, sessionId);
+      if (!await unsubscribeNativeSidebarSession(sessionId)) {
+        throw new Error("Codex 尚未释放会话，未执行删除，请稍后重试");
+      }
+      if (isSidebarSessionActive(sessionId)) {
+        throw new Error("要删除的会话已重新打开，未执行删除，请切离后重试");
+      }
       const result = await callBridge("/session/delete", { sessionId, title });
       const alreadyDeleted = isSessionAlreadyDeletedMessage(result?.message);
       if (
@@ -2457,7 +2516,6 @@
         thread,
         sessionId,
         title,
-        isActive,
         alreadyDeleted,
         nativeDeletionNotified,
       );
@@ -2468,7 +2526,6 @@
           thread,
           sessionId,
           title,
-          isActive,
           true,
           nativeDeletionNotified,
         );
@@ -2488,9 +2545,11 @@
 
   const openSessionDeletePopover = (thread, anchor) => {
     closeSessionDeletePopover();
-    const title = String(
-      thread.getAttribute("data-app-action-sidebar-thread-title") || "未命名会话",
-    ).trim() || "未命名会话";
+    const target = {
+      sessionId: threadSessionIdFromRow(thread),
+      title: String(thread.getAttribute("data-app-action-sidebar-thread-title") || "").trim(),
+    };
+    const title = target.title || "未命名会话";
     const popover = document.createElement("div");
     popover.id = sessionDeletePopoverId;
     popover.setAttribute("role", "dialog");
@@ -2542,7 +2601,7 @@
     deletePopoverCleanup = close;
     cancelButton.addEventListener("click", close);
     confirmButton.addEventListener("click", () => {
-      void deleteSidebarSession(thread, anchor, confirmButton);
+      void deleteSidebarSession(thread, anchor, confirmButton, target);
     });
     window.setTimeout(() => {
       if (deletePopoverCleanup !== close) return;

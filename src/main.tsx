@@ -211,7 +211,7 @@ if (import.meta.env.DEV) {
       const selected = previewConfig.selectedModelsByProvider[providerId] || [];
       const manual = previewConfig.manualThirdPartyModelsByProvider[providerId] || [];
       const selectableOfficial = previewOfficialModels.filter(
-        (model) => official || includesModelId(upstream, model.slug),
+        (model) => official && (selected.length === 0 || includesModelId(selected, model.slug)),
       );
       const thirdPartyModels = official ? [] : selected;
       const requestedDefault = previewConfig.defaultModel;
@@ -228,10 +228,10 @@ if (import.meta.env.DEV) {
         thirdPartyModels[0] ||
         "";
       return {
-        officialModels: previewOfficialModels.map((model) => ({
+        officialModels: official ? previewOfficialModels.map((model) => ({
           ...model,
-          supported: official || includesModelId(upstream, model.slug),
-        })),
+          supported: selected.length === 0 || includesModelId(selected, model.slug),
+        })) : [],
         officialModelIds: previewOfficialModels.map((model) => model.slug),
         thirdPartyModels,
         manualThirdPartyModels: manual.filter((model) =>
@@ -599,14 +599,15 @@ if (import.meta.env.DEV) {
         ]).filter((model) => !modelIdsEqual(model, AUTO_REVIEW_MODEL));
         previewConfig = {
           ...previewConfig,
-          profiles: previewConfig.profiles.map((profile) =>
+          settingsRevision: previewConfig.settingsRevision + 1,
+          profiles: previewConfig.localRouterEnabled ? previewConfig.profiles.map((profile) =>
             profile.id === targetProfile?.id
               ? { ...profile, supportsAutoReview }
               : profile,
-          ),
+          ) : previewConfig.profiles,
           selectedModelsByProvider: {
             ...previewConfig.selectedModelsByProvider,
-            [providerId]: thirdPartyModels.filter(
+            [providerId]: (targetProfile?.authMode === "officialAccount" ? officialModels : thirdPartyModels).filter(
               (model) => !modelIdsEqual(model, AUTO_REVIEW_MODEL),
             ),
           },
@@ -618,11 +619,14 @@ if (import.meta.env.DEV) {
           },
           declaredOfficialModelsByProvider: {
             ...previewConfig.declaredOfficialModelsByProvider,
-            [providerId]: officialModels,
+            [providerId]: previewConfig.localRouterEnabled ? officialModels : [],
           },
           upstreamModelsByProvider: {
             ...previewConfig.upstreamModelsByProvider,
-            [providerId]: supportedModels,
+            [providerId]: previewConfig.localRouterEnabled ? supportedModels : uniqueModelIds([
+              ...(previewConfig.upstreamModelsByProvider[providerId] || []),
+              ...supportedModels,
+            ]),
           },
         };
         refreshPreviewModelState();

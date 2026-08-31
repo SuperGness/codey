@@ -102,7 +102,9 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(app, /const canSyncCurrentProvider = !dirty \|\| pendingNativeRouterToggle/);
   assert.match(app, /canSyncCurrentProvider=\{canSyncCurrentProvider\}/);
   assert.match(app, /if \(shouldPersistNativeToggle\) \{\s*await persist\(config\)/);
-  assert.match(app, /if \(nativeMode\) \{\s*await syncCurrentProvider\(\);\s*return/);
+  assert.match(app, /if \(nativeMode\) \{\s*openModelPicker\(/);
+  assert.match(app, /result\.providerStatus\.provider\.official \? null : result\.providerStatus\.provider\.id/);
+  assert.match(app, /if \(nativeMode \|\| route\.authMode === "officialAccount"\) \{\s*await syncCurrentProvider\(\);\s*return/);
   assert.match(
     sections,
     /disabled=\{\s*routeConfigReadOnly \|\|\s*isBusy \|\|\s*dirty \|\|\s*config\.profiles\.length <= 1\s*\}/,

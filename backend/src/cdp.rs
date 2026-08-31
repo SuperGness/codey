@@ -471,7 +471,7 @@ fn prepare_injection_scripts_for_platform(
     );
     let mut descriptors = Vec::with_capacity(builtin_scripts.len() + user_scripts.len());
     for (id, name, script, probe, visibility, applicability) in builtin_scripts {
-        if !applicability.supports(platform) || (id == "model-whitelist" && !local_router_enabled) {
+        if !applicability.supports(platform) {
             continue;
         }
         let descriptor = InjectionScriptDescriptor {
@@ -481,7 +481,14 @@ fn prepare_injection_scripts_for_platform(
             visibility,
             probe: Some(probe),
         };
-        let prepared = prepare_script(script, slim_codex_pet);
+        let prepared = if id == "model-whitelist" {
+            Cow::Owned(format!(
+                "window.__codeyNativeModelSelectionOnly = {};\n{script}",
+                !local_router_enabled,
+            ))
+        } else {
+            prepare_script(script, slim_codex_pet)
+        };
         append_guarded_script(&mut core_bundle, &descriptor, prepared.as_ref());
         descriptors.push(descriptor);
     }
@@ -1715,7 +1722,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_local_router_omits_the_model_routing_injection_only() {
+    fn disabled_local_router_installs_only_native_model_selection_mode() {
         let prepared = prepare_injection_scripts_for_platform(
             false,
             false,
@@ -1728,9 +1735,9 @@ mod tests {
             prepared
                 .descriptors
                 .iter()
-                .all(|descriptor| descriptor.id != "model-whitelist")
+                .any(|descriptor| descriptor.id == "model-whitelist")
         );
-        assert!(!prepared.scripts[0].contains("__codeyModelWhitelistPatch"));
+        assert!(prepared.scripts[0].contains("window.__codeyNativeModelSelectionOnly = true;"));
         assert!(prepared.scripts[0].contains("window.__codeyBridgeHelpersInstalled"));
         assert!(
             prepared

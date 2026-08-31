@@ -162,10 +162,7 @@ export function buildSubagentModelOptions(
       ? uniqueModelIds(
         officialModels.length > 0 ? officialModels : modelState.officialModelIds,
       )
-      : uniqueModelIds([
-        ...modelState.thirdPartyModels,
-        ...modelState.upstreamModels,
-      ]);
+      : modelState.thirdPartyModels;
     for (const modelId of models) {
       appendOption({
         modelId,

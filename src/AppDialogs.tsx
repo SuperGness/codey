@@ -32,6 +32,7 @@ import {
 
 type ModelPickerDialogProps = {
   open: boolean;
+  routeConfigReadOnly: boolean;
   isBusy: boolean;
   busy: string | null;
   container: HTMLElement | null;
@@ -54,6 +55,7 @@ type ModelPickerDialogProps = {
 
 function ModelPickerDialogComponent({
   open,
+  routeConfigReadOnly,
   isBusy,
   busy,
   container,
@@ -116,6 +118,7 @@ function ModelPickerDialogComponent({
             {modelState.officialModels.length > 0
               ? "请选择本次官方账号登录可用的模型。"
               : "请选择同步到的线路模型，或手动输入当前线路支持的模型 ID。"}
+            {routeConfigReadOnly && " 保存只更新模型选择，线路连接配置保持只读。"}
           </DialogDescription>
         </DialogHeader>
         {modelSyncWarning && (
@@ -155,7 +158,7 @@ function ModelPickerDialogComponent({
         {modelInputError && (
           <p className="mt-1.5 text-[11px] leading-[1.45] text-[#d70015]" role="alert">{modelInputError}</p>
         )}
-        <div className="mt-3 flex items-center justify-between gap-4 rounded-[9px] border border-black/8 bg-[#f7f7f8] px-3 py-2.5">
+        {!routeConfigReadOnly && <div className="mt-3 flex items-center justify-between gap-4 rounded-[9px] border border-black/8 bg-[#f7f7f8] px-3 py-2.5">
           <div className="grid min-w-0 gap-0.5">
             <strong className="text-xs font-semibold text-[#1d1d1f]">Auto Review</strong>
             <small className="text-[10px] leading-[1.45] text-[#6e6e73]">
@@ -169,7 +172,7 @@ function ModelPickerDialogComponent({
             onCheckedChange={onAutoReviewSupportedChange}
             aria-label="当前线路支持 auto-review"
           />
-        </div>
+        </div>}
         <div className="my-3 max-h-[360px] overflow-y-auto rounded-[10px] border border-black/8 bg-[#fbfbfc] py-1 pl-1 pr-0.5 [scrollbar-color:rgba(99,99,104,0.46)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-button]:hidden [&::-webkit-scrollbar-thumb]:min-h-11 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-transparent [&::-webkit-scrollbar-thumb]:bg-black/40 [&::-webkit-scrollbar-thumb]:bg-clip-padding">
           {modelState.officialModels.length > 0 && (
             <>

@@ -18,7 +18,8 @@ use toml_edit::{
 #[cfg(test)]
 use crate::codex_config_guidance::PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT;
 use crate::codex_config_guidance::{
-    CODEY_FASTCTX_GUIDANCE, CODEY_FASTCTX_GUIDANCE_VERSIONS, ROOT_AGENT_COLLABORATION_USAGE_HINT,
+    CODEY_FASTCTX_GUIDANCE, CODEY_FASTCTX_GUIDANCE_VERSIONS, NO_WRITABLE_SUBAGENT_GUIDANCE,
+    READ_ONLY_AGENT_WRITE_GUARD, ROOT_AGENT_COLLABORATION_USAGE_HINT,
     ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS, ROOT_AGENT_MULTI_AGENT_MODE_HINT,
     SUBAGENT_GUIDANCE, SUBAGENT_GUIDANCE_VERSIONS, append_root_agent_collaboration_usage_hint,
     previous_default_agent_config_without_sandbox, remove_codey_fastctx_guidance,
@@ -26,7 +27,7 @@ use crate::codex_config_guidance::{
 };
 use crate::config::{
     CodeyConfig, SUBAGENT_REASONING_EFFORTS, SUBAGENT_ROLE_DEFAULT, SUBAGENT_ROLE_IDS,
-    SubagentRoleConfig, default_config_path,
+    SUBAGENT_ROLE_VISUAL_WORKER, SUBAGENT_ROLE_WORKER, SubagentRoleConfig, default_config_path,
 };
 #[cfg(test)]
 use crate::config::{DEFAULT_SUBAGENT_MODEL, DEFAULT_SUBAGENT_REASONING_EFFORT};
@@ -453,6 +454,8 @@ fn apply_isolated_runtime_router_config(
             SUBAGENT_GUIDANCE,
             &SUBAGENT_GUIDANCE_VERSIONS[1..],
         )?;
+        let root_instructions =
+            runtime_root_instructions_for_roles(&root_instructions, &runtime_roles);
         let collaboration_hint = read_or_create_constraint_file_with_exact_migration(
             &constraints_dir.join(CODEY_COLLABORATION_HINT_FILE),
             ROOT_AGENT_COLLABORATION_USAGE_HINT,
@@ -688,6 +691,19 @@ fn runtime_subagent_roles(
         .collect()
 }
 
+fn runtime_root_instructions_for_roles(
+    root_instructions: &str,
+    roles: &BTreeMap<String, SubagentRoleConfig>,
+) -> String {
+    let has_writable_role =
+        roles.contains_key(SUBAGENT_ROLE_WORKER) || roles.contains_key(SUBAGENT_ROLE_VISUAL_WORKER);
+    if has_writable_role {
+        root_instructions.to_string()
+    } else {
+        append_constraint_text(root_instructions, NO_WRITABLE_SUBAGENT_GUIDANCE)
+    }
+}
+
 fn prepare_runtime_agent_files(
     constraints_dir: &Path,
     roles: &BTreeMap<String, SubagentRoleConfig>,
@@ -825,6 +841,14 @@ fn render_runtime_agent(
             document.as_table_mut(),
             "developer_instructions",
             instructions,
+            "developer_instructions",
+        )?;
+    }
+    if !matches!(role, SUBAGENT_ROLE_WORKER | SUBAGENT_ROLE_VISUAL_WORKER) {
+        append_table_constraint_text(
+            document.as_table_mut(),
+            "developer_instructions",
+            READ_ONLY_AGENT_WRITE_GUARD,
             "developer_instructions",
         )?;
     }

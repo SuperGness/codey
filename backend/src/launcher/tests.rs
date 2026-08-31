@@ -140,18 +140,56 @@ fn generated_catalog_uses_the_route_aware_default_selector() {
 
 #[test]
 fn subagent_runtime_models_use_route_aware_aliases() {
-    let route_aliases = vec!["route-b/shared-model".to_string()];
+    let target = |provider: &str, model: &str, official: bool| RuntimeModelTarget {
+        route_id: provider.into(),
+        provider_id: provider.into(),
+        alias: local_router::model_alias(provider, model),
+        request_provider_id: ROUTER_PROVIDER_ID.into(),
+        request_model: model.into(),
+        upstream_model: model.into(),
+        official,
+    };
+    let targets = vec![
+        target("route-b", "shared-model", false),
+        target("route-b", "vendor/model", false),
+        target("openai", "gpt-5.6-sol", true),
+    ];
+    for (requested, expected) in [
+        ("shared-model", "route-b/shared-model"),
+        (" SHARED-MODEL ", "route-b/shared-model"),
+        ("route-b/shared-model", "route-b/shared-model"),
+        ("vendor/model", "route-b/vendor/model"),
+        ("gpt-5.6-sol", "openai/gpt-5.6-sol"),
+        ("unknown-model", "route-a/unknown-model"),
+    ] {
+        assert_eq!(
+            route_subagent_model("route-a", requested, &targets, false),
+            expected,
+            "requested: {requested}"
+        );
+    }
+
+    let mut ambiguous = targets.clone();
+    ambiguous.push(target("route-a", "shared-model", false));
     assert_eq!(
-        route_subagent_model("route-a", "shared-model", &route_aliases),
+        route_subagent_model("route-a", "shared-model", &ambiguous, false),
         "route-a/shared-model"
     );
     assert_eq!(
-        route_subagent_model("route-a", "gpt-5.6-sol", &route_aliases),
-        "route-a/gpt-5.6-sol"
-    );
-    assert_eq!(
-        route_subagent_model("route-a", "route-b/shared-model", &route_aliases),
+        route_subagent_model("route-a", "route-b/shared-model", &ambiguous, false),
         "route-b/shared-model"
+    );
+
+    let official_targets = vec![target("openai", "gpt-5.6-sol", true)];
+    for requested in ["gpt-5.6-sol", "openai/gpt-5.6-sol"] {
+        assert_eq!(
+            route_subagent_model("openai", requested, &official_targets, true),
+            "gpt-5.6-sol"
+        );
+    }
+    assert_eq!(
+        route_subagent_model("openai", "unknown-model", &official_targets, true),
+        "unknown-model"
     );
 }
 

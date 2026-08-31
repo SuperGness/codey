@@ -1264,6 +1264,7 @@ impl RouterServer {
                 }
             };
         body_mutated |= model_was_defaulted;
+        let subagent_request = request_is_subagent(&request);
         let binding_keys = request_binding_keys(&request);
         // Route lookup and binding refresh are both synchronous hash lookups.
         // Keeping them under one short critical section halves mutex traffic on
@@ -1277,9 +1278,7 @@ impl RouterServer {
             let resolved =
                 snapshot.target_for_request(&model, route_hint.as_deref(), bound_route.as_deref());
             if let Ok(resolved) = &resolved {
-                let refresh_session_binding = route_hint.is_some()
-                    && incoming_header(&request, "x-openai-subagent").is_none()
-                    && incoming_header(&request, "x-codex-parent-thread-id").is_none();
+                let refresh_session_binding = route_hint.is_some() && !subagent_request;
                 bindings.remember(
                     &binding_keys,
                     &resolved.provider_id,
@@ -1464,7 +1463,11 @@ impl RouterServer {
                 &resolved.upstream_model,
             );
         }
+        // Subagents always use their own HTTP/SSE upstream request. Keeping
+        // them out of the cached upstream WebSocket prevents concurrent agents
+        // from competing with the main agent for one stateful connection.
         if downstream_websocket
+            && !subagent_request
             && request_kind == ResponsesRequestKind::Create
             && stream_requested
             && bridge == ProtocolBridge::NativeResponses
@@ -1484,6 +1487,7 @@ impl RouterServer {
                 encoded_body = None;
             }
         }
+        let fallback_headers = headers.clone();
         let mut request_builder = self.client.post(upstream_url).headers(headers);
         request_builder = if bridge == ProtocolBridge::NativeResponses {
             // Native HTTP requests keep large input/tool fields as their raw
@@ -1521,9 +1525,40 @@ impl RouterServer {
         } else {
             UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT
         };
-        let response = match tokio::time::timeout(response_header_timeout, request_builder.send())
-            .await
-        {
+        let initial_response =
+            tokio::time::timeout(response_header_timeout, request_builder.send()).await;
+        let (response_result, effective_upstream_stream, effective_header_timeout) =
+            match initial_response {
+                Ok(Err(error))
+                    if subagent_request && upstream_stream_requested && error.is_connect() =>
+                {
+                    // A connect error happens before the request reaches the
+                    // provider, so retrying once as a non-streaming HTTP
+                    // request cannot duplicate model or tool side effects.
+                    // Errors after the request was sent are never replayed.
+                    let mut fallback_body = upstream_body.clone();
+                    fallback_body
+                        .as_object_mut()
+                        .expect("validated Responses body must remain an object")
+                        .insert("stream".to_string(), Value::Bool(false));
+                    let fallback_request = self
+                        .client
+                        .post(upstream_url)
+                        .headers(fallback_headers)
+                        .json(&fallback_body);
+                    (
+                        tokio::time::timeout(
+                            UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT,
+                            fallback_request.send(),
+                        )
+                        .await,
+                        false,
+                        UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT,
+                    )
+                }
+                response => (response, upstream_stream_requested, response_header_timeout),
+            };
+        let response = match response_result {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 let timeout = error.is_timeout();
@@ -1544,8 +1579,8 @@ impl RouterServer {
                         "upstreamProtocol": bridge.upstream_protocol().label(),
                         "protocolBridge": bridge.label(),
                         "requestKind": request_kind.label(),
-                        "upstreamStream": upstream_stream_requested,
-                        "responseHeaderTimeoutSeconds": response_header_timeout.as_secs(),
+                        "upstreamStream": effective_upstream_stream,
+                        "responseHeaderTimeoutSeconds": effective_header_timeout.as_secs(),
                         "requestId": current_router_request_id(),
                     }),
                 );
@@ -1592,8 +1627,8 @@ impl RouterServer {
                         "upstreamProtocol": bridge.upstream_protocol().label(),
                         "protocolBridge": bridge.label(),
                         "requestKind": request_kind.label(),
-                        "upstreamStream": upstream_stream_requested,
-                        "responseHeaderTimeoutSeconds": response_header_timeout.as_secs(),
+                        "upstreamStream": effective_upstream_stream,
+                        "responseHeaderTimeoutSeconds": effective_header_timeout.as_secs(),
                         "requestId": current_router_request_id(),
                     }),
                 );
@@ -1612,8 +1647,8 @@ impl RouterServer {
             }
         };
         match bridge {
-            ProtocolBridge::ResponsesToChatCompletions if response.status().is_success() => {
-                write_chat_completions_as_responses(
+            ProtocolBridge::ResponsesToAnthropicMessages => {
+                write_anthropic_messages_as_responses(
                     downstream,
                     response,
                     &resolved.upstream_model,
@@ -1623,8 +1658,12 @@ impl RouterServer {
                 )
                 .await
             }
-            ProtocolBridge::ResponsesToAnthropicMessages => {
-                write_anthropic_messages_as_responses(
+            _ if !response.status().is_success() => {
+                write_upstream_http_error(downstream, response, &resolved, bridge, request_kind)
+                    .await
+            }
+            ProtocolBridge::ResponsesToChatCompletions => {
+                write_chat_completions_as_responses(
                     downstream,
                     response,
                     &resolved.upstream_model,
@@ -2007,6 +2046,11 @@ fn incoming_header<'a>(request: &'a HttpRequest, header_name: &str) -> Option<&'
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(header_name))
         .map(|(_, value)| value.as_str())
+}
+
+fn request_is_subagent(request: &HttpRequest) -> bool {
+    incoming_header(request, "x-openai-subagent").is_some()
+        || incoming_header(request, "x-codex-parent-thread-id").is_some()
 }
 
 fn incoming_openai_authorization<'a>(
@@ -3501,6 +3545,11 @@ fn append_chat_message_item(
             }
             Some("tool_search_output") => {
                 append_responses_tool_search_output_item(object, messages)
+            }
+            Some("web_search_call")
+                if object.get("status").and_then(Value::as_str) == Some("completed") =>
+            {
+                Ok(())
             }
             Some(item_type) if is_opaque_responses_input_item_type(item_type) => Ok(()),
             Some("input_text" | "output_text" | "text" | "input_image" | "image_url") => {
@@ -5861,6 +5910,11 @@ impl WebSocketResponsesDownstream {
             }
         };
 
+        let upstream_model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
         let message_body = body
             .as_object_mut()
             .context("Responses WebSocket 上游请求必须是 JSON 对象")?;
@@ -5910,7 +5964,16 @@ impl WebSocketResponsesDownstream {
                             ),
                         };
                     let mut raw_json_text = raw_json_text;
-                    for event in events {
+                    for mut event in events {
+                        if responses_event_is_failure(&event) {
+                            annotate_upstream_websocket_failure(
+                                &mut event,
+                                route,
+                                &upstream_model,
+                                upstream_url,
+                            );
+                            raw_json_text = None;
+                        }
                         let terminal = responses_event_is_terminal(&event);
                         if let Some(response_id) = responses_event_response_id(&event) {
                             produced_response_id = Some(response_id.to_string());
@@ -5991,6 +6054,13 @@ fn responses_event_is_terminal(event: &Value) -> bool {
     matches!(
         event.get("type").and_then(Value::as_str),
         Some("response.completed" | "response.failed" | "response.incomplete" | "error")
+    )
+}
+
+fn responses_event_is_failure(event: &Value) -> bool {
+    matches!(
+        event.get("type").and_then(Value::as_str),
+        Some("response.failed" | "error")
     )
 }
 
@@ -6528,6 +6598,249 @@ async fn write_proxy_response(
     Ok(())
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct UpstreamErrorSummary {
+    message: Option<String>,
+    error_type: Option<String>,
+    code: Option<String>,
+}
+
+fn first_string_at<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a str> {
+    pointers
+        .iter()
+        .find_map(|pointer| value.pointer(pointer).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn sanitize_upstream_error_text(
+    value: &str,
+    route: &RouteTarget,
+    max_chars: usize,
+) -> Option<String> {
+    let mut sanitized = value.to_string();
+    if let Ok(headers) = route.upstream_headers.as_ref() {
+        for secret in headers.values().filter_map(|value| value.to_str().ok()) {
+            let secret = secret.trim();
+            if secret.len() < 4 {
+                continue;
+            }
+            sanitized = sanitized.replace(secret, "***");
+            if let Some((scheme, token)) = secret.split_once(' ')
+                && scheme.eq_ignore_ascii_case("bearer")
+                && token.trim().len() >= 4
+            {
+                sanitized = sanitized.replace(token.trim(), "***");
+            }
+        }
+    }
+    let collapsed = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let mut chars = collapsed.chars();
+    let mut bounded = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    Some(bounded)
+}
+
+fn upstream_error_summary(value: &Value, route: &RouteTarget) -> UpstreamErrorSummary {
+    let message = first_string_at(
+        value,
+        &[
+            "/response/error/message",
+            "/error/error/message",
+            "/error/message",
+            "/message",
+            "/detail",
+            "/error",
+        ],
+    )
+    .and_then(|message| sanitize_upstream_error_text(message, route, 512));
+    let error_type = first_string_at(
+        value,
+        &["/response/error/type", "/error/error/type", "/error/type"],
+    )
+    .and_then(|kind| sanitize_upstream_error_text(kind, route, 128));
+    let code = first_string_at(
+        value,
+        &[
+            "/response/error/code",
+            "/error/error/code",
+            "/error/code",
+            "/code",
+        ],
+    )
+    .and_then(|code| sanitize_upstream_error_text(code, route, 128));
+    UpstreamErrorSummary {
+        message,
+        error_type,
+        code,
+    }
+}
+
+fn upstream_error_detail(summary: &UpstreamErrorSummary) -> Option<String> {
+    let mut detail = summary.message.clone().unwrap_or_default();
+    let mut attributes = Vec::new();
+    if let Some(error_type) = summary.error_type.as_deref() {
+        attributes.push(format!("类型：{error_type}"));
+    }
+    if let Some(code) = summary.code.as_deref() {
+        attributes.push(format!("代码：{code}"));
+    }
+    if !attributes.is_empty() {
+        if detail.is_empty() {
+            detail = attributes.join("；");
+        } else {
+            detail.push_str(&format!("（{}）", attributes.join("；")));
+        }
+    }
+    (!detail.is_empty()).then_some(detail)
+}
+
+fn bounded_upstream_request_id(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut chars = trimmed.chars().filter(|character| !character.is_control());
+    let bounded = chars.by_ref().take(128).collect::<String>();
+    (!bounded.is_empty()).then_some(bounded)
+}
+
+fn upstream_request_id_from_headers(headers: &HeaderMap) -> Option<String> {
+    ["x-request-id", "request-id", "x-amzn-requestid", "cf-ray"]
+        .iter()
+        .find_map(|name| headers.get(*name).and_then(|value| value.to_str().ok()))
+        .and_then(bounded_upstream_request_id)
+}
+
+async fn write_upstream_http_error<D>(
+    downstream: &mut D,
+    response: reqwest::Response,
+    resolved: &RouteSelection,
+    bridge: ProtocolBridge,
+    request_kind: ResponsesRequestKind,
+) -> Result<()>
+where
+    D: ResponsesDownstream + ?Sized,
+{
+    let status = response.status().as_u16();
+    let upstream_request_id = upstream_request_id_from_headers(response.headers());
+    let body = read_bounded_upstream_error_body(response).await?;
+    let parsed = serde_json::from_slice::<Value>(&body).ok();
+    let summary = parsed
+        .as_ref()
+        .map(|value| upstream_error_summary(value, &resolved.route))
+        .unwrap_or_default();
+    let detail = upstream_error_detail(&summary);
+    let mut message = format!(
+        "Codey 线路「{}」请求模型 {} 时，上游返回 HTTP {status}",
+        route_display_name(&resolved.route),
+        resolved.upstream_model
+    );
+    if let Some(detail) = detail.as_deref() {
+        message.push_str(&format!("：{detail}"));
+    }
+    if let Some(request_id) = upstream_request_id.as_deref() {
+        message.push_str(&format!("（上游请求 ID：{request_id}）"));
+    }
+    crate::error_log::record_failure(
+        "local_router_upstream_http_error",
+        "proxy_local_router_response",
+        message.clone(),
+        serde_json::json!({
+            "routeId": resolved.provider_id.as_str(),
+            "routeName": resolved.route.route_name.as_str(),
+            "requestedModel": resolved.requested_model.as_str(),
+            "model": resolved.upstream_model.as_str(),
+            "status": status,
+            "upstreamRequestId": upstream_request_id,
+            "upstreamErrorType": summary.error_type,
+            "upstreamErrorCode": summary.code,
+            "upstream": resolved.route.upstream_authority.as_str(),
+            "upstreamProtocol": bridge.upstream_protocol().label(),
+            "protocolBridge": bridge.label(),
+            "requestKind": request_kind.label(),
+            "requestId": current_router_request_id(),
+        }),
+    );
+    if downstream.is_websocket() {
+        downstream
+            .write_error(
+                status,
+                "upstream_http_error",
+                message,
+                Some(&resolved.route),
+            )
+            .await
+    } else {
+        downstream
+            .write_text_error(status, "upstream_http_error", message)
+            .await
+    }
+}
+
+fn annotate_upstream_websocket_failure(
+    event: &mut Value,
+    route: &RouteTarget,
+    model: &str,
+    upstream_url: &str,
+) {
+    let summary = upstream_error_summary(event, route);
+    let detail =
+        upstream_error_detail(&summary).unwrap_or_else(|| "上游未提供具体错误信息".to_string());
+    let message = format!(
+        "Codey 线路「{}」请求模型 {model} 时，Responses WebSocket 上游返回错误：{detail}",
+        route_display_name(route)
+    );
+    let upstream_request_id = first_string_at(
+        event,
+        &[
+            "/response/error/request_id",
+            "/error/request_id",
+            "/request_id",
+        ],
+    )
+    .and_then(bounded_upstream_request_id);
+    crate::error_log::record_failure(
+        "local_router_upstream_websocket_error",
+        "proxy_responses_websocket_event",
+        message.clone(),
+        serde_json::json!({
+            "routeId": route.provider_id.as_str(),
+            "routeName": route.route_name.as_str(),
+            "model": model,
+            "upstream": route.upstream_authority.as_str(),
+            "upstreamEndpoint": upstream_url,
+            "upstreamRequestId": upstream_request_id,
+            "upstreamErrorType": summary.error_type,
+            "upstreamErrorCode": summary.code,
+            "requestId": current_router_request_id(),
+        }),
+    );
+
+    let mut updated = false;
+    if let Some(error) = event
+        .get_mut("response")
+        .and_then(Value::as_object_mut)
+        .and_then(|response| response.get_mut("error"))
+        .and_then(Value::as_object_mut)
+    {
+        error.insert("message".to_string(), Value::String(message.clone()));
+        updated = true;
+    }
+    if !updated && let Some(error) = event.get_mut("error").and_then(Value::as_object_mut) {
+        error.insert("message".to_string(), Value::String(message.clone()));
+        updated = true;
+    }
+    if !updated && let Some(object) = event.as_object_mut() {
+        object.insert("message".to_string(), Value::String(message));
+    }
+}
+
 async fn write_chat_completions_as_responses<D>(
     downstream: &mut D,
     response: reqwest::Response,
@@ -6695,8 +7008,7 @@ fn anthropic_upstream_error_detail(body: &[u8]) -> Option<String> {
 
 async fn read_bounded_upstream_error_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
     let mut body = Vec::new();
-    while let Some(chunk) =
-        read_upstream_chunk(&mut response, "读取 Anthropic Messages 上游错误响应失败").await?
+    while let Some(chunk) = read_upstream_chunk(&mut response, "读取上游错误响应失败").await?
     {
         let remaining = MAX_UPSTREAM_ERROR_BYTES.saturating_sub(body.len());
         if remaining == 0 {
@@ -9044,6 +9356,13 @@ mod tests {
     async fn connect_router_websocket(
         endpoint: &RuntimeRouterEndpoint,
     ) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
+        connect_router_websocket_with_headers(endpoint, &[]).await
+    }
+
+    async fn connect_router_websocket_with_headers(
+        endpoint: &RuntimeRouterEndpoint,
+        headers: &[(&str, &str)],
+    ) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
         let url = format!(
             "{}/responses",
             endpoint.base_url.replacen("http://", "ws://", 1)
@@ -9053,6 +9372,12 @@ mod tests {
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", endpoint.token)).unwrap(),
         );
+        for (name, value) in headers {
+            request.headers_mut().insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
         connect_async_with_config(request, None, false)
             .await
             .unwrap()
@@ -9794,6 +10119,92 @@ mod tests {
                 .unwrap_or_default()
                 .contains(RESPONSES_WEBSOCKET_BETA)
         );
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn subagents_use_isolated_sse_and_accept_non_streaming_http_fallback() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for sequence in 1..=2 {
+                let (mut stream, _) = upstream.accept().await.unwrap();
+                let request = read_http_request(&mut stream).await.unwrap();
+                assert_eq!(
+                    request.method, "POST",
+                    "subagents must not open upstream WS"
+                );
+                assert_eq!(request.path, "/v1/responses");
+                let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+                assert_eq!(body["stream"], true, "subagents should prefer SSE");
+
+                let response = json!({
+                    "id":format!("resp-subagent-{sequence}"),
+                    "object":"response",
+                    "status":"completed",
+                    "model":body["model"],
+                    "output":[],
+                });
+                let (content_type, payload) = if sequence == 1 {
+                    (
+                        "text/event-stream",
+                        format!(
+                            "event: response.completed\ndata: {}\n\n",
+                            serde_json::to_string(&json!({
+                                "type":"response.completed",
+                                "response":response,
+                            }))
+                            .unwrap()
+                        ),
+                    )
+                } else {
+                    (
+                        "application/json",
+                        serde_json::to_string(&response).unwrap(),
+                    )
+                };
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                            payload.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                requests.push(body);
+            }
+            requests
+        });
+
+        let (mut config, provider_id, model) =
+            router_config(format!("http://{upstream_address}/v1"));
+        config.profiles[0].supports_websockets = true;
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let alias = model_alias(&provider_id, &model);
+
+        for (header, value, input) in [
+            ("x-openai-subagent", "codey_worker", "sse child"),
+            (
+                "x-codex-parent-thread-id",
+                "parent-thread",
+                "http fallback child",
+            ),
+        ] {
+            let mut socket =
+                connect_router_websocket_with_headers(&endpoint, &[(header, value)]).await;
+            let events = send_router_websocket_request(&mut socket, &alias, input).await;
+            assert_eq!(events.last().unwrap()["type"], "response.completed");
+            socket.close(None).await.unwrap();
+        }
+
+        let requests = upstream_task.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0]["input"], "sse child");
+        assert_eq!(requests[1]["input"], "http fallback child");
         router.stop().await.unwrap();
     }
 
@@ -11711,13 +12122,19 @@ mod tests {
     }
 
     #[test]
-    fn opaque_responses_history_items_are_ignored_during_chat_fallback_conversion() {
+    fn nonportable_responses_history_items_are_ignored_during_chat_fallback_conversion() {
         let body = json!({
             "model":"provider-model",
             "input":[
                 {"role":"user","content":"continue"},
                 {"type":"reasoning","id":"rs_1","encrypted_content":"opaque-reasoning"},
-                {"type":"compaction","id":"cmp_1","encrypted_content":"opaque-window"}
+                {"type":"compaction","id":"cmp_1","encrypted_content":"opaque-window"},
+                {
+                    "type":"web_search_call",
+                    "id":"ws_1",
+                    "status":"completed",
+                    "action":{"type":"search","query":"provider-side query"}
+                }
             ]
         });
 
@@ -11727,6 +12144,7 @@ mod tests {
             json!([{"role":"user","content":"continue"}])
         );
         assert!(!chat.to_string().contains("opaque"));
+        assert!(!chat.to_string().contains("provider-side query"));
 
         let missing = responses_to_chat_completions_body(&json!({
             "model":"provider-model",
@@ -11744,6 +12162,16 @@ mod tests {
         }))
         .unwrap_err();
         assert!(trigger.to_string().contains("compaction_trigger"));
+
+        let active_search = responses_to_chat_completions_body(&json!({
+            "model":"provider-model",
+            "input":[
+                {"role":"user","content":"continue"},
+                {"type":"web_search_call","status":"in_progress"}
+            ]
+        }))
+        .unwrap_err();
+        assert!(active_search.to_string().contains("web_search_call"));
     }
 
     #[test]
@@ -13065,6 +13493,128 @@ mod tests {
         assert_eq!(responses["output"][1]["arguments"], "{\"q\":1}");
         assert_eq!(responses["usage"]["input_tokens"], 4);
         assert_eq!(responses["usage"]["output_tokens"], 3);
+    }
+
+    #[test]
+    fn upstream_error_summary_extracts_context_and_redacts_route_credentials() {
+        let (config, provider_id, _) = router_config("https://relay.example/v1".into());
+        let snapshot = RouterSnapshot::from_config(&config);
+        let route = snapshot.routes.get(&provider_id).unwrap();
+        let summary = upstream_error_summary(
+            &json!({
+                "error": {
+                    "message":"image is too large for sk-upstream\nplease resize it",
+                    "type":"invalid_request_error",
+                    "code":"image_too_large"
+                }
+            }),
+            route,
+        );
+
+        assert_eq!(
+            summary.message.as_deref(),
+            Some("image is too large for *** please resize it")
+        );
+        assert_eq!(summary.error_type.as_deref(), Some("invalid_request_error"));
+        assert_eq!(summary.code.as_deref(), Some("image_too_large"));
+        assert_eq!(
+            upstream_error_detail(&summary).as_deref(),
+            Some(
+                "image is too large for *** please resize it（类型：invalid_request_error；代码：image_too_large）"
+            )
+        );
+    }
+
+    #[test]
+    fn websocket_failure_event_keeps_provider_codes_and_adds_route_context() {
+        let (config, provider_id, _) = router_config("https://relay.example/v1".into());
+        let snapshot = RouterSnapshot::from_config(&config);
+        let route = snapshot.routes.get(&provider_id).unwrap();
+        let mut event = json!({
+            "type":"response.failed",
+            "response":{
+                "error":{
+                    "message":"openai_error",
+                    "type":"bad_response_status_code",
+                    "code":"bad_response_status_code"
+                }
+            }
+        });
+
+        annotate_upstream_websocket_failure(
+            &mut event,
+            route,
+            "provider-model",
+            "wss://relay.example/v1/responses",
+        );
+
+        let error = &event["response"]["error"];
+        assert_eq!(error["type"], "bad_response_status_code");
+        assert_eq!(error["code"], "bad_response_status_code");
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains("线路「Relay」"));
+        assert!(message.contains("provider-model"));
+        assert!(message.contains("openai_error"));
+        assert!(message.contains("bad_response_status_code"));
+    }
+
+    #[tokio::test]
+    async fn native_responses_upstream_http_error_is_preserved_as_safe_text() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            let body = r#"{"error":{"message":"image exceeds the provider limit for sk-upstream","type":"invalid_request_error","code":"image_too_large"}}"#;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 429 Too Many Requests\r\ncontent-type: application/json\r\nx-request-id: upstream-request-123\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            request.path
+        });
+        let (config, provider_id, model) =
+            router_config(format!("http://{upstream_address}/v1/responses"));
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+
+        let response = reqwest::Client::new()
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .json(&json!({
+                "model": model_alias(&provider_id, &model),
+                "input":"inspect the image",
+                "stream":true
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("text/plain")
+        );
+        let body = response.text().await.unwrap();
+        assert!(body.contains("线路「Relay」"));
+        assert!(body.contains("provider-model"));
+        assert!(body.contains("HTTP 429"));
+        assert!(body.contains("image exceeds the provider limit for ***"));
+        assert!(body.contains("image_too_large"));
+        assert!(body.contains("上游请求 ID：upstream-request-123"));
+        assert!(!body.contains("sk-upstream"));
+        assert_eq!(upstream_task.await.unwrap(), "/v1/responses");
+        router.stop().await.unwrap();
     }
 
     #[tokio::test]

@@ -144,12 +144,11 @@ pub fn cleanup(home: &Path) -> Result<SessionIndexCleanupReport> {
         .map(|candidate| candidate.id.clone())
         .collect::<HashSet<_>>();
     let live_thread_scan = collect_live_thread_ids(home, &candidate_ids)?;
-    // An empty result is only authoritative when at least one rollout or
-    // session-aware SQLite database was actually available. During Windows
-    // packaged-app startup these sources can be temporarily absent; treating
-    // "not discovered" as "confirmed orphan" would erase the complete index
-    // before Codex gets a chance to hydrate it.
-    if live_thread_scan.authoritative_sources == 0 {
+    // A discoverable schema (including an old empty catalog) is not evidence
+    // that every indexed thread was deleted. If no candidate can be confirmed
+    // live, keep the whole index and retry discovery on a later startup. Exact
+    // user-requested deletions use remove_thread and do not need this inference.
+    if live_thread_scan.authoritative_sources == 0 || live_thread_scan.ids.is_empty() {
         return Ok(SessionIndexCleanupReport {
             scanned_entries: plan.scanned_entries,
             ..SessionIndexCleanupReport::default()
@@ -771,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_prunes_all_exact_duplicate_orphans() {
+    fn explicit_delete_removes_all_exact_duplicate_entries() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
         let sqlite = home.join("sqlite");
@@ -790,7 +789,7 @@ mod tests {
         )
         .unwrap();
 
-        let report = cleanup(home).unwrap();
+        let report = remove_thread(home, "duplicate-orphan").unwrap();
 
         assert_eq!(report.pruned_entries, 2);
         assert!(
@@ -821,6 +820,70 @@ mod tests {
         assert!(report.backup_dir.is_none());
         assert_eq!(fs::read_to_string(index_path).unwrap(), original);
         assert!(!cleanup_marker_path(home).exists());
+    }
+
+    #[test]
+    fn cleanup_preserves_history_when_catalog_cannot_confirm_any_indexed_thread() {
+        for catalog_has_unrelated_thread in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path();
+            let sqlite = home.join("sqlite");
+            fs::create_dir_all(&sqlite).unwrap();
+            let db = Connection::open(sqlite.join("codex.db")).unwrap();
+            db.execute("CREATE TABLE local_thread_catalog (thread_id TEXT)", [])
+                .unwrap();
+            if catalog_has_unrelated_thread {
+                db.execute(
+                    "INSERT INTO local_thread_catalog VALUES ('other-thread')",
+                    [],
+                )
+                .unwrap();
+            }
+            drop(db);
+            // A newer or externally located state database need not be among
+            // the known paths. An old catalog must not invalidate this history.
+            let newer = Connection::open(home.join("state_6.sqlite")).unwrap();
+            newer
+                .execute_batch(
+                    "CREATE TABLE threads (id TEXT); INSERT INTO threads VALUES ('history-one');",
+                )
+                .unwrap();
+            drop(newer);
+            let original = format!(
+                "{}\n{}\n",
+                index_line("history-one", "first"),
+                index_line("history-two", "second")
+            );
+            let index = home.join("session_index.jsonl");
+            fs::write(&index, &original).unwrap();
+
+            let report = cleanup(home).unwrap();
+
+            assert_eq!(report.pruned_entries, 0);
+            assert!(report.backup_dir.is_none());
+            assert_eq!(fs::read_to_string(&index).unwrap(), original);
+            assert!(!cleanup_marker_path(home).exists());
+        }
+    }
+
+    #[test]
+    fn explicit_delete_aborts_if_another_writer_appends_after_planning() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let path = home.join("session_index.jsonl");
+        fs::write(&path, format!("{}\n", index_line("target", "remove"))).unwrap();
+        let plan = plan_cleanup_matching(&path, |candidate| candidate.id == "target")
+            .unwrap()
+            .unwrap();
+        let appended = format!(
+            "{}{}\n",
+            plan.original_text,
+            index_line("new-thread", "keep")
+        );
+        fs::write(&path, &appended).unwrap();
+
+        assert!(apply_cleanup_plan(home, plan, 0, false).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), appended);
     }
 
     #[test]
@@ -876,11 +939,12 @@ mod tests {
         assert_eq!(fs::read_to_string(&index_path).unwrap(), index);
 
         fs::write(&index_path, format!("{index}\n")).unwrap();
-        assert_eq!(cleanup(home).unwrap().pruned_entries, 1);
-        assert!(
-            !fs::read_to_string(index_path)
-                .unwrap()
-                .contains("temporarily-live")
+        // A changed index triggers discovery, but an empty catalog cannot
+        // prove that the last historical thread should be removed.
+        assert_eq!(cleanup(home).unwrap().pruned_entries, 0);
+        assert_eq!(
+            fs::read_to_string(index_path).unwrap(),
+            format!("{index}\n")
         );
     }
 

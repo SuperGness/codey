@@ -940,6 +940,17 @@ developer_instructions = """
 image_generation = false
 "#####;
 
+pub(crate) const READ_ONLY_AGENT_WRITE_GUARD: &str = "\
+当前任务类型是只读子代理，只能检查、搜索、分析和回报。不要调用 `replace`、`apply_patch`、\
+文件写入命令或任何会创建、修改、删除、移动文件及改变外部状态的工具。即使任务正文要求写入，\
+也不要尝试或重试；请停止实施，把需要修改的内容和证据交回主代理，由主代理完成写入。";
+
+pub(crate) const NO_WRITABLE_SUBAGENT_GUIDANCE: &str = "\
+本次运行没有启用 `codey_worker` 或 `codey_visual_worker`，因此没有可写子代理。所有创建、修改、\
+删除、移动文件或其他会改变状态的工作都由主代理直接完成；只读子代理只能承担检索、分析和证据\
+收集。不得把写入任务改派给 `default` 或任何只读角色，也不得要求它们尝试 `replace`、\
+`apply_patch` 或其他写入工具。";
+
 pub(crate) fn subagent_source_config(role: &str) -> Option<&'static str> {
     match role {
         "codey_quick_scan" => Some(QUICK_SCAN_AGENT_CONFIG),

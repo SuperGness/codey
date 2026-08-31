@@ -65,7 +65,7 @@ class FakeElement extends FakeElementCore {
 function loadInjection({
   bridge,
   sessionController,
-  dispatcher,
+  dispatcher = async () => {},
   now = () => Date.now(),
   tasksSectionHeading = "Tasks",
   tasksSectionLabel = "",
@@ -129,6 +129,10 @@ function loadInjection({
   const placeholder = new FakeElement();
   const bridgeCalls = [];
   const dispatcherCalls = [];
+  const reloadCalls = [];
+  const timers = new Map();
+  let nextTimerId = 0;
+  const location = { pathname: "/", reload() { reloadCalls.push(true); }, search: "" };
   const documentListeners = new Map();
   const document = {
     body,
@@ -154,6 +158,10 @@ function loadInjection({
         return body
           .querySelectorAll("[data-app-action-sidebar-thread-id]")
           .filter((element) => element.hasAttribute("data-app-action-sidebar-thread-title"));
+      }
+      if (selector === '[data-app-action-sidebar-thread-active="true"]') {
+        return body.querySelectorAll("[data-app-action-sidebar-thread-id]")
+          .filter((element) => element.getAttribute("data-app-action-sidebar-thread-active") === "true");
       }
       if (selector === "[data-app-action-sidebar-project-row][data-app-action-sidebar-project-id]") {
         return project.parentElement ? [project] : [];
@@ -181,7 +189,7 @@ function loadInjection({
       return { status: "ok" };
     },
     addEventListener() {},
-    clearTimeout() {},
+    clearTimeout(id) { timers.delete(id); },
     dispatchEvent() {},
     innerHeight: 800,
     innerWidth: 1200,
@@ -193,9 +201,10 @@ function loadInjection({
     },
     removeEventListener() {},
     setTimeout(callback, delay = 0) {
-      if (delay > 1000) return 1;
-      callback();
-      return 1;
+      const id = ++nextTimerId;
+      if (delay > 1000) timers.set(id, { callback, delay });
+      else callback();
+      return id;
     },
   };
   if (sessionController) window.__codeyCodexSessionController = sessionController;
@@ -232,7 +241,7 @@ function loadInjection({
     URLSearchParams,
     console,
     document,
-    location: { pathname: "/", reload() {}, search: "" },
+    location,
     window,
   });
   return {
@@ -241,6 +250,15 @@ function loadInjection({
     archiveTooltip,
     bridgeCalls,
     dispatcherCalls,
+    reloadCalls,
+    location,
+    fireTimers(delay) {
+      for (const [id, timer] of [...timers]) {
+        if (timer.delay !== delay) continue;
+        timers.delete(id);
+        timer.callback();
+      }
+    },
     document,
     project,
     projectActionButton,
@@ -383,6 +401,174 @@ test("uses AppServerManager cache eviction and deletion notification on current 
     "manager:deleted:thread-1",
     "manager:refresh",
   ]);
+});
+
+test("cancels deletion when a virtualized row changes identity during confirmation", async () => {
+  const runtime = loadInjection();
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.thread.setAttribute("data-app-action-sidebar-thread-id", "local:thread-2");
+  runtime.thread.setAttribute("data-app-action-sidebar-thread-title", "另一条会话");
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete"), false);
+  assert.equal(runtime.dispatcherCalls.some(({ signal }) => signal === "unsubscribe-thread-for-host"), false);
+  assert.equal(runtime.thread.getAttribute("data-codey-session-delete-state"), null);
+  assert.match(runtime.document.getElementById("codey-runtime-toast")?.textContent, /重新确认/);
+});
+
+test("keeps the confirmed title when the same conversation is renamed", async () => {
+  const runtime = loadInjection();
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.thread.setAttribute("data-app-action-sidebar-thread-title", "更新后的标题");
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const deletion = runtime.bridgeCalls.find(({ path }) => path === "/session/delete");
+  assert.equal(deletion?.payload.sessionId, "thread-1");
+  assert.equal(deletion?.payload.title, "待删除会话");
+});
+
+test("leaves the active conversation before eviction and hard deletion", async () => {
+  const events = [];
+  const runtime = loadInjection({
+    bridge: async (path) => {
+      if (path === "/session/delete") {
+        events.push("delete");
+        return { status: "ok", deleted: true };
+      }
+      return { status: "ok" };
+    },
+    dispatcher: async (signal) => {
+      if (signal === "unsubscribe-thread-for-host") {
+        assert.equal(runtime.thread.getAttribute("data-app-action-sidebar-thread-active"), "false");
+        assert.equal(runtime.location.pathname, "/");
+        events.push("discard");
+      }
+    },
+  });
+  runtime.thread.setAttribute("data-app-action-sidebar-thread-active", "true");
+  runtime.location.pathname = "/c/thread-1";
+  runtime.newTaskButton.addEventListener("click", () => {
+    events.push("navigate");
+    runtime.thread.setAttribute("data-app-action-sidebar-thread-active", "false");
+    runtime.location.pathname = "/";
+  });
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(events, ["navigate", "discard", "delete"]);
+  assert.deepEqual(runtime.reloadCalls, []);
+});
+
+test("does not evict or delete if navigation leaves the current page on the target", async () => {
+  const runtime = loadInjection();
+  runtime.thread.setAttribute("data-app-action-sidebar-thread-active", "true");
+  runtime.location.pathname = "/c/thread-1";
+  // A sidebar update alone does not prove that React finished navigation.
+  runtime.newTaskButton.addEventListener("click", () => {
+    runtime.thread.setAttribute("data-app-action-sidebar-thread-active", "false");
+    runtime.document.body.appendChild(new FakeElement("div", {
+      "data-app-action-sidebar-thread-active": "true",
+      "data-app-action-sidebar-thread-id": "local:thread-2",
+      "data-app-action-sidebar-thread-title": "新选中的会话",
+    }));
+  });
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete"), false);
+  assert.equal(runtime.dispatcherCalls.some(({ signal }) => signal === "unsubscribe-thread-for-host"), false);
+  assert.equal(runtime.thread.getAttribute("data-codey-session-delete-state"), null);
+  assert.match(runtime.document.getElementById("codey-runtime-toast")?.textContent, /未执行删除/);
+  assert.deepEqual(runtime.reloadCalls, []);
+});
+
+test("aborts hard deletion when native unsubscribe rejects or times out", async (t) => {
+  for (const outcome of ["reject", "timeout"]) {
+    await t.test(outcome, async () => {
+      const runtime = loadInjection({
+        dispatcher: async (signal) => {
+          if (signal !== "unsubscribe-thread-for-host") return;
+          if (outcome === "reject") throw new Error("app-server unavailable");
+          return new Promise(() => {});
+        },
+      });
+      runtime.thread.querySelector("[data-codey-session-delete]").click();
+      runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+      await new Promise((resolve) => setImmediate(resolve));
+      if (outcome === "timeout") {
+        runtime.fireTimers(5_000);
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+
+      assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete"), false);
+      assert.equal(runtime.thread.getAttribute("data-codey-session-delete-state"), null);
+      assert.match(runtime.document.getElementById("codey-runtime-toast")?.textContent, /未执行删除/);
+      assert.deepEqual(runtime.reloadCalls, []);
+    });
+  }
+});
+
+test("does not delete a conversation reopened while native unsubscribe was pending", async () => {
+  let finishUnsubscribe;
+  const runtime = loadInjection({
+    dispatcher: async (signal) => {
+      if (signal !== "unsubscribe-thread-for-host") return;
+      return new Promise((resolve) => { finishUnsubscribe = resolve; });
+    },
+  });
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  runtime.location.pathname = "/c/thread-1";
+  finishUnsubscribe();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete"), false);
+  assert.equal(runtime.thread.getAttribute("data-codey-session-delete-state"), null);
+  assert.match(runtime.document.getElementById("codey-runtime-toast")?.textContent, /已重新打开/);
+  assert.deepEqual(runtime.reloadCalls, []);
+});
+
+test("does not evict the active page if the user returns during a backend deletion", async () => {
+  let finishDelete;
+  const runtime = loadInjection({
+    bridge: async (path) => {
+      if (path !== "/session/delete") return { status: "ok" };
+      return new Promise((resolve) => { finishDelete = resolve; });
+    },
+  });
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  runtime.location.pathname = "/c/thread-1";
+  finishDelete({ status: "ok", deleted: true });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(runtime.thread.getAttribute("data-codey-session-delete-state"), "deleted");
+  assert.equal(runtime.dispatcherCalls.some(({ signal }) => signal === "handle-app-server-notification-for-host"), false);
+  assert.match(runtime.document.getElementById("codey-runtime-toast")?.textContent, /列表同步暂未完成/);
+  assert.deepEqual(runtime.reloadCalls, []);
+});
+
+test("does not reload other conversations when post-delete synchronization fails", async () => {
+  const runtime = loadInjection({
+    dispatcher: async (signal) => {
+      if (signal === "unsubscribe-thread-for-host") return;
+      throw new Error("renderer synchronization unavailable");
+    },
+  });
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(runtime.bridgeCalls.filter(({ path }) => path === "/session/delete").length, 1);
+  assert.equal(runtime.thread.getAttribute("data-codey-session-delete-state"), "deleted");
+  assert.deepEqual(runtime.reloadCalls, []);
+  assert.match(runtime.document.getElementById("codey-runtime-toast")?.textContent, /列表同步暂未完成/);
 });
 
 test("keeps permanently deleted virtualized sidebar rows hidden for the renderer lifetime", async () => {

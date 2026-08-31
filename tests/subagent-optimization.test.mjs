@@ -48,10 +48,7 @@ test("subagent settings expose the five supported role controls", async () => {
   assert.match(modelOptionsSource, /if \(!config\.localRouterEnabled\)/);
   assert.match(modelOptionsSource, /currentProvider\?\.id/);
   assert.match(modelOptionsSource, /value: modelId/);
-  assert.match(
-    modelOptionsSource,
-    /\.\.\.modelState\.thirdPartyModels,\s*\.\.\.modelState\.upstreamModels/,
-  );
+  assert.match(modelOptionsSource, /: modelState\.thirdPartyModels/);
   assert.match(modelOptionsSource, /official && officialModelMetadata/);
   assert.match(
     modelOptionsSource,

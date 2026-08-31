@@ -991,7 +991,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             optional_argument::<Vec<String>>(&args, "manualThirdPartyModels"),
             optional_argument::<Vec<String>>(&args, "deletedThirdPartyModels"),
             optional_argument::<bool>(&args, "supportsAutoReview"),
-            optional_argument::<String>(&args, "routeId"),
+            optional_argument::<Option<String>>(&args, "routeId").map(Option::flatten),
         ) {
             (
                 Ok(official_models),
@@ -1021,7 +1021,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         },
         "save_default_model" => match (
             string_argument(&args, "model"),
-            optional_argument::<String>(&args, "routeId"),
+            optional_argument::<Option<String>>(&args, "routeId").map(Option::flatten),
         ) {
             (Ok(model), Ok(route_id)) => save_default_model(state, model, route_id).await,
             (Err(error), _) | (_, Err(error)) => Err(error),
@@ -1347,7 +1347,11 @@ async fn save_codey_config_locked(
     if local_router_enabled_present {
         config.local_router_enabled = config_input.local_router_enabled;
     }
-    retain_route_scoped_config(&mut config);
+    // Native providers can have model selections without a saved Codey route.
+    // Do not prune these caches during read-only saves or router transitions.
+    if previous.local_router_enabled && config.local_router_enabled {
+        retain_route_scoped_config(&mut config);
+    }
     ensure_local_route_config_change_allowed(&previous, &config)?;
     config_input
         .webhook
@@ -1428,7 +1432,11 @@ async fn save_codey_config_locked(
         );
     }
     config = config.normalize();
-    ensure_local_route_config_change_allowed(&previous, &config)?;
+    // The input was checked before normalization. Re-enabling can migrate
+    // native model selections back into the router's legacy model maps.
+    if !config.local_router_enabled {
+        ensure_local_route_config_change_allowed(&previous, &config)?;
+    }
     if (config.subagent_optimization
         || (previous.local_router_enabled && !config.local_router_enabled))
         && let Ok(model_state) = current_model_state_async(&config).await

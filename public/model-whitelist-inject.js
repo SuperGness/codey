@@ -1,6 +1,7 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "40";
+  const patchVersion = "42";
+  const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
   const legacyOfficialRouteProviderIds = new Set([
@@ -12,7 +13,8 @@
     localRouterProviderId,
   ]);
   const existingPatch = window.__codeyModelWhitelistPatch;
-  if (existingPatch?.version === patchVersion) {
+  if (existingPatch?.version === patchVersion
+    && existingPatch.nativeSelectionOnly === nativeSelectionOnly) {
     void existingPatch.refresh();
     return;
   }
@@ -414,10 +416,12 @@
       !value
       || typeof value !== "object"
       || !["ok", "not_configured"].includes(value.status)
+      || (value.native_selection_only === true) !== nativeSelectionOnly
     ) {
       return null;
     }
     const models = uniqueModelNames(value.models);
+    if (nativeSelectionOnly && models.length === 0) return null;
     const requestedDefault = [value.default_model, value.model]
       .map((model) => canonicalModelName(models, model))
       .find(Boolean);
@@ -433,7 +437,7 @@
           return model ? [[model, metadata]] : [];
         }),
     );
-    const routeMetadata = Object.fromEntries(
+    const routeMetadata = nativeSelectionOnly ? {} : Object.fromEntries(
       Object.entries(modelMetadata).map(([model, metadata]) => {
         const providerId = typeof metadata.provider_id === "string"
           ? metadata.provider_id.trim()
@@ -473,6 +477,7 @@
       )),
     );
     for (const model of models) {
+      if (nativeSelectionOnly) break;
       if (routeMetadata[model]) continue;
       const separator = model.indexOf("/");
       if (separator <= 0) continue;
@@ -624,6 +629,9 @@
   );
 
   const modelDescriptor = (modelName, current = null) => {
+    if (nativeSelectionOnly && current) {
+      return current.hidden === true ? { ...current, hidden: false } : current;
+    }
     const metadata = catalog.modelMetadata[modelName];
     const presentation = modelPresentation(modelName, current);
     const displayName = presentation.displayName;
@@ -648,6 +656,19 @@
     ].find((effort) => (
       typeof effort === "string" && supportedNames.includes(effort.trim())
     ));
+    if (nativeSelectionOnly) {
+      return {
+        model: modelName,
+        id: modelName,
+        slug: modelName,
+        name: metadata?.display_name || modelName,
+        displayName: metadata?.display_name || modelName,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort: requestedDefault?.trim() || "medium",
+        supportedReasoningEfforts: resolvedReasoningEfforts,
+      };
+    }
     return {
       ...(current && typeof current === "object" ? current : {}),
       model: modelName,
@@ -741,6 +762,11 @@
     const nextModels = catalog.models.map((modelName) => (
       modelDescriptor(modelName, existing.get(modelKey(modelName)))
     ));
+    if (nativeSelectionOnly) {
+      return models.length === nextModels.length
+        && models.every((model, index) => model === nextModels[index])
+        ? null : nextModels;
+    }
     const unchanged = (
       models.length === nextModels.length
       && models.every((model, index) => (
@@ -815,7 +841,7 @@
       next.available_models = [...catalog.models];
       changed = true;
     }
-    if ("defaultModel" in value && catalog.defaultModel) {
+    if (!nativeSelectionOnly && "defaultModel" in value && catalog.defaultModel) {
       if (typeof value.defaultModel === "string" && value.defaultModel !== catalog.defaultModel) {
         next.defaultModel = catalog.defaultModel;
         changed = true;
@@ -848,7 +874,7 @@
     const value = config.value;
     if (
       sameModelNames(value.available_models, catalog.models)
-      && value.default_model === catalog.defaultModel
+      && (nativeSelectionOnly || value.default_model === catalog.defaultModel)
     ) {
       return config;
     }
@@ -857,7 +883,7 @@
       value: {
         ...value,
         available_models: [...catalog.models],
-        default_model: catalog.defaultModel,
+        ...(nativeSelectionOnly ? {} : { default_model: catalog.defaultModel }),
       },
     };
     try {
@@ -899,7 +925,7 @@
         if (!String(key).includes(modelConfigId)) continue;
         const alreadyPatched = (
           sameModelNames(current?.value?.available_models, catalog.models)
-          && current?.value?.default_model === catalog.defaultModel
+          && (nativeSelectionOnly || current?.value?.default_model === catalog.defaultModel)
         );
         const next = patchedModelConfig(current);
         if (next !== current) {
@@ -916,7 +942,7 @@
       const current = parent[key];
       const alreadyPatched = (
         sameModelNames(current?.value?.available_models, catalog.models)
-        && current?.value?.default_model === catalog.defaultModel
+        && (nativeSelectionOnly || current?.value?.default_model === catalog.defaultModel)
       );
       const next = patchedModelConfig(current);
       if (next !== current) {
@@ -1084,6 +1110,7 @@
   };
 
   const enhanceGroupedModelMenus = () => {
+    if (nativeSelectionOnly) return;
     if (!catalog.loaded || disposed || typeof document.querySelectorAll !== "function") return;
     ensureGroupedMenuStyles();
     const byDisplayName = new Map();
@@ -1170,6 +1197,7 @@
   };
 
   const scheduleGroupedModelMenuEnhancement = () => {
+    if (nativeSelectionOnly) return;
     if (disposed || groupedMenuTimer || !catalog.loaded) return;
     groupedMenuTimer = window.setTimeout(() => {
       groupedMenuTimer = 0;
@@ -1346,15 +1374,21 @@
         // Ignore proxy-backed values that reject capability probes.
       }
 
-      const patched = patchedModelPayload(value);
-      if (patched.changed && patched.value !== value) {
-        for (const key of ["data", "models", "result", "message", "availableModels", "available_models", "defaultModel"]) {
-          if (!(key in patched.value) || patched.value[key] === value[key]) continue;
-          try {
-            value[key] = patched.value[key];
-            reactContainers += 1;
-          } catch {
-            // QueryClient.setQueryData handles immutable cached results below.
+      // Native selection must update model queries through QueryClient so its
+      // observers receive a new result. Mutating a React result object first
+      // makes the later cache pass look unchanged and leaves mounted pickers
+      // memoized on the old model list.
+      if (!nativeSelectionOnly) {
+        const patched = patchedModelPayload(value);
+        if (patched.changed && patched.value !== value) {
+          for (const key of ["data", "models", "result", "message", "availableModels", "available_models", "defaultModel"]) {
+            if (!(key in patched.value) || patched.value[key] === value[key]) continue;
+            try {
+              value[key] = patched.value[key];
+              reactContainers += 1;
+            } catch {
+              // QueryClient.setQueryData handles immutable cached results below.
+            }
           }
         }
       }
@@ -1424,7 +1458,10 @@
     for (const client of scan.queryClients) {
       let entries = [];
       try {
-        entries = client.getQueriesData({ queryKey: modelQueryKey }) || [];
+        entries = client.getQueriesData({
+          queryKey: modelQueryKey,
+          exact: false,
+        }) || [];
       } catch {
         knownModelQueryClients.delete(client);
         continue;
@@ -1444,6 +1481,7 @@
         try {
           invalidations.push(Promise.resolve(client.invalidateQueries({
             queryKey: modelQueryKey,
+            exact: false,
             refetchType: "active",
           })));
         } catch {
@@ -2279,6 +2317,7 @@
       || typeof request !== "object"
     ) return detail;
     rememberOutgoingModelListRequest(detail);
+    if (nativeSelectionOnly) return detail;
 
     const { wrappedMethod, method, params } = outgoingRequestParts(request);
     const nextParams = patchedRequestParams(method, params);
@@ -2390,7 +2429,7 @@
     const data = event?.data;
     if (data?.type !== "mcp-response") return;
     const message = data.message || data.response;
-    rememberThreadProvidersFromResponse(data, message);
+    if (!nativeSelectionOnly) rememberThreadProvidersFromResponse(data, message);
     const requestId = message?.id == null ? "" : String(message.id);
     const isModelListResponse = (
       modelListRequestIds.has(requestId)
@@ -2398,6 +2437,7 @@
       || message?.requestMethod === "model/list"
     );
     if (!isModelListResponse) {
+      if (nativeSelectionOnly) return;
       replaceThreadDisplayPayload(message, "result");
       applyThreadDisplayPatch(data);
       return;
@@ -2420,7 +2460,7 @@
   let lastInteractionApply = 0;
   const interactionApplyIntervalMs = 2_000;
   const handleInteraction = (event) => {
-    rememberMenuRouteIntent(event);
+    if (!nativeSelectionOnly) rememberMenuRouteIntent(event);
     scheduleGroupedModelMenuEnhancement();
     const now = Date.now();
     if (now - lastInteractionApply < interactionApplyIntervalMs) return;
@@ -2433,10 +2473,12 @@
   interactionEvents.forEach((eventName) => {
     document.addEventListener(eventName, handleInteraction, true);
   });
-  installGroupedModelMenuObserver();
-  restoreThreadRoutes();
+  if (!nativeSelectionOnly) {
+    installGroupedModelMenuObserver();
+    restoreThreadRoutes();
+  }
   window.addEventListener?.("focus", handleFocus);
-  installModelRequestDispatchPatch();
+  if (!nativeSelectionOnly) installModelRequestDispatchPatch();
   if (typeof window.addEventListener === "function") {
     window.addEventListener(modelRequestEvent, handleModelRequest, true);
     window.addEventListener(modelResponseEvent, handleModelResponse, true);
@@ -2445,6 +2487,7 @@
 
   const api = {
     version: patchVersion,
+    nativeSelectionOnly,
     apply: applyModelWhitelist,
     refresh: loadModelCatalog,
     setCatalog: setModelCatalog,
@@ -2458,7 +2501,7 @@
       // model/list reply can bypass the response patch and replace Codey's hot
       // catalog after a completed turn.
       rememberOutgoingModelListRequest(detail);
-      rememberOutgoingThreadRequest(detail);
+      if (!nativeSelectionOnly) rememberOutgoingThreadRequest(detail);
       return detail;
     },
     isBlockedOutgoingMessage: (detail) => Boolean(blockedProviderRequest(detail)),

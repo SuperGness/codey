@@ -196,8 +196,15 @@ async fn sync_native_current_provider_models(
 
     let mut next = latest.clone();
     if !context.provider.official {
+        let mut cached_models = visible_fetched_models.clone();
+        if let Some(manual_models) = next
+            .manual_third_party_models_by_provider
+            .get(&context.provider.id)
+        {
+            cached_models = preserve_selected_third_party_models(cached_models, manual_models);
+        }
         next.upstream_models_by_provider
-            .insert(context.provider.id.clone(), visible_fetched_models.clone());
+            .insert(context.provider.id.clone(), cached_models);
     }
     let model_state = native_model_state_for_provider(&next, &context.provider, codex_home())?;
     let visible_models = if context.provider.official {
@@ -227,6 +234,7 @@ async fn sync_native_current_provider_models(
     }
     drop(_config_write_guard);
 
+    let hot_reload = hot_reload_runtime_models(state, &next, &model_state).await;
     let subagent_hot_reload = if changed {
         hot_reload_runtime_subagent_config(state, &next).await
     } else {
@@ -238,7 +246,7 @@ async fn sync_native_current_provider_models(
         provider: context.provider,
     };
     Ok(add_subagent_hot_reload_to_response(
-        json!({
+        hot_reload.add_to_response(json!({
             "status": "ok",
             "config": redacted_config(&next),
             "providerStatus": provider_status,
@@ -246,7 +254,7 @@ async fn sync_native_current_provider_models(
             "modelState": model_state,
             "routeModelState": model_state,
             "restartRequired": restart_required,
-        }),
+        })),
         subagent_hot_reload,
     ))
 }
@@ -849,6 +857,17 @@ pub async fn save_selected_models(
     validate_regular_route_model_list("其他模型", &requested_third_party_models)?;
     validate_regular_route_model_list("手动添加的其他模型", &requested_manual_third_party_models)?;
     validate_regular_route_model_list("待删除的其他模型", &requested_deleted_third_party_models)?;
+    if !state.config.read().await.local_router_enabled {
+        return save_native_selected_models(
+            state,
+            requested_official_models,
+            requested_third_party_models,
+            requested_manual_third_party_models,
+            requested_deleted_third_party_models,
+            requested_route_id,
+        )
+        .await;
+    }
     let _config_write_guard = state.config_write_lock.lock().await;
     let mut config = state.config.read().await.clone();
     ensure_local_route_config_writable(&config)?;
@@ -973,6 +992,175 @@ pub async fn save_selected_models(
         })),
         subagent_hot_reload,
     ))
+}
+
+async fn save_native_selected_models(
+    state: &Arc<AppState>,
+    requested_official_models: Vec<String>,
+    requested_third_party_models: Vec<String>,
+    requested_manual_third_party_models: Vec<String>,
+    requested_deleted_third_party_models: Vec<String>,
+    requested_route_id: Option<String>,
+) -> Result<Value, String> {
+    let previous = state.config.read().await.clone();
+    if previous.local_router_enabled {
+        return Err("本地路由已启用，请使用线路模型配置".to_string());
+    }
+    let context = native_provider_context(&previous).await?;
+    if let Some(route_id) = requested_route_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|route_id| !route_id.is_empty())
+        && route_id != context.route_id
+        && route_id != context.provider.id
+    {
+        return Err("只能更新当前 Codex 线路的模型".to_string());
+    }
+    let current_provider = current_codex_provider().await?;
+    if current_provider != context.provider {
+        return Err("保存模型期间当前 Codex 线路已变化，请重试".to_string());
+    }
+
+    let _config_write_guard = state.config_write_lock.lock().await;
+    let latest = state.config.read().await.clone();
+    if latest.local_router_enabled {
+        return Err("保存模型期间本地路由已启用，请重试".to_string());
+    }
+    if latest.settings_revision != previous.settings_revision {
+        return Err("Codey 设置在保存模型期间已更新，请重新载入后再操作".to_string());
+    }
+    let mut next = config_with_native_selected_models(
+        &latest,
+        &context.provider,
+        requested_official_models,
+        requested_third_party_models,
+        requested_manual_third_party_models,
+        requested_deleted_third_party_models,
+    )?;
+    let model_state = native_model_state_for_provider(&next, &context.provider, codex_home())?;
+    reconcile_subagent_models_for_mode(&mut next, &model_state);
+    next = next.normalize();
+    if next != latest {
+        next.settings_revision = latest.settings_revision.saturating_add(1);
+        save_config_to_store(state, &next)
+            .await
+            .map_err(|error| format!("保存当前线路模型选择失败：{error}"))?;
+        *state.config.write().await = next.clone();
+    }
+    let public_config = redacted_config(&next);
+    drop(_config_write_guard);
+    let hot_reload = hot_reload_runtime_models(state, &next, &model_state).await;
+    let subagent_hot_reload = hot_reload_runtime_subagent_config(state, &next).await;
+    let restart_required = runtime_config_requires_restart(state, &next).await;
+    Ok(add_subagent_hot_reload_to_response(
+        hot_reload.add_to_response(json!({
+            "status":"ok",
+            "config":public_config,
+            "modelState":model_state,
+            "restartRequired":restart_required,
+        })),
+        subagent_hot_reload,
+    ))
+}
+
+fn config_with_native_selected_models(
+    config: &CodeyConfig,
+    provider: &codex_provider::CurrentProvider,
+    requested_official_models: Vec<String>,
+    requested_third_party_models: Vec<String>,
+    requested_manual_third_party_models: Vec<String>,
+    requested_deleted_third_party_models: Vec<String>,
+) -> Result<CodeyConfig, String> {
+    let provider_id = provider.id.clone();
+    let mut next = config.clone();
+    if provider.official {
+        if !requested_third_party_models.is_empty()
+            || !requested_manual_third_party_models.is_empty()
+            || !requested_deleted_third_party_models.is_empty()
+        {
+            return Err("官方线路不支持添加第三方模型".to_string());
+        }
+        let official_models = model_catalog::default_official_model_slugs();
+        let (selected_models, third_party_models) =
+            validate_manual_model_selection(&official_models, &requested_official_models, &[])?;
+        if selected_models.is_empty() {
+            return Err("官方账号线路至少需要保留一个模型".to_string());
+        }
+        if !third_party_models.is_empty() {
+            return Err("官方线路不支持添加第三方模型".to_string());
+        }
+        next.selected_models_by_provider
+            .insert(provider_id.clone(), selected_models);
+        next.manual_third_party_models_by_provider
+            .remove(&provider_id);
+        next.declared_official_models_by_provider
+            .remove(&provider_id);
+        next.upstream_models_by_provider.remove(&provider_id);
+        return Ok(next.normalize());
+    }
+
+    if !requested_official_models.is_empty() {
+        return Err(
+            "API Key 线路不能添加官方账号模型；该线路上游返回的同名模型请作为线路模型选择"
+                .to_string(),
+        );
+    }
+    let upstream_models = next
+        .upstream_models_by_provider
+        .get(&provider_id)
+        .cloned()
+        .unwrap_or_default();
+    let existing_manual_models = next
+        .manual_third_party_models_by_provider
+        .get(&provider_id)
+        .cloned()
+        .unwrap_or_default();
+    let route_official_model_ids: &[String] = &[];
+    let (supported_official, selected) = validate_manual_model_selection(
+        route_official_model_ids,
+        &requested_official_models,
+        &requested_third_party_models,
+    )?;
+    let deleted_third_party_model_keys = validate_deleted_third_party_models(
+        route_official_model_ids,
+        &requested_deleted_third_party_models,
+    )?;
+    let selected = selected
+        .into_iter()
+        .filter(|model| !deleted_third_party_model_keys.contains(&model_id::key(model)))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err("当前线路至少需要保留一个模型".to_string());
+    }
+    validate_deleted_models_are_manual(&existing_manual_models, &deleted_third_party_model_keys)?;
+    let manual_third_party_models = validate_manual_third_party_model_sources(
+        route_official_model_ids,
+        &selected,
+        &upstream_models,
+        &existing_manual_models,
+        &requested_manual_third_party_models,
+    )?;
+    let mut supported_models = supported_official;
+    preserve_selected_third_party_models_except(
+        &mut supported_models,
+        &upstream_models,
+        &deleted_third_party_model_keys,
+    );
+    preserve_selected_third_party_models_except(&mut supported_models, &selected, &HashSet::new());
+    next.upstream_models_by_provider
+        .insert(provider_id.clone(), supported_models);
+    next.declared_official_models_by_provider
+        .remove(&provider_id);
+    next.selected_models_by_provider
+        .insert(provider_id.clone(), selected);
+    if manual_third_party_models.is_empty() {
+        next.manual_third_party_models_by_provider
+            .remove(&provider_id);
+    } else {
+        next.manual_third_party_models_by_provider
+            .insert(provider_id, manual_third_party_models);
+    }
+    Ok(next.normalize())
 }
 
 fn validate_requested_model_list_bounds(label: &str, models: &[String]) -> Result<(), String> {
@@ -1265,9 +1453,6 @@ pub(super) async fn hot_reload_runtime_models(
     config: &CodeyConfig,
     model_state: &model_catalog::ModelSelectionState,
 ) -> ModelHotReloadOutcome {
-    if !config.local_router_enabled {
-        return ModelHotReloadOutcome::default();
-    }
     let runtime = state.runtime.lock().await.clone();
     let Some(runtime) = runtime else {
         return ModelHotReloadOutcome::default();
@@ -1281,7 +1466,9 @@ pub(super) async fn hot_reload_runtime_models(
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or_default();
-    runtime.sync_local_router_routes(config);
+    if config.local_router_enabled {
+        runtime.sync_local_router_routes(config);
+    }
     let websocket_url = runtime.renderer_websocket_url().await;
     match cdp::refresh_model_whitelist(&websocket_url, &expected_catalog).await {
         Ok(refresh) => {
@@ -1418,18 +1605,40 @@ fn native_model_state_for_provider(
         .upstream_models_by_provider
         .get(provider.id.as_str())
         .map(Vec::as_slice);
-    let selected_models = if provider.official {
+    let configured_models = config
+        .selected_models_by_provider
+        .get(provider.id.as_str())
+        .map(Vec::as_slice);
+    let declared_models = config
+        .declared_official_models_by_provider
+        .get(provider.id.as_str());
+    let selected_models = if configured_models.is_some() || declared_models.is_some() {
+        let mut models = configured_models.unwrap_or_default().to_vec();
+        if let Some(declared_models) = declared_models {
+            models = preserve_selected_third_party_models(models, declared_models);
+        }
+        models
+    } else if provider.official {
+        Vec::new()
+    } else {
+        upstream_models.unwrap_or_default().to_vec()
+    };
+    let manual_third_party_models = if provider.official {
         &[][..]
     } else {
-        upstream_models.unwrap_or_default()
+        config
+            .manual_third_party_models_by_provider
+            .get(provider.id.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
     };
     let requested_default = native_upstream_model(config, &config.subagent_model);
     model_catalog::selection_state_with_manual_models(
         home,
         provider.official,
         upstream_models,
-        selected_models,
-        &[],
+        &selected_models,
+        manual_third_party_models,
         Some(&requested_default),
     )
     .map_err(|error| error.to_string())
@@ -1533,8 +1742,11 @@ pub(super) fn runtime_supports_current_routes_for_hot_reload(
     applied: &CodeyConfig,
     current: &CodeyConfig,
 ) -> bool {
-    if !applied.local_router_enabled || !current.local_router_enabled {
+    if applied.local_router_enabled != current.local_router_enabled {
         return false;
+    }
+    if !current.local_router_enabled {
+        return true;
     }
     if websocket_transport_requires_restart(applied, current)
         || remote_compaction_transport_requires_restart(applied, current)
@@ -1603,6 +1815,9 @@ pub(super) fn renderer_model_catalog_value(
     config: &CodeyConfig,
     model_state: &model_catalog::ModelSelectionState,
 ) -> Value {
+    if !config.local_router_enabled {
+        return renderer_native_model_catalog_value(model_state);
+    }
     let route_catalog = renderer_route_model_catalog(config, model_state);
     let models = route_catalog
         .iter()
@@ -1656,6 +1871,51 @@ pub(super) fn renderer_model_catalog_value(
             "status": "unknown",
             "message": ""
         }
+    })
+}
+
+fn renderer_native_model_catalog_value(model_state: &model_catalog::ModelSelectionState) -> Value {
+    let mut metadata = model_state
+        .official_models
+        .iter()
+        .filter(|model| model.supported)
+        .map(|model| {
+            json!({
+                "model": model.slug,
+                "display_name": model.display_name,
+                "supported_reasoning_efforts": model.supported_reasoning_efforts,
+                "default_reasoning_effort": model.default_reasoning_effort,
+            })
+        })
+        .collect::<Vec<_>>();
+    for model in regular_route_models(model_state.third_party_models.clone()) {
+        let details = model_state
+            .third_party_model_metadata
+            .iter()
+            .find(|details| model_id::equal(&details.slug, &model));
+        let mut entry = json!({ "model": model, "display_name": model });
+        if let Some(details) = details {
+            entry["supported_reasoning_efforts"] = json!(details.supported_reasoning_efforts);
+            entry["default_reasoning_effort"] = json!(details.default_reasoning_effort);
+        }
+        metadata.push(entry);
+    }
+    let models = metadata
+        .iter()
+        .map(|entry| entry["model"].clone())
+        .collect::<Vec<_>>();
+    let default_model = models
+        .iter()
+        .find(|model| model.as_str() == Some(model_state.default_model.as_str()))
+        .or_else(|| models.first())
+        .cloned()
+        .unwrap_or_else(|| json!(""));
+    json!({
+        "status": if models.is_empty() { "not_configured" } else { "ok" },
+        "native_selection_only": true,
+        "default_model": default_model,
+        "models": models,
+        "model_metadata": metadata,
     })
 }
 
@@ -2032,6 +2292,178 @@ mod tests {
                 .values()
                 .all(|selection| selection.model == "model-a")
         );
+    }
+
+    #[test]
+    fn native_model_selection_updates_current_provider_models_without_route_edits() {
+        let home = tempfile::tempdir().unwrap();
+        let route = configured_route("route-a", None);
+        let provider = codex_provider::CurrentProvider {
+            id: "route-a".into(),
+            name: "Current route".into(),
+            official: false,
+            supports_remote_compaction: false,
+            base_url: route.base_url.clone(),
+        };
+        let config = CodeyConfig {
+            local_router_enabled: false,
+            active_profile_id: route.id.clone(),
+            profiles: vec![route.clone()],
+            upstream_models_by_provider: BTreeMap::from([(
+                "route-a".into(),
+                vec!["model-a".into(), "model-b".into()],
+            )]),
+            subagent_model: "route-a/model-a".into(),
+            subagent_roles: crate::config::uniform_subagent_roles("route-a/model-a", "high"),
+            ..CodeyConfig::default()
+        }
+        .normalize();
+
+        let mut selected = config_with_native_selected_models(
+            &config,
+            &provider,
+            Vec::new(),
+            vec!["model-b".into()],
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let state = native_model_state_for_provider(&selected, &provider, home.path()).unwrap();
+        reconcile_subagent_models_for_mode(&mut selected, &state);
+        selected = selected.normalize();
+
+        assert_eq!(selected.profiles, config.profiles);
+        assert_eq!(
+            selected.upstream_models_by_provider["route-a"],
+            ["model-a", "model-b"]
+        );
+        assert_eq!(selected.selected_models_by_provider["route-a"], ["model-b"]);
+        assert_eq!(state.third_party_models, ["model-b"]);
+        assert_eq!(selected.subagent_model, "model-b");
+    }
+
+    #[test]
+    fn native_official_model_selection_keeps_selection_official_only() {
+        let provider = codex_provider::CurrentProvider {
+            id: "openai".into(),
+            name: "OpenAI".into(),
+            official: true,
+            supports_remote_compaction: true,
+            base_url: String::new(),
+        };
+        let config = CodeyConfig {
+            local_router_enabled: false,
+            ..CodeyConfig::default()
+        }
+        .normalize();
+
+        let selected = config_with_native_selected_models(
+            &config,
+            &provider,
+            vec!["gpt-5.6-sol".into()],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            selected.selected_models_by_provider["openai"],
+            ["gpt-5.6-sol"]
+        );
+        let home = tempfile::tempdir().unwrap();
+        let model_state =
+            native_model_state_for_provider(&selected, &provider, home.path()).unwrap();
+        let catalog = renderer_model_catalog_value(&selected, &model_state);
+        assert_eq!(catalog["native_selection_only"], true);
+        assert_eq!(catalog["models"], json!(["gpt-5.6-sol"]));
+        assert!(catalog.get("model_provider").is_none());
+        assert!(
+            catalog["model_metadata"][0]
+                .get("route_provider_id")
+                .is_none()
+        );
+        assert!(
+            config_with_native_selected_models(
+                &config,
+                &provider,
+                vec!["gpt-5.6-sol".into()],
+                vec!["custom-model".into()],
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap_err()
+            .contains("官方线路不支持添加第三方模型")
+        );
+    }
+
+    #[test]
+    fn native_renderer_catalog_and_hot_reload_do_not_require_local_routes() {
+        let config = CodeyConfig {
+            local_router_enabled: false,
+            ..CodeyConfig::default()
+        };
+        let model_state = model_catalog::ModelSelectionState {
+            third_party_models: vec!["org/model-a".into()],
+            upstream_models: vec!["org/model-a".into(), "unchecked-model".into()],
+            default_model: "org/model-a".into(),
+            ..Default::default()
+        };
+        let catalog = renderer_model_catalog_value(&config, &model_state);
+        assert_eq!(catalog["models"], json!(["org/model-a"]));
+        assert!(catalog["model_metadata"][0].get("provider_id").is_none());
+        assert!(runtime_supports_current_routes_for_hot_reload(
+            &config, &config
+        ));
+        let enabled = CodeyConfig {
+            local_router_enabled: true,
+            ..config.clone()
+        };
+        assert!(!runtime_supports_current_routes_for_hot_reload(
+            &enabled, &config
+        ));
+        assert!(!runtime_supports_current_routes_for_hot_reload(
+            &config, &enabled
+        ));
+    }
+
+    #[test]
+    fn native_third_party_gpt_selection_keeps_raw_ids_and_does_not_restore_unchecked_models() {
+        let home = tempfile::tempdir().unwrap();
+        let provider = codex_provider::CurrentProvider {
+            id: "external-provider".into(),
+            name: "Native provider".into(),
+            official: false,
+            supports_remote_compaction: false,
+            base_url: "https://example.invalid/v1".into(),
+        };
+        let mut config = CodeyConfig {
+            local_router_enabled: false,
+            ..CodeyConfig::default()
+        }
+        .normalize();
+        config.upstream_models_by_provider.insert(
+            provider.id.clone(),
+            vec!["gpt-5.5".into(), "claude-sonnet-4-5".into()],
+        );
+        let selected = config_with_native_selected_models(
+            &config,
+            &provider,
+            Vec::new(),
+            vec!["gpt-5.5".into()],
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        let state = native_model_state_for_provider(&selected, &provider, home.path()).unwrap();
+        assert_eq!(selected.profiles, config.profiles);
+        assert_eq!(
+            selected.selected_models_by_provider[&provider.id],
+            ["gpt-5.5"]
+        );
+        assert_eq!(state.third_party_models, ["gpt-5.5"]);
+        assert_eq!(state.upstream_models, ["gpt-5.5", "claude-sonnet-4-5"]);
+        assert!(state.official_models.is_empty());
     }
 
     #[test]

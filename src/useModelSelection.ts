@@ -298,7 +298,7 @@ export function useModelSelection({
       manualThirdPartyModels,
       deletedThirdPartyModels: deletedModels,
       supportsAutoReview,
-      routeId: modelPickerRouteId,
+      ...(modelPickerRouteId == null ? {} : { routeId: modelPickerRouteId }),
     });
     setPersistedConfig(result.config);
     setModelState(result.modelState);
@@ -364,7 +364,7 @@ export function useModelSelection({
         manualThirdPartyModels,
         deletedThirdPartyModels,
         draftAutoReviewSupported,
-        `已更新模型声明：${thirdPartyModels.length} 个线路模型`,
+        `已保存 ${officialModels.length + thirdPartyModels.length} 个当前线路模型`,
         true,
       );
     });

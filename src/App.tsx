@@ -461,10 +461,19 @@ export function App({
         ...current,
         restartRequired: result.restartRequired ?? current.restartRequired,
       }));
+      if (nativeMode) {
+        openModelPicker(
+          result.providerStatus.provider.official
+            ? result.modelState
+            : { ...result.modelState, officialModels: [] },
+          "",
+          result.providerStatus.provider.official ? null : result.providerStatus.provider.id,
+        );
+      }
       setNotice({
         tone: result.restartRequired ? "info" : "success",
         text: nativeMode
-          ? `已刷新当前线路「${result.providerStatus.provider.name}」及其模型`
+          ? `已同步当前线路「${result.providerStatus.provider.name}」，请勾选要启用的模型`
           : result.restartRequired
             ? "已重新读取 Codex 配置，重启后应用当前线路"
             : "已重新读取 Codex 配置",
@@ -585,11 +594,7 @@ export function App({
   async function fetchRouteModels(route: Profile) {
     if (!config) return;
     const nativeMode = !config.localRouterEnabled;
-    if (nativeMode) {
-      await syncCurrentProvider();
-      return;
-    }
-    if (route.authMode === "officialAccount") {
+    if (nativeMode || route.authMode === "officialAccount") {
       await syncCurrentProvider();
       return;
     }
@@ -1326,6 +1331,7 @@ export function App({
 
       <ModelPickerDialog
         open={modelPickerVisible}
+        routeConfigReadOnly={config?.localRouterEnabled === false}
         isBusy={isBusy}
         busy={busy}
         container={portalContainer}

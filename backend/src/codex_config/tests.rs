@@ -834,6 +834,64 @@ fn disabled_subagent_roles_are_omitted_from_runtime_registration_and_policy_inpu
 }
 
 #[test]
+fn runtime_guidance_keeps_writes_with_root_when_all_writable_roles_are_disabled() {
+    let mut configured = crate::config::default_subagent_roles();
+    configured
+        .get_mut(crate::config::SUBAGENT_ROLE_WORKER)
+        .unwrap()
+        .enabled = false;
+    configured
+        .get_mut(crate::config::SUBAGENT_ROLE_VISUAL_WORKER)
+        .unwrap()
+        .enabled = false;
+    let runtime_roles = runtime_subagent_roles(
+        Some(&configured),
+        DEFAULT_SUBAGENT_MODEL,
+        DEFAULT_SUBAGENT_REASONING_EFFORT,
+    );
+
+    let instructions = runtime_root_instructions_for_roles("BASE", &runtime_roles);
+    assert!(instructions.contains("BASE"));
+    assert!(instructions.contains(NO_WRITABLE_SUBAGENT_GUIDANCE));
+    assert!(instructions.contains("所有创建、修改"));
+    assert!(instructions.contains("由主代理直接完成"));
+
+    let writable_roles = runtime_subagent_roles(
+        Some(&crate::config::default_subagent_roles()),
+        DEFAULT_SUBAGENT_MODEL,
+        DEFAULT_SUBAGENT_REASONING_EFFORT,
+    );
+    assert_eq!(
+        runtime_root_instructions_for_roles("BASE", &writable_roles),
+        "BASE"
+    );
+}
+
+#[test]
+fn runtime_read_only_agents_are_explicitly_told_not_to_call_write_tools() {
+    let temp = tempfile::tempdir().unwrap();
+    let constraints_dir = temp.path().join("codex-constraints");
+    let roles = crate::config::default_subagent_roles();
+    let plans =
+        plan_runtime_agent_files(&constraints_dir, &roles, Some(CODEY_FASTCTX_GUIDANCE)).unwrap();
+
+    let quick_scan = plans
+        .iter()
+        .find(|plan| plan.registration.role == crate::config::SUBAGENT_ROLE_QUICK_SCAN)
+        .unwrap();
+    let quick_scan = String::from_utf8(quick_scan.contents.clone()).unwrap();
+    assert!(quick_scan.contains(READ_ONLY_AGENT_WRITE_GUARD));
+    assert!(quick_scan.contains("不要调用 `replace`、`apply_patch`"));
+
+    let worker = plans
+        .iter()
+        .find(|plan| plan.registration.role == crate::config::SUBAGENT_ROLE_WORKER)
+        .unwrap();
+    let worker = String::from_utf8(worker.contents.clone()).unwrap();
+    assert!(!worker.contains(READ_ONLY_AGENT_WRITE_GUARD));
+}
+
+#[test]
 fn failed_lease_marker_removal_keeps_the_recovery_backup() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");

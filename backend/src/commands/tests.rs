@@ -1,6 +1,64 @@
 use super::*;
 use crate::config::ProviderProfile;
 
+#[tokio::test]
+async fn model_save_routes_accept_missing_or_null_ids_without_weakening_required_routes() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(CodeyConfig {
+            local_router_enabled: true,
+            profiles: Vec::new(),
+            active_profile_id: "missing-route".into(),
+            ..CodeyConfig::default()
+        }),
+        ..AppState::default()
+    });
+    for (command, payload, expected_message) in [
+        (
+            "save_selected_models",
+            json!({ "officialModels": [], "thirdPartyModels": ["model-a"] }),
+            "找不到要配置模型的线路",
+        ),
+        (
+            "save_default_model",
+            json!({ "model": "model-a" }),
+            "找不到要设置默认模型的线路",
+        ),
+    ] {
+        for route_id in [None, Some(Value::Null), Some(json!("missing-route"))] {
+            let mut args = payload.clone();
+            if let Some(route_id) = route_id {
+                args["routeId"] = route_id;
+            }
+            let result = invoke_api(&state, command, args).await;
+            assert_eq!(result["status"], "failed");
+            // Reaching route lookup proves the request passed argument parsing;
+            // a missing fixture route prevents any configuration writes.
+            assert_eq!(result["message"], expected_message, "{command}");
+        }
+        for route_id in [json!(7), json!(false), json!([]), json!({})] {
+            let mut args = payload.clone();
+            args["routeId"] = route_id;
+            let result = invoke_api(&state, command, args).await;
+            assert_eq!(result["status"], "failed");
+            assert!(
+                result["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("参数 routeId 无效")
+            );
+        }
+    }
+    let result = invoke_api(
+        &state,
+        "delete_route",
+        json!({ "routeId": null, "expectedRevision": 0 }),
+    )
+    .await;
+    assert_eq!(result["message"], "缺少参数：routeId");
+}
+
 #[test]
 fn bridge_field_helpers_preserve_existing_payload_semantics() {
     let payload = json!({
@@ -600,6 +658,56 @@ async fn disabled_local_router_skips_automatic_route_import_without_writing() {
 }
 
 #[tokio::test]
+async fn native_model_cache_without_saved_route_does_not_block_settings_or_reenable() {
+    for provider_id in ["external-provider", "openai"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut initial = CodeyConfig {
+            local_router_enabled: false,
+            ..CodeyConfig::default()
+        };
+        initial.upstream_models_by_provider.insert(
+            provider_id.into(),
+            vec!["gpt-5.5".into(), "native-model".into()],
+        );
+        initial
+            .selected_models_by_provider
+            .insert(provider_id.into(), vec!["gpt-5.5".into()]);
+        let initial = initial.normalize();
+        let state = Arc::new(AppState {
+            store: ConfigStore::new(directory.path().join("config.json")),
+            config: RwLock::new(initial.clone()),
+            ..AppState::default()
+        });
+        let mut unrelated = initial.clone();
+        unrelated.slim_codex_pet = !unrelated.slim_codex_pet;
+        save_codey_config_locked(&state, CodeyConfigSaveInput::complete(unrelated))
+            .await
+            .unwrap();
+        let saved = state.config.read().await.clone();
+        assert_eq!(saved.profiles, initial.profiles);
+        assert_eq!(
+            saved.selected_models_by_provider,
+            initial.selected_models_by_provider
+        );
+        assert_eq!(
+            saved.upstream_models_by_provider,
+            initial.upstream_models_by_provider
+        );
+        assert_eq!(state.store.load().unwrap(), saved);
+
+        let mut reenabled = saved;
+        reenabled.local_router_enabled = true;
+        save_codey_config_locked(&state, CodeyConfigSaveInput::complete(reenabled))
+            .await
+            .unwrap();
+        let reenabled = state.config.read().await.clone();
+        assert!(reenabled.local_router_enabled);
+        assert_eq!(reenabled.profiles, initial.profiles);
+        assert_eq!(state.store.load().unwrap(), reenabled);
+    }
+}
+
+#[tokio::test]
 async fn legacy_save_without_local_router_field_preserves_disabled_state() {
     let directory = tempfile::tempdir().unwrap();
     let initial = CodeyConfig {
@@ -780,11 +888,17 @@ async fn custom_role_matrix_persists_official_models_for_the_current_provider() 
     let saved = state.config.read().await.clone();
     assert_eq!(
         saved.subagent_roles["codey_quick_scan"],
-        SubagentRoleConfig::new("gpt-5.6-luna", "low")
+        SubagentRoleConfig::new(
+            crate::local_router::model_alias(&provider_id, "gpt-5.6-luna"),
+            "low",
+        )
     );
     assert_eq!(
         saved.subagent_roles["codey_worker"],
-        SubagentRoleConfig::new("gpt-5.6-terra", "max")
+        SubagentRoleConfig::new(
+            crate::local_router::model_alias(&provider_id, "gpt-5.6-terra"),
+            "max",
+        )
     );
     assert_eq!(
         saved.declared_official_models_by_provider[&provider_id],

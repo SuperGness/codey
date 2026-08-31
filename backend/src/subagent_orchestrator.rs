@@ -3797,7 +3797,7 @@ pub(crate) fn authorize_child_tool_with_context(
                 ))
             }
             Some(reservation) if !reservation_declares_write(reservation) => Some(format!(
-                "Codey 能力门禁：attempt `{}` 不是可写角色或未声明 `workspace.write` capability，禁止写入工具 `{tool_name}`。",
+                "Codey 能力门禁：attempt `{}` 当前不具备写入权限，工具 `{tool_name}` 未执行。请停止在本子代理内重试写入，把修改建议和证据返回主代理，由主代理完成写入。",
                 reservation.attempt_id
             )),
             Some(_) => None,
@@ -8170,7 +8170,9 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(capability_denial.contains("workspace.write"));
+        assert!(capability_denial.contains("当前不具备写入权限"));
+        assert!(capability_denial.contains("未执行"));
+        assert!(capability_denial.contains("返回主代理"));
 
         let provenance_denial = authorize_child_tool(
             temp.path(),
@@ -8256,7 +8258,9 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(denial.contains("不是可写角色"));
+        assert!(denial.contains("当前不具备写入权限"));
+        assert!(denial.contains("未执行"));
+        assert!(denial.contains("返回主代理"));
     }
 
     #[test]
@@ -8360,7 +8364,9 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(write_denial.contains("不是可写角色"));
+        assert!(write_denial.contains("当前不具备写入权限"));
+        assert!(write_denial.contains("未执行"));
+        assert!(write_denial.contains("返回主代理"));
 
         let store = LedgerStore::open(temp.path(), "session-a").unwrap();
         let mut ledger = store.load("runtime-a", "session-a", 45).unwrap().unwrap();
@@ -8442,7 +8448,9 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(write_denial.contains("不是可写角色"));
+        assert!(write_denial.contains("当前不具备写入权限"));
+        assert!(write_denial.contains("未执行"));
+        assert!(write_denial.contains("返回主代理"));
     }
 
     #[test]
