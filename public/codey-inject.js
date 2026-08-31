@@ -246,6 +246,13 @@
     return normalized;
   };
 
+  const usableCompletionTurnId = (value) => {
+    const normalized = usableMessageId(value);
+    return normalized && !/(?:^|:)tail(?::|$)/i.test(normalized)
+      ? normalized
+      : "";
+  };
+
   const reactStateKeys = (element) => Object.keys(element).filter((key) => (
     key.startsWith("__reactFiber")
     || key.startsWith("__reactInternalInstance")
@@ -320,6 +327,25 @@
   };
 
   const getCurrentTurnId = () => {
+    const turnRows = Array.from(document.querySelectorAll?.("[data-turn-key]") || []);
+    for (let index = turnRows.length - 1; index >= 0; index -= 1) {
+      let parent = turnRows[index].parentElement;
+      let nested = false;
+      while (parent) {
+        if (parent.matches?.("[data-turn-key]")) {
+          nested = true;
+          break;
+        }
+        parent = parent.parentElement;
+      }
+      if (nested) continue;
+      const turnId = usableCompletionTurnId(turnRows[index].getAttribute("data-turn-key"));
+      if (turnId) return turnId;
+    }
+
+    // Older renderer shapes may omit data-turn-key. Keep the React/message
+    // fallback for those builds, but never let a tail placeholder override a
+    // canonical rollout turn from the first pass.
     const rows = Array.from(document.querySelectorAll?.(conversationTurnSelector) || []);
     for (let index = rows.length - 1; index >= 0; index -= 1) {
       let parent = rows[index].parentElement;
@@ -332,7 +358,7 @@
         parent = parent.parentElement;
       }
       if (nested) continue;
-      const turnId = getMessageId(rows[index]);
+      const turnId = usableCompletionTurnId(getMessageId(rows[index]));
       if (turnId) return turnId;
     }
     return "";
@@ -2300,11 +2326,26 @@
     });
   };
 
-  const isTaskRunning = () => [...document.querySelectorAll("button[aria-label]")].some((button) => {
-    const label = String(button.getAttribute("aria-label") || "").trim().toLowerCase();
-    const runningLabel = label === "停止" || label.includes("停止生成") || label === "stop" || label.includes("stop generating");
-    return runningLabel && button.getClientRects().length > 0 && !button.disabled;
-  });
+  const nativeTaskControlSelector = "button[aria-label], button[title], button[data-testid]";
+  const nativeTaskControlIsRunning = (button) => {
+    if (!(button instanceof HTMLElement) || button.disabled) return false;
+    const label = [
+      button.getAttribute("aria-label"),
+      button.getAttribute("title"),
+    ].filter(Boolean).join(" ").trim().toLowerCase();
+    const testId = String(button.getAttribute("data-testid") || "").trim().toLowerCase();
+    const runningLabel = label === "停止"
+      || label.includes("停止生成")
+      || label.includes("停止回答")
+      || label === "stop"
+      || label.includes("stop generating")
+      || label.includes("stop response");
+    const runningTestId = /(?:^|[-_])(?:stop|cancel)(?:[-_](?:generating|generation|response|task|turn))?(?:[-_]button)?$/.test(testId)
+      || /(?:^|[-_])(?:generating|generation|response|task|turn)[-_](?:stop|cancel)(?:[-_]button)?$/.test(testId);
+    return (runningLabel || runningTestId) && button.getClientRects().length > 0;
+  };
+  const isTaskRunning = () => [...document.querySelectorAll(nativeTaskControlSelector)]
+    .some(nativeTaskControlIsRunning);
 
   const closeSessionDeletePopover = () => {
     deletePopoverCleanup?.();

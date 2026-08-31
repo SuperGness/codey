@@ -74,6 +74,7 @@ function loadInjection({
   initialNow = 1_000_000,
   turnIds = ["turn-1"],
   sessionTitle = "排查飞书通知",
+  stopButtonAttributes = { "aria-label": "停止" },
   bridgeHandler = null,
   codexSessionController = null,
   codexSignalDispatcher = null,
@@ -90,7 +91,7 @@ function loadInjection({
     "data-app-action-sidebar-thread-id": "local:session-1",
     "data-app-action-sidebar-thread-title": sessionTitle,
   });
-  const stopButton = new FakeElement({ "aria-label": "停止" });
+  const stopButton = new FakeElement(stopButtonAttributes);
   let running = initialRunning;
   let now = initialNow;
   let sessionId = "session-1";
@@ -133,7 +134,9 @@ function loadInjection({
           && row.classList.contains("codey-message-selected")
         ));
       }
-      if (selector === "button[aria-label]") return running ? [stopButton] : [];
+      if (selector === "button[aria-label], button[title], button[data-testid]") {
+        return running ? [stopButton] : [];
+      }
       if (selector === "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]") {
         return [sidebarThread];
       }
@@ -295,6 +298,41 @@ test("waits for the stuck-running grace period before probing completion", async
   );
 });
 
+test("recognizes current Codex stop controls by title or test id", async () => {
+  for (const stopButtonAttributes of [
+    { title: "Stop response" },
+    { "data-testid": "stop-generation-button" },
+    { "data-testid": "response-stop-button" },
+  ]) {
+    const runtime = loadInjection({
+      stopButtonAttributes,
+      bridgeHandler: async () => completedProbeResult({
+        lifecycle: "running",
+        terminal: false,
+        terminalKind: null,
+      }),
+    });
+    runtime.advanceTime(30_000);
+    await runtime.window.__codeyProbeStuckTaskCompletion();
+    assert.equal(
+      runtime.bridgeCalls.filter((call) => call.path === "/session/completion-state").length,
+      1,
+    );
+  }
+});
+
+test("does not treat an unrelated voice stop control as task generation", async () => {
+  const runtime = loadInjection({
+    stopButtonAttributes: { "data-testid": "stop-voice-input" },
+  });
+  runtime.advanceTime(30_000);
+  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
+  assert.equal(
+    runtime.bridgeCalls.filter((call) => call.path === "/session/completion-state").length,
+    0,
+  );
+});
+
 test("probes the outer conversation turn instead of a nested activity turn", async () => {
   const runtime = loadInjection({
     turnIds: ["turn-outer"],
@@ -322,6 +360,34 @@ test("probes the outer conversation turn instead of a nested activity turn", asy
     turnId: "turn-outer",
   });
   assert.deepEqual(JSON.parse(JSON.stringify(probe?.options)), { timeoutMs: 10_000 });
+});
+
+test("skips the Codex history tail placeholder when probing the current turn", async () => {
+  const runtime = loadInjection({
+    turnIds: [
+      "history-content:turn:turn-real",
+      "history-content:tail:0:local:temporary-tail",
+    ],
+    bridgeHandler: async () => ({
+      status: "ok",
+      sessionId: "session-1",
+      turnId: "turn-real",
+      sessionKnown: true,
+      turnKnown: true,
+      lifecycle: "running",
+      terminal: false,
+      terminalKind: null,
+    }),
+  });
+
+  runtime.advanceTime(30_000);
+  await runtime.window.__codeyProbeStuckTaskCompletion();
+
+  const probe = runtime.bridgeCalls.find((call) => call.path === "/session/completion-state");
+  assert.deepEqual(JSON.parse(JSON.stringify(probe?.payload)), {
+    sessionId: "session-1",
+    turnId: "turn-real",
+  });
 });
 
 test("does not recover while the authoritative lifecycle is running or waiting", async () => {

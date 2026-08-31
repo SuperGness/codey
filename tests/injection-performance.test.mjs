@@ -7,7 +7,7 @@ const root = new URL("../", import.meta.url);
 const readSource = async (path) =>
   (await readFile(new URL(path, root), "utf8")).replace(/\r\n/g, "\n");
 
-test("renderer core waits for sidebar interaction before loading session tools", async () => {
+test("renderer core keeps session tools lazy until sidebar use or an active task", async () => {
   const [inject, sessionTools, bridge, petShield, securityShield, promptOptimize] = await Promise.all([
     readSource("public/renderer-inject.js"),
     readSource("public/codey-inject.js"),
@@ -29,12 +29,17 @@ test("renderer core waits for sidebar interaction before loading session tools",
   assert.doesNotMatch(inject, /const sidebarDetected =/);
   assert.match(
     inject,
-    /armSessionToolsInteraction\(\);\s*scan\(\);\s*void hydrateUpdateAvailability\(\)/,
+    /armSessionToolsInteraction\(\);\s*armSessionToolsRunningProbe\(\);\s*loadSessionToolsForRunningTask\(\);\s*scan\(\);\s*void hydrateUpdateAvailability\(\)/,
   );
   assert.match(inject, /const backendStatusPath = "\/backend\/status"/);
   assert.doesNotMatch(inject, /showUpdateDialog|codey-update-check-status/);
   assert.match(inject, /document\.addEventListener\("pointerover", loadSessionToolsFromInteraction/);
   assert.match(inject, /document\.addEventListener\("focusin", loadSessionToolsFromInteraction/);
+  assert.match(inject, /const sessionToolsRunningProbeIntervalMs = 5_000/);
+  assert.match(inject, /const nativeTaskControlSelector = "button\[aria-label\], button\[title\], button\[data-testid\]"/);
+  assert.match(inject, /armSessionToolsRunningProbe\(\);\s*loadSessionToolsForRunningTask\(\);\s*scan\(\)/);
+  assert.match(inject, /window\.setInterval\(\(\) => \{\s*loadSessionToolsForRunningTask\(\);\s*\}, sessionToolsRunningProbeIntervalMs\)/);
+  assert.match(inject, /disarmSessionToolsRunningProbe\(\);\s*bootstrapObserver\?\.disconnect/);
   assert.match(inject, /bootstrapObserver\?\.disconnect\(\)/);
   assert.match(inject, /mutationDispatcher\.subscribe\(\s*handleBootstrapMutations/);
   assert.match(inject, /new MutationObserver\(handleBootstrapMutations\)/);
@@ -71,6 +76,7 @@ test("renderer core waits for sidebar interaction before loading session tools",
   assert.match(sessionTools, /exportSize > fallbackSessionExportMaxBytes/);
   assert.match(sessionTools, /watcherWakeTimer = window\.setTimeout\(\(\) => \{[\s\S]*\}, 30_000\)/);
   assert.match(sessionTools, /const stuckCompletionGraceMs = 30_000/);
+  assert.match(sessionTools, /const nativeTaskControlSelector = "button\[aria-label\], button\[title\], button\[data-testid\]"/);
   assert.match(sessionTools, /const stuckCompletionProbeIntervalMs = 15_000/);
   assert.match(sessionTools, /const stuckCompletionProbeTimeoutMs = 10_000/);
   assert.match(sessionTools, /const stuckCompletionRecoveryRetryMs = 30_000/);
