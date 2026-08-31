@@ -8,7 +8,7 @@ resolver = "2"
 
 [workspace.package]
 edition = "2024"
-version = "0.9.8"
+version = "0.9.9"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]
