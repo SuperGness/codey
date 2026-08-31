@@ -132,6 +132,21 @@ fn read_codex_config(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(snapshot.exists().then(|| snapshot.raw().to_vec()))
 }
 
+fn read_or_create_codex_config(path: &Path) -> Result<Vec<u8>> {
+    let manager = ConfigManager::new(path);
+    let snapshot = manager.load()?;
+    if snapshot.exists() {
+        return Ok(snapshot.raw().to_vec());
+    }
+    let created = manager.replace_text(
+        Some(snapshot.revision()),
+        "",
+        "create empty Codex config.toml for desktop compatibility",
+        "codex_config.read_or_create_codex_config",
+    )?;
+    Ok(created.raw().to_vec())
+}
+
 fn codex_config_matches(path: &Path, expected: Option<&[u8]>) -> Result<bool> {
     Ok(read_codex_config(path)?.as_deref() == expected)
 }
@@ -363,9 +378,8 @@ fn apply_isolated_runtime_router_config(
     fs::create_dir_all(home)?;
     let config_path = home.join("config.toml");
     let hooks_path = home.join("hooks.json");
-    let original_config = read_codex_config(&config_path)?;
-    let existing = str::from_utf8(original_config.as_deref().unwrap_or_default())
-        .context("Codex config.toml 不是 UTF-8")?;
+    let original_config = read_or_create_codex_config(&config_path)?;
+    let existing = str::from_utf8(&original_config).context("Codex config.toml 不是 UTF-8")?;
     let persistent = parse_document(existing).context("解析 Codex config.toml 失败")?;
     if user_owned_router_provider_occupies_id(&persistent) {
         anyhow::bail!(
@@ -532,7 +546,7 @@ fn apply_isolated_runtime_router_config(
         return Err(error);
     }
 
-    let inputs_unchanged = codex_config_matches(&config_path, original_config.as_deref())?
+    let inputs_unchanged = codex_config_matches(&config_path, Some(&original_config))?
         && (!runtime_hooks_enabled
             || optional_file_matches(&hooks_path, original_hooks.as_deref())?);
     if !inputs_unchanged {

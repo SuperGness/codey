@@ -774,9 +774,11 @@ source = {}
 source_type = "local"
 source = {}
 "#,
-                toml_edit::value(marketplace_config_path(&home.join(".tmp/plugins"))),
-                toml_edit::value(marketplace_config_path(&home.join(".tmp/plugins"))),
-                toml_edit::value(marketplace_config_path(&home.join(".tmp/plugins-remote"))),
+                toml_edit::value(marketplace_config_path(&home.join(".tmp").join("plugins"))),
+                toml_edit::value(marketplace_config_path(&home.join(".tmp").join("plugins"))),
+                toml_edit::value(marketplace_config_path(
+                    &home.join(".tmp").join("plugins-remote"),
+                )),
             ),
         )
         .unwrap();
@@ -796,10 +798,14 @@ source = {}
         );
         assert_eq!(
             parsed["marketplaces"][CODEY_CURATED_MARKETPLACE]["source"].as_str(),
-            Some(expected_marketplace_path(&home.join(".tmp/plugins-remote")).as_str())
+            Some(expected_marketplace_path(&home.join(".tmp").join("plugins-remote")).as_str())
         );
         let manifest = std::fs::read_to_string(
-            home.join(".tmp/plugins-remote/.agents/plugins/marketplace.json"),
+            home.join(".tmp")
+                .join("plugins-remote")
+                .join(".agents")
+                .join("plugins")
+                .join("marketplace.json"),
         )
         .unwrap();
         assert_eq!(
@@ -900,8 +906,13 @@ source = {}
         assert_eq!(
             parsed["marketplaces"]["role-specific-plugins"]["source"].as_str(),
             Some(
-                expected_marketplace_path(&home.join(".tmp/marketplaces/role-specific-plugins"),)
-                    .as_str()
+                expected_marketplace_path(
+                    &home
+                        .join(".tmp")
+                        .join("marketplaces")
+                        .join("role-specific-plugins"),
+                )
+                .as_str()
             )
         );
         for plugin in [
@@ -1032,10 +1043,14 @@ source = {}
         );
         assert_eq!(
             parsed["marketplaces"][CODEY_CURATED_MARKETPLACE]["source"].as_str(),
-            Some(expected_marketplace_path(&home.join(".tmp/plugins-remote")).as_str())
+            Some(expected_marketplace_path(&home.join(".tmp").join("plugins-remote")).as_str())
         );
         let manifest = std::fs::read_to_string(
-            home.join(".tmp/plugins-remote/.agents/plugins/marketplace.json"),
+            home.join(".tmp")
+                .join("plugins-remote")
+                .join(".agents")
+                .join("plugins")
+                .join("marketplace.json"),
         )
         .unwrap();
         assert_eq!(
@@ -1054,11 +1069,13 @@ source = {}
         assert!(result.initialized);
         assert!(result.configured);
         let root = home.join(".tmp").join("plugins-remote");
-        assert!(root.join(".agents/plugins/marketplace.json").is_file());
-        let marketplace: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(root.join(".agents/plugins/marketplace.json")).unwrap(),
-        )
-        .unwrap();
+        let marketplace_path = root
+            .join(".agents")
+            .join("plugins")
+            .join("marketplace.json");
+        assert!(marketplace_path.is_file());
+        let marketplace: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(marketplace_path).unwrap()).unwrap();
         assert_eq!(marketplace["name"], CODEY_CURATED_MARKETPLACE);
         assert!(
             marketplace["plugins"]

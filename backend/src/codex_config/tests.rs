@@ -636,6 +636,47 @@ fn local_router_accepts_a_codey_owned_resume_shim() {
 }
 
 #[test]
+fn isolated_runtime_config_creates_empty_codex_config_when_missing() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex-home");
+    let marker = temp.path().join("codey-state/codex-lease.json");
+    let backup_root = temp.path().join("codey-state/codex-backups");
+    fs::create_dir_all(&home).unwrap();
+    let endpoint = crate::local_router::RuntimeRouterEndpoint {
+        base_url: "http://127.0.0.1:43127/v1".into(),
+        token: "launch-only-router-token".into(),
+        supports_websockets: false,
+        supports_remote_compaction: false,
+        requires_openai_auth: false,
+    };
+
+    let applied = apply_isolated_runtime_router_config(
+        &home,
+        RouterApplyOptions {
+            local_router: &endpoint,
+            use_official_catalog: true,
+            default_model: Some("openai/gpt-5.6-sol"),
+            fastctx_command: None,
+            subagent_optimization: false,
+            subagent_model: DEFAULT_SUBAGENT_MODEL,
+            subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+            subagent_roles: None,
+            marker: &marker,
+            backup_root: &backup_root,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(fs::read(home.join("config.toml")).unwrap(), b"");
+    assert!(
+        applied
+            .runtime_config_overrides
+            .iter()
+            .any(|entry| entry == "model_provider=\"codey_router\"")
+    );
+}
+
+#[test]
 fn legacy_repair_keeps_a_user_owned_codey_router_provider() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");

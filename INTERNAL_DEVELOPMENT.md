@@ -2,7 +2,7 @@
 
 本文档面向 Codey 的开发和维护，保留实现细节、构建发布流程、配置路径、启动恢复机制和已知限制。面向使用者的功能介绍只维护在 `README.md`；不要把协议、端口、路径、构建命令、数据库结构、补丁策略或其他内部技术细节迁回公开 README。
 
-Codey 是一个无界面的 Rust 桌面辅助进程，通过 CDP 连接官方 Codex Electron 客户端，并把 React 配置控制台直接注入 Codex 页面内的隔离浮层。官方账号线路与 Codey 保存的第三方线路都通过每次启动创建的 loopback Responses 网关统一接入；官方请求继续使用 Codex 的 ChatGPT OAuth，第三方请求则由网关替换为目标线路自己的 API Key。该网关负责入口认证、独立线路元数据解析、旧模型别名兼容、上游鉴权隔离，并按线路协议直接转发 Responses，或把 Responses 请求适配为 OpenAI Chat Completions / Anthropic Messages 后再把响应还原为 Responses。运行时 provider 与入口地址由 Electron 启动补丁通过 app-server 单次 `-c key=value` 覆盖注入，用户 `config.toml` 除窄范围旧版污染修复与 `codey_router` 恢复桩外保持只读；无法识别的旧协议值按统一默认规则归一为 Responses。租约只负责 Codey 独立 Hook、子代理证明策略和应用自有运行文件的清理。
+Codey 是一个无界面的 Rust 桌面辅助进程，通过 CDP 连接官方 Codex Electron 客户端，并把 React 配置控制台直接注入 Codex 页面内的隔离浮层。官方账号线路与 Codey 保存的第三方线路都通过每次启动创建的 loopback Responses 网关统一接入；官方请求继续使用 Codex 的 ChatGPT OAuth，第三方请求则由网关替换为目标线路自己的 API Key。该网关负责入口认证、独立线路元数据解析、旧模型别名兼容、上游鉴权隔离，并按线路协议直接转发 Responses，或把 Responses 请求适配为 OpenAI Chat Completions / Anthropic Messages 后再把响应还原为 Responses。运行时 provider 与入口地址由 Electron 启动补丁通过 app-server 单次 `-c key=value` 覆盖注入；已有用户 `config.toml` 除窄范围旧版污染修复与 `codey_router` 恢复桩外保持只读，文件缺失时则在启动准备入口创建空文件，满足 Codex Desktop 对实体配置文件的读取要求。无法识别的旧协议值按统一默认规则归一为 Responses。租约只负责 Codey 独立 Hook、子代理证明策略和应用自有运行文件的清理。
 
 提示词优化走 Codey 官方账号线路时复用本次 loopback `/v1/responses`，但该本地官方代理接受的请求 schema 比第三方 Responses 更窄：必须显式发送 `store: false` 与 `stream: true`，并且不能发送 `max_output_tokens`。手动配置和第三方 Responses 线路仍保留 `max_output_tokens`，以维持现有输出上限行为；官方优化响应按 SSE 的 `response.output_text.delta` 聚合文本。
 
@@ -167,7 +167,7 @@ Codey 将运行时 core/data crate 固定在 `vendor/CodeyRuntime`，复用生�
 
 ### Codex `config.toml` 只读快照与安全写事务（2026-08）
 
-本节是 `config.toml` 配置管理的维护契约。Codey 自身的 `config.json`、`auth.json`、运行时 lease、模型目录 JSON 和 Hook 文件不属于该事务。内置路由启动、当前 Provider 识别和首次导入只读取 `ConfigManager` 快照，不提交进程覆盖；恢复路径仅允许提交带 Codey-owned 证据的旧版污染修复。插件市场修复等用户明确触发的独立维护功能仍通过同一个 manager 执行带 revision 的写事务。备份目录中的历史快照不属于活动配置入口。
+本节是 `config.toml` 配置管理的维护契约。Codey 自身的 `config.json`、`auth.json`、运行时 lease、模型目录 JSON 和 Hook 文件不属于该事务。内置路由启动、当前 Provider 识别和首次导入读取 `ConfigManager` 快照，不把进程覆盖写回用户配置；启动准备仅在 `config.toml` 缺失时通过同一个 manager 创建空文件，避免 Codex Desktop 的设置、任务创建和插件解析直接读取不存在的路径。恢复路径仅允许提交带 Codey-owned 证据的旧版污染修复。插件市场修复等用户明确触发的独立维护功能仍通过同一个 manager 执行带 revision 的写事务。备份目录中的历史快照不属于活动配置入口。
 
 #### 快照与校验
 
