@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -8,7 +9,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use hyper_util::client::proxy::matcher::Matcher as SystemProxyMatcher;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
+use reqwest::header::{
+    AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue,
+};
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
 use serde_json::{Value, json};
@@ -1104,7 +1107,49 @@ impl RouterServer {
         stream: TcpStream,
         request_kind: ResponsesRequestKind,
     ) -> Result<()> {
-        let encoded_body = std::mem::take(&mut request.body);
+        let encoded_body =
+            match decode_responses_request_body(&mut request, &self.request_body_budget).await {
+                Ok(body) => body,
+                Err(error)
+                    if error
+                        .downcast_ref::<RequestBodyBudgetUnavailable>()
+                        .is_some() =>
+                {
+                    let mut downstream = HttpResponsesDownstream::new(stream);
+                    downstream
+                        .write_error(
+                            503,
+                            "router_memory_busy",
+                            "Codey 本地路由请求缓冲区已满，请稍后重试".to_string(),
+                            None,
+                        )
+                        .await?;
+                    return Ok(());
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<UnsupportedRequestContentEncoding>()
+                        .is_some() =>
+                {
+                    let mut downstream = HttpResponsesDownstream::new(stream);
+                    downstream
+                        .write_error(415, "unsupported_content_encoding", error.to_string(), None)
+                        .await?;
+                    return Ok(());
+                }
+                Err(error) => {
+                    let mut downstream = HttpResponsesDownstream::new(stream);
+                    downstream
+                        .write_error(
+                            400,
+                            "invalid_request_body",
+                            format!("Responses 请求体解码失败：{error:#}"),
+                            None,
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            };
         let body = match serde_json::from_slice::<Value>(&encoded_body) {
             Ok(body) if body.is_object() => body,
             Ok(_) => {
@@ -1860,6 +1905,7 @@ fn should_forward_incoming_header(name: &str, official_account: bool) -> bool {
     if name.eq_ignore_ascii_case("authorization")
         || name.eq_ignore_ascii_case(ROUTER_AUTH_HEADER)
         || name.eq_ignore_ascii_case(ROUTE_METADATA_KEY)
+        || name.eq_ignore_ascii_case(CONTENT_ENCODING.as_str())
         || is_hop_by_hop_header(name)
     {
         return false;
@@ -4772,6 +4818,23 @@ impl std::fmt::Display for RequestBodyBudgetUnavailable {
 
 impl std::error::Error for RequestBodyBudgetUnavailable {}
 
+#[derive(Debug)]
+struct UnsupportedRequestContentEncoding;
+
+impl std::fmt::Display for UnsupportedRequestContentEncoding {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Responses 请求体仅支持 identity 或 zstd Content-Encoding")
+    }
+}
+
+impl std::error::Error for UnsupportedRequestContentEncoding {}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResponsesRequestBodyEncoding {
+    Identity,
+    Zstd,
+}
+
 async fn read_http_request_with_budget<R>(
     stream: &mut R,
     body_budget: Option<&Arc<Semaphore>>,
@@ -4875,6 +4938,126 @@ where
     })
 }
 
+fn responses_request_body_encoding(request: &HttpRequest) -> Result<ResponsesRequestBodyEncoding> {
+    let mut encoding = None;
+    for (name, value) in &request.headers {
+        if !name.eq_ignore_ascii_case(CONTENT_ENCODING.as_str()) {
+            continue;
+        }
+        for token in value.split(',') {
+            let token = token.trim();
+            if token.is_empty() || encoding.replace(token).is_some() {
+                return Err(anyhow::Error::new(UnsupportedRequestContentEncoding));
+            }
+        }
+    }
+    match encoding {
+        None => Ok(ResponsesRequestBodyEncoding::Identity),
+        Some(encoding) if encoding.eq_ignore_ascii_case("identity") => {
+            Ok(ResponsesRequestBodyEncoding::Identity)
+        }
+        Some(encoding) if encoding.eq_ignore_ascii_case("zstd") => {
+            Ok(ResponsesRequestBodyEncoding::Zstd)
+        }
+        Some(_) => Err(anyhow::Error::new(UnsupportedRequestContentEncoding)),
+    }
+}
+
+async fn decode_responses_request_body(
+    request: &mut HttpRequest,
+    body_budget: &Arc<Semaphore>,
+) -> Result<Vec<u8>> {
+    let encoding = responses_request_body_encoding(request)?;
+    request
+        .headers
+        .retain(|(name, _)| !name.eq_ignore_ascii_case(CONTENT_ENCODING.as_str()));
+    let encoded = std::mem::take(&mut request.body);
+    if encoding == ResponsesRequestBodyEncoding::Identity {
+        return Ok(encoded);
+    }
+
+    reserve_request_body_budget_for_decompression(request, body_budget)?;
+    let decoded = tokio::task::spawn_blocking(move || decode_zstd_request_body(encoded))
+        .await
+        .context("等待 Responses zstd 请求体解压任务失败")??;
+    shrink_request_body_budget(request, decoded.len())?;
+    Ok(decoded)
+}
+
+fn decode_zstd_request_body(encoded: Vec<u8>) -> Result<Vec<u8>> {
+    let mut decoder = zstd::stream::read::Decoder::new(Cursor::new(encoded))
+        .context("初始化 Responses zstd 请求体解码器失败")?;
+    decoder
+        .window_log_max(25)
+        .context("限制 Responses zstd 请求体解压窗口失败")?;
+    let mut decoded = Vec::new();
+    decoder
+        .take((MAX_REQUEST_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut decoded)
+        .context("解压 Responses zstd 请求体失败")?;
+    if decoded.len() > MAX_REQUEST_BYTES {
+        anyhow::bail!("解压后的 Responses 请求体超过 Codey 本地路由安全上限");
+    }
+    Ok(decoded)
+}
+
+fn request_body_budget_permit_count(wire_bytes: usize) -> Result<usize> {
+    if wire_bytes > MAX_REQUEST_BYTES {
+        anyhow::bail!("请求体超过 Codey 本地路由安全上限");
+    }
+    let estimated_memory = wire_bytes.saturating_mul(REQUEST_MEMORY_BUDGET_MULTIPLIER);
+    Ok(estimated_memory.div_ceil(REQUEST_BODY_BUDGET_UNIT_BYTES))
+}
+
+fn reserve_request_body_budget_for_decompression(
+    request: &mut HttpRequest,
+    body_budget: &Arc<Semaphore>,
+) -> Result<()> {
+    let required = request_body_budget_permit_count(MAX_REQUEST_BYTES)?;
+    let held = request
+        ._body_budget_permit
+        .as_ref()
+        .map(OwnedSemaphorePermit::num_permits)
+        .unwrap_or(0);
+    let additional = required.saturating_sub(held);
+    if additional == 0 {
+        return Ok(());
+    }
+    let additional = u32::try_from(additional).context("请求体解压预算超出内部上限")?;
+    let permit = Arc::clone(body_budget)
+        .try_acquire_many_owned(additional)
+        .map_err(|_| anyhow::Error::new(RequestBodyBudgetUnavailable))?;
+    if let Some(held) = request._body_budget_permit.as_mut() {
+        held.merge(permit);
+    } else {
+        request._body_budget_permit = Some(permit);
+    }
+    Ok(())
+}
+
+fn shrink_request_body_budget(request: &mut HttpRequest, decoded_bytes: usize) -> Result<()> {
+    let desired = request_body_budget_permit_count(decoded_bytes)?;
+    let Some(mut held) = request._body_budget_permit.take() else {
+        return Ok(());
+    };
+    if desired == 0 {
+        return Ok(());
+    }
+    if desired > held.num_permits() {
+        anyhow::bail!("Responses 请求体解压预算不足");
+    }
+    if desired == held.num_permits() {
+        request._body_budget_permit = Some(held);
+        return Ok(());
+    }
+    let retained = held
+        .split(desired)
+        .context("缩减 Responses 请求体解压预算失败")?;
+    drop(held);
+    request._body_budget_permit = Some(retained);
+    Ok(())
+}
+
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -4883,11 +5066,7 @@ fn acquire_request_body_budget(
     body_budget: &Arc<Semaphore>,
     wire_bytes: usize,
 ) -> Result<Option<OwnedSemaphorePermit>> {
-    if wire_bytes > MAX_REQUEST_BYTES {
-        anyhow::bail!("请求体超过 Codey 本地路由安全上限");
-    }
-    let estimated_memory = wire_bytes.saturating_mul(REQUEST_MEMORY_BUDGET_MULTIPLIER);
-    let permits = estimated_memory.div_ceil(REQUEST_BODY_BUDGET_UNIT_BYTES);
+    let permits = request_body_budget_permit_count(wire_bytes)?;
     if permits == 0 {
         return Ok(None);
     }
@@ -8744,6 +8923,7 @@ fn reason_phrase(status: u16) -> &'static str {
         401 => "Unauthorized",
         408 => "Request Timeout",
         409 => "Conflict",
+        415 => "Unsupported Media Type",
         404 => "Not Found",
         424 => "Failed Dependency",
         500 => "Internal Server Error",
@@ -10132,6 +10312,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn zstd_compressed_responses_request_is_decoded_and_forwarded_as_json() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            let content_encoding =
+                incoming_header(&request, CONTENT_ENCODING.as_str()).map(str::to_string);
+            let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({
+                    "id":"resp-zstd",
+                    "object":"response",
+                    "status":"completed",
+                    "model":body["model"],
+                    "output":[],
+                }),
+            )
+            .await
+            .unwrap();
+            (content_encoding, body)
+        });
+        let (config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let request_body = serde_json::to_vec(&json!({
+            "model":model_alias(&provider_id, &model),
+            "input":[{
+                "role":"user",
+                "content":[{"type":"input_text","text":"compressed"}],
+            }],
+            "store":false,
+            "stream":false,
+        }))
+        .unwrap();
+        let compressed = zstd::stream::encode_all(Cursor::new(request_body), 3).unwrap();
+
+        let response = reqwest::Client::new()
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_ENCODING, "zstd")
+            .body(compressed)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.json::<Value>().await.unwrap()["id"], "resp-zstd");
+        let (content_encoding, body) = upstream_task.await.unwrap();
+        assert!(content_encoding.is_none());
+        assert_eq!(body["model"], model);
+        assert_eq!(body["input"][0]["content"][0]["text"], "compressed");
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn stopping_router_aborts_connections_that_outlive_the_drain_deadline() {
         let router = LocalRouter::start(&CodeyConfig::default()).await.unwrap();
         let port = router
@@ -10770,6 +11009,7 @@ mod tests {
     fn protocol_tokens_are_case_insensitive_without_rewriting_endpoint_paths() {
         assert!(is_hop_by_hop_header("Transfer-Encoding"));
         assert!(!should_forward_incoming_header("ConNection", true));
+        assert!(!should_forward_incoming_header("Content-Encoding", true));
         assert!(is_sse_content_type("Text/Event-Stream; Charset=UTF-8"));
 
         let base_url = "https://relay.example/API/V1/Responses?token=private#debug";
