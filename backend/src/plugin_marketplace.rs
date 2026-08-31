@@ -278,8 +278,8 @@ mod tests {
     fn marketplace_repair_replaces_managed_reserved_entries() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
-        let official_root = home.join(".tmp/plugins");
-        let remote_root = home.join(".tmp/plugins-remote");
+        let official_root = home.join(".tmp").join("plugins");
+        let remote_root = home.join(".tmp").join("plugins-remote");
         fs::write(
             home.join("config.toml"),
             format!(
