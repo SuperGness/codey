@@ -1906,6 +1906,7 @@ fn should_forward_incoming_header(name: &str, official_account: bool) -> bool {
         || name.eq_ignore_ascii_case(ROUTER_AUTH_HEADER)
         || name.eq_ignore_ascii_case(ROUTE_METADATA_KEY)
         || name.eq_ignore_ascii_case(CONTENT_ENCODING.as_str())
+        || name.eq_ignore_ascii_case(CONTENT_TYPE.as_str())
         || is_hop_by_hop_header(name)
     {
         return false;
@@ -10320,6 +10321,12 @@ mod tests {
             let request = read_http_request(&mut stream).await.unwrap();
             let content_encoding =
                 incoming_header(&request, CONTENT_ENCODING.as_str()).map(str::to_string);
+            let content_types = request
+                .headers
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case(CONTENT_TYPE.as_str()))
+                .map(|(_, value)| value.clone())
+                .collect::<Vec<_>>();
             let body = serde_json::from_slice::<Value>(&request.body).unwrap();
             write_json_response(
                 &mut stream,
@@ -10334,7 +10341,7 @@ mod tests {
             )
             .await
             .unwrap();
-            (content_encoding, body)
+            (content_encoding, content_types, body)
         });
         let (config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
         let router = LocalRouter::start(&config).await.unwrap();
@@ -10363,8 +10370,9 @@ mod tests {
 
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.json::<Value>().await.unwrap()["id"], "resp-zstd");
-        let (content_encoding, body) = upstream_task.await.unwrap();
+        let (content_encoding, content_types, body) = upstream_task.await.unwrap();
         assert!(content_encoding.is_none());
+        assert_eq!(content_types, ["application/json"]);
         assert_eq!(body["model"], model);
         assert_eq!(body["input"][0]["content"][0]["text"], "compressed");
         router.stop().await.unwrap();
@@ -11010,6 +11018,7 @@ mod tests {
         assert!(is_hop_by_hop_header("Transfer-Encoding"));
         assert!(!should_forward_incoming_header("ConNection", true));
         assert!(!should_forward_incoming_header("Content-Encoding", true));
+        assert!(!should_forward_incoming_header("Content-Type", true));
         assert!(is_sse_content_type("Text/Event-Stream; Charset=UTF-8"));
 
         let base_url = "https://relay.example/API/V1/Responses?token=private#debug";
