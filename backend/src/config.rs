@@ -860,6 +860,20 @@ impl CodeyConfig {
     /// Official ChatGPT-account routes enable it automatically once login is
     /// available; third-party routes must explicitly declare Responses WS.
     pub(crate) fn route_supports_websockets_this_launch(&self, profile: &ProviderProfile) -> bool {
+        self.route_supports_websockets_this_launch_with_proxy(
+            profile,
+            local_router::outbound_proxy_applies_to_route(profile),
+        )
+    }
+
+    fn route_supports_websockets_this_launch_with_proxy(
+        &self,
+        profile: &ProviderProfile,
+        outbound_proxy_configured: bool,
+    ) -> bool {
+        if outbound_proxy_configured {
+            return false;
+        }
         if profile.official_account {
             return self.official_account_available_this_launch;
         }
@@ -2457,6 +2471,26 @@ mod tests {
         config.official_account_available_this_launch = false;
         assert!(!config.runtime_supports_websockets());
         assert!(config.runtime_websocket_model_aliases().is_empty());
+    }
+
+    #[test]
+    fn effective_proxy_disables_runtime_websocket_route_advertising() {
+        let mut official = ProviderProfile::new("OpenAI 官方直登");
+        official.id = DERIVED_OFFICIAL_PROFILE_ID.into();
+        official.source_provider_id = Some("openai".into());
+        official.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+        official.normalize();
+        let config = CodeyConfig {
+            active_profile_id: official.id.clone(),
+            profiles: vec![official],
+            official_account_available_this_launch: true,
+            ..CodeyConfig::default()
+        }
+        .normalize();
+
+        assert!(
+            !config.route_supports_websockets_this_launch_with_proxy(&config.profiles[0], true)
+        );
     }
 
     #[test]

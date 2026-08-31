@@ -368,6 +368,7 @@ dependencies = [
  "fastctx",
  "fs2",
  "futures-util",
+ "hyper-util",
  "libc",
  "objc2",
  "objc2-app-kit",

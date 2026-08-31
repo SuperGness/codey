@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
+use hyper_util::client::proxy::matcher::Matcher as SystemProxyMatcher;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
 use serde_json::value::RawValue;
@@ -21,7 +22,9 @@ use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse as WebSocketErrorResponse, Request as WebSocketRequest,
     Response as WebSocketResponse,
 };
-use tokio_tungstenite::tungstenite::http::StatusCode as WebSocketStatusCode;
+use tokio_tungstenite::tungstenite::http::{
+    StatusCode as WebSocketStatusCode, Uri as WebSocketUri,
+};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{
     Error as WebSocketError, Message as WebSocketMessage, Utf8Bytes as WebSocketText,
@@ -33,8 +36,8 @@ use uuid::Uuid;
 
 use crate::codex_config::CHATGPT_CODEX_BASE_URL;
 use crate::config::{
-    CodeyConfig, UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES, UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
-    UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+    CodeyConfig, ProviderProfile, UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+    UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS, UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
 };
 
 pub(crate) const ROUTER_PROVIDER_ID: &str = "codey_router";
@@ -314,6 +317,27 @@ impl LocalRouter {
         }
         Ok(())
     }
+}
+
+#[cfg(not(test))]
+pub(crate) fn outbound_proxy_applies_to_route(profile: &ProviderProfile) -> bool {
+    let base_url = if profile.official_account {
+        CHATGPT_CODEX_BASE_URL
+    } else {
+        profile.base_url.as_str()
+    };
+    outbound_proxy_applies_to_url_with_matcher(base_url, &SystemProxyMatcher::from_system())
+}
+
+#[cfg(test)]
+pub(crate) fn outbound_proxy_applies_to_route(_profile: &ProviderProfile) -> bool {
+    false
+}
+
+fn outbound_proxy_applies_to_url_with_matcher(url: &str, matcher: &SystemProxyMatcher) -> bool {
+    url.parse::<WebSocketUri>()
+        .ok()
+        .is_some_and(|uri| matcher.intercept(&uri).is_some())
 }
 
 impl Drop for LocalRouter {
@@ -8767,6 +8791,34 @@ mod tests {
             .selected_models_by_provider
             .insert(provider_id.clone(), vec![model.clone()]);
         (config, provider_id, model)
+    }
+
+    #[test]
+    fn outbound_proxy_matcher_detects_effective_proxy_for_official_route() {
+        let proxied = SystemProxyMatcher::builder()
+            .https("http://127.0.0.1:7890")
+            .build();
+        assert!(outbound_proxy_applies_to_url_with_matcher(
+            CHATGPT_CODEX_BASE_URL,
+            &proxied
+        ));
+
+        let bypassed = SystemProxyMatcher::builder()
+            .https("http://127.0.0.1:7890")
+            .no("chatgpt.com")
+            .build();
+        assert!(!outbound_proxy_applies_to_url_with_matcher(
+            CHATGPT_CODEX_BASE_URL,
+            &bypassed
+        ));
+
+        let http_only = SystemProxyMatcher::builder()
+            .http("http://127.0.0.1:7890")
+            .build();
+        assert!(!outbound_proxy_applies_to_url_with_matcher(
+            CHATGPT_CODEX_BASE_URL,
+            &http_only
+        ));
     }
 
     async fn connect_router_websocket(
