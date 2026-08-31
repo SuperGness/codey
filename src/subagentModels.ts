@@ -1,4 +1,4 @@
-import type { Config, ModelState, Profile } from "./App.types";
+import type { Config, ModelState, Profile, ProviderStatus } from "./App.types";
 import { modelKey, uniqueModelIds } from "./modelIds";
 import { routeModelAlias, routeProviderId } from "./modelRoutes";
 import { routeDisplayPrefix } from "./routeShortNames";
@@ -67,6 +67,7 @@ export function buildSubagentModelOptions(
   config: Config | null,
   modelState: ModelState,
   officialAccountAvailable: boolean,
+  currentProvider: ProviderStatus["provider"] | null = null,
 ) {
   if (!config) return [];
 
@@ -82,47 +83,117 @@ export function buildSubagentModelOptions(
   const seenAliases = new Set<string>();
   const options: SubagentModelOption[] = [];
 
+  const appendOption = ({
+    modelId,
+    value,
+    routeId,
+    providerId,
+    routeName,
+    routePrefix,
+    official,
+  }: {
+    modelId: string;
+    value: string;
+    routeId: string;
+    providerId: string;
+    routeName: string;
+    routePrefix: string;
+    official: boolean;
+  }) => {
+    const valueKey = modelKey(value);
+    if (seenAliases.has(valueKey)) return;
+    seenAliases.add(valueKey);
+
+    const officialModelMetadata = metadataForModel(officialMetadata, modelId);
+    const thirdPartyModelMetadata = metadataForModel(thirdPartyMetadata, modelId);
+    const efforts = official && officialModelMetadata
+      ? officialModelMetadata.supportedReasoningEfforts
+      : thirdPartyReasoningEfforts(
+        thirdPartyModelMetadata?.supportedReasoningEfforts ??
+          officialModelMetadata?.supportedReasoningEfforts,
+      );
+    const supportedReasoningEfforts = efforts.length > 0 ? efforts : ["low"];
+    const requestedDefaultEffort =
+      official && officialModelMetadata
+        ? officialModelMetadata.defaultReasoningEffort || supportedReasoningEfforts[0]
+        : thirdPartyModelMetadata?.defaultReasoningEffort || "low";
+    options.push({
+      value,
+      label: official && officialModelMetadata
+        ? officialModelMetadata.displayName
+        : modelId,
+      modelId,
+      routeId,
+      providerId,
+      routeName,
+      routePrefix,
+      official,
+      supportedReasoningEfforts,
+      defaultReasoningEffort:
+        supportedReasoningEfforts.includes(requestedDefaultEffort)
+          ? requestedDefaultEffort
+          : supportedReasoningEfforts[0],
+    });
+  };
+
+  if (!config.localRouterEnabled) {
+    const matchingProfile = currentProvider
+      ? config.profiles.find((profile) =>
+        profile.id === currentProvider.id ||
+        routeProviderId(profile) === currentProvider.id)
+      : config.profiles.find((profile) => profile.id === config.activeProfileId);
+    const providerId = currentProvider?.id ||
+      (matchingProfile ? routeProviderId(matchingProfile) : "");
+    if (!providerId) return [];
+    const official = currentProvider?.official ??
+      matchingProfile?.authMode === "officialAccount";
+    const routeName = currentProvider?.name.trim() ||
+      matchingProfile?.name.trim() ||
+      providerId;
+    const routePrefix = matchingProfile
+      ? routeDisplayPrefix(matchingProfile)
+      : official
+        ? "官"
+        : routeName.slice(0, 2);
+    const officialModels = modelState.officialModels
+      .filter((model) => model.supported)
+      .map((model) => model.slug);
+    const models = official
+      ? uniqueModelIds(
+        officialModels.length > 0 ? officialModels : modelState.officialModelIds,
+      )
+      : uniqueModelIds([
+        ...modelState.thirdPartyModels,
+        ...modelState.upstreamModels,
+      ]);
+    for (const modelId of models) {
+      appendOption({
+        modelId,
+        value: modelId,
+        routeId: matchingProfile?.id || providerId,
+        providerId,
+        routeName,
+        routePrefix,
+        official,
+      });
+    }
+    return options;
+  }
+
   for (const profile of config.profiles) {
     const official = profile.authMode === "officialAccount";
     if (official && !officialAccountAvailable) continue;
 
     const providerId = routeProviderId(profile);
     for (const modelId of enabledModelsForRoute(config, modelState, profile)) {
-      const value = routeModelAlias(profile, modelId);
-      const valueKey = modelKey(value);
-      if (seenAliases.has(valueKey)) continue;
-      seenAliases.add(valueKey);
-
-      const officialModelMetadata = metadataForModel(officialMetadata, modelId);
-      const thirdPartyModelMetadata = metadataForModel(thirdPartyMetadata, modelId);
-      const usesOfficialMetadata = official;
-      const efforts = usesOfficialMetadata && officialModelMetadata
-        ? officialModelMetadata.supportedReasoningEfforts
-        : thirdPartyReasoningEfforts(
-          thirdPartyModelMetadata?.supportedReasoningEfforts ??
-            officialModelMetadata?.supportedReasoningEfforts,
-        );
-      const supportedReasoningEfforts = efforts.length > 0 ? efforts : ["low"];
-      const requestedDefaultEffort =
-        usesOfficialMetadata && officialModelMetadata
-          ? officialModelMetadata.defaultReasoningEffort || supportedReasoningEfforts[0]
-          : thirdPartyModelMetadata?.defaultReasoningEffort || "low";
-      options.push({
-        value,
-        label: usesOfficialMetadata && officialModelMetadata
-          ? officialModelMetadata.displayName
-          : modelId,
+      appendOption({
         modelId,
+        value: routeModelAlias(profile, modelId),
         routeId: profile.id,
         providerId,
         routeName: profile.name.trim() || providerId,
         routePrefix: routeDisplayPrefix(profile),
         official,
-        supportedReasoningEfforts,
-        defaultReasoningEffort:
-          supportedReasoningEfforts.includes(requestedDefaultEffort)
-            ? requestedDefaultEffort
-            : supportedReasoningEfforts[0],
       });
     }
   }

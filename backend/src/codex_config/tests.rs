@@ -232,7 +232,9 @@ default_subagent_reasoning_effort = "max"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(restore_runtime_config_at(&home, &temp.path().join("missing-lease.json")).unwrap());
+    assert!(
+        restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
+    );
     let repaired = fs::read_to_string(home.join("config.toml")).unwrap();
     let document = repaired.parse::<DocumentMut>().unwrap();
 
@@ -274,6 +276,29 @@ default_subagent_reasoning_effort = "max"
 }
 
 #[test]
+fn read_only_router_mode_does_not_repair_or_rewrite_codex_config_without_a_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex-home");
+    fs::create_dir_all(&home).unwrap();
+    let original = br#"model_provider = "codey_router"
+model = "relay/relay-model"
+
+[model_providers.codey_router]
+name = "Codey Local Router"
+base_url = "http://127.0.0.1:43127/v1"
+wire_api = "responses"
+experimental_bearer_token = "runtime-token"
+http_headers = { x-codey-router-token = "runtime-token" }
+"#;
+    fs::write(home.join("config.toml"), original).unwrap();
+
+    assert!(
+        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), false,).unwrap()
+    );
+    assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
+}
+
+#[test]
 fn restore_without_a_lease_repairs_dangling_codey_router_selection() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
@@ -288,7 +313,9 @@ base_url = "https://relay.example/v1"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(restore_runtime_config_at(&home, &temp.path().join("missing-lease.json")).unwrap());
+    assert!(
+        restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
+    );
     let repaired = fs::read_to_string(home.join("config.toml")).unwrap();
     let document = repaired.parse::<DocumentMut>().unwrap();
 
@@ -500,7 +527,7 @@ fn isolated_runtime_restores_live_disk_provider_to_resume_shim() {
     apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
-            local_router: &endpoint,
+            local_router: Some(&endpoint),
             use_official_catalog: false,
             default_model: Some("route-a/hy3"),
             fastctx_command: None,
@@ -529,7 +556,7 @@ fn isolated_runtime_restores_live_disk_provider_to_resume_shim() {
         "launch-only-router-token",
     );
 
-    assert!(restore_runtime_config_at(&home, &marker).unwrap());
+    assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
     let restored = fs::read_to_string(home.join("config.toml"))
         .unwrap()
         .parse::<DocumentMut>()
@@ -609,7 +636,7 @@ fn local_router_accepts_a_codey_owned_resume_shim() {
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
-            local_router: &endpoint,
+            local_router: Some(&endpoint),
             use_official_catalog: true,
             default_model: Some("openai/gpt-5.6-sol"),
             fastctx_command: None,
@@ -653,7 +680,7 @@ fn isolated_runtime_config_creates_empty_codex_config_when_missing() {
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
-            local_router: &endpoint,
+            local_router: Some(&endpoint),
             use_official_catalog: true,
             default_model: Some("openai/gpt-5.6-sol"),
             fastctx_command: None,
@@ -691,7 +718,9 @@ wire_api = "responses"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json")).unwrap());
+    assert!(
+        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
+    );
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
 }
 
@@ -706,7 +735,9 @@ model_providers = { codey_router = { name = "User-Owned Router", base_url = "htt
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json")).unwrap());
+    assert!(
+        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
+    );
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
 }
 
@@ -730,7 +761,9 @@ tool_namespace = "agents"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json")).unwrap());
+    assert!(
+        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
+    );
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
     assert!(!home.join("config.toml.bak").exists());
 }
@@ -851,6 +884,123 @@ fn stale_backup_dirs_are_pruned_beyond_retention() {
 
 fn relative_model_catalog_path() -> Option<&'static Path> {
     Some(Path::new(crate::model_catalog::relative_path()))
+}
+
+#[test]
+fn native_provider_patch_keeps_local_route_configuration_unchanged() {
+    let existing = r#"model_provider = "relay"
+model = "relay-model"
+model_catalog_json = "/user/catalog.json"
+
+[model_providers.relay]
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+"#;
+    let result = patch_config_with_fastctx_mode(
+        existing,
+        RouterPatchOptions {
+            config_path: Path::new("config.toml"),
+            model_catalog_path: None,
+            default_model: None,
+            fastctx_command: None,
+            subagent_optimization: false,
+            subagent_model: DEFAULT_SUBAGENT_MODEL,
+            subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+            local_router: None,
+        },
+    )
+    .unwrap();
+    let document = result.parse::<DocumentMut>().unwrap();
+
+    assert_eq!(document["model_provider"].as_str(), Some("relay"));
+    assert_eq!(document["model"].as_str(), Some("relay-model"));
+    assert_eq!(
+        document["model_catalog_json"].as_str(),
+        Some("/user/catalog.json")
+    );
+    assert!(
+        document
+            .get("model_providers")
+            .and_then(Item::as_table)
+            .is_some_and(|providers| {
+                providers.contains_key("relay")
+                    && !providers.contains_key(local_router::ROUTER_PROVIDER_ID)
+            })
+    );
+}
+
+#[test]
+fn native_isolated_runtime_does_not_create_a_missing_codex_config() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex-home");
+    let marker = temp.path().join("codey-state/codex-lease.json");
+    let backup_root = temp.path().join("codey-state/codex-backups");
+    fs::create_dir_all(&home).unwrap();
+
+    let applied = apply_isolated_runtime_router_config(
+        &home,
+        RouterApplyOptions {
+            local_router: None,
+            use_official_catalog: false,
+            default_model: None,
+            fastctx_command: None,
+            subagent_optimization: false,
+            subagent_model: DEFAULT_SUBAGENT_MODEL,
+            subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+            subagent_roles: None,
+            marker: &marker,
+            backup_root: &backup_root,
+        },
+    )
+    .unwrap();
+
+    assert!(!home.join("config.toml").exists());
+    assert!(applied.runtime_config_overrides.iter().all(|entry| {
+        !entry.starts_with("model_provider=")
+            && !entry.starts_with("model_catalog_json=")
+            && !entry.starts_with("model_providers.")
+    }));
+    assert!(restore_runtime_config_at(&home, &marker, false).unwrap());
+    assert!(!home.join("config.toml").exists());
+}
+
+#[test]
+fn native_isolated_runtime_preserves_a_user_owned_reserved_provider() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex-home");
+    let marker = temp.path().join("codey-state/codex-lease.json");
+    let backup_root = temp.path().join("codey-state/codex-backups");
+    fs::create_dir_all(&home).unwrap();
+    let original = br#"model_provider = "codey_router"
+model = "user-model"
+
+[model_providers.codey_router]
+name = "User Router"
+base_url = "https://user-router.example/v1"
+wire_api = "responses"
+"#;
+    fs::write(home.join("config.toml"), original).unwrap();
+
+    apply_isolated_runtime_router_config(
+        &home,
+        RouterApplyOptions {
+            local_router: None,
+            use_official_catalog: false,
+            default_model: None,
+            fastctx_command: None,
+            subagent_optimization: false,
+            subagent_model: DEFAULT_SUBAGENT_MODEL,
+            subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+            subagent_roles: None,
+            marker: &marker,
+            backup_root: &backup_root,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
+    assert!(restore_runtime_config_at(&home, &marker, false).unwrap());
+    assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
 }
 
 #[test]
@@ -1812,7 +1962,7 @@ command = "echo preserve-user-hook"
             subagent_optimization: true,
             subagent_model: "gpt-5.6-sol",
             subagent_reasoning_effort: "high",
-            local_router: test_runtime_router_endpoint(),
+            local_router: Some(test_runtime_router_endpoint()),
         },
     )
     .unwrap();
@@ -1983,7 +2133,7 @@ fn subagent_and_fastctx_share_one_pre_tool_hook() {
             subagent_optimization: true,
             subagent_model: "gpt-5.6-sol",
             subagent_reasoning_effort: "high",
-            local_router: test_runtime_router_endpoint(),
+            local_router: Some(test_runtime_router_endpoint()),
         },
     )
     .unwrap();
@@ -2103,7 +2253,7 @@ timeout = 2
             subagent_optimization: true,
             subagent_model: "gpt-5.6-sol",
             subagent_reasoning_effort: "high",
-            local_router: test_runtime_router_endpoint(),
+            local_router: Some(test_runtime_router_endpoint()),
         },
     )
     .unwrap();
@@ -2162,7 +2312,7 @@ timeout = 2
             subagent_optimization: true,
             subagent_model: "gpt-5.6-sol",
             subagent_reasoning_effort: "high",
-            local_router: test_runtime_router_endpoint(),
+            local_router: Some(test_runtime_router_endpoint()),
         },
     )
     .unwrap();
@@ -2191,7 +2341,7 @@ default_subagent_reasoning_effort = "low"
             subagent_optimization: true,
             subagent_model: "gpt-5.6-sol",
             subagent_reasoning_effort: "high",
-            local_router: test_runtime_router_endpoint(),
+            local_router: Some(test_runtime_router_endpoint()),
         },
     )
     .unwrap();
@@ -2259,7 +2409,7 @@ tool_namespace = "agents"
             subagent_optimization: true,
             subagent_model: "gpt-5.6-sol",
             subagent_reasoning_effort: "high",
-            local_router: test_runtime_router_endpoint(),
+            local_router: Some(test_runtime_router_endpoint()),
         },
     )
     .unwrap();
@@ -2283,7 +2433,7 @@ fn subagent_optimization_keeps_a_standalone_explicit_lower_concurrency() {
             subagent_optimization: true,
             subagent_model: "gpt-5.6-sol",
             subagent_reasoning_effort: "high",
-            local_router: test_runtime_router_endpoint(),
+            local_router: Some(test_runtime_router_endpoint()),
         },
     )
     .unwrap();
@@ -2314,7 +2464,7 @@ fn subagent_optimization_defaults_concurrency_for_new_or_invalid_configs() {
                 subagent_optimization: true,
                 subagent_model: "gpt-5.6-sol",
                 subagent_reasoning_effort: "high",
-                local_router: test_runtime_router_endpoint(),
+                local_router: Some(test_runtime_router_endpoint()),
             },
         )
         .unwrap();
@@ -2346,7 +2496,7 @@ fn subagent_optimization_accepts_dynamic_model_ids_and_rejects_empty_values() {
             subagent_optimization: true,
             subagent_model: "gpt-5.6-luna",
             subagent_reasoning_effort: "high",
-            local_router: test_runtime_router_endpoint(),
+            local_router: Some(test_runtime_router_endpoint()),
         },
     )
     .unwrap();
@@ -2366,7 +2516,7 @@ fn subagent_optimization_accepts_dynamic_model_ids_and_rejects_empty_values() {
             subagent_optimization: true,
             subagent_model: "   ",
             subagent_reasoning_effort: "high",
-            local_router: test_runtime_router_endpoint(),
+            local_router: Some(test_runtime_router_endpoint()),
         },
     )
     .unwrap_err();
@@ -2555,7 +2705,7 @@ experimental_bearer_token = "upstream-secret-token"
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
-            local_router: &endpoint,
+            local_router: Some(&endpoint),
             use_official_catalog: true,
             default_model: Some("route-a/provider-model"),
             fastctx_command: None,
@@ -2638,7 +2788,7 @@ fn official_login_uses_the_websocket_router_without_overriding_builtin_openai() 
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
-            local_router: &endpoint,
+            local_router: Some(&endpoint),
             use_official_catalog: true,
             default_model: Some("openai/gpt-5.6-sol"),
             fastctx_command: None,
@@ -2686,7 +2836,7 @@ wire_api = "responses"
     let error = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
-            local_router: &endpoint,
+            local_router: Some(&endpoint),
             use_official_catalog: true,
             default_model: Some("relay/provider-model"),
             fastctx_command: None,
@@ -2769,7 +2919,7 @@ wire_api = "responses"
             .contains(crate::fastctx_route_gate::HOOK_ARGUMENT)
     );
 
-    assert!(restore_runtime_config_at(&home, &marker).unwrap());
+    assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original_config);
     assert!(!home.join("hooks.json").exists());
 }
@@ -3094,7 +3244,7 @@ wire_api = "responses"
     ]
     .concat();
     fs::write(home.join("config.toml"), &switched_config).unwrap();
-    assert!(restore_runtime_config_at(&home, &marker).unwrap());
+    assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), switched_config);
     assert_eq!(fs::read(home.join("hooks.json")).unwrap(), original_hooks);
     assert!(!marker.exists());
@@ -3165,5 +3315,5 @@ developer_instructions = "CUSTOM SUBAGENT CONSTRAINT"
         fs::read_to_string(constraints_dir.join(CODEY_RUNTIME_DEFAULT_AGENT_FILE)).unwrap();
     assert!(runtime_agent.contains("CUSTOM SUBAGENT CONSTRAINT"));
     assert!(runtime_agent.contains("CUSTOM FASTCTX CONSTRAINT"));
-    assert!(restore_runtime_config_at(&home, &marker).unwrap());
+    assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
 }

@@ -9,6 +9,10 @@
   background: #ffffff;
 }
 
+.route-manager-current {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .route-list-pane,
 .route-catalog-pane {
   min-width: 0;

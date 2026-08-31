@@ -461,6 +461,15 @@ fn restart_sensitive_config_changes_are_detected() {
     let applied_models = RuntimeModelConfig::from_config(&applied);
     let applied_subagent = RuntimeSubagentConfig::from_config(&applied);
 
+    let mut local_router_change = applied.clone();
+    local_router_change.local_router_enabled = false;
+    assert!(config_requires_restart(
+        &applied,
+        &applied_models,
+        &applied_subagent,
+        &local_router_change
+    ));
+
     let mut model_change = applied.clone();
     let provider_id = model_change.current_provider_id().unwrap().to_string();
     model_change

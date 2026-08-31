@@ -394,6 +394,34 @@ input:focus-visible,
   flex-shrink: 0;
 }
 
+.local-router-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 32px;
+  padding: 4px 9px 4px 11px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.local-router-toggle > span {
+  display: grid;
+  gap: 1px;
+  line-height: 1.2;
+}
+
+.local-router-toggle strong {
+  color: var(--mac-text-primary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.local-router-toggle small {
+  color: var(--mac-text-tertiary);
+  font-size: 10px;
+}
+
 .badge-secondary,
 .mantine-Badge-root[data-variant="light"][data-color="gray"] {
   background: rgba(0, 0, 0, 0.07);

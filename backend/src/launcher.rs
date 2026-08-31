@@ -22,9 +22,10 @@ use crate::cdp;
 use crate::codex_config::{
     BUILTIN_OPENAI_PROVIDER_ID, RuntimeRouterConfigOptions, apply_runtime_router_config,
     codex_home, prepare_persistent_router_resume_shim as prepare_codex_router_resume_shim,
-    restore_runtime_config as restore_codex_runtime_config, user_owned_router_provider_occupies_id,
+    restore_runtime_config_for_router_mode as restore_codex_runtime_config_for_router_mode,
+    user_owned_router_provider_occupies_id,
 };
-use crate::config::{CodeyConfig, GpuLaunchMode, ProviderProfile};
+use crate::config::{CodeyConfig, GpuLaunchMode, ProviderProfile, RuntimeModelTarget};
 use crate::crashpad_pending_guard::{self, CrashpadPendingStatsHandle};
 use crate::error_log;
 use crate::local_router::{self, LocalRouter, ROUTER_PROVIDER_ID, RuntimeRouterEndpoint};
@@ -161,7 +162,7 @@ pub struct CodeyRuntime {
     crashpad_guard_enabled: Arc<AtomicBool>,
     crashpad_guard_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     crashpad_guard_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    local_router: LocalRouter,
+    local_router: Option<LocalRouter>,
 }
 
 fn persistent_session_provider(home: &std::path::Path) -> Result<String> {
@@ -624,7 +625,7 @@ async fn prepare_codex_startup_state(
         apply_runtime_router_config(
             &runtime_config_home,
             RuntimeRouterConfigOptions {
-                local_router: &runtime_local_router,
+                local_router: Some(&runtime_local_router),
                 use_official_catalog,
                 default_model: runtime_default_model.as_deref(),
                 fast_context_tools,
@@ -838,14 +839,19 @@ fn injection_failure_cleanup_operation() -> &'static str {
     }
 }
 
+struct RuntimeConfigRestoreContext<'a> {
+    home: &'a std::path::Path,
+    local_router_enabled: bool,
+}
+
 async fn inject_initial_renderer(
     debug_port: u16,
     handler: codey_runtime_core::bridge::BridgeHandler,
     injection_scripts: &cdp::PreparedInjectionScripts,
     app_dir: &std::path::Path,
-    home: &std::path::Path,
     spawned: &SpawnedCodex,
     child: &Arc<Mutex<Option<Child>>>,
+    restore_context: RuntimeConfigRestoreContext<'_>,
 ) -> Result<cdp::InjectedTarget> {
     let failure = match cdp::retry_inject_with_scripts(debug_port, handler, injection_scripts).await
     {
@@ -906,7 +912,12 @@ async fn inject_initial_renderer(
     if let Some(child) = child.lock().await.take() {
         reap_child_after_cleanup(child, "reap_child_after_injection_failure").await;
     }
-    Err(restore_runtime_config_after_error(home, error).await)
+    Err(restore_runtime_config_after_error(
+        restore_context.home,
+        restore_context.local_router_enabled,
+        error,
+    )
+    .await)
 }
 
 struct InjectionWatchdog {
@@ -1188,6 +1199,118 @@ async fn prepare_runtime_provider_state(
     })
 }
 
+fn native_subagent_model(
+    config: &CodeyConfig,
+    targets: &[RuntimeModelTarget],
+    model: &str,
+) -> String {
+    let model = model.trim();
+    targets
+        .iter()
+        .find(|target| model_id::equal(&target.alias, model))
+        .map(|target| target.upstream_model.clone())
+        .or_else(|| native_provider_prefixed_subagent_model(config, model))
+        .unwrap_or_else(|| model.to_string())
+}
+
+fn native_provider_prefixed_subagent_model(config: &CodeyConfig, model: &str) -> Option<String> {
+    for profile in &config.profiles {
+        let provider_id = profile.provider_id();
+        let prefix = local_router::model_alias(provider_id, "");
+        let Some(upstream_model) = strip_model_provider_prefix(model, &prefix) else {
+            continue;
+        };
+        let known_model = config
+            .upstream_models_by_provider
+            .get(provider_id)
+            .into_iter()
+            .flatten()
+            .chain(
+                config
+                    .selected_models_by_provider
+                    .get(provider_id)
+                    .into_iter()
+                    .flatten(),
+            )
+            .chain(
+                config
+                    .declared_official_models_by_provider
+                    .get(provider_id)
+                    .into_iter()
+                    .flatten(),
+            )
+            .find(|known| model_id::equal(known, upstream_model))
+            .cloned()
+            .or_else(|| {
+                model_catalog::default_official_model_slugs()
+                    .into_iter()
+                    .find(|known| model_id::equal(known, upstream_model))
+            });
+        if known_model.is_some() {
+            return known_model;
+        }
+    }
+    None
+}
+
+fn strip_model_provider_prefix<'a>(model: &'a str, prefix: &str) -> Option<&'a str> {
+    let prefix = prefix.trim();
+    model
+        .get(..prefix.len())
+        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .and_then(|_| model.get(prefix.len()..))
+        .map(str::trim)
+        .filter(|suffix| !suffix.is_empty())
+}
+
+fn native_subagent_runtime_config(config: &CodeyConfig) -> CodeyConfig {
+    let mut runtime_config = config.clone();
+    let targets = config.runtime_model_targets();
+    runtime_config.subagent_model = native_subagent_model(config, &targets, &config.subagent_model);
+    for selection in runtime_config.subagent_roles.values_mut() {
+        selection.model = native_subagent_model(config, &targets, &selection.model);
+    }
+    runtime_config
+}
+
+async fn prepare_native_runtime_state(
+    home: &std::path::Path,
+    config: &CodeyConfig,
+) -> Result<PreparedProviderState> {
+    let runtime_config_home = home.to_path_buf();
+    let fast_context_tools = config.fast_context_tools;
+    let subagent_optimization = config.subagent_optimization;
+    let native_subagent_config = native_subagent_runtime_config(config);
+    let subagent_model = native_subagent_config.subagent_model;
+    let subagent_reasoning_effort = native_subagent_config.subagent_reasoning_effort;
+    let subagent_roles = native_subagent_config.subagent_roles;
+    let applied = tokio::task::spawn_blocking(move || {
+        apply_runtime_router_config(
+            &runtime_config_home,
+            RuntimeRouterConfigOptions {
+                local_router: None,
+                use_official_catalog: false,
+                default_model: None,
+                fast_context_tools,
+                subagent_optimization,
+                subagent_model: &subagent_model,
+                subagent_reasoning_effort: &subagent_reasoning_effort,
+                subagent_roles: Some(&subagent_roles),
+            },
+        )
+    })
+    .await
+    .map_err(|error| {
+        anyhow::Error::new(error).context("应用原生 Provider 运行配置任务异常退出")
+    })??;
+    let mut runtime_config = config.clone();
+    runtime_config.fast_context_tools = applied.fast_context_tools_active;
+    Ok(PreparedProviderState {
+        runtime_config,
+        runtime_config_overrides: applied.runtime_config_overrides,
+    })
+}
+
 async fn prepare_startup_patches(
     home: &std::path::Path,
     config: &CodeyConfig,
@@ -1208,6 +1331,7 @@ async fn prepare_startup_patches(
             );
             return Err(restore_runtime_config_after_error(
                 home,
+                config.local_router_enabled,
                 error.context("应用 Codex 宠物精简设置失败"),
             )
             .await);
@@ -1224,6 +1348,7 @@ async fn prepare_startup_patches(
             );
             return Err(restore_runtime_config_after_error(
                 home,
+                config.local_router_enabled,
                 anyhow::Error::new(error).context("Codex 宠物精简设置任务异常退出"),
             )
             .await);
@@ -1253,7 +1378,12 @@ async fn spawn_and_inject_runtime(
     {
         Ok(spawned) => spawned,
         Err(error) => {
-            return Err(restore_runtime_config_after_error(home, error).await);
+            return Err(restore_runtime_config_after_error(
+                home,
+                config.local_router_enabled,
+                error,
+            )
+            .await);
         }
     };
     let maintenance = MaintenanceStatus {
@@ -1270,9 +1400,12 @@ async fn spawn_and_inject_runtime(
         handler.clone(),
         injection_scripts,
         &storage.app_dir,
-        home,
         &spawned,
         &child,
+        RuntimeConfigRestoreContext {
+            home,
+            local_router_enabled: config.local_router_enabled,
+        },
     )
     .await?;
     Ok(SpawnedRenderer {
@@ -1341,11 +1474,13 @@ impl CodeyRuntime {
     }
 
     pub fn sync_local_router_routes(&self, config: &CodeyConfig) {
-        self.local_router.update_config(config);
+        if let Some(local_router) = self.local_router.as_ref() {
+            local_router.update_config(config);
+        }
     }
 
-    pub(crate) fn local_router_endpoint(&self) -> RuntimeRouterEndpoint {
-        self.local_router.endpoint()
+    pub(crate) fn local_router_endpoint(&self) -> Option<RuntimeRouterEndpoint> {
+        self.local_router.as_ref().map(LocalRouter::endpoint)
     }
 
     pub async fn applied_subagent_config(&self) -> RuntimeSubagentConfig {
@@ -1359,8 +1494,17 @@ impl CodeyRuntime {
     pub fn supports_subagent_config_hot_reload(&self, config: &CodeyConfig) -> bool {
         self.applied_config.subagent_optimization
             && config.subagent_optimization
+            && self.applied_config.local_router_enabled == config.local_router_enabled
             && self.applied_config.fast_context_tools == config.fast_context_tools
             && self.applied_config.active_profile() == config.active_profile()
+    }
+
+    pub(crate) fn subagent_reconcile_config(&self, config: &CodeyConfig) -> CodeyConfig {
+        if self.applied_config.local_router_enabled {
+            config.clone()
+        } else {
+            native_subagent_runtime_config(config)
+        }
     }
 
     pub fn set_crashpad_pending_protection(&self, enabled: bool) {
@@ -1404,13 +1548,18 @@ impl CodeyRuntime {
         let home = codex_home();
         trace_log_write_protection_active.store(false, Ordering::Release);
         let injection_scripts = cdp::prepare_injection_scripts(
+            config.local_router_enabled,
             config.slim_codex_pet,
             config.hide_full_access_warning,
             &config.user_scripts,
         );
         let initial_storage_guards = spawn_initial_storage_guards(home, config);
-        let startup_profile = resolve_startup_profile(config)?;
-        // Threads created or resumed under Codey persist `codey_router` in
+        let startup_profile = config
+            .local_router_enabled
+            .then(|| resolve_startup_profile(config))
+            .transpose()?;
+        // When local routing is enabled, threads created or resumed under
+        // Codey persist `codey_router` in
         // rollout headers and the Codex thread index. Codex Desktop resolves
         // that id from disk config; process `-c` overlays do not replace that
         // lookup. Sync records back to the user's persistent provider so
@@ -1418,9 +1567,14 @@ impl CodeyRuntime {
         // resume shim here: that table is ChatGPT-account transport and would
         // send third-party catalog aliases to chatgpt.com for the whole live
         // session. The live loopback table is written after the local router
-        // binds, inside apply_runtime_router_config.
-        let persistent_session_provider = resolve_persistent_session_provider(home).await?;
-        let session_provider_sync_target = Some(persistent_session_provider.as_str());
+        // binds, inside apply_runtime_router_config. Native mode skips this
+        // routing-specific session rewrite and leaves Codex records untouched.
+        let persistent_session_provider = if config.local_router_enabled {
+            Some(resolve_persistent_session_provider(home).await?)
+        } else {
+            None
+        };
+        let session_provider_sync_target = persistent_session_provider.as_deref();
         let storage = prepare_startup_storage(
             home,
             config,
@@ -1430,15 +1584,31 @@ impl CodeyRuntime {
             &crashpad_pending_stats,
         )
         .await?;
-        let local_router = LocalRouter::start(config).await?;
+        let local_router = if config.local_router_enabled {
+            Some(LocalRouter::start(config).await?)
+        } else {
+            None
+        };
+        let prepared_provider_state = if let (Some(startup_profile), Some(local_router)) =
+            (startup_profile.as_ref(), local_router.as_ref())
+        {
+            prepare_runtime_provider_state(home, config, startup_profile, local_router).await
+        } else {
+            prepare_native_runtime_state(home, config).await
+        };
         let PreparedProviderState {
             runtime_config,
             runtime_config_overrides,
-        } = match prepare_runtime_provider_state(home, config, &startup_profile, &local_router)
-            .await
-        {
+        } = match prepared_provider_state {
             Ok(state) => state,
-            Err(error) => return Err(restore_runtime_config_after_error(home, error).await),
+            Err(error) => {
+                return Err(restore_runtime_config_after_error(
+                    home,
+                    config.local_router_enabled,
+                    error,
+                )
+                .await);
+            }
         };
         let patch = prepare_startup_patches(home, config).await?;
         let SpawnedRenderer {
@@ -1550,8 +1720,15 @@ impl CodeyRuntime {
         if let Some(child) = self.child.lock().await.take() {
             reap_child_after_cleanup(child, "reap_child_during_runtime_stop").await;
         }
-        let config_restore = restore_runtime_config(codex_home()).await;
-        let local_router_stop = self.local_router.stop().await;
+        let config_restore = restore_runtime_config_for_router_mode(
+            codex_home(),
+            self.applied_config.local_router_enabled,
+        )
+        .await;
+        let local_router_stop = match self.local_router.as_ref() {
+            Some(local_router) => local_router.stop().await,
+            None => Ok(()),
+        };
         if let Err(error) = &local_router_stop {
             error_log::record_failure(
                 "cleanup_failed",
@@ -1692,8 +1869,11 @@ fn session_maintenance_summary(
 #[cfg(test)]
 mod maintenance_status_tests;
 
-pub async fn restore_previous_runtime_state(home: &std::path::Path) -> Result<()> {
-    restore_runtime_config(home).await
+pub async fn restore_previous_runtime_state(
+    home: &std::path::Path,
+    local_router_enabled: bool,
+) -> Result<()> {
+    restore_runtime_config_for_router_mode(home, local_router_enabled).await
 }
 
 pub async fn prepare_persistent_router_resume_shim(home: &std::path::Path) -> Result<()> {
@@ -1720,15 +1900,23 @@ fn prepare_persistent_router_resume_shim_blocking(home: &std::path::Path) -> Res
     result
 }
 
-pub async fn restore_runtime_config(home: &std::path::Path) -> Result<()> {
+async fn restore_runtime_config_for_router_mode(
+    home: &std::path::Path,
+    local_router_enabled: bool,
+) -> Result<()> {
     let home = home.to_path_buf();
-    tokio::task::spawn_blocking(move || restore_runtime_config_blocking(&home))
-        .await
-        .context("恢复 Codey 运行时配置任务异常退出")?
+    tokio::task::spawn_blocking(move || {
+        restore_runtime_config_for_router_mode_blocking(&home, local_router_enabled)
+    })
+    .await
+    .context("恢复 Codey 运行时配置任务异常退出")?
 }
 
-fn restore_runtime_config_blocking(home: &std::path::Path) -> Result<()> {
-    let result = restore_codex_runtime_config(home)
+fn restore_runtime_config_for_router_mode_blocking(
+    home: &std::path::Path,
+    local_router_enabled: bool,
+) -> Result<()> {
+    let result = restore_codex_runtime_config_for_router_mode(home, local_router_enabled)
         .map(|_| ())
         .context("恢复 Codex 配置失败");
     if let Err(error) = &result {
@@ -1738,6 +1926,7 @@ fn restore_runtime_config_blocking(home: &std::path::Path) -> Result<()> {
             format!("{error:#}"),
             serde_json::json!({
                 "codexHome": home,
+                "localRouterEnabled": local_router_enabled,
             }),
         );
     }
@@ -1746,9 +1935,10 @@ fn restore_runtime_config_blocking(home: &std::path::Path) -> Result<()> {
 
 async fn restore_runtime_config_after_error(
     home: &std::path::Path,
+    local_router_enabled: bool,
     error: anyhow::Error,
 ) -> anyhow::Error {
-    match restore_runtime_config(home).await {
+    match restore_runtime_config_for_router_mode(home, local_router_enabled).await {
         Ok(()) => error,
         Err(restore_error) => {
             anyhow::anyhow!("{error:#}；启动失败后恢复临时 Codex 配置也失败：{restore_error:#}")

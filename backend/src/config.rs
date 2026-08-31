@@ -459,6 +459,11 @@ pub(crate) struct RuntimeModelTarget {
 pub struct CodeyConfig {
     #[serde(default)]
     pub settings_revision: u64,
+    /// Controls whether Codey installs and uses its process-local multi-route
+    /// gateway. Missing values default to enabled so existing installations
+    /// keep their current behavior after upgrading.
+    #[serde(default = "default_true")]
+    pub local_router_enabled: bool,
     #[serde(default)]
     pub active_profile_id: String,
     #[serde(default)]
@@ -570,6 +575,7 @@ impl Default for CodeyConfig {
         let profile = ProviderProfile::new("默认配置");
         Self {
             settings_revision: 0,
+            local_router_enabled: true,
             active_profile_id: profile.id.clone(),
             profiles: vec![profile],
             webhook: WebhookConfig::default(),
@@ -2909,6 +2915,25 @@ mod tests {
 
         assert!(config.disable_trace_log_writes);
         assert!(config.protect_crashpad_pending);
+    }
+
+    #[test]
+    fn local_router_defaults_to_enabled_for_existing_configs() {
+        let legacy = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
+            .unwrap()
+            .normalize();
+        let disabled = serde_json::from_str::<CodeyConfig>(
+            r#"{"activeProfileId":"","profiles":[],"localRouterEnabled":false}"#,
+        )
+        .unwrap()
+        .normalize();
+
+        assert!(legacy.local_router_enabled);
+        assert!(!disabled.local_router_enabled);
+        assert_eq!(
+            serde_json::to_value(disabled).unwrap()["localRouterEnabled"],
+            serde_json::json!(false)
+        );
     }
 
     #[test]

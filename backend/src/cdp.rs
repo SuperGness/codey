@@ -198,11 +198,13 @@ impl InjectedTarget {
 }
 
 pub fn prepare_injection_scripts(
+    local_router_enabled: bool,
     slim_codex_pet: bool,
     hide_full_access_warning: bool,
     user_scripts: &[String],
 ) -> PreparedInjectionScripts {
     prepare_injection_scripts_for_platform(
+        local_router_enabled,
         slim_codex_pet,
         hide_full_access_warning,
         user_scripts,
@@ -211,6 +213,7 @@ pub fn prepare_injection_scripts(
 }
 
 fn prepare_injection_scripts_for_platform(
+    local_router_enabled: bool,
     slim_codex_pet: bool,
     hide_full_access_warning: bool,
     user_scripts: &[String],
@@ -468,7 +471,7 @@ fn prepare_injection_scripts_for_platform(
     );
     let mut descriptors = Vec::with_capacity(builtin_scripts.len() + user_scripts.len());
     for (id, name, script, probe, visibility, applicability) in builtin_scripts {
-        if !applicability.supports(platform) {
+        if !applicability.supports(platform) || (id == "model-whitelist" && !local_router_enabled) {
             continue;
         }
         let descriptor = InjectionScriptDescriptor {
@@ -1572,6 +1575,7 @@ mod tests {
     #[test]
     fn core_scripts_share_one_cdp_document_script_and_user_scripts_stay_isolated() {
         let prepared = prepare_injection_scripts_for_platform(
+            true,
             false,
             false,
             &["".to_string(), "window.userScriptRan = true;".to_string()],
@@ -1664,12 +1668,14 @@ mod tests {
     fn windows_only_scripts_are_excluded_from_non_windows_injection() {
         let user_scripts = ["window.userScriptRan = true;".to_string()];
         let non_windows = prepare_injection_scripts_for_platform(
+            true,
             false,
             false,
             &user_scripts,
             InjectionHostPlatform::Other,
         );
         let windows = prepare_injection_scripts_for_platform(
+            true,
             false,
             false,
             &user_scripts,
@@ -1700,7 +1706,7 @@ mod tests {
             Some("user-script-1")
         );
 
-        let current = prepare_injection_scripts(false, false, &[]);
+        let current = prepare_injection_scripts(true, false, false, &[]);
         let current_has_windows_scripts = current
             .descriptors
             .iter()
@@ -1709,8 +1715,35 @@ mod tests {
     }
 
     #[test]
+    fn disabled_local_router_omits_the_model_routing_injection_only() {
+        let prepared = prepare_injection_scripts_for_platform(
+            false,
+            false,
+            false,
+            &[],
+            InjectionHostPlatform::Other,
+        );
+
+        assert!(
+            prepared
+                .descriptors
+                .iter()
+                .all(|descriptor| descriptor.id != "model-whitelist")
+        );
+        assert!(!prepared.scripts[0].contains("__codeyModelWhitelistPatch"));
+        assert!(prepared.scripts[0].contains("window.__codeyBridgeHelpersInstalled"));
+        assert!(
+            prepared
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.id == "settings-overlay-loader")
+        );
+    }
+
+    #[test]
     fn injection_statuses_preserve_script_order_and_report_missing_entries() {
         let prepared = prepare_injection_scripts_for_platform(
+            true,
             false,
             false,
             &["window.userScriptRan = true;".to_string()],

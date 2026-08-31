@@ -19,7 +19,7 @@ use super::{
 };
 use crate::codex_config::codex_home;
 use crate::error_log;
-use crate::launcher::{CodeyRuntime, restore_previous_runtime_state, restore_runtime_config};
+use crate::launcher::{CodeyRuntime, restore_previous_runtime_state};
 
 const CODEX_APP_VERSION_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -322,7 +322,8 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
     #[cfg(windows)]
     ensure_windows_codex_app_path(state).await?;
     stop_waiting_webhook_watcher(state).await;
-    restore_previous_runtime_state(codex_home())
+    let local_router_enabled = state.config.read().await.local_router_enabled;
+    restore_previous_runtime_state(codex_home(), local_router_enabled)
         .await
         .map_err(|error| format!("恢复上次 Codey 临时 Codex 配置失败：{error}"))?;
     prepare_routes_for_current_launch(state).await?;
@@ -538,7 +539,8 @@ async fn stop_codey_runtime_locked(state: &Arc<AppState>) -> Result<Value, Strin
             return Err(error.to_string());
         }
     } else {
-        restore_runtime_config(codex_home())
+        let local_router_enabled = state.config.read().await.local_router_enabled;
+        restore_previous_runtime_state(codex_home(), local_router_enabled)
             .await
             .map_err(|error| error.to_string())?;
     }

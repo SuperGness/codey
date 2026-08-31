@@ -156,6 +156,121 @@ fn subagent_runtime_models_use_route_aware_aliases() {
 }
 
 #[test]
+fn native_subagent_runtime_models_use_upstream_model_ids() {
+    let mut route = ProviderProfile::new("Relay");
+    route.id = "route-a".to_string();
+    route.short_name = "R".to_string();
+    route.base_url = "https://relay.example/v1".to_string();
+    route.api_key = "secret".to_string();
+    route.normalize();
+    let mut config = CodeyConfig {
+        active_profile_id: route.id.clone(),
+        profiles: vec![route],
+        subagent_model: local_router::model_alias("route-a", "shared-model"),
+        ..CodeyConfig::default()
+    };
+    config.selected_models_by_provider.insert(
+        "route-a".to_string(),
+        vec!["shared-model".to_string(), "worker-model".to_string()],
+    );
+    config.subagent_roles.get_mut("codey_worker").unwrap().model =
+        local_router::model_alias("route-a", "worker-model");
+    config
+        .subagent_roles
+        .get_mut("codey_quick_scan")
+        .unwrap()
+        .model = local_router::model_alias("route-a", "gpt-5.6-terra");
+    config
+        .subagent_roles
+        .get_mut("codey_visual_worker")
+        .unwrap()
+        .model = "custom/gpt-5.6-luna".to_string();
+    let native = native_subagent_runtime_config(&config);
+
+    assert_eq!(native.subagent_model, "shared-model");
+    assert_eq!(native.subagent_roles["codey_worker"].model, "worker-model");
+    assert_eq!(
+        native.subagent_roles["codey_quick_scan"].model,
+        "gpt-5.6-terra"
+    );
+    assert_eq!(
+        native.subagent_roles["codey_visual_worker"].model,
+        "custom/gpt-5.6-luna"
+    );
+}
+
+#[test]
+fn native_subagent_runtime_strips_official_provider_prefix_without_route_targets() {
+    let mut route = ProviderProfile::new("Custom");
+    route.id = "custom".to_string();
+    route.short_name = "C".to_string();
+    route.base_url = "https://relay.example/v1".to_string();
+    route.api_key = "secret".to_string();
+    route.normalize();
+    let mut config = CodeyConfig {
+        active_profile_id: route.id.clone(),
+        local_router_enabled: false,
+        profiles: vec![route],
+        subagent_model: "custom/gpt-5.6-sol".into(),
+        subagent_roles: crate::config::uniform_subagent_roles("custom/gpt-5.6-sol", "high"),
+        ..CodeyConfig::default()
+    };
+    config
+        .subagent_roles
+        .get_mut("codey_quick_scan")
+        .unwrap()
+        .model = "custom/gpt-5.6-terra".to_string();
+    config
+        .subagent_roles
+        .get_mut("codey_visual_worker")
+        .unwrap()
+        .model = "custom/gpt-5.6-luna".to_string();
+    config
+        .subagent_roles
+        .get_mut("codey_deep_research")
+        .unwrap()
+        .model = "custom/vendor/model".to_string();
+    let native = native_subagent_runtime_config(&config);
+
+    assert_eq!(native.subagent_model, "gpt-5.6-sol");
+    assert_eq!(
+        native.subagent_roles["codey_quick_scan"].model,
+        "gpt-5.6-terra"
+    );
+    assert_eq!(
+        native.subagent_roles["codey_visual_worker"].model,
+        "gpt-5.6-luna"
+    );
+    assert_eq!(
+        native.subagent_roles["codey_deep_research"].model,
+        "custom/vendor/model"
+    );
+}
+
+#[test]
+fn native_subagent_runtime_uses_synced_upstream_model_without_route_targets() {
+    let mut route = ProviderProfile::new("Custom");
+    route.id = "custom".to_string();
+    route.base_url = "https://relay.example/v1".to_string();
+    route.api_key = "secret".to_string();
+    route.normalize();
+    let mut config = CodeyConfig {
+        active_profile_id: route.id.clone(),
+        local_router_enabled: false,
+        profiles: vec![route],
+        subagent_model: "custom/vendor/model".into(),
+        ..CodeyConfig::default()
+    };
+    config
+        .upstream_models_by_provider
+        .insert("custom".into(), vec!["vendor/model".into()]);
+
+    let native = native_subagent_runtime_config(&config);
+
+    assert_eq!(native.subagent_model, "vendor/model");
+}
+
+#[test]
 fn persistent_session_provider_never_targets_the_launch_only_router_id() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(

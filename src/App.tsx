@@ -96,6 +96,15 @@ function thirdPartyRouteModelState(
   };
 }
 
+function onlyLocalRouterToggleChanged(current: Config, persisted: Config) {
+  if (current.localRouterEnabled === persisted.localRouterEnabled) return false;
+  return JSON.stringify({
+    ...current,
+    localRouterEnabled: persisted.localRouterEnabled,
+    settingsRevision: 0,
+  }) === JSON.stringify({ ...persisted, settingsRevision: 0 });
+}
+
 export function App({
   embedded = false,
   modalContainer,
@@ -137,6 +146,13 @@ export function App({
   const provider = providerStatus?.provider;
   const isBusy = busy !== null;
   const configLoaded = config !== null;
+  const pendingNativeRouterToggle = Boolean(
+    config &&
+      persistedConfigRef.current &&
+      !config.localRouterEnabled &&
+      onlyLocalRouterToggleChanged(config, persistedConfigRef.current),
+  );
+  const canSyncCurrentProvider = !dirty || pendingNativeRouterToggle;
   const setPersistedConfig = useCallback((next: Config) => {
     persistedConfigRef.current = next;
     setConfig(next);
@@ -218,6 +234,7 @@ export function App({
     saveModelSelection,
   } = useModelSelection({
     config,
+    currentProvider: provider ?? null,
     officialAccountAvailable: status.officialAccountAvailable === true,
     runOperation,
     setPersistedConfig,
@@ -418,8 +435,19 @@ export function App({
   }
 
   async function syncCurrentProvider() {
-    if (dirty || isBusy) return;
+    if (!config || isBusy) return;
+    const nativeMode = config?.localRouterEnabled === false;
+    const shouldPersistNativeToggle = Boolean(
+      nativeMode &&
+        dirty &&
+        persistedConfigRef.current &&
+        onlyLocalRouterToggleChanged(config, persistedConfigRef.current),
+    );
+    if (dirty && !shouldPersistNativeToggle) return;
     await runOperation("sync-provider", async () => {
+      if (shouldPersistNativeToggle) {
+        await persist(config);
+      }
       const result = await invoke<{
         config: Config;
         providerStatus: ProviderStatus;
@@ -435,9 +463,11 @@ export function App({
       }));
       setNotice({
         tone: result.restartRequired ? "info" : "success",
-        text: result.restartRequired
-          ? "已重新读取 Codex 配置，重启后应用当前线路"
-          : "已重新读取 Codex 配置",
+        text: nativeMode
+          ? `已刷新当前线路「${result.providerStatus.provider.name}」及其模型`
+          : result.restartRequired
+            ? "已重新读取 Codex 配置，重启后应用当前线路"
+            : "已重新读取 Codex 配置",
       });
     });
   }
@@ -554,15 +584,18 @@ export function App({
 
   async function fetchRouteModels(route: Profile) {
     if (!config) return;
+    const nativeMode = !config.localRouterEnabled;
+    if (nativeMode) {
+      await syncCurrentProvider();
+      return;
+    }
     if (route.authMode === "officialAccount") {
       await syncCurrentProvider();
       return;
     }
     await runOperation("fetch-route-models", async () => {
       const savedConfig = config;
-      const savedRoute = savedConfig.profiles.find(
-        (profile) => profile.id === route.id,
-      );
+      const savedRoute = savedConfig.profiles.find((profile) => profile.id === route.id);
       if (!savedRoute) throw new Error("找不到要同步模型的线路");
       try {
         const result = await invoke<{
@@ -896,6 +929,19 @@ export function App({
   const handleFetchRouteModels = useStableEvent((route: Profile) => {
     void fetchRouteModels(route);
   });
+  const handleToggleLocalRouter = useStableEvent((checked: boolean) => {
+    if (!config) return;
+    editConfig({
+      ...config,
+      localRouterEnabled: checked,
+    });
+    setNotice({
+      tone: "info",
+      text: checked
+        ? "保存并重启 Codex 后启用本地路由"
+        : "保存并重启 Codex 后关闭本地路由；线路配置将保持只读",
+    });
+  });
   const handleToggleAccountUsage = useStableEvent((checked: boolean) => {
     if (!config) return;
     editConfig({
@@ -1180,13 +1226,16 @@ export function App({
           <div className="full-row-section">
             <ModelSection
               config={config}
+              currentProvider={provider ?? null}
               officialAccountAvailable={status.officialAccountAvailable === true}
               popupContainer={popupContainer}
               modelState={modelState}
               dirty={dirty}
+              canSyncCurrentProvider={canSyncCurrentProvider}
               isBusy={isBusy}
               busy={busy}
               showAccountUsageInHeader={config.showAccountUsageInHeader}
+              onToggleLocalRouter={handleToggleLocalRouter}
               onSyncCurrentProvider={handleSyncCurrentProvider}
               onSaveRoute={handleSaveRoute}
               onDeleteRoute={handleDeleteRoute}

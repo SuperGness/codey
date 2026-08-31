@@ -14,7 +14,7 @@ import {
   IconWorld,
 } from "@tabler/icons-react";
 
-import type { Config, ModelState, Profile } from "./App.types";
+import type { Config, ModelState, Profile, ProviderStatus } from "./App.types";
 import {
   Badge,
   Button,
@@ -40,13 +40,16 @@ import { validateOutboundApiUrl } from "./urlValidation";
 
 type ModelSectionProps = {
   config: Config;
+  currentProvider: ProviderStatus["provider"] | null;
   officialAccountAvailable: boolean;
   popupContainer: HTMLElement | null;
   modelState: ModelState;
   dirty: boolean;
+  canSyncCurrentProvider: boolean;
   isBusy: boolean;
   busy: string | null;
   showAccountUsageInHeader: boolean;
+  onToggleLocalRouter: (checked: boolean) => void;
   onSyncCurrentProvider: () => void;
   onSaveRoute: (route: Profile) => Promise<boolean>;
   onDeleteRoute: (routeId: string) => void;
@@ -129,13 +132,16 @@ const routeProtocolOptions: Array<{
 
 function ModelSectionComponent({
   config,
+  currentProvider,
   officialAccountAvailable,
   popupContainer,
   modelState,
   dirty,
+  canSyncCurrentProvider,
   isBusy,
   busy,
   showAccountUsageInHeader,
+  onToggleLocalRouter,
   onSyncCurrentProvider,
   onSaveRoute,
   onDeleteRoute,
@@ -150,14 +156,53 @@ function ModelSectionComponent({
   const [routeApiKeyVisible, setRouteApiKeyVisible] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
   const [selectedProviderFilter, setSelectedProviderFilter] = useState<string>("all");
+  const routeConfigReadOnly = !config.localRouterEnabled;
 
+  useEffect(() => {
+    if (!routeConfigReadOnly) return;
+    setRouteDialogOpen(false);
+    setRouteDraft(null);
+    setRouteApiKeyVisible(false);
+  }, [routeConfigReadOnly]);
+
+  const nativeProfile = useMemo<Profile | null>(() => {
+    if (!routeConfigReadOnly || !currentProvider) return null;
+    const matchingProfile = config.profiles.find(
+      (profile) =>
+        profile.id === currentProvider.id ||
+        routeProviderId(profile) === currentProvider.id,
+    );
+    const official = currentProvider.official;
+    return {
+      id: matchingProfile?.id || currentProvider.id,
+      name:
+        currentProvider.name.trim() ||
+        matchingProfile?.name.trim() ||
+        currentProvider.id,
+      shortName: matchingProfile?.shortName || (official ? "官" : ""),
+      baseUrl: currentProvider.baseUrl || matchingProfile?.baseUrl || "",
+      apiKey: "",
+      upstreamProtocol:
+        matchingProfile?.upstreamProtocol ||
+        (official ? "official" : "openaiResponses"),
+      authMode: official ? "officialAccount" : "apiKey",
+      apiKeyConfigured: matchingProfile?.apiKeyConfigured === true,
+      sourceProviderId: currentProvider.id,
+      officialAccount: official,
+      supportsRemoteCompaction: matchingProfile?.supportsRemoteCompaction,
+      supportsWebsockets: matchingProfile?.supportsWebsockets,
+      supportsAutoReview: matchingProfile?.supportsAutoReview,
+    };
+  }, [config.profiles, currentProvider, routeConfigReadOnly]);
   const visibleProfiles = useMemo(
-    () =>
-      config.profiles.filter(
+    () => {
+      if (routeConfigReadOnly) return nativeProfile ? [nativeProfile] : [];
+      return config.profiles.filter(
         (profile) =>
           profile.authMode !== "officialAccount" || officialAccountAvailable,
-      ),
-    [config.profiles, officialAccountAvailable],
+      );
+    },
+    [config.profiles, nativeProfile, officialAccountAvailable, routeConfigReadOnly],
   );
   const officialDisplayNames = useMemo(
     () =>
@@ -187,23 +232,39 @@ function ModelSectionComponent({
         const providerId = routeProviderId(profile);
         const official = profile.authMode === "officialAccount";
         const configuredModels = config.selectedModelsByProvider[providerId] || [];
-        const models = official
-          ? configuredModels.length > 0
-            ? configuredModels
-            : officialCatalog
-          : uniqueModelIds([
-              ...configuredModels,
-              ...(config.declaredOfficialModelsByProvider[providerId] || []),
-            ]);
+        const nativeOfficialModels = modelState.officialModels
+          .filter((model) => model.supported)
+          .map((model) => model.slug);
+        const models = routeConfigReadOnly
+          ? official
+            ? uniqueModelIds(
+                nativeOfficialModels.length > 0
+                  ? nativeOfficialModels
+                  : modelState.officialModelIds,
+              )
+            : uniqueModelIds([
+                ...modelState.thirdPartyModels,
+                ...modelState.upstreamModels,
+              ])
+          : official
+            ? configuredModels.length > 0
+              ? configuredModels
+              : officialCatalog
+            : uniqueModelIds([
+                ...configuredModels,
+                ...(config.declaredOfficialModelsByProvider[providerId] || []),
+              ]);
         return {
           profile,
           providerId,
           models,
-          defaultModel: globalDefaultForRoute(config, profile, models),
+          defaultModel: routeConfigReadOnly
+            ? modelState.defaultModel
+            : globalDefaultForRoute(config, profile, models),
           official,
         };
       }),
-    [config, officialCatalog, visibleProfiles],
+    [config, modelState, officialCatalog, routeConfigReadOnly, visibleProfiles],
   );
   const modelGroupByProviderId = useMemo(
     () => new Map(modelGroups.map((group) => [group.providerId, group])),
@@ -327,28 +388,50 @@ function ModelSectionComponent({
           </span>
           <div>
             <h2 id="route-title">线路与模型</h2>
-            <p>统一管理供应商线路与模型目录</p>
+            <p>
+              {routeConfigReadOnly
+                ? "查看 Codex 当前线路并同步原始模型目录"
+                : "统一管理供应商线路与模型目录"}
+            </p>
           </div>
         </div>
         <div className="route-heading-actions">
+          <div className="local-router-toggle">
+            <span>
+              <strong>本地路由</strong>
+              <small>{config.localRouterEnabled ? "已启用" : "配置只读"}</small>
+            </span>
+            <Switch
+              size="sm"
+              checked={config.localRouterEnabled}
+              disabled={isBusy}
+              onCheckedChange={onToggleLocalRouter}
+              aria-label="启用本地路由"
+            />
+          </div>
           <Button
             variant="outline"
             size="sm"
-            disabled={dirty || isBusy}
+            disabled={!canSyncCurrentProvider || isBusy}
             onClick={onSyncCurrentProvider}
           >
             <RefreshCw
               className={busy === "sync-provider" ? "animate-spin" : ""}
               aria-hidden="true"
             />
-            重新读取 Codex 配置
+            {routeConfigReadOnly ? "刷新当前线路" : "重新读取 Codex 配置"}
           </Button>
         </div>
       </div>
 
       <Card className={`route-card ${flushCardClass}`}>
-        <div className="route-manager route-manager-balanced">
-          <aside className="route-list-pane" aria-label="线路列表">
+        <div
+          className={`route-manager route-manager-balanced${
+            routeConfigReadOnly ? " route-manager-current" : ""
+          }`}
+        >
+          {!routeConfigReadOnly && (
+            <aside className="route-list-pane" aria-label="线路列表">
             <div className="route-list-heading">
               <div>
                 <div className="route-list-heading-title">
@@ -357,12 +440,16 @@ function ModelSectionComponent({
                     {visibleProfiles.length}
                   </Badge>
                 </div>
-                <small>第三方线路同时接入统一路由</small>
+                <small>
+                  {routeConfigReadOnly
+                    ? "已保存线路以只读方式加载"
+                    : "第三方线路同时接入统一路由"}
+                </small>
               </div>
               <Button
                 size="xs"
                 variant="secondary"
-                disabled={isBusy || dirty}
+                disabled={routeConfigReadOnly || isBusy || dirty}
                 onClick={openNewRouteDialog}
               >
                 <Plus size={13} aria-hidden="true" />
@@ -414,7 +501,7 @@ function ModelSectionComponent({
                             className="route-action-button route-edit-button"
                             variant="ghost"
                             size="xs"
-                            disabled={isBusy || dirty}
+                            disabled={routeConfigReadOnly || isBusy || dirty}
                             onClick={() => openEditRouteDialog(profile)}
                             aria-label={`编辑线路 ${profile.name}`}
                             title={`编辑线路 ${profile.name}`}
@@ -425,7 +512,12 @@ function ModelSectionComponent({
                             className="route-action-button route-delete-button"
                             variant="ghost"
                             size="xs"
-                            disabled={isBusy || dirty || config.profiles.length <= 1}
+                            disabled={
+                              routeConfigReadOnly ||
+                              isBusy ||
+                              dirty ||
+                              config.profiles.length <= 1
+                            }
                             onClick={() => onDeleteRoute(profile.id)}
                             aria-label={`删除线路 ${profile.name}`}
                             title={
@@ -446,10 +538,20 @@ function ModelSectionComponent({
                         </Badge>
                         {!isOfficial && (
                           <Badge
-                            variant={group?.models.length ? "brand" : "secondary"}
+                            variant={
+                              routeConfigReadOnly
+                                ? "secondary"
+                                : group?.models.length
+                                  ? "brand"
+                                  : "secondary"
+                            }
                             size="xs"
                           >
-                            {group?.models.length ? "已接入路由" : "待配置模型"}
+                            {routeConfigReadOnly
+                              ? "配置只读"
+                              : group?.models.length
+                                ? "已接入路由"
+                                : "待配置模型"}
                           </Badge>
                         )}
                         {(isOfficial || profile.supportsWebsockets) && (
@@ -476,18 +578,25 @@ function ModelSectionComponent({
                 );
               })}
             </div>
-          </aside>
+            </aside>
+          )}
 
           <div className="route-catalog-pane">
             <div className="catalog-aggregate-heading">
               <div className="catalog-aggregate-title-wrap">
                 <div className="catalog-aggregate-title">
-                  <strong>统一模型目录</strong>
+                  <strong>
+                    {routeConfigReadOnly ? "当前线路模型" : "统一模型目录"}
+                  </strong>
                   <Badge variant="secondary" size="xs">
                     {totalModelCount} 个
                   </Badge>
                 </div>
-                <small>选择模型时，本地路由会自动分发到所属供应商</small>
+                <small>
+                  {routeConfigReadOnly
+                    ? "模型请求由 Codex 当前 Provider 直接处理"
+                    : "选择模型时，本地路由会自动分发到所属供应商"}
+                </small>
               </div>
             </div>
 
@@ -539,6 +648,14 @@ function ModelSectionComponent({
               className="provider-model-groups"
               role={modelGroups.length > 1 ? "tabpanel" : undefined}
             >
+              {routeConfigReadOnly && displayedGroups.length === 0 ? (
+                <div className="provider-model-empty">
+                  <div className="provider-empty-content">
+                    <IconCpu size={16} className="provider-empty-icon" aria-hidden="true" />
+                    <span>尚未读取到 Codex 当前线路</span>
+                  </div>
+                </div>
+              ) : null}
               {displayedGroups.map((group) => (
                 <section
                   className="provider-model-group"
@@ -573,9 +690,9 @@ function ModelSectionComponent({
                         <Button
                           variant="ghost"
                           size="xs"
-                          disabled={isBusy || dirty}
+                          disabled={!canSyncCurrentProvider || isBusy}
                           onClick={() => {
-                            if (group.official) {
+                            if (group.official && !routeConfigReadOnly) {
                               openEditRouteDialog(group.profile);
                             } else {
                               onFetchRouteModels(group.profile);
@@ -586,7 +703,8 @@ function ModelSectionComponent({
                             size={12}
                             className={
                               busy === "fetch-route-models" &&
-                              group.profile.id === config.activeProfileId
+                              (routeConfigReadOnly ||
+                                group.profile.id === config.activeProfileId)
                                 ? "animate-spin"
                                 : ""
                             }
@@ -609,15 +727,19 @@ function ModelSectionComponent({
                               type="button"
                               key={`${group.providerId}:${model}`}
                               className={`model-tag-pill${isDefault ? " is-default" : ""}`}
-                              disabled={isBusy || dirty || isDefault}
+                              disabled={routeConfigReadOnly || isBusy || dirty || isDefault}
                               onClick={() => onSetDefaultModel(group.profile.id, model)}
                               title={
-                                isDefault
+                                routeConfigReadOnly
+                                  ? displayName
+                                  : isDefault
                                   ? `${displayName}（当前默认模型）`
                                   : `点击设为默认模型：${displayName}`
                               }
                               aria-label={
-                                isDefault
+                                routeConfigReadOnly
+                                  ? displayName
+                                  : isDefault
                                   ? `${displayName}，当前默认模型`
                                   : `设 ${displayName} 为默认模型`
                               }
@@ -646,9 +768,9 @@ function ModelSectionComponent({
                         <Button
                           variant="outline"
                           size="xs"
-                          disabled={isBusy || dirty}
+                          disabled={!canSyncCurrentProvider || isBusy}
                           onClick={() => {
-                            if (group.official) {
+                            if (group.official && !routeConfigReadOnly) {
                               openEditRouteDialog(group.profile);
                             } else {
                               onFetchRouteModels(group.profile);
@@ -656,7 +778,11 @@ function ModelSectionComponent({
                           }}
                         >
                           <RefreshCw size={12} aria-hidden="true" />
-                          {group.official ? "配置官方模型" : "同步或手动添加"}
+                          {routeConfigReadOnly
+                            ? "同步模型"
+                            : group.official
+                              ? "配置官方模型"
+                              : "同步或手动添加"}
                         </Button>
                       </div>
                     )}
@@ -669,10 +795,15 @@ function ModelSectionComponent({
         <div className="readonly-note">
           <IconInfoCircle size={14} className="readonly-note-icon" aria-hidden="true" />
           <span className="readonly-note-text">
-            所有第三方线路通过 Codey 本地路由同时生效，线路列表仅用于管理配置
+            {routeConfigReadOnly
+              ? "本地路由已关闭；仅展示 Codex 当前线路，可同步模型，线路地址、密钥和协议保持只读"
+              : "所有第三方线路通过 Codey 本地路由同时生效，线路列表仅用于管理配置"}
           </span>
-          <Badge variant="brand" className="readonly-note-tag">
-            一次性
+          <Badge
+            variant={routeConfigReadOnly ? "secondary" : "brand"}
+            className="readonly-note-tag"
+          >
+            {routeConfigReadOnly ? "当前线路" : "一次性"}
           </Badge>
         </div>
       </Card>

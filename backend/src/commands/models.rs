@@ -5,8 +5,8 @@ use serde_json::{Value, json};
 
 use super::{
     AppState, STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT, SubagentHotReloadOutcome,
-    hot_reload_runtime_subagent_config, redacted_config, runtime_config_requires_restart,
-    save_config_to_store,
+    ensure_local_route_config_writable, hot_reload_runtime_subagent_config, redacted_config,
+    runtime_config_requires_restart, save_config_to_store,
 };
 use crate::cdp;
 use crate::codex_config::codex_home;
@@ -86,6 +86,10 @@ fn add_subagent_hot_reload_to_response(
 }
 
 pub async fn sync_current_provider_command(state: &Arc<AppState>) -> Result<Value, String> {
+    if !state.config.read().await.local_router_enabled {
+        let _provider_model_sync_guard = state.provider_model_sync_lock.lock().await;
+        return sync_native_current_provider_models(state, None).await;
+    }
     super::prepare_routes_for_current_launch(state).await?;
     let current_provider = current_codex_provider().await?;
     let provider_status = if current_provider.official {
@@ -109,6 +113,142 @@ pub async fn sync_current_provider_command(state: &Arc<AppState>) -> Result<Valu
         "modelState":model_state,
         "restartRequired":restart_required,
     }))
+}
+
+struct NativeProviderContext {
+    provider: codex_provider::CurrentProvider,
+    fetch_profile: Option<ProviderProfile>,
+    route_id: String,
+}
+
+async fn native_provider_context(config: &CodeyConfig) -> Result<NativeProviderContext, String> {
+    let config = config.clone();
+    let home = codex_home().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let provider = codex_provider::current_provider(&home)
+            .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))?;
+        if provider.official {
+            return Ok(NativeProviderContext {
+                route_id: provider.id.clone(),
+                provider,
+                fetch_profile: None,
+            });
+        }
+        let (projected, _) = codex_provider::sync_current_third_party_provider(&config, &home)
+            .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))?;
+        let fetch_profile = projected
+            .active_profile()
+            .ok_or_else(|| "当前 Codex 线路缺少可用的 Provider 配置".to_string())?
+            .clone();
+        Ok(NativeProviderContext {
+            route_id: fetch_profile.id.clone(),
+            provider,
+            fetch_profile: Some(fetch_profile),
+        })
+    })
+    .await
+    .map_err(|error| format!("读取当前 Codex 线路任务异常退出：{error}"))?
+}
+
+async fn sync_native_current_provider_models(
+    state: &Arc<AppState>,
+    expected_route: Option<(String, u64)>,
+) -> Result<Value, String> {
+    let previous = state.config.read().await.clone();
+    if previous.local_router_enabled {
+        return Err("本地路由已启用，请使用线路模型同步".to_string());
+    }
+    if let Some((_, expected_revision)) = expected_route.as_ref() {
+        ensure_route_revision(&previous, *expected_revision)?;
+    }
+    let context = native_provider_context(&previous).await?;
+    if let Some((expected_route_id, _)) = expected_route.as_ref()
+        && expected_route_id.trim() != context.route_id
+        && expected_route_id.trim() != context.provider.id
+    {
+        return Err("只能同步当前 Codex 线路的模型".to_string());
+    }
+    let visible_fetched_models = if let Some(fetch_profile) = context.fetch_profile.clone() {
+        fetch_profile.validate()?;
+        let fetched_models = fetch_provider_models(fetch_profile, &state.http_client)
+            .await
+            .map_err(|error| error.to_string())?;
+        regular_route_models(fetched_models)
+    } else {
+        Vec::new()
+    };
+
+    let current_provider = current_codex_provider().await?;
+    if current_provider != context.provider {
+        return Err("同步模型期间当前 Codex 线路已变化，请重试".to_string());
+    }
+    let _config_write_guard = state.config_write_lock.lock().await;
+    let latest = state.config.read().await.clone();
+    if latest.local_router_enabled {
+        return Err("同步模型期间本地路由已启用，请重试".to_string());
+    }
+    if latest.settings_revision != previous.settings_revision {
+        return Err("Codey 设置在同步模型期间已更新，请重新载入后再操作".to_string());
+    }
+    if let Some((_, expected_revision)) = expected_route.as_ref() {
+        ensure_route_revision(&latest, *expected_revision)?;
+    }
+
+    let mut next = latest.clone();
+    if !context.provider.official {
+        next.upstream_models_by_provider
+            .insert(context.provider.id.clone(), visible_fetched_models.clone());
+    }
+    let model_state = native_model_state_for_provider(&next, &context.provider, codex_home())?;
+    let visible_models = if context.provider.official {
+        let supported = model_state
+            .official_models
+            .iter()
+            .filter(|model| model.supported)
+            .map(|model| model.slug.clone())
+            .collect::<Vec<_>>();
+        if supported.is_empty() {
+            model_state.official_model_ids.clone()
+        } else {
+            supported
+        }
+    } else {
+        visible_fetched_models
+    };
+    reconcile_subagent_models_for_mode(&mut next, &model_state);
+    next = next.normalize();
+    let changed = next != latest;
+    if changed {
+        next.settings_revision = latest.settings_revision.saturating_add(1);
+        save_config_to_store(state, &next)
+            .await
+            .map_err(|error| format!("保存当前线路模型同步结果失败：{error}"))?;
+        *state.config.write().await = next.clone();
+    }
+    drop(_config_write_guard);
+
+    let subagent_hot_reload = if changed {
+        hot_reload_runtime_subagent_config(state, &next).await
+    } else {
+        SubagentHotReloadOutcome::default()
+    };
+    let restart_required = runtime_config_requires_restart(state, &next).await;
+    let provider_status = codex_provider::ProviderStatus {
+        changed,
+        provider: context.provider,
+    };
+    Ok(add_subagent_hot_reload_to_response(
+        json!({
+            "status": "ok",
+            "config": redacted_config(&next),
+            "providerStatus": provider_status,
+            "models": visible_models,
+            "modelState": model_state,
+            "routeModelState": model_state,
+            "restartRequired": restart_required,
+        }),
+        subagent_hot_reload,
+    ))
 }
 
 async fn current_codex_provider() -> Result<codex_provider::CurrentProvider, String> {
@@ -145,6 +285,7 @@ where
         + 'static,
 {
     let previous = state.config.read().await.clone();
+    ensure_local_route_config_writable(&previous)?;
     let sync_input = previous.clone();
     let sync_result = tokio::task::spawn_blocking(move || sync(sync_input)).await;
     match sync_result {
@@ -353,6 +494,15 @@ pub(super) async fn sync_provider_models_for_launch(
     allow_third_party_sync: bool,
 ) -> CodeyConfig {
     let config = state.config.read().await.clone();
+    if !config.local_router_enabled {
+        return reconcile_current_subagent_defaults(state, None)
+            .await
+            .map(|(config, _)| config)
+            .unwrap_or_else(|error| {
+                eprintln!("启动时刷新当前 Codex 线路的子代理模型失败，沿用当前设置：{error}");
+                config
+            });
+    }
     let Some(profile) = config.active_profile() else {
         return config;
     };
@@ -445,6 +595,10 @@ pub(super) async fn sync_provider_models_for_launch(
     };
     let _config_write_guard = state.config_write_lock.lock().await;
     let latest = state.config.read().await.clone();
+    if !latest.local_router_enabled {
+        eprintln!("启动时同步模型期间本地路由已关闭，忽略旧线路的同步结果");
+        return latest;
+    }
     if latest.current_provider_id() != Some(provider_id.as_str()) {
         eprintln!("启动时同步模型期间当前线路已变化，忽略旧线路的同步结果");
         return latest;
@@ -468,6 +622,9 @@ async fn commit_startup_model_sync(
     next: CodeyConfig,
     synced: bool,
 ) -> CodeyConfig {
+    if !latest.local_router_enabled {
+        return latest;
+    }
     if synced && let Err(error) = save_config_to_store(state, &next).await {
         eprintln!("保存启动时模型同步结果失败，本次启动沿用已持久化模型：{error:#}");
         return latest;
@@ -483,6 +640,7 @@ pub async fn delete_route(
 ) -> Result<Value, String> {
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
+    ensure_local_route_config_writable(&previous)?;
     ensure_route_revision(&previous, expected_revision)?;
     let route_id = route_id.trim();
     let config = config_after_route_deletion(&previous, route_id)?;
@@ -555,6 +713,11 @@ pub async fn fetch_route_models(
 ) -> Result<Value, String> {
     let _provider_model_sync_guard = state.provider_model_sync_lock.lock().await;
     let config = state.config.read().await.clone();
+    if !config.local_router_enabled {
+        return sync_native_current_provider_models(state, Some((route_id, expected_revision)))
+            .await;
+    }
+    ensure_local_route_config_writable(&config)?;
     ensure_route_revision(&config, expected_revision)?;
     let route_id = route_id.trim();
     let profile = config
@@ -574,6 +737,7 @@ pub async fn fetch_route_models(
     let visible_fetched_models = regular_route_models(fetched_models.clone());
     let _config_write_guard = state.config_write_lock.lock().await;
     let mut latest = state.config.read().await.clone();
+    ensure_local_route_config_writable(&latest)?;
     ensure_route_revision(&latest, expected_revision)?;
     let latest_profile = latest
         .profiles
@@ -687,6 +851,7 @@ pub async fn save_selected_models(
     validate_regular_route_model_list("待删除的其他模型", &requested_deleted_third_party_models)?;
     let _config_write_guard = state.config_write_lock.lock().await;
     let mut config = state.config.read().await.clone();
+    ensure_local_route_config_writable(&config)?;
     let target_route_id = requested_route_id
         .as_deref()
         .map(str::trim)
@@ -985,6 +1150,7 @@ pub async fn save_default_model(
 ) -> Result<Value, String> {
     let _config_write_guard = state.config_write_lock.lock().await;
     let mut config = state.config.read().await.clone();
+    ensure_local_route_config_writable(&config)?;
     let requested_model = requested_model.trim();
     if requested_model.is_empty() {
         return Err("默认模型不能为空".to_string());
@@ -1034,6 +1200,7 @@ pub async fn save_official_route_models(
     validate_requested_model_list_bounds("官方模型", &requested_models)?;
     let _config_write_guard = state.config_write_lock.lock().await;
     let mut config = state.config.read().await.clone();
+    ensure_local_route_config_writable(&config)?;
     let route_id = route_id.trim();
     let profile = config
         .profiles
@@ -1098,6 +1265,9 @@ pub(super) async fn hot_reload_runtime_models(
     config: &CodeyConfig,
     model_state: &model_catalog::ModelSelectionState,
 ) -> ModelHotReloadOutcome {
+    if !config.local_router_enabled {
+        return ModelHotReloadOutcome::default();
+    }
     let runtime = state.runtime.lock().await.clone();
     let Some(runtime) = runtime else {
         return ModelHotReloadOutcome::default();
@@ -1145,6 +1315,11 @@ pub(super) async fn hot_reload_runtime_models(
 pub(super) fn current_model_state(
     config: &CodeyConfig,
 ) -> Result<model_catalog::ModelSelectionState, String> {
+    if !config.local_router_enabled {
+        let provider = codex_provider::current_provider(codex_home())
+            .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))?;
+        return native_model_state_for_provider(config, &provider, codex_home());
+    }
     let active_profile = config
         .profiles
         .iter()
@@ -1171,6 +1346,131 @@ pub(super) fn current_model_state(
         requested_default_model.as_deref(),
     )
     .map_err(|error| error.to_string())
+}
+
+fn native_upstream_model(config: &CodeyConfig, model: &str) -> String {
+    let model = model.trim();
+    config
+        .runtime_model_targets()
+        .into_iter()
+        .find(|target| model_id::equal(&target.alias, model))
+        .map(|target| target.upstream_model)
+        .or_else(|| native_provider_prefixed_model(config, model))
+        .unwrap_or_else(|| model.to_string())
+}
+
+fn native_provider_prefixed_model(config: &CodeyConfig, model: &str) -> Option<String> {
+    for profile in &config.profiles {
+        let provider_id = profile.provider_id();
+        let prefix = local_router::model_alias(provider_id, "");
+        let Some(upstream_model) = strip_model_provider_prefix(model, &prefix) else {
+            continue;
+        };
+        let known_model = config
+            .upstream_models_by_provider
+            .get(provider_id)
+            .into_iter()
+            .flatten()
+            .chain(
+                config
+                    .selected_models_by_provider
+                    .get(provider_id)
+                    .into_iter()
+                    .flatten(),
+            )
+            .chain(
+                config
+                    .declared_official_models_by_provider
+                    .get(provider_id)
+                    .into_iter()
+                    .flatten(),
+            )
+            .find(|known| model_id::equal(known, upstream_model))
+            .cloned()
+            .or_else(|| {
+                model_catalog::default_official_model_slugs()
+                    .into_iter()
+                    .find(|known| model_id::equal(known, upstream_model))
+            });
+        if known_model.is_some() {
+            return known_model;
+        }
+    }
+    None
+}
+
+fn strip_model_provider_prefix<'a>(model: &'a str, prefix: &str) -> Option<&'a str> {
+    let prefix = prefix.trim();
+    model
+        .get(..prefix.len())
+        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .and_then(|_| model.get(prefix.len()..))
+        .map(str::trim)
+        .filter(|suffix| !suffix.is_empty())
+}
+
+fn native_model_state_for_provider(
+    config: &CodeyConfig,
+    provider: &codex_provider::CurrentProvider,
+    home: &std::path::Path,
+) -> Result<model_catalog::ModelSelectionState, String> {
+    let upstream_models = config
+        .upstream_models_by_provider
+        .get(provider.id.as_str())
+        .map(Vec::as_slice);
+    let selected_models = if provider.official {
+        &[][..]
+    } else {
+        upstream_models.unwrap_or_default()
+    };
+    let requested_default = native_upstream_model(config, &config.subagent_model);
+    model_catalog::selection_state_with_manual_models(
+        home,
+        provider.official,
+        upstream_models,
+        selected_models,
+        &[],
+        Some(&requested_default),
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(super) fn reconcile_subagent_models_for_mode(
+    config: &mut CodeyConfig,
+    model_state: &model_catalog::ModelSelectionState,
+) {
+    if !config.local_router_enabled {
+        config.subagent_model = native_upstream_model(config, &config.subagent_model);
+        let native_models = config
+            .subagent_roles
+            .iter()
+            .map(|(role, selection)| {
+                (
+                    role.clone(),
+                    native_upstream_model(config, &selection.model),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (role, model) in native_models {
+            if let Some(selection) = config.subagent_roles.get_mut(&role) {
+                selection.model = model;
+            }
+        }
+    }
+    subagent_policy::reconcile_with_model_state(config, Some(model_state));
+}
+
+pub(super) async fn current_provider_status_async(
+    config: &CodeyConfig,
+) -> Result<codex_provider::ProviderStatus, String> {
+    if config.local_router_enabled {
+        return Ok(codex_provider::status_from_config(config));
+    }
+    let provider = current_codex_provider().await?;
+    Ok(codex_provider::ProviderStatus {
+        changed: false,
+        provider,
+    })
 }
 
 pub(super) async fn current_model_state_async(
@@ -1208,7 +1508,8 @@ pub(super) fn provider_route_requires_restart(
     applied: &CodeyConfig,
     current: &CodeyConfig,
 ) -> bool {
-    provider_route_snapshots(applied) != provider_route_snapshots(current)
+    applied.local_router_enabled != current.local_router_enabled
+        || provider_route_snapshots(applied) != provider_route_snapshots(current)
         || websocket_transport_requires_restart(applied, current)
         || remote_compaction_transport_requires_restart(applied, current)
 }
@@ -1232,6 +1533,9 @@ pub(super) fn runtime_supports_current_routes_for_hot_reload(
     applied: &CodeyConfig,
     current: &CodeyConfig,
 ) -> bool {
+    if !applied.local_router_enabled || !current.local_router_enabled {
+        return false;
+    }
     if websocket_transport_requires_restart(applied, current)
         || remote_compaction_transport_requires_restart(applied, current)
     {
@@ -1561,9 +1865,13 @@ async fn reconcile_current_subagent_defaults(
 ) -> Result<(CodeyConfig, bool), String> {
     let _config_write_guard = state.config_write_lock.lock().await;
     let current = state.config.read().await.clone();
-    let (catalog_refresh, model_state) = refreshed_model_state_async(&current, false).await?;
+    let (catalog_refresh, model_state) = if current.local_router_enabled {
+        refreshed_model_state_async(&current, false).await?
+    } else {
+        (None, current_model_state_async(&current).await?)
+    };
     let mut next = current.clone();
-    subagent_policy::reconcile_with_model_state(&mut next, Some(&model_state));
+    reconcile_subagent_models_for_mode(&mut next, &model_state);
     next = next.normalize();
     if next == current {
         return Ok((current, false));
@@ -1673,6 +1981,77 @@ mod tests {
         }
         profile.normalize();
         profile
+    }
+
+    #[test]
+    fn native_model_state_and_subagent_defaults_follow_only_the_current_provider() {
+        let home = tempfile::tempdir().unwrap();
+        let route_a = configured_route("route-a", Some("model-a"));
+        let route_b = configured_route("route-b", Some("model-b"));
+        let mut config = CodeyConfig {
+            local_router_enabled: false,
+            active_profile_id: route_b.id.clone(),
+            profiles: vec![route_a, route_b],
+            selected_models_by_provider: BTreeMap::from([
+                ("route-a".into(), vec!["model-a".into()]),
+                ("route-b".into(), vec!["model-b".into()]),
+            ]),
+            upstream_models_by_provider: BTreeMap::from([
+                ("route-a".into(), vec!["model-a".into()]),
+                ("route-b".into(), vec!["model-b".into()]),
+            ]),
+            subagent_model: "route-b/model-b".into(),
+            subagent_roles: crate::config::uniform_subagent_roles("route-b/model-b", "high"),
+            ..CodeyConfig::default()
+        }
+        .normalize();
+        let provider = codex_provider::CurrentProvider {
+            id: "route-a".into(),
+            name: "Current route".into(),
+            official: false,
+            supports_remote_compaction: false,
+            base_url: "https://route-a.example/v1".into(),
+        };
+
+        let state = native_model_state_for_provider(&config, &provider, home.path()).unwrap();
+
+        assert_eq!(state.third_party_models, ["model-a"]);
+        assert_eq!(state.upstream_models, ["model-a"]);
+        assert!(
+            !state
+                .third_party_models
+                .iter()
+                .any(|model| model == "model-b")
+        );
+
+        reconcile_subagent_models_for_mode(&mut config, &state);
+        assert_eq!(config.subagent_model, "model-a");
+        assert!(
+            config
+                .subagent_roles
+                .values()
+                .all(|selection| selection.model == "model-a")
+        );
+    }
+
+    #[test]
+    fn native_model_conversion_uses_synced_upstream_models_without_enabled_targets() {
+        let route = configured_route("route-a", None);
+        let config = CodeyConfig {
+            local_router_enabled: false,
+            active_profile_id: route.id.clone(),
+            profiles: vec![route],
+            upstream_models_by_provider: BTreeMap::from([(
+                "route-a".into(),
+                vec!["vendor/model".into()],
+            )]),
+            ..CodeyConfig::default()
+        };
+
+        assert_eq!(
+            native_upstream_model(&config, "route-a/vendor/model"),
+            "vendor/model"
+        );
     }
 
     #[test]
@@ -2137,6 +2516,30 @@ mod tests {
 
         assert_eq!(committed, latest);
         assert_eq!(*state.config.read().await, latest);
+    }
+
+    #[tokio::test]
+    async fn disabled_local_router_discards_a_stale_startup_model_sync_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let latest = CodeyConfig {
+            local_router_enabled: false,
+            ..CodeyConfig::default()
+        };
+        let mut next = latest.clone();
+        let provider_id = next.current_provider_id().unwrap().to_string();
+        next.upstream_models_by_provider
+            .insert(provider_id, vec!["must-not-persist".into()]);
+        let state = Arc::new(AppState {
+            store: crate::config::ConfigStore::new(directory.path().join("config.json")),
+            config: tokio::sync::RwLock::new(latest.clone()),
+            ..AppState::default()
+        });
+
+        let committed = commit_startup_model_sync(&state, latest.clone(), next, true).await;
+
+        assert_eq!(committed, latest);
+        assert_eq!(*state.config.read().await, latest);
+        assert!(!state.store.path().exists());
     }
 
     #[test]

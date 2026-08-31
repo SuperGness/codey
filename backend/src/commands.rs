@@ -38,10 +38,11 @@ use models::{
     validate_deleted_third_party_models, validate_manual_model_selection,
 };
 use models::{
-    current_model_state_async, current_renderer_model_catalog_async, hot_reload_runtime_models,
-    official_route_snapshots, provider_route_requires_restart,
-    remote_compaction_transport_requires_restart, sync_current_third_party_provider_state,
-    sync_provider_models_for_launch, websocket_transport_requires_restart,
+    current_model_state_async, current_provider_status_async, current_renderer_model_catalog_async,
+    hot_reload_runtime_models, official_route_snapshots, provider_route_requires_restart,
+    reconcile_subagent_models_for_mode, remote_compaction_transport_requires_restart,
+    sync_current_third_party_provider_state, sync_provider_models_for_launch,
+    websocket_transport_requires_restart,
 };
 pub use models::{
     delete_route, fetch_route_models, save_default_model, save_official_route_models,
@@ -108,7 +109,6 @@ use crate::plugin_marketplace;
 use crate::session_delete;
 use crate::session_metadata;
 use crate::session_transfer;
-use crate::subagent_policy;
 use crate::trace_log_guard;
 use crate::trace_log_stats::TraceLogStatsHandle;
 
@@ -653,6 +653,44 @@ async fn save_config_to_store(state: &AppState, config: &CodeyConfig) -> Result<
         .map_err(|error| error.to_string())
 }
 
+const LOCAL_ROUTE_CONFIG_READ_ONLY_ERROR: &str =
+    "本地路由已关闭，本地线路配置当前为只读；请先启用本地路由";
+
+pub(super) fn ensure_local_route_config_writable(config: &CodeyConfig) -> Result<(), String> {
+    if config.local_router_enabled {
+        Ok(())
+    } else {
+        Err(LOCAL_ROUTE_CONFIG_READ_ONLY_ERROR.to_string())
+    }
+}
+
+fn local_route_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> bool {
+    previous.active_profile_id != next.active_profile_id
+        || previous.profiles != next.profiles
+        || previous.selected_models_by_provider != next.selected_models_by_provider
+        || previous.manual_third_party_models_by_provider
+            != next.manual_third_party_models_by_provider
+        || previous.declared_official_models_by_provider
+            != next.declared_official_models_by_provider
+        || previous.upstream_models_by_provider != next.upstream_models_by_provider
+        || previous.default_model != next.default_model
+        || previous.default_model_by_provider != next.default_model_by_provider
+        || previous.initial_route_import_completed != next.initial_route_import_completed
+}
+
+fn ensure_local_route_config_change_allowed(
+    previous: &CodeyConfig,
+    next: &CodeyConfig,
+) -> Result<(), String> {
+    if previous.local_router_enabled && next.local_router_enabled {
+        return Ok(());
+    }
+    if local_route_config_changed(previous, next) {
+        return Err(LOCAL_ROUTE_CONFIG_READ_ONLY_ERROR.to_string());
+    }
+    Ok(())
+}
+
 pub(super) fn validate_official_account_config_change(
     previous: &CodeyConfig,
     next: &CodeyConfig,
@@ -698,6 +736,11 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
 
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
+    if !previous.local_router_enabled {
+        let next = read_only_config_for_official_probe(previous, official_status);
+        *state.config.write().await = next;
+        return Ok(());
+    }
     let mut next = route_config_for_official_probe(&previous, official_status)?;
 
     if persisted_config_changed(&previous, &next) {
@@ -710,6 +753,28 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
     }
     *state.config.write().await = next;
     Ok(())
+}
+
+fn read_only_config_for_official_probe(
+    mut config: CodeyConfig,
+    official_status: OfficialAccountProfileStatus,
+) -> CodeyConfig {
+    match official_status {
+        OfficialAccountProfileStatus::Available(_) => {
+            config.official_account_available_this_launch = true;
+            config.official_account_status_this_launch = LaunchOfficialAccountStatus::Authenticated;
+        }
+        OfficialAccountProfileStatus::Unavailable { .. } => {
+            config.official_account_available_this_launch = false;
+            config.official_account_status_this_launch =
+                LaunchOfficialAccountStatus::Unauthenticated;
+        }
+        OfficialAccountProfileStatus::Unknown { .. } => {
+            config.official_account_available_this_launch = false;
+            config.official_account_status_this_launch = LaunchOfficialAccountStatus::Unknown;
+        }
+    }
+    config
 }
 
 fn route_config_for_official_probe(
@@ -1036,7 +1101,7 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
         state.config.read().await.clone()
     };
     let startup_error = state.startup_error.read().await.clone();
-    let provider_status = codex_provider::status_from_config(&config);
+    let provider_status = current_provider_status_async(&config).await?;
     let model_state = current_model_state_async(&config).await?;
     let fast_context_tools_status = current_fast_context_tools_status();
     let mut public_config = redacted_config(&config);
@@ -1058,7 +1123,10 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
 
 pub(super) async fn ensure_default_route_imported(state: &Arc<AppState>) -> bool {
     let config = state.config.read().await.clone();
-    if !config.needs_initial_route_import() || config.official_account_available_this_launch {
+    if !config.local_router_enabled
+        || !config.needs_initial_route_import()
+        || config.official_account_available_this_launch
+    {
         return false;
     }
     let current_provider = match current_codex_provider_for_initial_import().await {
@@ -1110,6 +1178,7 @@ async fn current_codex_provider_for_initial_import()
 async fn mark_initial_route_import_completed(state: &Arc<AppState>) -> Result<bool, String> {
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
+    ensure_local_route_config_writable(&previous)?;
     if previous.initial_route_import_completed {
         return Ok(false);
     }
@@ -1198,6 +1267,7 @@ pub async fn save_codey_config(
 
 struct CodeyConfigSaveInput {
     config: CodeyConfig,
+    local_router_enabled_present: bool,
     subagent_roles_present: bool,
     subagent_model_present: bool,
     subagent_reasoning_effort_present: bool,
@@ -1208,6 +1278,7 @@ impl CodeyConfigSaveInput {
     fn complete(config: CodeyConfig) -> Self {
         Self {
             config,
+            local_router_enabled_present: true,
             subagent_roles_present: true,
             subagent_model_present: true,
             subagent_reasoning_effort_present: true,
@@ -1223,6 +1294,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
     let fields = config_value
         .as_object()
         .ok_or_else(|| "参数 config 无效：必须是 object".to_string())?;
+    let local_router_enabled_present = fields.contains_key("localRouterEnabled");
     let subagent_roles_present = fields.contains_key("subagentRoles");
     let subagent_model_present = fields.contains_key("subagentModel");
     let subagent_reasoning_effort_present = fields.contains_key("subagentReasoningEffort");
@@ -1230,6 +1302,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         .map_err(|error| format!("参数 config 无效：{error}"))?;
     Ok(CodeyConfigSaveInput {
         config,
+        local_router_enabled_present,
         subagent_roles_present,
         subagent_model_present,
         subagent_reasoning_effort_present,
@@ -1259,6 +1332,7 @@ async fn save_codey_config_locked(
 ) -> Result<SavedCodeyConfig, String> {
     let CodeyConfigSaveInput {
         config: mut config_input,
+        local_router_enabled_present,
         subagent_roles_present,
         subagent_model_present,
         subagent_reasoning_effort_present,
@@ -1270,7 +1344,11 @@ async fn save_codey_config_locked(
     let mut config = previous.clone();
     config.profiles = merge_profile_secrets(config_input.profiles, &previous)?;
     config.active_profile_id = config_input.active_profile_id;
+    if local_router_enabled_present {
+        config.local_router_enabled = config_input.local_router_enabled;
+    }
     retain_route_scoped_config(&mut config);
+    ensure_local_route_config_change_allowed(&previous, &config)?;
     config_input
         .webhook
         .merge_redacted_secrets(&previous.webhook);
@@ -1344,12 +1422,18 @@ async fn save_codey_config_locked(
     config.show_account_usage_in_header = config_input.show_account_usage_in_header;
     let mut config = config.normalize();
     validate_official_account_config_change(&previous, &config)?;
-    config.remember_current_provider_official_model_support(explicitly_configured_subagent_models);
+    if previous.local_router_enabled && config.local_router_enabled {
+        config.remember_current_provider_official_model_support(
+            explicitly_configured_subagent_models,
+        );
+    }
     config = config.normalize();
-    if config.subagent_optimization
+    ensure_local_route_config_change_allowed(&previous, &config)?;
+    if (config.subagent_optimization
+        || (previous.local_router_enabled && !config.local_router_enabled))
         && let Ok(model_state) = current_model_state_async(&config).await
     {
-        subagent_policy::reconcile_with_model_state(&mut config, Some(&model_state));
+        reconcile_subagent_models_for_mode(&mut config, &model_state);
         config = config.normalize();
     }
     // Codex reads each registered role config_file again when spawning a child.
@@ -1565,7 +1649,7 @@ async fn finish_codey_config_save(
     let subagent_config_health = subagent_hot_reload.health();
     let subagent_config_repair_reasons = subagent_hot_reload.repair_reasons();
     let subagent_config_hot_reload_error = subagent_hot_reload.error();
-    let provider_status = codex_provider::status_from_config(&saved.config);
+    let provider_status = current_provider_status_async(&saved.config).await?;
     let public_config = redacted_config(&saved.config);
     Ok(model_hot_reload.add_to_response(json!({
         "status":"ok",
@@ -1796,7 +1880,7 @@ pub(super) async fn hot_reload_runtime_subagent_config(
         );
     }
 
-    let runtime_config = current_config.clone();
+    let runtime_config = runtime.subagent_reconcile_config(&current_config);
     let result = tokio::task::spawn_blocking(move || {
         reconcile_runtime_subagent_roles(&runtime_config).map_err(|error| format!("{error:#}"))
     })
@@ -1955,7 +2039,8 @@ pub(super) fn provider_route_restart_required_for_runtime(
     runtime: &CodeyRuntime,
     current: &CodeyConfig,
 ) -> bool {
-    official_route_snapshots(&runtime.applied_config) != official_route_snapshots(current)
+    runtime.applied_config.local_router_enabled != current.local_router_enabled
+        || official_route_snapshots(&runtime.applied_config) != official_route_snapshots(current)
         || websocket_transport_requires_restart(&runtime.applied_config, current)
         || remote_compaction_transport_requires_restart(&runtime.applied_config, current)
 }

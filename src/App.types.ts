@@ -55,6 +55,7 @@ export type SubagentRoleConfig = {
 
 export type Config = {
   settingsRevision: number;
+  localRouterEnabled: boolean;
   activeProfileId: string;
   profiles: Profile[];
   initialRouteImportCompleted: boolean;

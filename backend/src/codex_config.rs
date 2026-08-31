@@ -88,6 +88,8 @@ const CODEY_WSL_ONLY_OVERRIDE_PREFIX: &str = "__CODEY_WSL_ONLY__:";
 #[serde(rename_all = "camelCase")]
 struct RuntimeConfigLease {
     backup_dir: PathBuf,
+    #[serde(default = "lease_default_true")]
+    local_router_applied: bool,
     #[serde(default)]
     fastctx_command: Option<PathBuf>,
     #[serde(default)]
@@ -118,6 +120,10 @@ struct RuntimeConfigLease {
     runtime_hooks_applied: bool,
     #[serde(default)]
     original_hooks_file_exists: bool,
+}
+
+fn lease_default_true() -> bool {
+    true
 }
 
 pub fn codex_home() -> &'static Path {
@@ -214,7 +220,7 @@ impl Drop for RuntimeConfigLock {
 }
 
 pub(crate) struct RuntimeRouterConfigOptions<'a> {
-    pub local_router: &'a RuntimeRouterEndpoint,
+    pub local_router: Option<&'a RuntimeRouterEndpoint>,
     pub use_official_catalog: bool,
     pub default_model: Option<&'a str>,
     pub fast_context_tools: bool,
@@ -240,7 +246,7 @@ pub(crate) struct FastContextToolsStatus {
 }
 
 struct RouterApplyOptions<'a> {
-    local_router: &'a RuntimeRouterEndpoint,
+    local_router: Option<&'a RuntimeRouterEndpoint>,
     use_official_catalog: bool,
     default_model: Option<&'a str>,
     fastctx_command: Option<&'a Path>,
@@ -299,7 +305,9 @@ pub(crate) fn apply_runtime_router_config(
             backup_root: &backup_root,
         },
     )?;
-    persist_runtime_router_disk_provider_or_rollback(home, &marker, options.local_router)?;
+    if let Some(local_router) = options.local_router {
+        persist_runtime_router_disk_provider_or_rollback(home, &marker, local_router)?;
+    }
     Ok(applied)
 }
 
@@ -309,7 +317,7 @@ fn persist_runtime_router_disk_provider_or_rollback(
     endpoint: &RuntimeRouterEndpoint,
 ) -> Result<()> {
     if let Err(error) = prepare_runtime_router_disk_provider_at(home, endpoint) {
-        return match restore_runtime_config_at(home, marker) {
+        return match restore_runtime_config_at(home, marker, true) {
             Ok(_) => Err(error).context("写入运行时 codey_router 磁盘表失败，已回滚隔离运行配置"),
             Err(rollback_error) => anyhow::bail!(
                 "写入运行时 codey_router 磁盘表失败：{error:#}；回滚隔离运行配置也失败：{rollback_error:#}"
@@ -378,10 +386,15 @@ fn apply_isolated_runtime_router_config(
     fs::create_dir_all(home)?;
     let config_path = home.join("config.toml");
     let hooks_path = home.join("hooks.json");
-    let original_config = read_or_create_codex_config(&config_path)?;
-    let existing = str::from_utf8(&original_config).context("Codex config.toml 不是 UTF-8")?;
+    let original_config = if local_router.is_some() {
+        Some(read_or_create_codex_config(&config_path)?)
+    } else {
+        read_codex_config(&config_path)?
+    };
+    let existing = str::from_utf8(original_config.as_deref().unwrap_or_default())
+        .context("Codex config.toml 不是 UTF-8")?;
     let persistent = parse_document(existing).context("解析 Codex config.toml 失败")?;
-    if user_owned_router_provider_occupies_id(&persistent) {
+    if local_router.is_some() && user_owned_router_provider_occupies_id(&persistent) {
         anyhow::bail!(
             "Codex config.toml 已占用 Codey 内部 Provider ID「{}」；请先重命名该自定义 Provider",
             local_router::ROUTER_PROVIDER_ID
@@ -503,7 +516,7 @@ fn apply_isolated_runtime_router_config(
         &runtime_agents,
         model_catalog_path.as_deref(),
         fastctx_namespace,
-        local_router::ROUTER_PROVIDER_ID,
+        local_router.map(|_| local_router::ROUTER_PROVIDER_ID),
         &hook_trust_entries,
     )?;
 
@@ -521,6 +534,7 @@ fn apply_isolated_runtime_router_config(
 
     let state = RuntimeConfigLease {
         backup_dir: backup_dir.clone(),
+        local_router_applied: local_router.is_some(),
         fastctx_command: fastctx_command.map(Path::to_path_buf),
         subagent_optimization_applied: subagent_optimization,
         subagent_model: subagent_model.to_string(),
@@ -546,7 +560,7 @@ fn apply_isolated_runtime_router_config(
         return Err(error);
     }
 
-    let inputs_unchanged = codex_config_matches(&config_path, Some(&original_config))?
+    let inputs_unchanged = codex_config_matches(&config_path, original_config.as_deref())?
         && (!runtime_hooks_enabled
             || optional_file_matches(&hooks_path, original_hooks.as_deref())?);
     if !inputs_unchanged {
@@ -617,7 +631,7 @@ fn apply_isolated_test_runtime_config(
     apply_isolated_runtime_router_config(
         home,
         RouterApplyOptions {
-            local_router: test_runtime_router_endpoint(),
+            local_router: Some(test_runtime_router_endpoint()),
             use_official_catalog,
             default_model: None,
             fastctx_command,
@@ -1170,31 +1184,47 @@ fn runtime_home_for_lease(state: &RuntimeConfigLease) -> PathBuf {
     }
 }
 
-pub fn restore_runtime_config(home: &Path) -> Result<bool> {
+pub(crate) fn restore_runtime_config_for_router_mode(
+    home: &Path,
+    repair_router_config: bool,
+) -> Result<bool> {
     let marker = lease_marker_path();
     let _runtime_config_lock = RuntimeConfigLock::acquire(&marker)?;
-    restore_runtime_config_at(home, &marker)
+    restore_runtime_config_at(home, &marker, repair_router_config)
 }
 
-fn restore_runtime_config_at(home: &Path, marker: &Path) -> Result<bool> {
+fn restore_runtime_config_at(
+    home: &Path,
+    marker: &Path,
+    repair_router_config: bool,
+) -> Result<bool> {
     let state = match fs::read_to_string(marker) {
         Ok(contents) => serde_json::from_str::<RuntimeConfigLease>(&contents)
             .with_context(|| format!("解析 Codey Codex lease 失败：{}", marker.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return repair_persistent_codey_runtime_config(home);
+            return if repair_router_config {
+                repair_persistent_codey_runtime_config(home)
+            } else {
+                Ok(false)
+            };
         }
         Err(error) => return Err(error.into()),
     };
+    let repair_router_config = repair_router_config || state.local_router_applied;
     if state.isolated_runtime_constraints {
         rollback_isolated_runtime_config(home, marker, &state)?;
-        let _ = repair_persistent_codey_runtime_config(home)?;
+        if repair_router_config {
+            let _ = repair_persistent_codey_runtime_config(home)?;
+        }
         return Ok(true);
     }
     restore_runtime_hooks_file(home, &state)?;
     restore_runtime_subagent_files(home, &state)?;
     crate::subagent_gate::clear_runtime_subagent_policy(home)?;
     remove_optional(marker)?;
-    let _ = repair_persistent_codey_runtime_config(home)?;
+    if repair_router_config {
+        let _ = repair_persistent_codey_runtime_config(home)?;
+    }
     Ok(true)
 }
 
@@ -1891,7 +1921,7 @@ fn patch_config_with_fastctx(
             subagent_optimization,
             subagent_model: DEFAULT_SUBAGENT_MODEL,
             subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
-            local_router: test_runtime_router_endpoint(),
+            local_router: Some(test_runtime_router_endpoint()),
         },
     )
 }
@@ -1916,7 +1946,7 @@ struct RouterPatchOptions<'a> {
     subagent_optimization: bool,
     subagent_model: &'a str,
     subagent_reasoning_effort: &'a str,
-    local_router: &'a RuntimeRouterEndpoint,
+    local_router: Option<&'a RuntimeRouterEndpoint>,
 }
 
 fn patch_config_with_fastctx_mode(
@@ -1934,14 +1964,16 @@ fn patch_config_with_fastctx_mode(
         local_router,
     } = options;
     let mut doc = parse_document(existing)?;
-    ensure_provider_table(&mut doc)?;
-    doc["model_providers"]
-        .as_table_mut()
-        .expect("model_providers was initialized")[local_router::ROUTER_PROVIDER_ID] =
-        Item::Table(local_router_provider_table(local_router));
-    doc["model_provider"] = value(local_router::ROUTER_PROVIDER_ID);
-    update_model_catalog_reference(&mut doc, config_path, model_catalog_path);
-    set_model_selection(&mut doc, default_model);
+    if let Some(local_router) = local_router {
+        ensure_provider_table(&mut doc)?;
+        doc["model_providers"]
+            .as_table_mut()
+            .expect("model_providers was initialized")[local_router::ROUTER_PROVIDER_ID] =
+            Item::Table(local_router_provider_table(local_router));
+        doc["model_provider"] = value(local_router::ROUTER_PROVIDER_ID);
+        update_model_catalog_reference(&mut doc, config_path, model_catalog_path);
+        set_model_selection(&mut doc, default_model);
+    }
     enable_desktop_reasoning_efforts(&mut doc)?;
     ensure_default_service_tier(&mut doc);
     let fastctx_namespace = if let Some(command) = fastctx_command {
@@ -2298,7 +2330,7 @@ fn build_isolated_runtime_overrides(
     runtime_agents: &[RuntimeAgentRegistration],
     model_catalog_path: Option<&Path>,
     fastctx_namespace: Option<&str>,
-    provider_id: &str,
+    provider_id: Option<&str>,
     hook_trust_entries: &[RuntimeHookTrustEntry],
 ) -> Result<Vec<String>> {
     let mut overrides = Vec::new();
@@ -2310,12 +2342,14 @@ fn build_isolated_runtime_overrides(
     )?;
     push_required_document_override(&mut overrides, effective, &["service_tier"], "service_tier")?;
 
-    push_required_document_override(
-        &mut overrides,
-        effective,
-        &["model_provider"],
-        "model_provider",
-    )?;
+    if provider_id.is_some() {
+        push_required_document_override(
+            &mut overrides,
+            effective,
+            &["model_provider"],
+            "model_provider",
+        )?;
+    }
     push_document_override(&mut overrides, effective, &["model"], "model")?;
 
     if model_catalog_path.is_some() {
@@ -2329,28 +2363,31 @@ fn build_isolated_runtime_overrides(
 
     // The only runtime provider is Codey's process-local loopback gateway.
     // Upstream route tables and credentials never enter Codex's configuration.
-    let provider_segment = codex_config_override_bare_segment(provider_id, "Codex Provider ID")?;
-    for field in [
-        "name",
-        "base_url",
-        "wire_api",
-        "requires_openai_auth",
-        "supports_websockets",
-        "http_headers",
-    ] {
-        push_required_document_override(
+    if let Some(provider_id) = provider_id {
+        let provider_segment =
+            codex_config_override_bare_segment(provider_id, "Codex Provider ID")?;
+        for field in [
+            "name",
+            "base_url",
+            "wire_api",
+            "requires_openai_auth",
+            "supports_websockets",
+            "http_headers",
+        ] {
+            push_required_document_override(
+                &mut overrides,
+                effective,
+                &["model_providers", provider_id, field],
+                &format!("model_providers.{provider_segment}.{field}"),
+            )?;
+        }
+        push_document_override(
             &mut overrides,
             effective,
-            &["model_providers", provider_id, field],
-            &format!("model_providers.{provider_segment}.{field}"),
+            &["model_providers", provider_id, "experimental_bearer_token"],
+            &format!("model_providers.{provider_segment}.experimental_bearer_token"),
         )?;
     }
-    push_document_override(
-        &mut overrides,
-        effective,
-        &["model_providers", provider_id, "experimental_bearer_token"],
-        &format!("model_providers.{provider_segment}.experimental_bearer_token"),
-    )?;
 
     if fastctx_namespace.is_some() {
         for (path, key) in [
@@ -2629,7 +2666,9 @@ fn build_isolated_runtime_overrides(
             }
         }
     }
-    validate_runtime_router_overrides(&overrides, provider_id)?;
+    if let Some(provider_id) = provider_id {
+        validate_runtime_router_overrides(&overrides, provider_id)?;
+    }
     Ok(overrides)
 }
 

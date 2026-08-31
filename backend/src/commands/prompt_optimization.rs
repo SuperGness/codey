@@ -35,10 +35,15 @@ async fn resolve_request_config(
 ) -> Result<prompt_optimization::ResolvedPromptOptimizationConfig, String> {
     if optimization.uses_codey_route() {
         let config = state.config.read().await.clone();
+        if !config.local_router_enabled {
+            return Err("本地路由已关闭；请启用本地路由并重启 Codex，或改用手动配置".to_string());
+        }
         let runtime = state.runtime.lock().await.clone().ok_or_else(|| {
             "Codey 路由尚未运行，请先启动 Codey 后再测试或使用提示词优化".to_string()
         })?;
-        let endpoint = runtime.local_router_endpoint();
+        let endpoint = runtime.local_router_endpoint().ok_or_else(|| {
+            "本地路由已关闭；请启用本地路由并重启 Codex，或改用手动配置".to_string()
+        })?;
         let mut request_headers = std::collections::BTreeMap::new();
         request_headers.insert(local_router::ROUTER_AUTH_HEADER.to_string(), endpoint.token);
         let uses_official_account = endpoint.requires_openai_auth
@@ -221,6 +226,29 @@ pub async fn test_prompt_optimization_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn disabled_local_router_rejects_codey_route_optimization_before_runtime_lookup() {
+        let config = crate::config::CodeyConfig {
+            local_router_enabled: false,
+            ..crate::config::CodeyConfig::default()
+        };
+        let state = Arc::new(AppState {
+            config: tokio::sync::RwLock::new(config),
+            ..AppState::default()
+        });
+        let optimization = PromptOptimizationConfig {
+            mode: crate::config::PROMPT_OPTIMIZATION_MODE_CODEY_ROUTE.to_string(),
+            model: "relay/model".to_string(),
+            ..PromptOptimizationConfig::default()
+        };
+
+        let error = resolve_request_config(&state, &optimization)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("本地路由已关闭"));
+    }
 
     #[test]
     fn codey_route_official_model_detection_matches_route_alias() {

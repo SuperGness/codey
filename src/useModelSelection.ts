@@ -11,6 +11,7 @@ import type {
   Config,
   ModelState,
   Notice,
+  ProviderStatus,
   RuntimeStatus,
 } from "./App.types";
 import {
@@ -38,6 +39,7 @@ const pickerSelection = (state: ModelState) =>
 
 type UseModelSelectionOptions = {
   config: Config | null;
+  currentProvider: ProviderStatus["provider"] | null;
   officialAccountAvailable: boolean;
   runOperation: (name: string, action: () => Promise<void>) => Promise<void>;
   setPersistedConfig: (config: Config) => void;
@@ -58,6 +60,7 @@ type ModelRuntimeUpdate = {
 
 export function useModelSelection({
   config,
+  currentProvider,
   officialAccountAvailable,
   runOperation,
   setPersistedConfig,
@@ -144,8 +147,9 @@ export function useModelSelection({
         config,
         modelState,
         officialAccountAvailable,
+        currentProvider,
       ),
-    [config, modelState, officialAccountAvailable],
+    [config, currentProvider, modelState, officialAccountAvailable],
   );
 
   const openModelPicker = useCallback((

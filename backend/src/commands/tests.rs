@@ -531,6 +531,102 @@ async fn stale_concurrent_config_saves_are_rejected_without_diverging_disk_and_m
 }
 
 #[tokio::test]
+async fn disabled_local_router_keeps_route_config_read_only_without_blocking_other_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path().join("config.json"));
+    let initial = CodeyConfig {
+        local_router_enabled: false,
+        ..CodeyConfig::default()
+    };
+    store.save(&initial).unwrap();
+    let state = Arc::new(AppState {
+        store,
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+
+    let mut unrelated = initial;
+    unrelated.slim_codex_pet = !unrelated.slim_codex_pet;
+    save_codey_config_locked(&state, CodeyConfigSaveInput::complete(unrelated))
+        .await
+        .unwrap();
+    let saved = state.config.read().await.clone();
+    assert!(!saved.local_router_enabled);
+    assert!(!saved.slim_codex_pet);
+    assert_eq!(state.store.load().unwrap(), saved);
+
+    let mut route_edit = saved.clone();
+    route_edit.active_profile_id = "must-not-persist".to_string();
+    let error =
+        match save_codey_config_locked(&state, CodeyConfigSaveInput::complete(route_edit)).await {
+            Ok(_) => panic!("read-only route edit unexpectedly succeeded"),
+            Err(error) => error,
+        };
+    assert!(error.contains("只读"));
+    assert_eq!(*state.config.read().await, saved);
+    assert_eq!(state.store.load().unwrap(), saved);
+
+    let mut reenabled = saved.clone();
+    reenabled.local_router_enabled = true;
+    save_codey_config_locked(&state, CodeyConfigSaveInput::complete(reenabled))
+        .await
+        .unwrap();
+    let reenabled = state.config.read().await.clone();
+    assert!(reenabled.local_router_enabled);
+    assert_eq!(reenabled.profiles[0].name, saved.profiles[0].name);
+    assert_eq!(state.store.load().unwrap(), reenabled);
+}
+
+#[tokio::test]
+async fn disabled_local_router_skips_automatic_route_import_without_writing() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig {
+        local_router_enabled: false,
+        ..CodeyConfig::default()
+    };
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+
+    assert!(!ensure_default_route_imported(&state).await);
+    let error = mark_initial_route_import_completed(&state)
+        .await
+        .unwrap_err();
+    assert!(error.contains("只读"));
+    assert_eq!(*state.config.read().await, initial);
+    assert!(!state.store.path().exists());
+}
+
+#[tokio::test]
+async fn legacy_save_without_local_router_field_preserves_disabled_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig {
+        local_router_enabled: false,
+        ..CodeyConfig::default()
+    };
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let mut payload = serde_json::to_value(initial).unwrap();
+    payload
+        .as_object_mut()
+        .unwrap()
+        .remove("localRouterEnabled");
+    payload["slimCodexPet"] = json!(false);
+
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "ok");
+    let saved = state.config.read().await;
+    assert!(!saved.local_router_enabled);
+    assert!(!saved.slim_codex_pet);
+}
+
+#[tokio::test]
 async fn legacy_save_without_subagent_roles_preserves_differentiated_roles() {
     let directory = tempfile::tempdir().unwrap();
     let mut initial = CodeyConfig::default();

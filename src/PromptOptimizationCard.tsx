@@ -80,6 +80,7 @@ function PromptOptimizationCardComponent({
   const baseUrlInputId = controlId + "-base-url";
   const modelInputId = controlId + "-model";
   const usesCodeyRoute = optimization.mode === "codeyRoute";
+  const codeyRouteAvailable = config.localRouterEnabled;
   const hasApiKey = Boolean(
     optimization.apiKey.trim() ||
       (optimization.apiKeyConfigured && !optimization.clearApiKey),
@@ -98,7 +99,9 @@ function PromptOptimizationCardComponent({
         ? "请选择 Codey 路由模型"
         : "请选择或填写模型"
       : "";
-  const connectionDraftValid = usesCodeyRoute || (!baseUrlError && !apiKeyError);
+  const connectionDraftValid = usesCodeyRoute
+    ? codeyRouteAvailable
+    : !baseUrlError && !apiKeyError;
   const testDraftValid = connectionDraftValid && !modelError;
 
   useEffect(() => {
@@ -255,7 +258,12 @@ function PromptOptimizationCardComponent({
                     "prompt-optimization-mode-tab" +
                     (usesCodeyRoute ? " active" : "")
                   }
-                  disabled={isBusy}
+                  disabled={isBusy || !codeyRouteAvailable}
+                  title={
+                    codeyRouteAvailable
+                      ? undefined
+                      : "本地路由已关闭"
+                  }
                   onClick={() => changeMode("codeyRoute")}
                 >
                   使用 Codey 路由
@@ -309,12 +317,21 @@ function PromptOptimizationCardComponent({
                             ? "所有线路均暂无模型"
                             : "请选择模型"
                         }
-                        disabled={isBusy || subagentModelOptions.length === 0}
+                        disabled={
+                          isBusy ||
+                          !codeyRouteAvailable ||
+                          subagentModelOptions.length === 0
+                        }
                         options={subagentModelOptions}
                         getPopupContainer={() => popupContainer ?? document.body}
                         zIndex={SETTINGS_OVERLAY_Z_INDEX}
                         onChange={(model) => updateOptimization({ model })}
                       />
+                      {!codeyRouteAvailable ? (
+                        <small className="field-hint">
+                          本地路由已关闭。请启用并重启 Codex，或改用手动配置。
+                        </small>
+                      ) : null}
                       {modelError ? (
                         <small id={modelInputId + "-error"} className="field-error" role="alert">
                           {modelError}

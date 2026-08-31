@@ -42,9 +42,17 @@ test("subagent settings expose the five supported role controls", async () => {
     modelHookSource,
     /buildSubagentModelOptions\(\s*config,\s*modelState,\s*officialAccountAvailable/,
   );
+  assert.match(modelHookSource, /officialAccountAvailable,\s*currentProvider/);
   assert.match(modelOptionsSource, /for \(const profile of config\.profiles\)/);
-  assert.match(modelOptionsSource, /value = routeModelAlias\(profile, modelId\)/);
-  assert.match(modelOptionsSource, /const usesOfficialMetadata = official/);
+  assert.match(modelOptionsSource, /value: routeModelAlias\(profile, modelId\)/);
+  assert.match(modelOptionsSource, /if \(!config\.localRouterEnabled\)/);
+  assert.match(modelOptionsSource, /currentProvider\?\.id/);
+  assert.match(modelOptionsSource, /value: modelId/);
+  assert.match(
+    modelOptionsSource,
+    /\.\.\.modelState\.thirdPartyModels,\s*\.\.\.modelState\.upstreamModels/,
+  );
+  assert.match(modelOptionsSource, /official && officialModelMetadata/);
   assert.match(
     modelOptionsSource,
     /THIRD_PARTY_REASONING_EFFORTS\s*=\s*\["low",\s*"medium",\s*"high",\s*"xhigh"\]/,

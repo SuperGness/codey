@@ -42,6 +42,7 @@ if (import.meta.env.DEV) {
     } as const;
     let previewConfig: Config = {
       settingsRevision: 0,
+      localRouterEnabled: true,
       activeProfileId: "primary",
       initialRouteImportCompleted: true,
       profiles: [

@@ -59,6 +59,7 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(app, /onDeleteRoute=\{handleDeleteRoute\}/);
   assert.match(app, /onFetchRouteModels=\{handleFetchRouteModels\}/);
   assert.match(app, /onSetDefaultModel=\{handleSetRouteDefaultModel\}/);
+  assert.match(app, /onToggleLocalRouter=\{handleToggleLocalRouter\}/);
   assert.match(
     app,
     /onToggleAccountUsage=\{handleToggleAccountUsage\}/,
@@ -82,17 +83,29 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.equal(sections.match(/<Select\s/g)?.length, 2);
   assert.equal(sections.match(/<ModelCombobox\s/g)?.length, 1);
   assert.doesNotMatch(sections, /<select|route-native-select/);
-  assert.match(sections, /className="route-manager route-manager-balanced"/);
+  assert.match(sections, /route-manager route-manager-balanced/);
+  assert.match(sections, /route-manager-current/);
   assert.match(sections, /className="provider-model-groups"/);
   assert.match(sections, /modelState\.officialModelIds/);
   assert.match(sections, /checked=\{showAccountUsageInHeader\}/);
+  assert.match(sections, /checked=\{config\.localRouterEnabled\}/);
+  assert.match(sections, /const routeConfigReadOnly = !config\.localRouterEnabled/);
   assert.match(sections, /checked=\{checked\}/);
   assert.match(sections, /额度显示/);
   assert.match(sections, /<DialogTitle>/);
   assert.match(sections, /重新读取 Codex 配置/);
+  assert.match(sections, /刷新当前线路/);
+  assert.match(sections, /当前线路模型/);
+  assert.match(sections, /仅展示 Codex 当前线路，可同步模型/);
+  assert.match(sections, /if \(routeConfigReadOnly\) return nativeProfile \? \[nativeProfile\] : \[\]/);
+  assert.match(sections, /disabled=\{!canSyncCurrentProvider \|\| isBusy\}/);
+  assert.match(app, /const canSyncCurrentProvider = !dirty \|\| pendingNativeRouterToggle/);
+  assert.match(app, /canSyncCurrentProvider=\{canSyncCurrentProvider\}/);
+  assert.match(app, /if \(shouldPersistNativeToggle\) \{\s*await persist\(config\)/);
+  assert.match(app, /if \(nativeMode\) \{\s*await syncCurrentProvider\(\);\s*return/);
   assert.match(
     sections,
-    /disabled=\{isBusy \|\| dirty \|\| config\.profiles\.length <= 1\}/,
+    /disabled=\{\s*routeConfigReadOnly \|\|\s*isBusy \|\|\s*dirty \|\|\s*config\.profiles\.length <= 1\s*\}/,
   );
   assert.match(sections, /统一模型目录/);
   assert.doesNotMatch(sections, /catalog-search|searchQuery|搜索模型\.\.\./);
