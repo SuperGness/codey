@@ -275,6 +275,61 @@ mod tests {
     }
 
     #[test]
+    fn marketplace_repair_replaces_managed_reserved_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let official_root = home.join(".tmp/plugins");
+        let remote_root = home.join(".tmp/plugins-remote");
+        fs::write(
+            home.join("config.toml"),
+            format!(
+                r#"model = "gpt-5"
+
+[marketplaces.openai-curated]
+source_type = "local"
+source = {}
+
+[marketplaces.openai-api-curated]
+source_type = "local"
+source = {}
+
+[marketplaces.openai-curated-remote]
+source_type = "local"
+source = {}
+"#,
+                toml_edit::value(format!(r"\\?\{}", official_root.display())),
+                toml_edit::value(format!(r"\\?\{}", official_root.display())),
+                toml_edit::value(format!(r"\\?\{}", remote_root.display())),
+            ),
+        )
+        .unwrap();
+
+        let repair = ensure_marketplaces(home).unwrap();
+        let status = marketplaces_status(home);
+        let config = fs::read_to_string(home.join("config.toml")).unwrap();
+        let parsed = config.parse::<toml_edit::DocumentMut>().unwrap();
+        let marketplaces = parsed["marketplaces"].as_table().unwrap();
+
+        assert_eq!(repair["initializedRemote"], true);
+        assert!(marketplaces.get("openai-curated").is_none());
+        assert!(marketplaces.get("openai-api-curated").is_none());
+        assert!(marketplaces.get("openai-curated-remote").is_none());
+        assert_eq!(
+            marketplaces["codey-curated"]["source"].as_str(),
+            Some(
+                if cfg!(windows) {
+                    format!(r"\\?\{}", remote_root.display())
+                } else {
+                    remote_root.to_string_lossy().into_owned()
+                }
+                .as_str()
+            )
+        );
+        assert_eq!(parsed["model"].as_str(), Some("gpt-5"));
+        assert_eq!(status["needsRepair"], false);
+    }
+
+    #[test]
     fn marketplace_status_repairs_cached_remote_registration() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();

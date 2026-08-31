@@ -42,6 +42,7 @@ test("plugin marketplace repair is explicit and status checks stay read-only", a
   assert.match(coreMarketplaceSource, /const CODEY_CURATED_MARKETPLACE: &str = "codey-curated"/);
   assert.match(coreMarketplaceSource, /install_openai_curated_remote_marketplace_zip\(/);
   assert.match(coreMarketplaceSource, /cleanup_managed_reserved_marketplace_configs\(/);
+  assert.match(coreMarketplaceSource, /if !cfg!\(windows\) \|\| value\.starts_with/);
   assert.doesNotMatch(coreMarketplaceSource, /codeload\.github\.com\/openai\/plugins/);
   assert.ok(embeddedSnapshot.length > 1_000_000);
   assert.equal(embeddedSnapshot.subarray(0, 4).toString("binary"), "PK\u0003\u0004");
