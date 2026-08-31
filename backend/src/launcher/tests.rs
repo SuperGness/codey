@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::HashMap;
+use std::path::Path;
 
 #[test]
 fn packaged_activation_detects_a_reused_process_id() {
@@ -52,6 +53,28 @@ fn windows_stop_survivors_match_targets_by_creation_identity() {
 }
 
 #[test]
+fn windows_owned_process_ids_include_descendants_from_snapshot() {
+    let app_dir = Path::new(r"C:\Users\kim\AppData\Local\OpenAI Codex");
+    let owned_executable = Path::new(r"C:\Users\kim\AppData\Local\OpenAI Codex\ChatGPT.exe");
+    let unrelated_executable = Path::new(r"C:\Other\ChatGPT.exe");
+    let processes = [
+        (10, 0, Some(owned_executable)),
+        (11, 10, None),
+        (12, 11, None),
+        (13, 0, Some(unrelated_executable)),
+        (14, 13, None),
+    ];
+
+    let process_ids = windows_owned_process_ids_from_snapshot(app_dir, None, processes);
+
+    assert!(process_ids.contains(&10));
+    assert!(process_ids.contains(&11));
+    assert!(process_ids.contains(&12));
+    assert!(!process_ids.contains(&13));
+    assert!(!process_ids.contains(&14));
+}
+
+#[test]
 fn windows_stop_failure_summary_lists_surviving_executables() {
     let remaining = vec![
         (10, "ChatGPT.exe".to_string(), Some(100)),
@@ -68,6 +91,18 @@ fn windows_stop_failure_summary_lists_surviving_executables() {
     let summary = windows_stop_failure_summary(&many);
     assert!(summary.starts_with("7 个进程仍在运行："));
     assert!(summary.ends_with("等共 7 个"));
+}
+
+#[test]
+fn windows_stop_tracking_absorbs_late_descendants() {
+    let mut process_ids = HashSet::from([10]);
+
+    windows_extend_tracked_descendants_from_snapshot(
+        &mut process_ids,
+        vec![(10, 0, None), (11, 10, None), (12, 11, None), (20, 0, None)],
+    );
+
+    assert_eq!(process_ids, HashSet::from([10, 11, 12]));
 }
 
 #[test]

@@ -379,7 +379,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "39");
+  assert.equal(patch.version, "40");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -724,6 +724,215 @@ test("a raw model keeps its persisted thread route when multiple routes share th
     responsesapiClientMetadata: { codey_route: "route-b" },
   });
   restoredRuntime.patch.dispose();
+});
+
+test("thread responses expose the selector alias for unique raw route models", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["relay/gpt-5.5"],
+    default_model: "relay/gpt-5.5",
+    model_metadata: [{
+      model: "relay/gpt-5.5",
+      provider_id: "codey_router",
+      source_model: "gpt-5.5",
+      route_provider_id: "relay",
+    }],
+  }, [statsigClient()]);
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "read-thread-with-raw-model",
+        result: {
+          thread: {
+            id: "raw-route-thread",
+            model: "gpt-5.5",
+            modelProvider: "codey_router",
+          },
+        },
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.equal(
+    response.data.message.result.thread.model,
+    "relay/gpt-5.5",
+  );
+  runtime.patch.dispose();
+});
+
+test("legacy custom-provider thread responses display the matching route alias", async () => {
+  const alias = "aihub/gpt-5.6-sol";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [alias],
+    default_model: alias,
+    model_metadata: [{
+      model: alias,
+      route_name: "AIHub",
+      provider_id: "custom",
+      source_model: "gpt-5.6-sol",
+      route_provider_id: "aihub",
+      upstream_model: "gpt-5.6-sol",
+    }],
+  }, [statsigClient()]);
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "legacy-custom-thread-list",
+        result: {
+          data: [{
+            id: "legacy-custom-thread",
+            model: "gpt-5.6-sol",
+            modelProvider: "custom",
+          }],
+        },
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.equal(response.data.message.result.data[0].model, alias);
+  runtime.patch.dispose();
+});
+
+test("legacy custom-provider thread responses do not guess between shared routes", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["route-a/shared-model", "route-b/shared-model"],
+    default_model: "route-a/shared-model",
+    model_metadata: [
+      {
+        model: "route-a/shared-model",
+        provider_id: "custom",
+        source_model: "shared-model",
+        route_provider_id: "route-a",
+      },
+      {
+        model: "route-b/shared-model",
+        provider_id: "custom",
+        source_model: "shared-model",
+        route_provider_id: "route-b",
+      },
+    ],
+  }, [statsigClient()]);
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "ambiguous-legacy-custom-thread",
+        result: {
+          thread: {
+            id: "ambiguous-custom-thread",
+            model: "shared-model",
+            modelProvider: "custom",
+          },
+        },
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.equal(response.data.message.result.thread.model, "shared-model");
+  runtime.patch.dispose();
+});
+
+test("thread display aliases replace immutable result payloads", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["relay/gpt-5.5"],
+    default_model: "relay/gpt-5.5",
+    model_metadata: [{
+      model: "relay/gpt-5.5",
+      provider_id: "codey_router",
+      source_model: "gpt-5.5",
+      route_provider_id: "relay",
+    }],
+  }, [statsigClient()]);
+  const originalResult = Object.freeze({
+    thread: Object.freeze({
+      id: "immutable-thread",
+      model: "gpt-5.5",
+      modelProvider: "codey_router",
+    }),
+  });
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "immutable-thread-read",
+        result: originalResult,
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.notEqual(response.data.message.result, originalResult);
+  assert.equal(response.data.message.result.thread.model, "relay/gpt-5.5");
+  runtime.patch.dispose();
+});
+
+test("thread responses use stored routes to disambiguate shared raw models", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["persisted-thread", {
+      routeProviderId: "route-b",
+      sourceModel: "shared-model",
+    }],
+  ]));
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["route-a/shared-model", "route-b/shared-model"],
+    default_model: "route-a/shared-model",
+    model_metadata: [
+      {
+        model: "route-a/shared-model",
+        provider_id: "codey_router",
+        source_model: "shared-model",
+        route_provider_id: "route-a",
+      },
+      {
+        model: "route-b/shared-model",
+        provider_id: "codey_router",
+        source_model: "shared-model",
+        route_provider_id: "route-b",
+      },
+    ],
+  }, [statsigClient()], { storage });
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "list-threads-with-raw-models",
+        result: {
+          data: [
+            {
+              id: "persisted-thread",
+              model: "shared-model",
+              modelProvider: "codey_router",
+            },
+            {
+              id: "unbound-thread",
+              model: "shared-model",
+              modelProvider: "codey_router",
+            },
+          ],
+        },
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.equal(response.data.message.result.data[0].model, "route-b/shared-model");
+  assert.equal(response.data.message.result.data[1].model, "shared-model");
+  runtime.patch.dispose();
 });
 
 test("unchanged thread routes do not rewrite the full persisted binding table", async () => {

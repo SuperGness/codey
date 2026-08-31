@@ -86,7 +86,11 @@ fn decorate_plugin_marketplace_status(home: &Path, status: &mut Value) {
         );
         object.insert(
             "localMarketplacePath".into(),
-            Value::String(home.join(".tmp/plugins").to_string_lossy().to_string()),
+            Value::String(
+                home.join(".tmp/plugins-remote")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
         );
     }
 }
@@ -103,7 +107,7 @@ mod tests {
         assert_eq!(ready["status"], "ready");
         assert_eq!(
             ready["localMarketplacePath"],
-            home.join(".tmp/plugins").to_string_lossy().as_ref(),
+            home.join(".tmp/plugins-remote").to_string_lossy().as_ref(),
         );
 
         let mut needs_repair = json!({ "needsRepair": true });

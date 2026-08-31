@@ -6,6 +6,9 @@ const PATCH_RESULT: &str = "codey-startup-patch-installed-v37";
 const APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT: &str =
     "codey-app-server-runtime-overrides-verified";
 const MAX_INSPECTOR_TARGET_RESPONSE_BYTES: usize = 1024 * 1024;
+const STARTUP_PATCH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(24);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchOptions {
@@ -99,8 +102,13 @@ pub async fn install(
         runtime_config_overrides,
         require_app_server_runtime_overrides,
     );
+    let install_timeout = if require_app_server_runtime_overrides {
+        STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT
+    } else {
+        STARTUP_PATCH_INSTALL_TIMEOUT
+    };
     tokio::time::timeout(
-        std::time::Duration::from_secs(10),
+        install_timeout,
         install_over_websocket(
             &websocket_url,
             &expression,
@@ -341,6 +349,7 @@ mod tests {
             APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT,
             "codey-app-server-runtime-overrides-verified"
         );
+        assert!(STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT > STARTUP_PATCH_INSTALL_TIMEOUT);
     }
 
     #[test]

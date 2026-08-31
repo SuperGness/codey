@@ -117,14 +117,15 @@ function OperationsPanelComponent({
   const pluginStatusKnown = Boolean(
     pluginMarketplaceStatus && !pluginStatusError,
   );
-  const officialMarketplaceReady =
-    pluginMarketplaceStatus?.officialMarketplace === true &&
-    pluginMarketplaceStatus.officialRegistered === true;
   const remoteMarketplaceCached =
     pluginMarketplaceStatus?.remoteMarketplace === true;
   const remoteMarketplaceReady =
     remoteMarketplaceCached &&
     pluginMarketplaceStatus?.remoteRegistered === true;
+  const managedConfigCompatible =
+    pluginMarketplaceStatus?.managedConfigCompatible === true;
+  const embeddedMarketplaceReady =
+    remoteMarketplaceReady && managedConfigCompatible;
   const performanceError =
     maintenance?.performanceStatus === "error" ||
     maintenance?.performanceStatus === "degraded";
@@ -221,14 +222,14 @@ function OperationsPanelComponent({
         icon: IconShoppingBag,
         tooltip: !pluginStatusKnown
           ? "官方市场：正在检查"
-          : officialMarketplaceReady
-            ? "官方市场：快照与注册完整"
-            : pluginMarketplaceStatus?.officialMarketplace !== true
-              ? "官方市场：快照缺失"
-              : "官方市场：快照存在但尚未注册",
+          : embeddedMarketplaceReady
+            ? pluginMarketplaceStatus?.officialMarketplace === true
+              ? "官方市场：Codey 内置快照已接管，并检测到兼容缓存"
+              : "官方市场：Codey 内置快照已接管，无需联网下载"
+            : "官方市场：等待 Codey 内置快照修复",
         tone: !pluginStatusKnown
           ? "info"
-          : officialMarketplaceReady
+          : embeddedMarketplaceReady
             ? "success"
             : "warning",
       },
@@ -236,16 +237,18 @@ function OperationsPanelComponent({
         id: "plugin-remote",
         icon: IconCloudCheck,
         tooltip: !pluginStatusKnown
-          ? "远程市场：正在检查本地缓存"
+          ? "Codey 内置市场：正在检查"
           : !remoteMarketplaceCached
-            ? "远程市场：未缓存本地快照，无需修复"
-            : remoteMarketplaceReady
-              ? "远程市场：缓存与注册完整"
-              : "远程市场：已缓存但尚未注册",
+            ? "Codey 内置市场：快照缺失"
+            : !remoteMarketplaceReady
+              ? "Codey 内置市场：快照存在但尚未注册"
+              : !managedConfigCompatible
+                ? "Codey 内置市场：旧保留名配置待迁移"
+                : "Codey 内置市场：快照与注册完整",
         tone:
-          !pluginStatusKnown || !remoteMarketplaceCached
+          !pluginStatusKnown
             ? "info"
-            : remoteMarketplaceReady
+            : embeddedMarketplaceReady
               ? "success"
               : "warning",
       },
@@ -259,7 +262,8 @@ function OperationsPanelComponent({
       },
     ],
     [
-      officialMarketplaceReady,
+      embeddedMarketplaceReady,
+      managedConfigCompatible,
       pluginMarketplaceStatus?.officialMarketplace,
       pluginOk,
       pluginStatusKnown,

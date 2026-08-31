@@ -744,6 +744,10 @@ test("startup patch fails closed when app-server runtime override injection is n
   });
 
   try {
+    assert.match(
+      await loadPatchExpression(runtimeConfigOverrides, false, true),
+      /appServerRuntimeOverrideTimeoutMs = 20_000/,
+    );
     assert.equal(runtime.result, "codey-startup-patch-installed-v37");
     assert.equal(
       runtime.context.__CODEY_CODEX_STARTUP_PATCH__.appServerRuntimeOverrides.observed,

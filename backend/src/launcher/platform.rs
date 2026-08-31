@@ -15,6 +15,11 @@ use super::{SpawnedCodex, build_codex_command, reap_child_after_cleanup};
 use crate::error_log;
 
 #[cfg(windows)]
+const WINDOWS_CODEX_STOP_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(windows)]
+const WINDOWS_STARTUP_PATCH_FAILURE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
+
+#[cfg(any(windows, test))]
 pub(super) fn normalized_windows_path(path: &std::path::Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
@@ -120,7 +125,12 @@ pub(super) async fn stop_windows_spawned_codex(
     app_dir: &std::path::Path,
 ) -> Result<()> {
     let process_id = spawned.process_id.take();
-    let process_stop = terminate_windows_codex_processes(app_dir, process_id).await;
+    let process_stop = terminate_windows_codex_processes_with_timeout(
+        app_dir,
+        process_id,
+        WINDOWS_STARTUP_PATCH_FAILURE_STOP_TIMEOUT,
+    )
+    .await;
     if let Some(child) = spawned.child.take() {
         reap_child_after_cleanup(child, "reap_child_after_startup_patch_failure").await;
     }
@@ -334,7 +344,7 @@ pub(super) async fn macos_codex_is_running(app_dir: &std::path::Path) -> Result<
     Ok(macos_main_executable_is_running(&processes, &executable))
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn windows_path_is_within(path: &Path, directory: &Path) -> bool {
     let path = normalized_windows_path(path);
     let directory = normalized_windows_path(directory);
@@ -344,34 +354,71 @@ fn windows_path_is_within(path: &Path, directory: &Path) -> bool {
             .is_some_and(|rest| rest.starts_with('\\'))
 }
 
-#[cfg(windows)]
-pub(super) async fn terminate_windows_codex_processes(
+#[cfg(any(windows, test))]
+pub(super) fn windows_owned_process_ids_from_snapshot<'a>(
     app_dir: &Path,
     process_id: Option<u32>,
-) -> Result<()> {
-    let processes = codey_runtime_core::windows_enumerate_processes();
+    processes: impl IntoIterator<Item = (u32, u32, Option<&'a Path>)>,
+) -> HashSet<u32> {
+    let processes = processes.into_iter().collect::<Vec<_>>();
     let mut process_ids = processes
         .iter()
-        .filter(|process| {
-            Some(process.process_id) == process_id
-                || process
-                    .executable_path
-                    .as_deref()
-                    .is_some_and(|path| windows_path_is_within(path, app_dir))
+        .filter(|(candidate_process_id, _, executable_path)| {
+            Some(*candidate_process_id) == process_id
+                || executable_path.is_some_and(|path| windows_path_is_within(path, app_dir))
         })
-        .map(|process| process.process_id)
+        .map(|(candidate_process_id, _, _)| *candidate_process_id)
         .collect::<HashSet<_>>();
+    windows_extend_tracked_descendants_from_snapshot(&mut process_ids, processes);
+    process_ids
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn windows_extend_tracked_descendants_from_snapshot<'a>(
+    process_ids: &mut HashSet<u32>,
+    processes: impl IntoIterator<Item = (u32, u32, Option<&'a Path>)>,
+) {
+    let processes = processes.into_iter().collect::<Vec<_>>();
     loop {
         let previous_len = process_ids.len();
-        for process in &processes {
-            if process_ids.contains(&process.parent_process_id) {
-                process_ids.insert(process.process_id);
+        for (candidate_process_id, parent_process_id, _) in &processes {
+            if process_ids.contains(parent_process_id) {
+                process_ids.insert(*candidate_process_id);
             }
         }
         if process_ids.len() == previous_len {
             break;
         }
     }
+}
+
+#[cfg(windows)]
+pub(super) async fn terminate_windows_codex_processes(
+    app_dir: &Path,
+    process_id: Option<u32>,
+) -> Result<()> {
+    terminate_windows_codex_processes_with_timeout(app_dir, process_id, WINDOWS_CODEX_STOP_TIMEOUT)
+        .await
+}
+
+#[cfg(windows)]
+async fn terminate_windows_codex_processes_with_timeout(
+    app_dir: &Path,
+    process_id: Option<u32>,
+    stop_timeout: Duration,
+) -> Result<()> {
+    let processes = codey_runtime_core::windows_enumerate_processes();
+    let mut process_ids = windows_owned_process_ids_from_snapshot(
+        app_dir,
+        process_id,
+        processes.iter().map(|process| {
+            (
+                process.process_id,
+                process.parent_process_id,
+                process.executable_path.as_deref(),
+            )
+        }),
+    );
     process_ids.remove(&std::process::id());
     let mut ordered_process_ids = process_ids.iter().copied().collect::<Vec<_>>();
     ordered_process_ids.sort_by_key(|candidate| {
@@ -388,7 +435,7 @@ pub(super) async fn terminate_windows_codex_processes(
         }
         std::cmp::Reverse(depth)
     });
-    let expected_creation_times = process_ids
+    let mut expected_creation_times = process_ids
         .iter()
         .filter_map(|process_id| {
             processes
@@ -420,9 +467,47 @@ pub(super) async fn terminate_windows_codex_processes(
                 },
             );
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = tokio::time::Instant::now() + stop_timeout;
     loop {
         let current_processes = codey_runtime_core::windows_enumerate_processes();
+        let previous_process_ids = process_ids.clone();
+        windows_extend_tracked_descendants_from_snapshot(
+            &mut process_ids,
+            current_processes.iter().map(|process| {
+                (
+                    process.process_id,
+                    process.parent_process_id,
+                    process.executable_path.as_deref(),
+                )
+            }),
+        );
+        for discovered_process_id in process_ids.difference(&previous_process_ids) {
+            let Some(process) = current_processes
+                .iter()
+                .find(|process| process.process_id == *discovered_process_id)
+            else {
+                continue;
+            };
+            expected_creation_times.insert(*discovered_process_id, process.creation_time);
+            match (&process.executable_path, process.creation_time) {
+                (Some(path), Some(creation_time)) => {
+                    let _terminated_natively =
+                        codey_runtime_core::windows_terminate_process_if_matches(
+                            process.process_id,
+                            path,
+                            creation_time,
+                        );
+                }
+                (_, Some(creation_time)) => {
+                    let _terminated_natively =
+                        codey_runtime_core::windows_terminate_process_if_creation_matches(
+                            process.process_id,
+                            creation_time,
+                        );
+                }
+                _ => {}
+            }
+        }
         let current = current_processes
             .iter()
             .filter(|process| process_ids.contains(&process.process_id))

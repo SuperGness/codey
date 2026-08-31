@@ -775,7 +775,9 @@ export function App({
         setNotice({
           tone: "success",
           text:
-            result.configChanged || result.initializedRemote
+            result.configChanged ||
+            result.initializedRemote ||
+            result.configuredRemote
               ? "插件市场已修复并立即生效，无需重启 Codex"
               : "插件市场状态正常，无需修改",
         });

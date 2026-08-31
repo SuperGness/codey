@@ -1243,6 +1243,11 @@ impl RouterServer {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let bridge = ProtocolBridge::from_upstream_protocol(resolved.protocol);
+        if bridge == ProtocolBridge::NativeResponses
+            && remove_codey_synthetic_previous_response_id(&mut body)
+        {
+            body_mutated = true;
+        }
         let force_upstream_stream = should_force_upstream_streaming(
             bridge,
             request_kind,
@@ -1653,6 +1658,28 @@ fn should_passthrough_native_responses(
         && !body_mutated
 }
 
+fn remove_codey_synthetic_previous_response_id(body: &mut Value) -> bool {
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    let Some(previous_response_id) = object
+        .get("previous_response_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+    else {
+        return false;
+    };
+    if !is_codey_synthetic_response_id(previous_response_id) {
+        return false;
+    }
+    object.remove("previous_response_id");
+    true
+}
+
+fn is_codey_synthetic_response_id(response_id: &str) -> bool {
+    response_id.trim().starts_with("resp_codey_")
+}
+
 struct RawTopLevelObject<'a>(Vec<(String, &'a RawValue)>);
 
 struct RawTopLevelObjectVisitor;
@@ -1706,6 +1733,7 @@ fn rewrite_native_responses_encoded_body(original: &[u8], updated: &Value) -> Re
     let mut first = true;
     let mut saw_model = false;
     let mut saw_client_metadata = false;
+    let mut saw_previous_response_id = false;
     for (name, raw) in fields {
         let replacement = match name.as_str() {
             "model" => {
@@ -1715,6 +1743,10 @@ fn rewrite_native_responses_encoded_body(original: &[u8], updated: &Value) -> Re
             "client_metadata" => {
                 saw_client_metadata = true;
                 Some(updated.get("client_metadata"))
+            }
+            "previous_response_id" => {
+                saw_previous_response_id = true;
+                Some(updated.get("previous_response_id"))
             }
             _ => None,
         };
@@ -1733,6 +1765,7 @@ fn rewrite_native_responses_encoded_body(original: &[u8], updated: &Value) -> Re
     for (name, saw_field) in [
         ("model", saw_model),
         ("client_metadata", saw_client_metadata),
+        ("previous_response_id", saw_previous_response_id),
     ] {
         if saw_field {
             continue;
@@ -5025,6 +5058,7 @@ struct CachedUpstreamWebSocket {
     route_id: String,
     url: String,
     auth_identity: UpstreamWebSocketAuthIdentity,
+    response_ids: HashSet<String>,
     liveness: UpstreamWebSocketLiveness,
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
 }
@@ -5468,24 +5502,28 @@ impl WebSocketResponsesDownstream {
         let auth_identity = UpstreamWebSocketAuthIdentity::from_headers(headers);
         let backoff_key =
             UpstreamWebSocketBackoffKey::new(&route.provider_id, upstream_url, auth_identity);
-        let continues_existing_response = body
-            .get("previous_response_id")
-            .and_then(Value::as_str)
-            .is_some_and(|response_id| !response_id.trim().is_empty());
-        let cached_matches = self.upstream.as_ref().is_some_and(|cached| {
+        let previous_response_id = responses_previous_response_id(body);
+        let cached_available = self.upstream.as_ref().is_some_and(|cached| {
             cached.route_id == route.provider_id
                 && cached.url == *upstream_url
-                // A WebSocket previous_response_id is meaningful only on the
-                // connection that produced it. Token refreshes and account
-                // changes must affect new response chains, but must not move
-                // an in-flight continuation onto a fresh connection where the
-                // upstream would reject its parent response ID.
-                && (cached.auth_identity == auth_identity || continues_existing_response)
                 && cached.liveness.heartbeat_sent_at.is_none()
                 && cached.liveness.maintenance_action(now)
                     != UpstreamWebSocketMaintenanceAction::Drop
         });
+        if !cached_available {
+            self.upstream.take();
+        }
+        let cached_matches =
+            self.upstream
+                .as_ref()
+                .is_some_and(|cached| match previous_response_id {
+                    Some(response_id) => cached.response_ids.contains(response_id),
+                    None => cached.auth_identity == auth_identity,
+                });
         if !cached_matches {
+            if previous_response_id.is_some() {
+                return Ok(UpstreamWebSocketAttempt::UseHttp);
+            }
             self.upstream.take();
         }
         if self.upstream.is_none()
@@ -5510,6 +5548,7 @@ impl WebSocketResponsesDownstream {
                         route_id: route.provider_id.clone(),
                         url: upstream_url.clone(),
                         auth_identity,
+                        response_ids: HashSet::new(),
                         liveness: UpstreamWebSocketLiveness::new(Instant::now()),
                         socket,
                     }
@@ -5588,6 +5627,7 @@ impl WebSocketResponsesDownstream {
         .context("发送 Responses WebSocket 上游请求超时")?
         .context("发送 Responses WebSocket 上游请求失败")?;
 
+        let mut produced_response_id = None;
         loop {
             let next = tokio::time::timeout(UPSTREAM_READ_IDLE_TIMEOUT, upstream.socket.next())
                 .await
@@ -5598,31 +5638,55 @@ impl WebSocketResponsesDownstream {
             match message.context("读取 Responses WebSocket 上游事件失败")? {
                 WebSocketMessage::Text(text) => {
                     upstream.liveness.record_activity(Instant::now());
-                    let event = serde_json::from_str::<Value>(text.as_str())
-                        .context("Responses WebSocket 上游事件不是有效 JSON")?;
-                    let terminal = responses_event_is_terminal(&event);
-                    if self.event_needs_stream_id(&event) {
-                        self.write_event(&event).await?;
-                    } else {
-                        // Preserve the already-validated UTF-8 frame instead
-                        // of cloning and serializing the whole JSON event on
-                        // the latency-sensitive first-event path.
-                        self.write_text(text).await?;
-                    }
-                    if terminal {
-                        let successful_backoff_key = UpstreamWebSocketBackoffKey::new(
-                            &route.provider_id,
-                            upstream_url,
-                            upstream.auth_identity,
-                        );
-                        if responses_websocket_connection_is_reusable(&event) {
-                            self.upstream = Some(upstream);
+                    let (events, raw_json_text) =
+                        match serde_json::from_str::<Value>(text.as_str()) {
+                            Ok(event) => (vec![event], Some(text)),
+                            Err(json_error) => (
+                                parse_responses_websocket_sse_events(text.as_str()).with_context(
+                                    || {
+                                        format!(
+                                            "Responses WebSocket 上游响应既不是有效 JSON，也不是有效 SSE（JSON 错误：{json_error}）"
+                                        )
+                                    },
+                                )?,
+                                None,
+                            ),
+                        };
+                    let mut raw_json_text = raw_json_text;
+                    for event in events {
+                        let terminal = responses_event_is_terminal(&event);
+                        if let Some(response_id) = responses_event_response_id(&event) {
+                            produced_response_id = Some(response_id.to_string());
                         }
-                        self.websocket_backoffs
-                            .lock()
-                            .expect("upstream WebSocket backoff mutex poisoned")
-                            .record_success(&successful_backoff_key);
-                        return Ok(UpstreamWebSocketAttempt::Completed);
+                        if self.event_needs_stream_id(&event) {
+                            self.write_event(&event).await?;
+                        } else if let Some(text) = raw_json_text.take() {
+                            // Preserve an already-validated bare JSON frame on
+                            // the latency-sensitive first-event path. SSE-wrapped
+                            // WebSocket frames must be normalized to bare JSON
+                            // before they are sent to Codex.
+                            self.write_text(text).await?;
+                        } else {
+                            self.write_event(&event).await?;
+                        }
+                        if terminal {
+                            let successful_backoff_key = UpstreamWebSocketBackoffKey::new(
+                                &route.provider_id,
+                                upstream_url,
+                                upstream.auth_identity,
+                            );
+                            if let Some(response_id) = produced_response_id {
+                                upstream.response_ids.insert(response_id);
+                            }
+                            if responses_websocket_connection_is_reusable(&event) {
+                                self.upstream = Some(upstream);
+                            }
+                            self.websocket_backoffs
+                                .lock()
+                                .expect("upstream WebSocket backoff mutex poisoned")
+                                .record_success(&successful_backoff_key);
+                            return Ok(UpstreamWebSocketAttempt::Completed);
+                        }
                     }
                 }
                 WebSocketMessage::Ping(payload) => {
@@ -5671,6 +5735,52 @@ fn responses_event_is_terminal(event: &Value) -> bool {
         event.get("type").and_then(Value::as_str),
         Some("response.completed" | "response.failed" | "response.incomplete" | "error")
     )
+}
+
+fn parse_responses_websocket_sse_events(text: &str) -> Result<Vec<Value>> {
+    let bytes = text.as_bytes();
+    let mut cursor = 0;
+    let mut events = Vec::new();
+    while let Some(frame) = take_next_sse_frame(bytes, &mut cursor) {
+        append_responses_websocket_sse_event(&mut events, frame)?;
+    }
+    if !bytes[cursor..].iter().all(u8::is_ascii_whitespace) {
+        append_responses_websocket_sse_event(&mut events, &bytes[cursor..])?;
+    }
+    if events.is_empty() {
+        anyhow::bail!("Responses WebSocket SSE 帧不包含 JSON data 事件");
+    }
+    Ok(events)
+}
+
+fn append_responses_websocket_sse_event(events: &mut Vec<Value>, frame: &[u8]) -> Result<()> {
+    let Some(data) = sse_frame_data(frame)? else {
+        return Ok(());
+    };
+    if data.trim() == "[DONE]" {
+        return Ok(());
+    }
+    events.push(
+        serde_json::from_str::<Value>(&data)
+            .context("Responses WebSocket 上游 SSE data 不是有效 JSON")?,
+    );
+    Ok(())
+}
+
+fn responses_previous_response_id(body: &Value) -> Option<&str> {
+    body.get("previous_response_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|response_id| !response_id.is_empty())
+}
+
+fn responses_event_response_id(event: &Value) -> Option<&str> {
+    event
+        .get("response")
+        .and_then(|response| response.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|response_id| !response_id.is_empty())
 }
 
 fn responses_websocket_connection_is_reusable(event: &Value) -> bool {
@@ -8805,6 +8915,106 @@ mod tests {
     }
 
     #[test]
+    fn upstream_websocket_sse_wrapper_parser_accepts_complete_and_unterminated_frames() {
+        let text = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-sse\"}}\n\n",
+            "event: response.output_text.delta\r\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}"
+        );
+
+        let events = parse_responses_websocket_sse_events(text).unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["type"], "response.created");
+        assert_eq!(events[0]["response"]["id"], "resp-sse");
+        assert_eq!(events[1]["type"], "response.output_text.delta");
+        assert_eq!(events[1]["delta"], "ok");
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[tokio::test]
+    async fn upstream_websocket_normalizes_sse_wrapped_events_to_json_frames() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            assert!(matches!(
+                socket.next().await.unwrap().unwrap(),
+                WebSocketMessage::Text(_)
+            ));
+            for event in [
+                json!({
+                    "type":"response.created",
+                    "response":{
+                        "id":"resp-sse-wrapped",
+                        "object":"response",
+                        "status":"in_progress",
+                        "output":[],
+                    }
+                }),
+                json!({
+                    "type":"response.completed",
+                    "response":{
+                        "id":"resp-sse-wrapped",
+                        "object":"response",
+                        "status":"completed",
+                        "output":[],
+                    }
+                }),
+            ] {
+                let event_type = event["type"].as_str().unwrap();
+                let frame = format!(
+                    "event: {event_type}\ndata: {}\n\n",
+                    serde_json::to_string(&event).unwrap()
+                );
+                socket
+                    .send(WebSocketMessage::Text(frame.into()))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let (mut config, provider_id, model) =
+            router_config(format!("http://{upstream_address}/v1"));
+        config.profiles[0].supports_websockets = true;
+        let snapshot = RouterSnapshot::from_config(&config);
+        let route = Arc::clone(&snapshot.routes[&provider_id]);
+        let (downstream_socket, mut downstream_peer) = local_websocket_pair().await;
+        let mut downstream = WebSocketResponsesDownstream::new(downstream_socket);
+        let mut body = json!({"model":model,"input":"hello"});
+
+        assert_eq!(
+            downstream
+                .proxy_upstream_websocket(&route, &HeaderMap::new(), &mut body)
+                .await
+                .unwrap(),
+            UpstreamWebSocketAttempt::Completed
+        );
+
+        let mut received = Vec::new();
+        for _ in 0..2 {
+            let WebSocketMessage::Text(text) = downstream_peer.next().await.unwrap().unwrap()
+            else {
+                panic!("expected downstream JSON text frame");
+            };
+            received.push(serde_json::from_str::<Value>(text.as_str()).unwrap());
+        }
+        assert_eq!(received[0]["type"], "response.created");
+        assert_eq!(received[1]["type"], "response.completed");
+        assert!(
+            downstream
+                .upstream
+                .as_ref()
+                .unwrap()
+                .response_ids
+                .contains("resp-sse-wrapped")
+        );
+        upstream_task.await.unwrap();
+    }
+
+    #[test]
     fn websocket_error_events_are_terminal_and_connection_limits_force_reconnect() {
         let request_error = json!({
             "type":"error",
@@ -9007,6 +9217,7 @@ mod tests {
             route_id: "route-a".to_string(),
             url: "ws://upstream.example/responses".to_string(),
             auth_identity: UpstreamWebSocketAuthIdentity::default(),
+            response_ids: HashSet::new(),
             liveness: UpstreamWebSocketLiveness::new(heartbeat_due_at),
             socket: upstream_socket,
         });
@@ -9058,6 +9269,7 @@ mod tests {
             route_id: "route-a".to_string(),
             url: "ws://upstream.example/responses".to_string(),
             auth_identity: UpstreamWebSocketAuthIdentity::default(),
+            response_ids: HashSet::new(),
             liveness,
             socket: upstream_socket,
         });
@@ -9490,6 +9702,91 @@ mod tests {
         assert_eq!(captured_account, "acct-first");
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[1]["previous_response_id"], "resp-1");
+        assert!(!opened_replacement);
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[tokio::test]
+    async fn unknown_previous_response_id_uses_http_fallback_instead_of_websocket_reuse() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let WebSocketMessage::Text(text) = socket.next().await.unwrap().unwrap() else {
+                panic!("expected first response.create text message");
+            };
+            let first_request = serde_json::from_str::<Value>(text.as_str()).unwrap();
+            socket
+                .send(WebSocketMessage::Text(
+                    serde_json::to_string(&json!({
+                        "type":"response.completed",
+                        "response":{
+                            "id":"resp-known-on-websocket",
+                            "object":"response",
+                            "status":"completed",
+                            "output":[],
+                        }
+                    }))
+                    .unwrap()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            let reused_existing_socket =
+                tokio::time::timeout(Duration::from_millis(200), socket.next())
+                    .await
+                    .is_ok();
+            let opened_replacement =
+                tokio::time::timeout(Duration::from_millis(200), upstream.accept())
+                    .await
+                    .is_ok();
+            (first_request, reused_existing_socket, opened_replacement)
+        });
+
+        let (mut config, provider_id, model) =
+            router_config(format!("http://{upstream_address}/v1"));
+        config.profiles[0].supports_websockets = true;
+        let snapshot = RouterSnapshot::from_config(&config);
+        let route = Arc::clone(&snapshot.routes[&provider_id]);
+        let (downstream_socket, mut downstream_peer) = local_websocket_pair().await;
+        let mut downstream = WebSocketResponsesDownstream::new(downstream_socket);
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer same-token"));
+        headers.insert(
+            HeaderName::from_static(CHATGPT_ACCOUNT_ID_HEADER),
+            HeaderValue::from_static("acct-same"),
+        );
+
+        let mut first_body = json!({"model":model,"input":"first"});
+        assert_eq!(
+            downstream
+                .proxy_upstream_websocket(&route, &headers, &mut first_body)
+                .await
+                .unwrap(),
+            UpstreamWebSocketAttempt::Completed
+        );
+        let event = downstream_peer.next().await.unwrap().unwrap();
+        assert!(matches!(event, WebSocketMessage::Text(_)));
+
+        let mut continuation_from_elsewhere = json!({
+            "model":model,
+            "input":"second",
+            "previous_response_id":"resp-created-over-http"
+        });
+        assert_eq!(
+            downstream
+                .proxy_upstream_websocket(&route, &headers, &mut continuation_from_elsewhere)
+                .await
+                .unwrap(),
+            UpstreamWebSocketAttempt::UseHttp
+        );
+
+        let (first_request, reused_existing_socket, opened_replacement) =
+            upstream_task.await.unwrap();
+        assert_eq!(first_request["input"], "first");
+        assert!(!reused_existing_socket);
         assert!(!opened_replacement);
     }
 
@@ -10599,6 +10896,30 @@ mod tests {
     }
 
     #[test]
+    fn codey_synthetic_previous_response_ids_are_not_forwardable() {
+        assert!(is_codey_synthetic_response_id("resp_codey_local"));
+        assert!(is_codey_synthetic_response_id(" resp_codey_local "));
+        assert!(!is_codey_synthetic_response_id("resp_real_upstream"));
+        assert!(!is_codey_synthetic_response_id("resp-1"));
+
+        let mut synthetic = json!({
+            "model": "gpt-5.4",
+            "input": "continue",
+            "previous_response_id": "resp_codey_wrapped",
+        });
+        assert!(remove_codey_synthetic_previous_response_id(&mut synthetic));
+        assert!(synthetic.get("previous_response_id").is_none());
+
+        let mut upstream = json!({
+            "model": "gpt-5.4",
+            "input": "continue",
+            "previous_response_id": "resp_upstream",
+        });
+        assert!(!remove_codey_synthetic_previous_response_id(&mut upstream));
+        assert_eq!(upstream["previous_response_id"], "resp_upstream");
+    }
+
+    #[test]
     fn native_responses_rewrite_preserves_large_raw_fields() {
         let original = br#"{
             "model" : "route-a/gpt-5.4",
@@ -10626,7 +10947,8 @@ mod tests {
 
     #[test]
     fn native_responses_rewrite_adds_a_defaulted_model_and_can_remove_metadata() {
-        let original = br#"{"input":"hello","client_metadata":{"codey_route":"route-a"}}"#;
+        let original =
+            br#"{"input":"hello","previous_response_id":"resp_codey_old","client_metadata":{"codey_route":"route-a"}}"#;
         let updated = json!({"model":"gpt-5.6-sol","input":"hello"});
 
         let rewritten = rewrite_native_responses_encoded_body(original, &updated).unwrap();
@@ -10638,6 +10960,22 @@ mod tests {
             !String::from_utf8(rewritten)
                 .unwrap()
                 .contains(ROUTE_METADATA_KEY)
+        );
+    }
+
+    #[test]
+    fn native_responses_rewrite_can_update_previous_response_id() {
+        let original = br#"{"model":"gpt-5.4","input":"hello"}"#;
+        let updated = json!({
+            "model":"gpt-5.4",
+            "input":"hello",
+            "previous_response_id":"resp_upstream",
+        });
+
+        let rewritten = rewrite_native_responses_encoded_body(original, &updated).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&rewritten).unwrap(),
+            updated
         );
     }
 
@@ -12653,6 +12991,61 @@ mod tests {
         assert_eq!(body["model"], "provider-model");
         assert_eq!(body["tools"][0]["type"], "web_search");
         assert!(body.get("web_search_options").is_none());
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_responses_route_drops_only_codey_synthetic_previous_response_id() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let mut forwarded = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = upstream.accept().await.unwrap();
+                let request = read_http_request(&mut stream).await.unwrap();
+                let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+                write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({
+                        "id":"resp-upstream",
+                        "object":"response",
+                        "model":body["model"],
+                        "output_text":"ok"
+                    }),
+                )
+                .await
+                .unwrap();
+                forwarded.push(body);
+            }
+            forwarded
+        });
+        let (config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let client = reqwest::Client::new();
+        let alias = model_alias(&provider_id, &model);
+
+        for previous_response_id in ["resp_codey_wrapped", "resp_upstream"] {
+            let response = client
+                .post(format!("{}/responses", endpoint.base_url))
+                .bearer_auth(&endpoint.token)
+                .json(&json!({
+                    "model": alias,
+                    "input": "continue",
+                    "previous_response_id": previous_response_id,
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+        }
+
+        let forwarded = upstream_task.await.unwrap();
+        assert_eq!(forwarded.len(), 2);
+        assert_eq!(forwarded[0]["model"], "provider-model");
+        assert!(forwarded[0].get("previous_response_id").is_none());
+        assert_eq!(forwarded[1]["previous_response_id"], "resp_upstream");
         router.stop().await.unwrap();
     }
 

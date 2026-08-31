@@ -41,8 +41,15 @@ test("Windows startup patch failure cleans the paused process before compatible 
   );
   assert.doesNotMatch(windowsSpawn, /宠物精简启动补丁未能确认生效/);
   assert.doesNotMatch(windowsSpawn, /petSlimRequested/);
-  assert.match(cleanup, /terminate_windows_codex_processes\(app_dir, process_id\)\.await/);
   assert.match(cleanup, /-> Result<\(\)>/);
+  assert.match(
+    cleanup,
+    /terminate_windows_codex_processes_with_timeout\(\s*app_dir,\s*process_id,\s*WINDOWS_STARTUP_PATCH_FAILURE_STOP_TIMEOUT,\s*\)\s*\.await/,
+  );
+  assert.doesNotMatch(
+    cleanup,
+    /terminate_windows_codex_processes\(app_dir, process_id\)\.await/,
+  );
 });
 
 test("Windows startup patch requires app-server runtime override validation", async () => {

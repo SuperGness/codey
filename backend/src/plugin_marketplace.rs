@@ -9,17 +9,17 @@ use crate::error_log;
 
 /// Repairs the official/local marketplace registration without touching the
 /// Codex installation directory. The core crate owns the platform-specific
-/// config format and local remote marketplace; Codey only exposes a small,
+/// config format and embedded marketplace snapshot; Codey only exposes a small,
 /// renderer-friendly status/list API around it.
 pub fn ensure_marketplaces(home: &Path) -> Result<Value> {
     let remote =
         codey_runtime_core::plugin_marketplace::ensure_openai_curated_remote_marketplace_available(
             home,
         )
-        .context("初始化官方远程插件市场失败")?;
+        .context("初始化 Codey 内置插件市场失败")?;
     let curated_changed =
         codey_runtime_core::plugin_marketplace::ensure_openai_curated_marketplace_config(home)
-            .context("注册官方插件市场失败")?;
+            .context("迁移插件市场兼容配置失败")?;
     let role_changed =
         codey_runtime_core::plugin_marketplace::ensure_role_specific_plugins_marketplace_config(
             home,
@@ -30,14 +30,14 @@ pub fn ensure_marketplaces(home: &Path) -> Result<Value> {
         codey_runtime_core::plugin_marketplace::openai_curated_remote_marketplace_status(home);
     Ok(json!({
         "officialMarketplace": official.marketplace_root.is_some(),
-        "officialRegistered": official.config_registered,
         "officialPath": official.marketplace_root,
         "remoteMarketplace": remote_status.marketplace_root.is_some(),
         "remoteRegistered": remote_status.config_registered,
         "remotePath": remote_status.marketplace_root,
+        "managedConfigCompatible": official.config_registered,
         "initializedRemote": remote.initialized,
         "configuredRemote": remote.configured,
-        "configChanged": curated_changed || role_changed,
+        "configChanged": remote.configured || curated_changed || role_changed,
     }))
 }
 
@@ -50,19 +50,16 @@ pub fn marketplaces_status(home: &Path) -> Value {
         codey_runtime_core::plugin_marketplace::openai_curated_remote_marketplace_status(home);
     let official_marketplace = official.marketplace_root.is_some();
     let remote_marketplace = remote.marketplace_root.is_some();
-    // The remote snapshot is an optional cache populated outside Codey. When
-    // present it must be registered, but its absence is not repairable here
-    // and does not prevent the online marketplace from working.
-    let needs_repair = !official_marketplace
-        || !official.config_registered
-        || (remote_marketplace && !remote.config_registered);
+    let managed_config_compatible = official.config_registered;
+    let needs_repair =
+        !remote_marketplace || !remote.config_registered || !managed_config_compatible;
     json!({
         "officialMarketplace": official_marketplace,
-        "officialRegistered": official.config_registered,
         "officialPath": official.marketplace_root,
         "remoteMarketplace": remote_marketplace,
         "remoteRegistered": remote.config_registered,
         "remotePath": remote.marketplace_root,
+        "managedConfigCompatible": managed_config_compatible,
         "needsRepair": needs_repair,
     })
 }
@@ -261,19 +258,19 @@ mod tests {
     }
 
     #[test]
-    fn marketplace_status_does_not_require_optional_remote_cache() {
+    fn marketplace_repair_installs_the_embedded_snapshot() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
-        write_marketplace(home, "plugins", "openai-curated", "gmail");
 
         let repair = ensure_marketplaces(home).unwrap();
         let status = marketplaces_status(home);
 
-        assert_eq!(repair["initializedRemote"], false);
-        assert_eq!(status["officialMarketplace"], true);
-        assert_eq!(status["officialRegistered"], true);
-        assert_eq!(status["remoteMarketplace"], false);
-        assert_eq!(status["remoteRegistered"], false);
+        assert_eq!(repair["initializedRemote"], true);
+        assert_eq!(repair["configuredRemote"], true);
+        assert_eq!(status["officialMarketplace"], false);
+        assert_eq!(status["remoteMarketplace"], true);
+        assert_eq!(status["remoteRegistered"], true);
+        assert_eq!(status["managedConfigCompatible"], true);
         assert_eq!(status["needsRepair"], false);
     }
 
@@ -281,8 +278,6 @@ mod tests {
     fn marketplace_status_repairs_cached_remote_registration() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
-        write_marketplace(home, "plugins", "openai-curated", "gmail");
-        ensure_marketplaces(home).unwrap();
         write_marketplace(
             home,
             "plugins-remote",
@@ -294,12 +289,12 @@ mod tests {
         let repair = ensure_marketplaces(home).unwrap();
         let after = marketplaces_status(home);
 
-        assert_eq!(before["officialRegistered"], true);
         assert_eq!(before["remoteMarketplace"], true);
         assert_eq!(before["remoteRegistered"], false);
         assert_eq!(before["needsRepair"], true);
         assert_eq!(repair["configuredRemote"], true);
         assert_eq!(after["remoteRegistered"], true);
+        assert_eq!(after["managedConfigCompatible"], true);
         assert_eq!(after["needsRepair"], false);
     }
 }

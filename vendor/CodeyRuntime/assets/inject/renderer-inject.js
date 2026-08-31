@@ -2013,6 +2013,7 @@
     if (name === "openai-primary-runtime") return "OpenAI插件3(Codey)";
     if (name === "openai-api-curated") return "OpenAI插件4(Codey)";
     if (name === "openai-curated-remote") return "OpenAI插件5(Codey)";
+    if (name === "codey-curated") return "Codey精选插件";
     return fallback;
   }
 
@@ -2135,7 +2136,7 @@
 
   function codexPluginOfficialMarketplaceName(name) {
     const restored = restorePluginMarketplaceName(name);
-    return restored === "openai-bundled" || restored === "openai-curated" || restored === "openai-primary-runtime" || restored === "openai-api-curated" || restored === "openai-curated-remote";
+    return restored === "openai-bundled" || restored === "openai-curated" || restored === "openai-primary-runtime" || restored === "openai-api-curated" || restored === "openai-curated-remote" || restored === "codey-curated";
   }
 
   function isCodexPluginBuildFlavorFilter(callback, sample) {

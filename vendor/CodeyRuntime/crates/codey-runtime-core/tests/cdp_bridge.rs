@@ -646,6 +646,8 @@ fn injection_script_expands_api_key_plugin_marketplace_requests() {
     assert!(
         script.contains("if (name === \"openai-curated-remote\") return \"OpenAI插件5(Codey)\"")
     );
+    assert!(script.contains("if (name === \"codey-curated\") return \"Codey精选插件\""));
+    assert!(script.contains("restored === \"codey-curated\""));
     assert!(script.contains(
         "if (name === \"codey-openai-curated-remote\") return \"openai-curated-remote\""
     ));

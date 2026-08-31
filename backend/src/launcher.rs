@@ -1,11 +1,11 @@
+#[cfg(all(test, unix))]
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
-#[cfg(all(test, unix))]
-use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result};
 use codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved;

@@ -1413,7 +1413,7 @@
   ]);
   const appServerRuntimeOverrideVerifiedResult =
     "codey-app-server-runtime-overrides-verified";
-  const appServerRuntimeOverrideTimeoutMs = 8_000;
+  const appServerRuntimeOverrideTimeoutMs = 20_000;
   const appServerRuntimeOverrideEvidence = {
     version: 1,
     observed: false,

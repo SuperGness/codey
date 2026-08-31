@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "39";
+  const patchVersion = "40";
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
   const legacyOfficialRouteProviderIds = new Set([
@@ -1780,11 +1780,137 @@
     const matches = catalog.routesBySourceKey.get(modelKey(model)) || [];
     return matches.length === 1 ? matches[0] : null;
   };
+  const uniqueRouteForProviderModel = (providerId, model) => {
+    const providerKey = modelKey(providerId);
+    const sourceKey = modelKey(model);
+    if (!providerKey || !sourceKey) return null;
+    const matches = catalog.routes.filter((route) => (
+      modelKey(route?.sourceModel) === sourceKey
+      && (
+        modelKey(route?.routeProviderId) === providerKey
+        || modelKey(route?.providerId) === providerKey
+      )
+    ));
+    const uniqueMatches = new Map(
+      matches.map((route) => [modelKey(route.selectorModel), route]),
+    );
+    return uniqueMatches.size === 1 ? uniqueMatches.values().next().value : null;
+  };
   const routeForHintedRawModel = (routeProviderId, model) => routeFromNestedIndex(
     catalog.routeByRouteProviderSource,
     routeProviderId,
     model,
   );
+  const routeForThreadDisplayModel = (thread) => {
+    if (!catalog.loaded || !thread || typeof thread !== "object") return null;
+    const model = typeof thread.model === "string" ? thread.model.trim() : "";
+    if (!model || catalog.modelNamesByKey.has(modelKey(model))) return null;
+    const threadId = typeof thread.id === "string" ? thread.id.trim() : "";
+    const providerId = providerFromThread(thread);
+    const routeHint = requestProviderId(thread[routeMetadataParam]?.[routeMetadataKey]);
+    if (routeHint) {
+      const hintedRoute = routeForHintedRawModel(routeHint, model);
+      if (hintedRoute?.selectorModel) return hintedRoute;
+    }
+    const threadRoute = routeForThreadModel(threadId, model);
+    if (threadRoute?.selectorModel) return threadRoute;
+    const providerModel = (() => {
+      if (!providerId || !model) return model;
+      const prefix = `${providerId}/`;
+      return model.toLowerCase().startsWith(prefix.toLowerCase())
+        ? model.slice(prefix.length).trim()
+        : model;
+    })();
+    const providerRoute = providerId && modelKey(providerId) !== localRouterProviderId
+      ? uniqueRouteForProviderModel(providerId, providerModel)
+      : null;
+    if (providerRoute?.selectorModel) return providerRoute;
+    const aliasRoute = routeForProviderAlias(model);
+    if (aliasRoute?.selectorModel) return aliasRoute;
+    const rawRoute = uniqueRouteForRawModel(model);
+    return rawRoute?.selectorModel ? rawRoute : null;
+  };
+  const patchedThreadDisplayModel = (thread) => {
+    const route = routeForThreadDisplayModel(thread);
+    const selectorModel = typeof route?.selectorModel === "string"
+      ? route.selectorModel.trim()
+      : "";
+    if (
+      !selectorModel
+      || !thread
+      || typeof thread !== "object"
+      || modelKey(thread.model) === modelKey(selectorModel)
+    ) return thread;
+    return { ...thread, model: selectorModel };
+  };
+  const dataLooksLikeThreadList = (value) => (
+    Array.isArray(value)
+    && value.length > 0
+    && value.every((item) => (
+      item
+      && typeof item === "object"
+      && typeof item.id === "string"
+    ))
+    && value.some((item) => typeof item.model === "string")
+    && !value.some((item) => (
+      item
+      && typeof item === "object"
+      && (
+        Array.isArray(item.supportedReasoningEfforts)
+        || Array.isArray(item.serviceTiers)
+        || Object.hasOwn(item, "displayName")
+      )
+    ))
+  );
+  const patchedThreadDisplayPayload = (value) => {
+    if (!catalog.loaded || !value || typeof value !== "object") {
+      return { changed: false, value };
+    }
+    let changed = false;
+    const next = { ...value };
+    if (value.thread && typeof value.thread === "object") {
+      const thread = patchedThreadDisplayModel(value.thread);
+      if (thread !== value.thread) {
+        next.thread = thread;
+        changed = true;
+      }
+    }
+    if (dataLooksLikeThreadList(value.data)) {
+      const data = value.data.map((thread) => patchedThreadDisplayModel(thread));
+      if (data.some((thread, index) => thread !== value.data[index])) {
+        next.data = data;
+        changed = true;
+      }
+    }
+    return { changed, value: changed ? next : value };
+  };
+  const applyThreadDisplayPatch = (value) => {
+    const patched = patchedThreadDisplayPayload(value);
+    if (!patched.changed || patched.value === value) return false;
+    let applied = false;
+    for (const key of ["thread", "data"]) {
+      if (!(key in patched.value) || patched.value[key] === value[key]) continue;
+      try {
+        value[key] = patched.value[key];
+        applied = true;
+      } catch {
+        // Immutable bridge payloads remain unchanged; later requests still route safely.
+      }
+    }
+    return applied;
+  };
+  const replaceThreadDisplayPayload = (parent, key) => {
+    const value = parent?.[key];
+    const patched = patchedThreadDisplayPayload(value);
+    if (!patched.changed || patched.value === value) return false;
+    try {
+      parent[key] = patched.value;
+      if (parent[key] === patched.value) return true;
+    } catch {
+      // A mutable nested payload can still be repaired in place below.
+    }
+    return applyThreadDisplayPatch(value);
+  };
 
   const rememberMenuRouteIntent = (event) => {
     if (!routeSelectionEvents.has(event?.type) || !catalog.loaded) return;
@@ -2271,7 +2397,11 @@
       || data.requestMethod === "model/list"
       || message?.requestMethod === "model/list"
     );
-    if (!isModelListResponse) return;
+    if (!isModelListResponse) {
+      replaceThreadDisplayPayload(message, "result");
+      applyThreadDisplayPatch(data);
+      return;
+    }
     modelListRequestIds.delete(requestId);
     const patched = patchedModelPayload(message?.result);
     if (!patched.changed) return;
