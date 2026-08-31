@@ -48,7 +48,10 @@ fn assert_runtime_disk_provider(document: &DocumentMut, base_url: &str, token: &
     let router = document["model_providers"][local_router::ROUTER_PROVIDER_ID]
         .as_table_like()
         .expect("codey_router runtime disk provider");
-    assert_eq!(router.get("name").and_then(Item::as_str), Some("OpenAI"));
+    assert_eq!(
+        router.get("name").and_then(Item::as_str),
+        Some("Codey Local Router")
+    );
     assert_eq!(
         router.get("base_url").and_then(Item::as_str),
         Some(base_url)
@@ -1115,7 +1118,7 @@ fn runtime_router_provider_advertises_websockets_only_when_enabled() {
 }
 
 #[test]
-fn runtime_router_matches_cc_switch_openai_identity_and_auth_shape() {
+fn runtime_router_separates_openai_identity_from_auth_shape() {
     let mut endpoint = crate::local_router::RuntimeRouterEndpoint {
         base_url: "http://127.0.0.1:43127/v1".into(),
         token: "test-router-token".into(),
@@ -1125,7 +1128,7 @@ fn runtime_router_matches_cc_switch_openai_identity_and_auth_shape() {
     };
 
     let provider = local_router_provider_table(&endpoint);
-    assert_eq!(provider["name"].as_str(), Some("OpenAI"));
+    assert_eq!(provider["name"].as_str(), Some("Codey Local Router"));
     assert_eq!(provider["requires_openai_auth"].as_bool(), Some(true));
     assert!(provider.get("experimental_bearer_token").is_none());
     assert_eq!(
@@ -2839,7 +2842,7 @@ fn official_login_uses_the_websocket_router_without_overriding_builtin_openai() 
         base_url: "http://127.0.0.1:43127/v1".into(),
         token: "launch-only-router-token".into(),
         supports_websockets: true,
-        supports_remote_compaction: false,
+        supports_remote_compaction: true,
         requires_openai_auth: true,
     };
 

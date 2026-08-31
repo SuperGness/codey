@@ -1320,9 +1320,10 @@ pub(crate) fn prepare_persistent_router_resume_shim_at(home: &Path) -> Result<bo
 }
 
 /// Persist the live loopback `codey_router` table while the local router is
-/// running. Official routing uses CC Switch's OpenAI-authenticated provider
-/// shape; third-party-only routing uses the API-key shape. Desktop and config
-/// reload resolve that id from disk, so it must match the process `-c` overlay.
+/// running. Official authentication stays enabled when available, while the
+/// provider name advertises OpenAI-only capabilities only when every runtime
+/// route supports them. Desktop and config reload resolve that id from disk,
+/// so it must match the process `-c` overlay.
 pub(crate) fn prepare_runtime_router_disk_provider_at(
     home: &Path,
     endpoint: &RuntimeRouterEndpoint,
@@ -3190,16 +3191,15 @@ fn codey_hook_inline_table(
 
 fn local_router_provider_table(endpoint: &RuntimeRouterEndpoint) -> Table {
     let mut provider = Table::new();
-    provider["name"] = value(
-        if endpoint.requires_openai_auth || endpoint.supports_remote_compaction {
-            // Match CC Switch's official proxy route: Codex derives the OpenAI
-            // capability set (including remote compaction) from this exact name,
-            // while base_url still points every request at the loopback gateway.
-            OPENAI_PROVIDER_NAME
-        } else {
-            LOCAL_ROUTER_PROVIDER_NAME
-        },
-    );
+    provider["name"] = value(if endpoint.supports_remote_compaction {
+        // Codex derives remote compaction from this exact name. Authentication
+        // remains an independent provider field so mixed Chat/Responses
+        // runtimes can keep official login without advertising compaction to
+        // routes that cannot carry its Responses V2 trigger.
+        OPENAI_PROVIDER_NAME
+    } else {
+        LOCAL_ROUTER_PROVIDER_NAME
+    });
     provider["base_url"] = value(endpoint.base_url.trim_end_matches('/'));
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(endpoint.requires_openai_auth);

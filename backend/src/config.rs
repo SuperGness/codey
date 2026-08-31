@@ -928,14 +928,11 @@ impl CodeyConfig {
             && profile.upstream_protocol == UPSTREAM_PROTOCOL_OPENAI_RESPONSES
     }
 
-    /// For a third-party-only router, advertise the OpenAI provider identity
-    /// only when every runtime route explicitly supports native compaction.
-    /// Official-account routing follows Codex's native OpenAI capability path
-    /// independently via `router_requires_openai_auth`.
+    /// Advertise the OpenAI provider identity only when every runtime route
+    /// supports native compaction. Codex derives this capability from the
+    /// shared provider, so one adapted Chat/Anthropic route must disable it for
+    /// the whole runtime even when an official account route is also present.
     pub(crate) fn runtime_supports_remote_compaction(&self) -> bool {
-        if self.router_requires_openai_auth() {
-            return true;
-        }
         let mut has_runtime_route = false;
         for profile in &self.profiles {
             if profile.provider_id().trim().is_empty() {
@@ -2458,8 +2455,8 @@ mod tests {
         chat.normalize();
         config.profiles.push(chat);
         assert!(
-            config.runtime_supports_remote_compaction(),
-            "CC Switch-compatible official identity must survive mixed routes"
+            !config.runtime_supports_remote_compaction(),
+            "a shared provider must not advertise native compaction to an adapted Chat route"
         );
 
         config.official_account_available_this_launch = false;
