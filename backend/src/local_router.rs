@@ -67,6 +67,9 @@ const MAX_UPSTREAM_WEBSOCKET_BACKOFFS: usize = 128;
 const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
+// A non-streaming upstream may not send response headers until generation is
+// complete, so its header wait is also the model's total generation budget.
+const UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UPSTREAM_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 const DOWNSTREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -1240,6 +1243,18 @@ impl RouterServer {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let bridge = ProtocolBridge::from_upstream_protocol(resolved.protocol);
+        let force_upstream_stream = should_force_upstream_streaming(
+            bridge,
+            request_kind,
+            downstream_websocket,
+            stream_requested,
+        );
+        if force_upstream_stream {
+            body.as_object_mut()
+                .expect("validated Responses body must remain an object")
+                .insert("stream".to_string(), Value::Bool(true));
+            body_mutated = true;
+        }
         let upstream_url = match request_kind {
             ResponsesRequestKind::Create => &resolved.route.upstream_url,
             ResponsesRequestKind::Compact => &resolved.route.upstream_compact_url,
@@ -1415,11 +1430,17 @@ impl RouterServer {
             drop(encoded_body.take());
             request_builder.json(&upstream_body)
         };
-        let response = match tokio::time::timeout(
-            UPSTREAM_RESPONSE_HEADER_TIMEOUT,
-            request_builder.send(),
-        )
-        .await
+        let upstream_stream_requested = upstream_body
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let response_header_timeout = if upstream_stream_requested {
+            UPSTREAM_RESPONSE_HEADER_TIMEOUT
+        } else {
+            UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT
+        };
+        let response = match tokio::time::timeout(response_header_timeout, request_builder.send())
+            .await
         {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
@@ -1441,6 +1462,8 @@ impl RouterServer {
                         "upstreamProtocol": bridge.upstream_protocol().label(),
                         "protocolBridge": bridge.label(),
                         "requestKind": request_kind.label(),
+                        "upstreamStream": upstream_stream_requested,
+                        "responseHeaderTimeoutSeconds": response_header_timeout.as_secs(),
                         "requestId": current_router_request_id(),
                     }),
                 );
@@ -1487,6 +1510,8 @@ impl RouterServer {
                         "upstreamProtocol": bridge.upstream_protocol().label(),
                         "protocolBridge": bridge.label(),
                         "requestKind": request_kind.label(),
+                        "upstreamStream": upstream_stream_requested,
+                        "responseHeaderTimeoutSeconds": response_header_timeout.as_secs(),
                         "requestId": current_router_request_id(),
                     }),
                 );
@@ -1530,6 +1555,18 @@ impl RouterServer {
             _ => downstream.proxy_response(response).await,
         }
     }
+}
+
+fn should_force_upstream_streaming(
+    bridge: ProtocolBridge,
+    request_kind: ResponsesRequestKind,
+    downstream_websocket: bool,
+    stream_requested: bool,
+) -> bool {
+    request_kind == ResponsesRequestKind::Create
+        && !downstream_websocket
+        && !stream_requested
+        && bridge.can_collect_streamed_response()
 }
 
 fn request_binding_keys(request: &HttpRequest) -> Vec<String> {
@@ -2010,6 +2047,13 @@ impl ProtocolBridge {
                 responses_to_anthropic_messages_request(body).map(Some)
             }
         }
+    }
+
+    fn can_collect_streamed_response(self) -> bool {
+        matches!(
+            self,
+            Self::ResponsesToChatCompletions | Self::ResponsesToAnthropicMessages
+        )
     }
 }
 
@@ -12613,6 +12657,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_stream_chat_adapter_requests_upstream_stream_and_returns_json() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let (request_body_sent, request_body_received) = oneshot::channel();
+        let (first_event_sent, first_event_observed) = oneshot::channel();
+        let (release_upstream, wait_for_release) = oneshot::channel();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+            request_body_sent.send(body.clone()).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            write_test_http_chunk(
+                &mut stream,
+                "data: {\"id\":\"chatcmpl-internal-stream\",\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first-token\"},\"finish_reason\":null}]}\n\n",
+            )
+            .await;
+            first_event_sent.send(()).unwrap();
+            wait_for_release.await.unwrap();
+            write_test_http_chunk(
+                &mut stream,
+                "data: {\"id\":\"chatcmpl-internal-stream\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" done\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"chatcmpl-internal-stream\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":3,\"total_tokens\":7}}\n\ndata: [DONE]\n\n",
+            )
+            .await;
+            stream.write_all(b"0\r\n\r\n").await.unwrap();
+            body
+        });
+        let (mut config, provider_id, model) =
+            router_config(format!("http://{upstream_address}/v1"));
+        config.profiles[0].upstream_protocol =
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+        config.profiles[0].normalize();
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+
+        let mut client_task = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("{}/responses", endpoint.base_url))
+                .bearer_auth(&endpoint.token)
+                .json(&json!({
+                    "model": model_alias(&provider_id, &model),
+                    "input": "hello"
+                }))
+                .send()
+                .await
+                .unwrap()
+        });
+        let upstream_body = request_body_received.await.unwrap();
+        assert_eq!(upstream_body["stream"], true);
+        assert_eq!(upstream_body["stream_options"]["include_usage"], true);
+        first_event_observed.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut client_task)
+                .await
+                .is_err(),
+            "non-stream downstream response must wait for the complete upstream stream"
+        );
+
+        release_upstream.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), client_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let response = response.json::<Value>().await.unwrap();
+        assert_eq!(response["output_text"], "first-token done");
+        assert_eq!(response["usage"]["total_tokens"], 7);
+        assert_eq!(upstream_task.await.unwrap()["stream"], true);
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn chat_adapter_emits_text_before_the_upstream_stream_completes() {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let upstream_address = upstream.local_addr().unwrap();
@@ -12834,6 +12955,90 @@ mod tests {
                 .unwrap()
                 .starts_with(NAMESPACE_UPSTREAM_TOOL_PREFIX)
         );
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_stream_anthropic_adapter_requests_upstream_stream_and_returns_json() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let (request_body_sent, request_body_received) = oneshot::channel();
+        let (first_event_sent, first_event_observed) = oneshot::channel();
+        let (release_upstream, wait_for_release) = oneshot::channel();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+            request_body_sent.send(body.clone()).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            write_test_http_chunk(
+                &mut stream,
+                concat!(
+                    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-internal-stream\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"provider-model\",\"content\":[],\"usage\":{\"input_tokens\":4}}}\n\n",
+                    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"first-token\"}}\n\n"
+                ),
+            )
+            .await;
+            first_event_sent.send(()).unwrap();
+            wait_for_release.await.unwrap();
+            write_test_http_chunk(
+                &mut stream,
+                concat!(
+                    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" done\"}}\n\n",
+                    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+                    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+                ),
+            )
+            .await;
+            stream.write_all(b"0\r\n\r\n").await.unwrap();
+            body
+        });
+        let (mut config, provider_id, model) =
+            router_config(format!("http://{upstream_address}/v1"));
+        config.profiles[0].upstream_protocol =
+            crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES.into();
+        config.profiles[0].normalize();
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+
+        let mut client_task = tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("{}/responses", endpoint.base_url))
+                .bearer_auth(&endpoint.token)
+                .json(&json!({
+                    "model": model_alias(&provider_id, &model),
+                    "input": "hello"
+                }))
+                .send()
+                .await
+                .unwrap()
+        });
+        let upstream_body = request_body_received.await.unwrap();
+        assert_eq!(upstream_body["stream"], true);
+        first_event_observed.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut client_task)
+                .await
+                .is_err(),
+            "non-stream downstream response must wait for the complete upstream stream"
+        );
+
+        release_upstream.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), client_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let response = response.json::<Value>().await.unwrap();
+        assert_eq!(response["output_text"], "first-token done");
+        assert_eq!(response["usage"]["total_tokens"], 7);
+        assert_eq!(upstream_task.await.unwrap()["stream"], true);
         router.stop().await.unwrap();
     }
 
