@@ -6068,6 +6068,21 @@ async fn proxy_native_response_to_websocket(
     };
     let body = read_bounded_upstream_body(response, limit, "读取 Responses WebSocket 上游响应失败")
         .await?;
+    if (200..300).contains(&status)
+        && let Ok(text) = std::str::from_utf8(&body)
+        && responses_body_looks_like_sse(text)
+    {
+        let events = parse_responses_websocket_sse_events(text)
+            .context("解析 Responses WebSocket 上游未标记的 SSE 响应失败")?;
+        if !events.iter().any(responses_event_is_terminal) {
+            anyhow::bail!("Responses HTTP/SSE 降级响应缺少终态事件");
+        }
+        downstream.start_event_stream().await?;
+        for event in events {
+            downstream.write_event(&event).await?;
+        }
+        return downstream.finish_event_stream().await;
+    }
     match serde_json::from_slice::<Value>(&body) {
         Ok(value) => downstream.write_json(status, &value).await,
         Err(error) => {
@@ -6093,6 +6108,11 @@ async fn proxy_native_response_to_websocket(
                 .await
         }
     }
+}
+
+fn responses_body_looks_like_sse(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.trim_end_matches('\r').starts_with("data:"))
 }
 
 async fn write_error_response(
@@ -9025,6 +9045,53 @@ mod tests {
                 .response_ids
                 .contains("resp-sse-wrapped")
         );
+        upstream_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_http_fallback_parses_sse_with_a_json_content_type() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-mislabeled\",\"object\":\"response\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-mislabeled\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n"
+        );
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+                        sse.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let response = reqwest::get(format!("http://{upstream_address}/responses"))
+            .await
+            .unwrap();
+        let (downstream_socket, mut downstream_peer) = local_websocket_pair().await;
+        let mut downstream = WebSocketResponsesDownstream::new(downstream_socket);
+
+        proxy_native_response_to_websocket(&mut downstream, response)
+            .await
+            .unwrap();
+
+        for expected_type in ["response.created", "response.completed"] {
+            let WebSocketMessage::Text(text) = downstream_peer.next().await.unwrap().unwrap()
+            else {
+                panic!("expected downstream JSON text frame");
+            };
+            let event = serde_json::from_str::<Value>(text.as_str()).unwrap();
+            assert_eq!(event["type"], expected_type);
+            assert_eq!(event["response"]["id"], "resp-mislabeled");
+        }
         upstream_task.await.unwrap();
     }
 
