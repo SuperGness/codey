@@ -818,6 +818,36 @@ source = "/opt/user-marketplace"
         assert!(config.contains(r#"source = "/opt/user-marketplace""#));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn remote_marketplace_repairs_a_legacy_windows_path_on_unix() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let remote_root = home.join(".tmp/plugins-remote");
+        write_remote_marketplace(home);
+        std::fs::write(
+            home.join("config.toml"),
+            format!(
+                r#"[marketplaces.codey-curated]
+source_type = "local"
+source = {}
+"#,
+                toml_edit::value(format!(r"\\?\{}", remote_root.display())),
+            ),
+        )
+        .unwrap();
+
+        assert!(!openai_curated_remote_marketplace_status(home).config_registered);
+        assert!(ensure_openai_curated_remote_marketplace_config(home).unwrap());
+
+        let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let parsed = config.parse::<DocumentMut>().unwrap();
+        assert_eq!(
+            parsed["marketplaces"][CODEY_CURATED_MARKETPLACE]["source"].as_str(),
+            Some(remote_root.to_string_lossy().as_ref())
+        );
+    }
+
     #[test]
     fn ensure_openai_curated_marketplace_config_skips_when_snapshot_missing() {
         let temp = tempfile::tempdir().unwrap();
@@ -851,10 +881,8 @@ source = "/opt/user-marketplace"
         assert_eq!(
             parsed["marketplaces"]["role-specific-plugins"]["source"].as_str(),
             Some(
-                expected_marketplace_path(
-                    &home.join(".tmp/marketplaces/role-specific-plugins"),
-                )
-                .as_str()
+                expected_marketplace_path(&home.join(".tmp/marketplaces/role-specific-plugins"),)
+                    .as_str()
             )
         );
         for plugin in [
