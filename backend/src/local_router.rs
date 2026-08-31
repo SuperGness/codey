@@ -3478,6 +3478,9 @@ fn append_chat_message_item(
         Value::String(text) => push_chat_text_message(messages, "user", text),
         Value::Object(object) => match object.get("type").and_then(Value::as_str) {
             Some("message") => append_responses_message_object(object, messages, tool_bridge),
+            Some("agent_message") => {
+                append_responses_agent_message_object(object, messages, tool_bridge)
+            }
             None if looks_like_message_object(object) => {
                 append_responses_message_object(object, messages, tool_bridge)
             }
@@ -3499,6 +3502,7 @@ fn append_chat_message_item(
             Some("tool_search_output") => {
                 append_responses_tool_search_output_item(object, messages)
             }
+            Some(item_type) if is_opaque_responses_input_item_type(item_type) => Ok(()),
             Some("input_text" | "output_text" | "text" | "input_image" | "image_url") => {
                 append_single_content_part_as_user_message(item, messages)
             }
@@ -3518,6 +3522,21 @@ fn looks_like_message_object(object: &serde_json::Map<String, Value>) -> bool {
         || object.contains_key("function_call")
 }
 
+fn append_responses_agent_message_object(
+    object: &serde_json::Map<String, Value>,
+    messages: &mut Vec<Value>,
+    tool_bridge: &ResponsesToolBridge,
+) -> Result<()> {
+    let mut message = object.clone();
+    message.insert("role".to_string(), Value::String("assistant".to_string()));
+    if !message.contains_key("content")
+        && let Some(text) = message.get("message").and_then(Value::as_str)
+    {
+        message.insert("content".to_string(), Value::String(text.to_string()));
+    }
+    append_responses_message_object(&message, messages, tool_bridge)
+}
+
 fn append_responses_message_object(
     object: &serde_json::Map<String, Value>,
     messages: &mut Vec<Value>,
@@ -3534,10 +3553,13 @@ fn append_responses_message_object(
     }
     let mut message = serde_json::Map::new();
     message.insert("role".to_string(), Value::String(role.to_string()));
-    if let Some(content) = object.get("content") {
-        if let Some(chat_content) = responses_content_to_chat_content(content, role)? {
-            message.insert("content".to_string(), chat_content);
-        }
+    let chat_content = object
+        .get("content")
+        .map(|content| responses_content_to_chat_content(content, role))
+        .transpose()?
+        .flatten();
+    if let Some(chat_content) = chat_content {
+        message.insert("content".to_string(), chat_content);
     } else if let Some(text) = first_text_field(object) {
         message.insert("content".to_string(), Value::String(text.to_string()));
     }
@@ -3579,7 +3601,22 @@ fn first_text_field(object: &serde_json::Map<String, Value>) -> Option<&str> {
         .get("text")
         .or_else(|| object.get("input_text"))
         .or_else(|| object.get("output_text"))
+        .or_else(|| object.get("message"))
         .and_then(Value::as_str)
+}
+
+fn first_visible_content_part_text(object: &serde_json::Map<String, Value>) -> Option<&str> {
+    first_text_field(object).or_else(|| object.get("refusal").and_then(Value::as_str))
+}
+
+// These items are provider-maintained state from Responses history. They are not
+// visible model-facing text, and Chat Completions has no field that can carry them.
+fn is_opaque_responses_input_item_type(item_type: &str) -> bool {
+    matches!(item_type, "encrypted_content" | "reasoning" | "compaction")
+}
+
+fn is_opaque_responses_content_part_type(part_type: &str) -> bool {
+    matches!(part_type, "encrypted_content" | "reasoning" | "compaction")
 }
 
 fn responses_content_to_chat_content(content: &Value, role: &str) -> Result<Option<Value>> {
@@ -3625,13 +3662,13 @@ fn responses_content_part_to_chat_part(part: &Value) -> Result<Option<Value>> {
         Value::Object(object) => {
             let part_type = object.get("type").and_then(Value::as_str);
             match part_type {
-                Some("input_text" | "output_text" | "text") => {
-                    let text = first_text_field(object)
+                Some("input_text" | "output_text" | "text" | "refusal") => {
+                    let text = first_visible_content_part_text(object)
                         .ok_or_else(|| anyhow::anyhow!("文本 content part 缺少 text"))?;
                     Ok(Some(json!({"type":"text","text":text})))
                 }
-                None if first_text_field(object).is_some() => {
-                    let text = first_text_field(object).unwrap_or_default();
+                None if first_visible_content_part_text(object).is_some() => {
+                    let text = first_visible_content_part_text(object).unwrap_or_default();
                     Ok(Some(json!({"type":"text","text":text})))
                 }
                 Some("input_image" | "image_url") => Ok(Some(json!({
@@ -3644,6 +3681,8 @@ fn responses_content_part_to_chat_part(part: &Value) -> Result<Option<Value>> {
                         "image_url": responses_image_url_to_chat_image_url(object)?
                     })))
                 }
+                Some(part_type) if is_opaque_responses_content_part_type(part_type) => Ok(None),
+                None if object.contains_key("encrypted_content") => Ok(None),
                 Some(part_type) => anyhow::bail!(
                     "Responses content part 类型 {part_type} 不能无损转换为 Chat Completions content"
                 ),
@@ -11553,6 +11592,158 @@ mod tests {
                 .to_string()
                 .contains("additional_tools.role 必须是 developer")
         );
+    }
+
+    #[test]
+    fn agent_message_items_convert_to_assistant_history() {
+        let body = json!({
+            "model":"provider-model",
+            "input":[
+                {"role":"user","content":"inspect the screenshot"},
+                {"type":"agent_message","message":"The visual worker saw an error banner."},
+                {"type":"agent_message","content":[{"type":"output_text","text":"The selected route is Chat Completions."}]}
+            ]
+        });
+
+        let chat = responses_to_chat_completions_body(&body).unwrap();
+        assert_eq!(
+            chat["messages"],
+            json!([
+                {"role":"user","content":"inspect the screenshot"},
+                {"role":"assistant","content":"The visual worker saw an error banner."},
+                {"role":"assistant","content":"The selected route is Chat Completions."}
+            ])
+        );
+
+        let anthropic = responses_to_anthropic_messages_body(&body).unwrap();
+        assert_eq!(anthropic["messages"][1]["role"], "assistant");
+        assert_eq!(
+            anthropic["messages"][1]["content"],
+            json!([
+                {"type":"text","text":"The visual worker saw an error banner."},
+                {"type":"text","text":"The selected route is Chat Completions."}
+            ])
+        );
+    }
+
+    #[test]
+    fn opaque_responses_content_parts_are_ignored_during_chat_fallback_conversion() {
+        let body = json!({
+            "model":"provider-model",
+            "input":[
+                {"role":"user","content":"inspect the screenshot"},
+                {
+                    "type":"agent_message",
+                    "message":"The agent kept visible fallback text.",
+                    "content":[
+                        {"type":"encrypted_content","encrypted_content":"opaque-only-agent-state"}
+                    ]
+                },
+                {
+                    "type":"agent_message",
+                    "message":"Single object fallback text.",
+                    "content":{"type":"encrypted_content","encrypted_content":"opaque-single-agent-state"}
+                },
+                {
+                    "type":"agent_message",
+                    "content":[
+                        {"type":"encrypted_content","encrypted_content":"opaque-agent-state"},
+                        {"type":"output_text","text":"The visual worker saw an error banner."}
+                    ]
+                },
+                {
+                    "type":"message",
+                    "role":"assistant",
+                    "content":[
+                        {"type":"encrypted_content","encrypted_content":"opaque-assistant-state"},
+                        {"type":"refusal","refusal":"I cannot inspect that file."}
+                    ]
+                },
+                {
+                    "role":"user",
+                    "content":[
+                        {"encrypted_content":"opaque-user-state"},
+                        {"type":"reasoning","encrypted_content":"opaque-reasoning-part"},
+                        {"type":"compaction","encrypted_content":"opaque-compaction-part"},
+                        {"type":"input_text","text":"try again"}
+                    ]
+                },
+                {
+                    "role":"user",
+                    "content":{"type":"encrypted_content","encrypted_content":"opaque-single-user-state"}
+                }
+            ]
+        });
+
+        let chat = responses_to_chat_completions_body(&body).unwrap();
+        assert_eq!(
+            chat["messages"],
+            json!([
+                {"role":"user","content":"inspect the screenshot"},
+                {"role":"assistant","content":"The agent kept visible fallback text."},
+                {"role":"assistant","content":"Single object fallback text."},
+                {"role":"assistant","content":"The visual worker saw an error banner."},
+                {"role":"assistant","content":"I cannot inspect that file."},
+                {"role":"user","content":[{"type":"text","text":"try again"}]}
+            ])
+        );
+        assert!(!chat.to_string().contains("opaque"));
+
+        let anthropic = responses_to_anthropic_messages_body(&body).unwrap();
+        assert!(!anthropic.to_string().contains("opaque"));
+        assert_eq!(anthropic["messages"][1]["content"][0]["type"], "text");
+        assert_eq!(
+            anthropic["messages"][1]["content"][0]["text"],
+            "The agent kept visible fallback text."
+        );
+        assert_eq!(
+            anthropic["messages"][1]["content"][1]["text"],
+            "Single object fallback text."
+        );
+        assert_eq!(
+            anthropic["messages"][1]["content"][2]["text"],
+            "The visual worker saw an error banner."
+        );
+        assert_eq!(
+            anthropic["messages"][1]["content"][3]["text"],
+            "I cannot inspect that file."
+        );
+    }
+
+    #[test]
+    fn opaque_responses_history_items_are_ignored_during_chat_fallback_conversion() {
+        let body = json!({
+            "model":"provider-model",
+            "input":[
+                {"role":"user","content":"continue"},
+                {"type":"reasoning","id":"rs_1","encrypted_content":"opaque-reasoning"},
+                {"type":"compaction","id":"cmp_1","encrypted_content":"opaque-window"}
+            ]
+        });
+
+        let chat = responses_to_chat_completions_body(&body).unwrap();
+        assert_eq!(
+            chat["messages"],
+            json!([{"role":"user","content":"continue"}])
+        );
+        assert!(!chat.to_string().contains("opaque"));
+
+        let missing = responses_to_chat_completions_body(&json!({
+            "model":"provider-model",
+            "input":[{"type":"compaction","encrypted_content":"opaque-window"}]
+        }))
+        .unwrap_err();
+        assert!(missing.to_string().contains("缺少可转换"));
+
+        let trigger = responses_to_chat_completions_body(&json!({
+            "model":"provider-model",
+            "input":[
+                {"role":"user","content":"full context"},
+                {"type":"compaction_trigger"}
+            ]
+        }))
+        .unwrap_err();
+        assert!(trigger.to_string().contains("compaction_trigger"));
     }
 
     #[test]
