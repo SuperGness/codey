@@ -1138,8 +1138,8 @@ impl RouterServer {
                 .remove("stream_id");
             // HTTP/SSE is the deterministic fallback for a downstream WS
             // request, so the shared proxy path always asks an HTTP upstream
-            // to stream. `stream_id` remains WS-only and is reattached only
-            // when an upstream WS connection is actually used.
+            // to stream. `stream_id` is local to the downstream Codex socket
+            // and is reattached only to events written back to that socket.
             body.as_object_mut()
                 .expect("validated Responses body must remain an object")
                 .insert("stream".to_string(), Value::Bool(true));
@@ -1400,12 +1400,20 @@ impl RouterServer {
             && stream_requested
             && bridge == ProtocolBridge::NativeResponses
             && resolved.route.supports_websockets
-            && downstream
-                .try_proxy_upstream_websocket(&resolved.route, &headers, &mut upstream_body)
-                .await?
-                == UpstreamWebSocketAttempt::Completed
         {
-            return Ok(());
+            let websocket_attempt = downstream
+                .try_proxy_upstream_websocket(&resolved.route, &headers, &mut upstream_body)
+                .await?;
+            if websocket_attempt == UpstreamWebSocketAttempt::Completed {
+                return Ok(());
+            }
+            if remove_official_websocket_fallback_previous_response_id(
+                resolved.route.official_account,
+                &mut upstream_body,
+            ) {
+                body_mutated = true;
+                encoded_body = None;
+            }
         }
         let mut request_builder = self.client.post(upstream_url).headers(headers);
         request_builder = if bridge == ProtocolBridge::NativeResponses {
@@ -1672,8 +1680,20 @@ fn remove_codey_synthetic_previous_response_id(body: &mut Value) -> bool {
     if !is_codey_synthetic_response_id(previous_response_id) {
         return false;
     }
-    object.remove("previous_response_id");
-    true
+    remove_previous_response_id(body)
+}
+
+fn remove_official_websocket_fallback_previous_response_id(
+    official_account: bool,
+    body: &mut Value,
+) -> bool {
+    official_account && remove_previous_response_id(body)
+}
+
+fn remove_previous_response_id(body: &mut Value) -> bool {
+    body.as_object_mut()
+        .and_then(|object| object.remove("previous_response_id"))
+        .is_some()
 }
 
 fn is_codey_synthetic_response_id(response_id: &str) -> bool {
@@ -5603,12 +5623,6 @@ impl WebSocketResponsesDownstream {
             .context("Responses WebSocket 上游请求必须是 JSON 对象")?;
         message_body.remove("stream");
         message_body.remove("background");
-        if let Some(stream_id) = self.stream_id.as_deref() {
-            message_body.insert(
-                "stream_id".to_string(),
-                Value::String(stream_id.to_string()),
-            );
-        }
         message_body.insert(
             "type".to_string(),
             Value::String("response.create".to_string()),
@@ -9428,7 +9442,9 @@ mod tests {
         assert_eq!(requests[0]["model"], model);
         assert!(requests[0].get("stream").is_none());
         assert!(requests[0].get("background").is_none());
+        assert!(requests[0].get("stream_id").is_none());
         assert_eq!(requests[1]["input"], "second");
+        assert!(requests[1].get("stream_id").is_none());
         let handshake = handshake.lock().unwrap().clone().unwrap();
         assert_eq!(handshake.0, "/v1/responses");
         assert_eq!(handshake.1.as_deref(), Some("Bearer sk-upstream"));

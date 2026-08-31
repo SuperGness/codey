@@ -644,8 +644,16 @@ fn marketplace_config_points_to_root(home: &Path, marketplace_name: &str, root: 
 }
 
 fn managed_marketplace_path_matches(value: &str, path: &Path) -> bool {
+    let value = value.strip_prefix(r"\\?\").unwrap_or(value);
     let native = path.to_string_lossy();
-    value == native || value.strip_prefix(r"\\?\") == Some(native.as_ref())
+    let native = native.strip_prefix(r"\\?\").unwrap_or(native.as_ref());
+    if cfg!(windows) {
+        value
+            .replace('/', r"\")
+            .eq_ignore_ascii_case(&native.replace('/', r"\"))
+    } else {
+        value == native
+    }
 }
 
 fn marketplace_config_path(path: &Path) -> String {
@@ -816,6 +824,17 @@ source = "/opt/user-marketplace"
         assert!(!cleanup_managed_reserved_marketplace_configs(home).unwrap());
         let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(config.contains(r#"source = "/opt/user-marketplace""#));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_marketplace_path_matches_mixed_windows_separators() {
+        let path = Path::new(r"C:\Users\runner\.tmp\plugins");
+
+        assert!(managed_marketplace_path_matches(
+            r"\\?\C:\Users\runner\.tmp/plugins",
+            path,
+        ));
     }
 
     #[cfg(not(windows))]
