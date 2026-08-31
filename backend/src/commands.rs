@@ -2001,11 +2001,16 @@ async fn account_usage_snapshot(state: &Arc<AppState>) -> Value {
 }
 
 fn account_usage_enabled_for_config(config: &CodeyConfig) -> bool {
-    config.show_account_usage_in_header
-        && config
-            .profiles
-            .iter()
-            .any(|profile| profile.official_account)
+    if !config.show_account_usage_in_header {
+        return false;
+    }
+    if !config.local_router_enabled {
+        return config.official_account_available_this_launch;
+    }
+    config
+        .profiles
+        .iter()
+        .any(|profile| profile.official_account)
 }
 
 #[cfg(test)]

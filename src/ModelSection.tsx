@@ -681,6 +681,19 @@ function ModelSectionComponent({
                         </div>
                       </div>
                       <div className="provider-model-group-actions">
+                        {routeConfigReadOnly && group.official && (
+                          <div className="route-item-usage-toggle provider-model-usage-toggle">
+                            <span className="route-item-usage-label">额度显示</span>
+                            <Switch
+                              size="xs"
+                              checked={showAccountUsageInHeader}
+                              disabled={isBusy}
+                              onCheckedChange={(checked) =>
+                                onToggleAccountUsage?.(checked)}
+                              aria-label="在账户区域显示额度"
+                            />
+                          </div>
+                        )}
                         <Badge variant={group.official ? "info" : "brand"} size="xs">
                           {group.models.length} 模型
                         </Badge>

@@ -334,6 +334,33 @@ fn account_usage_requires_both_the_display_setting_and_an_official_route() {
 }
 
 #[test]
+fn native_account_usage_follows_the_current_official_provider_without_a_saved_route() {
+    let native_official = CodeyConfig {
+        local_router_enabled: false,
+        profiles: Vec::new(),
+        show_account_usage_in_header: true,
+        official_account_available_this_launch: true,
+        ..CodeyConfig::default()
+    };
+    assert!(account_usage_enabled_for_config(&native_official));
+
+    let native_third_party = CodeyConfig {
+        official_account_available_this_launch: false,
+        ..native_official.clone()
+    };
+    assert!(!account_usage_enabled_for_config(&native_third_party));
+
+    let router_enabled_without_official_route = CodeyConfig {
+        local_router_enabled: true,
+        official_account_available_this_launch: true,
+        ..native_official
+    };
+    assert!(!account_usage_enabled_for_config(
+        &router_enabled_without_official_route
+    ));
+}
+
+#[test]
 fn inconclusive_official_auth_probe_keeps_active_third_party_route() {
     let mut third_party = ProviderProfile::new("第三方线路");
     third_party.id = "custom".to_string();

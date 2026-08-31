@@ -92,6 +92,10 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(sections, /const routeConfigReadOnly = !config\.localRouterEnabled/);
   assert.match(sections, /checked=\{checked\}/);
   assert.match(sections, /额度显示/);
+  assert.match(
+    sections,
+    /routeConfigReadOnly && group\.official && \([\s\S]*provider-model-usage-toggle[\s\S]*checked=\{showAccountUsageInHeader\}/,
+  );
   assert.match(sections, /<DialogTitle>/);
   assert.match(sections, /重新读取 Codex 配置/);
   assert.match(sections, /刷新当前线路/);

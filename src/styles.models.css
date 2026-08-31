@@ -249,6 +249,10 @@
   font-weight: 500;
 }
 
+.provider-model-usage-toggle {
+  margin-left: 0;
+}
+
 .route-item-footer {
   display: flex;
   align-items: center;
