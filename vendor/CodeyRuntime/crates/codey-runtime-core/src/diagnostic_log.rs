@@ -484,7 +484,13 @@ mod tests {
         flush_diagnostic_log().unwrap();
 
         let contents = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(contents.lines().count(), 100);
+        // The test sink is process-global, so unrelated parallel tests may add
+        // their own records while this path is active.
+        let queued_record_count = contents
+            .lines()
+            .filter(|line| line.contains("\"event\":\"test.queued\""))
+            .count();
+        assert_eq!(queued_record_count, 100);
         assert!(contents.contains("\"event\":\"test.queued\""));
         set_diagnostic_log_path_for_tests(None);
     }
