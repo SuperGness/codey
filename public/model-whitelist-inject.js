@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "42";
+  const patchVersion = "43";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -1332,8 +1332,8 @@
     return nodes.filter((node, index, all) => all.indexOf(node) === index);
   };
 
-  const scanReactObjectGraph = (forceScan = false) => {
-    if (!forceScan && knownModelQueryClients.size > 0) {
+  const scanReactObjectGraph = (forceScan = false, discover = false) => {
+    if (!forceScan && !discover && knownModelQueryClients.size > 0) {
       return {
         queryClients: [...knownModelQueryClients],
         reactContainers: 0,
@@ -1431,26 +1431,24 @@
     return { queryClients: [...queryClients], reactContainers };
   };
 
-  const scanReactObjectGraphWhenDue = (forceScan = false) => {
-    let runFullScan = forceScan;
-    if (!runFullScan && knownModelQueryClients.size === 0) {
-      const now = Date.now();
-      if (now < nextFullReactDiscoveryAt) {
-        return { queryClients: [], reactContainers: 0 };
-      }
-      runFullScan = true;
+  const scanReactObjectGraphWhenDue = (forceScan = false, discover = false) => {
+    const now = Date.now();
+    const runFullScan = forceScan || now >= nextFullReactDiscoveryAt;
+    if (!runFullScan && knownModelQueryClients.size === 0 && !discover) {
+      return { queryClients: [], reactContainers: 0 };
     }
     if (runFullScan) {
-      nextFullReactDiscoveryAt = Date.now() + fullReactDiscoveryIntervalMs;
+      nextFullReactDiscoveryAt = now + fullReactDiscoveryIntervalMs;
     }
-    return scanReactObjectGraph(runFullScan);
+    return scanReactObjectGraph(runFullScan, discover);
   };
 
   const patchModelQueryClients = async ({
     forceScan = false,
+    discover = false,
     invalidate = false,
   } = {}) => {
-    const scan = scanReactObjectGraphWhenDue(forceScan);
+    const scan = scanReactObjectGraphWhenDue(forceScan, discover);
     let queryEntries = 0;
     let changedEntries = 0;
     const invalidations = [];
@@ -1548,11 +1546,15 @@
     );
   };
 
-  const deliverModelCatalog = async ({ invalidate = true } = {}) => {
+  const deliverModelCatalog = async ({
+    discoverQueryClients = false,
+    invalidate = true,
+  } = {}) => {
     if (!catalog.loaded || disposed) return false;
     const statsigChanged = applyModelWhitelist();
     const firstPass = await patchModelQueryClients({
       forceScan: invalidate,
+      discover: discoverQueryClients,
       invalidate,
     });
     const shouldNotify = (
@@ -2295,8 +2297,7 @@
   const rememberOutgoingModelListRequest = (detail) => {
     const request = detail?.request;
     if (
-      !routableOutgoingMessageTypes.has(detail?.type)
-      || !request
+      !request
       || typeof request !== "object"
       || request.id == null
     ) return;
@@ -2311,12 +2312,12 @@
 
   const rewrittenOutgoingMessage = (detail) => {
     const request = detail?.request;
+    rememberOutgoingModelListRequest(detail);
     if (
       !routableOutgoingMessageTypes.has(detail?.type)
       || !request
       || typeof request !== "object"
     ) return detail;
-    rememberOutgoingModelListRequest(detail);
     if (nativeSelectionOnly) return detail;
 
     const { wrappedMethod, method, params } = outgoingRequestParts(request);
@@ -2465,7 +2466,14 @@
     const now = Date.now();
     if (now - lastInteractionApply < interactionApplyIntervalMs) return;
     lastInteractionApply = now;
-    void deliverModelCatalog({ invalidate: false });
+    // A new or reopened task can mount a fresh QueryClient while the previous
+    // client remains callable. Probe the current React roots on picker
+    // interaction so the visible cache is repaired immediately without the
+    // expensive full-document discovery pass.
+    void deliverModelCatalog({
+      discoverQueryClients: true,
+      invalidate: false,
+    });
   };
   const handleFocus = () => {
     void loadModelCatalog();

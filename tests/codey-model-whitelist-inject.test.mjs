@@ -495,7 +495,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "42");
+  assert.equal(patch.version, "43");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -596,6 +596,43 @@ test("an app-server model refresh after a turn keeps newly added route models", 
   assert.deepEqual(
     response.data.message.result.data.map((model) => model.model),
     ["gpt-5.6-sol", "new-route/GLM-5.3-Flash"],
+  );
+  runtime.patch.dispose();
+});
+
+test("model list tracking survives a renderer request envelope type change", async () => {
+  const routeModel = "tokenrouter/z-ai/glm-5.3-free";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", routeModel],
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()]);
+
+  runtime.patch.trackOutgoingMessage({
+    type: "app-server-request",
+    request: {
+      id: "model-list-new-envelope",
+      method: "model/list",
+      params: { limit: 100 },
+    },
+  });
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "model-list-new-envelope",
+        result: {
+          data: [modelDescriptor("gpt-5.6-sol")],
+          nextCursor: null,
+        },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.deepEqual(
+    response.data.message.result.data.map((model) => model.model),
+    ["gpt-5.6-sol", routeModel],
   );
   runtime.patch.dispose();
 });
@@ -3126,6 +3163,35 @@ test("query client discovery reaches deep provider stacks", async () => {
   assert.equal(delivery.queryClients, 1);
   assert.equal(delivery.queryEntries, 1);
   assert.deepEqual(queryClient.models(), ["gpt-5.6-sol"]);
+  runtime.patch.dispose();
+});
+
+test("opening the model picker discovers a replacement QueryClient", async () => {
+  const routeModel = "tokenrouter/z-ai/glm-5.3-free";
+  const body = new FakeElementCore("body");
+  const firstQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const replacementQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", routeModel],
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()], { documentBody: body, queryClient: firstQueryClient });
+
+  assert.deepEqual(firstQueryClient.models(), ["gpt-5.6-sol", routeModel]);
+  body.__reactFiber$codeyTest = {
+    memoizedProps: { queryClient: replacementQueryClient },
+  };
+
+  runtime.dispatchDocumentEvent("pointerdown");
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(replacementQueryClient.models(), ["gpt-5.6-sol", routeModel]);
+  assert.equal(
+    runtime.wildcardScanCount(),
+    1,
+    "picker interaction should rediscover mounted roots without repeating the full document scan",
+  );
   runtime.patch.dispose();
 });
 

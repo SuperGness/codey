@@ -3131,6 +3131,58 @@ mod tests {
     }
 
     #[test]
+    fn renderer_catalog_keeps_multi_segment_models_from_a_non_current_route() {
+        let active = configured_route("active-route", Some("active-model"));
+        let mut tokenrouter = configured_route("tokenrouter", Some("z-ai/glm-5.3-free"));
+        tokenrouter.name = "TokenRouter".into();
+        tokenrouter.short_name = "tokenrouter".into();
+
+        let config = CodeyConfig {
+            active_profile_id: active.id.clone(),
+            profiles: vec![active, tokenrouter],
+            selected_models_by_provider: BTreeMap::from([
+                ("active-route".into(), vec!["active-model".into()]),
+                ("tokenrouter".into(), vec!["z-ai/glm-5.3-free".into()]),
+            ]),
+            upstream_models_by_provider: BTreeMap::from([
+                ("active-route".into(), vec!["active-model".into()]),
+                ("tokenrouter".into(), vec!["z-ai/glm-5.3-free".into()]),
+            ]),
+            ..CodeyConfig::default()
+        }
+        .normalize();
+        let active_model_state = model_catalog::ModelSelectionState {
+            third_party_models: vec!["active-model".into()],
+            upstream_models: vec!["active-model".into()],
+            default_model: "active-model".into(),
+            ..Default::default()
+        };
+
+        let catalog = renderer_model_catalog_value(&config, &active_model_state);
+        assert!(
+            catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|model| model.as_str() == Some("tokenrouter/z-ai/glm-5.3-free"))
+        );
+        let tokenrouter_metadata = catalog["model_metadata"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["model"].as_str() == Some("tokenrouter/z-ai/glm-5.3-free"))
+            .unwrap();
+        assert_eq!(
+            tokenrouter_metadata["source_model"].as_str(),
+            Some("z-ai/glm-5.3-free")
+        );
+        assert_eq!(
+            tokenrouter_metadata["route_provider_id"].as_str(),
+            Some("tokenrouter")
+        );
+    }
+
+    #[test]
     fn provider_route_restart_detection_ignores_model_only_changes() {
         let mut route_a = crate::config::ProviderProfile::new("Route A");
         route_a.id = "route-a".into();
