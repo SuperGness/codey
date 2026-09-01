@@ -91,6 +91,9 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /codexSessionId\?: string \| null/);
   assert.match(viewer, /codexSessionIsParent\?: boolean \| null/);
   assert.match(viewer, /item\.codexSessionIsParent[\s\S]*父/);
+  assert.match(viewer, /w-40 max-w-40 whitespace-nowrap">会话 ID/);
+  assert.match(viewer, /flex w-36 max-w-36 items-center gap-1\.5 overflow-hidden/);
+  assert.match(viewer, /className="shrink-0 whitespace-nowrap"/);
   assert.match(viewer, /onClick=\{\(\) => handleCopyId\(item\.codexSessionId!\)\}/);
   assert.match(viewer, /复制\$\{item\.codexSessionIsParent \? "父会话" : "会话"\} ID/);
   assert.match(viewer, /<span className="text-\[#8e8e93\]">—<\/span>/);

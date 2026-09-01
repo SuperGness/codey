@@ -478,11 +478,11 @@ export function RequestLogDialog({
             </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-auto" aria-busy={loading}>
-              <Table highlightOnHover withColumnBorders withRowBorders className="min-w-[1420px] text-xs">
+              <Table highlightOnHover withColumnBorders withRowBorders className="min-w-[1360px] text-xs">
                 <Table.Thead className="sticky top-0 z-[1] bg-[#f8f8fa] shadow-[0_1px_0_rgba(0,0,0,0.08)]">
                   <Table.Tr>
                     <Table.Th className="whitespace-nowrap">时间 / 请求 ID</Table.Th>
-                    <Table.Th className="whitespace-nowrap">会话 ID</Table.Th>
+                    <Table.Th className="w-40 max-w-40 whitespace-nowrap">会话 ID</Table.Th>
                     <Table.Th className="whitespace-nowrap">供应商 / 上游</Table.Th>
                     <Table.Th className="whitespace-nowrap">模型</Table.Th>
                     <Table.Th className="whitespace-nowrap">思考强度</Table.Th>
@@ -540,11 +540,15 @@ export function RequestLogDialog({
                             </div>
                           </div>
                         </Table.Td>
-                        <Table.Td>
+                        <Table.Td className="w-40 max-w-40 overflow-hidden">
                           {item.codexSessionId ? (
-                            <div className="flex min-w-32 max-w-52 items-center gap-1.5">
+                            <div className="flex w-36 max-w-36 items-center gap-1.5 overflow-hidden">
                               {item.codexSessionIsParent ? (
-                                <Badge variant="secondary" size="xs">
+                                <Badge
+                                  variant="secondary"
+                                  size="xs"
+                                  className="shrink-0 whitespace-nowrap"
+                                >
                                   父
                                 </Badge>
                               ) : null}
