@@ -1229,6 +1229,59 @@ mod tests {
     }
 
     #[test]
+    fn deletes_an_unfinished_turn_by_stable_id_without_consuming_its_completed_successor() {
+        let home = tempdir().unwrap();
+        let rollout_dir = home.path().join("sessions/2026/08/31");
+        fs::create_dir_all(&rollout_dir).unwrap();
+        let rollout = rollout_dir.join("rollout-interrupted-continuation.jsonl");
+        fs::write(
+            &rollout,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"interrupted\"}}\n",
+                "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"interrupted\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"remove interrupted turn\"}]}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"continued\"}}\n",
+                "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"continued\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"keep completed continuation\"}]}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"continued\"}}\n",
+            ),
+        )
+        .unwrap();
+        let db = home.path().join("state_5.sqlite");
+        let connection = Connection::open(&db).unwrap();
+        connection
+            .execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads (id, rollout_path) VALUES (?1, ?2)",
+                params!["s1", rollout.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let result = delete_messages_persistently(
+            home.path(),
+            "s1",
+            &["history-content:turn:interrupted".into()],
+        )
+        .unwrap();
+
+        assert_eq!(result.deleted, 1);
+        assert_eq!(result.resolved_message_ids, ["interrupted"]);
+        let remaining = fs::read_to_string(&rollout).unwrap();
+        assert!(!remaining.contains("remove interrupted turn"));
+        assert!(!remaining.contains("\"turn_id\":\"interrupted\""));
+        assert!(remaining.contains("keep completed continuation"));
+        assert!(remaining.contains("\"turn_id\":\"continued\""));
+        assert!(remaining.contains("\"type\":\"task_complete\""));
+    }
+
+    #[test]
     fn reapplies_hard_delete_after_a_loaded_thread_flushes_stale_history() {
         let home = tempdir().unwrap();
         let rollout_dir = home.path().join("sessions/2026/07/20");

@@ -62,12 +62,61 @@ class FakeElement extends FakeElementCore {
 
   appendChild() {}
 
-  addEventListener() {}
+  addEventListener(...args) {
+    return FakeElementCore.prototype.addEventListener.apply(this, args);
+  }
 
   remove() {
     this.removed = true;
   }
 }
+
+class TreeElement extends FakeElement {
+  querySelectorAll(selector) {
+    this.querySelectorAllCalls.push(selector);
+    return FakeElementCore.prototype.querySelectorAll.call(this, selector);
+  }
+
+  closest(selector) {
+    return FakeElementCore.prototype.closest.call(this, selector);
+  }
+
+  appendChild(child) {
+    if (child.parentElement) {
+      const siblings = child.parentElement.children;
+      const index = siblings.indexOf(child);
+      if (index >= 0) siblings.splice(index, 1);
+    }
+    child.parentElement = this;
+    child.isConnected = this.isConnected;
+    child.removed = false;
+    this.children.push(child);
+    return child;
+  }
+}
+
+function attachReactTurn(row, {
+  items = [],
+  status = "completed",
+  turnId = row.getAttribute("data-turn-key"),
+} = {}) {
+  row.__reactProps$test = {
+    children: {
+      props: {
+        entry: {
+          turnId,
+          turnKey: turnId,
+          turn: { items, status },
+        },
+      },
+    },
+  };
+  return row;
+}
+
+const messageSelectButton = (row) => row.children.find(
+  (child) => child.dataset.codeyMessageSelect === "true",
+) || null;
 
 function loadInjection({
   initialRunning = true,
@@ -97,6 +146,7 @@ function loadInjection({
   let sessionId = "session-1";
   const bridgeCalls = [];
   const alerts = [];
+  const confirmations = [];
   let reloadCount = 0;
   const timers = [];
   const toolbar = new FakeElement();
@@ -146,6 +196,7 @@ function loadInjection({
       return new FakeElement();
     },
   };
+  let mutationHandler = null;
   const window = {
     __codexSessionDeleteBridge: async (path, payload, options = {}) => {
       bridgeCalls.push({ options, path, payload });
@@ -157,7 +208,10 @@ function loadInjection({
     addEventListener: () => {},
     alert: (message) => alerts.push(String(message)),
     clearTimeout: () => {},
-    confirm: () => true,
+    confirm: (message) => {
+      confirmations.push(String(message));
+      return true;
+    },
     dispatchEvent: () => true,
     getComputedStyle: () => ({ display: "block", visibility: "visible" }),
     requestIdleCallback: (callback) => {
@@ -177,6 +231,10 @@ function loadInjection({
   };
   window.window = window;
   const MutationObserver = class {
+    constructor(handler) {
+      mutationHandler = handler;
+    }
+
     observe() {}
   };
   class ControlledDate extends Date {
@@ -231,6 +289,11 @@ function loadInjection({
     },
     alerts,
     bridgeCalls,
+    confirmations,
+    emitMutations: (mutations) => mutationHandler?.(mutations),
+    flushTimers: () => {
+      while (timers.length) timers.shift()();
+    },
     getReloadCount: () => reloadCount,
     getTurnRow: (index = 0) => rows[index] || null,
     getVisibleTurnIds: () => rows
@@ -984,6 +1047,935 @@ test("normalizes Codex history-content turn keys to rollout turn ids", () => {
   );
 });
 
+test("deletes an interrupted turn and its userless continuation as one logical round", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [],
+    codexSignalDispatcher: async () => {},
+    bridgeHandler: async (path) => (
+      path === "/session/delete-messages"
+        ? {
+          status: "ok",
+          deleted: 2,
+          resolvedMessageIds: ["stable-interrupted-turn", "stable-continued-turn"],
+        }
+        : { status: "ok" }
+    ),
+  });
+  const wrapper = new TreeElement({ "data-message-author-role": "assistant" });
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "history-content:tail:1:local:temporary-interrupted",
+  }), {
+    items: [{ type: "userMessage" }, { type: "commandExecution" }],
+    status: "interrupted",
+    turnId: "stable-interrupted-turn",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "history-content:tail:0:local:temporary-continued",
+  }), {
+    items: [{ type: "commandExecution" }, { type: "final_answer" }],
+    status: "completed",
+    turnId: "stable-continued-turn",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+
+  assert.equal(interrupted.dataset.codeyMessageId, "stable-interrupted-turn");
+  assert.equal(continued.dataset.codeyMessageId, "stable-continued-turn");
+  assert.equal(interrupted.dataset.codeyLogicalTurn, "anchor");
+  assert.equal(continued.dataset.codeyLogicalTurn, "continuation");
+  const interruptedButton = messageSelectButton(interrupted);
+  const continuedButton = messageSelectButton(continued);
+  assert.equal(interruptedButton.hidden, false);
+  assert.equal(continuedButton.hidden, true);
+
+  interruptedButton.dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.equal(interrupted.classList.contains("codey-message-selected"), true);
+  assert.equal(continued.classList.contains("codey-message-selected"), true);
+
+  await runtime.window.__codeyDeleteSelectedMessages();
+
+  const deletion = runtime.bridgeCalls.find(
+    (call) => call.path === "/session/delete-messages",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: "session-1",
+    messageIds: ["stable-interrupted-turn", "stable-continued-turn"],
+  });
+  assert.match(runtime.confirmations[0], /删除 1 轮对话/);
+  assert.deepEqual(runtime.getVisibleTurnIds(), []);
+});
+
+test("does not mistake a response id for a stable tail turn id", () => {
+  const runtime = loadInjection();
+  const tailKey = "history-content:tail:0:local:temporary-tail";
+  const row = new FakeElement({ "data-turn-key": tailKey });
+  row.__reactFiber$test = {
+    memoizedProps: {
+      response: { id: "resp-not-a-rollout-turn" },
+    },
+    return: null,
+  };
+
+  assert.equal(runtime.window.__codeyGetMessageId(row), tailKey);
+});
+
+test("upgrades an installed tail selector when React hydrates its stable turn id", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const tailKey = "history-content:tail:0:local:temporary-tail";
+  const row = new TreeElement({ "data-turn-key": tailKey });
+  row.isConnected = true;
+
+  runtime.window.__codeyInstallMessageSelection(row);
+  assert.equal(row.dataset.codeyMessageId, tailKey);
+
+  row.__reactProps$test = {
+    children: { props: { entry: { turnId: "hydrated-stable-turn" } } },
+  };
+  runtime.window.__codeyInstallMessageSelection(row);
+
+  assert.equal(row.dataset.codeyMessageId, "hydrated-stable-turn");
+});
+
+test("regroups a selected interrupted request when its tail continuation hydrates", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-before-tail",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const tailKey = "history-content:tail:0:local:temporary-continuation";
+  const continued = wrapper.appendChild(new TreeElement({ "data-turn-key": tailKey }));
+
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  messageSelectButton(interrupted).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.equal(continued.dataset.codeyLogicalTurn, "anchor");
+
+  attachReactTurn(continued, {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+    turnId: "hydrated-continuation",
+  });
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+
+  assert.equal(continued.dataset.codeyMessageId, "hydrated-continuation");
+  assert.equal(continued.dataset.codeyLogicalTurn, "continuation");
+  assert.equal(messageSelectButton(continued).hidden, true);
+  assert.equal(interrupted.classList.contains("codey-message-selected"), true);
+  assert.equal(continued.classList.contains("codey-message-selected"), true);
+});
+
+test("replaces a grouped tail placeholder with its hydrated stable turn id", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [],
+    codexSignalDispatcher: async () => {},
+    bridgeHandler: async (path) => (
+      path === "/session/delete-messages"
+        ? {
+          status: "ok",
+          deleted: 2,
+          resolvedMessageIds: ["turn-tail-origin", "turn-tail-stable"],
+        }
+        : { status: "ok" }
+    ),
+  });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-tail-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const tailKey = "history-content:tail:0:local:temporary-grouped-tail";
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": tailKey,
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+    turnId: tailKey,
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  assert.deepEqual(JSON.parse(interrupted.dataset.codeyMessageIds), [
+    "turn-tail-origin",
+    tailKey,
+  ]);
+  messageSelectButton(interrupted).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+
+  attachReactTurn(continued, {
+    items: [{ type: "commandExecution" }, { type: "final_answer" }],
+    status: "completed",
+    turnId: "turn-tail-stable",
+  });
+  runtime.window.__codeyInstallMessageSelection();
+
+  assert.deepEqual(JSON.parse(interrupted.dataset.codeyMessageIds), [
+    "turn-tail-origin",
+    "turn-tail-stable",
+  ]);
+  assert.equal(continued.classList.contains("codey-message-selected"), true);
+  await runtime.window.__codeyDeleteSelectedMessages();
+  const deletion = runtime.bridgeCalls.find(
+    (call) => call.path === "/session/delete-messages",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: "session-1",
+    messageIds: ["turn-tail-origin", "turn-tail-stable"],
+  });
+});
+
+test("waits for non-user continuation content before grouping an empty hydrated tail", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-empty-tail-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-empty-tail",
+  }), {
+    items: [],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  assert.equal(interrupted.dataset.codeyLogicalTurn, "anchor");
+  assert.equal(continued.dataset.codeyLogicalTurn, "anchor");
+
+  attachReactTurn(continued, {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  });
+  runtime.window.__codeyInstallMessageSelection();
+
+  assert.equal(continued.dataset.codeyLogicalTurn, "continuation");
+  assert.deepEqual(JSON.parse(interrupted.dataset.codeyMessageIds), [
+    "turn-empty-tail-origin",
+    "turn-empty-tail",
+  ]);
+});
+
+test("normalizes a selected standalone tail when hydration merges it into the origin", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [],
+    codexSignalDispatcher: async () => {},
+    bridgeHandler: async (path) => (
+      path === "/session/delete-messages"
+        ? {
+          status: "ok",
+          deleted: 2,
+          resolvedMessageIds: ["turn-selected-tail-origin", "turn-selected-tail"],
+        }
+        : { status: "ok" }
+    ),
+  });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-selected-tail-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-selected-tail",
+  }), {
+    items: [],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  messageSelectButton(continued).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+
+  attachReactTurn(continued, {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  });
+  runtime.window.__codeyInstallMessageSelection();
+  assert.equal(interrupted.classList.contains("codey-message-selected"), true);
+  assert.equal(continued.classList.contains("codey-message-selected"), true);
+
+  await runtime.window.__codeyDeleteSelectedMessages();
+  const deletion = runtime.bridgeCalls.find(
+    (call) => call.path === "/session/delete-messages",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: "session-1",
+    messageIds: ["turn-selected-tail-origin", "turn-selected-tail"],
+  });
+  assert.match(runtime.confirmations[0], /删除 1 轮对话/);
+});
+
+test("deselecting a hydrated logical group clears the earlier standalone selection", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [],
+    codexSignalDispatcher: async () => {},
+  });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-cancel-tail-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-cancel-tail",
+  }), {
+    items: [],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  messageSelectButton(continued).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  attachReactTurn(continued, {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  });
+  runtime.window.__codeyInstallMessageSelection();
+
+  messageSelectButton(interrupted).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await runtime.window.__codeyDeleteSelectedMessages();
+
+  assert.equal(interrupted.classList.contains("codey-message-selected"), false);
+  assert.equal(continued.classList.contains("codey-message-selected"), false);
+  assert.equal(
+    runtime.bridgeCalls.some((call) => call.path === "/session/delete-messages"),
+    false,
+  );
+  assert.match(runtime.alerts.at(-1), /尚未选择任何一轮对话/);
+});
+
+test("retains every logical turn id when a continuation is virtualized away", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-virtual-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-virtual-continuation",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  continued.remove();
+  runtime.window.__codeyInstallMessageSelection();
+
+  assert.deepEqual(JSON.parse(interrupted.dataset.codeyMessageIds), [
+    "turn-virtual-origin",
+    "turn-virtual-continuation",
+  ]);
+});
+
+test("restores a complete logical group when only its continuation remounts", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [],
+    codexSignalDispatcher: async () => {},
+    bridgeHandler: async (path) => (
+      path === "/session/delete-messages"
+        ? {
+          status: "ok",
+          deleted: 2,
+          resolvedMessageIds: ["turn-remount-origin", "turn-remount-continuation"],
+        }
+        : { status: "ok" }
+    ),
+  });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-remount-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-remount-continuation",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  interrupted.remove();
+  continued.removed = false;
+  runtime.window.__codeyInstallMessageSelection();
+
+  assert.equal(continued.dataset.codeyLogicalTurn, "anchor");
+  assert.equal(messageSelectButton(continued).hidden, false);
+  assert.deepEqual(JSON.parse(continued.dataset.codeyMessageIds), [
+    "turn-remount-origin",
+    "turn-remount-continuation",
+  ]);
+  messageSelectButton(continued).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await runtime.window.__codeyDeleteSelectedMessages();
+
+  const deletion = runtime.bridgeCalls.find(
+    (call) => call.path === "/session/delete-messages",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: "session-1",
+    messageIds: ["turn-remount-origin", "turn-remount-continuation"],
+  });
+});
+
+test("promotes a mounted continuation when removal mutation detaches its anchor", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-remove-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-remove-continuation",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  assert.equal(continued.dataset.codeyLogicalTurn, "continuation");
+
+  wrapper.children.splice(wrapper.children.indexOf(interrupted), 1);
+  interrupted.parentElement = null;
+  interrupted.isConnected = false;
+  interrupted.removed = true;
+  runtime.emitMutations([{
+    type: "childList",
+    target: wrapper,
+    addedNodes: [],
+    removedNodes: [interrupted],
+  }]);
+  runtime.flushTimers();
+
+  assert.equal(continued.dataset.codeyLogicalTurn, "anchor");
+  assert.equal(messageSelectButton(continued).hidden, false);
+  assert.deepEqual(JSON.parse(continued.dataset.codeyMessageIds), [
+    "turn-remove-origin",
+    "turn-remove-continuation",
+  ]);
+});
+
+test("restores selection when a logical group remounts through a new continuation node", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [],
+    codexSignalDispatcher: async () => {},
+    bridgeHandler: async (path) => (
+      path === "/session/delete-messages"
+        ? {
+          status: "ok",
+          deleted: 2,
+          resolvedMessageIds: ["turn-selected-origin", "turn-selected-continuation"],
+        }
+        : { status: "ok" }
+    ),
+  });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-selected-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-selected-continuation",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  messageSelectButton(interrupted).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+
+  for (const row of [interrupted, continued]) {
+    const index = wrapper.children.indexOf(row);
+    if (index >= 0) wrapper.children.splice(index, 1);
+    row.parentElement = null;
+    row.isConnected = false;
+    row.removed = true;
+  }
+  const remounted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-selected-continuation",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(remounted);
+  runtime.window.__codeyInstallMessageSelection(remounted);
+
+  assert.equal(remounted.dataset.codeyLogicalTurn, "anchor");
+  assert.equal(remounted.classList.contains("codey-message-selected"), true);
+  assert.equal(messageSelectButton(remounted).getAttribute("aria-pressed"), "true");
+  await runtime.window.__codeyDeleteSelectedMessages();
+  const deletion = runtime.bridgeCalls.find(
+    (call) => call.path === "/session/delete-messages",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: "session-1",
+    messageIds: ["turn-selected-origin", "turn-selected-continuation"],
+  });
+  assert.match(runtime.confirmations[0], /删除 1 轮对话/);
+});
+
+test("uses the selected group as topology after the ordinary logical cache is evicted", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [],
+    codexSignalDispatcher: async () => {},
+    bridgeHandler: async (path) => (
+      path === "/session/delete-messages"
+        ? {
+          status: "ok",
+          deleted: 2,
+          resolvedMessageIds: ["turn-evicted-origin", "turn-evicted-continuation"],
+        }
+        : { status: "ok" }
+    ),
+  });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-evicted-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-evicted-continuation",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  messageSelectButton(interrupted).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  interrupted.removed = true;
+  interrupted.isConnected = false;
+  continued.removed = true;
+  continued.isConnected = false;
+
+  // Each filler consumes two topology keys. 2,048 groups displace the two
+  // oldest target keys from the 4,096-key group-aware cache.
+  for (let index = 0; index < 2_048; index += 1) {
+    const filler = new TreeElement();
+    filler.isConnected = true;
+    filler.appendChild(attachReactTurn(new TreeElement({
+      "data-turn-key": `turn-cache-filler-origin-${index}`,
+    }), {
+      items: [{ type: "userMessage" }],
+      status: "interrupted",
+    }));
+    filler.appendChild(attachReactTurn(new TreeElement({
+      "data-turn-key": `turn-cache-filler-continuation-${index}`,
+    }), {
+      items: [{ type: "commandExecution" }],
+      status: "completed",
+    }));
+    runtime.window.__codeyInstallMessageSelection(filler);
+  }
+
+  const remountedOrigin = attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-evicted-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  });
+  remountedOrigin.isConnected = true;
+  runtime.appendExistingRow(remountedOrigin);
+  runtime.window.__codeyInstallMessageSelection(remountedOrigin);
+
+  assert.deepEqual(JSON.parse(remountedOrigin.dataset.codeyMessageIds), [
+    "turn-evicted-origin",
+    "turn-evicted-continuation",
+  ]);
+  assert.equal(remountedOrigin.classList.contains("codey-message-selected"), true);
+  await runtime.window.__codeyDeleteSelectedMessages();
+  const deletion = runtime.bridgeCalls.find(
+    (call) => call.path === "/session/delete-messages",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: "session-1",
+    messageIds: ["turn-evicted-origin", "turn-evicted-continuation"],
+  });
+});
+
+test("keeps the origin selected when a continuation row is reused for a new user turn", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [],
+    codexSignalDispatcher: async () => {},
+    bridgeHandler: async (path) => (
+      path === "/session/delete-messages"
+        ? {
+          status: "ok",
+          deleted: 2,
+          resolvedMessageIds: ["turn-reuse-origin", "turn-reuse-continuation"],
+        }
+        : { status: "ok" }
+    ),
+  });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-reuse-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const reused = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-reuse-continuation",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(reused);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  messageSelectButton(interrupted).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+
+  reused.setAttribute("data-turn-key", "turn-reuse-new-user");
+  attachReactTurn(reused, {
+    items: [{ type: "userMessage" }, { type: "final_answer" }],
+    status: "completed",
+    turnId: "turn-reuse-new-user",
+  });
+  runtime.window.__codeyInstallMessageSelection();
+
+  assert.equal(interrupted.classList.contains("codey-message-selected"), true);
+  assert.equal(reused.classList.contains("codey-message-selected"), false);
+  assert.equal(reused.dataset.codeyLogicalTurn, "anchor");
+  assert.deepEqual(JSON.parse(interrupted.dataset.codeyMessageIds), [
+    "turn-reuse-origin",
+    "turn-reuse-continuation",
+  ]);
+
+  await runtime.window.__codeyDeleteSelectedMessages();
+  const deletion = runtime.bridgeCalls.find(
+    (call) => call.path === "/session/delete-messages",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: "session-1",
+    messageIds: ["turn-reuse-origin", "turn-reuse-continuation"],
+  });
+  assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-reuse-new-user"]);
+});
+
+test("keeps an explicitly mismatched continuation reference in a separate group", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [],
+    codexSignalDispatcher: async () => {},
+    bridgeHandler: async (path) => (
+      path === "/session/delete-messages"
+        ? {
+          status: "ok",
+          deleted: 1,
+          resolvedMessageIds: ["turn-explicit-continuation"],
+        }
+        : { status: "ok" }
+    ),
+  });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-explicit-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-explicit-continuation",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  assert.equal(continued.dataset.codeyLogicalTurn, "continuation");
+
+  continued.__reactProps$test.children.props.entry.turn.resumedFromTurnId = "turn-other-origin";
+  runtime.window.__codeyInstallMessageSelection();
+
+  assert.equal(interrupted.dataset.codeyLogicalTurn, "anchor");
+  assert.equal(continued.dataset.codeyLogicalTurn, "anchor");
+  assert.equal(messageSelectButton(continued).hidden, false);
+  assert.deepEqual(JSON.parse(continued.dataset.codeyMessageIds), [
+    "turn-explicit-continuation",
+  ]);
+
+  messageSelectButton(continued).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  await runtime.window.__codeyDeleteSelectedMessages();
+  const deletion = runtime.bridgeCalls.find(
+    (call) => call.path === "/session/delete-messages",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: "session-1",
+    messageIds: ["turn-explicit-continuation"],
+  });
+});
+
+test("invalidates a cached group when a non-member turn appears between its rows", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-gap-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-gap-continuation",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  assert.equal(continued.dataset.codeyLogicalTurn, "continuation");
+
+  const insertedUserTurn = attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-gap-new-user",
+  }), {
+    items: [{ type: "userMessage" }, { type: "final_answer" }],
+    status: "completed",
+  });
+  insertedUserTurn.parentElement = wrapper;
+  insertedUserTurn.isConnected = true;
+  insertedUserTurn.removed = false;
+  wrapper.children.splice(1, 0, insertedUserTurn);
+  runtime.appendExistingRow(insertedUserTurn);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+
+  for (const row of [interrupted, insertedUserTurn, continued]) {
+    assert.equal(row.dataset.codeyLogicalTurn, "anchor");
+    assert.equal(messageSelectButton(row).hidden, false);
+    assert.deepEqual(JSON.parse(row.dataset.codeyMessageIds), [
+      row.dataset.codeyMessageId,
+    ]);
+  }
+});
+
+test("keeps only the old anchor selected when a cached continuation becomes a user turn", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [],
+    codexSignalDispatcher: async () => {},
+    bridgeHandler: async (path) => (
+      path === "/session/delete-messages"
+        ? {
+          status: "ok",
+          deleted: 1,
+          resolvedMessageIds: ["turn-split-origin"],
+        }
+        : { status: "ok" }
+    ),
+  });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-split-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-split-continuation",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  messageSelectButton(interrupted).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+  assert.equal(continued.classList.contains("codey-message-selected"), true);
+
+  attachReactTurn(continued, {
+    items: [{ type: "userMessage" }, { type: "final_answer" }],
+    status: "completed",
+  });
+  runtime.window.__codeyInstallMessageSelection();
+
+  assert.equal(interrupted.dataset.codeyLogicalTurn, "anchor");
+  assert.equal(continued.dataset.codeyLogicalTurn, "anchor");
+  assert.equal(interrupted.classList.contains("codey-message-selected"), true);
+  assert.equal(continued.classList.contains("codey-message-selected"), false);
+  assert.equal(messageSelectButton(interrupted).getAttribute("aria-pressed"), "true");
+  assert.equal(messageSelectButton(continued).getAttribute("aria-pressed"), "false");
+  await runtime.window.__codeyDeleteSelectedMessages();
+  const deletion = runtime.bridgeCalls.find(
+    (call) => call.path === "/session/delete-messages",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: "session-1",
+    messageIds: ["turn-split-origin"],
+  });
+  assert.match(runtime.confirmations[0], /删除 1 轮对话/);
+});
+
+test("shrinks an offscreen selected group when its visible continuation becomes a user turn", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [],
+    codexSignalDispatcher: async () => {},
+    bridgeHandler: async (path) => (
+      path === "/session/delete-messages"
+        ? {
+          status: "ok",
+          deleted: 1,
+          resolvedMessageIds: ["turn-offscreen-origin"],
+        }
+        : { status: "ok" }
+    ),
+  });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interrupted = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-offscreen-origin",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const continued = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-offscreen-continuation",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+  runtime.appendExistingRow(interrupted);
+  runtime.appendExistingRow(continued);
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+  messageSelectButton(interrupted).dispatchEvent({
+    type: "click",
+    preventDefault() {},
+    stopPropagation() {},
+  });
+
+  wrapper.children.splice(wrapper.children.indexOf(interrupted), 1);
+  interrupted.parentElement = null;
+  interrupted.isConnected = false;
+  interrupted.removed = true;
+  attachReactTurn(continued, {
+    items: [{ type: "userMessage" }, { type: "final_answer" }],
+    status: "completed",
+  });
+  runtime.window.__codeyInstallMessageSelection();
+
+  assert.equal(continued.dataset.codeyLogicalTurn, "anchor");
+  assert.equal(continued.classList.contains("codey-message-selected"), false);
+  await runtime.window.__codeyDeleteSelectedMessages();
+  const deletion = runtime.bridgeCalls.find(
+    (call) => call.path === "/session/delete-messages",
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
+    sessionId: "session-1",
+    messageIds: ["turn-offscreen-origin"],
+  });
+  assert.match(runtime.confirmations[0], /删除 1 轮对话/);
+});
+
+test("clears selection when a virtualized row is reused for another stable turn", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const row = new TreeElement({ "data-turn-key": "turn-before-reuse" });
+  row.isConnected = true;
+  runtime.window.__codeyInstallMessageSelection(row);
+  row.classList.add("codey-message-selected");
+
+  row.setAttribute("data-turn-key", "turn-after-reuse");
+  runtime.window.__codeyInstallMessageSelection(row);
+
+  assert.equal(row.dataset.codeyMessageId, "turn-after-reuse");
+  assert.equal(row.classList.contains("codey-message-selected"), false);
+});
+
 test("sends the normalized rollout turn id to the delete bridge", async () => {
   const uiTurnKey = "history-content:turn:019ff498-5f1c-7452-aac5-88e4eb99e657";
   const runtime = loadInjection({
@@ -1018,6 +2010,118 @@ test("rescans a direct turn boundary without enumerating its subtree", () => {
   runtime.window.__codeyInstallMessageSelection(row);
 
   assert.equal(row.querySelectorAllCalls.includes("[data-turn-key]"), false);
+});
+
+test("installs independent selection on canonical sibling turns inside a generic wrapper", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const wrapper = new TreeElement({ "data-message-author-role": "assistant" });
+  wrapper.isConnected = true;
+  const first = wrapper.appendChild(new TreeElement({ "data-turn-key": "turn-first" }));
+  const second = wrapper.appendChild(new TreeElement({ "data-turn-key": "turn-second" }));
+
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+
+  assert.equal(wrapper.dataset.codeyMessageId, undefined);
+  assert.equal(first.dataset.codeyMessageId, "turn-first");
+  assert.equal(second.dataset.codeyMessageId, "turn-second");
+});
+
+test("keeps real user turns and post-completion background turns independent", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const interruptedUserTurn = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-interrupted-user",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const nextUserTurn = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-next-user",
+  }), {
+    items: [{ type: "userMessage" }, { type: "final_answer" }],
+    status: "completed",
+  }));
+  const backgroundTurn = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-background",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "completed",
+  }));
+
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+
+  for (const row of [interruptedUserTurn, nextUserTurn, backgroundTurn]) {
+    assert.equal(row.dataset.codeyLogicalTurn, "anchor");
+    assert.equal(messageSelectButton(row).hidden, false);
+  }
+});
+
+test("groups every adjacent userless segment whose predecessor was interrupted", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const wrapper = new TreeElement();
+  wrapper.isConnected = true;
+  const first = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-request",
+  }), {
+    items: [{ type: "userMessage" }],
+    status: "interrupted",
+  }));
+  const second = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-resume-one",
+  }), {
+    items: [{ type: "commandExecution" }],
+    status: "interrupted",
+  }));
+  const third = wrapper.appendChild(attachReactTurn(new TreeElement({
+    "data-turn-key": "turn-resume-two",
+  }), {
+    items: [{ type: "final_answer" }],
+    status: "completed",
+  }));
+
+  runtime.window.__codeyInstallMessageSelection(wrapper);
+
+  assert.equal(first.dataset.codeyLogicalTurn, "anchor");
+  assert.equal(second.dataset.codeyLogicalTurn, "continuation");
+  assert.equal(third.dataset.codeyLogicalTurn, "continuation");
+  assert.deepEqual(JSON.parse(first.dataset.codeyMessageIds), [
+    "turn-request",
+    "turn-resume-one",
+    "turn-resume-two",
+  ]);
+});
+
+test("does not install selection on nested canonical activity turns", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const outer = new TreeElement({ "data-turn-key": "turn-outer" });
+  outer.isConnected = true;
+  const activity = outer.appendChild(new TreeElement({ "data-turn-key": "turn-activity" }));
+
+  runtime.window.__codeyInstallMessageSelection(outer);
+
+  assert.equal(outer.dataset.codeyMessageId, "turn-outer");
+  assert.equal(activity.dataset.codeyMessageId, undefined);
+});
+
+test("rescans every canonical sibling inside one newly added subtree", () => {
+  const runtime = loadInjection({ turnIds: [] });
+  const container = new TreeElement();
+  container.isConnected = true;
+  const wrapper = container.appendChild(new TreeElement());
+  const first = wrapper.appendChild(new TreeElement({ "data-turn-key": "turn-new-first" }));
+  const second = wrapper.appendChild(new TreeElement({ "data-turn-key": "turn-new-second" }));
+
+  runtime.emitMutations([{
+    type: "childList",
+    target: container,
+    addedNodes: [wrapper],
+    removedNodes: [],
+  }]);
+  runtime.flushTimers();
+
+  assert.equal(first.dataset.codeyMessageId, "turn-new-first");
+  assert.equal(second.dataset.codeyMessageId, "turn-new-second");
 });
 
 test("installs selection on mixed Codex turn row shapes", () => {

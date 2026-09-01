@@ -22,7 +22,7 @@ test("adjacent selected turns render as one continuous outline", () => {
 
 test("selection changes resynchronize adjacent-turn grouping", () => {
   assert.match(source, /const syncSelectionGroups = \(\) => \{/);
-  assert.match(source, /lastSelectedRow = row;\s*syncSelectionGroups\(\);/s);
+  assert.match(source, /lastSelectedRow = anchor;\s*syncSelectionGroups\(\);/s);
   assert.match(source, /row\.dataset\.codeySelectedPrevious = "true"/);
   assert.match(source, /row\.dataset\.codeySelectedNext = "true"/);
 });
