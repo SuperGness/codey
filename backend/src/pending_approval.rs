@@ -69,6 +69,7 @@ pub struct RecentSessionEvents {
     pub aborted_turns: Arc<Vec<AbortedTurn>>,
     pub completed_turns: Arc<Vec<CompletedTurn>>,
     pub session_statuses: Arc<HashMap<String, SessionLifecycleStatus>>,
+    pub rollout_revisions: Arc<HashMap<String, String>>,
     pub turn_configurations: Arc<HashMap<String, HashMap<String, TurnConfiguration>>>,
 }
 
@@ -97,6 +98,16 @@ impl RolloutSignature {
             #[cfg(unix)]
             inode: metadata.ino(),
         }
+    }
+
+    fn activity_revision(&self) -> String {
+        let modified_nanos = self
+            .modified
+            .as_ref()
+            .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        format!("{}:{modified_nanos}", self.len)
     }
 }
 
@@ -713,6 +724,7 @@ impl RecentSessionEventCache {
                 aborted_turns: Arc::clone(&snapshot.aborted_turns),
                 completed_turns: Arc::clone(&snapshot.completed_turns),
                 session_statuses: Arc::clone(&snapshot.session_statuses),
+                rollout_revisions: Arc::clone(&snapshot.rollout_revisions),
                 turn_configurations: Arc::clone(&snapshot.turn_configurations),
             });
             self.last_snapshot = Some(Arc::clone(&snapshot));
@@ -724,6 +736,7 @@ impl RecentSessionEventCache {
         let mut aborted_turns = Vec::new();
         let mut completed_turns = Vec::new();
         let mut session_statuses = HashMap::new();
+        let mut rollout_revisions = HashMap::new();
         let mut turn_configurations = HashMap::new();
         for (session_id, rollout_path) in rollouts {
             let Some(cached) = self
@@ -748,6 +761,7 @@ impl RecentSessionEventCache {
                 .map(|duration| duration.as_millis())
                 .unwrap_or_default();
             session_statuses.insert(session_id.clone(), status);
+            rollout_revisions.insert(session_id.clone(), signature.activity_revision());
             turn_configurations.insert(session_id.clone(), parsed.turn_configurations.clone());
             pending_approvals.extend(waiting_approvals.into_iter().map(|(turn_id, waiting_id)| {
                 PendingApproval {
@@ -798,6 +812,7 @@ impl RecentSessionEventCache {
             aborted_turns: Arc::new(aborted_turns),
             completed_turns: Arc::new(completed_turns),
             session_statuses: Arc::new(session_statuses),
+            rollout_revisions: Arc::new(rollout_revisions),
             turn_configurations: Arc::new(turn_configurations),
         });
         self.last_snapshot = Some(Arc::clone(&snapshot));

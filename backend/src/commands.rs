@@ -638,6 +638,7 @@ fn completion_state_response(
         "sessionKnown": events.session_statuses.contains_key(session_id),
         "turnKnown": turn_known,
         "lifecycle": lifecycle,
+        "activityRevision": events.rollout_revisions.get(session_id),
         "terminal": terminal_kind.is_some(),
         "terminalKind": terminal_kind,
         "completedAt": completed.and_then(|completed| completed.completed_at),

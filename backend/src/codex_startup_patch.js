@@ -912,6 +912,28 @@
       );
     }
     if (
+      !source.includes("codeyRehydrateRunningConversation")
+      && source.includes("discardConversationFromCache")
+      && source.includes("isLocalConversationInProgress")
+      && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
+      && source.includes("async resumeConversation(")
+    ) {
+      // A renderer can keep its local owner role after its notification stream
+      // silently detaches. The normal resume path then returns early because it
+      // still believes the conversation is streaming. Expose one narrow native
+      // operation that clears only that stale local role, marks the cached
+      // conversation for hydration, and runs thread/resume. It deliberately
+      // avoids discardConversationFromCache, thread/unsubscribe, interrupt, and
+      // turn/start so the active backend turn keeps running exactly once.
+      patched = replaceUniqueRendererGate(
+        patched,
+        /async resumeConversation\(([$A-Z_a-z][$\w]*)\)\{await this\.maybeResumeConversation\(\1\);/g,
+        (_match, paramsName) =>
+          `async codeyRehydrateRunningConversation(${paramsName}){let __codeyConversationId=${paramsName}?.conversationId,__codeyConversation=__codeyConversationId==null?null:this.getConversation(__codeyConversationId);if(__codeyConversationId==null||__codeyConversation==null||!this.productPolicy.runtimePolicy.isLocalConversationInProgress(__codeyConversation)||this.getStreamRole(__codeyConversationId)?.role!==\`owner\`)return!1;this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(__codeyConversationId);this.updateConversationState(__codeyConversationId,__codeyState=>{__codeyState.resumeState=\`needs_resume\`},!1);await this.maybeResumeConversation(${paramsName});return this.getStreamRole(__codeyConversationId)?.role===\`owner\`}async resumeConversation(${paramsName}){await this.maybeResumeConversation(${paramsName});`,
+        "running thread rehydration",
+      );
+    }
+    if (
       source.includes("assistantMessage.hookStats.label")
       && source.includes("assistantMessage.hookStats.title")
       && source.includes("tooltipMaxWidth:")

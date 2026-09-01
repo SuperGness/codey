@@ -476,6 +476,10 @@ fn completion_state_requires_the_exact_non_snapshot_terminal_turn() {
             "session-1".to_string(),
             pending_approval::SessionLifecycleStatus::Running,
         )])),
+        rollout_revisions: Arc::new(HashMap::from([(
+            "session-1".to_string(),
+            "620787:1788228569750217000".to_string(),
+        )])),
         ..pending_approval::RecentSessionEvents::default()
     };
 
@@ -488,6 +492,7 @@ fn completion_state_requires_the_exact_non_snapshot_terminal_turn() {
             "sessionKnown": true,
             "turnKnown": true,
             "lifecycle": "running",
+            "activityRevision": "620787:1788228569750217000",
             "terminal": true,
             "terminalKind": "completed",
             "completedAt": 42,

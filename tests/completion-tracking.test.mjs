@@ -242,6 +242,10 @@ function loadInjection({
     setSessionId: (value) => {
       sessionId = String(value);
     },
+    setTurnText: (index, value) => {
+      const row = rows[index];
+      if (row) row.textContent = String(value);
+    },
     window,
   };
 }
@@ -253,6 +257,7 @@ const completedProbeResult = (overrides = {}) => ({
   sessionKnown: true,
   turnKnown: true,
   lifecycle: "idle",
+  activityRevision: "100:1000",
   terminal: true,
   terminalKind: "completed",
   completedAt: 42,
@@ -267,6 +272,10 @@ const createRecoveryController = (events, overrides = {}) => ({
   async notifyConversationDeleted() {},
   async refreshRecentConversations() {
     events.push("refresh");
+  },
+  async rehydrateRunningConversation(payload) {
+    events.push(`rehydrate:${payload.conversationId}`);
+    return true;
   },
   async resumeConversation(payload) {
     events.push(`resume:${payload.conversationId}`);
@@ -390,6 +399,40 @@ test("skips the Codex history tail placeholder when probing the current turn", a
   });
 });
 
+test("probes the stable React turn hydrated into the current history tail row", async () => {
+  const runtime = loadInjection({
+    initialRunning: false,
+    turnIds: [
+      "history-content:turn:turn-previous",
+      "history-content:tail:0:local:temporary-tail",
+    ],
+    bridgeHandler: async () => ({
+      status: "ok",
+      sessionId: "session-1",
+      turnId: "turn-current",
+      sessionKnown: true,
+      turnKnown: true,
+      lifecycle: "running",
+      terminal: false,
+      terminalKind: null,
+    }),
+  });
+  runtime.getTurnRow(1).__reactProps$test = {
+    children: { props: { entry: { turnId: "turn-current" } } },
+  };
+  runtime.setRunning(true);
+
+  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
+  runtime.advanceTime(30_000);
+  await runtime.window.__codeyProbeStuckTaskCompletion();
+
+  const probe = runtime.bridgeCalls.find((call) => call.path === "/session/completion-state");
+  assert.deepEqual(JSON.parse(JSON.stringify(probe?.payload)), {
+    sessionId: "session-1",
+    turnId: "turn-current",
+  });
+});
+
 test("does not recover while the authoritative lifecycle is running or waiting", async () => {
   const events = [];
   let lifecycle = "running";
@@ -407,6 +450,99 @@ test("does not recover while the authoritative lifecycle is running or waiting",
   lifecycle = "waiting";
   runtime.advanceTime(15_000);
   assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
+  assert.deepEqual(events, []);
+});
+
+test("rehydrates a running task only after rollout activity advances while its rendered tail stays frozen", async () => {
+  const events = [];
+  let activityRevision = "100:1000";
+  const runtime = loadInjection({
+    codexSessionController: createRecoveryController(events),
+    bridgeHandler: async (path) => (
+      path === "/session/completion-state"
+        ? completedProbeResult({
+          activityRevision,
+          lifecycle: "running",
+          terminal: false,
+          terminalKind: null,
+        })
+        : { status: "ok" }
+    ),
+  });
+
+  runtime.setTurnText(0, "页面停在这里");
+  runtime.advanceTime(30_000);
+  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
+
+  activityRevision = "200:2000";
+  runtime.advanceTime(15_000);
+  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
+  activityRevision = "300:3000";
+  runtime.advanceTime(15_000);
+  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
+  activityRevision = "400:4000";
+  runtime.advanceTime(15_000);
+  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), true);
+
+  assert.deepEqual(events, ["rehydrate:session-1"]);
+});
+
+test("resets running stream detachment evidence whenever the current turn renders progress", async () => {
+  const events = [];
+  let activityRevision = "100:1000";
+  const runtime = loadInjection({
+    codexSessionController: createRecoveryController(events),
+    bridgeHandler: async () => completedProbeResult({
+      activityRevision,
+      lifecycle: "running",
+      terminal: false,
+      terminalKind: null,
+    }),
+  });
+
+  runtime.setTurnText(0, "第一段");
+  runtime.advanceTime(30_000);
+  await runtime.window.__codeyProbeStuckTaskCompletion();
+  activityRevision = "200:2000";
+  runtime.advanceTime(15_000);
+  await runtime.window.__codeyProbeStuckTaskCompletion();
+
+  runtime.setTurnText(0, "第一段\n页面已收到新内容");
+  activityRevision = "300:3000";
+  runtime.advanceTime(15_000);
+  await runtime.window.__codeyProbeStuckTaskCompletion();
+  activityRevision = "400:4000";
+  runtime.advanceTime(15_000);
+  await runtime.window.__codeyProbeStuckTaskCompletion();
+  activityRevision = "500:5000";
+  runtime.advanceTime(15_000);
+  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
+  assert.deepEqual(events, []);
+
+  activityRevision = "600:6000";
+  runtime.advanceTime(15_000);
+  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), true);
+  assert.deepEqual(events, ["rehydrate:session-1"]);
+});
+
+test("keeps a running task untouched when its rollout is not advancing", async () => {
+  const events = [];
+  const runtime = loadInjection({
+    codexSessionController: createRecoveryController(events),
+    bridgeHandler: async () => completedProbeResult({
+      activityRevision: "100:1000",
+      lifecycle: "running",
+      terminal: false,
+      terminalKind: null,
+    }),
+  });
+
+  runtime.advanceTime(30_000);
+  await runtime.window.__codeyProbeStuckTaskCompletion();
+  for (let index = 0; index < 8; index += 1) {
+    runtime.advanceTime(15_000);
+    assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
+  }
   assert.deepEqual(events, []);
 });
 

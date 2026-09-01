@@ -83,9 +83,14 @@ test("renderer core keeps session tools lazy until sidebar use or an active task
   assert.match(sessionTools, /const stuckCompletionRecoveryCooldownMs = 60_000/);
   assert.match(sessionTools, /const stuckCompletionRecoveryResetMs = 5 \* 60_000/);
   assert.match(sessionTools, /const stuckCompletionRecoveryMaxAttempts = 3/);
+  assert.match(sessionTools, /const stuckRunningStreamGraceMs = 30_000/);
+  assert.match(sessionTools, /const stuckRunningStreamMinActivityAdvances = 2/);
   assert.match(sessionTools, /const stuckCompletionBridgePath = "\/session\/completion-state"/);
   assert.match(sessionTools, /const completionRecoveryStateByKey = new Map\(\)/);
+  assert.match(sessionTools, /const currentTurnRenderFingerprint = \(turnId\) =>/);
   assert.doesNotMatch(sessionTools, /recoveredCompletionKeys|completionRecoveryCooldownUntil/);
+  assert.doesNotMatch(sessionTools, /characterData:\s*true/);
+  assert.doesNotMatch(sessionTools, /mutation\.type === "characterData"/);
   assert.match(
     sessionTools,
     /\{ timeoutMs: stuckCompletionProbeTimeoutMs \}/,
