@@ -511,6 +511,18 @@ if (import.meta.env.DEV) {
           items: filtered.slice((page - 1) * pageSize, page * pageSize),
         };
       }
+      if (command === "clear_route_request_logs") {
+        const hadLogs = previewRouteRequestLogs.length > 0;
+        previewRouteRequestLogs.length = 0;
+        return {
+          status: "ok",
+          removedFileCount: hadLogs ? 1 : 0,
+          removedFiles: hadLogs ? ["route-requests.sqlite3"] : [],
+          recordingEnabled: true,
+          recordingActive: true,
+          recordingRestarted: true,
+        };
+      }
       if (command === "save_codey_config") {
         const incoming = args.config as Config;
         previewConfig = {

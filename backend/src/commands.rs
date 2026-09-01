@@ -951,6 +951,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 Err(error) => Err(format!("请求日志查询参数无效：{error}")),
             }
         }
+        "clear_route_request_logs" => clear_route_request_logs(state).await,
         "restart_codey" => schedule_restart_codey_runtime(state).await,
         "clear_diagnostic_storage" => clear_diagnostic_storage(state).await,
         "test_notification_channel" => {
@@ -1006,6 +1007,39 @@ pub async fn query_route_request_logs(
     .map_err(|error| format!("请求日志查询任务异常退出：{error}"))?
     .map_err(|error| format!("查询请求日志失败：{error:#}"))?;
     serde_json::to_value(page).map_err(|error| format!("请求日志查询结果序列化失败：{error}"))
+}
+
+pub async fn clear_route_request_logs(state: &Arc<AppState>) -> Result<Value, String> {
+    // Keep the runtime decision stable while the controller serializes the
+    // writer shutdown/delete/restart sequence. This does not stop or lock the
+    // request forwarding task itself.
+    let _runtime_operation = state.runtime_operation.lock().await;
+    let runtime = state.runtime.lock().await.clone();
+    let recording_enabled = {
+        let config = state.config.read().await;
+        config.route_request_log.enabled
+            && config.route_request_log.sample_rate_per_million > 0
+            && config.local_router_enabled
+    };
+    let result = if let Some(runtime) = runtime
+        && let Some(result) = runtime.clear_request_logs().await
+    {
+        result
+    } else {
+        let root = codey_runtime_core::paths::default_app_state_dir();
+        match tokio::task::spawn_blocking(move || {
+            crate::route_request_log::clear_route_request_log_files(&root, recording_enabled)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => crate::route_request_log::RouteRequestLogClearResult::failed(
+                recording_enabled,
+                format!("请求日志清理任务异常退出：{error}"),
+            ),
+        }
+    };
+    serde_json::to_value(result).map_err(|error| format!("请求日志清理结果序列化失败：{error}"))
 }
 
 pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {

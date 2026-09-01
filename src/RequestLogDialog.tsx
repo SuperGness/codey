@@ -7,12 +7,15 @@ import {
 } from "@mantine/core";
 import {
   IconAlertCircle,
+  IconAlertTriangle,
   IconCheck,
   IconCopy,
   IconDatabaseOff,
+  IconLoader2,
   IconQuestionMark,
   IconRefresh,
   IconSearch,
+  IconTrash,
 } from "@tabler/icons-react";
 
 import type { Config } from "./App.types";
@@ -21,6 +24,12 @@ import {
   Badge,
   Button,
   ActionIcon,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
   Input,
   Select,
   Table,
@@ -81,6 +90,23 @@ type RouteRequestLogQueryPage = {
   total: number;
   totalPages: number;
   items: RouteRequestLogItem[];
+};
+
+type ClearRouteRequestLogsResult = {
+  status: "ok" | "failed";
+  message?: string;
+  removedFileCount: number;
+  removedFiles: string[];
+  recordingEnabled: boolean;
+  recordingActive: boolean;
+  recordingRestarted: boolean;
+  error?: string;
+  restartError?: string;
+};
+
+type ActionNotice = {
+  tone: "success" | "error";
+  text: string;
 };
 
 type RequestLogDialogProps = {
@@ -223,8 +249,12 @@ export function RequestLogDialog({
   const [result, setResult] = useState<RouteRequestLogQueryPage | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [clearConfirmationOpened, setClearConfirmationOpened] = useState(false);
+  const [clearing, setClearing] = useState(false);
+  const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const requestRevision = useRef(0);
+  const clearInFlight = useRef(false);
 
   const handleCopyId = (requestId: string) => {
     if (!navigator.clipboard) return;
@@ -326,6 +356,50 @@ export function RequestLogDialog({
     setPage(1);
   };
 
+  const clearRequestLogs = async () => {
+    if (clearInFlight.current) return;
+    clearInFlight.current = true;
+    setClearing(true);
+    setActionNotice(null);
+    try {
+      const clearResult = await invoke<ClearRouteRequestLogsResult>(
+        "clear_route_request_logs",
+        {},
+      );
+      if (clearResult.status !== "ok") {
+        throw new Error(clearResult.message || "删除请求日志失败");
+      }
+      requestRevision.current += 1;
+      setLoading(false);
+      setPage(1);
+      setResult((current) => current
+        ? {
+            ...current,
+            page: 1,
+            total: 0,
+            totalPages: 0,
+            items: [],
+          }
+        : current);
+      setClearConfirmationOpened(false);
+      setActionNotice({
+        tone: "success",
+        text: clearResult.removedFileCount > 0
+          ? "请求日志已全部删除。"
+          : "当前没有需要删除的历史请求日志。",
+      });
+    } catch (nextError) {
+      setActionNotice({
+        tone: "error",
+        text: nextError instanceof Error ? nextError.message : String(nextError),
+      });
+      setClearConfirmationOpened(false);
+    } finally {
+      clearInFlight.current = false;
+      setClearing(false);
+    }
+  };
+
   const hasFilters = Boolean(
     search || provider !== "all" || model !== "all" || status !== "all" || protocol !== "all",
   );
@@ -359,16 +433,48 @@ export function RequestLogDialog({
               查看内置路由的供应商、模型、耗时与 Token 使用情况。
             </p>
           </div>
-          <Button
-            size="sm"
-            variant="outline"
-            disabled={loading}
-            onClick={() => setRefreshRevision((value) => value + 1)}
-          >
-            <IconRefresh className={loading ? "animate-spin" : ""} aria-hidden="true" />
-            刷新
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              size="sm"
+              variant="destructive-light"
+              disabled={loading || clearing}
+              onClick={() => {
+                setActionNotice(null);
+                setClearConfirmationOpened(true);
+              }}
+            >
+              <IconTrash aria-hidden="true" />
+              删除请求日志
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={loading || clearing}
+              onClick={() => {
+                setActionNotice(null);
+                setRefreshRevision((value) => value + 1);
+              }}
+            >
+              <IconRefresh className={loading ? "animate-spin" : ""} aria-hidden="true" />
+              刷新
+            </Button>
+          </div>
         </div>
+
+        {actionNotice ? (
+          <Alert
+            className="flex-none"
+            color={actionNotice.tone === "success" ? "green" : "red"}
+            icon={actionNotice.tone === "success"
+              ? <IconCheck size={18} aria-hidden="true" />
+              : <IconAlertCircle size={18} aria-hidden="true" />}
+            title={actionNotice.tone === "success" ? "删除成功" : "删除失败"}
+            withCloseButton
+            onClose={() => setActionNotice(null)}
+          >
+            {actionNotice.text}
+          </Alert>
+        ) : null}
 
         <div className="grid flex-none grid-cols-[minmax(220px,1.6fr)_repeat(4,minmax(132px,1fr))_auto] gap-2 rounded-xl border border-black/8 bg-white p-3 shadow-sm max-[1100px]:grid-cols-3 max-[640px]:grid-cols-1">
           <Input
@@ -731,6 +837,63 @@ export function RequestLogDialog({
           ) : null}
         </div>
       </div>
+
+      <Dialog
+        open={clearConfirmationOpened}
+        onOpenChange={(nextOpened) => {
+          if (!nextOpened && !clearing) setClearConfirmationOpened(false);
+        }}
+      >
+        {clearConfirmationOpened ? (
+          <DialogContent
+            className="w-[min(460px,calc(100vw-32px))]"
+            container={container}
+            zIndex={SETTINGS_OVERLAY_Z_INDEX}
+            onEscapeKeyDown={(event) => {
+              if (clearing) event.preventDefault();
+            }}
+            onPointerDownOutside={(event) => {
+              if (clearing) event.preventDefault();
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>删除全部请求日志？</DialogTitle>
+              <DialogDescription>
+                这会删除全部历史请求日志，且不可恢复。正在进行的请求完成后仍可能产生新的日志。
+              </DialogDescription>
+            </DialogHeader>
+            <div
+              className="mt-4 flex items-start gap-2 rounded-[9px] border border-red-700/20 bg-red-50 px-3 py-2.5 text-xs leading-5 text-red-800"
+              role="alert"
+            >
+              <IconAlertTriangle className="mt-0.5 shrink-0" size={17} aria-hidden="true" />
+              <span>此操作只删除请求日志，不会关闭日志记录；后续请求仍会继续记录。</span>
+            </div>
+            <DialogFooter>
+              <Button
+                variant="outline"
+                disabled={clearing}
+                onClick={() => setClearConfirmationOpened(false)}
+              >
+                取消
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={clearing}
+                aria-busy={clearing}
+                onClick={() => void clearRequestLogs()}
+              >
+                {clearing ? (
+                  <IconLoader2 className="animate-spin" aria-hidden="true" />
+                ) : (
+                  <IconTrash aria-hidden="true" />
+                )}
+                {clearing ? "正在删除…" : "确认删除全部日志"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        ) : null}
+      </Dialog>
     </Modal>
   );
 }

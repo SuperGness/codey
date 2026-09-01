@@ -628,6 +628,48 @@
   margin-top: -2px;
 }
 
+.route-protocol-options {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.02);
+  overflow: hidden;
+}
+
+.route-option-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 12px;
+  transition: background 0.15s ease;
+}
+
+.route-option-item + .route-option-item {
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.route-option-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.route-option-title {
+  color: var(--mac-text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.route-option-content .route-field-hint {
+  color: var(--mac-text-secondary);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .route-websocket-option {
   display: flex;
   align-items: center;

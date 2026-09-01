@@ -46,6 +46,18 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /按状态筛选请求日志/);
   assert.match(viewer, /按协议筛选请求日志/);
   assert.match(viewer, /<Pagination/);
+  assert.match(viewer, />\s*删除请求日志\s*</);
+  assert.match(viewer, /"clear_route_request_logs"/);
+  assert.match(viewer, /删除全部请求日志？/);
+  assert.match(viewer, /删除全部历史请求日志，且不可恢复/);
+  assert.match(viewer, /确认删除全部日志/);
+  assert.match(viewer, /disabled=\{clearing\}/);
+  assert.doesNotMatch(viewer, /disabled=\{loading \|\| clearing \|\| result\?\.queryable !== true\}/);
+  assert.match(viewer, /if \(clearInFlight\.current\) return/);
+  assert.match(viewer, /setPage\(1\)/);
+  assert.match(viewer, /total:\s*0/);
+  assert.match(viewer, /items:\s*\[\]/);
+  assert.match(viewer, /title=\{actionNotice\.tone === "success" \? "删除成功" : "删除失败"\}/);
   assert.match(viewer, /result\?\.status === "unavailable"/);
   assert.match(viewer, /请求日志加载失败/);
   assert.match(viewer, /没有匹配的请求日志/);
@@ -101,4 +113,13 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /<span className="text-\[#8e8e93\]">—<\/span>/);
   assert.doesNotMatch(viewer, /codexSubagentSessionId/);
   assert.doesNotMatch(viewer, /item\.providerName && item\.provider \?/);
+});
+
+test("request log preview supports clearing all history", async () => {
+  const preview = await readFile(new URL("src/main.tsx", root), "utf8");
+
+  assert.match(preview, /command === "clear_route_request_logs"/);
+  assert.match(preview, /previewRouteRequestLogs\.length = 0/);
+  assert.match(preview, /removedFileCount: hadLogs \? 1 : 0/);
+  assert.match(preview, /recordingRestarted: true/);
 });

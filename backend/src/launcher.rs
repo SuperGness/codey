@@ -36,7 +36,7 @@ use crate::message_delete;
 use crate::model_catalog;
 use crate::model_id;
 use crate::pet_slim_patch;
-use crate::route_request_log::RouteRequestLogReconfigure;
+use crate::route_request_log::{RouteRequestLogClearResult, RouteRequestLogReconfigure};
 use crate::session_index_cleanup::{self, SessionIndexCleanupReport};
 use crate::startup_maintenance::{self, ProviderSyncPlan};
 use crate::subagent_policy;
@@ -1544,6 +1544,11 @@ impl CodeyRuntime {
             return Ok(None);
         };
         local_router.reconfigure_request_log(config).await.map(Some)
+    }
+
+    pub(crate) async fn clear_request_logs(&self) -> Option<RouteRequestLogClearResult> {
+        let local_router = self.local_router.as_ref()?;
+        Some(local_router.clear_request_logs().await)
     }
 
     pub(crate) fn local_router_endpoint(&self) -> Option<RuntimeRouterEndpoint> {

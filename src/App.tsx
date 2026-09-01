@@ -744,10 +744,9 @@ export function App({
         ? "Codey 设置已保存，启动参数将在重启 Codex 后生效"
         : "Codey 设置已保存";
       if (subagentConfigRepaired) {
-        noticeText =
-          "Codey 设置已保存；已校验并修复子代理运行配置，下一次派生将使用当前角色映射";
+        noticeText = "Codey 设置已保存；子代理配置已同步";
       } else if (subagentHotReloaded) {
-        noticeText = "Codey 设置已保存；子代理模型和思考深度已实时更新";
+        noticeText = "Codey 设置已保存；子代理配置已实时更新";
       } else if (subagentHotReloadFailed) {
         noticeText = "Codey 设置已保存；子代理配置暂未能热更新，重启 Codex 后生效";
       }

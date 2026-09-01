@@ -400,10 +400,7 @@ function ModelSectionComponent({
         </div>
         <div className="route-heading-actions">
           <div className="local-router-toggle">
-            <span>
-              <strong>本地路由</strong>
-              <small>{config.localRouterEnabled ? "已启用" : "配置只读"}</small>
-            </span>
+            <strong>本地路由</strong>
             <Switch
               size="sm"
               checked={config.localRouterEnabled}
@@ -415,10 +412,7 @@ function ModelSectionComponent({
           {config.localRouterEnabled && (
             <>
               <div className="local-router-toggle route-request-log-toggle">
-                <span>
-                  <strong>开启日志记录</strong>
-                  <small>{config.routeRequestLog.enabled ? "正在记录" : "已关闭"}</small>
-                </span>
+                <strong>开启日志记录</strong>
                 <Switch
                   size="sm"
                   checked={config.routeRequestLog.enabled}
@@ -1026,10 +1020,16 @@ function ModelSectionComponent({
                 </div>
 
                 {routeDraft.upstreamProtocol === "openaiResponses" && (
-                  <>
-                    <div className="route-websocket-option route-editor-span-all">
-                      <strong>WebSocket</strong>
+                  <div className="route-protocol-options route-editor-span-all">
+                    <div className="route-option-item">
+                      <div className="route-option-content">
+                        <strong className="route-option-title">WebSocket</strong>
+                        <small className="route-field-hint">
+                          启用 WebSocket 双向长连接，降低流式首字延迟
+                        </small>
+                      </div>
                       <Switch
+                        size="sm"
                         checked={Boolean(routeDraft.supportsWebsockets)}
                         disabled={isBusy}
                         onCheckedChange={(checked) =>
@@ -1037,14 +1037,15 @@ function ModelSectionComponent({
                         aria-label="WebSocket"
                       />
                     </div>
-                    <div className="route-websocket-option route-editor-span-all">
-                      <span>
-                        <strong>原生网页搜索</strong>
+                    <div className="route-option-item">
+                      <div className="route-option-content">
+                        <strong className="route-option-title">原生网页搜索</strong>
                         <small className="route-field-hint">
                           仅在上游和所选模型都明确支持时开启
                         </small>
-                      </span>
+                      </div>
                       <Switch
+                        size="sm"
                         checked={Boolean(routeDraft.supportsNativeWebSearch)}
                         disabled={isBusy}
                         onCheckedChange={(checked) =>
@@ -1052,7 +1053,7 @@ function ModelSectionComponent({
                         aria-label="原生网页搜索"
                       />
                     </div>
-                  </>
+                  </div>
                 )}
 
                 <label className="route-field">

@@ -43,8 +43,9 @@ use crate::config::{
     UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS, UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
 };
 use crate::route_request_log::{
-    FirstByteSource, RequestProtocol, RouteRequestLogController, RouteRequestLogGuard,
-    RouteRequestLogProbe, RouteRequestLogReconfigure, RouteRequestLogStart, UpstreamTransport,
+    FirstByteSource, RequestProtocol, RouteRequestLogClearResult, RouteRequestLogController,
+    RouteRequestLogGuard, RouteRequestLogProbe, RouteRequestLogReconfigure, RouteRequestLogStart,
+    UpstreamTransport,
 };
 
 pub(crate) const ROUTER_PROVIDER_ID: &str = "codey_router";
@@ -326,6 +327,10 @@ impl LocalRouter {
         config: &crate::config::RouteRequestLogConfig,
     ) -> Result<RouteRequestLogReconfigure> {
         self.request_log.reconfigure(config).await
+    }
+
+    pub(crate) async fn clear_request_logs(&self) -> RouteRequestLogClearResult {
+        self.request_log.clear().await
     }
 
     pub(crate) async fn stop(&self) -> Result<()> {

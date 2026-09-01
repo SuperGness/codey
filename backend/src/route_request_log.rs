@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -329,6 +329,60 @@ pub(crate) struct RouteRequestLogQueryItem {
     pub subagent: bool,
     pub codex_session_id: Option<String>,
     pub codex_session_is_parent: bool,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RouteRequestLogClearResult {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    pub removed_file_count: usize,
+    pub removed_files: Vec<String>,
+    pub recording_enabled: bool,
+    pub recording_active: bool,
+    pub recording_restarted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_error: Option<String>,
+}
+
+impl RouteRequestLogClearResult {
+    fn empty(recording_enabled: bool) -> Self {
+        Self {
+            status: "ok",
+            message: None,
+            removed_file_count: 0,
+            removed_files: Vec::new(),
+            recording_enabled,
+            recording_active: false,
+            recording_restarted: false,
+            error: None,
+            restart_error: None,
+        }
+    }
+
+    fn refresh_status(&mut self) {
+        self.status = if self.error.is_none() && self.restart_error.is_none() {
+            "ok"
+        } else {
+            "failed"
+        };
+        self.message = match (&self.error, &self.restart_error) {
+            (Some(error), Some(restart_error)) => Some(format!("{error}；{restart_error}")),
+            (Some(error), None) => Some(error.clone()),
+            (None, Some(restart_error)) => Some(restart_error.clone()),
+            (None, None) => None,
+        };
+    }
+
+    pub(crate) fn failed(recording_enabled: bool, error: impl Into<String>) -> Self {
+        let mut result = Self::empty(recording_enabled);
+        result.error = Some(error.into());
+        result.refresh_status();
+        result
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1067,6 +1121,72 @@ impl RouteRequestLogController {
         Ok(RouteRequestLogReconfigure::Enabled)
     }
 
+    /// Serializes clearing with reconfiguration, removes the active producer
+    /// before stopping its writer, and only republishes a replacement producer
+    /// after the new sink has completed its readiness handshake.
+    pub(crate) async fn clear(&self) -> RouteRequestLogClearResult {
+        let mut state = self.state.lock().await;
+        let config = state.config.clone().unwrap_or_default();
+        let desired_active = config.enabled && config.sample_rate_per_million > 0;
+
+        self.active.store(None);
+        if let Some(retiring) = state.runtime.take()
+            && !retiring.stop().await
+        {
+            let mut result = RouteRequestLogClearResult::empty(desired_active);
+            result.error = Some(
+                "请求日志 writer 未能在配置的期限内停止；为避免与仍在退出的 writer 竞争，未删除日志文件"
+                    .to_string(),
+            );
+            result.refresh_status();
+            return result;
+        }
+
+        let root = self.root.clone();
+        let mut result = match tokio::task::spawn_blocking(move || {
+            clear_route_request_log_files(&root, desired_active)
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                let mut result = RouteRequestLogClearResult::empty(desired_active);
+                result.error = Some(format!("请求日志清理任务异常退出：{error}"));
+                result
+            }
+        };
+
+        if desired_active {
+            let worker_config = config.clone();
+            let root = self.root.clone();
+            match tokio::task::spawn_blocking(move || {
+                RouteRequestLogRuntime::start_at(&worker_config, root)
+            })
+            .await
+            {
+                Ok(Ok(Some((producer, runtime)))) => {
+                    self.active.store(Some(Arc::new(producer)));
+                    state.runtime = Some(runtime);
+                    result.recording_active = true;
+                    result.recording_restarted = true;
+                }
+                Ok(Ok(None)) => {
+                    result.restart_error =
+                        Some("请求日志配置未启用 replacement writer".to_string());
+                }
+                Ok(Err(error)) => {
+                    result.restart_error = Some(format!("恢复请求日志记录失败：{error:#}"));
+                }
+                Err(error) => {
+                    result.restart_error =
+                        Some(format!("恢复请求日志 writer 任务异常退出：{error}"));
+                }
+            }
+        }
+        result.refresh_status();
+        result
+    }
+
     pub(crate) async fn stop(&self) -> Option<RouteRequestLogStatsSnapshot> {
         let mut state = self.state.lock().await;
         self.active.store(None);
@@ -1190,7 +1310,7 @@ impl RouteRequestLogRuntime {
         }
     }
 
-    pub(crate) async fn stop(&self) {
+    pub(crate) async fn stop(&self) -> bool {
         self.request_shutdown();
         let done = lock_unpoisoned(&self.done).take();
         let completed = match done {
@@ -1208,6 +1328,7 @@ impl RouteRequestLogRuntime {
             self.stats.shutdown_timeouts.fetch_add(1, Ordering::Relaxed);
             drop(worker);
         }
+        completed
     }
 
     pub(crate) fn stats_snapshot(&self) -> RouteRequestLogStatsSnapshot {
@@ -2229,6 +2350,84 @@ fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
     }
 }
 
+pub(crate) fn clear_route_request_log_files(
+    root: &Path,
+    recording_enabled: bool,
+) -> RouteRequestLogClearResult {
+    let mut result = RouteRequestLogClearResult::empty(recording_enabled);
+    let mut targets = vec![
+        OsString::from(SQLITE_FILE_NAME),
+        OsString::from(format!("{SQLITE_FILE_NAME}-wal")),
+        OsString::from(format!("{SQLITE_FILE_NAME}-shm")),
+        OsString::from(format!("{SQLITE_FILE_NAME}-journal")),
+        OsString::from(NDJSON_FILE_NAME),
+    ];
+
+    match fs::read_dir(root) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(entry) if is_ndjson_rotated_file_name(&entry.file_name()) => {
+                        targets.push(entry.file_name());
+                    }
+                    Ok(_) => {}
+                    Err(error) => append_clear_error(
+                        &mut result.error,
+                        format!("读取请求日志目录项失败：{error}"),
+                    ),
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            append_clear_error(&mut result.error, format!("读取请求日志目录失败：{error}"))
+        }
+    }
+
+    targets.sort();
+    targets.dedup();
+    for file_name in targets {
+        let path = root.join(&file_name);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                result.removed_file_count += 1;
+                result
+                    .removed_files
+                    .push(file_name.to_string_lossy().into_owned());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => append_clear_error(
+                &mut result.error,
+                format!(
+                    "删除请求日志文件 {} 失败：{error}",
+                    file_name.to_string_lossy()
+                ),
+            ),
+        }
+    }
+    result.refresh_status();
+    result
+}
+
+fn is_ndjson_rotated_file_name(file_name: &OsStr) -> bool {
+    let Some(file_name) = file_name.to_str() else {
+        return false;
+    };
+    let Some(index) = file_name.strip_prefix(&format!("{NDJSON_FILE_NAME}.")) else {
+        return false;
+    };
+    !index.is_empty() && !index.starts_with('0') && index.as_bytes().iter().all(u8::is_ascii_digit)
+}
+
+fn append_clear_error(target: &mut Option<String>, error: String) {
+    if let Some(current) = target {
+        current.push('；');
+        current.push_str(&error);
+    } else {
+        *target = Some(error);
+    }
+}
+
 fn rename_if_exists(source: &Path, destination: &Path) -> std::io::Result<()> {
     match fs::rename(source, destination) {
         Ok(()) => Ok(()),
@@ -2822,6 +3021,56 @@ mod tests {
     }
 
     #[test]
+    fn clear_only_removes_exact_request_log_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let removable = [
+            SQLITE_FILE_NAME,
+            "route-requests.sqlite3-wal",
+            "route-requests.sqlite3-shm",
+            "route-requests.sqlite3-journal",
+            NDJSON_FILE_NAME,
+            "route-requests.ndjson.1",
+            "route-requests.ndjson.27",
+        ];
+        let preserved = [
+            "route-requests.sqlite3.backup",
+            "route-requests.sqlite3-wal.backup",
+            "route-requests.ndjson.0",
+            "route-requests.ndjson.01",
+            "route-requests.ndjson.backup",
+            "route-requests.ndjson.2.tmp",
+            "unrelated.ndjson.1",
+        ];
+        for file_name in removable.iter().chain(preserved.iter()) {
+            fs::write(directory.path().join(file_name), b"test").unwrap();
+        }
+
+        let result = clear_route_request_log_files(directory.path(), false);
+
+        assert_eq!(result.status, "ok");
+        assert_eq!(result.removed_file_count, removable.len());
+        for file_name in removable {
+            assert!(!directory.path().join(file_name).exists(), "{file_name}");
+        }
+        for file_name in preserved {
+            assert!(directory.path().join(file_name).exists(), "{file_name}");
+        }
+    }
+
+    #[test]
+    fn clear_missing_or_empty_directory_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+
+        let first = clear_route_request_log_files(&missing, false);
+        let second = clear_route_request_log_files(&missing, false);
+
+        assert_eq!(first.status, "ok");
+        assert_eq!(first.removed_file_count, 0);
+        assert_eq!(second, first);
+    }
+
+    #[test]
     fn disabled_runtime_creates_no_queue_or_thread() {
         let config = RouteRequestLogConfig::default();
         let directory = tempfile::tempdir().unwrap();
@@ -2897,6 +3146,51 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn controller_clear_restarts_enabled_writer_and_accepts_new_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let controller = RouteRequestLogController::with_root(directory.path().to_path_buf());
+        let config = RouteRequestLogConfig {
+            enabled: true,
+            backend: RouteRequestLogBackend::Sqlite,
+            ..RouteRequestLogConfig::default()
+        };
+        controller.reconfigure(&config).await.unwrap();
+        controller
+            .active
+            .load_full()
+            .unwrap()
+            .submit(sample_entry("before-clear"));
+
+        let cleared = controller.clear().await;
+
+        assert_eq!(cleared.status, "ok");
+        assert!(cleared.recording_active);
+        assert!(cleared.recording_restarted);
+        let empty = query_route_request_logs(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery::default(),
+        )
+        .unwrap();
+        assert_eq!(empty.total, 0);
+
+        controller
+            .active
+            .load_full()
+            .unwrap()
+            .submit(sample_entry("after-clear"));
+        controller.stop().await;
+        let after = query_route_request_logs(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery::default(),
+        )
+        .unwrap();
+        assert_eq!(after.total, 1);
+        assert_eq!(after.items[0].request_id, "after-clear");
     }
 
     #[tokio::test]

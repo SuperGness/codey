@@ -405,21 +405,11 @@ input:focus-visible,
   background: rgba(255, 255, 255, 0.72);
 }
 
-.local-router-toggle > span {
-  display: grid;
-  gap: 1px;
-  line-height: 1.2;
-}
-
 .local-router-toggle strong {
   color: var(--mac-text-primary);
   font-size: 11px;
   font-weight: 650;
-}
-
-.local-router-toggle small {
-  color: var(--mac-text-tertiary);
-  font-size: 10px;
+  white-space: nowrap;
 }
 
 .badge-secondary,
