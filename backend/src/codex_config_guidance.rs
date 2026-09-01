@@ -748,14 +748,15 @@ tools; never call them through `functions.exec`. Dispatch every independent agen
 batch before the first wait. While any attempt is active, use \
 only the relevant `agents.send_message`, `agents.followup_task`, `agents.interrupt_agent`, \
 `agents.list_agents`, or `agents.wait_agent`, then return to `agents.wait_agent` with \
-`timeout_ms <= 120000`; `MESSAGE` and mailbox updates are not completion. Use `followup_task` only for a \
+`timeout_ms: 30000`; `MESSAGE` and mailbox updates are not completion. Use `followup_task` only for a \
 bound nonterminal attempt. If `CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT` is denied, do not retry \
 or wait for that target; take over or use a fresh `task_name` for a materially changed task. Treat \
 `FINAL_ANSWER`, `task_complete`, `completed`, `errored`, `error`, `failed`, `shutdown`, and `not_found` \
 as terminal. A successful root interrupt permanently abandons and fences that attempt, settles it for \
 the batch, and makes later active-looking provider state stale; do not wait for or follow up that target. \
-If wait output lacks per-agent terminal details, call unfiltered `agents.list_agents` and reconcile until \
-every attempt is terminal or fenced. Then call `mcp__codey_subagent_control__resolve_batch` with the batch \
+If a wait times out or lacks per-agent terminal details, call unfiltered `agents.list_agents` before \
+waiting again, and reconcile until every attempt is terminal or fenced. Then call \
+`mcp__codey_subagent_control__resolve_batch` with the batch \
 number, unique decision ID, reason, and exactly one of `spawn_next_batch`, `continue_root`, `complete`, or \
 `blocked`; spawn the next batch immediately after `spawn_next_batch`, and replace `continue_root` with a \
 terminal decision before Stop. While a batch is active, Codey's gate blocks non-collaboration tools and \
@@ -1468,7 +1469,7 @@ mod tests {
         assert!(combined.contains("`agents.spawn_agent`"));
         assert!(combined.contains("before the first wait"));
         assert!(combined.contains("direct commentary tools"));
-        assert!(combined.contains("`timeout_ms <= 120000`"));
+        assert!(combined.contains("`timeout_ms: 30000`"));
         assert!(combined.contains("mailbox updates are not completion"));
         assert!(combined.contains("`MESSAGE`"));
         assert!(

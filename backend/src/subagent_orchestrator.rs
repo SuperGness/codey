@@ -2283,6 +2283,11 @@ fn update_reservation_lifecycle(
     Ok(true)
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct StatusSettlement {
+    pub(crate) agent_id_hashes: Vec<String>,
+}
+
 pub(crate) fn observe_status_response(
     state_root: &Path,
     runtime_id: &str,
@@ -2290,10 +2295,10 @@ pub(crate) fn observe_status_response(
     tool_response: Option<&Value>,
     all_terminal: bool,
     now_ms: u64,
-) -> Result<()> {
+) -> Result<StatusSettlement> {
     let store = LedgerStore::open(state_root, session_id)?;
     let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
-        return Ok(());
+        return Ok(StatusSettlement::default());
     };
     let mut terminal_tasks = BTreeMap::new();
     if let Some(response) = tool_response
@@ -2313,6 +2318,7 @@ pub(crate) fn observe_status_response(
         }
     }
     let mut changed = false;
+    let mut settlement = StatusSettlement::default();
     let usage = telemetry::extract_token_usage(tool_response);
     let mut trace_events = Vec::new();
     for (task_id, outcome) in terminal_tasks {
@@ -2327,10 +2333,12 @@ pub(crate) fn observe_status_response(
         let refines_lifecycle_stop = reservation.state == ReservationState::Terminal
             && reservation.outcome == ExecutionOutcome::Unknown;
         if transitions_to_terminal || refines_lifecycle_stop {
+            if let Some(agent_id_hash) = reservation.agent_id_hash.take() {
+                settlement.agent_id_hashes.push(agent_id_hash);
+            }
             reservation.state = ReservationState::Terminal;
             reservation.outcome = outcome;
             reservation.fenced_at_ms.get_or_insert(now_ms);
-            reservation.agent_id_hash = None;
             reservation.pending_init_observed_at_ms = None;
             reservation.updated_at_ms = now_ms;
             reservation.completed_at_ms.get_or_insert(now_ms);
@@ -2400,7 +2408,9 @@ pub(crate) fn observe_status_response(
             recorder.record_best_effort(event);
         }
     }
-    Ok(())
+    settlement.agent_id_hashes.sort();
+    settlement.agent_id_hashes.dedup();
+    Ok(settlement)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -7324,7 +7334,7 @@ mod tests {
             }))
             .unwrap(),
         );
-        observe_status_response(
+        let settlement = observe_status_response(
             temp.path(),
             "runtime-a",
             "session-a",
@@ -7333,6 +7343,7 @@ mod tests {
             40,
         )
         .unwrap();
+        assert_eq!(settlement.agent_id_hashes, [hash_component("agent-done")]);
 
         let store = LedgerStore::open(temp.path(), "session-a").unwrap();
         let ledger = store.load("runtime-a", "session-a", 50).unwrap().unwrap();

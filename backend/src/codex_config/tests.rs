@@ -2080,7 +2080,7 @@ command = "echo preserve-user-hook"
     );
     assert_eq!(
         multi_agent["max_wait_timeout_ms"].as_integer(),
-        Some(120_000)
+        Some(30_000)
     );
     assert_eq!(multi_agent["custom_setting"].as_str(), Some("preserved"));
     assert_eq!(document["features"]["hooks"].as_bool(), Some(true));

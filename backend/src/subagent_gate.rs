@@ -1156,7 +1156,18 @@ fn post_tool_use_output(
             now_ms,
         )?;
     }
-    if is_wait_agent_tool(tool_name) {
+    if is_wait_agent_tool(tool_name)
+        && crate::subagent_orchestrator::active_reservation_count(
+            state_root,
+            runtime_id,
+            &input.session_id,
+            now_ms,
+        )?
+        .is_none()
+    {
+        // Legacy marker-only sessions cannot map canonical task paths through a
+        // ledger. Modern sessions defer marker deletion until the uniquely
+        // resolved terminal transition has been persisted below.
         remove_completed_agents_from_wait_response(
             state_root,
             runtime_id,
@@ -1164,7 +1175,7 @@ fn post_tool_use_output(
             input.tool_response.as_ref(),
         )?;
     } else if reconcile_list_agents_response(input, state_root, runtime_id, now_ms)? {
-        crate::subagent_orchestrator::observe_status_response(
+        settle_status_response_and_markers(
             state_root,
             runtime_id,
             &input.session_id,
@@ -1172,6 +1183,7 @@ fn post_tool_use_output(
             true,
             now_ms,
         )?;
+        remove_session_state(state_root, runtime_id, &input.session_id)?;
         if let Some(reason) = crate::subagent_orchestrator::open_batch_decision_if_settled(
             state_root,
             runtime_id,
@@ -1194,8 +1206,7 @@ fn post_tool_use_output(
         return Ok(json!({}));
     };
     if active == 0 {
-        remove_session_state(state_root, runtime_id, &input.session_id)?;
-        crate::subagent_orchestrator::observe_status_response(
+        settle_status_response_and_markers(
             state_root,
             runtime_id,
             &input.session_id,
@@ -1203,6 +1214,7 @@ fn post_tool_use_output(
             true,
             now_ms,
         )?;
+        remove_session_state(state_root, runtime_id, &input.session_id)?;
         if let Some(reason) = crate::subagent_orchestrator::open_batch_decision_if_settled(
             state_root,
             runtime_id,
@@ -1214,7 +1226,7 @@ fn post_tool_use_output(
         }
         return Ok(json!({}));
     }
-    crate::subagent_orchestrator::observe_status_response(
+    settle_status_response_and_markers(
         state_root,
         runtime_id,
         &input.session_id,
@@ -1271,6 +1283,28 @@ fn post_tool_use_output(
             root_local_reads_allowed,
         ))
     }
+}
+
+fn settle_status_response_and_markers(
+    state_root: &Path,
+    runtime_id: &str,
+    session_id: &str,
+    tool_response: Option<&Value>,
+    all_terminal: bool,
+    now_ms: u64,
+) -> Result<()> {
+    let settlement = crate::subagent_orchestrator::observe_status_response(
+        state_root,
+        runtime_id,
+        session_id,
+        tool_response,
+        all_terminal,
+        now_ms,
+    )?;
+    for agent_id_hash in &settlement.agent_id_hashes {
+        remove_active_marker_by_hash(state_root, runtime_id, session_id, agent_id_hash)?;
+    }
+    Ok(())
 }
 
 fn stop_output(
@@ -1818,7 +1852,6 @@ fn reconcile_list_agents_response(
             remove_active_marker_by_hash(state_root, runtime_id, &input.session_id, agent_id_hash)?;
         }
         if snapshot == AgentListSnapshotState::AllChildrenTerminal {
-            remove_session_state(state_root, runtime_id, &input.session_id)?;
             return Ok(true);
         }
         return Ok(false);
@@ -1828,10 +1861,7 @@ fn reconcile_list_agents_response(
     // the conservative session-level fallback instead of guessing which opaque
     // marker belongs to a canonical task path.
     match snapshot {
-        AgentListSnapshotState::AllChildrenTerminal => {
-            remove_session_state(state_root, runtime_id, &input.session_id)?;
-            Ok(true)
-        }
+        AgentListSnapshotState::AllChildrenTerminal => Ok(true),
         AgentListSnapshotState::OnlyPendingInit => {
             if observe_and_check_elapsed(
                 state_root,
@@ -1841,7 +1871,6 @@ fn reconcile_list_agents_response(
                 now_ms,
                 PENDING_INIT_GRACE_MILLIS,
             )? {
-                remove_session_state(state_root, runtime_id, &input.session_id)?;
                 Ok(true)
             } else {
                 Ok(false)
@@ -4329,7 +4358,7 @@ mod tests {
         partial_wait.tool_name = Some("agents.wait_agent".to_string());
         partial_wait.tool_response = Some(json!({
             "updates": [
-                { "agent_id": "agent-reader-a", "status": "completed", "message": "evidence" },
+                { "task_name": "/root/reader_a", "status": "completed", "message": "evidence" },
                 { "agent_id": "agent-reader-b", "status": "running" }
             ],
             "timed_out": false
@@ -4341,6 +4370,22 @@ mod tests {
         assert!(reason.contains("仍有 1 个子代理"));
         assert!(reason.contains("mcp__codey_fastctx__inspect_local_file"));
         assert!(reason.contains("写入、命令、网络"));
+        assert!(
+            !agent_marker_path(
+                &session_state_dir(root, read_session),
+                runtime_id,
+                "agent-reader-a",
+            )
+            .exists()
+        );
+        assert!(
+            agent_marker_path(
+                &session_state_dir(root, read_session),
+                runtime_id,
+                "agent-reader-b",
+            )
+            .exists()
+        );
         assert_eq!(
             handle_hook_for_runtime_at(
                 &root_tool(read_session, root_turn, "mcp__codey_fastctx__grep"),
@@ -4572,6 +4617,94 @@ mod tests {
 
         assert_eq!(handle_hook(&list, root).unwrap(), json!({}));
         assert_eq!(active_agent_count(root, "session-a").unwrap(), 0);
+    }
+
+    #[test]
+    fn mixed_full_list_settles_only_the_completed_ledger_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let runtime_id = "runtime-a";
+        let session_id = "mixed-ledger-list";
+        let spawn = |task_id: &str, agent_id: &str, now_ms: u64| {
+            let mut request = input("PreToolUse", session_id);
+            request.turn_id = Some("root-turn-a".to_string());
+            request.cwd = Some("/repo".to_string());
+            request.tool_name = Some("agents.spawn_agent".to_string());
+            request.tool_input = Some(json!({
+                "task_name": task_id,
+                "agent_type": "codey_deep_research",
+                "fork_turns": "none",
+                "message": delegation_message(json!({
+                    "id": task_id,
+                    "why": "independent_review",
+                    "visual": false,
+                    "root": "/repo",
+                    "read": [],
+                    "write": [],
+                    "capabilities": ["files.read"],
+                    "checks": []
+                }))
+            }));
+            assert_eq!(
+                handle_hook_for_runtime_at(&request, root, runtime_id, now_ms).unwrap(),
+                json!({})
+            );
+
+            let mut response = input("PostToolUse", session_id);
+            response.turn_id = request.turn_id.clone();
+            response.tool_name = request.tool_name.clone();
+            response.tool_input = request.tool_input.clone();
+            response.tool_response = Some(json!({ "agent_id": agent_id }));
+            assert_eq!(
+                handle_hook_for_runtime_at(&response, root, runtime_id, now_ms + 1).unwrap(),
+                json!({})
+            );
+
+            let mut started = input("SubagentStart", session_id);
+            started.agent_id = Some(agent_id.to_string());
+            started.agent_type = Some("codey_deep_research".to_string());
+            assert_eq!(
+                handle_hook_for_runtime_at(&started, root, runtime_id, now_ms + 2).unwrap(),
+                json!({})
+            );
+        };
+
+        spawn("list_reader_a", "agent-list-a", 10);
+        spawn("list_reader_b", "agent-list-b", 20);
+
+        let marker_a = agent_marker_path(
+            &session_state_dir(root, session_id),
+            runtime_id,
+            "agent-list-a",
+        );
+        let marker_b = agent_marker_path(
+            &session_state_dir(root, session_id),
+            runtime_id,
+            "agent-list-b",
+        );
+        assert!(marker_a.exists());
+        assert!(marker_b.exists());
+
+        let mut list = input("PostToolUse", session_id);
+        list.turn_id = Some("root-turn-a".to_string());
+        list.tool_name = Some("agents.list_agents".to_string());
+        list.tool_input = Some(json!({}));
+        list.tool_response = Some(json!({
+            "agents": [
+                { "agent_name": "/root", "agent_status": "running" },
+                { "agent_name": "/root/list_reader_a", "agent_status": { "completed": "done" } },
+                { "agent_name": "/root/list_reader_b", "agent_status": "running" }
+            ]
+        }));
+
+        let blocked = handle_hook_for_runtime_at(&list, root, runtime_id, 30).unwrap();
+        assert_eq!(blocked["decision"].as_str(), Some("block"));
+        assert_eq!(
+            active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+            1
+        );
+        assert!(!marker_a.exists());
+        assert!(marker_b.exists());
     }
 
     #[test]

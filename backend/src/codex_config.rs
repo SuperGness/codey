@@ -2111,7 +2111,7 @@ fn enable_subagent_optimization(
     }
     multi_agent["min_wait_timeout_ms"] = value(10_000);
     multi_agent["default_wait_timeout_ms"] = value(30_000);
-    multi_agent["max_wait_timeout_ms"] = value(120_000);
+    multi_agent["max_wait_timeout_ms"] = value(30_000);
     let existing_root_usage_hint = multi_agent
         .get("root_agent_usage_hint_text")
         .map(|item| {
