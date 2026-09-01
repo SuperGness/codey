@@ -2157,10 +2157,10 @@ fn ensure_private_sqlite_file(path: &Path) -> std::io::Result<()> {
     options.create(true).read(true).write(true);
     #[cfg(unix)]
     options.mode(0o600);
-    let file = options.open(path)?;
+    let _file = options.open(path)?;
     #[cfg(unix)]
     {
-        let mut permissions = file.metadata()?.permissions();
+        let mut permissions = _file.metadata()?.permissions();
         permissions.set_mode(0o600);
         fs::set_permissions(path, permissions)?;
     }
