@@ -119,14 +119,13 @@ const messageSelectButton = (row) => row.children.find(
 ) || null;
 
 function loadInjection({
-  initialRunning = true,
   initialNow = 1_000_000,
   turnIds = ["turn-1"],
   sessionTitle = "排查飞书通知",
-  stopButtonAttributes = { "aria-label": "停止" },
   bridgeHandler = null,
   codexSessionController = null,
   codexSignalDispatcher = null,
+  discoveredAppServerManager = null,
   selectedTurnIds = [],
 } = {}) {
   const rows = turnIds.map((turnId) => new FakeElement({ "data-turn-key": turnId }));
@@ -140,8 +139,6 @@ function loadInjection({
     "data-app-action-sidebar-thread-id": "local:session-1",
     "data-app-action-sidebar-thread-title": sessionTitle,
   });
-  const stopButton = new FakeElement(stopButtonAttributes);
-  let running = initialRunning;
   let now = initialNow;
   let sessionId = "session-1";
   const bridgeCalls = [];
@@ -152,9 +149,37 @@ function loadInjection({
   const toolbar = new FakeElement();
   const placeholder = new FakeElement();
   const documentElement = new FakeElement();
+  const documentBody = new FakeElement();
+  const managerAssetUrl = "app://-/assets/app-initial-completion-reconcile.js";
+  let managerModule = null;
+  if (discoveredAppServerManager) {
+    const scope = {
+      query: null,
+      get() {},
+      set() {},
+      watch() {},
+      when() {},
+      forHost() {},
+    };
+    documentBody.__reactFiber$test = {
+      dependencies: null,
+      memoizedProps: null,
+      memoizedState: { scope },
+      return: null,
+      updateQueue: null,
+    };
+    function resolveManager(candidateScope, hostId) {
+      candidateScope.get();
+      candidateScope.forHost();
+      if (hostId !== "local") throw new Error("AppServerManager RPC is not connected");
+      return discoveredAppServerManager;
+    }
+    managerModule = { resolveManager };
+  }
   const document = {
     documentElement,
-    body: new FakeElement(),
+    body: documentBody,
+    scripts: managerModule ? [{ src: managerAssetUrl }] : [],
     visibilityState: "visible",
     getElementById(id) {
       if (id === "codey-injected-style" || id === "codey-settings-button") return placeholder;
@@ -183,9 +208,6 @@ function loadInjection({
           && row.dataset.codeyMessageId
           && row.classList.contains("codey-message-selected")
         ));
-      }
-      if (selector === "button[aria-label], button[title], button[data-testid]") {
-        return running ? [stopButton] : [];
       }
       if (selector === "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]") {
         return [sidebarThread];
@@ -229,6 +251,12 @@ function loadInjection({
       setItem: () => {},
     },
   };
+  if (managerModule) {
+    window.__codeyImportCodexAsset = async (url) => {
+      assert.equal(url, managerAssetUrl);
+      return managerModule;
+    };
+  }
   window.window = window;
   const MutationObserver = class {
     constructor(handler) {
@@ -299,9 +327,6 @@ function loadInjection({
     getVisibleTurnIds: () => rows
       .filter((row) => !row.removed)
       .map((row) => row.getAttribute("data-turn-key")),
-    setRunning: (value) => {
-      running = Boolean(value);
-    },
     setSessionId: (value) => {
       sessionId = String(value);
     },
@@ -313,484 +338,133 @@ function loadInjection({
   };
 }
 
-const completedProbeResult = (overrides = {}) => ({
-  status: "ok",
-  sessionId: "session-1",
-  turnId: "turn-1",
-  sessionKnown: true,
-  turnKnown: true,
-  lifecycle: "idle",
-  activityRevision: "100:1000",
-  terminal: true,
-  terminalKind: "completed",
-  completedAt: 42,
-  ...overrides,
-});
-
 const createRecoveryController = (events, overrides = {}) => ({
   kind: "manager",
-  async discardConversation(sessionId) {
-    events.push(`discard:${sessionId}`);
-  },
+  async discardConversation() {},
   async notifyConversationDeleted() {},
-  async refreshRecentConversations() {
-    events.push("refresh");
-  },
-  async rehydrateRunningConversation(payload) {
-    events.push(`rehydrate:${payload.conversationId}`);
+  async refreshRecentConversations() {},
+  async reconcileCompletedConversation(payload) {
+    events.push({ payload, type: "reconcile" });
     return true;
   },
-  async resumeConversation(payload) {
-    events.push(`resume:${payload.conversationId}`);
-  },
+  async resumeConversation() {},
   ...overrides,
 });
 
-test("waits for the stuck-running grace period before probing completion", async () => {
-  const runtime = loadInjection({
-    bridgeHandler: async (path) => (
-      path === "/session/completion-state"
-        ? completedProbeResult({ lifecycle: "running", terminal: false, terminalKind: null })
-        : { status: "ok" }
-    ),
-  });
+const flushMicrotasks = async () => {
+  await new Promise((resolve) => setImmediate(resolve));
+};
 
-  runtime.advanceTime(29_999);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  assert.equal(
-    runtime.bridgeCalls.filter((call) => call.path === "/session/completion-state").length,
-    0,
-  );
-
-  runtime.advanceTime(1);
-  await runtime.window.__codeyProbeStuckTaskCompletion();
-  assert.equal(
-    runtime.bridgeCalls.filter((call) => call.path === "/session/completion-state").length,
-    1,
-  );
-});
-
-test("recognizes current Codex stop controls by title or test id", async () => {
-  for (const stopButtonAttributes of [
-    { title: "Stop response" },
-    { "data-testid": "stop-generation-button" },
-    { "data-testid": "response-stop-button" },
-  ]) {
-    const runtime = loadInjection({
-      stopButtonAttributes,
-      bridgeHandler: async () => completedProbeResult({
-        lifecycle: "running",
-        terminal: false,
-        terminalKind: null,
-      }),
-    });
-    runtime.advanceTime(30_000);
-    await runtime.window.__codeyProbeStuckTaskCompletion();
-    assert.equal(
-      runtime.bridgeCalls.filter((call) => call.path === "/session/completion-state").length,
-      1,
-    );
-  }
-});
-
-test("does not treat an unrelated voice stop control as task generation", async () => {
-  const runtime = loadInjection({
-    stopButtonAttributes: { "data-testid": "stop-voice-input" },
-  });
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  assert.equal(
-    runtime.bridgeCalls.filter((call) => call.path === "/session/completion-state").length,
-    0,
-  );
-});
-
-test("probes the outer conversation turn instead of a nested activity turn", async () => {
-  const runtime = loadInjection({
-    turnIds: ["turn-outer"],
-    bridgeHandler: async () => ({
-      status: "ok",
-      sessionId: "session-1",
-      turnId: "turn-outer",
-      sessionKnown: true,
-      turnKnown: true,
-      lifecycle: "running",
-      terminal: false,
-      terminalKind: null,
-    }),
-  });
-  const nested = new FakeElement({ "data-turn-key": "turn-nested" });
-  nested.parentElement = runtime.getTurnRow();
-  runtime.appendExistingRow(nested);
-
-  runtime.advanceTime(30_000);
-  await runtime.window.__codeyProbeStuckTaskCompletion();
-
-  const probe = runtime.bridgeCalls.find((call) => call.path === "/session/completion-state");
-  assert.deepEqual(JSON.parse(JSON.stringify(probe?.payload)), {
-    sessionId: "session-1",
-    turnId: "turn-outer",
-  });
-  assert.deepEqual(JSON.parse(JSON.stringify(probe?.options)), { timeoutMs: 10_000 });
-});
-
-test("skips the Codex history tail placeholder when probing the current turn", async () => {
-  const runtime = loadInjection({
-    turnIds: [
-      "history-content:turn:turn-real",
-      "history-content:tail:0:local:temporary-tail",
-    ],
-    bridgeHandler: async () => ({
-      status: "ok",
-      sessionId: "session-1",
-      turnId: "turn-real",
-      sessionKnown: true,
-      turnKnown: true,
-      lifecycle: "running",
-      terminal: false,
-      terminalKind: null,
-    }),
-  });
-
-  runtime.advanceTime(30_000);
-  await runtime.window.__codeyProbeStuckTaskCompletion();
-
-  const probe = runtime.bridgeCalls.find((call) => call.path === "/session/completion-state");
-  assert.deepEqual(JSON.parse(JSON.stringify(probe?.payload)), {
-    sessionId: "session-1",
-    turnId: "turn-real",
-  });
-});
-
-test("probes the stable React turn hydrated into the current history tail row", async () => {
-  const runtime = loadInjection({
-    initialRunning: false,
-    turnIds: [
-      "history-content:turn:turn-previous",
-      "history-content:tail:0:local:temporary-tail",
-    ],
-    bridgeHandler: async () => ({
-      status: "ok",
-      sessionId: "session-1",
-      turnId: "turn-current",
-      sessionKnown: true,
-      turnKnown: true,
-      lifecycle: "running",
-      terminal: false,
-      terminalKind: null,
-    }),
-  });
-  runtime.getTurnRow(1).__reactProps$test = {
-    children: { props: { entry: { turnId: "turn-current" } } },
-  };
-  runtime.setRunning(true);
-
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  runtime.advanceTime(30_000);
-  await runtime.window.__codeyProbeStuckTaskCompletion();
-
-  const probe = runtime.bridgeCalls.find((call) => call.path === "/session/completion-state");
-  assert.deepEqual(JSON.parse(JSON.stringify(probe?.payload)), {
-    sessionId: "session-1",
-    turnId: "turn-current",
-  });
-});
-
-test("does not recover while the authoritative lifecycle is running or waiting", async () => {
-  const events = [];
-  let lifecycle = "running";
-  const runtime = loadInjection({
-    codexSessionController: createRecoveryController(events),
-    bridgeHandler: async (path) => (
-      path === "/session/completion-state"
-        ? completedProbeResult({ lifecycle, terminal: false, terminalKind: null })
-        : { status: "ok" }
-    ),
-  });
-
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  lifecycle = "waiting";
-  runtime.advanceTime(15_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  assert.deepEqual(events, []);
-});
-
-test("rehydrates a running task only after rollout activity advances while its rendered tail stays frozen", async () => {
-  const events = [];
-  let activityRevision = "100:1000";
-  const runtime = loadInjection({
-    codexSessionController: createRecoveryController(events),
-    bridgeHandler: async (path) => (
-      path === "/session/completion-state"
-        ? completedProbeResult({
-          activityRevision,
-          lifecycle: "running",
-          terminal: false,
-          terminalKind: null,
-        })
-        : { status: "ok" }
-    ),
-  });
-
-  runtime.setTurnText(0, "页面停在这里");
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-
-  activityRevision = "200:2000";
-  runtime.advanceTime(15_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  activityRevision = "300:3000";
-  runtime.advanceTime(15_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  activityRevision = "400:4000";
-  runtime.advanceTime(15_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), true);
-
-  assert.deepEqual(events, ["rehydrate:session-1"]);
-});
-
-test("resets running stream detachment evidence whenever the current turn renders progress", async () => {
-  const events = [];
-  let activityRevision = "100:1000";
-  const runtime = loadInjection({
-    codexSessionController: createRecoveryController(events),
-    bridgeHandler: async () => completedProbeResult({
-      activityRevision,
-      lifecycle: "running",
-      terminal: false,
-      terminalKind: null,
-    }),
-  });
-
-  runtime.setTurnText(0, "第一段");
-  runtime.advanceTime(30_000);
-  await runtime.window.__codeyProbeStuckTaskCompletion();
-  activityRevision = "200:2000";
-  runtime.advanceTime(15_000);
-  await runtime.window.__codeyProbeStuckTaskCompletion();
-
-  runtime.setTurnText(0, "第一段\n页面已收到新内容");
-  activityRevision = "300:3000";
-  runtime.advanceTime(15_000);
-  await runtime.window.__codeyProbeStuckTaskCompletion();
-  activityRevision = "400:4000";
-  runtime.advanceTime(15_000);
-  await runtime.window.__codeyProbeStuckTaskCompletion();
-  activityRevision = "500:5000";
-  runtime.advanceTime(15_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  assert.deepEqual(events, []);
-
-  activityRevision = "600:6000";
-  runtime.advanceTime(15_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), true);
-  assert.deepEqual(events, ["rehydrate:session-1"]);
-});
-
-test("keeps a running task untouched when its rollout is not advancing", async () => {
+test("reconciles the current session through AppServerManager without a completion bridge", async () => {
   const events = [];
   const runtime = loadInjection({
     codexSessionController: createRecoveryController(events),
-    bridgeHandler: async () => completedProbeResult({
-      activityRevision: "100:1000",
-      lifecycle: "running",
-      terminal: false,
-      terminalKind: null,
-    }),
   });
 
-  runtime.advanceTime(30_000);
-  await runtime.window.__codeyProbeStuckTaskCompletion();
-  for (let index = 0; index < 8; index += 1) {
-    runtime.advanceTime(15_000);
-    assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  }
-  assert.deepEqual(events, []);
-});
+  await flushMicrotasks();
 
-test("retries a completed task when native recovery resolves but the Stop state remains", async () => {
-  const events = [];
-  const runtime = loadInjection({
-    codexSessionController: createRecoveryController(events),
-    bridgeHandler: async (path) => (
-      path === "/session/completion-state"
-        ? completedProbeResult()
-        : { status: "ok" }
-    ),
-  });
-
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), true);
-  assert.deepEqual(events, ["discard:session-1", "resume:session-1", "refresh"]);
-
-  runtime.advanceTime(29_999);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  runtime.advanceTime(1);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), true);
-  assert.deepEqual(events, [
-    "discard:session-1", "resume:session-1", "refresh",
-    "discard:session-1", "resume:session-1", "refresh",
-  ]);
-
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), true);
-  runtime.advanceTime(299_999);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  runtime.advanceTime(1);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), true);
-  assert.equal(events.filter((event) => event === "refresh").length, 4);
-});
-
-test("clears completed-task retry history after the native Stop state disappears", async () => {
-  const events = [];
-  const runtime = loadInjection({
-    codexSessionController: createRecoveryController(events),
-    bridgeHandler: async (path) => (
-      path === "/session/completion-state"
-        ? completedProbeResult()
-        : { status: "ok" }
-    ),
-  });
-
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), true);
-  runtime.setRunning(false);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-
-  runtime.setRunning(true);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), true);
-  assert.equal(events.filter((event) => event === "refresh").length, 2);
-});
-
-test("rejects mismatched completion confirmation", async () => {
-  const events = [];
-  const runtime = loadInjection({
-    codexSessionController: createRecoveryController(events),
-    bridgeHandler: async (path) => (
-      path === "/session/completion-state"
-        ? completedProbeResult({ turnId: "turn-other" })
-        : { status: "ok" }
-    ),
-  });
-
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  assert.deepEqual(events, []);
-});
-
-test("cancels recovery when the visible task changes during confirmation", async () => {
-  const events = [];
-  let resolveCompletion;
-  const runtime = loadInjection({
-    codexSessionController: createRecoveryController(events),
-    bridgeHandler: async (path) => {
-      if (path !== "/session/completion-state") return { status: "ok" };
-      return new Promise((resolve) => {
-        resolveCompletion = resolve;
-      });
+  assert.deepEqual(JSON.parse(JSON.stringify(events)), [{
+    payload: {
+      collaborationMode: null,
+      conversationId: "session-1",
+      model: null,
+      reasoningEffort: null,
+      serviceTier: null,
+      showThreadGoalResumeConfirmation: false,
+      workspaceRoots: [],
     },
-  });
+    type: "reconcile",
+  }]);
+  assert.equal(
+    runtime.bridgeCalls.some((call) => call.path === "/session/completion-state"),
+    false,
+  );
+  assert.equal(await runtime.window.__codeyReconcileStaleCompletedTask(), false);
+  assert.equal(events.length, 1);
+});
 
-  runtime.advanceTime(30_000);
-  const probe = runtime.window.__codeyProbeStuckTaskCompletion();
-  await Promise.resolve();
+test("resets the reconciliation interval when the visible session changes", async () => {
+  const events = [];
+  const runtime = loadInjection({
+    codexSessionController: createRecoveryController(events),
+  });
+  await flushMicrotasks();
+
+  assert.equal(events.length, 1);
   runtime.setSessionId("session-2");
-  resolveCompletion(completedProbeResult());
-
-  assert.equal(await probe, false);
-  assert.deepEqual(events, []);
+  assert.equal(await runtime.window.__codeyReconcileStaleCompletedTask(), true);
+  assert.deepEqual(
+    events.map((event) => event.payload.conversationId),
+    ["session-1", "session-2"],
+  );
 });
 
-test("cancels recovery when Codex clears its native running state", async () => {
+test("rejects a reconciliation result when the visible session changes in flight", async () => {
   const events = [];
-  let resolveCompletion;
-  const runtime = loadInjection({
-    codexSessionController: createRecoveryController(events),
-    bridgeHandler: async (path) => {
-      if (path !== "/session/completion-state") return { status: "ok" };
-      return new Promise((resolve) => {
-        resolveCompletion = resolve;
-      });
-    },
-  });
-
-  runtime.advanceTime(30_000);
-  const probe = runtime.window.__codeyProbeStuckTaskCompletion();
-  await Promise.resolve();
-  runtime.setRunning(false);
-  resolveCompletion(completedProbeResult());
-
-  assert.equal(await probe, false);
-  assert.deepEqual(events, []);
-});
-
-test("backs off after a native recovery failure without reloading", async () => {
-  let discardCalls = 0;
-  const runtime = loadInjection({
-    codexSessionController: createRecoveryController([], {
-      async discardConversation() {
-        discardCalls += 1;
-        throw new Error("controller failed");
-      },
-    }),
-    bridgeHandler: async (path) => (
-      path === "/session/completion-state"
-        ? completedProbeResult()
-        : { status: "ok" }
-    ),
-  });
-
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  assert.equal(discardCalls, 1);
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  assert.equal(discardCalls, 1);
-  runtime.advanceTime(31_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  assert.equal(discardCalls, 2);
-  assert.equal(runtime.getReloadCount(), 0);
-});
-
-test("scopes native recovery cooldown to the failed task", async () => {
-  const events = [];
-  let failNextDiscard = true;
+  let deferReconcile = false;
+  let resolveReconcile;
   const runtime = loadInjection({
     codexSessionController: createRecoveryController(events, {
-      async discardConversation(sessionId) {
-        if (failNextDiscard) {
-          failNextDiscard = false;
-          throw new Error("controller failed");
-        }
-        events.push(`discard:${sessionId}`);
+      async reconcileCompletedConversation(payload) {
+        events.push({ payload, type: "reconcile" });
+        if (!deferReconcile) return false;
+        return new Promise((resolve) => {
+          resolveReconcile = resolve;
+        });
       },
     }),
-    bridgeHandler: async (path, payload) => (
-      path === "/session/completion-state"
-        ? completedProbeResult({ sessionId: payload.sessionId, turnId: payload.turnId })
-        : { status: "ok" }
-    ),
+  });
+  await flushMicrotasks();
+
+  deferReconcile = true;
+  runtime.advanceTime(15_000);
+  const reconciliation = runtime.window.__codeyReconcileStaleCompletedTask();
+  await flushMicrotasks();
+  runtime.setSessionId("session-2");
+  resolveReconcile(true);
+
+  assert.equal(await reconciliation, false);
+  assert.deepEqual(
+    events.map((event) => event.payload.conversationId),
+    ["session-1", "session-1"],
+  );
+});
+
+test("retries AppServerManager discovery when a signals controller was cached first", async () => {
+  const managerEvents = [];
+  const signalEvents = [];
+  const discoveredAppServerManager = {
+    codeyReconcileCompletedConversation(payload) {
+      managerEvents.push("reconcile:" + payload.conversationId);
+      return Promise.resolve(true);
+    },
+    discardConversationFromCache() {},
+    handleThreadDeletion() {},
+    refreshRecentConversations() {},
+    resumeConversation() {},
+  };
+  const runtime = loadInjection({
+    codexSessionController: {
+      kind: "signals",
+      discardConversation: () => signalEvents.push("discard"),
+      notifyConversationDeleted: () => signalEvents.push("delete"),
+      refreshRecentConversations: () => signalEvents.push("refresh"),
+      resumeConversation: () => signalEvents.push("resume"),
+    },
+    discoveredAppServerManager,
   });
 
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
+  await flushMicrotasks();
 
-  runtime.setSessionId("session-2");
-  runtime.appendTurn("turn-2");
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), false);
-  runtime.advanceTime(30_000);
-  assert.equal(await runtime.window.__codeyProbeStuckTaskCompletion(), true);
-  assert.deepEqual(events, ["discard:session-2", "resume:session-2", "refresh"]);
+  assert.deepEqual(managerEvents, ["reconcile:session-1"]);
+  assert.deepEqual(signalEvents, []);
+  assert.equal(runtime.window.__codeyCodexSessionController.kind, "manager");
 });
 
 test("unloads Codex memory without discarding the active conversation", async () => {
   const dispatcherCalls = [];
   const events = [];
   const runtime = loadInjection({
-    initialRunning: false,
     codexSignalDispatcher: async (signal, payload) => {
       dispatcherCalls.push({ signal, payload });
       events.push(`signal:${signal}`);
@@ -853,7 +527,6 @@ test("uses the current AppServerManager flow to evict, clean, resume, and refres
   const events = [];
   const managerCalls = [];
   const runtime = loadInjection({
-    initialRunning: false,
     codexSessionController: {
       kind: "manager",
       async discardConversation(sessionId) {
@@ -914,7 +587,6 @@ test("uses the current AppServerManager flow to evict, clean, resume, and refres
 test("removes a hard-deleted turn and rejects a stale React rerender", async () => {
   let deleteCalls = 0;
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: ["turn-1", "turn-2"],
     selectedTurnIds: ["turn-1"],
     codexSignalDispatcher: async () => {},
@@ -939,7 +611,6 @@ test("reuses the resolved turn id when cleaning up a deleted tail turn", async (
   const tailKey = "history-content:tail:0:local:temporary-id";
   let deleteCalls = 0;
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [tailKey],
     selectedTurnIds: [tailKey],
     codexSignalDispatcher: async () => {},
@@ -972,7 +643,6 @@ test("keeps a turn visible when no persisted turn was deleted", async () => {
   let deleteCalls = 0;
   let dispatcherCalls = 0;
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: ["failed-turn"],
     selectedTurnIds: ["failed-turn"],
     codexSignalDispatcher: async () => {
@@ -1000,7 +670,6 @@ test("keeps a turn visible when no persisted turn was deleted", async () => {
 
 test("reports a rejected delete bridge call without hiding the selected turn", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: ["bridge-failed-turn"],
     selectedTurnIds: ["bridge-failed-turn"],
     bridgeHandler: async (path) => {
@@ -1018,7 +687,6 @@ test("reports a rejected delete bridge call without hiding the selected turn", a
 
 test("keeps all selected rows visible when only part of a delete is confirmed", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: ["turn-1", "turn-2"],
     selectedTurnIds: ["turn-1", "turn-2"],
     bridgeHandler: async (path) => (
@@ -1049,7 +717,6 @@ test("normalizes Codex history-content turn keys to rollout turn ids", () => {
 
 test("deletes an interrupted turn and its userless continuation as one logical round", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [],
     codexSignalDispatcher: async () => {},
     bridgeHandler: async (path) => (
@@ -1181,7 +848,6 @@ test("regroups a selected interrupted request when its tail continuation hydrate
 
 test("replaces a grouped tail placeholder with its hydrated stable turn id", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [],
     codexSignalDispatcher: async () => {},
     bridgeHandler: async (path) => (
@@ -1283,7 +949,6 @@ test("waits for non-user continuation content before grouping an empty hydrated 
 
 test("normalizes a selected standalone tail when hydration merges it into the origin", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [],
     codexSignalDispatcher: async () => {},
     bridgeHandler: async (path) => (
@@ -1340,7 +1005,6 @@ test("normalizes a selected standalone tail when hydration merges it into the or
 
 test("deselecting a hydrated logical group clears the earlier standalone selection", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [],
     codexSignalDispatcher: async () => {},
   });
@@ -1419,7 +1083,6 @@ test("retains every logical turn id when a continuation is virtualized away", ()
 
 test("restores a complete logical group when only its continuation remounts", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [],
     codexSignalDispatcher: async () => {},
     bridgeHandler: async (path) => (
@@ -1519,7 +1182,6 @@ test("promotes a mounted continuation when removal mutation detaches its anchor"
 
 test("restores selection when a logical group remounts through a new continuation node", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [],
     codexSignalDispatcher: async () => {},
     bridgeHandler: async (path) => (
@@ -1587,7 +1249,6 @@ test("restores selection when a logical group remounts through a new continuatio
 
 test("uses the selected group as topology after the ordinary logical cache is evicted", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [],
     codexSignalDispatcher: async () => {},
     bridgeHandler: async (path) => (
@@ -1674,7 +1335,6 @@ test("uses the selected group as topology after the ordinary logical cache is ev
 
 test("keeps the origin selected when a continuation row is reused for a new user turn", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [],
     codexSignalDispatcher: async () => {},
     bridgeHandler: async (path) => (
@@ -1739,7 +1399,6 @@ test("keeps the origin selected when a continuation row is reused for a new user
 
 test("keeps an explicitly mismatched continuation reference in a separate group", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [],
     codexSignalDispatcher: async () => {},
     bridgeHandler: async (path) => (
@@ -1841,7 +1500,6 @@ test("invalidates a cached group when a non-member turn appears between its rows
 
 test("keeps only the old anchor selected when a cached continuation becomes a user turn", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [],
     codexSignalDispatcher: async () => {},
     bridgeHandler: async (path) => (
@@ -1903,7 +1561,6 @@ test("keeps only the old anchor selected when a cached continuation becomes a us
 
 test("shrinks an offscreen selected group when its visible continuation becomes a user turn", async () => {
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [],
     codexSignalDispatcher: async () => {},
     bridgeHandler: async (path) => (
@@ -1979,7 +1636,6 @@ test("clears selection when a virtualized row is reused for another stable turn"
 test("sends the normalized rollout turn id to the delete bridge", async () => {
   const uiTurnKey = "history-content:turn:019ff498-5f1c-7452-aac5-88e4eb99e657";
   const runtime = loadInjection({
-    initialRunning: false,
     turnIds: [uiTurnKey],
     selectedTurnIds: [uiTurnKey],
     codexSignalDispatcher: async () => {},

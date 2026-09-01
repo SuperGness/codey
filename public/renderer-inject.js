@@ -1,6 +1,6 @@
 // Lightweight renderer bootstrap injected by the Codey CDP launcher.
 // The heavier session/sidebar tools live in codey-inject.js and are loaded
-// after sidebar interaction or when an active task needs completion recovery.
+// after sidebar interaction or once the renderer has idle time.
 (() => {
   const rendererCoreAlreadyLoaded = window.__codeyRendererCoreLoaded === true;
   window.__codeyRendererModuleReady = true;
@@ -24,8 +24,7 @@
   const runtimeHealthFailureThreshold = 2;
   const accountUsageRefreshIntervalMs = 60_000;
   const accountUsageTimeoutMs = 8_000;
-  const sessionToolsRunningProbeIntervalMs = 5_000;
-  const nativeTaskControlSelector = "button[aria-label], button[title], button[data-testid]";
+  const sessionToolsIdleLoadTimeoutMs = 5_000;
   const sidebarSelector = [
     "[data-app-action-sidebar-scroll]",
     "[data-app-action-sidebar-section]",
@@ -56,7 +55,7 @@
   let accountUsagePollingEnabled = true;
   let accountUsageLastResult = null;
   let sessionToolsInteractionArmed = false;
-  let sessionToolsRunningProbeTimer = 0;
+  let sessionToolsIdleLoadScheduled = false;
   let bootstrapObserver = null;
   let headerMountDirty = true;
 
@@ -70,30 +69,6 @@
     }
     return matches;
   };
-
-  const nativeTaskControlIsRunning = (control) => {
-    if (!(control instanceof HTMLElement) || control.disabled) return false;
-    const label = [
-      control.getAttribute("aria-label"),
-      control.getAttribute("title"),
-    ].filter(Boolean).join(" ").trim().toLowerCase();
-    const testId = String(control.getAttribute("data-testid") || "").trim().toLowerCase();
-    const runningLabel = label === "停止"
-      || label.includes("停止生成")
-      || label.includes("停止回答")
-      || label === "stop"
-      || label.includes("stop generating")
-      || label.includes("stop response");
-    const runningTestId = /(?:^|[-_])(?:stop|cancel)(?:[-_](?:generating|generation|response|task|turn))?(?:[-_]button)?$/.test(testId)
-      || /(?:^|[-_])(?:generating|generation|response|task|turn)[-_](?:stop|cancel)(?:[-_]button)?$/.test(testId);
-    return (runningLabel || runningTestId) && control.getClientRects().length > 0;
-  };
-
-  const nativeTaskIsRunning = () => (
-    document.visibilityState !== "hidden"
-    && [...document.querySelectorAll(nativeTaskControlSelector)].some(nativeTaskControlIsRunning)
-  );
-  window.__codeyNativeTaskRunning = nativeTaskIsRunning;
 
   const callBridge = (path, payload = {}, options = {}) => {
     if (typeof window.__codexSessionDeleteBridge === "function") {
@@ -962,7 +937,6 @@
   const finishSessionToolsLoad = () => {
     if (window.__codeySessionToolsInjectLoaded !== true) return false;
     disarmSessionToolsInteraction();
-    disarmSessionToolsRunningProbe();
     bootstrapObserver?.disconnect();
     bootstrapObserver = null;
     return true;
@@ -1033,31 +1007,22 @@
     document.removeEventListener("focusin", loadSessionToolsFromInteraction, true);
   };
 
-  const loadSessionToolsForRunningTask = () => {
+  const scheduleSessionToolsIdleLoad = () => {
     if (
-      sessionToolsLoadPromise
+      sessionToolsIdleLoadScheduled
+      || sessionToolsLoadPromise
       || window.__codeySessionToolsInjectLoaded === true
-      || !nativeTaskIsRunning()
-    ) return false;
-    void loadSessionTools();
-    return true;
-  };
-
-  const armSessionToolsRunningProbe = () => {
-    if (
-      sessionToolsRunningProbeTimer
-      || window.__codeySessionToolsInjectLoaded === true
-      || typeof window.setInterval !== "function"
     ) return;
-    sessionToolsRunningProbeTimer = window.setInterval(() => {
-      loadSessionToolsForRunningTask();
-    }, sessionToolsRunningProbeIntervalMs);
-  };
-
-  const disarmSessionToolsRunningProbe = () => {
-    if (!sessionToolsRunningProbeTimer) return;
-    window.clearInterval(sessionToolsRunningProbeTimer);
-    sessionToolsRunningProbeTimer = 0;
+    sessionToolsIdleLoadScheduled = true;
+    const run = () => {
+      sessionToolsIdleLoadScheduled = false;
+      void loadSessionTools();
+    };
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(run, { timeout: sessionToolsIdleLoadTimeoutMs });
+      return;
+    }
+    window.setTimeout(run, 1_000);
   };
 
   const scan = (root = document) => {
@@ -1094,8 +1059,7 @@
   // targets, so this closes the observer/debounce race without moving the heavy
   // session-tools evaluation into startup.
   armSessionToolsInteraction();
-  armSessionToolsRunningProbe();
-  loadSessionToolsForRunningTask();
+  scheduleSessionToolsIdleLoad();
   scan();
   void hydrateUpdateAvailability();
   void checkRuntimeHealth();
@@ -1218,18 +1182,18 @@
   window.__codeyRefreshRuntimeHealth = checkRuntimeHealth;
 
   window.addEventListener?.("focus", () => {
-    loadSessionToolsForRunningTask();
+    void loadSessionTools();
     scan();
     scheduleRuntimeHealthCheck(0);
     scheduleAccountUsageCheck(0);
   });
   document.addEventListener?.("visibilitychange", () => {
-    loadSessionToolsForRunningTask();
+    if (document.visibilityState !== "hidden") void loadSessionTools();
     scheduleRuntimeHealthCheck(0);
     scheduleAccountUsageCheck(0);
   });
   window.addEventListener?.("pageshow", () => {
-    loadSessionToolsForRunningTask();
+    void loadSessionTools();
     scan();
     scheduleRuntimeHealthCheck(0);
   });

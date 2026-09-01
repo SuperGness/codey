@@ -912,25 +912,24 @@
       );
     }
     if (
-      !source.includes("codeyRehydrateRunningConversation")
-      && source.includes("discardConversationFromCache")
+      !source.includes("codeyReconcileCompletedConversation")
       && source.includes("isLocalConversationInProgress")
       && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
+      && source.includes("getConversationStreamRevision")
       && source.includes("async resumeConversation(")
     ) {
-      // A renderer can keep its local owner role after its notification stream
-      // silently detaches. The normal resume path then returns early because it
-      // still believes the conversation is streaming. Expose one narrow native
-      // operation that clears only that stale local role, marks the cached
-      // conversation for hydration, and runs thread/resume. It deliberately
-      // avoids discardConversationFromCache, thread/unsubscribe, interrupt, and
-      // turn/start so the active backend turn keeps running exactly once.
+      // A renderer can miss the terminal notification while retaining its old
+      // in-progress turn and stream role. Confirm the native app-server state
+      // twice, reject a concurrent stream revision or follower window, then use
+      // the same needs_resume + maybeResumeConversation path as reconnect. This
+      // hydrates paginated history without discarding, interrupting, or starting
+      // another turn.
       patched = replaceUniqueRendererGate(
         patched,
         /async resumeConversation\(([$A-Z_a-z][$\w]*)\)\{await this\.maybeResumeConversation\(\1\);/g,
         (_match, paramsName) =>
-          `async codeyRehydrateRunningConversation(${paramsName}){let __codeyConversationId=${paramsName}?.conversationId,__codeyConversation=__codeyConversationId==null?null:this.getConversation(__codeyConversationId);if(__codeyConversationId==null||__codeyConversation==null||!this.productPolicy.runtimePolicy.isLocalConversationInProgress(__codeyConversation)||this.getStreamRole(__codeyConversationId)?.role!==\`owner\`)return!1;this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(__codeyConversationId);this.updateConversationState(__codeyConversationId,__codeyState=>{__codeyState.resumeState=\`needs_resume\`},!1);await this.maybeResumeConversation(${paramsName});return this.getStreamRole(__codeyConversationId)?.role===\`owner\`}async resumeConversation(${paramsName}){await this.maybeResumeConversation(${paramsName});`,
-        "running thread rehydration",
+          `async codeyReconcileCompletedConversation(${paramsName}){let __codeyConversationId=${paramsName}?.conversationId,__codeyConversation=__codeyConversationId==null?null:this.getConversation(__codeyConversationId);if(__codeyConversationId==null||__codeyConversation==null||!this.productPolicy.runtimePolicy.isLocalConversationInProgress(__codeyConversation)||this.getStreamRole(__codeyConversationId)?.role===\`follower\`)return!1;let __codeyRevision=this.getConversationStreamRevision(__codeyConversationId),__codeyReadStatus=async()=>{let __codeyResponse=await this.sendRequest(\`thread/read\`,{threadId:__codeyConversationId,includeTurns:!1}),__codeyStatus=__codeyResponse?.thread?.status;return typeof __codeyStatus===\`string\`?__codeyStatus:__codeyStatus?.type},__codeyStatus=await __codeyReadStatus();if(__codeyStatus!==\`idle\`&&__codeyStatus!==\`error\`)return!1;await new Promise(__codeyResolve=>setTimeout(__codeyResolve,250));if(await __codeyReadStatus()!==__codeyStatus||this.getConversationStreamRevision(__codeyConversationId)!==__codeyRevision)return!1;__codeyConversation=this.getConversation(__codeyConversationId);if(__codeyConversation==null||!this.productPolicy.runtimePolicy.isLocalConversationInProgress(__codeyConversation)||this.getStreamRole(__codeyConversationId)?.role===\`follower\`)return!1;this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(__codeyConversationId);this.updateConversationState(__codeyConversationId,__codeyState=>{__codeyState.resumeState=\`needs_resume\`},!1);await this.maybeResumeConversation(${paramsName});__codeyConversation=this.getConversation(__codeyConversationId);return __codeyConversation!=null&&!this.productPolicy.runtimePolicy.isLocalConversationInProgress(__codeyConversation)}async resumeConversation(${paramsName}){await this.maybeResumeConversation(${paramsName});`,
+        "completed thread reconciliation",
       );
     }
     if (

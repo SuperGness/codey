@@ -7,7 +7,7 @@ const root = new URL("../", import.meta.url);
 const readSource = async (path) =>
   (await readFile(new URL(path, root), "utf8")).replace(/\r\n/g, "\n");
 
-test("renderer core keeps session tools lazy until sidebar use or an active task", async () => {
+test("renderer core loads session tools after idle time or sidebar use", async () => {
   const [inject, sessionTools, bridge, petShield, securityShield, promptOptimize] = await Promise.all([
     readSource("public/renderer-inject.js"),
     readSource("public/codey-inject.js"),
@@ -29,17 +29,22 @@ test("renderer core keeps session tools lazy until sidebar use or an active task
   assert.doesNotMatch(inject, /const sidebarDetected =/);
   assert.match(
     inject,
-    /armSessionToolsInteraction\(\);\s*armSessionToolsRunningProbe\(\);\s*loadSessionToolsForRunningTask\(\);\s*scan\(\);\s*void hydrateUpdateAvailability\(\)/,
+    /armSessionToolsInteraction\(\);\s*scheduleSessionToolsIdleLoad\(\);\s*scan\(\);\s*void hydrateUpdateAvailability\(\)/,
   );
   assert.match(inject, /const backendStatusPath = "\/backend\/status"/);
   assert.doesNotMatch(inject, /showUpdateDialog|codey-update-check-status/);
   assert.match(inject, /document\.addEventListener\("pointerover", loadSessionToolsFromInteraction/);
   assert.match(inject, /document\.addEventListener\("focusin", loadSessionToolsFromInteraction/);
-  assert.match(inject, /const sessionToolsRunningProbeIntervalMs = 5_000/);
-  assert.match(inject, /const nativeTaskControlSelector = "button\[aria-label\], button\[title\], button\[data-testid\]"/);
-  assert.match(inject, /armSessionToolsRunningProbe\(\);\s*loadSessionToolsForRunningTask\(\);\s*scan\(\)/);
-  assert.match(inject, /window\.setInterval\(\(\) => \{\s*loadSessionToolsForRunningTask\(\);\s*\}, sessionToolsRunningProbeIntervalMs\)/);
-  assert.match(inject, /disarmSessionToolsRunningProbe\(\);\s*bootstrapObserver\?\.disconnect/);
+  assert.match(inject, /const sessionToolsIdleLoadTimeoutMs = 5_000/);
+  assert.match(inject, /const scheduleSessionToolsIdleLoad = \(\) =>/);
+  assert.match(
+    inject,
+    /window\.requestIdleCallback\(run, \{ timeout: sessionToolsIdleLoadTimeoutMs \}\)/,
+  );
+  assert.match(inject, /window\.setTimeout\(run, 1_000\)/);
+  assert.match(inject, /window\.addEventListener\?\.\("focus", \(\) => \{\s*void loadSessionTools\(\)/);
+  assert.doesNotMatch(inject, /SessionToolsRunningProbe|loadSessionToolsForRunningTask|__codeyNativeTaskRunning/);
+  assert.match(inject, /disarmSessionToolsInteraction\(\);\s*bootstrapObserver\?\.disconnect/);
   assert.match(inject, /bootstrapObserver\?\.disconnect\(\)/);
   assert.match(inject, /mutationDispatcher\.subscribe\(\s*handleBootstrapMutations/);
   assert.match(inject, /new MutationObserver\(handleBootstrapMutations\)/);
@@ -75,32 +80,35 @@ test("renderer core keeps session tools lazy until sidebar use or an active task
   assert.match(sessionTools, /fallbackSessionExportMaxBytes = 64 \* 1024 \* 1024/);
   assert.match(sessionTools, /exportSize > fallbackSessionExportMaxBytes/);
   assert.match(sessionTools, /watcherWakeTimer = window\.setTimeout\(\(\) => \{[\s\S]*\}, 30_000\)/);
-  assert.match(sessionTools, /const stuckCompletionGraceMs = 30_000/);
-  assert.match(sessionTools, /const nativeTaskControlSelector = "button\[aria-label\], button\[title\], button\[data-testid\]"/);
-  assert.match(sessionTools, /const stuckCompletionProbeIntervalMs = 15_000/);
-  assert.match(sessionTools, /const stuckCompletionProbeTimeoutMs = 10_000/);
-  assert.match(sessionTools, /const stuckCompletionRecoveryRetryMs = 30_000/);
-  assert.match(sessionTools, /const stuckCompletionRecoveryCooldownMs = 60_000/);
-  assert.match(sessionTools, /const stuckCompletionRecoveryResetMs = 5 \* 60_000/);
-  assert.match(sessionTools, /const stuckCompletionRecoveryMaxAttempts = 3/);
-  assert.match(sessionTools, /const stuckRunningStreamGraceMs = 30_000/);
-  assert.match(sessionTools, /const stuckRunningStreamMinActivityAdvances = 2/);
-  assert.match(sessionTools, /const stuckCompletionBridgePath = "\/session\/completion-state"/);
-  assert.match(sessionTools, /const completionRecoveryStateByKey = new Map\(\)/);
-  assert.match(sessionTools, /const currentTurnRenderFingerprint = \(turnId\) =>/);
-  assert.doesNotMatch(sessionTools, /recoveredCompletionKeys|completionRecoveryCooldownUntil/);
+  assert.match(sessionTools, /const completedTaskReconcileIntervalMs = 15_000/);
+  assert.match(sessionTools, /const reconcileStaleCompletedTask = async \(\) =>/);
+  assert.match(sessionTools, /controller\.reconcileCompletedConversation\(\{/);
+  assert.match(
+    sessionTools,
+    /loadCodexSessionController\(\{ requireCompletionReconcile: true \}\)/,
+  );
+  assert.match(sessionTools, /fallbackDispatcher && !requireCompletionReconcile/);
+  assert.doesNotMatch(
+    sessionTools,
+    /stuckCompletion|stuckRunning|activityRevision|currentTurnRenderFingerprint|rehydrateRunningConversation|\/session\/completion-state/,
+  );
   assert.doesNotMatch(sessionTools, /characterData:\s*true/);
   assert.doesNotMatch(sessionTools, /mutation\.type === "characterData"/);
   assert.match(
     sessionTools,
-    /\{ timeoutMs: stuckCompletionProbeTimeoutMs \}/,
+    /window\.setInterval\(\(\) => \{\s*void reconcileStaleCompletedTask\(\);\s*\}, completedTaskReconcileIntervalMs\)/,
   );
-  assert.match(
-    sessionTools,
-    /window\.setInterval\(\(\) => \{\s*void probeStuckTaskCompletion\(\);\s*\}, stuckCompletionProbeIntervalMs\)/,
+  assert.match(sessionTools, /window\.addEventListener\("focus", reconcileStaleCompletedTask\)/);
+  assert.match(sessionTools, /window\.addEventListener\("pageshow", reconcileStaleCompletedTask\)/);
+  const reconcileBody = sessionTools.match(
+    /const reconcileStaleCompletedTask = async \(\) => \{([\s\S]*?)\n  \};/,
+  )?.[1] ?? "";
+  assert.ok(reconcileBody.length > 0);
+  assert.match(reconcileBody, /const sessionId = getSessionId\(\)/);
+  assert.doesNotMatch(
+    reconcileBody,
+    /querySelector|data-turn-key|textContent|discardConversation|unsubscribe|interrupt|turn\/start/,
   );
-  assert.match(sessionTools, /window\.addEventListener\("focus", probeStuckTaskCompletion\)/);
-  assert.match(sessionTools, /window\.addEventListener\("pageshow", probeStuckTaskCompletion\)/);
   assert.match(sessionTools, /window\.__codeyRendererInvalidateHeaderMount\?\.\(root\)/);
   assert.doesNotMatch(sessionTools, /headerMountDirty/);
   assert.match(sessionTools, /const threadUpdatedAtRows = new Set\(\)/);
@@ -110,7 +118,7 @@ test("renderer core keeps session tools lazy until sidebar use or an active task
   assert.match(sessionTools, /window\.requestIdleCallback\(run\)/);
   assert.match(
     sessionTools,
-    /window\.__codeySessionToolsInjectLoaded = true;\s*window\.__codeySessionToolsInjectLoading = false;\s*void probeStuckTaskCompletion\(\);\s*scheduleInitialScan\(\)/,
+    /window\.__codeySessionToolsInjectLoaded = true;\s*window\.__codeySessionToolsInjectLoading = false;\s*void reconcileStaleCompletedTask\(\);\s*scheduleInitialScan\(\)/,
   );
   assert.doesNotMatch(sessionTools, /addStyle\(\);\s*scan\(\)/);
   assert.doesNotMatch(sessionTools, /installThreadUpdatedTimes\(document(?:, true)?\)/);
@@ -140,7 +148,7 @@ test("renderer core keeps session tools lazy until sidebar use or an active task
   assert.match(sessionObserverBody, /addPendingScanRoot\(threadRow\)/);
   assert.match(sessionObserverBody, /syncConversationRichTooltipOpen\(target\)/);
   assert.doesNotMatch(sessionObserverBody, /syncSidebarThreadTimeState\(threadRow\)/);
-  assert.doesNotMatch(sessionObserverBody, /probeStuckTaskCompletion/);
+  assert.doesNotMatch(sessionObserverBody, /reconcileStaleCompletedTask/);
   assert.match(sessionTools, /mutationDispatcher\.subscribe\(\s*handleSessionToolMutations/);
   assert.match(sessionTools, /new MutationObserver\(handleSessionToolMutations\)/);
   assert.match(promptOptimize, /mutationDispatcher\.subscribe\(\s*handleComposerMutations/);

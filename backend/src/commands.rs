@@ -143,7 +143,6 @@ pub struct AppState {
     runtime_generation: AtomicU64,
     session_titles: RwLock<HashMap<String, String>>,
     session_metadata_cache: BlockingMutex<session_metadata::SessionMetadataCache>,
-    completion_probe_cache: BlockingMutex<pending_approval::RecentSessionEventCache>,
     #[cfg(test)]
     session_metadata_cache_contended: Notify,
     webhook_notifications: Mutex<WebhookNotificationState>,
@@ -233,9 +232,6 @@ impl Default for AppState {
             session_titles: RwLock::new(HashMap::new()),
             session_metadata_cache: BlockingMutex::new(
                 session_metadata::SessionMetadataCache::default(),
-            ),
-            completion_probe_cache: BlockingMutex::new(
-                pending_approval::RecentSessionEventCache::default(),
             ),
             #[cfg(test)]
             session_metadata_cache_contended: Notify::new(),
@@ -359,20 +355,6 @@ impl AppState {
             "/session/wake-watcher" => {
                 self.session_scan_wake.notify_one();
                 json!({"status":"ok"})
-            }
-            "/session/completion-state" => {
-                let session_id = bridge_string(&payload, "sessionId").trim().to_string();
-                let turn_id = bridge_string(&payload, "turnId").trim().to_string();
-                if session_id.is_empty() || turn_id.is_empty() {
-                    return api_error_message("缺少会话或轮次 ID");
-                }
-                if session_id.len() > 256 || turn_id.len() > 256 {
-                    return api_error_message("会话或轮次 ID 过长");
-                }
-                match with_completion_probe_cache(self, session_id, turn_id).await {
-                    Ok(result) => result,
-                    Err(error) => api_error_message(error),
-                }
             }
             "/session/titles" => cache_session_titles(self, &payload).await,
             "/session/timestamps" => {
@@ -563,88 +545,6 @@ where
     })
     .await
     .map_err(|error| format!("{operation}任务异常退出：{error}"))
-}
-
-async fn with_completion_probe_cache(
-    state: &Arc<AppState>,
-    session_id: String,
-    turn_id: String,
-) -> Result<Value, String> {
-    let state = Arc::clone(state);
-    tokio::task::spawn_blocking(move || {
-        let mut cache = state
-            .completion_probe_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let events = cache.refresh_session(codex_home(), &session_id);
-        completion_state_response(&events, &session_id, &turn_id)
-    })
-    .await
-    .map_err(|error| format!("确认会话完成状态任务异常退出：{error}"))
-}
-
-fn completion_state_response(
-    events: &pending_approval::RecentSessionEvents,
-    session_id: &str,
-    turn_id: &str,
-) -> Value {
-    let lifecycle = match events.session_statuses.get(session_id) {
-        Some(pending_approval::SessionLifecycleStatus::Idle) => "idle",
-        Some(pending_approval::SessionLifecycleStatus::Running) => "running",
-        Some(pending_approval::SessionLifecycleStatus::Error) => "error",
-        Some(pending_approval::SessionLifecycleStatus::Waiting) => "waiting",
-        None => "unknown",
-    };
-    let completed = events.completed_turns.iter().find(|completed| {
-        completed.session_id == session_id
-            && completed.turn_id == turn_id
-            && !completed.is_snapshot_replay
-    });
-    let aborted = events.aborted_turns.iter().find(|aborted| {
-        aborted.session_id == session_id
-            && aborted.turn_id == turn_id
-            && !aborted.is_snapshot_replay
-    });
-    let terminal_kind = if completed.is_some() {
-        Some("completed")
-    } else if aborted.is_some() {
-        Some("aborted")
-    } else {
-        None
-    };
-    let turn_known = events
-        .started_turns
-        .iter()
-        .any(|started| started.session_id == session_id && started.turn_id == turn_id)
-        || events
-            .completed_turns
-            .iter()
-            .any(|completed| completed.session_id == session_id && completed.turn_id == turn_id)
-        || events
-            .aborted_turns
-            .iter()
-            .any(|aborted| aborted.session_id == session_id && aborted.turn_id == turn_id)
-        || events
-            .pending_approvals
-            .iter()
-            .any(|pending| pending.session_id == session_id && pending.turn_id == turn_id)
-        || events
-            .turn_configurations
-            .get(session_id)
-            .is_some_and(|configurations| configurations.contains_key(turn_id));
-
-    json!({
-        "status": "ok",
-        "sessionId": session_id,
-        "turnId": turn_id,
-        "sessionKnown": events.session_statuses.contains_key(session_id),
-        "turnKnown": turn_known,
-        "lifecycle": lifecycle,
-        "activityRevision": events.rollout_revisions.get(session_id),
-        "terminal": terminal_kind.is_some(),
-        "terminalKind": terminal_kind,
-        "completedAt": completed.and_then(|completed| completed.completed_at),
-    })
 }
 
 async fn save_config_to_store(state: &AppState, config: &CodeyConfig) -> Result<(), String> {

@@ -52,9 +52,9 @@
   let watcherWakeTimer = 0;
   let deletePopoverCleanup = null;
   let codexSessionControllerPromise = null;
-  let completionRunningObservation = null;
-  let completionProbeInFlight = false;
-  let completionNextProbeAt = 0;
+  let completionReconcileInFlight = false;
+  let completionNextReconcileAt = 0;
+  let completionReconcileSessionId = "";
   let sidebarActionTooltipTimer = 0;
   let sidebarActionTooltipAnchor = null;
   let threadUpdatedAtFetchTimer = 0;
@@ -75,7 +75,6 @@
   const deletedSidebarSessionIds = new Set();
   const pendingSidebarSessionDeleteIds = new Set();
   const hardDeletedMessageKeys = new Set();
-  const completionRecoveryStateByKey = new Map();
   const messageSelectButtons = new WeakMap();
   const messageLogicalAnchorByRow = new WeakMap();
   const messageLogicalRowsByAnchor = new WeakMap();
@@ -112,22 +111,12 @@
   const taskListSectionHeadings = new Set(["task", "tasks", "recent", "recents", "任务", "最近"]);
   const threadRunningLossGraceMs = 2_000;
   const threadTimestampRefreshIntervalMs = 60_000;
-  const stuckCompletionGraceMs = 30_000;
-  const stuckCompletionProbeIntervalMs = 15_000;
-  const stuckCompletionProbeTimeoutMs = 10_000;
-  const stuckCompletionRecoveryRetryMs = 30_000;
-  const stuckCompletionRecoveryCooldownMs = 60_000;
-  const stuckCompletionRecoveryResetMs = 5 * 60_000;
-  const stuckCompletionRecoveryMaxAttempts = 3;
-  const stuckRunningStreamGraceMs = 30_000;
-  const stuckRunningStreamMinActivityAdvances = 2;
+  const completedTaskReconcileIntervalMs = 15_000;
   const threadTimestampBridgePath = "/session/timestamps";
-  const stuckCompletionBridgePath = "/session/completion-state";
   const maxPendingThreadTimestampRefs = 200;
   const fallbackSessionExportMaxBytes = 64 * 1024 * 1024;
   const maxSessionCacheEntries = 2_048;
   const maxHardDeletedMessageKeys = 10_000;
-  const maxCompletionRecoveryKeys = 512;
   const maxPendingScanRoots = 64;
   const maxMessageLogicalGroupKeys = 4_096;
   const maxSelectedLogicalMessageKeys = 2_048;
@@ -258,13 +247,6 @@
   const isHistoryTailMessageId = (value) => (
     /(?:^|:)tail(?::|$)/i.test(String(value || ""))
   );
-
-  const usableCompletionTurnId = (value) => {
-    const normalized = usableMessageId(value);
-    return normalized && !isHistoryTailMessageId(normalized)
-      ? normalized
-      : "";
-  };
 
   const reactStateKeys = (element) => Object.keys(element).filter((key) => (
     key.startsWith("__reactFiber")
@@ -492,75 +474,6 @@
     return childMessageId
       ? preferStableReactTurnId(row, childMessageId)
       : messageIdFromReactState(row);
-  };
-
-  const getCurrentTurnId = () => {
-    const turnRows = Array.from(document.querySelectorAll?.("[data-turn-key]") || []);
-    for (let index = turnRows.length - 1; index >= 0; index -= 1) {
-      let parent = turnRows[index].parentElement;
-      let nested = false;
-      while (parent) {
-        if (parent.matches?.("[data-turn-key]")) {
-          nested = true;
-          break;
-        }
-        parent = parent.parentElement;
-      }
-      if (nested) continue;
-      // A history tail key is only a temporary DOM position. Current Codex
-      // hydrates the real rollout turn id into that same row's React state, so
-      // resolve the row before deciding whether to fall back to an older turn.
-      const turnId = usableCompletionTurnId(getMessageId(turnRows[index]));
-      if (turnId) return turnId;
-    }
-
-    // Older renderer shapes may omit data-turn-key. Keep the React/message
-    // fallback for those builds, but never let a tail placeholder override a
-    // canonical rollout turn from the first pass.
-    const rows = Array.from(document.querySelectorAll?.(conversationTurnSelector) || []);
-    for (let index = rows.length - 1; index >= 0; index -= 1) {
-      let parent = rows[index].parentElement;
-      let nested = false;
-      while (parent) {
-        if (parent.matches?.(conversationTurnSelector)) {
-          nested = true;
-          break;
-        }
-        parent = parent.parentElement;
-      }
-      if (nested) continue;
-      const turnId = usableCompletionTurnId(getMessageId(rows[index]));
-      if (turnId) return turnId;
-    }
-    return "";
-  };
-
-  const currentTurnRenderFingerprint = (turnId) => {
-    const normalizedTurnId = usableCompletionTurnId(turnId);
-    if (!normalizedTurnId) return "";
-    const rows = Array.from(document.querySelectorAll?.("[data-turn-key]") || []);
-    for (let index = rows.length - 1; index >= 0; index -= 1) {
-      const row = rows[index];
-      let parent = row.parentElement;
-      let nested = false;
-      while (parent) {
-        if (parent.matches?.("[data-turn-key]")) {
-          nested = true;
-          break;
-        }
-        parent = parent.parentElement;
-      }
-      if (nested || getMessageId(row) !== normalizedTurnId) continue;
-      const text = String(row.textContent || "");
-      const childCount = Number(row.childElementCount ?? row.children?.length ?? 0) || 0;
-      return [
-        String(row.getAttribute("data-turn-key") || ""),
-        childCount,
-        text.length,
-        text.slice(-512),
-      ].join("\u0000");
-    }
-    return "";
   };
 
   const hardDeletedMessageKey = (sessionId, messageId) => {
@@ -2265,8 +2178,8 @@
     discardConversation: (sessionId) => manager.discardConversationFromCache(sessionId),
     notifyConversationDeleted: (sessionId) => manager.handleThreadDeletion([sessionId]),
     refreshRecentConversations: () => manager.refreshRecentConversations(),
-    rehydrateRunningConversation: typeof manager.codeyRehydrateRunningConversation === "function"
-      ? (payload) => manager.codeyRehydrateRunningConversation(payload)
+    reconcileCompletedConversation: typeof manager.codeyReconcileCompletedConversation === "function"
+      ? (payload) => manager.codeyReconcileCompletedConversation(payload)
       : null,
     resumeConversation: (payload) => manager.resumeConversation(payload),
   });
@@ -2279,47 +2192,67 @@
     && typeof controller.resumeConversation === "function"
   );
 
-  const loadCodexSessionController = async () => {
-    if (sessionControllerLooksUsable(window.__codeyCodexSessionController)) {
+  const sessionControllerCanReconcileCompletedConversation = (controller) => (
+    controller?.kind === "manager"
+    && typeof controller.reconcileCompletedConversation === "function"
+  );
+
+  const loadCodexSessionController = async ({ requireCompletionReconcile = false } = {}) => {
+    if (
+      sessionControllerLooksUsable(window.__codeyCodexSessionController)
+      && (
+        !requireCompletionReconcile
+        || sessionControllerCanReconcileCompletedConversation(
+          window.__codeyCodexSessionController,
+        )
+      )
+    ) {
       return window.__codeyCodexSessionController;
     }
-    if (typeof window.__codeyCodexSignalDispatcher === "function") {
-      const controller = legacySessionController(window.__codeyCodexSignalDispatcher);
-      window.__codeyCodexSessionController = controller;
-      return controller;
-    }
-    const signalAssetPriority = (url) => (
-      url.includes("app-server-manager-signals-")
+    let fallbackDispatcher = typeof window.__codeyCodexSignalDispatcher === "function"
+      ? window.__codeyCodexSignalDispatcher
+      : null;
+    const managerAssetPriority = (url) => (
+      url.includes("app-initial-")
         ? 2
-        : Number(url.includes("app-initial-"))
+        : Number(url.includes("app-server-manager-signals-"))
     );
     const urls = (await discoverCodexAppAssetUrls())
-      .sort((left, right) => signalAssetPriority(right) - signalAssetPriority(left));
+      .sort((left, right) => managerAssetPriority(right) - managerAssetPriority(left));
     for (const url of urls) {
       const namedSignalAsset = url.includes("app-server-manager-signals-");
       try {
         const module = typeof window.__codeyImportCodexAsset === "function"
           ? await window.__codeyImportCodexAsset(url)
           : await import(url);
-        const dispatcher = signalDispatcherFromModule(module, namedSignalAsset);
-        if (dispatcher) {
-          window.__codeyCodexSignalDispatcher = dispatcher;
-          const controller = legacySessionController(dispatcher);
-          window.__codeyCodexSessionController = controller;
-          return controller;
-        }
         const resolver = appServerManagerResolverFromModule(module);
         const manager = resolver ? appServerManagerFromReact(resolver) : null;
         if (manager) {
           const controller = managerSessionController(manager);
-          window.__codeyCodexSessionController = controller;
-          return controller;
+          if (
+            !requireCompletionReconcile
+            || sessionControllerCanReconcileCompletedConversation(controller)
+          ) {
+            window.__codeyCodexSessionController = controller;
+            return controller;
+          }
         }
+        fallbackDispatcher ||= signalDispatcherFromModule(module, namedSignalAsset);
       } catch {
         continue;
       }
     }
-    throw new Error("Codex 会话管理接口不可用");
+    if (fallbackDispatcher && !requireCompletionReconcile) {
+      window.__codeyCodexSignalDispatcher = fallbackDispatcher;
+      const controller = legacySessionController(fallbackDispatcher);
+      window.__codeyCodexSessionController = controller;
+      return controller;
+    }
+    throw new Error(
+      requireCompletionReconcile
+        ? "Codex 完成态同步接口不可用"
+        : "Codex 会话管理接口不可用",
+    );
   };
   window.__codeyLoadCodexSessionController = loadCodexSessionController;
 
@@ -2357,160 +2290,32 @@
   };
   window.__codeyReadAccountRateLimits = readAccountRateLimits;
 
-  const completionProbeTargetStillCurrent = (sessionId, turnId) => (
-    document.visibilityState !== "hidden"
-    && isTaskRunning()
-    && getSessionId() === sessionId
-    && getCurrentTurnId() === turnId
-  );
-
-  const completionRecoveryIsBlocked = (completionKey, now) => (
-    now < (completionRecoveryStateByKey.get(completionKey)?.retryAt || 0)
-  );
-
-  const rememberCompletionRecoveryAttempt = (completionKey, retryDelayMs) => {
-    const previousAttempts = completionRecoveryStateByKey.get(completionKey)?.attempts || 0;
-    const attempts = previousAttempts + 1;
-    const attemptsExhausted = attempts >= stuckCompletionRecoveryMaxAttempts;
-    rememberBoundedMapValue(
-      completionRecoveryStateByKey,
-      completionKey,
-      {
-        attempts: attemptsExhausted ? 0 : attempts,
-        retryAt: Date.now() + (
-          attemptsExhausted ? stuckCompletionRecoveryResetMs : retryDelayMs
-        ),
-      },
-      maxCompletionRecoveryKeys,
-    );
-  };
-
-  const resetRunningStreamEvidence = (
-    observation,
-    activityRevision = "",
-    renderFingerprint = "",
-  ) => {
-    if (!observation) return;
-    observation.activityRevision = activityRevision;
-    observation.renderFingerprint = renderFingerprint;
-    observation.activityAdvanceCount = 0;
-    observation.streamStalledSince = 0;
-  };
-
-  const observeRunningStreamDetachment = (result, turnId, now) => {
-    const observation = completionRunningObservation;
-    const activityRevision = typeof result?.activityRevision === "string"
-      ? result.activityRevision.trim()
-      : "";
-    const renderFingerprint = currentTurnRenderFingerprint(turnId);
-    if (!observation || !activityRevision || !renderFingerprint) {
-      resetRunningStreamEvidence(observation, activityRevision, renderFingerprint);
-      return { confirmed: false, renderFingerprint };
-    }
-    if (observation.renderFingerprint !== renderFingerprint) {
-      resetRunningStreamEvidence(observation, activityRevision, renderFingerprint);
-      return { confirmed: false, renderFingerprint };
-    }
-    if (!observation.activityRevision) {
-      observation.activityRevision = activityRevision;
-      return { confirmed: false, renderFingerprint };
-    }
-    if (observation.activityRevision === activityRevision) {
-      return { confirmed: false, renderFingerprint };
-    }
-    observation.activityRevision = activityRevision;
-    observation.activityAdvanceCount += 1;
-    observation.streamStalledSince ||= now;
-    return {
-      confirmed: observation.activityAdvanceCount >= stuckRunningStreamMinActivityAdvances
-        && now - observation.streamStalledSince >= stuckRunningStreamGraceMs,
-      renderFingerprint,
-    };
-  };
-
-  const probeStuckTaskCompletion = async () => {
-    if (document.visibilityState === "hidden") {
-      completionRunningObservation = null;
+  const reconcileStaleCompletedTask = async () => {
+    if (document.visibilityState === "hidden") return false;
+    const sessionId = getSessionId();
+    if (!sessionId) {
+      completionReconcileSessionId = "";
+      completionNextReconcileAt = 0;
       return false;
+    }
+    if (completionReconcileSessionId !== sessionId) {
+      completionReconcileSessionId = sessionId;
+      completionNextReconcileAt = 0;
     }
     const now = Date.now();
-    if (!isTaskRunning()) {
-      if (completionRunningObservation?.key) {
-        completionRecoveryStateByKey.delete(completionRunningObservation.key);
-      }
-      completionRunningObservation = null;
-      return false;
-    }
-    const sessionId = getSessionId();
-    const turnId = getCurrentTurnId();
-    if (!sessionId || !turnId) {
-      completionRunningObservation = null;
-      return false;
-    }
-    const completionKey = `${sessionId}\u0000${turnId}`;
-    if (completionRunningObservation?.key !== completionKey) {
-      completionRunningObservation = {
-        activityAdvanceCount: 0,
-        activityRevision: "",
-        key: completionKey,
-        renderFingerprint: currentTurnRenderFingerprint(turnId),
-        since: now,
-        streamStalledSince: 0,
-      };
-      return false;
-    }
-    if (now - completionRunningObservation.since < stuckCompletionGraceMs) return false;
-    if (
-      completionProbeInFlight
-      || now < completionNextProbeAt
-      || completionRecoveryIsBlocked(completionKey, now)
-    ) return false;
+    if (completionReconcileInFlight || now < completionNextReconcileAt) return false;
 
-    completionProbeInFlight = true;
-    completionNextProbeAt = now + stuckCompletionProbeIntervalMs;
-    let recoveryAttempted = false;
+    completionReconcileInFlight = true;
+    completionNextReconcileAt = now + completedTaskReconcileIntervalMs;
     try {
-      const result = await callBridge(
-        stuckCompletionBridgePath,
-        { sessionId, turnId },
-        { timeoutMs: stuckCompletionProbeTimeoutMs },
-      );
-      if (result?.status !== "ok") {
-        rememberCompletionRecoveryAttempt(
-          completionKey,
-          stuckCompletionRecoveryCooldownMs,
-        );
-        return false;
-      }
-      const authoritativeTargetMatches = result.sessionId === sessionId
-        && result.turnId === turnId
-        && result.sessionKnown === true
-        && result.turnKnown === true;
-      if (!authoritativeTargetMatches) {
-        resetRunningStreamEvidence(completionRunningObservation);
-        return false;
-      }
-      if (result.lifecycle === "running" && result.terminal === false) {
-        const streamEvidence = observeRunningStreamDetachment(result, turnId, Date.now());
-        if (!streamEvidence.confirmed) return false;
-
-        recoveryAttempted = true;
-        const controller = await getCodexSessionController();
-        if (typeof controller.rehydrateRunningConversation !== "function") {
-          rememberCompletionRecoveryAttempt(
-            completionKey,
-            stuckCompletionRecoveryCooldownMs,
-          );
-          return false;
-        }
-        // Asset discovery can take long enough for React to receive another
-        // stream event. Recheck both identity and the exact rendered tail before
-        // clearing the stale local owner role.
+      return await callNativeCompletionReconcileOperation(async (controller) => {
         if (
-          !completionProbeTargetStillCurrent(sessionId, turnId)
-          || currentTurnRenderFingerprint(turnId) !== streamEvidence.renderFingerprint
+          controller?.kind !== "manager"
+          || typeof controller.reconcileCompletedConversation !== "function"
+          || document.visibilityState === "hidden"
+          || getSessionId() !== sessionId
         ) return false;
-        const rehydrated = await controller.rehydrateRunningConversation({
+        const reconciled = await controller.reconcileCompletedConversation({
           conversationId: sessionId,
           model: null,
           serviceTier: null,
@@ -2519,73 +2324,14 @@
           collaborationMode: null,
           showThreadGoalResumeConfirmation: false,
         });
-        if (rehydrated !== true) {
-          rememberCompletionRecoveryAttempt(
-            completionKey,
-            stuckCompletionRecoveryCooldownMs,
-          );
-          return false;
-        }
-        resetRunningStreamEvidence(
-          completionRunningObservation,
-          String(result.activityRevision || ""),
-          currentTurnRenderFingerprint(turnId),
-        );
-        rememberCompletionRecoveryAttempt(
-          completionKey,
-          stuckCompletionRecoveryRetryMs,
-        );
-        return true;
-      }
-      resetRunningStreamEvidence(
-        completionRunningObservation,
-        typeof result.activityRevision === "string" ? result.activityRevision : "",
-        currentTurnRenderFingerprint(turnId),
-      );
-      const lifecycleIsTerminal = result?.lifecycle === "idle" || result?.lifecycle === "error";
-      const terminalKindIsKnown = result?.terminalKind === "completed"
-        || result?.terminalKind === "aborted";
-      if (
-        result.terminal !== true
-        || !terminalKindIsKnown
-        || !lifecycleIsTerminal
-        || !completionProbeTargetStillCurrent(sessionId, turnId)
-      ) return false;
-
-      recoveryAttempted = true;
-      const controller = await getCodexSessionController();
-      // Controller discovery can import renderer assets. Recheck the exact
-      // task and turn immediately before the first native state mutation.
-      if (!completionProbeTargetStillCurrent(sessionId, turnId)) return false;
-      await controller.discardConversation(sessionId);
-      await controller.resumeConversation({
-        conversationId: sessionId,
-        model: null,
-        serviceTier: null,
-        reasoningEffort: null,
-        workspaceRoots: [],
-        collaborationMode: null,
-        showThreadGoalResumeConfirmation: false,
+        return reconciled === true
+          && document.visibilityState !== "hidden"
+          && getSessionId() === sessionId;
       });
-      await controller.refreshRecentConversations();
-      // Native refresh promises can resolve before React drops the stale Stop
-      // state. Revisit the same exact task after a short grace period; clearing
-      // the Stop state removes this retry record at the top of the next probe.
-      rememberCompletionRecoveryAttempt(
-        completionKey,
-        stuckCompletionRecoveryRetryMs,
-      );
-      return true;
     } catch {
-      rememberCompletionRecoveryAttempt(
-        completionKey,
-        recoveryAttempted
-          ? stuckCompletionRecoveryCooldownMs
-          : stuckCompletionProbeIntervalMs,
-      );
       return false;
     } finally {
-      completionProbeInFlight = false;
+      completionReconcileInFlight = false;
     }
   };
 
@@ -2598,6 +2344,17 @@
     // Bound discovery separately: a late import must not start a destructive
     // native operation after the caller has already reported a timeout.
     const controller = await waitForNativeSessionOperation(getCodexSessionController);
+    return waitForNativeSessionOperation(() => operation(controller));
+  };
+
+  const callNativeCompletionReconcileOperation = async (operation) => {
+    // A legacy signals controller may have been cached by account usage or
+    // message deletion before app-initial became discoverable. Completion
+    // reconciliation specifically requires the patched AppServerManager, so it
+    // must retry manager discovery instead of accepting that cached fallback.
+    const controller = await waitForNativeSessionOperation(() => (
+      loadCodexSessionController({ requireCompletionReconcile: true })
+    ));
     return waitForNativeSessionOperation(() => operation(controller));
   };
 
@@ -3724,7 +3481,7 @@
   window.__codeyGetSessionTitle = getSessionTitle;
   window.__codeySyncSidebarTitles = syncSidebarTitles;
   window.__codeyGetMessageId = getMessageId;
-  window.__codeyProbeStuckTaskCompletion = probeStuckTaskCompletion;
+  window.__codeyReconcileStaleCompletedTask = reconcileStaleCompletedTask;
   window.__codeyProjectPathFromRow = projectPathFromRow;
   window.__codeyFormatRelativeThreadTime = formatRelativeThreadTime;
   window.__codeyThreadTimestampMsFromPayload = threadTimestampMsFromPayload;
@@ -4035,7 +3792,7 @@
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "hidden") {
         refreshThreadUpdatedTimesOnReturn();
-        void probeStuckTaskCompletion();
+        void reconcileStaleCompletedTask();
       }
     });
     document.addEventListener("pointerdown", wakeSessionWatcher, { capture: true, passive: true });
@@ -4044,15 +3801,15 @@
   if (typeof window.addEventListener === "function") {
     window.addEventListener("focus", wakeSessionWatcher);
     window.addEventListener("focus", refreshThreadUpdatedTimesOnReturn);
-    window.addEventListener("focus", probeStuckTaskCompletion);
+    window.addEventListener("focus", reconcileStaleCompletedTask);
     window.addEventListener("pageshow", wakeSessionWatcher);
     window.addEventListener("pageshow", refreshThreadUpdatedTimesOnReturn);
-    window.addEventListener("pageshow", probeStuckTaskCompletion);
+    window.addEventListener("pageshow", reconcileStaleCompletedTask);
   }
   if (typeof window.setInterval === "function") {
     window.setInterval(() => {
-      void probeStuckTaskCompletion();
-    }, stuckCompletionProbeIntervalMs);
+      void reconcileStaleCompletedTask();
+    }, completedTaskReconcileIntervalMs);
     window.setInterval(() => {
       if (document.visibilityState === "hidden") return;
       refreshTrackedThreadUpdatedTimes(false);
@@ -4061,6 +3818,6 @@
   window.__codeyRendererInjectLoaded = true;
   window.__codeySessionToolsInjectLoaded = true;
   window.__codeySessionToolsInjectLoading = false;
-  void probeStuckTaskCompletion();
+  void reconcileStaleCompletedTask();
   scheduleInitialScan();
 })();

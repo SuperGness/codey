@@ -69,7 +69,6 @@ pub struct RecentSessionEvents {
     pub aborted_turns: Arc<Vec<AbortedTurn>>,
     pub completed_turns: Arc<Vec<CompletedTurn>>,
     pub session_statuses: Arc<HashMap<String, SessionLifecycleStatus>>,
-    pub rollout_revisions: Arc<HashMap<String, String>>,
     pub turn_configurations: Arc<HashMap<String, HashMap<String, TurnConfiguration>>>,
 }
 
@@ -98,16 +97,6 @@ impl RolloutSignature {
             #[cfg(unix)]
             inode: metadata.ino(),
         }
-    }
-
-    fn activity_revision(&self) -> String {
-        let modified_nanos = self
-            .modified
-            .as_ref()
-            .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|duration| duration.as_nanos())
-            .unwrap_or_default();
-        format!("{}:{modified_nanos}", self.len)
     }
 }
 
@@ -527,18 +516,6 @@ impl RecentSessionEventCache {
         self.refresh_rollouts(rollouts)
     }
 
-    /// Refreshes lifecycle state for one exact root session. Completion probes
-    /// use this narrower path so a renderer check does not rescan every recent
-    /// rollout or move the webhook watcher's cache out from under it.
-    pub fn refresh_session(&mut self, home: &Path, session_id: &str) -> Arc<RecentSessionEvents> {
-        let session_id = session_id.trim();
-        if session_id.is_empty() {
-            return self.refresh_rollouts(Vec::new());
-        }
-        let rollouts = self.codey_rollouts_for_session(home, session_id);
-        self.refresh_rollouts(rollouts)
-    }
-
     pub(crate) fn release_database_connections(&mut self) {
         self.database_connections.clear();
     }
@@ -567,53 +544,6 @@ impl RecentSessionEventCache {
         rollouts.sort();
         rollouts.dedup();
         rollouts
-    }
-
-    fn codey_rollouts_for_session(
-        &mut self,
-        home: &Path,
-        session_id: &str,
-    ) -> Vec<(String, PathBuf)> {
-        let database_paths = self.session_database_paths(home);
-        let mut candidates = Vec::new();
-        for database_path in database_paths {
-            if !self.ensure_database_connection(&database_path) {
-                continue;
-            }
-            let query_result = self.database_connections.get(&database_path).map(|cached| {
-                query_codey_rollout_for_session(&cached.connection, home, session_id)
-            });
-            match query_result {
-                Some(Ok(Some(row))) => candidates.push(row),
-                Some(Ok(None)) => {}
-                Some(Err(_)) => {
-                    self.database_connections.remove(&database_path);
-                }
-                None => {}
-            }
-        }
-        let Some(latest_updated_at) = candidates
-            .iter()
-            .map(|(updated_at, _, _)| *updated_at)
-            .max()
-        else {
-            return Vec::new();
-        };
-        let mut latest = candidates
-            .into_iter()
-            .filter(|(updated_at, _, _)| *updated_at == latest_updated_at)
-            .map(|(_, session_id, path)| (session_id, path))
-            .collect::<Vec<_>>();
-        latest.sort();
-        latest.dedup();
-        // Multiple newest rows that disagree on the rollout path have no safe
-        // authority ordering. Refuse to confirm completion instead of merging
-        // a stale terminal event from one database with another's lifecycle.
-        if latest.len() == 1 {
-            latest
-        } else {
-            Vec::new()
-        }
     }
 
     fn session_database_paths(&mut self, home: &Path) -> Vec<PathBuf> {
@@ -724,7 +654,6 @@ impl RecentSessionEventCache {
                 aborted_turns: Arc::clone(&snapshot.aborted_turns),
                 completed_turns: Arc::clone(&snapshot.completed_turns),
                 session_statuses: Arc::clone(&snapshot.session_statuses),
-                rollout_revisions: Arc::clone(&snapshot.rollout_revisions),
                 turn_configurations: Arc::clone(&snapshot.turn_configurations),
             });
             self.last_snapshot = Some(Arc::clone(&snapshot));
@@ -736,7 +665,6 @@ impl RecentSessionEventCache {
         let mut aborted_turns = Vec::new();
         let mut completed_turns = Vec::new();
         let mut session_statuses = HashMap::new();
-        let mut rollout_revisions = HashMap::new();
         let mut turn_configurations = HashMap::new();
         for (session_id, rollout_path) in rollouts {
             let Some(cached) = self
@@ -761,7 +689,6 @@ impl RecentSessionEventCache {
                 .map(|duration| duration.as_millis())
                 .unwrap_or_default();
             session_statuses.insert(session_id.clone(), status);
-            rollout_revisions.insert(session_id.clone(), signature.activity_revision());
             turn_configurations.insert(session_id.clone(), parsed.turn_configurations.clone());
             pending_approvals.extend(waiting_approvals.into_iter().map(|(turn_id, waiting_id)| {
                 PendingApproval {
@@ -812,7 +739,6 @@ impl RecentSessionEventCache {
             aborted_turns: Arc::new(aborted_turns),
             completed_turns: Arc::new(completed_turns),
             session_statuses: Arc::new(session_statuses),
-            rollout_revisions: Arc::new(rollout_revisions),
             turn_configurations: Arc::new(turn_configurations),
         });
         self.last_snapshot = Some(Arc::clone(&snapshot));
@@ -983,35 +909,6 @@ fn query_recent_codey_rollouts(
         ));
     }
     Ok(rollouts)
-}
-
-fn query_codey_rollout_for_session(
-    connection: &Connection,
-    home: &Path,
-    session_id: &str,
-) -> rusqlite::Result<Option<(i64, String, PathBuf)>> {
-    let mut statement = connection.prepare_cached(
-        "SELECT updated_at, id, rollout_path FROM threads \
-         WHERE archived=0 AND id=?1 \
-           AND typeof(id)='text' AND typeof(rollout_path)='text' \
-         ORDER BY updated_at DESC LIMIT 1",
-    )?;
-    let mut rows = statement.query(params![session_id])?;
-    let Some(row) = rows.next()? else {
-        return Ok(None);
-    };
-    let updated_at = row.get::<_, i64>(0)?;
-    let session_id = row.get::<_, String>(1)?;
-    let rollout_path = PathBuf::from(row.get::<_, String>(2)?);
-    Ok(Some((
-        updated_at,
-        session_id,
-        if rollout_path.is_absolute() {
-            rollout_path
-        } else {
-            home.join(rollout_path)
-        },
-    )))
 }
 
 #[cfg(test)]
@@ -1718,83 +1615,5 @@ mod tests {
 
         cache.release_database_connections();
         assert!(cache.database_connections.is_empty());
-    }
-
-    #[test]
-    fn exact_session_refresh_ignores_unrelated_rollouts_and_updates_incrementally() {
-        let temp = tempfile::tempdir().unwrap();
-        let target_rollout = temp.path().join("rollout-target.jsonl");
-        let unrelated_rollout = temp.path().join("rollout-unrelated.jsonl");
-        fs::write(
-            &target_rollout,
-            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-target"}}
-"#,
-        )
-        .unwrap();
-        fs::write(
-            &unrelated_rollout,
-            r#"{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-other"}}
-{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-other"}}
-"#,
-        )
-        .unwrap();
-        let database_path = temp.path().join("state_5.sqlite");
-        let database = Connection::open(&database_path).unwrap();
-        database
-            .execute_batch(
-                "CREATE TABLE threads (
-                    id TEXT PRIMARY KEY,
-                    rollout_path TEXT NOT NULL,
-                    archived INTEGER NOT NULL DEFAULT 0,
-                    updated_at INTEGER NOT NULL
-                );",
-            )
-            .unwrap();
-        for (session_id, rollout_path, updated_at) in [
-            ("target", &target_rollout, 1_i64),
-            ("unrelated", &unrelated_rollout, 2_i64),
-        ] {
-            database
-                .execute(
-                    "INSERT INTO threads (id, rollout_path, archived, updated_at)
-                     VALUES (?1, ?2, 0, ?3)",
-                    params![session_id, rollout_path.to_string_lossy(), updated_at],
-                )
-                .unwrap();
-        }
-        drop(database);
-
-        let mut cache = RecentSessionEventCache::default();
-        let first = cache.refresh_session(temp.path(), "target");
-
-        assert_eq!(first.session_statuses.len(), 1);
-        assert_eq!(
-            first.session_statuses.get("target"),
-            Some(&SessionLifecycleStatus::Running)
-        );
-        assert!(!first.session_statuses.contains_key("unrelated"));
-        assert!(first.completed_turns.is_empty());
-
-        writeln!(
-            fs::OpenOptions::new()
-                .append(true)
-                .open(&target_rollout)
-                .unwrap(),
-            r#"{{"type":"event_msg","payload":{{"type":"task_complete","turn_id":"turn-target"}}}}"#
-        )
-        .unwrap();
-        let completed = cache.refresh_session(temp.path(), "target");
-
-        assert_eq!(cache.incremental_parse_count, 1);
-        assert_eq!(
-            completed.session_statuses.get("target"),
-            Some(&SessionLifecycleStatus::Idle)
-        );
-        assert_eq!(completed.completed_turns.len(), 1);
-        assert_eq!(completed.completed_turns[0].turn_id, "turn-target");
-
-        let unknown = cache.refresh_session(temp.path(), "missing");
-        assert!(unknown.session_statuses.is_empty());
-        assert!(unknown.completed_turns.is_empty());
     }
 }

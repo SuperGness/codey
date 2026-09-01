@@ -1015,67 +1015,115 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       delete globalThis.__CODEY_THREAD_OWNER_DISCOVERY_V2__;
     }
 
-    const runningRehydrationSource = [
+    const completedReconciliationSource = [
       "class RunningManager{",
       "constructor(){this.conversation={inProgress:!0,resumeState:`resumed`};",
-      "this.role={role:`owner`};this.events=[];",
+      "this.role={role:`owner`};this.revision=1;this.statuses=[`idle`,`idle`];this.events=[];",
       "this.productPolicy={runtimePolicy:{isLocalConversationInProgress:e=>e.inProgress===!0}};",
       "this.inactiveThreadUnsubscriber={clearConversationStreamOwnership:e=>{this.events.push(`clear:${e}`);this.role=null}}}",
       "getConversation(){return this.conversation}",
+      "getConversationStreamRevision(){return this.revision}",
       "getStreamRole(){return this.role}",
+      "async sendRequest(e,t){this.events.push(`read:${e}:${t.threadId}:${t.includeTurns}`);return{thread:{status:this.statuses.shift()??`idle`}}}",
       "updateConversationState(e,t){this.events.push(`state:${e}`);t(this.conversation)}",
-      "async maybeResumeConversation(e){this.events.push(`resume:${e.conversationId}`);this.role={role:`owner`}}",
+      "async maybeResumeConversation(e){this.events.push(`resume:${e.conversationId}`);this.conversation.inProgress=!1;this.role={role:`owner`}}",
       "async resumeConversation(e){await this.maybeResumeConversation(e);return{activeTurnId:null}}",
       "discardConversationFromCache(e){return this.productPolicy.runtimePolicy.isLocalConversationInProgress(this.conversation)&&this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(e)}",
       "}",
     ].join("");
     electron.protocol.handle(
       "app",
-      async () => new Response(runningRehydrationSource),
+      async () => new Response(completedReconciliationSource),
     );
-    const runningRehydrationResponse = await installedHandler({
+    const completedReconciliationResponse = await installedHandler({
       url: "app://-/assets/app-initial-BHB6SClA.js",
     });
-    const patchedRunningRehydrationSource = await runningRehydrationResponse.text();
+    const patchedCompletedReconciliationSource = await completedReconciliationResponse.text();
     assert.match(
-      patchedRunningRehydrationSource,
-      /async codeyRehydrateRunningConversation\(/,
+      patchedCompletedReconciliationSource,
+      /async codeyReconcileCompletedConversation\(/,
     );
     const RunningManager = Function(
-      `${patchedRunningRehydrationSource};return RunningManager`,
+      `${patchedCompletedReconciliationSource};return RunningManager`,
     )();
-    const runningManager = new RunningManager();
-    assert.equal(
-      await runningManager.codeyRehydrateRunningConversation({
-        conversationId: "thread-running",
-      }),
-      true,
-    );
-    assert.deepEqual(runningManager.events, [
-      "clear:thread-running",
-      "state:thread-running",
-      "resume:thread-running",
-    ]);
-    assert.equal(runningManager.conversation.resumeState, "needs_resume");
-    assert.deepEqual(runningManager.role, { role: "owner" });
+    const reconcileNativeSetTimeout = globalThis.setTimeout;
+    const reconcileDelays = [];
+    globalThis.setTimeout = (callback, delay) => {
+      reconcileDelays.push(delay);
+      callback();
+      return 1;
+    };
+    try {
+      const completedManager = new RunningManager();
+      assert.equal(
+        await completedManager.codeyReconcileCompletedConversation({
+          conversationId: "thread-completed",
+        }),
+        true,
+      );
+      assert.deepEqual(completedManager.events, [
+        "read:thread/read:thread-completed:false",
+        "read:thread/read:thread-completed:false",
+        "clear:thread-completed",
+        "state:thread-completed",
+        "resume:thread-completed",
+      ]);
+      assert.deepEqual(reconcileDelays, [250]);
+      assert.equal(completedManager.conversation.resumeState, "needs_resume");
+      assert.deepEqual(completedManager.role, { role: "owner" });
 
-    const idleManager = new RunningManager();
-    idleManager.conversation.inProgress = false;
-    assert.equal(
-      await idleManager.codeyRehydrateRunningConversation({ conversationId: "thread-idle" }),
-      false,
-    );
-    assert.deepEqual(idleManager.events, []);
+      const activeManager = new RunningManager();
+      activeManager.statuses = ["running"];
+      assert.equal(
+        await activeManager.codeyReconcileCompletedConversation({
+          conversationId: "thread-running",
+        }),
+        false,
+      );
+      assert.deepEqual(activeManager.events, [
+        "read:thread/read:thread-running:false",
+      ]);
 
-    const followerManager = new RunningManager();
-    followerManager.role = { role: "follower", ownerClientId: "other-window" };
-    assert.equal(
-      await followerManager.codeyRehydrateRunningConversation({
-        conversationId: "thread-followed",
-      }),
-      false,
-    );
-    assert.deepEqual(followerManager.events, []);
+      const changedRevisionManager = new RunningManager();
+      const sendRequest = changedRevisionManager.sendRequest.bind(changedRevisionManager);
+      changedRevisionManager.sendRequest = async (...args) => {
+        const response = await sendRequest(...args);
+        if (changedRevisionManager.events.length === 2) {
+          changedRevisionManager.revision += 1;
+        }
+        return response;
+      };
+      assert.equal(
+        await changedRevisionManager.codeyReconcileCompletedConversation({
+          conversationId: "thread-updated",
+        }),
+        false,
+      );
+      assert.deepEqual(changedRevisionManager.events, [
+        "read:thread/read:thread-updated:false",
+        "read:thread/read:thread-updated:false",
+      ]);
+
+      const idleManager = new RunningManager();
+      idleManager.conversation.inProgress = false;
+      assert.equal(
+        await idleManager.codeyReconcileCompletedConversation({ conversationId: "thread-idle" }),
+        false,
+      );
+      assert.deepEqual(idleManager.events, []);
+
+      const followerManager = new RunningManager();
+      followerManager.role = { role: "follower", ownerClientId: "other-window" };
+      assert.equal(
+        await followerManager.codeyReconcileCompletedConversation({
+          conversationId: "thread-followed",
+        }),
+        false,
+      );
+      assert.deepEqual(followerManager.events, []);
+    } finally {
+      globalThis.setTimeout = reconcileNativeSetTimeout;
+    }
 
     const interactionPerformanceSource = [
       "Hcn=class{activeInteractions=new Map;beginCpuSampling;",

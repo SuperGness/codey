@@ -490,7 +490,13 @@ const createStartupUpdateFixture = (bridge) => {
       selector === "header" ? [visibleHeader] : [],
   };
   const window = {
-    __codexSessionDeleteBridge: bridge,
+    __codexSessionDeleteBridge: async (path, payload, options) => {
+      if (path === "/internal/codey/session-tools/load") {
+        window.__codeySessionToolsInjectLoaded = true;
+        return { status: "ok" };
+      }
+      return bridge(path, payload, options);
+    },
     addEventListener() {},
     alert(message) {
       alerts.push(String(message));
@@ -506,6 +512,18 @@ const createStartupUpdateFixture = (bridge) => {
     getComputedStyle: () => ({ display: "flex", visibility: "visible" }),
     innerWidth: 1200,
     localStorage: { getItem: () => null, key: () => null, length: 0, setItem() {} },
+    requestIdleCallback(callback, options = {}) {
+      const timer = {
+        id: nextTimerId,
+        callback,
+        delay: options.timeout ?? 0,
+        cleared: false,
+        idle: true,
+      };
+      nextTimerId += 1;
+      timers.push(timer);
+      return timer.id;
+    },
     setTimeout(callback, delay) {
       const timer = { id: nextTimerId, callback, delay, cleared: false };
       nextTimerId += 1;
@@ -527,6 +545,7 @@ const createStartupUpdateFixture = (bridge) => {
     HTMLElement: FakeElement,
     location: { pathname: "/", search: "" },
     MutationObserver: class {
+      disconnect() {}
       observe() {}
     },
     URLSearchParams,
