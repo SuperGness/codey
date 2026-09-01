@@ -173,9 +173,11 @@ pub fn refresh_for_provider(
         upstream_models,
         selected_models,
         None,
+        None,
     )
 }
 
+#[cfg(test)]
 pub(crate) fn refresh_for_provider_with_websocket_models(
     home: &Path,
     official_provider: bool,
@@ -189,6 +191,25 @@ pub(crate) fn refresh_for_provider_with_websocket_models(
         upstream_models,
         selected_models,
         Some(websocket_models),
+        None,
+    )
+}
+
+pub(crate) fn refresh_for_provider_with_capabilities(
+    home: &Path,
+    official_provider: bool,
+    upstream_models: Option<&[String]>,
+    selected_models: &[String],
+    websocket_models: &[String],
+    native_web_search_models: &[String],
+) -> Result<usize> {
+    refresh_for_provider_with_transport_preferences(
+        home,
+        official_provider,
+        upstream_models,
+        selected_models,
+        Some(websocket_models),
+        Some(native_web_search_models),
     )
 }
 
@@ -198,6 +219,7 @@ fn refresh_for_provider_with_transport_preferences(
     upstream_models: Option<&[String]>,
     selected_models: &[String],
     websocket_models: Option<&[String]>,
+    native_web_search_models: Option<&[String]>,
 ) -> Result<usize> {
     let official_models = read_official_entries(home)?;
     ensure_runtime_compatible_models(&official_models)?;
@@ -286,6 +308,14 @@ fn refresh_for_provider_with_transport_preferences(
                 .is_some_and(|slug| websocket_model_keys.contains(&model_id::key(slug)));
             model["prefer_websockets"] = json!(prefer_websockets);
         }
+    }
+    let native_web_search_model_keys = native_web_search_models
+        .unwrap_or_default()
+        .iter()
+        .map(|model| model_id::key(model))
+        .collect::<HashSet<_>>();
+    for model in &mut catalog_models {
+        gate_synthetic_native_web_search(model, &native_web_search_model_keys);
     }
     write_catalog(home, &catalog_models)?;
     let written_models = read_runtime_catalog_models(home)?;
@@ -470,6 +500,45 @@ pub fn is_available(home: &Path) -> bool {
         let models = catalog_models_from_value(&value);
         runtime_compatible_models(&models)
     })
+}
+
+/// Makes a previously generated catalog safe to reuse when the upstream model
+/// cache cannot be refreshed. Older catalogs may still advertise native Web
+/// Search for a route whose protocol or capability setting has since changed.
+/// This fallback is intentionally subtractive: it can remove stale capability
+/// metadata, but never invent support that was absent from the cached source.
+pub(crate) fn prepare_cached_catalog_for_native_web_search(
+    home: &Path,
+    native_web_search_models: &[String],
+) -> Result<bool> {
+    if !is_available(home) {
+        return Ok(false);
+    }
+
+    let mut models = read_runtime_catalog_models(home)?;
+    let allowed_model_keys = native_web_search_models
+        .iter()
+        .map(|model| model_id::key(model))
+        .collect::<HashSet<_>>();
+    let mut changed = false;
+    for model in &mut models {
+        let previous = model.clone();
+        gate_cached_native_web_search(model, &allowed_model_keys);
+        changed |= *model != previous;
+    }
+    if changed {
+        write_catalog(home, &models)?;
+    }
+
+    let written_models = read_runtime_catalog_models(home)?;
+    let mut safely_gated_models = written_models.clone();
+    for model in &mut safely_gated_models {
+        gate_cached_native_web_search(model, &allowed_model_keys);
+    }
+    if safely_gated_models != written_models {
+        bail!("复用的 Codey 模型目录仍包含与当前线路不匹配的原生网页搜索能力");
+    }
+    Ok(true)
 }
 
 /// Repairs catalogs written by older Codey versions that copied model-cache
@@ -1204,6 +1273,33 @@ fn synthetic_model(
     model
 }
 
+fn gate_synthetic_native_web_search(model: &mut Value, allowed_model_keys: &HashSet<String>) {
+    if model.get("codey_source").and_then(Value::as_str) != Some("third_party") {
+        return;
+    }
+    gate_cached_native_web_search(model, allowed_model_keys);
+}
+
+fn gate_cached_native_web_search(model: &mut Value, allowed_model_keys: &HashSet<String>) {
+    let allowed = model
+        .get("slug")
+        .and_then(Value::as_str)
+        .is_some_and(|slug| allowed_model_keys.contains(&model_id::key(slug)));
+    let source_declares_search = model.get("supports_search_tool").and_then(Value::as_bool)
+        == Some(true)
+        && model
+            .get("web_search_tool_type")
+            .and_then(Value::as_str)
+            .is_some_and(|tool_type| !tool_type.trim().is_empty());
+    if allowed && source_declares_search {
+        return;
+    }
+    if let Some(object) = model.as_object_mut() {
+        object.remove("supports_search_tool");
+        object.remove("web_search_tool_type");
+    }
+}
+
 fn write_catalog(home: &Path, models: &[Value]) -> Result<()> {
     let mut catalog = serde_json::to_vec_pretty(&json!({ "models": models }))
         .context("序列化 Codey 模型目录失败")?;
@@ -1377,6 +1473,23 @@ mod tests {
         fs::write(
             home.join("models_cache.json"),
             serde_json::to_vec(&official_cache()).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_cache_with_native_web_search(home: &Path) {
+        let mut cache = official_cache();
+        let sol = cache["models"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|model| model["slug"] == "gpt-5.6-sol")
+            .unwrap();
+        sol["supports_search_tool"] = json!(true);
+        sol["web_search_tool_type"] = json!("text_and_image");
+        fs::write(
+            home.join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
         )
         .unwrap();
     }
@@ -2042,6 +2155,8 @@ mod tests {
             "auto_review_model_override",
             "node_repl_auto_review_required",
             "node_repl_disabled",
+            "supports_search_tool",
+            "web_search_tool_type",
         ] {
             assert!(
                 custom.get(field).is_none(),
@@ -2093,6 +2208,93 @@ mod tests {
 
         assert_eq!(websocket["prefer_websockets"], true);
         assert_eq!(http["prefer_websockets"], false);
+    }
+
+    #[test]
+    fn native_web_search_is_gated_by_route_and_source_model_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache_with_native_web_search(home.path());
+        let selected = vec![
+            "route-search/gpt-5.6-sol".to_string(),
+            "route-off/gpt-5.6-sol".to_string(),
+            "route-search/claude-opus-5".to_string(),
+        ];
+        let native_web_search_models = vec![
+            "route-search/gpt-5.6-sol".to_string(),
+            "route-search/claude-opus-5".to_string(),
+        ];
+
+        refresh_for_provider_with_capabilities(
+            home.path(),
+            false,
+            Some(&selected),
+            &selected,
+            &[],
+            &native_web_search_models,
+        )
+        .unwrap();
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
+        )
+        .unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        let search = models
+            .iter()
+            .find(|model| model["slug"] == "route-search/gpt-5.6-sol")
+            .unwrap();
+        let disabled = models
+            .iter()
+            .find(|model| model["slug"] == "route-off/gpt-5.6-sol")
+            .unwrap();
+        let unknown = models
+            .iter()
+            .find(|model| model["slug"] == "route-search/claude-opus-5")
+            .unwrap();
+
+        assert_eq!(search["supports_search_tool"], true);
+        assert!(search["web_search_tool_type"].is_string());
+        for model in [disabled, unknown] {
+            assert!(model.get("supports_search_tool").is_none());
+            assert!(model.get("web_search_tool_type").is_none());
+        }
+    }
+
+    #[test]
+    fn cached_catalog_fallback_removes_stale_native_web_search_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache_with_native_web_search(home.path());
+        let selected = vec!["route-search/gpt-5.6-sol".to_string()];
+
+        refresh_for_provider_with_capabilities(
+            home.path(),
+            false,
+            Some(&selected),
+            &selected,
+            &[],
+            &selected,
+        )
+        .unwrap();
+        let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
+        let mut stale: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stale["models"][0]["supports_search_tool"], true);
+        assert!(stale["models"][0]["web_search_tool_type"].is_string());
+        stale["models"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("codey_source");
+        fs::write(&path, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
+
+        assert!(
+            prepare_cached_catalog_for_native_web_search(home.path(), &[]).unwrap(),
+            "a valid cached catalog should remain usable after stale capabilities are removed"
+        );
+        let sanitized: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert!(sanitized["models"][0].get("supports_search_tool").is_none());
+        assert!(sanitized["models"][0].get("web_search_tool_type").is_none());
+        let sanitized_bytes = fs::read(&path).unwrap();
+
+        assert!(prepare_cached_catalog_for_native_web_search(home.path(), &[]).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), sanitized_bytes);
     }
 
     #[test]

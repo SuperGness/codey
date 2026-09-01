@@ -59,6 +59,45 @@ async fn model_save_routes_accept_missing_or_null_ids_without_weakening_required
     assert_eq!(result["message"], "缺少参数：routeId");
 }
 
+#[tokio::test]
+async fn request_log_query_api_reports_ndjson_as_not_queryable() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = CodeyConfig::default();
+    config.route_request_log.backend = crate::config::RouteRequestLogBackend::Ndjson;
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(config),
+        ..AppState::default()
+    });
+
+    let result = invoke_api(
+        &state,
+        "query_route_request_logs",
+        json!({"page": 1, "pageSize": 25}),
+    )
+    .await;
+
+    assert_eq!(result["status"], "unavailable");
+    assert_eq!(result["backend"], "ndjson");
+    assert_eq!(result["queryable"], false);
+    assert_eq!(result["reason"], "ndjson_not_queryable");
+}
+
+#[tokio::test]
+async fn request_log_query_api_rejects_excessive_page_sizes() {
+    let state = Arc::new(AppState::default());
+
+    let result = invoke_api(
+        &state,
+        "query_route_request_logs",
+        json!({"page": 1, "pageSize": 101}),
+    )
+    .await;
+
+    assert_eq!(result["status"], "failed");
+    assert!(result["message"].as_str().unwrap().contains("每页条数"));
+}
+
 #[test]
 fn bridge_field_helpers_preserve_existing_payload_semantics() {
     let payload = json!({
@@ -618,6 +657,28 @@ async fn stale_concurrent_config_saves_are_rejected_without_diverging_disk_and_m
     assert_eq!(disk, memory);
     assert_eq!(memory.settings_revision, 1);
     assert_eq!(memory.user_scripts.len(), 1);
+}
+
+#[tokio::test]
+async fn request_log_save_without_a_running_router_reports_not_applicable_without_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig::default();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let mut input = initial;
+    input.route_request_log.enabled = true;
+    input.route_request_log.backend = crate::config::RouteRequestLogBackend::Sqlite;
+
+    let response = save_codey_config(&state, input).await.unwrap();
+
+    assert_eq!(response["status"], "ok");
+    assert_eq!(response["restartRequired"], false);
+    assert_eq!(response["routeRequestLogHotReloaded"], false);
+    assert_eq!(response["routeRequestLogHealth"], "not_applicable");
+    assert!(response["routeRequestLogHotReloadError"].is_null());
 }
 
 #[tokio::test]

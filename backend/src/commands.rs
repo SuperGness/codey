@@ -106,6 +106,8 @@ use crate::model_id;
 use crate::notifications::NotificationChannelConfig;
 use crate::pending_approval;
 use crate::plugin_marketplace;
+use crate::route_request_log::RouteRequestLogQuery;
+use crate::route_request_log::RouteRequestLogReconfigure;
 use crate::session_delete;
 use crate::session_metadata;
 use crate::session_transfer;
@@ -1043,6 +1045,12 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         }
         "refresh_diagnostic_storage_stats" => refresh_diagnostic_storage_stats(state).await,
         "refresh_trace_log_stats" => refresh_trace_log_stats(state).await,
+        "query_route_request_logs" => {
+            match serde_json::from_value::<RouteRequestLogQuery>(args.clone()) {
+                Ok(query) => query_route_request_logs(state, query).await,
+                Err(error) => Err(format!("请求日志查询参数无效：{error}")),
+            }
+        }
         "restart_codey" => schedule_restart_codey_runtime(state).await,
         "clear_diagnostic_storage" => clear_diagnostic_storage(state).await,
         "test_notification_channel" => {
@@ -1083,6 +1091,21 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         _ => Err(format!("未知 Codey API 命令：{command}")),
     };
     result.unwrap_or_else(api_error_message)
+}
+
+pub async fn query_route_request_logs(
+    state: &Arc<AppState>,
+    query: RouteRequestLogQuery,
+) -> Result<Value, String> {
+    let backend = state.config.read().await.route_request_log.backend;
+    let root = codey_runtime_core::paths::default_app_state_dir();
+    let page = tokio::task::spawn_blocking(move || {
+        crate::route_request_log::query_route_request_logs(&root, backend, query)
+    })
+    .await
+    .map_err(|error| format!("请求日志查询任务异常退出：{error}"))?
+    .map_err(|error| format!("查询请求日志失败：{error:#}"))?;
+    serde_json::to_value(page).map_err(|error| format!("请求日志查询结果序列化失败：{error}"))
 }
 
 pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
@@ -1269,6 +1292,7 @@ pub async fn save_codey_config(
 struct CodeyConfigSaveInput {
     config: CodeyConfig,
     local_router_enabled_present: bool,
+    route_request_log_present: bool,
     subagent_roles_present: bool,
     subagent_model_present: bool,
     subagent_reasoning_effort_present: bool,
@@ -1280,6 +1304,7 @@ impl CodeyConfigSaveInput {
         Self {
             config,
             local_router_enabled_present: true,
+            route_request_log_present: true,
             subagent_roles_present: true,
             subagent_model_present: true,
             subagent_reasoning_effort_present: true,
@@ -1296,6 +1321,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         .as_object()
         .ok_or_else(|| "参数 config 无效：必须是 object".to_string())?;
     let local_router_enabled_present = fields.contains_key("localRouterEnabled");
+    let route_request_log_present = fields.contains_key("routeRequestLog");
     let subagent_roles_present = fields.contains_key("subagentRoles");
     let subagent_model_present = fields.contains_key("subagentModel");
     let subagent_reasoning_effort_present = fields.contains_key("subagentReasoningEffort");
@@ -1304,6 +1330,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
     Ok(CodeyConfigSaveInput {
         config,
         local_router_enabled_present,
+        route_request_log_present,
         subagent_roles_present,
         subagent_model_present,
         subagent_reasoning_effort_present,
@@ -1334,6 +1361,7 @@ async fn save_codey_config_locked(
     let CodeyConfigSaveInput {
         config: mut config_input,
         local_router_enabled_present,
+        route_request_log_present,
         subagent_roles_present,
         subagent_model_present,
         subagent_reasoning_effort_present,
@@ -1347,6 +1375,9 @@ async fn save_codey_config_locked(
     config.active_profile_id = config_input.active_profile_id;
     if local_router_enabled_present {
         config.local_router_enabled = config_input.local_router_enabled;
+    }
+    if route_request_log_present {
+        config.route_request_log = config_input.route_request_log;
     }
     // Native providers can have model selections without a saved Codey route.
     // Do not prune these caches during read-only saves or router transitions.
@@ -1646,6 +1677,7 @@ async fn finish_codey_config_save(
     schedule_crashpad_pending_refresh(state, saved.config.protect_crashpad_pending);
     let model_state = current_model_state_async(&saved.config).await?;
     let model_hot_reload = hot_reload_runtime_models(state, &saved.config, &model_state).await;
+    let route_request_log_hot_reload = hot_reload_runtime_request_log(state, &saved.config).await;
     let subagent_hot_reload = if saved.reconcile_subagent_config {
         hot_reload_runtime_subagent_config(state, &saved.config).await
     } else {
@@ -1667,12 +1699,134 @@ async fn finish_codey_config_save(
         "modelState":model_state,
         "fastContextToolsStatus":saved.fast_context_tools_status,
         "restartRequired":restart_required,
+        "routeRequestLogHotReloaded":route_request_log_hot_reload.reloaded(),
+        "routeRequestLogHealth":route_request_log_hot_reload.health(),
+        "routeRequestLogHotReloadError":route_request_log_hot_reload.error(),
         "subagentConfigHotReloaded":subagent_config_hot_reloaded,
         "subagentConfigRepaired":subagent_config_repaired,
         "subagentConfigHealth":subagent_config_health,
         "subagentConfigRepairReasons":subagent_config_repair_reasons,
         "subagentConfigHotReloadError":subagent_config_hot_reload_error,
     })))
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum RouteRequestLogHotReloadStatus {
+    #[default]
+    NotApplicable,
+    Unchanged,
+    Enabled,
+    Disabled,
+    Superseded,
+    Failed,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct RouteRequestLogHotReloadOutcome {
+    status: RouteRequestLogHotReloadStatus,
+    error: Option<String>,
+}
+
+impl RouteRequestLogHotReloadOutcome {
+    fn superseded(error: impl Into<String>) -> Self {
+        Self {
+            status: RouteRequestLogHotReloadStatus::Superseded,
+            error: Some(error.into()),
+        }
+    }
+
+    fn failed(error: impl Into<String>) -> Self {
+        Self {
+            status: RouteRequestLogHotReloadStatus::Failed,
+            error: Some(error.into()),
+        }
+    }
+
+    fn reloaded(&self) -> bool {
+        matches!(
+            self.status,
+            RouteRequestLogHotReloadStatus::Enabled | RouteRequestLogHotReloadStatus::Disabled
+        )
+    }
+
+    fn health(&self) -> &'static str {
+        match self.status {
+            RouteRequestLogHotReloadStatus::NotApplicable => "not_applicable",
+            RouteRequestLogHotReloadStatus::Unchanged => "unchanged",
+            RouteRequestLogHotReloadStatus::Enabled => "enabled",
+            RouteRequestLogHotReloadStatus::Disabled => "disabled",
+            RouteRequestLogHotReloadStatus::Superseded => "superseded",
+            RouteRequestLogHotReloadStatus::Failed => "failed",
+        }
+    }
+
+    fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+async fn hot_reload_runtime_request_log(
+    state: &Arc<AppState>,
+    config: &CodeyConfig,
+) -> RouteRequestLogHotReloadOutcome {
+    let desired = config.route_request_log.clone();
+    let _runtime_operation = state.runtime_operation.lock().await;
+    let _config_commit_guard = state.config_write_lock.lock().await;
+    let current_config = state.config.read().await.clone();
+    if current_config.route_request_log != desired
+        || current_config.local_router_enabled != config.local_router_enabled
+    {
+        return RouteRequestLogHotReloadOutcome::superseded(
+            "Codey 设置在请求日志热更新前已被更新；已跳过过期配置",
+        );
+    }
+    let Some(runtime) = state.runtime.lock().await.clone() else {
+        return RouteRequestLogHotReloadOutcome::default();
+    };
+    if !runtime.applied_config.local_router_enabled || !current_config.local_router_enabled {
+        return RouteRequestLogHotReloadOutcome::default();
+    }
+    let runtime_generation = state.runtime_generation.load(Ordering::Acquire);
+    let current_runtime = state.runtime.lock().await.clone();
+    let same_runtime = current_runtime
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, &runtime));
+    if state.is_shutting_down()
+        || state.restart_in_progress.load(Ordering::Acquire)
+        || runtime_generation != state.runtime_generation.load(Ordering::Acquire)
+        || !same_runtime
+        || state.startup_error.read().await.is_some()
+    {
+        return RouteRequestLogHotReloadOutcome::superseded(
+            "Codex 运行时在请求日志热更新前发生变化；已跳过过期配置",
+        );
+    }
+
+    match runtime.reconfigure_request_log(&desired).await {
+        Ok(Some(RouteRequestLogReconfigure::Unchanged)) => RouteRequestLogHotReloadOutcome {
+            status: RouteRequestLogHotReloadStatus::Unchanged,
+            error: None,
+        },
+        Ok(Some(RouteRequestLogReconfigure::Enabled)) => RouteRequestLogHotReloadOutcome {
+            status: RouteRequestLogHotReloadStatus::Enabled,
+            error: None,
+        },
+        Ok(Some(RouteRequestLogReconfigure::Disabled)) => RouteRequestLogHotReloadOutcome {
+            status: RouteRequestLogHotReloadStatus::Disabled,
+            error: None,
+        },
+        Ok(None) => RouteRequestLogHotReloadOutcome::default(),
+        Err(error) => {
+            let error = format!("请求日志热更新失败：{error:#}");
+            error_log::record_failure(
+                "route_request_log_hot_reload_failed",
+                "reconfigure_route_request_log",
+                error.clone(),
+                json!({}),
+            );
+            RouteRequestLogHotReloadOutcome::failed(error)
+        }
+    }
 }
 
 fn schedule_crashpad_pending_refresh(state: &Arc<AppState>, protection_enabled: bool) {

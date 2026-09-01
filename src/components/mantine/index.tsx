@@ -235,6 +235,7 @@ export const Collapse = MantineCollapse;
 export interface InputProps
   extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "size"> {
   error?: boolean;
+  leftSection?: React.ReactNode;
   wrapperClassName?: string;
 }
 

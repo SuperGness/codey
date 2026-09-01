@@ -25,7 +25,9 @@ use crate::codex_config::{
     restore_runtime_config_for_router_mode as restore_codex_runtime_config_for_router_mode,
     user_owned_router_provider_occupies_id,
 };
-use crate::config::{CodeyConfig, GpuLaunchMode, ProviderProfile, RuntimeModelTarget};
+use crate::config::{
+    CodeyConfig, GpuLaunchMode, ProviderProfile, RouteRequestLogConfig, RuntimeModelTarget,
+};
 use crate::crashpad_pending_guard::{self, CrashpadPendingStatsHandle};
 use crate::error_log;
 use crate::local_router::{self, LocalRouter, ROUTER_PROVIDER_ID, RuntimeRouterEndpoint};
@@ -34,6 +36,7 @@ use crate::message_delete;
 use crate::model_catalog;
 use crate::model_id;
 use crate::pet_slim_patch;
+use crate::route_request_log::RouteRequestLogReconfigure;
 use crate::session_index_cleanup::{self, SessionIndexCleanupReport};
 use crate::startup_maintenance::{self, ProviderSyncPlan};
 use crate::subagent_policy;
@@ -489,6 +492,7 @@ async fn prepare_startup_model_catalog(
     let has_third_party_route = config.has_third_party_route();
     let (runtime_upstream_models, runtime_selected_models) = config.runtime_catalog_models();
     let runtime_websocket_models = config.runtime_websocket_model_aliases();
+    let runtime_native_web_search_models = config.runtime_native_web_search_model_aliases();
     let refresh_official_provider =
         config.official_account_available_this_launch && !has_third_party_route;
     let refresh_upstream_models = has_third_party_route.then_some(runtime_upstream_models);
@@ -512,16 +516,24 @@ async fn prepare_startup_model_catalog(
         .cloned()
         .unwrap_or_default();
     let requested_default_model = config.default_model_for_profile(current_profile);
-    let (refresh_result, catalog_available, selection_result) =
+    let (refresh_result, cached_catalog_result, selection_result) =
         tokio::task::spawn_blocking(move || {
-            let refresh = model_catalog::refresh_for_provider_with_websocket_models(
+            let refresh = model_catalog::refresh_for_provider_with_capabilities(
                 &catalog_home,
                 refresh_official_provider,
                 refresh_upstream_models.as_deref(),
                 &runtime_selected_models,
                 &runtime_websocket_models,
+                &runtime_native_web_search_models,
             );
-            let catalog_available = refresh.is_err() && model_catalog::is_available(&catalog_home);
+            let cached_catalog = if refresh.is_err() {
+                model_catalog::prepare_cached_catalog_for_native_web_search(
+                    &catalog_home,
+                    &runtime_native_web_search_models,
+                )
+            } else {
+                Ok(false)
+            };
             let selection = model_catalog::selection_state_with_manual_models(
                 &catalog_home,
                 official_provider,
@@ -530,7 +542,7 @@ async fn prepare_startup_model_catalog(
                 &manual_models,
                 requested_default_model.as_deref(),
             );
-            (refresh, catalog_available, selection)
+            (refresh, cached_catalog, selection)
         })
         .await
         .map_err(|error| {
@@ -547,6 +559,22 @@ async fn prepare_startup_model_catalog(
             error
         })?;
 
+    let catalog_available = match cached_catalog_result {
+        Ok(available) => available,
+        Err(error) => {
+            error_log::record_failure(
+                "patch_failed",
+                "sanitize_cached_model_catalog",
+                format!("{error:#}"),
+                serde_json::json!({
+                    "fallback": "codex_builtin_catalog",
+                    "officialProvider": official_provider,
+                }),
+            );
+            eprintln!("旧模型目录的原生网页搜索能力无法安全校正，改用 Codex 内置目录：{error:#}");
+            false
+        }
+    };
     let catalog_available_for_runtime = match refresh_result {
         Ok(_) => true,
         Err(error) if model_catalog::is_runtime_model_cache_unavailable(&error) => {
@@ -1506,6 +1534,16 @@ impl CodeyRuntime {
         if let Some(local_router) = self.local_router.as_ref() {
             local_router.update_config(config);
         }
+    }
+
+    pub(crate) async fn reconfigure_request_log(
+        &self,
+        config: &RouteRequestLogConfig,
+    ) -> Result<Option<RouteRequestLogReconfigure>> {
+        let Some(local_router) = self.local_router.as_ref() else {
+            return Ok(None);
+        };
+        local_router.reconfigure_request_log(config).await.map(Some)
     }
 
     pub(crate) fn local_router_endpoint(&self) -> Option<RuntimeRouterEndpoint> {

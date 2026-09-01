@@ -328,6 +328,7 @@ fn profile_from_provider(
         official_account: provider.official,
         supports_remote_compaction: provider.supports_remote_compaction,
         supports_websockets: provider.official,
+        supports_native_web_search: provider.official,
         supports_auto_review: provider.official,
     }
 }
@@ -963,6 +964,7 @@ experimental_bearer_token = "sk-relay"
             let (config, status) =
                 sync_current_third_party_provider(&CodeyConfig::default(), home.path()).unwrap();
             assert_eq!(config.profiles[0].upstream_protocol, expected);
+            assert!(!config.profiles[0].supports_native_web_search);
             assert_eq!(status.provider.id, "relay");
         }
     }
@@ -985,6 +987,7 @@ experimental_bearer_token = "sk-relay"
         };
         assert!(profile.official_account);
         assert!(profile.supports_websockets);
+        assert!(profile.supports_native_web_search);
         assert_eq!(profile.provider_id(), "openai");
         assert!(profile.api_key.is_empty());
 
@@ -1025,6 +1028,7 @@ experimental_bearer_token = "sk-relay"
         };
         assert!(profile.official_account);
         assert!(profile.supports_websockets);
+        assert!(profile.supports_native_web_search);
         assert_eq!(profile.provider_id(), "openai");
         assert!(reason.contains("auth.json"));
     }

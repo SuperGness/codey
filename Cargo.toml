@@ -13,6 +13,7 @@ license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 anyhow = "1"
+arc-swap = "1"
 base64 = "0.22"
 bytes = "1"
 directories = "6"
@@ -45,5 +46,8 @@ opt-level = 3
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# The request-observation writer is isolated with catch_unwind. Unwinding is
+# required for a writer panic to degrade logging instead of terminating the
+# latency-sensitive router process.
+panic = "unwind"
 strip = "symbols"

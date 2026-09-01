@@ -117,6 +117,60 @@ fn third_party_provider_installs_the_codey_model_catalog_when_available() {
     assert!(!should_install_codey_model_catalog(false, false));
 }
 
+#[tokio::test]
+async fn startup_fallback_removes_search_from_a_stale_chat_route_catalog() {
+    let home = tempfile::tempdir().unwrap();
+    let path = home.path().join(model_catalog::relative_path());
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "models": [{
+                "slug": "route-chat/gpt-5.6-sol",
+                "display_name": "Chat / GPT-5.6-Sol",
+                "description": "Third-party API model",
+                "base_instructions": "test instructions",
+                "codey_source": "third_party",
+                "supports_search_tool": true,
+                "web_search_tool_type": "text_and_image"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let mut route = ProviderProfile::new("Chat route");
+    route.id = "route-chat".into();
+    route.base_url = "https://chat.example/v1".into();
+    route.api_key = "secret".into();
+    route.api_key_configured = true;
+    route.upstream_protocol = crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+    route.normalize();
+    let mut config = CodeyConfig {
+        local_router_enabled: true,
+        active_profile_id: route.id.clone(),
+        profiles: vec![route],
+        ..CodeyConfig::default()
+    };
+    config
+        .upstream_models_by_provider
+        .insert("route-chat".into(), vec!["gpt-5.6-sol".into()]);
+    config
+        .selected_models_by_provider
+        .insert("route-chat".into(), vec!["gpt-5.6-sol".into()]);
+    config = config.normalize();
+
+    let startup = prepare_startup_model_catalog(&config, &config.profiles[0], home.path())
+        .await
+        .unwrap();
+
+    assert!(startup.use_official_catalog);
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(catalog["models"][0].get("supports_search_tool").is_none());
+    assert!(catalog["models"][0].get("web_search_tool_type").is_none());
+}
+
 #[test]
 fn generated_catalog_uses_the_route_aware_default_selector() {
     let config = CodeyConfig {

@@ -580,6 +580,57 @@ fn restart_sensitive_config_changes_are_detected() {
     ));
 }
 
+#[test]
+fn request_log_only_config_changes_do_not_require_restart() {
+    let applied = CodeyConfig::default();
+    let applied_models = RuntimeModelConfig::from_config(&applied);
+    let applied_subagent = RuntimeSubagentConfig::from_config(&applied);
+    let mut current = applied.clone();
+    current.route_request_log.enabled = true;
+    current.route_request_log.backend = crate::config::RouteRequestLogBackend::Sqlite;
+
+    assert!(!config_requires_restart(
+        &applied,
+        &applied_models,
+        &applied_subagent,
+        &current,
+    ));
+}
+
+#[test]
+fn request_log_hot_reload_status_contract_is_stable() {
+    let cases = [
+        (
+            RouteRequestLogHotReloadStatus::NotApplicable,
+            "not_applicable",
+            false,
+        ),
+        (
+            RouteRequestLogHotReloadStatus::Unchanged,
+            "unchanged",
+            false,
+        ),
+        (RouteRequestLogHotReloadStatus::Enabled, "enabled", true),
+        (RouteRequestLogHotReloadStatus::Disabled, "disabled", true),
+        (
+            RouteRequestLogHotReloadStatus::Superseded,
+            "superseded",
+            false,
+        ),
+        (RouteRequestLogHotReloadStatus::Failed, "failed", false),
+    ];
+    for (status, health, reloaded) in cases {
+        let outcome = RouteRequestLogHotReloadOutcome {
+            status,
+            error: None,
+        };
+        assert_eq!(outcome.health(), health);
+        assert_eq!(outcome.reloaded(), reloaded);
+    }
+    let failed = RouteRequestLogHotReloadOutcome::failed("sink failed");
+    assert_eq!(failed.error(), Some("sink failed"));
+}
+
 #[tokio::test]
 async fn shutdown_cancels_a_restart_waiting_for_the_runtime_lock() {
     let state = Arc::new(AppState::default());

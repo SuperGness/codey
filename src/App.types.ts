@@ -21,6 +21,7 @@ export type Profile = {
   officialAccount: boolean;
   supportsRemoteCompaction?: boolean;
   supportsWebsockets?: boolean;
+  supportsNativeWebSearch?: boolean;
   supportsAutoReview?: boolean;
 };
 
@@ -53,9 +54,23 @@ export type SubagentRoleConfig = {
   reasoningEffort: string;
 };
 
+export type RouteRequestLogConfig = {
+  enabled: boolean;
+  backend: "ndjson" | "sqlite";
+  queueCapacity: number;
+  batchSize: number;
+  flushIntervalMs: number;
+  shutdownFlushTimeoutMs: number;
+  sampleRatePerMillion: number;
+  maxFileBytes: number;
+  retainedFiles: number;
+  retentionDays: number;
+};
+
 export type Config = {
   settingsRevision: number;
   localRouterEnabled: boolean;
+  routeRequestLog: RouteRequestLogConfig;
   activeProfileId: string;
   profiles: Profile[];
   initialRouteImportCompleted: boolean;

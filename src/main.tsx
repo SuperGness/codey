@@ -43,6 +43,18 @@ if (import.meta.env.DEV) {
     let previewConfig: Config = {
       settingsRevision: 0,
       localRouterEnabled: true,
+      routeRequestLog: {
+        enabled: true,
+        backend: "sqlite",
+        queueCapacity: 8192,
+        batchSize: 256,
+        flushIntervalMs: 1000,
+        shutdownFlushTimeoutMs: 1500,
+        sampleRatePerMillion: 1_000_000,
+        maxFileBytes: 134_217_728,
+        retainedFiles: 7,
+        retentionDays: 30,
+      },
       activeProfileId: "primary",
       initialRouteImportCompleted: true,
       profiles: [
@@ -59,6 +71,7 @@ if (import.meta.env.DEV) {
           sourceProviderId: "primary",
           officialAccount: false,
           supportsRemoteCompaction: false,
+          supportsNativeWebSearch: false,
           supportsAutoReview: false,
         },
         {
@@ -74,6 +87,7 @@ if (import.meta.env.DEV) {
           sourceProviderId: "backup",
           officialAccount: false,
           supportsRemoteCompaction: false,
+          supportsNativeWebSearch: false,
           supportsAutoReview: false,
         },
       ],
@@ -249,6 +263,62 @@ if (import.meta.env.DEV) {
     let previewCrashpadStats:
       | typeof previewCrashpadPendingStats
       | undefined = previewCrashpadPendingStats;
+    const previewRouteRequestLogs = Array.from({ length: 47 }, (_, index) => {
+      const primary = index % 3 !== 1;
+      const failed = index % 9 === 4;
+      const protocol = (["sse", "ws", "http"] as const)[index % 3];
+      const inputTokens = 1_200 + index * 137;
+      const outputTokens = failed ? undefined : 240 + index * 29;
+      const cachedInputTokens = index % 4 === 0 ? 640 + index * 11 : undefined;
+      const codexSessionIsParent = index % 8 === 0;
+      return {
+        requestId: `preview-request-${String(index + 1).padStart(4, "0")}`,
+        traceId: `preview-trace-${String(index + 1).padStart(4, "0")}`,
+        codexSessionId: index % 10 === 9
+          ? null
+          : `preview-${codexSessionIsParent ? "parent-" : ""}session-${String(index + 1).padStart(4, "0")}`,
+        codexSessionIsParent,
+        timestampUnixMs: Date.now() - index * 83_000,
+        provider: primary ? "primary" : "backup",
+        providerName: primary ? "主力代理 (ChatGPT)" : "备用中转 (Claude)",
+        requestedModel: primary ? "provider-fast-coder" : "claude-sonnet-4-5",
+        model: primary ? "provider-fast-coder" : "claude-sonnet-4-5",
+        reasoningEffort: (["low", "medium", "high"] as const)[index % 3],
+        thinkingBudgetTokens: undefined,
+        ttftMs: failed ? undefined : 190 + index * 13,
+        upstreamHeaderMs: 120 + index * 8,
+        totalDurationMs: failed ? 1_640 + index * 31 : 2_350 + index * 91,
+        queueDelayMs: index % 5,
+        inputTokens,
+        outputTokens,
+        cachedInputTokens,
+        cacheCreationInputTokens: undefined,
+        reasoningOutputTokens: outputTokens ? Math.floor(outputTokens / 4) : undefined,
+        totalTokens: outputTokens == null ? inputTokens : inputTokens + outputTokens,
+        usageReported: !failed,
+        usageUnavailableReason: failed ? "upstream_error" : undefined,
+        requestProtocol: protocol,
+        upstreamTransport: protocol === "ws" ? "ws" : "http",
+        requestKind: "responses",
+        status: failed ? "failed" : "succeeded",
+        statusCode: failed ? 502 : 200,
+        upstreamStatusCode: failed ? 429 : 200,
+        errorCode: failed ? "upstream_rate_limited" : undefined,
+        upstreamErrorSummary: failed
+          ? "供应商额度不足，请稍后重试或切换备用线路（代码：rate_limit_exceeded）"
+          : undefined,
+        completionReason: failed ? undefined : "completed",
+        retryCount: failed ? 2 : index % 5 === 0 ? 1 : 0,
+        fallbackCount: failed ? 1 : 0,
+        fallbackReason: failed ? "rate_limited" : undefined,
+        upstreamAuthority: primary ? "primary.example.invalid" : "backup.example.invalid",
+        upstreamRequestId: `upstream-preview-${index + 1}`,
+        upstreamProtocol: primary ? "openaiResponses" : "openaiChatCompletions",
+        protocolBridge: primary ? undefined : "chat_completions_to_responses",
+        firstByteSource: protocol === "http" ? "headers" : "stream",
+        subagent: index % 6 === 0,
+      };
+    });
 
     window.__codeyInvokeApi = async (command, args) => {
       console.log(`[Mock API Call] ${command}`, args);
@@ -404,6 +474,43 @@ if (import.meta.env.DEV) {
       if (command === "refresh_trace_log_stats") {
         previewTraceStats = previewTraceLogStats;
         return { status: "ok", traceLogStats: previewTraceStats };
+      }
+      if (command === "query_route_request_logs") {
+        const page = Math.max(1, Number(args.page) || 1);
+        const pageSize = Math.min(100, Math.max(1, Number(args.pageSize) || 20));
+        const search = String(args.search || "").trim().toLocaleLowerCase();
+        const provider = String(args.provider || "");
+        const model = String(args.model || "");
+        const status = String(args.status || "");
+        const protocol = String(args.protocol || "");
+        const filtered = previewRouteRequestLogs.filter((item) => {
+          if (provider && item.provider !== provider && item.providerName !== provider) return false;
+          if (model && item.model !== model && item.requestedModel !== model) return false;
+          if (status && item.status !== status) return false;
+          if (protocol && item.requestProtocol !== protocol) return false;
+          if (!search) return true;
+          return [
+            item.requestId,
+            item.traceId,
+            item.codexSessionId,
+            item.provider,
+            item.providerName,
+            item.model,
+            item.upstreamAuthority,
+            item.upstreamErrorSummary,
+          ].some((value) => value?.toLocaleLowerCase().includes(search));
+        });
+        const totalPages = Math.ceil(filtered.length / pageSize);
+        return {
+          status: "ok",
+          backend: "sqlite",
+          queryable: true,
+          page,
+          pageSize,
+          total: filtered.length,
+          totalPages,
+          items: filtered.slice((page - 1) * pageSize, page * pageSize),
+        };
       }
       if (command === "save_codey_config") {
         const incoming = args.config as Config;

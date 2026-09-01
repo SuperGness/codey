@@ -1720,6 +1720,7 @@ pub(super) fn provider_route_requires_restart(
     applied.local_router_enabled != current.local_router_enabled
         || provider_route_snapshots(applied) != provider_route_snapshots(current)
         || websocket_transport_requires_restart(applied, current)
+        || native_web_search_capability_requires_restart(applied, current)
         || remote_compaction_transport_requires_restart(applied, current)
 }
 
@@ -1738,6 +1739,14 @@ pub(super) fn remote_compaction_transport_requires_restart(
     applied.runtime_supports_remote_compaction() != current.runtime_supports_remote_compaction()
 }
 
+pub(super) fn native_web_search_capability_requires_restart(
+    applied: &CodeyConfig,
+    current: &CodeyConfig,
+) -> bool {
+    applied.runtime_native_web_search_model_aliases()
+        != current.runtime_native_web_search_model_aliases()
+}
+
 pub(super) fn runtime_supports_current_routes_for_hot_reload(
     applied: &CodeyConfig,
     current: &CodeyConfig,
@@ -1749,6 +1758,7 @@ pub(super) fn runtime_supports_current_routes_for_hot_reload(
         return true;
     }
     if websocket_transport_requires_restart(applied, current)
+        || native_web_search_capability_requires_restart(applied, current)
         || remote_compaction_transport_requires_restart(applied, current)
     {
         return false;
@@ -1777,6 +1787,7 @@ pub(super) struct ProviderRouteSnapshot {
     official_account: bool,
     supports_remote_compaction: bool,
     supports_websockets: bool,
+    supports_native_web_search: bool,
     model_request_headers: BTreeMap<String, String>,
 }
 
@@ -1795,6 +1806,7 @@ fn provider_route_snapshots(config: &CodeyConfig) -> BTreeMap<String, ProviderRo
                     official_account: profile.official_account,
                     supports_remote_compaction: profile.supports_remote_compaction,
                     supports_websockets: profile.supports_websockets,
+                    supports_native_web_search: profile.supports_native_web_search,
                     model_request_headers: profile.model_request_headers.clone(),
                 },
             )
@@ -2083,7 +2095,12 @@ struct ModelCatalogRefresh {
 fn refresh_model_catalog_or_fallback(config: &CodeyConfig) -> Result<ModelCatalogRefresh, String> {
     let home = codex_home();
     let snapshot = model_catalog::snapshot(home).map_err(|error| error.to_string())?;
-    let result = model_catalog_fallback(try_refresh_model_catalog(config), home);
+    let native_web_search_models = config.runtime_native_web_search_model_aliases();
+    let result = model_catalog_fallback(
+        try_refresh_model_catalog(config),
+        home,
+        &native_web_search_models,
+    );
     match result {
         Ok(fallback) => Ok(ModelCatalogRefresh { fallback, snapshot }),
         Err(error) => Err(rollback_model_catalog_snapshot(snapshot, error)),
@@ -2202,11 +2219,17 @@ fn rollback_model_catalog_snapshot(
 fn model_catalog_fallback(
     result: anyhow::Result<()>,
     home: &std::path::Path,
+    native_web_search_models: &[String],
 ) -> Result<bool, String> {
     match result {
         Ok(()) => Ok(false),
         Err(error) if model_catalog::is_runtime_model_cache_unavailable(&error) => {
-            Ok(!model_catalog::is_available(home))
+            model_catalog::prepare_cached_catalog_for_native_web_search(
+                home,
+                native_web_search_models,
+            )
+            .map(|available| !available)
+            .map_err(|fallback_error| fallback_error.to_string())
         }
         Err(error) => Err(error.to_string()),
     }
@@ -2216,12 +2239,14 @@ fn try_refresh_model_catalog(config: &CodeyConfig) -> anyhow::Result<()> {
     let has_third_party_route = config.has_third_party_route();
     let (upstream_models, selected_models) = config.runtime_catalog_models();
     let websocket_models = config.runtime_websocket_model_aliases();
-    model_catalog::refresh_for_provider_with_websocket_models(
+    let native_web_search_models = config.runtime_native_web_search_model_aliases();
+    model_catalog::refresh_for_provider_with_capabilities(
         codex_home(),
         config.official_account_available_this_launch && !has_third_party_route,
         has_third_party_route.then_some(upstream_models).as_deref(),
         &selected_models,
         &websocket_models,
+        &native_web_search_models,
     )
     .map(|_| ())
 }
@@ -2751,10 +2776,10 @@ mod tests {
         let missing_cache =
             model_catalog::refresh_for_provider(home.path(), false, Some(&[]), &[]).unwrap_err();
 
-        assert!(model_catalog_fallback(Err(missing_cache), home.path()).unwrap());
-        assert!(!model_catalog_fallback(Ok(()), home.path()).unwrap());
+        assert!(model_catalog_fallback(Err(missing_cache), home.path(), &[]).unwrap());
+        assert!(!model_catalog_fallback(Ok(()), home.path(), &[]).unwrap());
         assert_eq!(
-            model_catalog_fallback(Err(anyhow::anyhow!("模型目录写入失败")), home.path())
+            model_catalog_fallback(Err(anyhow::anyhow!("模型目录写入失败")), home.path(), &[],)
                 .unwrap_err(),
             "模型目录写入失败"
         );
@@ -3255,6 +3280,46 @@ mod tests {
         assert!(websocket_transport_requires_restart(&enabled, &applied));
         assert!(!runtime_supports_current_routes_for_hot_reload(
             &enabled, &applied
+        ));
+    }
+
+    #[test]
+    fn native_web_search_switch_and_model_changes_require_restart() {
+        let mut route = crate::config::ProviderProfile::new("Search Route");
+        route.id = "route-search".into();
+        route.base_url = "https://route-search.example/v1".into();
+        route.api_key = "route-search-secret".into();
+        route.normalize();
+        let mut applied = CodeyConfig {
+            active_profile_id: route.id.clone(),
+            profiles: vec![route],
+            ..CodeyConfig::default()
+        };
+        applied
+            .selected_models_by_provider
+            .insert("route-search".into(), vec!["model-a".into()]);
+
+        let mut enabled = applied.clone();
+        enabled.profiles[0].supports_native_web_search = true;
+        assert!(native_web_search_capability_requires_restart(
+            &applied, &enabled
+        ));
+        assert!(provider_route_requires_restart(&applied, &enabled));
+        assert!(!runtime_supports_current_routes_for_hot_reload(
+            &applied, &enabled
+        ));
+
+        let mut after_add = enabled.clone();
+        after_add
+            .selected_models_by_provider
+            .get_mut("route-search")
+            .unwrap()
+            .push("model-b".into());
+        assert!(native_web_search_capability_requires_restart(
+            &enabled, &after_add
+        ));
+        assert!(!runtime_supports_current_routes_for_hot_reload(
+            &enabled, &after_add
         ));
     }
 

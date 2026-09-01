@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::server::{
@@ -41,6 +41,10 @@ use crate::codex_config::CHATGPT_CODEX_BASE_URL;
 use crate::config::{
     CodeyConfig, ProviderProfile, UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
     UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS, UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+};
+use crate::route_request_log::{
+    FirstByteSource, RequestProtocol, RouteRequestLogController, RouteRequestLogGuard,
+    RouteRequestLogProbe, RouteRequestLogReconfigure, RouteRequestLogStart, UpstreamTransport,
 };
 
 pub(crate) const ROUTER_PROVIDER_ID: &str = "codey_router";
@@ -100,6 +104,7 @@ const ROUTER_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
 tokio::task_local! {
     static ROUTER_REQUEST_ID: String;
+    static ROUTER_REQUEST_STARTED_AT: Instant;
 }
 
 #[derive(Clone, Debug)]
@@ -120,6 +125,7 @@ pub(crate) struct LocalRouter {
     websocket_backoffs: Arc<Mutex<UpstreamWebSocketBackoffs>>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    request_log: Arc<RouteRequestLogController>,
 }
 
 impl LocalRouter {
@@ -143,6 +149,15 @@ impl LocalRouter {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let official_auth_path = crate::codex_config::codex_home().join("auth.json");
         let websocket_backoffs = Arc::new(Mutex::new(UpstreamWebSocketBackoffs::default()));
+        let request_log = Arc::new(RouteRequestLogController::new());
+        if let Err(error) = request_log.reconfigure(&config.route_request_log).await {
+            crate::error_log::record_failure(
+                "route_request_log_start_failed",
+                "start_route_request_log",
+                format!("{error:#}"),
+                serde_json::json!({}),
+            );
+        }
         let server = RouterServer {
             token: endpoint.token.clone(),
             bearer_token: format!("Bearer {}", endpoint.token),
@@ -170,6 +185,7 @@ impl LocalRouter {
             official_auth_cache: Arc::new(Mutex::new(
                 crate::account_usage::OfficialAuthCache::default(),
             )),
+            request_log: Arc::clone(&request_log),
         };
         let task = tokio::spawn(async move {
             let mut connections = JoinSet::new();
@@ -230,17 +246,20 @@ impl LocalRouter {
                                     }
                                 };
                                 let request_id = Uuid::new_v4().simple().to_string();
-                                connections.spawn(ROUTER_REQUEST_ID.scope(request_id.clone(), async move {
-                                    let _permit = permit;
-                                    if let Err(error) = server.handle_connection(stream).await {
-                                        crate::error_log::record_failure(
-                                            "local_router_request_failed",
-                                            "handle_local_router_connection",
-                                            format!("{error:#}"),
-                                            serde_json::json!({ "requestId": request_id }),
-                                        );
-                                    }
-                                }));
+                                connections.spawn(ROUTER_REQUEST_ID.scope(
+                                    request_id.clone(),
+                                    ROUTER_REQUEST_STARTED_AT.scope(Instant::now(), async move {
+                                        let _permit = permit;
+                                        if let Err(error) = server.handle_connection(stream).await {
+                                            crate::error_log::record_failure(
+                                                "local_router_request_failed",
+                                                "handle_local_router_connection",
+                                                format!("{error:#}"),
+                                                serde_json::json!({ "requestId": request_id }),
+                                            );
+                                        }
+                                    }),
+                                ));
                             }
                             Err(error) => {
                                 crate::error_log::record_failure(
@@ -282,6 +301,7 @@ impl LocalRouter {
             websocket_backoffs,
             shutdown: Mutex::new(Some(shutdown_tx)),
             task: Mutex::new(Some(task)),
+            request_log,
         })
     }
 
@@ -301,6 +321,13 @@ impl LocalRouter {
             .clear();
     }
 
+    pub(crate) async fn reconfigure_request_log(
+        &self,
+        config: &crate::config::RouteRequestLogConfig,
+    ) -> Result<RouteRequestLogReconfigure> {
+        self.request_log.reconfigure(config).await
+    }
+
     pub(crate) async fn stop(&self) -> Result<()> {
         if let Some(shutdown) = self
             .shutdown
@@ -315,10 +342,28 @@ impl LocalRouter {
             .lock()
             .expect("local router task mutex poisoned")
             .take();
-        if let Some(task) = task {
-            task.await.context("关闭 Codey 本地路由任务异常退出")?;
+        let task_result = match task {
+            Some(task) => task.await.context("关闭 Codey 本地路由任务异常退出"),
+            None => Ok(()),
+        };
+        if let Some(stats) = self.request_log.stop().await
+            && stats.degraded()
+        {
+            eprintln!(
+                "Codey 路由请求日志已静默降级：accepted={} written={} sampled_out={} dropped_full={} dropped_closed={} write_failures={} write_dropped={} observer_panics={} writer_panics={} shutdown_timeouts={}",
+                stats.accepted,
+                stats.entries_written,
+                stats.sampled_out,
+                stats.dropped_full,
+                stats.dropped_closed,
+                stats.write_failures,
+                stats.write_dropped,
+                stats.observer_panics,
+                stats.writer_panics,
+                stats.shutdown_timeouts,
+            );
         }
-        Ok(())
+        task_result
     }
 }
 
@@ -371,6 +416,7 @@ struct RouterServer {
     client: reqwest::Client,
     official_auth_path: PathBuf,
     official_auth_cache: Arc<Mutex<crate::account_usage::OfficialAuthCache>>,
+    request_log: Arc<RouteRequestLogController>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1053,12 +1099,15 @@ impl RouterServer {
                     let result = ROUTER_REQUEST_ID
                         .scope(
                             request_id.clone(),
-                            self.proxy_parsed_responses(
-                                request,
-                                body,
-                                None,
-                                ResponsesRequestKind::Create,
-                                &mut downstream,
+                            ROUTER_REQUEST_STARTED_AT.scope(
+                                Instant::now(),
+                                self.proxy_parsed_responses(
+                                    request,
+                                    body,
+                                    None,
+                                    ResponsesRequestKind::Create,
+                                    &mut downstream,
+                                ),
                             ),
                         )
                         .await;
@@ -1190,6 +1239,68 @@ impl RouterServer {
 
     async fn proxy_parsed_responses<D>(
         &self,
+        request: HttpRequest,
+        body: Value,
+        encoded_body: Option<Vec<u8>>,
+        request_kind: ResponsesRequestKind,
+        downstream: &mut D,
+    ) -> Result<()>
+    where
+        D: ResponsesDownstream + ?Sized,
+    {
+        let probe = self.request_log.begin(|producer| {
+            let request_id = current_router_request_id().unwrap_or_default();
+            let (codex_session_id, codex_session_is_parent) = request_log_codex_session(&request);
+            let downstream_websocket = downstream.is_websocket();
+            let stream_requested = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+            let request_protocol = if downstream_websocket {
+                RequestProtocol::WebSocket
+            } else if stream_requested {
+                RequestProtocol::Sse
+            } else {
+                RequestProtocol::Http
+            };
+            let requested_model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let reasoning_effort = body
+                .pointer("/reasoning/effort")
+                .or_else(|| body.get("reasoning_effort"))
+                .and_then(Value::as_str);
+            let thinking_budget_tokens = [
+                "/thinking/budget_tokens",
+                "/thinking/budgetTokens",
+                "/thinking_budget_tokens",
+                "/thinkingBudgetTokens",
+            ]
+            .into_iter()
+            .find_map(|pointer| body.pointer(pointer).and_then(Value::as_u64));
+            producer.begin(RouteRequestLogStart {
+                request_id: &request_id,
+                started_at: current_router_request_started_at().unwrap_or_else(Instant::now),
+                request_protocol,
+                request_kind: request_kind.label(),
+                requested_model,
+                reasoning_effort,
+                thinking_budget_tokens,
+                codex_session_id,
+                codex_session_is_parent,
+            })
+        });
+        if probe.is_none() {
+            return self
+                .proxy_parsed_responses_inner(request, body, encoded_body, request_kind, downstream)
+                .await;
+        }
+        let _request_log_guard = RouteRequestLogGuard::new(probe.clone());
+        let mut observed = ObservedResponsesDownstream::new(downstream, probe);
+        self.proxy_parsed_responses_inner(request, body, encoded_body, request_kind, &mut observed)
+            .await
+    }
+
+    async fn proxy_parsed_responses_inner<D>(
+        &self,
         mut request: HttpRequest,
         mut body: Value,
         mut encoded_body: Option<Vec<u8>>,
@@ -1310,7 +1421,28 @@ impl RouterServer {
             .and_then(|body| body.get("stream"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        if let Some(probe) = downstream.request_log_probe() {
+            probe.set_request_protocol(if downstream_websocket {
+                RequestProtocol::WebSocket
+            } else if stream_requested {
+                RequestProtocol::Sse
+            } else {
+                RequestProtocol::Http
+            });
+        }
         let bridge = ProtocolBridge::from_upstream_protocol(resolved.protocol);
+        if let Some(probe) = downstream.request_log_probe() {
+            probe.resolve_route(
+                &resolved.provider_id,
+                &resolved.route.route_name,
+                &resolved.requested_model,
+                &resolved.upstream_model,
+                &resolved.route.upstream_authority,
+                bridge.upstream_protocol().label(),
+                bridge.label(),
+                subagent_request,
+            );
+        }
         if bridge == ProtocolBridge::NativeResponses
             && remove_codey_synthetic_previous_response_id(&mut body)
         {
@@ -1479,6 +1611,9 @@ impl RouterServer {
             if websocket_attempt == UpstreamWebSocketAttempt::Completed {
                 return Ok(());
             }
+            if let Some(probe) = downstream.request_log_probe() {
+                probe.mark_fallback("websocket_to_http_sse");
+            }
             if remove_official_websocket_fallback_previous_response_id(
                 resolved.route.official_account,
                 &mut upstream_body,
@@ -1525,6 +1660,13 @@ impl RouterServer {
         } else {
             UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT
         };
+        if let Some(probe) = downstream.request_log_probe() {
+            probe.mark_upstream_send(if upstream_stream_requested {
+                UpstreamTransport::HttpSse
+            } else {
+                UpstreamTransport::Http
+            });
+        }
         let initial_response =
             tokio::time::timeout(response_header_timeout, request_builder.send()).await;
         let (response_result, effective_upstream_stream, effective_header_timeout) =
@@ -1532,6 +1674,10 @@ impl RouterServer {
                 Ok(Err(error))
                     if subagent_request && upstream_stream_requested && error.is_connect() =>
                 {
+                    if let Some(probe) = downstream.request_log_probe() {
+                        probe.mark_retry("stream_connect_to_non_stream_http");
+                        probe.set_upstream_transport(UpstreamTransport::Http);
+                    }
                     // A connect error happens before the request reaches the
                     // provider, so retrying once as a non-streaming HTTP
                     // request cannot duplicate model or tool side effects.
@@ -1646,6 +1792,10 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        if let Some(probe) = downstream.request_log_probe() {
+            let upstream_request_id = upstream_request_id_from_headers(response.headers());
+            probe.mark_upstream_headers(response.status().as_u16(), upstream_request_id.as_deref());
+        }
         match bridge {
             ProtocolBridge::ResponsesToAnthropicMessages => {
                 write_anthropic_messages_as_responses(
@@ -1699,6 +1849,28 @@ fn request_binding_keys(request: &HttpRequest) -> Vec<String> {
                 .then(|| format!("{header_name}:{value}"))
         })
         .collect()
+}
+
+fn request_log_codex_session(request: &HttpRequest) -> (Option<&str>, bool) {
+    if let Some(parent_thread_id) = incoming_header(request, "x-codex-parent-thread-id") {
+        return (valid_codex_session_id(parent_thread_id), true);
+    }
+    if incoming_header(request, "x-openai-subagent").is_some() {
+        return (None, true);
+    }
+    (
+        ["thread-id", "session-id"]
+            .into_iter()
+            .find_map(|header_name| incoming_header(request, header_name))
+            .and_then(valid_codex_session_id),
+        false,
+    )
+}
+
+fn valid_codex_session_id(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control))
+        .then_some(value)
 }
 
 fn take_codey_route_metadata(
@@ -2268,6 +2440,12 @@ fn current_router_request_id() -> Option<String> {
         .ok()
 }
 
+fn current_router_request_started_at() -> Option<Instant> {
+    ROUTER_REQUEST_STARTED_AT
+        .try_with(|started_at| *started_at)
+        .ok()
+}
+
 fn router_request_id_header() -> String {
     current_router_request_id()
         .map(|request_id| format!("x-codey-request-id: {request_id}\r\n"))
@@ -2743,6 +2921,9 @@ fn responses_to_chat_completions_request(body: &Value) -> Result<ConvertedRespon
         chat.insert("web_search_options".to_string(), web_search_options);
     }
     let web_search_enabled = chat.contains_key("web_search_options");
+    if web_search_enabled {
+        reject_unportable_chat_web_search_include(object.get("include"))?;
+    }
     if let Some(tools) = chat_tools.and_then(|tools| tools.tools) {
         chat.insert("tools".to_string(), tools);
     }
@@ -2906,14 +3087,25 @@ fn chat_web_search_options_for_tool_choice(
     has_chat_tools: bool,
 ) -> Result<Option<Value>> {
     let Some(tool_choice) = tool_choice else {
-        // Responses treats an omitted tool_choice as auto, while Chat search
-        // models always search when web_search_options is present. Dropping the
-        // optional search tool is the only conversion that does not turn a
-        // normal prompt into a mandatory web request.
+        if options.is_some() {
+            anyhow::bail!(
+                "Responses 可选 web_search 不能无损转换为 Chat Completions；请明确选择 web_search、required 或 none"
+            );
+        }
         return Ok(None);
     };
     match tool_choice {
-        Value::String(choice) if matches!(choice.as_str(), "auto" | "none") => Ok(None),
+        Value::String(choice) if choice == "auto" => {
+            // Codex app-server currently attaches an ambient optional
+            // `web_search` tool even when the selected model descriptor does
+            // not advertise search. Adapted Chat/Anthropic routes cannot
+            // execute that hosted Responses tool, but `auto` also proves the
+            // caller did not require it. Remove only this ambient declaration;
+            // explicit and required search choices remain fail-closed or use
+            // the dedicated Chat search mapping below.
+            Ok(None)
+        }
+        Value::String(choice) if choice == "none" => Ok(None),
         Value::String(choice) if choice == "required" => {
             let Some(options) = options else {
                 return Ok(None);
@@ -2930,6 +3122,11 @@ fn chat_web_search_options_for_tool_choice(
                 let options = options.ok_or_else(|| {
                     anyhow::anyhow!("Responses tool_choice 选择了未在 tools 中声明的 web_search")
                 })?;
+                if has_chat_tools {
+                    anyhow::bail!(
+                        "Responses tool_choice 明确选择 web_search 时仍包含其他工具，Chat Completions 无法无损表达"
+                    );
+                }
                 Ok(Some(options.clone()))
             }
             Some("function" | "custom" | "tool_search") => Ok(None),
@@ -2940,6 +3137,24 @@ fn chat_web_search_options_for_tool_choice(
         },
         _ => anyhow::bail!("tool_choice 必须是 auto/none/required 或对象"),
     }
+}
+
+fn reject_unportable_chat_web_search_include(include: Option<&Value>) -> Result<()> {
+    let Some(include) = include else {
+        return Ok(());
+    };
+    let entries = include
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Responses include 必须是数组"))?;
+    if entries
+        .iter()
+        .any(|entry| entry.as_str() == Some("web_search_call.action.sources"))
+    {
+        anyhow::bail!(
+            "Responses include=web_search_call.action.sources 不能无损转换为 Chat Completions"
+        );
+    }
+    Ok(())
 }
 
 fn responses_tool_choice_targets_web_search(tool_choice: &Value) -> Result<bool> {
@@ -5525,6 +5740,10 @@ trait ResponsesDownstream: Send {
         false
     }
 
+    fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
+        None
+    }
+
     async fn write_error(
         &mut self,
         status: u16,
@@ -5543,6 +5762,14 @@ trait ResponsesDownstream: Send {
     async fn finish_event_stream(&mut self) -> Result<()>;
     async fn proxy_response(&mut self, response: reqwest::Response) -> Result<()>;
 
+    async fn proxy_response_with_probe(
+        &mut self,
+        response: reqwest::Response,
+        _probe: Option<&RouteRequestLogProbe>,
+    ) -> Result<()> {
+        self.proxy_response(response).await
+    }
+
     async fn try_proxy_upstream_websocket(
         &mut self,
         _route: &RouteTarget,
@@ -5550,6 +5777,163 @@ trait ResponsesDownstream: Send {
         _body: &mut Value,
     ) -> Result<UpstreamWebSocketAttempt> {
         Ok(UpstreamWebSocketAttempt::UseHttp)
+    }
+
+    async fn try_proxy_upstream_websocket_with_probe(
+        &mut self,
+        route: &RouteTarget,
+        headers: &HeaderMap,
+        body: &mut Value,
+        _probe: Option<&RouteRequestLogProbe>,
+    ) -> Result<UpstreamWebSocketAttempt> {
+        self.try_proxy_upstream_websocket(route, headers, body)
+            .await
+    }
+}
+
+struct ObservedResponsesDownstream<'a, D>
+where
+    D: ResponsesDownstream + ?Sized,
+{
+    inner: &'a mut D,
+    probe: Option<RouteRequestLogProbe>,
+}
+
+impl<'a, D> ObservedResponsesDownstream<'a, D>
+where
+    D: ResponsesDownstream + ?Sized,
+{
+    fn new(inner: &'a mut D, probe: Option<RouteRequestLogProbe>) -> Self {
+        Self { inner, probe }
+    }
+
+    fn finish_result(&self, result: &Result<()>, operation: &str) {
+        let Some(probe) = self.probe.as_ref() else {
+            return;
+        };
+        if result.is_ok() {
+            probe.finish_success();
+        } else {
+            probe.mark_cancelled(operation);
+            probe.finish_cancelled();
+        }
+    }
+}
+
+#[async_trait]
+impl<D> ResponsesDownstream for ObservedResponsesDownstream<'_, D>
+where
+    D: ResponsesDownstream + ?Sized,
+{
+    fn is_websocket(&self) -> bool {
+        self.inner.is_websocket()
+    }
+
+    fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
+        self.probe.as_ref()
+    }
+
+    async fn write_error(
+        &mut self,
+        status: u16,
+        code: &str,
+        message: String,
+        route: Option<&RouteTarget>,
+    ) -> Result<()> {
+        if let Some(probe) = self.probe.as_ref() {
+            probe.mark_error(status, code);
+        }
+        let result = self.inner.write_error(status, code, message, route).await;
+        self.finish_result(&result, "downstream_error_write_failed");
+        result
+    }
+
+    async fn write_text_error(&mut self, status: u16, code: &str, message: String) -> Result<()> {
+        if let Some(probe) = self.probe.as_ref() {
+            probe.mark_error(status, code);
+        }
+        let result = self.inner.write_text_error(status, code, message).await;
+        self.finish_result(&result, "downstream_error_write_failed");
+        result
+    }
+
+    async fn write_json(&mut self, status: u16, value: &Value) -> Result<()> {
+        if let Some(probe) = self.probe.as_ref() {
+            probe.observe_response(status, value);
+        }
+        let result = self.inner.write_json(status, value).await;
+        self.finish_result(&result, "downstream_json_write_failed");
+        result
+    }
+
+    async fn start_event_stream(&mut self) -> Result<()> {
+        let result = self.inner.start_event_stream().await;
+        if let Some(probe) = self.probe.as_ref() {
+            if result.is_ok() {
+                probe.mark_response_started(200);
+            } else {
+                probe.mark_cancelled("downstream_stream_header_write_failed");
+                probe.finish_cancelled();
+            }
+        }
+        result
+    }
+
+    async fn write_event(&mut self, event: &Value) -> Result<()> {
+        if let Some(probe) = self.probe.as_ref() {
+            probe.observe_event(event);
+        }
+        let result = self.inner.write_event(event).await;
+        if let Some(probe) = self.probe.as_ref() {
+            if result.is_ok() {
+                probe.mark_response_started(200);
+            } else {
+                probe.mark_cancelled("downstream_event_write_failed");
+                probe.finish_cancelled();
+            }
+        }
+        result
+    }
+
+    async fn finish_event_stream(&mut self) -> Result<()> {
+        let result = self.inner.finish_event_stream().await;
+        self.finish_result(&result, "downstream_stream_finish_failed");
+        result
+    }
+
+    async fn proxy_response(&mut self, response: reqwest::Response) -> Result<()> {
+        let result = self
+            .inner
+            .proxy_response_with_probe(response, self.probe.as_ref())
+            .await;
+        self.finish_result(&result, "downstream_proxy_write_failed");
+        result
+    }
+
+    async fn try_proxy_upstream_websocket(
+        &mut self,
+        route: &RouteTarget,
+        headers: &HeaderMap,
+        body: &mut Value,
+    ) -> Result<UpstreamWebSocketAttempt> {
+        let result = self
+            .inner
+            .try_proxy_upstream_websocket_with_probe(route, headers, body, self.probe.as_ref())
+            .await;
+        match &result {
+            Ok(UpstreamWebSocketAttempt::Completed) => {
+                if let Some(probe) = self.probe.as_ref() {
+                    probe.finish_success();
+                }
+            }
+            Ok(UpstreamWebSocketAttempt::UseHttp) => {}
+            Err(_) => {
+                if let Some(probe) = self.probe.as_ref() {
+                    probe.mark_cancelled("upstream_websocket_proxy_failed");
+                }
+            }
+        }
+        result
     }
 }
 
@@ -5605,7 +5989,15 @@ impl ResponsesDownstream for HttpResponsesDownstream {
     }
 
     async fn proxy_response(&mut self, response: reqwest::Response) -> Result<()> {
-        write_proxy_response(&mut self.stream, response).await
+        write_proxy_response(&mut self.stream, response, None).await
+    }
+
+    async fn proxy_response_with_probe(
+        &mut self,
+        response: reqwest::Response,
+        probe: Option<&RouteRequestLogProbe>,
+    ) -> Result<()> {
+        write_proxy_response(&mut self.stream, response, probe).await
     }
 }
 
@@ -5802,6 +6194,7 @@ impl WebSocketResponsesDownstream {
         route: &RouteTarget,
         headers: &HeaderMap,
         body: &mut Value,
+        probe: Option<&RouteRequestLogProbe>,
     ) -> Result<UpstreamWebSocketAttempt> {
         if !route.supports_websockets {
             return Ok(UpstreamWebSocketAttempt::UseHttp);
@@ -5930,6 +6323,9 @@ impl WebSocketResponsesDownstream {
         // Once send is attempted the request may have reached the upstream.
         // Any later failure is surfaced to the caller and is never replayed
         // over HTTP, avoiding duplicate tool calls and other side effects.
+        if let Some(probe) = probe {
+            probe.mark_upstream_send(UpstreamTransport::WebSocket);
+        }
         tokio::time::timeout(
             DOWNSTREAM_WRITE_TIMEOUT,
             upstream.socket.send(WebSocketMessage::Text(message.into())),
@@ -5948,6 +6344,11 @@ impl WebSocketResponsesDownstream {
             };
             match message.context("读取 Responses WebSocket 上游事件失败")? {
                 WebSocketMessage::Text(text) => {
+                    if !text.is_empty()
+                        && let Some(probe) = probe
+                    {
+                        probe.mark_first_upstream_data(FirstByteSource::UpstreamWebSocketEvent);
+                    }
                     upstream.liveness.record_activity(Instant::now());
                     let (events, raw_json_text) =
                         match serde_json::from_str::<Value>(text.as_str()) {
@@ -5966,13 +6367,21 @@ impl WebSocketResponsesDownstream {
                     let mut raw_json_text = raw_json_text;
                     for mut event in events {
                         if responses_event_is_failure(&event) {
-                            annotate_upstream_websocket_failure(
+                            let error_summary = annotate_upstream_websocket_failure(
                                 &mut event,
                                 route,
                                 &upstream_model,
                                 upstream_url,
                             );
+                            if let (Some(probe), Some(error_summary)) =
+                                (probe, error_summary.as_deref())
+                            {
+                                probe.mark_upstream_error_summary(error_summary);
+                            }
                             raw_json_text = None;
+                        }
+                        if let Some(probe) = probe {
+                            probe.observe_event(&event);
                         }
                         let terminal = responses_event_is_terminal(&event);
                         if let Some(response_id) = responses_event_response_id(&event) {
@@ -6266,7 +6675,15 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
     }
 
     async fn proxy_response(&mut self, response: reqwest::Response) -> Result<()> {
-        proxy_native_response_to_websocket(self, response).await
+        proxy_native_response_to_websocket(self, response, None).await
+    }
+
+    async fn proxy_response_with_probe(
+        &mut self,
+        response: reqwest::Response,
+        probe: Option<&RouteRequestLogProbe>,
+    ) -> Result<()> {
+        proxy_native_response_to_websocket(self, response, probe).await
     }
 
     async fn try_proxy_upstream_websocket(
@@ -6275,7 +6692,19 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
         headers: &HeaderMap,
         body: &mut Value,
     ) -> Result<UpstreamWebSocketAttempt> {
-        self.proxy_upstream_websocket(route, headers, body).await
+        self.proxy_upstream_websocket(route, headers, body, None)
+            .await
+    }
+
+    async fn try_proxy_upstream_websocket_with_probe(
+        &mut self,
+        route: &RouteTarget,
+        headers: &HeaderMap,
+        body: &mut Value,
+        probe: Option<&RouteRequestLogProbe>,
+    ) -> Result<UpstreamWebSocketAttempt> {
+        self.proxy_upstream_websocket(route, headers, body, probe)
+            .await
     }
 }
 
@@ -6322,6 +6751,7 @@ fn websocket_response_failed_event(
 async fn proxy_native_response_to_websocket(
     downstream: &mut WebSocketResponsesDownstream,
     mut response: reqwest::Response,
+    probe: Option<&RouteRequestLogProbe>,
 ) -> Result<()> {
     let status = response.status().as_u16();
     let upstream_is_sse = response
@@ -6335,8 +6765,12 @@ async fn proxy_native_response_to_websocket(
         let mut cursor = 0;
         let mut done = false;
         let mut terminal = false;
-        while let Some(chunk) =
-            read_upstream_chunk(&mut response, "读取 Responses WebSocket 上游 SSE 流失败").await?
+        while let Some(chunk) = read_upstream_chunk(
+            &mut response,
+            "读取 Responses WebSocket 上游 SSE 流失败",
+            probe,
+        )
+        .await?
         {
             compact_sse_buffer(&mut buffer, &mut cursor);
             buffer.extend_from_slice(&chunk);
@@ -6352,6 +6786,9 @@ async fn proxy_native_response_to_websocket(
                 let event = serde_json::from_str::<Value>(&data)
                     .context("Responses WebSocket 上游 SSE data 不是有效 JSON")?;
                 terminal |= responses_event_is_terminal(&event);
+                if let Some(probe) = probe {
+                    probe.observe_event(&event);
+                }
                 downstream.write_event(&event).await?;
             }
             if done {
@@ -6366,6 +6803,9 @@ async fn proxy_native_response_to_websocket(
             let event = serde_json::from_str::<Value>(&data)
                 .context("Responses WebSocket 上游 SSE 末尾 data 不是有效 JSON")?;
             terminal |= responses_event_is_terminal(&event);
+            if let Some(probe) = probe {
+                probe.observe_event(&event);
+            }
             downstream.write_event(&event).await?;
         }
         if !terminal {
@@ -6379,8 +6819,13 @@ async fn proxy_native_response_to_websocket(
     } else {
         MAX_UPSTREAM_ERROR_BYTES
     };
-    let body = read_bounded_upstream_body(response, limit, "读取 Responses WebSocket 上游响应失败")
-        .await?;
+    let body = read_bounded_upstream_body(
+        response,
+        limit,
+        "读取 Responses WebSocket 上游响应失败",
+        probe,
+    )
+    .await?;
     if (200..300).contains(&status)
         && let Ok(text) = std::str::from_utf8(&body)
         && responses_body_looks_like_sse(text)
@@ -6392,12 +6837,20 @@ async fn proxy_native_response_to_websocket(
         }
         downstream.start_event_stream().await?;
         for event in events {
+            if let Some(probe) = probe {
+                probe.observe_event(&event);
+            }
             downstream.write_event(&event).await?;
         }
         return downstream.finish_event_stream().await;
     }
     match serde_json::from_slice::<Value>(&body) {
-        Ok(value) => downstream.write_json(status, &value).await,
+        Ok(value) => {
+            if let Some(probe) = probe {
+                probe.observe_response(status, &value);
+            }
+            downstream.write_json(status, &value).await
+        }
         Err(error) => {
             let detail = String::from_utf8_lossy(&body);
             downstream
@@ -6512,11 +6965,17 @@ impl std::error::Error for UpstreamReadIdleTimeout {}
 async fn read_upstream_chunk(
     response: &mut reqwest::Response,
     operation: &'static str,
+    probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Option<Bytes>> {
     let chunk = tokio::time::timeout(UPSTREAM_READ_IDLE_TIMEOUT, response.chunk())
         .await
         .map_err(|_| anyhow::Error::new(UpstreamReadIdleTimeout { operation }))?
         .with_context(|| operation)?;
+    if chunk.as_ref().is_some_and(|chunk| !chunk.is_empty())
+        && let Some(probe) = probe
+    {
+        probe.mark_first_upstream_data(FirstByteSource::UpstreamHttpBody);
+    }
     Ok(chunk)
 }
 
@@ -6524,9 +6983,10 @@ async fn read_bounded_upstream_body(
     mut response: reqwest::Response,
     limit: usize,
     operation: &'static str,
+    probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Vec<u8>> {
     let mut body = Vec::new();
-    while let Some(chunk) = read_upstream_chunk(&mut response, operation).await? {
+    while let Some(chunk) = read_upstream_chunk(&mut response, operation, probe).await? {
         if body.len().saturating_add(chunk.len()) > limit {
             anyhow::bail!("{operation}超过 Codey 安全上限");
         }
@@ -6570,6 +7030,7 @@ where
 async fn write_proxy_response(
     stream: &mut TcpStream,
     mut response: reqwest::Response,
+    probe: Option<&RouteRequestLogProbe>,
 ) -> Result<()> {
     let status = response.status().as_u16();
     let reason = response.status().canonical_reason().unwrap_or("OK");
@@ -6578,6 +7039,7 @@ async fn write_proxy_response(
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/json");
+    let mut log_tap = probe.map(|probe| RequestLogResponseTap::new(probe.clone()));
     write_all_with_timeout(
         stream,
         format!(
@@ -6588,14 +7050,251 @@ async fn write_proxy_response(
         "写入上游响应头失败",
     )
     .await?;
-    while let Some(chunk) = read_upstream_chunk(&mut response, "读取上游响应失败").await? {
+    if let Some(probe) = probe {
+        probe.mark_response_started(status);
+    }
+    while let Some(chunk) = read_upstream_chunk(&mut response, "读取上游响应失败", probe).await?
+    {
         if chunk.is_empty() {
             continue;
         }
+        if let Some(tap) = log_tap.as_mut() {
+            tap.observe(&chunk);
+        }
         write_chunked_frame(stream, &chunk, "写入上游响应块失败").await?;
+    }
+    if let Some(tap) = log_tap.as_mut() {
+        tap.finish();
     }
     write_all_with_timeout(stream, b"0\r\n\r\n", "结束上游响应流失败").await?;
     Ok(())
+}
+
+const REQUEST_LOG_TAP_CHUNK_BYTES: usize = 8 * 1024;
+const REQUEST_LOG_TAP_QUEUE_CHUNKS: usize = 64;
+const REQUEST_LOG_USAGE_PROJECTION_BYTES: usize = 16 * 1024;
+
+struct RequestLogResponseTap {
+    sender: Option<mpsc::Sender<Bytes>>,
+    probe: RouteRequestLogProbe,
+}
+
+impl RequestLogResponseTap {
+    fn new(probe: RouteRequestLogProbe) -> Self {
+        let (sender, mut receiver) = mpsc::channel::<Bytes>(REQUEST_LOG_TAP_QUEUE_CHUNKS);
+        let worker_probe = probe.clone();
+        let finish_guard = probe.defer_finish();
+        tokio::spawn(async move {
+            let _finish_guard = finish_guard;
+            let mut projector = RequestLogMetadataProjector::default();
+            while let Some(chunk) = receiver.recv().await {
+                if let Err(reason) = projector.observe(&chunk, &worker_probe) {
+                    worker_probe.mark_usage_unavailable(reason);
+                    break;
+                }
+            }
+        });
+        Self {
+            sender: Some(sender),
+            probe,
+        }
+    }
+
+    fn observe(&mut self, chunk: &Bytes) {
+        let Some(sender) = self.sender.as_ref() else {
+            return;
+        };
+        for start in (0..chunk.len()).step_by(REQUEST_LOG_TAP_CHUNK_BYTES) {
+            let end = (start + REQUEST_LOG_TAP_CHUNK_BYTES).min(chunk.len());
+            if sender.try_send(chunk.slice(start..end)).is_err() {
+                self.probe.mark_usage_unavailable("observer_queue_full");
+                self.sender = None;
+                return;
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        self.sender = None;
+    }
+}
+
+#[derive(Default)]
+struct RequestLogMetadataProjector {
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+    string: Vec<u8>,
+    string_overflow: bool,
+    last_key: Option<ProjectedMetadataKey>,
+    awaiting_usage: bool,
+    awaiting_scalar: Option<ProjectedMetadataScalar>,
+    capturing_scalar: Option<ProjectedMetadataScalar>,
+    usage: Option<UsageCapture>,
+}
+
+#[derive(Clone, Copy)]
+enum ProjectedMetadataKey {
+    Usage,
+    Type,
+    Status,
+    Code,
+}
+
+#[derive(Clone, Copy)]
+enum ProjectedMetadataScalar {
+    EventType,
+    ResponseStatus,
+    ErrorCode,
+}
+
+struct UsageCapture {
+    bytes: Vec<u8>,
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+}
+
+impl RequestLogMetadataProjector {
+    fn observe(
+        &mut self,
+        bytes: &[u8],
+        probe: &RouteRequestLogProbe,
+    ) -> std::result::Result<(), &'static str> {
+        for &byte in bytes {
+            if let Some(capture) = self.usage.as_mut() {
+                capture.bytes.push(byte);
+                if capture.bytes.len() > REQUEST_LOG_USAGE_PROJECTION_BYTES {
+                    return Err("usage_projection_limit_exceeded");
+                }
+                if capture.in_string {
+                    if capture.escaped {
+                        capture.escaped = false;
+                    } else if byte == b'\\' {
+                        capture.escaped = true;
+                    } else if byte == b'"' {
+                        capture.in_string = false;
+                    }
+                } else if byte == b'"' {
+                    capture.in_string = true;
+                } else if byte == b'{' {
+                    capture.depth += 1;
+                } else if byte == b'}' {
+                    capture.depth = capture.depth.saturating_sub(1);
+                    if capture.depth == 0 {
+                        let capture = self.usage.take().expect("usage capture exists");
+                        let usage = serde_json::from_slice::<Value>(&capture.bytes)
+                            .map_err(|_| "usage_projection_failed")?;
+                        probe.observe_event(&json!({"usage": usage}));
+                    }
+                }
+                continue;
+            }
+
+            if self.in_string {
+                if self.escaped {
+                    self.escaped = false;
+                } else if byte == b'\\' {
+                    self.escaped = true;
+                } else if byte == b'"' {
+                    self.in_string = false;
+                    if let Some(field) = self.capturing_scalar.take() {
+                        if !self.string_overflow {
+                            let value = String::from_utf8_lossy(&self.string);
+                            match field {
+                                ProjectedMetadataScalar::EventType => {
+                                    probe.observe_terminal_projection(Some(&value), None, None)
+                                }
+                                ProjectedMetadataScalar::ResponseStatus => {
+                                    probe.observe_terminal_projection(None, Some(&value), None)
+                                }
+                                ProjectedMetadataScalar::ErrorCode => {
+                                    probe.observe_terminal_projection(None, None, Some(&value))
+                                }
+                            }
+                        }
+                        self.last_key = None;
+                    } else {
+                        self.last_key = (!self.string_overflow)
+                            .then(|| projected_metadata_key(&self.string))
+                            .flatten();
+                    }
+                } else if self.string.len() < 64 {
+                    self.string.push(byte);
+                } else {
+                    self.string_overflow = true;
+                }
+                continue;
+            }
+
+            match byte {
+                b'"' => {
+                    self.in_string = true;
+                    self.escaped = false;
+                    self.string.clear();
+                    self.string_overflow = false;
+                    self.capturing_scalar = self.awaiting_scalar.take();
+                    self.awaiting_usage = false;
+                }
+                b':' => {
+                    let key = self.last_key.take();
+                    self.awaiting_usage =
+                        self.depth <= 2 && matches!(key, Some(ProjectedMetadataKey::Usage));
+                    self.awaiting_scalar = match (self.depth, key) {
+                        (1, Some(ProjectedMetadataKey::Type)) => {
+                            Some(ProjectedMetadataScalar::EventType)
+                        }
+                        (1 | 2, Some(ProjectedMetadataKey::Status)) => {
+                            Some(ProjectedMetadataScalar::ResponseStatus)
+                        }
+                        (2 | 3, Some(ProjectedMetadataKey::Code)) => {
+                            Some(ProjectedMetadataScalar::ErrorCode)
+                        }
+                        _ => None,
+                    };
+                }
+                b'{' if self.awaiting_usage => {
+                    self.awaiting_usage = false;
+                    self.awaiting_scalar = None;
+                    self.usage = Some(UsageCapture {
+                        bytes: vec![b'{'],
+                        depth: 1,
+                        in_string: false,
+                        escaped: false,
+                    });
+                }
+                b'{' | b'[' => {
+                    self.depth += 1;
+                    self.awaiting_usage = false;
+                    self.awaiting_scalar = None;
+                    self.last_key = None;
+                }
+                b'}' | b']' => {
+                    self.depth = self.depth.saturating_sub(1);
+                    self.awaiting_usage = false;
+                    self.awaiting_scalar = None;
+                    self.last_key = None;
+                }
+                byte if byte.is_ascii_whitespace() => {}
+                _ => {
+                    self.awaiting_usage = false;
+                    self.awaiting_scalar = None;
+                    self.last_key = None;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn projected_metadata_key(value: &[u8]) -> Option<ProjectedMetadataKey> {
+    match value {
+        b"usage" => Some(ProjectedMetadataKey::Usage),
+        b"type" => Some(ProjectedMetadataKey::Type),
+        b"status" => Some(ProjectedMetadataKey::Status),
+        b"code" => Some(ProjectedMetadataKey::Code),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -6729,13 +7428,17 @@ where
 {
     let status = response.status().as_u16();
     let upstream_request_id = upstream_request_id_from_headers(response.headers());
-    let body = read_bounded_upstream_error_body(response).await?;
+    let probe = downstream.request_log_probe().cloned();
+    let body = read_bounded_upstream_error_body(response, probe.as_ref()).await?;
     let parsed = serde_json::from_slice::<Value>(&body).ok();
     let summary = parsed
         .as_ref()
         .map(|value| upstream_error_summary(value, &resolved.route))
         .unwrap_or_default();
     let detail = upstream_error_detail(&summary);
+    if let (Some(probe), Some(detail)) = (probe.as_ref(), detail.as_deref()) {
+        probe.mark_upstream_error_summary(detail);
+    }
     let mut message = format!(
         "Codey 线路「{}」请求模型 {} 时，上游返回 HTTP {status}",
         route_display_name(&resolved.route),
@@ -6788,10 +7491,10 @@ fn annotate_upstream_websocket_failure(
     route: &RouteTarget,
     model: &str,
     upstream_url: &str,
-) {
+) -> Option<String> {
     let summary = upstream_error_summary(event, route);
-    let detail =
-        upstream_error_detail(&summary).unwrap_or_else(|| "上游未提供具体错误信息".to_string());
+    let error_summary = upstream_error_detail(&summary);
+    let detail = error_summary.as_deref().unwrap_or("上游未提供具体错误信息");
     let message = format!(
         "Codey 线路「{}」请求模型 {model} 时，Responses WebSocket 上游返回错误：{detail}",
         route_display_name(route)
@@ -6839,6 +7542,7 @@ fn annotate_upstream_websocket_failure(
     if !updated && let Some(object) = event.as_object_mut() {
         object.insert("message".to_string(), Value::String(message));
     }
+    error_summary
 }
 
 async fn write_chat_completions_as_responses<D>(
@@ -6867,7 +7571,15 @@ where
         )
         .await;
     }
-    let responses = match read_chat_completions_as_responses(response, model, tool_bridge).await {
+    let probe = downstream.request_log_probe().cloned();
+    let responses = match read_chat_completions_as_responses(
+        response,
+        model,
+        tool_bridge,
+        probe.as_ref(),
+    )
+    .await
+    {
         Ok(responses) => responses,
         Err(error) => {
             return downstream
@@ -6894,6 +7606,7 @@ async fn read_chat_completions_as_responses(
     mut response: reqwest::Response,
     model: &str,
     tool_bridge: &ResponsesToolBridge,
+    probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Value> {
     let upstream_is_sse = response
         .headers()
@@ -6901,12 +7614,13 @@ async fn read_chat_completions_as_responses(
         .and_then(|value| value.to_str().ok())
         .is_some_and(is_sse_content_type);
     let chat = if upstream_is_sse {
-        collect_chat_completion_sse(&mut response, model).await?
+        collect_chat_completion_sse(&mut response, model, probe).await?
     } else {
         let body = read_bounded_upstream_body(
             response,
             MAX_UPSTREAM_RESPONSE_BYTES,
             "读取 Chat Completions 上游响应失败",
+            probe,
         )
         .await?;
         match serde_json::from_slice::<Value>(&body) {
@@ -6935,8 +7649,12 @@ where
 {
     if !response.status().is_success() {
         let status = response.status();
-        let body = read_bounded_upstream_error_body(response).await?;
-        let detail = anthropic_upstream_error_detail(&body);
+        let probe = downstream.request_log_probe().cloned();
+        let body = read_bounded_upstream_error_body(response, probe.as_ref()).await?;
+        let detail = anthropic_upstream_error_detail(&body, route);
+        if let (Some(probe), Some(detail)) = (probe.as_ref(), detail.as_deref()) {
+            probe.mark_upstream_error_summary(detail);
+        }
         return downstream
             .write_error(
                 502,
@@ -6969,22 +7687,26 @@ where
         )
         .await;
     }
-    let responses = match read_anthropic_messages_as_responses(response, model, tool_bridge).await {
-        Ok(responses) => responses,
-        Err(error) => {
-            return downstream
-                .write_error(
-                    502,
-                    "upstream_protocol_error",
-                    format!(
-                        "线路「{}」的 Anthropic Messages 响应无法转换为 Responses：{error:#}",
-                        route_display_name(route)
-                    ),
-                    Some(route),
-                )
-                .await;
-        }
-    };
+    let probe = downstream.request_log_probe().cloned();
+    let responses =
+        match read_anthropic_messages_as_responses(response, model, tool_bridge, probe.as_ref())
+            .await
+        {
+            Ok(responses) => responses,
+            Err(error) => {
+                return downstream
+                    .write_error(
+                        502,
+                        "upstream_protocol_error",
+                        format!(
+                            "线路「{}」的 Anthropic Messages 响应无法转换为 Responses：{error:#}",
+                            route_display_name(route)
+                        ),
+                        Some(route),
+                    )
+                    .await;
+            }
+        };
     if stream_requested {
         write_responses_response_as_events(downstream, &responses).await
     } else {
@@ -6992,23 +7714,18 @@ where
     }
 }
 
-fn anthropic_upstream_error_detail(body: &[u8]) -> Option<String> {
+fn anthropic_upstream_error_detail(body: &[u8], route: &RouteTarget) -> Option<String> {
     let value = serde_json::from_slice::<Value>(body).ok()?;
-    let message = value
-        .get("error")
-        .and_then(|error| error.get("message"))
-        .or_else(|| value.get("message"))
-        .and_then(Value::as_str)?
-        .trim();
-    if message.is_empty() {
-        return None;
-    }
-    Some(message.chars().take(512).collect())
+    upstream_error_detail(&upstream_error_summary(&value, route))
 }
 
-async fn read_bounded_upstream_error_body(mut response: reqwest::Response) -> Result<Vec<u8>> {
+async fn read_bounded_upstream_error_body(
+    mut response: reqwest::Response,
+    probe: Option<&RouteRequestLogProbe>,
+) -> Result<Vec<u8>> {
     let mut body = Vec::new();
-    while let Some(chunk) = read_upstream_chunk(&mut response, "读取上游错误响应失败").await?
+    while let Some(chunk) =
+        read_upstream_chunk(&mut response, "读取上游错误响应失败", probe).await?
     {
         let remaining = MAX_UPSTREAM_ERROR_BYTES.saturating_sub(body.len());
         if remaining == 0 {
@@ -7026,6 +7743,7 @@ async fn read_anthropic_messages_as_responses(
     mut response: reqwest::Response,
     model: &str,
     tool_bridge: &ResponsesToolBridge,
+    probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Value> {
     let upstream_is_sse = response
         .headers()
@@ -7033,12 +7751,13 @@ async fn read_anthropic_messages_as_responses(
         .and_then(|value| value.to_str().ok())
         .is_some_and(is_sse_content_type);
     let message = if upstream_is_sse {
-        collect_anthropic_message_sse(&mut response, model).await?
+        collect_anthropic_message_sse(&mut response, model, probe).await?
     } else {
         let body = read_bounded_upstream_body(
             response,
             MAX_UPSTREAM_RESPONSE_BYTES,
             "读取 Anthropic Messages 上游响应失败",
+            probe,
         )
         .await?;
         match serde_json::from_slice::<Value>(&body) {
@@ -7480,12 +8199,13 @@ fn anthropic_sse_block_into_value(block: AnthropicSseBlock) -> Result<Value> {
 async fn collect_anthropic_message_sse(
     response: &mut reqwest::Response,
     model: &str,
+    probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Value> {
     let mut accumulator = AnthropicSseAccumulator::new(model);
     let mut buffer = Vec::new();
     let mut cursor = 0;
     while let Some(chunk) =
-        read_upstream_chunk(response, "读取 Anthropic Messages SSE 流失败").await?
+        read_upstream_chunk(response, "读取 Anthropic Messages SSE 流失败", probe).await?
     {
         compact_sse_buffer(&mut buffer, &mut cursor);
         buffer.extend_from_slice(&chunk);
@@ -7554,11 +8274,16 @@ where
     let mut output = ResponsesSseState::new(model, tool_bridge);
     output.start(downstream).await?;
     let mut accumulator = AnthropicSseAccumulator::new(model);
+    let request_log_probe = downstream.request_log_probe().cloned();
     let result: Result<()> = async {
         let mut buffer = Vec::new();
         let mut cursor = 0;
-        while let Some(chunk) =
-            read_upstream_chunk(&mut response, "读取 Anthropic Messages SSE 流失败").await?
+        while let Some(chunk) = read_upstream_chunk(
+            &mut response,
+            "读取 Anthropic Messages SSE 流失败",
+            request_log_probe.as_ref(),
+        )
+        .await?
         {
             compact_sse_buffer(&mut buffer, &mut cursor);
             buffer.extend_from_slice(&chunk);
@@ -8199,13 +8924,14 @@ impl ChatSseAccumulator {
 async fn collect_chat_completion_sse(
     response: &mut reqwest::Response,
     model: &str,
+    probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Value> {
     let mut accumulator = ChatSseAccumulator::new(model);
     let mut buffer = Vec::new();
     let mut cursor = 0;
     let mut done = false;
     while let Some(chunk) =
-        read_upstream_chunk(response, "读取 Chat Completions SSE 流失败").await?
+        read_upstream_chunk(response, "读取 Chat Completions SSE 流失败", probe).await?
     {
         compact_sse_buffer(&mut buffer, &mut cursor);
         buffer.extend_from_slice(&chunk);
@@ -8253,12 +8979,17 @@ where
     let mut output = ResponsesSseState::new(model, tool_bridge);
     output.start(downstream).await?;
     let mut accumulator = ChatSseAccumulator::new(model);
+    let request_log_probe = downstream.request_log_probe().cloned();
     let result: Result<()> = async {
         let mut buffer = Vec::new();
         let mut cursor = 0;
         let mut done = false;
-        while let Some(chunk) =
-            read_upstream_chunk(&mut response, "读取 Chat Completions SSE 流失败").await?
+        while let Some(chunk) = read_upstream_chunk(
+            &mut response,
+            "读取 Chat Completions SSE 流失败",
+            request_log_probe.as_ref(),
+        )
+        .await?
         {
             compact_sse_buffer(&mut buffer, &mut cursor);
             buffer.extend_from_slice(&chunk);
@@ -9291,6 +10022,68 @@ mod tests {
     use super::*;
     use crate::config::ProviderProfile;
 
+    #[test]
+    fn request_log_projector_extracts_usage_after_large_terminal_payload() {
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        let mut projector = RequestLogMetadataProjector::default();
+        let event = format!(
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"output\":[{{\"text\":\"{}\"}}],\"usage\":{{\"input_tokens\":11,\"output_tokens\":7,\"total_tokens\":18}}}}}}\n\n",
+            "x".repeat(128 * 1024)
+        );
+        for chunk in event.as_bytes().chunks(997) {
+            projector.observe(chunk, &probe).unwrap();
+        }
+        let usage = probe.token_usage_for_test();
+        assert_eq!(usage.input_tokens, Some(11));
+        assert_eq!(usage.output_tokens, Some(7));
+        assert_eq!(usage.total_tokens, Some(18));
+    }
+
+    #[test]
+    fn request_log_projector_bounds_usage_object() {
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        let mut projector = RequestLogMetadataProjector::default();
+        let event = format!(
+            "{{\"usage\":{{\"padding\":\"{}\"}}}}",
+            "x".repeat(20 * 1024)
+        );
+        let error = projector.observe(event.as_bytes(), &probe).unwrap_err();
+        assert_eq!(error, "usage_projection_limit_exceeded");
+    }
+
+    #[test]
+    fn request_log_projector_preserves_terminal_status_and_error_metadata() {
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        let mut projector = RequestLogMetadataProjector::default();
+        let event = br#"data: {"type":"response.failed","response":{"status":"failed","output":[],"error":{"code":"quota_exhausted"}}}\n\n"#;
+        for chunk in event.chunks(13) {
+            projector.observe(chunk, &probe).unwrap();
+        }
+
+        let (status, error_code, unavailable_reason) = probe.projected_metadata_for_test();
+        assert_eq!(status.as_deref(), Some("failed"));
+        assert_eq!(error_code.as_deref(), Some("quota_exhausted"));
+        assert_eq!(unavailable_reason, None);
+    }
+
+    #[tokio::test]
+    async fn request_log_response_tap_drops_observation_without_backpressure_when_full() {
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        let mut tap = RequestLogResponseTap::new(probe.clone());
+        let oversized_burst = Bytes::from(vec![
+            b'x';
+            REQUEST_LOG_TAP_CHUNK_BYTES
+                * (REQUEST_LOG_TAP_QUEUE_CHUNKS + 1)
+        ]);
+
+        tap.observe(&oversized_burst);
+        let (_, _, unavailable_reason) = probe.projected_metadata_for_test();
+        assert_eq!(unavailable_reason.as_deref(), Some("observer_queue_full"));
+
+        tap.finish();
+        tokio::task::yield_now().await;
+    }
+
     fn client_tool_search_definition() -> Value {
         json!({
             "type":"tool_search",
@@ -9618,7 +10411,7 @@ mod tests {
 
         assert_eq!(
             downstream
-                .proxy_upstream_websocket(&route, &HeaderMap::new(), &mut body)
+                .proxy_upstream_websocket(&route, &HeaderMap::new(), &mut body, None)
                 .await
                 .unwrap(),
             UpstreamWebSocketAttempt::Completed
@@ -9676,7 +10469,7 @@ mod tests {
         let (downstream_socket, mut downstream_peer) = local_websocket_pair().await;
         let mut downstream = WebSocketResponsesDownstream::new(downstream_socket);
 
-        proxy_native_response_to_websocket(&mut downstream, response)
+        proxy_native_response_to_websocket(&mut downstream, response, None)
             .await
             .unwrap();
 
@@ -10353,7 +11146,7 @@ mod tests {
             let mut body = json!({"model":model,"input":input});
             assert_eq!(
                 downstream
-                    .proxy_upstream_websocket(&route, &headers, &mut body)
+                    .proxy_upstream_websocket(&route, &headers, &mut body, None)
                     .await
                     .unwrap(),
                 UpstreamWebSocketAttempt::Completed
@@ -10455,7 +11248,7 @@ mod tests {
             }
             assert_eq!(
                 downstream
-                    .proxy_upstream_websocket(&route, &headers, &mut body)
+                    .proxy_upstream_websocket(&route, &headers, &mut body, None)
                     .await
                     .unwrap(),
                 UpstreamWebSocketAttempt::Completed
@@ -10528,7 +11321,7 @@ mod tests {
         let mut first_body = json!({"model":model,"input":"first"});
         assert_eq!(
             downstream
-                .proxy_upstream_websocket(&route, &headers, &mut first_body)
+                .proxy_upstream_websocket(&route, &headers, &mut first_body, None)
                 .await
                 .unwrap(),
             UpstreamWebSocketAttempt::Completed
@@ -10543,7 +11336,7 @@ mod tests {
         });
         assert_eq!(
             downstream
-                .proxy_upstream_websocket(&route, &headers, &mut continuation_from_elsewhere)
+                .proxy_upstream_websocket(&route, &headers, &mut continuation_from_elsewhere, None,)
                 .await
                 .unwrap(),
             UpstreamWebSocketAttempt::UseHttp
@@ -10926,6 +11719,59 @@ mod tests {
             bindings.route_for_keys(&["session-id:tree".to_string()]),
             Some("route-b".to_string())
         );
+    }
+
+    #[test]
+    fn request_log_codex_session_prefers_thread_and_falls_back_to_session() {
+        let mut request = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/responses".into(),
+            headers: vec![
+                ("session-id".into(), "session-tree".into()),
+                ("thread-id".into(), "current-thread".into()),
+            ],
+            body: b"must-not-be-inspected".to_vec(),
+            _body_budget_permit: None,
+        };
+        assert_eq!(
+            request_log_codex_session(&request),
+            (Some("current-thread"), false)
+        );
+
+        request.headers.retain(|(name, _)| name != "thread-id");
+        assert_eq!(
+            request_log_codex_session(&request),
+            (Some("session-tree"), false)
+        );
+    }
+
+    #[test]
+    fn request_log_parent_session_suppresses_child_identifiers() {
+        let mut request = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/responses".into(),
+            headers: vec![
+                ("x-codex-parent-thread-id".into(), "parent-thread".into()),
+                ("thread-id".into(), "child-thread".into()),
+                ("session-id".into(), "child-session".into()),
+            ],
+            body: b"child prompt must remain unrelated".to_vec(),
+            _body_budget_permit: None,
+        };
+        assert_eq!(
+            request_log_codex_session(&request),
+            (Some("parent-thread"), true)
+        );
+
+        request.headers[0].1.clear();
+        assert_eq!(request_log_codex_session(&request), (None, true));
+
+        request.headers = vec![
+            ("x-openai-subagent".into(), "codey_worker".into()),
+            ("thread-id".into(), "child-thread".into()),
+            ("session-id".into(), "child-session".into()),
+        ];
+        assert_eq!(request_log_codex_session(&request), (None, true));
     }
 
     #[test]
@@ -12970,27 +13816,39 @@ mod tests {
     }
 
     #[test]
-    fn responses_web_search_requires_explicit_chat_selection() {
+    fn responses_web_search_drops_ambient_auto_but_rejects_omitted_selection() {
         let omitted = responses_to_chat_completions_request(&json!({
             "model":"provider-model",
             "input":"normal conversation",
             "tools":[{"type":"web_search"}]
         }))
-        .unwrap();
-        assert!(omitted.body.get("web_search_options").is_none());
-        assert!(omitted.body.get("tools").is_none());
-        assert!(omitted.body.get("tool_choice").is_none());
+        .unwrap_err();
+        assert!(omitted.to_string().contains("可选 web_search"));
 
         let auto = responses_to_chat_completions_request(&json!({
             "model":"provider-model",
-            "input":"search the web",
-            "tools":[{"type":"web_search"}],
+            "input":"normal conversation",
+            "tools":[
+                {"type":"web_search"},
+                {"type":"function","name":"lookup","parameters":{"type":"object","properties":{}}}
+            ],
             "tool_choice":"auto"
         }))
         .unwrap();
         assert!(auto.body.get("web_search_options").is_none());
-        assert!(auto.body.get("tools").is_none());
-        assert!(auto.body.get("tool_choice").is_none());
+        assert_eq!(auto.body["tool_choice"], "auto");
+        assert_eq!(auto.body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(auto.body["tools"][0]["function"]["name"], "lookup");
+
+        let additional = responses_to_chat_completions_request(&json!({
+            "model":"provider-model",
+            "input":[
+                {"role":"user","content":"search the web"},
+                {"type":"additional_tools","role":"developer","tools":[{"type":"web_search"}]}
+            ]
+        }))
+        .unwrap_err();
+        assert!(additional.to_string().contains("可选 web_search"));
 
         let chat = responses_to_chat_completions_request(&json!({
             "model":"gpt-5-search-api",
@@ -13057,6 +13915,28 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("tool_choice=required"));
         assert!(error.to_string().contains("无法无损表达"));
+
+        let explicit_mixed = responses_to_chat_completions_request(&json!({
+            "model":"provider-model",
+            "input":"search the web",
+            "tools":[
+                {"type":"web_search"},
+                {"type":"function","name":"lookup","parameters":{"type":"object","properties":{}}}
+            ],
+            "tool_choice":{"type":"web_search"}
+        }))
+        .unwrap_err();
+        assert!(explicit_mixed.to_string().contains("仍包含其他工具"));
+
+        let sources = responses_to_chat_completions_request(&json!({
+            "model":"provider-model",
+            "input":"search the web",
+            "tools":[{"type":"web_search"}],
+            "tool_choice":{"type":"web_search"},
+            "include":["web_search_call.action.sources"]
+        }))
+        .unwrap_err();
+        assert!(sources.to_string().contains("action.sources"));
     }
 
     #[test]
@@ -13129,6 +14009,24 @@ mod tests {
             error.to_string().contains("web_search_options")
                 || error.to_string().contains("支持 Responses 的线路")
         );
+
+        let error = responses_to_anthropic_messages_request(&json!({
+            "model":"claude-test",
+            "input":"search",
+            "tools":[{"type":"web_search"}]
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("可选 web_search"));
+
+        let ambient = responses_to_anthropic_messages_request(&json!({
+            "model":"claude-test",
+            "input":"normal conversation",
+            "tools":[{"type":"web_search"}],
+            "tool_choice":"auto"
+        }))
+        .unwrap();
+        assert!(ambient.body.get("tools").is_none());
+        assert!(ambient.body.get("tool_choice").is_none());
     }
 
     #[test]
@@ -13541,7 +14439,7 @@ mod tests {
             }
         });
 
-        annotate_upstream_websocket_failure(
+        let error_summary = annotate_upstream_websocket_failure(
             &mut event,
             route,
             "provider-model",
@@ -13556,6 +14454,10 @@ mod tests {
         assert!(message.contains("provider-model"));
         assert!(message.contains("openai_error"));
         assert!(message.contains("bad_response_status_code"));
+        assert_eq!(
+            error_summary.as_deref(),
+            Some("openai_error（类型：bad_response_status_code；代码：bad_response_status_code）")
+        );
     }
 
     #[tokio::test]
@@ -14005,7 +14907,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_route_omits_optional_web_search_for_regular_provider_model() {
+    async fn chat_route_drops_ambient_auto_web_search_before_contacting_upstream() {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let upstream_address = upstream.local_addr().unwrap();
         let upstream_task = tokio::spawn(async move {
@@ -14016,14 +14918,14 @@ mod tests {
                 &mut stream,
                 200,
                 &json!({
-                    "id":"chatcmpl-regular",
+                    "id":"chatcmpl-ambient-search",
                     "created":123,
                     "model":body["model"],
                     "choices":[{
-                        "message":{"role":"assistant","content":"normal response"},
+                        "message":{"role":"assistant","content":"normal answer"},
                         "finish_reason":"stop"
                     }],
-                    "usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}
+                    "usage":{"prompt_tokens":2,"completion_tokens":2,"total_tokens":4}
                 }),
             )
             .await
@@ -14054,7 +14956,7 @@ mod tests {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(
             response.json::<Value>().await.unwrap()["output_text"],
-            "normal response"
+            "normal answer"
         );
         let (path, body) = upstream_task.await.unwrap();
         assert_eq!(path, "/v1/chat/completions");

@@ -151,7 +151,7 @@ const MODEL_PROMPT_FIELDS: [&str; 7] = [
     "personality_pragmatic",
 ];
 
-const GENERIC_MODEL_SPECIFIC_FIELDS: [&str; 9] = [
+const GENERIC_MODEL_SPECIFIC_FIELDS: [&str; 11] = [
     "tool_mode",
     "multi_agent_version",
     "comp_hash",
@@ -161,6 +161,8 @@ const GENERIC_MODEL_SPECIFIC_FIELDS: [&str; 9] = [
     "auto_review_model_override",
     "node_repl_auto_review_required",
     "node_repl_disabled",
+    "supports_search_tool",
+    "web_search_tool_type",
 ];
 
 /// 构建 codex model_catalog_json 内容。

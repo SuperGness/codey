@@ -6,6 +6,7 @@ import {
   IconEye,
   IconEyeOff,
   IconInfoCircle,
+  IconListDetails,
   IconPlus as Plus,
   IconRefresh as RefreshCw,
   IconServer as Server,
@@ -37,6 +38,7 @@ import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
 import { validateThirdPartyRouteShortName } from "./routeShortNames";
 import { flushCardClass } from "./uiClasses";
 import { validateOutboundApiUrl } from "./urlValidation";
+import { RequestLogDialog } from "./RequestLogDialog";
 
 type ModelSectionProps = {
   config: Config;
@@ -50,7 +52,7 @@ type ModelSectionProps = {
   busy: string | null;
   showAccountUsageInHeader: boolean;
   onToggleLocalRouter: (checked: boolean) => void;
-  onSyncCurrentProvider: () => void;
+  onToggleRouteRequestLog: (checked: boolean) => void;
   onSaveRoute: (route: Profile) => Promise<boolean>;
   onDeleteRoute: (routeId: string) => void;
   onFetchRouteModels: (route: Profile) => void;
@@ -93,6 +95,7 @@ function createRoute(profiles: Profile[]): Profile {
     officialAccount: false,
     supportsRemoteCompaction: false,
     supportsWebsockets: false,
+    supportsNativeWebSearch: false,
   };
 }
 
@@ -142,7 +145,7 @@ function ModelSectionComponent({
   busy,
   showAccountUsageInHeader,
   onToggleLocalRouter,
-  onSyncCurrentProvider,
+  onToggleRouteRequestLog,
   onSaveRoute,
   onDeleteRoute,
   onFetchRouteModels,
@@ -156,11 +159,13 @@ function ModelSectionComponent({
   const [routeApiKeyVisible, setRouteApiKeyVisible] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
   const [selectedProviderFilter, setSelectedProviderFilter] = useState<string>("all");
+  const [requestLogDialogOpen, setRequestLogDialogOpen] = useState(false);
   const routeConfigReadOnly = !config.localRouterEnabled;
 
   useEffect(() => {
     if (!routeConfigReadOnly) return;
     setRouteDialogOpen(false);
+    setRequestLogDialogOpen(false);
     setRouteDraft(null);
     setRouteApiKeyVisible(false);
   }, [routeConfigReadOnly]);
@@ -191,6 +196,7 @@ function ModelSectionComponent({
       officialAccount: official,
       supportsRemoteCompaction: matchingProfile?.supportsRemoteCompaction,
       supportsWebsockets: matchingProfile?.supportsWebsockets,
+      supportsNativeWebSearch: matchingProfile?.supportsNativeWebSearch,
       supportsAutoReview: matchingProfile?.supportsAutoReview,
     };
   }, [config.profiles, currentProvider, routeConfigReadOnly]);
@@ -406,18 +412,31 @@ function ModelSectionComponent({
               aria-label="启用本地路由"
             />
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={!canSyncCurrentProvider || isBusy}
-            onClick={onSyncCurrentProvider}
-          >
-            <RefreshCw
-              className={busy === "sync-provider" ? "animate-spin" : ""}
-              aria-hidden="true"
-            />
-            {routeConfigReadOnly ? "刷新当前线路" : "重新读取 Codex 配置"}
-          </Button>
+          {config.localRouterEnabled && (
+            <>
+              <div className="local-router-toggle route-request-log-toggle">
+                <span>
+                  <strong>开启日志记录</strong>
+                  <small>{config.routeRequestLog.enabled ? "正在记录" : "已关闭"}</small>
+                </span>
+                <Switch
+                  size="sm"
+                  checked={config.routeRequestLog.enabled}
+                  disabled={isBusy}
+                  onCheckedChange={onToggleRouteRequestLog}
+                  aria-label="开启请求日志记录"
+                />
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setRequestLogDialogOpen(true)}
+              >
+                <IconListDetails aria-hidden="true" />
+                查看请求日志
+              </Button>
+            </>
+          )}
         </div>
       </div>
 
@@ -993,6 +1012,10 @@ function ModelSectionComponent({
                           upstreamProtocol === "openaiResponses"
                             ? Boolean(routeDraft.supportsWebsockets)
                             : false,
+                        supportsNativeWebSearch:
+                          upstreamProtocol === "openaiResponses"
+                            ? Boolean(routeDraft.supportsNativeWebSearch)
+                            : false,
                       });
                     }}
                     optionList={routeProtocolOptions}
@@ -1003,16 +1026,33 @@ function ModelSectionComponent({
                 </div>
 
                 {routeDraft.upstreamProtocol === "openaiResponses" && (
-                  <div className="route-websocket-option route-editor-span-all">
-                    <strong>WebSocket</strong>
-                    <Switch
-                      checked={Boolean(routeDraft.supportsWebsockets)}
-                      disabled={isBusy}
-                      onCheckedChange={(checked) =>
-                        updateRouteDraft({ supportsWebsockets: checked })}
-                      aria-label="WebSocket"
-                    />
-                  </div>
+                  <>
+                    <div className="route-websocket-option route-editor-span-all">
+                      <strong>WebSocket</strong>
+                      <Switch
+                        checked={Boolean(routeDraft.supportsWebsockets)}
+                        disabled={isBusy}
+                        onCheckedChange={(checked) =>
+                          updateRouteDraft({ supportsWebsockets: checked })}
+                        aria-label="WebSocket"
+                      />
+                    </div>
+                    <div className="route-websocket-option route-editor-span-all">
+                      <span>
+                        <strong>原生网页搜索</strong>
+                        <small className="route-field-hint">
+                          仅在上游和所选模型都明确支持时开启
+                        </small>
+                      </span>
+                      <Switch
+                        checked={Boolean(routeDraft.supportsNativeWebSearch)}
+                        disabled={isBusy}
+                        onCheckedChange={(checked) =>
+                          updateRouteDraft({ supportsNativeWebSearch: checked })}
+                        aria-label="原生网页搜索"
+                      />
+                    </div>
+                  </>
                 )}
 
                 <label className="route-field">
@@ -1127,6 +1167,12 @@ function ModelSectionComponent({
           </DialogContent>
         )}
       </Dialog>
+      <RequestLogDialog
+        config={config}
+        container={popupContainer}
+        opened={requestLogDialogOpen}
+        onClose={() => setRequestLogDialogOpen(false)}
+      />
     </section>
   );
 }

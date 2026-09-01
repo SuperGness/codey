@@ -60,6 +60,7 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(app, /onFetchRouteModels=\{handleFetchRouteModels\}/);
   assert.match(app, /onSetDefaultModel=\{handleSetRouteDefaultModel\}/);
   assert.match(app, /onToggleLocalRouter=\{handleToggleLocalRouter\}/);
+  assert.match(app, /onToggleRouteRequestLog=\{handleToggleRouteRequestLog\}/);
   assert.match(
     app,
     /onToggleAccountUsage=\{handleToggleAccountUsage\}/,
@@ -97,8 +98,10 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
     /routeConfigReadOnly && group\.official && \([\s\S]*provider-model-usage-toggle[\s\S]*checked=\{showAccountUsageInHeader\}/,
   );
   assert.match(sections, /<DialogTitle>/);
-  assert.match(sections, /重新读取 Codex 配置/);
-  assert.match(sections, /刷新当前线路/);
+  assert.match(sections, /config\.localRouterEnabled && \(/);
+  assert.match(sections, /checked=\{config\.routeRequestLog\.enabled\}/);
+  assert.match(sections, /onCheckedChange=\{onToggleRouteRequestLog\}/);
+  assert.match(sections, /查看请求日志/);
   assert.match(sections, /当前线路模型/);
   assert.match(sections, /仅展示 Codex 当前线路，可同步模型/);
   assert.match(sections, /if \(routeConfigReadOnly\) return nativeProfile \? \[nativeProfile\] : \[\]/);

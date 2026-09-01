@@ -52,6 +52,11 @@ pub struct ProviderProfile {
     /// routes remain disabled unless the user explicitly opts in.
     #[serde(default)]
     pub supports_websockets: bool,
+    /// Whether this route natively serves the Responses hosted Web Search
+    /// tool. Official ChatGPT-account routes normalize to enabled;
+    /// third-party Responses routes require an explicit opt-in.
+    #[serde(default)]
+    pub supports_native_web_search: bool,
     /// Whether this route can serve Codex's hidden automatic review model.
     /// Official ChatGPT-account routes normalize to enabled; third-party
     /// routes remain disabled unless synchronization or the user enables it.
@@ -124,6 +129,7 @@ impl ProviderProfile {
             official_account: false,
             supports_remote_compaction: false,
             supports_websockets: false,
+            supports_native_web_search: false,
             supports_auto_review: false,
         }
     }
@@ -184,6 +190,7 @@ impl ProviderProfile {
             self.api_key.clear();
             self.supports_remote_compaction = true;
             self.supports_websockets = true;
+            self.supports_native_web_search = true;
             self.supports_auto_review = true;
             self.upstream_protocol = UPSTREAM_PROTOCOL_OFFICIAL.to_string();
             self.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
@@ -191,6 +198,9 @@ impl ProviderProfile {
             self.official_account = false;
             if self.upstream_protocol == UPSTREAM_PROTOCOL_OFFICIAL {
                 self.upstream_protocol = UPSTREAM_PROTOCOL_OPENAI_RESPONSES.to_string();
+            }
+            if self.upstream_protocol != UPSTREAM_PROTOCOL_OPENAI_RESPONSES {
+                self.supports_native_web_search = false;
             }
         }
         self.api_key_configured = !self.api_key.is_empty();
@@ -454,6 +464,115 @@ pub(crate) struct RuntimeModelTarget {
     pub official: bool,
 }
 
+const DEFAULT_ROUTE_REQUEST_LOG_QUEUE_CAPACITY: usize = 8_192;
+const DEFAULT_ROUTE_REQUEST_LOG_BATCH_SIZE: usize = 256;
+const DEFAULT_ROUTE_REQUEST_LOG_FLUSH_INTERVAL_MS: u64 = 1_000;
+const DEFAULT_ROUTE_REQUEST_LOG_SHUTDOWN_FLUSH_TIMEOUT_MS: u64 = 1_500;
+const DEFAULT_ROUTE_REQUEST_LOG_SAMPLE_RATE_PER_MILLION: u32 = 1_000_000;
+const DEFAULT_ROUTE_REQUEST_LOG_MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
+const DEFAULT_ROUTE_REQUEST_LOG_RETAINED_FILES: usize = 7;
+const DEFAULT_ROUTE_REQUEST_LOG_RETENTION_DAYS: u32 = 30;
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteRequestLogBackend {
+    #[default]
+    Ndjson,
+    Sqlite,
+}
+
+/// Best-effort request observations for the built-in router. The feature is
+/// opt-in: when disabled the router does not create a queue or writer thread.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteRequestLogConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub backend: RouteRequestLogBackend,
+    #[serde(default = "default_route_request_log_queue_capacity")]
+    pub queue_capacity: usize,
+    #[serde(default = "default_route_request_log_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_route_request_log_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+    #[serde(default = "default_route_request_log_shutdown_flush_timeout_ms")]
+    pub shutdown_flush_timeout_ms: u64,
+    /// Deterministic process-local sampling in parts per million.
+    #[serde(default = "default_route_request_log_sample_rate_per_million")]
+    pub sample_rate_per_million: u32,
+    #[serde(default = "default_route_request_log_max_file_bytes")]
+    pub max_file_bytes: u64,
+    #[serde(default = "default_route_request_log_retained_files")]
+    pub retained_files: usize,
+    #[serde(default = "default_route_request_log_retention_days")]
+    pub retention_days: u32,
+}
+
+impl Default for RouteRequestLogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: RouteRequestLogBackend::Ndjson,
+            queue_capacity: DEFAULT_ROUTE_REQUEST_LOG_QUEUE_CAPACITY,
+            batch_size: DEFAULT_ROUTE_REQUEST_LOG_BATCH_SIZE,
+            flush_interval_ms: DEFAULT_ROUTE_REQUEST_LOG_FLUSH_INTERVAL_MS,
+            shutdown_flush_timeout_ms: DEFAULT_ROUTE_REQUEST_LOG_SHUTDOWN_FLUSH_TIMEOUT_MS,
+            sample_rate_per_million: DEFAULT_ROUTE_REQUEST_LOG_SAMPLE_RATE_PER_MILLION,
+            max_file_bytes: DEFAULT_ROUTE_REQUEST_LOG_MAX_FILE_BYTES,
+            retained_files: DEFAULT_ROUTE_REQUEST_LOG_RETAINED_FILES,
+            retention_days: DEFAULT_ROUTE_REQUEST_LOG_RETENTION_DAYS,
+        }
+    }
+}
+
+impl RouteRequestLogConfig {
+    fn normalize(&mut self) {
+        self.queue_capacity = self.queue_capacity.clamp(128, 65_536);
+        self.batch_size = self.batch_size.clamp(1, 2_048).min(self.queue_capacity);
+        self.flush_interval_ms = self.flush_interval_ms.clamp(50, 60_000);
+        self.shutdown_flush_timeout_ms = self.shutdown_flush_timeout_ms.clamp(100, 10_000);
+        self.sample_rate_per_million = self.sample_rate_per_million.min(1_000_000);
+        self.max_file_bytes = self
+            .max_file_bytes
+            .clamp(1024 * 1024, 4 * 1024 * 1024 * 1024);
+        self.retained_files = self.retained_files.clamp(1, 100);
+        self.retention_days = self.retention_days.clamp(1, 3_650);
+    }
+}
+
+fn default_route_request_log_queue_capacity() -> usize {
+    DEFAULT_ROUTE_REQUEST_LOG_QUEUE_CAPACITY
+}
+
+fn default_route_request_log_batch_size() -> usize {
+    DEFAULT_ROUTE_REQUEST_LOG_BATCH_SIZE
+}
+
+fn default_route_request_log_flush_interval_ms() -> u64 {
+    DEFAULT_ROUTE_REQUEST_LOG_FLUSH_INTERVAL_MS
+}
+
+fn default_route_request_log_shutdown_flush_timeout_ms() -> u64 {
+    DEFAULT_ROUTE_REQUEST_LOG_SHUTDOWN_FLUSH_TIMEOUT_MS
+}
+
+fn default_route_request_log_sample_rate_per_million() -> u32 {
+    DEFAULT_ROUTE_REQUEST_LOG_SAMPLE_RATE_PER_MILLION
+}
+
+fn default_route_request_log_max_file_bytes() -> u64 {
+    DEFAULT_ROUTE_REQUEST_LOG_MAX_FILE_BYTES
+}
+
+fn default_route_request_log_retained_files() -> usize {
+    DEFAULT_ROUTE_REQUEST_LOG_RETAINED_FILES
+}
+
+fn default_route_request_log_retention_days() -> u32 {
+    DEFAULT_ROUTE_REQUEST_LOG_RETENTION_DAYS
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeyConfig {
@@ -464,6 +583,10 @@ pub struct CodeyConfig {
     /// keep their current behavior after upgrading.
     #[serde(default = "default_true")]
     pub local_router_enabled: bool,
+    /// Structured, best-effort request observations for the built-in router.
+    /// Disabled by default so existing installations pay no producer cost.
+    #[serde(default)]
+    pub route_request_log: RouteRequestLogConfig,
     #[serde(default)]
     pub active_profile_id: String,
     #[serde(default)]
@@ -576,6 +699,7 @@ impl Default for CodeyConfig {
         Self {
             settings_revision: 0,
             local_router_enabled: true,
+            route_request_log: RouteRequestLogConfig::default(),
             active_profile_id: profile.id.clone(),
             profiles: vec![profile],
             webhook: WebhookConfig::default(),
@@ -610,6 +734,7 @@ impl Default for CodeyConfig {
 impl CodeyConfig {
     pub fn normalize(mut self) -> Self {
         self.update_manifest_url = default_update_manifest_url();
+        self.route_request_log.normalize();
         self.profiles
             .retain(|profile| !profile.id.trim().is_empty());
         let mut used_short_names = self
@@ -912,6 +1037,42 @@ impl CodeyConfig {
 
     pub(crate) fn runtime_supports_websockets(&self) -> bool {
         !self.runtime_websocket_model_aliases().is_empty()
+    }
+
+    /// Whether one route can expose Codex's native Responses Web Search tool
+    /// this launch. A third-party route must opt in and use the native
+    /// Responses protocol; adapted Chat/Anthropic routes never qualify.
+    pub(crate) fn route_supports_native_web_search_this_launch(
+        &self,
+        profile: &ProviderProfile,
+    ) -> bool {
+        if profile.official_account {
+            return self.official_account_available_this_launch;
+        }
+        profile.supports_native_web_search
+            && profile.upstream_protocol == UPSTREAM_PROTOCOL_OPENAI_RESPONSES
+    }
+
+    /// Route-qualified model IDs that may retain native Web Search metadata in
+    /// the generated runtime catalog. The catalog applies a second gate and
+    /// only preserves the capability when the source model metadata declares
+    /// support as well.
+    pub(crate) fn runtime_native_web_search_model_aliases(&self) -> Vec<String> {
+        self.profiles
+            .iter()
+            .filter(|profile| self.route_supports_native_web_search_this_launch(profile))
+            .flat_map(|profile| {
+                let provider_id = profile.provider_id();
+                let models = if profile.official_account {
+                    self.enabled_official_route_models(provider_id)
+                } else {
+                    self.enabled_route_models(provider_id)
+                };
+                models
+                    .into_iter()
+                    .map(move |model| local_router::model_alias(provider_id, &model))
+            })
+            .collect()
     }
 
     /// Whether one route natively supports the Responses compaction contract
@@ -2094,6 +2255,7 @@ mod tests {
         }))
         .unwrap();
         assert!(!legacy.supports_websockets);
+        assert!(!legacy.supports_native_web_search);
         assert!(!legacy.supports_auto_review);
 
         let mut chat = ProviderProfile::new("Chat Relay");
@@ -2120,6 +2282,7 @@ mod tests {
         official.normalize();
         assert!(official.official_account);
         assert!(official.supports_websockets);
+        assert!(official.supports_native_web_search);
         assert!(official.supports_auto_review);
         assert_eq!(official.upstream_protocol, UPSTREAM_PROTOCOL_OFFICIAL);
         assert!(official.validate().is_ok());
@@ -2403,6 +2566,48 @@ mod tests {
     }
 
     #[test]
+    fn native_web_search_model_aliases_require_an_explicit_responses_route() {
+        let mut search_route = ProviderProfile::new("Search Route");
+        search_route.id = "route-search".into();
+        search_route.base_url = "https://search.example/v1".into();
+        search_route.api_key = "search-key".into();
+        search_route.supports_native_web_search = true;
+        search_route.normalize();
+
+        let mut regular_route = ProviderProfile::new("Regular Route");
+        regular_route.id = "route-regular".into();
+        regular_route.base_url = "https://regular.example/v1".into();
+        regular_route.api_key = "regular-key".into();
+        regular_route.normalize();
+
+        let mut chat_route = ProviderProfile::new("Chat Route");
+        chat_route.id = "route-chat".into();
+        chat_route.base_url = "https://chat.example/v1".into();
+        chat_route.api_key = "chat-key".into();
+        chat_route.upstream_protocol = UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+        chat_route.supports_native_web_search = true;
+        chat_route.normalize();
+        assert!(!chat_route.supports_native_web_search);
+
+        let mut config = CodeyConfig {
+            active_profile_id: search_route.id.clone(),
+            profiles: vec![search_route, regular_route, chat_route],
+            ..CodeyConfig::default()
+        }
+        .normalize();
+        for provider_id in ["route-search", "route-regular", "route-chat"] {
+            config
+                .selected_models_by_provider
+                .insert(provider_id.into(), vec!["gpt-5.6-sol".into()]);
+        }
+
+        assert_eq!(
+            config.runtime_native_web_search_model_aliases(),
+            vec![local_router::model_alias("route-search", "gpt-5.6-sol")]
+        );
+    }
+
+    #[test]
     fn third_party_remote_compaction_is_advertised_only_when_every_runtime_route_supports_it() {
         let mut capable = ProviderProfile::new("Responses Route");
         capable.id = "route-capable".into();
@@ -2491,6 +2696,33 @@ mod tests {
         config.official_account_available_this_launch = false;
         assert!(!config.runtime_supports_websockets());
         assert!(config.runtime_websocket_model_aliases().is_empty());
+    }
+
+    #[test]
+    fn official_native_web_search_models_require_login_this_launch() {
+        let mut official = ProviderProfile::new("OpenAI 官方直登");
+        official.id = DERIVED_OFFICIAL_PROFILE_ID.into();
+        official.source_provider_id = Some("openai".into());
+        official.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+        official.normalize();
+
+        let mut config = CodeyConfig {
+            active_profile_id: official.id.clone(),
+            profiles: vec![official],
+            official_account_available_this_launch: true,
+            ..CodeyConfig::default()
+        }
+        .normalize();
+        config
+            .selected_models_by_provider
+            .insert("openai".into(), vec!["gpt-5.6-sol".into()]);
+
+        assert_eq!(
+            config.runtime_native_web_search_model_aliases(),
+            vec![local_router::model_alias("openai", "gpt-5.6-sol")]
+        );
+        config.official_account_available_this_launch = false;
+        assert!(config.runtime_native_web_search_model_aliases().is_empty());
     }
 
     #[test]
@@ -2948,6 +3180,54 @@ mod tests {
             serde_json::to_value(disabled).unwrap()["localRouterEnabled"],
             serde_json::json!(false)
         );
+    }
+
+    #[test]
+    fn route_request_log_is_opt_in_and_normalizes_resource_bounds() {
+        let legacy = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
+            .unwrap()
+            .normalize();
+        assert!(!legacy.route_request_log.enabled);
+
+        let configured = serde_json::from_str::<CodeyConfig>(
+            r#"{
+                "activeProfileId":"",
+                "profiles":[],
+                "routeRequestLog":{
+                    "enabled":true,
+                    "backend":"sqlite",
+                    "queueCapacity":1,
+                    "batchSize":999999,
+                    "flushIntervalMs":1,
+                    "shutdownFlushTimeoutMs":999999,
+                    "sampleRatePerMillion":9999999,
+                    "maxFileBytes":1,
+                    "retainedFiles":0,
+                    "retentionDays":0
+                }
+            }"#,
+        )
+        .unwrap()
+        .normalize();
+        assert!(configured.route_request_log.enabled);
+        assert_eq!(
+            configured.route_request_log.backend,
+            RouteRequestLogBackend::Sqlite
+        );
+        assert_eq!(configured.route_request_log.queue_capacity, 128);
+        assert_eq!(configured.route_request_log.batch_size, 128);
+        assert_eq!(configured.route_request_log.flush_interval_ms, 50);
+        assert_eq!(
+            configured.route_request_log.shutdown_flush_timeout_ms,
+            10_000
+        );
+        assert_eq!(
+            configured.route_request_log.sample_rate_per_million,
+            1_000_000
+        );
+        assert_eq!(configured.route_request_log.max_file_bytes, 1024 * 1024);
+        assert_eq!(configured.route_request_log.retained_files, 1);
+        assert_eq!(configured.route_request_log.retention_days, 1);
     }
 
     #[test]

@@ -339,6 +339,15 @@ export function App({
       restartRequired?: boolean;
       modelHotReloaded?: boolean;
       modelHotReloadError?: string;
+      routeRequestLogHotReloaded?: boolean;
+      routeRequestLogHealth?:
+        | "not_applicable"
+        | "unchanged"
+        | "enabled"
+        | "disabled"
+        | "superseded"
+        | "failed";
+      routeRequestLogHotReloadError?: string;
       subagentConfigHotReloaded?: boolean;
       subagentConfigRepaired?: boolean;
       subagentConfigHealth?: string;
@@ -723,21 +732,37 @@ export function App({
       const subagentHotReloaded = Boolean(result.subagentConfigHotReloaded);
       const subagentHotReloadFailed = Boolean(result.subagentConfigHotReloadError);
       const subagentConfigRepaired = Boolean(result.subagentConfigRepaired);
-      setNotice({
-        tone:
-          result.restartRequired || subagentHotReloadFailed
-            ? "info"
-            : "success",
-        text: subagentConfigRepaired
-          ? "Codey 设置已保存；已校验并修复子代理运行配置，下一次派生将使用当前角色映射"
-          : subagentHotReloaded
-            ? "Codey 设置已保存；子代理模型和思考深度已实时更新"
-          : subagentHotReloadFailed
-            ? "Codey 设置已保存；子代理配置暂未能热更新，重启 Codex 后生效"
-            : result.restartRequired
-              ? "Codey 设置已保存，启动参数将在重启 Codex 后生效"
-              : "Codey 设置已保存",
-      });
+      const requestLogHealth = result.routeRequestLogHealth;
+      const requestLogHotReloadFailed = requestLogHealth === "failed";
+      const requestLogSuperseded = requestLogHealth === "superseded";
+      const restartSuffix = result.restartRequired
+        ? "；其他启动参数将在重启 Codex 后生效"
+        : "";
+      let noticeTone: "success" | "info" | "error" =
+        result.restartRequired || subagentHotReloadFailed ? "info" : "success";
+      let noticeText = result.restartRequired
+        ? "Codey 设置已保存，启动参数将在重启 Codex 后生效"
+        : "Codey 设置已保存";
+      if (subagentConfigRepaired) {
+        noticeText =
+          "Codey 设置已保存；已校验并修复子代理运行配置，下一次派生将使用当前角色映射";
+      } else if (subagentHotReloaded) {
+        noticeText = "Codey 设置已保存；子代理模型和思考深度已实时更新";
+      } else if (subagentHotReloadFailed) {
+        noticeText = "Codey 设置已保存；子代理配置暂未能热更新，重启 Codex 后生效";
+      }
+      if (requestLogHotReloadFailed) {
+        noticeTone = "error";
+        noticeText = `Codey 设置已保存；${result.routeRequestLogHotReloadError || "请求日志记录未能实时更新"}`;
+      } else if (requestLogSuperseded) {
+        noticeTone = "info";
+        noticeText = `Codey 设置已保存；${result.routeRequestLogHotReloadError || "请求日志配置被更新的设置取代，请确认当前开关状态"}`;
+      } else if (requestLogHealth === "enabled") {
+        noticeText = `Codey 设置已保存；请求日志记录已实时开启，无需重启${restartSuffix}`;
+      } else if (requestLogHealth === "disabled") {
+        noticeText = `Codey 设置已保存；请求日志记录已实时关闭，无需重启${restartSuffix}`;
+      }
+      setNotice({ tone: noticeTone, text: noticeText });
     });
   }
 
@@ -926,9 +951,6 @@ export function App({
   const handleSubagentOptimizationChange = useStableEvent(
     (checked: boolean) => setSubagentOptimization(checked),
   );
-  const handleSyncCurrentProvider = useStableEvent(
-    () => void syncCurrentProvider(),
-  );
   const handleSaveRoute = useStableEvent(saveRoute);
   const handleDeleteRoute = useStableEvent(requestDeleteRoute);
   const handleFetchRouteModels = useStableEvent((route: Profile) => {
@@ -945,6 +967,23 @@ export function App({
       text: checked
         ? "保存并重启 Codex 后启用本地路由"
         : "保存并重启 Codex 后关闭本地路由；线路配置将保持只读",
+    });
+  });
+  const handleToggleRouteRequestLog = useStableEvent((checked: boolean) => {
+    if (!config) return;
+    editConfig({
+      ...config,
+      routeRequestLog: {
+        ...config.routeRequestLog,
+        enabled: checked,
+        ...(checked ? { backend: "sqlite" as const } : {}),
+      },
+    });
+    setNotice({
+      tone: "info",
+      text: checked
+        ? "保存后将实时开启请求日志记录，无需重启 Codex"
+        : "保存后将实时关闭请求日志记录，无需重启 Codex；历史日志仍可查看",
     });
   });
   const handleToggleAccountUsage = useStableEvent((checked: boolean) => {
@@ -1241,7 +1280,7 @@ export function App({
               busy={busy}
               showAccountUsageInHeader={config.showAccountUsageInHeader}
               onToggleLocalRouter={handleToggleLocalRouter}
-              onSyncCurrentProvider={handleSyncCurrentProvider}
+              onToggleRouteRequestLog={handleToggleRouteRequestLog}
               onSaveRoute={handleSaveRoute}
               onDeleteRoute={handleDeleteRoute}
               onFetchRouteModels={handleFetchRouteModels}
