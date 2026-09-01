@@ -28,6 +28,7 @@ test("request log controls are scoped to built-in routing and preserve logger se
   assert.match(preview, /codexSessionId:/);
   assert.match(preview, /codexSessionIsParent,/);
   assert.match(preview, /item\.codexSessionId,/);
+  assert.doesNotMatch(preview, /retryCount/);
 });
 
 test("request log viewer uses a full-screen server-paginated searchable table", async () => {
@@ -61,10 +62,11 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
     "输出 Token",
     "缓存 Token",
     "总 Token",
-    "重试",
   ]) {
     assert.match(viewer, new RegExp(`>${heading}<`));
   }
+  assert.doesNotMatch(viewer, />重试</);
+  assert.doesNotMatch(viewer, /retryCount/);
   assert.match(viewer, /item\.upstreamAuthority/);
   assert.match(viewer, /upstreamErrorSummary\?: string \| null/);
   assert.match(viewer, /\[\s*item\.statusCode,\s*item\.upstreamStatusCode,[\s\S]*\.some/);

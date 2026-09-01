@@ -59,7 +59,6 @@ type RouteRequestLogItem = {
   errorCode?: string | null;
   upstreamErrorSummary?: string | null;
   completionReason?: string | null;
-  retryCount: number;
   fallbackCount: number;
   fallbackReason?: string | null;
   upstreamAuthority?: string | null;
@@ -493,7 +492,6 @@ export function RequestLogDialog({
                     <Table.Th className="whitespace-nowrap text-right">输出 Token</Table.Th>
                     <Table.Th className="whitespace-nowrap text-right">缓存 Token</Table.Th>
                     <Table.Th className="whitespace-nowrap text-right">总 Token</Table.Th>
-                    <Table.Th className="whitespace-nowrap text-right">重试</Table.Th>
                   </Table.Tr>
                 </Table.Thead>
                 <Table.Tbody>
@@ -692,13 +690,6 @@ export function RequestLogDialog({
                             </div>
                           ) : (
                             formatTokens(item.totalTokens)
-                          )}
-                        </Table.Td>
-                        <Table.Td className="whitespace-nowrap text-right font-mono">
-                          {item.retryCount > 0 ? (
-                            <span className="font-semibold text-amber-600">{item.retryCount}</span>
-                          ) : (
-                            <span className="text-[#8e8e93]">0</span>
                           )}
                         </Table.Td>
                       </Table.Tr>

@@ -21,7 +21,7 @@ use tokio::sync::oneshot;
 
 use crate::config::{RouteRequestLogBackend, RouteRequestLogConfig};
 
-const SCHEMA_VERSION: u8 = 4;
+const SCHEMA_VERSION: u8 = 5;
 const MAX_LOG_STRING_BYTES: usize = 512;
 const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 3;
 const PARTS_PER_MILLION: u64 = 1_000_000;
@@ -181,7 +181,6 @@ pub(crate) struct RouteRequestLogEntry {
     pub upstream_error_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_reason: Option<String>,
-    pub retry_count: u32,
     pub fallback_count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
@@ -320,7 +319,6 @@ pub(crate) struct RouteRequestLogQueryItem {
     pub error_code: Option<String>,
     pub upstream_error_summary: Option<String>,
     pub completion_reason: Option<String>,
-    pub retry_count: u32,
     pub fallback_count: u32,
     pub fallback_reason: Option<String>,
     pub upstream_authority: Option<String>,
@@ -438,7 +436,6 @@ impl RouteRequestLogProducer {
             error_code: None,
             upstream_error_summary: None,
             completion_reason: None,
-            retry_count: 0,
             fallback_count: 0,
             fallback_reason: None,
             upstream_authority: None,
@@ -577,7 +574,6 @@ struct PendingEntry {
     error_code: Option<String>,
     upstream_error_summary: Option<String>,
     completion_reason: Option<String>,
-    retry_count: u32,
     fallback_count: u32,
     fallback_reason: Option<String>,
     upstream_authority: Option<String>,
@@ -745,14 +741,6 @@ impl RouteRequestLogProbe {
             {
                 lock_unpoisoned(&self.shared.entry).first_byte_source = Some(source);
             }
-        });
-    }
-
-    pub(crate) fn mark_retry(&self, reason: &str) {
-        self.shield(|| {
-            let mut entry = lock_unpoisoned(&self.shared.entry);
-            entry.retry_count = entry.retry_count.saturating_add(1);
-            entry.fallback_reason = Some(bounded_string(reason));
         });
     }
 
@@ -949,7 +937,6 @@ impl RouteRequestLogProbe {
             error_code: pending.error_code.take(),
             upstream_error_summary: pending.upstream_error_summary.take(),
             completion_reason: pending.completion_reason.take(),
-            retry_count: pending.retry_count,
             fallback_count: pending.fallback_count,
             fallback_reason: pending.fallback_reason.take(),
             upstream_authority: pending.upstream_authority.take(),
@@ -1555,7 +1542,6 @@ impl SqliteSink {
                 error_code TEXT,
                 upstream_error_summary TEXT,
                 completion_reason TEXT,
-                retry_count INTEGER NOT NULL,
                 fallback_count INTEGER NOT NULL,
                 fallback_reason TEXT,
                 upstream_authority TEXT,
@@ -1601,7 +1587,7 @@ impl SqliteSink {
                     usage_reported, usage_unavailable_reason, request_protocol,
                     upstream_transport, request_kind,
                     status, status_code, upstream_status_code, error_code, completion_reason,
-                    retry_count, fallback_count, fallback_reason, upstream_authority,
+                    fallback_count, fallback_reason, upstream_authority,
                     upstream_request_id, upstream_protocol, protocol_bridge,
                     first_byte_source, client_fingerprint, subagent, schema_version,
                     upstream_error_summary, codex_session_id, codex_session_is_parent
@@ -1610,7 +1596,7 @@ impl SqliteSink {
                     ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
                     ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-                    ?41, ?42, ?43
+                    ?41, ?42
                 )",
             )?;
             for queued in batch {
@@ -1645,7 +1631,6 @@ impl SqliteSink {
                     entry.upstream_status_code,
                     entry.error_code,
                     entry.completion_reason,
-                    entry.retry_count,
                     entry.fallback_count,
                     entry.fallback_reason,
                     entry.upstream_authority,
@@ -1756,8 +1741,8 @@ fn query_sqlite_route_request_logs(
             cache_creation_input_tokens, reasoning_output_tokens, total_tokens,
             usage_reported, usage_unavailable_reason, request_protocol,
             upstream_transport, request_kind, status, status_code,
-            upstream_status_code, error_code, completion_reason, retry_count,
-            fallback_count, fallback_reason, upstream_authority,
+            upstream_status_code, error_code, completion_reason, fallback_count,
+            fallback_reason, upstream_authority,
             upstream_request_id, upstream_protocol, protocol_bridge,
             first_byte_source, subagent, {upstream_error_summary_column},
             {codex_session_id_column}, {codex_session_is_parent_column}
@@ -1889,18 +1874,17 @@ fn query_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequest
         upstream_status_code: row_optional_u16(row, 26)?,
         error_code: row.get(27)?,
         completion_reason: row.get(28)?,
-        retry_count: row_u32(row, 29)?,
-        fallback_count: row_u32(row, 30)?,
-        fallback_reason: row.get(31)?,
-        upstream_authority: row.get(32)?,
-        upstream_request_id: row.get(33)?,
-        upstream_protocol: row.get(34)?,
-        protocol_bridge: row.get(35)?,
-        first_byte_source: row.get(36)?,
-        subagent: row.get(37)?,
-        upstream_error_summary: row.get(38)?,
-        codex_session_id: row.get(39)?,
-        codex_session_is_parent: row.get(40)?,
+        fallback_count: row_u32(row, 29)?,
+        fallback_reason: row.get(30)?,
+        upstream_authority: row.get(31)?,
+        upstream_request_id: row.get(32)?,
+        upstream_protocol: row.get(33)?,
+        protocol_bridge: row.get(34)?,
+        first_byte_source: row.get(35)?,
+        subagent: row.get(36)?,
+        upstream_error_summary: row.get(37)?,
+        codex_session_id: row.get(38)?,
+        codex_session_is_parent: row.get(39)?,
     })
 }
 
@@ -2172,6 +2156,10 @@ fn ensure_sqlite_log_columns(connection: &Connection) -> rusqlite::Result<()> {
     let names = statement
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    if names.iter().any(|name| name == "retry_count") {
+        connection.execute_batch("ALTER TABLE route_request_logs DROP COLUMN retry_count;")?;
+    }
     if !names.iter().any(|name| name == "usage_reported") {
         connection.execute_batch(
             "ALTER TABLE route_request_logs
@@ -2288,7 +2276,6 @@ mod tests {
             error_code: None,
             upstream_error_summary: None,
             completion_reason: Some("completed".to_string()),
-            retry_count: 0,
             fallback_count: 0,
             fallback_reason: None,
             upstream_authority: Some("api.example.com".to_string()),
@@ -2368,6 +2355,7 @@ mod tests {
         assert_eq!(contents.lines().count(), 2);
         assert!(contents.contains("\"cachedInputTokens\":2"));
         assert!(contents.contains("\"codexSessionId\":\"thread-sample\""));
+        assert!(!contents.contains("retryCount"));
         assert!(!contents.contains("requestBody"));
     }
 
@@ -2401,6 +2389,117 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn sqlite_sink_migrates_v4_retry_column_without_losing_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(SQLITE_FILE_NAME);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE route_request_logs (
+                    request_id TEXT PRIMARY KEY,
+                    trace_id TEXT NOT NULL,
+                    timestamp_unix_ms INTEGER NOT NULL,
+                    provider TEXT,
+                    provider_name TEXT,
+                    requested_model TEXT NOT NULL,
+                    model TEXT,
+                    reasoning_effort TEXT,
+                    thinking_budget_tokens INTEGER,
+                    ttft_ms INTEGER,
+                    upstream_header_ms INTEGER,
+                    total_duration_ms INTEGER NOT NULL,
+                    queue_delay_ms INTEGER NOT NULL,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    cached_input_tokens INTEGER,
+                    cache_creation_input_tokens INTEGER,
+                    reasoning_output_tokens INTEGER,
+                    total_tokens INTEGER,
+                    usage_reported INTEGER NOT NULL,
+                    usage_unavailable_reason TEXT,
+                    request_protocol TEXT NOT NULL,
+                    upstream_transport TEXT,
+                    request_kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    status_code INTEGER,
+                    upstream_status_code INTEGER,
+                    error_code TEXT,
+                    upstream_error_summary TEXT,
+                    completion_reason TEXT,
+                    retry_count INTEGER NOT NULL,
+                    fallback_count INTEGER NOT NULL,
+                    fallback_reason TEXT,
+                    upstream_authority TEXT,
+                    upstream_request_id TEXT,
+                    upstream_protocol TEXT,
+                    protocol_bridge TEXT,
+                    first_byte_source TEXT,
+                    client_fingerprint TEXT,
+                    subagent INTEGER NOT NULL,
+                    schema_version INTEGER NOT NULL,
+                    codex_session_id TEXT,
+                    codex_session_is_parent INTEGER NOT NULL
+                );",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO route_request_logs (
+                    request_id, trace_id, timestamp_unix_ms, requested_model,
+                    total_duration_ms, queue_delay_ms, usage_reported,
+                    request_protocol, request_kind, status, retry_count,
+                    fallback_count, subagent, schema_version, codex_session_is_parent
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    "legacy",
+                    "legacy",
+                    to_i64(unix_timestamp_ms()),
+                    "model",
+                    1,
+                    0,
+                    false,
+                    "http",
+                    "responses",
+                    "succeeded",
+                    7,
+                    0,
+                    false,
+                    4,
+                    false,
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut sink = SqliteSink::open(path.clone(), 30).unwrap();
+        assert!(!sqlite_table_has_column(&sink.connection, "retry_count").unwrap());
+        let mut current = sample_entry("current");
+        current.timestamp_unix_ms = unix_timestamp_ms();
+        sink.write_batch(&[queued(current)]).unwrap();
+        sink.finish().unwrap();
+        drop(sink);
+
+        let page = query_route_request_logs(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery {
+                page_size: 10,
+                ..RouteRequestLogQuery::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.request_id.as_str())
+                .collect::<Vec<_>>(),
+            ["current", "legacy"]
+        );
+        assert!(!serde_json::to_string(&page).unwrap().contains("retryCount"));
     }
 
     #[test]
@@ -2665,7 +2764,6 @@ mod tests {
             error_code: None,
             upstream_error_summary: Some("rate limit reached".into()),
             completion_reason: None,
-            retry_count: 0,
             fallback_count: 0,
             fallback_reason: None,
             upstream_authority: None,
@@ -2684,6 +2782,7 @@ mod tests {
         assert_eq!(value["codexSessionId"], "parent-thread");
         assert_eq!(value["codexSessionIsParent"], true);
         assert!(value.get("request_id").is_none());
+        assert!(value.get("retryCount").is_none());
     }
 
     #[cfg(unix)]

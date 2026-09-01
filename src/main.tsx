@@ -308,7 +308,6 @@ if (import.meta.env.DEV) {
           ? "供应商额度不足，请稍后重试或切换备用线路（代码：rate_limit_exceeded）"
           : undefined,
         completionReason: failed ? undefined : "completed",
-        retryCount: failed ? 2 : index % 5 === 0 ? 1 : 0,
         fallbackCount: failed ? 1 : 0,
         fallbackReason: failed ? "rate_limited" : undefined,
         upstreamAuthority: primary ? "primary.example.invalid" : "backup.example.invalid",

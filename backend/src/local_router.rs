@@ -1675,7 +1675,7 @@ impl RouterServer {
                     if subagent_request && upstream_stream_requested && error.is_connect() =>
                 {
                     if let Some(probe) = downstream.request_log_probe() {
-                        probe.mark_retry("stream_connect_to_non_stream_http");
+                        probe.mark_fallback("stream_connect_to_non_stream_http");
                         probe.set_upstream_transport(UpstreamTransport::Http);
                     }
                     // A connect error happens before the request reaches the
