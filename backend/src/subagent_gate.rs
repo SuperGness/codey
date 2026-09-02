@@ -603,7 +603,7 @@ fn user_prompt_submit_output(
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": format!(
-                "Codey 检测到本轮用户输入到达时仍有 {active} 个子代理未确认终态。当前用户输入优先于旧任务描述：先调用一次不带筛选的 agents.list_agents 对账；若用户明确取消或缩小了某个子任务，只中断仍非终态且被明确取消的 target，再继续 wait/list 直到本批全部终态。普通状态询问或补充信息不得被解释为取消全部代理；完成对账前不得恢复非协作本地工作。{compatibility}"
+                "Codey 检测到本轮用户输入到达时仍有 {active} 个子代理未确认终态。当前用户输入优先于旧任务描述：先调用一次不带筛选的 agents.list_agents 对账；若用户明确取消或缩小了某个子任务，只中断仍非终态且被明确取消的 target。应用新输入后，如仍有计划内未派发的独立任务，按该任务角色重新计算并发上限；存在空余槽位时调用 agents.spawn_agent 补位，否则继续 wait/list。普通状态询问或补充信息不得被解释为取消全部代理；所有活动 attempt 结算前不得恢复非协作本地工作。{compatibility}"
             )
         }
     }))
@@ -1514,7 +1514,7 @@ fn post_wait_continuation(
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动标记尚未核销。保留下方内容；可继续使用 agents.wait_agent 或不带筛选的 agents.list_agents 对账。只有当前调用仍携带并匹配本批首个根派生调用的 turn_id 时，才可使用 agents.send_message、agents.followup_task 或 agents.interrupt_agent 协调；缺少该绑定时按匿名主体 fail-closed。completed、errored、shutdown、not_found、FINAL_ANSWER 和 task_complete 都视为终态；只对仍活动且未被根成功中断的 running、pending_init 或 interrupted 代理继续等待。根中断获得结构化成功回执后，该 target 即在 Codey 中永久放弃并视为本批已结算；后来仍显示 pending_init、running 或 interrupted 的上游快照不得触发再次等待。不得自动重派；若持续没有可信终态，Stop 恢复路径会在受控宽限期后 fence 遗留 attempt。{local_read_guidance}\n\n本次 wait_agent 已返回内容：\n{returned_update}{decryption_recovery}{compatibility}"
+            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动标记尚未核销。保留下方内容；可继续使用 agents.wait_agent 或不带筛选的 agents.list_agents 对账。只有当前调用仍携带并匹配本批首个根派生调用的 turn_id 时，才可使用 agents.spawn_agent、agents.send_message、agents.followup_task 或 agents.interrupt_agent 协调；缺少该绑定时按匿名主体 fail-closed。completed、errored、shutdown、not_found、FINAL_ANSWER 和 task_complete 都视为终态；任一 attempt 终态或被根成功中断并 fence 后，如仍有计划内未派发的独立任务，按该任务角色重新计算并发上限，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待。后来仍显示已 fence target 为活动的上游快照不得触发再次等待。不得自动重派已结束或已放弃的旧任务；若持续没有可信终态，Stop 恢复路径会在受控宽限期后 fence 遗留 attempt。{local_read_guidance}\n\n本次 wait_agent 已返回内容：\n{returned_update}{decryption_recovery}{compatibility}"
         ),
     })
 }
@@ -1537,7 +1537,7 @@ fn post_list_continuation(
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：agents.list_agents 核对后仍有 {active} 个子代理尚未确认进入终态。只对仍活动且未被根成功中断的 running、pending_init 或 interrupted 代理继续等待、转向或停止；completed、errored、shutdown 和 not_found 不再阻塞。累计 10 分钟仍无终态时只中断一次对应代理；中断获得结构化成功回执后立即接管，不再等待该 target 的上游状态变化，只有中断失败或目标无法匹配时才继续对账。不得无限 wait 或自动重派。若 pending_init 实际已僵死，门禁会在持续 10 分钟无法进展后释放遗留状态。{local_read_guidance}\n\n本次 list_agents 已返回内容：\n{returned_update}{compatibility}"
+            "Codey 子代理汇合门禁：agents.list_agents 核对后仍有 {active} 个子代理尚未确认进入终态。任一 attempt 已终态或被成功中断并 fence 后，如仍有计划内未派发的独立任务，可信根代理应按该任务角色重新计算并发上限，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待、转向或停止。completed、errored、shutdown 和 not_found 不再阻塞。累计 10 分钟仍无终态时只中断一次对应代理；中断获得结构化成功回执后立即接管，不再等待该 target 的上游状态变化，只有中断失败或目标无法匹配时才继续对账。不得无限 wait，也不得自动重派已结束或已放弃的旧任务。若 pending_init 实际已僵死，门禁会在持续 10 分钟无法进展后释放遗留状态。{local_read_guidance}\n\n本次 list_agents 已返回内容：\n{returned_update}{compatibility}"
         ),
     })
 }
@@ -3342,6 +3342,7 @@ mod tests {
             .unwrap();
         assert!(context.contains("当前用户输入优先"));
         assert!(context.contains("只中断仍非终态且被明确取消的 target"));
+        assert!(context.contains("agents.spawn_agent 补位"));
         assert!(context.contains("不得被解释为取消全部代理"));
         interrupt.turn_id = Some("root-turn-b".to_string());
         assert_eq!(
@@ -4048,6 +4049,8 @@ mod tests {
         assert!(first_reason.contains("仍有 2 个子代理"));
         assert!(first_reason.contains("first result"));
         assert!(first_reason.contains("可继续使用 agents.wait_agent"));
+        assert!(first_reason.contains("按该任务角色重新计算并发上限"));
+        assert!(first_reason.contains("不得自动重派已结束或已放弃的旧任务"));
         assert!(first_reason.contains("不得恢复非协作本地工作"));
 
         let mut root_steer = input("PreToolUse", "session-a");
@@ -4267,6 +4270,12 @@ mod tests {
 
         let blocked = handle_hook_for_runtime_at(&list, root, runtime_id, 30).unwrap();
         assert_eq!(blocked["decision"].as_str(), Some("block"));
+        assert!(
+            blocked["reason"]
+                .as_str()
+                .unwrap()
+                .contains("按该任务角色重新计算并发上限")
+        );
         assert_eq!(
             active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
             1

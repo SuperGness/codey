@@ -2518,6 +2518,41 @@ mod tests {
         })
     }
 
+    fn admit_and_bind(
+        state_root: &Path,
+        session_id: &str,
+        task_id: &str,
+        role: &str,
+        agent_id: &str,
+        workspace: &str,
+        active_agents: usize,
+        now_ms: u64,
+    ) {
+        let input = spawn_input(task_id, role);
+        assert_eq!(
+            pre_spawn_with_workspace(
+                state_root,
+                "runtime-a",
+                session_id,
+                Some(&input),
+                Some(workspace),
+                active_agents,
+                now_ms,
+            )
+            .unwrap(),
+            None
+        );
+        post_spawn(
+            state_root,
+            "runtime-a",
+            session_id,
+            Some(&input),
+            Some(&json!({ "agent_id": agent_id })),
+            now_ms + 1,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn native_capsule_assigns_role_capabilities() {
         let temp = tempdir().unwrap();
@@ -2624,6 +2659,129 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn terminal_read_agent_releases_a_concurrency_slot_immediately() {
+        let temp = tempdir().unwrap();
+        let session = "read-refill";
+        for (index, (task, agent)) in [
+            ("read_a", "agent-a"),
+            ("read_b", "agent-b"),
+            ("read_c", "agent-c"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            admit_and_bind(
+                temp.path(),
+                session,
+                task,
+                "codey_quick_scan",
+                agent,
+                "/repo",
+                index,
+                10 + index as u64 * 10,
+            );
+        }
+
+        let refill = spawn_input("read_d", "codey_quick_scan");
+        let denial = pre_spawn_with_workspace(
+            temp.path(),
+            "runtime-a",
+            session,
+            Some(&refill),
+            Some("/repo"),
+            3,
+            40,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(denial.contains("并发上限 3"));
+
+        subagent_stopped(temp.path(), "runtime-a", session, "agent-a", 41).unwrap();
+        assert_eq!(
+            pre_spawn_with_workspace(
+                temp.path(),
+                "runtime-a",
+                session,
+                Some(&refill),
+                Some("/repo"),
+                2,
+                42,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn mixed_limit_recomputes_after_the_writer_stops() {
+        let temp = tempdir().unwrap();
+        let session = "mixed-refill";
+        admit_and_bind(
+            temp.path(),
+            session,
+            "writer_a",
+            "codey_worker",
+            "agent-writer",
+            "/write-repo",
+            0,
+            10,
+        );
+        admit_and_bind(
+            temp.path(),
+            session,
+            "read_a",
+            "codey_quick_scan",
+            "agent-reader",
+            "/read-repo",
+            1,
+            20,
+        );
+
+        let read_refill = spawn_input("read_b", "codey_quick_scan");
+        let denial = pre_spawn_with_workspace(
+            temp.path(),
+            "runtime-a",
+            session,
+            Some(&read_refill),
+            Some("/read-repo"),
+            2,
+            30,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(denial.contains("并发上限 2"));
+
+        subagent_stopped(temp.path(), "runtime-a", session, "agent-writer", 31).unwrap();
+        assert_eq!(
+            pre_spawn_with_workspace(
+                temp.path(),
+                "runtime-a",
+                session,
+                Some(&read_refill),
+                Some("/read-repo"),
+                1,
+                32,
+            )
+            .unwrap(),
+            None
+        );
+
+        let writer_refill = spawn_input("writer_b", "codey_worker");
+        let denial = pre_spawn_with_workspace(
+            temp.path(),
+            "runtime-a",
+            session,
+            Some(&writer_refill),
+            Some("/write-repo"),
+            2,
+            33,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(denial.contains("并发上限 2"));
     }
 
     #[test]

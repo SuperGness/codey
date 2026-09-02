@@ -438,7 +438,7 @@ Codey 在 attempt 身份和角色 capability 校验通过后，不再解析、�
 - 用户新输入使旧批次失效时，先完成对账；只有可信根 turn 绑定仍有效时才中断活动代理。中断成功后立即接管并忽略迟到结果，不再等待上游把 `interrupted` 另行改成终态；否则让受控恢复路径接管。编排账本、未清偿验收债和未验证结算证据按运行代次与会话恢复；协作工具不可用时不要循环调用不存在的工具。
 "#;
 
-pub(crate) const SUBAGENT_GUIDANCE: &str = r#"## 子代理使用
+pub(crate) const PREVIOUS_SUBAGENT_GUIDANCE_V14: &str = r#"## 子代理使用
 
 默认由主代理直接处理短而明确、步骤互相依赖或即将修改关键代码/文档的任务；不要为了形式分工而派生。只在独立并行工作、宽范围检索、上下文隔离或独立高风险证据确有收益时使用子代理。不超过 2 个小文件和 3 次本地工具调用的精确任务通常由主代理完成。
 
@@ -458,6 +458,31 @@ pub(crate) const SUBAGENT_GUIDANCE: &str = r#"## 子代理使用
 ### 生命周期
 
 - 先派发彼此独立的任务，再等待所有活动 attempt 进入终态；期间只使用必要的 `agents.*` 协作工具，普通本地工作和 Stop 仍受生命周期门禁限制。
+- `MESSAGE` 只保存证据并继续等待。`completed`、`errored`、`error`、`failed`、`shutdown`、`not_found`、`FINAL_ANSWER` 和 `task_complete` 为终态；`pending_init`、`running`、`interrupted` 仍是非终态，除非根代理成功中断并永久放弃该 attempt。
+- 成功的 `agents.interrupt_agent` 会永久 fence 该 attempt；不要再等待或追派。重复 task ID 时只做一次无筛选 `agents.list_agents` 对账：原代理存在则等待或消费结果，不存在则由根代理接管。只有任务范围实质改变时才用全新 task ID 最多重派一次。
+- 协作工具不可用时不要循环调用；依赖有界的 pending-init、超时和 Stop 恢复路径收敛。
+"#;
+
+pub(crate) const SUBAGENT_GUIDANCE: &str = r#"## 子代理使用
+
+默认由主代理直接处理短而明确、步骤互相依赖或即将修改关键代码/文档的任务；不要为了形式分工而派生。只在独立并行工作、宽范围检索、上下文隔离或独立高风险证据确有收益时使用子代理。不超过 2 个小文件和 3 次本地工具调用的精确任务通常由主代理完成。
+
+纯只读工作最多同时运行 3 个子代理；存在写入型或身份未确认的代理时最多同时运行 2 个。并发限制只约束同时运行数量，不限制后续派发次数。
+
+### 派发
+
+- 直接调用 `agents.spawn_agent`，按任务选择 `codey_quick_scan`、`codey_deep_research`、`codey_visual_analysis`、`codey_worker` 或 `codey_visual_worker`；`default` 仅兼容旧配置。`task_name` 只含小写字母、数字和下划线。
+- `message` 是唯一任务胶囊：写清目标、范围、允许操作、交付格式和必要背景，不复制整段对话，不附加 V1/V2 契约、sidecar、checks 或其他尾行协议。
+- 只读角色获得 `files.read`；写入角色获得 `command.execute`、`files.read` 和 `workspace.write`。写入角色暂按当前工作区建立互斥锁；实际文件与网络权限仍由 Codex 原生 sandbox、approval policy、permission profile 和 writable roots 决定。
+
+### 返回与验收
+
+- 每个子代理只执行一轮且不得继续派生。返回首行使用 `status: completed | partial | blocked`，正文只保留影响决策的结论、最多 5 条带 `file:line`/符号/链接的证据和明确 gaps；多代理证据冲突时比较出处。
+- 子代理结果是候选产物，不是验收结论。所有代理结算后，由根代理结合用户要求、变更差异和必要的确定性检查统一验收；Codey 不再创建逐任务机械验收债或强制验收命令。
+
+### 生命周期
+
+- 先派发不超过当前并发上限的独立任务，再进入 wait/list。任一 attempt 终态或被成功中断并 fence 后，按下一个计划任务的角色重新计算并发上限；存在空余槽位时立即使用新 `task_name` 补位，否则继续等待。所有计划任务均已派发后，继续等待剩余活动 attempt 结算。活动 attempt 期间只使用必要的 `agents.*` 协作工具，普通本地工作和 Stop 仍受生命周期门禁限制。
 - `MESSAGE` 只保存证据并继续等待。`completed`、`errored`、`error`、`failed`、`shutdown`、`not_found`、`FINAL_ANSWER` 和 `task_complete` 为终态；`pending_init`、`running`、`interrupted` 仍是非终态，除非根代理成功中断并永久放弃该 attempt。
 - 成功的 `agents.interrupt_agent` 会永久 fence 该 attempt；不要再等待或追派。重复 task ID 时只做一次无筛选 `agents.list_agents` 对账：原代理存在则等待或消费结果，不存在则由根代理接管。只有任务范围实质改变时才用全新 task ID 最多重派一次。
 - 协作工具不可用时不要循环调用；依赖有界的 pending-init、超时和 Stop 恢复路径收敛。
@@ -604,6 +629,7 @@ pub(crate) const PREVIOUS_SUBAGENT_GUIDANCE_V8: &str = r#"## 子代理使用
 
 pub(crate) const SUBAGENT_GUIDANCE_VERSIONS: &[&str] = &[
     SUBAGENT_GUIDANCE,
+    PREVIOUS_SUBAGENT_GUIDANCE_V14,
     PREVIOUS_SUBAGENT_GUIDANCE_V13,
     PREVIOUS_SUBAGENT_GUIDANCE_V12,
     PREVIOUS_SUBAGENT_GUIDANCE_V11,
@@ -736,7 +762,7 @@ stale-state recovery. While spawned subagents are active, Codey's runtime gate d
 local tools and prevents the root turn from finishing. The `functions.exec` tool world is a separate route \
 and does not contain collaboration tools.";
 
-pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT: &str = "\
+pub(crate) const PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT_V11: &str = "\
 `agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools are direct commentary \
 tools; never call them through `functions.exec`. Dispatch every independent agent planned for the current \
 group before the first wait. While any attempt is active, use \
@@ -753,12 +779,34 @@ waiting again, and reconcile until every attempt is terminal or fenced. Then the
 combined result and either continues the work or finishes. While an attempt is active, Codey's gate blocks \
 non-collaboration tools and Stop. If collaboration tools are unavailable, do not loop on an unregistered tool.";
 
+pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT: &str = "\
+`agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools are direct commentary \
+tools; never call them through `functions.exec`. Dispatch up to the current concurrency limit from the \
+planned independent work before the first wait. While any attempt is active, use only the relevant \
+`agents.spawn_agent`, `agents.send_message`, `agents.followup_task`, `agents.interrupt_agent`, \
+`agents.list_agents`, or `agents.wait_agent`. After a terminal or successfully fenced update, recompute the \
+role-aware concurrency limit; if it exposes a slot, immediately use `agents.spawn_agent` with a new \
+`task_name` for the next planned, unspawned task; \
+otherwise return to `agents.wait_agent` with `timeout_ms: 30000`. `MESSAGE` and mailbox updates are not \
+completion. Use `followup_task` only for a bound nonterminal attempt. If \
+`CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT` is denied, do not retry or wait for that target; take \
+over or use a fresh `task_name` for a materially changed task. Treat `FINAL_ANSWER`, `task_complete`, \
+`completed`, `errored`, `error`, `failed`, `shutdown`, and `not_found` as terminal. A successful root \
+interrupt permanently abandons and fences that attempt, settles it for the lifecycle ledger, and makes \
+later active-looking provider state stale; do not wait for or follow up that target. If a wait times out or \
+lacks per-agent terminal details, call unfiltered `agents.list_agents` before waiting again. Continue until \
+all planned work has been spawned and every attempt is terminal or fenced. Then the root agent validates \
+the combined result and either continues the work or finishes. While an attempt is active, Codey's gate \
+blocks non-collaboration tools and Stop. If collaboration tools are unavailable, do not loop on an \
+unregistered tool.";
+
 pub(crate) const ROOT_AGENT_MULTI_AGENT_MODE_HINT: &str = "Proactive multi-agent delegation is \
 active. Any earlier instruction requiring an explicit user request before spawning sub-agents no \
 longer applies. Delegate only when independent parallel work, context isolation, or specialized evidence \
 materially helps; keep short, sequential, or low-benefit work with the root. There is no fixed spawn \
 budget: up to three concurrent agents are allowed only when all are verified read-only, otherwise the \
-limit is two. `CODEY_SUBAGENT_CONCURRENCY_LIMIT` means wait for a slot, not failure. If an active child \
+limit is two. `CODEY_SUBAGENT_CONCURRENCY_LIMIT` means wait for a slot, not failure; when any child settles, \
+recompute the role-aware limit and fill a slot from the remaining planned independent work when allowed. If an active child \
 cannot decrypt its task body, use `agents.send_message` exactly once to restate the complete task; do not \
 interrupt or respawn it. If that fails, take over. After all attempts settle, validate their combined result \
 before continuing or finishing. If every spawn fails, take over. On `CODEY_SUBAGENT_DUPLICATE_TASK_ID`, call \
@@ -809,6 +857,7 @@ route and does not contain collaboration tools.";
 
 pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS: &[&str] = &[
     ROOT_AGENT_COLLABORATION_USAGE_HINT,
+    PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT_V11,
     PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT_V10,
     PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT_V9,
     PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT_V8,
@@ -1462,9 +1511,7 @@ mod tests {
         assert!(combined.contains("`timeout_ms: 30000`"));
         assert!(combined.contains("mailbox updates are not completion"));
         assert!(combined.contains("`MESSAGE`"));
-        assert!(
-            combined.contains("Dispatch every independent agent planned for the current group")
-        );
+        assert!(combined.contains("Dispatch up to the current concurrency limit"));
         assert!(combined.contains("`agents.send_message`"));
         assert!(combined.contains("Use `followup_task` only for"));
         assert!(combined.contains("`CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT`"));
@@ -1482,12 +1529,11 @@ mod tests {
         assert!(combined.contains("active-looking provider state stale"));
         assert!(combined.contains("terminal or fenced"));
         assert!(combined.contains("unfiltered `agents.list_agents`"));
+        assert!(combined.contains("recompute the role-aware concurrency limit"));
+        assert!(combined.contains("next planned, unspawned task"));
+        assert!(combined.contains("all planned work has been spawned"));
         assert!(combined.contains("do not loop on an unregistered tool"));
         assert!(combined.contains("never call them through `functions.exec`"));
-        assert!(
-            ROOT_AGENT_COLLABORATION_USAGE_HINT.len()
-                < PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT_V10.len()
-        );
         assert!(!combined.contains("Write-Output"));
         assert!(!combined.contains("Write-Error"));
         assert_eq!(
@@ -1508,6 +1554,7 @@ mod tests {
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("up to three concurrent agents"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("limit is two"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("`CODEY_SUBAGENT_CONCURRENCY_LIMIT`"));
+        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("recompute the role-aware limit"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("cannot decrypt its task body"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("`agents.send_message` exactly once"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("do not interrupt or respawn it"));
@@ -1520,6 +1567,7 @@ mod tests {
     #[test]
     fn root_agent_usage_hint_migrates_only_complete_owned_paragraphs() {
         for previous in [
+            PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT_V11,
             PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT_V10,
             PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT_V9,
             PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT_V8,
@@ -1553,6 +1601,7 @@ mod tests {
     #[test]
     fn subagent_guidance_migrates_the_previous_owned_block() {
         for previous in [
+            PREVIOUS_SUBAGENT_GUIDANCE_V14,
             PREVIOUS_SUBAGENT_GUIDANCE_V13,
             PREVIOUS_SUBAGENT_GUIDANCE_V12,
             PREVIOUS_SUBAGENT_GUIDANCE_V11,
@@ -1590,6 +1639,8 @@ mod tests {
         assert!(SUBAGENT_GUIDANCE.contains("唯一任务胶囊"));
         assert!(SUBAGENT_GUIDANCE.contains("纯只读工作最多同时运行 3 个子代理"));
         assert!(SUBAGENT_GUIDANCE.contains("最多同时运行 2 个"));
+        assert!(SUBAGENT_GUIDANCE.contains("按下一个计划任务的角色重新计算并发上限"));
+        assert!(SUBAGENT_GUIDANCE.contains("普通本地工作和 Stop 仍受生命周期门禁限制"));
         assert!(SUBAGENT_GUIDANCE.contains("status: completed | partial | blocked"));
         assert!(SUBAGENT_GUIDANCE.contains("多代理证据冲突时比较出处"));
         assert!(SUBAGENT_GUIDANCE.contains("根代理结合用户要求"));
@@ -1603,7 +1654,6 @@ mod tests {
         assert!(!SUBAGENT_GUIDANCE.contains("resolve_batch"));
         assert!(!SUBAGENT_GUIDANCE.contains("# codey-accept:"));
         assert!(SUBAGENT_GUIDANCE.contains("`completed`、`errored`、`error`、`failed`"));
-        assert!(SUBAGENT_GUIDANCE.len() < PREVIOUS_SUBAGENT_GUIDANCE_V13.len());
     }
 
     #[test]
