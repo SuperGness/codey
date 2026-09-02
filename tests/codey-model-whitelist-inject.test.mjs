@@ -495,7 +495,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "44");
+  assert.equal(patch.version, "45");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -3214,6 +3214,40 @@ test("opening the model picker discovers a replacement QueryClient", async () =>
     1,
     "picker interaction should rediscover mounted roots without repeating the full document scan",
   );
+  runtime.patch.dispose();
+});
+
+test("native selection ignores non-picker interactions before discovering QueryClients", async () => {
+  const body = new FakeElementCore("body");
+  const sendButton = body.appendChild(new FakeElementCore("button"));
+  const modelButton = body.appendChild(new FakeElementCore("button", {
+    attributes: { "aria-haspopup": "menu" },
+  }));
+  const firstQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const replacementQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const models = ["gpt-5.6-sol", "gpt-5.5"];
+  const runtime = await loadPatch({
+    status: "ok",
+    native_selection_only: true,
+    models,
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()], {
+    documentBody: body,
+    queryClient: firstQueryClient,
+    nativeSelectionOnly: true,
+  });
+
+  body.__reactFiber$codeyTest = {
+    memoizedProps: { queryClient: replacementQueryClient },
+  };
+  runtime.dispatchDocumentEvent("pointerdown", { target: sendButton });
+  await Promise.resolve();
+  assert.deepEqual(replacementQueryClient.models(), ["gpt-5.6-sol"]);
+
+  runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(replacementQueryClient.models(), models);
   runtime.patch.dispose();
 });
 

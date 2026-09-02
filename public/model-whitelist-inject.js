@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "44";
+  const patchVersion = "45";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -2477,6 +2477,10 @@
   let lastInteractionApply = 0;
   const interactionApplyIntervalMs = 2_000;
   const handleInteraction = (event) => {
+    if (
+      nativeSelectionOnly
+      && !event?.target?.closest?.(`${groupedMenuSelector}, [aria-haspopup]`)
+    ) return;
     if (!nativeSelectionOnly) rememberMenuRouteIntent(event);
     scheduleGroupedModelMenuEnhancement();
     const now = Date.now();
