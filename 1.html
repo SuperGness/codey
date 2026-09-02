@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>鹈鹕骑自行车 - 2D动画</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(to bottom, #f0f4ff, #e0e8ff);
+            font-family: system-ui, -apple-system, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+        svg {
+            background: white;
+            border: 6px solid #222;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
+            animation: float 3s ease-in-out infinite;
+        }
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-12px); }
+        }
+    </style>
+</head>
+<body>
+<svg id="svg" width="900" height="480" viewBox="0 0 900 480" xmlns="http://www.w3.org/2000/svg">
+
+    <!-- 背景 -->
+    <rect width="900" height="480" fill="#f8f9ff"/>
+    <rect y="380" width="900" height="100" fill="#e8f0ff"/>
+
+    <!-- 地面 -->
+    <line x1="0" y1="380" x2="900" y2="380" stroke="#ddd" stroke-width="8" stroke-linecap="round"/>
+
+    <!-- 自行车 -->
+    <g id="bicycle" transform="translate(220, 310)">
+        <!-- 前轮 -->
+        <circle id="wheel1" cx="120" cy="40" r="48" fill="#fff" stroke="#222" stroke-width="14"/>
+        <!-- 后轮 -->
+        <circle id="wheel2" cx="260" cy="40" r="48" fill="#fff" stroke="#222" stroke-width="14"/>
+        <!-- 车架 -->
+        <line x1="120" y1="40" x2="260" y2="40" stroke="#222" stroke-width="16" stroke-linecap="round"/>
+        <!-- 座管 -->
+        <line x1="185" y1="10" x2="185" y2="40" stroke="#222" stroke-width="13" stroke-linecap="round"/>
+        <!-- 坐垫 -->
+        <line x1="185" y1="10" x2="185" y2="-25" stroke="#222" stroke-width="13" stroke-linecap="round"/>
+        <!-- 前把手 -->
+        <line x1="120" y1="10" x2="70" y2="-35" stroke="#222" stroke-width="11" stroke-linecap="round"/>
+        <!-- 后把手 -->
+        <line x1="120" y1="10" x2="170" y2="-35" stroke="#222" stroke-width="11" stroke-linecap="round"/>
+        <!-- 把手中心 -->
+        <line x1="170" y1="-35" x2="170" y1="10" stroke="#222" stroke-width="9" stroke-linecap="round"/>
+        <!-- 踏板 -->
+        <line x1="120" y1="40" x2="120" y2="78" stroke="#222" stroke-width="8" stroke-linecap="round"/>
+        <line x1="260" y1="40" x2="260" y2="78" stroke="#222" stroke-width="8" stroke-linecap="round"/>
+    </g>
+
+    <!-- 鹈鹕 -->
+    <g id="pelican" transform="translate(380, 180)">
+        <!-- 身体 -->
+        <ellipse id="body" cx="210" cy="85" rx="48" ry="38" fill="#f9d4a8" stroke="#222" stroke-width="7"/>
+        <!-- 头部 -->
+        <ellipse id="head" cx="265" cy="62" rx="26" ry="24" fill="#f9d4a8" stroke="#222" stroke-width="5"/>
+        <!-- 喙 -->
+        <polygon points="265,62 322,55 282,62" fill="#ff8c00" stroke="#222" stroke-width="5"/>
+        <!-- 眼睛 -->
+        <circle cx="250" cy="57" r="4" fill="#111"/>
+        <!-- 翅膀（扇动） -->
+        <g id="wing">
+            <ellipse cx="145" cy="95" rx="35" ry="26" fill="#f9d4a8" stroke="#222" stroke-width="6"/>
+            <ellipse cx="145" cy="95" rx="22" ry="15" fill="#f9d4a8" stroke="#222" stroke-width="3" transform="rotate(22 145 95)"/>
+        </g>
+        <!-- 尾巴 -->
+        <polygon points="145,105 105,95 125,125" fill="#f9d4a8" stroke="#222" stroke-width="5"/>
+        <!-- 腿 -->
+        <line x1="210" y1="123" x2="195" y2="148" stroke="#222" stroke-width="7" stroke-linecap="round"/>
+        <line x1="210" y1="123" x2="225" y2="148" stroke="#222" stroke-width="7" stroke-linecap="round"/>
+    </g>
+
+</svg>
+
+<script>
+    const bike = document.getElementById('bicycle');
+    const wheel1 = document.getElementById('wheel1');
+    const wheel2 = document.getElementById('wheel2');
+    const wing = document.getElementById('wing');
+
+    // 自行车前进 + 轻微摇晃
+    bike.style.animation = 'moveBike 3.8s linear infinite';
+
+    // 轮子旋转
+    wheel1.style.animation = 'rotateWheel 0.52s linear infinite';
+    wheel2.style.animation = 'rotateWheel 0.52s linear infinite';
+
+    // 翅膀扇动
+    wing.style.animation = 'flapWings 1.05s linear infinite';
+
+    // 关键帧
+    const style = document.createElement('style');
+    style.textContent = `
+    @keyframes moveBike {
+      0% { transform: translateX(80px); }
+      100% { transform: translateX(520px); }
+    }
+    @keyframes rotateWheel {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    @keyframes flapWings {
+      0%, 100% { transform: rotate(-32deg); }
+      50% { transform: rotate(32deg); }
+    }
+  `;
+    document.head.appendChild(style);
+</script>
+</body>
+</html>
