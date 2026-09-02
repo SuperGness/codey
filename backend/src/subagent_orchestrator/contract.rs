@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use serde_json::{Map, Value};
 
-use crate::subagent::api::{InvocationMode, TraceContext};
+use crate::subagent::api::TraceContext;
 use crate::subagent::rules::{RoleAccess, RolePolicy, RuleSet};
 
 use super::identity::consistent_string_field;
@@ -24,11 +24,7 @@ pub(super) struct PreparedContract {
     pub(super) role: String,
     pub(super) policy: RolePolicy,
     pub(super) workspace_root: Option<String>,
-    pub(super) read_paths: Vec<String>,
-    pub(super) native_read_scope: bool,
-    pub(super) write_paths: Vec<String>,
     pub(super) trace: TraceContext,
-    pub(super) invocation_mode: InvocationMode,
     pub(super) capabilities: Vec<String>,
 }
 
@@ -64,20 +60,15 @@ pub(super) fn prepare_task_capsule(
     if policy.access == RoleAccess::Write && workspace_root.is_none() {
         return Err(contract_error("写入角色缺少可信工作目录"));
     }
-    let scope = workspace_root.iter().cloned().collect::<Vec<_>>();
-    let (native_read_scope, write_paths, capabilities) = match policy.access {
-        RoleAccess::ReadOnly => (true, Vec::new(), vec!["files.read".to_string()]),
+    let capabilities = match policy.access {
+        RoleAccess::ReadOnly => vec!["files.read".to_string()],
         // ponytail: one workspace-wide writer lock; add narrower native ownership
         // only if the executor exposes a trusted path field.
-        RoleAccess::Write => (
-            false,
-            scope.clone(),
-            vec![
-                "command.execute".to_string(),
-                "files.read".to_string(),
-                "workspace.write".to_string(),
-            ],
-        ),
+        RoleAccess::Write => vec![
+            "command.execute".to_string(),
+            "files.read".to_string(),
+            "workspace.write".to_string(),
+        ],
     };
     Ok(PreparedContract {
         capsule: TaskCapsule {
@@ -86,11 +77,7 @@ pub(super) fn prepare_task_capsule(
         role: role.to_string(),
         policy,
         workspace_root,
-        read_paths: scope,
-        native_read_scope,
-        write_paths,
         trace: TraceContext::new(None),
-        invocation_mode: InvocationMode::Async,
         capabilities,
     })
 }

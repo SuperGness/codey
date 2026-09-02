@@ -4,6 +4,7 @@ use std::fs;
 #[cfg(windows)]
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::{
     Arc, Mutex as BlockingMutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -945,6 +946,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         }
         "refresh_diagnostic_storage_stats" => refresh_diagnostic_storage_stats(state).await,
         "refresh_trace_log_stats" => refresh_trace_log_stats(state).await,
+        "open_route_request_logs" => open_route_request_logs(state).await,
         "query_route_request_logs" => {
             match serde_json::from_value::<RouteRequestLogQuery>(args.clone()) {
                 Ok(query) => query_route_request_logs(state, query).await,
@@ -992,6 +994,40 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         _ => Err(format!("未知 Codey API 命令：{command}")),
     };
     result.unwrap_or_else(api_error_message)
+}
+
+pub async fn open_route_request_logs(state: &Arc<AppState>) -> Result<Value, String> {
+    let endpoint = state
+        .runtime
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|runtime| runtime.local_router_endpoint())
+        .ok_or_else(|| "本地路由尚未运行，无法打开请求日志".to_string())?;
+    let url = endpoint.request_log_url();
+    tokio::task::spawn_blocking(move || open_system_browser(&url))
+        .await
+        .map_err(|error| format!("打开系统浏览器任务异常退出：{error}"))??;
+    Ok(json!({"status":"ok"}))
+}
+
+fn open_system_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let mut command = Command::new("open");
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = Command::new("rundll32.exe");
+        command.arg("url.dll,FileProtocolHandler");
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = Command::new("xdg-open");
+
+    command
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法使用系统默认浏览器打开请求日志：{error}"))
 }
 
 pub async fn query_route_request_logs(

@@ -9,7 +9,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::subagent::api::{InvocationMode, TokenUsage, TraceContext};
+use crate::subagent::api::{TokenUsage, TraceContext};
 use crate::subagent::lifecycle::{ExecutionOutcome, ExecutionPhase as ReservationState};
 use crate::subagent::protocol::{AgentState, InterruptAcknowledgement, TerminalOutcome};
 use crate::subagent::rules::{self, RoleAccess, RuleActor, RuleContext, RuleEffect, ToolClass};
@@ -43,9 +43,10 @@ const CONCURRENCY_LIMIT_ERROR_CODE: &str = "CODEY_SUBAGENT_CONCURRENCY_LIMIT";
 const MAX_RETIRED_RUNTIME_IDS: usize = 1_024;
 const LEDGER_LOCK_TIMEOUT_MILLIS: u64 = 250;
 const LEDGER_LOCK_RETRY_MILLIS: u64 = 5;
-const SETTLEMENT_RECEIPT_PREFIX: &str = "orchestrator-settlement-v1";
 const MAX_TRANSCRIPT_METADATA_LINE_BYTES: usize = 1024 * 1024;
 const MAX_SPAWN_RESPONSE_JSON_BYTES: usize = 64 * 1024;
+const MAX_LEDGER_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_QUARANTINE_FILES_PER_SESSION: usize = 3;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SessionLedger {
@@ -92,12 +93,7 @@ struct Reservation {
     origin_runtime_id_hash: String,
     role: String,
     write_capable: bool,
-    visual: bool,
     workspace_root: Option<String>,
-    read_paths: Vec<String>,
-    #[serde(default)]
-    native_read_scope: bool,
-    write_paths: Vec<String>,
     state: ReservationState,
     #[serde(default)]
     outcome: ExecutionOutcome,
@@ -108,8 +104,6 @@ struct Reservation {
     trace_id: String,
     #[serde(default)]
     parent_id: Option<String>,
-    #[serde(default)]
-    invocation_mode: InvocationMode,
     #[serde(default)]
     capabilities: Vec<String>,
     #[serde(default)]
@@ -132,15 +126,6 @@ struct Reservation {
     spawn_failed: bool,
     #[serde(default)]
     pending_init_observed_at_ms: Option<u64>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct SettlementReceipt {
-    schema_version: u32,
-    runtime_id_hash: String,
-    session_id_hash: String,
-    ledger_created_at_ms: u64,
-    settled_at_ms: u64,
 }
 
 const fn default_fencing_token() -> u64 {
@@ -171,7 +156,7 @@ impl LedgerStore {
             )
         })?;
         let session_hash = hash_component(session_id);
-        let lock_path = state_root.join(format!("{LEDGER_LOCK_FILE}.{session_hash}"));
+        let lock_path = state_root.join(LEDGER_LOCK_FILE);
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -201,6 +186,7 @@ impl LedgerStore {
             }
         }
         let session_dir = state_root.join(session_hash);
+        cleanup_stale_ledger_temps(&session_dir)?;
         Ok(Self {
             lock,
             ledger_path: session_dir.join(LEDGER_FILE),
@@ -213,17 +199,8 @@ impl LedgerStore {
         session_id: &str,
         now_ms: u64,
     ) -> Result<Option<SessionLedger>> {
-        let bytes = match fs::read(&self.ledger_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "读取 Codey 子代理编排账本失败：{}",
-                        self.ledger_path.display()
-                    )
-                });
-            }
+        let Some(bytes) = self.read_bytes()? else {
+            return Ok(None);
         };
         let mut ledger: SessionLedger = serde_json::from_slice(&bytes).with_context(|| {
             format!(
@@ -301,6 +278,28 @@ impl LedgerStore {
         Ok(Some(ledger))
     }
 
+    fn read_bytes(&self) -> Result<Option<Vec<u8>>> {
+        match fs::symlink_metadata(&self.ledger_path) {
+            Ok(metadata) => anyhow::ensure!(
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() <= MAX_LEDGER_BYTES,
+                "Codey 子代理编排账本不是可信的有界普通文件：{}",
+                self.ledger_path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        }
+        crate::fs_util::read_bounded(&self.ledger_path, MAX_LEDGER_BYTES)
+            .map(Some)
+            .with_context(|| {
+                format!(
+                    "读取 Codey 子代理编排账本失败：{}",
+                    self.ledger_path.display()
+                )
+            })
+    }
+
     fn save(&self, ledger: &mut SessionLedger, now_ms: u64) -> Result<()> {
         // Never persist a state that the next Hook invocation would reject on
         // load. This also protects future write paths from bypassing
@@ -316,7 +315,7 @@ impl LedgerStore {
         ledger.revision = ledger.revision.saturating_add(1);
         ledger.updated_at_ms = now_ms;
         let bytes = serde_json::to_vec(ledger).context("序列化 Codey 子代理编排账本失败")?;
-        crate::fs_util::atomic_write(&self.ledger_path, &bytes).with_context(|| {
+        crate::fs_util::atomic_write_private(&self.ledger_path, &bytes).with_context(|| {
             format!(
                 "原子替换 Codey 子代理编排账本失败：{}",
                 self.ledger_path.display()
@@ -373,44 +372,6 @@ impl LedgerStore {
         Ok(())
     }
 
-    fn write_settlement_receipt(
-        &self,
-        ledger: &SessionLedger,
-        runtime_id: &str,
-        session_id: &str,
-    ) -> Result<()> {
-        let parent = self
-            .ledger_path
-            .parent()
-            .context("Codey 子代理结算回执缺少父目录")?;
-        fs::create_dir_all(parent)
-            .with_context(|| format!("创建 Codey 子代理结算回执目录失败：{}", parent.display()))?;
-        let receipt = SettlementReceipt {
-            schema_version: 1,
-            runtime_id_hash: hash_component(runtime_id),
-            session_id_hash: hash_component(session_id),
-            ledger_created_at_ms: ledger.created_at_ms,
-            settled_at_ms: ledger.updated_at_ms,
-        };
-        let bytes = serde_json::to_vec(&receipt).context("序列化 Codey 子代理结算回执失败")?;
-        let digest = hash_component_bytes(&bytes);
-        let receipt_path = parent.join(format!(
-            "{SETTLEMENT_RECEIPT_PREFIX}-{}-{}.json",
-            ledger.created_at_ms,
-            &digest[..16]
-        ));
-        if receipt_path.exists() {
-            anyhow::ensure!(
-                fs::read(&receipt_path).ok().as_deref() == Some(bytes.as_slice()),
-                "Codey 子代理结算回执目标冲突：{}",
-                receipt_path.display()
-            );
-            return Ok(());
-        }
-        crate::fs_util::atomic_write(&receipt_path, &bytes)
-            .with_context(|| format!("写入 Codey 子代理结算回执失败：{}", receipt_path.display()))
-    }
-
     fn remove(&self) -> Result<()> {
         match fs::remove_file(&self.ledger_path) {
             Ok(()) => {}
@@ -450,17 +411,8 @@ impl LedgerStore {
         session_id: &str,
         now_ms: u64,
     ) -> Result<()> {
-        let bytes = match fs::read(&self.ledger_path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return self.remove(),
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "读取 Codey 子代理编排账本失败：{}",
-                        self.ledger_path.display()
-                    )
-                });
-            }
+        let Some(bytes) = self.read_bytes()? else {
+            return self.remove();
         };
         let mut ledger = match serde_json::from_slice::<SessionLedger>(&bytes) {
             Ok(ledger) if ledger.session_id_hash == hash_component(session_id) => ledger,
@@ -535,8 +487,61 @@ impl LedgerStore {
             "Codey SessionEnd 已隔离不可读的子代理账本（{reason}）：{}",
             quarantine_path.display()
         );
+        cleanup_old_quarantines(
+            self.ledger_path
+                .parent()
+                .context("Codey 子代理编排账本缺少父目录")?,
+        )?;
         Ok(())
     }
+}
+
+fn cleanup_stale_ledger_temps(session_dir: &Path) -> Result<()> {
+    let entries = match fs::read_dir(session_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let prefix = format!(".{LEDGER_FILE}.codey-");
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_file()
+            && entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".tmp"))
+        {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_old_quarantines(session_dir: &Path) -> Result<()> {
+    let mut quarantines = fs::read_dir(session_dir)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && entry.file_name().to_str().is_some_and(|name| {
+                    name.starts_with("orchestrator-ledger-v1.corrupt-") && name.ends_with(".json")
+                })
+        })
+        .map(|entry| {
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (modified, entry.path())
+        })
+        .collect::<Vec<_>>();
+    quarantines.sort();
+    let remove_count = quarantines
+        .len()
+        .saturating_sub(MAX_QUARANTINE_FILES_PER_SESSION);
+    for (_, path) in quarantines.into_iter().take(remove_count) {
+        fs::remove_file(path)?;
+    }
+    Ok(())
 }
 
 impl Drop for LedgerStore {
@@ -876,6 +881,11 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
     if let Some(conflict) = resource_conflict(&prepared, &ledger) {
         return Ok(Some(conflict));
     }
+    if let Some(conflict) =
+        resource_conflict_in_other_sessions(state_root, runtime_id, &store.ledger_path, &prepared)?
+    {
+        return Ok(Some(conflict));
+    }
     if let Some(reason) = concurrency_denial(&ledger, &prepared, active_agents) {
         return Ok(Some(reason));
     }
@@ -904,11 +914,7 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
             origin_runtime_id_hash,
             role: prepared.role,
             write_capable: prepared.policy.access == RoleAccess::Write,
-            visual: prepared.policy.visual,
             workspace_root: prepared.workspace_root,
-            read_paths: prepared.read_paths,
-            native_read_scope: prepared.native_read_scope,
-            write_paths: prepared.write_paths,
             state: ReservationState::Pending,
             outcome: ExecutionOutcome::Unknown,
             agent_id_hash: None,
@@ -916,7 +922,6 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
             updated_at_ms: now_ms,
             trace_id: prepared.trace.trace_id,
             parent_id: prepared.trace.parent_id,
-            invocation_mode: prepared.invocation_mode,
             capabilities: prepared.capabilities,
             started_at_ms: None,
             completed_at_ms: None,
@@ -941,10 +946,6 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
         &task_id,
         None,
         Some(&role),
-    );
-    event.attributes.insert(
-        "invocation.mode".into(),
-        serde_json::to_value(prepared.invocation_mode).unwrap_or(Value::Null),
     );
     event.attributes.insert(
         "rules.source".into(),
@@ -1309,7 +1310,10 @@ fn update_reservation_lifecycle(
         anyhow::bail!("{AGENT_ID_COLLISION_ERROR_CODE}: {reason}");
     }
     let Some(task_id) = candidates.into_iter().next() else {
-        return Ok(false);
+        // A provider-owned Start is still live work even when an older/newer
+        // provider shape prevents reservation binding. Keep the marker barrier
+        // until its matching Stop or an authoritative full snapshot arrives.
+        return Ok(true);
     };
     if let Some(role) = agent_type
         && ledger
@@ -1754,17 +1758,32 @@ pub(crate) fn active_reservation_count(
     session_id: &str,
     now_ms: u64,
 ) -> Result<Option<usize>> {
+    Ok(
+        active_reservation_projection(state_root, runtime_id, session_id, now_ms)?
+            .map(|(count, _)| count),
+    )
+}
+
+pub(crate) fn active_reservation_projection(
+    state_root: &Path,
+    runtime_id: &str,
+    session_id: &str,
+    now_ms: u64,
+) -> Result<Option<(usize, BTreeSet<String>)>> {
     let store = LedgerStore::open(state_root, session_id)?;
     let Some(ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(None);
     };
-    Ok(Some(
-        ledger
-            .reservations
-            .values()
-            .filter(|reservation| reservation.state.is_active())
-            .count(),
-    ))
+    let active = ledger
+        .reservations
+        .values()
+        .filter(|reservation| reservation.state.is_active())
+        .collect::<Vec<_>>();
+    let identities = active
+        .iter()
+        .filter_map(|reservation| reservation.agent_id_hash.clone())
+        .collect();
+    Ok(Some((active.len(), identities)))
 }
 
 /// Proves that every active attempt is a bound, local-read-only child and that
@@ -1817,7 +1836,6 @@ pub(crate) fn verified_local_read_only_active_count(
             || reservation.outcome != ExecutionOutcome::Unknown
             || !role_is_read_only
             || reservation.write_capable
-            || !reservation.write_paths.is_empty()
             || !files_read_only
             || !bound_agent_hashes.insert(agent_id_hash.clone())
         {
@@ -2297,7 +2315,9 @@ pub(crate) fn authorize_child_tool_with_context(
             ),
         );
     }
-    TraceRecorder::new(state_root).record_best_effort(&audit);
+    if capability_denial.is_some() || decision.effect == RuleEffect::Deny {
+        TraceRecorder::new(state_root).record_best_effort(&audit);
+    }
     if let Some(reason) = capability_denial {
         return Ok(Some(reason));
     }
@@ -2324,7 +2344,6 @@ pub(crate) fn settle_turn(
         !ledger_has_outstanding(&ledger),
         "Codey 子代理仍有未结算的活动 attempt"
     );
-    store.write_settlement_receipt(&ledger, runtime_id, session_id)?;
     store.remove()
 }
 
@@ -2384,45 +2403,79 @@ fn resource_conflict(prepared: &PreparedContract, ledger: &SessionLedger) -> Opt
         .values()
         .filter(|reservation| !reservation.spawn_failed && reservation.state.is_active())
     {
-        if prepared.native_read_scope && !existing.write_paths.is_empty() {
-            return Some(format!(
-                "Codey 能力/资源冲突门禁：密文只读任务 `{}` 的具体 read scope 对 Hook 不可见，不能与活动写任务 `{}` 并行；请等待写任务结束后再派发。",
-                prepared.capsule.id, existing.task_id
-            ));
-        }
-        if existing.native_read_scope && !prepared.write_paths.is_empty() {
-            return Some(format!(
-                "Codey 能力/资源冲突门禁：写任务 `{}` 不能与活动密文只读任务 `{}` 并行，因为后者的具体 read scope 对 Hook 不可见；请先等待只读任务结束。",
-                prepared.capsule.id, existing.task_id
-            ));
-        }
-        for new_write in &prepared.write_paths {
-            if let Some(existing_path) = existing
-                .write_paths
-                .iter()
-                .chain(existing.read_paths.iter())
-                .find(|existing_path| paths_overlap(new_write, existing_path))
-            {
-                return Some(format!(
-                    "Codey 能力/资源冲突门禁：任务 `{}` 的写入 `{new_write}` 与活动任务 `{}` 的资源 `{existing_path}` 重叠；请合并任务、改为串行或声明互斥 ownership。",
-                    prepared.capsule.id, existing.task_id
-                ));
-            }
-        }
-        for new_read in &prepared.read_paths {
-            if let Some(existing_write) = existing
-                .write_paths
-                .iter()
-                .find(|existing_write| paths_overlap(new_read, existing_write))
-            {
-                return Some(format!(
-                    "Codey 能力/资源冲突门禁：任务 `{}` 的读取 `{new_read}` 与活动写任务 `{}` 的 `{existing_write}` 重叠；为避免读取过期状态，请改为串行。",
-                    prepared.capsule.id, existing.task_id
-                ));
-            }
+        if let Some(conflict) = reservation_resource_conflict(prepared, existing) {
+            return Some(conflict);
         }
     }
     None
+}
+
+fn resource_conflict_in_other_sessions(
+    state_root: &Path,
+    runtime_id: &str,
+    current_ledger_path: &Path,
+    prepared: &PreparedContract,
+) -> Result<Option<String>> {
+    let runtime_id_hash = hash_component(runtime_id);
+    for entry in fs::read_dir(state_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let ledger_path = entry.path().join(LEDGER_FILE);
+        if ledger_path == current_ledger_path {
+            continue;
+        }
+        let bytes = match crate::fs_util::read_bounded(&ledger_path, MAX_LEDGER_BYTES) {
+            Ok(bytes) => bytes,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("读取跨会话子代理账本失败：{}", ledger_path.display())
+                });
+            }
+        };
+        let ledger: SessionLedger = serde_json::from_slice(&bytes)
+            .with_context(|| format!("解析跨会话子代理账本失败：{}", ledger_path.display()))?;
+        if ledger.runtime_id_hash != runtime_id_hash {
+            continue;
+        }
+        for existing in ledger
+            .reservations
+            .values()
+            .filter(|reservation| !reservation.spawn_failed && reservation.state.is_active())
+        {
+            if let Some(conflict) = reservation_resource_conflict(prepared, existing) {
+                return Ok(Some(conflict));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn reservation_resource_conflict(
+    prepared: &PreparedContract,
+    existing: &Reservation,
+) -> Option<String> {
+    if prepared.policy.access != RoleAccess::Write && !existing.write_capable {
+        return None;
+    }
+    let overlaps = match (&prepared.workspace_root, &existing.workspace_root) {
+        (Some(left), Some(right)) => paths_overlap(left, right),
+        _ => true,
+    };
+    overlaps.then(|| {
+        format!(
+            "Codey 能力/资源冲突门禁：任务 `{}` 与活动任务 `{}` 共享工作区且至少一方可写；请串行执行。",
+            prepared.capsule.id, existing.task_id
+        )
+    })
 }
 
 fn paths_overlap(left: &str, right: &str) -> bool {
@@ -2476,7 +2529,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(readonly.capabilities, ["files.read"]);
-        assert!(readonly.write_paths.is_empty());
 
         let writer = prepare_task_capsule(
             Some(&spawn_input("write_task", "codey_worker")),
@@ -2488,7 +2540,6 @@ mod tests {
             writer.capabilities,
             ["command.execute", "files.read", "workspace.write"]
         );
-        assert_eq!(writer.write_paths, ["/repo"]);
     }
 
     #[test]
@@ -2498,7 +2549,7 @@ mod tests {
             pre_spawn_with_workspace(
                 temp.path(),
                 "runtime-a",
-                "session-a",
+                "session-b",
                 Some(&spawn_input("writer_a", "codey_worker")),
                 Some("/repo"),
                 0,
@@ -2519,6 +2570,32 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(denial.contains("资源冲突"));
+        assert_eq!(
+            pre_spawn_with_workspace(
+                temp.path(),
+                "runtime-a",
+                "session-c",
+                Some(&spawn_input("writer_c", "codey_worker")),
+                Some("/other-repo"),
+                0,
+                12,
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            pre_spawn_with_workspace(
+                temp.path(),
+                "runtime-b",
+                "session-d",
+                Some(&spawn_input("writer_d", "codey_worker")),
+                Some("/repo"),
+                0,
+                13,
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]

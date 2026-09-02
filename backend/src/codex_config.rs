@@ -81,7 +81,6 @@ const CODEY_RUNTIME_CONFIG_LOCK_FILE: &str = "codex-runtime-config.lock";
 const RUNTIME_CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_CONFIG_LOCK_RETRY: Duration = Duration::from_millis(10);
 const RUNTIME_AGENT_SCHEMA_VERSION: u32 = 1;
-const CODEY_WSL_ONLY_OVERRIDE_PREFIX: &str = "__CODEY_WSL_ONLY__:";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -281,6 +280,11 @@ pub(crate) fn apply_runtime_router_config(
     let fastctx_command = resolve_fastctx_command(options.fast_context_tools);
     let use_official_catalog = options.use_official_catalog;
     let default_model = options.default_model;
+    // The startup patch supplies the runtime gate that makes these generated
+    // roles safe. Never install the coupled role/prompt/hook configuration on
+    // a platform where that patch is not available.
+    let subagent_optimization =
+        options.subagent_optimization && cfg!(any(windows, target_os = "macos"));
     if !cfg!(any(windows, target_os = "macos")) {
         bail!(
             "当前平台尚不能把 Codey Provider 配置限定到单次 Codex 进程；为避免修改用户 config.toml，已取消启动"
@@ -296,7 +300,7 @@ pub(crate) fn apply_runtime_router_config(
             use_official_catalog,
             default_model,
             fastctx_command: fastctx_command.as_deref(),
-            subagent_optimization: options.subagent_optimization,
+            subagent_optimization,
             subagent_model: options.subagent_model,
             subagent_reasoning_effort: options.subagent_reasoning_effort,
             subagent_roles: options.subagent_roles,
@@ -2148,7 +2152,6 @@ struct CodeyHookSpec {
 struct RuntimeHookTrustEntry {
     state_key: String,
     trusted_hash: String,
-    wsl_trusted_hash: Option<String>,
 }
 
 struct RuntimeHooksFile {
@@ -2310,14 +2313,6 @@ fn build_runtime_hooks_file(
             trust_entries.push(RuntimeHookTrustEntry {
                 state_key,
                 trusted_hash,
-                wsl_trusted_hash: cfg!(windows).then(|| {
-                    crate::subagent_gate::hook_trust_hash(
-                        spec.event_key,
-                        spec.matcher,
-                        &commands.command,
-                        spec.timeout_seconds,
-                    )
-                }),
             });
         }
     }
@@ -2598,20 +2593,6 @@ fn build_isolated_runtime_overrides(
                 &key,
                 &Value::from(trust_entry.trusted_hash.as_str()),
             );
-            if let Some(wsl_trusted_hash) = trust_entry.wsl_trusted_hash.as_deref() {
-                let mut wsl_override = Vec::with_capacity(1);
-                push_runtime_override_value(
-                    &mut wsl_override,
-                    &key,
-                    &Value::from(wsl_trusted_hash),
-                );
-                overrides.push(format!(
-                    "{CODEY_WSL_ONLY_OVERRIDE_PREFIX}{}",
-                    wsl_override
-                        .pop()
-                        .expect("WSL Hook trust override was rendered")
-                ));
-            }
         }
     }
     if let Some(provider_id) = provider_id {

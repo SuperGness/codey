@@ -38,7 +38,7 @@ import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
 import { validateThirdPartyRouteShortName } from "./routeShortNames";
 import { flushCardClass } from "./uiClasses";
 import { validateOutboundApiUrl } from "./urlValidation";
-import { RequestLogDialog } from "./RequestLogDialog";
+import { invoke } from "./api";
 
 type ModelSectionProps = {
   config: Config;
@@ -159,13 +159,11 @@ function ModelSectionComponent({
   const [routeApiKeyVisible, setRouteApiKeyVisible] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
   const [selectedProviderFilter, setSelectedProviderFilter] = useState<string>("all");
-  const [requestLogDialogOpen, setRequestLogDialogOpen] = useState(false);
   const routeConfigReadOnly = !config.localRouterEnabled;
 
   useEffect(() => {
     if (!routeConfigReadOnly) return;
     setRouteDialogOpen(false);
-    setRequestLogDialogOpen(false);
     setRouteDraft(null);
     setRouteApiKeyVisible(false);
   }, [routeConfigReadOnly]);
@@ -424,7 +422,7 @@ function ModelSectionComponent({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setRequestLogDialogOpen(true)}
+                onClick={() => void invoke("open_route_request_logs")}
               >
                 <IconListDetails aria-hidden="true" />
                 查看请求日志
@@ -1168,12 +1166,6 @@ function ModelSectionComponent({
           </DialogContent>
         )}
       </Dialog>
-      <RequestLogDialog
-        config={config}
-        container={popupContainer}
-        opened={requestLogDialogOpen}
-        onClose={() => setRequestLogDialogOpen(false)}
-      />
     </section>
   );
 }

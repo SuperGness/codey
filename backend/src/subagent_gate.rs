@@ -34,6 +34,7 @@ pub(crate) const RUNTIME_ID_ENV: &str = "CODEY_SUBAGENT_GATE_RUNTIME_ID";
 pub(crate) const HOOK_TIMEOUT_SECONDS: u64 = 5;
 pub(crate) const SESSION_END_HOOK_TIMEOUT_SECONDS: u64 = 3;
 const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
+const MAX_SESSION_ID_BYTES: usize = 256;
 const MAX_RENDERED_TOOL_RESULT_CHARS: usize = 8 * 1024;
 pub(crate) const STATE_DIRECTORY: &str = "codey-subagent-gate-v3";
 const ACTIVE_MARKER_SCHEMA_VERSION: u32 = 1;
@@ -52,12 +53,12 @@ const STOP_BLOCKED_SINCE_FILE: &str = "stop-blocked-since.state";
 const STOP_ABSOLUTE_SINCE_FILE: &str = "stop-absolute-since.state";
 const STATUS_PROGRESS_FINGERPRINT_FILE: &str = "status-progress.state";
 const STATE_ERROR_SINCE_FILE: &str = "state-error-since.state";
-const SUBAGENT_CONTEXT_OBSERVED_FILE: &str = "subagent-context-observed.state";
 const PROTOCOL_HEALTH_FILE: &str = "protocol-health.json";
 const PROTOCOL_HEALTH_SCHEMA_VERSION: u32 = 1;
 const ROOT_TURN_BINDING_FILE: &str = "root-turn-binding.json";
 const ROOT_TURN_BINDING_SCHEMA_VERSION: u32 = 1;
 const MISSING_AGENT_ID_MARKER: &str = "__codey_missing_agent_id__";
+const HOOK_STATE_LOCK_FILE: &str = "hook-state.lock";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HookCommands {
@@ -174,11 +175,17 @@ fn parse_hook_input(raw: &[u8]) -> std::result::Result<HookInput, Value> {
             "Hook 输入超过 1 MiB 上限，无法确认子代理状态；请缩小单次工具输入",
         ));
     }
-    serde_json::from_slice(raw).map_err(|error| {
+    let input: HookInput = serde_json::from_slice(raw).map_err(|error| {
         undetermined_event_denial(&format!(
             "Hook 输入 JSON 解析失败（{error}），无法确认子代理状态"
         ))
-    })
+    })?;
+    if input.session_id.trim().is_empty() || input.session_id.len() > MAX_SESSION_ID_BYTES {
+        return Err(undetermined_event_denial(
+            "session_id 必须为 1..=256 字节的非空字符串",
+        ));
+    }
+    Ok(input)
 }
 
 // 输入本身不可用时事件名未知，两种 Hook 输出形状都带上，确保 Codex 按拒绝处理。
@@ -304,6 +311,7 @@ fn handle_hook_for_runtime_at(
     now_ms: u64,
 ) -> Result<Value> {
     let started = Instant::now();
+    let _state_lock = HookStateLock::acquire(state_root)?;
     let result = match input.hook_event_name.as_str() {
         "UserPromptSubmit" => user_prompt_submit_output(input, state_root, runtime_id, now_ms),
         "SubagentStart" => {
@@ -321,14 +329,6 @@ fn handle_hook_for_runtime_at(
                     create_active_marker(state_root, runtime_id, &input.session_id, agent_id)?;
                 }
             } else {
-                if nonempty(input.agent_type.as_deref()).is_some() {
-                    record_subagent_context_observed(
-                        state_root,
-                        runtime_id,
-                        &input.session_id,
-                        now_ms,
-                    )?;
-                }
                 record_protocol_issue(
                     state_root,
                     runtime_id,
@@ -362,14 +362,6 @@ fn handle_hook_for_runtime_at(
                     remove_session_state(state_root, runtime_id, &input.session_id)?;
                 }
             } else {
-                if nonempty(input.agent_type.as_deref()).is_some() {
-                    record_subagent_context_observed(
-                        state_root,
-                        runtime_id,
-                        &input.session_id,
-                        now_ms,
-                    )?;
-                }
                 let settlement = crate::subagent_orchestrator::settle_unique_anonymous_stop(
                     state_root,
                     runtime_id,
@@ -398,15 +390,15 @@ fn handle_hook_for_runtime_at(
                             agent_id_hash,
                         )?;
                     }
+                    remove_active_marker(
+                        state_root,
+                        runtime_id,
+                        &input.session_id,
+                        MISSING_AGENT_ID_MARKER,
+                    )?;
                     let active =
                         active_agent_count_for_runtime(state_root, runtime_id, &input.session_id)?;
                     if active == 0 {
-                        remove_active_marker(
-                            state_root,
-                            runtime_id,
-                            &input.session_id,
-                            MISSING_AGENT_ID_MARKER,
-                        )?;
                         remove_session_state(state_root, runtime_id, &input.session_id)?;
                     }
                 }
@@ -470,6 +462,9 @@ fn record_hook_evaluation(
             .and_then(Value::as_str)
             .or_else(|| value.get("reason").and_then(Value::as_str))
     });
+    if decision == "allow" {
+        return;
+    }
     let task_id = hook_task_identifier(input);
     let trace = TraceContext::new(None);
     let mut event = SubagentTraceEvent::new(
@@ -913,6 +908,11 @@ fn pre_tool_use_output(
         .as_deref()
         .is_some_and(is_followup_task_tool)
     {
+        if let Some(reason) = protocol_issue_reason(state_root, runtime_id, &input.session_id)? {
+            return Ok(pre_tool_reason_denial(format!(
+                "CODEY_SUBAGENT_PROTOCOL_CIRCUIT_OPEN: {reason}。协议状态恢复前禁止追派；只可继续对账、中断或由根代理接管。"
+            )));
+        }
         if let Some(reason) = crate::subagent_orchestrator::pre_followup_task(
             state_root,
             runtime_id,
@@ -929,16 +929,9 @@ fn pre_tool_use_output(
         .as_deref()
         .is_some_and(is_contract_spawn_tool)
     {
-        if active > 0
-            && let Some(reason) = protocol_issue_reason(state_root, runtime_id, &input.session_id)?
-            && !missing_agent_id_has_classified_subagent_context(
-                state_root,
-                runtime_id,
-                &input.session_id,
-            )?
-        {
+        if let Some(reason) = protocol_issue_reason(state_root, runtime_id, &input.session_id)? {
             return Ok(pre_tool_reason_denial(format!(
-                "Codey Hook 协议兼容性门禁：{reason}。当前无法可靠区分根代理和子代理，已停止继续派生；请先调用不带筛选的 agents.list_agents 对账。"
+                "CODEY_SUBAGENT_PROTOCOL_CIRCUIT_OPEN: {reason}。当前无法可靠区分根代理和子代理，已停止继续派生；请先调用不带筛选的 agents.list_agents 对账。"
             )));
         }
         if let Some(role) = requested_spawn_role(input.tool_input.as_ref())
@@ -1631,14 +1624,14 @@ fn record_status_progress(
     match fs::read_to_string(&path) {
         Ok(previous) if previous.trim() == fingerprint => Ok(false),
         Ok(_) => {
-            crate::fs_util::atomic_write(&path, format!("{fingerprint}\n").as_bytes())
+            crate::fs_util::atomic_write_private(&path, format!("{fingerprint}\n").as_bytes())
                 .with_context(|| {
                     format!("写入 Codex 子代理状态进展指纹失败：{}", path.display())
                 })?;
             Ok(true)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            crate::fs_util::atomic_write(&path, format!("{fingerprint}\n").as_bytes())
+            crate::fs_util::atomic_write_private(&path, format!("{fingerprint}\n").as_bytes())
                 .with_context(|| {
                     format!("写入 Codex 子代理状态进展指纹失败：{}", path.display())
                 })?;
@@ -1737,6 +1730,7 @@ enum AgentListSnapshotState {
     AllChildrenTerminal,
     OnlyPendingInit,
     HasLiveChildren,
+    NoChildren,
     Unknown,
 }
 
@@ -1750,7 +1744,10 @@ fn reconcile_list_agents_response(
         return Ok(false);
     }
     let snapshot = summarize_list_agents_response(input.tool_response.as_ref());
-    if snapshot == AgentListSnapshotState::Unknown {
+    if matches!(
+        snapshot,
+        AgentListSnapshotState::Unknown | AgentListSnapshotState::NoChildren
+    ) {
         return Ok(false);
     }
 
@@ -1809,7 +1806,7 @@ fn reconcile_list_agents_response(
             )?;
             Ok(false)
         }
-        AgentListSnapshotState::Unknown => Ok(false),
+        AgentListSnapshotState::NoChildren | AgentListSnapshotState::Unknown => Ok(false),
     }
 }
 
@@ -1861,6 +1858,7 @@ fn summarize_agents_response_value(value: &Value) -> Option<AgentListSnapshotSta
 }
 
 fn summarize_agents(agents: &[Value]) -> AgentListSnapshotState {
+    let mut children = 0;
     let mut pending_init = 0;
     let mut live = 0;
     let mut unknown = 0;
@@ -1874,6 +1872,7 @@ fn summarize_agents(agents: &[Value]) -> AgentListSnapshotState {
         if agent_name.is_some_and(is_root_agent_name) {
             continue;
         }
+        children += 1;
         let Some(status) = object_value_any(agent, &["agentstatus", "status", "state"]) else {
             unknown += 1;
             continue;
@@ -1885,7 +1884,9 @@ fn summarize_agents(agents: &[Value]) -> AgentListSnapshotState {
             ObservedAgentState::Unknown => unknown += 1,
         }
     }
-    if unknown > 0 {
+    if children == 0 {
+        AgentListSnapshotState::NoChildren
+    } else if unknown > 0 {
         AgentListSnapshotState::Unknown
     } else if pending_init == 0 && live == 0 {
         AgentListSnapshotState::AllChildrenTerminal
@@ -2025,30 +2026,8 @@ fn nonempty(value: Option<&str>) -> Option<&str> {
 }
 
 fn quote_posix(path: &Path) -> String {
-    let raw_path = path.to_string_lossy();
-    #[cfg(windows)]
-    let path = windows_path_to_wsl(&raw_path).unwrap_or_else(|| raw_path.into_owned());
-    #[cfg(not(windows))]
-    let path = raw_path.into_owned();
+    let path = path.to_string_lossy();
     format!("'{}'", path.replace('\'', "'\"'\"'"))
-}
-
-#[cfg(any(windows, test))]
-fn windows_path_to_wsl(path: &str) -> Option<String> {
-    let path = path.strip_prefix(r"\\?\").unwrap_or(path);
-    let bytes = path.as_bytes();
-    if bytes.len() < 3
-        || !bytes[0].is_ascii_alphabetic()
-        || bytes[1] != b':'
-        || !matches!(bytes[2], b'\\' | b'/')
-    {
-        return None;
-    }
-    Some(format!(
-        "/mnt/{}/{}",
-        (bytes[0] as char).to_ascii_lowercase(),
-        path[3..].replace('\\', "/")
-    ))
 }
 
 fn powershell_executable_invocation(path: &Path) -> String {
@@ -2101,13 +2080,12 @@ mod tests {
         );
 
         let events = hook_trace_events(root);
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 1);
         assert_eq!(events[0].event, TraceEventKind::HookEvaluated);
-        assert_eq!(events[0].attributes["decision"], json!("allow"));
-        assert_eq!(events[1].attributes["hook.stage"], json!("pre"));
-        assert_eq!(events[1].attributes["decision"], json!("deny"));
-        assert_eq!(events[1].attributes["reason.category"], json!("protocol"));
-        assert_eq!(events[1].error_code.as_deref(), Some("hook_denied"));
+        assert_eq!(events[0].attributes["hook.stage"], json!("pre"));
+        assert_eq!(events[0].attributes["decision"], json!("deny"));
+        assert_eq!(events[0].attributes["reason.category"], json!("protocol"));
+        assert_eq!(events[0].error_code.as_deref(), Some("hook_denied"));
         let encoded = fs::read_to_string(crate::subagent::telemetry::trace_file(root)).unwrap();
         assert!(!encoded.contains("当前调用已确认来自子代理"));
     }
@@ -3630,6 +3608,39 @@ mod tests {
     }
 
     #[test]
+    fn unbound_start_remains_in_the_root_barrier_until_matching_stop() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let runtime_id = "runtime-a";
+        let session_id = "unbound-start-session";
+
+        let mut spawn = input("PreToolUse", session_id);
+        spawn.tool_name = Some("agents.spawn_agent".to_string());
+        spawn.tool_input = Some(json!({
+            "task_name": "known_reader",
+            "agent_type": "codey_quick_scan",
+            "message": "Read only"
+        }));
+        handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap();
+
+        let mut start = input("SubagentStart", session_id);
+        start.agent_id = Some("unknown-agent".to_string());
+        handle_hook_for_runtime_at(&start, root, runtime_id, 11).unwrap();
+        assert_eq!(
+            active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+            2
+        );
+
+        let mut stop = input("SubagentStop", session_id);
+        stop.agent_id = start.agent_id;
+        handle_hook_for_runtime_at(&stop, root, runtime_id, 12).unwrap();
+        assert_eq!(
+            active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn missing_id_stop_settles_only_a_unique_active_ledger_candidate() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -3669,7 +3680,7 @@ mod tests {
         handle_hook_for_runtime_at(&anonymous_start, root, runtime_id, 12).unwrap();
         assert_eq!(
             active_agent_count_for_runtime(root, runtime_id, unique_session).unwrap(),
-            1
+            2
         );
         let mut anonymous_stop = input("SubagentStop", unique_session);
         anonymous_stop.agent_type = Some("codey_deep_research".to_string());
@@ -3693,7 +3704,7 @@ mod tests {
         handle_hook_for_runtime_at(&anonymous_stop, root, runtime_id, 33).unwrap();
         assert_eq!(
             active_agent_count_for_runtime(root, runtime_id, ambiguous_session).unwrap(),
-            2
+            3
         );
         assert!(
             agent_marker_path(
@@ -3946,6 +3957,12 @@ mod tests {
         .unwrap();
         assert_eq!(permission(&marker_mismatch).as_deref(), Some("deny"));
 
+        let mut reader_stop = input("SubagentStop", read_session);
+        reader_stop.agent_id = Some("agent-reader-b".to_string());
+        reader_stop.agent_type = Some("codey_quick_scan".to_string());
+        handle_hook_for_runtime_at(&reader_stop, root, runtime_id, base + 43).unwrap();
+        remove_active_marker(root, runtime_id, read_session, "untracked-agent").unwrap();
+
         let command_session = "command-capable-read-session";
         spawn_agent(
             command_session,
@@ -3971,6 +3988,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(native_readonly, json!({}));
+
+        let mut command_reader_stop = input("SubagentStop", command_session);
+        command_reader_stop.agent_id = Some("agent-command-reader".to_string());
+        command_reader_stop.agent_type = Some("codey_deep_research".to_string());
+        handle_hook_for_runtime_at(&command_reader_stop, root, runtime_id, base + 54).unwrap();
 
         let write_session = "writer-session";
         spawn_agent(
@@ -4261,6 +4283,21 @@ mod tests {
             let mut start = input("SubagentStart", "session-a");
             start.agent_id = Some(agent_id.to_string());
             handle_hook(&start, root).unwrap();
+        }
+
+        for response in [
+            json!({ "agents": [] }),
+            json!({ "agents": [{ "agent_name": "/root", "agent_status": "running" }] }),
+        ] {
+            let mut empty = input("PostToolUse", "session-a");
+            empty.tool_name = Some("agents.list_agents".to_string());
+            empty.tool_input = Some(json!({}));
+            empty.tool_response = Some(response);
+            assert_eq!(
+                handle_hook(&empty, root).unwrap()["decision"].as_str(),
+                Some("block")
+            );
+            assert_eq!(active_agent_count(root, "session-a").unwrap(), 2);
         }
 
         let mut filtered = input("PostToolUse", "session-a");
@@ -4966,6 +5003,82 @@ mod tests {
         let parsed = parse_hook_input(br#"{"hookEventName":"Stop","sessionId":"s"}"#).unwrap();
         assert_eq!(parsed.hook_event_name, "Stop");
         assert_eq!(parsed.session_id, "s");
+
+        for invalid in [
+            br#"{"hookEventName":"Stop","sessionId":""}"#.as_slice(),
+            br#"{"hookEventName":"Stop","sessionId":"   "}"#.as_slice(),
+        ] {
+            assert!(parse_hook_input(invalid).is_err());
+        }
+        let long_session = "x".repeat(MAX_SESSION_ID_BYTES + 1);
+        let encoded = serde_json::to_vec(&json!({
+            "hookEventName": "Stop",
+            "sessionId": long_session
+        }))
+        .unwrap();
+        assert!(parse_hook_input(&encoded).is_err());
+    }
+
+    #[test]
+    fn recovery_timer_resets_on_backward_clock_jumps_but_accepts_late_checks() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let grace = 10_000;
+        assert!(
+            !observe_and_check_elapsed(
+                root,
+                "runtime-a",
+                "clock-session",
+                STOP_BLOCKED_SINCE_FILE,
+                100_000,
+                grace,
+            )
+            .unwrap()
+        );
+        assert!(
+            !observe_and_check_elapsed(
+                root,
+                "runtime-a",
+                "clock-session",
+                STOP_BLOCKED_SINCE_FILE,
+                90_000,
+                grace,
+            )
+            .unwrap()
+        );
+        assert!(
+            observe_and_check_elapsed(
+                root,
+                "runtime-a",
+                "clock-session",
+                STOP_BLOCKED_SINCE_FILE,
+                90_000 + grace + 60_001,
+                grace,
+            )
+            .unwrap()
+        );
+        assert!(
+            !observe_and_check_elapsed(
+                root,
+                "runtime-a",
+                "clock-session",
+                PENDING_INIT_OBSERVED_FILE,
+                200_000,
+                grace,
+            )
+            .unwrap()
+        );
+        assert!(
+            observation_elapsed_if_present(
+                root,
+                "runtime-a",
+                "clock-session",
+                PENDING_INIT_OBSERVED_FILE,
+                200_000 + grace + 60_001,
+                grace,
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -5335,19 +5448,6 @@ mod tests {
         assert!(!runtime_gate_is_active(Some(OsStr::new("0"))));
         assert!(!runtime_gate_is_active(Some(OsStr::new("true"))));
         assert!(runtime_gate_is_active(Some(OsStr::new("1"))));
-    }
-
-    #[test]
-    fn windows_hook_executable_paths_translate_to_wsl_mounts() {
-        assert_eq!(
-            windows_path_to_wsl(r"C:\Program Files\Codey\codey.exe").as_deref(),
-            Some("/mnt/c/Program Files/Codey/codey.exe")
-        );
-        assert_eq!(
-            windows_path_to_wsl(r"\\?\D:\Apps\Codey.exe").as_deref(),
-            Some("/mnt/d/Apps/Codey.exe")
-        );
-        assert_eq!(windows_path_to_wsl("/Applications/Codey"), None);
     }
 
     #[test]

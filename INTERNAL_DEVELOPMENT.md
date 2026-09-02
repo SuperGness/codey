@@ -69,9 +69,8 @@ Codey 是一个无界面的 Rust 桌面辅助进程，通过 CDP 连接官方 Co
 - macOS / Windows 默认开启兼容型宠物精简：Codey 先把 Codex 自带的 `electron-avatar-overlay-open` 启动状态设为关闭，使宠物默认保持收起；Codex 设置页的 Pets 入口会在激活前按宠物专属语义 ID 屏蔽，设置 chunk 对 `codex-avatar` 的静态依赖替换成无资源桩，避免设置页预先载入宠物预览和内置精灵图，个人菜单和命令菜单中的宠物控件也继续屏蔽。主 bundle 中 Avatar Overlay manager 的启动预热会变成 no-op，普通启动不再提前创建长期隐藏的 `BrowserWindow`；同时匹配透明、无边框、不可聚焦、置顶和任务栏隐藏语义的 Overlay 会在隐藏时强制恢复后台节流，重新显示时再恢复上游显式关闭节流的设置。manager、`initialRoute=/avatar-overlay`、专用 preload 与原生 `avatar-overlay.node` 仍保留，用户主动使用官方语音时可通过原生 presentation 路径按需创建。不得按窗口尺寸、`Pet Surface` 标题或 Avatar Overlay 通用 ID 全局拦截普通窗口。关闭开关后会在下一次由 Codey 启动 Codex 时恢复宠物、控件及原生预热，不改写 `app.asar`。
 - 可选的 FastCtx 上下文优化默认关闭。没有现有 FastCtx 配置时，打开后会在下次启动 Codex 时把内嵌版本作为本地 STDIO MCP 临时注册，提供带分页和输出预算的 `inspect_local_file`、`grep`、`glob` 与 `replace` 工具，减少文件读取、搜索和机械替换产生的命令拼装与冗余上下文；无需另外安装 FastCtx、npm 包或 Node.js。检测到用户已经配置 FastCtx 时，设置页会禁用内置开关并通过悬浮提示说明原因，保存接口与启动配置层也会强制保持内置版本关闭，不复用用户 server、不注入 Codey FastCtx 指引。
 - 可选的提示词优化默认关闭。配置可选择 Codey 路由或手动模式：路由模式使用本地路由的已启用模型别名；手动模式保留独立地址、模型、凭据和自定义优化指令，并支持 OpenAI Responses、OpenAI Chat Completions 和 Anthropic Messages。配置热更新后 Codex composer 旁的按钮即时显示或隐藏；路由模式无需手动 Key。API Key 只保存在后端配置，优化日志不记录提示词正文或凭据。
-- 可选的 Codey 子代理角色与调度增强默认关闭，并叠加在 Codex 原生子代理能力之上。打开后，`[agents]`、`features.multi_agent_v2`、角色注册、根规则和 FastCtx 指引全部作为 app-server 命令级 `-c` 覆盖注入，用户 `config.toml` 始终只读。五个用户可见角色与内部 `default` 兼容角色的可编辑源保存在 Codey 自有约束目录；运行时只为 `enabled = true` 的有效角色集合生成和注册副本，已停用角色的运行副本会被清理。设置页从全部当前可用线路聚合已启用模型，并以全局角色矩阵保存 `enabled`、模型别名和推理档位，不再随 `activeProfileId` 切换。模型和推理档位热更新在生命周期锁和运行代次复核内执行；有效角色集合变化会改变 Codex 注册表，必须重启 Codex。首次启用、关闭、线路或 FastCtx 边界变化仍要求重启。运行时不会迁移旧 `max_threads`、删除 `max_depth`，也不会恢复或改写用户配置中的结构字段。
+- 可选的 Codey 子代理角色与调度增强默认关闭，并叠加在 Codex 原生子代理能力之上；仅在原生 macOS 与 Windows 运行，Linux 和 WSL 不生成或注入这套增强。打开后，`[agents]`、`features.multi_agent_v2`、角色注册、根规则和 FastCtx 指引全部作为 app-server 命令级 `-c` 覆盖注入，用户 `config.toml` 始终只读。五个用户可见角色与内部 `default` 兼容角色的可编辑源保存在 Codey 自有约束目录；运行时只为 `enabled = true` 的有效角色集合生成和注册副本，已停用角色的运行副本会被清理。设置页从全部当前可用线路聚合已启用模型，并以全局角色矩阵保存 `enabled`、模型别名和推理档位，不再随 `activeProfileId` 切换。模型和推理档位热更新在生命周期锁和运行代次复核内执行；有效角色集合变化会改变 Codex 注册表，必须重启 Codex。首次启用、关闭、线路或 FastCtx 边界变化仍要求重启。运行时不会迁移旧 `max_threads`、删除 `max_depth`，也不会恢复或改写用户配置中的结构字段。
 - 合成的未知第三方模型目录固定声明 `low`、`medium`、`high`、`xhigh` 四档推理强度，默认使用 `low`。第三方线路中与官方目录模型同名或明确 route alias 到官方模型的条目，可以继承官方目录明确声明的 `max`；只有匹配 `gpt-5.6-sol`、`gpt-5.6-terra` 或 `gpt-5.6-luna` 且官方模板同时声明 `ultra` 的模型才额外继承 `ultra`。这类 GPT-5.6 route alias 同时保留模板的 `v1` / `v2` `multi_agent_version`，其他合成模型继续移除协调器标记并保持叶子候选。Renderer 热刷新目录时也必须携带同一份第三方模型元数据，避免已打开页面继续沿用旧缓存中的单档能力。
-- Windows 原生 EXE 启动会移除继承到子进程的陈旧 `WSL_DISTRO_NAME`，避免新版客户端无意同步探测 `wsl.exe`；用户在 Codex 中明确启用的 WSL 模式不受影响。
 - 配置页提供“清理诊断存储”按钮：同一操作会在线清空 Trace 日志、截断 WAL 并压缩数据库，同时清理已稳定写入的 Crashpad 完整报告组；不会直接删除运行中仍被 Codex 持有的 SQLite 文件，也不触碰会话、账号、配置、插件或 Crashpad allowlist 之外的数据。Trace 与 Crashpad 分别返回清理结果，部分失败不会隐藏另一侧已经完成的回收。
 - 诊断存储使用两个独立统计模块和一个组合刷新命令。Trace 快照展示日志条数、SQLite 实际占用和内容字节估算；Crashpad 快照展示目录、完整报告、文件、占用、时间范围和是否超过上限。两个 blocking 扫描并发执行并分别原子替换内存快照；配置页状态查询只序列化现有快照，不触发磁盘扫描。
 - 侧边栏相对时间通过 Codey bridge 在 blocking worker 中只读复用 `SessionMetadataCache` 的 SQLite 连接，不再让 Renderer 寻找官方 signal dispatcher 或分页调用 `thread/list` / `thread/read`。每轮最多批量查询 200 个当前可见的本地任务，按 `recency_at_ms`、`recency_at`、`updated_at_ms`、`updated_at`、`created_at_ms`、`created_at` 的兼容优先级读取时间；超过 200 条的待处理项由独立 pump 接续。普通请求按会话限流 60 秒；批量读取失败时保留已有标签、不立即重试，等待下一刷新周期，避免不可用接口形成紧密重试。删除墓碑、无效时间与数据库中已缺失的时间会阻止旧缓存复活。删除、重载等功能只解析入口脚本声明的具名会话资产，不遍历或读取全部 Renderer 资源。
@@ -236,7 +235,7 @@ restore -> restore_latest_backup -> same validated writer transaction
 
 ### 子代理原生单路径编排
 
-子代理优化只保留一条生产路径：根代理直接调用原生 `agents.spawn_agent`，Hook 从可信工具输入读取 `task_name`、角色和非空 `message` 建立任务胶囊。不存在 V1/V2 尾行契约、写入 sidecar、逐任务 checks、验收债、批次决策状态机或独立控制 MCP。
+子代理优化只保留一条生产路径：原生 macOS/Windows 下根代理直接调用 `agents.spawn_agent`，Hook 从可信工具输入读取 `task_name`、角色和非空 `message` 建立任务胶囊。Linux/WSL 不启用这套增强。不存在 V1/V2 尾行契约、写入 sidecar、逐任务 checks、验收债、批次决策状态机或独立控制 MCP。
 
 ```mermaid
 flowchart LR
@@ -253,22 +252,23 @@ flowchart LR
 
 - `task_name` 只允许 1–64 个小写字母、数字或下划线；同一会话内不可复用。角色必须来自当前有效角色策略，运行时策略切换或损坏时在建账前拒绝。
 - 只读角色自动获得 `files.read`；写入角色自动获得 `command.execute`、`files.read` 和 `workspace.write`。能力来自角色策略，不再由提示词中的 JSON 自报。
-- 写入角色必须有可信的 Hook 工作目录，并以该工作区建立保守互斥锁。当前不解析工具输入中的目标路径；真实文件和命令权限仍由 Codex sandbox、approval policy、permission profile 与 writable roots 裁决。只有执行器提供可信路径字段后，才考虑把工作区锁细化为路径锁。
+- 写入角色必须有可信的 Hook 工作目录。派发准入在同一个 state-root 账本锁下扫描当前运行代次的所有会话账本，旧代次账本不参与互斥；同一工作区任一活动 writer 都会阻止其他会话再派 writer，不同工作区仍可并发。当前不解析工具输入中的目标路径；真实文件和命令权限仍由 Codex sandbox、approval policy、permission profile 与 writable roots 裁决。只有执行器提供可信路径字段后，才考虑把工作区锁细化为路径锁。
 - 已确认的纯只读任务最多并发 3 个；包含写入型或身份未确认任务时最多并发 2 个。并发限制只约束同时运行数量，不限制累计派发次数。
 
 #### 身份与生命周期
 
-- 会话账本是新任务的生命周期事实源，活动 marker 仅保留兼容和故障恢复用途。账本保存哈希化的 runtime/session/agent 标识、attempt、fencing token、角色、能力、工作区范围、phase/outcome 和必要时间戳。
-- `PreToolUse` 原子预留任务；`PostToolUse` 只从受控 spawn 回执字段建立 provisional 或真实 agent 绑定。后续 `SubagentStart`、child 首次工具调用和受限 transcript metadata 可完成身份收敛；歧义或碰撞会 fence 相关 attempt。
+- 会话账本是新任务的生命周期事实源，活动 marker 仅保留兼容和故障恢复用途。账本只保存哈希化的 runtime/session/agent 标识、attempt、fencing token、角色、读写能力、工作区、phase/outcome 和必要时间戳；不再复制目标路径、视觉属性或恒定调用模式。
+- `PreToolUse` 原子预留任务；`PostToolUse` 只从受控 spawn 回执字段建立 provisional 或真实 agent 绑定。后续 `SubagentStart`、child 首次工具调用和受限 transcript metadata 可完成身份收敛；无法绑定的 Start 仍建立 marker，活动数取账本活动项与未覆盖 marker 的并集，避免根代理提前越过屏障。歧义或碰撞会 fence 相关 attempt。
 - child 不能嵌套派生，也不能查看、等待、中断或追派其他代理；未绑定 child 只可向 `/root` 回报。绑定后按活动状态、fence 和角色能力裁决读取、命令、网络与写入工具。
-- `MESSAGE` 不结算任务。completed、errored、failed、shutdown、not_found 等终态由统一协议解析器归一化；pending_init、running 和 interrupted 保持活动，直到权威终态或根代理成功中断并永久放弃。
-- 重复 task ID 只触发一次无筛选 `agents.list_agents` 对账。follow-up 仅允许仍为 running、已绑定且未 fence 的 attempt；拒绝发生在唤醒前，不得循环重试。
+- `MESSAGE` 不结算任务。completed、errored、failed、shutdown、not_found 等终态由统一协议解析器归一化；pending_init、running 和 interrupted 保持活动，直到权威终态或根代理成功中断并永久放弃。无筛选 `list_agents` 返回空数组或只有 `/root` 时视为 `NoChildren`，不能据此结算活动任务。
+- 重复 task ID 只触发一次无筛选 `agents.list_agents` 对账。follow-up 仅允许仍为 running、已绑定且未 fence 的 attempt；拒绝发生在唤醒前，不得循环重试。协议身份或状态出现异常后，新的 spawn/follow-up 熔断，但仍允许 wait/list 对账、中断和根代理接管。
 
 #### 汇合、恢复与终局验收
 
 - 活动 attempt 存在时，根代理普通本地工具和 Stop 仍被阻止；可信根 turn 在纯只读任务运行期间可使用本地 FastCtx 读取。所有 attempt 终态或被 fence 后即可恢复根代理工作，不再要求额外批次决策。
-- pending-init、状态停滞、运行代次切换和成功 interrupt 都通过同一 reservation 状态机收敛。10 分钟停滞窗口与 60 分钟 Stop 绝对上限继续防止永久阻塞；恢复不会重放未知副作用。
-- Stop 只检查是否仍有未结算 attempt；通过后写入仅含运行时/会话哈希和时间戳的结算回执并删除活动账本。SessionEnd 保留损坏账本隔离与跨代次清理。
+- pending-init、状态停滞、运行代次切换和成功 interrupt 都通过同一 reservation 状态机收敛。10 分钟停滞窗口与 60 分钟 Stop 绝对上限继续防止永久阻塞；墙钟回拨会重置观察起点，正常晚到检查仍按原起点触发放行。恢复不会重放未知副作用。
+- Stop 只检查是否仍有未结算 attempt；通过后直接删除活动账本，不再生成无消费者的结算回执。SessionEnd 保留损坏账本隔离与跨代次清理；同一会话最多保留 3 份损坏账本副本。
+- Hook 辅助状态由 state-root 全局文件锁串行化，账本也使用 state-root 单一锁。账本读取上限为 4 MiB，运行策略为 256 KiB，其他辅助状态同样有界；写入使用私有同目录临时文件，`sync_all` 后原子替换并尽力同步父目录。每次打开会清理当前会话遗留的账本临时文件。
 - 子代理返回 `status: completed | partial | blocked`、关键证据与 gaps；这些只是候选产物。根代理结合用户要求、实际差异、必要的确定性检查和视觉证据统一验收。测试是否执行由任务风险和用户要求决定，不再由 Hook 解析命令或回执格式。
 #### 4. 规则配置与热更新
 
@@ -296,7 +296,7 @@ flowchart LR
 }
 ```
 
-裁决顺序为最高优先级优先；同优先级冲突时 deny 胜出；无匹配项执行顶层 fallback。热路径单次扫描规则集，只保留当前最高优先级候选，再按 ID 排序以保持审计输出稳定；工具名比较不再为每条规则分配小写字符串。每次裁决把选中规则、冲突规则、规则 revision、来源和解释写入审计 trace。不要依赖数组顺序表达优先级，也不要把 fallback 设为 allow。
+裁决顺序为最高优先级优先；同优先级冲突时 deny 胜出；无匹配项执行顶层 fallback。热路径单次扫描规则集，只保留当前最高优先级候选，再按 ID 排序以保持审计输出稳定；工具名比较不再为每条规则分配小写字符串。只有拒绝、错误和生命周期转换写入审计 trace，成功 Hook 与成功规则裁决不逐条落盘。不要依赖数组顺序表达优先级，也不要把 fallback 设为 allow。
 
 #### 5. FastCtx 使用规范
 
@@ -410,7 +410,7 @@ HTTP、SSE、WebSocket 共用同一个 probe。HTTP 连接 accept 时保存请�
 
 本地 sink 当前提供 NDJSON 与 SQLite 两种可运行实现。NDJSON 适合低依赖、人工检查和外部采集器 tail，按大小轮转并限制保留份数；轮转前会 flush、take 并关闭当前句柄，兼容 Windows rename 语义。SQLite 适合单机查询，使用 WAL、`synchronous=NORMAL`、250 ms busy timeout 和批量事务，数据库文件在 Unix 强制 `0600`；启动时和运行中每小时执行保留期清理，普通 `INSERT` 使重复 request ID 成为可见写失败而非静默吞掉。集中式生产观测推荐增加 ClickHouse `BatchSink`：按时间分区、provider/model/status 排序，使用批量 HTTP/native insert 和独立失败缓冲；不能让 ClickHouse 客户端或重试进入 producer 路径。sink enum 是切换边界，但当前配置没有启用网络型 ClickHouse sink，避免在没有凭据、重试上限和本地 spool 约束时引入不完整的远程投递语义。
 
-控制台的“查看请求日志”固定查询 SQLite，不遍历 NDJSON 轮转文件。前端调用 `query_route_request_logs` 传入受限的页码、每页条数、搜索词及 provider/model/status/protocol 筛选；后端在 `spawn_blocking` 中打开固定应用目录下的只读 SQLite 连接并启用 `query_only`，所有筛选值使用绑定参数，按 `timestamp_unix_ms DESC, request_id DESC` 稳定排序。搜索覆盖上游错误摘要和 Codex 会话 ID；前端会截断长会话 ID、保留完整悬浮提示和点击复制，`codexSessionIsParent=true` 时显示“父”标识。SQLite writer 启动时自动迁移 `codex_session_id` 与 `codex_session_is_parent` 列；旧 SQLite 缺少上游错误摘要或会话列时，只读查询分别使用 `NULL` / `false` 兼容，不要求先开启 writer 完成迁移。前端在下游或上游状态码为非 2xx 时于状态徽标旁显示可聚焦的问号图标，悬浮或键盘聚焦后展示纯文本错误摘要，缺失时回退为错误代码。SQLite 文件尚不存在时返回正常空页，当前配置为 NDJSON 时返回明确的 `ndjson_not_queryable` 状态。日志开关开启时控制台会把 sink 设为 SQLite；保存后新 writer 先完成存储就绪握手再原子发布 producer，关闭时先撤下 producer，再通过独立控制通道有界排空和 flush，长连接 probe 不参与 writer 存活判定。active 配置重建时先停止旧 generation，避免 NDJSON 两个 writer 同时轮转同一文件。`clear_route_request_logs` 与 reconfigure 共用 controller 异步锁：先撤下 producer 并有界 flush/停止 writer，只删除 SQLite 主文件及 `-wal` / `-shm` / `-journal` sidecar、NDJSON 主文件和 `.正整数` 轮转文件，再按原配置完成 sink ready 握手并恢复 producer；停止超时则不删除，部分删除或恢复失败会返回明确失败状态，请求转发始终不等待该操作。关闭记录不会删除历史 SQLite 数据；用户在全屏日志弹窗二次确认后可主动删除全部 SQLite 与 NDJSON 历史文件，即使当前后端不可在线查询。其余日志目录文件不会被匹配。本地路由关闭时只隐藏入口，不清除请求日志配置或历史记录。
+控制台的“查看请求日志”通过操作系统默认浏览器打开本地路由提供的 `/codey/request-logs` 页面；页面复用设置浮层的同一份日志组件与构建产物。启动随机令牌只通过 URL fragment 交给页面，再保存在当前标签页的 `sessionStorage` 并从地址栏移除；日志查询、目录读取与删除接口仍要求 `x-codey-router-token`，公开页面和脚本本身不包含配置或日志数据。日志页固定查询 SQLite，不遍历 NDJSON 轮转文件。前端调用 `query_route_request_logs` 传入受限的页码、每页条数、搜索词及 provider/model/status/protocol 筛选；后端在 `spawn_blocking` 中打开固定应用目录下的只读 SQLite 连接并启用 `query_only`，所有筛选值使用绑定参数，按 `timestamp_unix_ms DESC, request_id DESC` 稳定排序。搜索覆盖上游错误摘要和 Codex 会话 ID；前端会截断长会话 ID、保留完整悬浮提示和点击复制，`codexSessionIsParent=true` 时显示“父”标识。SQLite writer 启动时自动迁移 `codex_session_id` 与 `codex_session_is_parent` 列；旧 SQLite 缺少上游错误摘要或会话列时，只读查询分别使用 `NULL` / `false` 兼容，不要求先开启 writer 完成迁移。前端在下游或上游状态码为非 2xx 时于状态徽标旁显示可聚焦的问号图标，悬浮或键盘聚焦后展示纯文本错误摘要，缺失时回退为错误代码。SQLite 文件尚不存在时返回正常空页，当前配置为 NDJSON 时返回明确的 `ndjson_not_queryable` 状态。日志开关开启时控制台会把 sink 设为 SQLite；保存后新 writer 先完成存储就绪握手再原子发布 producer，关闭时先撤下 producer，再通过独立控制通道有界排空和 flush，长连接 probe 不参与 writer 存活判定。active 配置重建时先停止旧 generation，避免 NDJSON 两个 writer 同时轮转同一文件。`clear_route_request_logs` 与 reconfigure 共用 controller 异步锁：先撤下 producer 并有界 flush/停止 writer，只删除 SQLite 主文件及 `-wal` / `-shm` / `-journal` sidecar、NDJSON 主文件和 `.正整数` 轮转文件，再按原配置完成 sink ready 握手并恢复 producer；停止超时则不删除，部分删除或恢复失败会返回明确失败状态，请求转发始终不等待该操作。关闭记录不会删除历史 SQLite 数据；用户在浏览器日志页二次确认后可主动删除全部 SQLite 与 NDJSON 历史文件，即使当前后端不可在线查询。其余日志目录文件不会被匹配。本地路由关闭时只隐藏入口，不清除请求日志配置或历史记录。
 
 容量规划按 `queueCapacity * 单条记录上界` 评估；所有采集字符串最多 512 字节，HTTP/SSE 观察队列在现有 64 连接并发上限内每请求最多暂存 64 个 8 KiB 零拷贝切片，usage 投影最多 16 KiB，最终日志队列和 batch 也都有硬上限。高流量环境先使用 ppm 采样，再按存储端轮转/保留控制容量；队列丢弃是刻意的 overload 策略，不承诺审计级完整性。NDJSON 的大小限制是 batch 边界，单个 batch 可能让活动文件短暂超过阈值；异常终止、强杀或 shutdown flush 超时可能丢失内存队列中的尾部记录。该模块用于事后观测而非计费、合规审计或 exactly-once 账本。
 

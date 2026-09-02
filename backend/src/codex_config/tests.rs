@@ -3165,22 +3165,7 @@ wire_api = "responses"
             .count(),
         SUBAGENT_GATE_HOOKS.len()
     );
-    assert_eq!(
-        applied
-            .runtime_config_overrides
-            .iter()
-            .filter(|entry| entry.starts_with(CODEY_WSL_ONLY_OVERRIDE_PREFIX))
-            .count(),
-        if cfg!(windows) {
-            SUBAGENT_GATE_HOOKS.len()
-        } else {
-            0
-        }
-    );
     for runtime_override in &applied.runtime_config_overrides {
-        let runtime_override = runtime_override
-            .strip_prefix(CODEY_WSL_ONLY_OVERRIDE_PREFIX)
-            .unwrap_or(runtime_override);
         runtime_override
             .parse::<DocumentMut>()
             .unwrap_or_else(|error| {

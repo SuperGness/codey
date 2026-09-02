@@ -18,7 +18,7 @@ import {
   IconTrash,
 } from "@tabler/icons-react";
 
-import type { Config } from "./App.types";
+import type { Config, Profile } from "./App.types";
 import { invoke } from "./api";
 import {
   Badge,
@@ -109,11 +109,19 @@ type ActionNotice = {
   text: string;
 };
 
+export type RequestLogCatalog = {
+  profiles: Array<Pick<Profile, "id" | "name" | "sourceProviderId">>;
+  selectedModelsByProvider: Config["selectedModelsByProvider"];
+  declaredOfficialModelsByProvider: Config["declaredOfficialModelsByProvider"];
+  upstreamModelsByProvider: Config["upstreamModelsByProvider"];
+};
+
 type RequestLogDialogProps = {
-  config: Config;
+  catalog: RequestLogCatalog;
   container: HTMLElement | null;
   opened: boolean;
   onClose: () => void;
+  standalone?: boolean;
 };
 
 const statusOptions = [
@@ -276,10 +284,11 @@ function unavailableMessage(reason?: string) {
 }
 
 export function RequestLogDialog({
-  config,
+  catalog,
   container,
   opened,
   onClose,
+  standalone = false,
 }: RequestLogDialogProps) {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
@@ -311,7 +320,7 @@ export function RequestLogDialog({
 
   const providerOptions = useMemo(() => {
     const providers = new Map<string, string>();
-    for (const profile of config.profiles) {
+    for (const profile of catalog.profiles) {
       const value = profile.sourceProviderId || profile.id;
       if (value) providers.set(value, profile.name || value);
     }
@@ -319,16 +328,16 @@ export function RequestLogDialog({
       { label: "全部供应商", value: "all" },
       ...[...providers].map(([value, label]) => ({ label, value })),
     ];
-  }, [config.profiles]);
+  }, [catalog.profiles]);
 
   const modelOptions = useMemo(() => {
     const models = new Set<string>();
-    for (const catalog of [
-      config.selectedModelsByProvider,
-      config.declaredOfficialModelsByProvider,
-      config.upstreamModelsByProvider,
+    for (const modelsByProvider of [
+      catalog.selectedModelsByProvider,
+      catalog.declaredOfficialModelsByProvider,
+      catalog.upstreamModelsByProvider,
     ]) {
-      for (const values of Object.values(catalog)) {
+      for (const values of Object.values(modelsByProvider)) {
         for (const value of values) {
           if (value.trim()) models.add(value);
         }
@@ -341,9 +350,9 @@ export function RequestLogDialog({
         .map((value) => ({ label: value, value })),
     ];
   }, [
-    config.declaredOfficialModelsByProvider,
-    config.selectedModelsByProvider,
-    config.upstreamModelsByProvider,
+    catalog.declaredOfficialModelsByProvider,
+    catalog.selectedModelsByProvider,
+    catalog.upstreamModelsByProvider,
   ]);
 
   useEffect(() => {
@@ -456,6 +465,7 @@ export function RequestLogDialog({
       opened={opened}
       onClose={onClose}
       title="请求日志"
+      withCloseButton={!standalone}
       closeButtonProps={{ "aria-label": "关闭请求日志" }}
       closeOnClickOutside={false}
       classNames={{

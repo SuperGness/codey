@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { MantineProvider } from "@mantine/core";
 import mantineStyles from "@mantine/core/styles.css?inline";
@@ -8,11 +9,15 @@ import modelStyles from "./styles.models.css?inline";
 import featureStyles from "./styles.features.css?inline";
 import diagnosticStyles from "./styles.diagnostics.css?inline";
 import responsiveStyles from "./styles.responsive.css?inline";
-import { codeyApiPath } from "./api";
+import { codeyApiPath, invoke } from "./api";
 import { SETTINGS_OVERLAY_Z_INDEX_CSS } from "./overlay.constants";
 import { SETTINGS_OPENED_EVENT } from "./useRuntimeStatus";
 import { codeyMantineTheme } from "./mantine";
 import tailwindStyles from "./tailwind.css?inline";
+import {
+  RequestLogDialog,
+  type RequestLogCatalog,
+} from "./RequestLogDialog";
 
 type OverlayController = {
   open: () => void;
@@ -31,16 +36,89 @@ declare global {
   }
 }
 
+const REQUEST_LOG_PATH = "/codey/request-logs";
+const REQUEST_LOG_TOKEN_KEY = "codey-request-log-token";
+
+function RequestLogPage() {
+  const [catalog, setCatalog] = useState<RequestLogCatalog | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    void invoke<{ config: RequestLogCatalog }>("load_codey_config")
+      .then((result) => setCatalog(result.config))
+      .catch((nextError: unknown) => {
+        setError(nextError instanceof Error ? nextError.message : String(nextError));
+      });
+  }, []);
+
+  if (error) return <main className="p-6 text-sm text-red-700">{error}</main>;
+  if (!catalog) return <main className="p-6 text-sm text-[#6e6e73]">正在加载请求日志…</main>;
+  return (
+    <RequestLogDialog
+      catalog={catalog}
+      container={null}
+      opened
+      onClose={() => undefined}
+      standalone
+    />
+  );
+}
+
+function installBrowserBridge() {
+  const hashToken = decodeURIComponent(window.location.hash.slice(1));
+  if (hashToken) {
+    window.sessionStorage.setItem(REQUEST_LOG_TOKEN_KEY, hashToken);
+    window.history.replaceState(null, "", window.location.pathname);
+  }
+  const token = hashToken || window.sessionStorage.getItem(REQUEST_LOG_TOKEN_KEY) || "";
+  window.__codeyInvokeApi = async (command, args) => {
+    const response = await fetch(`/codey/api/${command}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-codey-router-token": token,
+      },
+      body: JSON.stringify(args),
+    });
+    const value = await response.json();
+    if (!response.ok) throw new Error(value?.error?.message || `Codey 请求失败（${response.status}）`);
+    return value;
+  };
+}
+
 function getOverlayMountTarget() {
   return document.body ?? document.documentElement;
 }
 
-window.__codeyInvokeApi = async (command, args) => {
-  if (typeof window.__codexSessionDeleteBridge !== "function") {
-    throw new Error("Codey bridge 尚未就绪");
-  }
-  return window.__codexSessionDeleteBridge(codeyApiPath(command), args);
-};
+if (window.location.pathname === REQUEST_LOG_PATH) {
+  installBrowserBridge();
+  document.title = "Codey 请求日志";
+  document.documentElement.setAttribute("data-mantine-color-scheme", "light");
+  const style = document.createElement("style");
+  style.textContent = [
+    mantineStyles,
+    tailwindStyles,
+    coreStyles,
+    operationsStyles,
+    modelStyles,
+    featureStyles,
+    diagnosticStyles,
+    responsiveStyles,
+  ].join("\n");
+  document.head.appendChild(style);
+  const root = document.getElementById("root") ?? document.body.appendChild(document.createElement("div"));
+  ReactDOM.createRoot(root).render(
+    <MantineProvider forceColorScheme="light" theme={codeyMantineTheme}>
+      <RequestLogPage />
+    </MantineProvider>,
+  );
+} else {
+  window.__codeyInvokeApi = async (command, args) => {
+    if (typeof window.__codexSessionDeleteBridge !== "function") {
+      throw new Error("Codey bridge 尚未就绪");
+    }
+    return window.__codexSessionDeleteBridge(codeyApiPath(command), args);
+  };
 
 if (!window.__codeySettingsOverlay) {
   const host = document.createElement("div");
@@ -143,4 +221,5 @@ if (!window.__codeySettingsOverlay) {
     isOpen,
     toggle: open,
   };
+}
 }

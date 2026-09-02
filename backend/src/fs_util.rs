@@ -1,8 +1,5 @@
-use std::fs;
-#[cfg(unix)]
-use std::fs::OpenOptions;
-#[cfg(unix)]
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -39,7 +36,15 @@ pub(crate) fn unique_temp_path(path: &Path) -> PathBuf {
 /// 失败路径只清理本次写入的临时文件。
 pub(crate) fn persist_temp_file(temp: &Path, destination: &Path) -> std::io::Result<()> {
     match fs::rename(temp, destination) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            if let Some(parent) = destination.parent() {
+                // Directory syncing is unsupported on some filesystems. The
+                // file itself is already durable; this best-effort sync closes
+                // the rename durability gap where the platform supports it.
+                let _ = File::open(parent).and_then(|directory| directory.sync_all());
+            }
+            Ok(())
+        }
         Err(error) => {
             let _ = fs::remove_file(temp);
             Err(error)
@@ -60,7 +65,11 @@ fn atomic_write_with(
 }
 
 pub(crate) fn atomic_write(destination: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    atomic_write_with(destination, |temp| fs::write(temp, bytes))?;
+    atomic_write_with(destination, |temp| {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })?;
     Ok(())
 }
 
@@ -75,9 +84,14 @@ pub(crate) fn atomic_write_private(destination: &Path, bytes: &[u8]) -> anyhow::
                 .open(temp)?;
             file.write_all(bytes)?;
             file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            file.sync_all()?;
         }
         #[cfg(not(unix))]
-        fs::write(temp, bytes)?;
+        {
+            let mut file = OpenOptions::new().write(true).create_new(true).open(temp)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+        }
         Ok(())
     })?;
     Ok(())
@@ -99,13 +113,40 @@ pub(crate) fn atomic_write_preserving_permissions(
     bytes: &[u8],
 ) -> anyhow::Result<()> {
     atomic_write_with(destination, |temp| {
-        fs::write(temp, bytes)?;
+        let mut file = OpenOptions::new().write(true).create_new(true).open(temp)?;
+        file.write_all(bytes)?;
         if let Ok(metadata) = fs::metadata(destination) {
             fs::set_permissions(temp, metadata.permissions())?;
         }
-        Ok(())
+        file.sync_all()
     })?;
     Ok(())
+}
+
+pub(crate) fn read_bounded(path: &Path, max_bytes: u64) -> anyhow::Result<Vec<u8>> {
+    let metadata = fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "不是可信普通文件：{}",
+        path.display()
+    );
+    anyhow::ensure!(
+        metadata.len() <= max_bytes,
+        "文件超过 {} 字节上限：{}",
+        max_bytes,
+        path.display()
+    );
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    File::open(path)?
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 <= max_bytes,
+        "文件读取期间超过 {} 字节上限：{}",
+        max_bytes,
+        path.display()
+    );
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -196,6 +237,16 @@ mod tests {
         atomic_write(&destination, b"new").unwrap();
 
         assert_eq!(fs::read(destination).unwrap(), b"new");
+    }
+
+    #[test]
+    fn bounded_read_rejects_oversized_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.json");
+        fs::write(&path, b"12345").unwrap();
+
+        assert_eq!(read_bounded(&path, 5).unwrap(), b"12345");
+        assert!(read_bounded(&path, 4).is_err());
     }
 
     #[cfg(unix)]

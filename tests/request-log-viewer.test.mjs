@@ -22,13 +22,27 @@ test("request log controls are scoped to built-in routing and preserve logger se
   assert.match(modelSection, /\{config\.localRouterEnabled && \([\s\S]*开启日志记录/);
   assert.match(modelSection, /aria-label="开启请求日志记录"/);
   assert.match(modelSection, /查看请求日志/);
-  assert.match(modelSection, /<RequestLogDialog/);
+  assert.match(modelSection, /invoke\("open_route_request_logs"\)/);
+  assert.doesNotMatch(modelSection, /<RequestLogDialog/);
   assert.match(preview, /routeRequestLog:\s*\{/);
   assert.match(preview, /command === "query_route_request_logs"/);
   assert.match(preview, /codexSessionId:/);
   assert.match(preview, /codexSessionIsParent,/);
   assert.match(preview, /item\.codexSessionId,/);
   assert.doesNotMatch(preview, /retryCount/);
+});
+
+test("request log viewer is hosted by the local router for the system browser", async () => {
+  const [api, overlay] = await Promise.all([
+    readFile(new URL("src/api.ts", root), "utf8"),
+    readFile(new URL("src/overlay.tsx", root), "utf8"),
+  ]);
+
+  assert.match(api, /"open_route_request_logs"/);
+  assert.match(overlay, /const REQUEST_LOG_PATH = "\/codey\/request-logs"/);
+  assert.match(overlay, /sessionStorage\.setItem\(REQUEST_LOG_TOKEN_KEY, hashToken\)/);
+  assert.match(overlay, /fetch\(`\/codey\/api\/\$\{command\}`/);
+  assert.match(overlay, /<RequestLogDialog[\s\S]*standalone/);
 });
 
 test("request log viewer uses a full-screen server-paginated searchable table", async () => {

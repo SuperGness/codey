@@ -128,7 +128,7 @@ test("Tailwind is compiled for both the page and Shadow DOM overlay", async () =
   assert.match(overlaySource, /getRootElement=\{\(\) => host\}/);
   assert.equal(
     overlaySource.match(/setAttribute\("data-mantine-color-scheme", "light"\)/g)?.length,
-    3,
+    4,
   );
   assert.match(tailwindSource, /@import "tailwindcss"/);
 });

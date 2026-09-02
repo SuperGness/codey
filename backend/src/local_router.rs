@@ -39,13 +39,13 @@ use uuid::Uuid;
 
 use crate::codex_config::CHATGPT_CODEX_BASE_URL;
 use crate::config::{
-    CodeyConfig, ProviderProfile, UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+    CodeyConfig, ProviderProfile, RouteRequestLogBackend, UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
     UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS, UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
 };
 use crate::route_request_log::{
     FirstByteSource, RequestProtocol, RouteRequestLogClearResult, RouteRequestLogController,
-    RouteRequestLogGuard, RouteRequestLogProbe, RouteRequestLogReconfigure, RouteRequestLogStart,
-    UpstreamTransport,
+    RouteRequestLogGuard, RouteRequestLogProbe, RouteRequestLogQuery, RouteRequestLogReconfigure,
+    RouteRequestLogStart, UpstreamTransport,
 };
 
 pub(crate) const ROUTER_PROVIDER_ID: &str = "codey_router";
@@ -98,6 +98,13 @@ const UPSTREAM_WEBSOCKET_PONG_TIMEOUT: Duration = Duration::from_secs(10);
 const UPSTREAM_WEBSOCKET_MAX_REUSE_AGE: Duration = Duration::from_secs(55 * 60);
 const RESPONSES_WEBSOCKET_BETA: &str = "responses_websockets=2026-02-06";
 const RESPONSES_WEBSOCKET_PATHS: [&str; 2] = ["/v1/responses", "/responses"];
+const REQUEST_LOG_PAGE_PATH: &str = "/codey/request-logs";
+const REQUEST_LOG_SCRIPT_PATH: &str = "/codey/request-logs.js";
+const REQUEST_LOG_PAGE: &str = r#"<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Codey 请求日志</title></head>
+<body><div id="root"></div><script src="/codey/request-logs.js"></script></body>
+</html>"#;
 #[cfg(not(test))]
 const ROUTER_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -118,6 +125,55 @@ pub(crate) struct RuntimeRouterEndpoint {
     /// native OpenAI login for this provider; the independent router header
     /// authenticates the loopback hop and the gateway isolates upstream auth.
     pub requires_openai_auth: bool,
+}
+
+impl RuntimeRouterEndpoint {
+    pub(crate) fn request_log_url(&self) -> String {
+        format!(
+            "{}/codey/request-logs#{}",
+            self.base_url.trim_end_matches("/v1"),
+            self.token
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RequestLogCatalog {
+    profiles: Vec<RequestLogProfile>,
+    selected_models_by_provider: BTreeMap<String, Vec<String>>,
+    declared_official_models_by_provider: BTreeMap<String, Vec<String>>,
+    upstream_models_by_provider: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RequestLogProfile {
+    id: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_provider_id: Option<String>,
+}
+
+impl RequestLogCatalog {
+    fn from_config(config: &CodeyConfig) -> Self {
+        Self {
+            profiles: config
+                .profiles
+                .iter()
+                .map(|profile| RequestLogProfile {
+                    id: profile.id.clone(),
+                    name: profile.name.clone(),
+                    source_provider_id: profile.source_provider_id.clone(),
+                })
+                .collect(),
+            selected_models_by_provider: config.selected_models_by_provider.clone(),
+            declared_official_models_by_provider: config
+                .declared_official_models_by_provider
+                .clone(),
+            upstream_models_by_provider: config.upstream_models_by_provider.clone(),
+        }
+    }
 }
 
 pub(crate) struct LocalRouter {
@@ -517,6 +573,8 @@ struct RouterSnapshot {
     raw_models: HashMap<String, Vec<AliasTarget>>,
     model_ids: Vec<String>,
     default_model: String,
+    request_log_backend: RouteRequestLogBackend,
+    request_log_catalog: RequestLogCatalog,
 }
 
 impl RouterSnapshot {
@@ -580,6 +638,8 @@ impl RouterSnapshot {
             raw_models,
             model_ids,
             default_model: config.default_model().unwrap_or_default().to_string(),
+            request_log_backend: config.route_request_log.backend,
+            request_log_catalog: RequestLogCatalog::from_config(config),
         }
     }
 
@@ -852,6 +912,24 @@ impl RouterServer {
             write_json_response(&mut stream, 200, &json!({"status":"ok"})).await?;
             return Ok(());
         }
+        if request.method == "GET" && request.path == REQUEST_LOG_PAGE_PATH {
+            write_static_response(
+                &mut stream,
+                "text/html; charset=utf-8",
+                REQUEST_LOG_PAGE.as_bytes(),
+            )
+            .await?;
+            return Ok(());
+        }
+        if request.method == "GET" && request.path == REQUEST_LOG_SCRIPT_PATH {
+            write_static_response(
+                &mut stream,
+                "text/javascript; charset=utf-8",
+                crate::cdp::SETTINGS_OVERLAY_SCRIPT.as_bytes(),
+            )
+            .await?;
+            return Ok(());
+        }
         if !self.authorized(&request) {
             write_error_response(
                 &mut stream,
@@ -879,6 +957,80 @@ impl RouterServer {
                     .collect::<Vec<_>>();
                 write_json_response(&mut stream, 200, &json!({"object":"list","data":data}))
                     .await?;
+            }
+            ("POST", "/codey/api/load_codey_config") => {
+                let catalog = self
+                    .snapshot
+                    .read()
+                    .expect("local router snapshot lock poisoned")
+                    .request_log_catalog
+                    .clone();
+                write_json_response(&mut stream, 200, &json!({"config": catalog})).await?;
+            }
+            ("POST", "/codey/api/query_route_request_logs") => {
+                let query = match serde_json::from_slice::<RouteRequestLogQuery>(&request.body) {
+                    Ok(query) => query,
+                    Err(error) => {
+                        write_error_response(
+                            &mut stream,
+                            400,
+                            "invalid_request_log_query",
+                            format!("请求日志查询参数无效：{error}"),
+                            None,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+                let backend = self
+                    .snapshot
+                    .read()
+                    .expect("local router snapshot lock poisoned")
+                    .request_log_backend;
+                let root = codey_runtime_core::paths::default_app_state_dir();
+                match tokio::task::spawn_blocking(move || {
+                    crate::route_request_log::query_route_request_logs(&root, backend, query)
+                })
+                .await
+                {
+                    Ok(Ok(page)) => {
+                        write_json_response(
+                            &mut stream,
+                            200,
+                            &serde_json::to_value(page).context("序列化请求日志查询结果失败")?,
+                        )
+                        .await?;
+                    }
+                    Ok(Err(error)) => {
+                        write_error_response(
+                            &mut stream,
+                            500,
+                            "request_log_query_failed",
+                            format!("查询请求日志失败：{error:#}"),
+                            None,
+                        )
+                        .await?;
+                    }
+                    Err(error) => {
+                        write_error_response(
+                            &mut stream,
+                            500,
+                            "request_log_query_failed",
+                            format!("请求日志查询任务异常退出：{error}"),
+                            None,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            ("POST", "/codey/api/clear_route_request_logs") => {
+                write_json_response(
+                    &mut stream,
+                    200,
+                    &serde_json::to_value(self.request_log.clear().await)
+                        .context("序列化请求日志清理结果失败")?,
+                )
+                .await?;
             }
             ("POST", "/v1/responses") | ("POST", "/responses") => {
                 self.proxy_responses(request, stream, ResponsesRequestKind::Create)
@@ -7056,6 +7208,20 @@ async fn write_json_response(stream: &mut TcpStream, status: u16, value: &Value)
     );
     write_all_with_timeout(stream, header.as_bytes(), "写入本地路由 JSON 响应头失败").await?;
     write_all_with_timeout(stream, &body, "写入本地路由 JSON 响应失败").await?;
+    Ok(())
+}
+
+async fn write_static_response(
+    stream: &mut TcpStream,
+    content_type: &str,
+    body: &[u8],
+) -> Result<()> {
+    let header = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\ncache-control: no-store\r\nx-content-type-options: nosniff\r\nconnection: close\r\n\r\n",
+        body.len()
+    );
+    write_all_with_timeout(stream, header.as_bytes(), "写入请求日志页面响应头失败").await?;
+    write_all_with_timeout(stream, body, "写入请求日志页面失败").await?;
     Ok(())
 }
 
@@ -16172,6 +16338,61 @@ mod tests {
             legacy_capability_response.status(),
             reqwest::StatusCode::UNAUTHORIZED
         );
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_log_page_is_public_but_its_api_requires_the_launch_token() {
+        let (config, provider_id, model) = router_config("http://127.0.0.1:9/v1".to_string());
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let gateway_root = endpoint.base_url.trim_end_matches("/v1");
+        let client = reqwest::Client::new();
+
+        let page = client
+            .get(format!("{gateway_root}{REQUEST_LOG_PAGE_PATH}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(page.status(), reqwest::StatusCode::OK);
+        assert!(page.text().await.unwrap().contains(REQUEST_LOG_SCRIPT_PATH));
+        let script = client
+            .get(format!("{gateway_root}{REQUEST_LOG_SCRIPT_PATH}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(script.status(), reqwest::StatusCode::OK);
+        assert!(script.text().await.unwrap().contains(REQUEST_LOG_PAGE_PATH));
+        assert_eq!(
+            endpoint.request_log_url(),
+            format!("{gateway_root}{REQUEST_LOG_PAGE_PATH}#{}", endpoint.token)
+        );
+
+        let unauthorized = client
+            .post(format!("{gateway_root}/codey/api/load_codey_config"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let catalog = client
+            .post(format!("{gateway_root}/codey/api/load_codey_config"))
+            .header(ROUTER_AUTH_HEADER, &endpoint.token)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(catalog.status(), reqwest::StatusCode::OK);
+        let catalog = catalog.json::<Value>().await.unwrap();
+        assert_eq!(catalog["config"]["profiles"][0]["id"], "route-a");
+        assert_eq!(
+            catalog["config"]["selectedModelsByProvider"][&provider_id][0],
+            model
+        );
+        assert!(catalog["config"]["profiles"][0].get("apiKey").is_none());
+        assert!(catalog["config"]["profiles"][0].get("baseUrl").is_none());
+
         router.stop().await.unwrap();
     }
 }

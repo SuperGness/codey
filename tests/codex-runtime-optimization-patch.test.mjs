@@ -117,12 +117,9 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
       'mcp_servers.codey_fastctx.command="C:\\\\Program Files\\\\Codey\\\\codey-fastctx.exe"',
       'agents.default.config_file="D:\\\\Codey\\\\runtime\\\\default.toml"',
       'hooks.state."C:\\\\Users\\\\Kim\\\\.codex\\\\hooks.json:pre_tool_use:1:0".trusted_hash="sha256:test"',
-      '__CODEY_WSL_ONLY__:hooks.state."C:\\\\Users\\\\Kim\\\\.codex\\\\hooks.json:pre_tool_use:1:0".trusted_hash="sha256:wsl"',
       `hooks.PreToolUse=[{ hooks = [{ type = "command", command = "'C:\\\\Program Files\\\\Codey\\\\codey.exe' --codey-subagent-gate-hook" }] }]`,
     ];
-    const nativeRuntimeConfigOverrides = runtimeConfigOverrides.filter(
-      (config) => !config.startsWith("__CODEY_WSL_ONLY__:"),
-    );
+    const nativeRuntimeConfigOverrides = runtimeConfigOverrides;
     const expression = await loadPatchExpression(runtimeConfigOverrides);
     assert.equal((0, eval)(expression), "codey-startup-patch-installed-v37");
 
@@ -340,8 +337,10 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
       spawnCalls.at(-1)[2].env.CODEY_SUBAGENT_GATE_ACTIVE,
       "1",
     );
-    assert.equal(
-      spawnCalls.at(-1)[2].env.CODEY_SUBAGENT_GATE_RUNTIME_ID,
+    const secondSubagentGateRuntimeId =
+      spawnCalls.at(-1)[2].env.CODEY_SUBAGENT_GATE_RUNTIME_ID;
+    assert.notEqual(
+      secondSubagentGateRuntimeId,
       subagentGateRuntimeId,
     );
 
@@ -404,109 +403,6 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
       ...nativeRuntimeConfigOverrides.flatMap((config) => ["-c", config]),
     ]);
 
-    const shellCommand = [
-      "source /etc/profile;",
-      "exec /usr/bin/codex -c features.code_mode_host=true",
-      "app-server --analytics-default-enabled",
-      `-c '${desktopMcpConfig}'`,
-    ].join(" ");
-    childProcess.spawn("wsl.exe", [
-      "-d",
-      "Ubuntu",
-      "--",
-      "/usr/bin/bash",
-      "-lc",
-      shellCommand,
-    ]);
-    const patchedShellCommand = spawnCalls.at(-1)[1].at(-1);
-    assert.doesNotMatch(patchedShellCommand, /--analytics-default-enabled/);
-    assert.match(
-      patchedShellCommand,
-      /CODEY_SUBAGENT_GATE_ACTIVE=1 exec \/usr\/bin\/codex/,
-    );
-    assert.match(
-      patchedShellCommand,
-      new RegExp(
-        `CODEY_SUBAGENT_GATE_RUNTIME_ID='${subagentGateRuntimeId}' ` +
-          "CODEY_SUBAGENT_GATE_ACTIVE=1",
-      ),
-    );
-    assert.match(
-      patchedShellCommand,
-      /-c 'mcp_servers\.codey_fastctx\.command="\/mnt\/c\/Program Files\/Codey\/codey-fastctx\.exe"'/,
-    );
-    assert.ok(
-      patchedShellCommand.indexOf("app-server") <
-        patchedShellCommand.indexOf("mcp_servers.codey_fastctx.command="),
-    );
-    assert.ok(
-      patchedShellCommand.indexOf("mcp_servers.codey_fastctx.command=") <
-        patchedShellCommand.indexOf(desktopMcpConfig),
-    );
-    assert.match(
-      patchedShellCommand,
-      /-c 'agents\.default\.config_file="\/mnt\/d\/Codey\/runtime\/default\.toml"'/,
-    );
-    assert.match(
-      patchedShellCommand,
-      /-c 'hooks\.state\."\/mnt\/c\/Users\/Kim\/\.codex\/hooks\.json:pre_tool_use:1:0"\.trusted_hash="sha256:wsl"'/,
-    );
-    assert.doesNotMatch(patchedShellCommand, /sha256:test/);
-    assert.match(
-      patchedShellCommand,
-      /\/mnt\/c\/Program Files\/Codey\/codey\.exe/,
-    );
-    assert.doesNotMatch(patchedShellCommand, /[A-Za-z]:\\\\/);
-    const alreadyPatchedShellArgs = spawnCalls.at(-1)[1];
-    childProcess.spawn("wsl.exe", alreadyPatchedShellArgs);
-    assert.equal(spawnCalls.at(-1)[1], alreadyPatchedShellArgs);
-
-    const configuredShellCommand = [
-      "source /etc/profile;",
-      "exec /usr/bin/codex --config=analytics.enabled=custom",
-      "app-server --analytics-default-enabled",
-    ].join(" ");
-    childProcess.spawn("wsl.exe", [
-      "-d",
-      "Ubuntu",
-      "--",
-      "/usr/bin/bash",
-      "-lc",
-      configuredShellCommand,
-    ]);
-    const patchedConfiguredShellCommand = spawnCalls.at(-1)[1].at(-1);
-    assert.match(
-      patchedConfiguredShellCommand,
-      /CODEY_SUBAGENT_GATE_ACTIVE=1 exec \/usr\/bin\/codex/,
-    );
-    assert.match(
-      patchedConfiguredShellCommand,
-      /-c 'analytics\.enabled=false'/,
-    );
-    assert.equal(
-      patchedConfiguredShellCommand.match(/analytics\.enabled=false/g)?.length,
-      1,
-    );
-
-    const shellWithoutLegacyAnalyticsFlag =
-      "source /etc/profile; exec /usr/bin/codex app-server";
-    childProcess.spawn("wsl.exe", [
-      "-d",
-      "Ubuntu",
-      "--",
-      "/usr/bin/bash",
-      "-lc",
-      shellWithoutLegacyAnalyticsFlag,
-    ]);
-    assert.match(
-      spawnCalls.at(-1)[1].at(-1),
-      /CODEY_SUBAGENT_GATE_ACTIVE=1 exec \/usr\/bin\/codex/,
-    );
-    assert.match(
-      spawnCalls.at(-1)[1].at(-1),
-      /-c 'analytics\.enabled=false'/,
-    );
-
     const unrelatedArgs = ["--version"];
     childProcess.spawn("git", unrelatedArgs);
     assert.equal(spawnCalls.at(-1)[1], unrelatedArgs);
@@ -514,18 +410,6 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
     const unrelatedShell = "echo 'app-server --analytics-default-enabled'";
     childProcess.spawn("bash", ["-lc", unrelatedShell]);
     assert.equal(spawnCalls.at(-1)[1].at(-1), unrelatedShell);
-
-    const unrelatedWslShell =
-      "source /etc/profile; exec /usr/bin/echo 'app-server --analytics-default-enabled'";
-    childProcess.spawn("wsl.exe", [
-      "-d",
-      "Ubuntu",
-      "--",
-      "/usr/bin/bash",
-      "-lc",
-      unrelatedWslShell,
-    ]);
-    assert.equal(spawnCalls.at(-1)[1].at(-1), unrelatedWslShell);
 
     const runtimeManagedAppServerArgs = ["app-server", "--analytics-default-enabled"];
     childProcess.spawn("node", runtimeManagedAppServerArgs);
@@ -542,7 +426,7 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
     assert.equal(spawnCalls.at(-1)[1], spawnOptions);
     assert.equal(
       globalThis.__CODEY_CODEX_STARTUP_PATCH__.appServerAnalyticsPatchCount,
-      8,
+      5,
     );
     assert.equal(
       globalThis.__CODEY_CODEX_STARTUP_PATCH__.appServerRuntimeOverrides.complete,
@@ -877,89 +761,6 @@ test("startup patch tolerates duplicate Codex analytics flags while injecting ru
     assert.equal(
       runtime.context.__CODEY_CODEX_STARTUP_PATCH__.appServerRuntimeOverrides.complete,
       true,
-    );
-  } finally {
-    runtime.restore();
-  }
-});
-
-test("startup patch tolerates duplicate analytics flags in WSL app-server commands", async () => {
-  const childProcess = process.getBuiltinModule("child_process");
-  const runtimeConfigOverrides = [
-    'model_provider="codey_router"',
-    'model_providers.codey_router.name="Codey Local Router"',
-    'model_providers.codey_router.base_url="http://127.0.0.1:61818/v1"',
-  ];
-  const runtime = await loadPatchInIsolatedContext(runtimeConfigOverrides);
-
-  try {
-    const pending =
-      runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__();
-    childProcess.spawn("wsl.exe", [
-      "-d",
-      "Ubuntu",
-      "--",
-      "/usr/bin/bash",
-      "-lc",
-      [
-        "source /etc/profile;",
-        "exec /usr/bin/codex app-server",
-        "--analytics-default-enabled --analytics-default-enabled",
-      ].join(" "),
-    ]);
-    assert.equal(
-      await pending,
-      "codey-app-server-runtime-overrides-verified",
-    );
-    const patchedCommand = runtime.spawnCalls.at(-1)[1].at(-1);
-    assert.doesNotMatch(patchedCommand, /--analytics-default-enabled/);
-    assert.match(patchedCommand, /-c 'analytics\.enabled=false'/);
-    for (const config of runtimeConfigOverrides) {
-      assert.ok(patchedCommand.includes(`-c '${config}'`), patchedCommand);
-    }
-  } finally {
-    runtime.restore();
-  }
-});
-
-test("startup patch validates runtime overrides injected into a WSL app-server command", async () => {
-  const childProcess = process.getBuiltinModule("child_process");
-  const runtimeConfigOverrides = [
-    'model_provider="codey_router"',
-    'model_providers.codey_router.name="Codey Local Router"',
-    'model_providers.codey_router.base_url="http://127.0.0.1:61818/v1"',
-  ];
-  const desktopMcpConfig =
-    'mcp_servers.codex_app={ command = "/opt/codex-app-mcp" }';
-  const runtime = await loadPatchInIsolatedContext(runtimeConfigOverrides);
-
-  try {
-    const pending =
-      runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__();
-    childProcess.spawn("wsl.exe", [
-      "-d",
-      "Ubuntu",
-      "--",
-      "/usr/bin/bash",
-      "-lc",
-      `source /etc/profile; exec /usr/bin/codex app-server -c '${desktopMcpConfig}'`,
-    ]);
-    assert.equal(
-      await pending,
-      "codey-app-server-runtime-overrides-verified",
-    );
-    const patchedCommand = runtime.spawnCalls.at(-1)[1].at(-1);
-    assert.match(patchedCommand, /-c 'analytics\.enabled=false'/);
-    const appServerIndex = patchedCommand.indexOf("app-server");
-    const desktopMcpIndex = patchedCommand.indexOf(desktopMcpConfig);
-    for (const config of runtimeConfigOverrides) {
-      assert.ok(patchedCommand.includes(`-c '${config}'`), patchedCommand);
-      assert.ok(patchedCommand.indexOf(config) > appServerIndex, patchedCommand);
-      assert.ok(patchedCommand.indexOf(config) < desktopMcpIndex, patchedCommand);
-    }
-    assert.equal(
-      runtime.context.__CODEY_CODEX_STARTUP_PATCH__.appServerRuntimeOverrides.mode,
-      "wsl-shell",
     );
   } finally {
     runtime.restore();

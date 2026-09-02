@@ -114,7 +114,7 @@ pub(super) fn read_optional_runtime_policy_file(path: &Path) -> Result<Option<Ve
         "Codey 子代理运行时策略状态不是可信普通文件：{}",
         path.display()
     );
-    fs::read(path)
+    crate::fs_util::read_bounded(path, 256 * 1024)
         .map(Some)
         .with_context(|| format!("读取 Codey 子代理运行时策略状态失败：{}", path.display()))
 }

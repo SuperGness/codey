@@ -35,7 +35,8 @@ const PET_CONTROL_SHIELD_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/pet-control-shield.js");
 const SECURITY_WARNING_SHIELD_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/security-warning-shield.js");
-const SETTINGS_OVERLAY_SCRIPT: &str = include_str!("../../dist-overlay/codey-overlay.js");
+pub(crate) const SETTINGS_OVERLAY_SCRIPT: &str =
+    include_str!("../../dist-overlay/codey-overlay.js");
 const PLUGIN_MARKETPLACE_FIX_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/plugin-marketplace-fix.js");
 const PROMPT_OPTIMIZE_SCRIPT: &str = include_str!("../../dist-overlay/inject/prompt-optimize.js");

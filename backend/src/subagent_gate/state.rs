@@ -5,19 +5,61 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 #[cfg(test)]
 use super::current_runtime_id;
 use super::{
-    ACTIVE_MARKER_SCHEMA_VERSION, PROTOCOL_HEALTH_FILE, PROTOCOL_HEALTH_SCHEMA_VERSION,
-    ROOT_TURN_BINDING_FILE, ROOT_TURN_BINDING_SCHEMA_VERSION, SUBAGENT_CONTEXT_OBSERVED_FILE,
+    ACTIVE_MARKER_SCHEMA_VERSION, HOOK_STATE_LOCK_FILE, PROTOCOL_HEALTH_FILE,
+    PROTOCOL_HEALTH_SCHEMA_VERSION, ROOT_TURN_BINDING_FILE, ROOT_TURN_BINDING_SCHEMA_VERSION,
 };
+
+pub(super) struct HookStateLock(File);
+
+impl HookStateLock {
+    pub(super) fn acquire(state_root: &Path) -> Result<Self> {
+        fs::create_dir_all(state_root)?;
+        let path = state_root.join(HOOK_STATE_LOCK_FILE);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        let started = Instant::now();
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(Self(file)),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        || (cfg!(windows) && error.raw_os_error() == Some(33)) =>
+                {
+                    anyhow::ensure!(
+                        started.elapsed() < Duration::from_secs(2),
+                        "获取 Codex 子代理 Hook 状态锁超时：{}",
+                        path.display()
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
+impl Drop for HookStateLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(super) struct ActiveMarker {
@@ -60,38 +102,6 @@ pub(super) fn current_timestamp_millis() -> u64 {
     u64::try_from(crate::fs_util::timestamp_millis()).unwrap_or(u64::MAX)
 }
 
-pub(super) fn record_subagent_context_observed(
-    state_root: &Path,
-    runtime_id: &str,
-    session_id: &str,
-    now_ms: u64,
-) -> Result<()> {
-    let session_dir = session_state_dir(state_root, session_id);
-    let path = session_auxiliary_path(&session_dir, runtime_id, SUBAGENT_CONTEXT_OBSERVED_FILE);
-    write_observation_timestamp(&session_dir, &path, now_ms)
-}
-
-pub(super) fn missing_agent_id_has_classified_subagent_context(
-    state_root: &Path,
-    runtime_id: &str,
-    session_id: &str,
-) -> Result<bool> {
-    let session_dir = session_state_dir(state_root, session_id);
-    let context_path =
-        session_auxiliary_path(&session_dir, runtime_id, SUBAGENT_CONTEXT_OBSERVED_FILE);
-    if read_observation_timestamp(&context_path)?.is_none() {
-        return Ok(false);
-    }
-    let health_path = session_auxiliary_path(&session_dir, runtime_id, PROTOCOL_HEALTH_FILE);
-    let Some(health) = read_protocol_health(&health_path)? else {
-        return Ok(false);
-    };
-    validate_protocol_health(&health, runtime_id)?;
-    Ok(health.missing_agent_id_events > 0
-        && health.unknown_status_responses == 0
-        && health.absolute_stop_timeouts == 0)
-}
-
 pub(super) fn observe_and_check_elapsed(
     state_root: &Path,
     runtime_id: &str,
@@ -103,7 +113,13 @@ pub(super) fn observe_and_check_elapsed(
     let session_dir = session_state_dir(state_root, session_id);
     let path = session_auxiliary_path(&session_dir, runtime_id, file_name);
     match read_observation_timestamp(&path)? {
-        Some(observed_at_ms) => Ok(now_ms.saturating_sub(observed_at_ms) >= grace_ms),
+        Some(observed_at_ms) => {
+            let Some(elapsed) = now_ms.checked_sub(observed_at_ms) else {
+                write_observation_timestamp(&session_dir, &path, now_ms)?;
+                return Ok(false);
+            };
+            Ok(elapsed >= grace_ms)
+        }
         None => {
             write_observation_timestamp(&session_dir, &path, now_ms)?;
             Ok(false)
@@ -124,18 +140,26 @@ pub(super) fn observation_elapsed_if_present(
         runtime_id,
         file_name,
     );
-    Ok(read_observation_timestamp(&path)?
-        .is_some_and(|observed_at_ms| now_ms.saturating_sub(observed_at_ms) >= grace_ms))
+    let Some(observed_at_ms) = read_observation_timestamp(&path)? else {
+        return Ok(false);
+    };
+    let Some(elapsed) = now_ms.checked_sub(observed_at_ms) else {
+        let session_dir = session_state_dir(state_root, session_id);
+        write_observation_timestamp(&session_dir, &path, now_ms)?;
+        return Ok(false);
+    };
+    Ok(elapsed >= grace_ms)
 }
 
 pub(super) fn read_observation_timestamp(path: &Path) -> Result<Option<u64>> {
-    match fs::read_to_string(path) {
-        Ok(value) => value
+    match crate::fs_util::read_bounded(path, 64) {
+        Ok(bytes) => std::str::from_utf8(&bytes)
+            .context("Codex 子代理门禁观察时间不是 UTF-8")?
             .trim()
             .parse::<u64>()
             .map(Some)
             .with_context(|| format!("解析 Codex 子代理门禁观察时间失败：{}", path.display())),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error_is_not_found(&error) => Ok(None),
         Err(error) => Err(error)
             .with_context(|| format!("读取 Codex 子代理门禁观察时间失败：{}", path.display())),
     }
@@ -152,7 +176,7 @@ pub(super) fn write_observation_timestamp(
             session_dir.display()
         )
     })?;
-    crate::fs_util::atomic_write(path, format!("{now_ms}\n").as_bytes())
+    crate::fs_util::atomic_write_private(path, format!("{now_ms}\n").as_bytes())
         .with_context(|| format!("替换 Codex 子代理门禁观察状态失败：{}", path.display()))
 }
 
@@ -270,9 +294,9 @@ pub(super) fn protocol_issue_reason(
 }
 
 pub(super) fn read_protocol_health(path: &Path) -> Result<Option<ProtocolHealth>> {
-    let bytes = match fs::read(path) {
+    let bytes = match crate::fs_util::read_bounded(path, 64 * 1024) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error_is_not_found(&error) => return Ok(None),
         Err(error) => {
             return Err(error)
                 .with_context(|| format!("读取 Codex Hook 协议诊断状态失败：{}", path.display()));
@@ -304,7 +328,7 @@ pub(super) fn write_protocol_health(
         )
     })?;
     let bytes = serde_json::to_vec(health).context("序列化 Codex Hook 协议诊断状态失败")?;
-    crate::fs_util::atomic_write(path, &bytes)
+    crate::fs_util::atomic_write_private(path, &bytes)
         .with_context(|| format!("替换 Codex Hook 协议诊断状态失败：{}", path.display()))
 }
 
@@ -330,7 +354,7 @@ pub(super) fn bind_root_turn(
         bound_at_ms: now_ms,
     };
     let bytes = serde_json::to_vec(&binding).context("序列化 Codex 根代理 turn 绑定失败")?;
-    crate::fs_util::atomic_write(&path, &bytes)
+    crate::fs_util::atomic_write_private(&path, &bytes)
         .with_context(|| format!("写入 Codex 根代理 turn 绑定失败：{}", path.display()))
 }
 
@@ -345,9 +369,9 @@ pub(super) fn root_turn_matches(
     };
     let session_dir = session_state_dir(state_root, session_id);
     let path = session_auxiliary_path(&session_dir, runtime_id, ROOT_TURN_BINDING_FILE);
-    let bytes = match fs::read(&path) {
+    let bytes = match crate::fs_util::read_bounded(&path, 16 * 1024) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error_is_not_found(&error) => return Ok(false),
         Err(error) => {
             return Err(error)
                 .with_context(|| format!("读取 Codex 根代理 turn 绑定失败：{}", path.display()));
@@ -405,7 +429,7 @@ pub(super) fn create_active_marker(
         started_at_ms: current_timestamp_millis(),
     };
     let bytes = serde_json::to_vec(&state).context("序列化 Codex 子代理门禁状态失败")?;
-    crate::fs_util::atomic_write(&marker, &bytes)
+    crate::fs_util::atomic_write_private(&marker, &bytes)
         .with_context(|| format!("替换 Codex 子代理门禁状态失败：{}", marker.display()))
 }
 
@@ -511,15 +535,18 @@ pub(super) fn active_agent_count_for_runtime(
     runtime_id: &str,
     session_id: &str,
 ) -> Result<usize> {
-    if let Some(active) = crate::subagent_orchestrator::active_reservation_count(
-        state_root,
-        runtime_id,
-        session_id,
-        current_timestamp_millis(),
-    )? {
-        return Ok(active);
+    let marker_hashes = active_marker_hashes_for_runtime(state_root, runtime_id, session_id)?;
+    if let Some((active, bound_agent_hashes)) =
+        crate::subagent_orchestrator::active_reservation_projection(
+            state_root,
+            runtime_id,
+            session_id,
+            current_timestamp_millis(),
+        )?
+    {
+        return Ok(active + marker_hashes.difference(&bound_agent_hashes).count());
     }
-    Ok(active_marker_hashes_for_runtime(state_root, runtime_id, session_id)?.len())
+    Ok(marker_hashes.len())
 }
 
 /// Returns the validated provider-identity hashes represented by legacy active
@@ -552,7 +579,7 @@ pub(super) fn active_marker_hashes_for_runtime(
             continue;
         }
         let path = entry.path();
-        let bytes = fs::read(&path)
+        let bytes = crate::fs_util::read_bounded(&path, 16 * 1024)
             .with_context(|| format!("读取 Codex 子代理门禁状态失败：{}", path.display()))?;
         let marker = serde_json::from_slice::<ActiveMarker>(&bytes)
             .with_context(|| format!("解析 Codex 子代理门禁状态失败：{}", path.display()))?;
@@ -647,4 +674,10 @@ pub(super) fn canonical_json(value: &Value) -> Value {
         Value::Array(values) => Value::Array(values.iter().map(canonical_json).collect()),
         other => other.clone(),
     }
+}
+
+fn error_is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
 }

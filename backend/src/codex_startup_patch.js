@@ -1403,18 +1403,11 @@
   // the user's persistent Codex configuration.
   const appServerAnalyticsConfig = "analytics.enabled=false";
   const codeyRuntimeConfigOverrides = "__CODEY_RUNTIME_CONFIG_OVERRIDES__";
-  const wslOnlyRuntimeOverridePrefix = "__CODEY_WSL_ONLY__:";
-  const validRuntimeConfigOverrides = Array.isArray(codeyRuntimeConfigOverrides)
+  const nativeRuntimeConfigOverrides = Array.isArray(codeyRuntimeConfigOverrides)
     ? codeyRuntimeConfigOverrides.filter(
         (entry) => typeof entry === "string" && entry.length > 0,
       )
     : [];
-  const nativeRuntimeConfigOverrides = validRuntimeConfigOverrides.filter(
-    (entry) => !entry.startsWith(wslOnlyRuntimeOverridePrefix),
-  );
-  const wslOnlyRuntimeConfigOverrides = validRuntimeConfigOverrides
-    .filter((entry) => entry.startsWith(wslOnlyRuntimeOverridePrefix))
-    .map((entry) => entry.slice(wslOnlyRuntimeOverridePrefix.length));
   const runtimeOverrideKey = (config) => {
     if (typeof config !== "string") return "";
     const separatorIndex = config.indexOf("=");
@@ -1549,59 +1542,7 @@
         ),
       };
     }
-    if (!/(?:^|[/\\])wsl(?:\.exe)?$/i.test(commandName)) return null;
-    const shellFlagIndexes = args
-      .map((argument, index) => argument === "-lc" ? index : -1)
-      .filter((index) => index >= 0);
-    if (shellFlagIndexes.length !== 1) return null;
-    const shellFlagIndex = shellFlagIndexes[0];
-    const shellCommand = args[shellFlagIndex + 1];
-    if (
-      !/(?:^|[/\\])bash$/i.test(String(args[shellFlagIndex - 1] ?? "")) ||
-      typeof shellCommand !== "string"
-    ) {
-      return null;
-    }
-    const execMatches = [...shellCommand.matchAll(/(?:^|;)\s*exec\s+/g)];
-    if (execMatches.length !== 1) return null;
-    const execCommandOffset = execMatches[0].index + execMatches[0][0].length;
-    const execCommand = shellCommand.slice(execCommandOffset);
-    const executableToken = /^(?:"[^"]+"|'[^']+'|(?:\\.|[^\s;&|])+)/.exec(
-      execCommand,
-    )?.[0];
-    if (executableToken == null) return null;
-    const normalizedExecutable = executableToken
-      .replace(/^(["'])|(["'])$/g, "")
-      .replace(/\\ /g, " ");
-    if (!/(?:^|[/\\])codex(?:\.exe)?$/i.test(normalizedExecutable)) {
-      return null;
-    }
-    const appServerOffset = execCommand.search(/\bapp-server\b/);
-    if (appServerOffset < 0) return null;
-    const afterAppServer = execCommand.slice(
-      appServerOffset + "app-server".length,
-    );
-    const wslReplacementKeys = new Set(
-      wslOnlyRuntimeConfigOverrides.map(runtimeOverrideKey),
-    );
-    const requiredRuntimeConfigs = uniqueRuntimeConfigsByKey([
-      appServerAnalyticsConfig,
-      ...nativeRuntimeConfigOverrides.filter(
-        (config) =>
-          runtimeOverrideKey(config) !== runtimeOverrideKey(appServerAnalyticsConfig) &&
-          !wslReplacementKeys.has(runtimeOverrideKey(config)),
-      ),
-      ...wslOnlyRuntimeConfigOverrides,
-    ]).map(rewriteTomlWindowsPathsForWsl);
-    return {
-      mode: "wsl-shell",
-      command,
-      args,
-      requiredRuntimeConfigs,
-      missingRuntimeConfigs: requiredRuntimeConfigs.filter(
-        (config) => !hasShellConfigArg(afterAppServer, config),
-      ),
-    };
+    return null;
   };
   const awaitCodexAppServerRuntimeOverrides = async () => {
     if (appServerRuntimeOverrideEvidence.complete) {
@@ -1653,25 +1594,9 @@
     typeof __SUBAGENT_GATE_ACTIVE__ === "boolean" &&
     __SUBAGENT_GATE_ACTIVE__;
   const randomUuid = process.getBuiltinModule("crypto")?.randomUUID;
-  const subagentGateRuntimeId = typeof randomUuid === "function"
+  const createSubagentGateRuntimeId = () => typeof randomUuid === "function"
     ? randomUuid()
     : `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const rewriteTomlWindowsPathsForWsl = (config) => {
-    if (typeof config !== "string") return config;
-    return config.replace(/"(?:\\.|[^"\\])*"/g, (literal) => {
-      try {
-        const value = JSON.parse(literal);
-        const match = /^(['"]?)([A-Za-z]):[\\/](.*)$/s.exec(value);
-        if (match == null) return literal;
-        const [, quote, drive, rest] = match;
-        return JSON.stringify(
-          `${quote}/mnt/${drive.toLowerCase()}/${rest.replace(/\\/g, "/")}`,
-        );
-      } catch {
-        return literal;
-      }
-    });
-  };
   const rewriteCodexAppServerArgs = (args) => {
     if (!Array.isArray(args)) return args;
     const appServerIndexes = args
@@ -1723,85 +1648,6 @@
     }
     return rewritten;
   };
-  const shellQuote = (value) => `'${String(value).replace(/'/g, "'\\''")}'`;
-  const escapeRegExp = (value) =>
-    String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const hasShellConfigArg = (command, config) => {
-    const forms = [config, shellQuote(config)];
-    return forms.some((form) => {
-      const escaped = escapeRegExp(form);
-      return new RegExp(
-        `(?:^|[\\s;])(?:-c|--config)\\s+${escaped}(?=$|[\\s;&|])`,
-      ).test(command) || new RegExp(
-        `(?:^|[\\s;])--config=${escaped}(?=$|[\\s;&|])`,
-      ).test(command);
-    });
-  };
-  const rewriteCodexAppServerShellCommand = (
-    command,
-    runtimeConfigs = appServerRuntimeConfigs,
-  ) => {
-    if (typeof command !== "string") return command;
-    const execMatches = [...command.matchAll(/(?:^|;)\s*exec\s+/g)];
-    if (execMatches.length !== 1) return command;
-    const execMatch = execMatches[0];
-    const execCommandOffset = execMatch.index + execMatch[0].length;
-    const execCommand = command.slice(execCommandOffset);
-    const executableToken = /^(?:"[^"]+"|'[^']+'|(?:\\.|[^\s;&|])+)/.exec(
-      execCommand,
-    )?.[0];
-    if (executableToken == null) return command;
-    const normalizedExecutable = executableToken
-      .replace(/^(["'])|(["'])$/g, "")
-      .replace(/\\ /g, " ");
-    if (!/(?:^|[/\\])codex(?:\.exe)?$/i.test(normalizedExecutable)) {
-      return command;
-    }
-
-    const appServerMatches = execCommand.match(/\bapp-server\b/g);
-    if (appServerMatches?.length !== 1) {
-      return command;
-    }
-
-    let rewritten = execCommand.replace(
-      /(^|[\s;])(-c|--config)\s+analytics\.enabled=[^\s;&|]+(?=$|[\s;&|])/g,
-      (_match, prefix) => prefix,
-    );
-    rewritten = rewritten.replace(
-      /(^|[\s;])--config=analytics\.enabled=[^\s;&|]+(?=$|[\s;&|])/g,
-      (_match, prefix) => prefix,
-    );
-    rewritten = rewritten.replace(
-      /(^|[\s;])--analytics-default-enabled(?=$|[\s;&|])/g,
-      (_match, prefix) => prefix,
-    );
-    const rewrittenAppServerOffset = rewritten.search(/\bapp-server\b/);
-    const afterAppServer = rewritten.slice(
-      rewrittenAppServerOffset + "app-server".length,
-    );
-    const injectedConfigs = runtimeConfigs.filter(
-      (config) => !hasShellConfigArg(afterAppServer, config),
-    );
-    if (injectedConfigs.length > 0) {
-      rewritten = rewritten.replace(
-        /\bapp-server\b/,
-        `app-server ${injectedConfigs.map((config) => `-c ${shellQuote(config)}`).join(" ")}`,
-      );
-    }
-    let commandPrefix = command.slice(0, execCommandOffset);
-    if (
-      subagentGateRuntimeActive &&
-      !commandPrefix.includes(`${subagentGateRuntimeEnv}=1 `)
-    ) {
-      const execKeywordIndex = commandPrefix.lastIndexOf("exec");
-      commandPrefix =
-        commandPrefix.slice(0, execKeywordIndex) +
-        `${subagentGateRuntimeIdEnv}=${shellQuote(subagentGateRuntimeId)} ` +
-        `${subagentGateRuntimeEnv}=1 ` +
-        commandPrefix.slice(execKeywordIndex);
-    }
-    return commandPrefix + rewritten;
-  };
   const rewriteCodexAppServerSpawnArgs = (command, args) => {
     if (!Array.isArray(args)) return args;
     const commandName = String(command ?? "");
@@ -1817,39 +1663,7 @@
     ) {
       return rewriteCodexAppServerArgs(args);
     }
-    if (!/(?:^|[/\\])wsl(?:\.exe)?$/i.test(commandName)) return args;
-
-    const shellFlagIndexes = args
-      .map((argument, index) => argument === "-lc" ? index : -1)
-      .filter((index) => index >= 0);
-    if (shellFlagIndexes.length !== 1) return args;
-    const shellFlagIndex = shellFlagIndexes[0];
-    if (
-      !/(?:^|[/\\])bash$/i.test(String(args[shellFlagIndex - 1] ?? "")) ||
-      typeof args[shellFlagIndex + 1] !== "string"
-    ) {
-      return args;
-    }
-    const wslReplacementKeys = new Set(
-      wslOnlyRuntimeConfigOverrides.map(runtimeOverrideKey),
-    );
-    const wslRuntimeConfigs = uniqueRuntimeConfigsByKey([
-      appServerAnalyticsConfig,
-      ...nativeRuntimeConfigOverrides.filter(
-        (config) =>
-          runtimeOverrideKey(config) !== runtimeOverrideKey(appServerAnalyticsConfig) &&
-          !wslReplacementKeys.has(runtimeOverrideKey(config)),
-      ),
-      ...wslOnlyRuntimeConfigOverrides,
-    ]).map(rewriteTomlWindowsPathsForWsl);
-    const rewrittenCommand = rewriteCodexAppServerShellCommand(
-      args[shellFlagIndex + 1],
-      wslRuntimeConfigs,
-    );
-    if (rewrittenCommand === args[shellFlagIndex + 1]) return args;
-    const rewritten = [...args];
-    rewritten[shellFlagIndex + 1] = rewrittenCommand;
-    return rewritten;
+    return args;
   };
   Object.defineProperty(globalThis, "__CODEY_REWRITE_CODEX_APP_SERVER_ARGS__", {
     configurable: false,
@@ -1870,13 +1684,14 @@
         nativeRuntimeConfigOverrides.length > 0
       );
     const withSubagentGateEnvironment = (rest) => {
+      const runtimeId = createSubagentGateRuntimeId();
       const options = rest[0];
       if (options == null) {
         return [{
           env: {
             ...process.env,
             [subagentGateRuntimeEnv]: "1",
-            [subagentGateRuntimeIdEnv]: subagentGateRuntimeId,
+            [subagentGateRuntimeIdEnv]: runtimeId,
           },
         }];
       }
@@ -1887,7 +1702,7 @@
         env: {
           ...inheritedEnvironment,
           [subagentGateRuntimeEnv]: "1",
-          [subagentGateRuntimeIdEnv]: subagentGateRuntimeId,
+          [subagentGateRuntimeIdEnv]: runtimeId,
         },
       }, ...rest.slice(1)];
     };
