@@ -429,7 +429,7 @@ fn renderer_model_catalog_routes_official_account_models_through_the_codey_route
 }
 
 #[test]
-fn renderer_catalog_uses_applied_route_while_provider_restart_is_pending() {
+fn renderer_catalog_uses_current_config_only_for_hot_reloadable_routes() {
     let applied = CodeyConfig::default();
     let mut current = applied.clone();
     let mut third_party = crate::config::ProviderProfile::new("第三方线路");
@@ -437,6 +437,12 @@ fn renderer_catalog_uses_applied_route_while_provider_restart_is_pending() {
     current.active_profile_id = third_party.id.clone();
     current.profiles.push(third_party);
 
+    assert!(std::ptr::eq(
+        model_catalog_config_for_runtime(&current, Some(&applied)),
+        &current
+    ));
+
+    current.profiles.last_mut().unwrap().official_account = true;
     assert!(std::ptr::eq(
         model_catalog_config_for_runtime(&current, Some(&applied)),
         &applied

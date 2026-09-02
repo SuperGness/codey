@@ -1713,6 +1713,7 @@ pub(super) async fn current_renderer_model_catalog_async(
         .map_err(|error| format!("读取渲染进程模型目录的任务异常退出：{error}"))?
 }
 
+#[cfg(test)]
 pub(super) fn provider_route_requires_restart(
     applied: &CodeyConfig,
     current: &CodeyConfig,

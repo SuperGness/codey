@@ -33,14 +33,15 @@ use diagnostics::{
 #[cfg(test)]
 use models::{
     config_with_current_provider_models, preserve_selected_third_party_models,
-    preserve_selected_third_party_models_except, renderer_model_catalog_value,
-    should_refresh_model_catalog, startup_model_sync_models_or_fallback, sync_provider_state_with,
+    preserve_selected_third_party_models_except, provider_route_requires_restart,
+    renderer_model_catalog_value, should_refresh_model_catalog,
+    startup_model_sync_models_or_fallback, sync_provider_state_with,
     validate_deleted_third_party_models, validate_manual_model_selection,
 };
 use models::{
     current_model_state_async, current_provider_status_async, current_renderer_model_catalog_async,
-    hot_reload_runtime_models, official_route_snapshots, provider_route_requires_restart,
-    reconcile_subagent_models_for_mode, remote_compaction_transport_requires_restart,
+    hot_reload_runtime_models, official_route_snapshots, reconcile_subagent_models_for_mode,
+    remote_compaction_transport_requires_restart, runtime_supports_current_routes_for_hot_reload,
     sync_current_third_party_provider_state, sync_provider_models_for_launch,
     websocket_transport_requires_restart,
 };
@@ -333,12 +334,11 @@ impl AppState {
             "/codex-model-catalog" => {
                 let current_config = self.config.read().await.clone();
                 let runtime = self.runtime.lock().await.clone();
-                let catalog_config = runtime
-                    .as_ref()
-                    .map(|runtime| &runtime.applied_config)
-                    .filter(|applied| provider_route_requires_restart(applied, &current_config))
-                    .cloned()
-                    .unwrap_or(current_config);
+                let catalog_config = model_catalog_config_for_runtime(
+                    &current_config,
+                    runtime.as_ref().map(|runtime| &runtime.applied_config),
+                )
+                .clone();
                 current_renderer_model_catalog_async(catalog_config)
                     .await
                     .unwrap_or_else(api_error_message)
@@ -2147,13 +2147,12 @@ pub(super) fn provider_route_restart_required_for_runtime(
         || remote_compaction_transport_requires_restart(&runtime.applied_config, current)
 }
 
-#[cfg(test)]
 fn model_catalog_config_for_runtime<'a>(
     current: &'a CodeyConfig,
     runtime_applied: Option<&'a CodeyConfig>,
 ) -> &'a CodeyConfig {
     runtime_applied
-        .filter(|applied| provider_route_requires_restart(applied, current))
+        .filter(|applied| !runtime_supports_current_routes_for_hot_reload(applied, current))
         .unwrap_or(current)
 }
 
