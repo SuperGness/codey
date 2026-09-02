@@ -1158,6 +1158,10 @@ fn current_batch_has_admitted_agent(ledger: &SessionLedger) -> bool {
     })
 }
 
+fn requires_recovery_blocked_decision(ledger: &SessionLedger) -> bool {
+    !current_batch_has_admitted_agent(ledger) && ledger_has_unverifiable_acceptance(ledger)
+}
+
 fn ensure_awaiting_batch_decision(
     ledger: &mut SessionLedger,
     active_agents: usize,
@@ -1165,8 +1169,8 @@ fn ensure_awaiting_batch_decision(
 ) -> bool {
     if !ledger.decision_required
         || active_agents != 0
-        || !current_batch_is_settled(ledger)
-        || !current_batch_has_admitted_agent(ledger)
+        || (!(current_batch_is_settled(ledger) && current_batch_has_admitted_agent(ledger))
+            && !requires_recovery_blocked_decision(ledger))
         || !matches!(ledger.batch_decision, BatchDecisionState::None)
     {
         return false;
@@ -1245,7 +1249,14 @@ fn advance_batch_if_settled(
     active_agents: usize,
     now_ms: u64,
 ) -> (bool, Option<String>) {
-    if active_agents != 0 || !current_batch_is_settled(ledger) {
+    if active_agents != 0 {
+        return (false, None);
+    }
+    if requires_recovery_blocked_decision(ledger) {
+        let opened = ensure_awaiting_batch_decision(ledger, active_agents, now_ms);
+        return (opened, Some(batch_decision_spawn_denial(ledger)));
+    }
+    if !current_batch_is_settled(ledger) {
         return (false, None);
     }
     if !current_batch_has_admitted_agent(ledger) {
@@ -3158,6 +3169,15 @@ pub(crate) fn prepare_batch_decision(
             "Codey 批次决策门禁：当前批次尚未全部进入终态，不能提前提交决策。".to_string(),
         ));
     }
+    if requires_recovery_blocked_decision(&ledger) && input.decision != RootBatchDecision::Blocked {
+        if opened {
+            store.save(&mut ledger, now_ms)?;
+        }
+        return Ok(Some(
+            "Codey 机械验收门禁：历史批次包含无法验证的验收项，且当前批次没有已创建的子代理；恢复结算只能提交 `blocked`。"
+                .to_string(),
+        ));
+    }
     if input.decision == RootBatchDecision::Complete && ledger_has_unverifiable_acceptance(&ledger)
     {
         if opened {
@@ -3561,6 +3581,13 @@ fn decision_receipt_matches(value: &Value, input: &BatchDecisionInput) -> bool {
 }
 
 fn batch_decision_continuation(ledger: &SessionLedger) -> String {
+    if requires_recovery_blocked_decision(ledger) {
+        return format!(
+            "Codey 恢复结算门禁：历史批次包含无法验证的机械验收，当前第 {} 批没有已创建的子代理。请调用 `{}` 并提交 `blocked`；继续 wait/list 或重启不会改变该状态。",
+            ledger.batch_number,
+            crate::subagent_control_mcp::QUALIFIED_TOOL_NAME
+        );
+    }
     format!(
         "Codey 批次决策门禁：第 {} 批已全部进入终态。请现在调用 `{}`，使用唯一 decision_id 和简短 reason，显式选择 `spawn_next_batch`、`continue_root`、`complete` 或 `blocked`。不要等待下一条用户消息，也不要跳过决策直接 Stop。",
         ledger.batch_number,
@@ -9532,6 +9559,100 @@ mod tests {
     }
 
     #[test]
+    fn historical_unverifiable_acceptance_can_block_and_settle_from_an_empty_batch() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = contract_input(
+            "worker_a",
+            "codey_worker",
+            worker_contract("worker_a", "backend/src"),
+        );
+        pre_spawn(temp.path(), "runtime-a", "session-a", Some(&input), 0, 10).unwrap();
+        post_spawn(
+            temp.path(),
+            "runtime-a",
+            "session-a",
+            Some(&input),
+            Some(&json!({ "agent_id": "agent-a" })),
+            11,
+        )
+        .unwrap();
+        authorize_worker_command_for_test(temp.path(), "session-a", "agent-a", 12);
+        observe_status_response(temp.path(), "runtime-a", "session-a", None, true, 15).unwrap();
+        let command = json!({
+            "command": "# codey-accept:worker_a:tests\ncargo test -p codey --lib"
+        });
+        for now_ms in [20, 30, 40] {
+            post_root_tool(
+                temp.path(),
+                "runtime-a",
+                "session-a",
+                Some(&command),
+                Some(&json!({ "exit_code": 1 })),
+                now_ms,
+            )
+            .unwrap();
+        }
+        pending_acceptance_reason(temp.path(), "runtime-a", "session-a", 50).unwrap();
+        commit_batch_decision_for_test(
+            temp.path(),
+            "session-a",
+            1,
+            RootBatchDecision::SpawnNextBatch,
+            51,
+        );
+
+        let store = LedgerStore::open(temp.path(), "session-a").unwrap();
+        let mut ledger = store.load("runtime-a", "session-a", 53).unwrap().unwrap();
+        start_next_batch(&mut ledger);
+        store.save(&mut ledger, 54).unwrap();
+        drop(ledger);
+        drop(store);
+
+        let stop_reason = batch_decision_stop_reason(temp.path(), "runtime-a", "session-a", 60)
+            .unwrap()
+            .unwrap();
+        assert!(stop_reason.contains("恢复结算"));
+        assert!(stop_reason.contains("`blocked`"));
+        assert!(stop_reason.contains("继续 wait/list 或重启不会改变"));
+
+        let next_spawn = contract_input(
+            "research_b",
+            "codey_deep_research",
+            research_contract("research_b"),
+        );
+        let spawn_denial = pre_spawn(
+            temp.path(),
+            "runtime-a",
+            "session-a",
+            Some(&next_spawn),
+            0,
+            61,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(spawn_denial.contains("批次决策"));
+
+        let continue_root =
+            batch_decision_input(2, RootBatchDecision::ContinueRoot, "recovery-continue");
+        let decision_denial = prepare_batch_decision(
+            temp.path(),
+            "runtime-a",
+            "session-a",
+            Some(&continue_root),
+            0,
+            62,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(decision_denial.contains("恢复结算只能提交 `blocked`"));
+
+        commit_batch_decision_for_test(temp.path(), "session-a", 2, RootBatchDecision::Blocked, 70);
+        settle_turn(temp.path(), "runtime-a", "session-a", 72).unwrap();
+        let store = LedgerStore::open(temp.path(), "session-a").unwrap();
+        assert!(store.load("runtime-a", "session-a", 73).unwrap().is_none());
+    }
+
+    #[test]
     fn unchanged_acceptance_debt_releases_after_three_stop_observations() {
         let temp = tempfile::tempdir().unwrap();
         let input = contract_input(
@@ -9976,7 +10097,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_recovery_keeps_unpaid_write_acceptance_only() {
+    fn runtime_recovery_clears_write_acceptance_from_functions_exec_text_blocks() {
         let temp = tempfile::tempdir().unwrap();
         let write = contract_input(
             "worker_a",
@@ -10011,6 +10132,28 @@ mod tests {
         assert_eq!(
             ledger.reservations["worker_a"].state,
             ReservationState::Recovered
+        );
+        drop(ledger);
+        drop(store);
+
+        let command = json!({
+            "command": "# codey-accept:worker_a:tests\ncargo test -p codey --lib"
+        });
+        post_root_tool(
+            temp.path(),
+            "runtime-b",
+            "session-a",
+            Some(&command),
+            Some(&json!([
+                { "type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+                { "type": "input_text", "text": "{\"exit_code\":0,\"output\":\"\"}" }
+            ])),
+            50,
+        )
+        .unwrap();
+        assert_eq!(
+            pending_acceptance_reason(temp.path(), "runtime-b", "session-a", 60).unwrap(),
+            None
         );
     }
 

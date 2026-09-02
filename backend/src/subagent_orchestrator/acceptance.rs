@@ -81,7 +81,14 @@ pub(super) fn collect_exit_status(
     match value {
         Value::Array(values) => {
             for value in values {
-                collect_exit_status(value, exit_codes, error, depth + 1, false);
+                if allow_plain_text_status
+                    && value.get("type").and_then(Value::as_str) == Some("input_text")
+                    && let Some(text) = value.get("text")
+                {
+                    collect_exit_status(text, exit_codes, error, depth + 1, true);
+                } else {
+                    collect_exit_status(value, exit_codes, error, depth + 1, false);
+                }
             }
         }
         Value::Object(values) => {
