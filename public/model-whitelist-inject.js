@@ -559,6 +559,14 @@
     description: `${reasoningEffort} effort`,
   }));
 
+  const sameReasoningEffortNames = (left, right) => (
+    Array.isArray(left)
+    && left.length === right.length
+    && left.every((value, index) => (
+      reasoningEffortName(value) === reasoningEffortName(right[index])
+    ))
+  );
+
   const fallbackReasoningEfforts = () => reasoningEffortDescriptors([
     "minimal",
     "low",
@@ -629,15 +637,15 @@
   );
 
   const modelDescriptor = (modelName, current = null) => {
-    if (nativeSelectionOnly && current) {
-      return current.hidden === true ? { ...current, hidden: false } : current;
-    }
     const metadata = catalog.modelMetadata[modelName];
     const presentation = modelPresentation(modelName, current);
     const displayName = presentation.displayName;
     const supportedReasoningEfforts = reasoningEffortDescriptors(
       metadata?.supported_reasoning_efforts,
     );
+    if (nativeSelectionOnly && current && supportedReasoningEfforts.length === 0) {
+      return current.hidden === true ? { ...current, hidden: false } : current;
+    }
     const currentReasoningEfforts = reasoningEffortDescriptors(
       current?.supportedReasoningEfforts,
     );
@@ -656,7 +664,23 @@
     ].find((effort) => (
       typeof effort === "string" && supportedNames.includes(effort.trim())
     ));
+    const defaultReasoningEffort = requestedDefault?.trim() || "medium";
     if (nativeSelectionOnly) {
+      if (current) {
+        return (
+          current.hidden !== true
+          && current.defaultReasoningEffort === defaultReasoningEffort
+          && sameReasoningEffortNames(
+            current.supportedReasoningEfforts,
+            resolvedReasoningEfforts,
+          )
+        ) ? current : {
+          ...current,
+          hidden: false,
+          defaultReasoningEffort,
+          supportedReasoningEfforts: resolvedReasoningEfforts,
+        };
+      }
       return {
         model: modelName,
         id: modelName,
@@ -665,7 +689,7 @@
         displayName: metadata?.display_name || modelName,
         hidden: false,
         isDefault: false,
-        defaultReasoningEffort: requestedDefault?.trim() || "medium",
+        defaultReasoningEffort,
         supportedReasoningEfforts: resolvedReasoningEfforts,
       };
     }
@@ -688,7 +712,7 @@
         : presentation.routeName || "Custom model",
       hidden: false,
       isDefault: modelName === catalog.defaultModel,
-      defaultReasoningEffort: requestedDefault?.trim() || "medium",
+      defaultReasoningEffort,
       supportedReasoningEfforts: resolvedReasoningEfforts,
       serviceTiers: nativeFastServiceTiers(current?.serviceTiers),
       additionalSpeedTiers: nativeFastSpeedTiers(current?.additionalSpeedTiers),
@@ -697,14 +721,6 @@
         : null,
     };
   };
-
-  const sameReasoningEffortNames = (left, right) => (
-    Array.isArray(left)
-    && left.length === right.length
-    && left.every((value, index) => (
-      reasoningEffortName(value) === reasoningEffortName(right[index])
-    ))
-  );
 
   const sameReasoningEfforts = (left, right) => (
     Array.isArray(left)

@@ -3379,9 +3379,17 @@ test("an unchanged model list repairs missing native Fast tiers", async () => {
 test("catalog model metadata overrides stale native reasoning efforts", async () => {
   const client = statsigClient();
   const queryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const stale = queryClient.model("gpt-5.6-sol");
+  stale.defaultReasoningEffort = "xhigh";
+  stale.supportedReasoningEfforts = ["low", "medium", "high", "xhigh"]
+    .map((reasoningEffort) => ({
+      reasoningEffort,
+      description: `${reasoningEffort} effort`,
+    }));
 
   const { patch } = await loadPatch({
     status: "ok",
+    native_selection_only: true,
     models: ["gpt-5.6-sol"],
     default_model: "gpt-5.6-sol",
     model_metadata: [{
@@ -3389,7 +3397,7 @@ test("catalog model metadata overrides stale native reasoning efforts", async ()
       supported_reasoning_efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
       default_reasoning_effort: "low",
     }],
-  }, [client], { queryClient });
+  }, [client], { queryClient, nativeSelectionOnly: true });
 
   const repaired = queryClient.model("gpt-5.6-sol");
   assert.deepEqual(
