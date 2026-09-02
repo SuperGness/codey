@@ -118,6 +118,36 @@ test("startup patch preserves native child processes and ordinary BrowserWindows
   }
 });
 
+test("checkout WebView attachment stays inside the unique checkout handler", () => {
+  const source = [
+    "function kI({getAuthToken:e,owner:t}){",
+    "x.on(`will-attach-webview`,()=>{});x.on(`did-attach-webview`,()=>{});",
+    "let i=n.shift();i!=null&&AI({webContents:d})}",
+    "function bL({getAuthToken:e,onBusinessCheckoutComplete:t,",
+    "onPersonalCheckoutComplete:n,onPurchaseCheckoutComplete:r,",
+    "onReturnToCodex:i,owner:a}){",
+    "x.on(`will-attach-webview`,()=>{});x.on(`did-attach-webview`,()=>{});",
+    "let s=q.shift();if(s==null)return;inspect({webContents:d});",
+    "AI(()=>{},{webContents:g})},cleanup()}",
+    "function SL(){AI(()=>{},{webContents:c})},cleanup()}",
+  ].join("");
+
+  const patched =
+    globalThis.__CODEY_PATCH_CHECKOUT_WEBVIEW_ATTACHMENT__(source);
+
+  assert.match(
+    patched,
+    /track\(a,s\.partition,g\);inspect\(\{webContents:d\}\)/,
+  );
+  assert.doesNotMatch(patched, /track\(t,/);
+  assert.throws(
+    () => globalThis.__CODEY_PATCH_CHECKOUT_WEBVIEW_ATTACHMENT__(
+      source.replace("AI(()=>{},{webContents:g})},", "AI(),"),
+    ),
+    /guest reference not found/,
+  );
+});
+
 test("execution snapshot normalizes app-server ownership and root process trees", () => {
   const lifecycle = globalThis.__CODEY_EXECUTION_PROCESS_LIFECYCLE__;
   const normalized = lifecycle.normalizeSnapshot([

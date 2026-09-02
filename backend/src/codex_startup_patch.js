@@ -2676,6 +2676,60 @@
     value: temporaryWebViewLifecycle,
     writable: false,
   });
+  const findCheckoutWebViewAttachFunction = (source) => {
+    const attachFunctionPattern =
+      /function [$A-Z_a-z][$\w]*\(\{getAuthToken:[$A-Z_a-z][$\w]*[^{}]{0,500},owner:([$A-Z_a-z][$\w]*)\}\)\{/g;
+    const matches = [];
+    for (const candidate of source.matchAll(attachFunctionPattern)) {
+      const signature = candidate[0];
+      if (
+        !signature.includes("onBusinessCheckoutComplete:") ||
+        !signature.includes("onPersonalCheckoutComplete:") ||
+        !signature.includes("onPurchaseCheckoutComplete:")
+      ) continue;
+      const end = source.indexOf("}function ", candidate.index + signature.length);
+      if (end < 0 || end > candidate.index + 3000) continue;
+      const body = source.slice(candidate.index, end + 1);
+      if (!body.includes("will-attach-webview") || !body.includes("did-attach-webview")) continue;
+      matches.push({ body, match: candidate });
+    }
+    return matches.length === 1 ? matches[0] : null;
+  };
+  const patchCheckoutWebViewAttachment = (source) => {
+    const attachment = findCheckoutWebViewAttachFunction(source);
+    if (!attachment) {
+      throw new Error("Codey temporary WebView attach handler not found");
+    }
+    const shiftedEntries = [...attachment.body.matchAll(
+      /let ([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*\.shift\(\);if\(\1==null\)return;/g,
+    )];
+    if (shiftedEntries.length !== 1) {
+      throw new Error("Codey temporary WebView attachment queue not found");
+    }
+    const shiftedEntry = shiftedEntries[0];
+    const guestReferences = [...attachment.body
+      .slice(shiftedEntry.index + shiftedEntry[0].length)
+      .matchAll(/webContents:([$A-Z_a-z][$\w]*)\}\)\},/g)];
+    if (guestReferences.length !== 1) {
+      throw new Error("Codey temporary WebView guest reference not found");
+    }
+    const trackOffset =
+      attachment.match.index + shiftedEntry.index + shiftedEntry[0].length;
+    return (
+      source.slice(0, trackOffset) +
+      `globalThis.__CODEY_TEMP_WEBVIEW_LIFECYCLE__.track(${attachment.match[1]},${shiftedEntry[1]}.partition,${guestReferences[0][1]});` +
+      source.slice(trackOffset)
+    );
+  };
+  Object.defineProperty(
+    globalThis,
+    "__CODEY_PATCH_CHECKOUT_WEBVIEW_ATTACHMENT__",
+    {
+      configurable: false,
+      value: patchCheckoutWebViewAttachment,
+      writable: false,
+    },
+  );
 
   const installExecutionReaper = ({
     connection,
@@ -3206,37 +3260,7 @@
         `globalThis.__CODEY_TEMP_WEBVIEW_LIFECYCLE__.close(${ownerName},${partitionName});` +
         source.slice(closeBranchOffset + closeBranch.length);
 
-      const attachFunctionPattern =
-        /function [$A-Z_a-z][$\w]*\(\{getAuthToken:[$A-Z_a-z][$\w]*[^{}]{0,500},owner:([$A-Z_a-z][$\w]*)\}\)\{/g;
-      let attachFunction = null;
-      for (const candidate of source.matchAll(attachFunctionPattern)) {
-        const nearby = source.slice(candidate.index, candidate.index + 2500);
-        if (nearby.includes("will-attach-webview") && nearby.includes("did-attach-webview")) {
-          attachFunction = candidate;
-          break;
-        }
-      }
-      if (!attachFunction) {
-        throw new Error("Codey temporary WebView attach handler not found");
-      }
-      const attachOwnerName = attachFunction[1];
-      const attachTail = source.slice(attachFunction.index, attachFunction.index + 3000);
-      const shiftedEntry =
-        /let ([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*\.shift\(\);if\(\1==null\)return;/.exec(attachTail);
-      if (!shiftedEntry) {
-        throw new Error("Codey temporary WebView attachment queue not found");
-      }
-      const guestReference = /webContents:([$A-Z_a-z][$\w]*)/.exec(
-        attachTail.slice(shiftedEntry.index + shiftedEntry[0].length),
-      );
-      if (!guestReference) {
-        throw new Error("Codey temporary WebView guest reference not found");
-      }
-      const trackOffset = attachFunction.index + shiftedEntry.index + shiftedEntry[0].length;
-      source =
-        source.slice(0, trackOffset) +
-        `globalThis.__CODEY_TEMP_WEBVIEW_LIFECYCLE__.track(${attachOwnerName},${shiftedEntry[1]}.partition,${guestReference[1]});` +
-        source.slice(trackOffset);
+      source = patchCheckoutWebViewAttachment(source);
 
       const reaperAnchorPattern =
         /([$A-Z_a-z][$\w]*)\.add\(([$A-Z_a-z][$\w]*)\(\{appServerConnection:([$A-Z_a-z][$\w]*)\(\),closeActiveTurn:([$A-Z_a-z][$\w]*)\.closeActiveTurn\}\)\);/;
