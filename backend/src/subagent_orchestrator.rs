@@ -2283,11 +2283,6 @@ fn update_reservation_lifecycle(
     Ok(true)
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct StatusSettlement {
-    pub(crate) agent_id_hashes: Vec<String>,
-}
-
 pub(crate) fn observe_status_response(
     state_root: &Path,
     runtime_id: &str,
@@ -2295,10 +2290,10 @@ pub(crate) fn observe_status_response(
     tool_response: Option<&Value>,
     all_terminal: bool,
     now_ms: u64,
-) -> Result<StatusSettlement> {
+) -> Result<Vec<String>> {
     let store = LedgerStore::open(state_root, session_id)?;
     let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
-        return Ok(StatusSettlement::default());
+        return Ok(Vec::new());
     };
     let mut terminal_tasks = BTreeMap::new();
     if let Some(response) = tool_response
@@ -2318,7 +2313,7 @@ pub(crate) fn observe_status_response(
         }
     }
     let mut changed = false;
-    let mut settlement = StatusSettlement::default();
+    let mut agent_id_hashes = Vec::new();
     let usage = telemetry::extract_token_usage(tool_response);
     let mut trace_events = Vec::new();
     for (task_id, outcome) in terminal_tasks {
@@ -2334,7 +2329,7 @@ pub(crate) fn observe_status_response(
             && reservation.outcome == ExecutionOutcome::Unknown;
         if transitions_to_terminal || refines_lifecycle_stop {
             if let Some(agent_id_hash) = reservation.agent_id_hash.take() {
-                settlement.agent_id_hashes.push(agent_id_hash);
+                agent_id_hashes.push(agent_id_hash);
             }
             reservation.state = ReservationState::Terminal;
             reservation.outcome = outcome;
@@ -2408,15 +2403,9 @@ pub(crate) fn observe_status_response(
             recorder.record_best_effort(event);
         }
     }
-    settlement.agent_id_hashes.sort();
-    settlement.agent_id_hashes.dedup();
-    Ok(settlement)
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct PendingInitRecovery {
-    pub(crate) agent_id_hashes: Vec<String>,
-    pub(crate) task_ids: Vec<String>,
+    agent_id_hashes.sort();
+    agent_id_hashes.dedup();
+    Ok(agent_id_hashes)
 }
 
 /// Reconciles a full provider list snapshot into reservation-local PendingInit
@@ -2429,7 +2418,7 @@ pub(crate) fn reconcile_pending_init_status_response(
     tool_response: Option<&Value>,
     now_ms: u64,
     grace_ms: u64,
-) -> Result<Option<PendingInitRecovery>> {
+) -> Result<Option<Vec<String>>> {
     let mut observations = Vec::new();
     if let Some(response) = tool_response {
         crate::subagent::protocol::collect_agent_status_observations(response, &mut observations);
@@ -2453,7 +2442,7 @@ pub(crate) fn recover_expired_pending_init_reservations(
     session_id: &str,
     now_ms: u64,
     grace_ms: u64,
-) -> Result<Option<PendingInitRecovery>> {
+) -> Result<Option<Vec<String>>> {
     reconcile_pending_init_observations(state_root, runtime_id, session_id, &[], now_ms, grace_ms)
 }
 
@@ -2464,7 +2453,7 @@ fn reconcile_pending_init_observations(
     observations: &[crate::subagent::protocol::AgentStatusObservation],
     now_ms: u64,
     grace_ms: u64,
-) -> Result<Option<PendingInitRecovery>> {
+) -> Result<Option<Vec<String>>> {
     let store = LedgerStore::open(state_root, session_id)?;
     let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(None);
@@ -2536,7 +2525,7 @@ fn reconcile_pending_init_observations(
         }
     }
 
-    let mut recovery = PendingInitRecovery::default();
+    let mut agent_id_hashes = Vec::new();
     let mut trace_events = Vec::new();
     for (task_id, reservation) in &mut ledger.reservations {
         if !reservation.state.is_active() {
@@ -2555,9 +2544,8 @@ fn reconcile_pending_init_observations(
         let trace = reservation_trace(reservation);
         let role = reservation.role.clone();
         if let Some(agent_id_hash) = reservation.agent_id_hash.take() {
-            recovery.agent_id_hashes.push(agent_id_hash);
+            agent_id_hashes.push(agent_id_hash);
         }
-        recovery.task_ids.push(task_id.clone());
         reservation.state = ReservationState::Recovered;
         reservation.outcome = ExecutionOutcome::Lost;
         reservation.pending_init_observed_at_ms = None;
@@ -2604,7 +2592,7 @@ fn reconcile_pending_init_observations(
             recorder.record_best_effort(event);
         }
     }
-    Ok(Some(recovery))
+    Ok(Some(agent_id_hashes))
 }
 
 /// Returns the lifecycle ledger projection when a session ledger exists.
@@ -2735,7 +2723,6 @@ pub(crate) struct InterruptSettlement {
     /// source of truth, but returning it lets the gate remove the migration
     /// fallback without retaining a raw provider identifier.
     pub(crate) agent_id_hash: Option<String>,
-    pub(crate) changed: bool,
 }
 
 /// Applies a provider-owned interrupt acknowledgement only after every identity
@@ -2783,10 +2770,7 @@ pub(crate) fn settle_interrupt_acknowledgement(
         && reservation.outcome == ExecutionOutcome::Unknown
         && acknowledgement.prior_outcome.is_some();
     if !reservation.state.is_active() && !refines_unknown_terminal {
-        return Ok(Some(InterruptSettlement {
-            agent_id_hash,
-            changed: false,
-        }));
+        return Ok(Some(InterruptSettlement { agent_id_hash }));
     }
 
     let trace = reservation_trace(reservation);
@@ -2884,10 +2868,7 @@ pub(crate) fn settle_interrupt_acknowledgement(
     }
     TraceRecorder::new(state_root).record_best_effort(&event);
 
-    Ok(Some(InterruptSettlement {
-        agent_id_hash,
-        changed: true,
-    }))
+    Ok(Some(InterruptSettlement { agent_id_hash }))
 }
 
 pub(crate) fn open_batch_decision_if_settled(
@@ -6859,7 +6840,6 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(abandoned.changed);
         assert_eq!(
             abandoned.agent_id_hash.as_deref(),
             Some(hash_component("agent-reader_a").as_str())
@@ -6881,7 +6861,7 @@ mod tests {
 
         let duplicate = Value::String(serde_json::to_string(&interrupt).unwrap());
         assert!(
-            !settle_interrupt_acknowledgement(
+            settle_interrupt_acknowledgement(
                 temp.path(),
                 "runtime-a",
                 session_id,
@@ -6891,7 +6871,8 @@ mod tests {
             )
             .unwrap()
             .unwrap()
-            .changed
+            .agent_id_hash
+            .is_none()
         );
         subagent_stopped(temp.path(), "runtime-a", session_id, "agent-reader_a", 34).unwrap();
 
@@ -6960,7 +6941,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(first, PendingInitRecovery::default());
+        assert!(first.is_empty());
 
         let store = LedgerStore::open(temp.path(), session_id).unwrap();
         let ledger = store.load("runtime-a", session_id, 1_001).unwrap().unwrap();
@@ -6993,8 +6974,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(recovery.task_ids, ["reader_a"]);
-        assert_eq!(recovery.agent_id_hashes, [hash_component("agent-reader_a")]);
+        assert_eq!(recovery, [hash_component("agent-reader_a")]);
 
         let store = LedgerStore::open(temp.path(), session_id).unwrap();
         let ledger = store.load("runtime-a", session_id, 1_101).unwrap().unwrap();
@@ -7136,8 +7116,7 @@ mod tests {
                 32,
             )
             .unwrap()
-            .unwrap()
-            .changed
+            .is_some()
         );
         let store = LedgerStore::open(temp.path(), session_id).unwrap();
         let ledger = store.load("runtime-a", session_id, 33).unwrap().unwrap();
@@ -7343,7 +7322,7 @@ mod tests {
             40,
         )
         .unwrap();
-        assert_eq!(settlement.agent_id_hashes, [hash_component("agent-done")]);
+        assert_eq!(settlement, [hash_component("agent-done")]);
 
         let store = LedgerStore::open(temp.path(), "session-a").unwrap();
         let ledger = store.load("runtime-a", "session-a", 50).unwrap().unwrap();
@@ -10137,7 +10116,6 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert!(!settlement.changed);
         assert_eq!(settlement.agent_id_hash, Some(hash_component(target)));
 
         let decision =

@@ -743,12 +743,17 @@ fn object_terminal_outcome(values: &Map<String, Value>) -> Option<TerminalOutcom
         })
 }
 
-fn is_terminal_marker_field(key: &str) -> bool {
+pub(crate) fn is_terminal_marker_field(key: &str) -> bool {
     matches!(
         key,
         "finalanswer"
             | "taskcomplete"
             | "completed"
+            | "aborted"
+            | "cancelled"
+            | "canceled"
+            | "closed"
+            | "stopped"
             | "errored"
             | "failed"
             | "timedout"
@@ -771,7 +776,9 @@ fn terminal_outcome_from_identifier(value: &str) -> Option<TerminalOutcome> {
         "finalanswer" | "taskcomplete" | "completed" => Some(TerminalOutcome::Succeeded),
         "errored" | "error" | "failed" => Some(TerminalOutcome::Failed),
         "timedout" | "timeout" => Some(TerminalOutcome::TimedOut),
-        "shutdown" | "notfound" => Some(TerminalOutcome::Lost),
+        "aborted" | "cancelled" | "canceled" | "closed" | "stopped" | "shutdown" | "notfound" => {
+            Some(TerminalOutcome::Lost)
+        }
         _ => None,
     }
 }
@@ -809,6 +816,16 @@ mod tests {
             classify_agent_status(&json!("interrupted")),
             AgentState::Live
         );
+
+        for status in ["aborted", "cancelled", "canceled", "closed", "stopped"] {
+            for value in [
+                json!(status),
+                json!({"status": status}),
+                json!({(status): true}),
+            ] {
+                assert_eq!(classify_agent_status(&value), AgentState::Terminal);
+            }
+        }
     }
 
     #[test]
@@ -885,6 +902,15 @@ mod tests {
                 identifiers: vec!["agent-reader-c".into()],
             })
         );
+
+        for status in ["aborted", "cancelled", "canceled", "closed", "stopped"] {
+            assert_eq!(
+                interrupt_acknowledgement(&json!({"previous_status": status}))
+                    .unwrap()
+                    .prior_outcome,
+                Some(TerminalOutcome::Lost)
+            );
+        }
     }
 
     #[test]

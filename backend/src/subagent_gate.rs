@@ -1293,7 +1293,7 @@ fn settle_status_response_and_markers(
     all_terminal: bool,
     now_ms: u64,
 ) -> Result<()> {
-    let settlement = crate::subagent_orchestrator::observe_status_response(
+    let agent_id_hashes = crate::subagent_orchestrator::observe_status_response(
         state_root,
         runtime_id,
         session_id,
@@ -1301,7 +1301,7 @@ fn settle_status_response_and_markers(
         all_terminal,
         now_ms,
     )?;
-    for agent_id_hash in &settlement.agent_id_hashes {
+    for agent_id_hash in &agent_id_hashes {
         remove_active_marker_by_hash(state_root, runtime_id, session_id, agent_id_hash)?;
     }
     Ok(())
@@ -1343,7 +1343,7 @@ fn stop_output(
             &input.session_id,
             PENDING_INIT_OBSERVED_FILE,
         )?;
-        for agent_id_hash in &recovery.agent_id_hashes {
+        for agent_id_hash in recovery {
             remove_active_marker_by_hash(state_root, runtime_id, &input.session_id, agent_id_hash)?;
         }
         active = active_agent_count_for_runtime(state_root, runtime_id, &input.session_id)?;
@@ -1785,10 +1785,8 @@ fn collect_status_progress_tokens(value: &Value, tokens: &mut Vec<String>, depth
             }
             for (key, value) in values {
                 let key = normalized_ascii_identifier(key);
-                if matches!(
-                    key.as_str(),
-                    "completed" | "errored" | "failed" | "shutdown" | "notfound"
-                ) && !matches!(value, Value::Bool(false) | Value::Null)
+                if protocol::is_terminal_marker_field(&key)
+                    && !matches!(value, Value::Bool(false) | Value::Null)
                 {
                     tokens.push(format!("terminal:{identifier}:{key}"));
                 }
@@ -1848,7 +1846,7 @@ fn reconcile_list_agents_response(
             &input.session_id,
             PENDING_INIT_OBSERVED_FILE,
         )?;
-        for agent_id_hash in &recovery.agent_id_hashes {
+        for agent_id_hash in &recovery {
             remove_active_marker_by_hash(state_root, runtime_id, &input.session_id, agent_id_hash)?;
         }
         if snapshot == AgentListSnapshotState::AllChildrenTerminal {
@@ -2005,17 +2003,13 @@ fn remove_completed_agents_from_wait_response(
         return Ok(());
     };
     let mut completed_agent_ids = Vec::new();
-    collect_completed_agent_ids(tool_response, &mut completed_agent_ids);
+    protocol::collect_terminal_agent_ids(tool_response, &mut completed_agent_ids);
     completed_agent_ids.sort();
     completed_agent_ids.dedup();
     for agent_id in completed_agent_ids {
         remove_active_marker(state_root, runtime_id, session_id, &agent_id)?;
     }
     Ok(())
-}
-
-fn collect_completed_agent_ids(value: &Value, completed_agent_ids: &mut Vec<String>) {
-    protocol::collect_terminal_agent_ids(value, completed_agent_ids);
 }
 
 fn object_reports_agent_completion(values: &Map<String, Value>) -> bool {
@@ -4573,7 +4567,10 @@ mod tests {
     fn errored_and_other_terminal_wait_statuses_release_markers() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        for agent_id in ["agent-a", "agent-b", "agent-c", "agent-d"] {
+        for agent_id in [
+            "agent-a", "agent-b", "agent-c", "agent-d", "agent-e", "agent-f", "agent-g", "agent-h",
+            "agent-i",
+        ] {
             let mut start = input("SubagentStart", "session-a");
             start.agent_id = Some(agent_id.to_string());
             handle_hook(&start, root).unwrap();
@@ -4586,7 +4583,12 @@ mod tests {
                 { "agent_id": "agent-a", "status": "completed" },
                 { "agent_id": "agent-b", "state": "errored" },
                 { "agent_id": "agent-c", "agent_status": { "errored": "429 Too Many Requests" } },
-                { "agent_id": "agent-d", "status": "shutdown" }
+                { "agent_id": "agent-d", "status": "shutdown" },
+                { "agent_id": "agent-e", "status": "aborted" },
+                { "agent_id": "agent-f", "state": "cancelled" },
+                { "agent_id": "agent-g", "agent_status": "canceled" },
+                { "agent_id": "agent-h", "status": "closed" },
+                { "agent_id": "agent-i", "status": { "stopped": true } }
             ]
         }));
 
@@ -4620,7 +4622,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_full_list_settles_only_the_completed_ledger_marker() {
+    fn mixed_full_list_settles_only_the_terminal_ledger_marker() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let runtime_id = "runtime-a";
@@ -4692,7 +4694,7 @@ mod tests {
         list.tool_response = Some(json!({
             "agents": [
                 { "agent_name": "/root", "agent_status": "running" },
-                { "agent_name": "/root/list_reader_a", "agent_status": { "completed": "done" } },
+                { "agent_name": "/root/list_reader_a", "agent_status": "closed" },
                 { "agent_name": "/root/list_reader_b", "agent_status": "running" }
             ]
         }));

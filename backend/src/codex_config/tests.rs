@@ -2997,6 +2997,9 @@ fn isolated_runtime_constraints_stay_out_of_config_and_restore_hooks() {
 model_catalog_json = "/user/catalog.json"
 developer_instructions = "Keep the user's instructions."
 
+[features.multi_agent_v2]
+max_wait_timeout_ms = 120000
+
 [model_providers.relay]
 name = "Relay"
 base_url = "https://relay.example/v1"
@@ -3049,6 +3052,12 @@ wire_api = "responses"
     .unwrap();
 
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original_config);
+    assert!(
+        applied
+            .runtime_config_overrides
+            .iter()
+            .any(|entry| entry == "features.multi_agent_v2.max_wait_timeout_ms=30000")
+    );
     assert!(!home.join("AGENTS.md").exists());
     assert!(!home.join("agents/default.toml").exists());
     assert!(
