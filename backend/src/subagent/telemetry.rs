@@ -28,6 +28,7 @@ const TRACE_LOCK_RETRY_MILLIS: u64 = 1;
 pub(crate) enum TraceEventKind {
     Scheduled,
     Started,
+    HookEvaluated,
     RuleEvaluated,
     Completed,
     Failed,

@@ -37,7 +37,6 @@ use crate::local_router::{self, RuntimeRouterEndpoint};
 mod fastctx;
 mod fs_io;
 mod runtime_role_transaction;
-mod subagent_control;
 
 use fastctx::{
     apply_fastctx_guidance_to_table, arguments_have_codey_fastctx_marker,
@@ -50,7 +49,6 @@ use fs_io::{
     atomic_write, create_private_dir_all, read_optional, remove_optional, write_private_file,
 };
 use runtime_role_transaction::refresh_runtime_subagent_roles_at;
-use subagent_control::{disable_subagent_control_mcp, enable_subagent_control_mcp};
 
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 pub(crate) const BUILTIN_OPENAI_PROVIDER_ID: &str = "openai";
@@ -589,7 +587,7 @@ fn apply_isolated_runtime_router_config(
     }
 
     let policy_result = if subagent_optimization {
-        crate::subagent_gate::write_runtime_subagent_policy(
+        crate::subagent_gate::commit_runtime_subagent_policy(
             home,
             &state.subagent_roles,
             &state.runtime_agent_hashes,
@@ -2008,7 +2006,6 @@ fn patch_config_with_fastctx_mode(
         None
     };
     if subagent_optimization {
-        enable_subagent_control_mcp(&mut doc)?;
         enable_subagent_optimization(
             &mut doc,
             config_path,
@@ -2016,8 +2013,6 @@ fn patch_config_with_fastctx_mode(
             subagent_reasoning_effort,
             fastctx_namespace.as_deref(),
         )?;
-    } else {
-        disable_subagent_control_mcp(&mut doc);
     }
     if fastctx_namespace.is_some() {
         enable_hooks_feature(&mut doc)?;
@@ -2485,78 +2480,6 @@ fn build_isolated_runtime_overrides(
     }
 
     if !runtime_agents.is_empty() {
-        for (path, key) in [
-            (
-                &[
-                    "mcp_servers",
-                    crate::subagent_control_mcp::SERVER_ID,
-                    "command",
-                ][..],
-                "mcp_servers.codey_subagent_control.command",
-            ),
-            (
-                &[
-                    "mcp_servers",
-                    crate::subagent_control_mcp::SERVER_ID,
-                    "args",
-                ][..],
-                "mcp_servers.codey_subagent_control.args",
-            ),
-            (
-                &[
-                    "mcp_servers",
-                    crate::subagent_control_mcp::SERVER_ID,
-                    "startup_timeout_sec",
-                ][..],
-                "mcp_servers.codey_subagent_control.startup_timeout_sec",
-            ),
-            (
-                &[
-                    "mcp_servers",
-                    crate::subagent_control_mcp::SERVER_ID,
-                    "tool_timeout_sec",
-                ][..],
-                "mcp_servers.codey_subagent_control.tool_timeout_sec",
-            ),
-            (
-                &[
-                    "mcp_servers",
-                    crate::subagent_control_mcp::SERVER_ID,
-                    "enabled_tools",
-                ][..],
-                "mcp_servers.codey_subagent_control.enabled_tools",
-            ),
-            (
-                &[
-                    "mcp_servers",
-                    crate::subagent_control_mcp::SERVER_ID,
-                    "disabled_tools",
-                ][..],
-                "mcp_servers.codey_subagent_control.disabled_tools",
-            ),
-            (
-                &[
-                    "mcp_servers",
-                    crate::subagent_control_mcp::SERVER_ID,
-                    "tools",
-                    crate::subagent_control_mcp::RESOLVE_BATCH_TOOL_NAME,
-                    "approval_mode",
-                ][..],
-                "mcp_servers.codey_subagent_control.tools.resolve_batch.approval_mode",
-            ),
-            (
-                &[
-                    "mcp_servers",
-                    crate::subagent_control_mcp::SERVER_ID,
-                    "tools",
-                    crate::subagent_control_mcp::PREPARE_DELEGATION_TOOL_NAME,
-                    "approval_mode",
-                ][..],
-                "mcp_servers.codey_subagent_control.tools.prepare_delegation.approval_mode",
-            ),
-        ] {
-            push_required_document_override(&mut overrides, effective, path, key)?;
-        }
         if fastctx_namespace.is_none() {
             push_document_override(
                 &mut overrides,

@@ -178,7 +178,7 @@ fn discarding_a_cancelled_startup_clears_active_and_pending_runtime_policy() {
     fs::write(&marker, b"lease").unwrap();
     let roles = crate::config::uniform_subagent_roles("provider-model", "high");
     let hashes = BTreeMap::from([("default".to_string(), "digest".to_string())]);
-    crate::subagent_gate::write_runtime_subagent_policy(&home, &roles, &hashes).unwrap();
+    crate::subagent_gate::commit_runtime_subagent_policy(&home, &roles, &hashes).unwrap();
     crate::subagent_gate::begin_runtime_subagent_policy_update(&home, &roles, &hashes).unwrap();
 
     discard_runtime_lease(&home, &marker, &backup_dir).unwrap();
@@ -2095,29 +2095,6 @@ command = "echo preserve-user-hook"
         multi_agent["multi_agent_mode_hint_text"].as_str(),
         Some(ROOT_AGENT_MULTI_AGENT_MODE_HINT)
     );
-    let control_server = document["mcp_servers"][crate::subagent_control_mcp::SERVER_ID]
-        .as_table()
-        .unwrap();
-    assert!(
-        control_server["command"]
-            .as_str()
-            .is_some_and(|command| !command.is_empty())
-    );
-    assert_eq!(
-        control_server["args"]
-            .as_array()
-            .and_then(|args| args.get(0))
-            .and_then(Value::as_str),
-        Some(crate::subagent_control_mcp::ARGUMENT)
-    );
-    assert!(
-        document["features"]["code_mode"]["direct_only_tool_namespaces"]
-            .as_array()
-            .is_some_and(|namespaces| namespaces.iter().any(|namespace| {
-                namespace.as_str() == Some(crate::subagent_control_mcp::NAMESPACE)
-            }))
-    );
-
     let pre_tool_use = document["hooks"]["PreToolUse"]
         .as_array_of_tables()
         .unwrap();
@@ -3151,14 +3128,6 @@ wire_api = "responses"
         "mcp_servers.codey_fastctx.env.FASTCTX_TOKEN_BUDGET",
         "mcp_servers.codey_fastctx.env.FASTCTX_GREP_TOKEN_BUDGET",
         "mcp_servers.codey_fastctx.env.FASTCTX_GLOB_TOKEN_BUDGET",
-        "mcp_servers.codey_subagent_control.command",
-        "mcp_servers.codey_subagent_control.args",
-        "mcp_servers.codey_subagent_control.startup_timeout_sec",
-        "mcp_servers.codey_subagent_control.tool_timeout_sec",
-        "mcp_servers.codey_subagent_control.enabled_tools",
-        "mcp_servers.codey_subagent_control.disabled_tools",
-        "mcp_servers.codey_subagent_control.tools.resolve_batch.approval_mode",
-        "mcp_servers.codey_subagent_control.tools.prepare_delegation.approval_mode",
         "tool_output_token_limit",
         "agents.enabled",
         "agents.max_concurrent_threads_per_session",

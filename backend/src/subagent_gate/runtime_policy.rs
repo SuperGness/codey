@@ -82,14 +82,6 @@ pub(crate) fn commit_runtime_subagent_policy(
     remove_optional_runtime_policy_file(&pending_path)
 }
 
-pub(crate) fn write_runtime_subagent_policy(
-    home: &Path,
-    roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
-    runtime_agent_hashes: &BTreeMap<String, String>,
-) -> Result<()> {
-    commit_runtime_subagent_policy(home, roles, runtime_agent_hashes)
-}
-
 pub(crate) fn runtime_subagent_policy_matches(
     home: &Path,
     roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,

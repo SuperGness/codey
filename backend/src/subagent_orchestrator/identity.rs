@@ -10,7 +10,6 @@ use std::path::Path;
 
 use anyhow::Result;
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 
 use crate::subagent::lifecycle::{ExecutionOutcome, ExecutionPhase as ReservationState};
 use crate::subagent::protocol;
@@ -399,11 +398,6 @@ pub(super) fn identifier_mentions_task(identifier: &str, task_id: &str) -> bool 
 
 pub(super) fn normalized_identifier(value: &str) -> String {
     protocol::normalize_identifier(value)
-}
-
-pub(super) fn canonical_value_hash(value: &Value) -> String {
-    let bytes = serde_json::to_vec(value).expect("serde_json::Value must always be serializable");
-    format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
 pub(super) fn hash_component(value: &str) -> String {
