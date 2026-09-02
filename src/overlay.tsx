@@ -65,9 +65,16 @@ function RequestLogPage() {
 }
 
 function installBrowserBridge() {
-  const hashToken = decodeURIComponent(window.location.hash.slice(1));
+  let hashToken = "";
+  try {
+    hashToken = decodeURIComponent(window.location.hash.slice(1));
+  } catch {
+    // Ignore malformed external links and fall back to the last session token.
+  }
   if (hashToken) {
     window.sessionStorage.setItem(REQUEST_LOG_TOKEN_KEY, hashToken);
+  }
+  if (window.location.hash) {
     window.history.replaceState(null, "", window.location.pathname);
   }
   const token = hashToken || window.sessionStorage.getItem(REQUEST_LOG_TOKEN_KEY) || "";
@@ -219,7 +226,7 @@ if (!window.__codeySettingsOverlay) {
     open,
     close,
     isOpen,
-    toggle: open,
+    toggle: () => (visible ? close() : open()),
   };
 }
 }

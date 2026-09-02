@@ -79,3 +79,45 @@ test("rejects a release whose tag does not match its version", async () => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /must match version/);
 });
+
+test("rejects non-HTTPS download URLs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codey-update-manifest-"));
+  const result = spawnSync(
+    process.execPath,
+    [
+      manifestScript,
+      "--version", "1.2.3",
+      "--tag", "v1.2.3",
+      "--download-base-url", "http://updates.example.com/releases/v1.2.3",
+      "--output", join(directory, "latest.json"),
+      join(directory, "placeholder"),
+    ],
+    { cwd: root, encoding: "utf8" },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /must use HTTPS/);
+});
+
+test("rejects duplicate release asset basenames", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codey-update-manifest-"));
+  const duplicateName = artifacts[0][0];
+  const result = spawnSync(
+    process.execPath,
+    [
+      manifestScript,
+      "--version", "1.2.3",
+      "--tag", "v1.2.3",
+      "--download-base-url", "https://updates.example.com/releases/v1.2.3",
+      "--output", join(directory, "latest.json"),
+      join(directory, "first", duplicateName),
+      join(directory, "second", duplicateName),
+      join(directory, artifacts[1][0]),
+      join(directory, artifacts[2][0]),
+    ],
+    { cwd: root, encoding: "utf8" },
+  );
+
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Duplicate release asset name/);
+});

@@ -422,7 +422,7 @@ impl SQLiteStorageAdapter {
             if let Some(tables) = backup["tables"].as_object() {
                 validate_restore_tables(tables)?;
                 detect_restore_conflicts(&db, tables)?;
-                detect_file_restore_conflicts(tables)?;
+                let files = prepare_file_restores(&self.db_path, tables)?;
                 let tx = db.transaction()?;
                 for (table, rows) in tables {
                     if table.starts_with("__") {
@@ -443,23 +443,11 @@ impl SQLiteStorageAdapter {
                     }
                 }
                 tx.commit()?;
-                if let Some(files) = tables.get("__files").and_then(Value::as_array) {
-                    for file in files {
-                        let Some(path) = file.get("path").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        let Some(content) = file.get("content_b64").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        let bytes = base64::Engine::decode(
-                            &base64::engine::general_purpose::STANDARD,
-                            content,
-                        )?;
-                        if let Some(parent) = Path::new(path).parent() {
-                            fs::create_dir_all(parent)?;
-                        }
-                        fs::write(path, bytes)?;
+                for (path, bytes) in files {
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
                     }
+                    fs::write(path, bytes)?;
                 }
             }
             Ok(DeleteResult {
@@ -475,17 +463,28 @@ impl SQLiteStorageAdapter {
 
     pub fn find_archived_thread_by_title(&self, title: &str) -> Option<SessionRef> {
         let db = Connection::open(&self.db_path).ok()?;
+        let columns = table_columns(&db, "threads").ok()?;
         if schema_kind(&db).ok().flatten() != Some(SchemaKind::CodexThreads)
-            || !has_columns(&db, "threads", &["archived"]).ok()?
+            || !columns.iter().any(|column| column == "archived")
         {
             return None;
         }
+        let order_by = [
+            "archived_at",
+            "updated_at_ms",
+            "updated_at",
+            "created_at_ms",
+            "created_at",
+            "id",
+        ]
+        .into_iter()
+        .find(|candidate| columns.iter().any(|column| column == candidate))?;
         let mut stmt = db
-            .prepare(
+            .prepare(&format!(
                 "SELECT id, title FROM threads
                  WHERE archived = 1 AND (title = ?1 OR title LIKE ?2 OR ?1 LIKE '%' || title || '%')
-                 ORDER BY archived_at DESC LIMIT 1",
-            )
+                 ORDER BY {order_by} DESC, id DESC LIMIT 1"
+            ))
             .ok()?;
         let mut rows = stmt.query((title, format!("%{title}%"))).ok()?;
         let row = rows.next().ok().flatten()?;
@@ -553,6 +552,9 @@ impl SQLiteStorageAdapter {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let rollout_path = checked_codex_rollout_path(&self.db_path, &rollout_path)?
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let tx = db.transaction()?;
             tx.execute(
                 "UPDATE threads SET cwd = ?1 WHERE id = ?2",
@@ -625,7 +627,9 @@ impl SQLiteStorageAdapter {
                     "history": []
                 }));
             };
-            let rollout = PathBuf::from(&rollout_path);
+            let Some(rollout) = checked_codex_rollout_path(&self.db_path, &rollout_path)? else {
+                unreachable!("empty rollout paths returned above")
+            };
             if !rollout.is_file() {
                 return Ok(json!({
                     "status": "failed",
@@ -767,7 +771,10 @@ impl SQLiteStorageAdapter {
                 "Thread not found in local storage".to_string(),
             ));
         }
-        let file_backups = rollout_file_backups(tables.get("threads").and_then(Value::as_array));
+        let file_backups = rollout_file_backups(
+            &self.db_path,
+            tables.get("threads").and_then(Value::as_array),
+        )?;
         if !file_backups.is_empty() {
             tables.insert("__files".to_string(), Value::Array(file_backups.clone()));
         }
@@ -1258,22 +1265,35 @@ fn restore_conflict_key_columns<'a>(table: &str, row: &'a Map<String, Value>) ->
     }
 }
 
-fn detect_file_restore_conflicts(tables: &Map<String, Value>) -> anyhow::Result<()> {
+fn prepare_file_restores(
+    db_path: &Path,
+    tables: &Map<String, Value>,
+) -> anyhow::Result<Vec<(PathBuf, Vec<u8>)>> {
     let Some(files) = tables.get("__files").and_then(Value::as_array) else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let allowed_paths = allowed_backup_file_paths(tables);
+    let mut prepared = Vec::new();
     for file in files {
         if let Some(path) = file.get("path").and_then(Value::as_str) {
             if !allowed_paths.contains(path) {
                 anyhow::bail!("unexpected backup file path: {path}");
             }
-            if Path::new(path).exists() {
-                anyhow::bail!("restore conflict: file already exists: {path}");
+            let Some(path) = checked_codex_rollout_path(db_path, path)? else {
+                anyhow::bail!("unexpected empty backup file path");
+            };
+            if path.exists() {
+                anyhow::bail!("restore conflict: file already exists: {}", path.display());
             }
+            let Some(content) = file.get("content_b64").and_then(Value::as_str) else {
+                continue;
+            };
+            let bytes =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content)?;
+            prepared.push((path, bytes));
         }
     }
-    Ok(())
+    Ok(prepared)
 }
 
 fn allowed_backup_file_paths(tables: &Map<String, Value>) -> HashSet<String> {
@@ -1399,19 +1419,74 @@ fn matching_rows_exist(
     Ok(exists)
 }
 
-fn rollout_file_backups(thread_rows: Option<&Vec<Value>>) -> Vec<Value> {
-    thread_rows
+fn rollout_file_backups(
+    db_path: &Path,
+    thread_rows: Option<&Vec<Value>>,
+) -> anyhow::Result<Vec<Value>> {
+    let mut backups = Vec::new();
+    for path in thread_rows
         .into_iter()
         .flatten()
         .filter_map(|row| row.get("rollout_path").and_then(Value::as_str))
-        .filter_map(|path| {
-            let bytes = fs::read(path).ok()?;
-            Some(json!({
-                "path": path,
-                "content_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
-            }))
-        })
-        .collect()
+    {
+        let Some(checked_path) = checked_codex_rollout_path(db_path, path)? else {
+            continue;
+        };
+        let bytes = match fs::read(&checked_path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        backups.push(json!({
+            "path": path,
+            "content_b64": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
+        }));
+    }
+    Ok(backups)
+}
+
+fn codex_home_from_db_path(db_path: &Path) -> Option<&Path> {
+    let db_dir = db_path.parent()?;
+    if db_dir.ends_with("sqlite") {
+        db_dir.parent()
+    } else {
+        Some(db_dir)
+    }
+}
+
+fn checked_codex_rollout_path(db_path: &Path, value: &str) -> anyhow::Result<Option<PathBuf>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let path = PathBuf::from(value);
+    if !path.is_absolute() {
+        anyhow::bail!("rollout path must be absolute: {value}");
+    }
+    let home = codex_home_from_db_path(db_path)
+        .ok_or_else(|| anyhow::anyhow!("database path has no Codex home: {}", db_path.display()))?
+        .canonicalize()?;
+    let canonical_path = match path.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("rollout path has no parent: {value}"))?
+                .canonicalize()?;
+            let file_name = path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("rollout path has no file name: {value}"))?;
+            parent.join(file_name)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !["sessions", "archived_sessions"]
+        .into_iter()
+        .any(|directory| canonical_path.starts_with(home.join(directory)))
+    {
+        anyhow::bail!("rollout path is outside managed session directories: {value}");
+    }
+    Ok(Some(path))
 }
 
 fn codex_thread_rollout_paths(
@@ -1424,23 +1499,16 @@ fn codex_thread_rollout_paths(
     for path in thread_rows
         .iter()
         .filter_map(|row| row.get("rollout_path").and_then(Value::as_str))
-        .filter(|path| !path.trim().is_empty())
     {
-        add_rollout_path(&mut paths, &mut seen, PathBuf::from(path));
+        if let Some(path) = checked_codex_rollout_path(db_path, path)? {
+            add_rollout_path(&mut paths, &mut seen, path);
+        }
     }
 
-    let Some(db_dir) = db_path.parent() else {
+    let Some(home) = codex_home_from_db_path(db_path) else {
         return Ok(paths);
     };
-    let home = if db_dir.ends_with("sqlite") {
-        db_dir.parent()
-    } else {
-        Some(db_dir)
-    };
-    for root in home
-        .into_iter()
-        .flat_map(|home| [home.join("sessions"), home.join("archived_sessions")])
-    {
+    for root in [home.join("sessions"), home.join("archived_sessions")] {
         collect_matching_rollout_paths(&root, thread_id, &mut paths, &mut seen)?;
     }
     Ok(paths)
@@ -1521,7 +1589,9 @@ fn update_rollout_session_meta_cwd(
         let mut raw = line.to_string();
         if let Ok(mut item) = serde_json::from_str::<Value>(body)
             && item.get("type") == Some(&json!("session_meta"))
-            && item["payload"]["id"] == thread_id
+            && ["id", "session_id"]
+                .iter()
+                .any(|key| item["payload"][*key] == thread_id)
         {
             matched = true;
             if item["payload"]["cwd"] != target_cwd

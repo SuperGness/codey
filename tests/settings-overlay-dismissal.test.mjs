@@ -19,6 +19,11 @@ test("settings modal keeps dismissal and stacking inside the overlay", async () 
     appSource,
     /function closeSettings\(\) \{[\s\S]*setConfig\(persistedConfigRef\.current\)[\s\S]*setDirty\(false\)[\s\S]*onClose\?\.\(\)/,
   );
+  assert.match(appSource, /function closeSettings\(\) \{\s*if \(isBusy\) return;/);
+  assert.match(
+    appSource,
+    /aria-label="关闭配置"[\s\S]{0,180}disabled=\{isBusy\}[\s\S]{0,100}onClick=\{handleCloseSettings\}/,
+  );
   assert.match(
     shellSource,
     /<Modal[\s\S]*closeOnClickOutside=\{false\}[\s\S]*closeOnEscape=\{false\}[\s\S]*onClose=\{onCancel\}/,
@@ -37,6 +42,8 @@ test("settings modal keeps dismissal and stacking inside the overlay", async () 
   );
   assert.match(appSource, /onCancel=\{handleCloseSettings\}/);
   assert.doesNotMatch(overlaySource, /codey-overlay-(?:backdrop|dialog)/);
+  assert.match(overlaySource, /try \{\s*hashToken = decodeURIComponent/);
+  assert.match(overlaySource, /toggle: \(\) => \(visible \? close\(\) : open\(\)\)/);
   assert.equal(constants.SETTINGS_OVERLAY_Z_INDEX, 2_147_483_647);
   assert.equal(constants.SETTINGS_OVERLAY_Z_INDEX_CSS, "2147483647");
 });

@@ -65,13 +65,27 @@ function urlForAsset(downloadBaseUrl, fileName) {
 }
 
 async function buildManifest({ version, tag, downloadBaseUrl, assetPaths }) {
+  let downloadUrl;
+  try {
+    downloadUrl = new URL(downloadBaseUrl);
+  } catch {
+    fail(`Download base URL is invalid: ${downloadBaseUrl}`);
+  }
+  if (downloadUrl.protocol !== "https:") {
+    fail(`Download base URL must use HTTPS: ${downloadBaseUrl}`);
+  }
   const expectedByName = new Map(
     artifactDefinitions.map((definition) => [
       `Codey-${version}-${definition.suffix}`,
       definition,
     ]),
   );
-  const providedPaths = new Map(assetPaths.map((assetPath) => [basename(assetPath), resolve(assetPath)]));
+  const providedPaths = new Map();
+  for (const assetPath of assetPaths) {
+    const fileName = basename(assetPath);
+    if (providedPaths.has(fileName)) fail(`Duplicate release asset name: ${fileName}`);
+    providedPaths.set(fileName, resolve(assetPath));
+  }
 
   const missing = [...expectedByName.keys()].filter((fileName) => !providedPaths.has(fileName));
   if (missing.length > 0) fail(`Missing release assets: ${missing.join(", ")}`);

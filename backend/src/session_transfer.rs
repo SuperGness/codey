@@ -406,6 +406,7 @@ fn import_session_bundle<R: BufRead>(
         .map(normalize_session_id)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("数据文件缺少会话 ID"))?;
+    validate_import_session_id(original_id)?;
     let db_path = active_thread_database(home)?
         .ok_or_else(|| anyhow::anyhow!("未找到可写入的 Codex 会话数据库"))?;
     let duplicated = thread_exists(home, original_id)?;
@@ -1280,6 +1281,21 @@ fn imported_rollout_path(home: &Path, session_id: &str) -> PathBuf {
         .join(format!("rollout-{}-{session_id}.jsonl", timestamp_millis()))
 }
 
+fn validate_import_session_id(session_id: &str) -> Result<()> {
+    if matches!(session_id, "." | "..")
+        || session_id.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                )
+        })
+    {
+        anyhow::bail!("会话 ID 包含不安全的文件名字符");
+    }
+    Ok(())
+}
+
 fn has_table(db: &Connection, table: &str) -> Result<bool> {
     Ok(db
         .query_row(
@@ -1361,6 +1377,14 @@ mod tests {
         };
         assert!(ensure_transfer_capacity(nearly_full, 0, 1).is_ok());
         assert!(ensure_transfer_capacity(nearly_full, 0, 2).is_err());
+    }
+
+    #[test]
+    fn imported_session_ids_must_be_safe_filename_components() {
+        assert!(validate_import_session_id("01900000-0000-7000-8000-000000000001").is_ok());
+        for session_id in ["../escape", "nested/id", "nested\\id", "bad\0id"] {
+            assert!(validate_import_session_id(session_id).is_err());
+        }
     }
 
     fn create_thread_db(home: &Path, session_id: &str, cwd: &Path, title: &str) -> PathBuf {

@@ -576,7 +576,7 @@
     }
     busy = true;
     updateButtonState();
-    const bridgeCall = callBridge(optimizePath, { text });
+    const bridgeCall = Promise.resolve().then(() => callBridge(optimizePath, { text }));
     const result = withTimeout(
       bridgeCall,
       optimizeTimeoutMs,

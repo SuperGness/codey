@@ -3,14 +3,14 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::settings::{BackendSettings, SettingsStore, normalize_codex_extra_args};
 use crate::status::{LaunchStatus, StatusStore};
@@ -19,6 +19,8 @@ use crate::status::{LaunchStatus, StatusStore};
 const POST_LAUNCH_COMPUTER_USE_GUARD_SECONDS: &[u64] = &[0, 5, 15, 30, 60, 120, 180, 240, 300];
 #[cfg_attr(not(windows), allow(dead_code))]
 const POST_LAUNCH_COMPUTER_USE_GUARD_STABLE_ATTEMPTS: usize = 3;
+const HELPER_MAX_CONNECTIONS: usize = 64;
+const HELPER_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 static PET_OVERLAY_SYNC_FAILED: AtomicBool = AtomicBool::new(false);
 #[cfg(windows)]
 static PET_CURSOR_DRIVER_FAILED: AtomicBool = AtomicBool::new(false);
@@ -621,13 +623,18 @@ impl LaunchHooks for DefaultLaunchHooks {
             }),
         );
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let connections = Arc::new(Semaphore::new(HELPER_MAX_CONNECTIONS));
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = &mut shutdown_rx => break,
                     accepted = listener.accept() => {
                         if let Ok((stream, addr)) = accepted {
+                            let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
+                                continue;
+                            };
                             tokio::spawn(async move {
+                                let _permit = permit;
                                 let _ = handle_helper_connection(stream, Some(addr)).await;
                             });
                         }
@@ -944,7 +951,7 @@ async fn handle_helper_connection_with_settings(
     mut stream: tokio::net::TcpStream,
     remote_addr: Option<SocketAddr>,
 ) -> anyhow::Result<()> {
-    let request_bytes = read_http_request(&mut stream).await?;
+    let request_bytes = read_http_request_with_timeout(&mut stream, HELPER_REQUEST_TIMEOUT).await?;
     let request = String::from_utf8_lossy(&request_bytes);
     let request_line = request.lines().next().unwrap_or_default();
     let mut parts = request_line.split_whitespace();
@@ -1146,6 +1153,15 @@ mod computer_use_tests {
         );
         assert_eq!(overlay_image_content_type(Path::new("overlay.txt")), None);
     }
+}
+
+async fn read_http_request_with_timeout(
+    stream: &mut tokio::net::TcpStream,
+    timeout: Duration,
+) -> anyhow::Result<Vec<u8>> {
+    tokio::time::timeout(timeout, read_http_request(stream))
+        .await
+        .context("helper request read timed out")?
 }
 
 async fn read_http_request(stream: &mut tokio::net::TcpStream) -> anyhow::Result<Vec<u8>> {
@@ -2034,6 +2050,24 @@ fn activate_packaged_app_blocking(app_user_model_id: &str, arguments: &str) -> a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn helper_request_read_times_out() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (client, accepted) =
+            tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
+        let _client = client.unwrap();
+        let (mut server, _) = accepted.unwrap();
+
+        let error = read_http_request_with_timeout(&mut server, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("timed out"));
+    }
 
     #[test]
     fn post_launch_guard_stops_after_stable_ready_artifacts() {

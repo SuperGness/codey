@@ -616,7 +616,7 @@ export function DialogContent({
         <Button
           aria-label="关闭"
           className="absolute! right-3 top-3 z-[1] h-8! w-8! p-0!"
-          onClick={() => dialog.setOpen(false)}
+          onClick={handleCancel}
           size="icon-sm"
           variant="ghost"
         >

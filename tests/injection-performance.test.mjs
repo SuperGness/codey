@@ -120,6 +120,14 @@ test("renderer core loads session tools after idle time or sidebar use", async (
     sessionTools,
     /window\.__codeySessionToolsInjectLoaded = true;\s*window\.__codeySessionToolsInjectLoading = false;\s*void reconcileStaleCompletedTask\(\);\s*scheduleInitialScan\(\)/,
   );
+  assert.match(
+    sessionTools,
+    /catch \(error\) \{\s*window\.__codeySessionToolsInjectLoading = false;\s*throw error;/,
+  );
+  assert.match(
+    promptOptimize,
+    /const bridgeCall = Promise\.resolve\(\)\.then\(\(\) => callBridge\(optimizePath, \{ text \}\)\)/,
+  );
   assert.doesNotMatch(sessionTools, /addStyle\(\);\s*scan\(\)/);
   assert.doesNotMatch(sessionTools, /installThreadUpdatedTimes\(document(?:, true)?\)/);
   assert.doesNotMatch(sessionTools, /pendingScanRoots\.add\(document\.documentElement\)/);

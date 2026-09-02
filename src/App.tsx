@@ -766,6 +766,7 @@ export function App({
   }
 
   function closeSettings() {
+    if (isBusy) return;
     if (persistedConfigRef.current) {
       setConfig(persistedConfigRef.current);
     }
@@ -1188,6 +1189,7 @@ export function App({
             <Button
               aria-label="关闭配置"
               className="flex-none max-[520px]:h-8! max-[520px]:w-8! max-[520px]:p-0!"
+              disabled={isBusy}
               onClick={handleCloseSettings}
               size="icon-sm"
               variant="ghost"

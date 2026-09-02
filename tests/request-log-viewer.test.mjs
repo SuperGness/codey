@@ -65,6 +65,7 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /删除全部请求日志？/);
   assert.match(viewer, /删除全部历史请求日志，且不可恢复/);
   assert.match(viewer, /确认删除全部日志/);
+  assert.match(viewer, /container=\{standalone \? document\.body : container\}/);
   assert.match(viewer, /disabled=\{clearing\}/);
   assert.doesNotMatch(viewer, /disabled=\{loading \|\| clearing \|\| result\?\.queryable !== true\}/);
   assert.match(viewer, /if \(clearInFlight\.current\) return/);
@@ -128,6 +129,7 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /flex w-36 max-w-36 items-center gap-1\.5 overflow-hidden/);
   assert.match(viewer, /className="shrink-0 whitespace-nowrap"/);
   assert.match(viewer, /onClick=\{\(\) => handleCopyId\(item\.codexSessionId!\)\}/);
+  assert.match(viewer, /navigator\.clipboard\.writeText\(requestId\)\.then\([\s\S]*setCopiedId\(requestId\)/);
   assert.match(viewer, /复制\$\{item\.codexSessionIsParent \? "父会话" : "会话"\} ID/);
   assert.match(viewer, /<span className="text-\[#8e8e93\]">—<\/span>/);
   assert.doesNotMatch(viewer, /codexSubagentSessionId/);

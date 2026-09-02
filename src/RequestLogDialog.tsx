@@ -311,11 +311,15 @@ export function RequestLogDialog({
 
   const handleCopyId = (requestId: string) => {
     if (!navigator.clipboard) return;
-    void navigator.clipboard.writeText(requestId);
-    setCopiedId(requestId);
-    window.setTimeout(() => {
-      setCopiedId((current) => (current === requestId ? null : current));
-    }, 1500);
+    void navigator.clipboard.writeText(requestId).then(
+      () => {
+        setCopiedId(requestId);
+        window.setTimeout(() => {
+          setCopiedId((current) => (current === requestId ? null : current));
+        }, 1500);
+      },
+      () => undefined,
+    );
   };
 
   const providerOptions = useMemo(() => {
@@ -929,7 +933,7 @@ export function RequestLogDialog({
         {clearConfirmationOpened ? (
           <DialogContent
             className="w-[min(460px,calc(100vw-32px))]"
-            container={container}
+            container={standalone ? document.body : container}
             zIndex={SETTINGS_OVERLAY_Z_INDEX}
             onEscapeKeyDown={(event) => {
               if (clearing) event.preventDefault();

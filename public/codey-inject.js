@@ -5,6 +5,7 @@
   if (window.__codeySessionToolsInjectLoaded) return;
   if (window.__codeySessionToolsInjectLoading) return;
   window.__codeySessionToolsInjectLoading = true;
+  try {
   const rendererSettingsButtonSelector = "#codey-settings-button";
   const toolbarId = "codey-message-toolbar";
   const toastId = "codey-runtime-toast";
@@ -3820,4 +3821,8 @@
   window.__codeySessionToolsInjectLoading = false;
   void reconcileStaleCompletedTask();
   scheduleInitialScan();
+  } catch (error) {
+    window.__codeySessionToolsInjectLoading = false;
+    throw error;
+  }
 })();

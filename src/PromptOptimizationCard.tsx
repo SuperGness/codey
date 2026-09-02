@@ -455,7 +455,7 @@ function PromptOptimizationCardComponent({
                           placeholder={
                             optimization.apiKeyConfigured &&
                             optimization.apiKey.trim() === ""
-                              ? "已保存（点击眼睛查看，或输入新 Key 替换）"
+                              ? "已保存（输入新 Key 可替换）"
                               : "sk-…"
                           }
                           autoComplete="new-password"
@@ -484,7 +484,7 @@ function PromptOptimizationCardComponent({
                         !optimization.clearApiKey &&
                         !optimization.apiKey.trim() ? (
                         <small className="field-hint">
-                          Key 已保存；点击眼睛可查看，直接输入可替换。
+                          Key 已保存；直接输入可替换。
                         </small>
                       ) : null}
                     </div>

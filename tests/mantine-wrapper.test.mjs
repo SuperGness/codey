@@ -27,6 +27,10 @@ test("shared controls are backed by Mantine without Semi remnants", async () => 
     assert.match(wrapper, new RegExp(`\\b${component}\\b`));
   }
   assert.match(wrapper, /from "@mantine\/core"/);
+  assert.match(
+    wrapper,
+    /aria-label="关闭"[\s\S]{0,180}onClick=\{handleCancel\}/,
+  );
   assert.match(packageSource, /"@mantine\/core": "9\.5\.2"/);
   assert.doesNotMatch(`${wrapper}\n${styles}\n${packageSource}`, /@douyinfe|\.semi-|--semi-/);
 });

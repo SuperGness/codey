@@ -86,6 +86,12 @@ fn create_codex_thread_db(path: &Path, rollout_path: &Path) {
     .unwrap();
 }
 
+fn managed_rollout_path(home: &Path, name: &str) -> std::path::PathBuf {
+    let path = home.join("sessions").join(name);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    path
+}
+
 fn thread_count(path: &Path, id: &str) -> i64 {
     let db = Connection::open(path).unwrap();
     db.query_row("SELECT COUNT(*) FROM threads WHERE id = ?1", [id], |row| {
@@ -215,7 +221,7 @@ fn undo_fails_on_existing_db_row_conflict_without_overwriting_new_row() {
 fn undo_fails_on_existing_rollout_file_conflict_without_overwriting_new_file() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
-    let rollout_path = tmp.path().join("rollout.jsonl");
+    let rollout_path = managed_rollout_path(tmp.path(), "rollout.jsonl");
     fs::write(&rollout_path, "old rollout\n").unwrap();
     create_codex_thread_db(&db_path, &rollout_path);
     let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
@@ -237,6 +243,30 @@ fn undo_fails_on_existing_rollout_file_conflict_without_overwriting_new_file() {
         .unwrap(),
         0
     );
+}
+
+#[test]
+fn undo_rejects_invalid_file_content_before_restoring_database_rows() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = managed_rollout_path(tmp.path(), "rollout.jsonl");
+    fs::write(&rollout_path, "old rollout\n").unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let backup_store = BackupStore::new(tmp.path().join("backups"));
+    let adapter = SQLiteStorageAdapter::new(&db_path, backup_store.clone());
+    let deleted = adapter.delete_local(&session("t1", "Codex Thread"));
+    let token = deleted.undo_token.as_deref().unwrap();
+    let backup_path = backup_store.path_for(token);
+    let mut backup: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+    backup["tables"]["__files"][0]["content_b64"] = json!("not base64");
+    fs::write(&backup_path, serde_json::to_string_pretty(&backup).unwrap()).unwrap();
+
+    let restored = adapter.undo(token);
+
+    assert_eq!(restored.status, DeleteStatus::Failed);
+    assert!(!rollout_path.exists());
+    assert_eq!(thread_count(&db_path, "t1"), 0);
 }
 
 #[test]
@@ -286,7 +316,7 @@ fn undo_fails_for_unknown_backup_table_without_executing_it() {
 fn undo_rejects_backup_file_paths_outside_thread_rollouts() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
-    let rollout_path = tmp.path().join("rollout.jsonl");
+    let rollout_path = managed_rollout_path(tmp.path(), "rollout.jsonl");
     let outside_path = tmp.path().join("outside.txt");
     fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
     create_codex_thread_db(&db_path, &rollout_path);
@@ -322,6 +352,38 @@ fn undo_rejects_backup_file_paths_outside_thread_rollouts() {
         .unwrap(),
         0
     );
+}
+
+#[test]
+fn undo_rejects_a_tampered_thread_path_outside_managed_rollouts() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_path = managed_rollout_path(tmp.path(), "rollout.jsonl");
+    let outside_path = tmp.path().join("outside.txt");
+    fs::write(&rollout_path, "old rollout\n").unwrap();
+    create_codex_thread_db(&db_path, &rollout_path);
+    let backup_store = BackupStore::new(tmp.path().join("backups"));
+    let adapter = SQLiteStorageAdapter::new(&db_path, backup_store.clone());
+    let deleted = adapter.delete_local(&session("t1", "Codex Thread"));
+    let token = deleted.undo_token.as_deref().unwrap();
+    let backup_path = backup_store.path_for(token);
+    let mut backup: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&backup_path).unwrap()).unwrap();
+    backup["tables"]["threads"][0]["rollout_path"] =
+        json!(outside_path.to_string_lossy().to_string());
+    backup["tables"]["__files"][0]["path"] = json!(outside_path.to_string_lossy().to_string());
+    fs::write(&backup_path, serde_json::to_string_pretty(&backup).unwrap()).unwrap();
+
+    let restored = adapter.undo(token);
+
+    assert_eq!(restored.status, DeleteStatus::Failed);
+    assert!(
+        restored
+            .message
+            .contains("outside managed session directories")
+    );
+    assert!(!outside_path.exists());
+    assert_eq!(thread_count(&db_path, "t1"), 0);
 }
 
 #[test]
@@ -366,7 +428,7 @@ fn generic_delete_rolls_back_when_later_delete_fails() {
 fn delete_codex_thread_schema_removes_related_rows_file_and_undo_restores_everything() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
-    let rollout_path = tmp.path().join("rollout.jsonl");
+    let rollout_path = managed_rollout_path(tmp.path(), "rollout.jsonl");
     fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
     create_codex_thread_db(&db_path, &rollout_path);
     let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
@@ -423,6 +485,26 @@ fn delete_codex_thread_schema_removes_related_rows_file_and_undo_restores_everyt
         .unwrap(),
         Some("t1".to_string())
     );
+}
+
+#[test]
+fn permanent_delete_rejects_rollouts_outside_managed_directories() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let outside_path = tmp.path().join("outside.jsonl");
+    fs::write(&outside_path, "do not delete\n").unwrap();
+    create_codex_thread_db(&db_path, &outside_path);
+
+    let result = delete_local_from_paths(vec![db_path.clone()], &session("t1", "Codex Thread"));
+
+    assert_eq!(result.status, DeleteStatus::Failed);
+    assert!(
+        result
+            .message
+            .contains("outside managed session directories")
+    );
+    assert!(outside_path.exists());
+    assert_eq!(thread_count(&db_path, "t1"), 1);
 }
 
 #[test]
@@ -503,8 +585,8 @@ fn delete_local_from_paths_removes_duplicate_threads_from_all_databases() {
     let tmp = tempdir().unwrap();
     let first_db = tmp.path().join("first.sqlite");
     let second_db = tmp.path().join("second.sqlite");
-    let first_rollout = tmp.path().join("first.jsonl");
-    let second_rollout = tmp.path().join("second.jsonl");
+    let first_rollout = managed_rollout_path(tmp.path(), "first.jsonl");
+    let second_rollout = managed_rollout_path(tmp.path(), "second.jsonl");
     fs::write(&first_rollout, "{\"type\":\"message\"}\n").unwrap();
     fs::write(&second_rollout, "{\"type\":\"message\"}\n").unwrap();
     create_codex_thread_db(&first_db, &first_rollout);
@@ -599,7 +681,7 @@ fn delete_local_from_paths_removes_an_orphaned_rollout_without_a_thread_row() {
 fn delete_local_from_paths_surfaces_catalog_failure_after_thread_deletion() {
     let tmp = tempdir().unwrap();
     let thread_db_path = tmp.path().join("threads.db");
-    let rollout_path = tmp.path().join("t1.jsonl");
+    let rollout_path = managed_rollout_path(tmp.path(), "t1.jsonl");
     fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
     create_codex_thread_db(&thread_db_path, &rollout_path);
 
@@ -753,8 +835,8 @@ fn move_thread_workspace_from_paths_uses_database_that_contains_thread() {
     let tmp = tempdir().unwrap();
     let stale_db = tmp.path().join("stale.sqlite");
     let live_db = tmp.path().join("live.sqlite");
-    let stale_rollout = tmp.path().join("stale.jsonl");
-    let live_rollout = tmp.path().join("live.jsonl");
+    let stale_rollout = managed_rollout_path(tmp.path(), "stale.jsonl");
+    let live_rollout = managed_rollout_path(tmp.path(), "live.jsonl");
     fs::write(&stale_rollout, "{\"type\":\"message\"}\n").unwrap();
     fs::write(
         &live_rollout,
@@ -795,7 +877,7 @@ fn move_thread_workspace_from_paths_uses_database_that_contains_thread() {
 fn move_thread_workspace_rolls_back_database_when_rollout_update_fails() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
-    let rollout_path = tmp.path().join("rollout.jsonl");
+    let rollout_path = managed_rollout_path(tmp.path(), "rollout.jsonl");
     fs::write(&rollout_path, [0xff, 0xfe]).unwrap();
     create_codex_thread_db(&db_path, &rollout_path);
     let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
@@ -943,7 +1025,7 @@ fn delete_local_session_removes_codex_automation_run_and_inbox_items() {
 fn undo_codex_thread_delete_fails_when_agent_job_was_reassigned() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
-    let rollout_path = tmp.path().join("rollout.jsonl");
+    let rollout_path = managed_rollout_path(tmp.path(), "rollout.jsonl");
     fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
     create_codex_thread_db(&db_path, &rollout_path);
     let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
@@ -986,7 +1068,7 @@ fn undo_codex_thread_delete_fails_when_agent_job_was_reassigned() {
 fn codex_delete_rolls_back_when_related_delete_fails() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
-    let rollout_path = tmp.path().join("rollout.jsonl");
+    let rollout_path = managed_rollout_path(tmp.path(), "rollout.jsonl");
     fs::write(&rollout_path, "{\"type\":\"message\"}\n").unwrap();
     create_codex_thread_db(&db_path, &rollout_path);
     let db = Connection::open(&db_path).unwrap();
@@ -1060,10 +1142,10 @@ fn missing_db_and_unsupported_schema_return_failed_results() {
 fn archived_lookup_and_workspace_move_match_expected_shape() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
-    let rollout_path = tmp.path().join("rollout.jsonl");
+    let rollout_path = managed_rollout_path(tmp.path(), "rollout.jsonl");
     fs::write(
         &rollout_path,
-        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t1\",\"cwd\":\"/old/project\",\"title\":\"Codex Thread\"}}\n{\"type\":\"session_meta\",\"payload\":{\"id\":\"other\",\"cwd\":\"/old/project\"}}\n",
+        "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"t1\",\"cwd\":\"/old/project\",\"title\":\"Codex Thread\"}}\n{\"type\":\"session_meta\",\"payload\":{\"id\":\"other\",\"cwd\":\"/old/project\"}}\n",
     )
     .unwrap();
     create_codex_thread_db(&db_path, &rollout_path);
@@ -1091,7 +1173,9 @@ fn archived_lookup_and_workspace_move_match_expected_shape() {
     assert_eq!(moved["updated_at"], 100);
     assert_eq!(moved["updated_at_ms"], 100000);
     let text = fs::read_to_string(&rollout_path).unwrap();
-    assert!(text.contains("\"id\":\"t1\",\"cwd\":\"/new/project\""));
+    let metadata: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    assert_eq!(metadata["payload"]["session_id"], "t1");
+    assert_eq!(metadata["payload"]["cwd"], "/new/project");
     assert!(text.contains("\"id\":\"other\",\"cwd\":\"/old/project\""));
 
     assert_eq!(
@@ -1106,10 +1190,36 @@ fn archived_lookup_and_workspace_move_match_expected_shape() {
 }
 
 #[test]
+fn archived_lookup_supports_legacy_schema_without_archived_at() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let db = Connection::open(&db_path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE threads (
+            id TEXT PRIMARY KEY,
+            rollout_path TEXT,
+            title TEXT,
+            cwd TEXT,
+            archived INTEGER,
+            updated_at INTEGER
+        );
+        INSERT INTO threads VALUES ('t1', '', 'Legacy Thread', '/project', 1, 100);",
+    )
+    .unwrap();
+    drop(db);
+    let adapter = SQLiteStorageAdapter::new(&db_path, BackupStore::new(tmp.path().join("backups")));
+
+    assert_eq!(
+        adapter.find_archived_thread_by_title("Legacy Thread"),
+        Some(session("t1", "Legacy Thread"))
+    );
+}
+
+#[test]
 fn thread_usage_history_reads_rollout_token_count_events() {
     let tmp = tempdir().unwrap();
     let db_path = tmp.path().join("state_5.sqlite");
-    let rollout_path = tmp.path().join("rollout.jsonl");
+    let rollout_path = managed_rollout_path(tmp.path(), "rollout.jsonl");
     fs::write(
         &rollout_path,
         concat!(

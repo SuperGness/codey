@@ -26,6 +26,8 @@ test("all configuration API keys use PasswordInput with local values", async () 
     /<PasswordInput[\s\S]*?id=\{apiKeyInputId\}[\s\S]*?onVisibilityChange=/,
   );
   assert.doesNotMatch(promptOptimization, /reveal_prompt_optimization_api_key/);
+  assert.match(promptOptimization, /已保存（输入新 Key 可替换）/);
+  assert.doesNotMatch(promptOptimization, /Key 已保存；点击眼睛可查看/);
   assert.doesNotMatch(api, /reveal_(?:route|prompt_optimization)_api_key/);
   assert.doesNotMatch(backend, /profile\.api_key\.clear\(\)/);
   assert.doesNotMatch(backend, /prompt_optimization\.api_key\.clear\(\)/);

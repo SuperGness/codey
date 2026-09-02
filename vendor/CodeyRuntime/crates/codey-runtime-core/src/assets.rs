@@ -1,7 +1,7 @@
 use base64::Engine;
 use serde_json::Map;
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Component, Path};
 
 use crate::settings::BackendSettings;
 
@@ -229,7 +229,7 @@ fn expand_local_plugin_marketplace(
                     .map(str::to_string)
             })
             .unwrap_or_default();
-        if plugin_name.is_empty() {
+        if !is_safe_plugin_name(&plugin_name) {
             continue;
         }
         let manifest_path = marketplace_root
@@ -262,6 +262,18 @@ fn expand_local_plugin_marketplace(
             Value::Bool(installed_plugins.contains(&format!("{plugin_name}@{marketplace_name}"))),
         );
     }
+}
+
+fn is_safe_plugin_name(name: &str) -> bool {
+    !name.is_empty()
+        && !matches!(name, "." | "..")
+        && !name.chars().any(|character| {
+            character.is_control()
+                || matches!(
+                    character,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                )
+        })
 }
 
 fn absolutize_plugin_icon_paths(plugin: &mut Map<String, Value>, plugin_root: &Path) {
@@ -298,6 +310,13 @@ fn absolutize_plugin_asset_path(value: &str, root: &Path) -> Option<String> {
         return None;
     }
     let relative = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    if relative.contains('\\')
+        || Path::new(relative)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
     Some(root.join(relative).to_string_lossy().to_string())
 }
 
@@ -488,5 +507,25 @@ mod tests {
             array[2]["plugins"][0]["marketplacePath"].as_str(),
             Some("openai-curated-remote")
         );
+    }
+
+    #[test]
+    fn local_plugin_paths_reject_traversal() {
+        let root = Path::new("/plugins/example");
+
+        assert!(is_safe_plugin_name("example"));
+        assert!(!is_safe_plugin_name("../example"));
+        assert!(!is_safe_plugin_name("..\\example"));
+        assert!(!is_safe_plugin_name("C:example"));
+        assert_eq!(
+            absolutize_plugin_asset_path("assets/icon.png", root),
+            Some(root.join("assets/icon.png").to_string_lossy().to_string())
+        );
+        assert_eq!(absolutize_plugin_asset_path("../icon.png", root), None);
+        assert_eq!(
+            absolutize_plugin_asset_path("assets/../../icon.png", root),
+            None
+        );
+        assert_eq!(absolutize_plugin_asset_path("..\\icon.png", root), None);
     }
 }
