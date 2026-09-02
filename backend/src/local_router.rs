@@ -1600,11 +1600,10 @@ impl RouterServer {
                 &resolved.upstream_model,
             );
         }
-        // Subagents always use their own HTTP/SSE upstream request. Keeping
-        // them out of the cached upstream WebSocket prevents concurrent agents
-        // from competing with the main agent for one stateful connection.
+        // Every downstream socket owns its upstream WebSocket cache. Subagents
+        // therefore keep incremental `previous_response_id` state on their own
+        // upstream connection without sharing the main agent's connection.
         if downstream_websocket
-            && !subagent_request
             && request_kind == ResponsesRequestKind::Create
             && stream_requested
             && bridge == ProtocolBridge::NativeResponses
@@ -1618,13 +1617,6 @@ impl RouterServer {
             }
             if let Some(probe) = downstream.request_log_probe() {
                 probe.mark_fallback("websocket_to_http_sse");
-            }
-            if remove_official_websocket_fallback_previous_response_id(
-                resolved.route.official_account,
-                &mut upstream_body,
-            ) {
-                body_mutated = true;
-                encoded_body = None;
             }
         }
         let fallback_headers = headers.clone();
@@ -1966,13 +1958,6 @@ fn remove_codey_synthetic_previous_response_id(body: &mut Value) -> bool {
         return false;
     }
     remove_previous_response_id(body)
-}
-
-fn remove_official_websocket_fallback_previous_response_id(
-    official_account: bool,
-    body: &mut Value,
-) -> bool {
-    official_account && remove_previous_response_id(body)
 }
 
 fn remove_previous_response_id(body: &mut Value) -> bool {
@@ -10920,59 +10905,43 @@ mod tests {
         router.stop().await.unwrap();
     }
 
+    #[allow(clippy::result_large_err)]
     #[tokio::test]
-    async fn subagents_use_isolated_sse_and_accept_non_streaming_http_fallback() {
+    async fn subagents_use_isolated_upstream_websockets() {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let upstream_address = upstream.local_addr().unwrap();
         let upstream_task = tokio::spawn(async move {
             let mut requests = Vec::new();
             for sequence in 1..=2 {
-                let (mut stream, _) = upstream.accept().await.unwrap();
-                let request = read_http_request(&mut stream).await.unwrap();
-                assert_eq!(
-                    request.method, "POST",
-                    "subagents must not open upstream WS"
-                );
-                assert_eq!(request.path, "/v1/responses");
-                let body = serde_json::from_slice::<Value>(&request.body).unwrap();
-                assert_eq!(body["stream"], true, "subagents should prefer SSE");
-
-                let response = json!({
-                    "id":format!("resp-subagent-{sequence}"),
-                    "object":"response",
-                    "status":"completed",
-                    "model":body["model"],
-                    "output":[],
-                });
-                let (content_type, payload) = if sequence == 1 {
-                    (
-                        "text/event-stream",
-                        format!(
-                            "event: response.completed\ndata: {}\n\n",
-                            serde_json::to_string(&json!({
-                                "type":"response.completed",
-                                "response":response,
-                            }))
-                            .unwrap()
-                        ),
-                    )
-                } else {
-                    (
-                        "application/json",
-                        serde_json::to_string(&response).unwrap(),
-                    )
+                let (stream, _) = tokio::time::timeout(Duration::from_secs(1), upstream.accept())
+                    .await
+                    .expect("each subagent must open its own upstream WebSocket")
+                    .unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let WebSocketMessage::Text(text) = socket.next().await.unwrap().unwrap() else {
+                    panic!("expected subagent response.create text message");
                 };
-                stream
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
-                            payload.len()
-                        )
-                        .as_bytes(),
-                    )
+                let request = serde_json::from_str::<Value>(text.as_str()).unwrap();
+                assert_eq!(request["type"], "response.create");
+                assert!(request.get("stream").is_none());
+                socket
+                    .send(WebSocketMessage::Text(
+                        serde_json::to_string(&json!({
+                            "type":"response.completed",
+                            "response":{
+                                "id":format!("resp-subagent-{sequence}"),
+                                "object":"response",
+                                "status":"completed",
+                                "model":request["model"],
+                                "output":[],
+                            }
+                        }))
+                        .unwrap()
+                        .into(),
+                    ))
                     .await
                     .unwrap();
-                requests.push(body);
+                requests.push(request);
             }
             requests
         });
@@ -10985,12 +10954,8 @@ mod tests {
         let alias = model_alias(&provider_id, &model);
 
         for (header, value, input) in [
-            ("x-openai-subagent", "codey_worker", "sse child"),
-            (
-                "x-codex-parent-thread-id",
-                "parent-thread",
-                "http fallback child",
-            ),
+            ("x-openai-subagent", "codey_worker", "first child"),
+            ("x-codex-parent-thread-id", "parent-thread", "second child"),
         ] {
             let mut socket =
                 connect_router_websocket_with_headers(&endpoint, &[(header, value)]).await;
@@ -11001,8 +10966,8 @@ mod tests {
 
         let requests = upstream_task.await.unwrap();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0]["input"], "sse child");
-        assert_eq!(requests[1]["input"], "http fallback child");
+        assert_eq!(requests[0]["input"], "first child");
+        assert_eq!(requests[1]["input"], "second child");
         router.stop().await.unwrap();
     }
 

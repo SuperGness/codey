@@ -111,7 +111,13 @@ pub(super) fn collect_exit_status(
         }
         Value::String(value) if allow_plain_text_status && value.len() <= 64 * 1024 => {
             if let Ok(parsed) = serde_json::from_str::<Value>(value) {
-                collect_exit_status(&parsed, exit_codes, error, depth + 1, false);
+                collect_exit_status(
+                    &parsed,
+                    exit_codes,
+                    error,
+                    depth + 1,
+                    allow_plain_text_status,
+                );
             } else if let Some(exit_code) = parse_plain_text_exit_code(value) {
                 exit_codes.push(exit_code);
             } else if let Some(exit_code) = parse_unified_exec_envelope_exit_code(value) {

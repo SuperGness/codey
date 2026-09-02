@@ -9456,6 +9456,14 @@ mod tests {
             AcceptanceEvidence::MissingExitStatus
         );
         assert_eq!(
+            classify_acceptance_evidence(Some(&json!({
+                "output": [
+                    { "type": "input_text", "text": "{\"exit_code\":0}" }
+                ]
+            }))),
+            AcceptanceEvidence::MissingExitStatus
+        );
+        assert_eq!(
             classify_acceptance_evidence(Some(&Value::String(
                 "test output\nexit code: 0".to_string()
             ))),
@@ -10144,10 +10152,13 @@ mod tests {
             "runtime-b",
             "session-a",
             Some(&command),
-            Some(&json!([
-                { "type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n" },
-                { "type": "input_text", "text": "{\"exit_code\":0,\"output\":\"\"}" }
-            ])),
+            Some(&Value::String(
+                serde_json::to_string(&json!([
+                    { "type": "input_text", "text": "Script completed\nWall time 0.1 seconds\nOutput:\n" },
+                    { "type": "input_text", "text": "{\"exit_code\":0,\"output\":\"\"}" }
+                ]))
+                .unwrap(),
+            )),
             50,
         )
         .unwrap();

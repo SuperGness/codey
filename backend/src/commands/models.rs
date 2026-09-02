@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
@@ -1729,7 +1729,7 @@ pub(super) fn websocket_transport_requires_restart(
     applied: &CodeyConfig,
     current: &CodeyConfig,
 ) -> bool {
-    websocket_route_ids(applied) != websocket_route_ids(current)
+    applied.runtime_supports_websockets() != current.runtime_supports_websockets()
         || applied.runtime_websocket_model_aliases() != current.runtime_websocket_model_aliases()
 }
 
@@ -1768,15 +1768,6 @@ pub(super) fn runtime_supports_current_routes_for_hot_reload(
     official_route_snapshots(current)
         .into_iter()
         .all(|(provider_id, route)| applied.get(&provider_id) == Some(&route))
-}
-
-fn websocket_route_ids(config: &CodeyConfig) -> BTreeSet<String> {
-    config
-        .profiles
-        .iter()
-        .filter(|profile| config.route_supports_websockets_this_launch(profile))
-        .map(|profile| profile.provider_id().to_string())
-        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3334,6 +3325,18 @@ mod tests {
         assert!(!runtime_supports_current_routes_for_hot_reload(
             &enabled, &applied
         ));
+
+        let mut mixed = enabled.clone();
+        let mut http_route = crate::config::ProviderProfile::new("HTTP Route");
+        http_route.id = "route-http".into();
+        http_route.base_url = "https://route-http.example/v1".into();
+        http_route.api_key = "route-http-secret".into();
+        http_route.normalize();
+        mixed.profiles.push(http_route);
+        assert!(websocket_transport_requires_restart(&enabled, &mixed));
+        assert!(!runtime_supports_current_routes_for_hot_reload(
+            &enabled, &mixed
+        ));
     }
 
     #[test]
@@ -3422,10 +3425,7 @@ mod tests {
             .selected_models_by_provider
             .insert("openai".into(), vec!["gpt-5.6-sol".into()]);
 
-        assert_eq!(
-            websocket_route_ids(&available),
-            BTreeSet::from(["openai".into()])
-        );
+        assert!(available.runtime_supports_websockets());
         assert_eq!(
             available.runtime_websocket_model_aliases(),
             vec![crate::local_router::model_alias("openai", "gpt-5.6-sol")]
@@ -3433,7 +3433,7 @@ mod tests {
 
         let mut unavailable = available.clone();
         unavailable.official_account_available_this_launch = false;
-        assert!(websocket_route_ids(&unavailable).is_empty());
+        assert!(!unavailable.runtime_supports_websockets());
         assert!(unavailable.runtime_websocket_model_aliases().is_empty());
         assert!(websocket_transport_requires_restart(
             &available,
