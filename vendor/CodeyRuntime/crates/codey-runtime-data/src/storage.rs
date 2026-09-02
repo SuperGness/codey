@@ -81,7 +81,9 @@ fn delete_local_permanently(db_path: &Path, session: &SessionRef) -> DeleteResul
             Some(SchemaKind::GenericSessions) => {
                 permanently_delete_generic_session(&mut db, session)
             }
-            Some(SchemaKind::CodexThreads) => permanently_delete_codex_thread(&mut db, session),
+            Some(SchemaKind::CodexThreads) => {
+                permanently_delete_codex_thread(db_path, &mut db, session)
+            }
             Some(SchemaKind::CodexAutomationRuns) => {
                 permanently_delete_codex_automation_run(&mut db, session)
             }
@@ -120,18 +122,14 @@ fn permanently_delete_generic_session(
 }
 
 fn permanently_delete_codex_thread(
+    db_path: &Path,
     db: &mut Connection,
     session: &SessionRef,
 ) -> anyhow::Result<DeleteResult> {
     let thread_id = normalize_codex_thread_id(&session.session_id);
     let thread_rows = select_dicts(db, "SELECT * FROM threads WHERE id = ?1", &[&thread_id])?;
-    let rollout_paths = thread_rows
-        .iter()
-        .filter_map(|row| row.get("rollout_path").and_then(Value::as_str))
-        .filter(|path| !path.trim().is_empty())
-        .map(PathBuf::from)
-        .collect::<Vec<_>>();
-    let mut found = !thread_rows.is_empty();
+    let rollout_paths = codex_thread_rollout_paths(db_path, &thread_rows, &thread_id)?;
+    let mut found = !thread_rows.is_empty() || !rollout_paths.is_empty();
     for (table, where_clause) in [
         ("thread_dynamic_tools", "thread_id = ?1"),
         ("thread_goals", "thread_id = ?1"),
@@ -1414,6 +1412,94 @@ fn rollout_file_backups(thread_rows: Option<&Vec<Value>>) -> Vec<Value> {
             }))
         })
         .collect()
+}
+
+fn codex_thread_rollout_paths(
+    db_path: &Path,
+    thread_rows: &[Value],
+    thread_id: &str,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    for path in thread_rows
+        .iter()
+        .filter_map(|row| row.get("rollout_path").and_then(Value::as_str))
+        .filter(|path| !path.trim().is_empty())
+    {
+        add_rollout_path(&mut paths, &mut seen, PathBuf::from(path));
+    }
+
+    let Some(db_dir) = db_path.parent() else {
+        return Ok(paths);
+    };
+    let home = if db_dir.ends_with("sqlite") {
+        db_dir.parent()
+    } else {
+        Some(db_dir)
+    };
+    for root in home
+        .into_iter()
+        .flat_map(|home| [home.join("sessions"), home.join("archived_sessions")])
+    {
+        collect_matching_rollout_paths(&root, thread_id, &mut paths, &mut seen)?;
+    }
+    Ok(paths)
+}
+
+fn add_rollout_path(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    if seen.insert(path.clone()) {
+        paths.push(path);
+    }
+}
+
+fn collect_matching_rollout_paths(
+    root: &Path,
+    thread_id: &str,
+    paths: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+) -> anyhow::Result<()> {
+    let metadata = match fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(root)?;
+    for entry in entries {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_matching_rollout_paths(&path, thread_id, paths, seen)?;
+        } else if file_type.is_file()
+            && path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+            && rollout_matches_thread_id(&path, thread_id)?
+        {
+            add_rollout_path(paths, seen, path);
+        }
+    }
+    Ok(())
+}
+
+fn rollout_matches_thread_id(path: &Path, thread_id: &str) -> anyhow::Result<bool> {
+    for line in BufReader::new(File::open(path)?).lines() {
+        let line = line?;
+        let Ok(event) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(metadata) = event
+            .get("payload")
+            .filter(|_| event.get("type").and_then(Value::as_str) == Some("session_meta"))
+        else {
+            continue;
+        };
+        return Ok(["id", "session_id"]
+            .iter()
+            .any(|key| metadata.get(*key).and_then(Value::as_str) == Some(thread_id)));
+    }
+    Ok(false)
 }
 
 fn update_rollout_session_meta_cwd(

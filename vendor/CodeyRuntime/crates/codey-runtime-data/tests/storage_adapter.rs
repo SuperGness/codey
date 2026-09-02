@@ -527,6 +527,75 @@ fn delete_local_from_paths_removes_duplicate_threads_from_all_databases() {
 }
 
 #[test]
+fn delete_local_from_paths_removes_all_rollouts_with_the_deleted_thread_id() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let live_dir = tmp.path().join("sessions/2026/07/18");
+    let archived_dir = tmp.path().join("archived_sessions/2026/07/17");
+    fs::create_dir_all(&live_dir).unwrap();
+    fs::create_dir_all(&archived_dir).unwrap();
+    let live_rollout = live_dir.join("current.jsonl");
+    let stale_live_rollout = live_dir.join("previous.jsonl");
+    let stale_archived_rollout = archived_dir.join("archived.jsonl");
+    let other_rollout = archived_dir.join("unrelated.jsonl");
+    fs::write(
+        &live_rollout,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t1\"}}\n",
+    )
+    .unwrap();
+    fs::write(
+        &stale_live_rollout,
+        "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"t1\"}}\n",
+    )
+    .unwrap();
+    fs::write(
+        &stale_archived_rollout,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t1\"}}\n",
+    )
+    .unwrap();
+    fs::write(
+        &other_rollout,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t2\"}}\n",
+    )
+    .unwrap();
+    create_codex_thread_db(&db_path, &live_rollout);
+
+    let result =
+        delete_local_from_paths(vec![db_path.clone()], &session("local:t1", "Codex Thread"));
+
+    assert_eq!(result.status, DeleteStatus::LocalDeleted);
+    assert_eq!(thread_count(&db_path, "t1"), 0);
+    assert!(!live_rollout.exists());
+    assert!(!stale_live_rollout.exists());
+    assert!(!stale_archived_rollout.exists());
+    assert!(other_rollout.exists());
+}
+
+#[test]
+fn delete_local_from_paths_removes_an_orphaned_rollout_without_a_thread_row() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("state_5.sqlite");
+    let rollout_dir = tmp.path().join("sessions/2026/07/18");
+    fs::create_dir_all(&rollout_dir).unwrap();
+    let rollout = rollout_dir.join("orphaned.jsonl");
+    fs::write(
+        &rollout,
+        "{\"type\":\"session_meta\",\"payload\":{\"id\":\"t1\"}}\n",
+    )
+    .unwrap();
+    create_codex_thread_db(&db_path, &rollout);
+    Connection::open(&db_path)
+        .unwrap()
+        .execute("DELETE FROM threads WHERE id = 't1'", [])
+        .unwrap();
+
+    let result = delete_local_from_paths(vec![db_path], &session("local:t1", "Codex Thread"));
+
+    assert_eq!(result.status, DeleteStatus::LocalDeleted);
+    assert!(!rollout.exists());
+}
+
+#[test]
 fn delete_local_from_paths_surfaces_catalog_failure_after_thread_deletion() {
     let tmp = tempdir().unwrap();
     let thread_db_path = tmp.path().join("threads.db");
