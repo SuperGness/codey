@@ -85,6 +85,11 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /statusCode < 200 \|\| statusCode >= 300/);
   assert.match(viewer, /<IconQuestionMark/);
   assert.match(viewer, /查看上游错误信息/);
+  assert.match(viewer, /cancelled: \{ label: "已中断"/);
+  assert.match(viewer, /downstream_event_write_failed/);
+  assert.match(viewer, /completionReason === "scope_dropped"/);
+  assert.match(viewer, /查看中断原因/);
+  assert.match(viewer, /`HTTP \$\{item\.statusCode\}`/);
   assert.match(viewer, /<Tooltip[\s\S]*autoAdjustOverflow/);
   for (const reason of [
     "not_reported_by_upstream",

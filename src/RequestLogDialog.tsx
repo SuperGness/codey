@@ -121,7 +121,7 @@ const statusOptions = [
   { label: "成功", value: "succeeded" },
   { label: "失败", value: "failed" },
   { label: "未完成", value: "incomplete" },
-  { label: "已取消", value: "cancelled" },
+  { label: "已中断", value: "cancelled" },
 ];
 
 const protocolOptions = [
@@ -143,8 +143,52 @@ const statusPresentation: Record<
   succeeded: { label: "成功", variant: "success" },
   failed: { label: "失败", variant: "destructive" },
   incomplete: { label: "未完成", variant: "warning" },
-  cancelled: { label: "已取消", variant: "secondary" },
+  cancelled: { label: "已中断", variant: "secondary" },
 };
+
+const cancellationPresentations: Record<string, { label: string; message: string }> = {
+  downstream_stream_header_write_failed: {
+    label: "响应头未送达",
+    message: "发送流式响应头时连接已断开，HTTP 响应未完整建立。",
+  },
+  downstream_event_write_failed: {
+    label: "连接中断",
+    message: "HTTP 响应已建立，但流式内容传输期间连接断开。通常是客户端停止请求、关闭页面或网络中断。",
+  },
+  downstream_stream_finish_failed: {
+    label: "结束时断开",
+    message: "流式内容已经发送，但连接在结束响应时断开。",
+  },
+  downstream_json_write_failed: {
+    label: "响应未送达",
+    message: "响应已经生成，但写回客户端时连接断开。",
+  },
+  downstream_proxy_write_failed: {
+    label: "连接中断",
+    message: "转发上游响应时客户端连接断开。",
+  },
+  downstream_error_write_failed: {
+    label: "错误响应未送达",
+    message: "错误响应已经生成，但写回客户端时连接断开。",
+  },
+};
+
+function cancellationPresentation(item: RouteRequestLogItem) {
+  if (item.status !== "cancelled") return null;
+  if (item.errorCode && cancellationPresentations[item.errorCode]) {
+    return cancellationPresentations[item.errorCode];
+  }
+  if (item.completionReason === "scope_dropped") {
+    return {
+      label: "任务提前结束",
+      message: "请求处理任务在响应完成前结束，可能是客户端取消、路由重启或程序退出。",
+    };
+  }
+  return {
+    label: "请求未完成",
+    message: "请求已经开始，但响应没有完整传输到客户端。",
+  };
+}
 
 function optionalFilter(value: string) {
   return value === "all" ? undefined : value;
@@ -621,6 +665,7 @@ export function RequestLogDialog({
                     const usageUnavailable = usageUnavailablePresentation(
                       item.usageUnavailableReason,
                     );
+                    const cancellation = cancellationPresentation(item);
                     return (
                       <Table.Tr key={`${item.timestampUnixMs}:${item.requestId}`}>
                         <Table.Td>
@@ -734,10 +779,37 @@ export function RequestLogDialog({
                                   </ActionIcon>
                                 </Tooltip>
                               ) : null}
+                              {cancellation ? (
+                                <Tooltip
+                                  content={(
+                                    <span className="block max-w-[420px] break-words whitespace-normal">
+                                      {cancellation.message}
+                                    </span>
+                                  )}
+                                  getPopupContainer={() => container ?? document.body}
+                                  position="top"
+                                  autoAdjustOverflow
+                                  zIndex={SETTINGS_OVERLAY_Z_INDEX}
+                                >
+                                  <ActionIcon
+                                    size="xs"
+                                    variant="subtle"
+                                    color="gray"
+                                    aria-label={`查看中断原因：${cancellation.message}`}
+                                  >
+                                    <IconQuestionMark size={12} aria-hidden="true" />
+                                  </ActionIcon>
+                                </Tooltip>
+                              ) : null}
                             </div>
-                            {item.statusCode || item.errorCode ? (
+                            {item.statusCode != null || item.errorCode || cancellation ? (
                               <small className="whitespace-nowrap font-mono text-[10px] text-[#8e8e93]">
-                                {item.statusCode ?? item.errorCode}
+                                {item.statusCode != null
+                                  ? `HTTP ${item.statusCode}`
+                                  : cancellation?.label || item.errorCode}
+                                {cancellation && item.statusCode != null
+                                  ? ` · ${cancellation.label}`
+                                  : null}
                               </small>
                             ) : null}
                           </div>
