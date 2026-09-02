@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "43";
+  const patchVersion = "44";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -2503,6 +2503,9 @@
     // CustomEvent. The startup source gate invokes this synchronous hook at the
     // real transport boundary so thread/start receives modelProvider in time.
     rewriteOutgoingMessage: rewrittenOutgoingMessage,
+    rewriteIncomingResult: (method, result) => (
+      method === "model/list" ? patchedModelPayload(result).value : result
+    ),
     trackOutgoingMessage: (detail) => {
       // AppServerRequestClient runs rewriteOutgoingMessage before createRequest
       // assigns an id. Track the concrete request too, otherwise a later native

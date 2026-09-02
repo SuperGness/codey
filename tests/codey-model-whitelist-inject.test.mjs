@@ -495,7 +495,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "43");
+  assert.equal(patch.version, "44");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -597,6 +597,28 @@ test("an app-server model refresh after a turn keeps newly added route models", 
     response.data.message.result.data.map((model) => model.model),
     ["gpt-5.6-sol", "new-route/GLM-5.3-Flash"],
   );
+  runtime.patch.dispose();
+});
+
+test("model list results are patched before the renderer query caches them", async () => {
+  const routeModel = "route-mtjqj5wv-t53bc9/glm-5.3-flash";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", routeModel],
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()]);
+  const upstream = {
+    data: [modelDescriptor("gpt-5.6-sol")],
+    nextCursor: null,
+  };
+
+  const patched = runtime.patch.rewriteIncomingResult("model/list", upstream);
+
+  assert.deepEqual(
+    patched.data.map((model) => model.model),
+    ["gpt-5.6-sol", routeModel],
+  );
+  assert.equal(runtime.patch.rewriteIncomingResult("thread/list", upstream), upstream);
   runtime.patch.dispose();
 });
 

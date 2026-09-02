@@ -631,7 +631,8 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "class AppServerRequestClient{",
       "constructor(){this.hostId=`local`;this.sent=[];this.queuedRequests=[];this.requestPromises=new Map();this.useHostRequestScheduler=!1;this.dispatchMessage=(e,t)=>this.sent.push({type:e,payload:t})}",
       "createRequest(e,t,n,r=null){return{request:{id:`req-1`,method:e,params:t},promise:Promise.resolve({ok:!0})}}",
-      "startRequest(){} onError(){} pumpQueue(){let e=this.queuedRequests.shift();e?.dispatch()}",
+      "startRequest(){} onError(){} emitRequestLifecycleEvent(){} pumpQueue(){let e=this.queuedRequests.shift();e?.dispatch()}",
+      "onResult(e,t,n){let r=this.requestPromises.get(e);if(r){this.requestPromises.delete(e),r.resolve(t),this.emitRequestLifecycleEvent({type:`completed`,hostId:this.hostId,method:r.method});return}}",
       "enqueueRequest(e,t,n,r=t=>{this.dispatchMessage?.(`mcp-request`,{request:t,hostId:this.hostId,...t.trace==null?{}:{dispatchedAtMs:Date.now()},priority:Mjt(e,n),source:Ejt(e,n?.source),timeoutMs:n?.timeoutMs,expiresAtMs:n?.timeoutMs!=null&&n.timeoutMs>0?Date.now()+n.timeoutMs:void 0,widget:n?.widget})},i=null){let a=Mjt(e,n),o=Ejt(e,n?.source);let{request:s,promise:c}=this.createRequest(e,t,n,i);return this.queuedRequests.push({dispatch:()=>{this.startRequest(s);try{r(s)}catch(e){this.onError(s.id,e)}},priority:a}),this.pumpQueue(),c}",
       "async sendRequest(e,t,n){return this.enqueueRequest(e,t,n)}",
       "}",
@@ -677,6 +678,11 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
         trackOutgoingMessage(detail) {
           trackedAppServerMessages.push(detail);
         },
+        rewriteIncomingResult(method, result) {
+          return method === "model/list"
+            ? { ...result, data: [...result.data, { model: "route/model" }] }
+            : result;
+        },
       },
     };
     const AppServerRequestClient = Function(
@@ -718,6 +724,17 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       type: "mcp-request",
       request: requestClient.sent[0].payload.request,
     });
+    const modelListResults = [];
+    requestClient.requestPromises.set("model-list", {
+      method: "model/list",
+      resolve(result) {
+        modelListResults.push(result);
+      },
+    });
+    requestClient.onResult("model-list", { data: [{ model: "gpt-5.6-sol" }] });
+    assert.deepEqual(modelListResults, [{
+      data: [{ model: "gpt-5.6-sol" }, { model: "route/model" }],
+    }]);
     assert.equal(
       patchErrors.length,
       2,

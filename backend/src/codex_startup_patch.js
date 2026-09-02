@@ -844,6 +844,16 @@
           `${createRequest}globalThis.__codeyModelWhitelistPatch?.trackOutgoingMessage?.({type:\`mcp-request\`,request:${requestName}});`,
         "app server request identity tracking",
       );
+      // Promise consumers update React Query before the diagnostic response
+      // event runs. Rewrite model/list at the resolver boundary so the native
+      // result can never replace Codey's current route catalog.
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(([$A-Z_a-z][$\w]*)\.resolve\()([$A-Z_a-z][$\w]*)(\),this\.emitRequestLifecycleEvent\(\{type:`completed`,hostId:this\.hostId,method:\2\.method)/g,
+        (_match, prefix, requestName, resultName, suffix) =>
+          `${prefix}${resultName}=globalThis.__codeyModelWhitelistPatch?.rewriteIncomingResult?.(${requestName}.method,${resultName})??${resultName}${suffix}`,
+        "app server model result rewrite",
+      );
     }
     if (
       disablePet
