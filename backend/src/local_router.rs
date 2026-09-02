@@ -1421,6 +1421,10 @@ impl RouterServer {
                 );
             body_mutated = true;
         }
+        if !resolved.route.official_account && normalize_responses_tool_parameter_roots(&mut body) {
+            body_mutated = true;
+            encoded_body = None;
+        }
         let stream_requested = body
             .as_object()
             .and_then(|body| body.get("stream"))
@@ -4250,6 +4254,122 @@ struct ResponsesChatToolsConversion<'a> {
     converted: Vec<Value>,
     web_search_options: Option<Value>,
     web_search_tool_seen: bool,
+}
+
+// Tool calls always carry object arguments, but some OpenAI-compatible
+// providers reject a root union when any branch also permits a scalar or null.
+fn normalize_responses_tool_parameter_roots(body: &mut Value) -> bool {
+    let Some(body) = body.as_object_mut() else {
+        return false;
+    };
+    let mut changed = normalize_responses_tool_list(body.get_mut("tools"));
+    match body.get_mut("input") {
+        Some(Value::Array(items)) => {
+            for item in items {
+                changed |= normalize_responses_input_tool_list(item);
+            }
+        }
+        Some(item) => changed |= normalize_responses_input_tool_list(item),
+        None => {}
+    }
+    changed
+}
+
+fn normalize_responses_input_tool_list(item: &mut Value) -> bool {
+    let Some(item) = item.as_object_mut() else {
+        return false;
+    };
+    if !matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("additional_tools" | "tool_search_output")
+    ) {
+        return false;
+    }
+    normalize_responses_tool_list(item.get_mut("tools"))
+}
+
+fn normalize_responses_tool_list(tools: Option<&mut Value>) -> bool {
+    let Some(tools) = tools.and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for tool in tools {
+        let Some(tool) = tool.as_object_mut() else {
+            continue;
+        };
+        if let Some(parameters) = tool.get_mut("parameters") {
+            changed |= normalize_tool_parameter_root(parameters);
+        }
+        if let Some(parameters) = tool
+            .get_mut("function")
+            .and_then(Value::as_object_mut)
+            .and_then(|function| function.get_mut("parameters"))
+        {
+            changed |= normalize_tool_parameter_root(parameters);
+        }
+        for field in ["tools", "children"] {
+            changed |= normalize_responses_tool_list(tool.get_mut(field));
+        }
+    }
+    changed
+}
+
+fn normalize_tool_parameter_root(schema: &mut Value) -> bool {
+    match restrict_tool_parameter_schema_to_object(schema) {
+        Some(changed) => changed,
+        None => {
+            *schema = json!({"type":"object","properties":{}});
+            true
+        }
+    }
+}
+
+fn restrict_tool_parameter_schema_to_object(schema: &mut Value) -> Option<bool> {
+    match schema {
+        Value::Bool(true) => {
+            *schema = json!({"type":"object"});
+            Some(true)
+        }
+        Value::Object(schema) => {
+            let mut changed = match schema.get("type") {
+                Some(Value::String(schema_type)) if schema_type == "object" => false,
+                Some(Value::Array(schema_types))
+                    if schema_types
+                        .iter()
+                        .any(|schema_type| schema_type.as_str() == Some("object")) =>
+                {
+                    schema.insert("type".to_string(), Value::String("object".to_string()));
+                    true
+                }
+                None => {
+                    schema.insert("type".to_string(), Value::String("object".to_string()));
+                    true
+                }
+                _ => return None,
+            };
+            for keyword in ["anyOf", "oneOf"] {
+                let mut remove_keyword = false;
+                if let Some(branches) = schema.get_mut(keyword).and_then(Value::as_array_mut) {
+                    branches.retain_mut(|branch| {
+                        let Some(branch_changed) = restrict_tool_parameter_schema_to_object(branch)
+                        else {
+                            changed = true;
+                            return false;
+                        };
+                        changed |= branch_changed;
+                        true
+                    });
+                    remove_keyword = branches.is_empty();
+                }
+                if remove_keyword {
+                    schema.remove(keyword);
+                    changed = true;
+                }
+            }
+            Some(changed)
+        }
+        _ => None,
+    }
 }
 
 fn responses_tools_to_chat_tools_with_bridge(
@@ -14663,7 +14783,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn responses_route_passes_hosted_web_search_through_natively() {
+    async fn responses_route_normalizes_tool_schemas_and_passes_web_search_natively() {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let upstream_address = upstream.local_addr().unwrap();
         let upstream_task = tokio::spawn(async move {
@@ -14710,13 +14830,31 @@ mod tests {
             .json(&json!({
                 "model":model_alias(&provider_id, &model),
                 "input":"search the web",
-                "tools":[{
-                    "type":"web_search",
-                    "search_context_size":"high",
-                    "filters":{"allowed_domains":["example.com"]},
-                    "return_token_budget":2048,
-                    "external_web_access":false
-                }]
+                "tools":[
+                    {
+                        "type":"web_search",
+                        "search_context_size":"high",
+                        "filters":{"allowed_domains":["example.com"]},
+                        "return_token_budget":2048,
+                        "external_web_access":false
+                    },
+                    {
+                        "type":"function",
+                        "name":"automation_update",
+                        "parameters":{
+                            "anyOf":[
+                                {"type":"object","properties":{"mode":{"const":"view"}},"required":["mode"]},
+                                {"oneOf":[{}, {"type":"null"}]},
+                                {"type":"null"}
+                            ]
+                        }
+                    },
+                    {
+                        "type":"function",
+                        "name":"read_file",
+                        "parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}
+                    }
+                ]
             }))
             .send()
             .await
@@ -14727,6 +14865,17 @@ mod tests {
         assert_eq!(path, "/v1/responses");
         assert_eq!(body["model"], model);
         assert_eq!(body["tools"][0]["type"], "web_search");
+        let union = &body["tools"][1]["parameters"];
+        assert_eq!(union["type"], "object");
+        let branches = union["anyOf"].as_array().unwrap();
+        assert_eq!(branches.len(), 2);
+        assert!(branches.iter().all(|branch| branch["type"] == "object"));
+        assert_eq!(branches[1]["oneOf"].as_array().unwrap().len(), 1);
+        assert_eq!(branches[1]["oneOf"][0]["type"], "object");
+        assert_eq!(
+            body["tools"][2]["parameters"],
+            json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})
+        );
         assert_eq!(
             body["tools"][0]["filters"]["allowed_domains"][0],
             "example.com"
