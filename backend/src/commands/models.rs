@@ -2029,17 +2029,21 @@ fn renderer_route_model_catalog(
         for (model, supported_reasoning_efforts, default_reasoning_effort) in
             official_models.chain(third_party_models)
         {
-            let alias = route_model_alias(&provider_id, &model, &mut aliases);
-            // `alias` is only a renderer selector id. Codex and the upstream
-            // must see the provider's real model id; the renderer sends the
-            // route id separately in Responses client metadata.
+            let alias = if profile.official_account {
+                aliases.insert(model.clone());
+                model.clone()
+            } else {
+                route_model_alias(&provider_id, &model, &mut aliases)
+            };
+            // ChatGPT validates official model ids before the local router;
+            // only third-party entries may use route-qualified selectors.
             let (request_provider_id, request_model) = (
                 config.runtime_gateway_provider_id().to_string(),
                 model.clone(),
             );
-            let is_default = config
-                .default_model()
-                .is_some_and(|default| model_id::equal(default, &alias));
+            let is_default = default_model
+                .as_deref()
+                .is_some_and(|default| model_id::equal(default, &model));
             entries.push(RendererRouteModelEntry {
                 alias,
                 provider_id: provider_id.clone(),
@@ -3074,9 +3078,8 @@ mod tests {
             .iter()
             .map(|model| model.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert!(model_names.contains(&"openai/gpt-5.6-sol"));
+        assert!(model_names.contains(&"gpt-5.6-sol"));
         assert!(model_names.contains(&"relay/gpt-5.6-sol"));
-        assert!(!model_names.contains(&"gpt-5.6-sol"));
         assert_eq!(catalog["default_model"].as_str(), Some("relay/gpt-5.6-sol"));
         assert_eq!(
             catalog["model_provider"].as_str(),
@@ -3088,7 +3091,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|entry| entry["model"].as_str() == Some("openai/gpt-5.6-sol"))
+            .find(|entry| entry["model"].as_str() == Some("gpt-5.6-sol"))
             .unwrap();
         assert_eq!(
             official_metadata["display_name"].as_str(),
@@ -3428,7 +3431,7 @@ mod tests {
         assert!(available.runtime_supports_websockets());
         assert_eq!(
             available.runtime_websocket_model_aliases(),
-            vec![crate::local_router::model_alias("openai", "gpt-5.6-sol")]
+            vec!["gpt-5.6-sol"]
         );
 
         let mut unavailable = available.clone();

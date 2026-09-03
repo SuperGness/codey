@@ -190,6 +190,25 @@ fn generated_catalog_uses_the_route_aware_default_selector() {
         runtime_default_model(&config, false, &state).as_deref(),
         Some("shared-model")
     );
+
+    let mut official = ProviderProfile::new("Official");
+    official.source_provider_id = Some("openai".into());
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+    official.normalize();
+    let mut official_config = CodeyConfig {
+        active_profile_id: official.id.clone(),
+        profiles: vec![official],
+        default_model: "openai/gpt-5.6-sol".into(),
+        official_account_available_this_launch: true,
+        ..CodeyConfig::default()
+    };
+    official_config
+        .selected_models_by_provider
+        .insert("openai".into(), vec!["gpt-5.6-sol".into()]);
+    assert_eq!(
+        runtime_default_model(&official_config, true, &state).as_deref(),
+        Some("gpt-5.6-sol")
+    );
 }
 
 #[test]
@@ -213,7 +232,7 @@ fn subagent_runtime_models_use_route_aware_aliases() {
         (" SHARED-MODEL ", "route-b/shared-model"),
         ("route-b/shared-model", "route-b/shared-model"),
         ("vendor/model", "route-b/vendor/model"),
-        ("gpt-5.6-sol", "openai/gpt-5.6-sol"),
+        ("gpt-5.6-sol", "gpt-5.6-sol"),
         ("unknown-model", "route-a/unknown-model"),
     ] {
         assert_eq!(

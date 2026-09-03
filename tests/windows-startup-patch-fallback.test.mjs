@@ -20,16 +20,16 @@ async function loadWindowsStartupSource() {
       "#[cfg(target_os = \"macos\")]\npub(super) fn build_fresh_macos_open_command",
     ),
   );
-  return { cleanup, windowsSpawn };
+  return { cleanup, launcher, launcherPlatform, windowsSpawn };
 }
 
-test("Windows startup patch failure cleans the paused process before compatible restart", async () => {
+test("Windows startup compatibility failure cleans the process before compatible restart", async () => {
   const { cleanup, windowsSpawn } = await loadWindowsStartupSource();
   const cleanupCall = windowsSpawn.indexOf(
     "stop_windows_spawned_codex(&mut spawned, app_dir).await",
   );
   const compatibleRestart = windowsSpawn.indexOf(
-    "match spawn_windows_codex(app_dir, debug_port, &runtime_arguments).await",
+    "match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[]).await",
   );
 
   assert.ok(cleanupCall >= 0);
@@ -53,18 +53,25 @@ test("Windows startup patch failure cleans the paused process before compatible 
 });
 
 test("Windows startup patch requires app-server runtime override validation", async () => {
-  const { windowsSpawn } = await loadWindowsStartupSource();
+  const { launcher, launcherPlatform, windowsSpawn } = await loadWindowsStartupSource();
 
   assert.match(
-    windowsSpawn,
+    launcher,
     /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*!runtime_config_overrides\.is_empty\(\),\s*\)/,
   );
   assert.doesNotMatch(
-    windowsSpawn,
+    launcher,
     /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*false,\s*\)/,
   );
   assert.match(
     windowsSpawn,
-    /if !runtime_config_overrides\.is_empty\(\) \{[\s\S]*?Codex 启动补丁未能确认 app-server 运行时覆盖/,
+    /if !runtime_config_overrides\.is_empty\(\) \{[\s\S]*?Codex 启动兼容方案未能确认 app-server 运行时覆盖/,
   );
+  assert.match(windowsSpawn, /prepare_cli_wrapper\(/);
+  assert.match(windowsSpawn, /install_startup_patch_with_cli_fallback\(/);
+  assert.match(windowsSpawn, /WindowsPackageDebugSession::finish/);
+  assert.match(launcherPlatform, /WindowsPackageDebugSession::start\(app_dir, environment\)/);
+  assert.match(launcherPlatform, /settings\.EnableDebugging\(/);
+  assert.match(launcherPlatform, /settings\.DisableDebugging\(/);
+  assert.match(launcherPlatform, /child_command\.envs\(environment/);
 });

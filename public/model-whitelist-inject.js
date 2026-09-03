@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "45";
+  const patchVersion = "46";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -322,7 +322,10 @@
         )
         ? localRouterProviderId
         : providerId;
-    const routedModel = preservesLegacyOfficialCarrier
+    // Route-qualified ids are UI selectors, not valid ChatGPT-account model
+    // ids. Keep the route in metadata while every official request uses the
+    // upstream model id.
+    const routedModel = isOfficialRoute(route)
       ? cleanText(route?.sourceModel) || model
       : model;
     const next = { ...source };

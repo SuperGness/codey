@@ -1014,7 +1014,7 @@ impl CodeyConfig {
             && profile.upstream_protocol == UPSTREAM_PROTOCOL_OPENAI_RESPONSES
     }
 
-    /// Route-qualified catalog model IDs that use Responses WebSocket.
+    /// Runtime catalog model IDs that use Responses WebSocket.
     /// Codex selects WebSocket transport at the provider level, so model-level
     /// preferences are only valid when every runtime route supports WebSocket.
     pub(crate) fn runtime_websocket_model_aliases(&self) -> Vec<String> {
@@ -1033,7 +1033,7 @@ impl CodeyConfig {
                 };
                 models
                     .into_iter()
-                    .map(move |model| local_router::model_alias(provider_id, &model))
+                    .map(move |model| runtime_catalog_model_id(profile, &model))
             })
             .collect()
     }
@@ -1077,7 +1077,7 @@ impl CodeyConfig {
             && profile.upstream_protocol == UPSTREAM_PROTOCOL_OPENAI_RESPONSES
     }
 
-    /// Route-qualified model IDs that may retain native Web Search metadata in
+    /// Runtime model IDs that may retain native Web Search metadata in
     /// the generated runtime catalog. The catalog applies a second gate and
     /// only preserves the capability when the source model metadata declares
     /// support as well.
@@ -1094,7 +1094,7 @@ impl CodeyConfig {
                 };
                 models
                     .into_iter()
-                    .map(move |model| local_router::model_alias(provider_id, &model))
+                    .map(move |model| runtime_catalog_model_id(profile, &model))
             })
             .collect()
     }
@@ -1339,7 +1339,7 @@ impl CodeyConfig {
                     let enabled = self.enabled_official_route_models(provider_id);
                     let aliases = enabled
                         .iter()
-                        .map(|model| local_router::model_alias(provider_id, model))
+                        .map(|model| runtime_catalog_model_id(profile, model))
                         .collect::<Vec<_>>();
                     upstream.extend(aliases.iter().cloned());
                     selected.extend(aliases);
@@ -1503,6 +1503,14 @@ impl CodeyConfig {
             self.subagent_reasoning_effort
                 .clone_from(&default_role.reasoning_effort);
         }
+    }
+}
+
+fn runtime_catalog_model_id(profile: &ProviderProfile, model: &str) -> String {
+    if profile.official_account {
+        model.trim().to_string()
+    } else {
+        local_router::model_alias(profile.provider_id(), model)
     }
 }
 
@@ -2524,7 +2532,7 @@ mod tests {
 
         let (upstream, selected) = config.runtime_catalog_models();
 
-        assert!(upstream.iter().any(|model| model == "openai/gpt-5.6-sol"));
+        assert!(upstream.iter().any(|model| model == "gpt-5.6-sol"));
         assert!(upstream.iter().any(|model| model == "relay/relay-a"));
         assert!(upstream.iter().any(|model| model == "relay/manual-model"));
         assert_eq!(
@@ -2537,13 +2545,13 @@ mod tests {
         assert_eq!(
             selected,
             [
-                "openai/gpt-5.6-sol",
-                "openai/gpt-5.6-terra",
-                "openai/gpt-5.6-luna",
-                "openai/gpt-5.5",
-                "openai/gpt-5.4",
-                "openai/gpt-5.4-mini",
-                "openai/gpt-5.3-codex-spark",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.3-codex-spark",
                 "relay/shared-model",
                 "relay/manual-model",
             ]
@@ -2719,7 +2727,7 @@ mod tests {
         assert!(config.runtime_supports_websockets());
         assert_eq!(
             config.runtime_websocket_model_aliases(),
-            vec![local_router::model_alias("openai", "gpt-5.6-sol")]
+            vec!["gpt-5.6-sol"]
         );
 
         config.official_account_available_this_launch = false;
@@ -2748,7 +2756,7 @@ mod tests {
 
         assert_eq!(
             config.runtime_native_web_search_model_aliases(),
-            vec![local_router::model_alias("openai", "gpt-5.6-sol")]
+            vec!["gpt-5.6-sol"]
         );
         config.official_account_available_this_launch = false;
         assert!(config.runtime_native_web_search_model_aliases().is_empty());

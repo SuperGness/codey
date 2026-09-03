@@ -20,6 +20,165 @@ const WINDOWS_CODEX_STOP_TIMEOUT: Duration = Duration::from_secs(8);
 const WINDOWS_STARTUP_PATCH_FAILURE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[cfg(any(windows, test))]
+fn windows_package_full_name(app_dir: &Path) -> Option<String> {
+    codey_runtime_core::app_paths::packaged_app_user_model_id(app_dir)?;
+    let path = app_dir.to_string_lossy().replace('\\', "/");
+    let mut parts = path.split('/').filter(|part| !part.is_empty());
+    let mut package_name = parts.next_back()?;
+    if package_name.eq_ignore_ascii_case("app") {
+        package_name = parts.next_back()?;
+    }
+    Some(package_name.to_string())
+}
+
+#[cfg(any(windows, test))]
+fn windows_environment_block(environment: &[(String, String)]) -> Result<Vec<u16>> {
+    let mut entries = environment
+        .iter()
+        .map(|(name, value)| {
+            anyhow::ensure!(
+                !name.is_empty() && !name.contains(['=', '\0']) && !value.contains('\0'),
+                "Windows Codex 兼容环境包含无效字符"
+            );
+            Ok(format!("{name}={value}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.to_ascii_uppercase());
+    let mut block = Vec::new();
+    for entry in entries {
+        block.extend(entry.encode_utf16());
+        block.push(0);
+    }
+    if block.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    Ok(block)
+}
+
+#[cfg(windows)]
+pub(super) struct WindowsPackageDebugSession {
+    package_full_name: Option<String>,
+}
+
+#[cfg(windows)]
+impl WindowsPackageDebugSession {
+    fn start(app_dir: &Path, environment: &[(String, String)]) -> Result<Self> {
+        let package_full_name =
+            windows_package_full_name(app_dir).context("无法识别 Windows Store Codex 包全名")?;
+        enable_windows_packaged_environment(&package_full_name, environment)?;
+        Ok(Self {
+            package_full_name: Some(package_full_name),
+        })
+    }
+
+    pub(super) fn finish(mut self) -> Result<()> {
+        let package_full_name = self
+            .package_full_name
+            .as_deref()
+            .expect("active package debug session should have a package name");
+        disable_windows_packaged_environment(package_full_name)?;
+        self.package_full_name.take();
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsPackageDebugSession {
+    fn drop(&mut self) {
+        if let Some(package_full_name) = self.package_full_name.take() {
+            let _ = disable_windows_packaged_environment(&package_full_name);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn with_windows_package_debug_settings<T>(
+    operation: impl FnOnce(
+        &windows::Win32::UI::Shell::IPackageDebugSettings,
+    ) -> windows::core::Result<T>,
+) -> Result<T> {
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize,
+    };
+    use windows::Win32::UI::Shell::{IPackageDebugSettings, PackageDebugSettings};
+
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let should_uninitialize = initialized.is_ok();
+        initialized.ok().or_else(|error| {
+            const RPC_E_CHANGED_MODE: i32 = -2147417850;
+            if error.code().0 == RPC_E_CHANGED_MODE {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })?;
+        let result = (|| {
+            let settings: IPackageDebugSettings =
+                CoCreateInstance(&PackageDebugSettings, None, CLSCTX_INPROC_SERVER)?;
+            operation(&settings)
+        })();
+        if should_uninitialize {
+            CoUninitialize();
+        }
+        result.map_err(Into::into)
+    }
+}
+
+#[cfg(windows)]
+fn enable_windows_packaged_environment(
+    package_full_name: &str,
+    environment: &[(String, String)],
+) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+
+    let package_full_name = package_full_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let executable = std::env::current_exe().context("定位 Codey 包启动恢复助手失败")?;
+    let mut debugger_command = vec![u16::from(b'"')];
+    debugger_command.extend(executable.as_os_str().encode_wide());
+    debugger_command.extend(
+        format!(
+            "\" {}",
+            crate::codex_startup_patch::WINDOWS_PACKAGE_RESUME_ARGUMENT
+        )
+        .encode_utf16(),
+    );
+    debugger_command.push(0);
+    let environment = windows_environment_block(environment)?;
+
+    with_windows_package_debug_settings(|settings| unsafe {
+        let package = PCWSTR(package_full_name.as_ptr());
+        settings.DisableDebugging(package)?;
+        settings.EnableDebugging(
+            package,
+            PCWSTR(debugger_command.as_ptr()),
+            PCWSTR(environment.as_ptr()),
+        )
+    })
+    .context("为 Windows Store Codex 安装一次性 CLI 兼容环境失败")
+}
+
+#[cfg(windows)]
+fn disable_windows_packaged_environment(package_full_name: &str) -> Result<()> {
+    use windows::core::PCWSTR;
+
+    let package_full_name = package_full_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    with_windows_package_debug_settings(|settings| unsafe {
+        settings.DisableDebugging(PCWSTR(package_full_name.as_ptr()))
+    })
+    .context("清理 Windows Store Codex 一次性 CLI 兼容环境失败")
+}
+
+#[cfg(any(windows, test))]
 pub(super) fn normalized_windows_path(path: &std::path::Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
@@ -32,7 +191,8 @@ pub(super) async fn spawn_windows_codex(
     app_dir: &std::path::Path,
     debug_port: u16,
     extra_args: &[String],
-) -> Result<SpawnedCodex> {
+    environment: &[(String, String)],
+) -> Result<(SpawnedCodex, Option<WindowsPackageDebugSession>, bool)> {
     if let Some(activation) =
         codey_runtime_core::launcher::build_packaged_activation(app_dir, debug_port, extra_args)
         && let codey_runtime_core::launcher::CodexLaunch::PackagedActivation {
@@ -41,6 +201,23 @@ pub(super) async fn spawn_windows_codex(
             ..
         } = activation
     {
+        let package_debug_session = if environment.is_empty() {
+            None
+        } else {
+            match WindowsPackageDebugSession::start(app_dir, environment) {
+                Ok(session) => Some(session),
+                Err(error) => {
+                    error_log::record_failure(
+                        "compatibility_fallback",
+                        "enable_windows_packaged_cli_environment",
+                        format!("{error:#}"),
+                        serde_json::json!({ "appPath": app_dir }),
+                    );
+                    None
+                }
+            }
+        };
+        let environment_applied = package_debug_session.is_some();
         let existing_process_ids = codey_runtime_core::windows_enumerate_processes()
             .into_iter()
             .map(|process| process.process_id)
@@ -70,12 +247,16 @@ pub(super) async fn spawn_windows_codex(
                 );
             }
         }
-        return Ok(SpawnedCodex {
-            child: None,
-            process_id: Some(process_id),
-            performance_status: String::new(),
-            performance_detail: String::new(),
-        });
+        return Ok((
+            SpawnedCodex {
+                child: None,
+                process_id: Some(process_id),
+                performance_status: String::new(),
+                performance_detail: String::new(),
+            },
+            package_debug_session,
+            environment_applied,
+        ));
     }
 
     let command = build_codex_command(app_dir, debug_port, extra_args);
@@ -84,6 +265,7 @@ pub(super) async fn spawn_windows_codex(
         .ok_or_else(|| anyhow::anyhow!("Codex 启动命令为空"))?;
     let mut child_command = Command::new(executable);
     child_command.args(&command[1..]);
+    child_command.envs(environment.iter().map(|(name, value)| (name, value)));
     // A stale WSL_DISTRO_NAME inherited by the native Windows app makes
     // current Codex builds synchronously probe wsl.exe during startup.
     child_command.env_remove("WSL_DISTRO_NAME");
@@ -92,12 +274,16 @@ pub(super) async fn spawn_windows_codex(
         .spawn()
         .with_context(|| format!("启动 Codex 失败：{executable}"))?;
     let process_id = child.id();
-    Ok(SpawnedCodex {
-        child: Some(child),
-        process_id,
-        performance_status: String::new(),
-        performance_detail: String::new(),
-    })
+    Ok((
+        SpawnedCodex {
+            child: Some(child),
+            process_id,
+            performance_status: String::new(),
+            performance_detail: String::new(),
+        },
+        None,
+        !environment.is_empty(),
+    ))
 }
 
 #[cfg(any(windows, test))]
@@ -590,5 +776,28 @@ pub(super) fn windows_stop_failure_summary(remaining: &[(u32, String, Option<u64
         )
     } else {
         format!("{} 个进程仍在运行：{listed}", remaining.len())
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn windows_packaged_cli_environment_is_valid_and_scoped_to_the_codex_package() {
+        let app_dir = Path::new(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.901.20858.0_x64__2p2nqsd0c76g0\app",
+        );
+        assert_eq!(
+            windows_package_full_name(app_dir).as_deref(),
+            Some("OpenAI.Codex_26.901.20858.0_x64__2p2nqsd0c76g0")
+        );
+
+        let block = windows_environment_block(&[
+            ("B".to_string(), "two".to_string()),
+            ("A".to_string(), "1".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(block, "A=1\0B=two\0\0".encode_utf16().collect::<Vec<_>>());
     }
 }

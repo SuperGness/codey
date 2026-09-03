@@ -495,7 +495,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "45");
+  assert.equal(patch.version, "46");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -1195,7 +1195,7 @@ test("a persisted thread route is discarded when that route no longer exposes th
   });
   assert.deepEqual(nextTurn.request.params, {
     threadId: "stale-route-thread",
-    model: "openai/gpt-5.6-sol",
+    model: "gpt-5.6-sol",
     responsesapiClientMetadata: { codey_route: "openai" },
   });
   assert.deepEqual(
@@ -1865,7 +1865,7 @@ test("an external-provider thread resumes onto the router and switches to an off
   assert.equal(runtime.patch.isBlockedOutgoingMessage(switched), false);
   assert.deepEqual(switched.request.params, {
     threadId: "external-official-thread",
-    model: alias,
+    model: "gpt-5.6-sol",
     responsesapiClientMetadata: { codey_route: "openai" },
   });
   runtime.patch.dispose();
@@ -2791,7 +2791,7 @@ test("model picker ignores streaming mutations outside the picker", async () => 
   runtime.patch.dispose();
 });
 
-test("the clicked model route overrides stale thread and turn metadata", async () => {
+test("the clicked official route emits a raw ChatGPT model despite stale route metadata", async () => {
   const storage = memoryStorage();
   storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
     ["menu-route-thread", {
@@ -2851,7 +2851,7 @@ test("the clicked model route overrides stale thread and turn metadata", async (
   });
   assert.deepEqual(selectedTurn.request.params, {
     threadId: "menu-route-thread",
-    model: "openai/gpt-5.6-sol",
+    model: "gpt-5.6-sol",
     responsesapiClientMetadata: { codey_route: "openai" },
   });
 
@@ -2865,7 +2865,7 @@ test("the clicked model route overrides stale thread and turn metadata", async (
   });
   assert.deepEqual(laterTurn.request.params, {
     threadId: "menu-route-thread",
-    model: "openai/gpt-5.6-sol",
+    model: "gpt-5.6-sol",
     responsesapiClientMetadata: { codey_route: "openai" },
   });
   runtime.patch.dispose();

@@ -2,12 +2,12 @@
 
 use anyhow::Result;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos", test))]
 use anyhow::Context;
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", test))]
 use std::ffi::{OsStr, OsString};
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 use std::io::Write;
 
 const PATCH_RESULT: &str = "codey-startup-patch-installed-v37";
@@ -18,16 +18,18 @@ const STARTUP_PATCH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::
 const STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(24);
 
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) const CLI_WRAPPER_TARGET_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TARGET";
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) const CLI_WRAPPER_OVERRIDES_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_OVERRIDES";
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) const CLI_WRAPPER_SUBAGENT_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_SUBAGENT";
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) const CLI_WRAPPER_PORT_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_PORT";
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) const CLI_WRAPPER_TOKEN_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TOKEN";
+#[cfg(any(windows, test))]
+pub(crate) const WINDOWS_PACKAGE_RESUME_ARGUMENT: &str = "--codey-resume-packaged-app";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchOptions {
@@ -109,9 +111,12 @@ pub fn reserve_loopback_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(windows, target_os = "macos"))]
 pub fn run_cli_wrapper_if_requested() -> Result<bool> {
-    use std::os::unix::process::CommandExt;
+    #[cfg(windows)]
+    if run_windows_package_resume_helper_if_requested()? {
+        return Ok(true);
+    }
 
     let Some(target) = std::env::var_os(CLI_WRAPPER_TARGET_ENV) else {
         return Ok(false);
@@ -139,10 +144,6 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         .count()
         == 1;
     let rewritten_args = rewrite_app_server_args(&original_args, &runtime_overrides);
-
-    if app_server {
-        notify_cli_wrapper_ready();
-    }
 
     let mut command = std::process::Command::new(&target);
     command.args(rewritten_args);
@@ -172,15 +173,80 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         }
     }
 
-    Err(command.exec()).with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::process::CommandExt;
+
+        if app_server {
+            notify_cli_wrapper_ready();
+        }
+        Err(command.exec()).with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(codey_runtime_core::windows_create_no_window());
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))?;
+        if app_server {
+            notify_cli_wrapper_ready();
+        }
+        let status = child
+            .wait()
+            .with_context(|| format!("等待 Codex CLI 退出失败：{}", target.display()))?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     Ok(false)
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(windows)]
+fn run_windows_package_resume_helper_if_requested() -> Result<bool> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let Some(thread_id) = windows_package_resume_thread_id(&arguments)? else {
+        return Ok(false);
+    };
+    let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, false, thread_id) }
+        .context("打开 Windows Store Codex 启动线程失败")?;
+    let previous_suspend_count = unsafe { ResumeThread(thread) };
+    let resume_error = (previous_suspend_count == u32::MAX).then(windows::core::Error::from_win32);
+    unsafe { CloseHandle(thread) }.context("关闭 Windows Store Codex 启动线程句柄失败")?;
+    if let Some(error) = resume_error {
+        return Err(error).context("恢复 Windows Store Codex 启动线程失败");
+    }
+    Ok(true)
+}
+
+#[cfg(any(windows, test))]
+fn windows_package_resume_thread_id(arguments: &[OsString]) -> Result<Option<u32>> {
+    if arguments.first().and_then(|value| value.to_str()) != Some(WINDOWS_PACKAGE_RESUME_ARGUMENT) {
+        return Ok(None);
+    }
+    let value = arguments
+        .windows(2)
+        .find(|pair| {
+            pair[0]
+                .to_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case("-tid"))
+        })
+        .and_then(|pair| pair[1].to_str())
+        .context("Windows Store 未向 Codey 传递待恢复的线程 ID")?;
+    let thread_id = value
+        .parse::<u32>()
+        .context("Windows Store 传递了无效的线程 ID")?;
+    anyhow::ensure!(thread_id != 0, "Windows Store 传递了空线程 ID");
+    Ok(Some(thread_id))
+}
+
+#[cfg(any(windows, target_os = "macos"))]
 fn notify_cli_wrapper_ready() {
     let Some(port) = std::env::var(CLI_WRAPPER_PORT_ENV)
         .ok()
@@ -203,12 +269,12 @@ fn notify_cli_wrapper_ready() {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", test))]
 fn runtime_override_key(config: &str) -> &str {
     config.split_once('=').map_or(config, |(key, _)| key).trim()
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", test))]
 fn app_server_runtime_configs(runtime_overrides: &[String]) -> Vec<String> {
     let mut configs = vec!["analytics.enabled=false".to_string()];
     for config in runtime_overrides {
@@ -228,7 +294,7 @@ fn app_server_runtime_configs(runtime_overrides: &[String]) -> Vec<String> {
     configs
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos", test))]
 fn rewrite_app_server_args(args: &[OsString], runtime_overrides: &[String]) -> Vec<OsString> {
     if args
         .iter()
@@ -534,6 +600,24 @@ fn ensure_protocol_success(payload: &serde_json::Value, method: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_package_resume_helper_requires_its_marker_and_thread_id() {
+        assert_eq!(windows_package_resume_thread_id(&[]).unwrap(), None);
+        assert_eq!(
+            windows_package_resume_thread_id(
+                &[WINDOWS_PACKAGE_RESUME_ARGUMENT, "-p", "42", "-tid", "73"].map(OsString::from)
+            )
+            .unwrap(),
+            Some(73)
+        );
+        assert!(
+            windows_package_resume_thread_id(
+                &[WINDOWS_PACKAGE_RESUME_ARGUMENT, "-tid", "invalid"].map(OsString::from)
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn cli_wrapper_rewrites_only_managed_app_server_configs() {

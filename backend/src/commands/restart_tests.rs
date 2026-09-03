@@ -403,8 +403,8 @@ fn renderer_model_catalog_routes_official_account_models_through_the_codey_route
 
     let catalog = renderer_model_catalog_value(&config, &model_state);
 
-    assert_eq!(catalog["models"], json!(["openai/gpt-5.6-sol"]));
-    assert_eq!(catalog["default_model"], "openai/gpt-5.6-sol");
+    assert_eq!(catalog["models"], json!(["gpt-5.6-sol"]));
+    assert_eq!(catalog["default_model"], "gpt-5.6-sol");
     assert_eq!(
         catalog["model_provider"],
         crate::local_router::ROUTER_PROVIDER_ID
@@ -412,7 +412,7 @@ fn renderer_model_catalog_routes_official_account_models_through_the_codey_route
     assert_eq!(
         catalog["model_metadata"][0],
         json!({
-            "model": "openai/gpt-5.6-sol",
+            "model": "gpt-5.6-sol",
             "display_name": "[官] gpt-5.6-sol",
             "route_name": "默认配置",
             "route_prefix": "官",

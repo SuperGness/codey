@@ -443,15 +443,18 @@ fn route_subagent_model(
             })
         });
     if let Some(target) = target {
-        // The built-in official catalog has native slugs. Synthetic aliases
-        // would lose its model metadata, including prefer_websockets.
-        return if builtin_official_catalog && target.official {
+        // ChatGPT validates official slugs before the loopback router. Only
+        // third-party targets may use route-qualified runtime ids.
+        return if target.official {
             target.upstream_model.clone()
         } else {
             target.alias.clone()
         };
     }
-    if builtin_official_catalog {
+    let official_route = targets
+        .iter()
+        .any(|target| target.official && target.provider_id == route_provider);
+    if builtin_official_catalog || official_route {
         requested.to_string()
     } else {
         local_router::model_alias(route_provider, requested)
@@ -468,14 +471,20 @@ fn runtime_default_model(
     model_state: &model_catalog::ModelSelectionState,
 ) -> Option<String> {
     let model = if codey_catalog_installed {
-        // The generated catalog uses route-qualified selector ids. Keep that
-        // stable id inside Codex so its picker can resolve the configured
-        // default; the loopback gateway alone translates it back to the
-        // upstream model id immediately before forwarding the HTTP request.
-        config.default_model().unwrap_or(&model_state.default_model)
+        config
+            .effective_runtime_default_target()
+            .map(|target| {
+                if target.official {
+                    target.upstream_model
+                } else {
+                    target.alias
+                }
+            })
+            .or_else(|| config.default_model().map(str::to_string))
+            .unwrap_or_else(|| model_state.default_model.clone())
     } else {
         // The built-in Codex catalog only contains native OpenAI model ids.
-        &model_state.default_model
+        model_state.default_model.clone()
     };
     let model = model.trim();
     (!model.is_empty()).then(|| model.to_string())

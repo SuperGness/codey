@@ -698,6 +698,24 @@ impl RouterSnapshot {
         {
             return self.target_for_route_model(route_hint, requested_model, requested_model);
         }
+        // Raw ids in the mixed runtime catalog are native OpenAI entries;
+        // third-party selections remain route-qualified. An explicit hint
+        // above can still select a third-party route with the same model.
+        if requested_model != CODEX_AUTO_REVIEW_MODEL
+            && let Some(official) = self.raw_models.get(requested_model).and_then(|candidates| {
+                candidates.iter().find(|candidate| {
+                    self.routes
+                        .get(&candidate.provider_id)
+                        .is_some_and(|route| route.official_account)
+                })
+            })
+        {
+            return self.target_for_route_model(
+                &official.provider_id,
+                &official.model,
+                requested_model,
+            );
+        }
         // Codex can replay Responses client metadata from an earlier turn
         // after the sticky model has changed. An invalid hint therefore is
         // not sufficient evidence of a current route choice. Continue into
@@ -13377,6 +13395,35 @@ mod tests {
         let auto_review = snapshot.target_for_model(CODEX_AUTO_REVIEW_MODEL).unwrap();
         assert_eq!(auto_review.route.provider_id, "openai");
         assert_eq!(auto_review.upstream_model, CODEX_AUTO_REVIEW_MODEL);
+
+        let mut mixed = config.clone();
+        let mut relay = ProviderProfile::new("Relay");
+        relay.id = "relay".into();
+        relay.base_url = "https://relay.example/v1".into();
+        relay.api_key = "relay-key".into();
+        relay.normalize();
+        let relay_id = relay.provider_id().to_string();
+        mixed.profiles.push(relay);
+        mixed
+            .selected_models_by_provider
+            .insert(relay_id.clone(), vec!["gpt-5.6-sol".into()]);
+        let mixed_snapshot = RouterSnapshot::from_config(&mixed);
+        assert_eq!(
+            mixed_snapshot
+                .target_for_model("gpt-5.6-sol")
+                .unwrap()
+                .route
+                .provider_id,
+            "openai"
+        );
+        assert_eq!(
+            mixed_snapshot
+                .target_for_request("gpt-5.6-sol", Some(&relay_id), None)
+                .unwrap()
+                .route
+                .provider_id,
+            relay_id
+        );
 
         let mut api_key_launch = config;
         api_key_launch.official_account_available_this_launch = false;
