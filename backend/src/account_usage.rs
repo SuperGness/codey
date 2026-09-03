@@ -25,6 +25,9 @@ const ACCOUNT_USAGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_ACCOUNT_USAGE_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_JWT_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_JWT_PAYLOAD_ENCODED_BYTES: usize = 96 * 1024;
+// Local-router requests only need eventual auth-file invalidation. Rechecking once per
+// second avoids filesystem work on every request while keeping account switches prompt.
+const OFFICIAL_AUTH_REVALIDATE_TTL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OfficialAuth {
@@ -48,31 +51,37 @@ fn official_auth_fingerprint(path: &Path) -> Option<OfficialAuthFingerprint> {
 
 #[derive(Debug, Default)]
 pub(crate) struct OfficialAuthCache {
-    cached: Option<(OfficialAuthFingerprint, OfficialAuth)>,
+    cached: Option<std::result::Result<OfficialAuth, String>>,
+    expires_at: Option<Instant>,
 }
 
 impl OfficialAuthCache {
-    pub(crate) fn read(&mut self, path: &Path) -> Result<OfficialAuth> {
-        let fingerprint = official_auth_fingerprint(path);
-        if let Some(fingerprint) = fingerprint.as_ref()
-            && let Some((cached_fingerprint, cached_auth)) = self.cached.as_ref()
-            && cached_fingerprint == fingerprint
-        {
-            return Ok(cached_auth.clone());
-        }
+    /// Returns the cached auth (or cached read failure) without touching the filesystem.
+    /// Callers that miss can perform the blocking read outside their mutex, then [`Self::store`]
+    /// the result under a short lock.
+    pub(crate) fn get(&self, now: Instant) -> Option<std::result::Result<OfficialAuth, String>> {
+        self.expires_at
+            .filter(|expires_at| now < *expires_at)
+            .and_then(|_| self.cached.clone())
+    }
 
-        if fingerprint.is_none() {
-            self.cached = None;
+    /// Stores an auth-file read result for the short revalidation interval.
+    pub(crate) fn store(
+        &mut self,
+        result: Result<OfficialAuth>,
+        now: Instant,
+    ) -> Result<OfficialAuth> {
+        let result = result.map_err(|error| error.to_string());
+        self.cached = Some(result.clone());
+        self.expires_at = Some(now + OFFICIAL_AUTH_REVALIDATE_TTL);
+        result.map_err(anyhow::Error::msg)
+    }
+
+    fn read_at(&mut self, path: &Path, now: Instant) -> Result<OfficialAuth> {
+        match self.get(now) {
+            Some(result) => result.map_err(anyhow::Error::msg),
+            None => self.store(read_official_auth(path), now),
         }
-        let auth = match read_official_auth(path) {
-            Ok(auth) => auth,
-            Err(error) => {
-                self.cached = None;
-                return Err(error);
-            }
-        };
-        self.cached = fingerprint.map(|fingerprint| (fingerprint, auth.clone()));
-        Ok(auth)
     }
 }
 
@@ -662,14 +671,25 @@ mod tests {
         )
         .unwrap();
         let mut cache = OfficialAuthCache::default();
-        assert_eq!(cache.read(&path).unwrap().access_token, "first");
+        let now = Instant::now();
+        assert_eq!(cache.read_at(&path, now).unwrap().access_token, "first");
 
         fs::write(
             &path,
             r#"{"auth_mode":"chatgpt","tokens":{"access_token":"second-token","account_id":"acct-2"}}"#,
         )
         .unwrap();
-        let refreshed = cache.read(&path).unwrap();
+        assert_eq!(
+            cache
+                .read_at(&path, now + Duration::from_millis(1))
+                .unwrap()
+                .access_token,
+            "first"
+        );
+
+        let refreshed = cache
+            .read_at(&path, now + OFFICIAL_AUTH_REVALIDATE_TTL)
+            .unwrap();
         assert_eq!(refreshed.access_token, "second-token");
         assert_eq!(refreshed.account_id.as_deref(), Some("acct-2"));
     }
@@ -684,10 +704,15 @@ mod tests {
         )
         .unwrap();
         let mut cache = OfficialAuthCache::default();
-        assert_eq!(cache.read(&path).unwrap().access_token, "first");
+        let now = Instant::now();
+        assert_eq!(cache.read_at(&path, now).unwrap().access_token, "first");
 
         fs::remove_file(&path).unwrap();
-        assert!(cache.read(&path).is_err());
+        assert!(
+            cache
+                .read_at(&path, now + OFFICIAL_AUTH_REVALIDATE_TTL)
+                .is_err()
+        );
     }
 
     #[test]

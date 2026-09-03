@@ -48,6 +48,9 @@ type RouteRequestLogItem = {
   reasoningEffort?: string | null;
   thinkingBudgetTokens?: number | null;
   ttftMs?: number | null;
+  routerPreUpstreamMs?: number | null;
+  upstreamFirstByteMs?: number | null;
+  downstreamFirstContentMs?: number | null;
   upstreamHeaderMs?: number | null;
   totalDurationMs: number;
   queueDelayMs: number;
@@ -680,6 +683,10 @@ export function RequestLogDialog({
                       item.usageUnavailableReason,
                     );
                     const cancellation = cancellationPresentation(item);
+                    const displayedTtft = item.downstreamFirstContentMs ?? item.ttftMs;
+                    const timingTitle = item.downstreamFirstContentMs == null
+                      ? `首字耗时 (旧指标，上游首包): ${formatDuration(item.ttftMs)}`
+                      : `端到端首内容: ${formatDuration(item.downstreamFirstContentMs)} · 路由前置: ${formatDuration(item.routerPreUpstreamMs)} · 上游首包: ${formatDuration(item.upstreamFirstByteMs)}`;
                     return (
                       <Table.Tr key={`${item.timestampUnixMs}:${item.requestId}`}>
                         <Table.Td>
@@ -832,11 +839,11 @@ export function RequestLogDialog({
                           <div className="grid justify-items-end gap-0.5 leading-tight">
                             <div
                               className="flex items-center justify-end gap-1.5"
-                              title={`首字耗时 (TTFT): ${formatDuration(item.ttftMs)}`}
+                              title={timingTitle}
                             >
                               <span className="text-[10px] text-[#8e8e93]">TTFT</span>
                               <span className="text-[11px] font-medium text-[#1d1d1f]">
-                                {formatDuration(item.ttftMs)}
+                                {formatDuration(displayedTtft)}
                               </span>
                             </div>
                             <div

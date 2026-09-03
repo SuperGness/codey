@@ -2518,6 +2518,7 @@ mod tests {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn admit_and_bind(
         state_root: &Path,
         session_id: &str,

@@ -21,7 +21,7 @@ use tokio::sync::oneshot;
 
 use crate::config::{RouteRequestLogBackend, RouteRequestLogConfig};
 
-const SCHEMA_VERSION: u8 = 5;
+const SCHEMA_VERSION: u8 = 6;
 const MAX_LOG_STRING_BYTES: usize = 512;
 const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 3;
 const PARTS_PER_MILLION: u64 = 1_000_000;
@@ -158,6 +158,12 @@ pub(crate) struct RouteRequestLogEntry {
     pub thinking_budget_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttft_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub router_pre_upstream_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_first_byte_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub downstream_first_content_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_header_ms: Option<u64>,
     pub total_duration_ms: u64,
@@ -299,6 +305,9 @@ pub(crate) struct RouteRequestLogQueryItem {
     pub reasoning_effort: Option<String>,
     pub thinking_budget_tokens: Option<u64>,
     pub ttft_ms: Option<u64>,
+    pub router_pre_upstream_ms: Option<u64>,
+    pub upstream_first_byte_ms: Option<u64>,
+    pub downstream_first_content_ms: Option<u64>,
     pub upstream_header_ms: Option<u64>,
     pub total_duration_ms: u64,
     pub queue_delay_ms: u64,
@@ -508,6 +517,8 @@ impl RouteRequestLogProducer {
                 started_at: start.started_at,
                 upstream_started_at: OnceLock::new(),
                 first_byte_micros: AtomicU64::new(0),
+                router_pre_upstream_micros: AtomicU64::new(0),
+                downstream_first_content_micros: AtomicU64::new(0),
                 upstream_header_micros: AtomicU64::new(0),
                 finished: AtomicBool::new(false),
                 finish_gate: Mutex::new(ProbeFinishGate::default()),
@@ -580,6 +591,8 @@ struct ProbeShared {
     started_at: Instant,
     upstream_started_at: OnceLock<Instant>,
     first_byte_micros: AtomicU64,
+    router_pre_upstream_micros: AtomicU64,
+    downstream_first_content_micros: AtomicU64,
     upstream_header_micros: AtomicU64,
     finished: AtomicBool,
     finish_gate: Mutex<ProbeFinishGate>,
@@ -710,6 +723,14 @@ impl RouteRequestLogProbe {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn downstream_content_observed_for_test(&self) -> bool {
+        self.shared
+            .downstream_first_content_micros
+            .load(Ordering::Relaxed)
+            != 0
+    }
+
     fn shield(&self, operation: impl FnOnce()) {
         let _ = self.shared.producer.catch_observer_panic(operation);
     }
@@ -747,6 +768,10 @@ impl RouteRequestLogProbe {
 
     pub(crate) fn mark_upstream_send(&self, transport: UpstreamTransport) {
         self.shield(|| {
+            store_elapsed_once(
+                &self.shared.router_pre_upstream_micros,
+                self.shared.started_at,
+            );
             let _ = self.shared.upstream_started_at.set(Instant::now());
             lock_unpoisoned(&self.shared.entry).upstream_transport = Some(transport);
         });
@@ -795,6 +820,18 @@ impl RouteRequestLogProbe {
             {
                 lock_unpoisoned(&self.shared.entry).first_byte_source = Some(source);
             }
+        });
+    }
+
+    /// Records when the first user-visible content has been handed to the
+    /// downstream response writer. This is intentionally independent of the
+    /// upstream first byte: protocol adaptation may delay visible text.
+    pub(crate) fn mark_first_downstream_content(&self) {
+        self.shield(|| {
+            store_elapsed_once(
+                &self.shared.downstream_first_content_micros,
+                self.shared.started_at,
+            );
         });
     }
 
@@ -976,6 +1013,11 @@ impl RouteRequestLogProbe {
             reasoning_effort: pending.reasoning_effort.take(),
             thinking_budget_tokens: pending.thinking_budget_tokens,
             ttft_ms: load_duration_ms(&self.shared.first_byte_micros),
+            router_pre_upstream_ms: load_duration_ms(&self.shared.router_pre_upstream_micros),
+            upstream_first_byte_ms: load_duration_ms(&self.shared.first_byte_micros),
+            downstream_first_content_ms: load_duration_ms(
+                &self.shared.downstream_first_content_micros,
+            ),
             upstream_header_ms: load_duration_ms(&self.shared.upstream_header_micros),
             total_duration_ms: elapsed_millis(self.shared.started_at),
             queue_delay_ms: 0,
@@ -1643,6 +1685,9 @@ impl SqliteSink {
                 reasoning_effort TEXT,
                 thinking_budget_tokens INTEGER,
                 ttft_ms INTEGER,
+                router_pre_upstream_ms INTEGER,
+                upstream_first_byte_ms INTEGER,
+                downstream_first_content_ms INTEGER,
                 upstream_header_ms INTEGER,
                 total_duration_ms INTEGER NOT NULL,
                 queue_delay_ms INTEGER NOT NULL,
@@ -1702,7 +1747,8 @@ impl SqliteSink {
                 "INSERT INTO route_request_logs (
                     request_id, trace_id, timestamp_unix_ms, provider, provider_name,
                     requested_model, model, reasoning_effort, thinking_budget_tokens,
-                    ttft_ms, upstream_header_ms, total_duration_ms, queue_delay_ms,
+                    ttft_ms, router_pre_upstream_ms, upstream_first_byte_ms,
+                    downstream_first_content_ms, upstream_header_ms, total_duration_ms, queue_delay_ms,
                     input_tokens, output_tokens, cached_input_tokens,
                     cache_creation_input_tokens, reasoning_output_tokens, total_tokens,
                     usage_reported, usage_unavailable_reason, request_protocol,
@@ -1717,7 +1763,7 @@ impl SqliteSink {
                     ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
                     ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-                    ?41, ?42
+                    ?41, ?42, ?43, ?44, ?45
                 )",
             )?;
             for queued in batch {
@@ -1733,6 +1779,9 @@ impl SqliteSink {
                     entry.reasoning_effort,
                     entry.thinking_budget_tokens.map(to_i64),
                     entry.ttft_ms.map(to_i64),
+                    entry.router_pre_upstream_ms.map(to_i64),
+                    entry.upstream_first_byte_ms.map(to_i64),
+                    entry.downstream_first_content_ms.map(to_i64),
                     entry.upstream_header_ms.map(to_i64),
                     to_i64(entry.total_duration_ms),
                     to_i64(entry.queue_delay_ms),
@@ -1822,6 +1871,12 @@ fn query_sqlite_route_request_logs(
     )?;
     connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
     connection.pragma_update(None, "query_only", "ON")?;
+    let has_router_pre_upstream_ms =
+        sqlite_table_has_column(&connection, "router_pre_upstream_ms")?;
+    let has_upstream_first_byte_ms =
+        sqlite_table_has_column(&connection, "upstream_first_byte_ms")?;
+    let has_downstream_first_content_ms =
+        sqlite_table_has_column(&connection, "downstream_first_content_ms")?;
     let has_upstream_error_summary =
         sqlite_table_has_column(&connection, "upstream_error_summary")?;
     let has_codex_session_id = sqlite_table_has_column(&connection, "codex_session_id")?;
@@ -1843,6 +1898,21 @@ fn query_sqlite_route_request_logs(
     } else {
         "NULL AS upstream_error_summary"
     };
+    let router_pre_upstream_ms_column = if has_router_pre_upstream_ms {
+        "router_pre_upstream_ms"
+    } else {
+        "NULL AS router_pre_upstream_ms"
+    };
+    let upstream_first_byte_ms_column = if has_upstream_first_byte_ms {
+        "upstream_first_byte_ms"
+    } else {
+        "NULL AS upstream_first_byte_ms"
+    };
+    let downstream_first_content_ms_column = if has_downstream_first_content_ms {
+        "downstream_first_content_ms"
+    } else {
+        "NULL AS downstream_first_content_ms"
+    };
     let codex_session_id_column = if has_codex_session_id {
         "codex_session_id"
     } else {
@@ -1857,7 +1927,8 @@ fn query_sqlite_route_request_logs(
         "SELECT
             request_id, trace_id, timestamp_unix_ms, provider, provider_name,
             requested_model, model, reasoning_effort, thinking_budget_tokens,
-            ttft_ms, upstream_header_ms, total_duration_ms, queue_delay_ms,
+            ttft_ms, {router_pre_upstream_ms_column}, {upstream_first_byte_ms_column},
+            {downstream_first_content_ms_column}, upstream_header_ms, total_duration_ms, queue_delay_ms,
             input_tokens, output_tokens, cached_input_tokens,
             cache_creation_input_tokens, reasoning_output_tokens, total_tokens,
             usage_reported, usage_unavailable_reason, request_protocol,
@@ -1976,36 +2047,39 @@ fn query_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequest
         reasoning_effort: row.get(7)?,
         thinking_budget_tokens: row_optional_u64(row, 8)?,
         ttft_ms: row_optional_u64(row, 9)?,
-        upstream_header_ms: row_optional_u64(row, 10)?,
-        total_duration_ms: row_u64(row, 11)?,
-        queue_delay_ms: row_u64(row, 12)?,
-        input_tokens: row_optional_u64(row, 13)?,
-        output_tokens: row_optional_u64(row, 14)?,
-        cached_input_tokens: row_optional_u64(row, 15)?,
-        cache_creation_input_tokens: row_optional_u64(row, 16)?,
-        reasoning_output_tokens: row_optional_u64(row, 17)?,
-        total_tokens: row_optional_u64(row, 18)?,
-        usage_reported: row.get(19)?,
-        usage_unavailable_reason: row.get(20)?,
-        request_protocol: row.get(21)?,
-        upstream_transport: row.get(22)?,
-        request_kind: row.get(23)?,
-        status: row.get(24)?,
-        status_code: row_optional_u16(row, 25)?,
-        upstream_status_code: row_optional_u16(row, 26)?,
-        error_code: row.get(27)?,
-        completion_reason: row.get(28)?,
-        fallback_count: row_u32(row, 29)?,
-        fallback_reason: row.get(30)?,
-        upstream_authority: row.get(31)?,
-        upstream_request_id: row.get(32)?,
-        upstream_protocol: row.get(33)?,
-        protocol_bridge: row.get(34)?,
-        first_byte_source: row.get(35)?,
-        subagent: row.get(36)?,
-        upstream_error_summary: row.get(37)?,
-        codex_session_id: row.get(38)?,
-        codex_session_is_parent: row.get(39)?,
+        router_pre_upstream_ms: row_optional_u64(row, 10)?,
+        upstream_first_byte_ms: row_optional_u64(row, 11)?,
+        downstream_first_content_ms: row_optional_u64(row, 12)?,
+        upstream_header_ms: row_optional_u64(row, 13)?,
+        total_duration_ms: row_u64(row, 14)?,
+        queue_delay_ms: row_u64(row, 15)?,
+        input_tokens: row_optional_u64(row, 16)?,
+        output_tokens: row_optional_u64(row, 17)?,
+        cached_input_tokens: row_optional_u64(row, 18)?,
+        cache_creation_input_tokens: row_optional_u64(row, 19)?,
+        reasoning_output_tokens: row_optional_u64(row, 20)?,
+        total_tokens: row_optional_u64(row, 21)?,
+        usage_reported: row.get(22)?,
+        usage_unavailable_reason: row.get(23)?,
+        request_protocol: row.get(24)?,
+        upstream_transport: row.get(25)?,
+        request_kind: row.get(26)?,
+        status: row.get(27)?,
+        status_code: row_optional_u16(row, 28)?,
+        upstream_status_code: row_optional_u16(row, 29)?,
+        error_code: row.get(30)?,
+        completion_reason: row.get(31)?,
+        fallback_count: row_u32(row, 32)?,
+        fallback_reason: row.get(33)?,
+        upstream_authority: row.get(34)?,
+        upstream_request_id: row.get(35)?,
+        upstream_protocol: row.get(36)?,
+        protocol_bridge: row.get(37)?,
+        first_byte_source: row.get(38)?,
+        subagent: row.get(39)?,
+        upstream_error_summary: row.get(40)?,
+        codex_session_id: row.get(41)?,
+        codex_session_is_parent: row.get(42)?,
     })
 }
 
@@ -2296,6 +2370,24 @@ fn ensure_sqlite_log_columns(connection: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE route_request_logs ADD COLUMN usage_unavailable_reason TEXT;",
         )?;
     }
+    if !names.iter().any(|name| name == "router_pre_upstream_ms") {
+        connection.execute_batch(
+            "ALTER TABLE route_request_logs ADD COLUMN router_pre_upstream_ms INTEGER;",
+        )?;
+    }
+    if !names.iter().any(|name| name == "upstream_first_byte_ms") {
+        connection.execute_batch(
+            "ALTER TABLE route_request_logs ADD COLUMN upstream_first_byte_ms INTEGER;",
+        )?;
+    }
+    if !names
+        .iter()
+        .any(|name| name == "downstream_first_content_ms")
+    {
+        connection.execute_batch(
+            "ALTER TABLE route_request_logs ADD COLUMN downstream_first_content_ms INTEGER;",
+        )?;
+    }
     if !names.iter().any(|name| name == "upstream_error_summary") {
         connection.execute_batch(
             "ALTER TABLE route_request_logs ADD COLUMN upstream_error_summary TEXT;",
@@ -2453,6 +2545,9 @@ mod tests {
             reasoning_effort: Some("high".to_string()),
             thinking_budget_tokens: None,
             ttft_ms: Some(12),
+            router_pre_upstream_ms: Some(4),
+            upstream_first_byte_ms: Some(12),
+            downstream_first_content_ms: Some(14),
             upstream_header_ms: Some(3),
             total_duration_ms: 45,
             queue_delay_ms: 0,
@@ -2554,6 +2649,9 @@ mod tests {
         assert_eq!(contents.lines().count(), 2);
         assert!(contents.contains("\"cachedInputTokens\":2"));
         assert!(contents.contains("\"codexSessionId\":\"thread-sample\""));
+        assert!(contents.contains("\"routerPreUpstreamMs\":4"));
+        assert!(contents.contains("\"upstreamFirstByteMs\":12"));
+        assert!(contents.contains("\"downstreamFirstContentMs\":14"));
         assert!(!contents.contains("retryCount"));
         assert!(!contents.contains("requestBody"));
     }
@@ -2575,7 +2673,7 @@ mod tests {
     #[test]
     fn sqlite_sink_inserts_one_row_per_request() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("requests.sqlite3");
+        let path = directory.path().join(SQLITE_FILE_NAME);
         let mut sink = SqliteSink::open(path.clone(), 30).unwrap();
         sink.write_batch(&[queued(sample_entry("one")), queued(sample_entry("two"))])
             .unwrap();
@@ -2588,6 +2686,20 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 2);
+
+        let page = query_route_request_logs(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery {
+                page_size: 10,
+                ..RouteRequestLogQuery::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(page.items[0].ttft_ms, Some(12));
+        assert_eq!(page.items[0].router_pre_upstream_ms, Some(4));
+        assert_eq!(page.items[0].upstream_first_byte_ms, Some(12));
+        assert_eq!(page.items[0].downstream_first_content_ms, Some(14));
     }
 
     #[test]
@@ -2869,6 +2981,9 @@ mod tests {
         connection
             .execute_batch(
                 "ALTER TABLE route_request_logs DROP COLUMN upstream_error_summary;
+                 ALTER TABLE route_request_logs DROP COLUMN router_pre_upstream_ms;
+                 ALTER TABLE route_request_logs DROP COLUMN upstream_first_byte_ms;
+                 ALTER TABLE route_request_logs DROP COLUMN downstream_first_content_ms;
                  ALTER TABLE route_request_logs DROP COLUMN codex_session_id;
                  ALTER TABLE route_request_logs DROP COLUMN codex_session_is_parent;",
             )
@@ -2883,6 +2998,9 @@ mod tests {
         .unwrap();
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].upstream_error_summary, None);
+        assert_eq!(page.items[0].router_pre_upstream_ms, None);
+        assert_eq!(page.items[0].upstream_first_byte_ms, None);
+        assert_eq!(page.items[0].downstream_first_content_ms, None);
         assert_eq!(page.items[0].codex_session_id, None);
         assert!(!page.items[0].codex_session_is_parent);
 
@@ -2943,6 +3061,9 @@ mod tests {
             reasoning_effort: None,
             thinking_budget_tokens: None,
             ttft_ms: None,
+            router_pre_upstream_ms: None,
+            upstream_first_byte_ms: None,
+            downstream_first_content_ms: None,
             upstream_header_ms: None,
             total_duration_ms: 1,
             queue_delay_ms: 0,
@@ -2980,8 +3101,25 @@ mod tests {
         assert_eq!(value["upstreamErrorSummary"], "rate limit reached");
         assert_eq!(value["codexSessionId"], "parent-thread");
         assert_eq!(value["codexSessionIsParent"], true);
+        assert!(value.get("routerPreUpstreamMs").unwrap().is_null());
+        assert!(value.get("upstreamFirstByteMs").unwrap().is_null());
+        assert!(value.get("downstreamFirstContentMs").unwrap().is_null());
         assert!(value.get("request_id").is_none());
         assert!(value.get("retryCount").is_none());
+    }
+
+    #[test]
+    fn optional_timing_fields_preserve_ttft_wire_compatibility() {
+        let mut entry = sample_entry("timing");
+        entry.router_pre_upstream_ms = None;
+        entry.upstream_first_byte_ms = None;
+        entry.downstream_first_content_ms = None;
+
+        let value = serde_json::to_value(&entry).unwrap();
+        assert_eq!(value["ttftMs"], 12);
+        assert!(value.get("routerPreUpstreamMs").is_none());
+        assert!(value.get("upstreamFirstByteMs").is_none());
+        assert!(value.get("downstreamFirstContentMs").is_none());
     }
 
     #[cfg(unix)]
@@ -3300,6 +3438,7 @@ mod tests {
         );
         probe.mark_upstream_send(UpstreamTransport::HttpSse);
         probe.mark_first_upstream_data(FirstByteSource::UpstreamHttpBody);
+        probe.mark_first_downstream_content();
         probe.mark_upstream_error_summary("provider detail");
         probe.observe_event(&serde_json::json!({
             "type":"response.completed",
@@ -3312,6 +3451,9 @@ mod tests {
         assert_eq!(queued.entry.request_id, "request-one");
         assert_eq!(queued.entry.status, RequestStatus::Succeeded);
         assert!(queued.entry.ttft_ms.is_some());
+        assert!(queued.entry.router_pre_upstream_ms.is_some());
+        assert_eq!(queued.entry.upstream_first_byte_ms, queued.entry.ttft_ms);
+        assert!(queued.entry.downstream_first_content_ms.is_some());
         assert_eq!(queued.entry.token_usage.total_tokens, Some(15));
         assert_eq!(queued.entry.codex_session_id.as_deref(), Some("thread-one"));
         assert!(!queued.entry.codex_session_is_parent);

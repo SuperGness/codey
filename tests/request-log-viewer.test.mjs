@@ -95,6 +95,11 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.doesNotMatch(viewer, />重试</);
   assert.doesNotMatch(viewer, /retryCount/);
   assert.match(viewer, /item\.upstreamAuthority/);
+  assert.match(viewer, /downstreamFirstContentMs\?: number \| null/);
+  assert.match(viewer, /item\.downstreamFirstContentMs \?\? item\.ttftMs/);
+  assert.match(viewer, /端到端首内容/);
+  assert.match(viewer, /路由前置/);
+  assert.match(viewer, /上游首包/);
   assert.match(viewer, /upstreamErrorSummary\?: string \| null/);
   assert.match(viewer, /\[\s*item\.statusCode,\s*item\.upstreamStatusCode,[\s\S]*\.some/);
   assert.match(viewer, /statusCode < 200 \|\| statusCode >= 300/);

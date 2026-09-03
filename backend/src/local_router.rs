@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -63,6 +64,10 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_UPSTREAM_ERROR_BYTES: usize = 64 * 1024;
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_UPSTREAM_SSE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+const UPSTREAM_SSE_SNIFF_BYTES: usize = 1024;
+const REQUEST_JSON_OFFLOAD_BYTES: usize = 256 * 1024;
+const MAX_CUSTOM_TOOL_BRIDGE_DESCRIPTION_BYTES: usize = 8 * 1024;
+const MAX_CUSTOM_TOOL_SOURCE_DESCRIPTION_BYTES: usize = 2 * 1024;
 const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 const MAX_CONCURRENT_REJECTIONS: usize = 4;
 const REQUEST_BODY_BUDGET_BYTES: usize = 256 * 1024 * 1024;
@@ -113,6 +118,24 @@ const ROUTER_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 tokio::task_local! {
     static ROUTER_REQUEST_ID: String;
     static ROUTER_REQUEST_STARTED_AT: Instant;
+}
+
+fn record_router_failure_nonblocking(
+    event: &'static str,
+    operation: &'static str,
+    error: impl Into<String>,
+    context: Value,
+) {
+    let error = error.into();
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        // ponytail: router concurrency/backoff bounds task volume; use a shared bounded
+        // error-log queue if failure storms ever make this measurable.
+        drop(runtime.spawn_blocking(move || {
+            crate::error_log::record_failure(event, operation, error, context);
+        }));
+    } else {
+        crate::error_log::record_failure(event, operation, error, context);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -208,7 +231,7 @@ impl LocalRouter {
         let websocket_backoffs = Arc::new(Mutex::new(UpstreamWebSocketBackoffs::default()));
         let request_log = Arc::new(RouteRequestLogController::new());
         if let Err(error) = request_log.reconfigure(&config.route_request_log).await {
-            crate::error_log::record_failure(
+            record_router_failure_nonblocking(
                 "route_request_log_start_failed",
                 "start_route_request_log",
                 format!("{error:#}"),
@@ -253,7 +276,7 @@ impl LocalRouter {
                         if let Some(Err(error)) = joined
                             && error.is_panic()
                         {
-                            crate::error_log::record_failure(
+                            record_router_failure_nonblocking(
                                 "local_router_connection_task_failed",
                                 "join_local_router_connection",
                                 error.to_string(),
@@ -308,7 +331,7 @@ impl LocalRouter {
                                     ROUTER_REQUEST_STARTED_AT.scope(Instant::now(), async move {
                                         let _permit = permit;
                                         if let Err(error) = server.handle_connection(stream).await {
-                                            crate::error_log::record_failure(
+                                            record_router_failure_nonblocking(
                                                 "local_router_request_failed",
                                                 "handle_local_router_connection",
                                                 format!("{error:#}"),
@@ -319,7 +342,7 @@ impl LocalRouter {
                                 ));
                             }
                             Err(error) => {
-                                crate::error_log::record_failure(
+                                record_router_failure_nonblocking(
                                     "local_router_accept_failed",
                                     "accept_local_router_connection",
                                     error.to_string(),
@@ -337,7 +360,7 @@ impl LocalRouter {
                     if let Err(error) = joined
                         && error.is_panic()
                     {
-                        crate::error_log::record_failure(
+                        record_router_failure_nonblocking(
                             "local_router_connection_task_failed",
                             "drain_local_router_connection",
                             error.to_string(),
@@ -863,9 +886,74 @@ impl RouterServer {
         if request_looks_like_responses_websocket(&stream).await? {
             return self.handle_responses_websocket(stream).await;
         }
+        let pending =
+            match tokio::time::timeout(REQUEST_READ_TIMEOUT, read_http_request_head(&mut stream))
+                .await
+            {
+                Ok(Ok(request)) => request,
+                Ok(Err(error)) => {
+                    write_error_response(
+                        &mut stream,
+                        400,
+                        "invalid_http_request",
+                        format!("本地路由请求无效：{error:#}"),
+                        None,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                Err(_) => {
+                    write_error_response(
+                        &mut stream,
+                        408,
+                        "request_timeout",
+                        "读取本地路由请求超时",
+                        None,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+        if pending.request.path == "/healthz" {
+            write_json_response(&mut stream, 200, &json!({"status":"ok"})).await?;
+            return Ok(());
+        }
+        if pending.request.method == "GET" && pending.request.path == REQUEST_LOG_PAGE_PATH {
+            write_static_response(
+                &mut stream,
+                "text/html; charset=utf-8",
+                REQUEST_LOG_PAGE.as_bytes(),
+            )
+            .await?;
+            return Ok(());
+        }
+        if pending.request.method == "GET" && pending.request.path == REQUEST_LOG_SCRIPT_PATH {
+            write_static_response(
+                &mut stream,
+                "text/javascript; charset=utf-8",
+                crate::cdp::SETTINGS_OVERLAY_SCRIPT.as_bytes(),
+            )
+            .await?;
+            return Ok(());
+        }
+        if !self.authorized(&pending.request) {
+            write_error_response(
+                &mut stream,
+                401,
+                "invalid_router_token",
+                "Codey 本地路由认证失败",
+                None,
+            )
+            .await?;
+            return Ok(());
+        }
         let request = match tokio::time::timeout(
             REQUEST_READ_TIMEOUT,
-            read_http_request_with_budget(&mut stream, Some(&self.request_body_budget)),
+            read_http_request_body_with_budget(
+                &mut stream,
+                pending,
+                Some(&self.request_body_budget),
+            ),
         )
         .await
         {
@@ -908,39 +996,6 @@ impl RouterServer {
                 return Ok(());
             }
         };
-        if request.path == "/healthz" {
-            write_json_response(&mut stream, 200, &json!({"status":"ok"})).await?;
-            return Ok(());
-        }
-        if request.method == "GET" && request.path == REQUEST_LOG_PAGE_PATH {
-            write_static_response(
-                &mut stream,
-                "text/html; charset=utf-8",
-                REQUEST_LOG_PAGE.as_bytes(),
-            )
-            .await?;
-            return Ok(());
-        }
-        if request.method == "GET" && request.path == REQUEST_LOG_SCRIPT_PATH {
-            write_static_response(
-                &mut stream,
-                "text/javascript; charset=utf-8",
-                crate::cdp::SETTINGS_OVERLAY_SCRIPT.as_bytes(),
-            )
-            .await?;
-            return Ok(());
-        }
-        if !self.authorized(&request) {
-            write_error_response(
-                &mut stream,
-                401,
-                "invalid_router_token",
-                "Codey 本地路由认证失败",
-                None,
-            )
-            .await?;
-            return Ok(());
-        }
         let route_path = request.path.as_str();
         match (request.method.as_str(), route_path) {
             ("GET", "/v1/models") | ("GET", "/models") => {
@@ -1269,7 +1324,7 @@ impl RouterServer {
                         )
                         .await;
                     if let Err(error) = result {
-                        crate::error_log::record_failure(
+                        record_router_failure_nonblocking(
                             "local_router_websocket_request_failed",
                             "proxy_local_router_websocket_request",
                             format!("{error:#}"),
@@ -1356,10 +1411,24 @@ impl RouterServer {
                     return Ok(());
                 }
             };
-        let body = match serde_json::from_slice::<Value>(&encoded_body) {
+        let mut downstream = HttpResponsesDownstream::new(stream);
+        let (encoded_body, parsed_body) = match parse_responses_request_body(encoded_body).await {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                downstream
+                    .write_error(
+                        500,
+                        "request_parse_failed",
+                        format!("Responses 请求解析任务失败：{error:#}"),
+                        None,
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
+        let body = match parsed_body {
             Ok(body) if body.is_object() => body,
             Ok(_) => {
-                let mut downstream = HttpResponsesDownstream::new(stream);
                 downstream
                     .write_error(
                         400,
@@ -1371,7 +1440,6 @@ impl RouterServer {
                 return Ok(());
             }
             Err(error) => {
-                let mut downstream = HttpResponsesDownstream::new(stream);
                 downstream
                     .write_error(
                         400,
@@ -1383,7 +1451,6 @@ impl RouterServer {
                 return Ok(());
             }
         };
-        let mut downstream = HttpResponsesDownstream::new(stream);
         self.proxy_parsed_responses(
             request,
             body,
@@ -1640,7 +1707,35 @@ impl RouterServer {
             }
         };
         let mut tool_bridge = ResponsesToolBridge::default();
-        let mut upstream_body = match bridge.convert_responses_body(&body) {
+        let offload_conversion = bridge != ProtocolBridge::NativeResponses
+            && encoded_body
+                .as_ref()
+                .is_some_and(|body| body.len() >= REQUEST_JSON_OFFLOAD_BYTES);
+        let (body, converted) = if offload_conversion {
+            match tokio::task::spawn_blocking(move || {
+                let converted = bridge.convert_responses_body(&body);
+                (body, converted)
+            })
+            .await
+            {
+                Ok(converted) => converted,
+                Err(error) => {
+                    downstream
+                        .write_error(
+                            500,
+                            "request_conversion_failed",
+                            format!("等待 Responses 协议转换任务失败：{error}"),
+                            Some(&resolved.route),
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            }
+        } else {
+            let converted = bridge.convert_responses_body(&body);
+            (body, converted)
+        };
+        let mut upstream_body = match converted {
             Ok(converted) => {
                 if let Some(converted) = converted {
                     tool_bridge = converted.tool_bridge;
@@ -1701,18 +1796,13 @@ impl RouterServer {
             headers.insert(HeaderName::from_static("x-codey-request-id"), value);
         }
         if resolved.route.official_account {
-            let official_auth = {
-                let mut auth_cache = self
-                    .official_auth_cache
-                    .lock()
-                    .expect("official auth cache mutex poisoned");
-                resolve_official_upstream_auth(
-                    &request,
-                    &self.bearer_token,
-                    &self.official_auth_path,
-                    &mut auth_cache,
-                )
-            };
+            let official_auth = resolve_official_upstream_auth(
+                &request,
+                &self.bearer_token,
+                &self.official_auth_path,
+                &self.official_auth_cache,
+            )
+            .await;
             let Some(official_auth) = official_auth else {
                 downstream
                     .write_error(
@@ -1775,7 +1865,12 @@ impl RouterServer {
                 probe.mark_fallback("websocket_to_http_sse");
             }
         }
-        let fallback_headers = headers.clone();
+        let upstream_stream_requested = upstream_body
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let fallback_headers =
+            (subagent_request && upstream_stream_requested).then(|| headers.clone());
         let mut request_builder = self.client.post(upstream_url).headers(headers);
         request_builder = if bridge == ProtocolBridge::NativeResponses {
             // Native HTTP requests keep large input/tool fields as their raw
@@ -1793,7 +1888,9 @@ impl RouterServer {
                 {
                     body
                 }
-                Some(body) => rewrite_native_responses_encoded_body(&body, &upstream_body)?,
+                Some(body) => {
+                    rewrite_native_responses_encoded_body_offloaded(body, &upstream_body).await?
+                }
                 None => serde_json::to_vec(&upstream_body)
                     .context("序列化 Responses WebSocket 上游请求失败")?,
             };
@@ -1804,10 +1901,6 @@ impl RouterServer {
             drop(encoded_body.take());
             request_builder.json(&upstream_body)
         };
-        let upstream_stream_requested = upstream_body
-            .get("stream")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
         let response_header_timeout = if upstream_stream_requested {
             UPSTREAM_RESPONSE_HEADER_TIMEOUT
         } else {
@@ -1843,7 +1936,10 @@ impl RouterServer {
                     let fallback_request = self
                         .client
                         .post(upstream_url)
-                        .headers(fallback_headers)
+                        .headers(
+                            fallback_headers
+                                .expect("streaming subagent fallback headers must be prepared"),
+                        )
                         .json(&fallback_body);
                     (
                         tokio::time::timeout(
@@ -1863,7 +1959,7 @@ impl RouterServer {
                 let timeout = error.is_timeout();
                 let connect = error.is_connect();
                 let sanitized_error = error.without_url().to_string();
-                crate::error_log::record_failure(
+                record_router_failure_nonblocking(
                     "local_router_upstream_failed",
                     "proxy_local_router_request",
                     sanitized_error,
@@ -1911,7 +2007,7 @@ impl RouterServer {
                 return Ok(());
             }
             Err(_) => {
-                crate::error_log::record_failure(
+                record_router_failure_nonblocking(
                     "local_router_upstream_failed",
                     "wait_for_local_router_upstream_headers",
                     "等待上游响应头超时",
@@ -2226,6 +2322,32 @@ fn rewrite_native_responses_encoded_body(original: &[u8], updated: &Value) -> Re
     Ok(output)
 }
 
+async fn rewrite_native_responses_encoded_body_offloaded(
+    original: Vec<u8>,
+    updated: &Value,
+) -> Result<Vec<u8>> {
+    if original.len() < REQUEST_JSON_OFFLOAD_BYTES {
+        return rewrite_native_responses_encoded_body(&original, updated);
+    }
+    let updated = updated
+        .as_object()
+        .context("Responses 上游请求必须是 JSON 对象")?
+        .iter()
+        .filter(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "model" | "client_metadata" | "previous_response_id"
+            )
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    tokio::task::spawn_blocking(move || {
+        rewrite_native_responses_encoded_body(&original, &Value::Object(updated))
+    })
+    .await
+    .context("等待大型 Responses 请求改写任务失败")?
+}
+
 fn take_route_hint_from_metadata_value(metadata: &mut Value) -> Result<Option<String>> {
     let Some(metadata) = metadata.as_object_mut() else {
         return Ok(None);
@@ -2397,25 +2519,26 @@ fn incoming_chatgpt_account_id(request: &HttpRequest) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn resolve_official_upstream_auth(
+async fn resolve_official_upstream_auth(
     request: &HttpRequest,
     router_bearer_token: &str,
     auth_path: &Path,
-    auth_cache: &mut crate::account_usage::OfficialAuthCache,
+    auth_cache: &Mutex<crate::account_usage::OfficialAuthCache>,
 ) -> Option<OfficialUpstreamAuth> {
     if let Some(authorization) = incoming_openai_authorization(request, router_bearer_token) {
+        let account_id = match incoming_chatgpt_account_id(request) {
+            Some(account_id) => Some(account_id),
+            None => read_cached_official_auth(auth_path, auth_cache)
+                .await
+                .and_then(|auth| auth.account_id),
+        };
         return Some(OfficialUpstreamAuth {
             authorization: authorization.to_string(),
-            account_id: incoming_chatgpt_account_id(request).or_else(|| {
-                auth_cache
-                    .read(auth_path)
-                    .ok()
-                    .and_then(|auth| auth.account_id)
-            }),
+            account_id,
         });
     }
 
-    let auth = auth_cache.read(auth_path).ok()?;
+    let auth = read_cached_official_auth(auth_path, auth_cache).await?;
     Some(OfficialUpstreamAuth {
         authorization: format!("Bearer {}", auth.access_token),
         // The account ID stored with the selected OAuth token is authoritative.
@@ -2425,6 +2548,34 @@ fn resolve_official_upstream_auth(
             .account_id
             .or_else(|| incoming_chatgpt_account_id(request)),
     })
+}
+
+async fn read_cached_official_auth(
+    auth_path: &Path,
+    auth_cache: &Mutex<crate::account_usage::OfficialAuthCache>,
+) -> Option<crate::account_usage::OfficialAuth> {
+    let now = Instant::now();
+    if let Some(cached) = auth_cache
+        .lock()
+        .expect("official auth cache mutex poisoned")
+        .get(now)
+    {
+        return cached.ok();
+    }
+
+    let auth_path = auth_path.to_path_buf();
+    let result =
+        tokio::task::spawn_blocking(move || crate::account_usage::read_official_auth(&auth_path))
+            .await
+            .ok()?;
+    let now = Instant::now();
+    let mut cache = auth_cache
+        .lock()
+        .expect("official auth cache mutex poisoned");
+    if let Some(cached) = cache.get(now) {
+        return cached.ok();
+    }
+    cache.store(result, now).ok()
 }
 
 fn route_display_name(route: &RouteTarget) -> &str {
@@ -3122,11 +3273,26 @@ fn responses_input_without_additional_tools(
                     continue;
                 }
                 append_responses_tool_search_output_tools(item, &mut additional_tools)?;
+                if item
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_opaque_responses_input_item_type)
+                {
+                    continue;
+                }
                 normalized.push(item.clone());
             }
             Ok((Some(Value::Array(normalized)), additional_tools))
         }
         Value::Object(_) if append_responses_additional_tools(input, &mut additional_tools)? => {
+            Ok((None, additional_tools))
+        }
+        Value::Object(_)
+            if input
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(is_opaque_responses_input_item_type) =>
+        {
             Ok((None, additional_tools))
         }
         Value::Object(_) => {
@@ -3175,24 +3341,39 @@ fn merge_responses_tools(
     configured: Option<&Value>,
     additional: Vec<Value>,
 ) -> Result<Option<Value>> {
-    if additional.is_empty() {
-        return Ok(configured.cloned());
+    if configured.is_none() && additional.is_empty() {
+        return Ok(None);
     }
-    let mut merged = match configured {
-        Some(Value::Array(tools)) => tools.clone(),
+    let configured = match configured {
+        Some(Value::Array(tools)) => tools.as_slice(),
         Some(_) => anyhow::bail!("tools 必须是数组"),
-        None => Vec::new(),
+        None => &[],
     };
-    for tool in additional {
-        if let Some(identity) = responses_tool_identity(&tool)
-            && let Some(existing) = merged.iter().find(|existing| {
-                responses_tool_identity(existing).as_deref() == Some(identity.as_str())
-            })
-        {
-            if existing == &tool {
+    let mut merged = Vec::with_capacity(configured.len() + additional.len());
+    let mut identities = HashMap::with_capacity(configured.len() + additional.len());
+    for tool in configured {
+        if let Some(identity) = responses_tool_identity(tool) {
+            if identity.starts_with("function/")
+                && identities
+                    .get(&identity)
+                    .and_then(|index| merged.get(*index))
+                    == Some(tool)
+            {
                 continue;
             }
-            anyhow::bail!("additional_tools 包含定义冲突的工具 {identity}");
+            identities.entry(identity).or_insert(merged.len());
+        }
+        merged.push(tool.clone());
+    }
+    for tool in additional {
+        if let Some(identity) = responses_tool_identity(&tool) {
+            if let Some(index) = identities.get(&identity).copied() {
+                if merged[index] == tool {
+                    continue;
+                }
+                anyhow::bail!("additional_tools 包含定义冲突的工具 {identity}");
+            }
+            identities.insert(identity, merged.len());
         }
         merged.push(tool);
     }
@@ -3364,9 +3545,10 @@ fn responses_to_anthropic_messages_request(body: &Value) -> Result<ConvertedResp
         body: chat,
         tool_bridge,
     } = responses_to_chat_completions_request(body)?;
-    let chat = chat
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("Responses 请求无法归一化为消息对象"))?;
+    let mut chat = match chat {
+        Value::Object(chat) => chat,
+        _ => anyhow::bail!("Responses 请求无法归一化为消息对象"),
+    };
     for unsupported in [
         "presence_penalty",
         "frequency_penalty",
@@ -3389,16 +3571,16 @@ fn responses_to_anthropic_messages_request(body: &Value) -> Result<ConvertedResp
     let model = chat
         .get("model")
         .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("缺少 model 字段"))?;
+        .ok_or_else(|| anyhow::anyhow!("缺少 model 字段"))?
+        .to_string();
     let mut system_parts = Vec::new();
     let mut messages = Vec::new();
-    for message in chat
-        .get("messages")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        append_anthropic_message_from_chat(message, &mut system_parts, &mut messages)?;
+    let chat_messages = match chat.remove("messages") {
+        Some(Value::Array(messages)) => messages,
+        _ => Vec::new(),
+    };
+    for message in chat_messages {
+        append_anthropic_message_from_chat(&message, &mut system_parts, &mut messages)?;
     }
     if messages.is_empty() {
         anyhow::bail!("缺少可转换为 Anthropic Messages messages 的 input");
@@ -3412,7 +3594,7 @@ fn responses_to_anthropic_messages_request(body: &Value) -> Result<ConvertedResp
         anyhow::bail!("max_output_tokens 必须大于 0");
     }
     let mut anthropic = serde_json::Map::from_iter([
-        ("model".to_string(), Value::String(model.to_string())),
+        ("model".to_string(), Value::String(model)),
         ("messages".to_string(), Value::Array(messages)),
         ("max_tokens".to_string(), Value::Number(max_tokens.into())),
         (
@@ -3426,8 +3608,8 @@ fn responses_to_anthropic_messages_request(body: &Value) -> Result<ConvertedResp
             Value::String(system_parts.join("\n\n")),
         );
     }
-    copy_number_or_string_field(chat, &mut anthropic, "temperature", "temperature");
-    copy_number_or_string_field(chat, &mut anthropic, "top_p", "top_p");
+    copy_number_or_string_field(&chat, &mut anthropic, "temperature", "temperature");
+    copy_number_or_string_field(&chat, &mut anthropic, "top_p", "top_p");
     if let Some(top_k) = body.get("top_k") {
         if !top_k.is_number() {
             anyhow::bail!("top_k 必须是数字");
@@ -3460,8 +3642,8 @@ fn responses_to_anthropic_messages_request(body: &Value) -> Result<ConvertedResp
         .get("parallel_tool_calls")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    if let Some(tools) = chat.get("tools") {
-        let converted_tools = chat_tools_to_anthropic_tools(tools)?;
+    if let Some(tools) = chat.remove("tools") {
+        let converted_tools = chat_tools_to_anthropic_tools(&tools)?;
         let mut tool_choice = chat
             .get("tool_choice")
             .map(chat_tool_choice_to_anthropic_tool_choice)
@@ -4964,20 +5146,48 @@ fn register_custom_tool_name(
 }
 
 fn custom_tool_bridge_description(object: &serde_json::Map<String, Value>) -> Result<String> {
-    let original = serde_json::to_string(object).context("序列化 Responses custom 工具定义失败")?;
     let mut description = object
         .get("description")
         .and_then(Value::as_str)
         .filter(|description| !description.is_empty())
-        .map(|description| format!("{description}\n\n"))
+        .map(|description| {
+            format!(
+                "{}\n\n",
+                utf8_prefix(description, MAX_CUSTOM_TOOL_SOURCE_DESCRIPTION_BYTES)
+            )
+        })
         .unwrap_or_default();
     description.push_str(
         "[Codey compatibility bridge] This was an OpenAI Responses custom free-form tool. \
 Call this function with exactly one `input` string containing the complete raw tool input. \
-Do not JSON-encode the string again and do not add wrapper text. Original definition: ",
+Do not JSON-encode the string again and do not add wrapper text.",
     );
-    description.push_str(&original);
+    if let Some(format) = object.get("format") {
+        description.push_str(" Format: ");
+        description.push_str(
+            &serde_json::to_string(format).context("序列化 Responses custom 工具格式提示失败")?,
+        );
+    }
+    if description.len() > MAX_CUSTOM_TOOL_BRIDGE_DESCRIPTION_BYTES {
+        let mut end = MAX_CUSTOM_TOOL_BRIDGE_DESCRIPTION_BYTES - '…'.len_utf8();
+        while !description.is_char_boundary(end) {
+            end -= 1;
+        }
+        description.truncate(end);
+        description.push('…');
+    }
     Ok(description)
+}
+
+fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 fn response_function_name<'a>(
@@ -5365,6 +5575,12 @@ struct HttpRequest {
     _body_budget_permit: Option<OwnedSemaphorePermit>,
 }
 
+#[derive(Debug)]
+struct PendingHttpRequest {
+    request: HttpRequest,
+    content_length: usize,
+}
+
 #[cfg(test)]
 async fn read_http_request<R>(stream: &mut R) -> Result<HttpRequest>
 where
@@ -5405,6 +5621,14 @@ async fn read_http_request_with_budget<R>(
     stream: &mut R,
     body_budget: Option<&Arc<Semaphore>>,
 ) -> Result<HttpRequest>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let pending = read_http_request_head(stream).await?;
+    read_http_request_body_with_budget(stream, pending, body_budget).await
+}
+
+async fn read_http_request_head<R>(stream: &mut R) -> Result<PendingHttpRequest>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
@@ -5473,17 +5697,38 @@ where
     if content_length > MAX_REQUEST_BYTES {
         anyhow::bail!("请求体超过 Codey 本地路由安全上限");
     }
-    let body_budget_permit = body_budget
-        .map(|body_budget| acquire_request_body_budget(body_budget, content_length))
-        .transpose()?
-        .flatten();
     let body_start = header_end + 4;
     let buffered_body = buffer.get(body_start..).unwrap_or_default();
-    let mut body = Vec::with_capacity(content_length);
+    let mut body = Vec::with_capacity(buffered_body.len().min(content_length));
     body.extend_from_slice(&buffered_body[..buffered_body.len().min(content_length)]);
+    Ok(PendingHttpRequest {
+        request: HttpRequest {
+            method,
+            path,
+            headers,
+            body,
+            _body_budget_permit: None,
+        },
+        content_length,
+    })
+}
+
+async fn read_http_request_body_with_budget<R>(
+    stream: &mut R,
+    mut pending: PendingHttpRequest,
+    body_budget: Option<&Arc<Semaphore>>,
+) -> Result<HttpRequest>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let body_budget_permit = body_budget
+        .map(|body_budget| acquire_request_body_budget(body_budget, pending.content_length))
+        .transpose()?
+        .flatten();
+    pending.request._body_budget_permit = body_budget_permit;
     let mut chunk = [0_u8; 8192];
-    while body.len() < content_length {
-        let remaining = content_length - body.len();
+    while pending.request.body.len() < pending.content_length {
+        let remaining = pending.content_length - pending.request.body.len();
         let read_length = remaining.min(chunk.len());
         let read = stream
             .read(&mut chunk[..read_length])
@@ -5492,16 +5737,10 @@ where
         if read == 0 {
             anyhow::bail!("请求体读取完成前连接断开");
         }
-        body.extend_from_slice(&chunk[..read]);
+        pending.request.body.extend_from_slice(&chunk[..read]);
     }
-    body.truncate(content_length);
-    Ok(HttpRequest {
-        method,
-        path,
-        headers,
-        body,
-        _body_budget_permit: body_budget_permit,
-    })
+    pending.request.body.truncate(pending.content_length);
+    Ok(pending.request)
 }
 
 fn responses_request_body_encoding(request: &HttpRequest) -> Result<ResponsesRequestBodyEncoding> {
@@ -5548,6 +5787,21 @@ async fn decode_responses_request_body(
         .context("等待 Responses zstd 请求体解压任务失败")??;
     shrink_request_body_budget(request, decoded.len())?;
     Ok(decoded)
+}
+
+async fn parse_responses_request_body(
+    encoded: Vec<u8>,
+) -> Result<(Vec<u8>, serde_json::Result<Value>)> {
+    if encoded.len() < REQUEST_JSON_OFFLOAD_BYTES {
+        let parsed = serde_json::from_slice(&encoded);
+        return Ok((encoded, parsed));
+    }
+    tokio::task::spawn_blocking(move || {
+        let parsed = serde_json::from_slice(&encoded);
+        (encoded, parsed)
+    })
+    .await
+    .context("等待大型 Responses JSON 解析任务失败")
 }
 
 fn decode_zstd_request_body(encoded: Vec<u8>) -> Result<Vec<u8>> {
@@ -5996,6 +6250,16 @@ fn upstream_websocket_backoff_duration(failure_count: u32) -> Duration {
     UPSTREAM_WEBSOCKET_BACKOFF_STEPS[index.min(UPSTREAM_WEBSOCKET_BACKOFF_STEPS.len() - 1)]
 }
 
+fn record_upstream_websocket_failure(
+    backoffs: &Arc<Mutex<UpstreamWebSocketBackoffs>>,
+    key: &UpstreamWebSocketBackoffKey,
+) {
+    backoffs
+        .lock()
+        .expect("upstream WebSocket backoff mutex poisoned")
+        .record_failure(key.clone(), Instant::now());
+}
+
 #[async_trait]
 trait ResponsesDownstream: Send {
     fn is_websocket(&self) -> bool {
@@ -6124,6 +6388,12 @@ where
             probe.observe_response(status, value);
         }
         let result = self.inner.write_json(status, value).await;
+        if result.is_ok()
+            && (200..300).contains(&status)
+            && let Some(probe) = self.probe.as_ref()
+        {
+            probe.mark_first_downstream_content();
+        }
         self.finish_result(&result, "downstream_json_write_failed");
         result
     }
@@ -6149,6 +6419,9 @@ where
         if let Some(probe) = self.probe.as_ref() {
             if result.is_ok() {
                 probe.mark_response_started(200);
+                if responses_event_has_user_content(event) {
+                    probe.mark_first_downstream_content();
+                }
             } else {
                 probe.mark_cancelled("downstream_event_write_failed");
                 probe.finish_cancelled();
@@ -6526,7 +6799,7 @@ impl WebSocketResponsesDownstream {
                             .lock()
                             .expect("upstream WebSocket backoff mutex poisoned")
                             .record_unsupported(backoff_key, Instant::now());
-                        crate::error_log::record_failure(
+                        record_router_failure_nonblocking(
                             "local_router_upstream_websocket_degraded",
                             "connect_responses_websocket",
                             format!("{error:#}"),
@@ -6546,7 +6819,7 @@ impl WebSocketResponsesDownstream {
                         .lock()
                         .expect("upstream WebSocket backoff mutex poisoned")
                         .record_failure(backoff_key.clone(), Instant::now());
-                    crate::error_log::record_failure(
+                    record_router_failure_nonblocking(
                         "local_router_upstream_websocket_degraded",
                         "connect_responses_websocket",
                         format!("{error:#}"),
@@ -6588,23 +6861,49 @@ impl WebSocketResponsesDownstream {
         if let Some(probe) = probe {
             probe.mark_upstream_send(UpstreamTransport::WebSocket);
         }
-        tokio::time::timeout(
+        match tokio::time::timeout(
             DOWNSTREAM_WRITE_TIMEOUT,
             upstream.socket.send(WebSocketMessage::Text(message.into())),
         )
         .await
-        .context("发送 Responses WebSocket 上游请求超时")?
-        .context("发送 Responses WebSocket 上游请求失败")?;
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
+                return Err(error).context("发送 Responses WebSocket 上游请求失败");
+            }
+            Err(_) => {
+                record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
+                anyhow::bail!("发送 Responses WebSocket 上游请求超时");
+            }
+        }
 
         let mut produced_response_id = None;
         loop {
-            let next = tokio::time::timeout(UPSTREAM_READ_IDLE_TIMEOUT, upstream.socket.next())
-                .await
-                .context("读取 Responses WebSocket 上游事件超时")?;
+            let next = match tokio::time::timeout(
+                UPSTREAM_READ_IDLE_TIMEOUT,
+                upstream.socket.next(),
+            )
+            .await
+            {
+                Ok(next) => next,
+                Err(_) => {
+                    record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
+                    anyhow::bail!("读取 Responses WebSocket 上游事件超时");
+                }
+            };
             let Some(message) = next else {
+                record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
                 anyhow::bail!("Responses WebSocket 上游在终态事件前断开");
             };
-            match message.context("读取 Responses WebSocket 上游事件失败")? {
+            let message = match message {
+                Ok(message) => message,
+                Err(error) => {
+                    record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
+                    return Err(error).context("读取 Responses WebSocket 上游事件失败");
+                }
+            };
+            match message {
                 WebSocketMessage::Text(text) => {
                     if !text.is_empty()
                         && let Some(probe) = probe
@@ -6660,6 +6959,11 @@ impl WebSocketResponsesDownstream {
                         } else {
                             self.write_event(&event).await?;
                         }
+                        if responses_event_has_user_content(&event)
+                            && let Some(probe) = probe
+                        {
+                            probe.mark_first_downstream_content();
+                        }
                         if terminal {
                             let successful_backoff_key = UpstreamWebSocketBackoffKey::new(
                                 &route.provider_id,
@@ -6681,20 +6985,37 @@ impl WebSocketResponsesDownstream {
                     }
                 }
                 WebSocketMessage::Ping(payload) => {
-                    tokio::time::timeout(
+                    match tokio::time::timeout(
                         DOWNSTREAM_WRITE_TIMEOUT,
                         upstream.socket.send(WebSocketMessage::Pong(payload)),
                     )
                     .await
-                    .context("回复 Responses WebSocket 上游 Ping 超时")?
-                    .context("回复 Responses WebSocket 上游 Ping 失败")?;
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => {
+                            record_upstream_websocket_failure(
+                                &self.websocket_backoffs,
+                                &backoff_key,
+                            );
+                            return Err(error).context("回复 Responses WebSocket 上游 Ping 失败");
+                        }
+                        Err(_) => {
+                            record_upstream_websocket_failure(
+                                &self.websocket_backoffs,
+                                &backoff_key,
+                            );
+                            anyhow::bail!("回复 Responses WebSocket 上游 Ping 超时");
+                        }
+                    }
                     upstream.liveness.record_activity(Instant::now());
                 }
                 WebSocketMessage::Pong(_) => upstream.liveness.record_pong(Instant::now()),
                 WebSocketMessage::Close(_) => {
+                    record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
                     anyhow::bail!("Responses WebSocket 上游在终态事件前关闭连接");
                 }
                 WebSocketMessage::Binary(_) | WebSocketMessage::Frame(_) => {
+                    record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
                     anyhow::bail!("Responses WebSocket 上游返回了不支持的二进制消息");
                 }
             }
@@ -6726,6 +7047,37 @@ fn responses_event_is_terminal(event: &Value) -> bool {
         event.get("type").and_then(Value::as_str),
         Some("response.completed" | "response.failed" | "response.incomplete" | "error")
     )
+}
+
+fn responses_event_type_has_user_content(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "response.output_text.delta"
+            | "response.refusal.delta"
+            | "response.function_call_arguments.delta"
+            | "response.custom_tool_call_input.delta"
+            | "response.reasoning_summary_text.delta"
+    )
+}
+
+fn responses_event_has_user_content(event: &Value) -> bool {
+    let Some(event_type) = event.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    if responses_event_type_has_user_content(event_type) {
+        return event.get("delta").is_some_and(|delta| match delta {
+            Value::Null => false,
+            Value::String(value) => !value.is_empty(),
+            Value::Array(value) => !value.is_empty(),
+            Value::Object(value) => !value.is_empty(),
+            Value::Bool(_) | Value::Number(_) => true,
+        });
+    }
+    matches!(event_type, "response.completed" | "response.incomplete")
+        && event
+            .pointer("/response/output")
+            .and_then(Value::as_array)
+            .is_some_and(|output| !output.is_empty())
 }
 
 fn responses_event_is_failure(event: &Value) -> bool {
@@ -7012,23 +7364,20 @@ fn websocket_response_failed_event(
 
 async fn proxy_native_response_to_websocket(
     downstream: &mut WebSocketResponsesDownstream,
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<()> {
     let status = response.status().as_u16();
-    let upstream_is_sse = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(is_sse_content_type);
-    if upstream_is_sse {
+    let mut prepared =
+        prepare_upstream_response(response, "读取 Responses WebSocket 上游响应失败", probe).await?;
+    if prepared.is_sse {
         downstream.start_event_stream().await?;
         let mut buffer = Vec::new();
         let mut cursor = 0;
         let mut done = false;
         let mut terminal = false;
-        while let Some(chunk) = read_upstream_chunk(
-            &mut response,
+        while let Some(chunk) = read_prepared_upstream_chunk(
+            &mut prepared,
             "读取 Responses WebSocket 上游 SSE 流失败",
             probe,
         )
@@ -7052,6 +7401,11 @@ async fn proxy_native_response_to_websocket(
                     probe.observe_event(&event);
                 }
                 downstream.write_event(&event).await?;
+                if responses_event_has_user_content(&event)
+                    && let Some(probe) = probe
+                {
+                    probe.mark_first_downstream_content();
+                }
             }
             if done {
                 break;
@@ -7069,6 +7423,11 @@ async fn proxy_native_response_to_websocket(
                 probe.observe_event(&event);
             }
             downstream.write_event(&event).await?;
+            if responses_event_has_user_content(&event)
+                && let Some(probe) = probe
+            {
+                probe.mark_first_downstream_content();
+            }
         }
         if !terminal {
             anyhow::bail!("Responses HTTP/SSE 降级流在终态事件前断开");
@@ -7081,8 +7440,8 @@ async fn proxy_native_response_to_websocket(
     } else {
         MAX_UPSTREAM_ERROR_BYTES
     };
-    let body = read_bounded_upstream_body(
-        response,
+    let body = read_bounded_prepared_upstream_body(
+        prepared,
         limit,
         "读取 Responses WebSocket 上游响应失败",
         probe,
@@ -7103,6 +7462,11 @@ async fn proxy_native_response_to_websocket(
                 probe.observe_event(&event);
             }
             downstream.write_event(&event).await?;
+            if responses_event_has_user_content(&event)
+                && let Some(probe) = probe
+            {
+                probe.mark_first_downstream_content();
+            }
         }
         return downstream.finish_event_stream().await;
     }
@@ -7111,7 +7475,14 @@ async fn proxy_native_response_to_websocket(
             if let Some(probe) = probe {
                 probe.observe_response(status, &value);
             }
-            downstream.write_json(status, &value).await
+            let result = downstream.write_json(status, &value).await;
+            if result.is_ok()
+                && (200..300).contains(&status)
+                && let Some(probe) = probe
+            {
+                probe.mark_first_downstream_content();
+            }
+            result
         }
         Err(error) => {
             let detail = String::from_utf8_lossy(&body);
@@ -7238,6 +7609,116 @@ impl std::fmt::Display for UpstreamReadIdleTimeout {
 
 impl std::error::Error for UpstreamReadIdleTimeout {}
 
+struct PreparedUpstreamResponse {
+    response: reqwest::Response,
+    prefix: VecDeque<Bytes>,
+    is_sse: bool,
+}
+
+async fn prepare_upstream_response(
+    mut response: reqwest::Response,
+    operation: &'static str,
+    probe: Option<&RouteRequestLogProbe>,
+) -> Result<PreparedUpstreamResponse> {
+    if response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(is_sse_content_type)
+    {
+        return Ok(PreparedUpstreamResponse {
+            response,
+            prefix: VecDeque::new(),
+            is_sse: true,
+        });
+    }
+
+    let mut prefix = VecDeque::new();
+    let mut sniff = Vec::with_capacity(UPSTREAM_SSE_SNIFF_BYTES);
+    loop {
+        let Some(chunk) = read_upstream_chunk(&mut response, operation, probe).await? else {
+            return Ok(PreparedUpstreamResponse {
+                response,
+                prefix,
+                is_sse: false,
+            });
+        };
+        if chunk.is_empty() {
+            continue;
+        }
+        let remaining = UPSTREAM_SSE_SNIFF_BYTES.saturating_sub(sniff.len());
+        sniff.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        prefix.push_back(chunk);
+        if let Some(is_sse) = classify_upstream_sse_prefix(&sniff) {
+            return Ok(PreparedUpstreamResponse {
+                response,
+                prefix,
+                is_sse,
+            });
+        }
+        if sniff.len() == UPSTREAM_SSE_SNIFF_BYTES {
+            return Ok(PreparedUpstreamResponse {
+                response,
+                prefix,
+                is_sse: false,
+            });
+        }
+    }
+}
+
+fn classify_upstream_sse_prefix(prefix: &[u8]) -> Option<bool> {
+    const UTF8_BOM: &[u8] = b"\xef\xbb\xbf";
+    const SSE_PREFIXES: [&[u8]; 5] = [b"data:", b"event:", b"id:", b"retry:", b":"];
+    let prefix = if prefix.starts_with(UTF8_BOM) {
+        &prefix[UTF8_BOM.len()..]
+    } else if UTF8_BOM.starts_with(prefix) {
+        return None;
+    } else {
+        prefix
+    };
+    let prefix = &prefix[prefix
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(prefix.len())..];
+    if prefix.is_empty() {
+        return None;
+    }
+    if SSE_PREFIXES.iter().any(|marker| prefix.starts_with(marker)) {
+        return Some(true);
+    }
+    if SSE_PREFIXES.iter().any(|marker| marker.starts_with(prefix)) {
+        return None;
+    }
+    Some(false)
+}
+
+async fn read_prepared_upstream_chunk(
+    prepared: &mut PreparedUpstreamResponse,
+    operation: &'static str,
+    probe: Option<&RouteRequestLogProbe>,
+) -> Result<Option<Bytes>> {
+    if let Some(chunk) = prepared.prefix.pop_front() {
+        return Ok(Some(chunk));
+    }
+    read_upstream_chunk(&mut prepared.response, operation, probe).await
+}
+
+async fn read_bounded_prepared_upstream_body(
+    mut prepared: PreparedUpstreamResponse,
+    limit: usize,
+    operation: &'static str,
+    probe: Option<&RouteRequestLogProbe>,
+) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = read_prepared_upstream_chunk(&mut prepared, operation, probe).await? {
+        if body.len().saturating_add(chunk.len()) > limit {
+            anyhow::bail!("{operation}超过 Codey 安全上限");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
 async fn read_upstream_chunk(
     response: &mut reqwest::Response,
     operation: &'static str,
@@ -7253,22 +7734,6 @@ async fn read_upstream_chunk(
         probe.mark_first_upstream_data(FirstByteSource::UpstreamHttpBody);
     }
     Ok(chunk)
-}
-
-async fn read_bounded_upstream_body(
-    mut response: reqwest::Response,
-    limit: usize,
-    operation: &'static str,
-    probe: Option<&RouteRequestLogProbe>,
-) -> Result<Vec<u8>> {
-    let mut body = Vec::new();
-    while let Some(chunk) = read_upstream_chunk(&mut response, operation, probe).await? {
-        if body.len().saturating_add(chunk.len()) > limit {
-            anyhow::bail!("{operation}超过 Codey 安全上限");
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 async fn write_all_with_timeout<W>(
@@ -7305,16 +7770,24 @@ where
 
 async fn write_proxy_response(
     stream: &mut TcpStream,
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<()> {
     let status = response.status().as_u16();
     let reason = response.status().canonical_reason().unwrap_or("OK");
-    let content_type = response
+    let original_content_type = response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/json");
+        .unwrap_or("application/json")
+        .to_string();
+    let mut prepared = prepare_upstream_response(response, "读取上游响应失败", probe).await?;
+    let upstream_is_sse = prepared.is_sse;
+    let content_type = if upstream_is_sse {
+        "text/event-stream"
+    } else {
+        original_content_type.as_str()
+    };
     let mut log_tap = probe.map(|probe| RequestLogResponseTap::new(probe.clone()));
     write_all_with_timeout(
         stream,
@@ -7329,15 +7802,19 @@ async fn write_proxy_response(
     if let Some(probe) = probe {
         probe.mark_response_started(status);
     }
-    while let Some(chunk) = read_upstream_chunk(&mut response, "读取上游响应失败", probe).await?
+    while let Some(chunk) =
+        read_prepared_upstream_chunk(&mut prepared, "读取上游响应失败", probe).await?
     {
         if chunk.is_empty() {
             continue;
         }
+        write_chunked_frame(stream, &chunk, "写入上游响应块失败").await?;
         if let Some(tap) = log_tap.as_mut() {
             tap.observe(&chunk);
         }
-        write_chunked_frame(stream, &chunk, "写入上游响应块失败").await?;
+        if !upstream_is_sse && let Some(probe) = probe {
+            probe.mark_first_downstream_content();
+        }
     }
     if let Some(tap) = log_tap.as_mut() {
         tap.finish();
@@ -7433,6 +7910,8 @@ struct RequestLogMetadataProjector {
     awaiting_usage: bool,
     awaiting_scalar: Option<ProjectedMetadataScalar>,
     capturing_scalar: Option<ProjectedMetadataScalar>,
+    event_type_has_user_content: bool,
+    event_delta_has_content: bool,
     usage: Option<UsageCapture>,
 }
 
@@ -7440,6 +7919,7 @@ struct RequestLogMetadataProjector {
 enum ProjectedMetadataKey {
     Usage,
     Type,
+    Delta,
     Status,
     Code,
 }
@@ -7447,6 +7927,7 @@ enum ProjectedMetadataKey {
 #[derive(Clone, Copy)]
 enum ProjectedMetadataScalar {
     EventType,
+    Delta,
     ResponseStatus,
     ErrorCode,
 }
@@ -7570,19 +8051,36 @@ impl RequestLogMetadataProjector {
                 } else if byte == b'"' {
                     self.in_string = false;
                     if let Some(field) = self.capturing_scalar.take() {
-                        if !self.string_overflow {
-                            let value = String::from_utf8_lossy(&self.string);
-                            match field {
-                                ProjectedMetadataScalar::EventType => {
-                                    probe.observe_terminal_projection(Some(&value), None, None)
-                                }
-                                ProjectedMetadataScalar::ResponseStatus => {
-                                    probe.observe_terminal_projection(None, Some(&value), None)
-                                }
-                                ProjectedMetadataScalar::ErrorCode => {
-                                    probe.observe_terminal_projection(None, None, Some(&value))
+                        match field {
+                            ProjectedMetadataScalar::Delta => {
+                                self.event_delta_has_content =
+                                    self.string_overflow || !self.string.is_empty();
+                                if self.event_type_has_user_content && self.event_delta_has_content
+                                {
+                                    probe.mark_first_downstream_content();
                                 }
                             }
+                            ProjectedMetadataScalar::EventType if !self.string_overflow => {
+                                let value = String::from_utf8_lossy(&self.string);
+                                self.event_type_has_user_content =
+                                    responses_event_type_has_user_content(&value);
+                                if self.event_type_has_user_content && self.event_delta_has_content
+                                {
+                                    probe.mark_first_downstream_content();
+                                }
+                                probe.observe_terminal_projection(Some(&value), None, None)
+                            }
+                            ProjectedMetadataScalar::ResponseStatus if !self.string_overflow => {
+                                let value = String::from_utf8_lossy(&self.string);
+                                probe.observe_terminal_projection(None, Some(&value), None)
+                            }
+                            ProjectedMetadataScalar::ErrorCode if !self.string_overflow => {
+                                let value = String::from_utf8_lossy(&self.string);
+                                probe.observe_terminal_projection(None, None, Some(&value))
+                            }
+                            ProjectedMetadataScalar::EventType
+                            | ProjectedMetadataScalar::ResponseStatus
+                            | ProjectedMetadataScalar::ErrorCode => {}
                         }
                         self.last_key = None;
                     } else {
@@ -7615,6 +8113,9 @@ impl RequestLogMetadataProjector {
                         (1, Some(ProjectedMetadataKey::Type)) => {
                             Some(ProjectedMetadataScalar::EventType)
                         }
+                        (1, Some(ProjectedMetadataKey::Delta)) => {
+                            Some(ProjectedMetadataScalar::Delta)
+                        }
                         (1 | 2, Some(ProjectedMetadataKey::Status)) => {
                             Some(ProjectedMetadataScalar::ResponseStatus)
                         }
@@ -7629,7 +8130,17 @@ impl RequestLogMetadataProjector {
                     self.awaiting_scalar = None;
                     self.usage = Some(UsageCapture::new());
                 }
-                b'{' | b'[' => {
+                b'{' => {
+                    if self.depth == 0 {
+                        self.event_type_has_user_content = false;
+                        self.event_delta_has_content = false;
+                    }
+                    self.depth += 1;
+                    self.awaiting_usage = false;
+                    self.awaiting_scalar = None;
+                    self.last_key = None;
+                }
+                b'[' => {
                     self.depth += 1;
                     self.awaiting_usage = false;
                     self.awaiting_scalar = None;
@@ -7657,6 +8168,7 @@ fn projected_metadata_key(value: &[u8]) -> Option<ProjectedMetadataKey> {
     match value {
         b"usage" => Some(ProjectedMetadataKey::Usage),
         b"type" => Some(ProjectedMetadataKey::Type),
+        b"delta" => Some(ProjectedMetadataKey::Delta),
         b"status" => Some(ProjectedMetadataKey::Status),
         b"code" => Some(ProjectedMetadataKey::Code),
         _ => None,
@@ -7816,7 +8328,7 @@ where
     if let Some(request_id) = upstream_request_id.as_deref() {
         message.push_str(&format!("（上游请求 ID：{request_id}）"));
     }
-    crate::error_log::record_failure(
+    record_router_failure_nonblocking(
         "local_router_upstream_http_error",
         "proxy_local_router_response",
         message.clone(),
@@ -7874,7 +8386,7 @@ fn annotate_upstream_websocket_failure(
         ],
     )
     .and_then(bounded_upstream_request_id);
-    crate::error_log::record_failure(
+    record_router_failure_nonblocking(
         "local_router_upstream_websocket_error",
         "proxy_responses_websocket_event",
         message.clone(),
@@ -7922,24 +8434,41 @@ async fn write_chat_completions_as_responses<D>(
 where
     D: ResponsesDownstream + ?Sized,
 {
-    let upstream_is_sse = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(is_sse_content_type);
-    if stream_requested && upstream_is_sse {
+    let probe = downstream.request_log_probe().cloned();
+    let prepared = match prepare_upstream_response(
+        response,
+        "读取 Chat Completions 上游响应失败",
+        probe.as_ref(),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return downstream
+                .write_error(
+                    502,
+                    "upstream_protocol_error",
+                    format!(
+                        "线路「{}」的 Chat Completions 响应无法转换为 Responses：{error:#}",
+                        route_display_name(route)
+                    ),
+                    Some(route),
+                )
+                .await;
+        }
+    };
+    if stream_requested && prepared.is_sse {
         return stream_chat_completions_as_responses(
             downstream,
-            response,
+            prepared,
             model,
             route,
             tool_bridge,
         )
         .await;
     }
-    let probe = downstream.request_log_probe().cloned();
     let responses = match read_chat_completions_as_responses(
-        response,
+        prepared,
         model,
         tool_bridge,
         probe.as_ref(),
@@ -7969,21 +8498,16 @@ where
 }
 
 async fn read_chat_completions_as_responses(
-    mut response: reqwest::Response,
+    mut prepared: PreparedUpstreamResponse,
     model: &str,
     tool_bridge: &ResponsesToolBridge,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Value> {
-    let upstream_is_sse = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(is_sse_content_type);
-    let chat = if upstream_is_sse {
-        collect_chat_completion_sse(&mut response, model, probe).await?
+    let chat = if prepared.is_sse {
+        collect_chat_completion_sse(&mut prepared, model, probe).await?
     } else {
-        let body = read_bounded_upstream_body(
-            response,
+        let body = read_bounded_prepared_upstream_body(
+            prepared,
             MAX_UPSTREAM_RESPONSE_BYTES,
             "读取 Chat Completions 上游响应失败",
             probe,
@@ -8038,24 +8562,41 @@ where
             )
             .await;
     }
-    let upstream_is_sse = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(is_sse_content_type);
-    if stream_requested && upstream_is_sse {
+    let probe = downstream.request_log_probe().cloned();
+    let prepared = match prepare_upstream_response(
+        response,
+        "读取 Anthropic Messages 上游响应失败",
+        probe.as_ref(),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return downstream
+                .write_error(
+                    502,
+                    "upstream_protocol_error",
+                    format!(
+                        "线路「{}」的 Anthropic Messages 响应无法转换为 Responses：{error:#}",
+                        route_display_name(route)
+                    ),
+                    Some(route),
+                )
+                .await;
+        }
+    };
+    if stream_requested && prepared.is_sse {
         return stream_anthropic_messages_as_responses(
             downstream,
-            response,
+            prepared,
             model,
             route,
             tool_bridge,
         )
         .await;
     }
-    let probe = downstream.request_log_probe().cloned();
     let responses =
-        match read_anthropic_messages_as_responses(response, model, tool_bridge, probe.as_ref())
+        match read_anthropic_messages_as_responses(prepared, model, tool_bridge, probe.as_ref())
             .await
         {
             Ok(responses) => responses,
@@ -8106,21 +8647,16 @@ async fn read_bounded_upstream_error_body(
 }
 
 async fn read_anthropic_messages_as_responses(
-    mut response: reqwest::Response,
+    mut prepared: PreparedUpstreamResponse,
     model: &str,
     tool_bridge: &ResponsesToolBridge,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Value> {
-    let upstream_is_sse = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(is_sse_content_type);
-    let message = if upstream_is_sse {
-        collect_anthropic_message_sse(&mut response, model, probe).await?
+    let message = if prepared.is_sse {
+        collect_anthropic_message_sse(&mut prepared, model, probe).await?
     } else {
-        let body = read_bounded_upstream_body(
-            response,
+        let body = read_bounded_prepared_upstream_body(
+            prepared,
             MAX_UPSTREAM_RESPONSE_BYTES,
             "读取 Anthropic Messages 上游响应失败",
             probe,
@@ -8563,7 +9099,7 @@ fn anthropic_sse_block_into_value(block: AnthropicSseBlock) -> Result<Value> {
 }
 
 async fn collect_anthropic_message_sse(
-    response: &mut reqwest::Response,
+    prepared: &mut PreparedUpstreamResponse,
     model: &str,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Value> {
@@ -8571,7 +9107,7 @@ async fn collect_anthropic_message_sse(
     let mut buffer = Vec::new();
     let mut cursor = 0;
     while let Some(chunk) =
-        read_upstream_chunk(response, "读取 Anthropic Messages SSE 流失败", probe).await?
+        read_prepared_upstream_chunk(prepared, "读取 Anthropic Messages SSE 流失败", probe).await?
     {
         compact_sse_buffer(&mut buffer, &mut cursor);
         buffer.extend_from_slice(&chunk);
@@ -8629,7 +9165,7 @@ fn parse_anthropic_message_sse_bytes(bytes: &[u8], model: &str) -> Result<Value>
 
 async fn stream_anthropic_messages_as_responses<D>(
     downstream: &mut D,
-    mut response: reqwest::Response,
+    mut prepared: PreparedUpstreamResponse,
     model: &str,
     route: &RouteTarget,
     tool_bridge: &ResponsesToolBridge,
@@ -8644,8 +9180,8 @@ where
     let result: Result<()> = async {
         let mut buffer = Vec::new();
         let mut cursor = 0;
-        while let Some(chunk) = read_upstream_chunk(
-            &mut response,
+        while let Some(chunk) = read_prepared_upstream_chunk(
+            &mut prepared,
             "读取 Anthropic Messages SSE 流失败",
             request_log_probe.as_ref(),
         )
@@ -9288,7 +9824,7 @@ impl ChatSseAccumulator {
 }
 
 async fn collect_chat_completion_sse(
-    response: &mut reqwest::Response,
+    prepared: &mut PreparedUpstreamResponse,
     model: &str,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Value> {
@@ -9297,7 +9833,7 @@ async fn collect_chat_completion_sse(
     let mut cursor = 0;
     let mut done = false;
     while let Some(chunk) =
-        read_upstream_chunk(response, "读取 Chat Completions SSE 流失败", probe).await?
+        read_prepared_upstream_chunk(prepared, "读取 Chat Completions SSE 流失败", probe).await?
     {
         compact_sse_buffer(&mut buffer, &mut cursor);
         buffer.extend_from_slice(&chunk);
@@ -9334,7 +9870,7 @@ async fn collect_chat_completion_sse(
 
 async fn stream_chat_completions_as_responses<D>(
     downstream: &mut D,
-    mut response: reqwest::Response,
+    mut prepared: PreparedUpstreamResponse,
     model: &str,
     route: &RouteTarget,
     tool_bridge: &ResponsesToolBridge,
@@ -9350,8 +9886,8 @@ where
         let mut buffer = Vec::new();
         let mut cursor = 0;
         let mut done = false;
-        while let Some(chunk) = read_upstream_chunk(
-            &mut response,
+        while let Some(chunk) = read_prepared_upstream_chunk(
+            &mut prepared,
             "读取 Chat Completions SSE 流失败",
             request_log_probe.as_ref(),
         )
@@ -9555,14 +10091,27 @@ fn compact_sse_buffer(buffer: &mut Vec<u8>, cursor: &mut usize) {
     }
 }
 
-fn sse_frame_data(frame: &[u8]) -> Result<Option<String>> {
+fn sse_frame_data(frame: &[u8]) -> Result<Option<Cow<'_, str>>> {
     let frame = std::str::from_utf8(frame).context("上游 SSE 不是 UTF-8")?;
-    let data = frame
+    let mut data = frame
         .lines()
         .filter_map(|line| line.trim_end_matches('\r').strip_prefix("data:"))
-        .map(str::trim_start)
-        .collect::<Vec<_>>();
-    Ok((!data.is_empty()).then(|| data.join("\n")))
+        .map(str::trim_start);
+    let Some(first) = data.next() else {
+        return Ok(None);
+    };
+    let Some(second) = data.next() else {
+        return Ok(Some(Cow::Borrowed(first)));
+    };
+    let mut joined = String::with_capacity(first.len() + second.len() + 1);
+    joined.push_str(first);
+    joined.push('\n');
+    joined.push_str(second);
+    for line in data {
+        joined.push('\n');
+        joined.push_str(line);
+    }
+    Ok(Some(Cow::Owned(joined)))
 }
 
 fn current_unix_timestamp() -> i64 {
@@ -10150,11 +10699,7 @@ async fn write_responses_sse_event(stream: &mut TcpStream, event: &Value) -> Res
         "event: {event_type}\ndata: {}\n\n",
         serde_json::to_string(event).context("序列化 Responses SSE 事件失败")?
     );
-    write_chunked_frame(stream, payload.as_bytes(), "写入 Responses SSE 事件失败").await?;
-    tokio::time::timeout(DOWNSTREAM_WRITE_TIMEOUT, stream.flush())
-        .await
-        .context("刷新 Responses SSE 事件超过写入期限")?
-        .context("刷新 Responses SSE 事件失败")
+    write_chunked_frame(stream, payload.as_bytes(), "写入 Responses SSE 事件失败").await
 }
 
 async fn finish_chunked_response(stream: &mut TcpStream) -> Result<()> {
@@ -10387,6 +10932,78 @@ fn reason_phrase(status: u16) -> &'static str {
 mod tests {
     use super::*;
     use crate::config::ProviderProfile;
+
+    #[test]
+    fn sse_sniffer_handles_fragmented_and_mislabeled_prefixes() {
+        assert_eq!(classify_upstream_sse_prefix(b"d"), None);
+        assert_eq!(classify_upstream_sse_prefix(b"data"), None);
+        assert_eq!(classify_upstream_sse_prefix(b"data: {}\n\n"), Some(true));
+        assert_eq!(
+            classify_upstream_sse_prefix(b"\xef\xbb\xbf event: message\n"),
+            Some(true)
+        );
+        assert_eq!(classify_upstream_sse_prefix(br#"{"ok":true}"#), Some(false));
+    }
+
+    #[test]
+    fn downstream_content_timing_ignores_control_events() {
+        assert!(!responses_event_has_user_content(
+            &json!({"type":"response.created"})
+        ));
+        assert!(!responses_event_has_user_content(
+            &json!({"type":"response.output_text.delta","delta":""})
+        ));
+        assert!(responses_event_has_user_content(
+            &json!({"type":"response.output_text.delta","delta":"hello"})
+        ));
+    }
+
+    #[test]
+    fn request_log_projector_waits_for_a_nonempty_content_delta() {
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        let mut projector = RequestLogMetadataProjector::default();
+        projector
+            .observe(
+                br#"data: {"type":"response.created"}\n\ndata: {"type":"response.output_text.delta","delta":""}\n\n"#,
+                &probe,
+            )
+            .unwrap();
+        assert!(!probe.downstream_content_observed_for_test());
+
+        for chunk in br#"data: {"delta":"hello","type":"response.output_text.delta"}\n\n"#.chunks(7)
+        {
+            projector.observe(chunk, &probe).unwrap();
+        }
+        assert!(probe.downstream_content_observed_for_test());
+    }
+
+    #[test]
+    fn custom_tool_bridge_description_is_bounded_without_embedding_the_definition() {
+        let tool = json!({
+            "type":"custom",
+            "name":"apply_patch",
+            "description":"d".repeat(MAX_CUSTOM_TOOL_BRIDGE_DESCRIPTION_BYTES * 2),
+            "format":{"type":"grammar","syntax":"lark","definition":"start: WORD"},
+            "unrelated":"must-not-be-forwarded",
+        });
+        let description = custom_tool_bridge_description(tool.as_object().unwrap()).unwrap();
+        assert!(description.len() <= MAX_CUSTOM_TOOL_BRIDGE_DESCRIPTION_BYTES);
+        assert!(description.contains("Codey compatibility bridge"));
+        assert!(description.contains("\"syntax\":\"lark\""));
+        assert!(!description.contains("must-not-be-forwarded"));
+    }
+
+    #[tokio::test]
+    async fn large_request_json_is_parsed_off_the_router_worker() {
+        let encoded = serde_json::to_vec(&json!({
+            "model":"test-model",
+            "input":"x".repeat(REQUEST_JSON_OFFLOAD_BYTES),
+        }))
+        .unwrap();
+        let (encoded, parsed) = parse_responses_request_body(encoded).await.unwrap();
+        assert!(encoded.len() >= REQUEST_JSON_OFFLOAD_BYTES);
+        assert_eq!(parsed.unwrap()["model"], "test-model");
+    }
 
     #[test]
     fn request_log_projector_extracts_usage_after_large_terminal_payload() {
@@ -10870,46 +11487,65 @@ mod tests {
     async fn websocket_http_fallback_parses_sse_with_a_json_content_type() {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let upstream_address = upstream.local_addr().unwrap();
-        let sse = concat!(
+        let first_sse = concat!(
             "event: response.created\n",
-            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-mislabeled\",\"object\":\"response\",\"status\":\"in_progress\",\"output\":[]}}\n\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-mislabeled\",\"object\":\"response\",\"status\":\"in_progress\",\"output\":[]}}\n\n"
+        );
+        let final_sse = concat!(
             "event: response.completed\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-mislabeled\",\"object\":\"response\",\"status\":\"completed\",\"output\":[]}}\n\n"
         );
+        let (first_event_sent, first_event_observed) = oneshot::channel();
+        let (release_upstream, wait_for_release) = oneshot::channel();
         let upstream_task = tokio::spawn(async move {
             let (mut stream, _) = upstream.accept().await.unwrap();
             let mut request = [0_u8; 1024];
             let _ = stream.read(&mut request).await.unwrap();
             stream
                 .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
-                        sse.len()
-                    )
-                    .as_bytes(),
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
                 )
                 .await
                 .unwrap();
+            write_test_http_chunk(&mut stream, first_sse).await;
+            first_event_sent.send(()).unwrap();
+            wait_for_release.await.unwrap();
+            write_test_http_chunk(&mut stream, final_sse).await;
+            stream.write_all(b"0\r\n\r\n").await.unwrap();
         });
         let response = reqwest::get(format!("http://{upstream_address}/responses"))
             .await
             .unwrap();
         let (downstream_socket, mut downstream_peer) = local_websocket_pair().await;
         let mut downstream = WebSocketResponsesDownstream::new(downstream_socket);
+        let proxy_task = tokio::spawn(async move {
+            proxy_native_response_to_websocket(&mut downstream, response, None)
+                .await
+                .unwrap();
+        });
 
-        proxy_native_response_to_websocket(&mut downstream, response, None)
-            .await
-            .unwrap();
+        first_event_observed.await.unwrap();
+        let WebSocketMessage::Text(text) =
+            tokio::time::timeout(Duration::from_secs(2), downstream_peer.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected downstream JSON text frame");
+        };
+        let event = serde_json::from_str::<Value>(text.as_str()).unwrap();
+        assert_eq!(event["type"], "response.created");
+        assert_eq!(event["response"]["id"], "resp-mislabeled");
 
-        for expected_type in ["response.created", "response.completed"] {
-            let WebSocketMessage::Text(text) = downstream_peer.next().await.unwrap().unwrap()
-            else {
-                panic!("expected downstream JSON text frame");
-            };
-            let event = serde_json::from_str::<Value>(text.as_str()).unwrap();
-            assert_eq!(event["type"], expected_type);
-            assert_eq!(event["response"]["id"], "resp-mislabeled");
-        }
+        release_upstream.send(()).unwrap();
+        let WebSocketMessage::Text(text) = downstream_peer.next().await.unwrap().unwrap() else {
+            panic!("expected downstream JSON text frame");
+        };
+        let event = serde_json::from_str::<Value>(text.as_str()).unwrap();
+        assert_eq!(event["type"], "response.completed");
+        assert_eq!(event["response"]["id"], "resp-mislabeled");
+        proxy_task.await.unwrap();
         upstream_task.await.unwrap();
     }
 
@@ -12032,8 +12668,8 @@ mod tests {
     #[tokio::test]
     async fn stopping_router_aborts_connections_that_outlive_the_drain_deadline() {
         let router = LocalRouter::start(&CodeyConfig::default()).await.unwrap();
-        let port = router
-            .endpoint()
+        let endpoint = router.endpoint();
+        let port = endpoint
             .base_url
             .strip_prefix("http://127.0.0.1:")
             .and_then(|value| value.split('/').next())
@@ -12042,7 +12678,13 @@ mod tests {
             .unwrap();
         let mut connection = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         connection
-            .write_all(b"POST /v1/responses HTTP/1.1\r\ncontent-length: 1024\r\n\r\n{")
+            .write_all(
+                format!(
+                    "POST /v1/responses HTTP/1.1\r\nauthorization: Bearer {}\r\ncontent-length: 1024\r\n\r\n{{",
+                    endpoint.token
+                )
+                .as_bytes(),
+            )
             .await
             .unwrap();
         tokio::task::yield_now().await;
@@ -12629,8 +13271,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn official_upstream_auth_prefers_incoming_oauth_over_auth_json() {
+    #[tokio::test]
+    async fn official_upstream_auth_prefers_incoming_oauth_over_auth_json() {
         let request = HttpRequest {
             method: "POST".to_string(),
             path: "/v1/responses".to_string(),
@@ -12648,20 +13290,21 @@ mod tests {
             _body_budget_permit: None,
         };
 
-        let mut auth_cache = crate::account_usage::OfficialAuthCache::default();
+        let auth_cache = Mutex::new(crate::account_usage::OfficialAuthCache::default());
         let auth = resolve_official_upstream_auth(
             &request,
             "Bearer codey-router-token",
             Path::new("/missing-auth.json"),
-            &mut auth_cache,
+            &auth_cache,
         )
+        .await
         .unwrap();
         assert_eq!(auth.authorization, "Bearer chatgpt-oauth");
         assert_eq!(auth.account_id.as_deref(), Some("acct-incoming"));
     }
 
-    #[test]
-    fn official_upstream_auth_loads_codex_auth_json_when_codex_uses_the_router_bearer() {
+    #[tokio::test]
+    async fn official_upstream_auth_loads_codex_auth_json_when_codex_uses_the_router_bearer() {
         let directory = tempfile::tempdir().unwrap();
         let auth_path = directory.path().join("auth.json");
         std::fs::write(
@@ -12680,20 +13323,21 @@ mod tests {
             _body_budget_permit: None,
         };
 
-        let mut auth_cache = crate::account_usage::OfficialAuthCache::default();
+        let auth_cache = Mutex::new(crate::account_usage::OfficialAuthCache::default());
         let auth = resolve_official_upstream_auth(
             &request,
             "Bearer codey-router-token",
             &auth_path,
-            &mut auth_cache,
+            &auth_cache,
         )
+        .await
         .unwrap();
         assert_eq!(auth.authorization, "Bearer chatgpt-access");
         assert_eq!(auth.account_id.as_deref(), Some("acct-9"));
     }
 
-    #[test]
-    fn official_upstream_auth_is_missing_without_oauth_or_auth_json() {
+    #[tokio::test]
+    async fn official_upstream_auth_is_missing_without_oauth_or_auth_json() {
         let request = HttpRequest {
             method: "POST".to_string(),
             path: "/v1/responses".to_string(),
@@ -12705,14 +13349,15 @@ mod tests {
             _body_budget_permit: None,
         };
 
-        let mut auth_cache = crate::account_usage::OfficialAuthCache::default();
+        let auth_cache = Mutex::new(crate::account_usage::OfficialAuthCache::default());
         assert!(
             resolve_official_upstream_auth(
                 &request,
                 "Bearer codey-router-token",
                 Path::new("/missing-auth.json"),
-                &mut auth_cache,
+                &auth_cache,
             )
+            .await
             .is_none()
         );
     }
@@ -13175,6 +13820,43 @@ mod tests {
         assert_eq!(chat["response_format"]["type"], "json_schema");
         assert_eq!(chat["response_format"]["json_schema"]["name"], "answer");
         assert_eq!(chat["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn configured_duplicate_function_tools_are_deduplicated_without_merging_conflicts() {
+        let string_lookup = json!({
+            "type":"function",
+            "name":"lookup",
+            "description":"lookup data",
+            "parameters":{"type":"object","properties":{"id":{"type":"string"}}},
+            "strict":true
+        });
+        let number_lookup = json!({
+            "type":"function",
+            "name":"lookup",
+            "description":"lookup data",
+            "parameters":{"type":"object","properties":{"id":{"type":"number"}}},
+            "strict":true
+        });
+        let body = json!({
+            "model":"provider-model",
+            "input":"hello",
+            "tools":[string_lookup.clone(), string_lookup, number_lookup]
+        });
+
+        let chat = responses_to_chat_completions_body(&body).unwrap();
+        let anthropic = responses_to_anthropic_messages_body(&body).unwrap();
+
+        assert_eq!(chat["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(anthropic["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            chat["tools"][0]["function"]["parameters"]["properties"]["id"]["type"],
+            "string"
+        );
+        assert_eq!(
+            chat["tools"][1]["function"]["parameters"]["properties"]["id"]["type"],
+            "number"
+        );
     }
 
     #[test]
@@ -15527,7 +16209,7 @@ mod tests {
             request_body_sent.send(body.clone()).unwrap();
             stream
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
                 )
                 .await
                 .unwrap();
@@ -15591,7 +16273,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_adapter_emits_text_before_the_upstream_stream_completes() {
+    async fn chat_adapter_streams_mislabeled_sse_before_upstream_completes() {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let upstream_address = upstream.local_addr().unwrap();
         let (first_event_sent, first_event_observed) = oneshot::channel();
@@ -15601,7 +16283,7 @@ mod tests {
             let _request = read_http_request(&mut stream).await.unwrap();
             stream
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
                 )
                 .await
                 .unwrap();
@@ -15829,7 +16511,7 @@ mod tests {
             request_body_sent.send(body.clone()).unwrap();
             stream
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
                 )
                 .await
                 .unwrap();
@@ -16037,7 +16719,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anthropic_adapter_emits_text_before_the_upstream_stream_completes() {
+    async fn anthropic_adapter_streams_mislabeled_sse_before_upstream_completes() {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let upstream_address = upstream.local_addr().unwrap();
         let (first_event_sent, first_event_observed) = oneshot::channel();
@@ -16047,7 +16729,7 @@ mod tests {
             let _request = read_http_request(&mut stream).await.unwrap();
             stream
                 .write_all(
-                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n",
                 )
                 .await
                 .unwrap();
@@ -16490,6 +17172,32 @@ mod tests {
             legacy_capability_response.status(),
             reqwest::StatusCode::UNAUTHORIZED
         );
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn router_rejects_unauthorized_request_before_reading_its_body() {
+        let (config, _, _) = router_config("http://127.0.0.1:9/v1".to_string());
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let url = reqwest::Url::parse(&endpoint.base_url).unwrap();
+        let mut stream = TcpStream::connect((url.host_str().unwrap(), url.port().unwrap()))
+            .await
+            .unwrap();
+        stream
+            .write_all(
+                b"POST /v1/responses HTTP/1.1\r\nhost: localhost\r\ncontent-length: 1048576\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(1), stream.read_to_string(&mut response))
+            .await
+            .expect("unauthorized request must not wait for its declared body")
+            .unwrap();
+        assert!(response.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
+        assert!(response.contains("invalid_router_token"));
         router.stop().await.unwrap();
     }
 
