@@ -77,6 +77,7 @@ impl OfficialAuthCache {
         result.map_err(anyhow::Error::msg)
     }
 
+    #[cfg(test)]
     fn read_at(&mut self, path: &Path, now: Instant) -> Result<OfficialAuth> {
         match self.get(now) {
             Some(result) => result.map_err(anyhow::Error::msg),
