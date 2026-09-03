@@ -20,6 +20,7 @@ const ROLLOUT_SEARCH_DIRS: [&str; 2] = ["sessions", "archived_sessions"];
 const TOMBSTONE_VERSION: u32 = 1;
 const TOMBSTONE_DIR: &str = ".codey-message-delete-tombstones-v1";
 const TOMBSTONE_LOCK_FILE: &str = ".codey-message-delete-tombstones-v1.lock";
+const THREAD_HISTORY_DB: &str = "thread_history_1.sqlite";
 static TOMBSTONE_LOCK: Mutex<()> = Mutex::new(());
 type PendingDeleteTombstones = BTreeMap<String, (BTreeSet<String>, Vec<PathBuf>)>;
 type ResolvedPersistentMessageIds = (BTreeSet<String>, Vec<(String, String)>);
@@ -392,9 +393,33 @@ pub fn delete_messages(
         resolved_message_ids: message_ids.clone(),
         unsupported_databases: Vec::new(),
     };
-    if let Some(rollout_path) = find_rollout_path(home, session_id)? {
+    let mut deleted_ids = HashSet::new();
+    let mut history_session_id = session_id.to_string();
+    let has_rollout = if let Some(rollout_path) = find_rollout_path(home, session_id)? {
+        if let Some(thread_id) = rollout_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(rollout_thread_id_from_filename)
+        {
+            history_session_id = thread_id;
+        }
         let selected = message_ids.iter().cloned().collect::<HashSet<_>>();
-        result.deleted = delete_turns_from_rollout(home, &rollout_path, &selected)?;
+        deleted_ids.extend(delete_turns_from_rollout(home, &rollout_path, &selected)?);
+        true
+    } else {
+        false
+    };
+
+    let history_path = home.join(THREAD_HISTORY_DB);
+    match delete_from_thread_history(&history_path, &history_session_id, &message_ids)? {
+        Some(found) => deleted_ids.extend(found),
+        None if history_path.exists() => result
+            .unsupported_databases
+            .push(history_path.to_string_lossy().to_string()),
+        None => {}
+    }
+    result.deleted = deleted_ids.len();
+    if has_rollout || result.deleted > 0 {
         return Ok(result);
     }
 
@@ -617,7 +642,9 @@ fn session_absent_from_every_store(home: &Path, session_id: &str) -> bool {
 /// 查不到只说明「没有证据表明它存在」，误报方向是继续保守失败而非丢墓碑。
 fn databases_reference_session(home: &Path, session_id: &str) -> bool {
     let needle = session_id.as_bytes();
-    for db_path in codex_session_db_paths_from_home(home) {
+    let mut database_paths = codex_session_db_paths_from_home(home);
+    database_paths.push(home.join(THREAD_HISTORY_DB));
+    for db_path in database_paths {
         for path in codex_sqlite_sidecar_paths(&db_path) {
             let Ok(bytes) = fs::read(&path) else {
                 continue;
@@ -637,7 +664,7 @@ fn delete_turns_from_rollout(
     home: &Path,
     rollout_path: &Path,
     selected: &HashSet<String>,
-) -> Result<usize> {
+) -> Result<HashSet<String>> {
     let canonical_rollout = canonical_rollout_path(home, rollout_path)?;
 
     let original = fs::read_to_string(&canonical_rollout)
@@ -673,12 +700,12 @@ fn delete_turns_from_rollout(
         }
     }
     if found.is_empty() {
-        return Ok(0);
+        return Ok(found);
     }
 
     rewrite_in_place(&canonical_rollout, output.as_bytes())
         .with_context(|| format!("写回会话记录失败：{}", canonical_rollout.display()))?;
-    Ok(found.len())
+    Ok(found)
 }
 
 fn canonical_rollout_path(home: &Path, rollout_path: &Path) -> Result<PathBuf> {
@@ -846,6 +873,53 @@ fn delete_from_db(
     Ok(deleted)
 }
 
+fn delete_from_thread_history(
+    path: &Path,
+    session_id: &str,
+    message_ids: &[String],
+) -> Result<Option<HashSet<String>>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let mut connection = Connection::open(path)?;
+    let mut tables = Vec::new();
+    for table in ["thread_items", "thread_turns"] {
+        let columns = crate::sqlite_util::table_columns(&connection, table)?;
+        if columns.contains("thread_id") && columns.contains("turn_id") {
+            tables.push(table);
+        }
+    }
+    if tables.len() != 2 {
+        return Ok(None);
+    }
+
+    let placeholders = std::iter::repeat_n("?", message_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut values = message_ids.to_vec();
+    values.push(session_id.to_string());
+    let transaction = connection.transaction()?;
+    let mut found = HashSet::new();
+    for table in &tables {
+        let filter = format!("turn_id IN ({placeholders}) AND thread_id = ?");
+        let matched = {
+            let mut statement = transaction.prepare(&format!(
+                "SELECT DISTINCT turn_id FROM {table} WHERE {filter}"
+            ))?;
+            statement
+                .query_map(params_from_iter(values.iter()), |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()?
+        };
+        found.extend(matched);
+        transaction.execute(
+            &format!("DELETE FROM {table} WHERE {filter}"),
+            params_from_iter(values.iter()),
+        )?;
+    }
+    transaction.commit()?;
+    Ok(Some(found))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,6 +952,80 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
             .unwrap();
         assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn deletes_a_projected_turn_using_the_rollout_thread_id() {
+        let home = tempdir().unwrap();
+        let session_id = "019ff8aa-0b6e-7a01-a605-7a717a7795e3";
+        let rollout_thread_id = "019ff8ab-0b6e-7a01-a605-7a717a7795e3";
+        let rollout_dir = home.path().join("sessions/2026/09/03");
+        fs::create_dir_all(&rollout_dir).unwrap();
+        let rollout = rollout_dir.join(format!(
+            "rollout-test-{session_id}_{rollout_thread_id}.jsonl"
+        ));
+        fs::write(
+            &rollout,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\"}}\n",
+                "{\"type\":\"turn_context\",\"payload\":{\"turn_id\":\"t2\"}}\n",
+            ),
+        )
+        .unwrap();
+        let catalog = Connection::open(home.path().join("state_5.sqlite")).unwrap();
+        catalog
+            .execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT NOT NULL)",
+                [],
+            )
+            .unwrap();
+        catalog
+            .execute(
+                "INSERT INTO threads VALUES (?1, ?2)",
+                params![session_id, rollout.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        drop(catalog);
+
+        let history_path = home.path().join(THREAD_HISTORY_DB);
+        let connection = Connection::open(&history_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE thread_turns (thread_id TEXT, turn_id TEXT, status TEXT);\
+                 CREATE TABLE thread_items (thread_id TEXT, turn_id TEXT, item_id TEXT);\
+                 INSERT INTO thread_turns VALUES ('019ff8ab-0b6e-7a01-a605-7a717a7795e3', 't1', 'completed'), ('019ff8ab-0b6e-7a01-a605-7a717a7795e3', 't2', 'completed');\
+                 INSERT INTO thread_items VALUES ('019ff8ab-0b6e-7a01-a605-7a717a7795e3', 't1', 'm1'), ('019ff8ab-0b6e-7a01-a605-7a717a7795e3', 't2', 'm2');",
+            )
+            .unwrap();
+        drop(connection);
+
+        let result = delete_messages_persistently(home.path(), session_id, &["t1".into()]).unwrap();
+
+        assert_eq!(result.deleted, 1);
+        assert!(result.unsupported_databases.is_empty());
+        let connection = Connection::open(history_path).unwrap();
+        for table in ["thread_turns", "thread_items"] {
+            assert_eq!(
+                connection
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE turn_id = 't1'"),
+                        [],
+                        |row| row.get::<_, usize>(0),
+                    )
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                connection
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE turn_id = 't2'"),
+                        [],
+                        |row| row.get::<_, usize>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+        }
     }
 
     #[test]

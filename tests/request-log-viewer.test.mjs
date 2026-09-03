@@ -136,7 +136,13 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /onClick=\{\(\) => handleCopyId\(item\.codexSessionId!\)\}/);
   assert.match(viewer, /navigator\.clipboard\.writeText\(requestId\)\.then\([\s\S]*setCopiedId\(requestId\)/);
   assert.match(viewer, /复制\$\{item\.codexSessionIsParent \? "父会话" : "会话"\} ID/);
-  assert.match(viewer, /<span className="text-\[#8e8e93\]">—<\/span>/);
+  assert.match(viewer, /setCopyToast\(\{/);
+  assert.match(viewer, /role="status"/);
+  assert.match(viewer, /aria-live="polite"/);
+  assert.match(viewer, /总请求数/);
+  assert.match(viewer, /请求成功率/);
+  assert.match(viewer, /平均首字耗时 \(TTFT\)/);
+  assert.match(viewer, /Token 消耗/);
   assert.doesNotMatch(viewer, /codexSubagentSessionId/);
   assert.doesNotMatch(viewer, /item\.providerName && item\.provider \?/);
 });

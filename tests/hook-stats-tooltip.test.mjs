@@ -30,3 +30,17 @@ test("conversation rich tooltips reuse the session-tools observer instead of bod
   assert.match(source, /syncConversationRichTooltipOpen\(target\)/);
   assert.match(source, /syncConversationRichTooltipOpen\(\);/);
 });
+
+test("pointer handoff keeps conversation rich tooltips open while entering them", () => {
+  assert.match(source, /const conversationRichTooltipHandoffMs = 150/);
+  assert.match(source, /event\.stopPropagation\(\)/);
+  assert.match(source, /new PointerEvent\("pointerout", \{/);
+  assert.match(
+    source,
+    /document\.addEventListener\("pointerout", holdConversationRichTooltipOpen, true\)/,
+  );
+  assert.match(
+    source,
+    /document\.addEventListener\("pointerover", continueConversationRichTooltipHandoff, true\)/,
+  );
+});

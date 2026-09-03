@@ -78,7 +78,7 @@ CODEY_UPDATE_BASE_URL 可在编译时覆盖客户端更新源。发布标签版�
 2. 加载 Codey 配置，只读检查 Codex 配置、登录状态和应用位置；首次空配置可导入当前第三方线路。
 3. 在 Codex 未运行时完成会话索引维护、旧版 Codey 状态清理和诊断保护准备。
 4. 按设置启动本地路由、生成本次进程覆盖、Hook、子代理角色和注入脚本。
-5. 启动 Codex，确认 app-server 收到完整运行时覆盖，再通过 CDP 安装桥接与页面增强。
+5. 启动 Codex，确认 app-server 收到完整运行时覆盖，再通过 CDP 安装桥接与页面增强。当前 Codex 未开放主进程 Inspector 时，以已确认的 CLI 兼容入口继续运行并标记为非致命降级；只有启动补丁与兼容入口都失败时才停止 Codex。
 6. 启动健康检查、退出监听、通知和平台保护任务。设置保存后，支持热更新的项目立即替换；影响启动参数、角色集合或能力目录的项目标记为需要重启。
 7. Codex 退出、系统信号或安装更新时，先停止 watcher 和路由，再停止受控 Codex，最后清理 Hook、租约及其他 Codey 自有运行状态。
 
@@ -122,7 +122,7 @@ Codex 更新后，优先检查启动补丁、app-server 参数结构、入口资
 
 提示词优化可使用运行中的 Codey 路由，也可使用独立配置。地址、认证和模型由后端校验；日志不保存提示词正文或凭据。
 
-子代理增强只在原生 macOS 和 Windows 启用。五个用户角色与内部 default 角色的配置源位于 backend/src/codex_config_guidance.rs，默认规则数据位于 backend/resources/subagent-rules.default.json。当前路径直接使用 Codex 原生 agents 工具和生命周期 Hook，不再使用旧版 sidecar、逐任务回执、prepare_delegation 或 resolve_batch 流程。只读任务最多并行三个；出现写入角色时最多两个，并由根代理在所有尝试结束后验收结果。角色名和 Hook 不是文件系统安全边界，真实权限仍由 Codex sandbox 与 approval 设置决定。
+子代理增强只在原生 macOS 和 Windows 启用。五个用户角色与内部 default 角色的配置源位于 backend/src/codex_config_guidance.rs，默认规则数据位于 backend/resources/subagent-rules.default.json。当前路径直接使用 Codex 原生 agents 工具和生命周期 Hook，不再使用旧版 sidecar、逐任务回执、prepare_delegation 或 resolve_batch 流程。只读任务最多并行三个；出现写入角色时最多两个，并由根代理在所有尝试结束后验收结果。活动 attempt 全部通过绑定、marker 和 `files.read` 能力校验时，可信根 turn 可继续使用规则确认的本地读取、网页检索、MCP Resource 与数据库 schema/只读 SQL 工具；SQL 只接受单条、可保守证明为只读的语句，写入、命令、视觉、未知工具以及 writer/mixed/unverified 批次仍保持关闭。角色名、词法 SQL 校验和 Hook 不是最终安全边界，真实权限仍由数据库只读账号以及 Codex sandbox 与 approval 设置决定。
 
 完整且无筛选的 agents 列表若只包含根代理，会精准回收从未绑定、从未启动的 pending spawn，覆盖 provider 在线程上限等失败后缺少 PostToolUse 回执的路径；已绑定或已启动 attempt 不受影响。顶层 wait 超时和仅根代理快照不算语义进展，不得重置 Stop 的 10 分钟停滞恢复窗口，只有带具体代理身份的状态或输出变化才会重置。
 

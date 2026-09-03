@@ -98,6 +98,10 @@
   // four descendant :has() selectors on every mutation.
   const conversationRichTooltipOpenClass = "codey-rich-tooltip-open";
   const conversationRichTooltipTriggerSelector = "button, [role=\"button\"], span[tabindex=\"0\"]";
+  const conversationRichTooltipHandoffMs = 150;
+  const conversationRichTooltipCloseEvent = Symbol("codey-rich-tooltip-close");
+  let conversationRichTooltipHandoffTimer = 0;
+  let conversationRichTooltipHandoffTrigger = null;
   const sidebarScanRootSelector = [
     "header",
     "nav",
@@ -3660,6 +3664,66 @@
     }
     body.classList.toggle(conversationRichTooltipOpenClass, conversationHasOpenRichTooltip());
   };
+  const conversationRichTooltipFor = (trigger) => String(
+    trigger?.getAttribute?.("aria-describedby") || "",
+  ).split(/\s+/).map((id) => document.getElementById(id)).find((element) => (
+    element?.getAttribute?.("role") === "tooltip"
+  )) || null;
+  const clearConversationRichTooltipHandoff = () => {
+    if (conversationRichTooltipHandoffTimer) {
+      window.clearTimeout(conversationRichTooltipHandoffTimer);
+      conversationRichTooltipHandoffTimer = 0;
+    }
+  };
+  const closeConversationRichTooltip = () => {
+    const trigger = conversationRichTooltipHandoffTrigger;
+    clearConversationRichTooltipHandoff();
+    conversationRichTooltipHandoffTrigger = null;
+    if (!(trigger instanceof HTMLElement) || trigger.isConnected === false) return;
+    const event = new PointerEvent("pointerout", {
+      bubbles: true,
+      pointerType: "mouse",
+      relatedTarget: document.body,
+    });
+    Object.defineProperty(event, conversationRichTooltipCloseEvent, { value: true });
+    trigger.dispatchEvent(event);
+  };
+  const holdConversationRichTooltipOpen = (event) => {
+    if (event[conversationRichTooltipCloseEvent]) return;
+    const target = event.target instanceof Element ? event.target : null;
+    const relatedTarget = event.relatedTarget instanceof Element ? event.relatedTarget : null;
+    const trigger = target?.closest?.(conversationRichTooltipTriggerSelector);
+    if (
+      trigger
+      && isConversationRichTooltipTriggerShape(trigger)
+      && trigger.hasAttribute("aria-describedby")
+      && !trigger.contains(relatedTarget)
+    ) {
+      event.stopPropagation();
+      clearConversationRichTooltipHandoff();
+      conversationRichTooltipHandoffTrigger = trigger;
+      conversationRichTooltipHandoffTimer = window.setTimeout(
+        closeConversationRichTooltip,
+        conversationRichTooltipHandoffMs,
+      );
+      return;
+    }
+    const activeTrigger = conversationRichTooltipHandoffTrigger;
+    const tooltip = conversationRichTooltipFor(activeTrigger);
+    if (
+      tooltip?.contains(target)
+      && !tooltip.contains(relatedTarget)
+      && !activeTrigger?.contains(relatedTarget)
+    ) closeConversationRichTooltip();
+  };
+  const continueConversationRichTooltipHandoff = (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const trigger = conversationRichTooltipHandoffTrigger;
+    if (
+      trigger?.contains(target)
+      || conversationRichTooltipFor(trigger)?.contains(target)
+    ) clearConversationRichTooltipHandoff();
+  };
 
   const handleSessionToolMutations = (mutations) => {
     for (const mutation of mutations) {
@@ -3796,6 +3860,8 @@
         void reconcileStaleCompletedTask();
       }
     });
+    document.addEventListener("pointerout", holdConversationRichTooltipOpen, true);
+    document.addEventListener("pointerover", continueConversationRichTooltipHandoff, true);
     document.addEventListener("pointerdown", wakeSessionWatcher, { capture: true, passive: true });
     document.addEventListener("keydown", wakeSessionWatcherFromKey, true);
   }

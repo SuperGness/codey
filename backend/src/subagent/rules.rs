@@ -254,6 +254,25 @@ impl RuleSet {
                 );
             }
         }
+        for class in [
+            ToolClass::Visual,
+            ToolClass::Write,
+            ToolClass::Command,
+            ToolClass::Collaboration,
+            ToolClass::Spawn,
+            ToolClass::Unknown,
+        ] {
+            let decision = self.evaluate(&RuleContext {
+                actor: RuleActor::Root,
+                role: None,
+                tool_name: "__codey_root_security_probe__",
+                tool_class: class,
+            });
+            anyhow::ensure!(
+                decision.effect == RuleEffect::Deny,
+                "子代理规则不能向根代理只读窗口开放 {class:?} 工具"
+            );
+        }
         Ok(())
     }
 
@@ -664,6 +683,39 @@ mod tests {
                     .effect,
                 RuleEffect::Allow,
                 "{role}"
+            );
+        }
+        for class in [ToolClass::Read, ToolClass::Network] {
+            assert_eq!(
+                rules
+                    .evaluate(&RuleContext {
+                        actor: RuleActor::Root,
+                        role: None,
+                        tool_name: "root-read",
+                        tool_class: class,
+                    })
+                    .effect,
+                RuleEffect::Allow,
+                "{class:?}"
+            );
+        }
+        for class in [
+            ToolClass::Write,
+            ToolClass::Command,
+            ToolClass::Visual,
+            ToolClass::Unknown,
+        ] {
+            assert_eq!(
+                rules
+                    .evaluate(&RuleContext {
+                        actor: RuleActor::Root,
+                        role: None,
+                        tool_name: "root-denied",
+                        tool_class: class,
+                    })
+                    .effect,
+                RuleEffect::Deny,
+                "{class:?}"
             );
         }
     }

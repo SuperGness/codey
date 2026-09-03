@@ -126,9 +126,8 @@ function OperationsPanelComponent({
     pluginMarketplaceStatus?.managedConfigCompatible === true;
   const embeddedMarketplaceReady =
     remoteMarketplaceReady && managedConfigCompatible;
-  const performanceError =
-    maintenance?.performanceStatus === "error" ||
-    maintenance?.performanceStatus === "degraded";
+  const performanceError = maintenance?.performanceStatus === "error";
+  const performanceDegraded = maintenance?.performanceStatus === "degraded";
   const injectionScripts = status.injectionScripts ?? EMPTY_INJECTION_SCRIPTS;
   const enabledOptimizationFeatures = useMemo<EnabledOptimizationFeature[]>(
     () =>
@@ -312,11 +311,14 @@ function OperationsPanelComponent({
               ? status.running
                 ? "正在读取最近一次功能生效结果。"
                 : "Codex 启动后将在这里汇总已生效功能。"
-              : !performanceError
-                ? isWindowsClient
-                  ? "精简策略、Windows 性能补丁与功能自检均已通过。"
-                  : "精简策略与功能自检均已通过。"
-                : "部分精简策略尚未启用，保留完整功能。",
+              : performanceError
+                ? maintenance?.performanceDetail || "系统优化组件启动失败。"
+                : performanceDegraded
+                  ? maintenance?.performanceDetail ||
+                    "兼容模式运行正常，部分非必要精简策略未启用。"
+                  : isWindowsClient
+                    ? "精简策略、Windows 性能补丁与功能自检均已通过。"
+                    : "精简策略与功能自检均已通过。",
       metrics: [],
       label: internalInjectionError
         ? "基础异常"
@@ -332,13 +334,16 @@ function OperationsPanelComponent({
                 : "待启动"
               : performanceError
                 ? "异常"
-                : "已优化",
+                : performanceDegraded
+                  ? "兼容模式"
+                  : "已优化",
       tone:
         injectionError || performanceError
           ? "destructive"
           : injectionStatusPending ||
               internalInjectionPending ||
-              unverifiedInjectionScriptCount > 0
+              unverifiedInjectionScriptCount > 0 ||
+              performanceDegraded
             ? "warning"
             : "success",
       icon: Cpu,

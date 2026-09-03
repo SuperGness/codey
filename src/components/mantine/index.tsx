@@ -236,6 +236,7 @@ export interface InputProps
   extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "size"> {
   error?: boolean;
   leftSection?: React.ReactNode;
+  rightSection?: React.ReactNode;
   wrapperClassName?: string;
 }
 

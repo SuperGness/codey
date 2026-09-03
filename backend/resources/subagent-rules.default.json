@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "revision": 6,
+  "revision": 7,
   "conflictResolution": "highest_priority_deny_wins",
   "fallback": "deny",
   "roles": {
@@ -12,6 +12,14 @@
     "default": { "access": "read_only", "visual": false }
   },
   "rules": [
+    {
+      "id": "allow-root-readonly-capabilities",
+      "priority": 800,
+      "effect": "allow",
+      "actors": ["root"],
+      "toolClasses": ["read", "network"],
+      "explanation": "严格只读协作期间，可信根代理可继续使用已确认无副作用的读取工具。"
+    },
     {
       "id": "deny-nested-spawn",
       "priority": 1000,

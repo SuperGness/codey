@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::subagent::protocol::{self, AgentState as ObservedAgentState};
+use crate::subagent::rules::{RuleActor, RuleContext, RuleEffect, ToolClass};
 use crate::subagent::{
     api::TraceContext,
     telemetry::{ExecutionStatus, SubagentTraceEvent, TraceEventKind, TraceRecorder},
@@ -968,12 +969,11 @@ fn pre_tool_use_output(
     }
     if active > 0
         && trusted_root_turn
-        && input
-            .tool_name
-            .as_deref()
-            .is_some_and(is_root_local_read_tool)
         && verified_local_read_only_active_count(state_root, runtime_id, &input.session_id, now_ms)?
             == Some(active)
+        && input.tool_name.as_deref().is_some_and(|tool_name| {
+            root_read_tool_allowed(state_root, tool_name, input.tool_input.as_ref())
+        })
     {
         return Ok(json!({}));
     }
@@ -1506,7 +1506,7 @@ fn post_wait_continuation(
         .map(|issue| format!("\n\nHook 协议兼容性诊断：{issue}。"))
         .unwrap_or_default();
     let local_read_guidance = if root_local_reads_allowed {
-        " 当前账本与活动 marker 已共同证明剩余子代理均已绑定且只具备 `files.read`；可信根代理可使用 `mcp__codey_fastctx__inspect_local_file`、`mcp__codey_fastctx__grep` 或 `mcp__codey_fastctx__glob` 消化本次部分结果。写入、命令、网络、其他本地工具和结束任务仍被拒绝；完成有界读取后继续 wait/list 汇合。"
+        " 当前账本与活动 marker 已共同证明剩余子代理均已绑定且只具备 `files.read`；可信根代理可继续使用规则确认的本地读取、网页检索、MCP Resource 与数据库 schema/只读 SQL 工具消化本次部分结果。写入、命令、视觉、无法证明只读的工具和结束任务仍被拒绝；完成有界读取后继续 wait/list 汇合。"
     } else {
         " 在所有子代理进入终态或被根成功中断并 fence 前，不得恢复非协作本地工作、形成最终结论或结束当前任务。"
     };
@@ -1529,7 +1529,7 @@ fn post_list_continuation(
         .map(|issue| format!("\n\nHook 协议兼容性诊断：{issue}。"))
         .unwrap_or_default();
     let local_read_guidance = if root_local_reads_allowed {
-        " 当前账本与活动 marker 已共同证明剩余子代理均已绑定且只具备 `files.read`；可信根代理可使用 FastCtx 的 inspect、grep 或 glob 消化已返回证据，但写入、命令、网络、其他本地工具和结束任务仍被拒绝，随后必须继续汇合。"
+        " 当前账本与活动 marker 已共同证明剩余子代理均已绑定且只具备 `files.read`；可信根代理可继续使用规则确认的本地读取、网页检索、MCP Resource 与数据库 schema/只读 SQL 工具消化已返回证据，但写入、命令、视觉、无法证明只读的工具和结束任务仍被拒绝，随后必须继续汇合。"
     } else {
         " 所有活动代理结算前继续保持全局本地工具屏障。"
     };
@@ -1966,13 +1966,350 @@ fn verified_local_read_only_active_count(
     )
 }
 
-fn is_root_local_read_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name.trim().to_ascii_lowercase().as_str(),
-        "mcp__codey_fastctx__inspect_local_file"
-            | "mcp__codey_fastctx__grep"
-            | "mcp__codey_fastctx__glob"
-    )
+fn root_read_tool_allowed(state_root: &Path, tool_name: &str, tool_input: Option<&Value>) -> bool {
+    let Some(tool_class) = root_read_tool_class(tool_name, tool_input) else {
+        return false;
+    };
+    let loaded_rules = crate::subagent::rules::load(state_root);
+    if let Some(warning) = &loaded_rules.warning {
+        eprintln!("Codey 子代理规则回退：{warning}");
+    }
+    loaded_rules
+        .rules
+        .evaluate(&RuleContext {
+            actor: RuleActor::Root,
+            role: None,
+            tool_name,
+            tool_class,
+        })
+        .effect
+        == RuleEffect::Allow
+}
+
+fn root_read_tool_class(tool_name: &str, tool_input: Option<&Value>) -> Option<ToolClass> {
+    let tool_class = crate::subagent::rules::classify_tool(tool_name);
+    if matches!(tool_class, ToolClass::Read | ToolClass::Network) {
+        return Some(tool_class);
+    }
+
+    let normalized = tool_name.trim().to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "read_mcp_resource"
+            | "functions.read_mcp_resource"
+            | "list_mcp_resources"
+            | "functions.list_mcp_resources"
+            | "list_mcp_resource_templates"
+            | "functions.list_mcp_resource_templates"
+    ) {
+        return Some(ToolClass::Read);
+    }
+
+    database_mcp_is_read_only(&normalized, tool_input).then_some(ToolClass::Read)
+}
+
+fn database_mcp_is_read_only(tool_name: &str, tool_input: Option<&Value>) -> bool {
+    let Some((server, tool)) = tool_name
+        .strip_prefix("mcp__")
+        .and_then(|name| name.rsplit_once("__"))
+        .filter(|(server, tool)| !server.is_empty() && !tool.is_empty())
+    else {
+        return false;
+    };
+
+    if matches!(
+        tool,
+        "get_schema"
+            | "get_db_schema"
+            | "get_database_schema"
+            | "get_schema_info"
+            | "get_table_schema"
+            | "get_table_definition"
+            | "get_table_ddl"
+            | "get_connection"
+            | "get_connection_status"
+            | "connection_status"
+            | "test_connection"
+            | "ping"
+            | "health_check"
+            | "get_database_info"
+            | "get_server_info"
+            | "get_table_info"
+            | "describe_table"
+            | "describe_tables"
+            | "inspect_schema"
+            | "inspect_table"
+            | "list_databases"
+            | "list_schemas"
+            | "list_tables"
+            | "list_columns"
+            | "show_databases"
+            | "show_schemas"
+            | "show_tables"
+            | "show_columns"
+            | "show_create_table"
+    ) {
+        return tool_input.is_none_or(|value| value.is_null() || value.is_object());
+    }
+
+    let sql_tool = matches!(
+        tool,
+        "execute_sql" | "run_sql" | "sql_query" | "query_sql" | "read_query"
+    ) || (matches!(
+        tool,
+        "query" | "execute_query" | "run_query" | "query_database"
+    ) && database_server_name(server));
+    sql_tool && sql_input(tool_input).is_some_and(sql_is_read_only)
+}
+
+fn database_server_name(server: &str) -> bool {
+    server
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|part| {
+            matches!(
+                part,
+                "db" | "database"
+                    | "sql"
+                    | "mysql"
+                    | "mariadb"
+                    | "postgres"
+                    | "postgresql"
+                    | "sqlite"
+                    | "duckdb"
+                    | "mssql"
+                    | "oracle"
+                    | "clickhouse"
+                    | "snowflake"
+                    | "bigquery"
+                    | "supabase"
+            )
+        })
+        || server.ends_with("db")
+}
+
+fn sql_input(tool_input: Option<&Value>) -> Option<&str> {
+    let input = tool_input?.as_object()?;
+    let mut sql = None;
+    for key in ["sql", "query", "statement", "sql_query"] {
+        let Some(value) = input.get(key) else {
+            continue;
+        };
+        let candidate = value.as_str()?.trim();
+        if candidate.is_empty() || sql.is_some_and(|current| current != candidate) {
+            return None;
+        }
+        sql = Some(candidate);
+    }
+    sql
+}
+
+fn sql_is_read_only(sql: &str) -> bool {
+    let Some(mut tokens) = sql_tokens(sql) else {
+        return false;
+    };
+    if tokens.last().is_some_and(|token| token == ";") {
+        tokens.pop();
+    }
+    if tokens.is_empty() || tokens.iter().any(|token| token == ";") {
+        return false;
+    }
+
+    let first = tokens[0].as_str();
+    let forbidden = |token: &str| {
+        matches!(
+            token,
+            "INSERT"
+                | "UPDATE"
+                | "DELETE"
+                | "REPLACE"
+                | "UPSERT"
+                | "MERGE"
+                | "CREATE"
+                | "ALTER"
+                | "DROP"
+                | "TRUNCATE"
+                | "RENAME"
+                | "GRANT"
+                | "REVOKE"
+                | "COMMENT"
+                | "CALL"
+                | "EXEC"
+                | "EXECUTE"
+                | "DO"
+                | "SET"
+                | "RESET"
+                | "USE"
+                | "ATTACH"
+                | "DETACH"
+                | "COPY"
+                | "LOAD"
+                | "LOCK"
+                | "UNLOCK"
+                | "VACUUM"
+                | "ANALYZE"
+                | "CLUSTER"
+                | "REINDEX"
+                | "REFRESH"
+                | "BEGIN"
+                | "START"
+                | "COMMIT"
+                | "ROLLBACK"
+                | "SAVEPOINT"
+                | "RELEASE"
+                | "PREPARE"
+                | "DEALLOCATE"
+                | "DISCARD"
+                | "LISTEN"
+                | "NOTIFY"
+                | "UNLISTEN"
+                | "SECURITY"
+                | "CHECKPOINT"
+                | "SHUTDOWN"
+                | "KILL"
+                | "OPTIMIZE"
+                | "REPAIR"
+                | "INSTALL"
+                | "UNINSTALL"
+                | "INTO"
+                | "OUTFILE"
+                | "DUMPFILE"
+                | "NEXTVAL"
+                | "SETVAL"
+                | "SET_CONFIG"
+                | "GET_LOCK"
+                | "RELEASE_LOCK"
+                | "PG_ADVISORY_LOCK"
+                | "PG_ADVISORY_XACT_LOCK"
+                | "PG_ADVISORY_UNLOCK"
+                | "PG_ADVISORY_UNLOCK_ALL"
+                | "PG_CANCEL_BACKEND"
+                | "PG_TERMINATE_BACKEND"
+                | "PG_RELOAD_CONF"
+                | "PG_ROTATE_LOGFILE"
+                | "DBLINK_EXEC"
+                | "LO_EXPORT"
+                | "LO_IMPORT"
+                | "LO_UNLINK"
+        )
+    };
+
+    match first {
+        "SHOW" | "DESCRIBE" | "DESC" => !tokens
+            .iter()
+            .any(|token| matches!(token.as_str(), "INTO" | "OUTFILE" | "DUMPFILE")),
+        "SELECT" => !tokens.iter().any(|token| forbidden(token)),
+        "WITH" => {
+            tokens.iter().any(|token| token == "SELECT")
+                && !tokens.iter().any(|token| forbidden(token))
+        }
+        "EXPLAIN" => {
+            tokens.iter().skip(1).any(|token| {
+                matches!(
+                    token.as_str(),
+                    "SELECT" | "WITH" | "SHOW" | "DESCRIBE" | "DESC"
+                )
+            }) && !tokens.iter().any(|token| forbidden(token))
+        }
+        _ => false,
+    }
+}
+
+fn sql_tokens(sql: &str) -> Option<Vec<String>> {
+    // ponytail: lexical SQL checks cannot prove user-defined functions are pure; keep database
+    // credentials read-only until Hook payloads expose trusted connector capability metadata.
+    let bytes = sql.as_bytes();
+    let mut index = 0;
+    let mut tokens = Vec::new();
+    while index < bytes.len() {
+        match bytes[index] {
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+                    index += 1;
+                }
+            }
+            b'#' => {
+                index += 1;
+                while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                if matches!(bytes.get(index + 2), Some(b'!'))
+                    || matches!(
+                        (bytes.get(index + 2), bytes.get(index + 3)),
+                        (Some(b'M' | b'm'), Some(b'!'))
+                    )
+                {
+                    return None;
+                }
+                index += 2;
+                let mut depth = 1;
+                while index < bytes.len() && depth > 0 {
+                    if bytes.get(index..index + 2) == Some(b"/*") {
+                        depth += 1;
+                        index += 2;
+                    } else if bytes.get(index..index + 2) == Some(b"*/") {
+                        depth -= 1;
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                }
+                if depth != 0 {
+                    return None;
+                }
+            }
+            quote @ (b'\'' | b'"' | b'`') => {
+                index += 1;
+                let mut closed = false;
+                while index < bytes.len() {
+                    if bytes[index] == b'\\' {
+                        index = (index + 2).min(bytes.len());
+                    } else if bytes[index] == quote {
+                        if bytes.get(index + 1) == Some(&quote) {
+                            index += 2;
+                        } else {
+                            index += 1;
+                            closed = true;
+                            break;
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
+                if !closed {
+                    return None;
+                }
+            }
+            b'[' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b']' {
+                    index += 1;
+                }
+                if index == bytes.len() {
+                    return None;
+                }
+                index += 1;
+            }
+            b';' => {
+                tokens.push(";".to_string());
+                index += 1;
+            }
+            byte if byte.is_ascii_alphanumeric() || byte == b'_' => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                {
+                    index += 1;
+                }
+                tokens.push(sql[start..index].to_ascii_uppercase());
+            }
+            _ => index += 1,
+        }
+    }
+    Some(tokens)
 }
 
 fn is_collaboration_tool(tool_name: &str) -> bool {
@@ -3772,7 +4109,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_read_only_batch_allows_only_trusted_root_fastctx_reads() {
+    fn verified_read_only_batch_allows_only_proven_safe_root_reads() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let runtime_id = "runtime-read-window";
@@ -3861,6 +4198,12 @@ mod tests {
             "mcp__codey_fastctx__inspect_local_file",
             "mcp__codey_fastctx__grep",
             "mcp__codey_fastctx__glob",
+            "tool_search",
+            "web.run",
+            "functions.read_mcp_resource",
+            "functions.list_mcp_resources",
+            "functions.list_mcp_resource_templates",
+            "mcp__cms_database__describe_table",
         ] {
             assert_eq!(
                 handle_hook_for_runtime_at(
@@ -3874,13 +4217,22 @@ mod tests {
                 "{tool_name}"
             );
         }
+        let mut sql_read = root_tool(read_session, root_turn, "mcp__cms_database__execute_sql");
+        sql_read.tool_input = Some(json!({
+            "sql": "WITH columns AS (SELECT * FROM information_schema.columns) SELECT * FROM columns;"
+        }));
+        assert_eq!(
+            handle_hook_for_runtime_at(&sql_read, root, runtime_id, base + 30).unwrap(),
+            json!({})
+        );
         for tool_name in [
             "mcp__codey_fastctx__replace",
             "functions.apply_patch",
             "functions.exec",
-            "web.run",
-            "tool_search",
             "functions.view_image",
+            "mcp__cms_database__drop_table",
+            "mcp__unknown__query",
+            "mcp__unknown__read_everything",
         ] {
             let denied = handle_hook_for_runtime_at(
                 &root_tool(read_session, root_turn, tool_name),
@@ -3890,6 +4242,20 @@ mod tests {
             )
             .unwrap();
             assert_eq!(permission(&denied).as_deref(), Some("deny"), "{tool_name}");
+        }
+        for sql in [
+            "UPDATE cargo SET volume = 0",
+            "SELECT * FROM cargo INTO OUTFILE '/tmp/cargo'",
+            "SELECT pg_terminate_backend(42)",
+            "EXPLAIN ANALYZE DELETE FROM cargo",
+            "SELECT 1; DROP TABLE cargo",
+            "/*!50000 DELETE FROM cargo */ SELECT 1",
+            "SELECT 'unterminated",
+        ] {
+            let mut tool = root_tool(read_session, root_turn, "mcp__cms_database__execute_sql");
+            tool.tool_input = Some(json!({ "sql": sql }));
+            let denied = handle_hook_for_runtime_at(&tool, root, runtime_id, base + 31).unwrap();
+            assert_eq!(permission(&denied).as_deref(), Some("deny"), "{sql}");
         }
         let untrusted = handle_hook_for_runtime_at(
             &root_tool(read_session, "different-turn", "mcp__codey_fastctx__grep"),
@@ -3921,8 +4287,8 @@ mod tests {
         assert_eq!(continuation["decision"].as_str(), Some("block"));
         let reason = continuation["reason"].as_str().unwrap();
         assert!(reason.contains("仍有 1 个子代理"));
-        assert!(reason.contains("mcp__codey_fastctx__inspect_local_file"));
-        assert!(reason.contains("写入、命令、网络"));
+        assert!(reason.contains("数据库 schema/只读 SQL"));
+        assert!(reason.contains("写入、命令、视觉"));
         assert!(
             !agent_marker_path(
                 &session_state_dir(root, read_session),
@@ -4023,6 +4389,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(permission(&writer_active).as_deref(), Some("deny"));
+    }
+
+    #[test]
+    fn root_database_read_classifier_is_conservative() {
+        for sql in [
+            "SELECT 'UPDATE cargo', `delete`, [drop] FROM cargo",
+            "-- comment\nSELECT * FROM cargo;",
+            "/* outer /* nested */ comment */ SHOW TABLES",
+            "WITH cargo AS (SELECT 1) SELECT * FROM cargo",
+            "EXPLAIN SELECT * FROM cargo",
+        ] {
+            assert!(sql_is_read_only(sql), "{sql}");
+        }
+        for sql in [
+            "",
+            "INSERT INTO cargo VALUES (1)",
+            "WITH deleted AS (DELETE FROM cargo RETURNING *) SELECT * FROM deleted",
+            "SELECT nextval('cargo_id_seq')",
+            "SELECT * FROM cargo FOR UPDATE",
+            "SHOW TABLES INTO OUTFILE '/tmp/tables'",
+            "PRAGMA journal_mode=WAL",
+            "SELECT 1;;",
+            "/* missing close SELECT 1",
+        ] {
+            assert!(!sql_is_read_only(sql), "{sql}");
+        }
+
+        assert!(database_mcp_is_read_only(
+            "mcp__cms_database__query",
+            Some(&json!({ "query": "SELECT 1" })),
+        ));
+        assert!(!database_mcp_is_read_only(
+            "mcp__cms_database__query",
+            Some(&json!({ "query": "SELECT 1", "sql": "SELECT 2" })),
+        ));
+        assert!(!database_mcp_is_read_only(
+            "mcp__cms__query",
+            Some(&json!({ "query": "SELECT 1" })),
+        ));
+        assert!(!database_mcp_is_read_only(
+            "mcp__cms_database__execute_sql",
+            None,
+        ));
     }
 
     #[test]

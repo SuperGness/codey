@@ -16,6 +16,7 @@ import {
   IconRefresh,
   IconSearch,
   IconTrash,
+  IconX,
 } from "@tabler/icons-react";
 
 import type { Config, Profile } from "./App.types";
@@ -309,21 +310,91 @@ export function RequestLogDialog({
   const [clearing, setClearing] = useState(false);
   const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [copyToast, setCopyToast] = useState<{
+    text: string;
+    subtext?: string;
+  } | null>(null);
+  const copyToastTimer = useRef<number | null>(null);
   const requestRevision = useRef(0);
   const clearInFlight = useRef(false);
 
-  const handleCopyId = (requestId: string) => {
+  const handleCopyId = (requestId: string, customLabel?: string) => {
     if (!navigator.clipboard) return;
     void navigator.clipboard.writeText(requestId).then(
       () => {
         setCopiedId(requestId);
-        window.setTimeout(() => {
+        if (copyToastTimer.current) {
+          window.clearTimeout(copyToastTimer.current);
+        }
+        const isSession = requestId.includes("-") || (requestId.length === 36 && !requestId.startsWith("req_"));
+        const defaultLabel = isSession ? "会话 ID" : "请求 ID";
+        const label = customLabel || defaultLabel;
+        setCopyToast({
+          text: `已复制${label}`,
+          subtext: requestId,
+        });
+        copyToastTimer.current = window.setTimeout(() => {
+          setCopyToast(null);
           setCopiedId((current) => (current === requestId ? null : current));
-        }, 1500);
+        }, 2200);
       },
       () => undefined,
     );
   };
+
+  const stats = useMemo(() => {
+    if (!result || result.items.length === 0) return null;
+    let succeededCount = 0;
+    let failedCount = 0;
+    let totalDurationSum = 0;
+    let durationCount = 0;
+    let ttftSum = 0;
+    let ttftCount = 0;
+    let totalTokensSum = 0;
+    let cachedTokensSum = 0;
+
+    for (const item of result.items) {
+      if (item.status === "succeeded") succeededCount += 1;
+      else if (item.status === "failed") failedCount += 1;
+
+      if (Number.isFinite(item.totalDurationMs) && item.totalDurationMs > 0) {
+        totalDurationSum += item.totalDurationMs;
+        durationCount += 1;
+      }
+      const ttft = item.downstreamFirstContentMs ?? item.ttftMs;
+      if (ttft != null && Number.isFinite(ttft) && ttft > 0) {
+        ttftSum += ttft;
+        ttftCount += 1;
+      }
+      if (item.totalTokens != null && Number.isFinite(item.totalTokens)) {
+        totalTokensSum += item.totalTokens;
+      }
+      if (item.cachedInputTokens != null && Number.isFinite(item.cachedInputTokens)) {
+        cachedTokensSum += item.cachedInputTokens;
+      }
+    }
+
+    const successRate = result.items.length > 0
+      ? Math.round((succeededCount / result.items.length) * 100)
+      : null;
+    const avgDuration = durationCount > 0
+      ? Math.round(totalDurationSum / durationCount)
+      : null;
+    const avgTtft = ttftCount > 0
+      ? Math.round(ttftSum / ttftCount)
+      : null;
+
+    return {
+      total: result.total,
+      successRate,
+      succeededCount,
+      failedCount,
+      avgDuration,
+      avgTtft,
+      totalTokensSum,
+      cachedTokensSum,
+    };
+  }, [result]);
 
   const providerOptions = useMemo(() => {
     const providers = new Map<string, string>();
@@ -488,9 +559,21 @@ export function RequestLogDialog({
       zIndex={SETTINGS_OVERLAY_Z_INDEX}
     >
       <div className="flex min-h-0 flex-1 flex-col gap-3 p-4 max-[760px]:p-2.5">
-        <div className="flex flex-none items-center justify-between gap-3">
+        <div className="flex flex-none items-center justify-between gap-3 max-[640px]:flex-col max-[640px]:items-start">
           <div className="min-w-0">
-            <p className="m-0 text-xs text-[#6e6e73]">
+            <div className="flex items-center gap-2">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
+              </span>
+              <span className="text-xs font-semibold text-[#1d1d1f]">内置路由请求审计</span>
+              {result?.status === "ok" ? (
+                <span className="rounded-full border border-emerald-600/15 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+                  {result.backend === "sqlite" ? "SQLite 实时存储" : "NDJSON 存储"}
+                </span>
+              ) : null}
+            </div>
+            <p className="m-0 mt-0.5 text-xs text-[#6e6e73]">
               查看内置路由的供应商、模型、耗时与 Token 使用情况。
             </p>
           </div>
@@ -537,12 +620,85 @@ export function RequestLogDialog({
           </Alert>
         ) : null}
 
+        {stats && result?.queryable && result.status === "ok" ? (
+          <div className="grid flex-none grid-cols-2 gap-2.5 sm:grid-cols-4">
+            <div className="flex flex-col justify-between rounded-xl border border-black/8 bg-white p-3 shadow-xs">
+              <span className="text-[11px] font-medium text-[#8e8e93]">总请求数</span>
+              <div className="mt-1 flex items-baseline gap-1.5">
+                <span className="text-lg font-bold text-[#1d1d1f] tabular-nums">
+                  {stats.total.toLocaleString()}
+                </span>
+                <span className="text-[10px] text-[#8e8e93]">条</span>
+              </div>
+              <span className="mt-0.5 text-[10px] text-[#6e6e73]">
+                当前显示 {firstVisible.toLocaleString()}–{lastVisible.toLocaleString()} 条
+              </span>
+            </div>
+            <div className="flex flex-col justify-between rounded-xl border border-black/8 bg-white p-3 shadow-xs">
+              <span className="text-[11px] font-medium text-[#8e8e93]">请求成功率</span>
+              <div className="mt-1 flex items-baseline gap-1.5">
+                <span
+                  className={`text-lg font-bold tabular-nums ${
+                    stats.successRate != null && stats.successRate >= 95
+                      ? "text-emerald-600"
+                      : stats.successRate != null && stats.successRate >= 80
+                        ? "text-amber-600"
+                        : "text-rose-600"
+                  }`}
+                >
+                  {stats.successRate != null ? `${stats.successRate}%` : "—"}
+                </span>
+              </div>
+              <span className="mt-0.5 text-[10px] text-[#6e6e73]">
+                当前页 成功 {stats.succeededCount} · 失败 {stats.failedCount}
+              </span>
+            </div>
+            <div className="flex flex-col justify-between rounded-xl border border-black/8 bg-white p-3 shadow-xs">
+              <span className="text-[11px] font-medium text-[#8e8e93]">平均首字耗时 (TTFT)</span>
+              <div className="mt-1 flex items-baseline gap-1.5">
+                <span className="text-lg font-bold text-[#1d1d1f] tabular-nums">
+                  {formatDuration(stats.avgTtft)}
+                </span>
+              </div>
+              <span className="mt-0.5 text-[10px] text-[#6e6e73]">
+                平均总耗时 {formatDuration(stats.avgDuration)}
+              </span>
+            </div>
+            <div className="flex flex-col justify-between rounded-xl border border-black/8 bg-white p-3 shadow-xs">
+              <span className="text-[11px] font-medium text-[#8e8e93]">当前页 Token 消耗</span>
+              <div className="mt-1 flex items-baseline gap-1.5">
+                <span className="text-lg font-bold text-[#1d1d1f] tabular-nums">
+                  {formatTokens(stats.totalTokensSum)}
+                </span>
+                <span className="text-[10px] text-[#8e8e93]">tokens</span>
+              </div>
+              <span className="mt-0.5 text-[10px] font-medium text-purple-600">
+                {stats.cachedTokensSum > 0
+                  ? `已缓存命中 ${formatTokens(stats.cachedTokensSum)}`
+                  : "全量计算"}
+              </span>
+            </div>
+          </div>
+        ) : null}
+
         <div className="grid flex-none grid-cols-[minmax(220px,1.6fr)_repeat(4,minmax(132px,1fr))_auto] gap-2 rounded-xl border border-black/8 bg-white p-3 shadow-sm max-[1100px]:grid-cols-3 max-[640px]:grid-cols-1">
           <Input
-            aria-label="搜索请求日志"
+            aria-label="搜索请求 ID、会话 ID、供应商、模型或上游"
             placeholder="搜索请求 ID、会话 ID、供应商、模型或上游"
             value={searchInput}
             leftSection={<IconSearch size={15} className="text-[#8e8e93]" aria-hidden="true" />}
+            rightSection={
+              searchInput ? (
+                <button
+                  type="button"
+                  className="flex h-5 w-5 cursor-pointer items-center justify-center rounded-full text-[#8e8e93] hover:bg-black/5 hover:text-[#1d1d1f]"
+                  onClick={() => setSearchInput("")}
+                  aria-label="清空搜索"
+                >
+                  <IconX size={12} aria-hidden="true" />
+                </button>
+              ) : undefined
+            }
             onChange={(event) => setSearchInput(event.currentTarget.value)}
           />
           <Select
@@ -596,6 +752,7 @@ export function RequestLogDialog({
             variant="ghost"
             disabled={!hasFilters}
             onClick={resetFilters}
+            className={hasFilters ? "text-blue-600 hover:text-blue-700" : ""}
           >
             清除筛选
           </Button>
@@ -768,7 +925,17 @@ export function RequestLogDialog({
                         </Table.Td>
                         <Table.Td className="whitespace-nowrap text-[#48484a]">{reasoningLabel(item)}</Table.Td>
                         <Table.Td>
-                          <Badge variant="secondary" size="xs">
+                          <Badge
+                            variant="secondary"
+                            size="xs"
+                            className={
+                              item.requestProtocol === "ws"
+                                ? "border-cyan-600/25 bg-cyan-50 text-cyan-700"
+                                : item.requestProtocol === "sse"
+                                  ? "border-purple-600/25 bg-purple-50 text-purple-700"
+                                  : ""
+                            }
+                          >
                             {(item.requestProtocol || "—").toUpperCase()}
                           </Badge>
                         </Table.Td>
@@ -841,8 +1008,8 @@ export function RequestLogDialog({
                               className="flex items-center justify-end gap-1.5"
                               title={timingTitle}
                             >
-                              <span className="text-[10px] text-[#8e8e93]">TTFT</span>
-                              <span className="text-[11px] font-medium text-[#1d1d1f]">
+                              <span className="rounded bg-blue-50 px-1 py-0.2 text-[9px] font-semibold text-blue-600">TTFT</span>
+                              <span className="text-[11px] font-medium text-[#1d1d1f] tabular-nums">
                                 {formatDuration(displayedTtft)}
                               </span>
                             </div>
@@ -851,16 +1018,24 @@ export function RequestLogDialog({
                               title={`总耗时: ${formatDuration(item.totalDurationMs)}`}
                             >
                               <span className="text-[10px] text-[#8e8e93]">总</span>
-                              <span className="text-[11px] text-[#48484a]">
+                              <span className="text-[11px] text-[#48484a] tabular-nums">
                                 {formatDuration(item.totalDurationMs)}
                               </span>
                             </div>
                           </div>
                         </Table.Td>
-                        <Table.Td className="whitespace-nowrap text-right font-mono text-[#48484a]">{formatTokens(item.inputTokens)}</Table.Td>
-                        <Table.Td className="whitespace-nowrap text-right font-mono text-[#48484a]">{formatTokens(item.outputTokens)}</Table.Td>
-                        <Table.Td className="whitespace-nowrap text-right font-mono text-[#48484a]">{formatTokens(item.cachedInputTokens)}</Table.Td>
-                        <Table.Td className="whitespace-nowrap text-right font-mono font-medium text-[#1d1d1f]">
+                        <Table.Td className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">{formatTokens(item.inputTokens)}</Table.Td>
+                        <Table.Td className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">{formatTokens(item.outputTokens)}</Table.Td>
+                        <Table.Td className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">
+                          {item.cachedInputTokens && item.cachedInputTokens > 0 ? (
+                            <span className="font-medium text-purple-600">
+                              {formatTokens(item.cachedInputTokens)}
+                            </span>
+                          ) : (
+                            formatTokens(item.cachedInputTokens)
+                          )}
+                        </Table.Td>
+                        <Table.Td className="whitespace-nowrap text-right font-mono font-medium text-[#1d1d1f] tabular-nums">
                           {item.totalTokens == null ? (
                             <div className="flex min-w-20 items-center justify-end gap-1">
                               <span className="text-[10px] font-medium text-[#8e8e93]">
@@ -987,6 +1162,34 @@ export function RequestLogDialog({
           </DialogContent>
         ) : null}
       </Dialog>
+
+      {copyToast ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="pointer-events-auto fixed bottom-6 right-6 z-[1000] flex max-w-[min(420px,calc(100vw-32px))] items-center gap-2.5 rounded-xl border border-black/10 border-l-4 border-l-[#34c759] bg-white/95 px-4 py-3 text-xs text-[#1d1d1f] shadow-[0_12px_32px_rgba(0,0,0,0.14)] backdrop-blur-2xl transition-all duration-200"
+        >
+          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-emerald-600">
+            <IconCheck size={15} stroke={2.5} aria-hidden="true" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="m-0 font-medium text-[#1d1d1f]">{copyToast.text}</p>
+            {copyToast.subtext ? (
+              <p className="m-0 mt-0.5 truncate font-mono text-[11px] text-[#8e8e93]">
+                {copyToast.subtext}
+              </p>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            className="ml-1 -mr-1 flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent text-[#8e8e93] hover:bg-black/5 hover:text-[#1d1d1f]"
+            onClick={() => setCopyToast(null)}
+            aria-label="关闭提示"
+          >
+            <IconX size={14} aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
     </Modal>
   );
 }

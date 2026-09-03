@@ -548,6 +548,15 @@ async fn install_startup_patch_with_cli_fallback(
                         }
                     }
                 } else {
+                    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                        "launcher.startup_compatibility_mode",
+                        serde_json::json!({
+                            "platform": platform,
+                            "reason": "main_process_inspector_unavailable",
+                            "inspectorPort": inspector_port,
+                            "runtimeConfigOverrideCount": runtime_config_overrides.len(),
+                        }),
+                    );
                     Ok(true)
                 }
             },

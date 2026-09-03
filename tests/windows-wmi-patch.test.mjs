@@ -281,8 +281,13 @@ test("settings keeps Windows optimization checks without a standalone banner", a
   assert.doesNotMatch(sectionsSource, /script\.id === "windows-wmi-sampler"/);
   assert.match(
     sectionsSource,
-    /performanceStatus === "error" \|\|[\s\S]*?performanceStatus === "degraded"/,
+    /const performanceError = maintenance\?\.performanceStatus === "error"/,
   );
+  assert.match(
+    sectionsSource,
+    /const performanceDegraded = maintenance\?\.performanceStatus === "degraded"/,
+  );
+  assert.match(sectionsSource, /performanceDegraded[\s\S]*?"兼容模式"/);
   assert.doesNotMatch(sectionsSource, /windowsPatchReady/);
   assert.doesNotMatch(sectionsSource, /windowsPatchFailed/);
   assert.doesNotMatch(
