@@ -38,3 +38,14 @@ test("macOS startup patch requires app-server runtime override validation", asyn
     /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*false,\s*\)/,
   );
 });
+
+test("Codex CLI wrapper environment does not leak into the real CLI", async () => {
+  const source = await readFile(
+    new URL("../backend/src/codex_startup_patch.rs", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /for name in \[\s*"CODEX_CLI_PATH",\s*CLI_WRAPPER_TARGET_ENV,/,
+  );
+});

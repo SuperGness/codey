@@ -148,6 +148,8 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     let mut command = std::process::Command::new(&target);
     command.args(rewritten_args);
     for name in [
+        "CODEX_CLI_PATH",
+        CLI_WRAPPER_TARGET_ENV,
         CLI_WRAPPER_OVERRIDES_ENV,
         CLI_WRAPPER_SUBAGENT_ENV,
         CLI_WRAPPER_PORT_ENV,
