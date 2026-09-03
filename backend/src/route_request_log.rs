@@ -840,7 +840,7 @@ impl RouteRequestLogProbe {
     pub(crate) fn mark_usage_unavailable(&self, reason: &str) {
         self.shield(|| {
             let mut entry = lock_unpoisoned(&self.shared.entry);
-            if !entry.token_usage.reported() {
+            if !entry.token_usage.reported() && entry.usage_unavailable_reason.is_none() {
                 entry.usage_unavailable_reason = Some(bounded_string(reason));
             }
         });
@@ -3459,6 +3459,7 @@ mod tests {
             })
             .unwrap();
         probe.mark_usage_unavailable("response_tap_limit_exceeded");
+        probe.mark_usage_unavailable("observer_queue_full");
         probe.finish_success();
 
         let entry = receiver.try_recv().unwrap().entry;

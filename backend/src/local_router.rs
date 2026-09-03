@@ -7349,29 +7349,42 @@ async fn write_proxy_response(
 const REQUEST_LOG_TAP_CHUNK_BYTES: usize = 8 * 1024;
 const REQUEST_LOG_TAP_QUEUE_CHUNKS: usize = 64;
 const REQUEST_LOG_USAGE_PROJECTION_BYTES: usize = 16 * 1024;
+const REQUEST_LOG_USAGE_STRING_BYTES: usize = 64;
+
+struct RequestLogObservedChunk {
+    bytes: Bytes,
+    _queue_budget: OwnedSemaphorePermit,
+}
 
 struct RequestLogResponseTap {
-    sender: Option<mpsc::Sender<Bytes>>,
+    sender: Option<mpsc::Sender<RequestLogObservedChunk>>,
+    queue_budget: Arc<Semaphore>,
     probe: RouteRequestLogProbe,
 }
 
 impl RequestLogResponseTap {
     fn new(probe: RouteRequestLogProbe) -> Self {
-        let (sender, mut receiver) = mpsc::channel::<Bytes>(REQUEST_LOG_TAP_QUEUE_CHUNKS);
+        let (sender, mut receiver) =
+            mpsc::channel::<RequestLogObservedChunk>(REQUEST_LOG_TAP_QUEUE_CHUNKS);
+        let queue_budget = Arc::new(Semaphore::new(REQUEST_LOG_TAP_QUEUE_CHUNKS));
         let worker_probe = probe.clone();
         let finish_guard = probe.defer_finish();
         tokio::spawn(async move {
             let _finish_guard = finish_guard;
             let mut projector = RequestLogMetadataProjector::default();
             while let Some(chunk) = receiver.recv().await {
-                if let Err(reason) = projector.observe(&chunk, &worker_probe) {
+                if let Err(reason) = projector.observe(&chunk.bytes, &worker_probe) {
                     worker_probe.mark_usage_unavailable(reason);
                     break;
                 }
             }
+            if projector.usage.is_some() {
+                worker_probe.mark_usage_unavailable("usage_projection_failed");
+            }
         });
         Self {
             sender: Some(sender),
+            queue_budget,
             probe,
         }
     }
@@ -7380,13 +7393,27 @@ impl RequestLogResponseTap {
         let Some(sender) = self.sender.as_ref() else {
             return;
         };
-        for start in (0..chunk.len()).step_by(REQUEST_LOG_TAP_CHUNK_BYTES) {
-            let end = (start + REQUEST_LOG_TAP_CHUNK_BYTES).min(chunk.len());
-            if sender.try_send(chunk.slice(start..end)).is_err() {
+        let permits = chunk
+            .len()
+            .div_ceil(REQUEST_LOG_TAP_CHUNK_BYTES)
+            .clamp(1, REQUEST_LOG_TAP_QUEUE_CHUNKS) as u32;
+        let Ok(queue_budget) = Arc::clone(&self.queue_budget).try_acquire_many_owned(permits)
+        else {
+            self.probe.mark_usage_unavailable("observer_queue_full");
+            self.sender = None;
+            return;
+        };
+        let observed = RequestLogObservedChunk {
+            bytes: chunk.clone(),
+            _queue_budget: queue_budget,
+        };
+        match sender.try_send(observed) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
                 self.probe.mark_usage_unavailable("observer_queue_full");
                 self.sender = None;
-                return;
             }
+            Err(mpsc::error::TrySendError::Closed(_)) => self.sender = None,
         }
     }
 
@@ -7429,6 +7456,92 @@ struct UsageCapture {
     depth: usize,
     in_string: bool,
     escaped: bool,
+    string_start: usize,
+    string_bytes: usize,
+    string_overflow: bool,
+}
+
+impl UsageCapture {
+    fn new() -> Self {
+        Self {
+            bytes: vec![b'{'],
+            depth: 1,
+            in_string: false,
+            escaped: false,
+            string_start: 0,
+            string_bytes: 0,
+            string_overflow: false,
+        }
+    }
+
+    fn observe_byte(&mut self, byte: u8) -> std::result::Result<bool, &'static str> {
+        if self.in_string {
+            if !self.escaped && byte == b'"' {
+                self.bytes.push(byte);
+                self.in_string = false;
+                self.ensure_within_limit()?;
+                return Ok(false);
+            }
+            if !self.escaped && byte < b' ' {
+                return Err("usage_projection_failed");
+            }
+            if !self.string_overflow {
+                self.string_bytes += 1;
+                if self.string_bytes <= REQUEST_LOG_USAGE_STRING_BYTES {
+                    self.bytes.push(byte);
+                } else {
+                    self.bytes.truncate(self.string_start + 1);
+                    self.string_overflow = true;
+                }
+            }
+            if self.escaped {
+                self.escaped = false;
+            } else if byte == b'\\' {
+                self.escaped = true;
+            }
+            return Ok(false);
+        }
+
+        match byte {
+            b'"' => {
+                self.string_start = self.bytes.len();
+                self.string_bytes = 0;
+                self.string_overflow = false;
+                self.in_string = true;
+                self.bytes.push(byte);
+            }
+            b'{' => {
+                self.depth += 1;
+                self.push_projected_byte(byte)?;
+            }
+            b'}' => {
+                let Some(depth) = self.depth.checked_sub(1) else {
+                    return Err("usage_projection_failed");
+                };
+                self.depth = depth;
+                self.push_projected_byte(byte)?;
+                if depth == 0 {
+                    return Ok(true);
+                }
+            }
+            byte if byte.is_ascii_whitespace() => {}
+            _ => self.push_projected_byte(byte)?,
+        }
+        Ok(false)
+    }
+
+    fn push_projected_byte(&mut self, byte: u8) -> std::result::Result<(), &'static str> {
+        self.bytes.push(byte);
+        self.ensure_within_limit()
+    }
+
+    fn ensure_within_limit(&self) -> std::result::Result<(), &'static str> {
+        if self.bytes.len() > REQUEST_LOG_USAGE_PROJECTION_BYTES {
+            Err("usage_projection_limit_exceeded")
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl RequestLogMetadataProjector {
@@ -7439,30 +7552,12 @@ impl RequestLogMetadataProjector {
     ) -> std::result::Result<(), &'static str> {
         for &byte in bytes {
             if let Some(capture) = self.usage.as_mut() {
-                capture.bytes.push(byte);
-                if capture.bytes.len() > REQUEST_LOG_USAGE_PROJECTION_BYTES {
-                    return Err("usage_projection_limit_exceeded");
-                }
-                if capture.in_string {
-                    if capture.escaped {
-                        capture.escaped = false;
-                    } else if byte == b'\\' {
-                        capture.escaped = true;
-                    } else if byte == b'"' {
-                        capture.in_string = false;
-                    }
-                } else if byte == b'"' {
-                    capture.in_string = true;
-                } else if byte == b'{' {
-                    capture.depth += 1;
-                } else if byte == b'}' {
-                    capture.depth = capture.depth.saturating_sub(1);
-                    if capture.depth == 0 {
-                        let capture = self.usage.take().expect("usage capture exists");
-                        let usage = serde_json::from_slice::<Value>(&capture.bytes)
-                            .map_err(|_| "usage_projection_failed")?;
-                        probe.observe_event(&json!({"usage": usage}));
-                    }
+                let complete = capture.observe_byte(byte)?;
+                if complete {
+                    let capture = self.usage.take().expect("usage capture exists");
+                    let usage = serde_json::from_slice::<Value>(&capture.bytes)
+                        .map_err(|_| "usage_projection_failed")?;
+                    probe.observe_event(&json!({"usage": usage}));
                 }
                 continue;
             }
@@ -7532,12 +7627,7 @@ impl RequestLogMetadataProjector {
                 b'{' if self.awaiting_usage => {
                     self.awaiting_usage = false;
                     self.awaiting_scalar = None;
-                    self.usage = Some(UsageCapture {
-                        bytes: vec![b'{'],
-                        depth: 1,
-                        in_string: false,
-                        escaped: false,
-                    });
+                    self.usage = Some(UsageCapture::new());
                 }
                 b'{' | b'[' => {
                     self.depth += 1;
@@ -10320,11 +10410,29 @@ mod tests {
         let probe = RouteRequestLogProbe::detached_test_probe();
         let mut projector = RequestLogMetadataProjector::default();
         let event = format!(
-            "{{\"usage\":{{\"padding\":\"{}\"}}}}",
-            "x".repeat(20 * 1024)
+            "{{\"usage\":{{\"padding\":[{}0]}}}}",
+            "0,".repeat(REQUEST_LOG_USAGE_PROJECTION_BYTES)
         );
         let error = projector.observe(event.as_bytes(), &probe).unwrap_err();
         assert_eq!(error, "usage_projection_limit_exceeded");
+    }
+
+    #[test]
+    fn request_log_projector_ignores_large_usage_strings() {
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        let mut projector = RequestLogMetadataProjector::default();
+        let event = format!(
+            "{{\"usage\":{{\"padding\":\"{}\",\"input_tokens\":11,\"output_tokens\":7,\"total_tokens\":18}}}}",
+            "x".repeat(128 * 1024)
+        );
+        for chunk in event.as_bytes().chunks(997) {
+            projector.observe(chunk, &probe).unwrap();
+        }
+
+        let usage = probe.token_usage_for_test();
+        assert_eq!(usage.input_tokens, Some(11));
+        assert_eq!(usage.output_tokens, Some(7));
+        assert_eq!(usage.total_tokens, Some(18));
     }
 
     #[test]
@@ -10342,22 +10450,66 @@ mod tests {
         assert_eq!(unavailable_reason, None);
     }
 
-    #[tokio::test]
-    async fn request_log_response_tap_drops_observation_without_backpressure_when_full() {
+    #[test]
+    fn request_log_response_tap_accepts_one_large_upstream_chunk() {
         let probe = RouteRequestLogProbe::detached_test_probe();
-        let mut tap = RequestLogResponseTap::new(probe.clone());
-        let oversized_burst = Bytes::from(vec![
+        let (sender, _receiver) =
+            mpsc::channel::<RequestLogObservedChunk>(REQUEST_LOG_TAP_QUEUE_CHUNKS);
+        let mut tap = RequestLogResponseTap {
+            sender: Some(sender),
+            queue_budget: Arc::new(Semaphore::new(REQUEST_LOG_TAP_QUEUE_CHUNKS)),
+            probe: probe.clone(),
+        };
+        let chunk = Bytes::from(vec![
             b'x';
             REQUEST_LOG_TAP_CHUNK_BYTES
                 * (REQUEST_LOG_TAP_QUEUE_CHUNKS + 1)
         ]);
 
-        tap.observe(&oversized_burst);
+        tap.observe(&chunk);
+
+        let (_, _, unavailable_reason) = probe.projected_metadata_for_test();
+        assert_eq!(unavailable_reason, None);
+    }
+
+    #[test]
+    fn request_log_response_tap_drops_observation_without_backpressure_when_full() {
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        let (sender, _receiver) =
+            mpsc::channel::<RequestLogObservedChunk>(REQUEST_LOG_TAP_QUEUE_CHUNKS);
+        let mut tap = RequestLogResponseTap {
+            sender: Some(sender),
+            queue_budget: Arc::new(Semaphore::new(REQUEST_LOG_TAP_QUEUE_CHUNKS)),
+            probe: probe.clone(),
+        };
+        let chunk = Bytes::from(vec![b'x'; REQUEST_LOG_TAP_CHUNK_BYTES]);
+
+        for _ in 0..=REQUEST_LOG_TAP_QUEUE_CHUNKS {
+            tap.observe(&chunk);
+        }
         let (_, _, unavailable_reason) = probe.projected_metadata_for_test();
         assert_eq!(unavailable_reason.as_deref(), Some("observer_queue_full"));
+    }
 
-        tap.finish();
-        tokio::task::yield_now().await;
+    #[test]
+    fn request_log_response_tap_preserves_worker_reason_when_closed() {
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        probe.mark_usage_unavailable("usage_projection_limit_exceeded");
+        let (sender, receiver) = mpsc::channel::<RequestLogObservedChunk>(1);
+        drop(receiver);
+        let mut tap = RequestLogResponseTap {
+            sender: Some(sender),
+            queue_budget: Arc::new(Semaphore::new(REQUEST_LOG_TAP_QUEUE_CHUNKS)),
+            probe: probe.clone(),
+        };
+
+        tap.observe(&Bytes::from_static(b"x"));
+
+        let (_, _, unavailable_reason) = probe.projected_metadata_for_test();
+        assert_eq!(
+            unavailable_reason.as_deref(),
+            Some("usage_projection_limit_exceeded")
+        );
     }
 
     fn client_tool_search_definition() -> Value {
