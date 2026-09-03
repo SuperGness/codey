@@ -124,14 +124,13 @@ pub(crate) fn collect_agent_status_observations(
     collect_agent_status_observations_in_envelope(value, target, 0, true);
 }
 
-/// Detects the provider-owned collaboration update emitted when a child could
-/// not open the encrypted NEW_TASK payload. Codey intentionally does not try to
-/// decrypt that payload locally; the safe recovery is for the root to restate
-/// the task once through the collaboration channel while the child is active.
-pub(crate) fn response_reports_task_body_decryption_failure(value: &Value) -> bool {
+/// Detects a provider-owned collaboration update emitted when a child could
+/// not open or did not receive the encrypted NEW_TASK payload. Codey does not
+/// decrypt that payload locally; the safe recovery is one active restatement.
+pub(crate) fn response_reports_task_body_unavailable(value: &Value) -> bool {
     let decoded = decode_json_encoded_response(value);
     let value = decoded.as_ref().unwrap_or(value);
-    response_contains_task_body_decryption_failure(value, 0, true)
+    response_contains_task_body_unavailable(value, 0, true)
 }
 
 fn decode_json_encoded_response(value: &Value) -> Option<Value> {
@@ -142,7 +141,7 @@ fn decode_json_encoded_response(value: &Value) -> Option<Value> {
     serde_json::from_str(encoded).ok()
 }
 
-fn response_contains_task_body_decryption_failure(
+fn response_contains_task_body_unavailable(
     value: &Value,
     depth: usize,
     entry_allowed: bool,
@@ -151,10 +150,10 @@ fn response_contains_task_body_decryption_failure(
         return false;
     }
     match value {
-        Value::String(value) => entry_allowed && text_reports_task_body_decryption_failure(value),
+        Value::String(value) => entry_allowed && text_reports_task_body_unavailable(value),
         Value::Array(values) if entry_allowed => values
             .iter()
-            .any(|value| response_contains_task_body_decryption_failure(value, depth + 1, true)),
+            .any(|value| response_contains_task_body_unavailable(value, depth + 1, true)),
         Value::Object(values) => values.iter().any(|(key, value)| {
             let normalized_key = normalize_identifier(key);
             let text_field = matches!(
@@ -163,40 +162,50 @@ fn response_contains_task_body_decryption_failure(
             );
             (entry_allowed
                 && text_field
-                && nested_text_reports_task_body_decryption_failure(value, depth + 1))
+                && nested_text_reports_task_body_unavailable(value, depth + 1))
                 || ((is_agent_collection_field(key) || is_provider_envelope_field(key))
-                    && response_contains_task_body_decryption_failure(value, depth + 1, true))
+                    && response_contains_task_body_unavailable(value, depth + 1, true))
         }),
         _ => false,
     }
 }
 
-fn nested_text_reports_task_body_decryption_failure(value: &Value, depth: usize) -> bool {
+fn nested_text_reports_task_body_unavailable(value: &Value, depth: usize) -> bool {
     if depth > 8 {
         return false;
     }
     match value {
-        Value::String(value) => text_reports_task_body_decryption_failure(value),
+        Value::String(value) => text_reports_task_body_unavailable(value),
         Value::Array(values) => values
             .iter()
-            .any(|value| nested_text_reports_task_body_decryption_failure(value, depth + 1)),
+            .any(|value| nested_text_reports_task_body_unavailable(value, depth + 1)),
         Value::Object(values) => values.iter().any(|(key, value)| {
             matches!(
                 normalize_identifier(key).as_str(),
                 "message" | "text" | "content" | "output" | "reason" | "error"
-            ) && nested_text_reports_task_body_decryption_failure(value, depth + 1)
+            ) && nested_text_reports_task_body_unavailable(value, depth + 1)
         }),
         _ => false,
     }
 }
 
-fn text_reports_task_body_decryption_failure(value: &str) -> bool {
+fn text_reports_task_body_unavailable(value: &str) -> bool {
     if [
         "任务正文未能解密",
         "任务正文无法解密",
         "无法解密任务正文",
         "任务内容未能解密",
         "任务内容无法解密",
+        "任务体为空",
+        "任务正文为空",
+        "任务内容为空",
+        "任务体缺失",
+        "任务正文缺失",
+        "任务内容缺失",
+        "任务 payload 为空",
+        "任务payload为空",
+        "任务 payload 缺失",
+        "任务payload缺失",
     ]
     .iter()
     .any(|pattern| value.contains(pattern))
@@ -215,6 +224,13 @@ fn text_reports_task_body_decryption_failure(value: &str) -> bool {
         "unable to decrypt task body",
         "failed to decrypt the task body",
         "failed to decrypt task body",
+        "task body is empty",
+        "empty task body",
+        "task body is missing",
+        "missing task body",
+        "task payload is empty",
+        "task payload is missing",
+        "missing task payload",
     ]
     .iter()
     .any(|pattern| normalized.contains(pattern))
@@ -1065,7 +1081,7 @@ mod tests {
     }
 
     #[test]
-    fn task_body_decryption_failures_are_detected_only_in_collaboration_envelopes() {
+    fn unavailable_task_bodies_are_detected_only_in_collaboration_envelopes() {
         let direct = json!({
             "updates": [{
                 "agent_id": "visual-a",
@@ -1073,7 +1089,17 @@ mod tests {
                 "message": "任务正文未能解密，无法开始视觉核验。"
             }]
         });
-        assert!(response_reports_task_body_decryption_failure(&direct));
+        assert!(response_reports_task_body_unavailable(&direct));
+
+        for message in ["payload 为空，任务体缺失。", "The task body is missing."] {
+            assert!(response_reports_task_body_unavailable(&json!({
+                "updates": [{
+                    "agent_id": "visual-a",
+                    "status": "MESSAGE",
+                    "message": message
+                }]
+            })));
+        }
 
         let encoded = Value::String(
             serde_json::to_string(&json!({
@@ -1085,16 +1111,23 @@ mod tests {
             }))
             .unwrap(),
         );
-        assert!(response_reports_task_body_decryption_failure(&encoded));
+        assert!(response_reports_task_body_unavailable(&encoded));
 
-        assert!(!response_reports_task_body_decryption_failure(&json!({
+        assert!(!response_reports_task_body_unavailable(&json!({
             "updates": [{
                 "agent_id": "visual-a",
                 "status": "MESSAGE",
                 "message": "The encrypted cache was refreshed successfully."
             }]
         })));
-        assert!(!response_reports_task_body_decryption_failure(&json!({
+        assert!(!response_reports_task_body_unavailable(&json!({
+            "updates": [{
+                "agent_id": "research-a",
+                "status": "MESSAGE",
+                "message": "The API response has a missing payload."
+            }]
+        })));
+        assert!(!response_reports_task_body_unavailable(&json!({
             "output": {
                 "details": "任务正文未能解密"
             }

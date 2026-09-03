@@ -1093,7 +1093,6 @@ fn post_tool_use_output(
             state_root,
             runtime_id,
             &input.session_id,
-            tool_name,
             input.tool_response.as_ref(),
         )? {
             remove_session_auxiliary_file(
@@ -1495,12 +1494,12 @@ fn post_wait_continuation(
     root_local_reads_allowed: bool,
 ) -> Value {
     let returned_update = render_tool_result(tool_response, "wait_agent");
-    let decryption_recovery = tool_response
+    let task_body_recovery = tool_response
         .filter(|response| {
-            crate::subagent::protocol::response_reports_task_body_decryption_failure(response)
+            crate::subagent::protocol::response_reports_task_body_unavailable(response)
         })
         .map(|_| {
-            "\n\n检测到活动子代理报告任务正文解密失败。不要中断该代理，也不要立即重派；请使用 `agents.send_message` 向对应活动 target 只重述一次自包含的任务目标、输入、范围、约束和验收上下文，然后立即回到 `agents.wait_agent`。若重述无法送达、再次解密失败或代理已进入终态，由主代理接管，禁止循环重试。"
+            "\n\n检测到活动子代理报告任务正文无法解密、为空或缺失。不要中断该代理，也不要立即重派；请使用 `agents.send_message` 向对应活动 target 只重述一次自包含的任务目标、输入、范围、约束和验收上下文，然后立即回到 `agents.wait_agent`。若重述无法送达、任务正文仍不可用或代理已进入终态，由主代理接管，禁止循环重试。"
         })
         .unwrap_or_default();
     let compatibility = protocol_issue
@@ -1514,7 +1513,7 @@ fn post_wait_continuation(
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动标记尚未核销。保留下方内容；可继续使用 agents.wait_agent 或不带筛选的 agents.list_agents 对账。只有当前调用仍携带并匹配本批首个根派生调用的 turn_id 时，才可使用 agents.spawn_agent、agents.send_message、agents.followup_task 或 agents.interrupt_agent 协调；缺少该绑定时按匿名主体 fail-closed。completed、errored、shutdown、not_found、FINAL_ANSWER 和 task_complete 都视为终态；任一 attempt 终态或被根成功中断并 fence 后，如仍有计划内未派发的独立任务，按该任务角色重新计算并发上限，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待。后来仍显示已 fence target 为活动的上游快照不得触发再次等待。不得自动重派已结束或已放弃的旧任务；若持续没有可信终态，Stop 恢复路径会在受控宽限期后 fence 遗留 attempt。{local_read_guidance}\n\n本次 wait_agent 已返回内容：\n{returned_update}{decryption_recovery}{compatibility}"
+            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动标记尚未核销。保留下方内容；可继续使用 agents.wait_agent 或不带筛选的 agents.list_agents 对账。只有当前调用仍携带并匹配本批首个根派生调用的 turn_id 时，才可使用 agents.spawn_agent、agents.send_message、agents.followup_task 或 agents.interrupt_agent 协调；缺少该绑定时按匿名主体 fail-closed。completed、errored、shutdown、not_found、FINAL_ANSWER 和 task_complete 都视为终态；任一 attempt 终态或被根成功中断并 fence 后，如仍有计划内未派发的独立任务，按该任务角色重新计算并发上限，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待。后来仍显示已 fence target 为活动的上游快照不得触发再次等待。不得自动重派已结束或已放弃的旧任务；若持续没有可信终态，Stop 恢复路径会在受控宽限期后 fence 遗留 attempt。{local_read_guidance}\n\n本次 wait_agent 已返回内容：\n{returned_update}{task_body_recovery}{compatibility}"
         ),
     })
 }
@@ -1607,10 +1606,9 @@ fn record_status_progress(
     state_root: &Path,
     runtime_id: &str,
     session_id: &str,
-    tool_name: &str,
     tool_response: Option<&Value>,
 ) -> Result<bool> {
-    let Some(fingerprint) = status_progress_fingerprint(tool_name, tool_response) else {
+    let Some(fingerprint) = status_progress_fingerprint(tool_response) else {
         return Ok(false);
     };
     let session_dir = session_state_dir(state_root, session_id);
@@ -1642,7 +1640,7 @@ fn record_status_progress(
     }
 }
 
-fn status_progress_fingerprint(tool_name: &str, tool_response: Option<&Value>) -> Option<String> {
+fn status_progress_fingerprint(tool_response: Option<&Value>) -> Option<String> {
     let response = tool_response?;
     let decoded;
     let response = if let Value::String(encoded) = response {
@@ -1655,11 +1653,11 @@ fn status_progress_fingerprint(tool_name: &str, tool_response: Option<&Value>) -
     collect_status_progress_tokens(response, &mut tokens, 0);
     tokens.sort();
     tokens.dedup();
+    if tokens.is_empty() {
+        return None;
+    }
     let encoded = serde_json::to_string(&tokens).ok()?;
-    Some(hash_component(&format!(
-        "{}|{encoded}",
-        normalized_collaboration_tool(tool_name)
-    )))
+    Some(hash_component(&encoded))
 }
 
 fn collect_status_progress_tokens(value: &Value, tokens: &mut Vec<String>, depth: usize) {
@@ -1688,7 +1686,8 @@ fn collect_status_progress_tokens(value: &Value, tokens: &mut Vec<String>, depth
             )
             .and_then(Value::as_str)
             .map(normalized_ascii_identifier);
-            if let Some(status) = status.as_deref() {
+            let is_root = identifier == "root";
+            if !is_root && let Some(status) = status.as_deref() {
                 tokens.push(format!("state:{identifier}:{status}"));
                 if matches!(status, "message" | "partial")
                     && let Some(message) = object_value_any(values, &["message", "output", "text"])
@@ -1699,12 +1698,10 @@ fn collect_status_progress_tokens(value: &Value, tokens: &mut Vec<String>, depth
                     ));
                 }
             }
-            if object_value(values, "timedout").and_then(Value::as_bool) == Some(true) {
-                tokens.push("timeout".to_string());
-            }
             for (key, value) in values {
                 let key = normalized_ascii_identifier(key);
-                if protocol::is_terminal_marker_field(&key)
+                if !(is_root || identifier == "_" && matches!(key.as_str(), "timedout" | "timeout"))
+                    && protocol::is_terminal_marker_field(&key)
                     && !matches!(value, Value::Bool(false) | Value::Null)
                 {
                     tokens.push(format!("terminal:{identifier}:{key}"));
@@ -1744,10 +1741,16 @@ fn reconcile_list_agents_response(
         return Ok(false);
     }
     let snapshot = summarize_list_agents_response(input.tool_response.as_ref());
-    if matches!(
-        snapshot,
-        AgentListSnapshotState::Unknown | AgentListSnapshotState::NoChildren
-    ) {
+    if snapshot == AgentListSnapshotState::Unknown {
+        return Ok(false);
+    }
+    if snapshot == AgentListSnapshotState::NoChildren {
+        crate::subagent_orchestrator::recover_unstarted_reservations(
+            state_root,
+            runtime_id,
+            &input.session_id,
+            now_ms,
+        )?;
         return Ok(false);
     }
 
@@ -4352,6 +4355,51 @@ mod tests {
     }
 
     #[test]
+    fn root_only_full_list_recovers_a_spawn_that_never_started() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let runtime_id = "runtime-a";
+        let session_id = "failed-spawn-session";
+
+        let mut spawn = input("PreToolUse", session_id);
+        spawn.turn_id = Some("root-turn-a".to_string());
+        spawn.cwd = Some("/repo".to_string());
+        spawn.tool_name = Some("agents.spawn_agent".to_string());
+        spawn.tool_input = Some(json!({
+            "task_name": "agent_limit_failure",
+            "agent_type": "codey_quick_scan",
+            "message": "Inspect the failure path."
+        }));
+        assert_eq!(
+            handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+            1
+        );
+
+        // Some specialized collaboration failures produce a model-facing
+        // function result without delivering PostToolUse. A full provider list
+        // with no children is enough to fence only this never-started attempt.
+        let mut list = input("PostToolUse", session_id);
+        list.turn_id = spawn.turn_id;
+        list.tool_name = Some("agents.list_agents".to_string());
+        list.tool_input = Some(json!({}));
+        list.tool_response = Some(json!({
+            "agents": [{ "agent_name": "/root", "agent_status": "running" }]
+        }));
+        assert_eq!(
+            handle_hook_for_runtime_at(&list, root, runtime_id, 20).unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn stale_pending_init_and_unusable_collaboration_paths_release_after_grace() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -4840,6 +4888,48 @@ mod tests {
     }
 
     #[test]
+    fn timeout_and_root_only_snapshots_do_not_reset_the_stall_grace() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let runtime_id = "runtime-a";
+        let session_id = "no-progress-session";
+        let mut start = input("SubagentStart", session_id);
+        start.agent_id = Some("agent-a".to_string());
+        handle_hook_for_runtime_at(&start, root, runtime_id, 1_000).unwrap();
+
+        handle_hook_for_runtime_at(&input("Stop", session_id), root, runtime_id, 2_000).unwrap();
+        let session_dir = session_state_dir(root, session_id);
+        let stalled = session_auxiliary_path(&session_dir, runtime_id, STOP_BLOCKED_SINCE_FILE);
+        assert_eq!(fs::read_to_string(&stalled).unwrap(), "2000\n");
+
+        let mut wait = input("PostToolUse", session_id);
+        wait.tool_name = Some("agents.wait_agent".to_string());
+        wait.tool_response = Some(json!({ "timed_out": true, "message": "Wait timed out." }));
+        handle_hook_for_runtime_at(&wait, root, runtime_id, 3_000).unwrap();
+        assert_eq!(fs::read_to_string(&stalled).unwrap(), "2000\n");
+
+        let mut list = input("PostToolUse", session_id);
+        list.tool_name = Some("agents.list_agents".to_string());
+        list.tool_input = Some(json!({}));
+        list.tool_response = Some(json!({
+            "agents": [{ "agent_name": "/root", "agent_status": "running" }]
+        }));
+        handle_hook_for_runtime_at(&list, root, runtime_id, 4_000).unwrap();
+        assert_eq!(fs::read_to_string(&stalled).unwrap(), "2000\n");
+
+        assert_eq!(
+            handle_hook_for_runtime_at(
+                &input("Stop", session_id),
+                root,
+                runtime_id,
+                2_000 + STOP_STALL_GRACE_MILLIS,
+            )
+            .unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
     fn stop_absolute_release_still_allows_later_stall_cleanup() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -4857,10 +4947,12 @@ mod tests {
         let absolute = session_auxiliary_path(&session_dir, runtime_id, STOP_ABSOLUTE_SINCE_FILE);
         assert_eq!(fs::read_to_string(&absolute).unwrap(), "2000\n");
 
-        // 结构有效的 wait 响应只重置 10 分钟停滞计时，绝对计时保持不变。
+        // 带具体代理状态的 wait 进展只重置 10 分钟停滞计时，绝对计时保持不变。
         let mut wait = input("PostToolUse", session_id);
         wait.tool_name = Some("agents.wait_agent".to_string());
-        wait.tool_response = Some(json!({ "timedout": true, "message": "still running" }));
+        wait.tool_response = Some(json!({
+            "updates": [{ "agent_id": "agent-a", "status": "running" }]
+        }));
         handle_hook_for_runtime_at(&wait, root, runtime_id, 3_000).unwrap();
         assert_eq!(fs::read_to_string(&absolute).unwrap(), "2000\n");
 
@@ -5224,7 +5316,7 @@ mod tests {
     }
 
     #[test]
-    fn task_body_decryption_message_requests_one_active_restatement() {
+    fn unavailable_task_body_message_requests_one_active_restatement() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let runtime_id = "runtime-a";
@@ -5238,7 +5330,7 @@ mod tests {
             "updates": [{
                 "agent_id": "visual-a",
                 "status": "MESSAGE",
-                "message": "任务正文未能解密，无法开始视觉核验。"
+                "message": "payload 为空，任务体缺失，无法开始视觉核验。"
             }]
         }));
 

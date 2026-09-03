@@ -60,7 +60,7 @@ pub(super) fn prepare_task_capsule(
     if policy.access == RoleAccess::Write && workspace_root.is_none() {
         return Err(contract_error("写入角色缺少可信工作目录"));
     }
-    let capabilities = match policy.access {
+    let mut capabilities = match policy.access {
         RoleAccess::ReadOnly => vec!["files.read".to_string()],
         // ponytail: one workspace-wide writer lock; add narrower native ownership
         // only if the executor exposes a trusted path field.
@@ -70,6 +70,9 @@ pub(super) fn prepare_task_capsule(
             "workspace.write".to_string(),
         ],
     };
+    if policy.visual {
+        capabilities.push("visual.inspect".to_string());
+    }
     Ok(PreparedContract {
         capsule: TaskCapsule {
             id: task_name.to_string(),

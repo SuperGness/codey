@@ -43,6 +43,7 @@ pub(crate) enum RuleActor {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ToolClass {
     Read,
+    Visual,
     Write,
     Command,
     Network,
@@ -214,6 +215,21 @@ impl RuleSet {
                     "子代理规则必须拒绝只读角色 {role} 的写入工具"
                 );
             }
+            let visual = self.evaluate(&RuleContext {
+                actor: RuleActor::Child,
+                role: Some(role),
+                tool_name: "view_image",
+                tool_class: ToolClass::Visual,
+            });
+            anyhow::ensure!(
+                visual.effect
+                    == if expected_visual {
+                        RuleEffect::Allow
+                    } else {
+                        RuleEffect::Deny
+                    },
+                "子代理规则必须按 visual 属性限制角色 {role} 的视觉工具"
+            );
         }
         for role in
             std::iter::once(None).chain(EXPECTED_ROLES.iter().map(|(role, _, _)| Some(*role)))
@@ -479,14 +495,19 @@ pub(crate) fn classify_tool(tool_name: &str) -> ToolClass {
         ToolClass::Write
     } else if matches!(
         normalized.as_str(),
-        "web_search" | "websearch" | "web_run" | "open" | "find" | "screenshot"
+        "web_search" | "websearch" | "web_run" | "open" | "find"
     ) {
         ToolClass::Network
     } else if matches!(
         normalized.as_str(),
-        "read_file" | "inspect_local_file" | "grep" | "glob" | "tool_search" | "view_image"
+        "read_file" | "inspect_local_file" | "grep" | "glob" | "tool_search"
     ) {
         ToolClass::Read
+    } else if matches!(
+        normalized.as_str(),
+        "view_image" | "screenshot" | "cua_repl_js" | "cua_repl_js_reset" | "open_in_codex"
+    ) {
+        ToolClass::Visual
     } else if matches!(
         normalized.as_str(),
         "bash" | "shell" | "exec" | "exec_command" | "write_stdin" | "read_thread_terminal"
@@ -554,6 +575,9 @@ pub(crate) fn normalize_tool_name(tool_name: &str) -> String {
         "glob" | "mcp__codey_fastctx__glob" => Some("glob"),
         "tool_search" => Some("tool_search"),
         "view_image" | "functions.view_image" => Some("view_image"),
+        "mcp__cua_repl__js" => Some("cua_repl_js"),
+        "mcp__cua_repl__js_reset" => Some("cua_repl_js_reset"),
+        "mcp__codex_app__open_in_codex" => Some("open_in_codex"),
         "bash" => Some("bash"),
         "shell" => Some("shell"),
         "exec" => Some("exec"),
@@ -812,5 +836,40 @@ mod tests {
         assert_eq!(classify_tool("web_search"), ToolClass::Network);
         assert_eq!(classify_tool("web.run"), ToolClass::Network);
         assert_eq!(classify_tool("web__run"), ToolClass::Network);
+        for tool in [
+            "functions.view_image",
+            "screenshot",
+            "mcp__cua_repl__js",
+            "mcp__cua_repl__js_reset",
+            "mcp__codex_app__open_in_codex",
+        ] {
+            assert_eq!(classify_tool(tool), ToolClass::Visual, "{tool}");
+            for role in ["codey_visual_analysis", "codey_visual_worker"] {
+                assert_eq!(
+                    embedded()
+                        .evaluate(&RuleContext {
+                            actor: RuleActor::Child,
+                            role: Some(role),
+                            tool_name: tool,
+                            tool_class: classify_tool(tool),
+                        })
+                        .effect,
+                    RuleEffect::Allow,
+                    "{role} {tool}"
+                );
+            }
+            assert_eq!(
+                embedded()
+                    .evaluate(&RuleContext {
+                        actor: RuleActor::Child,
+                        role: Some("codey_quick_scan"),
+                        tool_name: tool,
+                        tool_class: classify_tool(tool),
+                    })
+                    .effect,
+                RuleEffect::Deny,
+                "{tool}"
+            );
+        }
     }
 }

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "revision": 5,
+  "revision": 6,
   "conflictResolution": "highest_priority_deny_wins",
   "fallback": "deny",
   "roles": {
@@ -36,6 +36,15 @@
       "actors": ["child"],
       "tools": ["wait_agent", "list_agents", "agent_status", "interrupt_agent", "followup_task"],
       "explanation": "子代理只可向根代理回报，不得等待、查看、中断或追派其他代理。"
+    },
+    {
+      "id": "allow-visual-capabilities",
+      "priority": 850,
+      "effect": "allow",
+      "actors": ["child"],
+      "roles": ["codey_visual_analysis", "codey_visual_worker"],
+      "toolClasses": ["visual"],
+      "explanation": "视觉角色可使用受信的图像、截图、GUI 与页面展示工具；实际操作仍受原生权限约束。"
     },
     {
       "id": "allow-readonly-capabilities",

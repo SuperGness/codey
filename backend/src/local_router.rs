@@ -4493,13 +4493,55 @@ fn append_responses_tool_call_output_item(
         .get("output")
         .or_else(|| object.get("content"))
         .ok_or_else(|| anyhow::anyhow!("{context} 缺少 output"))?;
-    let content = json_value_as_chat_string(Some(output)).unwrap_or_default();
+    let (content, images) = responses_tool_output_content(output)?.unwrap_or_else(|| {
+        (
+            json_value_as_chat_string(Some(output)).unwrap_or_default(),
+            Vec::new(),
+        )
+    });
     messages.push(json!({
         "role": "tool",
         "tool_call_id": call_id,
         "content": content,
     }));
+    if !images.is_empty() {
+        messages.push(json!({
+            "role": "user",
+            "content": images,
+        }));
+    }
     Ok(())
+}
+
+fn responses_tool_output_content(output: &Value) -> Result<Option<(String, Vec<Value>)>> {
+    let parts = match output {
+        Value::Array(parts) => parts.as_slice(),
+        Value::Object(_) => std::slice::from_ref(output),
+        _ => return Ok(None),
+    };
+    let mut text = Vec::new();
+    let mut images = Vec::new();
+    for part in parts {
+        let Some(part) = part.as_object() else {
+            return Ok(None);
+        };
+        match part.get("type").and_then(Value::as_str) {
+            Some("input_text" | "output_text" | "text" | "refusal") => {
+                text.push(
+                    first_visible_content_part_text(part)
+                        .ok_or_else(|| anyhow::anyhow!("工具文本输出缺少 text"))?
+                        .to_string(),
+                );
+            }
+            Some("input_image" | "image_url") => images.push(json!({
+                "type": "image_url",
+                "image_url": responses_image_url_to_chat_image_url(part)?,
+            })),
+            Some(part_type) if is_opaque_responses_content_part_type(part_type) => {}
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((text.join("\n"), images)))
 }
 
 fn normalize_chat_tool_calls(
@@ -13820,6 +13862,55 @@ mod tests {
         assert_eq!(chat["response_format"]["type"], "json_schema");
         assert_eq!(chat["response_format"]["json_schema"]["name"], "answer");
         assert_eq!(chat["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn responses_tool_output_images_remain_visible_in_fallback_protocols() {
+        let body = json!({
+            "model":"provider-model",
+            "input":[
+                {"type":"function_call","call_id":"call-1","name":"inspect","arguments":"{}"},
+                {
+                    "type":"function_call_output",
+                    "call_id":"call-1",
+                    "output":[
+                        {"type":"input_text","text":"rendered image:"},
+                        {"type":"input_image","image_url":"data:image/png;base64,aGVsbG8="}
+                    ]
+                }
+            ],
+            "tools":[{
+                "type":"function",
+                "name":"inspect",
+                "parameters":{"type":"object"}
+            }]
+        });
+
+        let chat = responses_to_chat_completions_body(&body).unwrap();
+        assert_eq!(chat["messages"][1]["role"], "tool");
+        assert_eq!(chat["messages"][1]["content"], "rendered image:");
+        assert_eq!(chat["messages"][2]["role"], "user");
+        assert_eq!(chat["messages"][2]["content"][0]["type"], "image_url");
+        assert_eq!(
+            chat["messages"][2]["content"][0]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
+
+        let anthropic = responses_to_anthropic_messages_body(&body).unwrap();
+        assert_eq!(anthropic["messages"][1]["role"], "user");
+        assert_eq!(
+            anthropic["messages"][1]["content"][0]["type"],
+            "tool_result"
+        );
+        assert_eq!(
+            anthropic["messages"][1]["content"][0]["content"],
+            "rendered image:"
+        );
+        assert_eq!(anthropic["messages"][1]["content"][1]["type"], "image");
+        assert_eq!(
+            anthropic["messages"][1]["content"][1]["source"]["data"],
+            "aGVsbG8="
+        );
     }
 
     #[test]

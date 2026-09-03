@@ -1883,6 +1883,43 @@ pub(crate) fn recover_active_reservations(
     Ok(recovered)
 }
 
+/// A full provider snapshot with no children is authoritative for a spawn that
+/// never produced a binding or lifecycle start. Running/bound attempts remain
+/// untouched because an empty snapshot may still be transient for live agents.
+pub(crate) fn recover_unstarted_reservations(
+    state_root: &Path,
+    runtime_id: &str,
+    session_id: &str,
+    now_ms: u64,
+) -> Result<usize> {
+    let store = LedgerStore::open(state_root, session_id)?;
+    let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
+        return Ok(0);
+    };
+    let mut recovered = 0_usize;
+    for reservation in ledger.reservations.values_mut() {
+        if reservation.state != ReservationState::Pending
+            || reservation.agent_id_hash.is_some()
+            || reservation.started_at_ms.is_some()
+        {
+            continue;
+        }
+        reservation.state = ReservationState::Recovered;
+        reservation.outcome = ExecutionOutcome::Lost;
+        reservation.pending_init_observed_at_ms = None;
+        reservation.updated_at_ms = now_ms;
+        reservation.completed_at_ms = Some(now_ms);
+        reservation.fenced_at_ms = Some(now_ms);
+        reservation.error_message =
+            Some("full agent list reported no child for the pending spawn".into());
+        recovered = recovered.saturating_add(1);
+    }
+    if recovered > 0 {
+        store.save(&mut ledger, now_ms)?;
+    }
+    Ok(recovered)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InterruptSettlement {
     /// Hash used by the legacy active-marker filename. The ledger remains the
@@ -2183,6 +2220,24 @@ pub(crate) fn authorize_child_tool_with_context(
             )),
             Some(_) => None,
         },
+        ToolClass::Visual => match bound_reservation {
+            None => Some(format!(
+                "{UNBOUND_ATTEMPT_ERROR_CODE}: Codey 视觉门禁：当前 child 未绑定有效 attempt，禁止视觉工具 `{tool_name}`。请停止调用并把错误码返回主代理。"
+            )),
+            Some(reservation)
+                if !reservation.state.is_active() || reservation.fenced_at_ms.is_some() =>
+            {
+                Some(format!(
+                    "{UNBOUND_ATTEMPT_ERROR_CODE}: Codey 视觉门禁：attempt `{}` 已终态、过期或被 fence，禁止继续使用视觉工具。",
+                    reservation.attempt_id
+                ))
+            }
+            Some(reservation) if !reservation_declares_visual(reservation) => Some(format!(
+                "Codey 视觉门禁：attempt `{}` 未声明 `visual.inspect` capability，禁止工具 `{tool_name}`。请改派视觉角色或由主代理接管。",
+                reservation.attempt_id
+            )),
+            Some(_) => None,
+        },
         ToolClass::Command => match bound_reservation {
             None => Some(format!(
                 "{UNBOUND_ATTEMPT_ERROR_CODE}: Codey 能力门禁：当前 child 没有由派生结果或生命周期事件绑定的有效 attempt，禁止执行命令。不要重试命令或等待门禁自行恢复；请立即把该错误码返回主代理，由主代理使用全新的 task_name 重新派生或直接接管。"
@@ -2378,6 +2433,13 @@ fn reservation_declares_read(reservation: &Reservation) -> bool {
         .any(|capability| capability == "files.read")
 }
 
+fn reservation_declares_visual(reservation: &Reservation) -> bool {
+    reservation
+        .capabilities
+        .iter()
+        .any(|capability| capability == "visual.inspect")
+}
+
 fn reservation_declares_write(reservation: &Reservation) -> bool {
     reservation.write_capable
         && reservation
@@ -2566,6 +2628,14 @@ mod tests {
         .unwrap();
         assert_eq!(readonly.capabilities, ["files.read"]);
 
+        let visual = prepare_task_capsule(
+            Some(&spawn_input("visual_task", "codey_visual_analysis")),
+            Some("/repo"),
+            &rules,
+        )
+        .unwrap();
+        assert_eq!(visual.capabilities, ["files.read", "visual.inspect"]);
+
         let writer = prepare_task_capsule(
             Some(&spawn_input("write_task", "codey_worker")),
             Some("/repo"),
@@ -2576,6 +2646,89 @@ mod tests {
             writer.capabilities,
             ["command.execute", "files.read", "workspace.write"]
         );
+
+        let visual_writer = prepare_task_capsule(
+            Some(&spawn_input("visual_write_task", "codey_visual_worker")),
+            Some("/repo"),
+            &rules,
+        )
+        .unwrap();
+        assert_eq!(
+            visual_writer.capabilities,
+            [
+                "command.execute",
+                "files.read",
+                "workspace.write",
+                "visual.inspect"
+            ]
+        );
+    }
+
+    #[test]
+    fn visual_tools_require_a_bound_visual_role() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        admit_and_bind(
+            root,
+            "visual-session",
+            "visual_reader",
+            "codey_visual_analysis",
+            "visual-agent",
+            "/repo",
+            0,
+            10,
+        );
+        for tool_name in [
+            "functions.view_image",
+            "mcp__cua_repl__js",
+            "mcp__codex_app__open_in_codex",
+        ] {
+            assert_eq!(
+                authorize_child_tool_with_context(
+                    root,
+                    "runtime-a",
+                    "visual-session",
+                    ChildToolContext {
+                        agent_id: "visual-agent",
+                        agent_type: Some("codey_visual_analysis"),
+                        transcript_path: None,
+                        tool_name,
+                        tool_input: None,
+                    },
+                    20,
+                )
+                .unwrap(),
+                None,
+                "{tool_name}"
+            );
+        }
+
+        admit_and_bind(
+            root,
+            "scan-session",
+            "plain_reader",
+            "codey_quick_scan",
+            "scan-agent",
+            "/repo",
+            0,
+            30,
+        );
+        let denied = authorize_child_tool_with_context(
+            root,
+            "runtime-a",
+            "scan-session",
+            ChildToolContext {
+                agent_id: "scan-agent",
+                agent_type: Some("codey_quick_scan"),
+                transcript_path: None,
+                tool_name: "mcp__cua_repl__js",
+                tool_input: None,
+            },
+            40,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(denied.contains("visual.inspect"));
     }
 
     #[test]
