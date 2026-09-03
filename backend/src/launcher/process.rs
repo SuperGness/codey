@@ -423,6 +423,188 @@ impl CliWrapperLaunch {
     }
 }
 
+#[cfg(any(windows, test))]
+const WINDOWS_CLI_RUNTIME_FILES: [&str; 4] = [
+    "codex.exe",
+    "codex-code-mode-host.exe",
+    "codex-windows-sandbox-setup.exe",
+    "codex-command-runner.exe",
+];
+
+#[cfg(any(windows, test))]
+fn sha256_file(path: &std::path::Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("读取 Codex 运行文件失败：{}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("校验 Codex 运行文件失败：{}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(any(windows, test))]
+fn windows_cli_runtime_matches(
+    directory: &std::path::Path,
+    files: &[(&str, PathBuf, u64, String)],
+) -> Result<bool> {
+    for (name, _, expected_len, expected_digest) in files {
+        let path = directory.join(name);
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            return Ok(false);
+        };
+        if !metadata.is_file()
+            || metadata.len() != *expected_len
+            || sha256_file(&path)? != expected_digest.as_str()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(any(windows, test))]
+fn copy_windows_cli_runtime_file(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<()> {
+    let copy_error = match std::fs::copy(source, destination) {
+        Ok(_) => return Ok(()),
+        Err(error) => error,
+    };
+
+    let _ = std::fs::remove_file(destination);
+    let buffered_copy = (|| -> std::io::Result<()> {
+        let mut input = std::fs::File::open(source)?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(destination)?;
+        std::io::copy(&mut input, &mut output)?;
+        output.sync_all()
+    })();
+    buffered_copy.with_context(|| {
+        format!(
+            "复制受保护的 Codex 运行文件失败：{} -> {}（系统复制错误：{copy_error}）",
+            source.display(),
+            destination.display()
+        )
+    })
+}
+
+#[cfg(any(windows, test))]
+fn stage_windows_cli_runtime(
+    target: &std::path::Path,
+    local_app_data: &std::path::Path,
+) -> Result<PathBuf> {
+    use sha2::{Digest, Sha256};
+
+    let source_dir = target.parent().context("Codex CLI 路径缺少父目录")?;
+    let mut files = Vec::with_capacity(WINDOWS_CLI_RUNTIME_FILES.len());
+    for name in WINDOWS_CLI_RUNTIME_FILES {
+        let source = if name == "codex.exe" {
+            target.to_path_buf()
+        } else {
+            source_dir.join(name)
+        };
+        let metadata = std::fs::metadata(&source)
+            .with_context(|| format!("Codex 运行文件缺失：{}", source.display()))?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "Codex 运行路径不是文件：{}",
+            source.display()
+        );
+        let digest = sha256_file(&source)?;
+        files.push((name, source, metadata.len(), digest));
+    }
+
+    let mut cache_hasher = Sha256::new();
+    for (name, _, _, digest) in &files {
+        cache_hasher.update(name.as_bytes());
+        cache_hasher.update([0]);
+        cache_hasher.update(digest.as_bytes());
+        cache_hasher.update([0]);
+    }
+    let cache_hash = format!("{:x}", cache_hasher.finalize());
+    let cache_root = local_app_data.join("OpenAI").join("Codex").join("bin");
+    let destination = cache_root.join(&cache_hash[..16]);
+    if windows_cli_runtime_matches(&destination, &files)? {
+        return Ok(destination.join("codex.exe"));
+    }
+
+    std::fs::create_dir_all(&cache_root)
+        .with_context(|| format!("创建 Codex 用户运行目录失败：{}", cache_root.display()))?;
+    if destination.is_dir() {
+        std::fs::remove_dir_all(&destination).with_context(|| {
+            format!(
+                "清理不完整的 Codex 用户运行目录失败：{}",
+                destination.display()
+            )
+        })?;
+    } else if destination.exists() {
+        std::fs::remove_file(&destination).with_context(|| {
+            format!(
+                "清理无效的 Codex 用户运行路径失败：{}",
+                destination.display()
+            )
+        })?;
+    }
+
+    let staging = cache_root.join(format!(
+        ".staging-{}-{}",
+        &cache_hash[..16],
+        uuid::Uuid::new_v4().simple()
+    ));
+    std::fs::create_dir(&staging)
+        .with_context(|| format!("创建 Codex 运行暂存目录失败：{}", staging.display()))?;
+    let result = (|| -> Result<PathBuf> {
+        for (name, source, _, expected_digest) in &files {
+            let staged = staging.join(name);
+            copy_windows_cli_runtime_file(source, &staged)?;
+            anyhow::ensure!(
+                sha256_file(&staged)? == expected_digest.as_str(),
+                "Codex 运行文件复制校验失败：{}",
+                staged.display()
+            );
+        }
+        if let Err(error) = std::fs::rename(&staging, &destination) {
+            if windows_cli_runtime_matches(&destination, &files)? {
+                return Ok(destination.join("codex.exe"));
+            }
+            return Err(error).with_context(|| {
+                format!("启用 Codex 用户运行目录失败：{}", destination.display())
+            });
+        }
+        Ok(destination.join("codex.exe"))
+    })();
+    if staging.exists() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+#[cfg(any(windows, test))]
+fn windows_cli_wrapper_target(app_dir: &std::path::Path) -> Result<PathBuf> {
+    let target = codey_runtime_core::app_paths::codex_runtime_executable(app_dir)
+        .ok_or_else(|| anyhow::anyhow!("Codex App 内未找到内置 CLI"))?;
+    if codey_runtime_core::app_paths::packaged_app_user_model_id(app_dir).is_none() {
+        return Ok(target);
+    }
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .context("Windows 未提供 LOCALAPPDATA，无法准备 Codex 用户运行目录")?;
+    stage_windows_cli_runtime(&target, &local_app_data)
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 async fn prepare_cli_wrapper(
     app_dir: &std::path::Path,
@@ -430,6 +612,14 @@ async fn prepare_cli_wrapper(
     runtime_config_overrides: &[String],
 ) -> Result<CliWrapperLaunch> {
     let wrapper = std::env::current_exe().context("定位 Codey 兼容执行器失败")?;
+    #[cfg(windows)]
+    let target = {
+        let app_dir = app_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || windows_cli_wrapper_target(&app_dir))
+            .await
+            .context("准备 Windows Codex 用户运行文件的任务异常退出")??
+    };
+    #[cfg(target_os = "macos")]
     let target = codey_runtime_core::app_paths::codex_runtime_executable(app_dir)
         .ok_or_else(|| anyhow::anyhow!("Codex App 内未找到内置 CLI"))?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -753,4 +943,39 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
         performance_status: String::new(),
         performance_detail: String::new(),
     })
+}
+
+#[cfg(test)]
+mod cli_wrapper_tests {
+    use super::*;
+
+    #[test]
+    fn windows_cli_runtime_is_staged_with_all_required_siblings() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        for name in WINDOWS_CLI_RUNTIME_FILES {
+            std::fs::write(resources.join(name), format!("payload:{name}")).unwrap();
+        }
+
+        let target = resources.join("codex.exe");
+        assert_eq!(windows_cli_wrapper_target(temp.path()).unwrap(), target);
+        let local_app_data = temp.path().join("local-app-data");
+        let staged = stage_windows_cli_runtime(&target, &local_app_data).unwrap();
+        assert!(staged.starts_with(local_app_data.join("OpenAI/Codex/bin")));
+        assert_eq!(
+            staged.parent().unwrap().file_name().unwrap(),
+            "657d1ed8f1a42bf7"
+        );
+        for name in WINDOWS_CLI_RUNTIME_FILES {
+            assert_eq!(
+                std::fs::read(staged.parent().unwrap().join(name)).unwrap(),
+                format!("payload:{name}").as_bytes()
+            );
+        }
+        assert_eq!(
+            stage_windows_cli_runtime(&target, &local_app_data).unwrap(),
+            staged
+        );
+    }
 }
