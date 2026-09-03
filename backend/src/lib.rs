@@ -69,6 +69,10 @@ pub fn run_error_log_helper_if_requested() -> Result<bool> {
     error_log::run_helper_if_requested()
 }
 
+pub fn run_codex_cli_wrapper_if_requested() -> Result<bool> {
+    codex_startup_patch::run_cli_wrapper_if_requested()
+}
+
 pub fn install_crash_log_hook(component: &'static str, stage: &'static str) {
     error_log::install_panic_hook(component, stage);
 }

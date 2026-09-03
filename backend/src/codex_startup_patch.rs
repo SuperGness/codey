@@ -2,6 +2,14 @@
 
 use anyhow::Result;
 
+#[cfg(target_os = "macos")]
+use anyhow::Context;
+
+#[cfg(any(target_os = "macos", test))]
+use std::ffi::{OsStr, OsString};
+#[cfg(target_os = "macos")]
+use std::io::Write;
+
 const PATCH_RESULT: &str = "codey-startup-patch-installed-v37";
 const APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT: &str =
     "codey-app-server-runtime-overrides-verified";
@@ -9,6 +17,17 @@ const MAX_INSPECTOR_TARGET_RESPONSE_BYTES: usize = 1024 * 1024;
 const STARTUP_PATCH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(24);
+
+#[cfg(target_os = "macos")]
+pub(crate) const CLI_WRAPPER_TARGET_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TARGET";
+#[cfg(target_os = "macos")]
+pub(crate) const CLI_WRAPPER_OVERRIDES_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_OVERRIDES";
+#[cfg(target_os = "macos")]
+pub(crate) const CLI_WRAPPER_SUBAGENT_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_SUBAGENT";
+#[cfg(target_os = "macos")]
+pub(crate) const CLI_WRAPPER_PORT_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_PORT";
+#[cfg(target_os = "macos")]
+pub(crate) const CLI_WRAPPER_TOKEN_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TOKEN";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchOptions {
@@ -88,6 +107,185 @@ fn patch_expression_with_runtime_overrides_and_validation(
 pub fn reserve_loopback_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     Ok(listener.local_addr()?.port())
+}
+
+#[cfg(target_os = "macos")]
+pub fn run_cli_wrapper_if_requested() -> Result<bool> {
+    use std::os::unix::process::CommandExt;
+
+    let Some(target) = std::env::var_os(CLI_WRAPPER_TARGET_ENV) else {
+        return Ok(false);
+    };
+    let target = std::path::PathBuf::from(target);
+    if !target.is_absolute() || !target.is_file() {
+        anyhow::bail!("Codex CLI 兼容目标无效：{}", target.display());
+    }
+    if std::fs::canonicalize(&target).ok()
+        == std::env::current_exe().and_then(std::fs::canonicalize).ok()
+    {
+        anyhow::bail!("Codex CLI 兼容目标不能指向 Codey 自身");
+    }
+
+    let runtime_overrides = std::env::var(CLI_WRAPPER_OVERRIDES_ENV)
+        .ok()
+        .map(|value| serde_json::from_str::<Vec<String>>(&value))
+        .transpose()
+        .context("解析 Codex CLI 兼容运行时配置失败")?
+        .unwrap_or_default();
+    let original_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let app_server = original_args
+        .iter()
+        .filter(|argument| argument.as_os_str() == OsStr::new("app-server"))
+        .count()
+        == 1;
+    let rewritten_args = rewrite_app_server_args(&original_args, &runtime_overrides);
+
+    if app_server {
+        notify_cli_wrapper_ready();
+    }
+
+    let mut command = std::process::Command::new(&target);
+    command.args(rewritten_args);
+    for name in [
+        CLI_WRAPPER_OVERRIDES_ENV,
+        CLI_WRAPPER_SUBAGENT_ENV,
+        CLI_WRAPPER_PORT_ENV,
+        CLI_WRAPPER_TOKEN_ENV,
+    ] {
+        command.env_remove(name);
+    }
+    if app_server && std::env::var_os(CLI_WRAPPER_SUBAGENT_ENV).as_deref() == Some(OsStr::new("1"))
+    {
+        command.env(crate::subagent_gate::RUNTIME_ACTIVE_ENV, "1");
+        command.env(
+            crate::subagent_gate::RUNTIME_ID_ENV,
+            uuid::Uuid::new_v4().to_string(),
+        );
+    }
+    if let Some(parent) = target.parent() {
+        let mut paths = vec![parent.to_path_buf()];
+        if let Some(path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&path));
+        }
+        if let Ok(path) = std::env::join_paths(paths) {
+            command.env("PATH", path);
+        }
+    }
+
+    Err(command.exec()).with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn run_cli_wrapper_if_requested() -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(target_os = "macos")]
+fn notify_cli_wrapper_ready() {
+    let Some(port) = std::env::var(CLI_WRAPPER_PORT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+    else {
+        return;
+    };
+    let Some(token) = std::env::var(CLI_WRAPPER_TOKEN_ENV)
+        .ok()
+        .filter(|value| !value.is_empty() && value.len() <= 128)
+    else {
+        return;
+    };
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    if let Ok(mut stream) =
+        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(500))
+    {
+        let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(500)));
+        let _ = stream.write_all(token.as_bytes());
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn runtime_override_key(config: &str) -> &str {
+    config.split_once('=').map_or(config, |(key, _)| key).trim()
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn app_server_runtime_configs(runtime_overrides: &[String]) -> Vec<String> {
+    let mut configs = vec!["analytics.enabled=false".to_string()];
+    for config in runtime_overrides {
+        let key = runtime_override_key(config);
+        if key.is_empty() || key == "analytics.enabled" {
+            continue;
+        }
+        if let Some(index) = configs
+            .iter()
+            .position(|existing| runtime_override_key(existing) == key)
+        {
+            configs[index] = config.clone();
+        } else {
+            configs.push(config.clone());
+        }
+    }
+    configs
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn rewrite_app_server_args(args: &[OsString], runtime_overrides: &[String]) -> Vec<OsString> {
+    if args
+        .iter()
+        .filter(|argument| argument.as_os_str() == OsStr::new("app-server"))
+        .count()
+        != 1
+    {
+        return args.to_vec();
+    }
+
+    let configs = app_server_runtime_configs(runtime_overrides);
+    let managed_keys = configs
+        .iter()
+        .map(|config| runtime_override_key(config))
+        .collect::<std::collections::HashSet<_>>();
+    let mut rewritten = Vec::with_capacity(args.len() + configs.len() * 2);
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        if argument.as_os_str() == OsStr::new("--analytics-default-enabled") {
+            index += 1;
+            continue;
+        }
+        if (argument.as_os_str() == OsStr::new("-c")
+            || argument.as_os_str() == OsStr::new("--config"))
+            && let Some(config) = args.get(index + 1).and_then(|value| value.to_str())
+        {
+            if !managed_keys.contains(runtime_override_key(config)) {
+                rewritten.push(argument.clone());
+                rewritten.push(args[index + 1].clone());
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(config) = argument
+            .to_str()
+            .and_then(|value| value.strip_prefix("--config="))
+            && managed_keys.contains(runtime_override_key(config))
+        {
+            index += 1;
+            continue;
+        }
+        rewritten.push(argument.clone());
+        index += 1;
+    }
+
+    let app_server_index = rewritten
+        .iter()
+        .position(|argument| argument.as_os_str() == OsStr::new("app-server"))
+        .expect("single app-server argument should remain");
+    rewritten.splice(
+        app_server_index + 1..app_server_index + 1,
+        configs
+            .into_iter()
+            .flat_map(|config| [OsString::from("-c"), OsString::from(config)]),
+    );
+    rewritten
 }
 
 pub async fn install(
@@ -336,6 +534,44 @@ fn ensure_protocol_success(payload: &serde_json::Value, method: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_wrapper_rewrites_only_managed_app_server_configs() {
+        let args = [
+            "-c",
+            "features.code_mode_host=true",
+            "app-server",
+            "--analytics-default-enabled",
+            "--config",
+            "model_provider=old",
+            "-c",
+            "unmanaged=true",
+        ]
+        .map(OsString::from);
+        let overrides = vec![
+            "model_provider=first".to_string(),
+            "features.hooks=true".to_string(),
+            "model_provider=codey_router".to_string(),
+        ];
+
+        assert_eq!(
+            rewrite_app_server_args(&args, &overrides),
+            [
+                "-c",
+                "features.code_mode_host=true",
+                "app-server",
+                "-c",
+                "analytics.enabled=false",
+                "-c",
+                "model_provider=codey_router",
+                "-c",
+                "features.hooks=true",
+                "-c",
+                "unmanaged=true",
+            ]
+            .map(OsString::from)
+        );
+    }
 
     #[test]
     fn inspector_is_loopback_only_and_pauses_before_startup() {

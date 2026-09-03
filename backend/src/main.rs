@@ -28,5 +28,8 @@ fn run() -> anyhow::Result<()> {
     if codey_lib::run_update_helper_if_requested()? {
         return Ok(());
     }
+    if codey_lib::run_codex_cli_wrapper_if_requested()? {
+        return Ok(());
+    }
     codey_lib::run_desktop_application()
 }

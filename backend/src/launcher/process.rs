@@ -265,31 +265,108 @@ pub(super) async fn spawn_codex(
             })?;
         let inspector_arg = crate::codex_startup_patch::inspector_argument(inspector_port);
         let mut launch_arguments = vec![inspector_arg.clone()];
-        launch_arguments.extend(runtime_arguments);
-        let command = if app_dir.extension().and_then(|value| value.to_str()) == Some("app") {
+        launch_arguments.extend(runtime_arguments.iter().cloned());
+        let mut command = if app_dir.extension().and_then(|value| value.to_str()) == Some("app") {
             build_fresh_macos_open_command(app_dir, debug_port, &launch_arguments)
         } else {
             build_codex_command(app_dir, debug_port, &launch_arguments)
         };
+        let wrapper_handshake =
+            if app_dir.extension().and_then(|value| value.to_str()) == Some("app") {
+                Some(
+                    add_macos_cli_wrapper(
+                        &mut command,
+                        app_dir,
+                        subagent_gate_active,
+                        runtime_config_overrides,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
         let mut spawned = spawn_command(command)?;
         spawned.inspector_argument = Some(inspector_arg.clone());
-        match crate::codex_startup_patch::install(
+        let mut patch_install = Box::pin(crate::codex_startup_patch::install(
             inspector_port,
             patch_options,
             runtime_config_overrides,
             !runtime_config_overrides.is_empty(),
-        )
-        .await
-        {
-            Ok(()) => {
+        ));
+        let startup_mode = if let Some((listener, token)) = wrapper_handshake {
+            let mut wrapper_ready = Box::pin(wait_for_macos_cli_wrapper(listener, token));
+            tokio::select! {
+                patch = &mut patch_install => match patch {
+                    Ok(()) => Ok(false),
+                    Err(patch_error) => match wrapper_ready.as_mut().await {
+                        Ok(()) => {
+                            error_log::record_failure(
+                                "patch_degraded",
+                                "use_codex_cli_wrapper_after_patch_failure",
+                                format!("{patch_error:#}"),
+                                serde_json::json!({ "platform": "macos" }),
+                            );
+                            Ok(true)
+                        }
+                        Err(wrapper_error) => Err(anyhow::anyhow!(
+                            "Codex 启动补丁失败：{patch_error:#}；CLI 兼容入口失败：{wrapper_error:#}"
+                        )),
+                    },
+                },
+                wrapper = &mut wrapper_ready => match wrapper {
+                    Ok(()) => {
+                        let inspector_is_active = tokio::time::timeout(
+                            Duration::from_millis(200),
+                            tokio::net::TcpStream::connect(("127.0.0.1", inspector_port)),
+                        )
+                        .await
+                        .is_ok_and(|result| result.is_ok());
+                        if inspector_is_active {
+                            match patch_install.as_mut().await {
+                                Ok(()) => Ok(false),
+                                Err(patch_error) => {
+                                    error_log::record_failure(
+                                        "patch_degraded",
+                                        "use_codex_cli_wrapper_after_patch_failure",
+                                        format!("{patch_error:#}"),
+                                        serde_json::json!({ "platform": "macos" }),
+                                    );
+                                    Ok(true)
+                                }
+                            }
+                        } else {
+                            Ok(true)
+                        }
+                    },
+                    Err(wrapper_error) => match patch_install.as_mut().await {
+                        Ok(()) => Ok(false),
+                        Err(patch_error) => Err(anyhow::anyhow!(
+                            "Codex CLI 兼容入口失败：{wrapper_error:#}；启动补丁失败：{patch_error:#}"
+                        )),
+                    },
+                },
+            }
+        } else {
+            patch_install.as_mut().await.map(|()| false)
+        };
+
+        match startup_mode {
+            Ok(false) => {
                 spawned.performance_status = "ready".to_string();
                 spawned.performance_detail = startup_patch_detail();
+                Ok(spawned)
+            }
+            Ok(true) => {
+                spawned.performance_status = "degraded".to_string();
+                spawned.performance_detail =
+                    "新版兼容模式已启用：运行时线路、FastCtx、子代理与页面注入保持可用；Codex 已禁用主进程调试，因此临时 WebView、执行环境回收和预加载界面补丁本次未启用"
+                        .to_string();
                 Ok(spawned)
             }
             Err(error) => {
                 error_log::record_failure(
                     "patch_failed",
-                    "install_startup_patch",
+                    "install_startup_patch_or_cli_wrapper",
                     format!("{error:#}"),
                     serde_json::json!({
                         "platform": "macos",
@@ -299,14 +376,14 @@ pub(super) async fn spawn_codex(
                         "disablePet": patch_options.disable_pet,
                     }),
                 );
-                if let Err(stop_error) = stop_macos_codex(
+                let stop_result = stop_macos_codex(
                     &inspector_arg,
                     app_dir,
                     spawned.process_id,
                     spawned.process_group_id,
                 )
-                .await
-                {
+                .await;
+                if let Err(stop_error) = &stop_result {
                     error_log::record_failure(
                         "cleanup_failed",
                         "cleanup_macos_after_startup_patch_failure",
@@ -322,7 +399,12 @@ pub(super) async fn spawn_codex(
                 if let Some(child) = spawned.child.take() {
                     reap_child_after_cleanup(child, "reap_child_after_startup_patch_failure").await;
                 }
-                Err(error).context("Codex 启动补丁未能安装；已停止 Codex")
+                if let Err(stop_error) = stop_result {
+                    anyhow::bail!(
+                        "Codex 启动兼容方案未能安装，且无法安全清理旧进程：{error:#}；{stop_error:#}"
+                    );
+                }
+                Err(error).context("Codex 启动兼容方案未能安装；已停止 Codex")
             }
         }
     }
@@ -334,6 +416,89 @@ pub(super) async fn spawn_codex(
         spawned.performance_status = "ready".to_string();
         spawned.performance_detail = "当前平台无需 macOS / Windows 启动补丁".to_string();
         Ok(spawned)
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn add_macos_cli_wrapper(
+    command: &mut Vec<String>,
+    app_dir: &std::path::Path,
+    subagent_gate_active: bool,
+    runtime_config_overrides: &[String],
+) -> Result<(tokio::net::TcpListener, Vec<u8>)> {
+    let wrapper = std::env::current_exe().context("定位 Codey 兼容执行器失败")?;
+    let target = codey_runtime_core::app_paths::codex_runtime_executable(app_dir)
+        .ok_or_else(|| anyhow::anyhow!("Codex App 内未找到内置 CLI"))?;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .context("创建 Codex CLI 兼容校验端口失败")?;
+    let port = listener.local_addr()?.port();
+    let token = uuid::Uuid::new_v4().to_string();
+    let overrides = serde_json::to_string(runtime_config_overrides)
+        .context("序列化 Codex CLI 兼容运行时配置失败")?;
+
+    let args_index = command
+        .iter()
+        .position(|argument| argument == "--args")
+        .ok_or_else(|| anyhow::anyhow!("macOS Codex 启动命令缺少 --args"))?;
+    let environment = [
+        format!("CODEX_CLI_PATH={}", wrapper.to_string_lossy()),
+        format!(
+            "{}={}",
+            crate::codex_startup_patch::CLI_WRAPPER_TARGET_ENV,
+            target.to_string_lossy()
+        ),
+        format!(
+            "{}={overrides}",
+            crate::codex_startup_patch::CLI_WRAPPER_OVERRIDES_ENV
+        ),
+        format!(
+            "{}={}",
+            crate::codex_startup_patch::CLI_WRAPPER_SUBAGENT_ENV,
+            u8::from(subagent_gate_active)
+        ),
+        format!(
+            "{}={port}",
+            crate::codex_startup_patch::CLI_WRAPPER_PORT_ENV
+        ),
+        format!(
+            "{}={token}",
+            crate::codex_startup_patch::CLI_WRAPPER_TOKEN_ENV
+        ),
+    ];
+    command.splice(
+        args_index..args_index,
+        environment
+            .into_iter()
+            .flat_map(|value| ["--env".to_string(), value]),
+    );
+    Ok((listener, token.into_bytes()))
+}
+
+#[cfg(target_os = "macos")]
+async fn wait_for_macos_cli_wrapper(
+    listener: tokio::net::TcpListener,
+    expected_token: Vec<u8>,
+) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+
+    match tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let (mut stream, _) = listener.accept().await?;
+            let mut received = vec![0; expected_token.len()];
+            if tokio::time::timeout(Duration::from_millis(750), stream.read_exact(&mut received))
+                .await
+                .is_ok_and(|result| result.is_ok())
+                && received == expected_token
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!("等待 Codex CLI 兼容执行器超时")),
     }
 }
 
