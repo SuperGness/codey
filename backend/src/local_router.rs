@@ -5659,6 +5659,7 @@ enum ResponsesRequestBodyEncoding {
     Zstd,
 }
 
+#[cfg(test)]
 async fn read_http_request_with_budget<R>(
     stream: &mut R,
     body_budget: Option<&Arc<Semaphore>>,
@@ -7867,8 +7868,9 @@ async fn write_proxy_response(
 
 const REQUEST_LOG_TAP_CHUNK_BYTES: usize = 8 * 1024;
 const REQUEST_LOG_TAP_QUEUE_CHUNKS: usize = 64;
-const REQUEST_LOG_USAGE_PROJECTION_BYTES: usize = 16 * 1024;
-const REQUEST_LOG_USAGE_STRING_BYTES: usize = 64;
+const REQUEST_LOG_USAGE_KEY_BYTES: usize = 64;
+const REQUEST_LOG_USAGE_SCALAR_BYTES: usize = 64;
+const REQUEST_LOG_USAGE_NESTING_DEPTH: usize = 64;
 
 struct RequestLogObservedChunk {
     bytes: Bytes,
@@ -7975,95 +7977,393 @@ enum ProjectedMetadataScalar {
 }
 
 struct UsageCapture {
-    bytes: Vec<u8>,
-    depth: usize,
+    containers: Vec<UsageContainer>,
+    values: [Option<(u8, u64)>; 6],
     in_string: bool,
     escaped: bool,
-    string_start: usize,
-    string_bytes: usize,
+    unicode_escape_digits: u8,
+    string_is_key: bool,
+    string: Vec<u8>,
     string_overflow: bool,
+    scalar: Vec<u8>,
+    scalar_overflow: bool,
+    scalar_field: Option<(ProjectedUsageField, u8)>,
+}
+
+#[derive(Clone, Copy)]
+enum UsageObjectContext {
+    Root,
+    CachedDetails(u8),
+    ReasoningDetails(u8),
+    Other,
+}
+
+#[derive(Clone, Copy)]
+enum ProjectedUsageKey {
+    Field(ProjectedUsageField, u8),
+    Object(UsageObjectContext),
+    Other,
+}
+
+#[derive(Clone, Copy)]
+enum ProjectedUsageField {
+    Input,
+    Output,
+    CachedInput,
+    CacheCreationInput,
+    ReasoningOutput,
+    Total,
+}
+
+impl ProjectedUsageField {
+    fn index(self) -> usize {
+        match self {
+            Self::Input => 0,
+            Self::Output => 1,
+            Self::CachedInput => 2,
+            Self::CacheCreationInput => 3,
+            Self::ReasoningOutput => 4,
+            Self::Total => 5,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UsageJsonState {
+    ObjectKeyOrEnd,
+    ObjectKey,
+    ObjectColon,
+    ObjectValue,
+    ObjectCommaOrEnd,
+    ArrayValueOrEnd,
+    ArrayValue,
+    ArrayCommaOrEnd,
+}
+
+struct UsageContainer {
+    context: Option<UsageObjectContext>,
+    state: UsageJsonState,
+    key: ProjectedUsageKey,
 }
 
 impl UsageCapture {
     fn new() -> Self {
         Self {
-            bytes: vec![b'{'],
-            depth: 1,
+            containers: vec![UsageContainer {
+                context: Some(UsageObjectContext::Root),
+                state: UsageJsonState::ObjectKeyOrEnd,
+                key: ProjectedUsageKey::Other,
+            }],
+            values: [None; 6],
             in_string: false,
             escaped: false,
-            string_start: 0,
-            string_bytes: 0,
+            unicode_escape_digits: 0,
+            string_is_key: false,
+            string: Vec::new(),
             string_overflow: false,
+            scalar: Vec::new(),
+            scalar_overflow: false,
+            scalar_field: None,
         }
     }
 
     fn observe_byte(&mut self, byte: u8) -> std::result::Result<bool, &'static str> {
         if self.in_string {
-            if !self.escaped && byte == b'"' {
-                self.bytes.push(byte);
+            if self.unicode_escape_digits > 0 {
+                if !byte.is_ascii_hexdigit() {
+                    return Err("usage_projection_failed");
+                }
+                self.unicode_escape_digits -= 1;
+            } else if self.escaped {
+                if !matches!(
+                    byte,
+                    b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' | b'u'
+                ) {
+                    return Err("usage_projection_failed");
+                }
+                self.escaped = false;
+                if byte == b'u' {
+                    self.unicode_escape_digits = 4;
+                }
+            } else if byte == b'\\' {
+                self.escaped = true;
+            } else if byte == b'"' {
                 self.in_string = false;
-                self.ensure_within_limit()?;
+                if self.string_is_key {
+                    self.finish_key()?;
+                }
                 return Ok(false);
-            }
-            if !self.escaped && byte < b' ' {
+            } else if byte < b' ' {
                 return Err("usage_projection_failed");
             }
-            if !self.string_overflow {
-                self.string_bytes += 1;
-                if self.string_bytes <= REQUEST_LOG_USAGE_STRING_BYTES {
-                    self.bytes.push(byte);
+            if self.string_is_key && !self.string_overflow {
+                if self.string.len() < REQUEST_LOG_USAGE_KEY_BYTES {
+                    self.string.push(byte);
                 } else {
-                    self.bytes.truncate(self.string_start + 1);
                     self.string_overflow = true;
                 }
             }
-            if self.escaped {
-                self.escaped = false;
-            } else if byte == b'\\' {
-                self.escaped = true;
+            return Ok(false);
+        }
+
+        if !self.scalar.is_empty() || self.scalar_overflow {
+            if byte.is_ascii_whitespace() || matches!(byte, b',' | b'}' | b']') {
+                self.finish_scalar()?;
+            } else {
+                if self.scalar.len() < REQUEST_LOG_USAGE_SCALAR_BYTES {
+                    self.scalar.push(byte);
+                } else {
+                    self.scalar_overflow = true;
+                }
+                return Ok(false);
             }
+        }
+
+        if byte.is_ascii_whitespace() {
             return Ok(false);
         }
 
         match byte {
             b'"' => {
-                self.string_start = self.bytes.len();
-                self.string_bytes = 0;
+                let state = self
+                    .containers
+                    .last()
+                    .map(|container| container.state)
+                    .ok_or("usage_projection_failed")?;
+                self.string_is_key = matches!(
+                    state,
+                    UsageJsonState::ObjectKeyOrEnd | UsageJsonState::ObjectKey
+                );
+                if !self.string_is_key {
+                    self.begin_value()?;
+                }
+                self.string.clear();
                 self.string_overflow = false;
                 self.in_string = true;
-                self.bytes.push(byte);
+                self.escaped = false;
+                self.unicode_escape_digits = 0;
             }
-            b'{' => {
-                self.depth += 1;
-                self.push_projected_byte(byte)?;
+            b'{' | b'[' => {
+                let key = self.begin_value()?;
+                if self.containers.len() >= REQUEST_LOG_USAGE_NESTING_DEPTH {
+                    return Err("usage_projection_limit_exceeded");
+                }
+                self.containers.push(if byte == b'{' {
+                    UsageContainer {
+                        context: Some(match key {
+                            ProjectedUsageKey::Object(context) => context,
+                            _ => UsageObjectContext::Other,
+                        }),
+                        state: UsageJsonState::ObjectKeyOrEnd,
+                        key: ProjectedUsageKey::Other,
+                    }
+                } else {
+                    UsageContainer {
+                        context: None,
+                        state: UsageJsonState::ArrayValueOrEnd,
+                        key: ProjectedUsageKey::Other,
+                    }
+                });
             }
             b'}' => {
-                let Some(depth) = self.depth.checked_sub(1) else {
+                let Some(container) = self.containers.last() else {
                     return Err("usage_projection_failed");
                 };
-                self.depth = depth;
-                self.push_projected_byte(byte)?;
-                if depth == 0 {
+                if container.context.is_none()
+                    || !matches!(
+                        container.state,
+                        UsageJsonState::ObjectKeyOrEnd | UsageJsonState::ObjectCommaOrEnd
+                    )
+                {
+                    return Err("usage_projection_failed");
+                }
+                self.containers.pop();
+                if self.containers.is_empty() {
                     return Ok(true);
                 }
             }
-            byte if byte.is_ascii_whitespace() => {}
-            _ => self.push_projected_byte(byte)?,
+            b']' => {
+                let Some(container) = self.containers.last() else {
+                    return Err("usage_projection_failed");
+                };
+                if container.context.is_some()
+                    || !matches!(
+                        container.state,
+                        UsageJsonState::ArrayValueOrEnd | UsageJsonState::ArrayCommaOrEnd
+                    )
+                {
+                    return Err("usage_projection_failed");
+                }
+                self.containers.pop();
+            }
+            b':' => {
+                let container = self
+                    .containers
+                    .last_mut()
+                    .ok_or("usage_projection_failed")?;
+                if !matches!(container.state, UsageJsonState::ObjectColon) {
+                    return Err("usage_projection_failed");
+                }
+                container.state = UsageJsonState::ObjectValue;
+            }
+            b',' => {
+                let container = self
+                    .containers
+                    .last_mut()
+                    .ok_or("usage_projection_failed")?;
+                container.state = match container.state {
+                    UsageJsonState::ObjectCommaOrEnd => UsageJsonState::ObjectKey,
+                    UsageJsonState::ArrayCommaOrEnd => UsageJsonState::ArrayValue,
+                    _ => return Err("usage_projection_failed"),
+                };
+            }
+            b'-' | b'0'..=b'9' | b't' | b'f' | b'n' => {
+                let key = self.begin_value()?;
+                self.scalar.clear();
+                self.scalar.push(byte);
+                self.scalar_overflow = false;
+                self.scalar_field = match key {
+                    ProjectedUsageKey::Field(field, priority) => Some((field, priority)),
+                    _ => None,
+                };
+            }
+            _ => return Err("usage_projection_failed"),
         }
         Ok(false)
     }
 
-    fn push_projected_byte(&mut self, byte: u8) -> std::result::Result<(), &'static str> {
-        self.bytes.push(byte);
-        self.ensure_within_limit()
+    fn begin_value(&mut self) -> std::result::Result<ProjectedUsageKey, &'static str> {
+        let container = self
+            .containers
+            .last_mut()
+            .ok_or("usage_projection_failed")?;
+        match container.state {
+            UsageJsonState::ObjectValue => {
+                container.state = UsageJsonState::ObjectCommaOrEnd;
+                Ok(std::mem::replace(
+                    &mut container.key,
+                    ProjectedUsageKey::Other,
+                ))
+            }
+            UsageJsonState::ArrayValueOrEnd | UsageJsonState::ArrayValue => {
+                container.state = UsageJsonState::ArrayCommaOrEnd;
+                Ok(ProjectedUsageKey::Other)
+            }
+            _ => Err("usage_projection_failed"),
+        }
     }
 
-    fn ensure_within_limit(&self) -> std::result::Result<(), &'static str> {
-        if self.bytes.len() > REQUEST_LOG_USAGE_PROJECTION_BYTES {
-            Err("usage_projection_limit_exceeded")
-        } else {
-            Ok(())
+    fn finish_key(&mut self) -> std::result::Result<(), &'static str> {
+        let container = self
+            .containers
+            .last_mut()
+            .ok_or("usage_projection_failed")?;
+        let context = container.context.ok_or("usage_projection_failed")?;
+        if !matches!(
+            container.state,
+            UsageJsonState::ObjectKeyOrEnd | UsageJsonState::ObjectKey
+        ) {
+            return Err("usage_projection_failed");
         }
+        container.key = if self.string_overflow {
+            ProjectedUsageKey::Other
+        } else {
+            let mut encoded = Vec::with_capacity(self.string.len() + 2);
+            encoded.push(b'"');
+            encoded.extend_from_slice(&self.string);
+            encoded.push(b'"');
+            let key = serde_json::from_slice::<String>(&encoded)
+                .map_err(|_| "usage_projection_failed")?;
+            projected_usage_key(context, key.as_bytes())
+        };
+        container.state = UsageJsonState::ObjectColon;
+        Ok(())
+    }
+
+    fn finish_scalar(&mut self) -> std::result::Result<(), &'static str> {
+        if self.scalar_overflow {
+            if self.scalar_field.is_some() {
+                return Err("usage_projection_failed");
+            }
+        } else {
+            let value = serde_json::from_slice::<Value>(&self.scalar)
+                .map_err(|_| "usage_projection_failed")?;
+            if let Some((field, priority)) = self.scalar_field
+                && let Some(value) = value.as_u64()
+            {
+                let slot = &mut self.values[field.index()];
+                if slot.is_none_or(|(current_priority, _)| priority <= current_priority) {
+                    *slot = Some((priority, value));
+                }
+            }
+        }
+        self.scalar.clear();
+        self.scalar_overflow = false;
+        self.scalar_field = None;
+        Ok(())
+    }
+
+    fn into_value(self) -> Value {
+        let value = |field: ProjectedUsageField| self.values[field.index()].map(|(_, value)| value);
+        json!({
+            "input_tokens": value(ProjectedUsageField::Input),
+            "output_tokens": value(ProjectedUsageField::Output),
+            "input_tokens_details": {
+                "cached_tokens": value(ProjectedUsageField::CachedInput),
+            },
+            "cache_creation_input_tokens": value(ProjectedUsageField::CacheCreationInput),
+            "output_tokens_details": {
+                "reasoning_tokens": value(ProjectedUsageField::ReasoningOutput),
+            },
+            "total_tokens": value(ProjectedUsageField::Total),
+        })
+    }
+}
+
+fn projected_usage_key(context: UsageObjectContext, value: &[u8]) -> ProjectedUsageKey {
+    use ProjectedUsageField as Field;
+    use ProjectedUsageKey::{Field as KeyField, Object, Other};
+    match (context, value) {
+        (UsageObjectContext::Root, b"input_tokens") => KeyField(Field::Input, 0),
+        (UsageObjectContext::Root, b"prompt_tokens") => KeyField(Field::Input, 1),
+        (UsageObjectContext::Root, b"inputTokens") => KeyField(Field::Input, 2),
+        (UsageObjectContext::Root, b"output_tokens") => KeyField(Field::Output, 0),
+        (UsageObjectContext::Root, b"completion_tokens") => KeyField(Field::Output, 1),
+        (UsageObjectContext::Root, b"outputTokens") => KeyField(Field::Output, 2),
+        (UsageObjectContext::Root, b"input_tokens_details") => {
+            Object(UsageObjectContext::CachedDetails(0))
+        }
+        (UsageObjectContext::Root, b"prompt_tokens_details") => {
+            Object(UsageObjectContext::CachedDetails(1))
+        }
+        (UsageObjectContext::Root, b"cache_read_input_tokens") => KeyField(Field::CachedInput, 2),
+        (UsageObjectContext::Root, b"cache_read_tokens") => KeyField(Field::CachedInput, 3),
+        (UsageObjectContext::Root, b"cached_input_tokens") => KeyField(Field::CachedInput, 4),
+        (UsageObjectContext::Root, b"cache_creation_input_tokens") => {
+            KeyField(Field::CacheCreationInput, 0)
+        }
+        (UsageObjectContext::Root, b"cache_creation_tokens") => {
+            KeyField(Field::CacheCreationInput, 1)
+        }
+        (UsageObjectContext::Root, b"cache_write_input_tokens") => {
+            KeyField(Field::CacheCreationInput, 2)
+        }
+        (UsageObjectContext::Root, b"output_tokens_details") => {
+            Object(UsageObjectContext::ReasoningDetails(0))
+        }
+        (UsageObjectContext::Root, b"completion_tokens_details") => {
+            Object(UsageObjectContext::ReasoningDetails(1))
+        }
+        (UsageObjectContext::Root, b"reasoning_tokens") => KeyField(Field::ReasoningOutput, 2),
+        (UsageObjectContext::Root, b"total_tokens") => KeyField(Field::Total, 0),
+        (UsageObjectContext::Root, b"totalTokens") => KeyField(Field::Total, 1),
+        (UsageObjectContext::CachedDetails(priority), b"cached_tokens") => {
+            KeyField(Field::CachedInput, priority)
+        }
+        (UsageObjectContext::ReasoningDetails(priority), b"reasoning_tokens") => {
+            KeyField(Field::ReasoningOutput, priority)
+        }
+        _ => Other,
     }
 }
 
@@ -8078,9 +8378,7 @@ impl RequestLogMetadataProjector {
                 let complete = capture.observe_byte(byte)?;
                 if complete {
                     let capture = self.usage.take().expect("usage capture exists");
-                    let usage = serde_json::from_slice::<Value>(&capture.bytes)
-                        .map_err(|_| "usage_projection_failed")?;
-                    probe.observe_event(&json!({"usage": usage}));
+                    probe.observe_event(&json!({"usage": capture.into_value()}));
                 }
                 continue;
             }
@@ -11065,15 +11363,24 @@ mod tests {
     }
 
     #[test]
-    fn request_log_projector_bounds_usage_object() {
+    fn request_log_projector_skips_large_unknown_usage_values() {
         let probe = RouteRequestLogProbe::detached_test_probe();
         let mut projector = RequestLogMetadataProjector::default();
         let event = format!(
-            "{{\"usage\":{{\"padding\":[{}0]}}}}",
-            "0,".repeat(REQUEST_LOG_USAGE_PROJECTION_BYTES)
+            "{{\"usage\":{{\"padding\":[{{\"nested\":[{}0]}}],\"input_tokens\":11,\"output_tokens\":7,\"input_tokens_details\":{{\"cached_tokens\":3}},\"cache_creation_input_tokens\":2,\"output_tokens_details\":{{\"reasoning_tokens\":4}},\"total_tokens\":18}}}}",
+            "0,".repeat(128 * 1024)
         );
-        let error = projector.observe(event.as_bytes(), &probe).unwrap_err();
-        assert_eq!(error, "usage_projection_limit_exceeded");
+        for chunk in event.as_bytes().chunks(997) {
+            projector.observe(chunk, &probe).unwrap();
+        }
+
+        let usage = probe.token_usage_for_test();
+        assert_eq!(usage.input_tokens, Some(11));
+        assert_eq!(usage.output_tokens, Some(7));
+        assert_eq!(usage.cached_input_tokens, Some(3));
+        assert_eq!(usage.cache_creation_input_tokens, Some(2));
+        assert_eq!(usage.reasoning_output_tokens, Some(4));
+        assert_eq!(usage.total_tokens, Some(18));
     }
 
     #[test]
