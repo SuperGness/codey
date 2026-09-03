@@ -337,7 +337,7 @@ mod tests {
             let bytes_read = socket.read(&mut request).await.unwrap();
             assert!(bytes_read > 0);
             server_request_count.fetch_add(1, Ordering::AcqRel);
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
             drop(socket);
 
             if let Ok(Ok((_retry, _))) =
@@ -347,7 +347,7 @@ mod tests {
             }
         });
         let client = Client::builder()
-            .timeout(Duration::from_millis(50))
+            .timeout(Duration::from_millis(500))
             .build()
             .unwrap();
         let config = NotificationChannelConfig {

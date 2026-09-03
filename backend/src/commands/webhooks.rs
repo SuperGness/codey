@@ -2153,7 +2153,7 @@ mod tests {
             let bytes_read = socket.read(&mut request).await.unwrap();
             assert!(bytes_read > 0);
             server_request_count.fetch_add(1, Ordering::AcqRel);
-            tokio::time::sleep(Duration::from_millis(150)).await;
+            tokio::time::sleep(Duration::from_millis(1_500)).await;
         });
         let mut config = CodeyConfig::default();
         config.webhook.channels = vec![NotificationChannelConfig {
@@ -2169,7 +2169,7 @@ mod tests {
             config: RwLock::new(config),
             webhook_http_client_override: Some(
                 reqwest::Client::builder()
-                    .timeout(Duration::from_millis(50))
+                    .timeout(Duration::from_millis(500))
                     .redirect(reqwest::redirect::Policy::none())
                     .build()
                     .unwrap(),

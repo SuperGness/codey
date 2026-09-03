@@ -679,6 +679,21 @@ impl RouterSnapshot {
         })
     }
 
+    fn target_for_auxiliary_request(
+        &self,
+        route_hint: Option<&str>,
+        bound_route: Option<&str>,
+    ) -> Result<Arc<RouteTarget>> {
+        for provider_id in [route_hint, bound_route].into_iter().flatten() {
+            if let Some(route) = self.routes.get(provider_id) {
+                return Ok(Arc::clone(route));
+            }
+        }
+        Ok(self
+            .target_for_request(self.default_model.trim(), None, None)?
+            .route)
+    }
+
     fn resolve_request(&self, request: RouteRequest<'_>) -> Result<RouteSelection> {
         let requested_model = request.requested_model.trim();
         if requested_model.is_empty() {
@@ -1109,6 +1124,9 @@ impl RouterServer {
                 self.proxy_responses(request, stream, ResponsesRequestKind::Create)
                     .await?;
             }
+            ("POST", "/v1/images/generations") | ("POST", "/images/generations") => {
+                self.proxy_image_generation(request, stream).await?;
+            }
             ("POST", "/v1/responses/compact")
             | ("POST", "/responses/compact")
             | ("POST", "/v1/v1/responses/compact")
@@ -1128,6 +1146,254 @@ impl RouterServer {
             }
         }
         Ok(())
+    }
+
+    async fn proxy_image_generation(
+        &self,
+        mut request: HttpRequest,
+        mut stream: TcpStream,
+    ) -> Result<()> {
+        let mut body = match serde_json::from_slice::<Value>(&request.body) {
+            Ok(body) if body.is_object() => body,
+            Ok(_) => {
+                write_error_response(
+                    &mut stream,
+                    400,
+                    "invalid_request_body",
+                    "Images 请求体必须是 JSON 对象",
+                    None,
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(error) => {
+                write_error_response(
+                    &mut stream,
+                    400,
+                    "invalid_request_body",
+                    format!("Images 请求体不是有效 JSON：{error}"),
+                    None,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let (route_hint, body_mutated) = match take_codey_route_metadata(&mut request, &mut body) {
+            Ok(extracted) => extracted,
+            Err(error) => {
+                write_error_response(
+                    &mut stream,
+                    400,
+                    "route_metadata_invalid",
+                    format!("Codey 线路元数据无效：{error:#}"),
+                    None,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let snapshot = Arc::clone(
+            &self
+                .snapshot
+                .read()
+                .expect("local router snapshot lock poisoned"),
+        );
+        let binding_keys = request_binding_keys(&request);
+        let bound_route = self
+            .bindings
+            .lock()
+            .expect("local router bindings mutex poisoned")
+            .route_for_keys(&binding_keys);
+        let route = match snapshot
+            .target_for_auxiliary_request(route_hint.as_deref(), bound_route.as_deref())
+        {
+            Ok(route) => route,
+            Err(error) => {
+                write_error_response(
+                    &mut stream,
+                    404,
+                    "route_not_enabled",
+                    format!("图片生成请求没有可用线路：{error:#}"),
+                    None,
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        if route.protocol == UpstreamProtocol::AnthropicMessages {
+            write_error_response(
+                &mut stream,
+                400,
+                "image_generation_not_supported",
+                format!(
+                    "线路「{}」使用 Anthropic Messages，不能转发 OpenAI Images 请求",
+                    route_display_name(&route)
+                ),
+                Some(&route),
+            )
+            .await?;
+            return Ok(());
+        }
+        let upstream_base_url = match &route.upstream_url {
+            Ok(url) => url,
+            Err(error) => {
+                write_error_response(
+                    &mut stream,
+                    502,
+                    "route_configuration_error",
+                    format!("线路「{}」的 {error}", route_display_name(&route)),
+                    Some(&route),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let upstream_url = match image_generation_endpoint(upstream_base_url) {
+            Ok(url) => url,
+            Err(error) => {
+                write_error_response(
+                    &mut stream,
+                    502,
+                    "route_configuration_error",
+                    format!(
+                        "线路「{}」的 Images API URL 无效：{error:#}",
+                        route_display_name(&route)
+                    ),
+                    Some(&route),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let headers = match self
+            .prepare_upstream_request_headers(&request, &route)
+            .await
+        {
+            Ok(headers) => headers,
+            Err((status, code, message)) => {
+                write_error_response(&mut stream, status, code, message, Some(&route)).await?;
+                return Ok(());
+            }
+        };
+        let stream_requested = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+        let request_builder = self
+            .client
+            .post(&upstream_url)
+            .headers(headers)
+            .header(CONTENT_TYPE, "application/json")
+            .body(if body_mutated {
+                serde_json::to_vec(&body).context("序列化 Images 上游请求失败")?
+            } else {
+                request.body
+            });
+        let response_header_timeout = if stream_requested {
+            UPSTREAM_RESPONSE_HEADER_TIMEOUT
+        } else {
+            UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT
+        };
+        let response =
+            match tokio::time::timeout(response_header_timeout, request_builder.send()).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    let timeout = error.is_timeout();
+                    let (status, code, message) = if timeout {
+                        (
+                            504,
+                            "upstream_timeout",
+                            format!(
+                                "Codey 线路「{}」请求图片生成上游超时",
+                                route_display_name(&route)
+                            ),
+                        )
+                    } else {
+                        (
+                            424,
+                            "upstream_unreachable",
+                            format!(
+                                "Codey 线路「{}」无法连接图片生成上游",
+                                route_display_name(&route)
+                            ),
+                        )
+                    };
+                    write_text_error_response(&mut stream, status, code, message).await?;
+                    return Ok(());
+                }
+                Err(_) => {
+                    write_text_error_response(
+                        &mut stream,
+                        504,
+                        "upstream_header_timeout",
+                        format!(
+                            "Codey 线路「{}」等待图片生成上游返回响应头超时",
+                            route_display_name(&route)
+                        ),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+        write_proxy_response(&mut stream, response, None).await
+    }
+
+    async fn prepare_upstream_request_headers(
+        &self,
+        request: &HttpRequest,
+        route: &RouteTarget,
+    ) -> std::result::Result<HeaderMap, (u16, &'static str, String)> {
+        let prepared_headers = route
+            .upstream_headers
+            .as_ref()
+            .map_err(|error| (502, "route_configuration_error", error.clone()))?;
+        let mut headers = HeaderMap::with_capacity(request.headers.len() + prepared_headers.len());
+        for (name, value) in &request.headers {
+            if should_forward_incoming_header(name, route.official_account)
+                && let (Ok(name), Ok(value)) = (
+                    HeaderName::from_bytes(name.as_bytes()),
+                    HeaderValue::from_str(value),
+                )
+            {
+                headers.insert(name, value);
+            }
+        }
+        for (name, value) in prepared_headers {
+            headers.insert(name, value.clone());
+        }
+        if let Some(request_id) = current_router_request_id()
+            && let Ok(value) = HeaderValue::from_str(&request_id)
+        {
+            headers.insert(HeaderName::from_static("x-codey-request-id"), value);
+        }
+        if route.official_account {
+            let official_auth = resolve_official_upstream_auth(
+                request,
+                &self.bearer_token,
+                &self.official_auth_path,
+                &self.official_auth_cache,
+            )
+            .await
+            .ok_or_else(|| {
+                (
+                    401,
+                    "openai_auth_missing",
+                    "官方账号线路缺少 Codex OpenAI 登录态，请重新登录后重试".to_string(),
+                )
+            })?;
+            let value = HeaderValue::from_str(&official_auth.authorization).map_err(|_| {
+                (
+                    401,
+                    "openai_auth_invalid",
+                    "官方账号线路的 Codex OpenAI 登录态无效，请重新登录后重试".to_string(),
+                )
+            })?;
+            headers.insert(AUTHORIZATION, value);
+            headers.remove(CHATGPT_ACCOUNT_ID_HEADER);
+            if let Some(account_id) = official_auth.account_id.as_deref()
+                && let Ok(value) = HeaderValue::from_str(account_id)
+            {
+                headers.insert(HeaderName::from_static(CHATGPT_ACCOUNT_ID_HEADER), value);
+            }
+        }
+        Ok(headers)
     }
 
     fn authorized(&self, request: &HttpRequest) -> bool {
@@ -1778,83 +2044,18 @@ impl RouterServer {
                 return Ok(());
             }
         };
-        let prepared_headers = match &resolved.route.upstream_headers {
+        let mut headers = match self
+            .prepare_upstream_request_headers(&request, &resolved.route)
+            .await
+        {
             Ok(headers) => headers,
-            Err(error) => {
+            Err((status, code, message)) => {
                 downstream
-                    .write_error(
-                        502,
-                        "route_configuration_error",
-                        error.clone(),
-                        Some(&resolved.route),
-                    )
+                    .write_error(status, code, message, Some(&resolved.route))
                     .await?;
                 return Ok(());
             }
         };
-        let mut headers = HeaderMap::with_capacity(request.headers.len() + prepared_headers.len());
-        for (name, value) in &request.headers {
-            if should_forward_incoming_header(name, resolved.route.official_account)
-                && let (Ok(name), Ok(value)) = (
-                    HeaderName::from_bytes(name.as_bytes()),
-                    HeaderValue::from_str(value),
-                )
-            {
-                headers.insert(name, value);
-            }
-        }
-        // Saved route headers deliberately win over incoming Codex headers,
-        // matching the previous per-request construction order.
-        for (name, value) in prepared_headers {
-            headers.insert(name, value.clone());
-        }
-        if let Some(request_id) = current_router_request_id()
-            && let Ok(value) = HeaderValue::from_str(&request_id)
-        {
-            headers.insert(HeaderName::from_static("x-codey-request-id"), value);
-        }
-        if resolved.route.official_account {
-            let official_auth = resolve_official_upstream_auth(
-                &request,
-                &self.bearer_token,
-                &self.official_auth_path,
-                &self.official_auth_cache,
-            )
-            .await;
-            let Some(official_auth) = official_auth else {
-                downstream
-                    .write_error(
-                        401,
-                        "openai_auth_missing",
-                        "官方账号线路缺少 Codex OpenAI 登录态，请重新登录后重试".to_string(),
-                        Some(&resolved.route),
-                    )
-                    .await?;
-                return Ok(());
-            };
-            let Ok(value) = HeaderValue::from_str(&official_auth.authorization) else {
-                downstream
-                    .write_error(
-                        401,
-                        "openai_auth_invalid",
-                        "官方账号线路的 Codex OpenAI 登录态无效，请重新登录后重试".to_string(),
-                        Some(&resolved.route),
-                    )
-                    .await?;
-                return Ok(());
-            };
-            headers.insert(AUTHORIZATION, value);
-            // The downstream WebSocket handshake headers can outlive a Codex
-            // account switch. Keep the account header paired with the OAuth
-            // identity resolved for this request instead of forwarding a
-            // stale value captured when the downstream socket was opened.
-            headers.remove(CHATGPT_ACCOUNT_ID_HEADER);
-            if let Some(account_id) = official_auth.account_id.as_deref()
-                && let Ok(value) = HeaderValue::from_str(account_id)
-            {
-                headers.insert(HeaderName::from_static(CHATGPT_ACCOUNT_ID_HEADER), value);
-            }
-        }
         if bridge == ProtocolBridge::NativeResponses {
             ensure_native_prompt_cache_key(
                 &mut headers,
@@ -2789,6 +2990,33 @@ fn responses_endpoint(base_url: &str) -> Result<String> {
         Ok(base.to_string())
     } else {
         Ok(format!("{base}/responses"))
+    }
+}
+
+fn image_generation_endpoint(base_url: &str) -> Result<String> {
+    let url = normalized_endpoint_url(base_url)?;
+    let base = url.as_str().trim_end_matches('/');
+    if strip_ascii_case_suffix(base, "/images/generations").is_some() {
+        return Ok(base.to_string());
+    }
+    for suffix in ["/chat/completions", "/responses"] {
+        if let Some(prefix) = strip_ascii_case_suffix(base, suffix) {
+            return Ok(format!(
+                "{}/images/generations",
+                prefix.trim_end_matches('/')
+            ));
+        }
+    }
+    let last_segment = url
+        .path()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    if has_version_suffix(last_segment) {
+        Ok(format!("{base}/images/generations"))
+    } else {
+        Ok(format!("{base}/v1/images/generations"))
     }
 }
 
@@ -14126,6 +14354,14 @@ mod tests {
             responses_compact_endpoint("https://relay.example/v1").unwrap(),
             "https://relay.example/v1/responses/compact"
         );
+        assert_eq!(
+            image_generation_endpoint("https://relay.example/v1/responses").unwrap(),
+            "https://relay.example/v1/images/generations"
+        );
+        assert_eq!(
+            image_generation_endpoint("https://relay.example/v1/chat/completions").unwrap(),
+            "https://relay.example/v1/images/generations"
+        );
     }
 
     #[test]
@@ -17567,6 +17803,52 @@ mod tests {
         assert!(response.contains("content-type: text/plain; charset=utf-8\r\n"));
         assert!(response.contains("Codey 线路「Relay」无法连接上游 relay.example:8443"));
         assert!(response.contains("错误码：upstream_unreachable"));
+    }
+
+    #[tokio::test]
+    async fn router_proxies_image_generation_to_the_default_openai_route() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            let authorization = incoming_header(&request, "authorization").map(str::to_string);
+            let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+            let response = r#"{"created":1,"data":[{"b64_json":"aGVsbG8="}]}"#;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                        response.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            (request.path, authorization, body)
+        });
+        let (mut config, provider_id, model) =
+            router_config(format!("http://{upstream_address}/v1/responses"));
+        config.default_model = model_alias(&provider_id, &model);
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+
+        let response = reqwest::Client::new()
+            .post(format!("{}/images/generations", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .json(&json!({"model":"gpt-image-2","prompt":"draw an otter"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.json::<Value>().await.unwrap()["created"], 1);
+        let (path, authorization, body) = upstream_task.await.unwrap();
+        assert_eq!(path, "/v1/images/generations");
+        assert_eq!(authorization.as_deref(), Some("Bearer sk-upstream"));
+        assert_eq!(body["model"], "gpt-image-2");
+        assert_eq!(body["prompt"], "draw an otter");
+        router.stop().await.unwrap();
     }
 
     #[tokio::test]
