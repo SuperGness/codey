@@ -135,14 +135,6 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
   const NativeWorker = workerThreads.Worker;
   const spawnCalls = [];
   const ipcHandlers = new Map();
-  const rendererStatusResponses = [];
-  const rendererEvent = {
-    sender: {
-      send(channel, message) {
-        rendererStatusResponses.push({ channel, message });
-      },
-    },
-  };
   const fakeIpcMain = new EventEmitter();
   fakeIpcMain.handle = (channel, handler) => {
     ipcHandlers.set(channel, handler);
@@ -186,179 +178,14 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
       "codex_desktop:message-from-view",
       passthroughMessageHandler,
     );
-    assert.notEqual(
+    assert.equal(
       ipcHandlers.get("codex_desktop:worker:git:from-view"),
       passthroughGitHandler,
     );
-    assert.notEqual(
+    assert.equal(
       ipcHandlers.get("codex_desktop:message-from-view"),
       passthroughMessageHandler,
     );
-    const startupGitGuardStatus = ipcHandlers.get(
-      "codex_desktop:message-from-view",
-    )(rendererEvent, {
-      type: "codey-git-request-guard-status",
-      requestId: "git-status-1",
-    });
-    assert.equal(startupGitGuardStatus.status, "ok");
-    assert.equal(startupGitGuardStatus.guard.gitHandlerPatched, false);
-    assert.equal(startupGitGuardStatus.guard.installed, !startupGitGuardStatus.guard.enabled);
-    assert.equal(startupGitGuardStatus.guard.statusHandlerPatched, true);
-    assert.equal(startupGitGuardStatus.guard.ipcHandlersWrapped, 2);
-    const startupWmiSamplerStatus = ipcHandlers.get(
-      "codex_desktop:message-from-view",
-    )(rendererEvent, {
-      type: "codey-windows-wmi-sampler-status",
-      requestId: "wmi-status-1",
-    });
-    assert.equal(startupWmiSamplerStatus.status, "ok");
-    assert.equal(startupWmiSamplerStatus.sampler.version, 4);
-    assert.equal(
-      startupWmiSamplerStatus.sampler.workerWrapperPatched,
-      true,
-    );
-    assert.equal(startupWmiSamplerStatus.sampler.blocked, 0);
-    assert.equal(
-      startupWmiSamplerStatus.sampler.esmExportsSynchronized,
-      true,
-    );
-    assert.deepEqual(
-      rendererStatusResponses.map(({ channel, message }) => ({
-        channel,
-        requestId: message.requestId,
-        type: message.type,
-      })),
-      [
-        {
-          channel: "codex_desktop:message-for-view",
-          requestId: "git-status-1",
-          type: "codey-git-request-guard-status-response",
-        },
-        {
-          channel: "codex_desktop:message-for-view",
-          requestId: "wmi-status-1",
-          type: "codey-windows-wmi-sampler-status-response",
-        },
-      ],
-    );
-
-    const renamedMessageChannel = "codex_desktop:messages:v2";
-    const renamedMessageHandler = () => "renamed-message-handler";
-    fakeElectron.ipcMain.handle(renamedMessageChannel, renamedMessageHandler);
-    const guardedRenamedMessageHandler =
-      ipcHandlers.get(renamedMessageChannel);
-    assert.notEqual(guardedRenamedMessageHandler, renamedMessageHandler);
-    const renamedChannelStatus = guardedRenamedMessageHandler(null, {
-      type: "codey-git-request-guard-status",
-    });
-    assert.equal(renamedChannelStatus.status, "ok");
-    assert.equal(
-      renamedChannelStatus.guard.lastWrappedChannel,
-      renamedMessageChannel,
-    );
-    assert.equal(renamedChannelStatus.guard.ipcHandlersWrapped, 3);
-
-    const eventGitChannel = "codex_desktop:worker:git:event";
-    let eventGitCalls = 0;
-    const eventGitHandler = () => {
-      eventGitCalls += 1;
-    };
-    patchedElectron.ipcMain.on(eventGitChannel, eventGitHandler);
-    assert.notEqual(
-      patchedElectron.ipcMain.rawListeners(eventGitChannel)[0],
-      eventGitHandler,
-    );
-    patchedElectron.ipcMain.emit(eventGitChannel, null, { type: "noop" });
-    patchedElectron.ipcMain.removeListener(eventGitChannel, eventGitHandler);
-    patchedElectron.ipcMain.emit(eventGitChannel, null, { type: "noop" });
-    assert.equal(eventGitCalls, 1);
-    assert.equal(
-      globalThis.__CODEY_MAIN_GIT_REQUEST_GUARD__.snapshot().ipcHandlersWrapped,
-      4,
-    );
-    let onceGitCalls = 0;
-    patchedElectron.ipcMain.once(eventGitChannel, () => {
-      onceGitCalls += 1;
-    });
-    patchedElectron.ipcMain.emit(eventGitChannel, null, { type: "noop" });
-    patchedElectron.ipcMain.emit(eventGitChannel, null, { type: "noop" });
-    assert.equal(onceGitCalls, 1);
-
-    let gitGuardTime = 10_000;
-    let nextGitGuardTimer = 0;
-    const gitGuardTimers = new Map();
-    const mainGitGuard =
-      globalThis.__CODEY_CREATE_MAIN_GIT_REQUEST_GUARD__({
-        enabled: true,
-        clock: () => gitGuardTime,
-        scheduleTimeout(callback, delay) {
-          const id = ++nextGitGuardTimer;
-          gitGuardTimers.set(id, {
-            callback,
-            dueAt: gitGuardTime + delay,
-          });
-          return id;
-        },
-        cancelTimeout(id) {
-          gitGuardTimers.delete(id);
-        },
-        limits: {
-          perKeyIntervalMs: 20,
-          tokenRefillMs: 10,
-        },
-      });
-    const handledGitRequests = [];
-    const nativeGitHandler = (_event, message) => {
-      handledGitRequests.push(message);
-      return { accepted: message.request?.id };
-    };
-    const guardedGitHandler = mainGitGuard.wrapGitHandler(nativeGitHandler);
-    assert.equal(mainGitGuard.snapshot().gitHandlerPatched, false);
-    for (const method of ["branch-commits", "commit", "worktree-health-v2"]) {
-      const request = {
-        type: "worker-request",
-        workerId: "git",
-        request: { id: method, method: "subscribe-live-query", params: { query: { method } } },
-      };
-      assert.deepEqual(guardedGitHandler(null, request), { accepted: method });
-      assert.equal(handledGitRequests.at(-1), request);
-    }
-    assert.equal(mainGitGuard.snapshot().matched, 0);
-    assert.equal(mainGitGuard.snapshot().gitHandlerPatched, false);
-    handledGitRequests.length = 0;
-    const gitRequest = (id) => ({
-      type: "worker-request",
-      workerId: "git",
-      request: {
-        id,
-        method: "status-summary",
-        params: { cwd: "C:\\repo" },
-      },
-    });
-    const firstGitRequest = guardedGitHandler(null, gitRequest("status-1"));
-    const secondGitRequest = guardedGitHandler(null, gitRequest("status-2"));
-    assert.equal(handledGitRequests.length, 1);
-    assert.equal(mainGitGuard.snapshot().queued, 1);
-    await firstGitRequest;
-    gitGuardTime += 20;
-    for (const [id, timer] of [...gitGuardTimers]) {
-      if (timer.dueAt > gitGuardTime) continue;
-      gitGuardTimers.delete(id);
-      timer.callback();
-      await Promise.resolve();
-    }
-    assert.deepEqual(await secondGitRequest, { accepted: "status-2" });
-    assert.equal(handledGitRequests.length, 2);
-    const guardedStatusHandler = mainGitGuard.wrapStatusHandler(() => {
-      throw new Error("Codey status messages must not reach Codex");
-    });
-    const mainGitGuardStatus = guardedStatusHandler(null, {
-      type: "codey-git-request-guard-status",
-    });
-    assert.equal(mainGitGuardStatus.status, "ok");
-    assert.equal(mainGitGuardStatus.guard.gitHandlerPatched, true);
-    assert.equal(mainGitGuardStatus.guard.statusHandlerPatched, true);
-    assert.equal(mainGitGuardStatus.guard.strategy, "main-process-ipc");
 
     const desktopMcpConfig =
       'mcp_servers.codex_app={ command = "/opt/codex-app-mcp", args = ["server.mjs"] }';

@@ -238,7 +238,7 @@ pub(super) async fn spawn_codex(
             Ok(true) => {
                 spawned.performance_status = "degraded".to_string();
                 spawned.performance_detail =
-                    "新版兼容模式已启用：运行时线路、FastCtx、子代理与页面注入保持可用；Codex 已禁用主进程调试，因此 Windows Git/WMI、临时 WebView、执行环境回收和预加载界面补丁本次未启用"
+                    "兼容模式已启用：线路、FastCtx、子代理与页面注入保持可用；主进程增强本次未启用"
                         .to_string();
                 Ok(spawned)
             }
@@ -276,7 +276,7 @@ pub(super) async fn spawn_codex(
                     Ok((mut fallback, _, _)) => {
                         fallback.performance_status = "degraded".to_string();
                         fallback.performance_detail =
-                            "启动补丁未能安装，已自动以兼容模式启动；本次会话的 Windows Git、WMI 与隐藏宠物窗口优化未生效，下次启动将重试"
+                            "启动增强未能安装，已采用基础启动方式；页面增强仍会尝试加载，下次启动将重试"
                                 .to_string();
                         error_log::record_failure(
                             "patch_degraded",
@@ -349,7 +349,7 @@ pub(super) async fn spawn_codex(
             Ok(true) => {
                 spawned.performance_status = "degraded".to_string();
                 spawned.performance_detail =
-                    "新版兼容模式已启用：运行时线路、FastCtx、子代理与页面注入保持可用；Codex 已禁用主进程调试，因此临时 WebView、执行环境回收和预加载界面补丁本次未启用"
+                    "兼容模式已启用：线路、FastCtx、子代理与页面注入保持可用；主进程增强本次未启用"
                         .to_string();
                 Ok(spawned)
             }
@@ -953,15 +953,7 @@ pub(super) async fn prepare_codex_for_launch(app_dir: &std::path::Path) -> Resul
 
 #[cfg(any(windows, target_os = "macos"))]
 fn startup_patch_detail() -> String {
-    #[cfg(windows)]
-    {
-        "Windows 启动补丁已安装：WMI 周期采样保护等待运行时确认，临时 WebView 与执行环境回收已启用"
-            .to_string()
-    }
-    #[cfg(not(windows))]
-    {
-        "启动补丁已启用：临时 WebView 和执行环境会自动回收".to_string()
-    }
+    "主进程启动增强已安装".to_string()
 }
 
 #[cfg(not(windows))]

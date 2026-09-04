@@ -29,13 +29,6 @@ test("development preview fixtures cannot be mistaken for live credentials", () 
   );
 });
 
-test("development preview includes Windows-only injection status only on Windows", () => {
-  assert.match(
-    source,
-    /\.\.\.\(previewClientPlatform === "windows"[\s\S]*?id: "windows-wmi-sampler"/,
-  );
-});
-
 test("development preview follows the current runtime-status contract", () => {
   assert.match(source, /visibility: "internal"/);
   assert.match(source, /visibility: "feature"/);

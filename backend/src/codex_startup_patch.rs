@@ -689,8 +689,6 @@ mod tests {
         assert!(expression.contains("const disableMicro = disableWindowsOptimizations"));
         assert!(expression.contains("patchCodexRendererResponse"));
         assert!(expression.contains("pet settings avatar resources"));
-        assert!(expression.contains("avatarOverlayPrewarm"));
-        assert!(expression.contains("__CODEY_PATCH_CODEX_AVATAR_OVERLAY_PREWARM__"));
         assert!(expression.contains("restoreNativeModelAndSpeedControls: true"));
         assert!(!expression.contains("CodeyPetBlockedBrowserWindow"));
         assert!(!expression.contains("__CODEY_DISABLED_PET_MANAGER__"));
@@ -706,11 +704,6 @@ mod tests {
         assert!(expression.contains("get throttleExternalPluginFocusReconcile()"));
         assert!(expression.contains("get disableAppStateHeartbeat()"));
         assert!(expression.contains("get optionalMainBundlePatchFailures()"));
-        assert!(expression.contains("__CODEY_MAIN_GIT_REQUEST_GUARD__"));
-        assert!(expression.contains("wrapIpcHandler"));
-        assert!(expression.contains("electron/main"));
-        assert!(expression.contains("codey-git-request-guard-status"));
-        assert!(expression.contains("get mainGitRequestGuard()"));
         assert!(expression.contains("module._compile(source, filename)"));
         assert!(expression.contains("CODEY_SUBAGENT_GATE_RUNTIME_ID"));
         assert!(expression.contains("default Chinese locale"));
@@ -745,73 +738,6 @@ mod tests {
         assert!(expression.contains("features.hooks=true"));
         assert!(expression.contains("developer_instructions="));
         assert!(!expression.contains("__CODEY_RUNTIME_CONFIG_OVERRIDES__"));
-    }
-
-    #[test]
-    fn windows_lag_patch_only_short_circuits_the_wmi_snapshot_worker() {
-        let expression = patch_expression(PatchOptions {
-            disable_pet: false,
-            subagent_gate_active: true,
-        });
-
-        assert!(expression.contains("process.platform === \"win32\""));
-        assert!(expression.contains("isKnownWmiSnapshotWorkerName"));
-        assert!(expression.contains("isKnownWmiSnapshotWorkerThreadName"));
-        assert!(expression.contains("worker-option-name"));
-        assert!(expression.contains("__codeyRunWmiSamplerSelfTest"));
-        assert!(expression.contains("const recognizersPassed ="));
-        assert!(expression.contains("selfTestPassed"));
-        assert!(expression.contains("hasWmiSnapshotSourceSignature"));
-        assert!(expression.contains("Get-(?:CimInstance|WmiObject)"));
-        assert!(expression.contains("Win32_Process"));
-        assert!(expression.contains("Win32_Perf(?:Formatted|Raw)Data_PerfProc_Process"));
-        assert!(expression.contains("CodeyDisabledWmiSnapshotWorker"));
-        assert!(expression.contains("this.emit(\"message\", { type: \"ok\", value: [] })"));
-        assert!(expression.contains("codey-windows-wmi-sampler-status"));
-        assert!(expression.contains("get windowsWmiSampler()"));
-        assert!(expression.contains("super(filename, {"));
-    }
-
-    #[test]
-    fn automatic_lifecycle_patch_unsubscribes_subagents_and_reclaims_node_repl() {
-        let expression = patch_expression(PatchOptions {
-            disable_pet: false,
-            subagent_gate_active: true,
-        });
-
-        assert!(expression.contains("__CODEY_TEMP_WEBVIEW_LIFECYCLE__.close"));
-        assert!(expression.contains("__CODEY_TEMP_WEBVIEW_LIFECYCLE__.track"));
-        assert!(expression.contains("checkout-webview-presentation-changed"));
-        assert!(expression.contains("__CODEY_INSTALL_EXECUTION_REAPER__"));
-        assert!(expression.contains("const activeTurns = new Map()"));
-        assert!(expression.contains("\"completed\""));
-        assert!(expression.contains("\"aborted\""));
-        assert!(expression.contains("reclaimAuthorizedVersion"));
-        assert!(expression.contains("waitForReclaimBarrier"));
-        assert!(!expression.contains("evictStaleTurns"));
-        assert!(expression.contains("turnStateVersion"));
-        assert!(expression.contains("__CODEY_EXECUTION_PROCESS_LIFECYCLE__"));
-        assert!(expression.contains("child-process-snapshot-worker.js"));
-        assert!(!expression.contains("mcpDuplicateGraceMs"));
-        assert!(expression.contains("subagentThreadIds"));
-        assert!(expression.contains("unsubscribeThread"));
-        assert!(expression.contains("successfulThreadUnsubscribeStates"));
-        assert!(expression.contains("\"notSubscribed\""));
-        assert!(expression.contains("maxSubagentUnsubscribeAttempts"));
-        assert!(expression.contains("isStandaloneNodeReplProcess"));
-        assert!(expression.contains("processInfo?.kind === \"other\""));
-        assert!(expression.contains("cua_node[/\\\\](?:bin[/\\\\])?node_repl"));
-        assert!(!expression.contains("codeyMcpDuplicateReclaimScope"));
-        assert!(!expression.contains("reclaimAuthorizedScope"));
-        assert!(!expression.contains("rootsByIdentity"));
-        assert!(expression.contains("rootChildPid"));
-        assert!(!expression.contains("mcp-duplicate"));
-        assert!(expression.contains("process.kill(normalizedPid, \"SIGTERM\")"));
-        assert!(!expression.contains("codegraph\\.js\\s+serve"));
-        assert!(!expression.contains("mcp[/\\\\]server"));
-        assert!(expression.contains("node_repl"));
-        assert!(!expression.contains("handlers[\"child-process-kill\"]"));
-        assert!(!expression.contains("listProcessManagerSnapshot"));
     }
 
     #[tokio::test]

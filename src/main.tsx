@@ -372,10 +372,7 @@ if (import.meta.env.DEV) {
             sqliteRowsUpdated: 7,
             ghostTasksPruned: 2,
             performanceStatus: "ready",
-            performanceDetail:
-              previewClientPlatform === "windows"
-                ? "Windows 启动补丁已安装：WMI 周期采样保护等待运行时确认，临时 WebView 与执行环境回收已启用"
-                : "启动补丁已启用：临时 WebView 和执行环境会自动回收",
+            performanceDetail: "主进程启动增强已安装",
           },
           injectionScripts: [
             {
@@ -386,18 +383,6 @@ if (import.meta.env.DEV) {
               status: "effective",
               detail: "桥接函数可调用",
             },
-            ...(previewClientPlatform === "windows"
-              ? [
-                  {
-                    id: "windows-wmi-sampler",
-                    name: "Windows WMI 周期采样保护",
-                    source: "builtin" as const,
-                    visibility: "feature" as const,
-                    status: "effective" as const,
-                    detail: "已阻止 2 次 WMI 周期进程采样",
-                  },
-                ]
-              : []),
             {
               id: "model-whitelist",
               name: "模型白名单",

@@ -96,18 +96,21 @@ Codey 当前声明版本为 0.9.18，不固定安装某一版 Codex。macOS 根�
 
 本次实际进程携带 Inspector 参数，但对应端口拒绝连接；renderer CDP 可用。Codex Framework 的 Electron fuse wire 为 v1、9 项、`010011001`，`EnableNodeCliInspectArguments` 为关闭状态。由此确认本机主进程 Inspector 不可用的直接原因。保持只读检查，不改写 fuse、应用包或签名。桌面 bundle 的 `src-BXVxNf6C.js` 中仍有 `CODEX_CLI_PATH` 解析及 app-server 子进程入口，实际 app-server 参数包含 Codey 的运行时覆盖。
 
-最终保留两条能力路径：renderer CDP 承担页面增强，CLI 包装器承担运行配置；主进程 Inspector 仅在应用允许时提供额外补丁。CLI 兼容模式不会安装主进程 Git/WMI、临时 WebView 和执行环境回收补丁。官方文档公开的 [codex app](https://developers.openai.com/codex/cli/reference) 用于打开客户端，[app-server](https://developers.openai.com/codex/app-server) 用于客户端协议，未提供可替代现有桌面页面增强的公开注入接口；`CODEX_CLI_PATH` 按当前 bundle 的兼容入口维护，不标为官方稳定扩展 API。
+当前保留 renderer CDP 页面增强和 CLI 包装器运行配置；主进程 Inspector 可用时安装其余启动增强，包括运行配置、模型/页面兼容、子代理约束与诊断精简。官方文档公开的 [codex app](https://developers.openai.com/codex/cli/reference) 用于打开客户端，[app-server](https://developers.openai.com/codex/app-server) 用于客户端协议；`CODEX_CLI_PATH` 按当前 bundle 的兼容入口维护，不标为官方稳定扩展 API。
 
-| 补丁 | 当前证据与适用范围 | 保留与移除条件 |
-| --- | --- | --- |
-| WMI Worker 拦截 | 只在 Windows 主进程补丁中启用，要求目标名称或完整进程采样源码特征。当前 macOS bundle 未见旧 snapshot worker；另有 `Win32_ComputerSystem` 查询，不能据 CIM 字样拦截它。 | 无当前 Windows 安装包和实机采样证据，保留。完整自检仅证明拦截器可用。支持的 Windows 版本均已移除该采样器或限制其成本，并有运行记录佐证后，才能移除 Worker 包装及状态探针。 |
-| Git 请求保护 | 3280462 引入 renderer 保护，1a0c4c7 加入主进程 IPC。当前 `worker.js` 已有 `sharedRuns` 去重、`repositoryRuns` 排队和 watcher 复用，未证实上游彻底消除高频请求。 | 保留 Windows 上四个明确读取方法的有界限流；未知订阅、写入和其他 worker 不参与。主进程必须观察到受保护请求才允许 renderer 让出限流。Windows 压测确认并发、重复订阅和失败重试均有界后再移除两层保护及探针。 |
-| WebView、执行环境与页面 bundle 补丁 | 当前 main bundle 仍有 checkout WebView、attach/detach 与执行环境相关路径；存在路径不等于存在泄漏。本机 CLI 模式未安装这些补丁。 | 尚无能够证明全部上游修复的运行证据，保留唯一语义匹配与失败诊断。逐项验证上游释放行为后移除，不按版本号猜测。 |
-| Windows Store 暂存、环境隔离、Trace/Crashpad 保护 | 前两项处理实际平台启动和子进程环境；后两项是用户可选的诊断数据管理功能。 | 保留路径、权限、所有权及安全边界。它们不能因某个性能问题消失而一并删除。 |
+### 性能补丁删除与依赖审查（2026-09-05）
 
-本次清理复用 `http_response::read_bounded_body`，删除模型列表的重复限长读取实现；保留声明长度和分块读取的双重限制。发布脚本及标签打包流程均执行带锁定依赖的 Rust 测试和 Clippy，不能假设只监听 master/PR 的 CI 已验证标签。
+按维护者明确要求，彻底删除 WMI 周期采样 Worker 拦截、主进程和 renderer Git 请求限流、临时 WebView 生命周期管理、执行环境及子代理回收、avatar overlay 预加载改写与隐藏窗口限速。同步删除状态 IPC、自检、renderer 探针、平台筛选、预览状态、专属脚本和已失效的测试。上述行为交回 Codex 自身处理，删除决定不代表已确认所有上游性能问题都已修复。
 
-本次 macOS 验证记录：`pnpm run check`、`pnpm run test:js`（391 项）、`pnpm run vite:build`、`cargo fmt --all -- --check`、`cargo test --workspace --locked`（1594 项）、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`pnpm run build`、`git diff --check` 全部通过；`cargo-machete .` 未发现未使用依赖。计数来自当时共享工作区，包含其他任务尚未提交的模型测试。本次新增回归覆盖停止/恢复失败重试、用户脚本幂等、CDP JavaScript 异常与断连、CLI 真实执行失败和环境隔离、Git 保护范围/接管证据，以及不应被 WMI 保护拦截的 ComputerSystem 查询。
+WMI 拦截自 0.2.0 存在；Git renderer 保护由 3280462 引入，主进程 IPC 由 1a0c4c7 引入。审查时上游 `worker.js` 已有 `sharedRuns` 去重、`repositoryRuns` 排队与 watcher 复用，缺少当前 Windows 实机证据。历史实现可从 Git 查询，当前代码不再保留兼容分支或等待命中状态。
+
+Windows Store 运行文件暂存、CLI 环境隔离、Inspector 启动时防止 Worker 继承调试参数，以及用户可选的 Trace/Crashpad 管理仍有独立用途，予以保留。
+
+依赖审查结合三个 Cargo 包、前端清单、构建脚本、平台 cfg 和源码调用；`cargo-machete .` 未发现未使用的直接依赖。`pnpm why @mantine/hooks` 确认它是 Mantine Core 的必需 peer，删除根声明不会减少安装树；`cargo tree --locked -i zopfli -e features` 确认 ZIP 的 deflate 特性同时由 FastCtx 启用，仅调整本项目不会移除 Zopfli。系统代理、系统证书、二维码、压缩包读取及原生平台依赖均保留，未改动依赖版本或锁文件。此次删除减少注入代码和打包脚本，不宣称减少第三方依赖数量。
+
+上轮审查清理复用 `http_response::read_bounded_body`，删除模型列表的重复限长读取实现；保留声明长度和分块读取的双重限制。发布脚本及标签打包流程均执行带锁定依赖的 Rust 测试和 Clippy，不能假设只监听 master/PR 的 CI 已验证标签。
+
+此次删除后的 macOS 验证：`pnpm run check`、`pnpm run test:js`（348 项）、`cargo fmt --all -- --check`、`cargo test --workspace --locked`（1591 项）、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`pnpm run build`、`git diff --check` 全部通过。计数来自共享工作区，包含其他任务尚未提交的模型测试。回归确认原生 Worker 和 IPC handler 不再被 WMI/Git 补丁拦截，用户脚本隔离、CLI 启动和剩余页面增强保持通过。
 
 release 应用通过 `plutil -lint`、`codesign --verify --deep --strict` 和可执行权限检查；使用临时 HOME/CODEX_HOME，经 release 包装器调用内置 CLI 0.153.0，app-server 的 initialize 请求成功且退出码为 0。未重启当前桌面会话。`cargo check --workspace --all-targets --locked --target x86_64-pc-windows-msvc` 在 ring 的 C 编译阶段因本机缺少 Windows SDK 的 `assert.h` 失败，不计为 Windows 验证通过；原生 Windows 测试由发布/CI 工作流执行，仍需实际运行。
 

@@ -163,7 +163,6 @@ function OperationsPanelComponent({
   const injectionStatusPending = injectionScripts.length === 0;
   const injectionError =
     internalInjectionError || failedInjectionScriptCount > 0;
-  const isWindowsClient = status.clientPlatform === "windows";
   const resolvedCodexPath = status.codexAppPath || "/Applications/ChatGPT.app";
   const restartPending = Boolean(status.restartRequired);
   const codexVersion = status.codexAppVersion?.trim();
@@ -316,9 +315,7 @@ function OperationsPanelComponent({
                 : performanceDegraded
                   ? maintenance?.performanceDetail ||
                     "兼容模式运行正常，部分非必要精简策略未启用。"
-                  : isWindowsClient
-                    ? "精简策略、Windows 性能补丁与功能自检均已通过。"
-                    : "精简策略与功能自检均已通过。",
+                  : "精简策略与功能自检均已通过。",
       metrics: [],
       label: internalInjectionError
         ? "基础异常"

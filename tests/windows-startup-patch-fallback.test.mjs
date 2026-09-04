@@ -37,7 +37,7 @@ test("Windows startup compatibility failure cleans the process before compatible
   assert.match(windowsSpawn, /fallback\.performance_status = "degraded"/);
   assert.match(
     windowsSpawn,
-    /本次会话的 Windows Git、WMI 与隐藏宠物窗口优化未生效/,
+    /启动增强未能安装，已采用基础启动方式/,
   );
   assert.doesNotMatch(windowsSpawn, /宠物精简启动补丁未能确认生效/);
   assert.doesNotMatch(windowsSpawn, /petSlimRequested/);

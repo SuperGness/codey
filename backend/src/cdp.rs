@@ -19,10 +19,6 @@ const CDP_INJECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const INJECTION_STATUS_READ_TIMEOUT: Duration = Duration::from_secs(1);
 const INJECTION_DEADLINE_MARGIN: Duration = Duration::from_millis(100);
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-bridge.js");
-const GIT_REQUEST_GUARD_SCRIPT: &str =
-    include_str!("../../dist-overlay/inject/git-request-guard.js");
-const WINDOWS_WMI_SAMPLER_GUARD_SCRIPT: &str =
-    include_str!("../../dist-overlay/inject/windows-wmi-sampler-guard.js");
 const MODEL_WHITELIST_INJECT_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/model-whitelist-inject.js");
 const RENDERER_INJECT_SCRIPT: &str = concat!(
@@ -100,37 +96,6 @@ impl InjectionScriptVisibility {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InjectionHostPlatform {
-    Windows,
-    Other,
-}
-
-impl InjectionHostPlatform {
-    fn current() -> Self {
-        if cfg!(windows) {
-            Self::Windows
-        } else {
-            Self::Other
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum InjectionScriptApplicability {
-    All,
-    WindowsOnly,
-}
-
-impl InjectionScriptApplicability {
-    fn supports(self, platform: InjectionHostPlatform) -> bool {
-        match self {
-            Self::All => true,
-            Self::WindowsOnly => platform == InjectionHostPlatform::Windows,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct InjectionScriptStatus {
@@ -204,23 +169,6 @@ pub fn prepare_injection_scripts(
     hide_full_access_warning: bool,
     user_scripts: &[String],
 ) -> PreparedInjectionScripts {
-    prepare_injection_scripts_for_platform(
-        local_router_enabled,
-        slim_codex_pet,
-        hide_full_access_warning,
-        user_scripts,
-        InjectionHostPlatform::current(),
-    )
-}
-
-fn prepare_injection_scripts_for_platform(
-    local_router_enabled: bool,
-    slim_codex_pet: bool,
-    hide_full_access_warning: bool,
-    user_scripts: &[String],
-    platform: InjectionHostPlatform,
-) -> PreparedInjectionScripts {
-    use InjectionScriptApplicability::{All, WindowsOnly};
     use InjectionScriptVisibility::{Feature, Internal};
 
     let builtin_scripts = [
@@ -233,111 +181,8 @@ fn prepare_injection_scripts_for_platform(
               ? "桥接函数可调用" : """#
                 .to_string(),
             Internal,
-            All,
         ),
-        (
-            "git-request-guard",
-            "Windows Git 请求保护",
-            GIT_REQUEST_GUARD_SCRIPT,
-            r#"(() => {
-              const guard = window.__codeyGitRequestGuard;
-              if (!guard || typeof guard.snapshot !== "function") return "";
-              guard.ensureInstalled?.();
-              const snapshot = guard.snapshot();
-              if (snapshot.enabled === false && snapshot.installed === true) {
-                return "Git 请求保护已就绪，当前平台无需启用";
-              }
-              if (snapshot.enabled === true && snapshot.mainProcessProtected === true) {
-                return `Windows Git 请求限流已由主进程接管（持续速率 ${Math.round(60000 / snapshot.mainProcessSnapshot.tokenRefillMs)} 次/分钟）`;
-              }
-              if (snapshot.enabled === true && snapshot.bridgePatched === true) {
-                return `Windows Git 请求限流已由 Renderer 接管（持续速率 ${Math.round(60000 / snapshot.tokenRefillMs)} 次/分钟）`;
-              }
-              const bridge = window.electronBridge;
-              const workerMethod = typeof bridge?.sendWorkerMessageFromView;
-              const statusMethod = typeof bridge?.sendMessageFromView;
-              const reason = snapshot.mainProcessProbeError || "等待主进程保护注册";
-              return {
-                effective: false,
-                detail: `Git 保护待确认：${reason}（workerBridge=${workerMethod}，statusBridge=${statusMethod}）`,
-              };
-            })()"#
-                .to_string(),
-            Feature,
-            WindowsOnly,
-        ),
-        (
-            "windows-wmi-sampler",
-            "Windows WMI 周期采样保护",
-            WINDOWS_WMI_SAMPLER_GUARD_SCRIPT,
-            r#"(() => {
-              const guard = window.__codeyWindowsWmiSamplerGuard;
-              if (!guard || typeof guard.snapshot !== "function") return "";
-              guard.requestProbe?.();
-              const snapshot = guard.snapshot();
-              if (snapshot.enabled === false && snapshot.installed === true) {
-                return "WMI 周期采样保护已就绪，当前平台无需启用";
-              }
-              if (snapshot.blocked > 0) {
-                const matchReason = snapshot.mainProcessSnapshot?.lastMatchReason;
-                const matchDetail = matchReason === "source-signature"
-                  ? "（通过 Worker 源码特征识别）"
-                  : matchReason === "worker-option-name"
-                    ? "（通过 Worker 语义名称识别）"
-                    : "";
-                return `已阻止 ${snapshot.blocked} 次 WMI 周期进程采样${matchDetail}`;
-              }
-              if (snapshot.mainProcessSnapshot?.selfTestError) {
-                return {
-                  effective: false,
-                  detail: `WMI 周期采样保护自检失败：${snapshot.mainProcessSnapshot.selfTestError}`,
-                };
-              }
-              if (snapshot.installed === true && snapshot.selfTestConfirmed === true) {
-                const workersObserved =
-                  Number(snapshot.mainProcessSnapshot?.workersObserved) || 0;
-                let detail = "WMI Worker 拦截器已安装且完整自检通过";
-                if (snapshot.sourceReadFailures > 0) {
-                  detail += `；有 ${snapshot.sourceReadFailures} 个 Worker 源码无法检查，尚未观察到实际 WMI 采样`;
-                } else if (snapshot.sourceInspections > 0) {
-                  detail += `；已检查 ${snapshot.sourceInspections} 个 Worker，尚未观察到实际 WMI 采样`;
-                } else if (workersObserved > 0) {
-                  detail += `；已观察 ${workersObserved} 个 Worker，尚未触发实际 WMI 采样`;
-                } else {
-                  detail += "；尚未触发实际 WMI 采样";
-                }
-                return detail;
-              }
-              if (snapshot.sourceReadFailures > 0) {
-                return {
-                  effective: false,
-                  detail: `有 ${snapshot.sourceReadFailures} 个 Worker 源码无法检查，WMI 周期采样保护尚不能确认`,
-                };
-              }
-              if (snapshot.installed === true) {
-                const observationComplete =
-                  snapshot.observationMs >= snapshot.observationWindowMs;
-                const detail = observationComplete
-                  ? snapshot.sourceInspections > 0
-                    ? `已检查 ${snapshot.sourceInspections} 个 Worker，尚未命中完整 WMI 周期采样特征；若 WMI 仍高占用，当前来源尚未被识别`
-                    : "WMI 周期采样保护已安装，但观察窗内未匹配到可识别的目标 Worker"
-                  : snapshot.selfTestPassed === true
-                    ? "旧版 WMI Worker 拦截器自检通过，等待实际目标采样确认"
-                    : `WMI 周期采样保护已安装，等待首次采样确认（已观察 ${Math.floor(snapshot.observationMs / 1000)} 秒）`;
-                return {
-                  effective: false,
-                  detail,
-                };
-              }
-              return {
-                effective: false,
-                detail: `WMI 周期采样保护待确认：${snapshot.probeError || "等待主进程保护注册"}`,
-              };
-            })()"#
-                .to_string(),
-            Feature,
-            WindowsOnly,
-        ),
+
         (
             "model-whitelist",
             "模型白名单",
@@ -352,7 +197,6 @@ fn prepare_injection_scripts_for_platform(
             })()"#
                 .to_string(),
             Internal,
-            All,
         ),
         (
             "pet-control-shield",
@@ -374,7 +218,6 @@ fn prepare_injection_scripts_for_platform(
                 }
             ),
             Feature,
-            All,
         ),
         (
             "security-warning-shield",
@@ -397,7 +240,6 @@ fn prepare_injection_scripts_for_platform(
                 }
             ),
             Feature,
-            All,
         ),
         (
             "settings-overlay-loader",
@@ -409,7 +251,6 @@ fn prepare_injection_scripts_for_platform(
               : """#
                 .to_string(),
             Internal,
-            All,
         ),
         (
             "renderer-controls",
@@ -426,7 +267,6 @@ fn prepare_injection_scripts_for_platform(
             })()"#
                 .to_string(),
             Internal,
-            All,
         ),
         (
             "plugin-marketplace-compatibility",
@@ -438,7 +278,6 @@ fn prepare_injection_scripts_for_platform(
               ? "插件市场桥接已接管" : """#
                 .to_string(),
             Internal,
-            All,
         ),
         (
             "prompt-optimize",
@@ -455,13 +294,10 @@ fn prepare_injection_scripts_for_platform(
             })()"#
                 .to_string(),
             Feature,
-            All,
         ),
     ];
     let mut core_bundle = String::with_capacity(
         CODEY_BRIDGE_SCRIPT.len()
-            + GIT_REQUEST_GUARD_SCRIPT.len()
-            + WINDOWS_WMI_SAMPLER_GUARD_SCRIPT.len()
             + MODEL_WHITELIST_INJECT_SCRIPT.len()
             + RENDERER_INJECT_SCRIPT.len()
             + PET_CONTROL_SHIELD_SCRIPT.len()
@@ -471,10 +307,7 @@ fn prepare_injection_scripts_for_platform(
             + 4096,
     );
     let mut descriptors = Vec::with_capacity(builtin_scripts.len() + user_scripts.len());
-    for (id, name, script, probe, visibility, applicability) in builtin_scripts {
-        if !applicability.supports(platform) {
-            continue;
-        }
+    for (id, name, script, probe, visibility) in builtin_scripts {
         let descriptor = InjectionScriptDescriptor {
             id: id.to_string(),
             name: name.to_string(),
@@ -1395,12 +1228,11 @@ mod tests {
 
     #[test]
     fn user_scripts_run_once_per_document_and_retry_after_failure() {
-        let scripts = prepare_injection_scripts_for_platform(
+        let scripts = prepare_injection_scripts(
             false,
             false,
             false,
             &["window.attempts = (window.attempts || 0) + 1; if (window.fail) throw new Error('retry');".to_string()],
-            InjectionHostPlatform::Other,
         );
         let harness = r#"
 const assert = require('node:assert/strict');
@@ -1635,19 +1467,18 @@ assert.equal(nextPage.window.attempts, 1);
 
     #[test]
     fn core_scripts_share_one_cdp_document_script_and_user_scripts_stay_isolated() {
-        let prepared = prepare_injection_scripts_for_platform(
+        let prepared = prepare_injection_scripts(
             true,
             false,
             false,
             &["".to_string(), "window.userScriptRan = true;".to_string()],
-            InjectionHostPlatform::Windows,
         );
 
         assert_eq!(prepared.scripts.len(), 2);
         let core = &prepared.scripts[0];
         assert!(core.contains("window.__codeyBridgeHelpersInstalled"));
-        assert!(core.contains("__codeyGitRequestGuard"));
-        assert!(core.contains("__codeyWindowsWmiSamplerGuard"));
+        assert!(!core.contains("__codeyGitRequestGuard"));
+        assert!(!core.contains("__codeyWindowsWmiSamplerGuard"));
         assert!(core.contains("window.__codeyModelWhitelistPatch"));
         assert!(core.contains("/codex-model-catalog"));
         let shared_runtime_offset = core
@@ -1674,30 +1505,24 @@ assert.equal(nextPage.window.attempts, 1);
         assert!(prepared.scripts[1].contains("window.userScriptRan = true;"));
         assert!(prepared.scripts[1].contains(r#"status = "executed""#));
         assert!(prepared.scripts[1].contains("用户脚本 1 injection failed"));
-        assert_eq!(prepared.descriptors.len(), 11);
-        assert_eq!(prepared.descriptors[10].id, "user-script-1");
-        assert_eq!(prepared.descriptors[10].source, "user");
+        assert_eq!(prepared.descriptors.len(), 9);
+        assert_eq!(prepared.descriptors[8].id, "user-script-1");
+        assert_eq!(prepared.descriptors[8].source, "user");
         assert_eq!(
             prepared.descriptors[0].visibility,
             InjectionScriptVisibility::Internal
         );
-        assert_eq!(prepared.descriptors[7].id, "renderer-controls");
+        assert_eq!(prepared.descriptors[5].id, "renderer-controls");
         assert_eq!(
-            prepared.descriptors[7].visibility,
+            prepared.descriptors[5].visibility,
             InjectionScriptVisibility::Internal
         );
         assert_eq!(
-            prepared.descriptors[10].visibility,
+            prepared.descriptors[8].visibility,
             InjectionScriptVisibility::Feature
         );
         let snapshot_script = injection_status_snapshot_script(&prepared.descriptors);
         assert!(snapshot_script.contains("bridge-helpers"));
-        assert!(snapshot_script.contains("Windows Git 请求限流已由主进程接管"));
-        assert!(snapshot_script.contains("guard.ensureInstalled?.()"));
-        assert!(snapshot_script.contains("snapshot.mainProcessProtected === true"));
-        assert!(snapshot_script.contains("WMI 周期采样保护已安装"));
-        assert!(snapshot_script.contains("snapshot.blocked > 0"));
-        assert!(snapshot_script.contains("snapshot.selfTestConfirmed === true"));
         assert!(snapshot_script.contains("effective: false"));
         assert!(snapshot_script.contains("entry.status = \"inactive\""));
         assert!(snapshot_script.contains("[\"executed\", \"effective\", \"inactive\"].includes"));
@@ -1726,64 +1551,8 @@ assert.equal(nextPage.window.attempts, 1);
     }
 
     #[test]
-    fn windows_only_scripts_are_excluded_from_non_windows_injection() {
-        let user_scripts = ["window.userScriptRan = true;".to_string()];
-        let non_windows = prepare_injection_scripts_for_platform(
-            true,
-            false,
-            false,
-            &user_scripts,
-            InjectionHostPlatform::Other,
-        );
-        let windows = prepare_injection_scripts_for_platform(
-            true,
-            false,
-            false,
-            &user_scripts,
-            InjectionHostPlatform::Windows,
-        );
-
-        for windows_only_id in ["git-request-guard", "windows-wmi-sampler"] {
-            assert!(
-                non_windows
-                    .descriptors
-                    .iter()
-                    .all(|descriptor| descriptor.id != windows_only_id)
-            );
-            assert!(
-                windows
-                    .descriptors
-                    .iter()
-                    .any(|descriptor| descriptor.id == windows_only_id)
-            );
-        }
-        assert!(!non_windows.scripts[0].contains("__codeyGitRequestGuard"));
-        assert!(!non_windows.scripts[0].contains("__codeyWindowsWmiSamplerGuard"));
-        assert_eq!(
-            non_windows
-                .descriptors
-                .last()
-                .map(|descriptor| descriptor.id.as_str()),
-            Some("user-script-1")
-        );
-
-        let current = prepare_injection_scripts(true, false, false, &[]);
-        let current_has_windows_scripts = current
-            .descriptors
-            .iter()
-            .any(|descriptor| descriptor.id == "git-request-guard");
-        assert_eq!(current_has_windows_scripts, cfg!(windows));
-    }
-
-    #[test]
     fn disabled_local_router_installs_only_native_model_selection_mode() {
-        let prepared = prepare_injection_scripts_for_platform(
-            false,
-            false,
-            false,
-            &[],
-            InjectionHostPlatform::Other,
-        );
+        let prepared = prepare_injection_scripts(false, false, false, &[]);
 
         assert!(
             prepared
@@ -1803,12 +1572,11 @@ assert.equal(nextPage.window.attempts, 1);
 
     #[test]
     fn injection_statuses_preserve_script_order_and_report_missing_entries() {
-        let prepared = prepare_injection_scripts_for_platform(
+        let prepared = prepare_injection_scripts(
             true,
             false,
             false,
             &["window.userScriptRan = true;".to_string()],
-            InjectionHostPlatform::Windows,
         );
         let reported = vec![
             RuntimeInjectionStatus {
@@ -1837,14 +1605,10 @@ assert.equal(nextPage.window.attempts, 1);
         assert_eq!(statuses[0].id, "bridge-helpers");
         assert_eq!(statuses[0].status, "effective");
         assert_eq!(statuses[0].detail.as_deref(), Some("桥接函数可调用"));
-        assert_eq!(statuses[1].id, "git-request-guard");
+        assert_eq!(statuses[1].id, "model-whitelist");
         assert_eq!(statuses[1].status, "unknown");
-        assert_eq!(statuses[2].id, "windows-wmi-sampler");
-        assert_eq!(statuses[2].status, "unknown");
-        assert_eq!(statuses[3].id, "model-whitelist");
-        assert_eq!(statuses[3].status, "unknown");
-        assert_eq!(statuses[5].id, "security-warning-shield");
-        assert_eq!(statuses[5].status, "inactive");
+        assert_eq!(statuses[3].id, "security-warning-shield");
+        assert_eq!(statuses[3].status, "inactive");
         assert_eq!(
             statuses.last().map(|status| status.id.as_str()),
             Some("user-script-1")
