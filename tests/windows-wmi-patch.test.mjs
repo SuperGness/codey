@@ -60,7 +60,7 @@ test("Windows lag patch bypasses only the recurring WMI snapshot worker", async 
 
     try {
       const expression = await loadPatchExpression();
-      assert.equal((0, eval)(expression), "codey-startup-patch-installed-v37");
+      assert.equal((0, eval)(expression), "codey-startup-patch-installed-v38");
       const initialSampler =
         globalThis.__CODEY_CODEX_STARTUP_PATCH__.windowsWmiSampler;
       assert.equal(initialSampler.version, 4);

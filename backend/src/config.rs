@@ -1015,8 +1015,6 @@ impl CodeyConfig {
     }
 
     /// Runtime catalog model IDs that use Responses WebSocket.
-    /// Codex selects WebSocket transport at the provider level, so model-level
-    /// preferences are only valid when every runtime route supports WebSocket.
     pub(crate) fn runtime_websocket_model_aliases(&self) -> Vec<String> {
         if !self.runtime_supports_websockets() {
             return Vec::new();
@@ -1038,29 +1036,14 @@ impl CodeyConfig {
             .collect()
     }
 
-    /// Codex treats `supports_websockets` as a provider-wide capability and
-    /// sends incremental follow-ups that depend on the upstream WebSocket's
-    /// `previous_response_id`. A shared provider may therefore advertise the
-    /// capability only when every route can preserve that state end to end.
+    /// Codex gates WebSocket transport at the provider level, then applies each
+    /// model's `prefer_websockets` setting from the runtime catalog.
     pub(crate) fn runtime_supports_websockets(&self) -> bool {
-        let mut has_runtime_route = false;
-        for profile in &self.profiles {
-            if profile.provider_id().trim().is_empty() {
-                continue;
-            }
-            if profile.official_account {
-                if !self.official_account_available_this_launch {
-                    continue;
-                }
-            } else if profile.normalized_base_url().is_empty() {
-                continue;
-            }
-            has_runtime_route = true;
-            if !self.route_supports_websockets_this_launch(profile) {
-                return false;
-            }
-        }
-        has_runtime_route
+        self.profiles.iter().any(|profile| {
+            !profile.provider_id().trim().is_empty()
+                && (profile.official_account || !profile.normalized_base_url().is_empty())
+                && self.route_supports_websockets_this_launch(profile)
+        })
     }
 
     /// Whether one route can expose Codex's native Responses Web Search tool
@@ -2559,7 +2542,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_websocket_routes_disable_provider_websockets() {
+    fn mixed_websocket_routes_enable_only_websocket_models() {
         let mut websocket_route = ProviderProfile::new("WS Route");
         websocket_route.id = "route-ws".into();
         websocket_route.base_url = "https://ws.example/v1".into();
@@ -2587,8 +2570,14 @@ mod tests {
             .selected_models_by_provider
             .insert("route-http".into(), vec!["shared-model".into()]);
 
-        assert!(!config.runtime_supports_websockets());
-        assert!(config.runtime_websocket_model_aliases().is_empty());
+        assert!(config.runtime_supports_websockets());
+        assert_eq!(
+            config.runtime_websocket_model_aliases(),
+            vec![
+                local_router::model_alias("route-ws", "shared-model"),
+                local_router::model_alias("route-ws", "ws-only"),
+            ]
+        );
 
         config.profiles[1].supports_websockets = true;
         assert!(config.runtime_supports_websockets());

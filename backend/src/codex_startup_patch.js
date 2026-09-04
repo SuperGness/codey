@@ -1429,6 +1429,69 @@
     }
     return uniqueConfigs;
   };
+  const runtimeConfigValue = (configs, key) => {
+    for (let index = configs.length - 1; index >= 0; index -= 1) {
+      const config = configs[index];
+      if (runtimeOverrideKey(config) !== key) continue;
+      const value = config.slice(config.indexOf("=") + 1).trim();
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value.replace(/^'(.*)'$/s, "$1");
+      }
+    }
+    return null;
+  };
+  const threadTitleModelId = "gpt-5.6-luna";
+  const selectThreadTitleModel = (
+    configs = nativeRuntimeConfigOverrides,
+    suppliedCatalogModels = null,
+  ) => {
+    const providerId = String(runtimeConfigValue(configs, "model_provider") ?? "").trim();
+    const defaultModel = String(runtimeConfigValue(configs, "model") ?? "").trim();
+    const officialAccountAvailable =
+      providerId === "openai" ||
+      runtimeConfigValue(
+        configs,
+        `model_providers.${providerId}.requires_openai_auth`,
+      ) === true;
+    if (officialAccountAvailable) return threadTitleModelId;
+
+    let catalogModels = suppliedCatalogModels;
+    if (!Array.isArray(catalogModels)) {
+      try {
+        const catalogPath = runtimeConfigValue(configs, "model_catalog_json");
+        const catalog = JSON.parse(
+          process.getBuiltinModule("fs").readFileSync(catalogPath, "utf8"),
+        );
+        catalogModels = catalog?.models;
+      } catch {
+        catalogModels = [];
+      }
+    }
+    const modelByKey = new Map(
+      catalogModels
+        .map((model) => String(model?.slug ?? "").trim())
+        .filter(Boolean)
+        .map((model) => [model.toLowerCase(), model]),
+    );
+    const routeSeparator = defaultModel.indexOf("/");
+    const thirdPartyLuna = routeSeparator > 0
+      ? `${defaultModel.slice(0, routeSeparator)}/${threadTitleModelId}`
+      : threadTitleModelId;
+    return modelByKey.get(thirdPartyLuna.toLowerCase()) || defaultModel;
+  };
+  const threadTitleModel = selectThreadTitleModel();
+  Object.defineProperty(globalThis, "__CODEY_THREAD_TITLE_MODEL__", {
+    configurable: false,
+    value: threadTitleModel,
+    writable: false,
+  });
+  Object.defineProperty(globalThis, "__CODEY_SELECT_THREAD_TITLE_MODEL__", {
+    configurable: false,
+    value: selectThreadTitleModel,
+    writable: false,
+  });
   const appServerRuntimeConfigs = uniqueRuntimeConfigsByKey([
     appServerAnalyticsConfig,
     ...nativeRuntimeConfigOverrides.filter(
@@ -1927,6 +1990,63 @@
     {
       configurable: false,
       value: patchCodexMainAppStateHeartbeat,
+      writable: false,
+    },
+  );
+
+  // Codex fixes metadata generation to Luna. Keep that choice for an available
+  // official account, otherwise use the selected third-party route's Luna or
+  // its default model. The native caller already preserves its provisional
+  // local title when metadata generation fails.
+  const patchCodexMainThreadTitleModel = (source) => {
+    const titleCalls = [...source.matchAll(
+      /await\s+([$A-Z_a-z][$\w]*)\(\{[^{}]{0,1000}\bfeature:(`thread_title`|"thread_title"|'thread_title')/g,
+    )];
+    if (titleCalls.length !== 1) {
+      throw new Error(`Codey thread title call matched ${titleCalls.length} times`);
+    }
+    const helperName = titleCalls[0][1];
+    const helperStart = source.indexOf(`async function ${helperName}({`);
+    const signatureEnd = source.indexOf("}){", helperStart);
+    const helperEnd = source.indexOf("}function ", signatureEnd);
+    if (helperStart < 0 || signatureEnd < 0 || helperEnd < 0) {
+      throw new Error("Codey thread title metadata helper not found");
+    }
+    const helper = source.slice(helperStart, helperEnd + 1);
+    const featureName = /\bfeature:([$A-Z_a-z][$\w]*)/.exec(
+      source.slice(helperStart, signatureEnd),
+    )?.[1];
+    const nativeModelName = /\bmodel:([$A-Z_a-z][$\w]*)/.exec(helper)?.[1];
+    if (!featureName || !nativeModelName) {
+      throw new Error("Codey thread title metadata fields not found");
+    }
+    const escapedNativeModelName = nativeModelName.replace(/[$]/g, "\\$&");
+    const nativeModelPattern = new RegExp(
+      `\\bmodel:${escapedNativeModelName}\\b`,
+      "g",
+    );
+    const modelMatches = helper.match(nativeModelPattern)?.length ?? 0;
+    if (modelMatches !== 3) {
+      throw new Error(
+        `Codey thread title metadata model matched ${modelMatches} times`,
+      );
+    }
+    const selectedModel =
+      `${featureName}===\`thread_title\`?` +
+      `globalThis.__CODEY_THREAD_TITLE_MODEL__||${nativeModelName}:` +
+      nativeModelName;
+    const patchedHelper = helper.replace(
+      nativeModelPattern,
+      `model:${selectedModel}`,
+    );
+    return source.slice(0, helperStart) + patchedHelper + source.slice(helperEnd + 1);
+  };
+  Object.defineProperty(
+    globalThis,
+    "__CODEY_PATCH_CODEX_MAIN_THREAD_TITLE_MODEL__",
+    {
+      configurable: false,
+      value: patchCodexMainThreadTitleModel,
       writable: false,
     },
   );
@@ -3051,6 +3171,11 @@
         patchCodexMainAppStateHeartbeat,
         source,
       );
+      source = applyOptionalMainBundlePatch(
+        "threadTitleModel",
+        patchCodexMainThreadTitleModel,
+        source,
+      );
       if (disablePet) {
         source = applyOptionalMainBundlePatch(
           "avatarOverlayPrewarm",
@@ -3112,6 +3237,8 @@
         !hasOptionalMainBundlePatchFailure("desktopCesAnalytics");
       globalThis.__CODEY_APP_STATE_HEARTBEAT_SOURCE_PATCHED__ =
         !hasOptionalMainBundlePatchFailure("appStateHeartbeat");
+      globalThis.__CODEY_THREAD_TITLE_MODEL_SOURCE_PATCHED__ =
+        !hasOptionalMainBundlePatchFailure("threadTitleModel");
       mainBundleSourcePatched = true;
       module._compile(source, filename);
       } catch (error) {
@@ -3382,6 +3509,9 @@
     get disableAppStateHeartbeat() {
       return !hasOptionalMainBundlePatchFailure("appStateHeartbeat");
     },
+    get routeThreadTitleModel() {
+      return !hasOptionalMainBundlePatchFailure("threadTitleModel");
+    },
     get optionalMainBundlePatchFailures() {
       return optionalMainBundlePatchFailures.map((failure) => ({ ...failure }));
     },
@@ -3411,5 +3541,5 @@
     if (requireAppServerRuntimeOverrideValidation) return;
     try { process.getBuiltinModule("inspector").close(); } catch {}
   });
-  return "codey-startup-patch-installed-v37";
+  return "codey-startup-patch-installed-v38";
 })()

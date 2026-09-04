@@ -10,7 +10,7 @@ use std::ffi::{OsStr, OsString};
 #[cfg(any(windows, target_os = "macos"))]
 use std::io::Write;
 
-const PATCH_RESULT: &str = "codey-startup-patch-installed-v37";
+const PATCH_RESULT: &str = "codey-startup-patch-installed-v38";
 const APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT: &str =
     "codey-app-server-runtime-overrides-verified";
 const MAX_INSPECTOR_TARGET_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn patch_result_is_stable_for_launch_status_validation() {
-        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v37");
+        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v38");
         assert_eq!(
             APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT,
             "codey-app-server-runtime-overrides-verified"

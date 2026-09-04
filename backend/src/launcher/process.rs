@@ -611,7 +611,7 @@ async fn prepare_cli_wrapper(
     subagent_gate_active: bool,
     runtime_config_overrides: &[String],
 ) -> Result<CliWrapperLaunch> {
-    let wrapper = std::env::current_exe().context("定位 Codey 兼容执行器失败")?;
+    let codey = std::env::current_exe().context("定位 Codey 兼容执行器失败")?;
     #[cfg(windows)]
     let target = {
         let app_dir = app_dir.to_path_buf();
@@ -629,11 +629,7 @@ async fn prepare_cli_wrapper(
     let token = uuid::Uuid::new_v4().to_string();
     let overrides = serde_json::to_string(runtime_config_overrides)
         .context("序列化 Codex CLI 兼容运行时配置失败")?;
-    let environment = vec![
-        (
-            "CODEX_CLI_PATH".to_string(),
-            wrapper.to_string_lossy().to_string(),
-        ),
+    let mut environment = vec![
         (
             crate::codex_startup_patch::CLI_WRAPPER_TARGET_ENV.to_string(),
             target.to_string_lossy().to_string(),
@@ -655,11 +651,53 @@ async fn prepare_cli_wrapper(
             token.clone(),
         ),
     ];
+    #[cfg(windows)]
+    let wrapper = codey;
+    #[cfg(target_os = "macos")]
+    let wrapper = {
+        let path = crate::config::default_config_path().with_file_name("codex-cli-wrapper");
+        write_macos_cli_wrapper(&path, &codey, &environment)?;
+        path
+    };
+    environment.insert(
+        0,
+        (
+            "CODEX_CLI_PATH".to_string(),
+            wrapper.to_string_lossy().to_string(),
+        ),
+    );
     Ok(CliWrapperLaunch {
         listener,
         token: token.into_bytes(),
         environment,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn write_macos_cli_wrapper(
+    path: &std::path::Path,
+    codey: &std::path::Path,
+    environment: &[(String, String)],
+) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+
+    let mut script = String::from("#!/bin/sh\n");
+    for (name, value) in environment {
+        script.push_str(&format!("export {name}={}\n", quote(value)));
+    }
+    script.push_str(&format!(
+        "exec {} \"$@\"\n",
+        quote(&codey.to_string_lossy())
+    ));
+    crate::fs_util::atomic_write_private_with_parent(path, script.as_bytes())
+        .with_context(|| format!("写入 macOS Codex CLI 兼容入口失败：{}", path.display()))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("设置 macOS Codex CLI 兼容入口权限失败：{}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -948,6 +986,48 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
 #[cfg(test)]
 mod cli_wrapper_tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_cli_wrapper_restores_environment_after_codex_filters_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let codey = temp.path().join("fake codey's executable");
+        std::fs::write(
+            &codey,
+            "#!/bin/sh\nprintf '%s\\n' \"$CODEY_CODEX_CLI_WRAPPER_TARGET\" \"$1\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&codey, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let expected = "target with ' quote";
+        let wrapper = temp.path().join("codex-cli-wrapper");
+        write_macos_cli_wrapper(
+            &wrapper,
+            &codey,
+            &[(
+                crate::codex_startup_patch::CLI_WRAPPER_TARGET_ENV.to_string(),
+                expected.to_string(),
+            )],
+        )
+        .unwrap();
+
+        let output = std::process::Command::new(&wrapper)
+            .env_clear()
+            .arg("app-server")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("{expected}\napp-server\n")
+        );
+        assert_eq!(
+            std::fs::metadata(wrapper).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
 
     #[test]
     fn windows_cli_runtime_is_staged_with_all_required_siblings() {

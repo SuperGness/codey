@@ -73,6 +73,58 @@ async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrid
   }
 }
 
+test("thread title routing prefers official Luna, route Luna, then the default model", async () => {
+  const runtime = await loadPatchInIsolatedContext([]);
+  try {
+    const select = runtime.context.__CODEY_SELECT_THREAD_TITLE_MODEL__;
+    const base = [
+      'model_provider="codey_router"',
+      'model="relay/gpt-5.6-sol"',
+    ];
+    assert.equal(
+      select([
+        ...base,
+        "model_providers.codey_router.requires_openai_auth=true",
+      ], []),
+      "gpt-5.6-luna",
+    );
+    assert.equal(
+      select([
+        ...base,
+        "model_providers.codey_router.requires_openai_auth=false",
+      ], [{ slug: "relay/gpt-5.6-luna" }]),
+      "relay/gpt-5.6-luna",
+    );
+    assert.equal(
+      select([
+        ...base,
+        "model_providers.codey_router.requires_openai_auth=false",
+      ], [{ slug: "relay/gpt-5.6-sol" }]),
+      "relay/gpt-5.6-sol",
+    );
+
+    const fixture = [
+      "async function hfe(){let d=await $9({appServerClient:r,",
+      "feature:`thread_title`,prompt:u})}",
+      "async function $9({appServerClient:e,feature:i}){try{",
+      "let h=await V0({model:tj,threadSource:i});",
+      "return WA({feature:i,model:tj}),h}catch(e){",
+      "throw WA({feature:i,model:tj}),e}}",
+      "function yfe(){}const unrelated={model:tj};",
+    ].join("");
+    const patched = runtime.context.__CODEY_PATCH_CODEX_MAIN_THREAD_TITLE_MODEL__(
+      fixture,
+    );
+    assert.equal(
+      patched.match(/globalThis\.__CODEY_THREAD_TITLE_MODEL__/g)?.length,
+      3,
+    );
+    assert.match(patched, /const unrelated=\{model:tj\}/);
+  } finally {
+    runtime.restore();
+  }
+});
+
 test("startup patch disables Codex analytics and trims diagnostic polling", async () => {
   const Module = process.getBuiltinModule("module");
   const childProcess = process.getBuiltinModule("child_process");
@@ -121,7 +173,7 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
     ];
     const nativeRuntimeConfigOverrides = runtimeConfigOverrides;
     const expression = await loadPatchExpression(runtimeConfigOverrides);
-    assert.equal((0, eval)(expression), "codey-startup-patch-installed-v37");
+    assert.equal((0, eval)(expression), "codey-startup-patch-installed-v38");
 
     const patchedElectron = Module._load("electron");
     const passthroughGitHandler = () => "git-handler";
@@ -632,7 +684,7 @@ test("startup patch fails closed when app-server runtime override injection is n
       await loadPatchExpression(runtimeConfigOverrides, false, true),
       /appServerRuntimeOverrideTimeoutMs = 20_000/,
     );
-    assert.equal(runtime.result, "codey-startup-patch-installed-v37");
+    assert.equal(runtime.result, "codey-startup-patch-installed-v38");
     assert.equal(
       runtime.context.__CODEY_CODEX_STARTUP_PATCH__.appServerRuntimeOverrides.observed,
       false,
