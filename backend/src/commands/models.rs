@@ -1644,6 +1644,15 @@ fn native_model_state_for_provider(
     .map_err(|error| error.to_string())
 }
 
+pub(crate) fn native_subagent_model_state(
+    config: &CodeyConfig,
+    home: &std::path::Path,
+) -> Result<model_catalog::ModelSelectionState, String> {
+    let provider = codex_provider::current_provider(home)
+        .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))?;
+    native_model_state_for_provider(config, &provider, home)
+}
+
 pub(super) fn reconcile_subagent_models_for_mode(
     config: &mut CodeyConfig,
     model_state: &model_catalog::ModelSelectionState,

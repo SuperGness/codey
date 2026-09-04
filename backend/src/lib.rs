@@ -137,6 +137,11 @@ fn build_async_runtime() -> Result<tokio::runtime::Runtime> {
 async fn run(ui: NativeUpdateUi) -> Result<()> {
     error_log::initialize();
     let state = Arc::new(AppState::default());
+    let configured_codex_app_path = state.config.read().await.codex_app_path.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        error_log::refresh_codex_app_version(None, Some(&configured_codex_app_path));
+    })
+    .await;
     let codex_home = codex_config::codex_home();
     let local_router_enabled = state.config.read().await.local_router_enabled;
     if let Err(error) =

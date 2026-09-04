@@ -719,6 +719,7 @@ mod tests {
         assert!(expression.contains("writeCodeyPatchFailuresAsync"));
         assert!(expression.contains("optionalPatchFailureQueue"));
         assert!(expression.contains("--codey-record-error"));
+        assert!(expression.contains("codex: readCodexAppVersion()"));
         assert!(expression.replace("\r\n", "\n").contains(
             "setImmediate(() => {\n        try { process.getBuiltinModule(\"inspector\").close()"
         ));

@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, atomic::Ordering};
 use std::time::{Duration, Instant};
 
-use codey_runtime_core::app_paths::{codex_app_version, resolve_codex_app_dir_with_saved};
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
 
@@ -231,18 +230,11 @@ async fn codex_app_version_for_status(
     let checked_runtime_app_path = runtime_app_path.clone();
     let checked_configured_app_path = configured_app_path.clone();
     let version = tokio::task::spawn_blocking(move || {
-        let configured_app_path = checked_configured_app_path.trim();
-        let configured_app_path =
-            (!configured_app_path.is_empty()).then(|| PathBuf::from(configured_app_path));
-        let app_dir = checked_runtime_app_path.or_else(|| {
-            configured_app_path
-                .as_deref()
-                .and_then(|path| resolve_codex_app_dir_with_saved(Some(path), None))
-        });
-        app_dir
-            .as_deref()
-            .and_then(codex_app_version)
-            .unwrap_or_default()
+        error_log::refresh_codex_app_version(
+            checked_runtime_app_path.as_deref(),
+            Some(&checked_configured_app_path),
+        )
+        .unwrap_or_default()
     })
     .await
     .unwrap_or_default();

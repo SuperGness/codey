@@ -120,6 +120,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     }
   }
   const fakeElectron = {
+    app: { getVersion: () => "26.826.1724" },
     BrowserWindow: FakeBrowserWindow,
     protocol: {
       handle(scheme, handler) {
@@ -322,6 +323,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     // anchors so an incompatible field bundle can be adapted without access to
     // that exact build.
     for (const record of JSON.parse(asyncLogSpawns[0].input)) {
+      assert.equal(record.versions.codex, "26.826.1724");
       assert.equal(record.context.matchCount, 0);
       assert.ok(
         Array.isArray(record.context.excerpts) &&

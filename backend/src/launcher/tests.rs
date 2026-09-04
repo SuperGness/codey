@@ -382,6 +382,60 @@ fn native_subagent_runtime_uses_synced_upstream_model_without_route_targets() {
 }
 
 #[test]
+fn native_subagent_runtime_follows_the_current_provider_models_and_efforts() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        r#"model_provider = "route-a"
+
+[model_providers.route-a]
+name = "Route A"
+base_url = "https://route-a.example/v1"
+wire_api = "responses"
+experimental_bearer_token = "secret"
+"#,
+    )
+    .unwrap();
+    let mut route_a = ProviderProfile::new("Route A");
+    route_a.id = "route-a".into();
+    route_a.base_url = "https://route-a.example/v1".into();
+    route_a.api_key = "secret".into();
+    route_a.normalize();
+    let mut route_b = ProviderProfile::new("Route B");
+    route_b.id = "route-b".into();
+    route_b.base_url = "https://route-b.example/v1".into();
+    route_b.api_key = "secret".into();
+    route_b.normalize();
+    let config = CodeyConfig {
+        local_router_enabled: false,
+        active_profile_id: route_b.id.clone(),
+        profiles: vec![route_a, route_b],
+        selected_models_by_provider: std::collections::BTreeMap::from([
+            ("route-a".into(), vec!["model-a".into()]),
+            ("route-b".into(), vec!["model-b".into()]),
+        ]),
+        upstream_models_by_provider: std::collections::BTreeMap::from([
+            ("route-a".into(), vec!["model-a".into()]),
+            ("route-b".into(), vec!["model-b".into()]),
+        ]),
+        subagent_model: "route-b/model-b".into(),
+        subagent_reasoning_effort: "max".into(),
+        subagent_roles: crate::config::uniform_subagent_roles("route-b/model-b", "max"),
+        ..CodeyConfig::default()
+    };
+
+    let native = reconciled_native_subagent_runtime_config(&config, home.path());
+
+    assert_eq!(native.subagent_model, "model-a");
+    assert_eq!(native.subagent_reasoning_effort, "low");
+    assert!(
+        native.subagent_roles.values().all(|selection| {
+            selection.model == "model-a" && selection.reasoning_effort == "low"
+        })
+    );
+}
+
+#[test]
 fn persistent_session_provider_never_targets_the_launch_only_router_id() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(

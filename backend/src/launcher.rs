@@ -396,7 +396,11 @@ async fn resolve_configured_codex_app_dir(config: &CodeyConfig) -> Result<PathBu
     let configured_app_path =
         (!configured_app_path_is_empty).then(|| PathBuf::from(configured_app_path));
     tokio::task::spawn_blocking(move || {
-        resolve_codex_app_dir_with_saved(configured_app_path.as_deref(), None)
+        let app_dir = resolve_codex_app_dir_with_saved(configured_app_path.as_deref(), None);
+        if let Some(app_dir) = app_dir.as_deref() {
+            error_log::refresh_codex_app_version(Some(app_dir), None);
+        }
+        app_dir
     })
     .await
     .map_err(|error| anyhow::Error::new(error).context("定位 Codex App 任务异常退出"))?
@@ -1339,6 +1343,17 @@ fn native_subagent_runtime_config(config: &CodeyConfig) -> CodeyConfig {
     runtime_config
 }
 
+fn reconciled_native_subagent_runtime_config(
+    config: &CodeyConfig,
+    home: &std::path::Path,
+) -> CodeyConfig {
+    let mut runtime_config = native_subagent_runtime_config(config);
+    if let Ok(model_state) = crate::commands::native_subagent_model_state(&runtime_config, home) {
+        subagent_policy::reconcile_with_model_state(&mut runtime_config, Some(&model_state));
+    }
+    runtime_config
+}
+
 async fn prepare_native_runtime_state(
     home: &std::path::Path,
     config: &CodeyConfig,
@@ -1346,11 +1361,12 @@ async fn prepare_native_runtime_state(
     let runtime_config_home = home.to_path_buf();
     let fast_context_tools = config.fast_context_tools;
     let subagent_optimization = config.subagent_optimization;
-    let native_subagent_config = native_subagent_runtime_config(config);
-    let subagent_model = native_subagent_config.subagent_model;
-    let subagent_reasoning_effort = native_subagent_config.subagent_reasoning_effort;
-    let subagent_roles = native_subagent_config.subagent_roles;
+    let native_subagent_config = config.clone();
     let applied = tokio::task::spawn_blocking(move || {
+        let native_subagent_config = reconciled_native_subagent_runtime_config(
+            &native_subagent_config,
+            &runtime_config_home,
+        );
         apply_runtime_router_config(
             &runtime_config_home,
             RuntimeRouterConfigOptions {
@@ -1359,9 +1375,9 @@ async fn prepare_native_runtime_state(
                 default_model: None,
                 fast_context_tools,
                 subagent_optimization,
-                subagent_model: &subagent_model,
-                subagent_reasoning_effort: &subagent_reasoning_effort,
-                subagent_roles: Some(&subagent_roles),
+                subagent_model: &native_subagent_config.subagent_model,
+                subagent_reasoning_effort: &native_subagent_config.subagent_reasoning_effort,
+                subagent_roles: Some(&native_subagent_config.subagent_roles),
             },
         )
     })

@@ -109,6 +109,7 @@
         timestamp: now.toISOString(),
         platform,
         versions: {
+          codex: readCodexAppVersion(),
           electron: process.versions?.electron || undefined,
           chrome: process.versions?.chrome || undefined,
           node: process.versions?.node || undefined,
@@ -132,6 +133,18 @@
   const disableWindowsWmiSampler = disableWindowsOptimizations;
   const Module = process.getBuiltinModule("module");
   const originalLoad = Module._load;
+  const readCodexAppVersion = () => {
+    try {
+      const parent = typeof module === "object" ? module : undefined;
+      const electron = Reflect.apply(originalLoad, Module, ["electron", parent, false]);
+      const version = electron?.app?.getVersion?.();
+      return typeof version === "string" && version.trim()
+        ? version.trim()
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
   const mainGitGuardStatusRequestType = "codey-git-request-guard-status";
   const mainGitGuardStatusResponseType =
     "codey-git-request-guard-status-response";

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -10,6 +10,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use anyhow::Context;
 use chrono::{DateTime, FixedOffset, NaiveDate, SecondsFormat, Utc};
+use codey_runtime_core::app_paths::{codex_app_version, resolve_codex_app_dir_with_saved};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -31,6 +32,7 @@ const FAILURE_DEDUP_MAX_KEYS: usize = 64;
 static ERROR_LOG_WRITER: OnceLock<Mutex<ErrorLogWriter>> = OnceLock::new();
 static PANIC_LOG_HOOK: OnceLock<()> = OnceLock::new();
 static FAILURE_DEDUP: OnceLock<Mutex<FailureDedupCache>> = OnceLock::new();
+static CODEX_APP_VERSION: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,9 +53,31 @@ impl ErrorVersions {
     fn current() -> Self {
         Self {
             codey: Some(env!("CARGO_PKG_VERSION").to_string()),
+            codex: cached_codex_app_version(),
             ..Self::default()
         }
     }
+}
+
+fn cached_codex_app_version() -> Option<String> {
+    CODEX_APP_VERSION
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .ok()?
+        .clone()
+}
+
+pub fn refresh_codex_app_version(
+    app_dir: Option<&Path>,
+    saved_app_path: Option<&str>,
+) -> Option<String> {
+    let version = resolve_codex_app_dir_with_saved(app_dir, saved_app_path)
+        .as_deref()
+        .and_then(codex_app_version);
+    if let Ok(mut cached) = CODEX_APP_VERSION.get_or_init(|| RwLock::new(None)).write() {
+        *cached = version.clone();
+    }
+    version
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -205,7 +229,8 @@ fn normalize_record(record: &mut ErrorRecord) {
         .versions
         .codex
         .take()
-        .or_else(|| take_context_version(&mut record.context, "codexVersion"));
+        .or_else(|| take_context_version(&mut record.context, "codexVersion"))
+        .or_else(cached_codex_app_version);
     record.versions.electron = record
         .versions
         .electron
@@ -1055,6 +1080,28 @@ mod tests {
             error_log_path().ends_with(".codex-session-delete/codey-errors.log"),
             "{}",
             error_log_path().display()
+        );
+    }
+
+    #[test]
+    fn current_versions_include_detected_codex_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_dir = temp.path().join("Codex.app");
+        let contents = app_dir.join("Contents");
+        std::fs::create_dir_all(&contents).unwrap();
+        std::fs::write(
+            contents.join("Info.plist"),
+            "<key>CFBundleShortVersionString</key><string>26.826.1724</string>",
+        )
+        .unwrap();
+
+        assert_eq!(
+            refresh_codex_app_version(Some(&app_dir), None).as_deref(),
+            Some("26.826.1724")
+        );
+        assert_eq!(
+            ErrorVersions::current().codex.as_deref(),
+            Some("26.826.1724")
         );
     }
 

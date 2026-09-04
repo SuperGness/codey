@@ -31,6 +31,7 @@ use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
 use diagnostics::{
     clear_diagnostic_storage, refresh_diagnostic_storage_stats, refresh_trace_log_stats,
 };
+pub(crate) use models::native_subagent_model_state;
 #[cfg(test)]
 use models::{
     config_with_current_provider_models, preserve_selected_third_party_models,
