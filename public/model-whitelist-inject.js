@@ -2051,16 +2051,12 @@
     if (!catalog.loaded) {
       // Before the catalog arrives there is no safe way to distinguish a
       // legacy route alias from a legitimate upstream model containing `/`.
-      // Preserve the model byte-for-byte. A resume with any known persisted
-      // provider is still moved onto the HTTP-only Codey carrier so later turns
-      // can switch routes without using the old provider transport.
+      // Preserve the model byte-for-byte, but keep every new, forked, or resumed
+      // thread on Codey's carrier so a route alias cannot reach the old provider.
       const safeSource = method === "turn/start"
         ? paramsWithoutUnverifiedRouteMetadata(source, requestedModel)
         : source;
-      const resumeProvider = method === "thread/resume"
-        ? knownThreadProvider(safeSource)
-        : "";
-      const providerId = method === "thread/resume" && resumeProvider
+      const providerId = threadProviderRequestMethods.has(method)
         ? localRouterProviderId
         : requestedProvider;
       return providerId && threadProviderRequestMethods.has(method)

@@ -1390,7 +1390,7 @@ test("an explicit official settings choice beats an old same-id relay route", as
   runtime.patch.dispose();
 });
 
-test("a slash-containing model is preserved before the catalog finishes loading", async () => {
+test("a slash-containing model uses the local router before the catalog finishes loading", async () => {
   const runtime = await loadPatch({ status: "failed" }, [statsigClient()]);
   const message = {
     type: "mcp-request",
@@ -1398,16 +1398,16 @@ test("a slash-containing model is preserved before the catalog finishes loading"
       id: "catalog-bootstrap-route",
       method: "thread/start",
       params: {
-        model: "route-bootstrap/gpt-5.5",
-        model_provider: "openai",
+        model: "route-mte98opq-fo43xj/gpt-5.6-sol",
+        model_provider: "aihub",
       },
     },
   };
 
   const rewritten = runtime.patch.rewriteOutgoingMessage(message);
   assert.deepEqual(rewritten.request.params, {
-    model: "route-bootstrap/gpt-5.5",
-    modelProvider: "openai",
+    model: "route-mte98opq-fo43xj/gpt-5.6-sol",
+    modelProvider: "codey_router",
   });
   assert.equal(runtime.patch.isBlockedOutgoingMessage(rewritten), false);
   runtime.patch.dispose();
