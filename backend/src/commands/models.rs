@@ -3345,8 +3345,9 @@ mod tests {
         http_route.api_key = "route-http-secret".into();
         http_route.normalize();
         mixed.profiles.push(http_route);
-        assert!(websocket_transport_requires_restart(&enabled, &mixed));
-        assert!(!runtime_supports_current_routes_for_hot_reload(
+        assert!(!websocket_transport_requires_restart(&enabled, &mixed));
+        assert!(provider_route_requires_restart(&enabled, &mixed));
+        assert!(runtime_supports_current_routes_for_hot_reload(
             &enabled, &mixed
         ));
     }
