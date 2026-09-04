@@ -1955,6 +1955,9 @@ impl RouterServer {
                 subagent_request,
             );
         }
+        if bridge != ProtocolBridge::NativeResponses {
+            downstream.prepare_adapted_response_context(&mut body);
+        }
         if bridge == ProtocolBridge::NativeResponses
             && remove_codey_synthetic_previous_response_id(&mut body)
         {
@@ -6559,6 +6562,12 @@ trait ResponsesDownstream: Send {
         None
     }
 
+    fn prepare_adapted_response_context(&mut self, _body: &mut Value) -> bool {
+        false
+    }
+
+    fn remember_adapted_response(&mut self, _response_id: &str, _output: &[Value]) {}
+
     async fn write_error(
         &mut self,
         status: u16,
@@ -6646,6 +6655,14 @@ where
 
     fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
         self.probe.as_ref()
+    }
+
+    fn prepare_adapted_response_context(&mut self, body: &mut Value) -> bool {
+        self.inner.prepare_adapted_response_context(body)
+    }
+
+    fn remember_adapted_response(&mut self, response_id: &str, output: &[Value]) {
+        self.inner.remember_adapted_response(response_id, output);
     }
 
     async fn write_error(
@@ -6830,6 +6847,65 @@ struct WebSocketResponsesDownstream {
     upstream: Option<CachedUpstreamWebSocket>,
     websocket_backoffs: Arc<Mutex<UpstreamWebSocketBackoffs>>,
     stream_id: Option<String>,
+    adapted_history: AdaptedResponsesHistory,
+}
+
+#[derive(Debug, Default)]
+struct AdaptedResponsesHistory {
+    last: Option<(String, Vec<Value>)>,
+    pending_input: Option<Vec<Value>>,
+}
+
+impl AdaptedResponsesHistory {
+    fn prepare(&mut self, body: &mut Value) -> bool {
+        self.pending_input = None;
+        let Some(object) = body.as_object_mut() else {
+            return false;
+        };
+        let input = match object.get("input") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(input)) => input.clone(),
+            Some(input @ (Value::String(_) | Value::Object(_))) => vec![input.clone()],
+            Some(_) => return false,
+        };
+        let previous_response_id = object
+            .get("previous_response_id")
+            .filter(|value| !value.is_null())
+            .and_then(Value::as_str)
+            .map(str::trim);
+        let mut context = if let Some(previous_response_id) = previous_response_id {
+            if !is_codey_synthetic_response_id(previous_response_id) {
+                return false;
+            }
+            let Some((_, context)) = self
+                .last
+                .as_ref()
+                .filter(|(response_id, _)| response_id == previous_response_id)
+            else {
+                return false;
+            };
+            context.clone()
+        } else {
+            Vec::new()
+        };
+        context.extend(input);
+        self.pending_input = Some(context.clone());
+        if previous_response_id.is_none() {
+            return false;
+        }
+        object.remove("previous_response_id");
+        object.insert("input".to_string(), Value::Array(context));
+        true
+    }
+
+    fn remember(&mut self, response_id: &str, output: &[Value]) {
+        let Some(mut context) = self.pending_input.take() else {
+            return;
+        };
+        context.extend(output.iter().cloned());
+        // ponytail: Codex continuations are linear; retain branches only if a client needs them.
+        self.last = Some((response_id.to_string(), context));
+    }
 }
 
 enum IdleWebSocketEvent {
@@ -6858,6 +6934,7 @@ impl WebSocketResponsesDownstream {
             upstream: None,
             websocket_backoffs,
             stream_id: None,
+            adapted_history: AdaptedResponsesHistory::default(),
         }
     }
 
@@ -7513,6 +7590,14 @@ fn upstream_websocket_endpoint_is_unsupported(error: &anyhow::Error) -> bool {
 impl ResponsesDownstream for WebSocketResponsesDownstream {
     fn is_websocket(&self) -> bool {
         true
+    }
+
+    fn prepare_adapted_response_context(&mut self, body: &mut Value) -> bool {
+        self.adapted_history.prepare(body)
+    }
+
+    fn remember_adapted_response(&mut self, response_id: &str, output: &[Value]) {
+        self.adapted_history.remember(response_id, output);
     }
 
     async fn write_error(
@@ -10290,7 +10375,10 @@ impl ChatSseAccumulator {
             if let Some(refusal) = delta.get("refusal").and_then(Value::as_str) {
                 self.refusal.push_str(refusal);
             }
-            if let Some(tool_calls) = delta.get("tool_calls") {
+            if let Some(tool_calls) = delta
+                .get("tool_calls")
+                .filter(|tool_calls| !tool_calls.is_null())
+            {
                 self.ingest_tool_calls(tool_calls)?;
             }
             if let Some(function_call) = delta.get("function_call") {
@@ -10561,7 +10649,10 @@ where
         if let Some(refusal) = delta.get("refusal").and_then(Value::as_str) {
             events.extend(output.refusal_delta(refusal));
         }
-        if let Some(tool_calls) = delta.get("tool_calls") {
+        if let Some(tool_calls) = delta
+            .get("tool_calls")
+            .filter(|tool_calls| !tool_calls.is_null())
+        {
             let tool_calls = tool_calls
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("Chat stream delta.tool_calls 必须是数组"))?;
@@ -11164,6 +11255,7 @@ impl<'a> ResponsesSseState<'a> {
         } else {
             "completed"
         };
+        downstream.remember_adapted_response(&self.response_id, &output);
         let mut response = json!({
             "id":self.response_id,
             "object":"response",
@@ -14277,6 +14369,41 @@ mod tests {
     }
 
     #[test]
+    fn adapted_websocket_continuation_reuses_the_previous_response_context() {
+        let mut history = AdaptedResponsesHistory::default();
+        let mut first = json!({"input":"hello"});
+        assert!(!history.prepare(&mut first));
+        let first_output = vec![json!({
+            "type":"function_call",
+            "call_id":"call-1",
+            "name":"lookup",
+            "arguments":"{}"
+        })];
+        history.remember("resp_codey_first", &first_output);
+
+        let tool_output = json!({
+            "type":"function_call_output",
+            "call_id":"call-1",
+            "output":"done"
+        });
+        let mut continuation = json!({
+            "model":"provider-model",
+            "input":[tool_output.clone()],
+            "previous_response_id":"resp_codey_first"
+        });
+        assert!(history.prepare(&mut continuation));
+        assert!(continuation.get("previous_response_id").is_none());
+        assert_eq!(
+            continuation["input"],
+            json!(["hello", first_output[0].clone(), tool_output])
+        );
+        let converted = responses_to_chat_completions_body(&continuation).unwrap();
+        assert_eq!(converted["messages"][0]["content"], "hello");
+        assert_eq!(converted["messages"][1]["tool_calls"][0]["id"], "call-1");
+        assert_eq!(converted["messages"][2]["tool_call_id"], "call-1");
+    }
+
+    #[test]
     fn native_responses_rewrite_preserves_large_raw_fields() {
         let original = br#"{
             "model" : "route-a/gpt-5.4",
@@ -16576,7 +16703,7 @@ mod tests {
             let authorization = incoming_header(&request, "authorization").map(str::to_string);
             let body = serde_json::from_slice::<Value>(&request.body).unwrap();
             let sse = concat!(
-                "data: {\"id\":\"chatcmpl-stream\",\"created\":123,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello \"},\"finish_reason\":null}]}\n\n",
+                "data: {\"id\":\"chatcmpl-stream\",\"created\":123,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello \",\"tool_calls\":null},\"finish_reason\":null}]}\n\n",
                 "data: {\"id\":\"chatcmpl-stream\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-stream\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]},\"finish_reason\":null}]}\n\n",
                 "data: {\"id\":\"chatcmpl-stream\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
                 "data: {\"id\":\"chatcmpl-stream\",\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":3,\"total_tokens\":7}}\n\n",

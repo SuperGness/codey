@@ -495,7 +495,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "46");
+  assert.equal(patch.version, "47");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -2549,11 +2549,11 @@ test("model picker menu groups models under route headings without changing mode
   const officialItem = menu.appendChild(new FakeElementCore("div", {
     attributes: { role: "menuitemradio" },
   }));
-  officialItem.textContent = "[官] gpt-5.6-sol";
+  officialItem.textContent = "gpt-5.6-sol";
   const relayItem = menu.appendChild(new FakeElementCore("div", {
     attributes: { role: "menuitemradio" },
   }));
-  relayItem.textContent = "[中转] gpt-5.6-sol";
+  relayItem.textContent = "relay/gpt-5.6-sol";
 
   const runtime = await loadPatch({
     status: "ok",
@@ -3188,11 +3188,15 @@ test("query client discovery reaches deep provider stacks", async () => {
   runtime.patch.dispose();
 });
 
-test("opening the model picker discovers a replacement QueryClient", async () => {
+test("reopening the model picker discovers each replacement QueryClient", async () => {
   const routeModel = "tokenrouter/z-ai/glm-5.3-free";
   const body = new FakeElementCore("body");
+  const modelButton = body.appendChild(new FakeElementCore("button", {
+    attributes: { "aria-haspopup": "menu" },
+  }));
   const firstQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
   const replacementQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const secondReplacementQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
   const runtime = await loadPatch({
     status: "ok",
     models: ["gpt-5.6-sol", routeModel],
@@ -3204,11 +3208,19 @@ test("opening the model picker discovers a replacement QueryClient", async () =>
     memoizedProps: { queryClient: replacementQueryClient },
   };
 
-  runtime.dispatchDocumentEvent("pointerdown");
+  runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
   await Promise.resolve();
   await Promise.resolve();
 
   assert.deepEqual(replacementQueryClient.models(), ["gpt-5.6-sol", routeModel]);
+  body.__reactFiber$codeyTest = {
+    memoizedProps: { queryClient: secondReplacementQueryClient },
+  };
+  runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(secondReplacementQueryClient.models(), ["gpt-5.6-sol", routeModel]);
   assert.equal(
     runtime.wildcardScanCount(),
     1,

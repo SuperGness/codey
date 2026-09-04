@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "46";
+  const patchVersion = "47";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -1132,12 +1132,14 @@
     if (nativeSelectionOnly) return;
     if (!catalog.loaded || disposed || typeof document.querySelectorAll !== "function") return;
     ensureGroupedMenuStyles();
-    const byDisplayName = new Map();
+    const byMenuLabel = new Map();
     for (const modelName of catalog.models) {
       const presentation = modelPresentation(modelName);
       const displayName = cleanText(presentation.displayName);
       if (!displayName || !presentation.routeName || !presentation.modelName) continue;
-      byDisplayName.set(displayName, { modelName, presentation });
+      for (const menuLabel of [displayName, cleanText(modelName)]) {
+        if (menuLabel) byMenuLabel.set(menuLabel, { modelName, presentation, menuLabel });
+      }
     }
     const containers = Array.from(document.querySelectorAll(groupedMenuSelector) || []);
     for (const container of containers) {
@@ -1147,7 +1149,7 @@
       const looksLikeModelMenu = existingHeadings.length > 0 || items.some((item) => (
         Boolean(item.dataset?.codeyRouteModel)
         || Boolean(item.dataset?.codeySupersededModel)
-        || byDisplayName.has(cleanText(item.textContent))
+        || byMenuLabel.has(cleanText(item.textContent))
       ));
       if (!looksLikeModelMenu) continue;
       const itemParents = new Set(existingHeadings.length > 0 ? [container] : []);
@@ -1169,8 +1171,8 @@
             .map(cleanText)
             .includes(itemText);
         const matched = existingPresentationStillMatches
-          ? { modelName: existingModel, presentation: existingPresentation }
-          : byDisplayName.get(itemText);
+          ? { modelName: existingModel, presentation: existingPresentation, menuLabel: itemText }
+          : byMenuLabel.get(itemText);
         if (!matched?.presentation?.routeName || !matched.presentation.modelName) {
           const supersededModel = (
             existingModel && !catalog.modelNamesByKey.has(modelKey(existingModel))
@@ -1195,7 +1197,7 @@
         );
         replaceTextOnce(
           item,
-          matched.presentation.displayName,
+          matched.menuLabel,
           matched.presentation.modelName,
         );
         enhancedItems.push({ item, routeName: matched.presentation.routeName });
@@ -2480,14 +2482,17 @@
   let lastInteractionApply = 0;
   const interactionApplyIntervalMs = 2_000;
   const handleInteraction = (event) => {
-    if (
-      nativeSelectionOnly
-      && !event?.target?.closest?.(`${groupedMenuSelector}, [aria-haspopup]`)
-    ) return;
-    if (!nativeSelectionOnly) rememberMenuRouteIntent(event);
+    const pickerInteraction = Boolean(
+      event?.target?.closest?.(`${groupedMenuSelector}, [aria-haspopup]`),
+    );
+    if (nativeSelectionOnly && !pickerInteraction) return;
+    if (!nativeSelectionOnly) {
+      installGroupedModelMenuObserver();
+      rememberMenuRouteIntent(event);
+    }
     scheduleGroupedModelMenuEnhancement();
     const now = Date.now();
-    if (now - lastInteractionApply < interactionApplyIntervalMs) return;
+    if (!pickerInteraction && now - lastInteractionApply < interactionApplyIntervalMs) return;
     lastInteractionApply = now;
     // A new or reopened task can mount a fresh QueryClient while the previous
     // client remains callable. Probe the current React roots on picker
