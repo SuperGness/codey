@@ -51,7 +51,7 @@ test("pull requests enforce the unified Rust quality gate", () => {
   );
 });
 
-test("desktop release builds keep macOS Rust coverage and lean on the CI gate for Windows", () => {
+test("tag-triggered desktop releases independently enforce Rust quality gates", () => {
   assert.match(workflow, /^\s*RUSTFLAGS: -D warnings$/m);
   const macosJob = workflow.slice(
     workflow.indexOf("\n  macos:"),
@@ -61,15 +61,15 @@ test("desktop release builds keep macOS Rust coverage and lean on the CI gate fo
     workflow.indexOf("\n  windows:"),
     workflow.indexOf("\n  publish:"),
   );
-  // macOS has no dedicated CI job, so the release build keeps its Rust tests;
-  // formatting and clippy are covered by the Linux/Windows CI gate.
-  assert.match(macosJob, /cargo test --workspace --locked/);
-  assert.doesNotMatch(macosJob, /cargo fmt/);
-  assert.doesNotMatch(macosJob, /cargo clippy/);
-  // Windows Rust coverage lives in ci.yml's windows-rust job, so the release
-  // build skips Rust checks and only builds the package.
-  assert.doesNotMatch(windowsJob, /cargo test/);
-  assert.doesNotMatch(windowsJob, /cargo clippy/);
+  assertRustQualityGates(macosJob);
+  assertRustQualityGates(windowsJob);
+});
+
+test("local releases run the same locked Rust checks", () => {
+  const releaseScript = fs.readFileSync(new URL("../scripts/release.mjs", import.meta.url), "utf8");
+  assert.match(releaseScript, /\["fmt", "--all", "--", "--check"\]/);
+  assert.match(releaseScript, /\["test", "--workspace", "--locked"\]/);
+  assert.match(releaseScript, /\["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"\]/);
 });
 
 test("desktop builds generate embedded overlay assets before Cargo compiles", () => {

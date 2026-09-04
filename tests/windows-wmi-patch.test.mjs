@@ -216,6 +216,15 @@ test("Windows lag patch bypasses only the recurring WMI snapshot worker", async 
         value: [],
       });
 
+      // Current Codex also contains a ComputerSystem query. Merely mentioning
+      // PowerShell/CIM must not identify it as the recurring process sampler.
+      const systemInfo = new workerThreads.Worker(
+        'const command = "powershell -NoProfile Get-CimInstance Win32_ComputerSystem"; require("node:worker_threads").parentPort.postMessage(command)',
+        { eval: true },
+      );
+      assert.match((await once(systemInfo, "message"))[0], /Win32_ComputerSystem/);
+      await systemInfo.terminate();
+
       const normal = new workerThreads.Worker(
         'require("node:worker_threads").parentPort.postMessage("normal-worker-ran")',
         { eval: true, name: "child-process-snapshot-preview" },

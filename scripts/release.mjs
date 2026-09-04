@@ -209,8 +209,9 @@ function runChecks() {
   run("pnpm", ["run", "check"]);
   run("pnpm", ["run", "test:js"]);
   run("pnpm", ["run", "vite:build"]);
-  run("cargo", ["fmt", "--check"]);
-  run("cargo", ["test", "--manifest-path", "Cargo.toml", "--quiet"]);
+  run("cargo", ["fmt", "--all", "--", "--check"]);
+  run("cargo", ["test", "--workspace", "--locked"]);
+  run("cargo", ["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"]);
   run("git", ["diff", "--check"]);
 }
 

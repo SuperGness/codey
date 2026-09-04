@@ -814,6 +814,12 @@ async fn wait_for_cli_wrapper(
                 .is_ok_and(|result| result.is_ok())
                 && received == expected_token
             {
+                let mut failure = [0];
+                let end =
+                    tokio::time::timeout(Duration::from_millis(750), stream.read(&mut failure))
+                        .await
+                        .context("等待 Codex CLI 执行确认超时")??;
+                anyhow::ensure!(end == 0, "Codex CLI 兼容执行器未能执行目标程序");
                 return Ok::<_, anyhow::Error>(());
             }
         }
@@ -986,6 +992,32 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
 #[cfg(test)]
 mod cli_wrapper_tests {
     use super::*;
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn cli_handshake_requires_authenticated_exec_completion() {
+        use tokio::io::AsyncWriteExt;
+
+        for failed in [false, true] {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let sender = tokio::spawn(async move {
+                let mut invalid = tokio::net::TcpStream::connect(address).await.unwrap();
+                invalid.write_all(b"invalid").await.unwrap();
+                drop(invalid);
+                let mut valid = tokio::net::TcpStream::connect(address).await.unwrap();
+                valid.write_all(b"token").await.unwrap();
+                if failed {
+                    valid.write_all(b"!").await.unwrap();
+                }
+            });
+            let result = wait_for_cli_wrapper(listener, b"token".to_vec()).await;
+            assert_eq!(result.is_err(), failed);
+            sender.await.unwrap();
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

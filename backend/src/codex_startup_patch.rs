@@ -179,10 +179,14 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     {
         use std::os::unix::process::CommandExt;
 
-        if app_server {
-            notify_cli_wrapper_ready();
+        // Rust sockets are close-on-exec. EOF after the token confirms exec
+        // succeeded; an explicit failure byte prevents a premature ready signal.
+        let readiness = app_server.then(notify_cli_wrapper_ready).flatten();
+        let error = command.exec();
+        if let Some(mut stream) = readiness {
+            let _ = stream.write_all(b"!");
         }
-        Err(command.exec()).with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
+        Err(error).with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
     }
     #[cfg(windows)]
     {
@@ -193,7 +197,7 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
             .spawn()
             .with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))?;
         if app_server {
-            notify_cli_wrapper_ready();
+            drop(notify_cli_wrapper_ready());
         }
         let status = child
             .wait()
@@ -249,26 +253,22 @@ fn windows_package_resume_thread_id(arguments: &[OsString]) -> Result<Option<u32
 }
 
 #[cfg(any(windows, target_os = "macos"))]
-fn notify_cli_wrapper_ready() {
-    let Some(port) = std::env::var(CLI_WRAPPER_PORT_ENV)
+fn notify_cli_wrapper_ready() -> Option<std::net::TcpStream> {
+    let port = std::env::var(CLI_WRAPPER_PORT_ENV)
         .ok()
-        .and_then(|value| value.parse::<u16>().ok())
-    else {
-        return;
-    };
-    let Some(token) = std::env::var(CLI_WRAPPER_TOKEN_ENV)
+        .and_then(|value| value.parse::<u16>().ok())?;
+    let token = std::env::var(CLI_WRAPPER_TOKEN_ENV)
         .ok()
-        .filter(|value| !value.is_empty() && value.len() <= 128)
-    else {
-        return;
-    };
+        .filter(|value| !value.is_empty() && value.len() <= 128)?;
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    if let Ok(mut stream) =
+    let mut stream =
         std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(500))
-    {
-        let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(500)));
-        let _ = stream.write_all(token.as_bytes());
-    }
+            .ok()?;
+    stream
+        .set_write_timeout(Some(std::time::Duration::from_millis(500)))
+        .ok()?;
+    stream.write_all(token.as_bytes()).ok()?;
+    Some(stream)
 }
 
 #[cfg(any(windows, target_os = "macos", test))]

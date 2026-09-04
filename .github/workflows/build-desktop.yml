@@ -64,6 +64,12 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace --locked
 
+      - name: Rust format
+        run: cargo fmt --all -- --check
+
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
       - name: Build unsigned macOS app
         env:
           CODEY_SKIP_CODESIGN: "1"
@@ -188,6 +194,15 @@ jobs:
 
       - name: JavaScript tests
         run: pnpm run test:js
+
+      - name: Rust format
+        run: cargo fmt --all -- --check
+
+      - name: Rust tests
+        run: cargo test --workspace --locked
+
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Build Windows executable
         env:

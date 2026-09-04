@@ -933,7 +933,7 @@ async fn inject_initial_renderer(
         stage: Some("startup.renderer_injection".to_string()),
         recoverable: Some(false),
     };
-    let error = failure.into_error();
+    let mut error = failure.into_error();
     error_log::record_failure_with_metadata(
         "injection_failed",
         "inject_cdp_bridge",
@@ -978,6 +978,9 @@ async fn inject_initial_renderer(
             context,
         );
         eprintln!("Codex 注入失败后的进程清理失败：{stop_error:#}");
+        error = anyhow::anyhow!(
+            "{error:#}；Codex 注入失败后的进程清理失败，请退出残留 Codex 后重试：{stop_error:#}"
+        );
     }
     if let Some(child) = child.lock().await.take() {
         reap_child_after_cleanup(child, "reap_child_after_injection_failure").await;
@@ -1780,6 +1783,42 @@ impl CodeyRuntime {
     }
 
     pub async fn stop(&self) -> Result<()> {
+        self.stop_with_cleanup(
+            stop_codex_processes(
+                &self.codex_app_path,
+                self.process_id,
+                #[cfg(unix)]
+                self.process_group_id,
+                #[cfg(target_os = "macos")]
+                self.inspector_argument.as_deref(),
+            ),
+            restore_runtime_config_for_router_mode(
+                codex_home(),
+                self.applied_config.local_router_enabled,
+            ),
+        )
+        .await
+    }
+
+    async fn stop_with_cleanup(
+        &self,
+        process_stop: impl std::future::Future<Output = Result<()>>,
+        config_restore: impl std::future::Future<Output = Result<()>>,
+    ) -> Result<()> {
+        // A failed stop leaves a live Codex using this bridge, router and config.
+        // Keep its watchers too, so the retained runtime can be stopped again.
+        if let Err(error) = process_stop.await {
+            error_log::record_failure(
+                "cleanup_failed",
+                "stop_codex_processes",
+                format!("{error:#}"),
+                serde_json::json!({
+                    "appPath": self.codex_app_path,
+                    "processId": self.process_id,
+                }),
+            );
+            return Err(error.context("清理 Codex 遗留进程失败"));
+        }
         stop_runtime_watcher(
             &self.crashpad_guard_shutdown,
             &self.crashpad_guard_task,
@@ -1804,24 +1843,10 @@ impl CodeyRuntime {
             "Codex 退出监听器关闭失败",
         )
         .await;
-        let process_stop = stop_codex_processes(
-            &self.codex_app_path,
-            self.process_id,
-            #[cfg(unix)]
-            self.process_group_id,
-            #[cfg(target_os = "macos")]
-            self.inspector_argument.as_deref(),
-        )
-        .await;
-
         if let Some(child) = self.child.lock().await.take() {
             reap_child_after_cleanup(child, "reap_child_during_runtime_stop").await;
         }
-        let config_restore = restore_runtime_config_for_router_mode(
-            codex_home(),
-            self.applied_config.local_router_enabled,
-        )
-        .await;
+        config_restore.await.context("恢复 Codex 配置失败")?;
         let local_router_stop = match self.local_router.as_ref() {
             Some(local_router) => local_router.stop().await,
             None => Ok(()),
@@ -1834,32 +1859,7 @@ impl CodeyRuntime {
                 serde_json::json!({}),
             );
         }
-        if let Err(error) = &process_stop {
-            error_log::record_failure(
-                "cleanup_failed",
-                "stop_codex_processes",
-                format!("{error:#}"),
-                serde_json::json!({
-                    "appPath": self.codex_app_path,
-                    "processId": self.process_id,
-                }),
-            );
-        }
-        let mut failures = Vec::new();
-        if let Err(error) = process_stop {
-            failures.push(format!("清理 Codex 遗留进程失败：{error:#}"));
-        }
-        if let Err(error) = config_restore {
-            failures.push(format!("恢复 Codex 配置失败：{error:#}"));
-        }
-        if let Err(error) = local_router_stop {
-            failures.push(format!("关闭本地线路路由失败：{error:#}"));
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            anyhow::bail!(failures.join("；"))
-        }
+        local_router_stop.context("关闭本地线路路由失败")
     }
 }
 

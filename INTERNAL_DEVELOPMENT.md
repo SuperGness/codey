@@ -55,6 +55,8 @@ pnpm run dev 会先构建完整 Cargo 工作区，再启动 Codey，确保主程
 
 该命令先重建前端与注入脚本，再进行 Rust release 构建。macOS 会额外生成 target/release/bundle/macos/Codey.app；Windows 安装包由 .github/workflows/build-desktop.yml 使用 NSIS 生成。CI 的实际门禁以 .github/workflows/ci.yml 为准。
 
+macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.apple.quarantine /Applications/Codey.app` 移除隔离属性。此操作不会补齐签名或公证，发布包仍需单独处理。
+
 ## 发布
 
 发布脚本会同步 package.json、Cargo.toml 和 Cargo.lock 的版本，运行检查，创建提交与标签并推送：
@@ -78,11 +80,36 @@ CODEY_UPDATE_BASE_URL 可在编译时覆盖客户端更新源。发布标签版�
 2. 加载 Codey 配置，只读检查 Codex 配置、登录状态和应用位置；首次空配置可导入当前第三方线路。
 3. 在 Codex 未运行时完成会话索引维护、旧版 Codey 状态清理和诊断保护准备。
 4. 按设置启动本地路由、生成本次进程覆盖、Hook、子代理角色和注入脚本。
-5. 启动 Codex，确认 app-server 收到完整运行时覆盖，再通过 CDP 安装桥接与页面增强。macOS 的 `CODEX_CLI_PATH` 指向私有可执行包装脚本，由脚本恢复可能被 Codex 子进程过滤的兼容环境后再进入 Codey CLI 包装分支，禁止把完整 Codey 桌面入口直接暴露为 CLI。当前 Codex 未开放主进程 Inspector 时，以已确认的 CLI 兼容入口继续运行并标记为非致命降级；只有启动补丁与兼容入口都失败时才停止 Codex。
+5. 启动 Codex，通过启动补丁或 CLI 包装入口传递本次 app-server 配置，再通过 CDP 安装桥接与页面增强。macOS 的 `CODEX_CLI_PATH` 指向私有可执行包装脚本，由脚本恢复可能被 Codex 子进程过滤的兼容环境后再进入 Codey CLI 包装分支，禁止把完整 Codey 桌面入口直接暴露为 CLI。包装器使用官方 CLI 的 `-c` 参数，执行目标程序后才完成握手；握手证明目标已执行，不代表 app-server 已完成初始化或接受了所有配置。Inspector 不可用时，以已确认的 CLI 兼容入口继续运行并标记为非致命降级；两条入口都失败且存在必须的运行时约束时停止 Codex。
 6. 启动健康检查、退出监听、通知和平台保护任务。设置保存后，支持热更新的项目立即替换；影响启动参数、角色集合或能力目录的项目标记为需要重启。
-7. Codex 退出、系统信号或安装更新时，先停止 watcher 和路由，再停止受控 Codex，最后清理 Hook、租约及其他 Codey 自有运行状态。
+7. Codex 退出、系统信号或安装更新时，先确认受控 Codex 已停止，再关闭 watcher、回收 Child、恢复临时配置，最后停止路由。停止进程失败时保留 watcher、桥接、配置和路由；配置恢复失败时保留路由，使同一运行时可以重试。只有清理完成后才释放 Hook、租约及其他 Codey 自有运行状态。
 
 启动任一步失败都应走同一清理路径。会话数据的安全修复不会在退出时回滚；临时路由、Hook 和运行文件必须可恢复。
+
+### 启动与补丁核验基线（2026-09-05）
+
+Codey 当前声明版本为 0.9.18，不固定安装某一版 Codex。macOS 根据应用位置启动桌面客户端，CLI 包装器的目标来自该应用的 Resources，不能用 PATH 中的 `codex --version` 代替桌面运行版本。
+
+本次本机证据：`/Applications/ChatGPT.app` 的 Info.plist 与 app.asar/package.json 均为 26.901.22334，构建号 7746，签名标识 com.openai.codex、TeamIdentifier 2DC432GLL2；运行主进程及 app-server 均来自此应用。内置 CLI 为 0.153.0，PATH 中独立安装的 CLI 为 0.145.0。包内开发依赖声明 Electron 42.3.0，实际 CDP 报告 Chromium 152.0.7977.64；不能把开发依赖版本当成定制运行时版本。
+
+已读取早期标签 0.2.0（e8082e6）和 0.2.1（48937a3）：两版都传递 `--inspect-brk` 并把主进程补丁失败视为启动失败，WMI Worker 拦截已存在，尚无 Git 请求保护。两版之间主进程补丁文件未变，页面注入改为延迟加载会话工具；没有旧 Codex 安装包，无法证明当时实际二进制是否开放 Inspector。CLI 兼容入口由 e8d485b 于 2026-09-03 加入，2f844dd 随后隔离包装器环境，Windows Store 使用 86b1af4 的用户目录运行文件暂存方案。
+
+本次实际进程携带 Inspector 参数，但对应端口拒绝连接；renderer CDP 可用。Codex Framework 的 Electron fuse wire 为 v1、9 项、`010011001`，`EnableNodeCliInspectArguments` 为关闭状态。由此确认本机主进程 Inspector 不可用的直接原因。保持只读检查，不改写 fuse、应用包或签名。桌面 bundle 的 `src-BXVxNf6C.js` 中仍有 `CODEX_CLI_PATH` 解析及 app-server 子进程入口，实际 app-server 参数包含 Codey 的运行时覆盖。
+
+最终保留两条能力路径：renderer CDP 承担页面增强，CLI 包装器承担运行配置；主进程 Inspector 仅在应用允许时提供额外补丁。CLI 兼容模式不会安装主进程 Git/WMI、临时 WebView 和执行环境回收补丁。官方文档公开的 [codex app](https://developers.openai.com/codex/cli/reference) 用于打开客户端，[app-server](https://developers.openai.com/codex/app-server) 用于客户端协议，未提供可替代现有桌面页面增强的公开注入接口；`CODEX_CLI_PATH` 按当前 bundle 的兼容入口维护，不标为官方稳定扩展 API。
+
+| 补丁 | 当前证据与适用范围 | 保留与移除条件 |
+| --- | --- | --- |
+| WMI Worker 拦截 | 只在 Windows 主进程补丁中启用，要求目标名称或完整进程采样源码特征。当前 macOS bundle 未见旧 snapshot worker；另有 `Win32_ComputerSystem` 查询，不能据 CIM 字样拦截它。 | 无当前 Windows 安装包和实机采样证据，保留。完整自检仅证明拦截器可用。支持的 Windows 版本均已移除该采样器或限制其成本，并有运行记录佐证后，才能移除 Worker 包装及状态探针。 |
+| Git 请求保护 | 3280462 引入 renderer 保护，1a0c4c7 加入主进程 IPC。当前 `worker.js` 已有 `sharedRuns` 去重、`repositoryRuns` 排队和 watcher 复用，未证实上游彻底消除高频请求。 | 保留 Windows 上四个明确读取方法的有界限流；未知订阅、写入和其他 worker 不参与。主进程必须观察到受保护请求才允许 renderer 让出限流。Windows 压测确认并发、重复订阅和失败重试均有界后再移除两层保护及探针。 |
+| WebView、执行环境与页面 bundle 补丁 | 当前 main bundle 仍有 checkout WebView、attach/detach 与执行环境相关路径；存在路径不等于存在泄漏。本机 CLI 模式未安装这些补丁。 | 尚无能够证明全部上游修复的运行证据，保留唯一语义匹配与失败诊断。逐项验证上游释放行为后移除，不按版本号猜测。 |
+| Windows Store 暂存、环境隔离、Trace/Crashpad 保护 | 前两项处理实际平台启动和子进程环境；后两项是用户可选的诊断数据管理功能。 | 保留路径、权限、所有权及安全边界。它们不能因某个性能问题消失而一并删除。 |
+
+本次清理复用 `http_response::read_bounded_body`，删除模型列表的重复限长读取实现；保留声明长度和分块读取的双重限制。发布脚本及标签打包流程均执行带锁定依赖的 Rust 测试和 Clippy，不能假设只监听 master/PR 的 CI 已验证标签。
+
+本次 macOS 验证记录：`pnpm run check`、`pnpm run test:js`（391 项）、`pnpm run vite:build`、`cargo fmt --all -- --check`、`cargo test --workspace --locked`（1594 项）、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`pnpm run build`、`git diff --check` 全部通过；`cargo-machete .` 未发现未使用依赖。计数来自当时共享工作区，包含其他任务尚未提交的模型测试。本次新增回归覆盖停止/恢复失败重试、用户脚本幂等、CDP JavaScript 异常与断连、CLI 真实执行失败和环境隔离、Git 保护范围/接管证据，以及不应被 WMI 保护拦截的 ComputerSystem 查询。
+
+release 应用通过 `plutil -lint`、`codesign --verify --deep --strict` 和可执行权限检查；使用临时 HOME/CODEX_HOME，经 release 包装器调用内置 CLI 0.153.0，app-server 的 initialize 请求成功且退出码为 0。未重启当前桌面会话。`cargo check --workspace --all-targets --locked --target x86_64-pc-windows-msvc` 在 ring 的 C 编译阶段因本机缺少 Windows SDK 的 `assert.h` 失败，不计为 Windows 验证通过；原生 Windows 测试由发布/CI 工作流执行，仍需实际运行。
 
 ## 配置与数据
 
@@ -111,6 +138,8 @@ Codex 自动标题优先使用可用官方账号的 `gpt-5.6-luna`；没有官�
 cdp.rs 负责准备嵌入资源、安装桥接、首次注入和健康复核。src/overlay.tsx 挂载 React 控制台；public/ 中的脚本分别处理模型、插件、会话、提示词和平台增强。
 
 控制台首次打开时再加载完整界面。轻量健康探针持续确认桥接状态，只有确定桥接缺失时才重注入；页面忙或探测超时保持保守状态。
+
+用户脚本在同一文档成功执行后不会因桥接恢复而重复运行，失败可重试，新文档正常运行。内置脚本保留自身的恢复逻辑。桥接安装检查 Runtime.evaluate 的 exceptionDetails；失败释放新连接，成功替换后关闭旧 pump。new-document 注册随各次 CDP 会话维护，不使用跨连接 target 缓存。
 
 Codex 更新后，优先检查启动补丁、app-server 参数结构、入口资源和页面语义选择器。兼容判断必须唯一命中，不能用宽泛文本或 DOM 位置猜测。
 
@@ -157,3 +186,4 @@ Trace 与 Crashpad 保护只处理各自允许范围内的诊断数据，不触�
 - FastCtx 不提供 PDF、MCP Resources 或 shell 工具，这些任务继续使用 Codex 自带能力。
 - 请求日志是尽力而为的诊断数据，异常退出或队列过载可能丢失尾部记录。
 - 当前发布的 macOS 与 Windows 安装包可能未签名，正式分发前应补齐平台签名与公证。
+- 若系统拒绝终止 Codex，已建立的运行时会保留依赖供停止重试；若首次启动尚未建好运行时就发生注入失败且无法终止进程，Codey 退出仍会关闭路由，需要人工退出残留 Codex 后重启。当前测试不能替代 Windows 实机或完整桌面重启验证。

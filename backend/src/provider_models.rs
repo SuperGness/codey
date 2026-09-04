@@ -121,7 +121,13 @@ pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<Str
         if !status.is_success() {
             anyhow::bail!("获取上游模型失败：{endpoint} 返回 HTTP {status}");
         }
-        let body = read_bounded_body(response, endpoint).await?;
+        let body = crate::http_response::read_bounded_body(
+            response,
+            MAX_PROVIDER_MODEL_RESPONSE_BYTES,
+            "上游模型列表响应",
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("{error:#}：{endpoint}"))?;
         match model_ids(&body) {
             Ok(models) => return Ok(models),
             Err(error) if has_fallback && error.allows_endpoint_fallback() => continue,
@@ -132,39 +138,6 @@ pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<Str
         }
     }
     anyhow::bail!("上游没有返回可用的模型列表")
-}
-
-async fn read_bounded_body(mut response: reqwest::Response, endpoint: &str) -> Result<Vec<u8>> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_PROVIDER_MODEL_RESPONSE_BYTES as u64)
-    {
-        anyhow::bail!(
-            "上游模型列表响应超过安全上限 {} 字节：{endpoint}",
-            MAX_PROVIDER_MODEL_RESPONSE_BYTES
-        );
-    }
-
-    let initial_capacity = response
-        .content_length()
-        .and_then(|length| usize::try_from(length).ok())
-        .unwrap_or_default()
-        .min(MAX_PROVIDER_MODEL_RESPONSE_BYTES);
-    let mut body = Vec::with_capacity(initial_capacity);
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .with_context(|| format!("读取上游模型列表失败：{endpoint}"))?
-    {
-        if body.len().saturating_add(chunk.len()) > MAX_PROVIDER_MODEL_RESPONSE_BYTES {
-            anyhow::bail!(
-                "上游模型列表响应超过安全上限 {} 字节：{endpoint}",
-                MAX_PROVIDER_MODEL_RESPONSE_BYTES
-            );
-        }
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 fn model_endpoints(base: &str) -> Result<Vec<String>> {
@@ -343,7 +316,9 @@ mod tests {
 
         let error = fetch(&profile, &client).await.unwrap_err();
 
-        assert!(error.to_string().contains("响应超过安全上限"));
+        let detail = error.to_string();
+        assert!(detail.contains("响应超过安全上限"));
+        assert!(detail.contains(&format!("http://{address}/v1/models")));
         server.join().unwrap();
     }
 

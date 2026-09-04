@@ -214,7 +214,6 @@
     let tokenUpdatedAt = Number(clock()) || 0;
     let drainTimer = null;
     let drainTimerAt = Number.POSITIVE_INFINITY;
-    let gitHandlerPatched = false;
     let statusHandlerPatched = false;
     let ipcHandlersWrapped = 0;
     let lastWrappedChannel = "";
@@ -268,7 +267,8 @@
         query && typeof query.method === "string"
           ? query.method
           : workerMethod;
-      if (!targetMethods.has(method) && query == null) return null;
+      // Keep the same explicit read allowlist as the renderer fallback.
+      if (!targetMethods.has(method)) return null;
       const params =
         query?.params && typeof query.params === "object"
           ? query.params
@@ -440,9 +440,10 @@
     const snapshot = () => ({
       version: 1,
       enabled,
-      installed: enabled ? gitHandlerPatched : true,
+      installed: enabled ? counters.matched > 0 : true,
       strategy: enabled ? "main-process-ipc" : "not-required",
-      gitHandlerPatched,
+      // Registering an arbitrary IPC handler does not prove Git uses this path.
+      gitHandlerPatched: counters.matched > 0,
       statusHandlerPatched,
       ipcHandlersWrapped,
       lastWrappedChannel,
@@ -461,10 +462,8 @@
     const wrapGitHandler = (handler, channel = "") => {
       if (typeof handler !== "function") return handler;
       if (handler.__codeyMainGitRequestGuardOwner === api) {
-        gitHandlerPatched = true;
         return handler;
       }
-      gitHandlerPatched = true;
       const wrapped = function (...args) {
         if (!enabled) return Reflect.apply(handler, this, args);
         const message = args[1];
@@ -2297,8 +2296,11 @@
       return null;
     };
 
-    // Codex starts this telemetry worker every 30 seconds. On Windows the
-    // worker shells out to PowerShell for two full CIM/WMI process scans.
+    // Compatibility with the Windows sampler targeted since Codey v0.2.0:
+    // two full CIM/WMI process scans per telemetry interval. A matching worker
+    // is required; installation/self-test does not prove current Codex uses it.
+    // Remove after supported Windows bundles and runtime traces confirm the
+    // sampler is gone or upstream bounds its cost (see INTERNAL_DEVELOPMENT.md).
     // Return the protocol's valid empty snapshot without creating a thread,
     // process, timer, or PowerShell child.
     class CodeyDisabledWmiSnapshotWorker extends EventEmitter {

@@ -537,6 +537,13 @@ fn append_guarded_script(
     let id = serde_json::to_string(&descriptor.id).expect("script id should serialize");
     let name = serde_json::to_string(&descriptor.name).expect("script name should serialize");
     let source = serde_json::to_string(descriptor.source).expect("script source should serialize");
+    // Built-ins repair their own state on reconnect; user scripts may install
+    // listeners or timers and should run only once per document after success.
+    if descriptor.source == "user" {
+        bundle.push_str("\nif (window.__codeyInjectionStatus?.[");
+        bundle.push_str(&id);
+        bundle.push_str("]?.status !== \"executed\") {\n");
+    }
     bundle.push_str("\n(window.__codeyInjectionStatus ||= Object.create(null))[");
     bundle.push_str(&id);
     bundle.push_str("] = { id: ");
@@ -574,6 +581,9 @@ fn append_guarded_script(
     bundle.push_str(");\n  console.error(\"[Codey] ");
     bundle.push_str(&descriptor.name);
     bundle.push_str(" injection failed\", error);\n}\n");
+    if descriptor.source == "user" {
+        bundle.push_str("}\n");
+    }
 }
 
 pub async fn retry_inject_with_scripts(
@@ -1382,6 +1392,49 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_scripts_run_once_per_document_and_retry_after_failure() {
+        let scripts = prepare_injection_scripts_for_platform(
+            false,
+            false,
+            false,
+            &["window.attempts = (window.attempts || 0) + 1; if (window.fail) throw new Error('retry');".to_string()],
+            InjectionHostPlatform::Other,
+        );
+        let harness = r#"
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const script = JSON.parse(process.argv[1]);
+const context = () => vm.createContext({ window: {}, console: { error() {} } });
+const page = context();
+page.window.fail = true;
+vm.runInContext(script, page);
+assert.equal(page.window.__codeyInjectionStatus['user-script-1'].status, 'failed');
+page.window.fail = false;
+vm.runInContext(script, page);
+vm.runInContext(script, page);
+assert.equal(page.window.attempts, 2);
+assert.equal(page.window.__codeyInjectionStatus['user-script-1'].status, 'executed');
+const nextPage = context();
+vm.runInContext(script, nextPage);
+vm.runInContext(script, nextPage);
+assert.equal(nextPage.window.attempts, 1);
+"#;
+        let output = std::process::Command::new("node")
+            .args([
+                "-e",
+                harness,
+                &serde_json::to_string(&scripts.scripts[1]).unwrap(),
+            ])
+            .output()
+            .expect("Node should run the generated user script");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn injection_deadline_leaves_time_for_slow_windows_renderer_startup() {

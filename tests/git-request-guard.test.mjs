@@ -90,6 +90,7 @@ function createRuntime({
       const guard = {
         enabled: true,
         gitHandlerPatched: true,
+        matched: mainGuardReady === "unobserved" ? 0 : 1,
         statusHandlerPatched: true,
         strategy: "main-process-ipc",
         tokenRefillMs: 1_000,
@@ -216,7 +217,7 @@ test("Git request guard leaves unknown and mutating worker requests untouched", 
   assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().matched, 0);
 });
 
-test("Git request guard covers renamed live queries without a duplicated worker id", async () => {
+test("Git request guard leaves unknown live queries without a duplicated worker id untouched", async () => {
   const runtime = createRuntime();
   const liveRequest = (id) => ({
     type: "worker-request",
@@ -241,16 +242,10 @@ test("Git request guard covers renamed live queries without a duplicated worker 
     liveRequest("live-2"),
   );
 
-  assert.equal(runtime.nativeCalls.length, 1);
-  assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().matched, 2);
-  assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().queued, 1);
-  await runtime.advance(2_000);
   await secondDelivery;
   assert.equal(runtime.nativeCalls.length, 2);
-  assert.equal(
-    runtime.window.__codeyGitRequestGuard.snapshot().lastMethod,
-    "worktree-health-v2",
-  );
+  assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().matched, 0);
+  assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().queued, 0);
 });
 
 test("Git request guard spaces duplicate read requests and cancels queued work", async () => {
@@ -301,7 +296,7 @@ test("Git request guard spaces duplicate read requests and cancels queued work",
   assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().sent, 2);
 });
 
-test("Git request guard recognizes live-query subscriptions independently of query names", async () => {
+test("Git request guard only protects explicitly supported live-query reads", async () => {
   const runtime = createRuntime();
   const protectedSubscription = gitRequest("live-review", "subscribe-live-query", {
     operationSource: "review_model",
@@ -333,8 +328,19 @@ test("Git request guard recognizes live-query subscriptions independently of que
   );
 
   assert.equal(runtime.nativeCalls.length, 2);
-  assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().matched, 2);
-  assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().lastMethod, "branch-commits");
+  assert.equal(runtime.nativeCalls[1].message, unrelatedSubscription);
+  assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().matched, 1);
+  assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().lastMethod, "review-summary");
+});
+
+test("Git request guard retains renderer protection until main observes a Git request", async () => {
+  const runtime = createRuntime({ mainGuardReady: "unobserved" });
+  await runtime.flush();
+  assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().mainProcessProtected, false);
+  await runtime.window.electronBridge.sendWorkerMessageFromView(
+    "git", gitRequest("status", "status-summary", { cwd: "C:\\repo" }),
+  );
+  assert.equal(runtime.window.__codeyGitRequestGuard.snapshot().matched, 1);
 });
 
 test("Git request guard allows a small burst and caps the sustained global rate", async () => {

@@ -1488,6 +1488,54 @@ async fn install_bridge_immediately_evaluates_new_document_scripts() {
 }
 
 #[tokio::test]
+async fn install_bridge_rejects_javascript_exceptions_and_closes_failed_sessions() {
+    for failing_evaluation in [1, 2] {
+        let (url, request_rx) = spawn_cdp_server(move |mut socket| async move {
+            let mut evaluations = 0;
+            loop {
+                let command = recv_json(&mut socket).await;
+                if command["method"] == "Runtime.evaluate" {
+                    evaluations += 1;
+                }
+                if evaluations == failing_evaluation {
+                    send_json(
+                        &mut socket,
+                        json!({
+                            "id": command["id"],
+                            "result": { "exceptionDetails": {
+                                "text": "Uncaught",
+                                "exception": { "description": "Error: injection failed" }
+                            }}
+                        }),
+                    )
+                    .await;
+                    assert!(matches!(
+                        socket.next().await,
+                        None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+                    ));
+                    return;
+                }
+                send_json(&mut socket, json!({ "id": command["id"], "result": {} })).await;
+            }
+        })
+        .await;
+        let error = bridge::install_bridge(
+            &url,
+            BRIDGE_BINDING_NAME,
+            noop_handler(),
+            &["throw new Error('injection failed');".to_string()],
+        )
+        .await
+        .expect_err("JavaScript exception must fail bridge installation");
+        assert!(error.to_string().contains("injection failed"), "{error:#}");
+        tokio::time::timeout(Duration::from_secs(1), request_rx)
+            .await
+            .expect("failed installation must release the socket")
+            .expect("CDP server should finish");
+    }
+}
+
+#[tokio::test]
 async fn install_bridge_returns_after_installing_and_keeps_message_pump_alive() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
         for expected_id in 1..=5 {

@@ -528,7 +528,7 @@ async fn stop_codey_runtime_locked(state: &Arc<AppState>) -> Result<Value, Strin
     if let Some(runtime) = runtime {
         if let Err(error) = runtime.stop().await {
             *state.runtime.lock().await = Some(runtime);
-            return Err(error.to_string());
+            return Err(format!("{error:#}"));
         }
     } else {
         let local_router_enabled = state.config.read().await.local_router_enabled;

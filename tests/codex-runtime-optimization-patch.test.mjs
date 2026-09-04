@@ -201,7 +201,8 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
       requestId: "git-status-1",
     });
     assert.equal(startupGitGuardStatus.status, "ok");
-    assert.equal(startupGitGuardStatus.guard.gitHandlerPatched, true);
+    assert.equal(startupGitGuardStatus.guard.gitHandlerPatched, false);
+    assert.equal(startupGitGuardStatus.guard.installed, !startupGitGuardStatus.guard.enabled);
     assert.equal(startupGitGuardStatus.guard.statusHandlerPatched, true);
     assert.equal(startupGitGuardStatus.guard.ipcHandlersWrapped, 2);
     const startupWmiSamplerStatus = ipcHandlers.get(
@@ -312,6 +313,19 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
       return { accepted: message.request?.id };
     };
     const guardedGitHandler = mainGitGuard.wrapGitHandler(nativeGitHandler);
+    assert.equal(mainGitGuard.snapshot().gitHandlerPatched, false);
+    for (const method of ["branch-commits", "commit", "worktree-health-v2"]) {
+      const request = {
+        type: "worker-request",
+        workerId: "git",
+        request: { id: method, method: "subscribe-live-query", params: { query: { method } } },
+      };
+      assert.deepEqual(guardedGitHandler(null, request), { accepted: method });
+      assert.equal(handledGitRequests.at(-1), request);
+    }
+    assert.equal(mainGitGuard.snapshot().matched, 0);
+    assert.equal(mainGitGuard.snapshot().gitHandlerPatched, false);
+    handledGitRequests.length = 0;
     const gitRequest = (id) => ({
       type: "worker-request",
       workerId: "git",

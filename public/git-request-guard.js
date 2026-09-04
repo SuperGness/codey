@@ -120,7 +120,8 @@
         ? outerParams.query
         : null;
     const method = query && typeof query.method === "string" ? query.method : workerMethod;
-    if (!targetMethods.has(method) && query == null) return null;
+    // Unknown subscriptions may not be Git reads; never delay them by shape alone.
+    if (!targetMethods.has(method)) return null;
 
     const params =
       query?.params && typeof query.params === "object" ? query.params : outerParams;
@@ -524,7 +525,8 @@
         if (
           result?.status === "ok" &&
           guard?.enabled === true &&
-          guard?.gitHandlerPatched === true
+          guard?.gitHandlerPatched === true &&
+          guard.matched > 0
         ) {
           mainProcessProtected = true;
           mainProcessProbeTransport =
@@ -538,7 +540,7 @@
         }
         mainProcessProbeError =
           result?.status === "ok"
-            ? "主进程 Git handler 尚未注册"
+            ? "主进程尚未确认受保护的 Git 请求"
             : "主进程未回传保护状态";
       })
       .catch((error) => {

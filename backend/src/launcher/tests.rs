@@ -711,6 +711,132 @@ async fn exit_watcher_reports_a_naturally_exited_child() {
 }
 
 #[tokio::test]
+async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
+    let temp = tempfile::tempdir().unwrap();
+    let config_path = temp.path().join("config.toml");
+    std::fs::write(&config_path, "runtime config").unwrap();
+    let config = CodeyConfig::default();
+    let router = LocalRouter::start(&config).await.unwrap();
+    let router_url = router.endpoint().base_url;
+    let child = Command::new("sleep")
+        .arg("30")
+        .kill_on_drop(true)
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let process_id = child.id();
+    let child = Arc::new(Mutex::new(Some(child)));
+    let (exit_shutdown, exit_rx, exit_task) =
+        spawn_codex_exit_watcher(child.clone(), Arc::new(AtomicBool::new(false)));
+    let (watchdog_shutdown, watchdog_rx) = oneshot::channel();
+    let watchdog_task = tokio::spawn(async move {
+        let _ = watchdog_rx.await;
+    });
+    let runtime = CodeyRuntime {
+        codex_app_path: temp.path().join("nonexistent-codex-app"),
+        maintenance: MaintenanceStatus {
+            session_status: String::new(),
+            session_files_fixed: 0,
+            sqlite_rows_updated: 0,
+            ghost_tasks_pruned: 0,
+            performance_status: String::new(),
+            performance_detail: String::new(),
+        },
+        applied_model_config: RwLock::new(RuntimeModelConfig::from_config(&config)),
+        applied_subagent_config: RwLock::new(RuntimeSubagentConfig::from_config(&config)),
+        applied_config: config,
+        injection_statuses: Arc::new(RwLock::new(Arc::from([]))),
+        injection_scripts: cdp::prepare_injection_scripts(false, false, false, &[]),
+        injection_websocket_url: Arc::new(RwLock::new(Arc::from(""))),
+        child,
+        process_id,
+        process_group_id: process_id,
+        #[cfg(target_os = "macos")]
+        inspector_argument: None,
+        watchdog_shutdown: Mutex::new(Some(watchdog_shutdown)),
+        watchdog_task: Mutex::new(Some(watchdog_task)),
+        exit_watchdog_shutdown: Mutex::new(Some(exit_shutdown)),
+        exit_watchdog_task: Mutex::new(Some(exit_task)),
+        crashpad_guard_enabled: Arc::new(AtomicBool::new(false)),
+        crashpad_guard_shutdown: Mutex::new(None),
+        crashpad_guard_task: Mutex::new(None),
+        local_router: Some(router),
+    };
+    let restore = || async { std::fs::write(&config_path, "restored config").map_err(Into::into) };
+    let failure = runtime
+        .stop_with_cleanup(
+            async {
+                Command::new(temp.path().join("missing-process-stopper"))
+                    .status()
+                    .await
+                    .context("process stop failed")?;
+                Ok(())
+            },
+            restore(),
+        )
+        .await
+        .unwrap_err();
+    assert!(failure.to_string().contains("清理 Codex 遗留进程失败"));
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        "runtime config"
+    );
+    assert!(
+        !runtime
+            .watchdog_task
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .is_finished()
+    );
+    assert!(
+        !runtime
+            .exit_watchdog_task
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .is_finished()
+    );
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    assert!(client.get(&router_url).send().await.is_ok());
+
+    // The real test child exits while its watcher still owns Child. A failed
+    // config write must leave the router available until restoration succeeds.
+    let failure = runtime
+        .stop_with_cleanup(
+            stop_codex_processes(
+                &runtime.codex_app_path,
+                process_id,
+                process_id,
+                #[cfg(target_os = "macos")]
+                None,
+            ),
+            async {
+                std::fs::write(config_path.join("invalid-child"), "config").map_err(Into::into)
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(failure.to_string().contains("恢复 Codex 配置失败"));
+    let _ = tokio::time::timeout(Duration::from_secs(1), exit_rx)
+        .await
+        .unwrap();
+    assert!(runtime.child.lock().await.is_none());
+    assert!(client.get(&router_url).send().await.is_ok());
+    runtime
+        .stop_with_cleanup(async { Ok(()) }, restore())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        "restored config"
+    );
+    assert!(client.get(&router_url).send().await.is_err());
+}
+
+#[tokio::test]
 async fn exit_watcher_returns_the_child_to_stop_on_shutdown() {
     let child = Command::new("sh")
         .args(["-c", "sleep 30"])

@@ -256,13 +256,14 @@ pub async fn install_bridge(
             json!({ "source": bridge_script }),
         )
         .await?;
-    session
+    let response = session
         .send_command(
             5,
             "Runtime.evaluate",
             runtime_evaluate_params(&bridge_script),
         )
         .await?;
+    ensure_runtime_evaluate_succeeded(response)?;
 
     for script in new_document_scripts {
         let message_id = next_message_id();
@@ -274,13 +275,14 @@ pub async fn install_bridge(
             )
             .await?;
         let message_id = next_message_id();
-        session
+        let response = session
             .send_command(
                 message_id,
                 "Runtime.evaluate",
                 runtime_evaluate_params(script),
             )
             .await?;
+        ensure_runtime_evaluate_succeeded(response)?;
     }
 
     let closing = Arc::new(AtomicBool::new(false));
