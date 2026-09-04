@@ -365,7 +365,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "codey"
-version = "0.9.16"
+version = "0.9.17"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "codey-runtime-core"
-version = "0.9.16"
+version = "0.9.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "codey-runtime-data"
-version = "0.9.16"
+version = "0.9.17"
 dependencies = [
  "anyhow",
  "base64",
@@ -2995,9 +2995,9 @@ dependencies = [
 
 [[package]]
 name = "tinyvec"
-version = "1.12.0"
+version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb4ebadaa0af04fab11ae01eb5f9fdb5f9c5b875506e210e71c07873528baa7f"
+checksum = "4cf0ded5c4e56918d8f8a339e1bb67d038d3bc6d144ac407904015ba2e4cde9b"
 dependencies = [
  "tinyvec_macros",
 ]
