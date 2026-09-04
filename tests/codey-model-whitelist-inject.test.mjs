@@ -374,7 +374,7 @@ test("native selection filters seven models to the five checked without changing
     runtime.dispatchWindowEvent("codex-message-from-view", { detail: request });
     assert.deepEqual(request, before);
   }
-  assert.equal(storageAccesses, 0);
+  assert.equal(storageAccesses, 1, "read historical route bindings once without writing native selections");
   runtime.patch.dispose();
 });
 
@@ -495,7 +495,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "47");
+  assert.equal(patch.version, "49");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -816,13 +816,13 @@ test("route aliases display clearly and dispatch to the selected provider", asyn
   };
   runtime.dispatchWindowEvent("codex-message-from-view", deletedRouteRequest);
   assert.deepEqual(deletedRouteRequest.detail.request.params, {
-    model: "route-b/shared-model",
-    responsesapiClientMetadata: { codey_route: "route-b" },
+    model: "route-a/shared-model",
+    responsesapiClientMetadata: { codey_route: "route-a" },
   });
   assert.equal(
     runtime.patch.isBlockedOutgoingMessage(deletedRouteRequest.detail),
     false,
-    "a stale route alias remains exact so the local gateway can reject it without guessing",
+    "a recorded alias migrates to the only remaining route serving the same model",
   );
   runtime.patch.dispose();
 });
@@ -1154,7 +1154,7 @@ test("unchanged thread routes do not rewrite the full persisted binding table", 
   runtime.patch.dispose();
 });
 
-test("a persisted thread route is discarded when that route no longer exposes the model", async () => {
+test("a persisted thread route migrates when only another route exposes the same model", async () => {
   const storage = memoryStorage();
   storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
     ["stale-route-thread", {
@@ -3630,4 +3630,217 @@ test("frozen Statsig results and Map memo caches receive patched copies", async 
     ["gpt-5.3-codex-spark"],
   );
   patch.dispose();
+});
+
+function historicalRouteCatalog(providerIds, model = "vendor/model") {
+  return {
+    status: "ok",
+    models: providerIds.map(id => `${encodeURIComponent(id)}/${model}`),
+    default_model: `${encodeURIComponent(providerIds[0])}/${model}`,
+    model_metadata: providerIds.map(id => ({
+      model: `${encodeURIComponent(id)}/${model}`,
+      provider_id: "codey_router", route_provider_id: id,
+      source_model: model, upstream_model: model,
+    })),
+  };
+}
+
+test("legacy codey selectors recover without a history field and leave current slash models intact", async () => {
+  const runtime = await loadPatch(historicalRouteCatalog(["current"]), [statsigClient()]);
+  for (const model of ["CoDeY/vendor/model", "vendor/model", "current/vendor/model"]) {
+    const message = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request", request: { method: "thread/resume", params: {
+        threadId: "legacy", model, model_provider: "codey",
+      } },
+    });
+    assert.deepEqual(message.request.params, {
+      threadId: "legacy", model: "current/vendor/model", modelProvider: "codey_router",
+    });
+  }
+  await runtime.patch.setCatalog(historicalRouteCatalog(["current"], "codey/vendor/model"));
+  const raw = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request", request: { method: "turn/start", params: { model: "codey/vendor/model" } },
+  });
+  assert.equal(raw.request.params.model, "current/codey/vendor/model");
+  runtime.patch.dispose();
+});
+
+test("persisted encoded aliases recover on a fresh renderer and history-only refresh invalidates the catalog", async () => {
+  const catalog = historicalRouteCatalog(["new/route"]);
+  const runtime = await loadPatch(catalog, [statsigClient()]);
+  const original = { type: "mcp-request", request: {
+    method: "thread/resume", params: { model: "old%2Froute/vendor/model", modelProvider: "codey_router" },
+  } };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(original).request.params.model, "old%2Froute/vendor/model");
+  await runtime.patch.setCatalog({ ...catalog, legacy_model_aliases: {
+    "old%2Froute/vendor/model": "vendor/model",
+    "unknown/vendor/model": "unrelated-model",
+  } });
+  assert.equal(runtime.patch.rewriteOutgoingMessage(original).request.params.model, "new%2Froute/vendor/model");
+  const unknown = { ...original, request: { ...original.request, params: { model: "unknown/vendor/model" } } };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(unknown).request.params.model, "unknown/vendor/model");
+  runtime.patch.dispose();
+  const reopened = await loadPatch({ ...catalog, legacy_model_aliases: {
+    "old%2froute/vendor/model": "vendor/model",
+  } }, [statsigClient()]);
+  assert.equal(reopened.patch.rewriteOutgoingMessage(original).request.params.model, "new%2Froute/vendor/model");
+  reopened.patch.dispose();
+});
+
+test("a model-less resume restores and persists the same model after its route disappears", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["restored", { routeProviderId: "deleted", sourceModel: "vendor/model" }],
+  ]));
+  const catalog = historicalRouteCatalog(["current"]);
+  const unrelated = historicalRouteCatalog(["another"], "different-model");
+  const runtime = await loadPatch({
+    ...catalog, models: [...unrelated.models, ...catalog.models],
+    default_model: unrelated.default_model,
+    model_metadata: [...unrelated.model_metadata, ...catalog.model_metadata],
+  }, [statsigClient()], { storage });
+  const resumed = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request", request: { method: "thread/resume", params: {
+      threadId: "restored", modelProvider: "codey_router",
+    } },
+  });
+  assert.equal(resumed.request.params.model, "current/vendor/model");
+  assert.deepEqual(JSON.parse(storage.getItem("codey.thread-route-bindings.v1")), [
+    ["restored", { routeProviderId: "current", sourceModel: "vendor/model" }],
+  ]);
+  runtime.patch.dispose();
+});
+
+test("ambiguous historical models retain their identity unless a valid hint chooses a route", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["ambiguous", { routeProviderId: "deleted", sourceModel: "vendor/model" }],
+  ]));
+  const runtime = await loadPatch(historicalRouteCatalog(["a", "b"]), [statsigClient()], { storage });
+  const original = { type: "mcp-request", request: { method: "turn/start", params: { model: "codey/vendor/model" } } };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(original).request.params.model, "codey/vendor/model");
+  const hinted = runtime.patch.rewriteOutgoingMessage({ ...original, request: { ...original.request, params: {
+    model: "codey/vendor/model", responsesapiClientMetadata: { codey_route: "b" },
+  } } });
+  assert.equal(hinted.request.params.model, "b/vendor/model");
+  const resumed = runtime.patch.rewriteOutgoingMessage({ type: "mcp-request", request: {
+    method: "thread/resume", params: { threadId: "ambiguous", modelProvider: "codey_router" },
+  } });
+  assert.equal(resumed.request.params.model, "vendor/model", "preserve the stored model for the gateway to reject ambiguity");
+  runtime.patch.dispose();
+});
+
+test("native mode migrates old aliases and the persisted carrier without changing ordinary requests", async () => {
+  const catalog = {
+    status: "ok", native_selection_only: true, native_model_provider: "native-provider",
+    models: ["vendor/model", "codey/raw-model"], default_model: "vendor/model",
+    legacy_model_aliases: { "deleted/vendor/model": "vendor/model" },
+  };
+  const runtime = await loadPatch(catalog, [statsigClient()], { nativeSelectionOnly: true });
+  for (const model of ["codey/vendor/model", "deleted/vendor/model", "vendor/model"]) {
+    const resumed = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request", request: { method: "send-cli-request-for-host", params: {
+        hostId: "local", method: "thread/resume", params: {
+          threadId: "old", model, model_provider: "codey_router",
+          responsesapiClientMetadata: { codey_route: "deleted", trace: "kept" },
+        },
+      } },
+    });
+    assert.deepEqual(resumed.request.params.params, {
+      threadId: "old", model: "vendor/model", modelProvider: "native-provider",
+      responsesapiClientMetadata: { trace: "kept" },
+    });
+    assert.equal(resumed.request.params.hostId, "local");
+  }
+  for (const model of ["vendor/model", "codey/raw-model", "unknown/model"]) {
+    const current = { type: "mcp-request", request: { method: "thread/start", params: {
+      model, modelProvider: "native-provider",
+    } } };
+    assert.equal(runtime.patch.rewriteOutgoingMessage(current), current);
+  }
+  const missing = runtime.patch.rewriteOutgoingMessage({ type: "mcp-request", request: {
+    method: "thread/resume", params: { model: "codey/missing", modelProvider: "codey_router" },
+  } });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(missing), true);
+  runtime.patch.dispose();
+});
+
+test("native mode can resume from a legacy binding without a model override and tracks successful provider migration", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["old", { routeProviderId: "deleted", sourceModel: "vendor/model" }],
+  ]));
+  const runtime = await loadPatch({
+    status: "ok", native_selection_only: true, native_model_provider: "native",
+    models: ["vendor/model", "new-model"], default_model: "vendor/model",
+  }, [statsigClient()], { nativeSelectionOnly: true, storage });
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    result: { data: [{ id: "old", model: "codey/vendor/model", modelProvider: "codey_router" }] },
+  } } });
+  const request = { type: "mcp-request", request: { id: "resume", method: "thread/resume", params: { threadId: "old" } } };
+  const resumed = runtime.patch.rewriteOutgoingMessage(request);
+  assert.equal(resumed.request.params.model, "vendor/model");
+  assert.equal(resumed.request.params.modelProvider, "native");
+  const turn = { type: "mcp-request", request: { method: "turn/start", params: { threadId: "old" } } };
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(runtime.patch.rewriteOutgoingMessage(turn)), true);
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    id: "resume", error: { code: -1, message: "resume failed" },
+  } } });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(runtime.patch.rewriteOutgoingMessage(turn)), true,
+    "a failed resume must not update the runtime provider");
+  runtime.patch.rewriteOutgoingMessage(request);
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    id: "resume", result: { thread: { id: "old", modelProvider: "codey_router", model: "vendor/model" } },
+  } } });
+  const continued = runtime.patch.rewriteOutgoingMessage(turn);
+  assert.equal(continued, turn, "native app-server now owns the sticky model");
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(continued), false);
+  const update = { type: "mcp-request", request: { method: "thread/settings/update", params: {
+    threadId: "old", model: "new-model",
+  } } };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(update), update);
+  assert.equal(runtime.patch.rewriteOutgoingMessage(turn), turn, "the old route must not overwrite a later native model choice");
+  assert.deepEqual(JSON.parse(storage.getItem("codey.thread-route-bindings.v1")), []);
+  runtime.patch.dispose();
+});
+
+test("native settings clear historical bindings only after a successful reply", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["native-thread", { routeProviderId: "deleted", sourceModel: "old-model" }],
+  ]));
+  const runtime = await loadPatch({
+    status: "ok", native_selection_only: true, native_model_provider: "native",
+    models: ["old-model", "new-model"], default_model: "old-model",
+  }, [statsigClient()], { nativeSelectionOnly: true, storage });
+  const request = { type: "mcp-request", request: { id: "settings", method: "thread/settings/update", params: {
+    threadId: "native-thread", model: "new-model",
+  } } };
+  runtime.patch.rewriteOutgoingMessage(request);
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    id: "settings", error: { message: "failed" },
+  } } });
+  assert.equal(JSON.parse(storage.getItem("codey.thread-route-bindings.v1")).length, 1);
+  runtime.patch.rewriteOutgoingMessage(request);
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    id: "settings", result: {},
+  } } });
+  assert.deepEqual(JSON.parse(storage.getItem("codey.thread-route-bindings.v1")), []);
+  const turn = { type: "mcp-request", request: { method: "turn/start", params: { threadId: "native-thread" } } };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(turn), turn);
+  runtime.patch.dispose();
+});
+
+test("thread list history is restored without an existing local binding", async () => {
+  const runtime = await loadPatch(historicalRouteCatalog(["current"]), [statsigClient()]);
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    result: { data: [{ id: "history", model: "codey/vendor/model", modelProvider: "codey" }] },
+  } } });
+  const resumed = runtime.patch.rewriteOutgoingMessage({ type: "mcp-request", request: {
+    method: "thread/resume", params: { threadId: "history" },
+  } });
+  assert.deepEqual(resumed.request.params, {
+    threadId: "history", model: "current/vendor/model", modelProvider: "codey_router",
+  });
+  runtime.patch.dispose();
 });

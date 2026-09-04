@@ -617,6 +617,10 @@ pub struct CodeyConfig {
     /// result with user-confirmed model declarations.
     #[serde(default)]
     pub upstream_models_by_provider: BTreeMap<String, Vec<String>>,
+    /// Previously published selectors mapped to upstream ids. Retained across
+    /// route removal and router-mode changes; contains no connection secrets.
+    #[serde(default)]
+    pub model_alias_history: BTreeMap<String, String>,
     /// One route-aware default model for the entire Codey model catalog.
     /// Official models keep their raw model id; third-party models use the
     /// local-router alias (`provider/model`) so equal upstream ids remain
@@ -710,6 +714,7 @@ impl Default for CodeyConfig {
             manual_third_party_models_by_provider: BTreeMap::new(),
             declared_official_models_by_provider: BTreeMap::new(),
             upstream_models_by_provider: BTreeMap::new(),
+            model_alias_history: BTreeMap::new(),
             default_model: String::new(),
             default_model_by_provider: BTreeMap::new(),
             disable_trace_log_writes: true,
@@ -793,6 +798,7 @@ impl CodeyConfig {
             &mut self.upstream_models_by_provider,
         );
         normalize_model_map(&mut self.default_model_by_provider);
+        self.remember_model_aliases();
         self.normalize_global_default_model();
         normalize_subagent_config(
             &mut self.subagent_model,
@@ -1217,6 +1223,22 @@ impl CodeyConfig {
             && self.default_model_by_provider.is_empty()
     }
 
+    pub(crate) fn remember_model_aliases(&mut self) {
+        self.model_alias_history = std::mem::take(&mut self.model_alias_history)
+            .into_iter()
+            .filter(|(alias, model)| {
+                alias.split_once('/').is_some_and(|(provider, suffix)| {
+                    !provider.trim().is_empty() && model_id::equal(suffix, model)
+                }) && !model.trim().is_empty()
+            })
+            .map(|(alias, model)| (model_id::key(&alias), model.trim().to_string()))
+            .collect();
+        for target in self.configured_model_targets() {
+            self.model_alias_history
+                .insert(model_id::key(&target.alias), target.upstream_model);
+        }
+    }
+
     fn configured_model_targets(&self) -> Vec<RuntimeModelTarget> {
         let mut targets = Vec::new();
         for profile in &self.profiles {
@@ -1290,9 +1312,18 @@ impl CodeyConfig {
             .find(|target| model_id::equal(&target.alias, &self.default_model))
             .map(|target| target.alias.clone())
             .or_else(|| {
+                let source = if targets
+                    .iter()
+                    .any(|target| model_id::equal(&target.upstream_model, &self.default_model))
+                {
+                    self.default_model.as_str()
+                } else {
+                    model_id::historical_source(&self.default_model, &self.model_alias_history)
+                        .unwrap_or(&self.default_model)
+                };
                 let matches = targets
                     .iter()
-                    .filter(|target| model_id::equal(&target.upstream_model, &self.default_model))
+                    .filter(|target| model_id::equal(&target.upstream_model, source))
                     .collect::<Vec<_>>();
                 (matches.len() == 1).then(|| matches[0].alias.clone())
             })
@@ -1435,9 +1466,18 @@ impl CodeyConfig {
                     // router selects their isolated HTTP/SSE transport per
                     // request, so catalog identity does not grant upstream WS.
                     // Never guess a route when the upstream model is ambiguous.
+                    let source = if targets
+                        .iter()
+                        .any(|target| model_id::equal(&target.upstream_model, requested))
+                    {
+                        requested
+                    } else {
+                        model_id::historical_source(requested, &self.model_alias_history)
+                            .unwrap_or(requested)
+                    };
                     let mut matches = targets
                         .iter()
-                        .filter(|target| model_id::equal(&target.upstream_model, requested));
+                        .filter(|target| model_id::equal(&target.upstream_model, source));
                     let target = matches.next()?;
                     matches.next().is_none().then(|| target.alias.clone())
                 })
@@ -2154,6 +2194,52 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
         assert_eq!(names, [std::ffi::OsString::from("config.json")]);
+    }
+
+    #[test]
+    fn old_config_gains_alias_history_and_preserves_model_on_route_identity_change() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path().join("config.json"));
+        let mut route = ProviderProfile::new("Old route");
+        route.id = "old/route".into();
+        route.base_url = "https://relay.example/v1".into();
+        let config = CodeyConfig {
+            profiles: vec![route],
+            selected_models_by_provider: BTreeMap::from([(
+                "old/route".into(),
+                vec!["vendor/model".into()],
+            )]),
+            default_model: "old%2Froute/vendor/model".into(),
+            subagent_roles: uniform_subagent_roles("old%2Froute/vendor/model", "high"),
+            ..CodeyConfig::default()
+        };
+        let mut old_json = serde_json::to_value(config).unwrap();
+        old_json
+            .as_object_mut()
+            .unwrap()
+            .remove("modelAliasHistory");
+        fs::write(store.path(), serde_json::to_vec(&old_json).unwrap()).unwrap();
+        let mut loaded = store.load().unwrap();
+        assert_eq!(
+            loaded.model_alias_history["old%2froute/vendor/model"],
+            "vendor/model"
+        );
+        loaded.profiles[0].id = "new-route".into();
+        loaded.selected_models_by_provider = BTreeMap::from([(
+            "new-route".into(),
+            vec!["other-model".into(), "vendor/model".into()],
+        )]);
+        loaded = loaded.normalize();
+        assert_eq!(loaded.default_model, "new-route/vendor/model");
+        assert_eq!(loaded.subagent_model, "new-route/vendor/model");
+        loaded.local_router_enabled = false;
+        store.save(&loaded).unwrap();
+        let restored = store.load().unwrap();
+        assert_eq!(
+            restored.model_alias_history["old%2froute/vendor/model"],
+            "vendor/model"
+        );
+        assert_eq!(restored.clone().normalize(), restored);
     }
 
     #[test]

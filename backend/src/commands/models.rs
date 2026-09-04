@@ -688,6 +688,7 @@ fn config_after_route_deletion(
         .map(|profile| profile.provider_id().to_string())
         .ok_or_else(|| "找不到要删除的线路".to_string())?;
     let mut config = previous.clone();
+    config.remember_model_aliases();
     config.profiles.retain(|profile| profile.id != route_id);
     config
         .selected_models_by_provider
@@ -1537,12 +1538,24 @@ pub(super) fn current_model_state(
 
 fn native_upstream_model(config: &CodeyConfig, model: &str) -> String {
     let model = model.trim();
+    if let Some(raw) = config
+        .upstream_models_by_provider
+        .values()
+        .chain(config.selected_models_by_provider.values())
+        .flatten()
+        .find(|raw| model_id::equal(raw, model))
+    {
+        return raw.clone();
+    }
     config
         .runtime_model_targets()
         .into_iter()
         .find(|target| model_id::equal(&target.alias, model))
         .map(|target| target.upstream_model)
         .or_else(|| native_provider_prefixed_model(config, model))
+        .or_else(|| {
+            model_id::historical_source(model, &config.model_alias_history).map(str::to_string)
+        })
         .unwrap_or_else(|| model.to_string())
 }
 
@@ -1829,7 +1842,14 @@ pub(super) fn renderer_model_catalog_value(
     model_state: &model_catalog::ModelSelectionState,
 ) -> Value {
     if !config.local_router_enabled {
-        return renderer_native_model_catalog_value(model_state);
+        let mut catalog = renderer_native_model_catalog_value(model_state);
+        catalog["legacy_model_aliases"] = json!(config.model_alias_history);
+        catalog["native_model_provider"] = json!(
+            codex_provider::current_provider(codex_home())
+                .map(|provider| provider.id)
+                .unwrap_or_default()
+        );
+        return catalog;
     }
     let route_catalog = renderer_route_model_catalog(config, model_state);
     let models = route_catalog
@@ -1879,6 +1899,7 @@ pub(super) fn renderer_model_catalog_value(
         "provider_name": provider_name,
         "models": models,
         "model_metadata": model_metadata,
+        "legacy_model_aliases": config.model_alias_history,
         "sources": [],
         "responses_api": {
             "status": "unknown",
@@ -2512,6 +2533,37 @@ mod tests {
 
         assert_eq!(
             native_upstream_model(&config, "route-a/vendor/model"),
+            "vendor/model"
+        );
+    }
+
+    #[test]
+    fn deleted_route_aliases_survive_native_catalog_and_model_conversion() {
+        let config = CodeyConfig {
+            local_router_enabled: false,
+            model_alias_history: BTreeMap::from([(
+                "deleted/vendor/model".into(),
+                "vendor/model".into(),
+            )]),
+            selected_models_by_provider: BTreeMap::from([(
+                "native".into(),
+                vec!["codey/raw-model".into()],
+            )]),
+            ..CodeyConfig::default()
+        };
+        for (input, expected) in [
+            ("deleted/vendor/model", "vendor/model"),
+            ("CODEY/vendor/model", "vendor/model"),
+            ("codey/raw-model", "codey/raw-model"),
+            ("vendor/model", "vendor/model"),
+            ("unknown/vendor/model", "unknown/vendor/model"),
+        ] {
+            assert_eq!(native_upstream_model(&config, input), expected);
+        }
+        let catalog =
+            renderer_model_catalog_value(&config, &model_catalog::ModelSelectionState::default());
+        assert_eq!(
+            catalog["legacy_model_aliases"]["deleted/vendor/model"],
             "vendor/model"
         );
     }

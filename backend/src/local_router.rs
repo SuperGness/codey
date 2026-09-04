@@ -43,6 +43,7 @@ use crate::config::{
     CodeyConfig, ProviderProfile, RouteRequestLogBackend, UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
     UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS, UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
 };
+use crate::model_id;
 use crate::route_request_log::{
     FirstByteSource, RequestProtocol, RouteRequestLogClearResult, RouteRequestLogController,
     RouteRequestLogGuard, RouteRequestLogProbe, RouteRequestLogQuery, RouteRequestLogReconfigure,
@@ -594,6 +595,7 @@ struct RouterSnapshot {
     routes: HashMap<String, Arc<RouteTarget>>,
     aliases: HashMap<String, AliasTarget>,
     raw_models: HashMap<String, Vec<AliasTarget>>,
+    model_alias_history: BTreeMap<String, String>,
     model_ids: Vec<String>,
     default_model: String,
     request_log_backend: RouteRequestLogBackend,
@@ -644,21 +646,28 @@ impl RouterSnapshot {
                     provider_id: provider_id.to_string(),
                     model: model.clone(),
                 };
-                aliases.insert(model_alias(provider_id, &model), alias_target.clone());
+                aliases.insert(
+                    model_id::key(&model_alias(provider_id, &model)),
+                    alias_target.clone(),
+                );
                 raw_models
-                    .entry(model.clone())
+                    .entry(model_id::key(&model))
                     .or_default()
                     .push(alias_target.clone());
                 target.models.insert(model.clone());
             }
             routes.insert(provider_id.to_string(), Arc::new(target));
         }
-        let mut model_ids = raw_models.keys().cloned().collect::<Vec<_>>();
+        let mut model_ids = raw_models
+            .values()
+            .filter_map(|models| models.first().map(|model| model.model.clone()))
+            .collect::<Vec<_>>();
         model_ids.sort_unstable();
         Self {
             routes,
             aliases,
             raw_models,
+            model_alias_history: config.model_alias_history.clone(),
             model_ids,
             default_model: config.default_model().unwrap_or_default().to_string(),
             request_log_backend: config.route_request_log.backend,
@@ -699,30 +708,68 @@ impl RouterSnapshot {
         if requested_model.is_empty() {
             anyhow::bail!("请求缺少 model 字段");
         }
-        if let Some(alias) = self.aliases.get(requested_model) {
+        if let Some(alias) = self.aliases.get(&model_id::key(requested_model)) {
             // A qualified `provider/model` selector already identifies the
             // route. Codex can replay client metadata from an earlier turn, so
             // an independent route hint must not redirect an explicit alias.
             return self.target_for_route_model(&alias.provider_id, &alias.model, requested_model);
         }
-        if let Some(route_hint) = request.route_hint
-            && self
-                .routes
-                .get(route_hint)
-                .is_some_and(|target| target.models.contains(requested_model))
+        if !self
+            .raw_models
+            .contains_key(&model_id::key(requested_model))
+            && let Some(source_model) =
+                model_id::historical_source(requested_model, &self.model_alias_history)
         {
-            return self.target_for_route_model(route_hint, requested_model, requested_model);
+            // Resolve a recorded upstream id as raw data, never recursively as
+            // another selector (an upstream id can itself contain a slash).
+            return self
+                .resolve_raw_request(
+                    source_model,
+                    request.route_hint,
+                    request.bound_route,
+                    requested_model,
+                )
+                .with_context(|| {
+                    format!(
+                        "历史线路已不可用：{requested_model}；请为模型 {source_model} 选择可用线路"
+                    )
+                });
+        }
+        self.resolve_raw_request(
+            requested_model,
+            request.route_hint,
+            request.bound_route,
+            requested_model,
+        )
+    }
+
+    fn resolve_raw_request(
+        &self,
+        model: &str,
+        route_hint: Option<&str>,
+        bound_route: Option<&str>,
+        requested_model: &str,
+    ) -> Result<RouteSelection> {
+        let candidates = self
+            .raw_models
+            .get(&model_id::key(model))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Some(route_hint) = route_hint
+            && let Some(candidate) = candidates
+                .iter()
+                .find(|candidate| candidate.provider_id == route_hint)
+        {
+            return self.target_for_route_model(route_hint, &candidate.model, requested_model);
         }
         // Raw ids in the mixed runtime catalog are native OpenAI entries;
         // third-party selections remain route-qualified. An explicit hint
         // above can still select a third-party route with the same model.
-        if requested_model != CODEX_AUTO_REVIEW_MODEL
-            && let Some(official) = self.raw_models.get(requested_model).and_then(|candidates| {
-                candidates.iter().find(|candidate| {
-                    self.routes
-                        .get(&candidate.provider_id)
-                        .is_some_and(|route| route.official_account)
-                })
+        if !model_id::equal(model, CODEX_AUTO_REVIEW_MODEL)
+            && let Some(official) = candidates.iter().find(|candidate| {
+                self.routes
+                    .get(&candidate.provider_id)
+                    .is_some_and(|route| route.official_account)
             })
         {
             return self.target_for_route_model(
@@ -736,20 +783,19 @@ impl RouterSnapshot {
         // not sufficient evidence of a current route choice. Continue into
         // the bound/unique lookup; valid hints still win above, and equal
         // raw model ids on multiple routes still fail closed below.
-        if let Some(bound_route) = request.bound_route
-            && self
-                .routes
-                .get(bound_route)
-                .is_some_and(|target| target.models.contains(requested_model))
+        if let Some(bound_route) = bound_route
+            && let Some(candidate) = candidates
+                .iter()
+                .find(|candidate| candidate.provider_id == bound_route)
         {
-            return self.target_for_route_model(bound_route, requested_model, requested_model);
+            return self.target_for_route_model(bound_route, &candidate.model, requested_model);
         }
         // Codex starts automatic approval review as a separate request with a
         // fixed hidden model. Some builds omit turn route metadata on that
         // request, so prefer the official route when no capable hint or thread
         // binding identified a route above. A capable bound third-party route
         // still wins before this fallback.
-        if requested_model == CODEX_AUTO_REVIEW_MODEL
+        if model_id::equal(model, CODEX_AUTO_REVIEW_MODEL)
             && let Some(official_route) = self.routes.values().find(|target| {
                 target.official_account && target.models.contains(CODEX_AUTO_REVIEW_MODEL)
             })
@@ -765,11 +811,6 @@ impl RouterSnapshot {
         // changes models and the old route cannot serve it, continue into
         // the normal unique-candidate lookup below. Ambiguous raw ids still
         // fail closed, so this fallback never guesses between routes.
-        let candidates = self
-            .raw_models
-            .get(requested_model)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
         if candidates.len() == 1 {
             let candidate = &candidates[0];
             return self.target_for_route_model(
@@ -13530,6 +13571,143 @@ mod tests {
     }
 
     #[test]
+    fn historical_aliases_recover_after_route_deletion_disable_and_restart() {
+        let (mut config, provider, model) = router_config("https://relay.example/v1".into());
+        for legacy in ["codey", "old/relay"] {
+            let mut old = config.profiles[0].clone();
+            old.id = legacy.into();
+            config.profiles.push(old);
+            config
+                .selected_models_by_provider
+                .insert(legacy.into(), vec![model.clone()]);
+        }
+        config = config.normalize();
+        config.profiles.retain(|route| route.id != "old/relay");
+        config.selected_models_by_provider.remove("old/relay");
+        config.selected_models_by_provider.remove("codey");
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::new(directory.path().join("config.json"));
+        store.save(&config).unwrap();
+        let restored = store.load().unwrap();
+        let snapshot = RouterSnapshot::from_config(&restored);
+        for requested in [
+            model.clone(),
+            format!("CODEY/{model}"),
+            model_alias("old/relay", &model),
+        ] {
+            let selected = snapshot
+                .target_for_request(&requested, Some("old/relay"), Some("codey"))
+                .unwrap();
+            assert_eq!(selected.provider_id, provider);
+            assert_eq!(selected.upstream_model, model);
+            assert_eq!(selected.requested_model, requested);
+        }
+    }
+
+    #[test]
+    fn legacy_codey_without_history_resolves_case_and_preserves_slash_raw_models() {
+        let (mut config, provider, _) = router_config("https://relay.example/v1".into());
+        config.selected_models_by_provider.insert(
+            provider.clone(),
+            vec!["Vendor/Model".into(), "codey/vendor/model".into()],
+        );
+        let snapshot = RouterSnapshot::from_config(&config);
+        for (requested, upstream) in [
+            ("vendor/model", "Vendor/Model"),
+            ("codey/vendor/model", "codey/vendor/model"),
+            ("CODEY/codey/vendor/model", "codey/vendor/model"),
+            ("ROUTE-A/VENDOR/MODEL", "Vendor/Model"),
+        ] {
+            assert_eq!(
+                snapshot.target_for_model(requested).unwrap().upstream_model,
+                upstream
+            );
+        }
+        assert!(snapshot.target_for_model("unknown/Vendor/Model").is_err());
+        assert!(
+            snapshot
+                .target_for_model("codey/missing")
+                .unwrap_err()
+                .to_string()
+                .contains("历史线路已不可用")
+        );
+        assert!(
+            snapshot
+                .target_for_model("")
+                .unwrap_err()
+                .to_string()
+                .contains("缺少 model")
+        );
+    }
+
+    #[test]
+    fn historical_aliases_require_an_unambiguous_route_and_never_override_active_aliases() {
+        let (mut config, provider, model) = router_config("https://relay.example/v1".into());
+        let mut second = config.profiles[0].clone();
+        second.id = "route-b".into();
+        config.profiles.push(second);
+        config
+            .selected_models_by_provider
+            .insert("route-b".into(), vec![model.clone()]);
+        let snapshot = RouterSnapshot::from_config(&config);
+        let legacy = format!("codey/{model}");
+        let error = snapshot.target_for_model(&legacy).unwrap_err();
+        assert!(format!("{error:#}").contains("缺少明确"));
+        for (hint, binding) in [(Some("route-b"), None), (None, Some("route-b"))] {
+            assert_eq!(
+                snapshot
+                    .target_for_request(&legacy, hint, binding)
+                    .unwrap()
+                    .provider_id,
+                "route-b"
+            );
+        }
+        let explicit = model_alias(&provider, &model);
+        assert_eq!(
+            snapshot
+                .target_for_request(&explicit, Some("route-b"), Some("route-b"))
+                .unwrap()
+                .provider_id,
+            provider
+        );
+        config.profiles[0].name = "Renamed display label".into();
+        assert_eq!(
+            RouterSnapshot::from_config(&config)
+                .target_for_model(&explicit)
+                .unwrap()
+                .provider_id,
+            provider
+        );
+    }
+
+    #[test]
+    fn historical_upstream_ids_are_not_recursively_interpreted_as_active_aliases() {
+        let (mut config, provider, _) = router_config("https://relay.example/v1".into());
+        config.model_alias_history.insert(
+            "old/route-a/provider-model".into(),
+            "route-a/provider-model".into(),
+        );
+        let snapshot = RouterSnapshot::from_config(&config);
+        assert!(
+            snapshot
+                .target_for_model("old/route-a/provider-model")
+                .is_err()
+        );
+        config
+            .selected_models_by_provider
+            .get_mut(&provider)
+            .unwrap()
+            .push("route-a/provider-model".into());
+        assert_eq!(
+            RouterSnapshot::from_config(&config)
+                .target_for_model("old/route-a/provider-model")
+                .unwrap()
+                .upstream_model,
+            "route-a/provider-model"
+        );
+    }
+
+    #[test]
     fn router_snapshot_keeps_all_third_party_routes_active_at_once() {
         let (mut config, provider_a, model) =
             router_config("https://relay-a.example/v1".to_string());
@@ -17619,6 +17797,76 @@ mod tests {
             model_alias("team/relay", "shared-model"),
             "team%2Frelay/shared-model"
         );
+    }
+
+    #[tokio::test]
+    async fn historical_alias_http_requests_survive_hot_route_removal() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let mut models = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = upstream.accept().await.unwrap();
+                let request = read_http_request(&mut stream).await.unwrap();
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                models.push(body["model"].clone());
+                write_json_response(&mut stream, 200, &json!({"model":body["model"]}))
+                    .await
+                    .unwrap();
+            }
+            models
+        });
+        let (mut config, _, model) = router_config(format!("http://{address}/v1"));
+        let mut old = config.profiles[0].clone();
+        old.id = "retired/route".into();
+        config.profiles.push(old);
+        config
+            .selected_models_by_provider
+            .insert("retired/route".into(), vec![model.clone()]);
+        config = config.normalize();
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let client = reqwest::Client::new();
+        for remove in [false, true] {
+            if remove {
+                config
+                    .profiles
+                    .retain(|profile| profile.id != "retired/route");
+                config.selected_models_by_provider.remove("retired/route");
+                router.update_config(&config);
+            }
+            let response = client
+                .post(format!("{}/responses", endpoint.base_url))
+                .bearer_auth(&endpoint.token)
+                .header("thread-id", "historical-thread")
+                .json(&json!({"model":model_alias("retired/route", &model), "input":"hello"}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            assert_eq!(response.json::<Value>().await.unwrap()["model"], model);
+        }
+        assert_eq!(
+            upstream_task.await.unwrap(),
+            vec![json!(model), json!(model)]
+        );
+        let error = client
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .json(&json!({"model":"codey/missing-model", "input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(error.status(), reqwest::StatusCode::NOT_FOUND);
+        let error: Value = error.json().await.unwrap();
+        assert_eq!(error["error"]["code"], "model_not_enabled");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("请为模型")
+        );
+        router.stop().await.unwrap();
     }
 
     #[tokio::test]

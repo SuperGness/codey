@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "47";
+  const patchVersion = "49";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -68,6 +68,8 @@
     routesBySourceKey: new Map(),
     routeByRouteProviderSource: new Map(),
     routeByAnyProviderSource: new Map(),
+    legacyAliases: new Map(),
+    nativeProviderId: "",
   };
   let refreshTimer = 0;
   let refreshUntil = 0;
@@ -532,6 +534,19 @@
         route,
       );
     }
+    const legacyAliases = new Map(catalog.legacyAliases);
+    for (const route of catalog.routes) {
+      if (modelKey(route.selectorModel) !== modelKey(route.sourceModel)) {
+        legacyAliases.set(modelKey(route.selectorModel), route.sourceModel);
+      }
+    }
+    for (const [alias, source] of Object.entries(value.legacy_model_aliases || {})) {
+      const separator = alias.indexOf("/");
+      if (typeof source === "string" && source.trim() && separator > 0
+        && modelKey(alias.slice(separator + 1)) === modelKey(source)) {
+        legacyAliases.set(modelKey(alias), source.trim());
+      }
+    }
     return {
       loaded: true,
       models,
@@ -544,6 +559,8 @@
       routesBySourceKey,
       routeByRouteProviderSource,
       routeByAnyProviderSource,
+      legacyAliases,
+      nativeProviderId: nativeSelectionOnly ? requestProviderId(value.native_model_provider) : "",
     };
   };
 
@@ -762,6 +779,9 @@
     left.loaded
     && sameModelNames(left.models, right.models)
     && left.defaultModel === right.defaultModel
+    && left.nativeProviderId === right.nativeProviderId
+    && left.legacyAliases.size === right.legacyAliases.size
+    && Array.from(left.legacyAliases).every(([alias, source]) => right.legacyAliases.get(alias) === source)
     && sameModelMetadata(left.modelMetadata, right.modelMetadata, right.models)
   );
 
@@ -1790,11 +1810,19 @@
     ));
   };
 
+  const historicalSourceModel = (modelName) => {
+    const key = modelKey(modelName);
+    // A configured raw id such as codey/vendor/model always keeps its meaning.
+    if (catalog.modelNamesByKey.has(key) || catalog.routesBySourceKey.has(key)) return "";
+    return catalog.legacyAliases.get(key)
+      || (key.startsWith("codey/") ? String(modelName).trim().slice(6).trim() : "");
+  };
   const routeForProviderAlias = (modelName) => {
     const model = typeof modelName === "string" ? modelName.trim() : "";
     const separator = model.indexOf("/");
     if (separator <= 0) return null;
-    const providerId = model.slice(0, separator).trim();
+    let providerId = model.slice(0, separator).trim();
+    try { providerId = decodeURIComponent(providerId); } catch { return null; }
     const sourceModel = model.slice(separator + 1).trim();
     if (!providerId || !sourceModel) return null;
     const catalogAlias = catalog.modelNamesByKey.get(modelKey(model)) || "";
@@ -1815,7 +1843,7 @@
       catalog.routeByAnyProviderSource,
       providerId,
       sourceModel,
-    );
+    ) || uniqueRouteForRawModel(historicalSourceModel(model));
   };
 
   const routeMatchesModel = (route, model) => (
@@ -1829,13 +1857,16 @@
       catalog.routeByRouteProviderSource,
       binding.routeProviderId,
       binding.sourceModel,
-    );
-    if (!route && threadId && threadRoutes.delete(threadId)) persistThreadRoutes();
+    ) || uniqueRouteForRawModel(binding.sourceModel);
+    if (route) rememberBoundedThreadRoute(threadId, route);
+    // Keep unresolved history until the user chooses a replacement; dropping
+    // it would make the next model-less resume silently use the global default.
     return route;
   };
   const routeForThreadModel = (threadId, model) => {
     const route = routeForThread(threadId);
-    return route && routeMatchesModel(route, model) ? route : null;
+    return route && (routeMatchesModel(route, model)
+      || modelKey(route.sourceModel) === modelKey(historicalSourceModel(model))) ? route : null;
   };
   const uniqueRouteForRawModel = (model) => {
     const matches = catalog.routesBySourceKey.get(modelKey(model)) || [];
@@ -2030,8 +2061,11 @@
 
   const patchedRequestParams = (method, params) => {
     if (!modelBoundRequestMethods.has(method)) return params;
-    const source = params && typeof params === "object" ? params : {};
+    let source = params && typeof params === "object" ? params : {};
     const hasModelOverride = Object.hasOwn(source, "model");
+    const restoredBinding = !hasModelOverride && (method === "thread/resume" || method === "turn/start")
+      ? threadRoutes.get(threadIdFromParams(source)) : null;
+    if (restoredBinding) source = { ...source, model: restoredBinding.sourceModel };
     const requestedModel = typeof source.model === "string"
       ? source.model.trim()
       : "";
@@ -2084,7 +2118,7 @@
       source[routeMetadataParam]?.[routeMetadataKey],
     );
     const metadataRoute = metadataRouteProviderId
-      ? routeForHintedRawModel(metadataRouteProviderId, requestedModel)
+      ? routeForHintedRawModel(metadataRouteProviderId, historicalSourceModel(requestedModel) || requestedModel)
       : null;
     const previouslyPatchedRoute = source[patchedRouteKey]
       && routeMatchesModel(source[patchedRouteKey], requestedModel)
@@ -2099,7 +2133,7 @@
       ? routeForThreadModel(threadId, requestedModel)
       : null;
     const stickyThreadRoute = (
-      method === "turn/start"
+      (method === "turn/start" || method === "thread/resume")
       && !hasModelOverride
     ) ? routeForThread(threadId) : null;
     const existingRoute = requestedProvider
@@ -2118,6 +2152,7 @@
     const defaultRoute = routeForModel(catalog.defaultModel);
     const matchingDefaultRoute = (
       requestedModel
+      && !restoredBinding
       && threadProviderRequestMethods.has(method)
       && routeMatchesModel(defaultRoute, requestedModel)
     ) ? defaultRoute : null;
@@ -2192,7 +2227,7 @@
     // An explicit unknown or deleted model must never be silently replaced by
     // an unrelated default. Preserve it so the caller can surface the exact
     // invalid selection instead of sending a different model than the user chose.
-    if (requestedModel) return params;
+    if (requestedModel) return source;
     if (!catalog.defaultModel) return params;
     const providerId = requestProviderId(defaultRoute?.providerId || "");
     return routedRequestParams(
@@ -2224,7 +2259,9 @@
     const requestId = requestIdKey(request);
     if (!requestId) return;
     const { method, params } = outgoingRequestParts(request);
-    if (!["thread/start", "thread/resume", "thread/fork", "thread/read"].includes(method)) {
+    const nativeModelUpdate = nativeSelectionOnly && method === "thread/settings/update"
+      && params && Object.hasOwn(params, "model");
+    if (!nativeModelUpdate && !["thread/start", "thread/resume", "thread/fork", "thread/read"].includes(method)) {
       return;
     }
     rememberBoundedMap(
@@ -2235,6 +2272,7 @@
         threadId: threadIdFromParams(params),
         providerId: paramsProviderId(params),
         route: params?.[patchedRouteKey] || null,
+        nativeModelUpdate,
       },
       maxPendingThreadRequests,
     );
@@ -2260,13 +2298,27 @@
     const provider = requestProviderId(providerId);
     if (!threadId || !provider) return;
     rememberBoundedThreadRuntimeProvider(threadId, provider);
+    if (nativeSelectionOnly && modelKey(provider) === modelKey(catalog.nativeProviderId)
+      && threadRoutes.delete(threadId)) persistThreadRoutes();
   };
   const rememberThreadRoute = (thread, fallbackRoute = null) => {
     const threadId = typeof thread?.id === "string" ? thread.id.trim() : "";
     if (!threadId) return;
     const model = typeof thread?.model === "string" ? thread.model.trim() : "";
+    if (nativeSelectionOnly) {
+      if (catalog.nativeProviderId
+        && modelKey(threadRuntimeProviders.get(threadId)) === modelKey(catalog.nativeProviderId)) return;
+      const sourceModel = historicalSourceModel(model);
+      if (sourceModel) rememberBoundedThreadRoute(threadId, {
+        routeProviderId: providerFromThread(thread) || localRouterProviderId,
+        sourceModel,
+      });
+      return;
+    }
     const route = fallbackRoute
       || (model ? routeForThreadModel(threadId, model) : null)
+      || (model ? routeForProviderAlias(model) : null)
+      || (model ? uniqueRouteForProviderModel(providerFromThread(thread), model) : null)
       || (model ? uniqueRouteForRawModel(model) : null);
     rememberBoundedThreadRoute(threadId, route);
   };
@@ -2281,6 +2333,8 @@
     const requestId = message.id == null ? "" : String(message.id);
     const pending = requestId ? pendingThreadRequests.get(requestId) : null;
     if (requestId) pendingThreadRequests.delete(requestId);
+    if (message.error) return;
+    if (pending?.nativeModelUpdate && threadRoutes.delete(pending.threadId)) persistThreadRoutes();
     const result = message.result;
     const resultThread = result?.thread;
     const fallbackProvider = pending?.method === "thread/start"
@@ -2327,6 +2381,49 @@
     );
   };
 
+  const patchedNativeRequestParams = (method, params) => {
+    if (!modelBoundRequestMethods.has(method) || !params || typeof params !== "object") return params;
+    const threadId = threadIdFromParams(params);
+    const model = typeof params.model === "string" ? params.model.trim() : "";
+    const binding = !Object.hasOwn(params, "model") ? threadRoutes.get(threadId) : null;
+    const historicalSource = historicalSourceModel(model);
+    const currentProvider = knownThreadProvider(params);
+    const oldCarrier = modelKey(currentProvider) === localRouterProviderId
+      || (modelKey(currentProvider) === "codey" && modelKey(catalog.nativeProviderId) !== "codey");
+    if (!historicalSource && !binding && !oldCarrier) return params;
+    if (method === "thread/settings/update" && params.model === null) return params;
+    const sourceModel = historicalSource || binding?.sourceModel || model;
+    const canonical = catalog.modelNamesByKey.get(modelKey(sourceModel));
+    const targetProvider = catalog.nativeProviderId;
+    const next = { ...params };
+    const needsResume = method === "turn/start" && currentProvider && targetProvider
+      && modelKey(currentProvider) !== modelKey(targetProvider);
+    if (!catalog.loaded || !targetProvider || (sourceModel && !canonical) || needsResume) {
+      return markBlockedProviderRequest(next, {
+        reason: "historical_route_unavailable",
+        message: needsResume
+          ? "该任务仍使用旧线路，请重新打开任务，恢复到当前线路后重试。"
+          : !catalog.loaded
+            ? "模型目录尚未加载，请稍后重试。"
+            : !targetProvider
+              ? "无法确认当前原生线路，请刷新设置后重试。"
+            : `历史线路已不可用，当前线路未确认支持模型 ${sourceModel || model}，请重新选择可用模型。`,
+      });
+    }
+    if (canonical) next.model = canonical;
+    delete next.model_provider;
+    if (threadProviderRequestMethods.has(method)) next.modelProvider = targetProvider;
+    else delete next.modelProvider;
+    const metadata = params[routeMetadataParam];
+    if (metadata && typeof metadata === "object") {
+      const cleanMetadata = { ...metadata };
+      delete cleanMetadata[routeMetadataKey];
+      if (Object.keys(cleanMetadata).length) next[routeMetadataParam] = cleanMetadata;
+      else delete next[routeMetadataParam];
+    }
+    return next;
+  };
+
   const rewrittenOutgoingMessage = (detail) => {
     const request = detail?.request;
     rememberOutgoingModelListRequest(detail);
@@ -2335,10 +2432,10 @@
       || !request
       || typeof request !== "object"
     ) return detail;
-    if (nativeSelectionOnly) return detail;
-
     const { wrappedMethod, method, params } = outgoingRequestParts(request);
-    const nextParams = patchedRequestParams(method, params);
+    const nextParams = nativeSelectionOnly
+      ? patchedNativeRequestParams(method, params)
+      : patchedRequestParams(method, params);
     if (nextParams === params) {
       rememberOutgoingThreadRequest(detail);
       return detail;
@@ -2371,7 +2468,7 @@
     const current = blocked.currentProviderId
       ? `当前任务仍绑定在 ${blocked.currentProviderId}`
       : "当前任务的运行时供应商身份尚未确认";
-    const message = `${current}，尚未完成迁入 Codey 统一路由，暂时不能安全发送到「${target}」。请重新打开该任务后重试；恢复完成后即可跨供应商切换。本次消息已在本地拦截，未请求任何上游。`;
+    const message = blocked.message || `${current}，尚未完成迁入 Codey 统一路由，暂时不能安全发送到「${target}」。请重新打开该任务后重试；恢复完成后即可跨供应商切换。本次消息已在本地拦截，未请求任何上游。`;
     console.warn("[Codey] provider migration required before routed turn", blocked);
     try {
       const noticeId = "codey-provider-mismatch-notice";
@@ -2447,7 +2544,7 @@
     const data = event?.data;
     if (data?.type !== "mcp-response") return;
     const message = data.message || data.response;
-    if (!nativeSelectionOnly) rememberThreadProvidersFromResponse(data, message);
+    rememberThreadProvidersFromResponse(data, message);
     const requestId = message?.id == null ? "" : String(message.id);
     const isModelListResponse = (
       modelListRequestIds.has(requestId)
@@ -2507,8 +2604,8 @@
   });
   if (!nativeSelectionOnly) {
     installGroupedModelMenuObserver();
-    restoreThreadRoutes();
   }
+  restoreThreadRoutes();
   window.addEventListener?.("focus", handleFocus);
   if (!nativeSelectionOnly) installModelRequestDispatchPatch();
   if (typeof window.addEventListener === "function") {
@@ -2536,7 +2633,7 @@
       // model/list reply can bypass the response patch and replace Codey's hot
       // catalog after a completed turn.
       rememberOutgoingModelListRequest(detail);
-      if (!nativeSelectionOnly) rememberOutgoingThreadRequest(detail);
+      rememberOutgoingThreadRequest(detail);
       return detail;
     },
     isBlockedOutgoingMessage: (detail) => Boolean(blockedProviderRequest(detail)),

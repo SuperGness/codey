@@ -1342,6 +1342,7 @@ async fn save_codey_config_locked(
         return Err("Codey 设置已被其他操作更新，请关闭后重新打开设置页面再保存".to_string());
     }
     let mut config = previous.clone();
+    config.remember_model_aliases();
     config.profiles = merge_profile_secrets(config_input.profiles, &previous)?;
     config.active_profile_id = config_input.active_profile_id;
     if local_router_enabled_present {
