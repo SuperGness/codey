@@ -30,6 +30,65 @@ fn wrapper_command(home: &Path, target: &Path, port: u16, overrides: &str) -> Co
     command
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn detached_browser_cli_uses_saved_target_without_wrapper_environment() {
+    use std::os::unix::fs::PermissionsExt;
+    const CHILD_ENV: &str = "CODEY_TEST_DETACHED_CLI_CHILD";
+    if std::env::var(CHILD_ENV).as_deref() == Ok("1") {
+        // A regression must fail this test, never enter the real desktop lifecycle.
+        assert!(codey_lib::run_codex_cli_wrapper_if_requested().unwrap());
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let app = temp.path().join("Codex.app");
+    let target = app.join("Contents/Resources/codex");
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    std::fs::write(&target, "#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 17\n").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = temp
+        .path()
+        .join("Library/Application Support/com.Codey.Codey/config.json");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config,
+        serde_json::json!({"codexAppPath": app}).to_string(),
+    )
+    .unwrap();
+    let args = [
+        "--exact",
+        "detached_browser_cli_uses_saved_target_without_wrapper_environment",
+        "--",
+        "sandbox",
+        "macos",
+        "--",
+        "node",
+        "argument with spaces",
+    ];
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .env_clear()
+        .env("HOME", temp.path())
+        .env("CODEX_HOME", temp.path())
+        .env("PATH", "/usr/bin:/bin")
+        .env("CODEX_CLI_PATH", env!("CARGO_BIN_EXE_codey"))
+        .env(CHILD_ENV, "1")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(17), "{output:?}");
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .ends_with(&format!("{}\n", args.join("\n")))
+    );
+}
+
 async fn handshake(listener: TcpListener, child: &mut Child) -> Vec<u8> {
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         let (stream, _) = listener.accept().await.unwrap();
@@ -42,6 +101,23 @@ async fn handshake(listener: TcpListener, child: &mut Child) -> Vec<u8> {
         let _ = child.kill().await;
     }
     result.expect("the wrapper must report launch success or failure before the deadline")
+}
+
+#[tokio::test]
+async fn app_server_never_starts_without_its_runtime_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("unused-cli");
+    std::fs::write(&target, "must not execute").unwrap();
+    let mut command = wrapper_command(temp.path(), &target, 0, "[]");
+    command
+        .env_remove("CODEY_CODEX_CLI_WRAPPER_OVERRIDES")
+        .arg("app-server");
+    let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("缺少本次启动配置"));
 }
 
 #[cfg(target_os = "macos")]

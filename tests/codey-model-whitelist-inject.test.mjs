@@ -520,7 +520,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "49");
+  assert.equal(patch.version, "50");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -1444,6 +1444,38 @@ test("a slash-containing model uses the local router before the catalog finishes
   runtime.patch.dispose();
 });
 
+test("unloaded catalogs and unknown models cannot bypass the runtime provider check", async () => {
+  for (const catalog of [{ status: "failed" }, { status: "ok", models: ["known"], default_model: "known" }]) {
+    const runtime = await loadPatch(catalog, [statsigClient()]);
+    for (const provider of [undefined, "openai", "yescode", "codey_router"]) {
+      const turn = runtime.patch.rewriteOutgoingMessage({
+        type: "mcp-request", request: { method: "turn/start", params: {
+          threadId: "late-task", model: "route-aizz/unknown-model", modelProvider: provider,
+        } },
+      });
+      assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), provider !== "codey_router");
+      assert.equal(turn.request.params.model, "route-aizz/unknown-model");
+    }
+    for (const method of ["thread/start", "thread/resume", "thread/fork"]) {
+      const config = {
+        model_provider: "yescode",
+        model_providers: { codey_router: { base_url: "https://wrong.example/v1" } },
+        "model_providers.codey_router.base_url": "https://wrong.example/v1",
+        "model_reasoning_effort": "high",
+      };
+      const request = runtime.patch.rewriteOutgoingMessage({
+        type: "mcp-request", request: { method, params: {
+          model: "route-aizz/unknown-model", modelProvider: "yescode", config,
+        } },
+      });
+      assert.equal(request.request.params.modelProvider, "codey_router");
+      assert.deepEqual(request.request.params.config, { model_reasoning_effort: "high" });
+      assert.equal(config.model_provider, "yescode", "the caller's saved config stays unchanged");
+    }
+    runtime.patch.dispose();
+  }
+});
+
 test("stale turn route metadata is removed before the catalog finishes loading", async () => {
   const storage = memoryStorage();
   storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
@@ -1957,159 +1989,46 @@ test("an external-provider thread resumes onto the router and switches to an off
   runtime.patch.dispose();
 });
 
-test("an unmigrated OpenAI thread can keep using an official route directly", async () => {
-  const runtime = await loadPatch({
-    status: "ok",
-    models: ["openai/gpt-5.6-sol", "relay/gpt-5.5"],
-    default_model: "relay/gpt-5.5",
-    model_metadata: [
-      {
-        model: "openai/gpt-5.6-sol",
-        route_name: "OpenAI 官方直登",
-        provider_id: "codey_router",
-        source_model: "gpt-5.6-sol",
-        route_provider_id: "openai",
+test("every official route requires the local router even on a legacy OpenAI task", async () => {
+  for (const routeId of ["openai", "local-official", "chatgpt-account"]) {
+    const model = routeId + "/gpt-5.6-sol";
+    const runtime = await loadPatch({
+      status: "ok", models: [model], default_model: model,
+      model_metadata: [{
+        model, provider_id: "codey_router", source_model: "gpt-5.6-sol",
+        route_provider_id: routeId, official_account: true,
+      }],
+    }, [statsigClient()]);
+    runtime.dispatchWindowEvent("message", { data: {
+      type: "mcp-response", message: { result: {
+        data: [{ id: "official-task", modelProvider: "openai" }],
+      } },
+    } });
+    for (const method of ["thread/settings/update", "turn/start"]) {
+      const request = runtime.patch.rewriteOutgoingMessage({
+        type: "mcp-request", request: { method, params: { threadId: "official-task", model } },
+      });
+      assert.equal(runtime.patch.isBlockedOutgoingMessage(request), true);
+    }
+    const resume = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request", request: {
+        id: "resume-official", method: "thread/resume", params: { threadId: "official-task", model },
       },
-      {
-        model: "relay/gpt-5.5",
-        route_name: "中转线路",
-        provider_id: "codey_router",
-        source_model: "gpt-5.5",
-        route_provider_id: "relay",
-      },
-    ],
-  }, [statsigClient()]);
-  runtime.dispatchWindowEvent("message", {
-    data: {
-      type: "mcp-response",
-      message: {
-        id: "thread-list",
-        result: {
-          data: [{ id: "unmigrated-official-thread", modelProvider: "openai" }],
-        },
-      },
-    },
-  });
-
-  const selected = runtime.patch.rewriteOutgoingMessage({
-    type: "mcp-request",
-    request: {
-      id: "select-official-on-unmigrated-thread",
-      method: "thread/settings/update",
-      params: {
-        threadId: "unmigrated-official-thread",
-        model: "openai/gpt-5.6-sol",
-      },
-    },
-  });
-  assert.equal(runtime.patch.isBlockedOutgoingMessage(selected), false);
-  assert.deepEqual(selected.request.params, {
-    threadId: "unmigrated-official-thread",
-    model: "gpt-5.6-sol",
-  });
-
-  const nextTurn = runtime.patch.rewriteOutgoingMessage({
-    type: "mcp-request",
-    request: {
-      id: "turn-on-unmigrated-official-thread",
-      method: "turn/start",
-      params: { threadId: "unmigrated-official-thread" },
-    },
-  });
-  assert.equal(runtime.patch.isBlockedOutgoingMessage(nextTurn), false);
-  assert.deepEqual(nextTurn.request.params, {
-    threadId: "unmigrated-official-thread",
-    model: "gpt-5.6-sol",
-  });
-  runtime.patch.dispose();
-});
-
-test("a legacy local-official catalog route stays direct on an unmigrated OpenAI task", async () => {
-  const runtime = await loadPatch({
-    status: "ok",
-    models: ["local-official/gpt-5.6-terra"],
-    default_model: "local-official/gpt-5.6-terra",
-    model_metadata: [{
-      model: "local-official/gpt-5.6-terra",
-      route_name: "OpenAI 官方直登",
-      provider_id: "codey_router",
-      source_model: "gpt-5.6-terra",
-      route_provider_id: "local-official",
-    }],
-  }, [statsigClient()]);
-  runtime.dispatchWindowEvent("message", {
-    data: {
-      type: "mcp-response",
-      message: {
-        id: "legacy-local-official-thread-list",
-        result: {
-          data: [{ id: "legacy-local-official-thread", modelProvider: "openai" }],
-        },
-      },
-    },
-  });
-
-  const turn = runtime.patch.rewriteOutgoingMessage({
-    type: "mcp-request",
-    request: {
-      id: "legacy-local-official-default-turn",
-      method: "turn/start",
-      params: { threadId: "legacy-local-official-thread" },
-    },
-  });
-
-  assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), false);
-  assert.deepEqual(turn.request.params, {
-    threadId: "legacy-local-official-thread",
-    model: "gpt-5.6-terra",
-  });
-  runtime.patch.dispose();
-});
-
-test("official-account route metadata keeps a custom official route direct on an OpenAI task", async () => {
-  const runtime = await loadPatch({
-    status: "ok",
-    models: ["chatgpt-account/gpt-5.6-sol"],
-    default_model: "chatgpt-account/gpt-5.6-sol",
-    model_metadata: [{
-      model: "chatgpt-account/gpt-5.6-sol",
-      route_name: "OpenAI 官方直登",
-      provider_id: "codey_router",
-      source_model: "gpt-5.6-sol",
-      route_provider_id: "chatgpt-account",
-      official_account: true,
-    }],
-  }, [statsigClient()]);
-  runtime.dispatchWindowEvent("message", {
-    data: {
-      type: "mcp-response",
-      message: {
-        id: "custom-official-thread-list",
-        result: {
-          data: [{ id: "custom-official-thread", modelProvider: "openai" }],
-        },
-      },
-    },
-  });
-
-  const selected = runtime.patch.rewriteOutgoingMessage({
-    type: "mcp-request",
-    request: {
-      id: "custom-official-settings",
-      method: "thread/settings/update",
-      params: {
-        threadId: "custom-official-thread",
-        model: "chatgpt-account/gpt-5.6-sol",
-      },
-    },
-  });
-
-  assert.equal(runtime.patch.isBlockedOutgoingMessage(selected), false);
-  assert.deepEqual(selected.request.params, {
-    threadId: "custom-official-thread",
-    model: "gpt-5.6-sol",
-  });
-  runtime.patch.dispose();
+    });
+    assert.equal(resume.request.params.modelProvider, "codey_router");
+    runtime.dispatchWindowEvent("message", { data: {
+      type: "mcp-response", message: { id: "resume-official", result: {
+        thread: { id: "official-task", modelProvider: "openai" }, modelProvider: "codey_router",
+      } },
+    } });
+    const turn = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request", request: { method: "turn/start", params: { threadId: "official-task", model } },
+    });
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), false);
+    assert.equal(turn.request.params.model, "gpt-5.6-sol");
+    assert.equal(turn.request.params.responsesapiClientMetadata.codey_route, routeId);
+    runtime.patch.dispose();
+  }
 });
 
 test("an official thread must resume onto the router before selecting a third-party model", async () => {

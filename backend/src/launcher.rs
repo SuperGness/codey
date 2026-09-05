@@ -44,6 +44,8 @@ mod platform;
 mod process;
 
 use platform::*;
+#[cfg(windows)]
+pub(crate) use process::windows_cli_wrapper_target;
 use process::{
     SpawnedCodex, prepare_codex_for_launch, reap_child_after_cleanup, spawn_codex,
     spawn_codex_exit_watcher,

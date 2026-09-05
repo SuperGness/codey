@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "49";
+  const patchVersion = "50";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -302,28 +302,13 @@
     }
     return params;
   };
-  const routedRequestParams = (method, source, model, providerId, route) => {
-    const usesCodeyRoute = Boolean(requestProviderId(route?.routeProviderId));
+  const routedRequestParams = (method, source, model, route) => {
     const routeProviderId = requestProviderId(route?.routeProviderId);
     const threadId = threadIdFromParams(source);
     const currentProviderId = providerBoundExistingThreadMethods.has(method)
       ? (threadId ? knownThreadProvider(source) : paramsProviderId(source))
       : "";
-    // A task that has not yet resumed through Codey's carrier can still use
-    // its original OpenAI provider for an official model. Keep that request
-    // direct and translate the renderer-only selector back to the real model
-    // id. Other cross-provider choices first migrate through `thread/resume`.
-    const preservesLegacyOfficialCarrier = method !== "thread/resume"
-      && modelKey(currentProviderId) === officialProviderId
-      && isOfficialRoute(route);
-    const routedProviderId = preservesLegacyOfficialCarrier
-      ? officialProviderId
-      : (
-          usesCodeyRoute
-          || (method === "thread/resume" && Boolean(currentProviderId))
-        )
-        ? localRouterProviderId
-        : providerId;
+    const routedProviderId = localRouterProviderId;
     // Route-qualified ids are UI selectors, not valid ChatGPT-account model
     // ids. Keep the route in metadata while every official request uses the
     // upstream model id.
@@ -334,15 +319,22 @@
     if (routedModel || Object.hasOwn(source, "model")) next.model = routedModel;
     delete next.model_provider;
     if (threadProviderRequestMethods.has(method)) {
-      if (routedProviderId) next.modelProvider = routedProviderId;
-      else delete next.modelProvider;
+      next.modelProvider = routedProviderId;
+      // Request-local config has higher priority than launch defaults. Keep
+      // provider transport owned by the launcher even for restored tasks.
+      if (source.config && typeof source.config === "object") {
+        next.config = Object.fromEntries(Object.entries(source.config).filter(([key]) => (
+          key !== "model_provider" && !key.startsWith("model_provider.")
+          && key !== "model_providers" && !key.startsWith("model_providers.")
+        )));
+      }
     } else {
       // `turn/start` has no modelProvider field. New, forked, and resumed
       // threads may use the HTTP-only Codey carrier; the persisted rollout
       // metadata remains untouched by a resume-time override.
       delete next.modelProvider;
     }
-    if (method === "turn/start" && routeProviderId && !preservesLegacyOfficialCarrier) {
+    if (method === "turn/start" && routeProviderId) {
       const existingMetadata = source[routeMetadataParam];
       next[routeMetadataParam] = {
         ...(existingMetadata && typeof existingMetadata === "object"
@@ -350,14 +342,6 @@
           : {}),
         [routeMetadataKey]: routeProviderId,
       };
-    } else if (preservesLegacyOfficialCarrier) {
-      const existingMetadata = source[routeMetadataParam];
-      if (existingMetadata && typeof existingMetadata === "object") {
-        const nextMetadata = { ...existingMetadata };
-        delete nextMetadata[routeMetadataKey];
-        if (Object.keys(nextMetadata).length > 0) next[routeMetadataParam] = nextMetadata;
-        else delete next[routeMetadataParam];
-      }
     }
     let blocked = false;
     if (providerBoundExistingThreadMethods.has(method) && routedProviderId) {
@@ -2077,18 +2061,7 @@
       const safeSource = method === "turn/start"
         ? paramsWithoutUnverifiedRouteMetadata(source, requestedModel)
         : source;
-      const providerId = threadProviderRequestMethods.has(method)
-        ? localRouterProviderId
-        : requestedProvider;
-      return providerId && threadProviderRequestMethods.has(method)
-        ? routedRequestParams(
-            method,
-            safeSource,
-            requestedModel,
-            providerId,
-            null,
-          )
-        : safeSource === source ? params : safeSource;
+      return routedRequestParams(method, safeSource, requestedModel, null);
     }
     const requestedModelForProvider = (() => {
       if (!requestedProvider || !requestedModel) return requestedModel;
@@ -2180,7 +2153,6 @@
         method,
         source,
         route.selectorModel || route.sourceModel,
-        requestProviderId(route.providerId),
         route,
       );
       if (userIntentRoute) pendingRouteIntent = null;
@@ -2191,37 +2163,26 @@
         method,
         source,
         canonicalRequestedModel,
-        requestedProvider,
         null,
       );
     }
-    // Any task with a known persisted provider can be resumed through the
+    // Any task can be resumed through the
     // HTTP-only Codey carrier without rewriting its rollout. Preserve an
     // unknown model exactly so the gateway can report it rather than falling
     // back to an unrelated default.
     if (method === "thread/resume") {
-      const currentProviderId = knownThreadProvider(source);
-      return currentProviderId
-        ? routedRequestParams(
-            method,
-            source,
-            requestedModel,
-            localRouterProviderId,
-            null,
-          )
-        : params;
+      return routedRequestParams(method, source, requestedModel, null);
     }
     // An explicit unknown or deleted model must never be silently replaced by
     // an unrelated default. Preserve it so the caller can surface the exact
     // invalid selection instead of sending a different model than the user chose.
-    if (requestedModel) return source;
-    if (!catalog.defaultModel) return params;
-    const providerId = requestProviderId(defaultRoute?.providerId || "");
+    if (requestedModel || !catalog.defaultModel) {
+      return routedRequestParams(method, source, requestedModel, null);
+    }
     return routedRequestParams(
       method,
       source,
       defaultRoute?.selectorModel || catalog.defaultModel,
-      providerId,
       defaultRoute,
     );
   };

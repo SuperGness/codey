@@ -617,7 +617,7 @@ fn stage_windows_cli_runtime(
 }
 
 #[cfg(any(windows, test))]
-fn windows_cli_wrapper_target(app_dir: &std::path::Path) -> Result<PathBuf> {
+pub(crate) fn windows_cli_wrapper_target(app_dir: &std::path::Path) -> Result<PathBuf> {
     let target = codey_runtime_core::app_paths::codex_runtime_executable(app_dir)
         .ok_or_else(|| anyhow::anyhow!("Codex App 内未找到内置 CLI"))?;
     if codey_runtime_core::app_paths::packaged_app_user_model_id(app_dir).is_none() {
@@ -675,6 +675,11 @@ async fn prepare_cli_wrapper(
             token.clone(),
         ),
     ];
+    if crate::codex_startup_patch::local_router_runtime_enabled(runtime_config_overrides) {
+        // Applies before Desktop chooses a transport, including CLI fallback
+        // launches where the inspector patch cannot set this environment.
+        environment.push(("CODEX_APP_SERVER_FORCE_CLI".to_string(), "1".to_string()));
+    }
     #[cfg(windows)]
     let wrapper = codey;
     #[cfg(target_os = "macos")]

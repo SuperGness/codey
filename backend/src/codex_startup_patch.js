@@ -1034,6 +1034,12 @@
     }
     return null;
   };
+  const localRouterRuntimeEnabled = runtimeConfigValue(nativeRuntimeConfigOverrides, "model_provider") === "codey_router";
+  if (localRouterRuntimeEnabled) {
+    // A shared daemon or external WebSocket can retain another provider and
+    // never read this launch's overrides. Use Codex's own process-local mode.
+    process.env.CODEX_APP_SERVER_FORCE_CLI = "1";
+  }
   const threadTitleModelId = "gpt-5.6-luna";
   const selectThreadTitleModel = (
     configs = nativeRuntimeConfigOverrides,
@@ -1258,6 +1264,9 @@
       .map((argument, index) => argument === "app-server" ? index : -1)
       .filter((index) => index >= 0);
     if (appServerIndexes.length !== 1) return args;
+    if (localRouterRuntimeEnabled && args.some((arg) => arg === "proxy" || arg === "daemon")) {
+      throw new Error("本地路由模式不能使用 app-server proxy/daemon；请移除自定义后台服务启动命令");
+    }
 
     const managedConfigKeys = new Set(
       appServerRuntimeConfigs.map(runtimeOverrideKey),
@@ -1285,14 +1294,10 @@
       }
       rewritten.push(argument);
     }
-    const appServerIndex = rewritten.indexOf("app-server");
     // Keep Codey's overrides in the app-server command's own config layer.
-    // The desktop app appends mcp_servers.codex_app after the subcommand; placing
-    // Codey's mcp_servers entries in the global layer lets that later table mask
-    // FastCtx and the subagent-control server.
-    rewritten.splice(
-      appServerIndex + 1,
-      0,
+    // Apply them last: a later parent-table override can otherwise replace
+    // model_providers.codey_router even though every managed key is present.
+    rewritten.push(
       ...appServerRuntimeConfigs.flatMap((config) => ["-c", config]),
     );
     if (

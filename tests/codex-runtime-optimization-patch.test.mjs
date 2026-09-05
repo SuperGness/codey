@@ -43,7 +43,7 @@ async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrid
   const context = {
     clearTimeout,
     console,
-    process,
+    process: { ...process, env: { ...process.env } },
     Promise,
     setImmediate,
     setTimeout,
@@ -72,6 +72,38 @@ async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrid
     throw error;
   }
 }
+
+test("router mode forces a private CLI and applies transport overrides after parent tables", async () => {
+  const overrides = [
+    'model_provider="codey_router"',
+    'model_providers.codey_router.base_url="http://127.0.0.1:43127/v1"',
+  ];
+  const processWithExternalTransport = () => ({ ...process, env: {
+    CODEX_APP_SERVER_FORCE_CLI: "0",
+    CODEX_APP_SERVER_USE_LOCAL_DAEMON: "1",
+    CODEX_APP_SERVER_WS_URL: "ws://127.0.0.1:9999",
+  } });
+  const runtime = await loadPatchInIsolatedContext(overrides, { process: processWithExternalTransport() });
+  try {
+    assert.equal(runtime.context.process.env.CODEX_APP_SERVER_FORCE_CLI, "1");
+    const parent = 'model_providers={codey_router={base_url="https://wrong.example/v1"}}';
+    process.getBuiltinModule("child_process").spawn("codex", ["app-server", "-c", parent]);
+    const args = Array.from(runtime.spawnCalls.at(-1)[1]);
+    assert.deepEqual(args.slice(-overrides.length * 2), overrides.flatMap((value) => ["-c", value]));
+    assert.ok(args.indexOf(parent) < args.indexOf(overrides[1]));
+    for (const command of ["proxy", "daemon"]) {
+      assert.throws(() => process.getBuiltinModule("child_process").spawn("codex", ["app-server", command]), /proxy\/daemon/);
+    }
+  } finally {
+    runtime.restore();
+  }
+  const native = await loadPatchInIsolatedContext([], { process: processWithExternalTransport() });
+  try {
+    assert.equal(native.context.process.env.CODEX_APP_SERVER_FORCE_CLI, "0");
+  } finally {
+    native.restore();
+  }
+});
 
 test("thread title routing prefers official Luna, route Luna, then the default model", async () => {
   const runtime = await loadPatchInIsolatedContext([]);
@@ -203,17 +235,17 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
       "features.code_mode_host=true",
       "app-server",
       "-c",
+      desktopMcpConfig,
+      "-c",
       "analytics.enabled=false",
       ...nativeRuntimeConfigOverrides.flatMap((config) => ["-c", config]),
-      "-c",
-      desktopMcpConfig,
     ]);
     const fastctxRuntimeConfig = nativeRuntimeConfigOverrides.find((config) =>
       config.startsWith("mcp_servers.codey_fastctx.command="),
     );
     assert.ok(fastctxRuntimeConfig);
     assert.ok(
-      spawnCalls.at(-1)[1].indexOf(fastctxRuntimeConfig) <
+      spawnCalls.at(-1)[1].indexOf(fastctxRuntimeConfig) >
         spawnCalls.at(-1)[1].indexOf(desktopMcpConfig),
     );
     assert.equal(
@@ -579,8 +611,8 @@ test("startup patch keeps Codey MCP servers in the app-server config layer", asy
         `${config} must follow app-server`,
       );
       assert.ok(
-        configIndex < desktopMcpIndex,
-        `${config} must share the desktop MCP layer`,
+        configIndex > desktopMcpIndex,
+        `${config} must follow Desktop's overrides in the same config layer`,
       );
     }
     assert.equal(

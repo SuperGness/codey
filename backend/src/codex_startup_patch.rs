@@ -146,24 +146,65 @@ impl std::error::Error for CliWrapperFailure {}
 pub(crate) const MAX_CLI_WRAPPER_FAILURE_BYTES: usize = 8 * 1024;
 
 #[cfg(any(windows, target_os = "macos"))]
+fn cli_wrapper_target(
+    arguments: &[OsString],
+    target: Option<OsString>,
+    config_store: &crate::config::ConfigStore,
+) -> Result<Option<std::path::PathBuf>> {
+    if let Some(target) = target {
+        return Ok(Some(target.into()));
+    }
+    // Browser helpers keep CODEX_CLI_PATH but can discard Codey's environment.
+    // CLI arguments must never fall through to the desktop startup/cleanup path.
+    let Some(first) = arguments.first() else {
+        return Ok(None);
+    };
+    if first == "--debug-port"
+        || cfg!(target_os = "macos")
+            && first
+                .to_str()
+                .is_some_and(|value| value.starts_with("-psn_"))
+    {
+        return Ok(None);
+    }
+    let config = config_store.load().context("读取 Codex CLI 应用位置失败")?;
+    let saved = config.codex_app_path.trim();
+    let app_dir = codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved(
+        (!saved.is_empty()).then_some(std::path::Path::new(saved)),
+        None,
+    )
+    .context("找不到有效的 Codex 桌面应用，无法转发 CLI 调用")?;
+    #[cfg(windows)]
+    let target = crate::launcher::windows_cli_wrapper_target(&app_dir)?;
+    #[cfg(target_os = "macos")]
+    let target = codey_runtime_core::app_paths::codex_runtime_executable(&app_dir)
+        .context("Codex App 内未找到内置 CLI")?;
+    Ok(Some(target))
+}
+
+#[cfg(any(windows, target_os = "macos"))]
 pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     #[cfg(windows)]
     if run_windows_package_resume_helper_if_requested()? {
         return Ok(true);
     }
 
-    let Some(target) = std::env::var_os(CLI_WRAPPER_TARGET_ENV) else {
+    let original_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let Some(target) = cli_wrapper_target(
+        &original_args,
+        std::env::var_os(CLI_WRAPPER_TARGET_ENV),
+        &crate::config::ConfigStore::default(),
+    )?
+    else {
         return Ok(false);
     };
-    let target = std::path::PathBuf::from(target);
-    let original_args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let app_server = original_args
         .iter()
         .filter(|argument| argument.as_os_str() == OsStr::new("app-server"))
         .count()
         == 1;
     // 启动器只接收首次握手；之后 app-server 重启时仍必须能执行 CLI。
-    let readiness = if app_server {
+    let readiness = if app_server && std::env::var_os(CLI_WRAPPER_TARGET_ENV).is_some() {
         match notify_cli_wrapper_ready() {
             Ok(stream) => Some(stream),
             Err(error) => {
@@ -206,9 +247,13 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
             .ok()
             .map(|value| serde_json::from_str::<Vec<String>>(&value))
             .transpose()
-            .context("解析 Codex CLI 兼容运行时配置失败")?
-            .unwrap_or_default();
-        let rewritten_args = rewrite_app_server_args(&original_args, &runtime_overrides);
+            .context("解析 Codex CLI 兼容运行时配置失败")?;
+        anyhow::ensure!(
+            !app_server || runtime_overrides.is_some(),
+            "Codex app-server 缺少本次启动配置，已停止启动；请通过 Codey 重新启动 Codex"
+        );
+        let runtime_overrides = runtime_overrides.unwrap_or_default();
+        let rewritten_args = rewrite_app_server_args(&original_args, &runtime_overrides)?;
         let mut command = std::process::Command::new(&target);
         command.args(rewritten_args);
         for name in [
@@ -388,15 +433,32 @@ fn app_server_runtime_configs(runtime_overrides: &[String]) -> Vec<String> {
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
-fn rewrite_app_server_args(args: &[OsString], runtime_overrides: &[String]) -> Vec<OsString> {
+pub(crate) fn local_router_runtime_enabled(overrides: &[String]) -> bool {
+    overrides.iter().rev().find_map(|entry| {
+        let (key, value) = entry.split_once('=')?;
+        (key.trim() == "model_provider").then(|| value.trim().trim_matches(['\'', '"']))
+    }) == Some(crate::local_router::ROUTER_PROVIDER_ID)
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn rewrite_app_server_args(
+    args: &[OsString],
+    runtime_overrides: &[String],
+) -> Result<Vec<OsString>> {
     if args
         .iter()
         .filter(|argument| argument.as_os_str() == OsStr::new("app-server"))
         .count()
         != 1
     {
-        return args.to_vec();
+        return Ok(args.to_vec());
     }
+
+    anyhow::ensure!(
+        !local_router_runtime_enabled(runtime_overrides)
+            || !args.iter().any(|arg| arg == "proxy" || arg == "daemon"),
+        "本地路由模式不能使用 app-server proxy/daemon；请移除自定义后台服务启动命令"
+    );
 
     let configs = app_server_runtime_configs(runtime_overrides);
     let managed_keys = configs
@@ -434,17 +496,13 @@ fn rewrite_app_server_args(args: &[OsString], runtime_overrides: &[String]) -> V
         index += 1;
     }
 
-    let app_server_index = rewritten
-        .iter()
-        .position(|argument| argument.as_os_str() == OsStr::new("app-server"))
-        .expect("single app-server argument should remain");
-    rewritten.splice(
-        app_server_index + 1..app_server_index + 1,
+    // Parent-table overrides from Desktop must precede the runtime fields.
+    rewritten.extend(
         configs
             .into_iter()
             .flat_map(|config| [OsString::from("-c"), OsString::from(config)]),
     );
-    rewritten
+    Ok(rewritten)
 }
 
 pub async fn install(
@@ -704,6 +762,65 @@ fn ensure_protocol_success(payload: &serde_json::Value, method: &str) -> Result<
 mod tests {
     use super::*;
 
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn detached_cli_calls_resolve_the_saved_app_or_fail_without_starting_the_desktop() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::new(temp.path().join("config.json"));
+        #[cfg(target_os = "macos")]
+        let app = temp.path().join("Codex.app");
+        #[cfg(windows)]
+        let app = temp.path().join("Codex");
+        #[cfg(target_os = "macos")]
+        let target = app.join("Contents/Resources/codex");
+        #[cfg(windows)]
+        let target = app.join("resources/codex.exe");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "test CLI").unwrap();
+        #[cfg(windows)]
+        std::fs::write(app.join("Codex.exe"), "test desktop").unwrap();
+        store
+            .save(&crate::config::CodeyConfig {
+                codex_app_path: app.to_string_lossy().into_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+        for args in [
+            vec!["sandbox", "windows", "--", "node.exe"],
+            vec!["-c", "key=value", "app-server"],
+            vec!["exec-server"],
+            vec!["--version"],
+        ] {
+            assert_eq!(
+                cli_wrapper_target(
+                    &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                    None,
+                    &store
+                )
+                .unwrap(),
+                Some(target.clone()),
+            );
+        }
+        std::fs::remove_file(&target).unwrap();
+        assert!(cli_wrapper_target(&["sandbox".into()], None, &store).is_err());
+        assert_eq!(cli_wrapper_target(&[], None, &store).unwrap(), None);
+        assert_eq!(
+            cli_wrapper_target(&["--debug-port".into(), "9333".into()], None, &store).unwrap(),
+            None,
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            cli_wrapper_target(&["-psn_0_1".into()], None, &store).unwrap(),
+            None
+        );
+        std::fs::write(store.path(), "invalid config").unwrap();
+        assert!(cli_wrapper_target(&["sandbox".into()], None, &store).is_err());
+        assert_eq!(
+            cli_wrapper_target(&[], Some(target.clone().into_os_string()), &store).unwrap(),
+            Some(target),
+        );
+    }
+
     #[test]
     fn windows_package_resume_helper_requires_its_marker_and_thread_id() {
         assert_eq!(windows_package_resume_thread_id(&[]).unwrap(), None);
@@ -742,22 +859,37 @@ mod tests {
         ];
 
         assert_eq!(
-            rewrite_app_server_args(&args, &overrides),
+            rewrite_app_server_args(&args, &overrides).unwrap(),
             [
                 "-c",
                 "features.code_mode_host=true",
                 "app-server",
+                "-c",
+                "unmanaged=true",
                 "-c",
                 "analytics.enabled=false",
                 "-c",
                 "model_provider=codey_router",
                 "-c",
                 "features.hooks=true",
-                "-c",
-                "unmanaged=true",
             ]
             .map(OsString::from)
         );
+    }
+
+    #[test]
+    fn router_runtime_rejects_shared_app_server_commands() {
+        let router = vec!["model_provider=\"codey_router\"".to_string()];
+        assert!(local_router_runtime_enabled(&router));
+        assert!(!local_router_runtime_enabled(&[
+            router[0].clone(),
+            "model_provider=\"openai\"".to_string(),
+        ]));
+        for subcommand in ["proxy", "daemon"] {
+            let args = ["app-server", subcommand].map(OsString::from);
+            assert!(rewrite_app_server_args(&args, &router).is_err());
+            assert!(rewrite_app_server_args(&args, &[]).is_ok());
+        }
     }
 
     #[test]
