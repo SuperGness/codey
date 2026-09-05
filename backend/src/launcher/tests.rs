@@ -436,19 +436,7 @@ experimental_bearer_token = "secret"
 }
 
 #[test]
-fn persistent_session_provider_never_targets_the_launch_only_router_id() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("config.toml"),
-        format!("model_provider = \"{ROUTER_PROVIDER_ID}\"\n"),
-    )
-    .unwrap();
-
-    assert_eq!(persistent_session_provider(temp.path()).unwrap(), "openai");
-}
-
-#[test]
-fn persistent_session_provider_rejects_a_user_owned_router_before_sync() {
+fn validate_router_provider_rejects_a_user_owned_router_before_maintenance() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("config.toml"),
@@ -460,12 +448,12 @@ fn persistent_session_provider_rejects_a_user_owned_router_before_sync() {
     )
     .unwrap();
 
-    let error = persistent_session_provider(temp.path()).unwrap_err();
+    let error = validate_router_provider(temp.path()).unwrap_err();
     assert!(error.to_string().contains("已占用 Codey 内部 Provider ID"));
 }
 
 #[test]
-fn persistent_session_provider_allows_a_codey_owned_resume_shim() {
+fn validate_router_provider_allows_a_codey_owned_resume_shim() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("config.toml"),
@@ -488,14 +476,11 @@ fn persistent_session_provider_allows_a_codey_owned_resume_shim() {
     )
     .unwrap();
 
-    assert_eq!(
-        persistent_session_provider(temp.path()).unwrap(),
-        "codey_global"
-    );
+    validate_router_provider(temp.path()).unwrap();
 }
 
 #[test]
-fn persistent_session_provider_reads_legacy_codey_global_after_resume_shim() {
+fn validate_router_provider_reads_legacy_codey_global_after_resume_shim() {
     let temp = tempfile::tempdir().unwrap();
     std::fs::write(
         temp.path().join("config.toml"),
@@ -512,88 +497,75 @@ fn persistent_session_provider_reads_legacy_codey_global_after_resume_shim() {
     .unwrap();
 
     assert!(crate::codex_config::prepare_persistent_router_resume_shim_at(temp.path()).unwrap());
+    validate_router_provider(temp.path()).unwrap();
+}
+
+#[tokio::test]
+async fn startup_maintenance_preserves_router_and_other_provider_threads() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = "model_provider = \"yescode\"\n\n[model_providers.yescode]\nbase_url = \"https://first.example/v1\"\n";
+    std::fs::write(temp.path().join("config.toml"), config).unwrap();
+    let database = rusqlite::Connection::open(temp.path().join("state_5.sqlite")).unwrap();
+    database
+        .execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT);",
+        )
+        .unwrap();
+    let mut rollouts = Vec::new();
+    for (index, provider) in [ROUTER_PROVIDER_ID, "aizz", "openai"].iter().enumerate() {
+        let directory = temp.path().join(if index == 1 {
+            "archived_sessions"
+        } else {
+            "sessions"
+        });
+        std::fs::create_dir_all(&directory).unwrap();
+        let thread_id = format!("thread-{index}");
+        let model = "route-aizz/gpt-5.6-luna";
+        let rollout = directory.join(format!("rollout-{thread_id}.jsonl"));
+        let content = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session_meta",
+                "payload": { "id": thread_id, "model_provider": provider, "model": model }
+            })
+        );
+        std::fs::write(&rollout, &content).unwrap();
+        database
+            .execute(
+                "INSERT INTO threads VALUES (?1, ?2, ?3)",
+                rusqlite::params![thread_id, provider, model],
+            )
+            .unwrap();
+        rollouts.push((rollout, content));
+    }
+
+    validate_router_provider(temp.path()).unwrap();
+    let summary = run_startup_session_maintenance(temp.path()).await.unwrap();
+
+    assert_eq!(summary.status, "ready");
+    assert_eq!(summary.files_fixed, 0);
+    assert_eq!(summary.sqlite_rows_updated, 0);
     assert_eq!(
-        persistent_session_provider(temp.path()).unwrap(),
-        "codey_global"
+        std::fs::read_to_string(temp.path().join("config.toml")).unwrap(),
+        config
     );
-}
-
-#[test]
-fn session_maintenance_repairs_router_stamped_threads_for_third_party_launches() {
-    // Third-party users may never set `model_provider` in config.toml, and a
-    // Codex started outside Codey cannot resolve the launch-only router id
-    // that Codey stamped into their thread records.
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("config.toml"),
-        "model = \"gpt-5.6-terra\"\n",
-    )
-    .unwrap();
-    let sessions = temp.path().join("sessions/2026/08/27");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let rollout = sessions.join("rollout-thread-1.jsonl");
-    std::fs::write(
-        &rollout,
-        format!(
-            "{}\n",
-            serde_json::json!({
-                "type": "session_meta",
-                "payload": {
-                    "id": "thread-1",
-                    "model_provider": ROUTER_PROVIDER_ID
-                }
-            })
-        ),
-    )
-    .unwrap();
-
-    let provider = persistent_session_provider(temp.path()).unwrap();
-    assert_eq!(provider, "openai");
-    let result =
-        codey_runtime_data::run_provider_sync_with_target(Some(temp.path()), Some(&provider));
-
-    assert_eq!(result.status, ProviderSyncStatus::Synced);
-    assert_eq!(result.target_provider, "openai");
-    let repaired = std::fs::read_to_string(&rollout).unwrap();
-    assert!(repaired.contains("\"model_provider\":\"openai\""));
-    assert!(!repaired.contains(ROUTER_PROVIDER_ID));
-}
-
-#[test]
-fn session_maintenance_repairs_a_runtime_only_provider_to_the_persistent_provider() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("config.toml"),
-        "model_provider = \"openai\"\n",
-    )
-    .unwrap();
-    let sessions = temp.path().join("sessions/2026/08/24");
-    std::fs::create_dir_all(&sessions).unwrap();
-    let rollout = sessions.join("rollout-thread-1.jsonl");
-    std::fs::write(
-        &rollout,
-        format!(
-            "{}\n",
-            serde_json::json!({
-                "type": "session_meta",
-                "payload": {
-                    "id": "thread-1",
-                    "model_provider": "route-runtime-only"
-                }
-            })
-        ),
-    )
-    .unwrap();
-
-    let provider = persistent_session_provider(temp.path()).unwrap();
-    let result =
-        codey_runtime_data::run_provider_sync_with_target(Some(temp.path()), Some(&provider));
-
-    assert_eq!(result.status, ProviderSyncStatus::Synced);
-    assert_eq!(result.target_provider, "openai");
-    let repaired = std::fs::read_to_string(rollout).unwrap();
-    assert!(repaired.contains("\"model_provider\":\"openai\""));
-    assert!(!repaired.contains("route-runtime-only"));
+    for (path, original) in rollouts {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+    let rows = database
+        .prepare("SELECT model_provider, model FROM threads ORDER BY id")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        [ROUTER_PROVIDER_ID, "aizz", "openai"]
+            .map(|provider| { (provider.to_string(), "route-aizz/gpt-5.6-luna".to_string()) })
+    );
 }
 
 #[cfg(target_os = "macos")]

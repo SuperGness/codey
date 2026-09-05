@@ -549,15 +549,17 @@ async fn pending_websocket_requests_are_bounded_by_count_and_shared_budget() {
         let mut downstream = WebSocketResponsesDownstream::new(server);
         let budget = Arc::new(Semaphore::new(permits));
         downstream.request_body_budget = budget.clone();
+        // Flush the frames together so TCP does not delay later small writes.
         for _ in 0..9 {
             client
-                .send(WebSocketMessage::Text("pending".into()))
+                .feed(WebSocketMessage::Text("pending".into()))
                 .await
                 .unwrap();
         }
+        client.flush().await.unwrap();
         let result = downstream
             .wait_for_upstream(tokio::time::timeout(
-                Duration::from_millis(30),
+                Duration::from_millis(500),
                 std::future::pending::<()>(),
             ))
             .await

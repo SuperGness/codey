@@ -1157,6 +1157,12 @@ test("unchanged thread routes do not rewrite the full persisted binding table", 
     ],
   }, [statsigClient()], { storage });
 
+  runtime.dispatchWindowEvent("message", { data: {
+    type: "mcp-response",
+    message: { method: "thread/started", params: {
+      thread: { id: "stable-route-thread", modelProvider: "codey_router" },
+    } },
+  } });
   const rewriteTurn = (model) => runtime.patch.rewriteOutgoingMessage({
     type: "mcp-request",
     request: {
@@ -1531,6 +1537,61 @@ test("an external-provider task resumes on the HTTP router before catalog load",
     modelProvider: "codey_router",
   });
   assert.equal(runtime.patch.isBlockedOutgoingMessage(rewritten), false);
+  runtime.patch.dispose();
+});
+
+test("an explicit runtime provider response takes precedence over the requested router migration", async () => {
+  const alias = "route-aizz/gpt-5.6-luna";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [alias],
+    default_model: alias,
+    model_metadata: [{
+      model: alias,
+      route_name: "aizz",
+      provider_id: "codey_router",
+      source_model: "gpt-5.6-luna",
+      route_provider_id: "route-aizz",
+    }],
+  }, [statsigClient()]);
+
+  for (const method of ["thread/start", "thread/resume", "thread/fork"]) {
+    const threadId = `provider-check-${method}`;
+    const migrate = (modelProvider) => {
+      const request = runtime.patch.rewriteOutgoingMessage({
+        type: "mcp-request",
+        request: {
+          id: `request-${method}`,
+          method,
+          params: { threadId, model: alias, modelProvider: "yescode" },
+        },
+      });
+      assert.equal(request.request.params.modelProvider, "codey_router");
+      runtime.patch.trackOutgoingMessage(request);
+      runtime.dispatchWindowEvent("message", { data: {
+        type: "mcp-response",
+        message: {
+          id: request.request.id,
+          result: { thread: { id: threadId, modelProvider: "yescode" }, modelProvider },
+        },
+      } });
+    };
+    const turn = () => runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request",
+      request: { method: "turn/start", params: { threadId, model: alias } },
+    });
+
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn()), true,
+      "a late-loaded renderer must not guess the existing task's runtime provider");
+    migrate("yescode");
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn()), true,
+      `${method} must not send the second route's model through the first provider`);
+    migrate("codey_router");
+    const routedTurn = turn();
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(routedTurn), false);
+    assert.equal(routedTurn.request.params.model, alias);
+    assert.equal(routedTurn.request.params.responsesapiClientMetadata.codey_route, "route-aizz");
+  }
   runtime.patch.dispose();
 });
 
@@ -2860,6 +2921,12 @@ test("the clicked official route emits a raw ChatGPT model despite stale route m
       },
     ],
   }, [statsigClient()], { documentBody: body, storage });
+  runtime.dispatchWindowEvent("message", { data: {
+    type: "mcp-response",
+    message: { method: "thread/started", params: {
+      thread: { id: "menu-route-thread", modelProvider: "codey_router" },
+    } },
+  } });
   runtime.patch.enhanceModelMenus();
   runtime.dispatchDocumentEvent("pointerdown", { target: officialItem });
 

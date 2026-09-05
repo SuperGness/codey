@@ -11,7 +11,6 @@ use anyhow::{Context, Result};
 use codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved;
 use codey_runtime_core::config_manager::ConfigManager;
 use codey_runtime_core::launcher::build_codex_command;
-use codey_runtime_data::{ProviderSyncResult, ProviderSyncStatus};
 use serde::Serialize;
 use tokio::process::Child;
 #[cfg(not(windows))]
@@ -20,8 +19,8 @@ use tokio::sync::{Mutex, RwLock, oneshot};
 
 use crate::cdp;
 use crate::codex_config::{
-    BUILTIN_OPENAI_PROVIDER_ID, RuntimeRouterConfigOptions, apply_runtime_router_config,
-    codex_home, prepare_persistent_router_resume_shim as prepare_codex_router_resume_shim,
+    RuntimeRouterConfigOptions, apply_runtime_router_config, codex_home,
+    prepare_persistent_router_resume_shim as prepare_codex_router_resume_shim,
     restore_runtime_config_for_router_mode as restore_codex_runtime_config_for_router_mode,
     user_owned_router_provider_occupies_id,
 };
@@ -38,7 +37,6 @@ use crate::model_id;
 use crate::pet_slim_patch;
 use crate::route_request_log::{RouteRequestLogClearResult, RouteRequestLogReconfigure};
 use crate::session_index_cleanup::{self, SessionIndexCleanupReport};
-use crate::startup_maintenance::{self, ProviderSyncPlan};
 use crate::subagent_policy;
 use crate::trace_log_guard;
 
@@ -168,44 +166,32 @@ pub struct CodeyRuntime {
     local_router: Option<LocalRouter>,
 }
 
-fn persistent_session_provider(home: &std::path::Path) -> Result<String> {
+fn validate_router_provider(home: &std::path::Path) -> Result<()> {
     let config_path = home.join("config.toml");
     let snapshot = ConfigManager::new(&config_path)
         .load()
         .context("读取 Codex 持久配置失败")?;
     let document = snapshot.document();
     if user_owned_router_provider_occupies_id(document) {
-        // Runtime setup rejects a user-owned collision too, but session
-        // maintenance is permanent and therefore must not run before the
-        // same validation. Codey-owned resume shims are not occupancy.
+        // Validate before startup maintenance. Codey-owned resume shims are
+        // compatible with the live loopback table installed later.
         anyhow::bail!(
             "Codex config.toml 已占用 Codey 内部 Provider ID「{}」；请先重命名该自定义 Provider",
             ROUTER_PROVIDER_ID
         );
     }
-    let provider = document
-        .get("model_provider")
-        .and_then(toml_edit::Item::as_str)
-        .map(str::trim)
-        .filter(|provider| !provider.is_empty())
-        .unwrap_or(BUILTIN_OPENAI_PROVIDER_ID);
-    if provider == ROUTER_PROVIDER_ID {
-        // Legacy releases could leave the launch-only router id selected in
-        // the persistent config; thread records must never sync toward it.
-        return Ok(BUILTIN_OPENAI_PROVIDER_ID.to_string());
-    }
-    Ok(provider.to_string())
+    Ok(())
 }
 
-async fn resolve_persistent_session_provider(home: &std::path::Path) -> Result<String> {
+async fn validate_startup_router_provider(home: &std::path::Path) -> Result<()> {
     let provider_home = home.to_path_buf();
-    tokio::task::spawn_blocking(move || persistent_session_provider(&provider_home))
+    tokio::task::spawn_blocking(move || validate_router_provider(&provider_home))
         .await
         .map_err(|error| {
-            let error = anyhow::Error::new(error).context("读取持久会话 Provider 任务异常退出");
+            let error = anyhow::Error::new(error).context("校验启动 Provider 配置任务异常退出");
             error_log::record_failure(
                 "patch_failed",
-                "read_persistent_session_provider",
+                "validate_router_provider",
                 format!("{error:#}"),
                 serde_json::json!({
                     "codexHome": home,
@@ -217,7 +203,7 @@ async fn resolve_persistent_session_provider(home: &std::path::Path) -> Result<S
         .map_err(|error| {
             error_log::record_failure(
                 "patch_failed",
-                "read_persistent_session_provider",
+                "validate_router_provider",
                 format!("{error:#}"),
                 serde_json::json!({
                     "codexHome": home,
@@ -229,44 +215,10 @@ async fn resolve_persistent_session_provider(home: &std::path::Path) -> Result<S
 
 async fn run_startup_session_maintenance(
     home: &std::path::Path,
-    provider: Option<&str>,
 ) -> Result<SessionMaintenanceSummary> {
     let maintenance_home = home.to_path_buf();
-    let maintenance_provider = provider.map(ToString::to_string);
     let maintenance_result = tokio::task::spawn_blocking(move || {
         let stale_lock_recovery = maintenance_lock::recover_stale_locks(&maintenance_home);
-        let provider_sync = maintenance_provider.map(|maintenance_provider| {
-            match startup_maintenance::provider_sync_plan(&maintenance_home, &maintenance_provider)
-            {
-                Ok(ProviderSyncPlan::Cached) => {
-                    startup_maintenance::cached_provider_sync_result(&maintenance_provider)
-                }
-                Ok(ProviderSyncPlan::Full) | Err(_) => {
-                    let result = codey_runtime_data::run_provider_sync_with_target(
-                        Some(&maintenance_home),
-                        Some(&maintenance_provider),
-                    );
-                    if result.status == ProviderSyncStatus::Synced
-                        && result.skipped_locked_rollout_files.is_empty()
-                        && let Err(error) = startup_maintenance::record_provider_sync_success(
-                            &maintenance_home,
-                            &maintenance_provider,
-                        )
-                    {
-                        error_log::record_failure(
-                            "patch_failed",
-                            "record_provider_sync_success",
-                            format!("{error:#}"),
-                            serde_json::json!({
-                                "provider": maintenance_provider,
-                            }),
-                        );
-                        eprintln!("保存 Provider 同步状态失败：{error:#}");
-                    }
-                    result
-                }
-            }
-        });
         // A loaded Codex thread may have flushed a deleted turn after the live
         // request completed. Reapply durable tombstones after the old process
         // is stopped and before the new process can hydrate that stale data.
@@ -274,30 +226,24 @@ async fn run_startup_session_maintenance(
         // `session_index.jsonl` is also cleaned before spawn, while its
         // source snapshot is stable. The original file is backed up.
         let index_cleanup = session_index_cleanup::cleanup(&maintenance_home);
-        (
-            stale_lock_recovery,
-            provider_sync,
-            message_delete_replay,
-            index_cleanup,
-        )
+        (stale_lock_recovery, message_delete_replay, index_cleanup)
     })
     .await;
-    let (stale_lock_recovery, provider_sync, message_delete_replay, index_cleanup) =
-        match maintenance_result {
-            Ok(result) => result,
-            Err(error) => {
-                let error = anyhow::Error::new(error).context("启动前会话修复任务异常退出");
-                error_log::record_failure(
-                    "patch_failed",
-                    "run_startup_session_repairs",
-                    format!("{error:#}"),
-                    serde_json::json!({
-                        "codexHome": home,
-                    }),
-                );
-                return Err(error);
-            }
-        };
+    let (stale_lock_recovery, message_delete_replay, index_cleanup) = match maintenance_result {
+        Ok(result) => result,
+        Err(error) => {
+            let error = anyhow::Error::new(error).context("启动前会话修复任务异常退出");
+            error_log::record_failure(
+                "patch_failed",
+                "run_startup_session_repairs",
+                format!("{error:#}"),
+                serde_json::json!({
+                    "codexHome": home,
+                }),
+            );
+            return Err(error);
+        }
+    };
     match stale_lock_recovery {
         Ok(recovered) => {
             for path in recovered {
@@ -314,33 +260,6 @@ async fn run_startup_session_maintenance(
                 }),
             );
             eprintln!("清理陈旧维护锁失败：{error:#}");
-        }
-    }
-    if let Some(provider_sync) = provider_sync.as_ref() {
-        if provider_sync.status != ProviderSyncStatus::Synced {
-            error_log::record_failure(
-                "patch_failed",
-                "sync_session_providers",
-                provider_sync.message.clone(),
-                serde_json::json!({
-                    "status": format!("{:?}", provider_sync.status),
-                    "targetProvider": provider_sync.target_provider,
-                    "skippedLockedFiles": provider_sync.skipped_locked_rollout_files.len(),
-                }),
-            );
-        } else if !provider_sync.skipped_locked_rollout_files.is_empty() {
-            error_log::record_failure(
-                "patch_failed",
-                "sync_session_providers",
-                format!(
-                    "跳过 {} 个被占用的会话文件",
-                    provider_sync.skipped_locked_rollout_files.len()
-                ),
-                serde_json::json!({
-                    "targetProvider": provider_sync.target_provider,
-                    "skippedLockedFiles": provider_sync.skipped_locked_rollout_files,
-                }),
-            );
         }
     }
     match message_delete_replay {
@@ -384,10 +303,7 @@ async fn run_startup_session_maintenance(
             }),
         );
     }
-    Ok(session_maintenance_summary(
-        provider_sync.as_ref(),
-        &index_cleanup,
-    ))
+    Ok(session_maintenance_summary(&index_cleanup))
 }
 
 async fn resolve_configured_codex_app_dir(config: &CodeyConfig) -> Result<PathBuf> {
@@ -1218,7 +1134,6 @@ fn resolve_startup_profile(config: &CodeyConfig) -> Result<ProviderProfile> {
 async fn prepare_startup_storage(
     home: &std::path::Path,
     config: &CodeyConfig,
-    session_provider_sync_target: Option<&str>,
     guards: InitialStorageGuards,
     trace_log_write_protection_active: &AtomicBool,
     crashpad_pending_stats: &CrashpadPendingStatsHandle,
@@ -1229,12 +1144,9 @@ async fn prepare_startup_storage(
     // before any permanent maintenance is applied.
     prepare_codex_for_launch(&app_dir).await?;
 
-    // Permanent maintenance runs before Codey installs the temporary runtime
-    // provider override. A lightweight header/SQLite validation normally
-    // reuses the last successful provider sync; provider changes still
-    // fall back to the complete rollout and SQLite repair.
-    let session_maintenance =
-        run_startup_session_maintenance(home, session_provider_sync_target).await?;
+    // Keep each task's saved provider. A global rewrite to the persistent
+    // default can send a different route's model directly to that upstream.
+    let session_maintenance = run_startup_session_maintenance(home).await?;
     await_initial_storage_guards(
         guards.trace,
         config.disable_trace_log_writes,
@@ -1658,27 +1570,14 @@ impl CodeyRuntime {
             .local_router_enabled
             .then(|| resolve_startup_profile(config))
             .transpose()?;
-        // When local routing is enabled, threads created or resumed under
-        // Codey persist `codey_router` in
-        // rollout headers and the Codex thread index. Codex Desktop resolves
-        // that id from disk config; process `-c` overlays do not replace that
-        // lookup. Sync records back to the user's persistent provider so
-        // threads remain loadable outside Codey. Do not install the ChatGPT
-        // resume shim here: that table is ChatGPT-account transport and would
-        // send third-party catalog aliases to chatgpt.com for the whole live
-        // session. The live loopback table is written after the local router
-        // binds, inside apply_runtime_router_config. Native mode skips this
-        // routing-specific session rewrite and leaves Codex records untouched.
-        let persistent_session_provider = if config.local_router_enabled {
-            Some(resolve_persistent_session_provider(home).await?)
-        } else {
-            None
-        };
-        let session_provider_sync_target = persistent_session_provider.as_deref();
+        // apply_runtime_router_config installs the live loopback table before
+        // Codex starts, so saved codey_router tasks need no provider rewrite.
+        if config.local_router_enabled {
+            validate_startup_router_provider(home).await?;
+        }
         let storage = prepare_startup_storage(
             home,
             config,
-            session_provider_sync_target,
             initial_storage_guards,
             trace_log_write_protection_active,
             &crashpad_pending_stats,
@@ -1942,23 +1841,18 @@ fn watchdog_should_reinject(consecutive_failures: &mut u8, health: InjectionHeal
 }
 
 fn session_maintenance_summary(
-    provider_sync: Option<&ProviderSyncResult>,
     index_cleanup: &Result<SessionIndexCleanupReport>,
 ) -> SessionMaintenanceSummary {
     let pruned_entries = match index_cleanup {
         Ok(report) => report.pruned_entries,
         Err(_) => 0,
     };
-    let has_errors = provider_sync.is_some_and(|provider_sync| {
-        provider_sync.status != ProviderSyncStatus::Synced
-            || !provider_sync.skipped_locked_rollout_files.is_empty()
-    }) || index_cleanup.is_err();
+    let has_errors = index_cleanup.is_err();
     let status = if has_errors { "error" } else { "ready" };
     SessionMaintenanceSummary {
         status: status.to_string(),
-        files_fixed: provider_sync.map_or(0, |provider_sync| provider_sync.changed_session_files),
-        sqlite_rows_updated: provider_sync
-            .map_or(0, |provider_sync| provider_sync.sqlite_rows_updated),
+        files_fixed: 0,
+        sqlite_rows_updated: 0,
         ghost_tasks_pruned: pruned_entries,
     }
 }

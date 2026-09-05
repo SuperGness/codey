@@ -364,10 +364,13 @@
       // `turn/start` has no modelProvider field, so provider migration must
       // happen during `thread/resume`. Resume may move any persisted provider
       // onto Codey's runtime router; later turns can then switch routes safely.
+      // A late injection may have missed the resume response. Unknown carriers
+      // must resume too, rather than leaking a route alias to an old upstream.
       if (
         threadId
-        && currentProviderId
-        && !providersAreCompatible(method, currentProviderId, routedProviderId)
+        && (!currentProviderId
+          ? method === "turn/start" && routedProviderId === localRouterProviderId
+          : !providersAreCompatible(method, currentProviderId, routedProviderId))
       ) {
         blocked = true;
         markBlockedProviderRequest(next, {
@@ -2329,13 +2332,15 @@
         ? threadPersistedProviders.get(pending.threadId)
         : "";
     const resultProvider = requestProviderId(result?.modelProvider) || fallbackProvider;
-    const runtimeProvider = (
+    // Top-level modelProvider reports the live carrier; thread.modelProvider
+    // can still describe the persisted rollout after a successful resume.
+    const runtimeProvider = requestProviderId(result?.modelProvider) || ((
       pending?.method === "thread/start"
       || pending?.method === "thread/resume"
       || pending?.method === "thread/fork"
     ) ? pending.providerId : pending?.threadId
       ? threadRuntimeProviders.get(pending.threadId)
-      : resultProvider;
+      : resultProvider);
     rememberThreadPersistedProvider(resultThread, resultProvider);
     rememberThreadRuntimeProvider(resultThread || pending?.threadId, runtimeProvider);
     rememberThreadRoute(resultThread, pending?.route);

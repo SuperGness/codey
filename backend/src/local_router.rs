@@ -9901,10 +9901,10 @@ impl AnthropicSseAccumulator {
 
     fn into_message(self) -> Result<Value> {
         if !self.stopped
-            && !self
+            && self
                 .stop_reason
                 .as_deref()
-                .is_some_and(|reason| !reason.trim().is_empty())
+                .is_none_or(|reason| reason.trim().is_empty())
         {
             anyhow::bail!("Anthropic Messages SSE 在结束事件或 stop_reason 前断开");
         }
@@ -10676,10 +10676,10 @@ impl ChatSseAccumulator {
 
     fn into_chat_completion(self, done: bool) -> Result<Value> {
         if !done
-            && !self
+            && self
                 .finish_reason
                 .as_deref()
-                .is_some_and(|reason| !reason.trim().is_empty())
+                .is_none_or(|reason| reason.trim().is_empty())
         {
             anyhow::bail!("Chat Completions SSE 在 [DONE] 或 finish_reason 前断开");
         }

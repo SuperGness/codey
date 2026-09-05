@@ -34,7 +34,6 @@ mod session_index_cleanup;
 mod session_metadata;
 mod session_transfer;
 mod sqlite_util;
-mod startup_maintenance;
 mod startup_update;
 mod subagent;
 mod subagent_gate;
