@@ -163,128 +163,165 @@ pub(super) async fn spawn_codex(
 
     #[cfg(windows)]
     {
-        let inspector_port =
-            crate::codex_startup_patch::reserve_loopback_port().map_err(|error| {
-                let error = error.context("为 Codex 启动补丁选择本地调试端口失败");
-                error_log::record_failure(
-                    "patch_failed",
-                    "reserve_startup_patch_port",
-                    format!("{error:#}"),
-                    serde_json::json!({
-                        "platform": "windows",
-                    }),
-                );
-                error
-            })?;
-        let wrapper = match prepare_cli_wrapper(
-            app_dir,
-            subagent_gate_active,
-            runtime_config_overrides,
-        )
-        .await
-        {
-            Ok(wrapper) => Some(wrapper),
-            Err(error) => {
-                error_log::record_failure(
-                    "compatibility_fallback",
-                    "prepare_windows_codex_cli_wrapper",
-                    format!("{error:#}"),
-                    serde_json::json!({ "platform": "windows" }),
-                );
-                None
-            }
-        };
-        let inspector_arg = crate::codex_startup_patch::inspector_argument(inspector_port);
-        let mut launch_arguments = vec![inspector_arg];
-        launch_arguments.extend(runtime_arguments.iter().cloned());
-        let wrapper_environment = wrapper
-            .as_ref()
-            .map(|wrapper| wrapper.environment.as_slice())
-            .unwrap_or_default();
-        let (mut spawned, package_debug_session, wrapper_environment_applied) =
-            spawn_windows_codex(app_dir, debug_port, &launch_arguments, wrapper_environment)
-                .await?;
-        let wrapper_handshake = wrapper_environment_applied
-            .then(|| wrapper.expect("applied wrapper environment should have a listener"))
-            .map(CliWrapperLaunch::into_handshake);
-        let startup_result = install_startup_patch_with_cli_fallback(
-            inspector_port,
-            patch_options,
-            runtime_config_overrides,
-            wrapper_handshake,
-            "windows",
-        )
-        .await;
-        let package_cleanup = package_debug_session
-            .map(WindowsPackageDebugSession::finish)
-            .transpose()
-            .map(|_| ());
-        let startup_result = match (startup_result, package_cleanup) {
-            (mode, Ok(())) => mode,
-            (Ok(_), Err(cleanup_error)) => {
-                Err(cleanup_error.context("Windows Store Codex 兼容环境清理失败"))
-            }
-            (Err(startup_error), Err(cleanup_error)) => Err(anyhow::anyhow!(
-                "{startup_error:#}；Windows Store Codex 兼容环境清理失败：{cleanup_error:#}"
-            )),
-        };
+        let mut attempt = 0;
+        let mut startup_deadline = None;
+        loop {
+            attempt += 1;
 
-        match startup_result {
-            Ok(()) => {
-                spawned.performance_status = "ready".to_string();
-                spawned.performance_detail = "Codex 启动成功".to_string();
-                Ok(spawned)
-            }
-            Err(error) => {
-                let startup_error = format!("{error:#}");
-                error_log::record_failure(
-                    "patch_failed",
-                    "install_startup_patch_or_cli_wrapper",
-                    startup_error.clone(),
-                    serde_json::json!({
-                        "platform": "windows",
-                        "inspectorPort": inspector_port,
-                        "processId": spawned.process_id,
-                        "disablePet": patch_options.disable_pet,
-                        "runtimeConfigOverrideCount": runtime_config_overrides.len(),
-                    }),
-                );
-                if let Err(cleanup_error) = stop_windows_spawned_codex(&mut spawned, app_dir).await
+            let (wrapper, wrapper_preparation_error) =
+                match prepare_cli_wrapper(app_dir, subagent_gate_active, runtime_config_overrides)
+                    .await
                 {
-                    anyhow::bail!(
-                        "Codex 启动兼容方案未能安装，且无法安全清理启动进程：{startup_error}；{cleanup_error:#}"
+                    Ok(wrapper) => (Some(wrapper), None),
+                    Err(error) => {
+                        error_log::record_failure(
+                            "compatibility_fallback",
+                            "prepare_windows_codex_cli_wrapper",
+                            format!("{error:#}"),
+                            serde_json::json!({ "platform": "windows" }),
+                        );
+                        (None, Some(error))
+                    }
+                };
+            let deadline = *startup_deadline.get_or_insert_with(|| {
+                tokio::time::Instant::now()
+                    + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT
+            });
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "Codex 兼容启动总时限已用尽"
+            );
+            let inspector_port =
+                crate::codex_startup_patch::reserve_loopback_port().map_err(|error| {
+                    let error = error.context("为 Codex 启动补丁选择本地调试端口失败");
+                    error_log::record_failure(
+                        "patch_failed",
+                        "reserve_startup_patch_port",
+                        format!("{error:#}"),
+                        serde_json::json!({
+                            "platform": "windows",
+                        }),
                     );
+                    error
+                })?;
+            let inspector_arg = crate::codex_startup_patch::inspector_argument(inspector_port);
+            let mut launch_arguments = vec![inspector_arg];
+            launch_arguments.extend(runtime_arguments.iter().cloned());
+            let wrapper_environment = wrapper
+                .as_ref()
+                .map(|wrapper| wrapper.environment.as_slice())
+                .unwrap_or_default();
+            let (mut spawned, package_debug_session, wrapper_environment_applied) =
+                spawn_windows_codex(app_dir, debug_port, &launch_arguments, wrapper_environment)
+                    .await?;
+            let wrapper_handshake = wrapper_environment_applied
+                .then(|| wrapper.expect("applied wrapper environment should have a listener"))
+                .map(CliWrapperLaunch::into_handshake);
+            let startup_result = install_startup_patch_with_cli_fallback(
+                inspector_port,
+                patch_options,
+                runtime_config_overrides,
+                wrapper_handshake,
+                "windows",
+                deadline,
+            )
+            .await
+            .map_err(|patch_error| {
+                let wrapper_error = wrapper_preparation_error.or_else(|| {
+                    (!wrapper_environment_applied)
+                        .then(|| anyhow::anyhow!("Windows 未能应用 CLI 兼容环境，详见启动错误日志"))
+                });
+                match wrapper_error {
+                    Some(wrapper_error) => combined_startup_error(patch_error, wrapper_error),
+                    None => patch_error,
                 }
-                if !runtime_config_overrides.is_empty() {
-                    anyhow::bail!(
-                        "Codex 启动兼容方案未能确认 app-server 运行时覆盖；为避免丢失 Codey 运行时约束，已停止 Codex：{startup_error}"
+            });
+            let package_cleanup = package_debug_session
+                .map(WindowsPackageDebugSession::finish)
+                .transpose()
+                .map(|_| ());
+            let package_cleanup_succeeded = package_cleanup.is_ok();
+            let startup_result = match (startup_result, package_cleanup) {
+                (mode, Ok(())) => mode,
+                (Ok(_), Err(cleanup_error)) => {
+                    Err(cleanup_error.context("Windows Store Codex 兼容环境清理失败"))
+                }
+                (Err(startup_error), Err(cleanup_error)) => Err(anyhow::anyhow!(
+                    "{startup_error:#}；Windows Store Codex 兼容环境清理失败：{cleanup_error:#}"
+                )),
+            };
+
+            match startup_result {
+                Ok(()) => {
+                    spawned.performance_status = "ready".to_string();
+                    spawned.performance_detail = "Codex 启动成功".to_string();
+                    return Ok(spawned);
+                }
+                Err(error) => {
+                    let retryable = startup_error_allows_retry(&error);
+                    let startup_error = format!("启动尝试 {attempt}/2：{error:#}");
+                    error_log::record_failure(
+                        "patch_failed",
+                        "install_startup_patch_or_cli_wrapper",
+                        startup_error.clone(),
+                        serde_json::json!({
+                            "platform": "windows",
+                            "inspectorPort": inspector_port,
+                            "processId": spawned.process_id,
+                            "startupAttempt": attempt,
+                            "retryable": retryable,
+                            "remainingBudgetMs": deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis(),
+                            "disablePet": patch_options.disable_pet,
+                            "runtimeConfigOverrideCount": runtime_config_overrides.len(),
+                        }),
                     );
-                }
-                if subagent_gate_active {
-                    anyhow::bail!(
-                        "Codex 启动兼容方案未能安装；为避免丢失 Codey 运行时约束，已停止 Codex：{startup_error}"
-                    );
-                }
-                match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[]).await {
-                    Ok((mut fallback, _, _)) => {
-                        fallback.performance_status = "degraded".to_string();
-                        fallback.performance_detail =
+                    if let Err(cleanup_error) =
+                        stop_windows_spawned_codex(&mut spawned, app_dir).await
+                    {
+                        anyhow::bail!(
+                            "Codex 启动兼容方案未能安装，且无法安全清理启动进程：{startup_error}；{cleanup_error:#}"
+                        );
+                    }
+                    if !package_cleanup_succeeded {
+                        anyhow::bail!(
+                            "Codex 启动兼容环境未能安全清理，已停止重试：{startup_error}"
+                        );
+                    }
+                    // 每次重试都重新准备兼容握手和调试端口，清理完成后才能启动。
+                    if should_retry_startup(&error, attempt, deadline) {
+                        continue;
+                    }
+                    if !runtime_config_overrides.is_empty() {
+                        anyhow::bail!(
+                            "Codex 启动兼容方案未能确认 app-server 运行时覆盖；为避免丢失 Codey 运行时约束，已停止 Codex：{startup_error}"
+                        );
+                    }
+                    if subagent_gate_active {
+                        anyhow::bail!(
+                            "Codex 启动兼容方案未能安装；为避免丢失 Codey 运行时约束，已停止 Codex：{startup_error}"
+                        );
+                    }
+                    match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[]).await {
+                        Ok((mut fallback, _, _)) => {
+                            fallback.performance_status = "degraded".to_string();
+                            fallback.performance_detail =
                             "Codex 已启动，但部分启动设置未能应用；页面功能以检测结果为准，下次启动将重试"
                                 .to_string();
-                        error_log::record_failure(
-                            "patch_degraded",
-                            "restart_without_startup_patch",
-                            startup_error,
-                            serde_json::json!({
-                                "platform": "windows",
-                                "processId": fallback.process_id,
-                            }),
-                        );
-                        Ok(fallback)
+                            error_log::record_failure(
+                                "patch_degraded",
+                                "restart_without_startup_patch",
+                                startup_error,
+                                serde_json::json!({
+                                    "platform": "windows",
+                                    "processId": fallback.process_id,
+                                }),
+                            );
+                            return Ok(fallback);
+                        }
+                        Err(fallback_error) => anyhow::bail!(
+                            "Codex 启动设置未能应用，且重试启动失败：{startup_error}；{fallback_error:#}"
+                        ),
                     }
-                    Err(fallback_error) => anyhow::bail!(
-                        "Codex 启动设置未能应用，且重试启动失败：{startup_error}；{fallback_error:#}"
-                    ),
                 }
             }
         }
@@ -330,6 +367,7 @@ pub(super) async fn spawn_codex(
             runtime_config_overrides,
             wrapper.map(CliWrapperLaunch::into_handshake),
             "macos",
+            tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT,
         )
         .await;
 
@@ -704,6 +742,44 @@ fn add_macos_cli_wrapper(
     Ok(())
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
+fn startup_error_allows_retry(error: &anyhow::Error) -> bool {
+    if let Some(failure) = error.downcast_ref::<crate::codex_startup_patch::CliWrapperFailure>() {
+        return failure.retryable;
+    }
+    error.is::<tokio::time::error::Elapsed>()
+        || error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(crate::codex_startup_patch::is_retryable_startup_io_error)
+}
+
+#[cfg(any(windows, test))]
+fn should_retry_startup(
+    error: &anyhow::Error,
+    attempt: u32,
+    deadline: tokio::time::Instant,
+) -> bool {
+    attempt < 2 && tokio::time::Instant::now() < deadline && startup_error_allows_retry(error)
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn combined_startup_error(
+    patch_error: anyhow::Error,
+    wrapper_error: anyhow::Error,
+) -> anyhow::Error {
+    let kind =
+        if startup_error_allows_retry(&patch_error) && startup_error_allows_retry(&wrapper_error) {
+            std::io::ErrorKind::TimedOut
+        } else {
+            std::io::ErrorKind::Other
+        };
+    std::io::Error::new(
+        kind,
+        format!("Codex 启动补丁失败：{patch_error:#}；CLI 兼容入口失败：{wrapper_error:#}"),
+    )
+    .into()
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 async fn install_startup_patch_with_cli_fallback(
     inspector_port: u16,
@@ -711,17 +787,25 @@ async fn install_startup_patch_with_cli_fallback(
     runtime_config_overrides: &[String],
     wrapper_handshake: Option<(tokio::net::TcpListener, Vec<u8>)>,
     platform: &'static str,
+    deadline: tokio::time::Instant,
 ) -> Result<()> {
-    let mut patch_install = Box::pin(crate::codex_startup_patch::install(
-        inspector_port,
-        patch_options,
-        runtime_config_overrides,
-        !runtime_config_overrides.is_empty(),
-    ));
+    let mut patch_install = Box::pin(async {
+        tokio::time::timeout_at(
+            deadline,
+            crate::codex_startup_patch::install(
+                inspector_port,
+                patch_options,
+                runtime_config_overrides,
+                !runtime_config_overrides.is_empty(),
+            ),
+        )
+        .await
+        .context("Codex 兼容启动总时限已用尽")?
+    });
     let Some((listener, token)) = wrapper_handshake else {
         return patch_install.as_mut().await;
     };
-    let mut wrapper_ready = Box::pin(wait_for_cli_wrapper(listener, token));
+    let mut wrapper_ready = Box::pin(wait_for_cli_wrapper(listener, token, deadline));
     tokio::select! {
         patch = &mut patch_install => match patch {
             Ok(()) => Ok(()),
@@ -735,9 +819,8 @@ async fn install_startup_patch_with_cli_fallback(
                     );
                     Ok(())
                 }
-                Err(wrapper_error) => Err(anyhow::anyhow!(
-                    "Codex 启动补丁失败：{patch_error:#}；CLI 兼容入口失败：{wrapper_error:#}"
-                )),
+                Err(wrapper_error) if wrapper_error.is::<crate::codex_startup_patch::CliWrapperFailure>() => Err(wrapper_error),
+                Err(wrapper_error) => Err(combined_startup_error(patch_error, wrapper_error)),
             },
         },
         wrapper = &mut wrapper_ready => match wrapper {
@@ -774,11 +857,10 @@ async fn install_startup_patch_with_cli_fallback(
                     Ok(())
                 }
             },
+            Err(wrapper_error) if wrapper_error.is::<crate::codex_startup_patch::CliWrapperFailure>() => Err(wrapper_error),
             Err(wrapper_error) => match patch_install.as_mut().await {
                 Ok(()) => Ok(()),
-                Err(patch_error) => Err(anyhow::anyhow!(
-                    "Codex CLI 兼容入口失败：{wrapper_error:#}；启动补丁失败：{patch_error:#}"
-                )),
+                Err(patch_error) => Err(combined_startup_error(patch_error, wrapper_error)),
             },
         },
     }
@@ -788,10 +870,15 @@ async fn install_startup_patch_with_cli_fallback(
 async fn wait_for_cli_wrapper(
     listener: tokio::net::TcpListener,
     expected_token: Vec<u8>,
+    deadline: tokio::time::Instant,
 ) -> Result<()> {
+    use crate::codex_startup_patch::{
+        CliWrapperFailure, MAX_CLI_WRAPPER_FAILURE_BYTES, STARTUP_READY_TIMEOUT,
+    };
     use tokio::io::AsyncReadExt;
 
-    match tokio::time::timeout(Duration::from_secs(20), async {
+    let deadline = deadline.min(tokio::time::Instant::now() + STARTUP_READY_TIMEOUT);
+    tokio::time::timeout_at(deadline, async {
         loop {
             let (mut stream, _) = listener.accept().await?;
             let mut received = vec![0; expected_token.len()];
@@ -800,21 +887,48 @@ async fn wait_for_cli_wrapper(
                 .is_ok_and(|result| result.is_ok())
                 && received == expected_token
             {
-                let mut failure = [0];
-                let end =
-                    tokio::time::timeout(Duration::from_millis(750), stream.read(&mut failure))
-                        .await
-                        .context("等待 Codex CLI 执行确认超时")??;
-                anyhow::ensure!(end == 0, "Codex CLI 兼容执行器未能执行目标程序");
-                return Ok::<_, anyhow::Error>(());
+                let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                    "launcher.cli_wrapper_authenticated",
+                    serde_json::json!({ "remainingBudgetMs": deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis() }),
+                );
+                // 令牌只证明包装器已进入启动流程，创建目标进程仍共享外层截止时间。
+                let mut status = [0];
+                let end = stream
+                    .read(&mut status)
+                    .await
+                    .context("读取 Codex CLI 执行确认失败")?;
+                if end == 0 {
+                    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                        "launcher.cli_wrapper_exec_confirmed", serde_json::json!({}),
+                    );
+                    return Ok::<_, anyhow::Error>(());
+                }
+                let mut body = Vec::new();
+                let payload = tokio::time::timeout(
+                    Duration::from_millis(750),
+                    stream
+                        .take((MAX_CLI_WRAPPER_FAILURE_BYTES + 1) as u64)
+                        .read_to_end(&mut body),
+                )
+                .await;
+                let failure = if status[0] == b'!'
+                    && payload.is_ok_and(|result| result.is_ok())
+                    && body.len() <= MAX_CLI_WRAPPER_FAILURE_BYTES
+                {
+                    serde_json::from_slice::<CliWrapperFailure>(&body).ok()
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| CliWrapperFailure {
+                    message: "目标程序未能执行，未收到完整的失败详情".to_string(),
+                    retryable: false,
+                });
+                return Err(failure.into());
             }
         }
     })
     .await
-    {
-        Ok(result) => result,
-        Err(_) => Err(anyhow::anyhow!("等待 Codex CLI 兼容执行器超时")),
-    }
+    .context("等待 Codex CLI 兼容执行器超时")?
 }
 
 pub(super) async fn reap_child_after_cleanup(mut child: Child, operation: &'static str) {
@@ -966,6 +1080,127 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
 mod cli_wrapper_tests {
     use super::*;
 
+    #[tokio::test(start_paused = true)]
+    async fn startup_retry_requires_a_transient_error_and_remaining_budget() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let timeout = || {
+            anyhow::Error::from(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "not ready",
+            ))
+        };
+        let transient = crate::codex_startup_patch::CliWrapperFailure {
+            message: "运行文件暂时被占用".to_string(),
+            retryable: true,
+        }
+        .into();
+        let invalid = crate::codex_startup_patch::CliWrapperFailure {
+            message: "运行时配置无效".to_string(),
+            retryable: false,
+        }
+        .into();
+        for (code, retryable) in [
+            (5, false),
+            (193, false),
+            (32, cfg!(windows)),
+            (33, cfg!(windows)),
+        ] {
+            let error = std::io::Error::from_raw_os_error(code).into();
+            assert_eq!(startup_error_allows_retry(&error), retryable);
+        }
+        assert!(should_retry_startup(&timeout(), 1, deadline));
+        assert!(should_retry_startup(&transient, 1, deadline));
+        assert!(!should_retry_startup(&invalid, 1, deadline));
+        assert!(!should_retry_startup(&timeout(), 2, deadline));
+        assert!(!startup_error_allows_retry(&combined_startup_error(
+            anyhow::anyhow!("invalid inspector response"),
+            timeout()
+        )));
+        assert!(startup_error_allows_retry(&combined_startup_error(
+            timeout(),
+            timeout()
+        )));
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert!(!should_retry_startup(&timeout(), 1, deadline));
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn compatibility_waits_share_the_callers_deadline() {
+        let port = crate::codex_startup_patch::reserve_loopback_port().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(80);
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            install_startup_patch_with_cli_fallback(
+                port,
+                crate::codex_startup_patch::PatchOptions {
+                    disable_pet: false,
+                    subagent_gate_active: true,
+                },
+                &["analytics.enabled=false".to_string()],
+                Some((listener, b"token".to_vec())),
+                "windows",
+                deadline,
+            ),
+        )
+        .await
+        .expect("neither compatibility path may reset the caller's deadline");
+        assert!(startup_error_allows_retry(&result.unwrap_err()));
+        assert!(tokio::time::Instant::now() >= deadline);
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn cli_launch_failure_returns_its_cause_without_waiting_for_inspector() {
+        use tokio::io::AsyncWriteExt;
+        for retryable in [false, true] {
+            let port = crate::codex_startup_patch::reserve_loopback_port().unwrap();
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let address = listener.local_addr().unwrap();
+            let sender = tokio::spawn(async move {
+                let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+                stream.write_all(b"token!").await.unwrap();
+                stream
+                    .write_all(
+                        serde_json::to_string(&crate::codex_startup_patch::CliWrapperFailure {
+                            message: "CreateProcess failed: os error 193".to_string(),
+                            retryable,
+                        })
+                        .unwrap()
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            });
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                install_startup_patch_with_cli_fallback(
+                    port,
+                    crate::codex_startup_patch::PatchOptions {
+                        disable_pet: false,
+                        subagent_gate_active: true,
+                    },
+                    &[],
+                    Some((listener, b"token".to_vec())),
+                    "windows",
+                    tokio::time::Instant::now()
+                        + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT,
+                ),
+            )
+            .await
+            .expect("an explicit CLI launch failure must return immediately");
+            let error = result.unwrap_err();
+            assert!(format!("{error:#}").contains("os error 193"));
+            assert_eq!(startup_error_allows_retry(&error), retryable);
+            sender.await.unwrap();
+        }
+    }
+
     #[cfg(any(windows, target_os = "macos"))]
     #[tokio::test]
     async fn cli_handshake_requires_authenticated_exec_completion() {
@@ -984,12 +1219,56 @@ mod cli_wrapper_tests {
                 valid.write_all(b"token").await.unwrap();
                 if failed {
                     valid.write_all(b"!").await.unwrap();
+                } else {
+                    // 创建进程超过旧的 750ms 窗口，仍应等到明确的执行结果。
+                    tokio::time::sleep(Duration::from_millis(900)).await;
                 }
             });
-            let result = wait_for_cli_wrapper(listener, b"token".to_vec()).await;
+            let result = wait_for_cli_wrapper(
+                listener,
+                b"token".to_vec(),
+                tokio::time::Instant::now()
+                    + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT,
+            )
+            .await;
             assert_eq!(result.is_err(), failed);
             sender.await.unwrap();
         }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test(start_paused = true)]
+    async fn cli_fallback_accepts_cold_start_within_readiness_deadline() {
+        use tokio::io::AsyncWriteExt;
+
+        // 保持 Inspector 不可用，让测试覆盖实际的 CLI 兼容启动路径。
+        let inspector = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let inspector_port = inspector.local_addr().unwrap().port();
+        drop(inspector);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let sender = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(18)).await;
+            tokio::time::resume();
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream.write_all(b"token").await.unwrap();
+        });
+        install_startup_patch_with_cli_fallback(
+            inspector_port,
+            crate::codex_startup_patch::PatchOptions {
+                disable_pet: false,
+                subagent_gate_active: true,
+            },
+            &["analytics.enabled=false".to_string()],
+            Some((listener, b"token".to_vec())),
+            "windows",
+            tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        sender.await.unwrap();
     }
 
     #[cfg(target_os = "macos")]

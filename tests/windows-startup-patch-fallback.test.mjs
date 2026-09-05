@@ -52,6 +52,26 @@ test("Windows startup compatibility failure cleans the process before compatible
   );
 });
 
+test("Windows retries the full compatible launch only after successful cleanup", async () => {
+  const { windowsSpawn } = await loadWindowsStartupSource();
+  const loop = windowsSpawn.indexOf("loop {");
+  const prepare = windowsSpawn.indexOf("prepare_cli_wrapper(");
+  const reservePort = windowsSpawn.indexOf("reserve_loopback_port()");
+  const launch = windowsSpawn.indexOf("spawn_windows_codex(");
+  const cleanup = windowsSpawn.indexOf("if let Err(cleanup_error) =");
+  const packageGuard = windowsSpawn.indexOf("if !package_cleanup_succeeded {");
+  const retry = windowsSpawn.indexOf("if should_retry_startup(&error, attempt, deadline) {");
+  const requiredConfigGuard = windowsSpawn.indexOf("if !runtime_config_overrides.is_empty() {");
+  assert.ok(loop >= 0 && prepare > loop && reservePort > prepare && launch > reservePort);
+  assert.ok(cleanup > launch && packageGuard > cleanup && retry > packageGuard);
+  assert.ok(requiredConfigGuard > retry);
+  assert.match(windowsSpawn, /let mut attempt = 0;\s*let mut startup_deadline = None;\s*loop \{\s*attempt \+= 1;/);
+  assert.match(windowsSpawn.slice(cleanup, retry), /if let Err\(cleanup_error\)[\s\S]*?anyhow::bail!/);
+  assert.match(windowsSpawn.slice(packageGuard, retry), /anyhow::bail!/);
+  assert.match(windowsSpawn.slice(retry, requiredConfigGuard), /if should_retry_startup\(&error, attempt, deadline\) \{\s*continue;\s*\}/);
+  assert.match(windowsSpawn, /return Ok\(spawned\);/);
+});
+
 test("Windows startup patch requires app-server runtime override validation", async () => {
   const { launcher, launcherPlatform, windowsSpawn } = await loadWindowsStartupSource();
 

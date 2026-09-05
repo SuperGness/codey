@@ -14,9 +14,13 @@ const PATCH_RESULT: &str = "codey-startup-patch-installed-v38";
 const APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT: &str =
     "codey-app-server-runtime-overrides-verified";
 const MAX_INSPECTOR_TARGET_RESPONSE_BYTES: usize = 1024 * 1024;
+pub(crate) const STARTUP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const STARTUP_PATCH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(24);
+// 整个兼容启动复用一次发现与安装的预算，重试不重新计时。
+pub(crate) const STARTUP_COMPATIBILITY_TIMEOUT: std::time::Duration =
+    STARTUP_READY_TIMEOUT.saturating_add(STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT);
 
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) const CLI_WRAPPER_TARGET_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TARGET";
@@ -111,6 +115,36 @@ pub fn reserve_loopback_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn is_retryable_startup_io_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+    ) || cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33))
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CliWrapperFailure {
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+impl std::fmt::Display for CliWrapperFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Codex CLI 兼容执行器启动失败：{}", self.message)
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+impl std::error::Error for CliWrapperFailure {}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) const MAX_CLI_WRAPPER_FAILURE_BYTES: usize = 8 * 1024;
+
 #[cfg(any(windows, target_os = "macos"))]
 pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     #[cfg(windows)]
@@ -122,88 +156,127 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         return Ok(false);
     };
     let target = std::path::PathBuf::from(target);
-    if !target.is_absolute() || !target.is_file() {
-        anyhow::bail!("Codex CLI 兼容目标无效：{}", target.display());
-    }
-    if std::fs::canonicalize(&target).ok()
-        == std::env::current_exe().and_then(std::fs::canonicalize).ok()
-    {
-        anyhow::bail!("Codex CLI 兼容目标不能指向 Codey 自身");
-    }
-
-    let runtime_overrides = std::env::var(CLI_WRAPPER_OVERRIDES_ENV)
-        .ok()
-        .map(|value| serde_json::from_str::<Vec<String>>(&value))
-        .transpose()
-        .context("解析 Codex CLI 兼容运行时配置失败")?
-        .unwrap_or_default();
     let original_args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let app_server = original_args
         .iter()
         .filter(|argument| argument.as_os_str() == OsStr::new("app-server"))
         .count()
         == 1;
-    let rewritten_args = rewrite_app_server_args(&original_args, &runtime_overrides);
-
-    let mut command = std::process::Command::new(&target);
-    command.args(rewritten_args);
-    for name in [
-        "CODEX_CLI_PATH",
-        CLI_WRAPPER_TARGET_ENV,
-        CLI_WRAPPER_OVERRIDES_ENV,
-        CLI_WRAPPER_SUBAGENT_ENV,
-        CLI_WRAPPER_PORT_ENV,
-        CLI_WRAPPER_TOKEN_ENV,
-    ] {
-        command.env_remove(name);
-    }
-    if app_server && std::env::var_os(CLI_WRAPPER_SUBAGENT_ENV).as_deref() == Some(OsStr::new("1"))
-    {
-        command.env(crate::subagent_gate::RUNTIME_ACTIVE_ENV, "1");
-        command.env(
-            crate::subagent_gate::RUNTIME_ID_ENV,
-            uuid::Uuid::new_v4().to_string(),
+    // 启动器只接收首次握手；之后 app-server 重启时仍必须能执行 CLI。
+    let readiness = if app_server {
+        match notify_cli_wrapper_ready() {
+            Ok(stream) => Some(stream),
+            Err(error) => {
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_none_or(|error| error.kind() != std::io::ErrorKind::ConnectionRefused)
+                {
+                    crate::error_log::record_failure(
+                        "compatibility_fallback",
+                        "connect_cli_wrapper_handshake",
+                        format!("{error:#}"),
+                        serde_json::json!({}),
+                    );
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let launch = (|| -> Result<std::process::Child> {
+        anyhow::ensure!(
+            target.is_absolute(),
+            "Codex CLI 兼容目标无效：{}",
+            target.display()
         );
-    }
-    if let Some(parent) = target.parent() {
-        let mut paths = vec![parent.to_path_buf()];
-        if let Some(path) = std::env::var_os("PATH") {
-            paths.extend(std::env::split_paths(&path));
+        let metadata = std::fs::metadata(&target)
+            .with_context(|| format!("Codex CLI 兼容目标无效：{}", target.display()))?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "Codex CLI 兼容目标不是文件：{}",
+            target.display()
+        );
+        if std::fs::canonicalize(&target).ok()
+            == std::env::current_exe().and_then(std::fs::canonicalize).ok()
+        {
+            anyhow::bail!("Codex CLI 兼容目标不能指向 Codey 自身");
         }
-        if let Ok(path) = std::env::join_paths(paths) {
-            command.env("PATH", path);
+        let runtime_overrides = std::env::var(CLI_WRAPPER_OVERRIDES_ENV)
+            .ok()
+            .map(|value| serde_json::from_str::<Vec<String>>(&value))
+            .transpose()
+            .context("解析 Codex CLI 兼容运行时配置失败")?
+            .unwrap_or_default();
+        let rewritten_args = rewrite_app_server_args(&original_args, &runtime_overrides);
+        let mut command = std::process::Command::new(&target);
+        command.args(rewritten_args);
+        for name in [
+            "CODEX_CLI_PATH",
+            CLI_WRAPPER_TARGET_ENV,
+            CLI_WRAPPER_OVERRIDES_ENV,
+            CLI_WRAPPER_SUBAGENT_ENV,
+            CLI_WRAPPER_PORT_ENV,
+            CLI_WRAPPER_TOKEN_ENV,
+        ] {
+            command.env_remove(name);
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::unix::process::CommandExt;
-
-        // Rust sockets are close-on-exec. EOF after the token confirms exec
-        // succeeded; an explicit failure byte prevents a premature ready signal.
-        let readiness = app_server.then(notify_cli_wrapper_ready).flatten();
-        let error = command.exec();
-        if let Some(mut stream) = readiness {
-            let _ = stream.write_all(b"!");
+        if app_server
+            && std::env::var_os(CLI_WRAPPER_SUBAGENT_ENV).as_deref() == Some(OsStr::new("1"))
+        {
+            command.env(crate::subagent_gate::RUNTIME_ACTIVE_ENV, "1");
+            command.env(
+                crate::subagent_gate::RUNTIME_ID_ENV,
+                uuid::Uuid::new_v4().to_string(),
+            );
         }
-        Err(error).with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-
-        command.creation_flags(codey_runtime_core::windows_create_no_window());
-        let mut child = command
-            .spawn()
-            .with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))?;
-        if app_server {
-            drop(notify_cli_wrapper_ready());
+        if let Some(parent) = target.parent() {
+            let mut paths = vec![parent.to_path_buf()];
+            if let Some(path) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&path));
+            }
+            if let Ok(path) = std::env::join_paths(paths) {
+                command.env("PATH", path);
+            }
         }
-        let status = child
-            .wait()
-            .with_context(|| format!("等待 Codex CLI 退出失败：{}", target.display()))?;
-        std::process::exit(status.code().unwrap_or(1));
-    }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::process::CommandExt;
+            Err(command.exec())
+                .with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(codey_runtime_core::windows_create_no_window());
+            command
+                .spawn()
+                .with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
+        }
+    })();
+    let mut child = match launch {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(mut stream) = readiness {
+                // 校验或创建进程失败必须显式回传，避免被误报成握手超时。
+                let failure = CliWrapperFailure {
+                    message: format!("{error:#}").chars().take(1024).collect(),
+                    retryable: error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(is_retryable_startup_io_error),
+                };
+                let _ = stream.write_all(b"!");
+                let _ = serde_json::to_writer(&mut stream, &failure);
+            }
+            return Err(error);
+        }
+    };
+    // macOS exec 成功由 CLOEXEC 关闭连接；Windows 只在 spawn 成功后关闭。
+    drop(readiness);
+    let status = child
+        .wait()
+        .with_context(|| format!("等待 Codex CLI 退出失败：{}", target.display()))?;
+    std::process::exit(status.code().unwrap_or(1));
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -225,6 +298,18 @@ fn run_windows_package_resume_helper_if_requested() -> Result<bool> {
     let previous_suspend_count = unsafe { ResumeThread(thread) };
     let resume_error = (previous_suspend_count == u32::MAX).then(windows::core::Error::from_win32);
     unsafe { CloseHandle(thread) }.context("关闭 Windows Store Codex 启动线程句柄失败")?;
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.windows_package_thread_resumed",
+        serde_json::json!({
+            "threadId": thread_id,
+            "previousSuspendCount": previous_suspend_count,
+            "succeeded": resume_error.is_none(),
+            "helperWrapperEnvironmentPresent": std::env::var_os(CLI_WRAPPER_TARGET_ENV).is_some(),
+            "helperWslEnvironmentPresent": std::env::var_os("WSL_DISTRO_NAME").is_some(),
+        }),
+    );
+    // 助手随即退出，确保这次恢复结果已写入磁盘。
+    let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
     if let Some(error) = resume_error {
         return Err(error).context("恢复 Windows Store Codex 启动线程失败");
     }
@@ -253,22 +338,28 @@ fn windows_package_resume_thread_id(arguments: &[OsString]) -> Result<Option<u32
 }
 
 #[cfg(any(windows, target_os = "macos"))]
-fn notify_cli_wrapper_ready() -> Option<std::net::TcpStream> {
+fn notify_cli_wrapper_ready() -> Result<std::net::TcpStream> {
     let port = std::env::var(CLI_WRAPPER_PORT_ENV)
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok())?;
-    let token = std::env::var(CLI_WRAPPER_TOKEN_ENV)
-        .ok()
-        .filter(|value| !value.is_empty() && value.len() <= 128)?;
+        .context("Codex CLI 缺少兼容校验端口")?
+        .parse::<u16>()
+        .context("Codex CLI 兼容校验端口无效")?;
+    anyhow::ensure!(port != 0, "Codex CLI 兼容校验端口不能为 0");
+    let token = std::env::var(CLI_WRAPPER_TOKEN_ENV).context("Codex CLI 缺少兼容校验令牌")?;
+    anyhow::ensure!(
+        !token.is_empty() && token.len() <= 128,
+        "Codex CLI 兼容校验令牌无效"
+    );
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream =
         std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(500))
-            .ok()?;
+            .context("连接 Codex CLI 兼容校验端口失败")?;
     stream
         .set_write_timeout(Some(std::time::Duration::from_millis(500)))
-        .ok()?;
-    stream.write_all(token.as_bytes()).ok()?;
-    Some(stream)
+        .context("设置 Codex CLI 兼容校验写入时限失败")?;
+    stream
+        .write_all(token.as_bytes())
+        .context("发送 Codex CLI 兼容校验令牌失败")?;
+    Ok(stream)
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -387,12 +478,14 @@ pub async fn install(
 }
 
 async fn wait_for_inspector(port: u16) -> Result<String> {
+    // 这里只访问本机 HTTP，无需同步加载系统 TLS 证书库。
     let client = reqwest::Client::builder()
         .no_proxy()
+        .tls_built_in_root_certs(false)
         .timeout(std::time::Duration::from_millis(750))
         .build()?;
     let endpoint = format!("http://127.0.0.1:{port}/json/list");
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    let deadline = tokio::time::Instant::now() + STARTUP_READY_TIMEOUT;
     let mut last_error = "调试端口尚未响应".to_string();
     let mut retry_delay = std::time::Duration::from_millis(20);
 
@@ -416,15 +509,19 @@ async fn wait_for_inspector(port: u16) -> Result<String> {
                                 .get("webSocketDebuggerUrl")
                                 .and_then(serde_json::Value::as_str)
                         }) {
+                            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                                "launcher.inspector_discovered",
+                                serde_json::json!({ "port": port }),
+                            );
                             return Ok(url.to_string());
                         }
                         last_error = "调试端口没有可连接的目标".to_string();
                     }
-                    Err(error) => last_error = error.to_string(),
+                    Err(error) => return Err(error.context("Codex Inspector 返回了无效的目标响应")),
                 }
             }
-            Ok(response) => last_error = format!("调试端口返回 HTTP {}", response.status()),
-            Err(error) => last_error = error.to_string(),
+            Ok(response) => anyhow::bail!("Codex Inspector 返回 HTTP {}", response.status()),
+            Err(error) => last_error = format!("{:#}", anyhow::Error::new(error)),
         }
         tokio::time::sleep(retry_delay).await;
         retry_delay = std::cmp::min(
@@ -433,7 +530,11 @@ async fn wait_for_inspector(port: u16) -> Result<String> {
         );
     }
 
-    anyhow::bail!("等待 Codex 启动补丁超时：{last_error}")
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("等待 Codex 启动补丁超时：{last_error}"),
+    )
+    .into())
 }
 
 async fn install_over_websocket(
@@ -738,6 +839,34 @@ mod tests {
         assert!(expression.contains("features.hooks=true"));
         assert!(expression.contains("developer_instructions="));
         assert!(!expression.contains("__CODEY_RUNTIME_CONFIG_OVERRIDES__"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inspector_discovery_accepts_cold_start_after_fifteen_seconds() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let port = reserve_loopback_port().unwrap();
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(18)).await;
+            tokio::time::resume();
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert_ne!(stream.read(&mut request).await.unwrap(), 0);
+            let body = r#"[{"webSocketDebuggerUrl":"ws://127.0.0.1/test"}]"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        assert_eq!(
+            wait_for_inspector(port).await.unwrap(),
+            "ws://127.0.0.1/test"
+        );
+        server.await.unwrap();
     }
 
     #[tokio::test]

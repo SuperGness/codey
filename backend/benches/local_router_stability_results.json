@@ -1,0 +1,3471 @@
+{
+  "date": "2026-09-05",
+  "comparison": "after SSE scan optimization, before vs after WebSocket cancellation and terminal handling",
+  "environment": "Apple M4 / macOS 27.0 arm64 / rustc 1.96.0",
+  "build": "release, lto=false, codegen-units=16",
+  "notes": [
+    "Three sequential paired runs. Same loopback fixture and build flags on both sides.",
+    "Downstream HTTP only; does not measure WebSocket throughput, provider inference, or renderer paint.",
+    "Mock waits 10 ms before content and 10 ms before completion. Request logging disabled.",
+    "CPU and peak RSS include mock and client; RSS is cumulative within each run.",
+    "Summary values are medians of per-run metrics, not pooled percentiles."
+  ],
+  "summary": [
+    {
+      "protocol": "openaiResponses",
+      "stream": true,
+      "concurrency": 1,
+      "requests": 8,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 13.348666999999999,
+        "first_content_p95_ms": 14.079375,
+        "total_p50_ms": 25.540332999999997,
+        "total_p95_ms": 26.8495,
+        "requests_per_second": 39.143946358114505,
+        "cpu_ms": 6.89800000000001,
+        "process_peak_rss_mib": 20.765625
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 13.439834,
+        "first_content_p95_ms": 13.705333999999999,
+        "total_p50_ms": 25.616459000000003,
+        "total_p95_ms": 26.842125000000003,
+        "requests_per_second": 38.99047157678939,
+        "cpu_ms": 6.707999999999998,
+        "process_peak_rss_mib": 20.90625
+      }
+    },
+    {
+      "protocol": "openaiResponses",
+      "stream": true,
+      "concurrency": 8,
+      "requests": 64,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 12.915375,
+        "first_content_p95_ms": 13.949708,
+        "total_p50_ms": 25.633125,
+        "total_p95_ms": 27.326459,
+        "requests_per_second": 310.8878763443472,
+        "cpu_ms": 31.852000000000032,
+        "process_peak_rss_mib": 21.859375
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 12.779499999999999,
+        "first_content_p95_ms": 14.419208,
+        "total_p50_ms": 25.440667,
+        "total_p95_ms": 27.667832999999998,
+        "requests_per_second": 311.77878321022536,
+        "cpu_ms": 33.226,
+        "process_peak_rss_mib": 22.015625
+      }
+    },
+    {
+      "protocol": "openaiResponses",
+      "stream": true,
+      "concurrency": 32,
+      "requests": 256,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 14.401625,
+        "first_content_p95_ms": 15.588125,
+        "total_p50_ms": 27.858667,
+        "total_p95_ms": 28.783541999999997,
+        "requests_per_second": 1152.3503179537088,
+        "cpu_ms": 93.43199999999996,
+        "process_peak_rss_mib": 25.125
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 15.039625,
+        "first_content_p95_ms": 16.585875,
+        "total_p50_ms": 28.706959,
+        "total_p95_ms": 29.534417,
+        "requests_per_second": 1116.792424182751,
+        "cpu_ms": 95.392,
+        "process_peak_rss_mib": 25.328125
+      }
+    },
+    {
+      "protocol": "openaiResponses",
+      "stream": true,
+      "concurrency": 64,
+      "requests": 512,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 16.658834000000002,
+        "first_content_p95_ms": 18.726083000000003,
+        "total_p50_ms": 30.748792,
+        "total_p95_ms": 32.586375000000004,
+        "requests_per_second": 2115.008031309257,
+        "cpu_ms": 156.995,
+        "process_peak_rss_mib": 29.171875
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 17.138082999999998,
+        "first_content_p95_ms": 19.006042,
+        "total_p50_ms": 30.819375,
+        "total_p95_ms": 33.338375000000006,
+        "requests_per_second": 2063.4206274042403,
+        "cpu_ms": 175.24800000000005,
+        "process_peak_rss_mib": 29.5
+      }
+    },
+    {
+      "protocol": "openaiChatCompletions",
+      "stream": true,
+      "concurrency": 1,
+      "requests": 8,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 13.59275,
+        "first_content_p95_ms": 14.212541,
+        "total_p50_ms": 25.680667,
+        "total_p95_ms": 27.063042,
+        "requests_per_second": 38.62281508200459,
+        "cpu_ms": 9.131999999999948,
+        "process_peak_rss_mib": 29.5
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 13.518458,
+        "first_content_p95_ms": 14.091125,
+        "total_p50_ms": 25.506417,
+        "total_p95_ms": 27.21225,
+        "requests_per_second": 38.91666549673441,
+        "cpu_ms": 8.135999999999967,
+        "process_peak_rss_mib": 29.8125
+      }
+    },
+    {
+      "protocol": "openaiChatCompletions",
+      "stream": true,
+      "concurrency": 8,
+      "requests": 64,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 12.703542,
+        "first_content_p95_ms": 14.084624999999999,
+        "total_p50_ms": 25.819416,
+        "total_p95_ms": 27.107415999999997,
+        "requests_per_second": 309.59196847614606,
+        "cpu_ms": 51.442999999999984,
+        "process_peak_rss_mib": 29.640625
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 12.940958,
+        "first_content_p95_ms": 14.00125,
+        "total_p50_ms": 26.402749999999997,
+        "total_p95_ms": 27.699666,
+        "requests_per_second": 306.82450767658617,
+        "cpu_ms": 45.50200000000018,
+        "process_peak_rss_mib": 29.875
+      }
+    },
+    {
+      "protocol": "openaiChatCompletions",
+      "stream": true,
+      "concurrency": 32,
+      "requests": 256,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 14.969542,
+        "first_content_p95_ms": 16.3945,
+        "total_p50_ms": 28.599,
+        "total_p95_ms": 30.812541,
+        "requests_per_second": 1115.098935280015,
+        "cpu_ms": 140.22599999999989,
+        "process_peak_rss_mib": 29.921875
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 14.825541,
+        "first_content_p95_ms": 15.57075,
+        "total_p50_ms": 28.613584,
+        "total_p95_ms": 29.705541,
+        "requests_per_second": 1125.2984233175653,
+        "cpu_ms": 135.18000000000006,
+        "process_peak_rss_mib": 30.125
+      }
+    },
+    {
+      "protocol": "openaiChatCompletions",
+      "stream": true,
+      "concurrency": 64,
+      "requests": 512,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 16.26725,
+        "first_content_p95_ms": 17.969583,
+        "total_p50_ms": 30.408458,
+        "total_p95_ms": 33.015583,
+        "requests_per_second": 2104.987267807725,
+        "cpu_ms": 201.81600000000003,
+        "process_peak_rss_mib": 30.671875
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 15.888083,
+        "first_content_p95_ms": 18.020625,
+        "total_p50_ms": 29.780791,
+        "total_p95_ms": 33.758292000000004,
+        "requests_per_second": 2120.00161484498,
+        "cpu_ms": 208.40200000000004,
+        "process_peak_rss_mib": 30.875
+      }
+    },
+    {
+      "protocol": "anthropicMessages",
+      "stream": true,
+      "concurrency": 1,
+      "requests": 8,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 13.270624999999999,
+        "first_content_p95_ms": 14.262667,
+        "total_p50_ms": 26.26325,
+        "total_p95_ms": 27.484208,
+        "requests_per_second": 38.297767816039006,
+        "cpu_ms": 8.625,
+        "process_peak_rss_mib": 30.71875
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 13.248292,
+        "first_content_p95_ms": 14.235041,
+        "total_p50_ms": 26.090167,
+        "total_p95_ms": 27.646666,
+        "requests_per_second": 38.74206922602426,
+        "cpu_ms": 8.516999999999825,
+        "process_peak_rss_mib": 30.96875
+      }
+    },
+    {
+      "protocol": "anthropicMessages",
+      "stream": true,
+      "concurrency": 8,
+      "requests": 64,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 13.387291000000001,
+        "first_content_p95_ms": 14.10875,
+        "total_p50_ms": 26.017292,
+        "total_p95_ms": 27.500332999999998,
+        "requests_per_second": 305.37483568209524,
+        "cpu_ms": 46.361000000000104,
+        "process_peak_rss_mib": 30.734375
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 13.205334,
+        "first_content_p95_ms": 14.696708,
+        "total_p50_ms": 26.112334,
+        "total_p95_ms": 27.778125,
+        "requests_per_second": 303.8282362515005,
+        "cpu_ms": 50.50599999999986,
+        "process_peak_rss_mib": 30.984375
+      }
+    },
+    {
+      "protocol": "anthropicMessages",
+      "stream": true,
+      "concurrency": 32,
+      "requests": 256,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 14.799332999999999,
+        "first_content_p95_ms": 16.461125,
+        "total_p50_ms": 28.615375,
+        "total_p95_ms": 31.609959,
+        "requests_per_second": 1111.385460278009,
+        "cpu_ms": 142.27500000000032,
+        "process_peak_rss_mib": 30.828125
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 15.028375,
+        "first_content_p95_ms": 15.994666,
+        "total_p50_ms": 28.600917,
+        "total_p95_ms": 31.14525,
+        "requests_per_second": 1120.9848026645284,
+        "cpu_ms": 142.03999999999996,
+        "process_peak_rss_mib": 31.078125
+      }
+    },
+    {
+      "protocol": "anthropicMessages",
+      "stream": true,
+      "concurrency": 64,
+      "requests": 512,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 15.849499999999999,
+        "first_content_p95_ms": 19.138584,
+        "total_p50_ms": 29.813708000000002,
+        "total_p95_ms": 33.537875,
+        "requests_per_second": 2108.606261217183,
+        "cpu_ms": 218.4000000000001,
+        "process_peak_rss_mib": 31.046875
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 16.400541,
+        "first_content_p95_ms": 18.142167,
+        "total_p50_ms": 29.8615,
+        "total_p95_ms": 32.350292,
+        "requests_per_second": 2110.61019616411,
+        "cpu_ms": 212.538,
+        "process_peak_rss_mib": 31.296875
+      }
+    },
+    {
+      "protocol": "openaiChatCompletions",
+      "stream": false,
+      "concurrency": 1,
+      "requests": 8,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 25.30875,
+        "first_content_p95_ms": 26.902583,
+        "total_p50_ms": 25.30875,
+        "total_p95_ms": 26.902583,
+        "requests_per_second": 39.35596424264674,
+        "cpu_ms": 6.52599999999984,
+        "process_peak_rss_mib": 31.0625
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 25.136667000000003,
+        "first_content_p95_ms": 26.861208,
+        "total_p50_ms": 25.136667000000003,
+        "total_p95_ms": 26.861208,
+        "requests_per_second": 39.20473201115375,
+        "cpu_ms": 5.913000000000011,
+        "process_peak_rss_mib": 31.3125
+      }
+    },
+    {
+      "protocol": "openaiChatCompletions",
+      "stream": false,
+      "concurrency": 8,
+      "requests": 64,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 26.306957999999998,
+        "first_content_p95_ms": 27.095625000000002,
+        "total_p50_ms": 26.306957999999998,
+        "total_p95_ms": 27.095625000000002,
+        "requests_per_second": 307.2014750586026,
+        "cpu_ms": 36.35100000000011,
+        "process_peak_rss_mib": 31.0625
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 26.342958,
+        "first_content_p95_ms": 27.495083,
+        "total_p50_ms": 26.342958,
+        "total_p95_ms": 27.495083,
+        "requests_per_second": 304.3186501565874,
+        "cpu_ms": 33.947000000000116,
+        "process_peak_rss_mib": 31.328125
+      }
+    },
+    {
+      "protocol": "openaiChatCompletions",
+      "stream": false,
+      "concurrency": 32,
+      "requests": 256,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 27.962417,
+        "first_content_p95_ms": 29.434749999999998,
+        "total_p50_ms": 27.962417,
+        "total_p95_ms": 29.434749999999998,
+        "requests_per_second": 1145.2913112649148,
+        "cpu_ms": 98.82300000000032,
+        "process_peak_rss_mib": 31.0625
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 27.804540999999997,
+        "first_content_p95_ms": 29.771124999999998,
+        "total_p50_ms": 27.804540999999997,
+        "total_p95_ms": 29.771124999999998,
+        "requests_per_second": 1165.552903467406,
+        "cpu_ms": 97.83399999999983,
+        "process_peak_rss_mib": 31.328125
+      }
+    },
+    {
+      "protocol": "openaiChatCompletions",
+      "stream": false,
+      "concurrency": 64,
+      "requests": 512,
+      "before": {
+        "errors": 0,
+        "first_content_p50_ms": 28.962833,
+        "first_content_p95_ms": 32.44,
+        "total_p50_ms": 28.962833,
+        "total_p95_ms": 32.44,
+        "requests_per_second": 2163.2911571413556,
+        "cpu_ms": 162.79600000000028,
+        "process_peak_rss_mib": 31.0625
+      },
+      "after": {
+        "errors": 0,
+        "first_content_p50_ms": 30.066958,
+        "first_content_p95_ms": 32.82875,
+        "total_p50_ms": 30.066958,
+        "total_p95_ms": 32.82875,
+        "requests_per_second": 2122.3410041397174,
+        "cpu_ms": 161.58399999999983,
+        "process_peak_rss_mib": 31.359375
+      }
+    }
+  ],
+  "raw_runs": [
+    {
+      "version": "optimized",
+      "run": 1,
+      "samples": [
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.348666999999999,
+          "first_content_p95_ms": 14.079375,
+          "total_p50_ms": 26.061792,
+          "total_p95_ms": 26.8495,
+          "requests_per_second": 38.125874959044474,
+          "cpu_ms": 7.1340000000000146,
+          "process_peak_rss_mib": 20.75
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 12.481209,
+          "first_content_p95_ms": 14.686458,
+          "total_p50_ms": 25.715083,
+          "total_p95_ms": 28.17625,
+          "requests_per_second": 310.8878763443472,
+          "cpu_ms": 34.935,
+          "process_peak_rss_mib": 21.859375
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.622667,
+          "first_content_p95_ms": 15.326375,
+          "total_p50_ms": 26.934375,
+          "total_p95_ms": 28.783541999999997,
+          "requests_per_second": 1187.9745439144142,
+          "cpu_ms": 91.02799999999996,
+          "process_peak_rss_mib": 25.125
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.037208,
+          "first_content_p95_ms": 18.901583,
+          "total_p50_ms": 30.864,
+          "total_p95_ms": 32.338792,
+          "requests_per_second": 2115.008031309257,
+          "cpu_ms": 156.995,
+          "process_peak_rss_mib": 29.171875
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.634167000000001,
+          "first_content_p95_ms": 14.236916,
+          "total_p50_ms": 25.797250000000002,
+          "total_p95_ms": 27.063042,
+          "requests_per_second": 38.597162023046124,
+          "cpu_ms": 10.496999999999957,
+          "process_peak_rss_mib": 29.5
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 12.703542,
+          "first_content_p95_ms": 13.618833,
+          "total_p50_ms": 24.995666,
+          "total_p95_ms": 27.107415999999997,
+          "requests_per_second": 311.6092706815694,
+          "cpu_ms": 53.46500000000003,
+          "process_peak_rss_mib": 29.640625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.969542,
+          "first_content_p95_ms": 16.3945,
+          "total_p50_ms": 27.928874999999998,
+          "total_p95_ms": 30.626250000000002,
+          "requests_per_second": 1151.006681234095,
+          "cpu_ms": 134.231,
+          "process_peak_rss_mib": 29.921875
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.158541,
+          "first_content_p95_ms": 17.914958000000002,
+          "total_p50_ms": 30.408458,
+          "total_p95_ms": 33.015583,
+          "requests_per_second": 2104.987267807725,
+          "cpu_ms": 195.6020000000001,
+          "process_peak_rss_mib": 30.59375
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.270624999999999,
+          "first_content_p95_ms": 14.270875,
+          "total_p50_ms": 26.336542,
+          "total_p95_ms": 27.674084,
+          "requests_per_second": 38.297767816039006,
+          "cpu_ms": 9.805000000000064,
+          "process_peak_rss_mib": 30.640625
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 13.387291000000001,
+          "first_content_p95_ms": 13.939375,
+          "total_p50_ms": 25.694208,
+          "total_p95_ms": 26.633416999999998,
+          "requests_per_second": 311.70564221840965,
+          "cpu_ms": 43.71100000000001,
+          "process_peak_rss_mib": 30.671875
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.715125,
+          "first_content_p95_ms": 20.800584,
+          "total_p50_ms": 28.4015,
+          "total_p95_ms": 35.496541,
+          "requests_per_second": 1111.385460278009,
+          "cpu_ms": 142.27500000000032,
+          "process_peak_rss_mib": 30.765625
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 15.322042,
+          "first_content_p95_ms": 19.138584,
+          "total_p50_ms": 29.577209,
+          "total_p95_ms": 33.537875,
+          "requests_per_second": 2127.878428320732,
+          "cpu_ms": 195.7489999999998,
+          "process_peak_rss_mib": 30.984375
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 25.076083,
+          "first_content_p95_ms": 26.902583,
+          "total_p50_ms": 25.076083,
+          "total_p95_ms": 26.902583,
+          "requests_per_second": 39.465635298064214,
+          "cpu_ms": 6.52599999999984,
+          "process_peak_rss_mib": 31.0
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 26.555209,
+          "first_content_p95_ms": 27.095625000000002,
+          "total_p50_ms": 26.555209,
+          "total_p95_ms": 27.095625000000002,
+          "requests_per_second": 306.3723656913215,
+          "cpu_ms": 39.36299999999983,
+          "process_peak_rss_mib": 31.0
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 28.893458,
+          "first_content_p95_ms": 30.126959,
+          "total_p50_ms": 28.893458,
+          "total_p95_ms": 30.126959,
+          "requests_per_second": 1105.9800357815648,
+          "cpu_ms": 101.98000000000002,
+          "process_peak_rss_mib": 31.0
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 27.367625,
+          "first_content_p95_ms": 33.776292,
+          "total_p50_ms": 27.367625,
+          "total_p95_ms": 33.776292,
+          "requests_per_second": 2238.0075871691824,
+          "cpu_ms": 168.70799999999963,
+          "process_peak_rss_mib": 31.0
+        }
+      ]
+    },
+    {
+      "version": "optimized",
+      "run": 2,
+      "samples": [
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.469833000000001,
+          "first_content_p95_ms": 14.154958,
+          "total_p50_ms": 25.540332999999997,
+          "total_p95_ms": 27.150291,
+          "requests_per_second": 39.503425546953196,
+          "cpu_ms": 6.637999999999991,
+          "process_peak_rss_mib": 21.015625
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 13.389208,
+          "first_content_p95_ms": 13.949708,
+          "total_p50_ms": 25.633125,
+          "total_p95_ms": 27.326459,
+          "requests_per_second": 310.2458698518576,
+          "cpu_ms": 31.852000000000032,
+          "process_peak_rss_mib": 22.03125
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.401625,
+          "first_content_p95_ms": 15.588125,
+          "total_p50_ms": 27.974334,
+          "total_p95_ms": 28.542708,
+          "requests_per_second": 1145.5368809178615,
+          "cpu_ms": 93.43199999999996,
+          "process_peak_rss_mib": 25.171875
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.924125,
+          "first_content_p95_ms": 18.726083000000003,
+          "total_p50_ms": 30.748792,
+          "total_p95_ms": 32.586375000000004,
+          "requests_per_second": 2099.3099309943295,
+          "cpu_ms": 163.8710000000001,
+          "process_peak_rss_mib": 29.40625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 12.505832999999999,
+          "first_content_p95_ms": 14.205708,
+          "total_p50_ms": 25.680667,
+          "total_p95_ms": 27.685624999999998,
+          "requests_per_second": 38.62281508200459,
+          "cpu_ms": 8.980999999999995,
+          "process_peak_rss_mib": 29.765625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 12.658042,
+          "first_content_p95_ms": 14.654459,
+          "total_p50_ms": 25.819416,
+          "total_p95_ms": 28.603292,
+          "requests_per_second": 306.1859728053656,
+          "cpu_ms": 51.442999999999984,
+          "process_peak_rss_mib": 29.84375
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.484583,
+          "first_content_p95_ms": 16.385292,
+          "total_p50_ms": 28.599,
+          "total_p95_ms": 30.96875,
+          "requests_per_second": 1115.098935280015,
+          "cpu_ms": 140.22599999999989,
+          "process_peak_rss_mib": 29.984375
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.611209,
+          "first_content_p95_ms": 17.969583,
+          "total_p50_ms": 29.873375,
+          "total_p95_ms": 32.153541000000004,
+          "requests_per_second": 2116.9048988164523,
+          "cpu_ms": 201.81600000000003,
+          "process_peak_rss_mib": 30.671875
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.329707999999998,
+          "first_content_p95_ms": 14.262667,
+          "total_p50_ms": 26.26325,
+          "total_p95_ms": 27.484208,
+          "requests_per_second": 37.81898696378574,
+          "cpu_ms": 8.383000000000038,
+          "process_peak_rss_mib": 30.71875
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 13.263125,
+          "first_content_p95_ms": 14.10875,
+          "total_p50_ms": 26.017292,
+          "total_p95_ms": 27.767291999999998,
+          "requests_per_second": 305.37483568209524,
+          "cpu_ms": 46.361000000000104,
+          "process_peak_rss_mib": 30.734375
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 15.068332999999999,
+          "first_content_p95_ms": 16.018166,
+          "total_p50_ms": 28.615375,
+          "total_p95_ms": 31.609959,
+          "requests_per_second": 1102.3170562426662,
+          "cpu_ms": 143.34299999999985,
+          "process_peak_rss_mib": 30.828125
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 15.849499999999999,
+          "first_content_p95_ms": 18.862417,
+          "total_p50_ms": 29.813708000000002,
+          "total_p95_ms": 33.109375,
+          "requests_per_second": 2108.606261217183,
+          "cpu_ms": 230.29300000000012,
+          "process_peak_rss_mib": 31.046875
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 25.327875,
+          "first_content_p95_ms": 26.845333999999998,
+          "total_p50_ms": 25.327875,
+          "total_p95_ms": 26.845333999999998,
+          "requests_per_second": 38.97355029317683,
+          "cpu_ms": 6.2840000000001055,
+          "process_peak_rss_mib": 31.0625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 26.306957999999998,
+          "first_content_p95_ms": 27.238792,
+          "total_p50_ms": 26.306957999999998,
+          "total_p95_ms": 27.238792,
+          "requests_per_second": 307.2014750586026,
+          "cpu_ms": 33.202000000000226,
+          "process_peak_rss_mib": 31.0625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 27.962417,
+          "first_content_p95_ms": 29.434749999999998,
+          "total_p50_ms": 27.962417,
+          "total_p95_ms": 29.434749999999998,
+          "requests_per_second": 1145.2913112649148,
+          "cpu_ms": 96.30700000000024,
+          "process_peak_rss_mib": 31.0625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 29.681167000000002,
+          "first_content_p95_ms": 31.745750000000005,
+          "total_p50_ms": 29.681167000000002,
+          "total_p95_ms": 31.745750000000005,
+          "requests_per_second": 2134.4691288248882,
+          "cpu_ms": 154.3730000000005,
+          "process_peak_rss_mib": 31.0625
+        }
+      ]
+    },
+    {
+      "version": "optimized",
+      "run": 3,
+      "samples": [
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 12.581833000000001,
+          "first_content_p95_ms": 13.637,
+          "total_p50_ms": 25.30875,
+          "total_p95_ms": 26.837083,
+          "requests_per_second": 39.143946358114505,
+          "cpu_ms": 6.89800000000001,
+          "process_peak_rss_mib": 20.765625
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 12.915375,
+          "first_content_p95_ms": 13.900915999999999,
+          "total_p50_ms": 24.829,
+          "total_p95_ms": 26.253834,
+          "requests_per_second": 318.2805561344007,
+          "cpu_ms": 31.326000000000022,
+          "process_peak_rss_mib": 21.796875
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.245834,
+          "first_content_p95_ms": 16.752458,
+          "total_p50_ms": 27.858667,
+          "total_p95_ms": 30.62225,
+          "requests_per_second": 1152.3503179537088,
+          "cpu_ms": 94.97999999999996,
+          "process_peak_rss_mib": 24.953125
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.658834000000002,
+          "first_content_p95_ms": 18.13375,
+          "total_p50_ms": 29.477916,
+          "total_p95_ms": 33.413625,
+          "requests_per_second": 2116.068637909969,
+          "cpu_ms": 154.4670000000001,
+          "process_peak_rss_mib": 28.9375
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.59275,
+          "first_content_p95_ms": 14.212541,
+          "total_p50_ms": 24.979291,
+          "total_p95_ms": 26.864041,
+          "requests_per_second": 39.47633808526792,
+          "cpu_ms": 9.131999999999948,
+          "process_peak_rss_mib": 29.34375
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 13.521791,
+          "first_content_p95_ms": 14.084624999999999,
+          "total_p50_ms": 26.126958,
+          "total_p95_ms": 26.739875,
+          "requests_per_second": 309.59196847614606,
+          "cpu_ms": 45.75100000000009,
+          "process_peak_rss_mib": 29.4375
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 15.022,
+          "first_content_p95_ms": 16.432916,
+          "total_p50_ms": 28.705834,
+          "total_p95_ms": 30.812541,
+          "requests_per_second": 1101.1522310699136,
+          "cpu_ms": 140.68200000000002,
+          "process_peak_rss_mib": 29.890625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.26725,
+          "first_content_p95_ms": 18.654207999999997,
+          "total_p50_ms": 31.319874999999996,
+          "total_p95_ms": 44.062834,
+          "requests_per_second": 1952.5669843263063,
+          "cpu_ms": 234.4269999999999,
+          "process_peak_rss_mib": 30.71875
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.045541,
+          "first_content_p95_ms": 13.817917000000001,
+          "total_p50_ms": 26.156417,
+          "total_p95_ms": 27.272292,
+          "requests_per_second": 38.498525364515224,
+          "cpu_ms": 8.625,
+          "process_peak_rss_mib": 30.828125
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 13.816125,
+          "first_content_p95_ms": 14.165542,
+          "total_p50_ms": 26.433999999999997,
+          "total_p95_ms": 27.500332999999998,
+          "requests_per_second": 304.96497367680536,
+          "cpu_ms": 47.526999999999816,
+          "process_peak_rss_mib": 30.84375
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.799332999999999,
+          "first_content_p95_ms": 16.461125,
+          "total_p50_ms": 28.726542000000002,
+          "total_p95_ms": 31.045625,
+          "requests_per_second": 1124.1622987362505,
+          "cpu_ms": 136.13499999999976,
+          "process_peak_rss_mib": 30.953125
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.497333,
+          "first_content_p95_ms": 19.487666,
+          "total_p50_ms": 30.099917,
+          "total_p95_ms": 34.413167,
+          "requests_per_second": 2076.1133484251095,
+          "cpu_ms": 218.4000000000001,
+          "process_peak_rss_mib": 31.1875
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 25.30875,
+          "first_content_p95_ms": 27.011625000000002,
+          "total_p50_ms": 25.30875,
+          "total_p95_ms": 27.011625000000002,
+          "requests_per_second": 39.35596424264674,
+          "cpu_ms": 7.255000000000109,
+          "process_peak_rss_mib": 31.203125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 25.558500000000002,
+          "first_content_p95_ms": 26.334542,
+          "total_p50_ms": 25.558500000000002,
+          "total_p95_ms": 26.334542,
+          "requests_per_second": 313.1379084008207,
+          "cpu_ms": 36.35100000000011,
+          "process_peak_rss_mib": 31.203125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 27.464083,
+          "first_content_p95_ms": 29.048458999999998,
+          "total_p50_ms": 27.464083,
+          "total_p95_ms": 29.048458999999998,
+          "requests_per_second": 1166.0307016794713,
+          "cpu_ms": 98.82300000000032,
+          "process_peak_rss_mib": 31.203125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 28.962833,
+          "first_content_p95_ms": 32.44,
+          "total_p50_ms": 28.962833,
+          "total_p95_ms": 32.44,
+          "requests_per_second": 2163.2911571413556,
+          "cpu_ms": 162.79600000000028,
+          "process_peak_rss_mib": 31.203125
+        }
+      ]
+    },
+    {
+      "version": "stability",
+      "run": 1,
+      "samples": [
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.10975,
+          "first_content_p95_ms": 13.705333999999999,
+          "total_p50_ms": 25.929208,
+          "total_p95_ms": 26.6175,
+          "requests_per_second": 39.027166503263985,
+          "cpu_ms": 6.707999999999998,
+          "process_peak_rss_mib": 20.90625
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 12.219249999999999,
+          "first_content_p95_ms": 14.152375,
+          "total_p50_ms": 25.440667,
+          "total_p95_ms": 27.669375,
+          "requests_per_second": 311.77878321022536,
+          "cpu_ms": 33.226,
+          "process_peak_rss_mib": 22.015625
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.876166999999999,
+          "first_content_p95_ms": 15.761375000000001,
+          "total_p50_ms": 27.6285,
+          "total_p95_ms": 29.130959,
+          "requests_per_second": 1154.5076610648,
+          "cpu_ms": 93.96999999999997,
+          "process_peak_rss_mib": 25.328125
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 17.138082999999998,
+          "first_content_p95_ms": 19.550417,
+          "total_p50_ms": 30.819375,
+          "total_p95_ms": 33.338375000000006,
+          "requests_per_second": 2063.4206274042403,
+          "cpu_ms": 175.24800000000005,
+          "process_peak_rss_mib": 29.5
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.522124999999999,
+          "first_content_p95_ms": 14.191042,
+          "total_p50_ms": 25.986292000000002,
+          "total_p95_ms": 27.21225,
+          "requests_per_second": 38.264002205804935,
+          "cpu_ms": 8.639999999999986,
+          "process_peak_rss_mib": 29.8125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 12.940958,
+          "first_content_p95_ms": 14.00125,
+          "total_p50_ms": 26.402749999999997,
+          "total_p95_ms": 27.731542,
+          "requests_per_second": 306.82450767658617,
+          "cpu_ms": 31.154999999999973,
+          "process_peak_rss_mib": 29.875
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.921208,
+          "first_content_p95_ms": 15.57075,
+          "total_p50_ms": 28.060875,
+          "total_p95_ms": 29.640542,
+          "requests_per_second": 1131.9918304503344,
+          "cpu_ms": 135.18000000000006,
+          "process_peak_rss_mib": 30.21875
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 15.374583000000001,
+          "first_content_p95_ms": 17.820417000000003,
+          "total_p50_ms": 28.34775,
+          "total_p95_ms": 33.758292000000004,
+          "requests_per_second": 2176.5368368253266,
+          "cpu_ms": 224.56899999999996,
+          "process_peak_rss_mib": 30.796875
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.534542,
+          "first_content_p95_ms": 14.235041,
+          "total_p50_ms": 26.090167,
+          "total_p95_ms": 27.646666,
+          "requests_per_second": 38.7453997405269,
+          "cpu_ms": 8.379000000000133,
+          "process_peak_rss_mib": 30.890625
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 13.034958,
+          "first_content_p95_ms": 14.129542,
+          "total_p50_ms": 25.757834,
+          "total_p95_ms": 27.455582999999997,
+          "requests_per_second": 309.5509767677929,
+          "cpu_ms": 52.60499999999979,
+          "process_peak_rss_mib": 30.90625
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.652709,
+          "first_content_p95_ms": 15.922416000000002,
+          "total_p50_ms": 28.1705,
+          "total_p95_ms": 29.014125,
+          "requests_per_second": 1137.1527632410146,
+          "cpu_ms": 142.03999999999996,
+          "process_peak_rss_mib": 31.0
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.645416,
+          "first_content_p95_ms": 18.142167,
+          "total_p50_ms": 29.8615,
+          "total_p95_ms": 32.350292,
+          "requests_per_second": 2140.6166297891796,
+          "cpu_ms": 190.28099999999995,
+          "process_peak_rss_mib": 31.28125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 25.136667000000003,
+          "first_content_p95_ms": 26.801208,
+          "total_p50_ms": 25.136667000000003,
+          "total_p95_ms": 26.801208,
+          "requests_per_second": 39.20473201115375,
+          "cpu_ms": 5.811999999999898,
+          "process_peak_rss_mib": 31.3125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 26.927708000000003,
+          "first_content_p95_ms": 27.627792000000003,
+          "total_p50_ms": 26.927708000000003,
+          "total_p95_ms": 27.627792000000003,
+          "requests_per_second": 298.9612842427569,
+          "cpu_ms": 33.702000000000226,
+          "process_peak_rss_mib": 31.328125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 28.021334,
+          "first_content_p95_ms": 29.771124999999998,
+          "total_p50_ms": 28.021334,
+          "total_p95_ms": 29.771124999999998,
+          "requests_per_second": 1132.4157890167833,
+          "cpu_ms": 105.05799999999999,
+          "process_peak_rss_mib": 31.328125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 30.352875,
+          "first_content_p95_ms": 32.445542,
+          "total_p50_ms": 30.352875,
+          "total_p95_ms": 32.445542,
+          "requests_per_second": 2106.657051093889,
+          "cpu_ms": 177.65099999999984,
+          "process_peak_rss_mib": 31.359375
+        }
+      ]
+    },
+    {
+      "version": "stability",
+      "run": 2,
+      "samples": [
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.468292,
+          "first_content_p95_ms": 13.698833,
+          "total_p50_ms": 25.616459000000003,
+          "total_p95_ms": 26.941208,
+          "requests_per_second": 38.978732837938004,
+          "cpu_ms": 6.282000000000011,
+          "process_peak_rss_mib": 21.09375
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 13.006291,
+          "first_content_p95_ms": 14.419208,
+          "total_p50_ms": 25.659542000000002,
+          "total_p95_ms": 27.667832999999998,
+          "requests_per_second": 310.1451382326573,
+          "cpu_ms": 36.345,
+          "process_peak_rss_mib": 22.15625
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 15.039625,
+          "first_content_p95_ms": 16.585875,
+          "total_p50_ms": 28.719250000000002,
+          "total_p95_ms": 29.534417,
+          "requests_per_second": 1116.792424182751,
+          "cpu_ms": 95.392,
+          "process_peak_rss_mib": 25.5
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.838583,
+          "first_content_p95_ms": 19.006042,
+          "total_p50_ms": 30.607125,
+          "total_p95_ms": 32.4415,
+          "requests_per_second": 2088.625145935543,
+          "cpu_ms": 170.02599999999995,
+          "process_peak_rss_mib": 29.578125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 12.805375000000002,
+          "first_content_p95_ms": 14.091125,
+          "total_p50_ms": 25.331,
+          "total_p95_ms": 27.614875,
+          "requests_per_second": 39.22534840077029,
+          "cpu_ms": 7.83400000000006,
+          "process_peak_rss_mib": 29.90625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 12.823167,
+          "first_content_p95_ms": 13.949292,
+          "total_p50_ms": 24.671542000000002,
+          "total_p95_ms": 27.335959,
+          "requests_per_second": 324.45318814242427,
+          "cpu_ms": 46.1930000000001,
+          "process_peak_rss_mib": 29.984375
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.825541,
+          "first_content_p95_ms": 15.603499999999999,
+          "total_p50_ms": 28.613584,
+          "total_p95_ms": 30.029375,
+          "requests_per_second": 1125.2984233175653,
+          "cpu_ms": 146.99199999999996,
+          "process_peak_rss_mib": 30.125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.671958,
+          "first_content_p95_ms": 19.101125,
+          "total_p50_ms": 30.289582999999997,
+          "total_p95_ms": 34.251417,
+          "requests_per_second": 2088.0438109763595,
+          "cpu_ms": 184.16399999999976,
+          "process_peak_rss_mib": 30.984375
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 12.997042,
+          "first_content_p95_ms": 14.265292,
+          "total_p50_ms": 25.472542,
+          "total_p95_ms": 27.73425,
+          "requests_per_second": 38.716491959061315,
+          "cpu_ms": 9.374000000000024,
+          "process_peak_rss_mib": 31.09375
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 13.205334,
+          "first_content_p95_ms": 15.049875,
+          "total_p50_ms": 26.112334,
+          "total_p95_ms": 27.778125,
+          "requests_per_second": 303.8282362515005,
+          "cpu_ms": 50.50599999999986,
+          "process_peak_rss_mib": 31.125
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 15.028375,
+          "first_content_p95_ms": 15.994666,
+          "total_p50_ms": 28.600917,
+          "total_p95_ms": 31.280917,
+          "requests_per_second": 1120.9848026645284,
+          "cpu_ms": 147.019,
+          "process_peak_rss_mib": 31.296875
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.400541,
+          "first_content_p95_ms": 17.81975,
+          "total_p50_ms": 29.839167,
+          "total_p95_ms": 33.460625,
+          "requests_per_second": 2110.61019616411,
+          "cpu_ms": 238.16400000000021,
+          "process_peak_rss_mib": 31.640625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 26.548542,
+          "first_content_p95_ms": 27.316416999999998,
+          "total_p50_ms": 26.548542,
+          "total_p95_ms": 27.316416999999998,
+          "requests_per_second": 38.39695128206821,
+          "cpu_ms": 6.394999999999527,
+          "process_peak_rss_mib": 31.65625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 26.342958,
+          "first_content_p95_ms": 27.495083,
+          "total_p50_ms": 26.342958,
+          "total_p95_ms": 27.495083,
+          "requests_per_second": 304.3186501565874,
+          "cpu_ms": 37.934999999999945,
+          "process_peak_rss_mib": 31.65625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 27.804540999999997,
+          "first_content_p95_ms": 29.210458000000003,
+          "total_p50_ms": 27.804540999999997,
+          "total_p95_ms": 29.210458000000003,
+          "requests_per_second": 1170.584270800624,
+          "cpu_ms": 97.83399999999983,
+          "process_peak_rss_mib": 31.65625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 30.066958,
+          "first_content_p95_ms": 33.025417000000004,
+          "total_p50_ms": 30.066958,
+          "total_p95_ms": 33.025417000000004,
+          "requests_per_second": 2124.773744277081,
+          "cpu_ms": 158.8180000000002,
+          "process_peak_rss_mib": 31.671875
+        }
+      ]
+    },
+    {
+      "version": "stability",
+      "run": 3,
+      "samples": [
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.439834,
+          "first_content_p95_ms": 13.888625,
+          "total_p50_ms": 25.364917000000002,
+          "total_p95_ms": 26.842125000000003,
+          "requests_per_second": 38.99047157678939,
+          "cpu_ms": 6.795999999999992,
+          "process_peak_rss_mib": 20.875
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 12.779499999999999,
+          "first_content_p95_ms": 14.448541,
+          "total_p50_ms": 24.662959,
+          "total_p95_ms": 26.518667,
+          "requests_per_second": 317.99405375962755,
+          "cpu_ms": 31.863,
+          "process_peak_rss_mib": 21.984375
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 15.619791,
+          "first_content_p95_ms": 17.030125,
+          "total_p50_ms": 28.706959,
+          "total_p95_ms": 31.675666999999997,
+          "requests_per_second": 1105.831332851335,
+          "cpu_ms": 103.62200000000001,
+          "process_peak_rss_mib": 25.328125
+        },
+        {
+          "protocol": "openaiResponses",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 17.487292,
+          "first_content_p95_ms": 18.483958,
+          "total_p50_ms": 31.091957999999998,
+          "total_p95_ms": 33.72825,
+          "requests_per_second": 2036.790855560125,
+          "cpu_ms": 195.09899999999993,
+          "process_peak_rss_mib": 29.375
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.518458,
+          "first_content_p95_ms": 14.059833000000001,
+          "total_p50_ms": 25.506417,
+          "total_p95_ms": 26.775167,
+          "requests_per_second": 38.91666549673441,
+          "cpu_ms": 8.135999999999967,
+          "process_peak_rss_mib": 29.671875
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 13.323291,
+          "first_content_p95_ms": 14.061458,
+          "total_p50_ms": 26.412959,
+          "total_p95_ms": 27.699666,
+          "requests_per_second": 302.10072108845947,
+          "cpu_ms": 45.50200000000018,
+          "process_peak_rss_mib": 29.75
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 14.766583,
+          "first_content_p95_ms": 15.337625000000001,
+          "total_p50_ms": 28.691416,
+          "total_p95_ms": 29.705541,
+          "requests_per_second": 1120.5464674008806,
+          "cpu_ms": 130.5719999999999,
+          "process_peak_rss_mib": 30.0625
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 15.888083,
+          "first_content_p95_ms": 18.020625,
+          "total_p50_ms": 29.780791,
+          "total_p95_ms": 33.182166,
+          "requests_per_second": 2120.00161484498,
+          "cpu_ms": 208.40200000000004,
+          "process_peak_rss_mib": 30.875
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 13.248292,
+          "first_content_p95_ms": 13.713750000000001,
+          "total_p50_ms": 26.157875,
+          "total_p95_ms": 27.0965,
+          "requests_per_second": 38.74206922602426,
+          "cpu_ms": 8.516999999999825,
+          "process_peak_rss_mib": 30.96875
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 13.751125,
+          "first_content_p95_ms": 14.696708,
+          "total_p50_ms": 26.331457999999998,
+          "total_p95_ms": 28.102875,
+          "requests_per_second": 299.3770973002884,
+          "cpu_ms": 46.402000000000044,
+          "process_peak_rss_mib": 30.984375
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 15.341667,
+          "first_content_p95_ms": 16.466458,
+          "total_p50_ms": 28.835124999999998,
+          "total_p95_ms": 31.14525,
+          "requests_per_second": 1109.6580177897945,
+          "cpu_ms": 140.07799999999997,
+          "process_peak_rss_mib": 31.078125
+        },
+        {
+          "protocol": "anthropicMessages",
+          "stream": true,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 16.026667,
+          "first_content_p95_ms": 18.302959,
+          "total_p50_ms": 30.74425,
+          "total_p95_ms": 31.930124999999997,
+          "requests_per_second": 2088.8115424821085,
+          "cpu_ms": 212.538,
+          "process_peak_rss_mib": 31.296875
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 1,
+          "requests": 8,
+          "errors": 0,
+          "first_content_p50_ms": 25.13,
+          "first_content_p95_ms": 26.861208,
+          "total_p50_ms": 25.13,
+          "total_p95_ms": 26.861208,
+          "requests_per_second": 39.595466384431504,
+          "cpu_ms": 5.913000000000011,
+          "process_peak_rss_mib": 31.3125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 8,
+          "requests": 64,
+          "errors": 0,
+          "first_content_p50_ms": 25.803292,
+          "first_content_p95_ms": 27.263875,
+          "total_p50_ms": 25.803292,
+          "total_p95_ms": 27.263875,
+          "requests_per_second": 311.7429046523366,
+          "cpu_ms": 33.947000000000116,
+          "process_peak_rss_mib": 31.3125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 32,
+          "requests": 256,
+          "errors": 0,
+          "first_content_p50_ms": 27.354875,
+          "first_content_p95_ms": 29.788917,
+          "total_p50_ms": 27.354875,
+          "total_p95_ms": 29.788917,
+          "requests_per_second": 1165.552903467406,
+          "cpu_ms": 95.38899999999967,
+          "process_peak_rss_mib": 31.3125
+        },
+        {
+          "protocol": "openaiChatCompletions",
+          "stream": false,
+          "concurrency": 64,
+          "requests": 512,
+          "errors": 0,
+          "first_content_p50_ms": 29.756375000000002,
+          "first_content_p95_ms": 32.82875,
+          "total_p50_ms": 29.756375000000002,
+          "total_p95_ms": 32.82875,
+          "requests_per_second": 2122.3410041397174,
+          "cpu_ms": 161.58399999999983,
+          "process_peak_rss_mib": 31.3125
+        }
+      ]
+    }
+  ],
+  "cancellation": {
+    "notes": [
+      "Release binary, three sequential repetitions of 16 scenarios.",
+      "Timer starts immediately before client Close and stops when the mock observes upstream disconnect. Includes test task scheduling.",
+      "All scenarios also require a timely Pong and a close acknowledgement without a terminal failure.",
+      "No old-version cancellation latency was measured; this is post-change resource release latency only."
+    ],
+    "summary": {
+      "samples": 48,
+      "p50_ms": 0.1075,
+      "p95_ms": 0.123,
+      "max_ms": 0.142
+    },
+    "raw_samples": [
+      {
+        "run": 1,
+        "protocol": "openaiResponses",
+        "phase": "headers",
+        "upstream_release_ms": 0.108
+      },
+      {
+        "run": 1,
+        "protocol": "openaiResponses",
+        "phase": "sniff",
+        "upstream_release_ms": 0.109
+      },
+      {
+        "run": 1,
+        "protocol": "openaiResponses",
+        "phase": "stream",
+        "upstream_release_ms": 0.071
+      },
+      {
+        "run": 1,
+        "protocol": "openaiResponses",
+        "phase": "error_body",
+        "upstream_release_ms": 0.142
+      },
+      {
+        "run": 1,
+        "protocol": "openaiResponses",
+        "phase": "json_body",
+        "upstream_release_ms": 0.113
+      },
+      {
+        "run": 1,
+        "protocol": "openaiChatCompletions",
+        "phase": "headers",
+        "upstream_release_ms": 0.072
+      },
+      {
+        "run": 1,
+        "protocol": "openaiChatCompletions",
+        "phase": "sniff",
+        "upstream_release_ms": 0.073
+      },
+      {
+        "run": 1,
+        "protocol": "openaiChatCompletions",
+        "phase": "stream",
+        "upstream_release_ms": 0.106
+      },
+      {
+        "run": 1,
+        "protocol": "openaiChatCompletions",
+        "phase": "error_body",
+        "upstream_release_ms": 0.114
+      },
+      {
+        "run": 1,
+        "protocol": "openaiChatCompletions",
+        "phase": "json_body",
+        "upstream_release_ms": 0.108
+      },
+      {
+        "run": 1,
+        "protocol": "anthropicMessages",
+        "phase": "headers",
+        "upstream_release_ms": 0.096
+      },
+      {
+        "run": 1,
+        "protocol": "anthropicMessages",
+        "phase": "sniff",
+        "upstream_release_ms": 0.106
+      },
+      {
+        "run": 1,
+        "protocol": "anthropicMessages",
+        "phase": "stream",
+        "upstream_release_ms": 0.12
+      },
+      {
+        "run": 1,
+        "protocol": "anthropicMessages",
+        "phase": "error_body",
+        "upstream_release_ms": 0.104
+      },
+      {
+        "run": 1,
+        "protocol": "anthropicMessages",
+        "phase": "json_body",
+        "upstream_release_ms": 0.1
+      },
+      {
+        "run": 1,
+        "protocol": "nativeWebSocket",
+        "phase": "events",
+        "upstream_release_ms": 0.078
+      },
+      {
+        "run": 2,
+        "protocol": "openaiResponses",
+        "phase": "headers",
+        "upstream_release_ms": 0.125
+      },
+      {
+        "run": 2,
+        "protocol": "openaiResponses",
+        "phase": "sniff",
+        "upstream_release_ms": 0.117
+      },
+      {
+        "run": 2,
+        "protocol": "openaiResponses",
+        "phase": "stream",
+        "upstream_release_ms": 0.068
+      },
+      {
+        "run": 2,
+        "protocol": "openaiResponses",
+        "phase": "error_body",
+        "upstream_release_ms": 0.11
+      },
+      {
+        "run": 2,
+        "protocol": "openaiResponses",
+        "phase": "json_body",
+        "upstream_release_ms": 0.107
+      },
+      {
+        "run": 2,
+        "protocol": "openaiChatCompletions",
+        "phase": "headers",
+        "upstream_release_ms": 0.114
+      },
+      {
+        "run": 2,
+        "protocol": "openaiChatCompletions",
+        "phase": "sniff",
+        "upstream_release_ms": 0.104
+      },
+      {
+        "run": 2,
+        "protocol": "openaiChatCompletions",
+        "phase": "stream",
+        "upstream_release_ms": 0.107
+      },
+      {
+        "run": 2,
+        "protocol": "openaiChatCompletions",
+        "phase": "error_body",
+        "upstream_release_ms": 0.113
+      },
+      {
+        "run": 2,
+        "protocol": "openaiChatCompletions",
+        "phase": "json_body",
+        "upstream_release_ms": 0.093
+      },
+      {
+        "run": 2,
+        "protocol": "anthropicMessages",
+        "phase": "headers",
+        "upstream_release_ms": 0.114
+      },
+      {
+        "run": 2,
+        "protocol": "anthropicMessages",
+        "phase": "sniff",
+        "upstream_release_ms": 0.101
+      },
+      {
+        "run": 2,
+        "protocol": "anthropicMessages",
+        "phase": "stream",
+        "upstream_release_ms": 0.12
+      },
+      {
+        "run": 2,
+        "protocol": "anthropicMessages",
+        "phase": "error_body",
+        "upstream_release_ms": 0.114
+      },
+      {
+        "run": 2,
+        "protocol": "anthropicMessages",
+        "phase": "json_body",
+        "upstream_release_ms": 0.101
+      },
+      {
+        "run": 2,
+        "protocol": "nativeWebSocket",
+        "phase": "events",
+        "upstream_release_ms": 0.075
+      },
+      {
+        "run": 3,
+        "protocol": "openaiResponses",
+        "phase": "headers",
+        "upstream_release_ms": 0.099
+      },
+      {
+        "run": 3,
+        "protocol": "openaiResponses",
+        "phase": "sniff",
+        "upstream_release_ms": 0.077
+      },
+      {
+        "run": 3,
+        "protocol": "openaiResponses",
+        "phase": "stream",
+        "upstream_release_ms": 0.075
+      },
+      {
+        "run": 3,
+        "protocol": "openaiResponses",
+        "phase": "error_body",
+        "upstream_release_ms": 0.113
+      },
+      {
+        "run": 3,
+        "protocol": "openaiResponses",
+        "phase": "json_body",
+        "upstream_release_ms": 0.122
+      },
+      {
+        "run": 3,
+        "protocol": "openaiChatCompletions",
+        "phase": "headers",
+        "upstream_release_ms": 0.114
+      },
+      {
+        "run": 3,
+        "protocol": "openaiChatCompletions",
+        "phase": "sniff",
+        "upstream_release_ms": 0.076
+      },
+      {
+        "run": 3,
+        "protocol": "openaiChatCompletions",
+        "phase": "stream",
+        "upstream_release_ms": 0.118
+      },
+      {
+        "run": 3,
+        "protocol": "openaiChatCompletions",
+        "phase": "error_body",
+        "upstream_release_ms": 0.115
+      },
+      {
+        "run": 3,
+        "protocol": "openaiChatCompletions",
+        "phase": "json_body",
+        "upstream_release_ms": 0.107
+      },
+      {
+        "run": 3,
+        "protocol": "anthropicMessages",
+        "phase": "headers",
+        "upstream_release_ms": 0.108
+      },
+      {
+        "run": 3,
+        "protocol": "anthropicMessages",
+        "phase": "sniff",
+        "upstream_release_ms": 0.077
+      },
+      {
+        "run": 3,
+        "protocol": "anthropicMessages",
+        "phase": "stream",
+        "upstream_release_ms": 0.11
+      },
+      {
+        "run": 3,
+        "protocol": "anthropicMessages",
+        "phase": "error_body",
+        "upstream_release_ms": 0.123
+      },
+      {
+        "run": 3,
+        "protocol": "anthropicMessages",
+        "phase": "json_body",
+        "upstream_release_ms": 0.117
+      },
+      {
+        "run": 3,
+        "protocol": "nativeWebSocket",
+        "phase": "events",
+        "upstream_release_ms": 0.08
+      }
+    ]
+  },
+  "confirmation_64": {
+    "notes": [
+      "Ten paired runs at concurrency 64. Execution order reversed on even runs.",
+      "Each side contains 20480 measured requests, with zero errors."
+    ],
+    "summary": [
+      {
+        "protocol": "openaiResponses",
+        "stream": true,
+        "concurrency": 64,
+        "requests": 512,
+        "before": {
+          "errors": 0.0,
+          "first_content_p50_ms": 16.982708,
+          "first_content_p95_ms": 18.6678335,
+          "total_p50_ms": 30.343313,
+          "total_p95_ms": 32.999729,
+          "requests_per_second": 2106.2412454246605,
+          "cpu_ms": 165.623,
+          "process_peak_rss_mib": 28.8203125
+        },
+        "after": {
+          "errors": 0.0,
+          "first_content_p50_ms": 16.683292,
+          "first_content_p95_ms": 18.4728955,
+          "total_p50_ms": 30.6188755,
+          "total_p95_ms": 33.3781455,
+          "requests_per_second": 2079.659459798693,
+          "cpu_ms": 167.268,
+          "process_peak_rss_mib": 28.9921875
+        }
+      },
+      {
+        "protocol": "openaiChatCompletions",
+        "stream": true,
+        "concurrency": 64,
+        "requests": 512,
+        "before": {
+          "errors": 0.0,
+          "first_content_p50_ms": 16.616625,
+          "first_content_p95_ms": 18.868625,
+          "total_p50_ms": 30.5375205,
+          "total_p95_ms": 32.9317915,
+          "requests_per_second": 2098.2508695051274,
+          "cpu_ms": 209.34049999999996,
+          "process_peak_rss_mib": 30.578125
+        },
+        "after": {
+          "errors": 0.0,
+          "first_content_p50_ms": 16.790083499999998,
+          "first_content_p95_ms": 19.013375000000003,
+          "total_p50_ms": 30.839896,
+          "total_p95_ms": 33.774208,
+          "requests_per_second": 2068.5502464718475,
+          "cpu_ms": 207.48650000000004,
+          "process_peak_rss_mib": 30.7265625
+        }
+      },
+      {
+        "protocol": "anthropicMessages",
+        "stream": true,
+        "concurrency": 64,
+        "requests": 512,
+        "before": {
+          "errors": 0.0,
+          "first_content_p50_ms": 16.636521000000002,
+          "first_content_p95_ms": 19.4419995,
+          "total_p50_ms": 30.895125,
+          "total_p95_ms": 34.0479585,
+          "requests_per_second": 2063.9970641740238,
+          "cpu_ms": 211.50500000000005,
+          "process_peak_rss_mib": 31.1171875
+        },
+        "after": {
+          "errors": 0.0,
+          "first_content_p50_ms": 16.7748545,
+          "first_content_p95_ms": 18.744645999999996,
+          "total_p50_ms": 30.554000000000002,
+          "total_p95_ms": 32.7753335,
+          "requests_per_second": 2090.8948058309807,
+          "cpu_ms": 211.87349999999998,
+          "process_peak_rss_mib": 31.28125
+        }
+      },
+      {
+        "protocol": "openaiChatCompletions",
+        "stream": false,
+        "concurrency": 64,
+        "requests": 512,
+        "before": {
+          "errors": 0.0,
+          "first_content_p50_ms": 30.175792,
+          "first_content_p95_ms": 32.799437499999996,
+          "total_p50_ms": 30.175792,
+          "total_p95_ms": 32.799437499999996,
+          "requests_per_second": 2106.73214935339,
+          "cpu_ms": 164.82649999999995,
+          "process_peak_rss_mib": 31.1328125
+        },
+        "after": {
+          "errors": 0.0,
+          "first_content_p50_ms": 30.4574585,
+          "first_content_p95_ms": 32.9923125,
+          "total_p50_ms": 30.4574585,
+          "total_p95_ms": 32.9923125,
+          "requests_per_second": 2084.1101995294657,
+          "cpu_ms": 161.62300000000005,
+          "process_peak_rss_mib": 31.3046875
+        }
+      }
+    ],
+    "raw_runs": [
+      {
+        "version": "optimized",
+        "run": 1,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.179624999999998,
+            "first_content_p95_ms": 18.229292,
+            "total_p50_ms": 29.835542,
+            "total_p95_ms": 31.875458000000002,
+            "requests_per_second": 2140.9564048672,
+            "cpu_ms": 157.005,
+            "process_peak_rss_mib": 28.53125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 15.464291999999999,
+            "first_content_p95_ms": 18.206959,
+            "total_p50_ms": 29.983541,
+            "total_p95_ms": 32.764250000000004,
+            "requests_per_second": 2105.9169273355833,
+            "cpu_ms": 212.72799999999995,
+            "process_peak_rss_mib": 30.375
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.713167000000002,
+            "first_content_p95_ms": 18.697459,
+            "total_p50_ms": 29.658832999999998,
+            "total_p95_ms": 32.199833,
+            "requests_per_second": 2147.6427548625693,
+            "cpu_ms": 203.77800000000002,
+            "process_peak_rss_mib": 30.890625
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.714875,
+            "first_content_p95_ms": 33.198208,
+            "total_p50_ms": 30.714875,
+            "total_p95_ms": 33.198208,
+            "requests_per_second": 2108.3428816146943,
+            "cpu_ms": 165.03999999999996,
+            "process_peak_rss_mib": 30.921875
+          }
+        ]
+      },
+      {
+        "version": "optimized",
+        "run": 2,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.356625,
+            "first_content_p95_ms": 18.381999999999998,
+            "total_p50_ms": 31.056667,
+            "total_p95_ms": 46.466667,
+            "requests_per_second": 1960.600980414603,
+            "cpu_ms": 134.88400000000001,
+            "process_peak_rss_mib": 28.78125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.594749999999998,
+            "first_content_p95_ms": 18.834625,
+            "total_p50_ms": 30.443416,
+            "total_p95_ms": 32.592957999999996,
+            "requests_per_second": 2099.3483130801437,
+            "cpu_ms": 196.11500000000007,
+            "process_peak_rss_mib": 30.53125
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.260875000000002,
+            "first_content_p95_ms": 18.609959,
+            "total_p50_ms": 29.685333,
+            "total_p95_ms": 32.088375,
+            "requests_per_second": 2143.9712990582143,
+            "cpu_ms": 185.562,
+            "process_peak_rss_mib": 31.03125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.442500000000003,
+            "first_content_p95_ms": 33.489125,
+            "total_p50_ms": 30.442500000000003,
+            "total_p95_ms": 33.489125,
+            "requests_per_second": 2095.66628164802,
+            "cpu_ms": 164.61299999999994,
+            "process_peak_rss_mib": 31.046875
+          }
+        ]
+      },
+      {
+        "version": "optimized",
+        "run": 3,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.94175,
+            "first_content_p95_ms": 17.983458000000002,
+            "total_p50_ms": 30.410166999999998,
+            "total_p95_ms": 32.800958,
+            "requests_per_second": 2116.1269464224515,
+            "cpu_ms": 170.87400000000002,
+            "process_peak_rss_mib": 28.8125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.249375,
+            "first_content_p95_ms": 18.942625,
+            "total_p50_ms": 31.394582999999997,
+            "total_p95_ms": 33.037,
+            "requests_per_second": 2057.2159902529106,
+            "cpu_ms": 217.06600000000003,
+            "process_peak_rss_mib": 30.53125
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 15.616042,
+            "first_content_p95_ms": 19.284166,
+            "total_p50_ms": 29.612167,
+            "total_p95_ms": 32.568042,
+            "requests_per_second": 2131.8513946018043,
+            "cpu_ms": 226.50300000000004,
+            "process_peak_rss_mib": 31.0
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.971834,
+            "first_content_p95_ms": 33.331,
+            "total_p50_ms": 30.971834,
+            "total_p95_ms": 33.331,
+            "requests_per_second": 2078.531549937025,
+            "cpu_ms": 168.23700000000008,
+            "process_peak_rss_mib": 31.03125
+          }
+        ]
+      },
+      {
+        "version": "optimized",
+        "run": 4,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.617041999999998,
+            "first_content_p95_ms": 17.575582999999998,
+            "total_p50_ms": 29.311542,
+            "total_p95_ms": 30.491791,
+            "requests_per_second": 2179.93976426208,
+            "cpu_ms": 158.14100000000002,
+            "process_peak_rss_mib": 28.6875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 15.162958000000001,
+            "first_content_p95_ms": 25.632958000000002,
+            "total_p50_ms": 28.690625,
+            "total_p95_ms": 39.090582999999995,
+            "requests_per_second": 2122.046328067815,
+            "cpu_ms": 204.24400000000003,
+            "process_peak_rss_mib": 30.578125
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.501416,
+            "first_content_p95_ms": 19.688541,
+            "total_p50_ms": 31.111333000000002,
+            "total_p95_ms": 34.984833,
+            "requests_per_second": 2015.0925314157157,
+            "cpu_ms": 222.08399999999995,
+            "process_peak_rss_mib": 31.1875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.170542,
+            "first_content_p95_ms": 32.139916,
+            "total_p50_ms": 30.170542,
+            "total_p95_ms": 32.139916,
+            "requests_per_second": 2144.767994099743,
+            "cpu_ms": 168.327,
+            "process_peak_rss_mib": 31.21875
+          }
+        ]
+      },
+      {
+        "version": "optimized",
+        "run": 5,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.696208000000002,
+            "first_content_p95_ms": 18.86225,
+            "total_p50_ms": 29.612416999999997,
+            "total_p95_ms": 32.634917,
+            "requests_per_second": 2151.537736167038,
+            "cpu_ms": 176.156,
+            "process_peak_rss_mib": 28.921875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.6385,
+            "first_content_p95_ms": 17.969917,
+            "total_p50_ms": 30.261708,
+            "total_p95_ms": 31.721292,
+            "requests_per_second": 2111.107331459313,
+            "cpu_ms": 208.87699999999995,
+            "process_peak_rss_mib": 30.78125
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.559875,
+            "first_content_p95_ms": 19.963,
+            "total_p50_ms": 30.953834,
+            "total_p95_ms": 34.516916,
+            "requests_per_second": 2079.436572761667,
+            "cpu_ms": 208.33300000000008,
+            "process_peak_rss_mib": 31.1875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 29.631917,
+            "first_content_p95_ms": 33.355250000000005,
+            "total_p50_ms": 29.631917,
+            "total_p95_ms": 33.355250000000005,
+            "requests_per_second": 2117.058446525667,
+            "cpu_ms": 153.50900000000001,
+            "process_peak_rss_mib": 31.203125
+          }
+        ]
+      },
+      {
+        "version": "optimized",
+        "run": 6,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.023666,
+            "first_content_p95_ms": 19.226875,
+            "total_p50_ms": 30.846542,
+            "total_p95_ms": 33.198499999999996,
+            "requests_per_second": 2045.9080590096628,
+            "cpu_ms": 183.103,
+            "process_peak_rss_mib": 29.125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.258958,
+            "first_content_p95_ms": 18.902625,
+            "total_p50_ms": 30.695708,
+            "total_p95_ms": 32.826583,
+            "requests_per_second": 2097.1534259301116,
+            "cpu_ms": 193.221,
+            "process_peak_rss_mib": 31.125
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.861625,
+            "first_content_p95_ms": 19.599833,
+            "total_p50_ms": 31.501792000000002,
+            "total_p95_ms": 34.126625000000004,
+            "requests_per_second": 2030.5380469349907,
+            "cpu_ms": 203.11,
+            "process_peak_rss_mib": 31.625
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.461125,
+            "first_content_p95_ms": 32.28075,
+            "total_p50_ms": 30.461125,
+            "total_p95_ms": 32.28075,
+            "requests_per_second": 2087.7826993358444,
+            "cpu_ms": 159.03700000000003,
+            "process_peak_rss_mib": 31.640625
+          }
+        ]
+      },
+      {
+        "version": "optimized",
+        "run": 7,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.4405,
+            "first_content_p95_ms": 21.2995,
+            "total_p50_ms": 30.276459,
+            "total_p95_ms": 32.781583000000005,
+            "requests_per_second": 2107.977586417787,
+            "cpu_ms": 160.446,
+            "process_peak_rss_mib": 28.796875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.10975,
+            "first_content_p95_ms": 18.076667,
+            "total_p50_ms": 30.499958,
+            "total_p95_ms": 31.830208999999996,
+            "requests_per_second": 2103.9744908215303,
+            "cpu_ms": 221.805,
+            "process_peak_rss_mib": 30.375
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.8495,
+            "first_content_p95_ms": 30.173333,
+            "total_p50_ms": 31.11425,
+            "total_p95_ms": 45.880458,
+            "requests_per_second": 1977.7872397385543,
+            "cpu_ms": 230.558,
+            "process_peak_rss_mib": 30.921875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.181042,
+            "first_content_p95_ms": 32.814625,
+            "total_p50_ms": 30.181042,
+            "total_p95_ms": 32.814625,
+            "requests_per_second": 2103.9892581485924,
+            "cpu_ms": 159.96299999999997,
+            "process_peak_rss_mib": 30.96875
+          }
+        ]
+      },
+      {
+        "version": "optimized",
+        "run": 8,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.875083,
+            "first_content_p95_ms": 18.761542,
+            "total_p50_ms": 29.886792,
+            "total_p95_ms": 33.931999999999995,
+            "requests_per_second": 2104.504904431534,
+            "cpu_ms": 169.88299999999998,
+            "process_peak_rss_mib": 29.171875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.792833,
+            "first_content_p95_ms": 19.89725,
+            "total_p50_ms": 30.575083,
+            "total_p95_ms": 34.535959,
+            "requests_per_second": 2048.7095418678923,
+            "cpu_ms": 196.647,
+            "process_peak_rss_mib": 30.859375
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.423167,
+            "first_content_p95_ms": 18.677875,
+            "total_p50_ms": 30.836416,
+            "total_p95_ms": 33.969291999999996,
+            "requests_per_second": 2063.6590448321867,
+            "cpu_ms": 199.99599999999998,
+            "process_peak_rss_mib": 31.359375
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.055875,
+            "first_content_p95_ms": 32.462083,
+            "total_p50_ms": 30.055875,
+            "total_p95_ms": 32.462083,
+            "requests_per_second": 2114.402820580325,
+            "cpu_ms": 164.39700000000016,
+            "process_peak_rss_mib": 31.453125
+          }
+        ]
+      },
+      {
+        "version": "optimized",
+        "run": 9,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.214125,
+            "first_content_p95_ms": 18.574125,
+            "total_p50_ms": 30.662042,
+            "total_p95_ms": 33.648540999999994,
+            "requests_per_second": 2071.908439355323,
+            "cpu_ms": 181.628,
+            "process_peak_rss_mib": 28.828125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.826334,
+            "first_content_p95_ms": 19.94425,
+            "total_p50_ms": 31.322250000000004,
+            "total_p95_ms": 33.455542,
+            "requests_per_second": 2037.2656473043535,
+            "cpu_ms": 209.80399999999997,
+            "process_peak_rss_mib": 30.8125
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.305457999999998,
+            "first_content_p95_ms": 18.983292,
+            "total_p50_ms": 30.751417,
+            "total_p95_ms": 33.484291,
+            "requests_per_second": 2064.335083515861,
+            "cpu_ms": 217.57500000000005,
+            "process_peak_rss_mib": 31.234375
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 29.943583,
+            "first_content_p95_ms": 32.78425,
+            "total_p50_ms": 29.943583,
+            "total_p95_ms": 32.78425,
+            "requests_per_second": 2105.1214170920853,
+            "cpu_ms": 165.70600000000013,
+            "process_peak_rss_mib": 31.25
+          }
+        ]
+      },
+      {
+        "version": "optimized",
+        "run": 10,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.10575,
+            "first_content_p95_ms": 18.806541,
+            "total_p50_ms": 30.6485,
+            "total_p95_ms": 33.490083,
+            "requests_per_second": 2062.943276195593,
+            "cpu_ms": 161.363,
+            "process_peak_rss_mib": 28.828125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.361417,
+            "first_content_p95_ms": 18.114542,
+            "total_p50_ms": 31.850084000000003,
+            "total_p95_ms": 45.574875,
+            "requests_per_second": 1956.2334189636304,
+            "cpu_ms": 215.235,
+            "process_peak_rss_mib": 30.578125
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.848708000000002,
+            "first_content_p95_ms": 19.755583,
+            "total_p50_ms": 31.421084,
+            "total_p95_ms": 34.781417000000005,
+            "requests_per_second": 2010.3458838572453,
+            "cpu_ms": 214.67700000000002,
+            "process_peak_rss_mib": 31.046875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 29.566540999999997,
+            "first_content_p95_ms": 31.891875,
+            "total_p50_ms": 29.566540999999997,
+            "total_p95_ms": 31.891875,
+            "requests_per_second": 2140.539817385197,
+            "cpu_ms": 175.894,
+            "process_peak_rss_mib": 31.0625
+          }
+        ]
+      },
+      {
+        "version": "stability",
+        "run": 1,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.6435,
+            "first_content_p95_ms": 18.436916,
+            "total_p50_ms": 30.976709000000003,
+            "total_p95_ms": 33.246833,
+            "requests_per_second": 2070.2751252096937,
+            "cpu_ms": 171.57099999999997,
+            "process_peak_rss_mib": 28.8125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.810708,
+            "first_content_p95_ms": 19.494334,
+            "total_p50_ms": 31.240625,
+            "total_p95_ms": 33.847916,
+            "requests_per_second": 2059.621413827522,
+            "cpu_ms": 185.07999999999998,
+            "process_peak_rss_mib": 30.625
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.945917,
+            "first_content_p95_ms": 19.228333,
+            "total_p50_ms": 30.474375000000002,
+            "total_p95_ms": 32.423958000000006,
+            "requests_per_second": 2105.7779825135044,
+            "cpu_ms": 199.2489999999999,
+            "process_peak_rss_mib": 31.125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.149209,
+            "first_content_p95_ms": 31.8615,
+            "total_p50_ms": 30.149209,
+            "total_p95_ms": 31.8615,
+            "requests_per_second": 2135.002042033545,
+            "cpu_ms": 160.01799999999992,
+            "process_peak_rss_mib": 31.140625
+          }
+        ]
+      },
+      {
+        "version": "stability",
+        "run": 2,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.642625000000002,
+            "first_content_p95_ms": 17.807666,
+            "total_p50_ms": 30.603209,
+            "total_p95_ms": 33.509458,
+            "requests_per_second": 2089.0437943876923,
+            "cpu_ms": 168.159,
+            "process_peak_rss_mib": 29.203125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.740208,
+            "first_content_p95_ms": 17.759417,
+            "total_p50_ms": 30.388042000000002,
+            "total_p95_ms": 33.132417,
+            "requests_per_second": 2094.95277716617,
+            "cpu_ms": 221.002,
+            "process_peak_rss_mib": 30.71875
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 14.839,
+            "first_content_p95_ms": 19.501917,
+            "total_p50_ms": 28.100875000000002,
+            "total_p95_ms": 33.109333,
+            "requests_per_second": 2223.5874315576966,
+            "cpu_ms": 198.111,
+            "process_peak_rss_mib": 31.21875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.676583,
+            "first_content_p95_ms": 33.022667,
+            "total_p50_ms": 30.676583,
+            "total_p95_ms": 33.022667,
+            "requests_per_second": 2094.577831006237,
+            "cpu_ms": 156.86899999999991,
+            "process_peak_rss_mib": 31.234375
+          }
+        ]
+      },
+      {
+        "version": "stability",
+        "run": 3,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 15.532957999999999,
+            "first_content_p95_ms": 19.004083,
+            "total_p50_ms": 28.214125,
+            "total_p95_ms": 31.943792,
+            "requests_per_second": 2236.2061881511827,
+            "cpu_ms": 152.281,
+            "process_peak_rss_mib": 28.921875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.598417,
+            "first_content_p95_ms": 19.076042,
+            "total_p50_ms": 30.375875,
+            "total_p95_ms": 32.548292,
+            "requests_per_second": 2096.0737962736384,
+            "cpu_ms": 202.91700000000003,
+            "process_peak_rss_mib": 30.703125
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.100792,
+            "first_content_p95_ms": 17.534042,
+            "total_p50_ms": 29.261374999999997,
+            "total_p95_ms": 31.266750000000002,
+            "requests_per_second": 2165.0036563190656,
+            "cpu_ms": 220.88400000000001,
+            "process_peak_rss_mib": 31.203125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.381625,
+            "first_content_p95_ms": 31.997042000000004,
+            "total_p50_ms": 30.381625,
+            "total_p95_ms": 31.997042000000004,
+            "requests_per_second": 2135.5233570260334,
+            "cpu_ms": 161.7739999999999,
+            "process_peak_rss_mib": 31.25
+          }
+        ]
+      },
+      {
+        "version": "stability",
+        "run": 4,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.433957999999997,
+            "first_content_p95_ms": 17.484750000000002,
+            "total_p50_ms": 30.463,
+            "total_p95_ms": 32.846541,
+            "requests_per_second": 2103.277644771712,
+            "cpu_ms": 165.714,
+            "process_peak_rss_mib": 28.9375
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.562875000000002,
+            "first_content_p95_ms": 18.860459,
+            "total_p50_ms": 30.720792,
+            "total_p95_ms": 33.7005,
+            "requests_per_second": 2095.490452159691,
+            "cpu_ms": 196.317,
+            "process_peak_rss_mib": 30.78125
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.5025,
+            "first_content_p95_ms": 18.599417,
+            "total_p50_ms": 30.285125,
+            "total_p95_ms": 32.007667,
+            "requests_per_second": 2104.688738836183,
+            "cpu_ms": 212.918,
+            "process_peak_rss_mib": 31.296875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.533292,
+            "first_content_p95_ms": 32.510416,
+            "total_p50_ms": 30.533292,
+            "total_p95_ms": 32.510416,
+            "requests_per_second": 2086.232293001546,
+            "cpu_ms": 161.4720000000002,
+            "process_peak_rss_mib": 31.3125
+          }
+        ]
+      },
+      {
+        "version": "stability",
+        "run": 5,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.863084,
+            "first_content_p95_ms": 18.036875000000002,
+            "total_p50_ms": 28.990417,
+            "total_p95_ms": 30.972209,
+            "requests_per_second": 2208.9813635792584,
+            "cpu_ms": 133.022,
+            "process_peak_rss_mib": 29.09375
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.786125,
+            "first_content_p95_ms": 18.970458999999998,
+            "total_p50_ms": 31.457541999999997,
+            "total_p95_ms": 74.45595800000001,
+            "requests_per_second": 1753.640607564955,
+            "cpu_ms": 241.45,
+            "process_peak_rss_mib": 30.796875
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.766541999999998,
+            "first_content_p95_ms": 19.230125,
+            "total_p50_ms": 31.290458,
+            "total_p95_ms": 33.199208,
+            "requests_per_second": 2035.1739996854462,
+            "cpu_ms": 190.226,
+            "process_peak_rss_mib": 31.296875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 29.839542,
+            "first_content_p95_ms": 31.722374999999996,
+            "total_p50_ms": 29.839542,
+            "total_p95_ms": 31.722374999999996,
+            "requests_per_second": 2154.27769683832,
+            "cpu_ms": 152.37199999999996,
+            "process_peak_rss_mib": 31.328125
+          }
+        ]
+      },
+      {
+        "version": "stability",
+        "run": 6,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.723084,
+            "first_content_p95_ms": 18.437583,
+            "total_p50_ms": 30.858583,
+            "total_p95_ms": 33.688708999999996,
+            "requests_per_second": 2057.7634041753618,
+            "cpu_ms": 170.165,
+            "process_peak_rss_mib": 29.046875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.794041999999997,
+            "first_content_p95_ms": 18.981125000000002,
+            "total_p50_ms": 30.585500000000003,
+            "total_p95_ms": 32.890125,
+            "requests_per_second": 2100.795081185267,
+            "cpu_ms": 210.21400000000006,
+            "process_peak_rss_mib": 30.78125
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.792749999999998,
+            "first_content_p95_ms": 17.843458,
+            "total_p50_ms": 30.633459,
+            "total_p95_ms": 32.856042,
+            "requests_per_second": 2077.100872825779,
+            "cpu_ms": 220.05000000000007,
+            "process_peak_rss_mib": 31.265625
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.296084,
+            "first_content_p95_ms": 33.014291,
+            "total_p50_ms": 30.296084,
+            "total_p95_ms": 33.014291,
+            "requests_per_second": 2081.988106057385,
+            "cpu_ms": 167.28199999999993,
+            "process_peak_rss_mib": 31.296875
+          }
+        ]
+      },
+      {
+        "version": "stability",
+        "run": 7,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.06325,
+            "first_content_p95_ms": 18.508208000000003,
+            "total_p50_ms": 28.924084,
+            "total_p95_ms": 31.774417,
+            "requests_per_second": 2189.5246742068534,
+            "cpu_ms": 166.377,
+            "process_peak_rss_mib": 29.171875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.660583,
+            "first_content_p95_ms": 18.658,
+            "total_p50_ms": 30.573249999999998,
+            "total_p95_ms": 32.909958,
+            "requests_per_second": 2077.479079116173,
+            "cpu_ms": 204.75900000000001,
+            "process_peak_rss_mib": 30.96875
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.215417,
+            "first_content_p95_ms": 18.74225,
+            "total_p50_ms": 31.325,
+            "total_p95_ms": 34.496917,
+            "requests_per_second": 2050.728494261615,
+            "cpu_ms": 203.15800000000002,
+            "process_peak_rss_mib": 31.390625
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 31.551707999999998,
+            "first_content_p95_ms": 32.970333999999994,
+            "total_p50_ms": 31.551707999999998,
+            "total_p95_ms": 32.970333999999994,
+            "requests_per_second": 2053.506131703132,
+            "cpu_ms": 133.5440000000001,
+            "process_peak_rss_mib": 31.40625
+          }
+        ]
+      },
+      {
+        "version": "stability",
+        "run": 8,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.458958,
+            "first_content_p95_ms": 19.050041,
+            "total_p50_ms": 31.253916999999998,
+            "total_p95_ms": 34.157167,
+            "requests_per_second": 2033.0960478610186,
+            "cpu_ms": 163.74399999999997,
+            "process_peak_rss_mib": 28.6875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.983458000000002,
+            "first_content_p95_ms": 19.722416,
+            "total_p50_ms": 31.14925,
+            "total_p95_ms": 34.079791,
+            "requests_per_second": 2036.9164612779218,
+            "cpu_ms": 196.80399999999997,
+            "process_peak_rss_mib": 30.625
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.803459,
+            "first_content_p95_ms": 19.197584,
+            "total_p50_ms": 31.550083,
+            "total_p95_ms": 33.472583,
+            "requests_per_second": 2020.5936776531514,
+            "cpu_ms": 213.18100000000004,
+            "process_peak_rss_mib": 31.15625
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 31.838333000000002,
+            "first_content_p95_ms": 33.215458000000005,
+            "total_p50_ms": 31.838333000000002,
+            "total_p95_ms": 33.215458000000005,
+            "requests_per_second": 2035.2383796603874,
+            "cpu_ms": 162.962,
+            "process_peak_rss_mib": 31.171875
+          }
+        ]
+      },
+      {
+        "version": "stability",
+        "run": 9,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.010667,
+            "first_content_p95_ms": 18.604292,
+            "total_p50_ms": 30.858041,
+            "total_p95_ms": 33.887791,
+            "requests_per_second": 2055.0811272776646,
+            "cpu_ms": 180.27999999999997,
+            "process_peak_rss_mib": 29.125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.784000000000002,
+            "first_content_p95_ms": 19.832834000000002,
+            "total_p50_ms": 32.688916,
+            "total_p95_ms": 49.374416999999994,
+            "requests_per_second": 1864.2235996973636,
+            "cpu_ms": 221.64600000000007,
+            "process_peak_rss_mib": 30.71875
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.783167000000002,
+            "first_content_p95_ms": 18.747041999999997,
+            "total_p50_ms": 30.939375000000002,
+            "total_p95_ms": 32.694624999999995,
+            "requests_per_second": 2073.2980343004647,
+            "cpu_ms": 212.731,
+            "process_peak_rss_mib": 31.453125
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.312917000000002,
+            "first_content_p95_ms": 40.063584,
+            "total_p50_ms": 30.312917000000002,
+            "total_p95_ms": 40.063584,
+            "requests_per_second": 2032.1162962375317,
+            "cpu_ms": 162.74599999999987,
+            "process_peak_rss_mib": 31.46875
+          }
+        ]
+      },
+      {
+        "version": "stability",
+        "run": 10,
+        "samples": [
+          {
+            "protocol": "openaiResponses",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.819625000000002,
+            "first_content_p95_ms": 20.372917,
+            "total_p50_ms": 30.634542,
+            "total_p95_ms": 34.341708999999994,
+            "requests_per_second": 2048.8427627866736,
+            "cpu_ms": 171.911,
+            "process_peak_rss_mib": 28.890625
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 17.038999999999998,
+            "first_content_p95_ms": 19.045625,
+            "total_p50_ms": 30.959,
+            "total_p95_ms": 47.383500000000005,
+            "requests_per_second": 1938.7449371824869,
+            "cpu_ms": 228.88200000000006,
+            "process_peak_rss_mib": 30.734375
+          },
+          {
+            "protocol": "anthropicMessages",
+            "stream": true,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 16.120791,
+            "first_content_p95_ms": 18.449084000000003,
+            "total_p50_ms": 30.474541000000002,
+            "total_p95_ms": 31.9365,
+            "requests_per_second": 2112.011555871228,
+            "cpu_ms": 211.01599999999996,
+            "process_peak_rss_mib": 31.296875
+          },
+          {
+            "protocol": "openaiChatCompletions",
+            "stream": false,
+            "concurrency": 64,
+            "requests": 512,
+            "errors": 0,
+            "first_content_p50_ms": 30.624167,
+            "first_content_p95_ms": 40.459333,
+            "total_p50_ms": 30.624167,
+            "total_p95_ms": 40.459333,
+            "requests_per_second": 2006.9337837519913,
+            "cpu_ms": 180.69799999999987,
+            "process_peak_rss_mib": 31.328125
+          }
+        ]
+      }
+    ]
+  }
+}

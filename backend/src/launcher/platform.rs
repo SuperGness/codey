@@ -67,6 +67,10 @@ impl WindowsPackageDebugSession {
         let package_full_name =
             windows_package_full_name(app_dir).context("无法识别 Windows Store Codex 包全名")?;
         enable_windows_packaged_environment(&package_full_name, environment)?;
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.windows_package_environment_enabled",
+            serde_json::json!({ "package": package_full_name }),
+        );
         Ok(Self {
             package_full_name: Some(package_full_name),
         })
@@ -78,6 +82,10 @@ impl WindowsPackageDebugSession {
             .as_deref()
             .expect("active package debug session should have a package name");
         disable_windows_packaged_environment(package_full_name)?;
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.windows_package_environment_cleared",
+            serde_json::json!({ "package": package_full_name }),
+        );
         self.package_full_name.take();
         Ok(())
     }
@@ -247,6 +255,13 @@ pub(super) async fn spawn_windows_codex(
                 );
             }
         }
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.windows_package_activated",
+            serde_json::json!({
+                "processId": process_id,
+                "wrapperEnvironmentApplied": environment_applied,
+            }),
+        );
         return Ok((
             SpawnedCodex {
                 child: None,

@@ -603,6 +603,7 @@ struct ProbeShared {
 struct ProbeFinishGate {
     observers: usize,
     pending: Option<(RequestStatus, &'static str)>,
+    response_duration_ms: Option<u64>,
 }
 
 pub(crate) struct RouteRequestLogFinishGuard {
@@ -827,11 +828,32 @@ impl RouteRequestLogProbe {
     /// downstream response writer. This is intentionally independent of the
     /// upstream first byte: protocol adaptation may delay visible text.
     pub(crate) fn mark_first_downstream_content(&self) {
+        if self
+            .shared
+            .downstream_first_content_micros
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            self.mark_first_downstream_content_at(Instant::now());
+        }
+    }
+
+    pub(crate) fn mark_first_downstream_content_at(&self, written_at: Instant) {
         self.shield(|| {
-            store_elapsed_once(
-                &self.shared.downstream_first_content_micros,
-                self.shared.started_at,
-            );
+            let target = &self.shared.downstream_first_content_micros;
+            if target.load(Ordering::Relaxed) == 0 {
+                let elapsed: u64 = written_at
+                    .saturating_duration_since(self.shared.started_at)
+                    .as_micros()
+                    .try_into()
+                    .unwrap_or(u64::MAX);
+                let _ = target.compare_exchange(
+                    0,
+                    elapsed.saturating_add(1),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                );
+            }
         });
     }
 
@@ -966,8 +988,12 @@ impl RouteRequestLogProbe {
     }
 
     fn finish_inner(&self, default_status: RequestStatus, default_reason: &'static str) {
-        {
+        let total_duration_ms = {
             let mut gate = lock_unpoisoned(&self.shared.finish_gate);
+            // Background metadata parsing may finish later than the response.
+            let duration = *gate
+                .response_duration_ms
+                .get_or_insert_with(|| elapsed_millis(self.shared.started_at));
             if gate.observers != 0 {
                 gate.pending.get_or_insert((default_status, default_reason));
                 return;
@@ -975,7 +1001,8 @@ impl RouteRequestLogProbe {
             if self.shared.finished.swap(true, Ordering::AcqRel) {
                 return;
             }
-        }
+            duration
+        };
         let mut pending = lock_unpoisoned(&self.shared.entry);
         let status = pending.status.unwrap_or(default_status);
         if pending.completion_reason.is_none() {
@@ -1019,7 +1046,7 @@ impl RouteRequestLogProbe {
                 &self.shared.downstream_first_content_micros,
             ),
             upstream_header_ms: load_duration_ms(&self.shared.upstream_header_micros),
-            total_duration_ms: elapsed_millis(self.shared.started_at),
+            total_duration_ms,
             queue_delay_ms: 0,
             usage_reported,
             usage_unavailable_reason,
@@ -3490,8 +3517,12 @@ mod tests {
             .unwrap();
         let observer = probe.defer_finish().unwrap();
 
+        let written_at = Instant::now();
         probe.finish_success();
+        let completed_duration_ms = elapsed_millis(probe.shared.started_at);
         assert!(matches!(receiver.try_recv(), Err(TryRecvError::Empty)));
+        std::thread::sleep(Duration::from_millis(20));
+        probe.mark_first_downstream_content_at(written_at);
         probe.observe_event(&serde_json::json!({
             "type":"response.completed",
             "response":{"usage":{"input_tokens":9,"output_tokens":4,"total_tokens":13}}
@@ -3499,6 +3530,13 @@ mod tests {
         drop(observer);
 
         let entry = receiver.try_recv().unwrap().entry;
+        assert!(entry.total_duration_ms <= completed_duration_ms);
+        assert_eq!(
+            entry.downstream_first_content_ms,
+            Some(duration_millis(
+                written_at.duration_since(probe.shared.started_at)
+            ))
+        );
         assert_eq!(entry.status, RequestStatus::Succeeded);
         assert_eq!(entry.token_usage.total_tokens, Some(13));
         probe.finish_cancelled();

@@ -1510,9 +1510,11 @@ impl RouterServer {
         let mut downstream = WebSocketResponsesDownstream::with_shared_backoffs(
             socket,
             Arc::clone(&self.websocket_backoffs),
+            Arc::clone(&self.request_body_budget),
         );
 
         while let Some(message) = downstream.next_message().await? {
+            downstream.clear_stream_id();
             match message {
                 WebSocketMessage::Text(text) => {
                     let body_budget_permit =
@@ -1649,22 +1651,33 @@ impl RouterServer {
                         )
                         .await;
                     if let Err(error) = result {
+                        if error.is::<DownstreamClosed>() {
+                            // Reading a Close queues tungstenite's close reply.
+                            // Drop the proxy future/upstream before flushing it.
+                            let _ = tokio::time::timeout(
+                                DOWNSTREAM_WRITE_TIMEOUT,
+                                downstream.socket.flush(),
+                            )
+                            .await;
+                            break;
+                        }
                         record_router_failure_nonblocking(
                             "local_router_websocket_request_failed",
                             "proxy_local_router_websocket_request",
                             format!("{error:#}"),
                             serde_json::json!({ "requestId": request_id }),
                         );
-                        downstream
-                            .write_error(
-                                502,
-                                "websocket_proxy_failed",
-                                "Codey 本地路由处理 WebSocket 请求失败".to_string(),
-                                None,
-                            )
-                            .await?;
+                        if !downstream.terminal_started {
+                            downstream
+                                .write_error(
+                                    502,
+                                    "websocket_proxy_failed",
+                                    "Codey 本地路由处理 WebSocket 请求失败".to_string(),
+                                    None,
+                                )
+                                .await?;
+                        }
                     }
-                    downstream.clear_stream_id();
                 }
                 WebSocketMessage::Ping(payload) => downstream.write_pong(payload).await?,
                 WebSocketMessage::Pong(_) => {}
@@ -2176,8 +2189,11 @@ impl RouterServer {
                 UpstreamTransport::Http
             });
         }
-        let initial_response =
-            tokio::time::timeout(response_header_timeout, request_builder.send()).await;
+        let initial_response = await_upstream(
+            downstream,
+            tokio::time::timeout(response_header_timeout, request_builder.send()),
+        )
+        .await?;
         let (response_result, effective_upstream_stream, effective_header_timeout) =
             match initial_response {
                 Ok(Err(error))
@@ -2205,11 +2221,14 @@ impl RouterServer {
                         )
                         .json(&fallback_body);
                     (
-                        tokio::time::timeout(
-                            UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT,
-                            fallback_request.send(),
+                        await_upstream(
+                            downstream,
+                            tokio::time::timeout(
+                                UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT,
+                                fallback_request.send(),
+                            ),
                         )
-                        .await,
+                        .await?,
                         false,
                         UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT,
                     )
@@ -6595,6 +6614,13 @@ fn record_upstream_websocket_failure(
 
 #[async_trait]
 trait ResponsesDownstream: Send {
+    async fn wait_for_upstream<T, F>(&mut self, future: F) -> Result<T>
+    where
+        T: Send,
+        F: std::future::Future<Output = T> + Send,
+    {
+        Ok(future.await)
+    }
     fn is_websocket(&self) -> bool {
         false
     }
@@ -6656,6 +6682,32 @@ trait ResponsesDownstream: Send {
     }
 }
 
+// HTTP FIN cannot distinguish a legal write-half shutdown from cancellation.
+// HTTP also avoids an extra async-trait allocation on every response chunk.
+async fn await_upstream<D, T, F>(downstream: &mut D, future: F) -> Result<T>
+where
+    D: ResponsesDownstream + ?Sized,
+    T: Send,
+    F: std::future::Future<Output = T> + Send,
+{
+    if downstream.is_websocket() {
+        downstream.wait_for_upstream(future).await
+    } else {
+        Ok(future.await)
+    }
+}
+
+#[derive(Debug)]
+struct DownstreamClosed;
+
+impl std::fmt::Display for DownstreamClosed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("下游 WebSocket 已关闭")
+    }
+}
+
+impl std::error::Error for DownstreamClosed {}
+
 struct ObservedResponsesDownstream<'a, D>
 where
     D: ResponsesDownstream + ?Sized,
@@ -6690,6 +6742,21 @@ impl<D> ResponsesDownstream for ObservedResponsesDownstream<'_, D>
 where
     D: ResponsesDownstream + ?Sized,
 {
+    async fn wait_for_upstream<T, F>(&mut self, future: F) -> Result<T>
+    where
+        T: Send,
+        F: std::future::Future<Output = T> + Send,
+    {
+        let result = self.inner.wait_for_upstream(future).await;
+        if let Err(error) = &result
+            && error.is::<DownstreamClosed>()
+            && let Some(probe) = &self.probe
+        {
+            probe.mark_cancelled("downstream_websocket_closed");
+            probe.finish_cancelled();
+        }
+        result
+    }
     fn is_websocket(&self) -> bool {
         self.inner.is_websocket()
     }
@@ -6809,9 +6876,13 @@ where
                 }
             }
             Ok(UpstreamWebSocketAttempt::UseHttp) => {}
-            Err(_) => {
+            Err(error) => {
                 if let Some(probe) = self.probe.as_ref() {
-                    probe.mark_cancelled("upstream_websocket_proxy_failed");
+                    if error.is::<DownstreamClosed>() {
+                        probe.mark_cancelled("downstream_websocket_closed");
+                    } else {
+                        probe.mark_error(502, "upstream_websocket_proxy_failed");
+                    }
                 }
             }
         }
@@ -6889,6 +6960,10 @@ struct WebSocketResponsesDownstream {
     websocket_backoffs: Arc<Mutex<UpstreamWebSocketBackoffs>>,
     stream_id: Option<String>,
     adapted_history: AdaptedResponsesHistory,
+    terminal_started: bool,
+    pending_messages: VecDeque<(WebSocketMessage, Option<OwnedSemaphorePermit>)>,
+    pending_budget_blocked: bool,
+    request_body_budget: Arc<Semaphore>,
 }
 
 #[derive(Debug, Default)]
@@ -6963,12 +7038,14 @@ impl WebSocketResponsesDownstream {
         Self::with_shared_backoffs(
             socket,
             Arc::new(Mutex::new(UpstreamWebSocketBackoffs::default())),
+            Arc::new(Semaphore::new(REQUEST_BODY_BUDGET_PERMITS)),
         )
     }
 
     fn with_shared_backoffs(
         socket: WebSocketStream<TcpStream>,
         websocket_backoffs: Arc<Mutex<UpstreamWebSocketBackoffs>>,
+        request_body_budget: Arc<Semaphore>,
     ) -> Self {
         Self {
             socket,
@@ -6976,6 +7053,10 @@ impl WebSocketResponsesDownstream {
             websocket_backoffs,
             stream_id: None,
             adapted_history: AdaptedResponsesHistory::default(),
+            terminal_started: false,
+            pending_messages: VecDeque::new(),
+            pending_budget_blocked: false,
+            request_body_budget,
         }
     }
 
@@ -6985,10 +7066,23 @@ impl WebSocketResponsesDownstream {
 
     fn clear_stream_id(&mut self) {
         self.stream_id = None;
+        self.terminal_started = false;
     }
 
     async fn next_message(&mut self) -> Result<Option<WebSocketMessage>> {
         loop {
+            if !self.pending_messages.is_empty()
+                && self.upstream.as_ref().is_none_or(|upstream| {
+                    upstream.liveness.heartbeat_sent_at.is_none()
+                        && upstream.liveness.maintenance_deadline() > Instant::now()
+                })
+            {
+                let (message, _permit) = self.pending_messages.pop_front().unwrap();
+                if self.pending_messages.is_empty() {
+                    self.pending_budget_blocked = false;
+                }
+                return Ok(Some(message));
+            }
             let Some(upstream) = self.upstream.as_ref() else {
                 return self
                     .socket
@@ -7015,7 +7109,7 @@ impl WebSocketResponsesDownstream {
                     biased;
                     message = upstream_socket.next() => IdleWebSocketEvent::Upstream(message),
                     _ = &mut maintenance => IdleWebSocketEvent::MaintainUpstream,
-                    message = downstream_socket.next() => IdleWebSocketEvent::Downstream(message),
+                    message = downstream_socket.next(), if self.pending_messages.is_empty() => IdleWebSocketEvent::Downstream(message),
                 }
             };
 
@@ -7117,8 +7211,9 @@ impl WebSocketResponsesDownstream {
             self.socket.send(WebSocketMessage::Text(text.into())),
         )
         .await
-        .context("写入 Codey Responses WebSocket 消息超时")?
-        .context("写入 Codey Responses WebSocket 消息失败")
+        .context("写入 Codey Responses WebSocket 消息超时")
+        .and_then(|result| result.context("写入 Codey Responses WebSocket 消息失败"))
+        .context(DownstreamClosed)
     }
 
     async fn write_pong(&mut self, payload: tokio_tungstenite::tungstenite::Bytes) -> Result<()> {
@@ -7185,7 +7280,10 @@ impl WebSocketResponsesDownstream {
         let mut upstream = if let Some(cached) = self.upstream.take() {
             cached
         } else {
-            match connect_upstream_responses_websocket(upstream_url, headers).await {
+            match self
+                .wait_for_upstream(connect_upstream_responses_websocket(upstream_url, headers))
+                .await?
+            {
                 Ok(socket) => {
                     self.websocket_backoffs
                         .lock()
@@ -7268,11 +7366,12 @@ impl WebSocketResponsesDownstream {
         if let Some(probe) = probe {
             probe.mark_upstream_send(UpstreamTransport::WebSocket);
         }
-        match tokio::time::timeout(
-            DOWNSTREAM_WRITE_TIMEOUT,
-            upstream.socket.send(WebSocketMessage::Text(message.into())),
-        )
-        .await
+        match self
+            .wait_for_upstream(tokio::time::timeout(
+                DOWNSTREAM_WRITE_TIMEOUT,
+                upstream.socket.send(WebSocketMessage::Text(message.into())),
+            ))
+            .await?
         {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -7287,11 +7386,12 @@ impl WebSocketResponsesDownstream {
 
         let mut produced_response_id = None;
         loop {
-            let next = match tokio::time::timeout(
-                UPSTREAM_READ_IDLE_TIMEOUT,
-                upstream.socket.next(),
-            )
-            .await
+            let next = match self
+                .wait_for_upstream(tokio::time::timeout(
+                    UPSTREAM_READ_IDLE_TIMEOUT,
+                    upstream.socket.next(),
+                ))
+                .await?
             {
                 Ok(next) => next,
                 Err(_) => {
@@ -7362,6 +7462,7 @@ impl WebSocketResponsesDownstream {
                             // the latency-sensitive first-event path. SSE-wrapped
                             // WebSocket frames must be normalized to bare JSON
                             // before they are sent to Codex.
+                            self.terminal_started |= terminal;
                             self.write_text(text).await?;
                         } else {
                             self.write_event(&event).await?;
@@ -7392,11 +7493,12 @@ impl WebSocketResponsesDownstream {
                     }
                 }
                 WebSocketMessage::Ping(payload) => {
-                    match tokio::time::timeout(
-                        DOWNSTREAM_WRITE_TIMEOUT,
-                        upstream.socket.send(WebSocketMessage::Pong(payload)),
-                    )
-                    .await
+                    match self
+                        .wait_for_upstream(tokio::time::timeout(
+                            DOWNSTREAM_WRITE_TIMEOUT,
+                            upstream.socket.send(WebSocketMessage::Pong(payload)),
+                        ))
+                        .await?
                     {
                         Ok(Ok(())) => {}
                         Ok(Err(error)) => {
@@ -7496,13 +7598,13 @@ fn responses_event_is_failure(event: &Value) -> bool {
 
 fn parse_responses_websocket_sse_events(text: &str) -> Result<Vec<Value>> {
     let bytes = text.as_bytes();
-    let mut cursor = 0;
+    let mut cursor = SseCursor::default();
     let mut events = Vec::new();
     while let Some(frame) = take_next_sse_frame(bytes, &mut cursor) {
         append_responses_websocket_sse_event(&mut events, frame)?;
     }
-    if !bytes[cursor..].iter().all(u8::is_ascii_whitespace) {
-        append_responses_websocket_sse_event(&mut events, &bytes[cursor..])?;
+    if !bytes[cursor.consumed..].iter().all(u8::is_ascii_whitespace) {
+        append_responses_websocket_sse_event(&mut events, &bytes[cursor.consumed..])?;
     }
     if events.is_empty() {
         anyhow::bail!("Responses WebSocket SSE 帧不包含 JSON data 事件");
@@ -7629,6 +7731,43 @@ fn upstream_websocket_endpoint_is_unsupported(error: &anyhow::Error) -> bool {
 
 #[async_trait]
 impl ResponsesDownstream for WebSocketResponsesDownstream {
+    async fn wait_for_upstream<T, F>(&mut self, future: F) -> Result<T>
+    where
+        T: Send,
+        F: std::future::Future<Output = T> + Send,
+    {
+        tokio::pin!(future);
+        loop {
+            tokio::select! {
+                // Keep the same pinned deadline when Ping or queued requests arrive.
+                result = &mut future => return Ok(result),
+                message = self.socket.next(), if self.pending_messages.len() < 8 && !self.pending_budget_blocked => {
+                    match message {
+                        Some(Ok(WebSocketMessage::Ping(payload))) => {
+                            self.write_pong(payload).await.map_err(|error| error.context(DownstreamClosed))?;
+                        }
+                        Some(Ok(WebSocketMessage::Pong(_))) => {}
+                        Some(Ok(WebSocketMessage::Close(_))) | None => {
+                            self.upstream.take();
+                            self.pending_messages.clear();
+                            return Err(DownstreamClosed.into());
+                        }
+                        Some(Err(error)) => return Err(anyhow::Error::new(error).context(DownstreamClosed)),
+                        Some(Ok(message)) => {
+                            // ponytail: full queues delay control frames; use an explicit
+                            // cancellation channel if cancellation must bypass queued requests.
+                            // At most one bounded frame may wait for the shared body budget.
+                            let permit = match acquire_request_body_budget(&self.request_body_budget, message.len()) {
+                                Ok(permit) => permit,
+                                Err(_) => { self.pending_budget_blocked = true; None }
+                            };
+                            self.pending_messages.push_back((message, permit));
+                        }
+                    }
+                }
+            }
+        }
+    }
     fn is_websocket(&self) -> bool {
         true
     }
@@ -7678,6 +7817,12 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
     }
 
     async fn write_event(&mut self, event: &Value) -> Result<()> {
+        if responses_event_is_terminal(event) {
+            if self.terminal_started {
+                return Ok(());
+            }
+            self.terminal_started = true;
+        }
         let encoded = if self.event_needs_stream_id(event) {
             let mut event = event.clone();
             event
@@ -7783,24 +7928,30 @@ async fn proxy_native_response_to_websocket(
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<()> {
     let status = response.status().as_u16();
-    let mut prepared =
-        prepare_upstream_response(response, "读取 Responses WebSocket 上游响应失败", probe).await?;
+    let mut prepared = await_upstream(
+        downstream,
+        prepare_upstream_response(response, "读取 Responses WebSocket 上游响应失败", probe),
+    )
+    .await??;
     if prepared.is_sse {
         downstream.start_event_stream().await?;
         let mut buffer = Vec::new();
-        let mut cursor = 0;
+        let mut cursor = SseCursor::default();
         let mut done = false;
         let mut terminal = false;
-        while let Some(chunk) = read_prepared_upstream_chunk(
-            &mut prepared,
-            "读取 Responses WebSocket 上游 SSE 流失败",
-            probe,
+        while let Some(chunk) = await_upstream(
+            downstream,
+            read_prepared_upstream_chunk(
+                &mut prepared,
+                "读取 Responses WebSocket 上游 SSE 流失败",
+                probe,
+            ),
         )
-        .await?
+        .await??
         {
             compact_sse_buffer(&mut buffer, &mut cursor);
             buffer.extend_from_slice(&chunk);
-            ensure_sse_buffer_within_limit(&buffer, cursor)?;
+            ensure_sse_buffer_within_limit(&buffer, cursor.consumed)?;
             while let Some(frame) = take_next_sse_frame(&buffer, &mut cursor) {
                 let Some(data) = sse_frame_data(frame)? else {
                     continue;
@@ -7827,8 +7978,10 @@ async fn proxy_native_response_to_websocket(
             }
         }
         if !done
-            && !buffer[cursor..].iter().all(u8::is_ascii_whitespace)
-            && let Some(data) = sse_frame_data(&buffer[cursor..])?
+            && !buffer[cursor.consumed..]
+                .iter()
+                .all(u8::is_ascii_whitespace)
+            && let Some(data) = sse_frame_data(&buffer[cursor.consumed..])?
             && data.trim() != "[DONE]"
         {
             let event = serde_json::from_str::<Value>(&data)
@@ -7855,13 +8008,16 @@ async fn proxy_native_response_to_websocket(
     } else {
         MAX_UPSTREAM_ERROR_BYTES
     };
-    let body = read_bounded_prepared_upstream_body(
-        prepared,
-        limit,
-        "读取 Responses WebSocket 上游响应失败",
-        probe,
+    let body = await_upstream(
+        downstream,
+        read_bounded_prepared_upstream_body(
+            prepared,
+            limit,
+            "读取 Responses WebSocket 上游响应失败",
+            probe,
+        ),
     )
-    .await?;
+    .await??;
     if (200..300).contains(&status)
         && let Ok(text) = std::str::from_utf8(&body)
         && responses_body_looks_like_sse(text)
@@ -8246,6 +8402,7 @@ const REQUEST_LOG_USAGE_NESTING_DEPTH: usize = 64;
 
 struct RequestLogObservedChunk {
     bytes: Bytes,
+    written_at: Instant,
     _queue_budget: OwnedSemaphorePermit,
 }
 
@@ -8266,7 +8423,9 @@ impl RequestLogResponseTap {
             let _finish_guard = finish_guard;
             let mut projector = RequestLogMetadataProjector::default();
             while let Some(chunk) = receiver.recv().await {
-                if let Err(reason) = projector.observe(&chunk.bytes, &worker_probe) {
+                if let Err(reason) =
+                    projector.observe(&chunk.bytes, &worker_probe, chunk.written_at)
+                {
                     worker_probe.mark_usage_unavailable(reason);
                     break;
                 }
@@ -8298,6 +8457,7 @@ impl RequestLogResponseTap {
         };
         let observed = RequestLogObservedChunk {
             bytes: chunk.clone(),
+            written_at: Instant::now(),
             _queue_budget: queue_budget,
         };
         match sender.try_send(observed) {
@@ -8744,6 +8904,7 @@ impl RequestLogMetadataProjector {
         &mut self,
         bytes: &[u8],
         probe: &RouteRequestLogProbe,
+        written_at: Instant,
     ) -> std::result::Result<(), &'static str> {
         for &byte in bytes {
             if let Some(capture) = self.usage.as_mut() {
@@ -8769,7 +8930,7 @@ impl RequestLogMetadataProjector {
                                     self.string_overflow || !self.string.is_empty();
                                 if self.event_type_has_user_content && self.event_delta_has_content
                                 {
-                                    probe.mark_first_downstream_content();
+                                    probe.mark_first_downstream_content_at(written_at);
                                 }
                             }
                             ProjectedMetadataScalar::EventType if !self.string_overflow => {
@@ -8778,7 +8939,7 @@ impl RequestLogMetadataProjector {
                                     responses_event_type_has_user_content(&value);
                                 if self.event_type_has_user_content && self.event_delta_has_content
                                 {
-                                    probe.mark_first_downstream_content();
+                                    probe.mark_first_downstream_content_at(written_at);
                                 }
                                 probe.observe_terminal_projection(Some(&value), None, None)
                             }
@@ -9019,7 +9180,11 @@ where
     let status = response.status().as_u16();
     let upstream_request_id = upstream_request_id_from_headers(response.headers());
     let probe = downstream.request_log_probe().cloned();
-    let body = read_bounded_upstream_error_body(response, probe.as_ref()).await?;
+    let body = await_upstream(
+        downstream,
+        read_bounded_upstream_error_body(response, probe.as_ref()),
+    )
+    .await??;
     let parsed = serde_json::from_slice::<Value>(&body).ok();
     let summary = parsed
         .as_ref()
@@ -9147,12 +9312,15 @@ where
     D: ResponsesDownstream + ?Sized,
 {
     let probe = downstream.request_log_probe().cloned();
-    let prepared = match prepare_upstream_response(
-        response,
-        "读取 Chat Completions 上游响应失败",
-        probe.as_ref(),
+    let prepared = match await_upstream(
+        downstream,
+        prepare_upstream_response(
+            response,
+            "读取 Chat Completions 上游响应失败",
+            probe.as_ref(),
+        ),
     )
-    .await
+    .await?
     {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -9179,13 +9347,11 @@ where
         )
         .await;
     }
-    let responses = match read_chat_completions_as_responses(
-        prepared,
-        model,
-        tool_bridge,
-        probe.as_ref(),
+    let responses = match await_upstream(
+        downstream,
+        read_chat_completions_as_responses(prepared, model, tool_bridge, probe.as_ref()),
     )
-    .await
+    .await?
     {
         Ok(responses) => responses,
         Err(error) => {
@@ -9252,7 +9418,11 @@ where
     if !response.status().is_success() {
         let status = response.status();
         let probe = downstream.request_log_probe().cloned();
-        let body = read_bounded_upstream_error_body(response, probe.as_ref()).await?;
+        let body = await_upstream(
+            downstream,
+            read_bounded_upstream_error_body(response, probe.as_ref()),
+        )
+        .await??;
         let detail = anthropic_upstream_error_detail(&body, route);
         if let (Some(probe), Some(detail)) = (probe.as_ref(), detail.as_deref()) {
             probe.mark_upstream_error_summary(detail);
@@ -9275,12 +9445,15 @@ where
             .await;
     }
     let probe = downstream.request_log_probe().cloned();
-    let prepared = match prepare_upstream_response(
-        response,
-        "读取 Anthropic Messages 上游响应失败",
-        probe.as_ref(),
+    let prepared = match await_upstream(
+        downstream,
+        prepare_upstream_response(
+            response,
+            "读取 Anthropic Messages 上游响应失败",
+            probe.as_ref(),
+        ),
     )
-    .await
+    .await?
     {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -9307,25 +9480,27 @@ where
         )
         .await;
     }
-    let responses =
-        match read_anthropic_messages_as_responses(prepared, model, tool_bridge, probe.as_ref())
-            .await
-        {
-            Ok(responses) => responses,
-            Err(error) => {
-                return downstream
-                    .write_error(
-                        502,
-                        "upstream_protocol_error",
-                        format!(
-                            "线路「{}」的 Anthropic Messages 响应无法转换为 Responses：{error:#}",
-                            route_display_name(route)
-                        ),
-                        Some(route),
-                    )
-                    .await;
-            }
-        };
+    let responses = match await_upstream(
+        downstream,
+        read_anthropic_messages_as_responses(prepared, model, tool_bridge, probe.as_ref()),
+    )
+    .await?
+    {
+        Ok(responses) => responses,
+        Err(error) => {
+            return downstream
+                .write_error(
+                    502,
+                    "upstream_protocol_error",
+                    format!(
+                        "线路「{}」的 Anthropic Messages 响应无法转换为 Responses：{error:#}",
+                        route_display_name(route)
+                    ),
+                    Some(route),
+                )
+                .await;
+        }
+    };
     if stream_requested {
         write_responses_response_as_events(downstream, &responses).await
     } else {
@@ -9725,6 +9900,14 @@ impl AnthropicSseAccumulator {
     }
 
     fn into_message(self) -> Result<Value> {
+        if !self.stopped
+            && !self
+                .stop_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+        {
+            anyhow::bail!("Anthropic Messages SSE 在结束事件或 stop_reason 前断开");
+        }
         let content = self
             .blocks
             .into_values()
@@ -9817,13 +10000,13 @@ async fn collect_anthropic_message_sse(
 ) -> Result<Value> {
     let mut accumulator = AnthropicSseAccumulator::new(model);
     let mut buffer = Vec::new();
-    let mut cursor = 0;
+    let mut cursor = SseCursor::default();
     while let Some(chunk) =
         read_prepared_upstream_chunk(prepared, "读取 Anthropic Messages SSE 流失败", probe).await?
     {
         compact_sse_buffer(&mut buffer, &mut cursor);
         buffer.extend_from_slice(&chunk);
-        ensure_sse_buffer_within_limit(&buffer, cursor)?;
+        ensure_sse_buffer_within_limit(&buffer, cursor.consumed)?;
         while let Some(frame) = take_next_sse_frame(&buffer, &mut cursor) {
             let Some(data) = sse_frame_data(frame)? else {
                 continue;
@@ -9838,8 +10021,10 @@ async fn collect_anthropic_message_sse(
         }
     }
     if !accumulator.stopped
-        && !buffer[cursor..].iter().all(u8::is_ascii_whitespace)
-        && let Some(data) = sse_frame_data(&buffer[cursor..])?
+        && !buffer[cursor.consumed..]
+            .iter()
+            .all(u8::is_ascii_whitespace)
+        && let Some(data) = sse_frame_data(&buffer[cursor.consumed..])?
     {
         accumulator.ingest(
             &serde_json::from_str::<Value>(&data)
@@ -9851,7 +10036,7 @@ async fn collect_anthropic_message_sse(
 
 fn parse_anthropic_message_sse_bytes(bytes: &[u8], model: &str) -> Result<Value> {
     let mut accumulator = AnthropicSseAccumulator::new(model);
-    let mut cursor = 0;
+    let mut cursor = SseCursor::default();
     while let Some(frame) = take_next_sse_frame(bytes, &mut cursor) {
         let Some(data) = sse_frame_data(frame)? else {
             continue;
@@ -9864,8 +10049,8 @@ fn parse_anthropic_message_sse_bytes(bytes: &[u8], model: &str) -> Result<Value>
             return accumulator.into_message();
         }
     }
-    if !bytes[cursor..].iter().all(u8::is_ascii_whitespace)
-        && let Some(data) = sse_frame_data(&bytes[cursor..])?
+    if !bytes[cursor.consumed..].iter().all(u8::is_ascii_whitespace)
+        && let Some(data) = sse_frame_data(&bytes[cursor.consumed..])?
     {
         accumulator.ingest(
             &serde_json::from_str::<Value>(&data)
@@ -9891,17 +10076,20 @@ where
     let request_log_probe = downstream.request_log_probe().cloned();
     let result: Result<()> = async {
         let mut buffer = Vec::new();
-        let mut cursor = 0;
-        while let Some(chunk) = read_prepared_upstream_chunk(
-            &mut prepared,
-            "读取 Anthropic Messages SSE 流失败",
-            request_log_probe.as_ref(),
+        let mut cursor = SseCursor::default();
+        while let Some(chunk) = await_upstream(
+            downstream,
+            read_prepared_upstream_chunk(
+                &mut prepared,
+                "读取 Anthropic Messages SSE 流失败",
+                request_log_probe.as_ref(),
+            ),
         )
-        .await?
+        .await??
         {
             compact_sse_buffer(&mut buffer, &mut cursor);
             buffer.extend_from_slice(&chunk);
-            ensure_sse_buffer_within_limit(&buffer, cursor)?;
+            ensure_sse_buffer_within_limit(&buffer, cursor.consumed)?;
             while let Some(frame) = take_next_sse_frame(&buffer, &mut cursor) {
                 let Some(data) = sse_frame_data(frame)? else {
                     continue;
@@ -9916,8 +10104,10 @@ where
             }
         }
         if !accumulator.stopped
-            && !buffer[cursor..].iter().all(u8::is_ascii_whitespace)
-            && let Some(data) = sse_frame_data(&buffer[cursor..])?
+            && !buffer[cursor.consumed..]
+                .iter()
+                .all(u8::is_ascii_whitespace)
+            && let Some(data) = sse_frame_data(&buffer[cursor.consumed..])?
         {
             let event = serde_json::from_str::<Value>(&data)
                 .context("Anthropic Messages SSE 末尾 data 不是有效 JSON")?;
@@ -9940,6 +10130,9 @@ where
     }
     .await;
     if let Err(error) = result {
+        if error.is::<DownstreamClosed>() {
+            return Err(error);
+        }
         let (code, message) = streaming_failure_message(&error, route);
         let _ = output.fail(downstream, code, &message).await;
         return Err(error);
@@ -10481,7 +10674,15 @@ impl ChatSseAccumulator {
         Ok(())
     }
 
-    fn into_chat_completion(self) -> Result<Value> {
+    fn into_chat_completion(self, done: bool) -> Result<Value> {
+        if !done
+            && !self
+                .finish_reason
+                .as_deref()
+                .is_some_and(|reason| !reason.trim().is_empty())
+        {
+            anyhow::bail!("Chat Completions SSE 在 [DONE] 或 finish_reason 前断开");
+        }
         let mut message = serde_json::Map::from_iter([(
             "role".to_string(),
             Value::String("assistant".to_string()),
@@ -10545,14 +10746,14 @@ async fn collect_chat_completion_sse(
 ) -> Result<Value> {
     let mut accumulator = ChatSseAccumulator::new(model);
     let mut buffer = Vec::new();
-    let mut cursor = 0;
+    let mut cursor = SseCursor::default();
     let mut done = false;
     while let Some(chunk) =
         read_prepared_upstream_chunk(prepared, "读取 Chat Completions SSE 流失败", probe).await?
     {
         compact_sse_buffer(&mut buffer, &mut cursor);
         buffer.extend_from_slice(&chunk);
-        ensure_sse_buffer_within_limit(&buffer, cursor)?;
+        ensure_sse_buffer_within_limit(&buffer, cursor.consumed)?;
         while let Some(frame) = take_next_sse_frame(&buffer, &mut cursor) {
             let Some(data) = sse_frame_data(frame)? else {
                 continue;
@@ -10571,16 +10772,20 @@ async fn collect_chat_completion_sse(
         }
     }
     if !done
-        && !buffer[cursor..].iter().all(u8::is_ascii_whitespace)
-        && let Some(data) = sse_frame_data(&buffer[cursor..])?
-        && data.trim() != "[DONE]"
+        && !buffer[cursor.consumed..]
+            .iter()
+            .all(u8::is_ascii_whitespace)
+        && let Some(data) = sse_frame_data(&buffer[cursor.consumed..])?
     {
-        accumulator.ingest(
-            &serde_json::from_str::<Value>(&data)
-                .context("Chat Completions SSE 末尾 data 不是有效 JSON")?,
-        )?;
+        done = data.trim() == "[DONE]";
+        if !done {
+            accumulator.ingest(
+                &serde_json::from_str::<Value>(&data)
+                    .context("Chat Completions SSE 末尾 data 不是有效 JSON")?,
+            )?;
+        }
     }
-    accumulator.into_chat_completion()
+    accumulator.into_chat_completion(done)
 }
 
 async fn stream_chat_completions_as_responses<D>(
@@ -10599,18 +10804,21 @@ where
     let request_log_probe = downstream.request_log_probe().cloned();
     let result: Result<()> = async {
         let mut buffer = Vec::new();
-        let mut cursor = 0;
+        let mut cursor = SseCursor::default();
         let mut done = false;
-        while let Some(chunk) = read_prepared_upstream_chunk(
-            &mut prepared,
-            "读取 Chat Completions SSE 流失败",
-            request_log_probe.as_ref(),
+        while let Some(chunk) = await_upstream(
+            downstream,
+            read_prepared_upstream_chunk(
+                &mut prepared,
+                "读取 Chat Completions SSE 流失败",
+                request_log_probe.as_ref(),
+            ),
         )
-        .await?
+        .await??
         {
             compact_sse_buffer(&mut buffer, &mut cursor);
             buffer.extend_from_slice(&chunk);
-            ensure_sse_buffer_within_limit(&buffer, cursor)?;
+            ensure_sse_buffer_within_limit(&buffer, cursor.consumed)?;
             while let Some(frame) = take_next_sse_frame(&buffer, &mut cursor) {
                 let Some(data) = sse_frame_data(frame)? else {
                     continue;
@@ -10629,16 +10837,20 @@ where
             }
         }
         if !done
-            && !buffer[cursor..].iter().all(u8::is_ascii_whitespace)
-            && let Some(data) = sse_frame_data(&buffer[cursor..])?
-            && data.trim() != "[DONE]"
+            && !buffer[cursor.consumed..]
+                .iter()
+                .all(u8::is_ascii_whitespace)
+            && let Some(data) = sse_frame_data(&buffer[cursor.consumed..])?
         {
-            let event = serde_json::from_str::<Value>(&data)
-                .context("Chat Completions SSE 末尾 data 不是有效 JSON")?;
-            accumulator.ingest(&event)?;
-            emit_chat_stream_event(&mut output, downstream, &event).await?;
+            done = data.trim() == "[DONE]";
+            if !done {
+                let event = serde_json::from_str::<Value>(&data)
+                    .context("Chat Completions SSE 末尾 data 不是有效 JSON")?;
+                accumulator.ingest(&event)?;
+                emit_chat_stream_event(&mut output, downstream, &event).await?;
+            }
         }
-        let chat = accumulator.into_chat_completion()?;
+        let chat = accumulator.into_chat_completion(done)?;
         let completed =
             chat_completion_to_responses_body_with_tool_bridge(chat, model, tool_bridge)?;
         if output.output_order.is_empty() {
@@ -10654,6 +10866,9 @@ where
     }
     .await;
     if let Err(error) = result {
+        if error.is::<DownstreamClosed>() {
+            return Err(error);
+        }
         let (code, message) = streaming_failure_message(&error, route);
         let _ = output.fail(downstream, code, &message).await;
         return Err(error);
@@ -10749,63 +10964,72 @@ where
 
 fn parse_chat_completion_sse_bytes(bytes: &[u8], model: &str) -> Result<Value> {
     let mut accumulator = ChatSseAccumulator::new(model);
-    let mut cursor = 0;
+    let mut cursor = SseCursor::default();
+    let mut done = false;
     while let Some(frame) = take_next_sse_frame(bytes, &mut cursor) {
         let Some(data) = sse_frame_data(frame)? else {
             continue;
         };
         if data.trim() == "[DONE]" {
-            return accumulator.into_chat_completion();
+            return accumulator.into_chat_completion(true);
         }
         accumulator.ingest(
             &serde_json::from_str::<Value>(&data)
                 .context("Chat Completions SSE data 不是有效 JSON")?,
         )?;
     }
-    if !bytes[cursor..].iter().all(u8::is_ascii_whitespace)
-        && let Some(data) = sse_frame_data(&bytes[cursor..])?
-        && data.trim() != "[DONE]"
+    if !bytes[cursor.consumed..].iter().all(u8::is_ascii_whitespace)
+        && let Some(data) = sse_frame_data(&bytes[cursor.consumed..])?
     {
-        accumulator.ingest(
-            &serde_json::from_str::<Value>(&data)
-                .context("Chat Completions SSE 末尾 data 不是有效 JSON")?,
-        )?;
-    }
-    accumulator.into_chat_completion()
-}
-
-fn take_next_sse_frame<'a>(buffer: &'a [u8], cursor: &mut usize) -> Option<&'a [u8]> {
-    let remaining = buffer.get(*cursor..)?;
-    let mut delimiter = None;
-    for index in 0..remaining.len() {
-        if remaining.get(index..index + 4) == Some(b"\r\n\r\n") {
-            delimiter = Some((index, 4));
-            break;
-        }
-        if remaining.get(index..index + 2) == Some(b"\n\n") {
-            delimiter = Some((index, 2));
-            break;
+        done = data.trim() == "[DONE]";
+        if !done {
+            accumulator.ingest(
+                &serde_json::from_str::<Value>(&data)
+                    .context("Chat Completions SSE 末尾 data 不是有效 JSON")?,
+            )?;
         }
     }
-    let (index, length) = delimiter?;
-    let frame_start = *cursor;
-    let frame_end = frame_start + index;
-    *cursor = frame_end + length;
-    Some(&buffer[frame_start..frame_end])
+    accumulator.into_chat_completion(done)
 }
 
-fn compact_sse_buffer(buffer: &mut Vec<u8>, cursor: &mut usize) {
-    if *cursor == 0 {
+#[derive(Default)]
+struct SseCursor {
+    consumed: usize,
+    scanned: usize,
+}
+
+fn take_next_sse_frame<'a>(buffer: &'a [u8], cursor: &mut SseCursor) -> Option<&'a [u8]> {
+    for index in cursor.scanned..buffer.len() {
+        let length = if buffer.get(index..index + 4) == Some(b"\r\n\r\n") {
+            4
+        } else if buffer.get(index..index + 2) == Some(b"\n\n") {
+            2
+        } else {
+            continue;
+        };
+        let frame = &buffer[cursor.consumed..index];
+        cursor.consumed = index + length;
+        cursor.scanned = cursor.consumed;
+        return Some(frame);
+    }
+    // Revisit only the suffix that can begin a delimiter split across chunks.
+    cursor.scanned = buffer.len().saturating_sub(3).max(cursor.consumed);
+    None
+}
+
+fn compact_sse_buffer(buffer: &mut Vec<u8>, cursor: &mut SseCursor) {
+    if cursor.consumed == 0 {
         return;
     }
-    if *cursor == buffer.len() {
+    if cursor.consumed == buffer.len() {
         buffer.clear();
-        *cursor = 0;
+        *cursor = SseCursor::default();
         return;
     }
-    if *cursor >= 64 * 1024 || cursor.saturating_mul(2) >= buffer.len() {
-        buffer.drain(..*cursor);
-        *cursor = 0;
+    if cursor.consumed >= 64 * 1024 || cursor.consumed.saturating_mul(2) >= buffer.len() {
+        buffer.drain(..cursor.consumed);
+        cursor.scanned -= cursor.consumed;
+        cursor.consumed = 0;
     }
 }
 
@@ -10880,6 +11104,7 @@ struct ResponsesSseState<'a> {
     message: Option<ResponsesStreamMessage>,
     tools: BTreeMap<usize, ResponsesStreamTool>,
     output_order: Vec<StreamOutputKind>,
+    terminal_started: bool,
 }
 
 impl<'a> ResponsesSseState<'a> {
@@ -10893,6 +11118,7 @@ impl<'a> ResponsesSseState<'a> {
             message: None,
             tools: BTreeMap::new(),
             output_order: Vec::new(),
+            terminal_started: false,
         }
     }
 
@@ -11143,6 +11369,9 @@ impl<'a> ResponsesSseState<'a> {
     where
         D: ResponsesDownstream + ?Sized,
     {
+        if self.terminal_started {
+            return Ok(());
+        }
         let mut events = Vec::new();
         if let Some(message) = self.message.as_ref() {
             if let Some(content_index) = message.text_content_index {
@@ -11319,15 +11548,22 @@ impl<'a> ResponsesSseState<'a> {
         } else {
             "response.completed"
         };
-        events.push(json!({"type":terminal_type,"response":response}));
         self.write_events(downstream, events).await?;
+        self.terminal_started = true;
+        downstream
+            .write_event(&json!({"type":terminal_type,"response":response}))
+            .await?;
         downstream.finish_event_stream().await
     }
 
-    async fn fail<D>(&self, downstream: &mut D, code: &str, message: &str) -> Result<()>
+    async fn fail<D>(&mut self, downstream: &mut D, code: &str, message: &str) -> Result<()>
     where
         D: ResponsesDownstream + ?Sized,
     {
+        if self.terminal_started {
+            return Ok(());
+        }
+        self.terminal_started = true;
         downstream
             .write_event(&json!({
                 "type":"response.failed",
@@ -11648,9 +11884,110 @@ fn reason_phrase(status: u16) -> &'static str {
 }
 
 #[cfg(test)]
+#[path = "local_router_bench.rs"]
+mod latency_bench;
+
+#[cfg(test)]
+#[path = "local_router_stability_tests.rs"]
+mod stability_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::ProviderProfile;
+
+    #[test]
+    fn fragmented_sse_preserves_frames_tail_and_scan_progress() {
+        for large in [false, true] {
+            let first = if large {
+                "x".repeat(70 * 1024)
+            } else {
+                "中文🙂".into()
+            };
+            let source =
+                format!("data: {first}\r\n\r\ndata: second\n\n: heartbeat\r\n\r\ndata: tail");
+            for chunk_size in [1, 2, 3, 4, 7, 127, 4096, 65536] {
+                let mut buffer = Vec::new();
+                let mut cursor = SseCursor::default();
+                let mut frames = Vec::new();
+                for chunk in source.as_bytes().chunks(chunk_size) {
+                    compact_sse_buffer(&mut buffer, &mut cursor);
+                    buffer.extend_from_slice(chunk);
+                    while let Some(frame) = take_next_sse_frame(&buffer, &mut cursor) {
+                        frames.push(frame.to_vec());
+                    }
+                    assert!(cursor.scanned >= buffer.len().saturating_sub(3));
+                    assert!(cursor.scanned >= cursor.consumed);
+                }
+                assert_eq!(
+                    frames,
+                    vec![
+                        format!("data: {first}").into_bytes(),
+                        b"data: second".to_vec(),
+                        b": heartbeat".to_vec()
+                    ]
+                );
+                assert_eq!(&buffer[cursor.consumed..], b"data: tail");
+                buffer.extend_from_slice(b"\n\n");
+                assert_eq!(
+                    take_next_sse_frame(&buffer, &mut cursor),
+                    Some(b"data: tail".as_slice())
+                );
+                compact_sse_buffer(&mut buffer, &mut cursor);
+                assert!(buffer.is_empty());
+                assert_eq!(cursor.scanned, 0);
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn downstream_backpressure_times_out_and_closed_reader_fails() {
+        let (mut writer, reader) = tokio::io::duplex(1);
+        let start = tokio::time::Instant::now();
+        let error = write_all_with_timeout(&mut writer, b"too large", "test write")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("超过写入期限"));
+        assert_eq!(start.elapsed(), DOWNSTREAM_WRITE_TIMEOUT);
+        drop(reader);
+        let error = write_all_with_timeout(&mut writer, b"x", "closed reader")
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(start.elapsed(), DOWNSTREAM_WRITE_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn upstream_body_idle_timeout_is_bounded() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, wait) = oneshot::channel::<()>();
+        let mock = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_http_request(&mut socket).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n").await.unwrap();
+            let _ = wait.await;
+        });
+        let mut response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/responses"))
+            .send()
+            .await
+            .unwrap();
+        tokio::time::pause();
+        let start = tokio::time::Instant::now();
+        let error = read_upstream_chunk(&mut response, "idle test", None)
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<UpstreamReadIdleTimeout>().is_some());
+        // Tokio timers round deadlines up to the next millisecond.
+        assert!(start.elapsed() >= UPSTREAM_READ_IDLE_TIMEOUT);
+        assert!(start.elapsed() <= UPSTREAM_READ_IDLE_TIMEOUT + Duration::from_millis(2));
+        drop(release);
+        mock.await.unwrap();
+    }
 
     #[test]
     fn sse_sniffer_handles_fragmented_and_mislabeled_prefixes() {
@@ -11685,13 +12022,14 @@ mod tests {
             .observe(
                 br#"data: {"type":"response.created"}\n\ndata: {"type":"response.output_text.delta","delta":""}\n\n"#,
                 &probe,
+                Instant::now(),
             )
             .unwrap();
         assert!(!probe.downstream_content_observed_for_test());
 
         for chunk in br#"data: {"delta":"hello","type":"response.output_text.delta"}\n\n"#.chunks(7)
         {
-            projector.observe(chunk, &probe).unwrap();
+            projector.observe(chunk, &probe, Instant::now()).unwrap();
         }
         assert!(probe.downstream_content_observed_for_test());
     }
@@ -11733,7 +12071,7 @@ mod tests {
             "x".repeat(128 * 1024)
         );
         for chunk in event.as_bytes().chunks(997) {
-            projector.observe(chunk, &probe).unwrap();
+            projector.observe(chunk, &probe, Instant::now()).unwrap();
         }
         let usage = probe.token_usage_for_test();
         assert_eq!(usage.input_tokens, Some(11));
@@ -11750,7 +12088,7 @@ mod tests {
             "0,".repeat(128 * 1024)
         );
         for chunk in event.as_bytes().chunks(997) {
-            projector.observe(chunk, &probe).unwrap();
+            projector.observe(chunk, &probe, Instant::now()).unwrap();
         }
 
         let usage = probe.token_usage_for_test();
@@ -11771,7 +12109,7 @@ mod tests {
             "x".repeat(128 * 1024)
         );
         for chunk in event.as_bytes().chunks(997) {
-            projector.observe(chunk, &probe).unwrap();
+            projector.observe(chunk, &probe, Instant::now()).unwrap();
         }
 
         let usage = probe.token_usage_for_test();
@@ -11786,7 +12124,7 @@ mod tests {
         let mut projector = RequestLogMetadataProjector::default();
         let event = br#"data: {"type":"response.failed","response":{"status":"failed","output":[],"error":{"code":"quota_exhausted"}}}\n\n"#;
         for chunk in event.chunks(13) {
-            projector.observe(chunk, &probe).unwrap();
+            projector.observe(chunk, &probe, Instant::now()).unwrap();
         }
 
         let (status, error_code, unavailable_reason) = probe.projected_metadata_for_test();
@@ -11871,7 +12209,7 @@ mod tests {
         })
     }
 
-    fn router_config(base_url: String) -> (CodeyConfig, String, String) {
+    pub(super) fn router_config(base_url: String) -> (CodeyConfig, String, String) {
         let mut route = ProviderProfile::new("Relay");
         route.id = "route-a".into();
         route.base_url = base_url;
@@ -11919,7 +12257,7 @@ mod tests {
         ));
     }
 
-    async fn connect_router_websocket(
+    pub(super) async fn connect_router_websocket(
         endpoint: &RuntimeRouterEndpoint,
     ) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
         connect_router_websocket_with_headers(endpoint, &[]).await
@@ -11950,7 +12288,7 @@ mod tests {
             .0
     }
 
-    async fn local_websocket_pair() -> (
+    pub(super) async fn local_websocket_pair() -> (
         WebSocketStream<TcpStream>,
         WebSocketStream<MaybeTlsStream<TcpStream>>,
     ) {
