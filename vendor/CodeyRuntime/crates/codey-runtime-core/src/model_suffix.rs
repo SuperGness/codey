@@ -151,9 +151,10 @@ const MODEL_PROMPT_FIELDS: [&str; 7] = [
     "personality_pragmatic",
 ];
 
-const GENERIC_MODEL_SPECIFIC_FIELDS: [&str; 11] = [
+const GENERIC_MODEL_SPECIFIC_FIELDS: [&str; 12] = [
     "tool_mode",
     "multi_agent_version",
+    "multi_agent_reasoning_effort",
     "comp_hash",
     "default_service_tier",
     "prefer_websockets",

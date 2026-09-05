@@ -1,11 +1,31 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
 const source = fs.readFileSync(
   new URL("../src/main.tsx", import.meta.url),
   "utf8",
 );
+
+test("GPT-6 preview matches the bundled model reasoning metadata", async () => {
+  const { previewOfficialModels, previewUpstreamModels } = await loadTypeScriptModule(
+    new URL("../src/previewModels.ts", import.meta.url),
+  );
+  const { models } = JSON.parse(fs.readFileSync(
+    new URL("../vendor/CodeyRuntime/assets/model-catalog-metadata.json", import.meta.url),
+    "utf8",
+  ));
+  const astra = models.find((model) => model.slug === "gpt-6-astra");
+  assert.ok(astra);
+  assert.deepEqual(previewOfficialModels.find((model) => model.slug === astra.slug), {
+    slug: astra.slug,
+    displayName: astra.display_name,
+    supportedReasoningEfforts: astra.supported_reasoning_levels.map((level) => level.effort),
+    defaultReasoningEffort: astra.default_reasoning_level,
+  });
+  assert.ok(previewUpstreamModels.includes(astra.slug));
+});
 
 test("development preview fixtures cannot be mistaken for live credentials", () => {
   assert.match(source, /example\.invalid/);

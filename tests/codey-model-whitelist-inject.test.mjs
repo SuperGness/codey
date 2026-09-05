@@ -345,6 +345,31 @@ test("native third-party selection notifies mounted pickers without mutating sha
   runtime.patch.dispose();
 });
 
+test("adding GPT-6 on routed models notifies the mounted picker without mutating shared results", async () => {
+  const originalModels = ["gpt-5.6-sol"];
+  const queryClient = activeModelQueryClient(originalModels);
+  const sharedReactResult = queryClient.result();
+  const runtime = await loadPatch({
+    status: "ok", models: originalModels, default_model: originalModels[0],
+  }, [statsigClient()], { queryClient, reactModelState: sharedReactResult });
+  let renderedModels = queryClient.models();
+  let notifications = 0;
+  queryClient.subscribe(result => {
+    notifications++;
+    renderedModels = result.data.map(model => model.model);
+  });
+
+  const selectedModels = ["gpt-6-astra", "gpt-5.6-sol"];
+  await runtime.patch.setCatalog({
+    status: "ok", models: selectedModels, default_model: "gpt-6-astra",
+  });
+
+  assert.equal(notifications, 1, "the mounted picker must receive the newly selected model");
+  assert.deepEqual(renderedModels, selectedModels);
+  assert.deepEqual(sharedReactResult.data.map(model => model.model), originalModels);
+  runtime.patch.dispose();
+});
+
 test("native selection filters seven models to the five checked without changing requests or native settings", async () => {
   const originalModels = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
   const selectedModels = originalModels.filter(model => !["gpt-5.4", "gpt-5.3-codex-spark"].includes(model));

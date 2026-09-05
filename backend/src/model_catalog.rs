@@ -30,7 +30,8 @@ const REASONING_LEVEL_DESCRIPTIONS: [(&str, &str); 6] = [
 const FAST_SERVICE_TIER_ID: &str = "priority";
 const FAST_SPEED_TIER_ID: &str = "fast";
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
-const OFFICIAL_MODELS: [(&str, &str); 7] = [
+const OFFICIAL_MODELS: [(&str, &str); 8] = [
+    ("gpt-6-astra", "GPT-6-Astra"),
     ("gpt-5.6-sol", "GPT-5.6-Sol"),
     ("gpt-5.6-terra", "GPT-5.6-Terra"),
     ("gpt-5.6-luna", "GPT-5.6-Luna"),
@@ -222,7 +223,12 @@ fn refresh_for_provider_with_transport_preferences(
     native_web_search_models: Option<&[String]>,
 ) -> Result<usize> {
     let official_models = read_official_entries(home)?;
-    ensure_runtime_compatible_models(&official_models)?;
+    if official_models
+        .iter()
+        .all(|model| model_instruction_source(model).is_none())
+    {
+        return Err(RuntimeModelCacheUnavailable.into());
+    }
     let official_slugs = official_models
         .iter()
         .filter_map(|model| model.get("slug").and_then(Value::as_str))
@@ -266,7 +272,10 @@ fn refresh_for_provider_with_transport_preferences(
     if !official_provider {
         let template = official_models
             .iter()
-            .find(|model| model.get("visibility").and_then(Value::as_str) == Some("list"))
+            .find(|model| {
+                model.get("visibility").and_then(Value::as_str) == Some("list")
+                    && model_instruction_source(model).is_some()
+            })
             .or_else(|| official_models.first())
             .cloned()
             .ok_or_else(|| {
@@ -316,6 +325,11 @@ fn refresh_for_provider_with_transport_preferences(
         .collect::<HashSet<_>>();
     for model in &mut catalog_models {
         gate_synthetic_native_web_search(model, &native_web_search_model_keys);
+    }
+    // Validate the selected models so a newly bundled model without a local
+    // runtime template cannot block routes that still use older models.
+    if !catalog_models.is_empty() {
+        ensure_runtime_compatible_models(&catalog_models)?;
     }
     write_catalog(home, &catalog_models)?;
     let written_models = read_runtime_catalog_models(home)?;
@@ -709,9 +723,10 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
             let fallbacks = matching_models.collect::<Vec<_>>();
             complete_reasoning_metadata(&mut model, &fallbacks);
             normalize_official_model(&mut model, slug, display_name, priority);
-            remove_fast_speed_controls(&mut model);
             if bundled_fast_model_slugs.contains(*slug) {
                 add_fast_speed_controls(&mut model);
+            } else {
+                remove_fast_speed_controls(&mut model);
             }
             Ok(model)
         })
@@ -790,7 +805,7 @@ fn normalize_official_model(model: &mut Value, slug: &str, display_name: &str, p
         .is_none()
     {
         match slug {
-            "gpt-5.6-sol" | "gpt-5.6-terra" => {
+            "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" => {
                 model["multi_agent_version"] = json!("v2");
             }
             "gpt-5.6-luna" => {
@@ -846,7 +861,7 @@ fn reasoning_efforts_from_value(model: &Value) -> Vec<String> {
 
 fn third_party_reasoning_efforts_from_value(model: &Value) -> Vec<String> {
     let mut efforts = fallback_third_party_reasoning_efforts();
-    let allow_ultra = third_party_gpt_5_6_template_supports_ultra(model);
+    let allow_ultra = third_party_template_supports_ultra(model);
     for effort in reasoning_efforts_from_value(model) {
         let allowed = effort == "max" || (effort == "ultra" && allow_ultra);
         if allowed && !efforts.iter().any(|existing| existing == &effort) {
@@ -856,23 +871,28 @@ fn third_party_reasoning_efforts_from_value(model: &Value) -> Vec<String> {
     efforts
 }
 
-fn third_party_gpt_5_6_template_supports_ultra(model: &Value) -> bool {
-    let is_gpt_5_6 = model
+fn third_party_template_supports_ultra(model: &Value) -> bool {
+    let is_supported_gpt = model
         .get("slug")
         .and_then(Value::as_str)
         .is_some_and(|slug| {
-            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
-                .iter()
-                .any(|candidate| model_id::equal(slug, candidate))
+            [
+                "gpt-6-astra",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+            ]
+            .iter()
+            .any(|candidate| model_id::equal(slug, candidate))
         });
-    is_gpt_5_6
+    is_supported_gpt
         && reasoning_efforts_from_value(model)
             .iter()
             .any(|effort| effort == "ultra")
 }
 
-fn third_party_gpt_5_6_template_supports_coordination(model: &Value) -> bool {
-    third_party_gpt_5_6_template_supports_ultra(model)
+fn third_party_template_supports_coordination(model: &Value) -> bool {
+    third_party_template_supports_ultra(model)
         && model
             .get("multi_agent_version")
             .and_then(Value::as_str)
@@ -1239,8 +1259,8 @@ fn synthetic_model(
     index: usize,
     preserve_source_runtime_metadata: bool,
 ) -> Value {
-    let preserve_multi_agent_version = preserve_source_runtime_metadata
-        && third_party_gpt_5_6_template_supports_coordination(template);
+    let preserve_multi_agent_version =
+        preserve_source_runtime_metadata && third_party_template_supports_coordination(template);
     let mut model = template.clone();
     if !preserve_source_runtime_metadata {
         codey_runtime_core::model_suffix::sanitize_generic_model_metadata(&mut model);
@@ -1258,11 +1278,12 @@ fn synthetic_model(
     if let Some(object) = model.as_object_mut() {
         object.remove("availability_nux");
         object.remove("upgrade");
-        // Only route aliases that exactly reuse a GPT-5.6 template with native
+        // Only route aliases that exactly reuse a supported GPT template with native
         // Ultra support may coordinate delegated work. Generic provider models
         // remain leaf candidates and must not inherit that capability.
         if !preserve_multi_agent_version {
             object.remove("multi_agent_version");
+            object.remove("multi_agent_reasoning_effort");
         }
     }
     model["service_tiers"] = json!([]);
@@ -1448,7 +1469,7 @@ mod tests {
         for model in cache["models"].as_array_mut().unwrap() {
             let slug = model["slug"].as_str().unwrap_or("test-model").to_string();
             match slug.as_str() {
-                "gpt-5.6-sol" | "gpt-5.6-terra" => {
+                "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" => {
                     model["multi_agent_version"] = json!("v2");
                 }
                 "gpt-5.6-luna" => {
@@ -1679,6 +1700,7 @@ mod tests {
                 .map(|model| model["slug"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             [
+                "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -1708,6 +1730,7 @@ mod tests {
                 .and_then(Value::as_str)
         };
 
+        assert_eq!(marker("gpt-6-astra"), Some("v2"));
         assert_eq!(marker("gpt-5.6-sol"), Some("v2"));
         assert_eq!(marker("gpt-5.6-terra"), Some("v2"));
         assert_eq!(marker("gpt-5.6-luna"), Some("v1"));
@@ -1760,7 +1783,12 @@ mod tests {
             &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
         )
         .unwrap();
-        let model = &catalog["models"][0];
+        let model = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["slug"] == "gpt-5.6-sol")
+            .unwrap();
         assert_eq!(
             model["base_instructions"],
             "runtime-cache-only base instructions"
@@ -1970,6 +1998,7 @@ mod tests {
                 .map(|model| model["slug"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             [
+                "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -2082,6 +2111,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
         let selected = vec![
+            "openai/gpt-6-astra".into(),
             "openai/gpt-5.6-sol".into(),
             "openai/gpt-5.5".into(),
             "provider/custom-model".into(),
@@ -2089,13 +2119,35 @@ mod tests {
 
         assert_eq!(
             refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap(),
-            3
+            4
         );
         let catalog: Value = serde_json::from_slice(
             &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
         )
         .unwrap();
         let models = catalog["models"].as_array().unwrap();
+
+        let astra = models
+            .iter()
+            .find(|model| model["slug"] == "openai/gpt-6-astra")
+            .unwrap();
+        assert_eq!(astra["use_responses_lite"], true);
+        assert_eq!(astra["tool_mode"], "code_mode_only");
+        assert_eq!(astra["multi_agent_version"], "v2");
+        assert_eq!(astra["multi_agent_reasoning_effort"], "xhigh");
+        assert_eq!(astra["node_repl_auto_review_required"], true);
+        assert_eq!(
+            astra["experimental_supported_tools"],
+            json!(["send_user_message_async", "clock"])
+        );
+        assert_eq!(
+            reasoning_efforts_from_value(astra),
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(
+            astra["base_instructions"],
+            "test-only instructions for gpt-6-astra"
+        );
 
         let gpt_56 = models
             .iter()
@@ -2148,6 +2200,7 @@ mod tests {
         for field in [
             "tool_mode",
             "multi_agent_version",
+            "multi_agent_reasoning_effort",
             "comp_hash",
             "default_service_tier",
             "prefer_websockets",
@@ -2375,6 +2428,103 @@ mod tests {
         assert!(!is_available(home.path()));
         let state = selection_state(home.path(), true, None, &[], None).unwrap();
         assert_eq!(state.official_models.len(), OFFICIAL_MODELS.len());
+        assert_eq!(state.available_model("gpt-6-astra"), Some("gpt-6-astra"));
+    }
+
+    #[test]
+    fn astra_selection_and_route_metadata_follow_the_native_reasoning_levels() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let selected = vec!["gpt-6-astra".into()];
+        let expected_efforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
+
+        let state =
+            selection_state(home.path(), true, None, &selected, Some("GPT-6-ASTRA")).unwrap();
+        assert_eq!(state.default_model, "gpt-6-astra");
+        assert_eq!(
+            state.official_models[0].supported_reasoning_efforts,
+            expected_efforts
+        );
+        assert_eq!(state.official_models[0].default_reasoning_effort, "medium");
+        refresh_for_provider(home.path(), true, None, &selected).unwrap();
+        let catalog = read_catalog_value(&home.path().join(relative_path())).unwrap();
+        assert_eq!(
+            catalog["models"][0]["service_tiers"][0]["description"],
+            "2x speed, increased usage"
+        );
+
+        let route = vec!["relay/GPT-6-ASTRA".into()];
+        let state = selection_state(home.path(), false, Some(&route), &route, None).unwrap();
+        let metadata = state
+            .third_party_model_metadata
+            .iter()
+            .find(|model| model.slug == route[0])
+            .unwrap();
+        assert_eq!(metadata.supported_reasoning_efforts, expected_efforts);
+
+        let mut cache = official_cache();
+        let astra = cache["models"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|model| model["slug"] == "gpt-6-astra")
+            .unwrap();
+        astra["supported_reasoning_levels"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|level| level["effort"] != "ultra");
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+
+        refresh_for_provider(home.path(), false, Some(&route), &route).unwrap();
+        let catalog = read_catalog_value(&home.path().join(relative_path())).unwrap();
+        let astra = &catalog["models"][0];
+        assert_eq!(
+            reasoning_efforts_from_value(astra),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        assert!(astra.get("multi_agent_version").is_none());
+        assert!(astra.get("multi_agent_reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn cache_without_astra_keeps_existing_routes_and_requires_its_own_runtime_template() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cache = official_cache();
+        cache["models"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|model| model["slug"] != "gpt-6-astra");
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+
+        for (official, model) in [
+            (true, "gpt-5.6-sol"),
+            (false, "relay/gpt-5.6-sol"),
+            (false, "provider/custom-model"),
+        ] {
+            let selected = vec![model.into()];
+            assert_eq!(
+                refresh_for_provider(home.path(), official, Some(&selected), &selected).unwrap(),
+                1
+            );
+        }
+
+        let path = home.path().join(relative_path());
+        let previous = fs::read(&path).unwrap();
+        for (official, model) in [(true, "gpt-6-astra"), (false, "relay/gpt-6-astra")] {
+            let selected = vec![model.into()];
+            let error = refresh_for_provider(home.path(), official, Some(&selected), &selected)
+                .unwrap_err();
+            assert!(is_runtime_model_cache_unavailable(&error));
+            assert_eq!(fs::read(&path).unwrap(), previous);
+        }
     }
 
     #[test]

@@ -1,5 +1,11 @@
 export const previewOfficialModels = [
   {
+    slug: "gpt-6-astra",
+    displayName: "GPT-6-Astra",
+    supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    defaultReasoningEffort: "medium",
+  },
+  {
     slug: "gpt-5.6-sol",
     displayName: "GPT-5.6-Sol",
     supportedReasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
@@ -45,6 +51,7 @@ export const previewOfficialModels = [
 
 export const previewUpstreamModels = [
   "codex-auto-review",
+  "gpt-6-astra",
   "gpt-5.6-sol",
   "gpt-5.4",
   "provider-fast-coder",

@@ -146,6 +146,7 @@ fn build_catalog_sanitizes_model_specific_runtime_metadata_from_external_templat
         "use_responses_lite": true,
         "tool_mode": "code_mode_only",
         "multi_agent_version": "v2",
+        "multi_agent_reasoning_effort": "xhigh",
         "comp_hash": "3000",
         "default_service_tier": "priority",
         "prefer_websockets": true,
@@ -168,6 +169,7 @@ fn build_catalog_sanitizes_model_specific_runtime_metadata_from_external_templat
     for field in [
         "tool_mode",
         "multi_agent_version",
+        "multi_agent_reasoning_effort",
         "comp_hash",
         "default_service_tier",
         "prefer_websockets",

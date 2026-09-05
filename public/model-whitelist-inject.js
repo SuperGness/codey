@@ -1383,7 +1383,6 @@
     const queryClients = new Set(knownModelQueryClients);
     const visited = new WeakSet();
     let visitedCount = 0;
-    let reactContainers = 0;
 
     const visit = (value, depth = 0) => {
       if (
@@ -1415,24 +1414,9 @@
         // Ignore proxy-backed values that reject capability probes.
       }
 
-      // Native selection must update model queries through QueryClient so its
-      // observers receive a new result. Mutating a React result object first
-      // makes the later cache pass look unchanged and leaves mounted pickers
-      // memoized on the old model list.
-      if (!nativeSelectionOnly) {
-        const patched = patchedModelPayload(value);
-        if (patched.changed && patched.value !== value) {
-          for (const key of ["data", "models", "result", "message", "availableModels", "available_models", "defaultModel"]) {
-            if (!(key in patched.value) || patched.value[key] === value[key]) continue;
-            try {
-              value[key] = patched.value[key];
-              reactContainers += 1;
-            } catch {
-              // QueryClient.setQueryData handles immutable cached results below.
-            }
-          }
-        }
-      }
+      // All model queries must update through QueryClient so mounted pickers
+      // are notified. Mutating shared React results here makes the cache pass
+      // look unchanged and leaves the displayed model list stale.
 
       let keys = [];
       try {
@@ -1469,7 +1453,7 @@
         visit(root);
       }
     }
-    return { queryClients: [...queryClients], reactContainers };
+    return { queryClients: [...queryClients], reactContainers: 0 };
   };
 
   const scanReactObjectGraphWhenDue = (forceScan = false, discover = false) => {
