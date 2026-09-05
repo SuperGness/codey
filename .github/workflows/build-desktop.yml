@@ -120,6 +120,9 @@ jobs:
   windows:
     name: Windows x64
     runs-on: windows-latest
+    env:
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
 
     steps:
       - name: Checkout Codey
