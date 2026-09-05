@@ -4,7 +4,7 @@
 
 .route-manager {
   display: grid;
-  grid-template-columns: minmax(320px, 380px) minmax(0, 1fr);
+  grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
   min-height: 280px;
   background: #ffffff;
 }
@@ -79,7 +79,7 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  gap: 10px;
+  gap: 8px;
   max-height: 380px;
   overflow-y: auto;
   overflow-x: hidden;
@@ -100,11 +100,11 @@
 .route-list-item {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   border: 1px solid rgba(0, 0, 0, 0.07);
   border-radius: 11px;
   background: #ffffff;
-  padding: 12px 14px;
+  padding: 12px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
   flex-shrink: 0;
   transition:
@@ -193,10 +193,10 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  min-width: 26px;
+  min-width: 28px;
   border-radius: 6px;
   color: var(--mac-text-secondary);
   transition: all 140ms ease;
@@ -255,6 +255,7 @@
 
 .route-item-footer {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -280,11 +281,12 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
-  max-height: 340px;
+  max-height: 380px;
   gap: 10px;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
+  overscroll-behavior-y: contain;
   scrollbar-color: rgba(0, 0, 0, 0.16) transparent;
   scrollbar-width: thin;
 }
@@ -320,7 +322,7 @@
   min-height: 44px;
   padding: 8px 12px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.05);
-  background: linear-gradient(180deg, #fbfbfd 0%, #f4f5f8 100%);
+  background: #f8f9fb;
 }
 
 .provider-heading-main {
@@ -386,74 +388,6 @@
   gap: 2px;
 }
 
-/* Segmented Filter Pills */
-.provider-tabs-bar {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px;
-  margin-bottom: 12px;
-  border-radius: 8px;
-  background: rgba(0, 0, 0, 0.04);
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.provider-tabs-bar::-webkit-scrollbar {
-  display: none;
-}
-
-.provider-tab-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 26px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: #636366;
-  font-size: 11.5px;
-  font-weight: 500;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 130ms ease;
-  user-select: none;
-}
-
-.provider-tab-pill:hover {
-  color: var(--mac-text-primary);
-  background: rgba(255, 255, 255, 0.5);
-}
-
-.provider-tab-pill.active {
-  background: #ffffff;
-  color: var(--mac-text-primary);
-  font-weight: 600;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0.5px 1px rgba(0, 0, 0, 0.04);
-}
-
-.tab-pill-icon {
-  display: inline-flex;
-  align-items: center;
-  color: var(--mac-blue);
-}
-
-.tab-pill-count {
-  font-size: 10px;
-  font-weight: 600;
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: rgba(0, 0, 0, 0.06);
-  color: inherit;
-  line-height: 14px;
-}
-
-.provider-tab-pill.active .tab-pill-count {
-  background: rgba(0, 122, 255, 0.1);
-  color: var(--mac-blue);
-}
-
 /* ==========================================================================
    Provider Group Container & Model Tag Pills
    ========================================================================== */
@@ -470,12 +404,14 @@
 .model-tag-pill {
   display: inline-flex;
   align-items: center;
+  min-width: 0;
+  max-width: 100%;
   gap: 6px;
-  min-height: 28px;
-  padding: 3px 10px;
+  min-height: 32px;
+  padding: 5px 10px;
   border: 1px solid rgba(0, 0, 0, 0.08);
   border-radius: 7px;
-  background: #f2f2f5;
+  background: #fafafb;
   color: var(--mac-text-primary);
   font-size: 12px;
   font-weight: 500;
@@ -492,9 +428,14 @@
 }
 
 .model-tag-pill:hover:not(:disabled) {
-  background: #e7e7eb;
-  border-color: rgba(0, 0, 0, 0.14);
+  background: #f0f6ff;
+  border-color: rgba(0, 122, 255, 0.3);
   color: var(--mac-text-primary);
+}
+
+.model-tag-pill:focus-visible {
+  outline: 2px solid var(--mac-blue);
+  outline-offset: 2px;
 }
 
 .model-tag-pill:active:not(:disabled) {
@@ -543,7 +484,8 @@
 }
 
 .model-tag-name {
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-family: inherit;
   letter-spacing: -0.01em;
 }
@@ -551,6 +493,7 @@
 /* Mini "默认" badge inside tag */
 .model-tag-badge {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   font-size: 10px;
   font-weight: 600;

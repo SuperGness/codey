@@ -1026,6 +1026,65 @@ fn native_isolated_runtime_does_not_create_a_missing_codex_config() {
 }
 
 #[test]
+fn isolated_runtime_preserves_computer_use_without_adding_an_mcp() {
+    let endpoint = RuntimeRouterEndpoint {
+        base_url: "http://127.0.0.1:43127/v1".into(),
+        token: "test-router-token".into(),
+        supports_websockets: false,
+        supports_remote_compaction: false,
+        requires_openai_auth: false,
+    };
+    for local_router in [None, Some(&endpoint)] {
+        for enabled in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path().join("codex-home");
+            let marker = temp.path().join("codey-state/codex-lease.json");
+            let backup_root = temp.path().join("codey-state/codex-backups");
+            let client_path = "Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
+            let client = home.join("computer-use").join(client_path);
+            fs::create_dir_all(client.parent().unwrap()).unwrap();
+            fs::write(client, b"test client").unwrap();
+            let original = format!(
+                "[plugins.\"unified-computer-use@openai-bundled\"]\nenabled = true\n\n\
+                 [mcp_servers.computer-use]\ncommand = './{client_path}'\nargs = ['mcp']\n\
+                 cwd = '.'\nenabled = {enabled}\n"
+            );
+            fs::write(home.join("config.toml"), &original).unwrap();
+
+            let applied = apply_isolated_runtime_router_config(
+                &home,
+                RouterApplyOptions {
+                    local_router,
+                    use_official_catalog: false,
+                    default_model: None,
+                    fastctx_command: None,
+                    subagent_optimization: false,
+                    subagent_model: DEFAULT_SUBAGENT_MODEL,
+                    subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+                    subagent_roles: None,
+                    marker: &marker,
+                    backup_root: &backup_root,
+                },
+            )
+            .unwrap();
+
+            assert_eq!(
+                fs::read_to_string(home.join("config.toml")).unwrap(),
+                original
+            );
+            assert!(applied.runtime_config_overrides.iter().all(|entry| {
+                !entry.starts_with("mcp_servers.") && !entry.starts_with("plugins.")
+            }));
+            assert!(restore_runtime_config_at(&home, &marker, false).unwrap());
+            assert_eq!(
+                fs::read_to_string(home.join("config.toml")).unwrap(),
+                original
+            );
+        }
+    }
+}
+
+#[test]
 fn native_isolated_runtime_preserves_a_user_owned_reserved_provider() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");

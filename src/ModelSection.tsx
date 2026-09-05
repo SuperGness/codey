@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import {
   IconCheck as Check,
   IconCpu,
@@ -158,7 +158,6 @@ function ModelSectionComponent({
   const [routeValidationAttempted, setRouteValidationAttempted] = useState(false);
   const [routeApiKeyVisible, setRouteApiKeyVisible] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
-  const [selectedProviderFilter, setSelectedProviderFilter] = useState<string>("all");
   const routeConfigReadOnly = !config.localRouterEnabled;
 
   useEffect(() => {
@@ -276,15 +275,6 @@ function ModelSectionComponent({
     () => modelGroups.reduce((count, group) => count + group.models.length, 0),
     [modelGroups],
   );
-  const providerFilterIds = useMemo(
-    () => ["all", ...modelGroups.map((group) => group.providerId)],
-    [modelGroups],
-  );
-  useEffect(() => {
-    if (!providerFilterIds.includes(selectedProviderFilter)) {
-      setSelectedProviderFilter("all");
-    }
-  }, [providerFilterIds, selectedProviderFilter]);
   const routeDraftErrors = useMemo(
     () => routeDraft ? validateRouteDraft(routeDraft, config.profiles) : null,
     [config.profiles, routeDraft],
@@ -293,36 +283,7 @@ function ModelSectionComponent({
     routeDraftErrors && Object.values(routeDraftErrors).some(Boolean),
   );
 
-  const handleProviderTabKeyDown = (
-    event: KeyboardEvent<HTMLButtonElement>,
-  ) => {
-    const currentIndex = providerFilterIds.indexOf(selectedProviderFilter);
-    let nextIndex = currentIndex < 0 ? 0 : currentIndex;
-    if (event.key === "ArrowRight") {
-      nextIndex = (nextIndex + 1) % providerFilterIds.length;
-    } else if (event.key === "ArrowLeft") {
-      nextIndex = (nextIndex - 1 + providerFilterIds.length) % providerFilterIds.length;
-    } else if (event.key === "Home") {
-      nextIndex = 0;
-    } else if (event.key === "End") {
-      nextIndex = providerFilterIds.length - 1;
-    } else {
-      return;
-    }
-    event.preventDefault();
-    setSelectedProviderFilter(providerFilterIds[nextIndex]);
-    event.currentTarget
-      .parentElement
-      ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
-      .item(nextIndex)
-      .focus();
-  };
-
-  const displayedGroups = useMemo(() => {
-    return selectedProviderFilter === "all"
-      ? modelGroups
-      : modelGroups.filter((group) => group.providerId === selectedProviderFilter);
-  }, [modelGroups, selectedProviderFilter]);
+  const displayedGroups = modelGroups;
 
   const openNewRouteDialog = () => {
     setRouteDraft(createRoute(config.profiles));
@@ -608,53 +569,11 @@ function ModelSectionComponent({
               </div>
             </div>
 
-            {modelGroups.length > 1 && (
-              <div
-                className="provider-tabs-bar"
-                role="tablist"
-                aria-label="按供应商筛选模型"
-              >
-                <button
-                  type="button"
-                  id="provider-filter-tab-0"
-                  role="tab"
-                  aria-controls="provider-model-groups"
-                  aria-selected={selectedProviderFilter === "all"}
-                  tabIndex={selectedProviderFilter === "all" ? 0 : -1}
-                  className={`provider-tab-pill ${selectedProviderFilter === "all" ? "active" : ""}`}
-                  onClick={() => setSelectedProviderFilter("all")}
-                  onKeyDown={handleProviderTabKeyDown}
-                >
-                  <span>全部</span>
-                  <span className="tab-pill-count">{totalModelCount}</span>
-                </button>
-                {modelGroups.map((g, index) => (
-                  <button
-                    type="button"
-                    key={g.providerId}
-                    id={`provider-filter-tab-${index + 1}`}
-                    role="tab"
-                    aria-controls="provider-model-groups"
-                    aria-selected={selectedProviderFilter === g.providerId}
-                    tabIndex={selectedProviderFilter === g.providerId ? 0 : -1}
-                    className={`provider-tab-pill ${selectedProviderFilter === g.providerId ? "active" : ""}`}
-                    onClick={() => setSelectedProviderFilter(g.providerId)}
-                    onKeyDown={handleProviderTabKeyDown}
-                  >
-                    <span className="tab-pill-icon" aria-hidden="true">
-                      {g.official ? <IconShieldCheck size={12} /> : <Server size={12} />}
-                    </span>
-                    <span>{g.profile.name}</span>
-                    <span className="tab-pill-count">{g.models.length}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-
             <div
               id="provider-model-groups"
               className="provider-model-groups"
-              role={modelGroups.length > 1 ? "tabpanel" : undefined}
+              role="region"
+              aria-label="供应商模型目录"
             >
               {routeConfigReadOnly && displayedGroups.length === 0 ? (
                 <div className="provider-model-empty">
@@ -683,7 +602,7 @@ function ModelSectionComponent({
                           )}
                         </div>
                         <div className="provider-heading-text">
-                          <strong id={`provider-model-${group.profile.id}`}>
+                          <strong id={`provider-model-${group.profile.id}`} title={group.profile.name}>
                             {group.profile.name}
                           </strong>
                           <small>

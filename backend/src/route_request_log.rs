@@ -3320,6 +3320,8 @@ mod tests {
         let config = RouteRequestLogConfig {
             enabled: true,
             backend: RouteRequestLogBackend::Sqlite,
+            // Allow slow CI disk I/O; shutdown deadlines have separate coverage.
+            shutdown_flush_timeout_ms: 10_000,
             ..RouteRequestLogConfig::default()
         };
         controller.reconfigure(&config).await.unwrap();
@@ -3331,7 +3333,7 @@ mod tests {
 
         let cleared = controller.clear().await;
 
-        assert_eq!(cleared.status, "ok");
+        assert_eq!(cleared.status, "ok", "{cleared:#?}");
         assert!(cleared.recording_active);
         assert!(cleared.recording_restarted);
         let empty = query_route_request_logs(

@@ -34,8 +34,6 @@ use crate::config::{DEFAULT_SUBAGENT_MODEL, DEFAULT_SUBAGENT_REASONING_EFFORT};
 use crate::fs_util::timestamp_millis;
 use crate::local_router::{self, RuntimeRouterEndpoint};
 
-#[cfg(any(target_os = "macos", test))]
-mod computer_use;
 mod fastctx;
 mod fs_io;
 mod runtime_role_transaction;
@@ -388,8 +386,6 @@ fn apply_isolated_runtime_router_config(
         marker,
         backup_root,
     } = options;
-    #[cfg(target_os = "macos")]
-    computer_use::preserve_enabled_legacy_server(home)?;
     fs::create_dir_all(home)?;
     let config_path = home.join("config.toml");
     let hooks_path = home.join("hooks.json");
