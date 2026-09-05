@@ -127,7 +127,7 @@ function OperationsPanelComponent({
   const embeddedMarketplaceReady =
     remoteMarketplaceReady && managedConfigCompatible;
   const performanceError = maintenance?.performanceStatus === "error";
-  const performanceDegraded = maintenance?.performanceStatus === "degraded";
+  const startupNeedsAttention = maintenance?.performanceStatus === "degraded";
   const injectionScripts = status.injectionScripts ?? EMPTY_INJECTION_SCRIPTS;
   const enabledOptimizationFeatures = useMemo<EnabledOptimizationFeature[]>(
     () =>
@@ -311,11 +311,11 @@ function OperationsPanelComponent({
                 ? "正在读取最近一次功能生效结果。"
                 : "Codex 启动后将在这里汇总已生效功能。"
               : performanceError
-                ? maintenance?.performanceDetail || "系统优化组件启动失败。"
-                : performanceDegraded
+                ? maintenance?.performanceDetail || "启动失败，请查看错误详情。"
+                : startupNeedsAttention
                   ? maintenance?.performanceDetail ||
-                    "兼容模式运行正常，部分非必要精简策略未启用。"
-                  : "精简策略与功能自检均已通过。",
+                    "部分启动设置未能应用，请查看错误详情。"
+                  : "已启用功能运行正常。",
       metrics: [],
       label: internalInjectionError
         ? "基础异常"
@@ -331,16 +331,16 @@ function OperationsPanelComponent({
                 : "待启动"
               : performanceError
                 ? "异常"
-                : performanceDegraded
-                  ? "兼容模式"
-                  : "已优化",
+                : startupNeedsAttention
+                  ? "需检查"
+                  : "正常",
       tone:
         injectionError || performanceError
           ? "destructive"
           : injectionStatusPending ||
               internalInjectionPending ||
               unverifiedInjectionScriptCount > 0 ||
-              performanceDegraded
+              startupNeedsAttention
             ? "warning"
             : "success",
       icon: Cpu,

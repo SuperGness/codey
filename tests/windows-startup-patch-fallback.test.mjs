@@ -37,7 +37,7 @@ test("Windows startup compatibility failure cleans the process before compatible
   assert.match(windowsSpawn, /fallback\.performance_status = "degraded"/);
   assert.match(
     windowsSpawn,
-    /启动增强未能安装，已采用基础启动方式/,
+    /Codex 已启动，但部分启动设置未能应用/,
   );
   assert.doesNotMatch(windowsSpawn, /宠物精简启动补丁未能确认生效/);
   assert.doesNotMatch(windowsSpawn, /petSlimRequested/);
@@ -69,6 +69,7 @@ test("Windows startup patch requires app-server runtime override validation", as
   );
   assert.match(windowsSpawn, /prepare_cli_wrapper\(/);
   assert.match(windowsSpawn, /install_startup_patch_with_cli_fallback\(/);
+  assert.match(windowsSpawn, /match startup_result \{\s*Ok\(\(\)\) => \{\s*spawned\.performance_status = "ready"/);
   assert.match(windowsSpawn, /WindowsPackageDebugSession::finish/);
   assert.match(launcherPlatform, /WindowsPackageDebugSession::start\(app_dir, environment\)/);
   assert.match(launcherPlatform, /settings\.EnableDebugging\(/);

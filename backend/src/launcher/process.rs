@@ -207,7 +207,7 @@ pub(super) async fn spawn_codex(
         let wrapper_handshake = wrapper_environment_applied
             .then(|| wrapper.expect("applied wrapper environment should have a listener"))
             .map(CliWrapperLaunch::into_handshake);
-        let startup_mode = install_startup_patch_with_cli_fallback(
+        let startup_result = install_startup_patch_with_cli_fallback(
             inspector_port,
             patch_options,
             runtime_config_overrides,
@@ -219,7 +219,7 @@ pub(super) async fn spawn_codex(
             .map(WindowsPackageDebugSession::finish)
             .transpose()
             .map(|_| ());
-        let startup_mode = match (startup_mode, package_cleanup) {
+        let startup_result = match (startup_result, package_cleanup) {
             (mode, Ok(())) => mode,
             (Ok(_), Err(cleanup_error)) => {
                 Err(cleanup_error.context("Windows Store Codex 兼容环境清理失败"))
@@ -229,17 +229,10 @@ pub(super) async fn spawn_codex(
             )),
         };
 
-        match startup_mode {
-            Ok(false) => {
+        match startup_result {
+            Ok(()) => {
                 spawned.performance_status = "ready".to_string();
-                spawned.performance_detail = startup_patch_detail();
-                Ok(spawned)
-            }
-            Ok(true) => {
-                spawned.performance_status = "degraded".to_string();
-                spawned.performance_detail =
-                    "兼容模式已启用：线路、FastCtx、子代理与页面注入保持可用；主进程增强本次未启用"
-                        .to_string();
+                spawned.performance_detail = "Codex 启动成功".to_string();
                 Ok(spawned)
             }
             Err(error) => {
@@ -276,7 +269,7 @@ pub(super) async fn spawn_codex(
                     Ok((mut fallback, _, _)) => {
                         fallback.performance_status = "degraded".to_string();
                         fallback.performance_detail =
-                            "启动增强未能安装，已采用基础启动方式；页面增强仍会尝试加载，下次启动将重试"
+                            "Codex 已启动，但部分启动设置未能应用；页面功能以检测结果为准，下次启动将重试"
                                 .to_string();
                         error_log::record_failure(
                             "patch_degraded",
@@ -290,7 +283,7 @@ pub(super) async fn spawn_codex(
                         Ok(fallback)
                     }
                     Err(fallback_error) => anyhow::bail!(
-                        "Codex 启动兼容方案未能安装，且兼容模式重启失败：{startup_error}；{fallback_error:#}"
+                        "Codex 启动设置未能应用，且重试启动失败：{startup_error}；{fallback_error:#}"
                     ),
                 }
             }
@@ -331,7 +324,7 @@ pub(super) async fn spawn_codex(
         };
         let mut spawned = spawn_command(command)?;
         spawned.inspector_argument = Some(inspector_arg.clone());
-        let startup_mode = install_startup_patch_with_cli_fallback(
+        let startup_result = install_startup_patch_with_cli_fallback(
             inspector_port,
             patch_options,
             runtime_config_overrides,
@@ -340,17 +333,10 @@ pub(super) async fn spawn_codex(
         )
         .await;
 
-        match startup_mode {
-            Ok(false) => {
+        match startup_result {
+            Ok(()) => {
                 spawned.performance_status = "ready".to_string();
-                spawned.performance_detail = startup_patch_detail();
-                Ok(spawned)
-            }
-            Ok(true) => {
-                spawned.performance_status = "degraded".to_string();
-                spawned.performance_detail =
-                    "兼容模式已启用：线路、FastCtx、子代理与页面注入保持可用；主进程增强本次未启用"
-                        .to_string();
+                spawned.performance_detail = "Codex 启动成功".to_string();
                 Ok(spawned)
             }
             Err(error) => {
@@ -404,7 +390,7 @@ pub(super) async fn spawn_codex(
         let command = build_codex_command(app_dir, debug_port, &runtime_arguments);
         let mut spawned = spawn_command(command)?;
         spawned.performance_status = "ready".to_string();
-        spawned.performance_detail = "当前平台无需 macOS / Windows 启动补丁".to_string();
+        spawned.performance_detail = "Codex 启动成功".to_string();
         Ok(spawned)
     }
 }
@@ -725,7 +711,7 @@ async fn install_startup_patch_with_cli_fallback(
     runtime_config_overrides: &[String],
     wrapper_handshake: Option<(tokio::net::TcpListener, Vec<u8>)>,
     platform: &'static str,
-) -> Result<bool> {
+) -> Result<()> {
     let mut patch_install = Box::pin(crate::codex_startup_patch::install(
         inspector_port,
         patch_options,
@@ -733,12 +719,12 @@ async fn install_startup_patch_with_cli_fallback(
         !runtime_config_overrides.is_empty(),
     ));
     let Some((listener, token)) = wrapper_handshake else {
-        return patch_install.as_mut().await.map(|()| false);
+        return patch_install.as_mut().await;
     };
     let mut wrapper_ready = Box::pin(wait_for_cli_wrapper(listener, token));
     tokio::select! {
         patch = &mut patch_install => match patch {
-            Ok(()) => Ok(false),
+            Ok(()) => Ok(()),
             Err(patch_error) => match wrapper_ready.as_mut().await {
                 Ok(()) => {
                     error_log::record_failure(
@@ -747,7 +733,7 @@ async fn install_startup_patch_with_cli_fallback(
                         format!("{patch_error:#}"),
                         serde_json::json!({ "platform": platform }),
                     );
-                    Ok(true)
+                    Ok(())
                 }
                 Err(wrapper_error) => Err(anyhow::anyhow!(
                     "Codex 启动补丁失败：{patch_error:#}；CLI 兼容入口失败：{wrapper_error:#}"
@@ -764,7 +750,7 @@ async fn install_startup_patch_with_cli_fallback(
                 .is_ok_and(|result| result.is_ok());
                 if inspector_is_active {
                     match patch_install.as_mut().await {
-                        Ok(()) => Ok(false),
+                        Ok(()) => Ok(()),
                         Err(patch_error) => {
                             error_log::record_failure(
                                 "patch_degraded",
@@ -772,7 +758,7 @@ async fn install_startup_patch_with_cli_fallback(
                                 format!("{patch_error:#}"),
                                 serde_json::json!({ "platform": platform }),
                             );
-                            Ok(true)
+                            Ok(())
                         }
                     }
                 } else {
@@ -785,11 +771,11 @@ async fn install_startup_patch_with_cli_fallback(
                             "runtimeConfigOverrideCount": runtime_config_overrides.len(),
                         }),
                     );
-                    Ok(true)
+                    Ok(())
                 }
             },
             Err(wrapper_error) => match patch_install.as_mut().await {
-                Ok(()) => Ok(false),
+                Ok(()) => Ok(()),
                 Err(patch_error) => Err(anyhow::anyhow!(
                     "Codex CLI 兼容入口失败：{wrapper_error:#}；启动补丁失败：{patch_error:#}"
                 )),
@@ -949,11 +935,6 @@ pub(super) async fn prepare_codex_for_launch(app_dir: &std::path::Path) -> Resul
             .context("停止正在运行的 Codex 失败")?;
     }
     Ok(())
-}
-
-#[cfg(any(windows, target_os = "macos"))]
-fn startup_patch_detail() -> String {
-    "主进程启动增强已安装".to_string()
 }
 
 #[cfg(not(windows))]

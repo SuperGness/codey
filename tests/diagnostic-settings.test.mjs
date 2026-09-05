@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
-test("settings presents startup compatibility without a standalone banner", async () => {
+test("settings reports startup health without exposing implementation modes", async () => {
   const [
     sectionsSource,
     typesSource,
@@ -36,9 +36,10 @@ test("settings presents startup compatibility without a standalone banner", asyn
   );
   assert.match(
     sectionsSource,
-    /const performanceDegraded = maintenance\?\.performanceStatus === "degraded"/,
+    /const startupNeedsAttention = maintenance\?\.performanceStatus === "degraded"/,
   );
-  assert.match(sectionsSource, /performanceDegraded[\s\S]*?"兼容模式"/);
+  assert.match(sectionsSource, /startupNeedsAttention\s*\? "需检查"\s*: "正常"/);
+  assert.doesNotMatch(sectionsSource, /兼容模式|主进程增强|已优化/);
   const failedSummary = runtimeStatusPresentation.summarizeInjectionScripts([
     {
       id: "windows-internal-failure",

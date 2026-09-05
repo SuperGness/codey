@@ -14,20 +14,20 @@ test("macOS startup patch requires app-server runtime override validation", asyn
   assert.ok(start >= 0);
   assert.ok(end > start);
   const macosSpawn = source.slice(start, end);
-  const degradedStart = macosSpawn.indexOf("Ok(true) =>");
-  const failureStart = macosSpawn.indexOf("Err(error) =>", degradedStart);
+  const successStart = macosSpawn.indexOf("Ok(()) =>");
+  const failureStart = macosSpawn.indexOf("Err(error) =>", successStart);
 
   assert.match(macosSpawn, /install_startup_patch_with_cli_fallback\(/);
-  assert.match(macosSpawn, /Ok\(true\)[\s\S]*?performance_status = "degraded"/);
-  assert.ok(degradedStart >= 0);
-  assert.ok(failureStart > degradedStart);
+  assert.match(macosSpawn, /Ok\(\(\)\)[\s\S]*?performance_status = "ready"/);
+  assert.ok(successStart >= 0);
+  assert.ok(failureStart > successStart);
   assert.doesNotMatch(
-    macosSpawn.slice(degradedStart, failureStart),
-    /stop_macos_codex|reap_child_after_cleanup/,
+    macosSpawn.slice(successStart, failureStart),
+    /stop_macos_codex|reap_child_after_cleanup|degraded/,
   );
   assert.match(
     source,
-    /"launcher\.startup_compatibility_mode"[\s\S]*?"main_process_inspector_unavailable"[\s\S]*?Ok\(true\)/,
+    /"launcher\.startup_compatibility_mode"[\s\S]*?"main_process_inspector_unavailable"[\s\S]*?Ok\(\(\)\)/,
   );
   assert.match(
     source,

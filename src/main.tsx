@@ -372,7 +372,7 @@ if (import.meta.env.DEV) {
             sqliteRowsUpdated: 7,
             ghostTasksPruned: 2,
             performanceStatus: "ready",
-            performanceDetail: "主进程启动增强已安装",
+            performanceDetail: "Codex 启动成功",
           },
           injectionScripts: [
             {
