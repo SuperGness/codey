@@ -150,35 +150,38 @@ async fn windows_wrapper_classifies_a_sharing_violation_as_retryable() {
 
 #[tokio::test]
 async fn wrapper_confirms_spawn_and_allows_later_launches_after_listener_closes() {
+    const CHILD_ENV: &str = "CODEY_TEST_CLI_WRAPPER_CHILD";
+    if std::env::var(CHILD_ENV).as_deref() == Ok("1") {
+        std::process::exit(17);
+    }
     let temp = tempfile::tempdir().unwrap();
-    #[cfg(target_os = "macos")]
-    let target = std::path::PathBuf::from("/bin/sh");
-    #[cfg(windows)]
-    let target =
-        std::path::PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/cmd.exe");
-    #[cfg(target_os = "macos")]
-    let args = ["-c", "exit 17", "app-server"];
-    #[cfg(windows)]
-    let args = ["/c", "exit", "17", "app-server"];
+    let target = std::env::current_exe().unwrap();
+    // Run this test as the child; injected CLI arguments stay after libtest's `--`.
+    let args = [
+        "--exact",
+        "wrapper_confirms_spawn_and_allows_later_launches_after_listener_closes",
+        "--",
+        "app-server",
+    ];
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let mut child = wrapper_command(temp.path(), &target, port, "[]")
+        .env(CHILD_ENV, "1")
         .args(args)
         .spawn()
         .unwrap();
     assert_eq!(handshake(listener, &mut child).await, b"audit-token");
-    assert_eq!(
-        child.wait_with_output().await.unwrap().status.code(),
-        Some(17)
-    );
+    let output = child.wait_with_output().await.unwrap();
+    assert_eq!(output.status.code(), Some(17), "{output:?}");
     let output = tokio::time::timeout(
         Duration::from_secs(5),
         wrapper_command(temp.path(), &target, port, "[]")
+            .env(CHILD_ENV, "1")
             .args(args)
             .output(),
     )
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(output.status.code(), Some(17));
+    assert_eq!(output.status.code(), Some(17), "{output:?}");
 }

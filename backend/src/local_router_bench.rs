@@ -40,7 +40,7 @@ fn fixture(protocol: &str) -> (String, String) {
 }
 
 #[cfg(unix)]
-fn resources() -> (f64, f64) {
+pub(super) fn resources() -> (f64, f64) {
     // getrusage reports this process, including the mock upstream and client.
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     let usage = unsafe {
@@ -59,11 +59,11 @@ fn resources() -> (f64, f64) {
 }
 
 #[cfg(not(unix))]
-fn resources() -> (f64, f64) {
+pub(super) fn resources() -> (f64, f64) {
     (f64::NAN, f64::NAN)
 }
 
-fn percentile(values: &mut [f64], percent: usize) -> f64 {
+pub(super) fn percentile(values: &mut [f64], percent: usize) -> f64 {
     values.sort_by(f64::total_cmp);
     values[(values.len() * percent).div_ceil(100).saturating_sub(1)]
 }

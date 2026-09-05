@@ -10114,9 +10114,18 @@ where
             accumulator.ingest(&event)?;
             emit_anthropic_stream_event(&mut output, downstream, &event).await?;
         }
+        // Text is already retained by output. Keep tool and unknown blocks in
+        // the existing conversion so validation and error ordering stay intact.
+        accumulator.blocks.retain(|_, block| {
+            !matches!(
+                block.block_type.as_str(),
+                "text" | "refusal" | "thinking" | "redacted_thinking"
+            )
+        });
         let message = accumulator.into_message()?;
         let completed =
             anthropic_message_to_responses_body_with_tool_bridge(&message, model, tool_bridge)?;
+        drop(message);
         if output.output_order.is_empty() {
             let events = output.ensure_message();
             output.write_events(downstream, events).await?;
@@ -10125,8 +10134,12 @@ where
         let incomplete_reason = completed
             .get("incomplete_details")
             .and_then(|details| details.get("reason"))
-            .and_then(Value::as_str);
-        output.finish(downstream, usage, incomplete_reason).await
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        drop(completed);
+        output
+            .finish(downstream, usage, incomplete_reason.as_deref())
+            .await
     }
     .await;
     if let Err(error) = result {
@@ -10850,6 +10863,10 @@ where
                 emit_chat_stream_event(&mut output, downstream, &event).await?;
             }
         }
+        // The final conversion is needed for tool validation, not visible text.
+        // Release duplicate text before building its temporary response objects.
+        accumulator.content = String::new();
+        accumulator.refusal = String::new();
         let chat = accumulator.into_chat_completion(done)?;
         let completed =
             chat_completion_to_responses_body_with_tool_bridge(chat, model, tool_bridge)?;
@@ -10861,8 +10878,12 @@ where
         let incomplete_reason = completed
             .get("incomplete_details")
             .and_then(|details| details.get("reason"))
-            .and_then(Value::as_str);
-        output.finish(downstream, usage, incomplete_reason).await
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        drop(completed);
+        output
+            .finish(downstream, usage, incomplete_reason.as_deref())
+            .await
     }
     .await;
     if let Err(error) = result {
@@ -11890,6 +11911,10 @@ mod latency_bench;
 #[cfg(test)]
 #[path = "local_router_stability_tests.rs"]
 mod stability_tests;
+
+#[cfg(test)]
+#[path = "local_router_tail_tests.rs"]
+mod tail_tests;
 
 #[cfg(test)]
 mod tests {
