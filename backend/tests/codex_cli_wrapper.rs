@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 
@@ -122,6 +122,59 @@ async fn app_server_never_starts_without_its_runtime_configuration() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+async fn router_wrapper_rewrites_stdin_without_inspector_and_preserves_exec_exit_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let target = temp.path().join("fake-codex");
+    std::fs::write(&target, "#!/bin/sh\necho $$ >&2\ncat\nexit 17\n").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for (argument, overrides, routed) in [
+        ("app-server", r#"["model_provider=\"codey_router\""]"#, true),
+        ("app-server", "[]", false),
+        ("exec", r#"["model_provider=\"codey_router\""]"#, false),
+    ] {
+        let mut child = wrapper_command(temp.path(), &target, 0, overrides)
+            .arg(argument)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+        let message = serde_json::json!({ "id": 1, "method": "thread/resume", "params": {
+            "threadId": "old-thread", "modelProvider": null, "model": "route-second/gpt-6-astra",
+            "config": { "model_provider": "first", "service_tier": "fast" }
+        }});
+        let mut input = serde_json::to_vec(&message).unwrap();
+        input.push(b'\n');
+        let mut stdin = child.stdin.take().unwrap();
+        for chunk in input.chunks(7) {
+            stdin.write_all(chunk).await.unwrap();
+        }
+        drop(stdin);
+        let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(17), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).trim(),
+            pid.to_string()
+        );
+        let actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        if routed {
+            assert_eq!(actual["params"]["modelProvider"], "codey_router");
+            assert_eq!(actual["params"]["model"], message["params"]["model"]);
+            assert_eq!(
+                actual["params"]["config"],
+                serde_json::json!({"service_tier": "fast"})
+            );
+        } else {
+            assert_eq!(actual, message);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
 async fn wrapper_confirms_exec_and_forwards_arguments_without_leaking_its_environment() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
@@ -160,6 +213,11 @@ async fn wrapper_reports_validation_and_process_creation_errors_instead_of_timin
         (false, "[]", "兼容目标无效"),
         (true, "invalid json", "解析 Codex CLI 兼容运行时配置失败"),
         (true, "[]", "启动 Codex CLI 失败"),
+        (
+            true,
+            r#"["model_provider=\"codey_router\""]"#,
+            "启动 Codex CLI 失败",
+        ),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("invalid-cli.exe");

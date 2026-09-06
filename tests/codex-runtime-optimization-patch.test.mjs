@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
 import test from "node:test";
 import vm from "node:vm";
 
 const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
+// Desktop's shared transport applies its own transform before serialization.
+const appServerTransportFixture = `globalThis.Transport=class {
+  constructor(options){this.options=options}
+  sendMessage(e){let n=this.options.getConnection(),a=this.options.transformOutgoingMessage==null?e:this.options.transformOutgoingMessage(e);n.send(JSON.stringify(a))}
+};`;
 
 async function loadPatchExpression(
   runtimeConfigOverrides = [],
@@ -32,7 +41,12 @@ async function loadPatchExpression(
     );
 }
 
-async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrides = {}) {
+async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrides = {}, installMessagePatch = true) {
+  const Module = process.getBuiltinModule("module");
+  const originalLoad = Module._load;
+  const originalJsExtension = Module._extensions[".js"];
+  const workerThreads = process.getBuiltinModule("worker_threads");
+  const NativeWorker = workerThreads.Worker;
   const childProcess = process.getBuiltinModule("child_process");
   const originalSpawn = childProcess.spawn;
   const spawnCalls = [];
@@ -50,6 +64,13 @@ async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrid
     ...contextOverrides,
   };
   context.globalThis = context;
+  const restore = () => {
+    childProcess.spawn = originalSpawn;
+    Module._load = originalLoad;
+    Module._extensions[".js"] = originalJsExtension;
+    workerThreads.Worker = NativeWorker;
+    Module.syncBuiltinESMExports?.();
+  };
   try {
     const result = vm.runInNewContext(
       await loadPatchExpression(
@@ -59,19 +80,232 @@ async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrid
       ),
       context,
     );
+    if (installMessagePatch) {
+      context.__CODEY_PATCH_CODEX_APP_SERVER_MESSAGES__(appServerTransportFixture);
+    }
     return {
       context,
       result,
-      restore() {
-        childProcess.spawn = originalSpawn;
-      },
+      restore,
       spawnCalls,
     };
   } catch (error) {
-    childProcess.spawn = originalSpawn;
+    restore();
     throw error;
   }
 }
+
+test("shared app-server chunk routes native thread requests after Desktop's transform", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codey-message-patch-"));
+  const filename = join(directory, ".vite", "build", "src-transport.js");
+  await mkdir(join(directory, ".vite", "build"), { recursive: true });
+  await writeFile(filename, appServerTransportFixture);
+  const runtime = await loadPatchInIsolatedContext(['model_provider="codey_router"'], {}, false);
+  try {
+    process.getBuiltinModule("module")._extensions[".js"]({
+      _compile(source) { vm.runInNewContext(source, runtime.context); },
+    }, filename);
+    assert.equal(runtime.context.__CODEY_CODEX_STARTUP_PATCH__.localRouterMessageSourcePatched, true);
+    const messages = [];
+    const options = {
+      hostKind: "local",
+      getConnection: () => ({ send: (message) => messages.push(JSON.parse(message)) }),
+      transformOutgoingMessage: (message) => ({ ...message, params: {
+        ...message.params, modelProvider: "first", config: { ...message.params.config, "model_provider": "first", "artifact.session": "keep" },
+      } }),
+    };
+    const transport = new runtime.context.Transport(options);
+    for (const method of ["thread/start", "thread/resume", "thread/fork"]) {
+      const message = Object.freeze({ id: 17, method, params: Object.freeze({
+        threadId: "old-thread", model: "route-second/gpt-6-astra", modelProvider: null,
+        config: Object.freeze({ model_providers: { first: { base_url: "https://wrong.example" } },
+          "model_providers.codey_router.base_url": "https://wrong.example", "model_provider.name": "first", service_tier: "fast" }),
+      }) });
+      transport.sendMessage(message);
+      assert.deepEqual(messages.at(-1), { id: 17, method, params: {
+        threadId: "old-thread", model: "route-second/gpt-6-astra", modelProvider: "codey_router",
+        config: { service_tier: "fast", "artifact.session": "keep" },
+      } });
+      assert.equal(message.params.modelProvider, null);
+      assert.ok(message.params.config.model_providers);
+    }
+    options.transformOutgoingMessage = null;
+    const turn = { id: 18, method: "turn/start", params: { threadId: "old-thread", model: "route-second/gpt-6-astra" } };
+    transport.sendMessage(turn);
+    assert.deepEqual(messages.at(-1), turn);
+    for (const hostKind of ["ssh", "remote-control", "durable", undefined]) {
+      options.hostKind = hostKind;
+      const remote = { id: 19, method: "thread/resume", params: { threadId: "remote", modelProvider: "remote-provider" } };
+      transport.sendMessage(remote);
+      assert.deepEqual(messages.at(-1), remote);
+    }
+    const patch = runtime.context.__CODEY_PATCH_CODEX_APP_SERVER_MESSAGES__;
+    assert.throws(() => patch("changed transport"), /matched 0/);
+    assert.throws(() => patch(appServerTransportFixture.repeat(2)), /matched 2/);
+    if (process.env.CODEY_TEST_CODEX_TRANSPORT_SOURCE) {
+      const source = await readFile(process.env.CODEY_TEST_CODEX_TRANSPORT_SOURCE, "utf8");
+      new vm.Script(patch(source));
+    }
+  } finally {
+    runtime.restore();
+    await rm(directory, { recursive: true, force: true });
+  }
+  const native = await loadPatchInIsolatedContext([]);
+  try {
+    const message = { method: "thread/resume", params: { modelProvider: "first" } };
+    assert.equal(native.context.__CODEY_ROUTE_LOCAL_APP_SERVER_MESSAGE__(message, "local"), message);
+  } finally { native.restore(); }
+});
+
+test("router mode refuses to spawn when the shared request patch is missing", async () => {
+  const runtime = await loadPatchInIsolatedContext(['model_provider="codey_router"'], {}, false);
+  try {
+    const pending = runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__();
+    assert.throws(() => process.getBuiltinModule("child_process").spawn("codex", ["app-server"]), /未能启用本地路由请求处理/);
+    assert.equal(runtime.spawnCalls.length, 0);
+    await assert.rejects(pending, /未能启用本地路由请求处理/);
+  } finally { runtime.restore(); }
+});
+
+test("real CLI routes new and resumed threads through the local entry", {
+  skip: !process.env.CODEY_TEST_CODEX_CLI,
+  timeout: 30_000,
+}, async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "codey-router-resume-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const requests = [];
+  const ports = {};
+  for (const provider of ["first", "codey_router"]) {
+    const server = createServer(async (req, res) => {
+      let body = "";
+      for await (const chunk of req) body += chunk;
+      requests.push({ provider, path: req.url, model: JSON.parse(body).model });
+      // A terminal HTTP error persists the turn without needing a model service.
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "isolated routing probe", type: "invalid_request_error" } }));
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    ports[provider] = server.address().port;
+  }
+  await writeFile(join(home, "config.toml"), [
+    'model_provider="first"', 'model="gpt-5.4"',
+    ...Object.entries(ports).flatMap(([provider, port]) => [
+      `[model_providers.${provider}]`, `name="${provider}"`,
+      `base_url="http://127.0.0.1:${port}/v1"`, 'wire_api="responses"', "requires_openai_auth=false",
+    ]),
+  ].join("\n"));
+  const runtime = await loadPatchInIsolatedContext(['model_provider="codey_router"']);
+  const routeMessage = runtime.context.__CODEY_ROUTE_LOCAL_APP_SERVER_MESSAGE__;
+  runtime.restore();
+  const spawn = process.getBuiltinModule("child_process").spawn;
+  const startClient = async (routerDefault, normalize = (message) => message, wrapper = false) => {
+    const child = spawn(wrapper ? process.env.CODEY_TEST_CODEX_WRAPPER : process.env.CODEY_TEST_CODEX_CLI, ["app-server",
+      ...(routerDefault ? ["-c", 'model_provider="codey_router"'] : []),
+    ], { env: { HOME: home, CODEX_HOME: home, PATH: process.env.PATH, RUST_LOG: "off",
+      ...(wrapper ? {
+        CODEY_CODEX_CLI_WRAPPER_TARGET: process.env.CODEY_TEST_CODEX_CLI,
+        CODEY_CODEX_CLI_WRAPPER_OVERRIDES: JSON.stringify(['model_provider="codey_router"']),
+        CODEY_CODEX_CLI_WRAPPER_PORT: "0", CODEY_CODEX_CLI_WRAPPER_TOKEN: "isolated-test",
+      } : {}),
+    }, stdio: ["pipe", "pipe", "ignore"] });
+    t.after(() => { if (child.exitCode == null) child.kill(); });
+    const messages = new EventEmitter();
+    const lines = createInterface({ input: child.stdout });
+    lines.on("line", (line) => messages.emit("message", JSON.parse(line)));
+    const waitFor = (predicate) => new Promise((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        messages.off("message", onMessage);
+        child.off("exit", onExit);
+        child.off("error", onError);
+      };
+      const onMessage = (message) => { if (predicate(message)) { cleanup(); resolve(message); } };
+      const onError = (error) => { cleanup(); reject(error); };
+      const onExit = (code) => onError(new Error(`app-server exited: ${code}`));
+      const timeout = setTimeout(() => onError(new Error("app-server response timed out")), 10_000);
+      messages.on("message", onMessage);
+      child.on("exit", onExit);
+      child.on("error", onError);
+    });
+    let id = 0;
+    const rpc = async (method, params) => {
+      const requestId = ++id;
+      const response = waitFor((message) => message.id === requestId);
+      child.stdin.write(JSON.stringify(normalize({ id: requestId, method, params }, "local")) + "\n");
+      const result = await response;
+      assert.equal(result.error, undefined, JSON.stringify(result.error));
+      return result.result;
+    };
+    await rpc("initialize", { clientInfo: { name: "codey_routing_regression", version: "1" }, capabilities: { experimentalApi: true } });
+    child.stdin.write('{"method":"initialized","params":{}}\n');
+    return { rpc,
+      async turn(threadId) {
+        const completed = waitFor((message) => message.method === "turn/completed");
+        await rpc("turn/start", { threadId, model: "route-second/gpt-5.4", input: [{ type: "text", text: "probe", text_elements: [] }] });
+        await completed;
+      },
+      async stop() {
+        const closed = new Promise((resolve) => child.once("close", resolve));
+        child.stdin.end();
+        await closed;
+      },
+    };
+  };
+  const seed = await startClient(false);
+  const original = await seed.rpc("thread/start", { modelProvider: "first", model: "gpt-5.4", cwd: home, approvalPolicy: "never", sandbox: "read-only" });
+  const threadId = original.thread.id;
+  await seed.turn(threadId);
+  await seed.stop();
+  requests.length = 0;
+  // Reproduce Desktop's null-provider resume with the local CLI default present.
+  const before = await startClient(true);
+  const old = await before.rpc("thread/resume", { threadId, modelProvider: null });
+  assert.equal(old.modelProvider, "first");
+  await before.turn(threadId);
+  await before.stop();
+  assert.deepEqual(requests, [{ provider: "first", path: "/v1/responses", model: "route-second/gpt-5.4" }]);
+  const newThreadCases = [
+    { modelProvider: null },
+    { modelProvider: "first" },
+    { modelProvider: null, config: { model_provider: "first" } },
+    { modelProvider: "codey_router", config: {
+      "model_providers.codey_router.base_url": `http://127.0.0.1:${ports.first}/v1`,
+    } },
+  ];
+  const createThread = (client, params) => client.rpc("thread/start", {
+    model: "route-second/gpt-5.4", cwd: home, approvalPolicy: "never", sandbox: "read-only",
+    ephemeral: true, ...params,
+  });
+  // New threads can override both the CLI's default provider and its endpoint.
+  const unpatched = await startClient(true);
+  for (const params of newThreadCases) {
+    requests.length = 0;
+    const fresh = await createThread(unpatched, params);
+    await unpatched.turn(fresh.thread.id);
+    assert.deepEqual(requests, [{ provider: params === newThreadCases[0] ? "codey_router" : "first",
+      path: "/v1/responses", model: "route-second/gpt-5.4" }]);
+  }
+  await unpatched.stop();
+  for (const wrapper of process.env.CODEY_TEST_CODEX_WRAPPER ? [false, true] : [false]) {
+    requests.length = 0;
+    const after = await startClient(true, wrapper ? (message) => message : routeMessage, wrapper);
+    const resumed = await after.rpc("thread/resume", { threadId, modelProvider: null, config: {
+      model_provider: "first", "model_providers.codey_router.base_url": `http://127.0.0.1:${ports.first}/v1`,
+    } });
+    assert.equal(resumed.modelProvider, "codey_router");
+    await after.turn(threadId);
+    assert.deepEqual(requests, [{ provider: "codey_router", path: "/v1/responses", model: "route-second/gpt-5.4" }], wrapper ? "CLI wrapper" : "main transport");
+    for (const params of newThreadCases) {
+      requests.length = 0;
+      const fresh = await createThread(after, params);
+      assert.equal(fresh.modelProvider, "codey_router");
+      await after.turn(fresh.thread.id);
+      assert.deepEqual(requests, [{ provider: "codey_router", path: "/v1/responses", model: "route-second/gpt-5.4" }], wrapper ? "new thread via CLI wrapper" : "new thread via main transport");
+    }
+    await after.stop();
+  }
+});
 
 test("router mode forces a private CLI and applies transport overrides after parent tables", async () => {
   const overrides = [
@@ -197,7 +431,7 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
     ];
     const nativeRuntimeConfigOverrides = runtimeConfigOverrides;
     const expression = await loadPatchExpression(runtimeConfigOverrides);
-    assert.equal((0, eval)(expression), "codey-startup-patch-installed-v38");
+    assert.equal((0, eval)(expression), "codey-startup-patch-installed-v39");
 
     const patchedElectron = Module._load("electron");
     const passthroughGitHandler = () => "git-handler";
@@ -557,7 +791,7 @@ test("startup patch fails closed when app-server runtime override injection is n
       await loadPatchExpression(runtimeConfigOverrides, false, true),
       /appServerRuntimeOverrideTimeoutMs = 20_000/,
     );
-    assert.equal(runtime.result, "codey-startup-patch-installed-v38");
+    assert.equal(runtime.result, "codey-startup-patch-installed-v39");
     assert.equal(
       runtime.context.__CODEY_CODEX_STARTUP_PATCH__.appServerRuntimeOverrides.observed,
       false,

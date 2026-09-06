@@ -62,7 +62,7 @@ test("startup patch preserves native child processes and ordinary BrowserWindows
     Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
     assert.equal(
       (0, eval)(await loadStartupPatchExpression()),
-      "codey-startup-patch-installed-v38",
+      "codey-startup-patch-installed-v39",
     );
 
     const childProcess = Module._load("node:child_process", undefined, false);

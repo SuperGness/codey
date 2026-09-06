@@ -1040,6 +1040,44 @@
     // never read this launch's overrides. Use Codex's own process-local mode.
     process.env.CODEX_APP_SERVER_FORCE_CLI = "1";
   }
+  // Native Desktop calls (including resume after restart) bypass the renderer.
+  // A null provider restores the rollout's old provider despite CLI defaults.
+  const routeLocalAppServerMessage = (message, hostKind) => {
+    if (!localRouterRuntimeEnabled || hostKind !== "local" ||
+        !["thread/start", "thread/resume", "thread/fork"].includes(message?.method)) {
+      return message;
+    }
+    const params = { ...message.params, modelProvider: "codey_router" };
+    if (params.config != null && typeof params.config === "object" && !Array.isArray(params.config)) {
+      params.config = Object.fromEntries(Object.entries(params.config).filter(([key]) =>
+        key !== "model_provider" && !key.startsWith("model_provider.") &&
+        key !== "model_providers" && !key.startsWith("model_providers."),
+      ));
+    }
+    return { ...message, params };
+  };
+  Object.defineProperty(globalThis, "__CODEY_ROUTE_LOCAL_APP_SERVER_MESSAGE__", {
+    value: routeLocalAppServerMessage,
+  });
+  let localRouterMessageSourcePatched = false;
+  const patchCodexAppServerMessages = (source) => {
+    let count = 0;
+    const patched = source.replace(
+      /this\.options\.transformOutgoingMessage==null\?([$A-Z_a-z][$\w]*):this\.options\.transformOutgoingMessage\(\1\)/g,
+      (expression) => {
+        count += 1;
+        return `globalThis.__CODEY_ROUTE_LOCAL_APP_SERVER_MESSAGE__((${expression}),this.options.hostKind)`;
+      },
+    );
+    if (count !== 1 || !source.includes("this.options.getConnection")) {
+      throw new Error(`Codey app-server message transport matched ${count} times`);
+    }
+    localRouterMessageSourcePatched = true;
+    return patched;
+  };
+  Object.defineProperty(globalThis, "__CODEY_PATCH_CODEX_APP_SERVER_MESSAGES__", {
+    value: patchCodexAppServerMessages,
+  });
   const threadTitleModelId = "gpt-5.6-luna";
   const selectThreadTitleModel = (
     configs = nativeRuntimeConfigOverrides,
@@ -1115,6 +1153,9 @@
     resolveAppServerRuntimeOverrideValidation = resolve;
   });
   const formatAppServerRuntimeOverrideError = (status) => {
+    if (localRouterRuntimeEnabled && status.observed && !localRouterMessageSourcePatched) {
+      return "当前 Codex 版本的任务请求结构与 Codey 不兼容，未能启用本地路由请求处理，已停止启动 app-server";
+    }
     const missing = status.missingRuntimeConfigs?.length
       ? `；缺失：${status.missingRuntimeConfigs
           .map(runtimeOverrideKey)
@@ -1266,6 +1307,10 @@
     if (appServerIndexes.length !== 1) return args;
     if (localRouterRuntimeEnabled && args.some((arg) => arg === "proxy" || arg === "daemon")) {
       throw new Error("本地路由模式不能使用 app-server proxy/daemon；请移除自定义后台服务启动命令");
+    }
+    if (localRouterRuntimeEnabled && !localRouterMessageSourcePatched) {
+      finishAppServerRuntimeOverrideValidation({ observed: true, complete: false });
+      throw new Error(formatAppServerRuntimeOverrideError(appServerRuntimeOverrideEvidence));
     }
 
     const managedConfigKeys = new Set(
@@ -1711,7 +1756,7 @@
     },
   );
 
-  // Install the main-bundle telemetry and model patches before compilation.
+  // The app-server transport can live in a shared Vite chunk, outside main.
   {
     const originalJsExtension = Module._extensions[".js"];
     Module._extensions[".js"] = function codeyMainBundleCompileHook(module, filename) {
@@ -1723,6 +1768,11 @@
 
       const fs = process.getBuiltinModule("fs");
       let source = fs.readFileSync(filename, "utf8");
+      const hasAppServerMessages = localRouterRuntimeEnabled &&
+        source.includes("this.options.transformOutgoingMessage");
+      if (hasAppServerMessages) {
+        source = patchCodexAppServerMessages(source);
+      }
       const hasMainBundleName =
         /[\\/]\.vite[\\/]build[\\/]main(?:[-.][^\\/]*)?\.(?:cjs|js)$/i.test(filename);
       const hasMainBundleSignature =
@@ -1730,6 +1780,7 @@
         source.includes("will-attach-webview") &&
         source.includes("did-attach-webview");
       if (!hasMainBundleName && !hasMainBundleSignature) {
+        if (hasAppServerMessages) return module._compile(source, filename);
         return Reflect.apply(originalJsExtension, this, arguments);
       }
 
@@ -1859,6 +1910,9 @@
     get appServerRuntimeOverrides() {
       return { ...appServerRuntimeOverrideEvidence };
     },
+    get localRouterMessageSourcePatched() {
+      return localRouterMessageSourcePatched;
+    },
     get throttleExternalPluginFocusReconcile() {
       return !hasOptionalMainBundlePatchFailure(
         "externalPluginFocusReconcile",
@@ -1889,5 +1943,5 @@
     if (requireAppServerRuntimeOverrideValidation) return;
     try { process.getBuiltinModule("inspector").close(); } catch {}
   });
-  return "codey-startup-patch-installed-v38";
+  return "codey-startup-patch-installed-v39";
 })()

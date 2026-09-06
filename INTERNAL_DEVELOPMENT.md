@@ -146,6 +146,14 @@ local_router.rs 维护不可变线路快照，按明确线路元数据、带线�
 
 本地路由开启时，启动环境和 Inspector 补丁均设置 Codex 原生的 `CODEX_APP_SERVER_FORCE_CLI=1`，避免本机任务复用不接收本次配置的 daemon 或外部 WebSocket。自定义 `app-server proxy/daemon` 启动命令直接报错；CLI 包装入口若丢失本次运行配置，也停止启动，不以空配置继续。Inspector 和 CLI 包装器都把运行参数放在 app-server 参数末尾，防止后续 `model_providers` 父表覆盖本地端点。关闭路由时保留原有传输选择。
 
+仅校验启动参数不能保证旧任务经过路由。实际 CLI 回归已复现：启动默认为 `codey_router`，但 `thread/resume` 传入 `modelProvider:null` 时，会恢复 rollout 中的旧 Provider，带线路前缀的模型直接到达旧端点。桌面主进程的内部恢复请求会绕过页面脚本，因此发送前还需要统一处理 `thread/start`、`thread/resume`、`thread/fork`：显式设置 `modelProvider=codey_router`，删除请求 config 中的 `model_provider`、`model_providers` 及其点号子键，保留模型、任务标识与其他配置。
+
+启动补丁 v39 在 Vite 共享 transport chunk 编译时安装该处理，位置在 Codex 自身 `transformOutgoingMessage` 之后、序列化之前，仅作用于本地 host。缺少匹配的发送入口时停止该启动路径，不将参数存在视为路由成功。Inspector 不可用时，CLI 包装器通过独立输入转发进程处理相同请求；其余 JSON-RPC 消息和无效输入原样交给 CLI。macOS 保留 exec 和 PID，桌面关闭输入管道后转发进程退出；Windows 在 CLI 退出后回收转发进程。非 app-server 调用及关闭路由时不经过该输入处理。
+
+回归包括分段输入、旧 Provider 配置覆盖、原始模型保留、远程 host 不变、缺少主进程匹配时停止启动，以及包装器的 PID、退出码和非路由调用。`tests/codex-runtime-optimization-patch.test.mjs` 可用 `CODEY_TEST_CODEX_CLI` 指定实际 CLI、`CODEY_TEST_CODEX_WRAPPER` 指定构建后的 Codey，运行临时 HOME/CODEX_HOME 中的旧任务持久化、进程重启、恢复和发起下一轮；两个 HTTP mock 分别记录旧端点和本地入口，测试不使用真实账号，也不替代问题设备验证。
+
+同一真实 CLI 回归还覆盖新任务：创建时 Provider 为空、显式指定远端 Provider、config 覆盖默认 Provider、config 覆盖本地 Provider 的端点。未处理请求时，后三种情况均会绕过本地入口；主进程请求处理和 CLI 包装器分别验证四种情况，均只向本地测试入口发送请求。测试包装器路径应使用本次 Cargo 构建产物，不使用构建缓存目录中的旧二进制。
+
 页面脚本 v50 移除旧官方任务直连例外；模型目录未加载、未知模型和缺少模型的恢复请求也经过统一供应商检查。新建、恢复和分支任务统一使用 `codey_router`，清除请求配置中可覆盖供应商及其端点的字段，保留其余配置和原始模型。升级脚本版本使已有页面重新注入时替换旧闭包，不能只刷新旧实现的模型目录。回归覆盖官方任务、目录加载失败、未知模型、任务配置覆盖、共享后台服务和启动配置缺失。使用临时 HOME/CODEX_HOME 与两个本地测试服务启动实际 Codex CLI，确认旧默认供应商及冲突父表存在时，有效供应商仍为 `codey_router`，错误端点收到 0 个请求，指定回环端点收到 1 个 `/v1/responses` 请求；此检查不使用真实账号，不代表问题机型已完成验证。
 
 模型选择器采用 `percent_encode(provider_id)/upstream_model`，用于区分不同线路上的同名模型；显示名称和短名称不参与标识。`modelAliasHistory` 在配置规范化、线路保存和删除前记录已发布别名与原始模型的对应关系，删除线路或关闭路由后继续保留，不保存凭据。旧配置缺少该字段时自动补齐当前已知别名；升级前已经删除且没有记录的任意前缀不做推断，仅对旧 `codey/` 格式保留兼容入口。

@@ -10,7 +10,7 @@ use std::ffi::{OsStr, OsString};
 #[cfg(any(windows, target_os = "macos"))]
 use std::io::Write;
 
-const PATCH_RESULT: &str = "codey-startup-patch-installed-v38";
+const PATCH_RESULT: &str = "codey-startup-patch-installed-v39";
 const APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT: &str =
     "codey-app-server-runtime-overrides-verified";
 const MAX_INSPECTOR_TARGET_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -184,6 +184,16 @@ fn cli_wrapper_target(
 
 #[cfg(any(windows, target_os = "macos"))]
 pub fn run_cli_wrapper_if_requested() -> Result<bool> {
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("--codey-route-app-server-input")) {
+        let result =
+            route_local_app_server_input(std::io::stdin().lock(), std::io::stdout().lock());
+        if let Err(error) = result
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(error).context("转发 Codex 本地路由请求失败");
+        }
+        return Ok(true);
+    }
     #[cfg(windows)]
     if run_windows_package_resume_helper_if_requested()? {
         return Ok(true);
@@ -225,6 +235,7 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     } else {
         None
     };
+    let mut input_router: Option<std::process::Child> = None;
     let launch = (|| -> Result<std::process::Child> {
         anyhow::ensure!(
             target.is_absolute(),
@@ -284,6 +295,27 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
                 command.env("PATH", path);
             }
         }
+        if app_server && local_router_runtime_enabled(&runtime_overrides) {
+            // Keep macOS exec/PID semantics. The helper owns only the input pipe;
+            // Desktop closing stdin ends it, including when app-server restarts.
+            let mut relay = std::process::Command::new(std::env::current_exe()?);
+            relay
+                .arg("--codey-route-app-server-input")
+                .stdout(std::process::Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                relay.creation_flags(codey_runtime_core::windows_create_no_window());
+            }
+            let mut relay = relay.spawn().context("启动 Codex 本地路由请求转发失败")?;
+            command.stdin(
+                relay
+                    .stdout
+                    .take()
+                    .context("Codex 本地路由请求管道不可用")?,
+            );
+            input_router = Some(relay);
+        }
         #[cfg(target_os = "macos")]
         {
             use std::os::unix::process::CommandExt;
@@ -302,6 +334,10 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     let mut child = match launch {
         Ok(child) => child,
         Err(error) => {
+            if let Some(mut relay) = input_router {
+                let _ = relay.kill();
+                let _ = relay.wait();
+            }
             if let Some(mut stream) = readiness {
                 // 校验或创建进程失败必须显式回传，避免被误报成握手超时。
                 let failure = CliWrapperFailure {
@@ -318,10 +354,59 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     };
     // macOS exec 成功由 CLOEXEC 关闭连接；Windows 只在 spawn 成功后关闭。
     drop(readiness);
-    let status = child
-        .wait()
-        .with_context(|| format!("等待 Codex CLI 退出失败：{}", target.display()))?;
+    let status = child.wait();
+    if let Some(mut relay) = input_router {
+        let _ = relay.kill();
+        let _ = relay.wait();
+    }
+    let status =
+        status.with_context(|| format!("等待 Codex CLI 退出失败：{}", target.display()))?;
     std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn route_local_app_server_input(
+    mut input: impl std::io::BufRead,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if input.read_until(b'\n', &mut line)? == 0 {
+            return Ok(());
+        }
+        if let Ok(mut message) = serde_json::from_slice::<serde_json::Value>(&line)
+            && matches!(
+                message.get("method").and_then(serde_json::Value::as_str),
+                Some("thread/start" | "thread/resume" | "thread/fork")
+            )
+        {
+            if message.get("params").is_none_or(serde_json::Value::is_null) {
+                message["params"] = serde_json::json!({});
+            }
+            if let Some(params) = message
+                .get_mut("params")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                params.insert("modelProvider".into(), "codey_router".into());
+                if let Some(config) = params
+                    .get_mut("config")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    config.retain(|key, _| {
+                        key != "model_provider"
+                            && !key.starts_with("model_provider.")
+                            && key != "model_providers"
+                            && !key.starts_with("model_providers.")
+                    });
+                }
+                line = serde_json::to_vec(&message).map_err(std::io::Error::other)?;
+                line.push(b'\n');
+            }
+        }
+        output.write_all(&line)?;
+        output.flush()?;
+    }
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -762,6 +847,41 @@ fn ensure_protocol_success(payload: &serde_json::Value, method: &str) -> Result<
 mod tests {
     use super::*;
 
+    #[test]
+    fn cli_input_routes_thread_requests_and_preserves_other_protocol_messages() {
+        for method in ["thread/start", "thread/resume", "thread/fork"] {
+            let message = serde_json::json!({
+                "id": 17, "method": method,
+                "params": { "threadId": "old-thread", "model": "route-second/gpt-6-astra",
+                    "modelProvider": null, "config": { "model_provider": "first",
+                        "model_provider.name": "first", "model_providers": {"first": {}},
+                        "model_providers.codey_router.base_url": "https://wrong.example",
+                        "service_tier": "fast", "artifact.session": "keep" } }
+            });
+            let passthrough = b"{\"id\":18,\"method\":\"turn/start\",\"params\":{\"model\":\"route-second/gpt-6-astra\"}}\r\n{\"id\":19,\"result\":{}}\ninvalid-json\n";
+            let mut input = serde_json::to_vec(&message).unwrap();
+            input.push(b'\n');
+            input.extend_from_slice(passthrough);
+            let mut output = Vec::new();
+            // One-byte buffers exercise split messages without changing framing.
+            route_local_app_server_input(
+                std::io::BufReader::with_capacity(1, input.as_slice()),
+                &mut output,
+            )
+            .unwrap();
+            let first_line = output.iter().position(|byte| *byte == b'\n').unwrap();
+            let routed: serde_json::Value = serde_json::from_slice(&output[..first_line]).unwrap();
+            assert_eq!(
+                routed,
+                serde_json::json!({ "id": 17, "method": method,
+                    "params": { "threadId": "old-thread", "model": "route-second/gpt-6-astra",
+                        "modelProvider": "codey_router", "config": { "service_tier": "fast", "artifact.session": "keep" } }
+                })
+            );
+            assert_eq!(&output[first_line + 1..], passthrough);
+        }
+    }
+
     #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn detached_cli_calls_resolve_the_saved_app_or_fail_without_starting_the_desktop() {
@@ -899,7 +1019,7 @@ mod tests {
 
     #[test]
     fn patch_result_is_stable_for_launch_status_validation() {
-        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v38");
+        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v39");
         assert_eq!(
             APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT,
             "codey-app-server-runtime-overrides-verified"
