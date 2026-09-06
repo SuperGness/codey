@@ -14,6 +14,45 @@ pub(crate) fn timestamp_millis() -> u128 {
         .as_millis()
 }
 
+/// 以毫秒时间戳命名的唯一子目录（不创建）。同一毫秒内的重复调用追加 `-n` 后缀。
+/// 此前 session_index_cleanup 与 codex_config 各自实现了一份备份目录命名。
+pub(crate) fn unique_timestamp_dir(root: &Path) -> PathBuf {
+    let base = timestamp_millis().to_string();
+    let mut path = root.join(&base);
+    let mut suffix = 0usize;
+    while path.exists() {
+        suffix += 1;
+        path = root.join(format!("{base}-{suffix}"));
+    }
+    path
+}
+
+/// 保留 `keep` 个最新的受管目录，删除其余。`sort_key` 返回 `None` 的条目不受管，
+/// 不参与计数也不会被删除；`Some(key)` 越大表示越新。删除失败静默忽略。
+pub(crate) fn prune_dirs(root: &Path, keep: usize, sort_key: impl Fn(&Path) -> Option<u128>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut managed = entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_type().ok()?.is_dir() {
+                return None;
+            }
+            let path = entry.path();
+            let key = sort_key(&path)?;
+            Some((key, path))
+        })
+        .collect::<Vec<_>>();
+    if managed.len() <= keep {
+        return;
+    }
+    managed.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
+    for (_, path) in managed.drain(keep..) {
+        let _ = fs::remove_dir_all(&path);
+    }
+}
+
 /// 小写十六进制 SHA-256。此前 subagent_gate、subagent_orchestrator、
 /// session_index_cleanup 各有一份逐字节相同的实现。
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {

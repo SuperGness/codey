@@ -1294,7 +1294,7 @@ mod tests {
         .unwrap();
         let mut cache = RecentSessionEventCache::default();
 
-        let events = cache.refresh_rollouts(vec![("fork".to_string(), rollout_path.to_path_buf())]);
+        let events = cache.refresh_rollouts(vec![("fork".to_string(), rollout_path)]);
 
         assert_eq!(
             events

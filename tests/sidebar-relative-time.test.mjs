@@ -6,10 +6,6 @@ import vm from "node:vm";
 import { FakeElementCore } from "./helpers/fake-element.mjs";
 
 const source = readFileSync(new URL("../public/codey-inject.js", import.meta.url), "utf8");
-const vendorSource = readFileSync(
-  new URL("../vendor/CodeyRuntime/assets/inject/renderer-inject.js", import.meta.url),
-  "utf8",
-);
 
 class FakeElement extends FakeElementCore {
   constructor(tagName = "div") {
@@ -1243,26 +1239,4 @@ test("timestamp metadata uses only the bounded bridge route", () => {
   assert.match(source, /callBridge\(threadTimestampBridgePath, \{ sessionIds \}\)/);
   assert.doesNotMatch(source, /method: "thread\/(?:list|read)"/);
   assert.doesNotMatch(source, /fetch\(url\)/);
-});
-
-test("vendor project moves preserve Codex-owned thread ordering", () => {
-  assert.doesNotMatch(
-    vendorSource,
-    /prioritizeRunning|rowHasRunningStatus|ProjectMovePrioritizeRunning/,
-  );
-  assert.doesNotMatch(
-    vendorSource,
-    /thread-sort-key|sortMs|codexProjectMoveSortMs|ChatsSortTimer/,
-  );
-  assert.doesNotMatch(
-    vendorSource,
-    /const ordered = \[\.\.\.running, \.\.\.idle\]/,
-  );
-  assert.doesNotMatch(
-    vendorSource,
-    /codexProjectMoveTimestampMs|timestampTrusted|timestampStateFromMoveResult/,
-  );
-  assert.match(vendorSource, /function insertProjectedRowItem\(list, item\)/);
-  assert.match(vendorSource, /item\.parentElement !== list/);
-  assert.match(vendorSource, /list\.insertBefore\(item, firstNonThreadItem\)/);
 });

@@ -3,10 +3,14 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 async function loadWindowsStartupSource() {
-  const [launcher, launcherPlatform] = await Promise.all([
+  const [launcher, launcherPlatform, startupPatch] = await Promise.all([
     readFile(new URL("../backend/src/launcher/process.rs", import.meta.url), "utf8"),
     readFile(
       new URL("../backend/src/launcher/platform.rs", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../backend/src/codex_startup_patch.rs", import.meta.url),
       "utf8",
     ),
   ]).then((sources) => sources.map((source) => source.replace(/\r\n/g, "\n")));
@@ -20,7 +24,7 @@ async function loadWindowsStartupSource() {
       "#[cfg(target_os = \"macos\")]\npub(super) fn build_fresh_macos_open_command",
     ),
   );
-  return { cleanup, launcher, launcherPlatform, windowsSpawn };
+  return { cleanup, launcher, launcherPlatform, startupPatch, windowsSpawn };
 }
 
 test("Windows startup compatibility failure cleans the process before compatible restart", async () => {
@@ -52,29 +56,97 @@ test("Windows startup compatibility failure cleans the process before compatible
   );
 });
 
-test("Windows retries without a breakpoint only after successful cleanup with wrapper support", async () => {
-  const { windowsSpawn } = await loadWindowsStartupSource();
+test("Windows skips the Inspector when the Electron fuse is off and retries without a breakpoint", async () => {
+  const { launcher, windowsSpawn } = await loadWindowsStartupSource();
+  const fuseProbe = windowsSpawn.indexOf(
+    "crate::electron_fuses::detect_node_cli_inspect_state(app_dir.to_path_buf()).await",
+  );
   const loop = windowsSpawn.indexOf("loop {");
   const prepare = windowsSpawn.indexOf("prepare_cli_wrapper(");
   const reservePort = windowsSpawn.indexOf("reserve_loopback_port()");
-  const launch = windowsSpawn.indexOf("spawn_windows_codex(");
+  const noEntry = windowsSpawn.indexOf("if inspector_port.is_none() && wrapper.is_none() {");
+  const launch = windowsSpawn.indexOf("spawn_windows_codex(", noEntry);
+  const budget = windowsSpawn.indexOf("let deadline =");
   const cleanup = windowsSpawn.indexOf("if let Err(cleanup_error) =");
   const packageGuard = windowsSpawn.indexOf("if !package_cleanup_succeeded {");
   const retry = windowsSpawn.indexOf("if should_retry_startup(&error, attempt) {");
   const requiredConfigGuard = windowsSpawn.indexOf("if !runtime_config_overrides.is_empty() {");
-  assert.ok(loop >= 0 && prepare > loop && reservePort > prepare && launch > reservePort);
-  assert.ok(cleanup > launch && packageGuard > cleanup && retry > packageGuard);
-  assert.ok(requiredConfigGuard > retry);
-  assert.match(windowsSpawn, /let mut attempt = 0;\s*let mut cli_only = false;\s*loop \{\s*attempt \+= 1;/);
+
+  // The fuse is read once before the attempt loop; every attempt re-prepares the wrapper.
+  assert.ok(fuseProbe >= 0 && fuseProbe < loop);
+  assert.match(windowsSpawn, /let mut cli_only = !inspect_fuse\.inspector_possible\(\);/);
+  assert.ok(loop < prepare && prepare < reservePort && reservePort < noEntry && noEntry < launch);
   assert.match(windowsSpawn, /let inspector_port = if cli_only \{\s*None/);
   assert.match(windowsSpawn, /startup_launch_arguments\(&runtime_arguments, inspector_port\)/);
-  assert.doesNotMatch(windowsSpawn, /startup_deadline\.get_or_insert/);
-  const budget = windowsSpawn.indexOf("let deadline = tokio::time::Instant::now()");
+  // Without any compatibility entry the decision is made before launching.
+  assert.match(
+    windowsSpawn.slice(noEntry, launch),
+    /return launch_windows_codex_without_compatibility\(/,
+  );
+  // Each attempt gets its own readiness budget, taken after activation.
   assert.ok(budget > launch && budget < cleanup);
+  assert.match(windowsSpawn, /STARTUP_CLI_READY_TIMEOUT/);
+  assert.doesNotMatch(windowsSpawn, /STARTUP_COMPATIBILITY_TIMEOUT|startup_deadline\.get_or_insert/);
+  assert.match(
+    windowsSpawn,
+    /StartupWaitContext \{\s*platform: "windows",\s*deadline,\s*renderer_debug_port: Some\(debug_port\),\s*spawned: Some\(&mut spawned\),/,
+  );
+  assert.ok(cleanup > launch && packageGuard > cleanup && retry > packageGuard);
+  assert.ok(requiredConfigGuard > retry);
   assert.match(windowsSpawn.slice(cleanup, retry), /if let Err\(cleanup_error\)[\s\S]*?anyhow::bail!/);
   assert.match(windowsSpawn.slice(packageGuard, retry), /anyhow::bail!/);
-  assert.match(windowsSpawn.slice(retry, requiredConfigGuard), /if should_retry_startup\(&error, attempt\) \{\s*cli_only = wrapper_environment_applied;\s*continue;\s*\}/);
+  assert.match(
+    windowsSpawn.slice(retry, requiredConfigGuard),
+    /if should_retry_startup\(&error, attempt\) \{\s*cli_only = true;\s*continue;\s*\}/,
+  );
   assert.match(windowsSpawn, /return Ok\(spawned\);/);
+
+  // Missing entries never launch a constrained Codex.
+  const noEntryLaunch = launcher.slice(
+    launcher.indexOf("async fn launch_windows_codex_without_compatibility"),
+    launcher.indexOf("async fn spawned_codex_alive"),
+  );
+  const overrideGuard = noEntryLaunch.indexOf("if !runtime_config_overrides.is_empty() {");
+  const subagentGuard = noEntryLaunch.indexOf("if subagent_gate_active {");
+  const degradedLaunch = noEntryLaunch.indexOf(
+    "spawn_windows_codex(app_dir, debug_port, runtime_arguments, &[], false)",
+  );
+  assert.ok(overrideGuard >= 0 && overrideGuard < subagentGuard && subagentGuard < degradedLaunch);
+  assert.match(noEntryLaunch, /performance_status = "degraded"/);
+});
+
+test("Startup waits end on process exit, marker confirmation or renderer evidence", async () => {
+  const { launcher, startupPatch } = await loadWindowsStartupSource();
+
+  assert.match(
+    launcher,
+    /tokio::select! \{\s*exited = exited => Err\(exited\.into\(\)\),\s*result = compatibility => result,\s*\}/,
+  );
+  assert.match(launcher, /error\.is::<crate::codex_startup_patch::StartupProcessExited>\(\)/);
+  assert.match(launcher, /let marker = watch_cli_wrapper_marker\(&marker_path\);/);
+  assert.match(launcher, /CLI_WRAPPER_MARKER_ENV\.to_string\(\)/);
+  assert.match(launcher, /prune_cli_wrapper_markers\(/);
+  assert.match(
+    launcher,
+    /Err\(patch_error\) if patch_error\.is::<InspectorUnavailable>\(\) => \{[\s\S]*?wrapper_ready\.as_mut\(\)\.await/,
+  );
+  assert.match(launcher, /渲染进程调试端口未就绪，主进程可能停在 --inspect-brk 断点/);
+
+  // The wrapper retries a slow loopback connect but never a refused one, and
+  // records its progress in the marker file as a second channel.
+  assert.match(startupPatch, /fn connect_loopback_with_retry\(/);
+  assert.match(
+    startupPatch,
+    /Err\(error\) if error\.kind\(\) == std::io::ErrorKind::ConnectionRefused => \{\s*return Err\(error\);/,
+  );
+  assert.match(startupPatch, /readiness\.mark\(CliWrapperMarkerStatus::Launching, None\)/);
+  assert.match(startupPatch, /fn executed\(self\) \{\s*self\.mark_executed\(\);/);
+  assert.match(startupPatch, /self\.mark\(CliWrapperMarkerStatus::Failed, Some\(failure\)\)/);
+  // Inspector discovery stops as soon as the renderer port proves the main script runs.
+  assert.match(
+    startupPatch,
+    /if loopback_port_accepts\(debug_port\)\.await \{[\s\S]*?return Err\(InspectorUnavailable \{/,
+  );
 });
 
 test("Windows startup patch requires app-server runtime override validation", async () => {
@@ -82,11 +154,11 @@ test("Windows startup patch requires app-server runtime override validation", as
 
   assert.match(
     launcher,
-    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*!runtime_config_overrides\.is_empty\(\),\s*\)/,
+    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*!runtime_config_overrides\.is_empty\(\),\s*renderer_debug_port,\s*\)/,
   );
   assert.doesNotMatch(
     launcher,
-    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*false,\s*\)/,
+    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*false,/,
   );
   assert.match(
     windowsSpawn,

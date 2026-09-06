@@ -4,7 +4,7 @@ import type {
   RuntimeStatus,
 } from "./App.types";
 
-export type OptimizationFeatureIcon =
+type OptimizationFeatureIcon =
   | "code"
   | "database"
   | "fastctx"
@@ -31,7 +31,7 @@ type OptimizationRuntimeStatus = Pick<
   | "crashpadDiskProtectionActive"
 >;
 
-export type InjectionStatusSummary = {
+type InjectionStatusSummary = {
   failedInjectionScriptCount: number;
   internalInjectionError: boolean;
   internalInjectionPending: boolean;

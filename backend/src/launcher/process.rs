@@ -163,8 +163,13 @@ pub(super) async fn spawn_codex(
 
     #[cfg(windows)]
     {
+        let inspect_fuse =
+            crate::electron_fuses::detect_node_cli_inspect_state(app_dir.to_path_buf()).await;
+        // Electron drops `--inspect-brk` when the fuse is off, so the Inspector
+        // patch can never attach on such builds. Start on the CLI wrapper right
+        // away instead of waiting for a debug port that will never answer.
+        let mut cli_only = !inspect_fuse.inspector_possible();
         let mut attempt = 0;
-        let mut cli_only = false;
         loop {
             attempt += 1;
 
@@ -183,9 +188,6 @@ pub(super) async fn spawn_codex(
                         (None, Some(error))
                     }
                 };
-            if cli_only && let Some(error) = wrapper_preparation_error.as_ref() {
-                anyhow::bail!("准备 Codex CLI 重试入口失败：{error:#}");
-            }
             let inspector_port = if cli_only {
                 None
             } else {
@@ -204,28 +206,51 @@ pub(super) async fn spawn_codex(
                     })?,
                 )
             };
+            if inspector_port.is_none() && wrapper.is_none() {
+                // Neither compatibility entry exists before launch: decide now
+                // instead of starting a process that would only be stopped again.
+                let error = wrapper_preparation_error
+                    .unwrap_or_else(|| anyhow::anyhow!("Codex CLI 兼容入口不可用"));
+                return launch_windows_codex_without_compatibility(
+                    app_dir,
+                    debug_port,
+                    &runtime_arguments,
+                    runtime_config_overrides,
+                    subagent_gate_active,
+                    format!(
+                        "启动尝试 {attempt}/2：主进程 Inspector 已被 Electron fuse 关闭（{}），且 CLI 兼容入口不可用：{error:#}",
+                        inspect_fuse.as_str()
+                    ),
+                )
+                .await;
+            }
             let launch_arguments = startup_launch_arguments(&runtime_arguments, inspector_port);
             let wrapper_environment = wrapper
                 .as_ref()
                 .map(|wrapper| wrapper.environment.as_slice())
                 .unwrap_or_default();
+            // Without an Inspector the wrapper is the only entry, so a launch
+            // that carries runtime constraints must not proceed unless Store
+            // accepts the wrapper environment; an unconstrained launch may.
+            let constrained = !runtime_config_overrides.is_empty() || subagent_gate_active;
             let (mut spawned, package_debug_session, wrapper_environment_applied) =
                 spawn_windows_codex(
                     app_dir,
                     debug_port,
                     &launch_arguments,
                     wrapper_environment,
-                    cli_only,
+                    cli_only && constrained,
                 )
                 .await?;
-            // Each of the two attempts gets its own readiness budget. Cleanup
-            // and Store activation must not consume the next attempt's window.
-            let deadline = tokio::time::Instant::now()
-                + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT;
+            // Each attempt gets its own readiness budget. Cleanup and Store
+            // activation must not consume the next attempt's window.
+            let deadline =
+                tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_CLI_READY_TIMEOUT;
             let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
                 "launcher.windows_startup_attempt",
                 serde_json::json!({
                     "attempt": attempt, "cliOnly": cli_only,
+                    "inspectorFuse": inspect_fuse.as_str(),
                     "processId": spawned.process_id,
                     "wrapperEnvironmentApplied": wrapper_environment_applied,
                 }),
@@ -233,13 +258,45 @@ pub(super) async fn spawn_codex(
             let wrapper_handshake = wrapper_environment_applied
                 .then(|| wrapper.expect("applied wrapper environment should have a listener"))
                 .map(CliWrapperLaunch::into_handshake);
+            if inspector_port.is_none() && wrapper_handshake.is_none() {
+                // The process is already running without any compatibility
+                // entry. It carries no constraints (see above), so keep it
+                // instead of stopping and relaunching the same configuration.
+                if let Some(session) = package_debug_session {
+                    session
+                        .finish()
+                        .context("Windows Store Codex 兼容环境清理失败")?;
+                }
+                let startup_error = format!(
+                    "启动尝试 {attempt}/2：主进程 Inspector 已被 Electron fuse 关闭（{}），且 Windows 未能应用 CLI 兼容环境，详见启动错误日志",
+                    inspect_fuse.as_str()
+                );
+                spawned.performance_status = "degraded".to_string();
+                spawned.performance_detail =
+                    "Codex 已启动，但部分启动设置未能应用；页面功能以检测结果为准，下次启动将重试"
+                        .to_string();
+                error_log::record_failure(
+                    "patch_degraded",
+                    "start_without_startup_patch",
+                    startup_error,
+                    serde_json::json!({
+                        "platform": "windows",
+                        "processId": spawned.process_id,
+                    }),
+                );
+                return Ok(spawned);
+            }
             let startup_result = install_startup_patch_with_cli_fallback(
                 inspector_port,
                 patch_options,
                 runtime_config_overrides,
                 wrapper_handshake,
-                "windows",
-                deadline,
+                StartupWaitContext {
+                    platform: "windows",
+                    deadline,
+                    renderer_debug_port: Some(debug_port),
+                    spawned: Some(&mut spawned),
+                },
             )
             .await
             .map_err(|patch_error| {
@@ -283,6 +340,7 @@ pub(super) async fn spawn_codex(
                         serde_json::json!({
                             "platform": "windows",
                             "inspectorPort": inspector_port,
+                            "inspectorFuse": inspect_fuse.as_str(),
                             "processId": spawned.process_id,
                             "startupAttempt": attempt,
                             "cliOnly": cli_only,
@@ -304,11 +362,11 @@ pub(super) async fn spawn_codex(
                             "Codex 启动兼容环境未能安全清理，已停止重试：{startup_error}"
                         );
                     }
-                    // An unreachable Inspector can leave --inspect-brk paused,
-                    // preventing Desktop from ever launching the CLI wrapper.
-                    // Retry without that breakpoint only with a usable wrapper.
+                    // A main process paused at an unreachable `--inspect-brk`,
+                    // a lost handshake or an early exit all get one more attempt
+                    // without the breakpoint; the wrapper is prepared again.
                     if should_retry_startup(&error, attempt) {
-                        cli_only = wrapper_environment_applied;
+                        cli_only = true;
                         continue;
                     }
                     if !runtime_config_overrides.is_empty() {
@@ -351,6 +409,8 @@ pub(super) async fn spawn_codex(
 
     #[cfg(target_os = "macos")]
     {
+        let inspect_fuse =
+            crate::electron_fuses::detect_node_cli_inspect_state(app_dir.to_path_buf()).await;
         let inspector_port =
             crate::codex_startup_patch::reserve_loopback_port().map_err(|error| {
                 let error = error.context("为 macOS Codex 启动补丁选择本地调试端口失败");
@@ -383,13 +443,21 @@ pub(super) async fn spawn_codex(
         };
         let mut spawned = spawn_command(command)?;
         spawned.inspector_argument = Some(inspector_arg.clone());
+        // The Inspector argument stays on the command line as the cleanup
+        // marker, but Electron drops it when the fuse is off: wait for the CLI
+        // wrapper alone in that case instead of a port that never answers.
         let startup_result = install_startup_patch_with_cli_fallback(
-            Some(inspector_port),
+            inspect_fuse.inspector_possible().then_some(inspector_port),
             patch_options,
             runtime_config_overrides,
             wrapper.map(CliWrapperLaunch::into_handshake),
-            "macos",
-            tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT,
+            StartupWaitContext {
+                platform: "macos",
+                deadline: tokio::time::Instant::now()
+                    + crate::codex_startup_patch::STARTUP_CLI_READY_TIMEOUT,
+                renderer_debug_port: Some(debug_port),
+                spawned: Some(&mut spawned),
+            },
         )
         .await;
 
@@ -407,6 +475,7 @@ pub(super) async fn spawn_codex(
                     serde_json::json!({
                         "platform": "macos",
                         "inspectorPort": inspector_port,
+                        "inspectorFuse": inspect_fuse.as_str(),
                         "processId": spawned.process_id,
                         "processGroupId": spawned.process_group_id,
                         "disablePet": patch_options.disable_pet,
@@ -459,14 +528,92 @@ pub(super) async fn spawn_codex(
 struct CliWrapperLaunch {
     listener: tokio::net::TcpListener,
     token: Vec<u8>,
+    marker_path: PathBuf,
     environment: Vec<(String, String)>,
 }
 
 #[cfg(any(windows, target_os = "macos"))]
 impl CliWrapperLaunch {
-    fn into_handshake(self) -> (tokio::net::TcpListener, Vec<u8>) {
-        (self.listener, self.token)
+    fn into_handshake(self) -> CliWrapperHandshake {
+        CliWrapperHandshake {
+            listener: self.listener,
+            token: self.token,
+            marker_path: self.marker_path,
+        }
     }
+}
+
+/// Two independent confirmation channels for the CLI wrapper: the loopback
+/// handshake connection and a marker file it writes next to Codey's state.
+#[cfg(any(windows, target_os = "macos"))]
+struct CliWrapperHandshake {
+    listener: tokio::net::TcpListener,
+    token: Vec<u8>,
+    marker_path: PathBuf,
+}
+
+/// Evidence available while waiting for a compatibility entry to confirm.
+#[cfg(any(windows, target_os = "macos"))]
+struct StartupWaitContext<'a> {
+    platform: &'static str,
+    deadline: tokio::time::Instant,
+    /// Chromium's `--remote-debugging-port`; once it answers, the main script
+    /// has started, so a refused Inspector port will never open.
+    renderer_debug_port: Option<u16>,
+    /// The launched process, polled so a crash or single-instance handoff ends
+    /// the wait immediately instead of at the deadline.
+    spawned: Option<&'a mut SpawnedCodex>,
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+const CLI_WRAPPER_MARKER_DIR: &str = "cli-wrapper";
+#[cfg(any(windows, target_os = "macos", test))]
+const CLI_WRAPPER_MARKER_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Removes marker files left behind by launches that never reached cleanup.
+#[cfg(any(windows, target_os = "macos", test))]
+fn prune_cli_wrapper_markers(
+    directory: &std::path::Path,
+    now: std::time::SystemTime,
+    max_age: Duration,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten().take(1024) {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= max_age);
+        if stale && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+async fn prepare_cli_wrapper_marker(token: &str) -> PathBuf {
+    let directory = codey_runtime_core::paths::default_app_state_dir().join(CLI_WRAPPER_MARKER_DIR);
+    let marker_path = directory.join(format!("{token}.json"));
+    let prune_directory = directory.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = std::fs::create_dir_all(&prune_directory);
+        prune_cli_wrapper_markers(
+            &prune_directory,
+            std::time::SystemTime::now(),
+            CLI_WRAPPER_MARKER_MAX_AGE,
+        )
+    })
+    .await;
+    marker_path
 }
 
 #[cfg(any(windows, test))]
@@ -499,26 +646,6 @@ fn sha256_file(path: &std::path::Path) -> Result<String> {
 }
 
 #[cfg(any(windows, test))]
-fn windows_cli_runtime_matches(
-    directory: &std::path::Path,
-    files: &[(&str, PathBuf, u64, String)],
-) -> Result<bool> {
-    for (name, _, expected_len, expected_digest) in files {
-        let path = directory.join(name);
-        let Ok(metadata) = std::fs::metadata(&path) else {
-            return Ok(false);
-        };
-        if !metadata.is_file()
-            || metadata.len() != *expected_len
-            || sha256_file(&path)? != expected_digest.as_str()
-        {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-#[cfg(any(windows, test))]
 fn copy_windows_cli_runtime_file(
     source: &std::path::Path,
     destination: &std::path::Path,
@@ -548,45 +675,137 @@ fn copy_windows_cli_runtime_file(
 }
 
 #[cfg(any(windows, test))]
+const STAGED_RUNTIME_MANIFEST: &str = ".codey-staged.json";
+#[cfg(any(windows, test))]
+const STAGED_RUNTIME_MANIFEST_VERSION: u32 = 1;
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct StagedRuntimeFile {
+    name: String,
+    len: u64,
+    source_modified_ms: Option<u64>,
+    sha256: String,
+}
+
+#[cfg(any(windows, test))]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StagedRuntimeManifest {
+    version: u32,
+    files: Vec<StagedRuntimeFile>,
+}
+
+#[cfg(any(windows, test))]
+struct WindowsCliRuntimeSource {
+    name: &'static str,
+    path: PathBuf,
+    len: u64,
+    modified_ms: Option<u64>,
+}
+
+#[cfg(any(windows, test))]
+fn file_modified_ms(metadata: &std::fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+}
+
+#[cfg(any(windows, test))]
+fn windows_cli_runtime_sources(target: &std::path::Path) -> Result<Vec<WindowsCliRuntimeSource>> {
+    let source_dir = target.parent().context("Codex CLI 路径缺少父目录")?;
+    let mut sources = Vec::with_capacity(WINDOWS_CLI_RUNTIME_FILES.len());
+    for name in WINDOWS_CLI_RUNTIME_FILES {
+        let path = if name == "codex.exe" {
+            target.to_path_buf()
+        } else {
+            source_dir.join(name)
+        };
+        let metadata = std::fs::metadata(&path)
+            .with_context(|| format!("Codex 运行文件缺失：{}", path.display()))?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "Codex 运行路径不是文件：{}",
+            path.display()
+        );
+        sources.push(WindowsCliRuntimeSource {
+            name,
+            path,
+            len: metadata.len(),
+            modified_ms: file_modified_ms(&metadata),
+        });
+    }
+    Ok(sources)
+}
+
+/// A staged directory is reusable when its manifest still describes the current
+/// package files and every copy has the recorded size. Store packages are
+/// immutable per version, so size and modification time identify the sources
+/// without re-hashing several hundred megabytes on every launch; content is
+/// verified once, when the copy is made.
+#[cfg(any(windows, test))]
+fn staged_runtime_ready(
+    destination: &std::path::Path,
+    sources: &[WindowsCliRuntimeSource],
+) -> bool {
+    let Ok(bytes) = std::fs::read(destination.join(STAGED_RUNTIME_MANIFEST)) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_slice::<StagedRuntimeManifest>(&bytes) else {
+        return false;
+    };
+    if manifest.version != STAGED_RUNTIME_MANIFEST_VERSION || manifest.files.len() != sources.len()
+    {
+        return false;
+    }
+    sources.iter().all(|source| {
+        let recorded = manifest.files.iter().any(|file| {
+            file.name == source.name
+                && file.len == source.len
+                && file.source_modified_ms == source.modified_ms
+        });
+        recorded
+            && std::fs::metadata(destination.join(source.name))
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() == source.len)
+    })
+}
+
+#[cfg(any(windows, test))]
 fn stage_windows_cli_runtime(
     target: &std::path::Path,
     local_app_data: &std::path::Path,
 ) -> Result<PathBuf> {
     use sha2::{Digest, Sha256};
 
-    let source_dir = target.parent().context("Codex CLI 路径缺少父目录")?;
-    let mut files = Vec::with_capacity(WINDOWS_CLI_RUNTIME_FILES.len());
-    for name in WINDOWS_CLI_RUNTIME_FILES {
-        let source = if name == "codex.exe" {
-            target.to_path_buf()
-        } else {
-            source_dir.join(name)
-        };
-        let metadata = std::fs::metadata(&source)
-            .with_context(|| format!("Codex 运行文件缺失：{}", source.display()))?;
-        anyhow::ensure!(
-            metadata.is_file(),
-            "Codex 运行路径不是文件：{}",
-            source.display()
-        );
-        let digest = sha256_file(&source)?;
-        files.push((name, source, metadata.len(), digest));
-    }
-
+    let sources = windows_cli_runtime_sources(target)?;
     let mut cache_hasher = Sha256::new();
-    for (name, _, _, digest) in &files {
-        cache_hasher.update(name.as_bytes());
+    for source in &sources {
+        cache_hasher.update(source.name.as_bytes());
         cache_hasher.update([0]);
-        cache_hasher.update(digest.as_bytes());
+        cache_hasher.update(source.len.to_le_bytes());
+        cache_hasher.update([0]);
+        cache_hasher.update(source.modified_ms.unwrap_or(0).to_le_bytes());
         cache_hasher.update([0]);
     }
     let cache_hash = format!("{:x}", cache_hasher.finalize());
     let cache_root = local_app_data.join("OpenAI").join("Codex").join("bin");
     let destination = cache_root.join(&cache_hash[..16]);
-    if windows_cli_runtime_matches(&destination, &files)? {
+    if staged_runtime_ready(&destination, &sources) {
         return Ok(destination.join("codex.exe"));
     }
 
+    // Slow path: a new Codex build or a damaged copy. Hash, copy, verify, then
+    // publish the directory atomically together with its manifest.
+    let mut files = Vec::with_capacity(sources.len());
+    for source in &sources {
+        files.push(StagedRuntimeFile {
+            name: source.name.to_string(),
+            len: source.len,
+            source_modified_ms: source.modified_ms,
+            sha256: sha256_file(&source.path)?,
+        });
+    }
     std::fs::create_dir_all(&cache_root)
         .with_context(|| format!("创建 Codex 用户运行目录失败：{}", cache_root.display()))?;
     if destination.is_dir() {
@@ -613,17 +832,26 @@ fn stage_windows_cli_runtime(
     std::fs::create_dir(&staging)
         .with_context(|| format!("创建 Codex 运行暂存目录失败：{}", staging.display()))?;
     let result = (|| -> Result<PathBuf> {
-        for (name, source, _, expected_digest) in &files {
-            let staged = staging.join(name);
-            copy_windows_cli_runtime_file(source, &staged)?;
+        for (source, file) in sources.iter().zip(&files) {
+            let staged = staging.join(source.name);
+            copy_windows_cli_runtime_file(&source.path, &staged)?;
             anyhow::ensure!(
-                sha256_file(&staged)? == expected_digest.as_str(),
+                sha256_file(&staged)? == file.sha256,
                 "Codex 运行文件复制校验失败：{}",
                 staged.display()
             );
         }
+        let manifest = StagedRuntimeManifest {
+            version: STAGED_RUNTIME_MANIFEST_VERSION,
+            files: files.clone(),
+        };
+        std::fs::write(
+            staging.join(STAGED_RUNTIME_MANIFEST),
+            serde_json::to_vec(&manifest)?,
+        )
+        .with_context(|| format!("写入 Codex 运行目录清单失败：{}", staging.display()))?;
         if let Err(error) = std::fs::rename(&staging, &destination) {
-            if windows_cli_runtime_matches(&destination, &files)? {
+            if staged_runtime_ready(&destination, &sources) {
                 return Ok(destination.join("codex.exe"));
             }
             return Err(error).with_context(|| {
@@ -673,6 +901,7 @@ async fn prepare_cli_wrapper(
         .context("创建 Codex CLI 兼容校验端口失败")?;
     let port = listener.local_addr()?.port();
     let token = uuid::Uuid::new_v4().to_string();
+    let marker_path = prepare_cli_wrapper_marker(&token).await;
     let overrides = serde_json::to_string(runtime_config_overrides)
         .context("序列化 Codex CLI 兼容运行时配置失败")?;
     let mut environment = vec![
@@ -695,6 +924,10 @@ async fn prepare_cli_wrapper(
         (
             crate::codex_startup_patch::CLI_WRAPPER_TOKEN_ENV.to_string(),
             token.clone(),
+        ),
+        (
+            crate::codex_startup_patch::CLI_WRAPPER_MARKER_ENV.to_string(),
+            marker_path.to_string_lossy().to_string(),
         ),
     ];
     if crate::codex_startup_patch::local_router_runtime_enabled(runtime_config_overrides) {
@@ -720,6 +953,7 @@ async fn prepare_cli_wrapper(
     Ok(CliWrapperLaunch {
         listener,
         token: token.into_bytes(),
+        marker_path,
         environment,
     })
 }
@@ -775,6 +1009,7 @@ fn startup_error_allows_retry(error: &anyhow::Error) -> bool {
         return failure.retryable;
     }
     error.is::<tokio::time::error::Elapsed>()
+        || error.is::<crate::codex_startup_patch::StartupProcessExited>()
         || error
             .downcast_ref::<std::io::Error>()
             .is_some_and(crate::codex_startup_patch::is_retryable_startup_io_error)
@@ -815,18 +1050,138 @@ fn combined_startup_error(
     .into()
 }
 
+/// Launches Codex with no compatibility entry at all. Only allowed when the
+/// launch carries no runtime constraints; otherwise the caller must stop.
+#[cfg(windows)]
+async fn launch_windows_codex_without_compatibility(
+    app_dir: &std::path::Path,
+    debug_port: u16,
+    runtime_arguments: &[String],
+    runtime_config_overrides: &[String],
+    subagent_gate_active: bool,
+    startup_error: String,
+) -> Result<SpawnedCodex> {
+    if !runtime_config_overrides.is_empty() {
+        anyhow::bail!(
+            "Codex 启动兼容入口不可用，无法应用 app-server 运行时覆盖；为避免丢失 Codey 运行时约束，已停止启动：{startup_error}"
+        );
+    }
+    if subagent_gate_active {
+        anyhow::bail!(
+            "Codex 启动兼容入口不可用；为避免丢失 Codey 运行时约束，已停止启动：{startup_error}"
+        );
+    }
+    let (mut spawned, _, _) =
+        spawn_windows_codex(app_dir, debug_port, runtime_arguments, &[], false)
+            .await
+            .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;
+    spawned.performance_status = "degraded".to_string();
+    spawned.performance_detail =
+        "Codex 已启动，但部分启动设置未能应用；页面功能以检测结果为准，下次启动将重试".to_string();
+    error_log::record_failure(
+        "patch_degraded",
+        "start_without_startup_patch",
+        startup_error,
+        serde_json::json!({
+            "platform": "windows",
+            "processId": spawned.process_id,
+        }),
+    );
+    Ok(spawned)
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+async fn spawned_codex_alive(spawned: &mut SpawnedCodex) -> bool {
+    if let Some(child) = spawned.child.as_mut() {
+        return !matches!(child.try_wait(), Ok(Some(_)));
+    }
+    #[cfg(windows)]
+    if let Some(process_id) = spawned.process_id {
+        // Store activations hand back a PID without a child handle.
+        return tokio::task::spawn_blocking(move || {
+            codey_runtime_core::windows_enumerate_processes()
+                .iter()
+                .any(|process| process.process_id == process_id)
+        })
+        .await
+        .unwrap_or(true);
+    }
+    true
+}
+
+/// Resolves once the launched process is gone; never resolves without one.
+#[cfg(any(windows, target_os = "macos"))]
+async fn startup_process_exited(
+    spawned: Option<&mut SpawnedCodex>,
+) -> crate::codex_startup_patch::StartupProcessExited {
+    let Some(spawned) = spawned else {
+        return std::future::pending().await;
+    };
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        if !spawned_codex_alive(spawned).await {
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "launcher.startup_process_exited",
+                serde_json::json!({ "processId": spawned.process_id }),
+            );
+            return crate::codex_startup_patch::StartupProcessExited {
+                process_id: spawned.process_id,
+            };
+        }
+    }
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 async fn install_startup_patch_with_cli_fallback(
     inspector_port: Option<u16>,
     patch_options: crate::codex_startup_patch::PatchOptions,
     runtime_config_overrides: &[String],
-    wrapper_handshake: Option<(tokio::net::TcpListener, Vec<u8>)>,
+    wrapper_handshake: Option<CliWrapperHandshake>,
+    context: StartupWaitContext<'_>,
+) -> Result<()> {
+    let StartupWaitContext {
+        platform,
+        deadline,
+        renderer_debug_port,
+        spawned,
+    } = context;
+    let exited = startup_process_exited(spawned);
+    let compatibility = wait_for_startup_compatibility(
+        inspector_port,
+        patch_options,
+        runtime_config_overrides,
+        wrapper_handshake,
+        platform,
+        deadline,
+        renderer_debug_port,
+    );
+    tokio::select! {
+        exited = exited => Err(exited.into()),
+        result = compatibility => result,
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+async fn wait_for_startup_compatibility(
+    inspector_port: Option<u16>,
+    patch_options: crate::codex_startup_patch::PatchOptions,
+    runtime_config_overrides: &[String],
+    wrapper_handshake: Option<CliWrapperHandshake>,
     platform: &'static str,
     deadline: tokio::time::Instant,
+    renderer_debug_port: Option<u16>,
 ) -> Result<()> {
+    use crate::codex_startup_patch::{
+        CliWrapperFailure, InspectorUnavailable, loopback_port_accepts,
+    };
+
     let Some(inspector_port) = inspector_port else {
-        let (listener, token) = wrapper_handshake.context("Codex CLI 重试缺少已配置的兼容入口")?;
-        return wait_for_cli_wrapper(listener, token, deadline).await;
+        let handshake = wrapper_handshake.context(
+            "Codex 启动兼容入口不可用：主进程 Inspector 已被 Electron fuse 关闭或本次不使用，且没有可用的 CLI 兼容入口",
+        )?;
+        return wait_for_cli_wrapper(handshake, deadline).await;
     };
     let mut patch_install = Box::pin(async {
         tokio::time::timeout_at(
@@ -836,43 +1191,72 @@ async fn install_startup_patch_with_cli_fallback(
                 patch_options,
                 runtime_config_overrides,
                 !runtime_config_overrides.is_empty(),
+                renderer_debug_port,
             ),
         )
         .await
         .context("Codex 兼容启动总时限已用尽")?
     });
-    let Some((listener, token)) = wrapper_handshake else {
+    let Some(handshake) = wrapper_handshake else {
         return patch_install.as_mut().await;
     };
-    let wrapper_deadline = deadline
-        .min(tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_READY_TIMEOUT);
-    let mut wrapper_ready = Box::pin(wait_for_cli_wrapper(listener, token, wrapper_deadline));
+    let mut wrapper_ready = Box::pin(wait_for_cli_wrapper(handshake, deadline));
     tokio::select! {
         patch = &mut patch_install => match patch {
             Ok(()) => Ok(()),
-            Err(patch_error) => match wrapper_ready.as_mut().await {
-                Ok(()) => {
-                    error_log::record_failure(
-                        "patch_degraded",
-                        "use_codex_cli_wrapper_after_patch_failure",
-                        format!("{patch_error:#}"),
-                        serde_json::json!({ "platform": platform }),
-                    );
-                    Ok(())
+            Err(patch_error) if patch_error.is::<InspectorUnavailable>() => {
+                // The main process runs without an Inspector; only the CLI
+                // wrapper can confirm the runtime configuration now, and it
+                // keeps the whole readiness budget.
+                let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                    "launcher.startup_compatibility_mode",
+                    serde_json::json!({
+                        "platform": platform,
+                        "reason": "main_process_inspector_unavailable",
+                        "inspectorPort": inspector_port,
+                        "detail": format!("{patch_error:#}"),
+                        "runtimeConfigOverrideCount": runtime_config_overrides.len(),
+                    }),
+                );
+                wrapper_ready.as_mut().await
+            }
+            Err(patch_error) => {
+                // Discovery timed out or the protocol failed. A live renderer
+                // debug port proves the main script runs, so the wrapper may
+                // still confirm; otherwise the main process is most likely
+                // paused at `--inspect-brk` and waiting longer cannot help.
+                let renderer_ready = match renderer_debug_port {
+                    Some(debug_port) => loopback_port_accepts(debug_port).await,
+                    None => true,
+                };
+                if !renderer_ready {
+                    return Err(combined_startup_error(
+                        patch_error,
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "渲染进程调试端口未就绪，主进程可能停在 --inspect-brk 断点，不再等待 CLI 兼容入口",
+                        )
+                        .into(),
+                    ));
                 }
-                Err(wrapper_error) if wrapper_error.is::<crate::codex_startup_patch::CliWrapperFailure>() => Err(wrapper_error),
-                Err(wrapper_error) => Err(combined_startup_error(patch_error, wrapper_error)),
-            },
+                match wrapper_ready.as_mut().await {
+                    Ok(()) => {
+                        error_log::record_failure(
+                            "patch_degraded",
+                            "use_codex_cli_wrapper_after_patch_failure",
+                            format!("{patch_error:#}"),
+                            serde_json::json!({ "platform": platform }),
+                        );
+                        Ok(())
+                    }
+                    Err(wrapper_error) if wrapper_error.is::<CliWrapperFailure>() => Err(wrapper_error),
+                    Err(wrapper_error) => Err(combined_startup_error(patch_error, wrapper_error)),
+                }
+            }
         },
         wrapper = &mut wrapper_ready => match wrapper {
             Ok(()) => {
-                let inspector_is_active = tokio::time::timeout(
-                    Duration::from_millis(200),
-                    tokio::net::TcpStream::connect(("127.0.0.1", inspector_port)),
-                )
-                .await
-                .is_ok_and(|result| result.is_ok());
-                if inspector_is_active {
+                if loopback_port_accepts(inspector_port).await {
                     match patch_install.as_mut().await {
                         Ok(()) => Ok(()),
                         Err(patch_error) => {
@@ -898,7 +1282,7 @@ async fn install_startup_patch_with_cli_fallback(
                     Ok(())
                 }
             },
-            Err(wrapper_error) if wrapper_error.is::<crate::codex_startup_patch::CliWrapperFailure>() => Err(wrapper_error),
+            Err(wrapper_error) if wrapper_error.is::<CliWrapperFailure>() => Err(wrapper_error),
             Err(wrapper_error) => match patch_install.as_mut().await {
                 Ok(()) => Ok(()),
                 Err(patch_error) => Err(combined_startup_error(patch_error, wrapper_error)),
@@ -907,71 +1291,140 @@ async fn install_startup_patch_with_cli_fallback(
     }
 }
 
+/// Polls the wrapper's marker file. Resolves on an executed or failed record;
+/// keeps waiting while the file is missing or still says launching.
+#[cfg(any(windows, target_os = "macos"))]
+async fn watch_cli_wrapper_marker(path: &std::path::Path) -> Result<()> {
+    use crate::codex_startup_patch::{CliWrapperFailure, CliWrapperMarker, CliWrapperMarkerStatus};
+
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    let mut launching_logged = false;
+    let mut invalid_logged = false;
+    loop {
+        interval.tick().await;
+        match CliWrapperMarker::read(path) {
+            Ok(None) => {}
+            Ok(Some(marker)) => match marker.status {
+                CliWrapperMarkerStatus::Launching => {
+                    if !launching_logged {
+                        launching_logged = true;
+                        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                            "launcher.cli_wrapper_marker_seen",
+                            serde_json::json!({ "wrapperPid": marker.pid }),
+                        );
+                    }
+                }
+                CliWrapperMarkerStatus::Executed => {
+                    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                        "launcher.cli_wrapper_marker_confirmed",
+                        serde_json::json!({ "wrapperPid": marker.pid }),
+                    );
+                    return Ok(());
+                }
+                CliWrapperMarkerStatus::Failed => {
+                    return Err(CliWrapperFailure {
+                        message: marker.message.unwrap_or_else(|| {
+                            "目标程序未能执行，记录文件未包含失败详情".to_string()
+                        }),
+                        retryable: marker.retryable.unwrap_or(false),
+                    }
+                    .into());
+                }
+            },
+            Err(error) => {
+                if !invalid_logged {
+                    invalid_logged = true;
+                    error_log::record_failure(
+                        "compatibility_fallback",
+                        "read_cli_wrapper_marker",
+                        format!("{error:#}"),
+                        serde_json::json!({ "marker": path }),
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 async fn wait_for_cli_wrapper(
-    listener: tokio::net::TcpListener,
-    expected_token: Vec<u8>,
+    handshake: CliWrapperHandshake,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
     use crate::codex_startup_patch::{CliWrapperFailure, MAX_CLI_WRAPPER_FAILURE_BYTES};
     use tokio::io::AsyncReadExt;
 
+    let CliWrapperHandshake {
+        listener,
+        token: expected_token,
+        marker_path,
+    } = handshake;
     let mut authenticated = false;
-    tokio::time::timeout_at(deadline, async {
-        loop {
-            let (mut stream, _) = listener.accept().await?;
-            let mut received = vec![0; expected_token.len()];
-            if tokio::time::timeout(Duration::from_millis(750), stream.read_exact(&mut received))
-                .await
-                .is_ok_and(|result| result.is_ok())
-                && received == expected_token
-            {
-                authenticated = true;
-                let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
-                    "launcher.cli_wrapper_authenticated",
-                    serde_json::json!({ "remainingBudgetMs": deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis() }),
-                );
-                // 令牌只证明包装器已进入启动流程，创建目标进程仍共享外层截止时间。
-                let mut status = [0];
-                let end = stream
-                    .read(&mut status)
+    let result = tokio::time::timeout_at(deadline, async {
+        let accept_handshake = async {
+            loop {
+                let (mut stream, _) = listener.accept().await?;
+                let mut received = vec![0; expected_token.len()];
+                if tokio::time::timeout(Duration::from_millis(750), stream.read_exact(&mut received))
                     .await
-                    .context("读取 Codex CLI 执行确认失败")?;
-                if end == 0 {
-                    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
-                        "launcher.cli_wrapper_exec_confirmed", serde_json::json!({}),
-                    );
-                    return Ok::<_, anyhow::Error>(());
-                }
-                let mut body = Vec::new();
-                let payload = tokio::time::timeout(
-                    Duration::from_millis(750),
-                    stream
-                        .take((MAX_CLI_WRAPPER_FAILURE_BYTES + 1) as u64)
-                        .read_to_end(&mut body),
-                )
-                .await;
-                let failure = if status[0] == b'!'
-                    && payload.is_ok_and(|result| result.is_ok())
-                    && body.len() <= MAX_CLI_WRAPPER_FAILURE_BYTES
+                    .is_ok_and(|result| result.is_ok())
+                    && received == expected_token
                 {
-                    serde_json::from_slice::<CliWrapperFailure>(&body).ok()
-                } else {
-                    None
+                    authenticated = true;
+                    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                        "launcher.cli_wrapper_authenticated",
+                        serde_json::json!({ "remainingBudgetMs": deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis() }),
+                    );
+                    // 令牌只证明包装器已进入启动流程，创建目标进程仍共享外层截止时间。
+                    let mut status = [0];
+                    let end = stream
+                        .read(&mut status)
+                        .await
+                        .context("读取 Codex CLI 执行确认失败")?;
+                    if end == 0 {
+                        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                            "launcher.cli_wrapper_exec_confirmed", serde_json::json!({}),
+                        );
+                        return Ok::<_, anyhow::Error>(());
+                    }
+                    let mut body = Vec::new();
+                    let payload = tokio::time::timeout(
+                        Duration::from_millis(750),
+                        stream
+                            .take((MAX_CLI_WRAPPER_FAILURE_BYTES + 1) as u64)
+                            .read_to_end(&mut body),
+                    )
+                    .await;
+                    let failure = if status[0] == b'!'
+                        && payload.is_ok_and(|result| result.is_ok())
+                        && body.len() <= MAX_CLI_WRAPPER_FAILURE_BYTES
+                    {
+                        serde_json::from_slice::<CliWrapperFailure>(&body).ok()
+                    } else {
+                        None
+                    }
+                    .unwrap_or_else(|| CliWrapperFailure {
+                        message: "目标程序未能执行，未收到完整的失败详情".to_string(),
+                        retryable: false,
+                    });
+                    return Err(failure.into());
                 }
-                .unwrap_or_else(|| CliWrapperFailure {
-                    message: "目标程序未能执行，未收到完整的失败详情".to_string(),
-                    retryable: false,
-                });
-                return Err(failure.into());
             }
+        };
+        let marker = watch_cli_wrapper_marker(&marker_path);
+        tokio::select! {
+            result = accept_handshake => result,
+            result = marker => result,
         }
     })
-    .await
-    .with_context(|| if authenticated {
-        "Codex CLI 包装器已连接，但等待目标程序执行确认超时"
-    } else {
-        "等待 Codex CLI 兼容执行器超时：未收到有效的包装器握手"
+    .await;
+    let _ = std::fs::remove_file(&marker_path);
+    result.with_context(|| {
+        if authenticated {
+            "Codex CLI 包装器已连接，但等待目标程序执行确认超时"
+        } else {
+            "等待 Codex CLI 兼容执行器超时：未收到有效的包装器握手，也没有执行记录"
+        }
     })?
 }
 
@@ -1124,6 +1577,42 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
 mod cli_wrapper_tests {
     use super::*;
 
+    #[cfg(any(windows, target_os = "macos"))]
+    fn test_handshake(
+        listener: tokio::net::TcpListener,
+        token: &[u8],
+    ) -> (CliWrapperHandshake, PathBuf) {
+        let marker_path = std::env::temp_dir().join(format!(
+            "codey-cli-wrapper-test-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        (
+            CliWrapperHandshake {
+                listener,
+                token: token.to_vec(),
+                marker_path: marker_path.clone(),
+            },
+            marker_path,
+        )
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    fn test_context(deadline: tokio::time::Instant) -> StartupWaitContext<'static> {
+        StartupWaitContext {
+            platform: "windows",
+            deadline,
+            renderer_debug_port: None,
+            spawned: None,
+        }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    const TEST_PATCH_OPTIONS: crate::codex_startup_patch::PatchOptions =
+        crate::codex_startup_patch::PatchOptions {
+            disable_pet: false,
+            subagent_gate_active: true,
+        };
+
     #[tokio::test(start_paused = true)]
     async fn startup_retry_requires_a_transient_error_and_is_limited_to_two_attempts() {
         let timeout = || {
@@ -1142,6 +1631,10 @@ mod cli_wrapper_tests {
             retryable: false,
         }
         .into();
+        let exited: anyhow::Error = crate::codex_startup_patch::StartupProcessExited {
+            process_id: Some(7),
+        }
+        .into();
         for (code, retryable) in [
             (5, false),
             (193, false),
@@ -1153,6 +1646,7 @@ mod cli_wrapper_tests {
         }
         assert!(should_retry_startup(&timeout(), 1));
         assert!(should_retry_startup(&transient, 1));
+        assert!(should_retry_startup(&exited, 1));
         assert!(!should_retry_startup(&invalid, 1));
         assert!(!should_retry_startup(&timeout(), 2));
         assert!(!startup_error_allows_retry(&combined_startup_error(
@@ -1175,19 +1669,16 @@ mod cli_wrapper_tests {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
+        let (handshake, _) = test_handshake(listener, b"token");
         let deadline = tokio::time::Instant::now() + Duration::from_millis(80);
         let result = tokio::time::timeout(
             Duration::from_millis(500),
             install_startup_patch_with_cli_fallback(
                 Some(port),
-                crate::codex_startup_patch::PatchOptions {
-                    disable_pet: false,
-                    subagent_gate_active: true,
-                },
+                TEST_PATCH_OPTIONS,
                 &["analytics.enabled=false".to_string()],
-                Some((listener, b"token".to_vec())),
-                "windows",
-                deadline,
+                Some(handshake),
+                test_context(deadline),
             ),
         )
         .await
@@ -1209,18 +1700,14 @@ mod cli_wrapper_tests {
         let first_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
-        let options = crate::codex_startup_patch::PatchOptions {
-            disable_pet: false,
-            subagent_gate_active: true,
-        };
+        let (first_handshake, _) = test_handshake(first_listener, b"token");
         let overrides = ["model_provider=\"codey_router\"".to_string()];
         let error = install_startup_patch_with_cli_fallback(
             Some(port),
-            options,
+            TEST_PATCH_OPTIONS,
             &overrides,
-            Some((first_listener, b"token".to_vec())),
-            "windows",
-            tokio::time::Instant::now() + Duration::from_millis(40),
+            Some(first_handshake),
+            test_context(tokio::time::Instant::now() + Duration::from_millis(40)),
         )
         .await
         .unwrap_err();
@@ -1234,35 +1721,36 @@ mod cli_wrapper_tests {
             .await
             .unwrap();
         let address = listener.local_addr().unwrap();
+        let (handshake, _) = test_handshake(listener, b"token");
         let sender = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(28)).await;
+            tokio::time::sleep(Duration::from_secs(45)).await;
             tokio::time::resume();
             let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
             stream.write_all(b"token").await.unwrap();
         });
         install_startup_patch_with_cli_fallback(
             None,
-            options,
+            TEST_PATCH_OPTIONS,
             &overrides,
-            Some((listener, b"token".to_vec())),
-            "windows",
-            tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT,
+            Some(handshake),
+            test_context(
+                tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_CLI_READY_TIMEOUT,
+            ),
         )
         .await
         .unwrap();
         sender.await.unwrap();
-        assert!(
-            install_startup_patch_with_cli_fallback(
-                None,
-                options,
-                &overrides,
-                None,
-                "windows",
-                tokio::time::Instant::now() + Duration::from_secs(1),
-            )
-            .await
-            .is_err()
-        );
+        let error = install_startup_patch_with_cli_fallback(
+            None,
+            TEST_PATCH_OPTIONS,
+            &overrides,
+            None,
+            test_context(tokio::time::Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("没有可用的 CLI 兼容入口"));
+        assert!(!startup_error_allows_retry(&error));
     }
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -1275,6 +1763,7 @@ mod cli_wrapper_tests {
                 .await
                 .unwrap();
             let address = listener.local_addr().unwrap();
+            let (handshake, _) = test_handshake(listener, b"token");
             let sender = tokio::spawn(async move {
                 let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
                 stream.write_all(b"token!").await.unwrap();
@@ -1294,15 +1783,13 @@ mod cli_wrapper_tests {
                 Duration::from_secs(5),
                 install_startup_patch_with_cli_fallback(
                     Some(port),
-                    crate::codex_startup_patch::PatchOptions {
-                        disable_pet: false,
-                        subagent_gate_active: true,
-                    },
+                    TEST_PATCH_OPTIONS,
                     &[],
-                    Some((listener, b"token".to_vec())),
-                    "windows",
-                    tokio::time::Instant::now()
-                        + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT,
+                    Some(handshake),
+                    test_context(
+                        tokio::time::Instant::now()
+                            + crate::codex_startup_patch::STARTUP_CLI_READY_TIMEOUT,
+                    ),
                 ),
             )
             .await
@@ -1324,6 +1811,7 @@ mod cli_wrapper_tests {
                 .await
                 .unwrap();
             let address = listener.local_addr().unwrap();
+            let (handshake, _) = test_handshake(listener, b"token");
             let sender = tokio::spawn(async move {
                 let mut invalid = tokio::net::TcpStream::connect(address).await.unwrap();
                 invalid.write_all(b"invalid").await.unwrap();
@@ -1338,15 +1826,152 @@ mod cli_wrapper_tests {
                 }
             });
             let result = wait_for_cli_wrapper(
-                listener,
-                b"token".to_vec(),
-                tokio::time::Instant::now()
-                    + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT,
+                handshake,
+                tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_CLI_READY_TIMEOUT,
             )
             .await;
             assert_eq!(result.is_err(), failed);
             sender.await.unwrap();
         }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn cli_wrapper_marker_confirms_execution_or_failure_without_a_connection() {
+        use crate::codex_startup_patch::{
+            CliWrapperFailure, CliWrapperMarker, CliWrapperMarkerStatus,
+        };
+
+        for failed in [false, true] {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let (handshake, marker_path) = test_handshake(listener, b"token");
+            let writer_path = marker_path.clone();
+            let writer = tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                CliWrapperMarker::new(CliWrapperMarkerStatus::Launching)
+                    .write(&writer_path)
+                    .unwrap();
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let mut marker = CliWrapperMarker::new(if failed {
+                    CliWrapperMarkerStatus::Failed
+                } else {
+                    CliWrapperMarkerStatus::Executed
+                });
+                if failed {
+                    marker.message = Some("运行文件暂时被占用".to_string());
+                    marker.retryable = Some(true);
+                }
+                marker.write(&writer_path).unwrap();
+            });
+            let result = wait_for_cli_wrapper(
+                handshake,
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await;
+            writer.await.unwrap();
+            if failed {
+                let error = result.unwrap_err();
+                let failure = error
+                    .downcast_ref::<CliWrapperFailure>()
+                    .expect("a failed marker must surface as a wrapper failure");
+                assert!(failure.message.contains("被占用"));
+                assert!(failure.retryable);
+            } else {
+                result.unwrap();
+            }
+            assert!(!marker_path.exists(), "the launcher removes its marker");
+        }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn startup_wait_ends_as_soon_as_the_codex_process_exits() {
+        #[cfg(target_os = "macos")]
+        let mut command = tokio::process::Command::new("sleep");
+        #[cfg(target_os = "macos")]
+        command.arg("30");
+        #[cfg(windows)]
+        let mut command = tokio::process::Command::new("cmd");
+        #[cfg(windows)]
+        command.args(["/c", "ping -n 30 127.0.0.1 > NUL"]);
+        let mut child = command.spawn().unwrap();
+        let process_id = child.id();
+        child.kill().await.unwrap();
+        let mut spawned = SpawnedCodex {
+            child: Some(child),
+            process_id,
+            #[cfg(unix)]
+            process_group_id: process_id,
+            #[cfg(target_os = "macos")]
+            inspector_argument: None,
+            performance_status: String::new(),
+            performance_detail: String::new(),
+        };
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let (handshake, marker_path) = test_handshake(listener, b"token");
+        let started = std::time::Instant::now();
+        let error = install_startup_patch_with_cli_fallback(
+            None,
+            TEST_PATCH_OPTIONS,
+            &[],
+            Some(handshake),
+            StartupWaitContext {
+                platform: "windows",
+                deadline: tokio::time::Instant::now()
+                    + crate::codex_startup_patch::STARTUP_CLI_READY_TIMEOUT,
+                renderer_debug_port: None,
+                spawned: Some(&mut spawned),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.is::<crate::codex_startup_patch::StartupProcessExited>(),
+            "{error:#}"
+        );
+        assert!(startup_error_allows_retry(&error));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let _ = std::fs::remove_file(marker_path);
+    }
+
+    #[test]
+    fn stale_cli_wrapper_markers_are_pruned() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now();
+        let old = now - Duration::from_secs(2 * 60 * 60);
+        let stale = temp.path().join("stale.json");
+        let fresh = temp.path().join("fresh.json");
+        let other = temp.path().join("stale.txt");
+        for path in [&stale, &fresh, &other] {
+            std::fs::write(path, "{}").unwrap();
+        }
+        for path in [&stale, &other] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        assert_eq!(
+            prune_cli_wrapper_markers(temp.path(), now, CLI_WRAPPER_MARKER_MAX_AGE),
+            1
+        );
+        assert!(!stale.exists());
+        assert!(fresh.exists());
+        assert!(other.exists());
+        assert_eq!(
+            prune_cli_wrapper_markers(
+                &temp.path().join("missing"),
+                now,
+                CLI_WRAPPER_MARKER_MAX_AGE
+            ),
+            0
+        );
     }
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -1362,6 +1987,7 @@ mod cli_wrapper_tests {
             .await
             .unwrap();
         let address = listener.local_addr().unwrap();
+        let (handshake, _) = test_handshake(listener, b"token");
         let sender = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(18)).await;
             tokio::time::resume();
@@ -1370,14 +1996,12 @@ mod cli_wrapper_tests {
         });
         install_startup_patch_with_cli_fallback(
             Some(inspector_port),
-            crate::codex_startup_patch::PatchOptions {
-                disable_pet: false,
-                subagent_gate_active: true,
-            },
+            TEST_PATCH_OPTIONS,
             &["analytics.enabled=false".to_string()],
-            Some((listener, b"token".to_vec())),
-            "windows",
-            tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT,
+            Some(handshake),
+            test_context(
+                tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_CLI_READY_TIMEOUT,
+            ),
         )
         .await
         .unwrap();
@@ -1427,7 +2051,7 @@ mod cli_wrapper_tests {
     }
 
     #[test]
-    fn windows_cli_runtime_is_staged_with_all_required_siblings() {
+    fn windows_cli_runtime_is_staged_once_and_repaired_when_a_copy_is_damaged() {
         let temp = tempfile::tempdir().unwrap();
         let resources = temp.path().join("resources");
         std::fs::create_dir_all(&resources).unwrap();
@@ -1439,20 +2063,46 @@ mod cli_wrapper_tests {
         assert_eq!(windows_cli_wrapper_target(temp.path()).unwrap(), target);
         let local_app_data = temp.path().join("local-app-data");
         let staged = stage_windows_cli_runtime(&target, &local_app_data).unwrap();
+        let staged_dir = staged.parent().unwrap().to_path_buf();
         assert!(staged.starts_with(local_app_data.join("OpenAI/Codex/bin")));
-        assert_eq!(
-            staged.parent().unwrap().file_name().unwrap(),
-            "657d1ed8f1a42bf7"
-        );
+        let directory_name = staged_dir.file_name().unwrap().to_str().unwrap();
+        assert_eq!(directory_name.len(), 16);
+        assert!(directory_name.chars().all(|c| c.is_ascii_hexdigit()));
         for name in WINDOWS_CLI_RUNTIME_FILES {
             assert_eq!(
-                std::fs::read(staged.parent().unwrap().join(name)).unwrap(),
+                std::fs::read(staged_dir.join(name)).unwrap(),
                 format!("payload:{name}").as_bytes()
             );
         }
+        let manifest: StagedRuntimeManifest = serde_json::from_slice(
+            &std::fs::read(staged_dir.join(STAGED_RUNTIME_MANIFEST)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.version, STAGED_RUNTIME_MANIFEST_VERSION);
+        assert_eq!(manifest.files.len(), WINDOWS_CLI_RUNTIME_FILES.len());
+        assert!(manifest.files.iter().all(|file| file.sha256.len() == 64));
+
+        // Unchanged package files reuse the directory without rewriting it.
+        std::fs::write(staged_dir.join("reused.marker"), "1").unwrap();
         assert_eq!(
             stage_windows_cli_runtime(&target, &local_app_data).unwrap(),
             staged
         );
+        assert!(staged_dir.join("reused.marker").exists());
+
+        // A damaged copy is detected by its size and staged again.
+        std::fs::write(&staged, "truncated").unwrap();
+        assert_eq!(
+            stage_windows_cli_runtime(&target, &local_app_data).unwrap(),
+            staged
+        );
+        assert_eq!(std::fs::read(&staged).unwrap(), b"payload:codex.exe");
+        assert!(!staged_dir.join("reused.marker").exists());
+
+        // A new package build gets its own directory.
+        std::fs::write(&target, "payload:codex.exe v2").unwrap();
+        let updated = stage_windows_cli_runtime(&target, &local_app_data).unwrap();
+        assert_ne!(updated.parent(), staged.parent());
+        assert_eq!(std::fs::read(&updated).unwrap(), b"payload:codex.exe v2");
     }
 }

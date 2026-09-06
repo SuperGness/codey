@@ -11,7 +11,7 @@ test("three-position GPU slider is accessible and available only on Windows", as
     readFile(new URL("src/FeaturePolicyCard.tsx", root), "utf8"),
     readAppStyles(root),
     readFile(new URL("src/App.tsx", root), "utf8"),
-    readFile(new URL("src/main.tsx", root), "utf8"),
+    readFile(new URL("src/dev/mockApi.ts", root), "utf8"),
   ]);
 
   assert.match(sectionsSource, /isWindowsClient: boolean/);

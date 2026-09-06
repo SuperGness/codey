@@ -7,10 +7,12 @@ mod codex_startup_patch;
 mod commands;
 mod config;
 mod crashpad_pending_guard;
+mod electron_fuses;
 mod error_log;
 pub mod fastctx;
 mod fastctx_route_gate;
 mod fs_util;
+mod hook_io;
 mod http_response;
 mod launcher;
 mod local_router;
@@ -43,7 +45,6 @@ mod trace_log_guard;
 mod trace_log_stats;
 mod update_helper;
 
-use std::path::Path;
 use std::sync::Arc;
 
 #[cfg(unix)]
@@ -158,35 +159,20 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
         );
         eprintln!("Codey 启动前恢复上次临时配置失败：{error:#}");
     }
-    if local_router_enabled {
-        if let Err(error) = launcher::prepare_persistent_router_resume_shim(codex_home).await {
-            error_log::record_failure_with_metadata(
-                "patch_failed",
-                "prepare_persistent_router_resume_shim_at_startup",
-                format!("{error:#}"),
-                error_log::FailureMetadata {
-                    stage: Some("startup.prepare_router_resume_shim".to_string()),
-                    recoverable: Some(true),
-                },
-                serde_json::json!({}),
-            );
-            eprintln!("Codey 启动前写入 codey_router 恢复兼容桩失败：{error:#}");
-        }
-        match repair_legacy_model_catalog(codex_home).await {
-            Ok(true) => eprintln!("已修复旧版 Codey 模型目录缺失的 description 字段"),
-            Ok(false) => {}
-            Err(error) => {
-                error_log::record_failure(
-                    "repair_failed",
-                    "repair_legacy_model_catalog",
-                    format!("{error:#}"),
-                    serde_json::json!({
-                        "codexHome": codex_home,
-                    }),
-                );
-                eprintln!("修复旧版 Codey 模型目录失败：{error:#}");
-            }
-        }
+    if local_router_enabled
+        && let Err(error) = launcher::prepare_persistent_router_resume_shim(codex_home).await
+    {
+        error_log::record_failure_with_metadata(
+            "patch_failed",
+            "prepare_persistent_router_resume_shim_at_startup",
+            format!("{error:#}"),
+            error_log::FailureMetadata {
+                stage: Some("startup.prepare_router_resume_shim".to_string()),
+                recoverable: Some(true),
+            },
+            serde_json::json!({}),
+        );
+        eprintln!("Codey 启动前写入 codey_router 恢复兼容桩失败：{error:#}");
     }
     let mut shutdown = Box::pin(shutdown_signal());
     let startup_update = startup_update::run(&state, &ui);
@@ -255,13 +241,6 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
         }
     }
     cleanup.map_err(anyhow::Error::msg)
-}
-
-async fn repair_legacy_model_catalog(home: &Path) -> Result<bool> {
-    let home = home.to_path_buf();
-    tokio::task::spawn_blocking(move || model_catalog::repair_missing_descriptions(&home))
-        .await
-        .map_err(anyhow::Error::from)?
 }
 
 async fn stop_runtime_with_retry(state: &Arc<AppState>) -> Result<(), String> {

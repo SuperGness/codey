@@ -14,13 +14,17 @@ const PATCH_RESULT: &str = "codey-startup-patch-installed-v39";
 const APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT: &str =
     "codey-app-server-runtime-overrides-verified";
 const MAX_INSPECTOR_TARGET_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Inspector 发现窗口。fuse 允许时 Node 在应用脚本运行前就绑定端口，20 秒足以覆盖冷启动。
 pub(crate) const STARTUP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const STARTUP_PATCH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(24);
-// 单次启动共用发现与安装预算；Windows 最多两次，清理后重新计时。
-pub(crate) const STARTUP_COMPATIBILITY_TIMEOUT: std::time::Duration =
-    STARTUP_READY_TIMEOUT.saturating_add(STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT);
+/// 单次启动尝试等待 CLI 包装器确认的上限。进程退出、明确失败或确认成功都会提前结束；
+/// Windows 最多两次尝试，清理后重新计时。
+pub(crate) const STARTUP_CLI_READY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(60);
+/// 回环端口连通性探测时限（渲染进程调试端口、Inspector 端口）。
+const LOOPBACK_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) const CLI_WRAPPER_TARGET_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TARGET";
@@ -32,6 +36,18 @@ pub(crate) const CLI_WRAPPER_SUBAGENT_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_SUBAG
 pub(crate) const CLI_WRAPPER_PORT_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_PORT";
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) const CLI_WRAPPER_TOKEN_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TOKEN";
+/// 包装器执行记录文件的绝对路径；回环握手丢失时启动器据此确认目标已执行。
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) const CLI_WRAPPER_MARKER_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_MARKER";
+#[cfg(any(windows, target_os = "macos", test))]
+const CLI_WRAPPER_HANDSHAKE_CONNECT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(500);
+/// 单次回连最多 500ms；被安全软件或高负载拖慢时在 3 秒内重试，端口被拒绝则立即放弃。
+#[cfg(any(windows, target_os = "macos", test))]
+const CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(any(windows, target_os = "macos", test))]
+const CLI_WRAPPER_HANDSHAKE_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(100);
 #[cfg(any(windows, test))]
 pub(crate) const WINDOWS_PACKAGE_RESUME_ARGUMENT: &str = "--codey-resume-packaged-app";
 
@@ -145,6 +161,126 @@ impl std::error::Error for CliWrapperFailure {}
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) const MAX_CLI_WRAPPER_FAILURE_BYTES: usize = 8 * 1024;
 
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) const MAX_CLI_WRAPPER_MARKER_BYTES: u64 = 16 * 1024;
+
+/// 包装器在握手端口之外留下的文件记录。回环连接被拖慢或丢失时，启动器仍能确认目标已执行，
+/// 不会因为一次握手丢失就杀掉健康的 Codex。
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CliWrapperMarkerStatus {
+    Launching,
+    Executed,
+    Failed,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CliWrapperMarker {
+    pub status: CliWrapperMarkerStatus,
+    pub pid: u32,
+    pub timestamp_ms: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+impl CliWrapperMarker {
+    pub(crate) fn new(status: CliWrapperMarkerStatus) -> Self {
+        Self {
+            status,
+            pid: std::process::id(),
+            timestamp_ms: crate::fs_util::timestamp_millis(),
+            message: None,
+            retryable: None,
+        }
+    }
+
+    pub(crate) fn write(&self, path: &std::path::Path) -> Result<()> {
+        crate::fs_util::atomic_write_private_with_parent(path, &serde_json::to_vec(self)?)
+    }
+
+    /// `Ok(None)` 表示文件尚不存在；内容无法解析时返回错误，由调用方决定是否继续等待。
+    pub(crate) fn read(path: &std::path::Path) -> Result<Option<Self>> {
+        match crate::fs_util::read_bounded(path, MAX_CLI_WRAPPER_MARKER_BYTES) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// 只接受启动器传入的绝对 JSON 路径，避免包装器把记录写到不可预期的位置。
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn cli_wrapper_marker_path_from_env(
+    value: Option<OsString>,
+) -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(value?);
+    (path.is_absolute()
+        && path
+            .extension()
+            .is_some_and(|extension| extension == "json"))
+    .then_some(path)
+}
+
+/// 渲染进程调试端口已应答而 Inspector 端口拒绝连接：Node 环境早已创建却没有 Inspector，
+/// 说明 `--inspect-brk` 被 Electron 丢弃，主进程补丁不会再有机会；进程本身在正常运行。
+#[derive(Debug)]
+pub(crate) struct InspectorUnavailable {
+    pub refused: u32,
+    pub elapsed_ms: u128,
+}
+
+impl std::fmt::Display for InspectorUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Codex 主进程 Inspector 不可用：渲染进程调试端口已就绪，但 Inspector 端口拒绝连接 {} 次（{} ms）",
+            self.refused, self.elapsed_ms
+        )
+    }
+}
+
+impl std::error::Error for InspectorUnavailable {}
+
+/// 启动兼容等待期间 Codex 进程已退出；无需再等待任何握手。
+#[derive(Debug)]
+pub(crate) struct StartupProcessExited {
+    pub process_id: Option<u32>,
+}
+
+impl std::fmt::Display for StartupProcessExited {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.process_id {
+            Some(process_id) => write!(
+                formatter,
+                "Codex 进程在启动兼容等待期间已退出（PID {process_id}）"
+            ),
+            None => write!(formatter, "Codex 进程在启动兼容等待期间已退出"),
+        }
+    }
+}
+
+impl std::error::Error for StartupProcessExited {}
+
+pub(crate) async fn loopback_port_accepts(port: u16) -> bool {
+    tokio::time::timeout(
+        LOOPBACK_PROBE_TIMEOUT,
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok())
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 fn cli_wrapper_target(
     arguments: &[OsString],
@@ -214,27 +350,8 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         .count()
         == 1;
     // 启动器只接收首次握手；之后 app-server 重启时仍必须能执行 CLI。
-    let readiness = if app_server && std::env::var_os(CLI_WRAPPER_TARGET_ENV).is_some() {
-        match notify_cli_wrapper_ready() {
-            Ok(stream) => Some(stream),
-            Err(error) => {
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_none_or(|error| error.kind() != std::io::ErrorKind::ConnectionRefused)
-                {
-                    crate::error_log::record_failure(
-                        "compatibility_fallback",
-                        "connect_cli_wrapper_handshake",
-                        format!("{error:#}"),
-                        serde_json::json!({}),
-                    );
-                }
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let readiness = (app_server && std::env::var_os(CLI_WRAPPER_TARGET_ENV).is_some())
+        .then(CliWrapperReadiness::begin);
     let mut input_router: Option<std::process::Child> = None;
     let launch = (|| -> Result<std::process::Child> {
         anyhow::ensure!(
@@ -274,6 +391,7 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
             CLI_WRAPPER_SUBAGENT_ENV,
             CLI_WRAPPER_PORT_ENV,
             CLI_WRAPPER_TOKEN_ENV,
+            CLI_WRAPPER_MARKER_ENV,
         ] {
             command.env_remove(name);
         }
@@ -319,6 +437,11 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         #[cfg(target_os = "macos")]
         {
             use std::os::unix::process::CommandExt;
+            // exec 成功后不再有机会写文件：先记录已执行，exec 失败时随后改写为失败。
+            if let Some(readiness) = readiness.as_ref() {
+                readiness.mark_executed();
+            }
+            let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
             Err(command.exec())
                 .with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
         }
@@ -338,22 +461,22 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
                 let _ = relay.kill();
                 let _ = relay.wait();
             }
-            if let Some(mut stream) = readiness {
+            if let Some(readiness) = readiness {
                 // 校验或创建进程失败必须显式回传，避免被误报成握手超时。
-                let failure = CliWrapperFailure {
+                readiness.fail(&CliWrapperFailure {
                     message: format!("{error:#}").chars().take(1024).collect(),
                     retryable: error
                         .downcast_ref::<std::io::Error>()
                         .is_some_and(is_retryable_startup_io_error),
-                };
-                let _ = stream.write_all(b"!");
-                let _ = serde_json::to_writer(&mut stream, &failure);
+                });
             }
             return Err(error);
         }
     };
     // macOS exec 成功由 CLOEXEC 关闭连接；Windows 只在 spawn 成功后关闭。
-    drop(readiness);
+    if let Some(readiness) = readiness {
+        readiness.executed();
+    }
     let status = child.wait();
     if let Some(mut relay) = input_router {
         let _ = relay.kill();
@@ -361,6 +484,7 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     }
     let status =
         status.with_context(|| format!("等待 Codex CLI 退出失败：{}", target.display()))?;
+    let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -468,7 +592,100 @@ fn windows_package_resume_thread_id(arguments: &[OsString]) -> Result<Option<u32
 }
 
 #[cfg(any(windows, target_os = "macos"))]
-fn notify_cli_wrapper_ready() -> Result<std::net::TcpStream> {
+/// 包装器向启动器汇报进度的两条通道：回环握手连接和记录文件。任一到达即可确认。
+#[cfg(any(windows, target_os = "macos"))]
+struct CliWrapperReadiness {
+    stream: Option<std::net::TcpStream>,
+    marker: Option<std::path::PathBuf>,
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl CliWrapperReadiness {
+    fn begin() -> Self {
+        let started = std::time::Instant::now();
+        let marker = cli_wrapper_marker_path_from_env(std::env::var_os(CLI_WRAPPER_MARKER_ENV));
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.cli_wrapper_started",
+            serde_json::json!({
+                "pid": std::process::id(),
+                "markerPresent": marker.is_some(),
+            }),
+        );
+        let readiness = Self {
+            stream: None,
+            marker,
+        };
+        readiness.mark(CliWrapperMarkerStatus::Launching, None);
+        let stream = match connect_cli_wrapper_handshake() {
+            Ok(stream) => Some(stream),
+            Err(error) => {
+                // 端口被拒绝说明启动器已不再监听（例如 app-server 重启），属正常情况。
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_none_or(|error| error.kind() != std::io::ErrorKind::ConnectionRefused)
+                {
+                    crate::error_log::record_failure(
+                        "compatibility_fallback",
+                        "connect_cli_wrapper_handshake",
+                        format!("{error:#}"),
+                        serde_json::json!({ "markerPresent": readiness.marker.is_some() }),
+                    );
+                }
+                None
+            }
+        };
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.cli_wrapper_handshake_connect",
+            serde_json::json!({
+                "connected": stream.is_some(),
+                "elapsedMs": started.elapsed().as_millis(),
+            }),
+        );
+        Self {
+            stream,
+            ..readiness
+        }
+    }
+
+    fn mark(&self, status: CliWrapperMarkerStatus, failure: Option<&CliWrapperFailure>) {
+        let Some(path) = self.marker.as_deref() else {
+            return;
+        };
+        let mut marker = CliWrapperMarker::new(status);
+        if let Some(failure) = failure {
+            marker.message = Some(failure.message.clone());
+            marker.retryable = Some(failure.retryable);
+        }
+        if let Err(error) = marker.write(path) {
+            crate::error_log::record_failure(
+                "compatibility_fallback",
+                "write_cli_wrapper_marker",
+                format!("{error:#}"),
+                serde_json::json!({ "marker": path, "status": status }),
+            );
+        }
+    }
+
+    fn mark_executed(&self) {
+        self.mark(CliWrapperMarkerStatus::Executed, None);
+    }
+
+    fn fail(mut self, failure: &CliWrapperFailure) {
+        self.mark(CliWrapperMarkerStatus::Failed, Some(failure));
+        if let Some(mut stream) = self.stream.take() {
+            let _ = stream.write_all(b"!");
+            let _ = serde_json::to_writer(&mut stream, failure);
+        }
+    }
+
+    /// 记录已执行；随后 drop 关闭握手连接，启动器以 EOF 作为执行确认。
+    fn executed(self) {
+        self.mark_executed();
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn connect_cli_wrapper_handshake() -> Result<std::net::TcpStream> {
     let port = std::env::var(CLI_WRAPPER_PORT_ENV)
         .context("Codex CLI 缺少兼容校验端口")?
         .parse::<u16>()
@@ -480,16 +697,46 @@ fn notify_cli_wrapper_ready() -> Result<std::net::TcpStream> {
         "Codex CLI 兼容校验令牌无效"
     );
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut stream =
-        std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(500))
-            .context("连接 Codex CLI 兼容校验端口失败")?;
+    let mut stream = connect_loopback_with_retry(
+        &address,
+        std::time::Instant::now() + CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET,
+    )
+    .context("连接 Codex CLI 兼容校验端口失败")?;
     stream
-        .set_write_timeout(Some(std::time::Duration::from_millis(500)))
+        .set_write_timeout(Some(CLI_WRAPPER_HANDSHAKE_CONNECT_TIMEOUT))
         .context("设置 Codex CLI 兼容校验写入时限失败")?;
     stream
         .write_all(token.as_bytes())
         .context("发送 Codex CLI 兼容校验令牌失败")?;
     Ok(stream)
+}
+
+/// 被拒绝立即返回；超时等暂时性错误在预算内重试，避免单次 500ms 连不上就静默放弃握手。
+#[cfg(any(windows, target_os = "macos", test))]
+fn connect_loopback_with_retry(
+    address: &std::net::SocketAddr,
+    deadline: std::time::Instant,
+) -> std::io::Result<std::net::TcpStream> {
+    let mut attempts = 0_u32;
+    loop {
+        attempts += 1;
+        match std::net::TcpStream::connect_timeout(address, CLI_WRAPPER_HANDSHAKE_CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                return Err(error);
+            }
+            Err(error) => {
+                let now = std::time::Instant::now();
+                if now + CLI_WRAPPER_HANDSHAKE_RETRY_DELAY >= deadline {
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("{error}（已重试 {attempts} 次）"),
+                    ));
+                }
+                std::thread::sleep(CLI_WRAPPER_HANDSHAKE_RETRY_DELAY);
+            }
+        }
+    }
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -595,8 +842,9 @@ pub async fn install(
     options: PatchOptions,
     runtime_config_overrides: &[String],
     require_app_server_runtime_overrides: bool,
+    renderer_debug_port: Option<u16>,
 ) -> Result<()> {
-    let websocket_url = wait_for_inspector(port).await?;
+    let websocket_url = wait_for_inspector(port, renderer_debug_port).await?;
     let expression = patch_expression_with_runtime_overrides_and_validation(
         options,
         runtime_config_overrides,
@@ -620,7 +868,25 @@ pub async fn install(
     Ok(())
 }
 
-async fn wait_for_inspector(port: u16) -> Result<String> {
+/// 从 reqwest 错误链里找出底层 socket 错误类型，用于区分「被拒绝」与「被拖住」。
+fn connect_error_kind(error: &reqwest::Error) -> Option<std::io::ErrorKind> {
+    if error.is_timeout() {
+        return Some(std::io::ErrorKind::TimedOut);
+    }
+    let mut source = std::error::Error::source(error);
+    while let Some(current) = source {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            return Some(io_error.kind());
+        }
+        source = current.source();
+    }
+    None
+}
+
+/// 等待 Inspector 的 `/json/list`。传入渲染进程调试端口时，一旦该端口已应答而 Inspector
+/// 端口仍被拒绝，立即返回 [`InspectorUnavailable`]：Chromium 的调试服务在应用脚本运行后
+/// 才监听，此时 Node 环境早已创建，Inspector 不会再出现，无需耗满发现窗口。
+async fn wait_for_inspector(port: u16, renderer_debug_port: Option<u16>) -> Result<String> {
     // 这里只访问本机 HTTP，无需同步加载系统 TLS 证书库。
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -628,9 +894,14 @@ async fn wait_for_inspector(port: u16) -> Result<String> {
         .timeout(std::time::Duration::from_millis(750))
         .build()?;
     let endpoint = format!("http://127.0.0.1:{port}/json/list");
-    let deadline = tokio::time::Instant::now() + STARTUP_READY_TIMEOUT;
+    let started = tokio::time::Instant::now();
+    let deadline = started + STARTUP_READY_TIMEOUT;
     let mut last_error = "调试端口尚未响应".to_string();
     let mut retry_delay = std::time::Duration::from_millis(20);
+    let mut refused = 0_u32;
+    let mut timed_out = 0_u32;
+    let mut other_errors = 0_u32;
+    let mut next_renderer_probe = started;
 
     while tokio::time::Instant::now() < deadline {
         match client.get(&endpoint).send().await {
@@ -664,7 +935,42 @@ async fn wait_for_inspector(port: u16) -> Result<String> {
                 }
             }
             Ok(response) => anyhow::bail!("Codex Inspector 返回 HTTP {}", response.status()),
-            Err(error) => last_error = format!("{:#}", anyhow::Error::new(error)),
+            Err(error) => {
+                match connect_error_kind(&error) {
+                    Some(std::io::ErrorKind::ConnectionRefused) => {
+                        refused += 1;
+                        let now = tokio::time::Instant::now();
+                        if let Some(debug_port) = renderer_debug_port
+                            && now >= next_renderer_probe
+                        {
+                            next_renderer_probe = now + std::time::Duration::from_millis(500);
+                            if loopback_port_accepts(debug_port).await {
+                                let elapsed_ms = started.elapsed().as_millis();
+                                let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                                    "launcher.inspector_probe_summary",
+                                    serde_json::json!({
+                                        "port": port,
+                                        "outcome": "unavailable",
+                                        "refused": refused,
+                                        "timedOut": timed_out,
+                                        "otherErrors": other_errors,
+                                        "rendererReady": true,
+                                        "elapsedMs": elapsed_ms,
+                                    }),
+                                );
+                                return Err(InspectorUnavailable {
+                                    refused,
+                                    elapsed_ms,
+                                }
+                                .into());
+                            }
+                        }
+                    }
+                    Some(std::io::ErrorKind::TimedOut) => timed_out += 1,
+                    _ => other_errors += 1,
+                }
+                last_error = format!("{:#}", anyhow::Error::new(error));
+            }
         }
         tokio::time::sleep(retry_delay).await;
         retry_delay = std::cmp::min(
@@ -673,9 +979,32 @@ async fn wait_for_inspector(port: u16) -> Result<String> {
         );
     }
 
+    let renderer_ready = match renderer_debug_port {
+        Some(debug_port) => Some(loopback_port_accepts(debug_port).await),
+        None => None,
+    };
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.inspector_probe_summary",
+        serde_json::json!({
+            "port": port,
+            "outcome": "timeout",
+            "refused": refused,
+            "timedOut": timed_out,
+            "otherErrors": other_errors,
+            "rendererReady": renderer_ready,
+            "elapsedMs": started.elapsed().as_millis(),
+        }),
+    );
+    let renderer_state = match renderer_ready {
+        Some(true) => "，渲染进程调试端口已就绪",
+        Some(false) => "，渲染进程调试端口未就绪",
+        None => "",
+    };
     Err(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
-        format!("等待 Codex 启动补丁超时：{last_error}"),
+        format!(
+            "等待 Codex 启动补丁超时：{last_error}；连接被拒绝 {refused} 次、超时 {timed_out} 次、其他错误 {other_errors} 次{renderer_state}"
+        ),
     )
     .into())
 }
@@ -1115,7 +1444,7 @@ mod tests {
             stream.write_all(response.as_bytes()).await.unwrap();
         });
         assert_eq!(
-            wait_for_inspector(port).await.unwrap(),
+            wait_for_inspector(port, None).await.unwrap(),
             "ws://127.0.0.1/test"
         );
         server.await.unwrap();
@@ -1443,5 +1772,83 @@ mod tests {
         );
         assert!(message.contains("not waiting"), "{message}");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inspector_wait_gives_up_once_the_renderer_port_answers_but_the_inspector_refuses() {
+        let renderer = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let renderer_port = renderer.local_addr().unwrap().port();
+        let inspector_port = reserve_loopback_port().unwrap();
+        let started = std::time::Instant::now();
+        let error = wait_for_inspector(inspector_port, Some(renderer_port))
+            .await
+            .unwrap_err();
+        let unavailable = error
+            .downcast_ref::<InspectorUnavailable>()
+            .unwrap_or_else(|| panic!("expected InspectorUnavailable, got {error:#}"));
+        assert!(unavailable.refused >= 1);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "must not wait for the full discovery window"
+        );
+        drop(renderer);
+    }
+
+    #[test]
+    fn cli_wrapper_marker_round_trips_and_only_accepts_absolute_json_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("marker.json");
+        assert!(CliWrapperMarker::read(&path).unwrap().is_none());
+        let mut marker = CliWrapperMarker::new(CliWrapperMarkerStatus::Failed);
+        marker.message = Some("boom".to_string());
+        marker.retryable = Some(true);
+        marker.write(&path).unwrap();
+        let read = CliWrapperMarker::read(&path).unwrap().unwrap();
+        assert_eq!(read.status, CliWrapperMarkerStatus::Failed);
+        assert_eq!(read.pid, std::process::id());
+        assert_eq!(read.message.as_deref(), Some("boom"));
+        assert_eq!(read.retryable, Some(true));
+        CliWrapperMarker::new(CliWrapperMarkerStatus::Executed)
+            .write(&path)
+            .unwrap();
+        let read = CliWrapperMarker::read(&path).unwrap().unwrap();
+        assert_eq!(read.status, CliWrapperMarkerStatus::Executed);
+        assert_eq!(read.message, None);
+        std::fs::write(&path, "not json").unwrap();
+        assert!(CliWrapperMarker::read(&path).is_err());
+
+        assert_eq!(
+            cli_wrapper_marker_path_from_env(Some(path.clone().into_os_string())),
+            Some(path.clone())
+        );
+        assert_eq!(
+            cli_wrapper_marker_path_from_env(Some(OsString::from("relative.json"))),
+            None
+        );
+        assert_eq!(
+            cli_wrapper_marker_path_from_env(Some(temp.path().join("marker.txt").into_os_string())),
+            None
+        );
+        assert_eq!(cli_wrapper_marker_path_from_env(None), None);
+    }
+
+    #[test]
+    fn handshake_connect_fails_fast_when_refused_and_connects_when_listening() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let deadline = std::time::Instant::now() + CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET;
+        connect_loopback_with_retry(&address, deadline).unwrap();
+        drop(listener);
+        let started = std::time::Instant::now();
+        let error =
+            connect_loopback_with_retry(&address, started + CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET)
+                .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "a refused port means the launcher is gone; never retry it"
+        );
     }
 }

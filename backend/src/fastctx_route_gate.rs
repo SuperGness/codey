@@ -1,7 +1,6 @@
 use std::ffi::OsStr;
-use std::io::{Read, Write};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -58,11 +57,10 @@ pub fn run_hook_if_requested() -> Result<bool> {
         return Ok(false);
     }
 
-    let mut raw = Vec::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES + 1)
-        .read_to_end(&mut raw)
-        .context("读取 Codex FastCtx 路由 Hook 输入失败")?;
+    let raw = crate::hook_io::read_stdin_bounded(
+        MAX_HOOK_INPUT_BYTES,
+        "读取 Codex FastCtx 路由 Hook 输入失败",
+    )?;
     // 路由改道只是上下文优化,不是安全边界:输入超限或解析失败时显式放行原命令,
     // 与未安装本 Hook 的行为一致,避免非零退出在 Codex 中被反复报告为 Hook 错误。
     if raw.len() as u64 > MAX_HOOK_INPUT_BYTES {
@@ -81,12 +79,7 @@ pub fn run_hook_if_requested() -> Result<bool> {
 }
 
 fn write_hook_output(output: &Value) -> Result<()> {
-    let mut stdout = std::io::stdout().lock();
-    serde_json::to_writer(&mut stdout, output)
-        .context("序列化 Codex FastCtx 路由 Hook 输出失败")?;
-    stdout.write_all(b"\n")?;
-    stdout.flush()?;
-    Ok(())
+    crate::hook_io::write_output(output, "序列化 Codex FastCtx 路由 Hook 输出失败")
 }
 
 fn handle_hook(input: &HookInput) -> Value {
@@ -122,7 +115,7 @@ pub(crate) fn hook_output(
         return json!({});
     };
 
-    deny(format!(
+    deny(&format!(
         "Codey FastCtx：请改用 `{}`；仅当该工具不可用时，才以 `{FALLBACK_MARKER}` 作为命令首行重试。",
         route.tool_name(),
     ))
@@ -144,16 +137,16 @@ fn guard_resource_read(tool_input: Option<&Value>) -> Value {
     let server = string_field(tool_input, "server");
     let uri = string_field(tool_input, "uri");
     if server.is_none_or(str::is_empty) || uri.is_none_or(str::is_empty) {
-        return deny(invalid_resource_read_reason());
+        return deny(&invalid_resource_read_reason());
     }
     if server.is_some_and(is_codey_fastctx_resource_alias) {
-        return deny(fastctx_resource_reason());
+        return deny(&fastctx_resource_reason());
     }
     if uri.is_some_and(is_local_file_uri) {
-        return deny(local_resource_bypass_reason());
+        return deny(&local_resource_bypass_reason());
     }
     if uri.is_some_and(|uri| is_plain_local_path(uri) || !has_uri_scheme(uri)) {
-        return deny(invalid_resource_read_reason());
+        return deny(&invalid_resource_read_reason());
     }
     json!({})
 }
@@ -164,12 +157,11 @@ fn guard_resource_list(tool_input: Option<&Value>) -> Value {
     };
     if server.trim().is_empty() {
         return deny(
-            "MCP 资源发现已停止：若要查询全部已配置服务器，请省略 `server`；若要查询单个服务器，请传入配置中真实存在的名称。"
-                .to_string(),
+            "MCP 资源发现已停止：若要查询全部已配置服务器，请省略 `server`；若要查询单个服务器，请传入配置中真实存在的名称。",
         );
     }
     if is_codey_fastctx_resource_alias(server) {
-        return deny(fastctx_resource_reason());
+        return deny(&fastctx_resource_reason());
     }
     json!({})
 }
@@ -229,7 +221,7 @@ fn local_resource_bypass_reason() -> String {
     "本地 `file://` MCP 资源读取已停止：本地工作区文件必须通过 Codey FastCtx 直接文件工具访问，不能经外部 filesystem 资源服务器绕过 direct-only 边界。请调用 `mcp__codey_fastctx__inspect_local_file`；搜索与发现请分别调用 `mcp__codey_fastctx__grep` 和 `mcp__codey_fastctx__glob`。".to_string()
 }
 
-fn deny(reason: String) -> Value {
+fn deny(reason: &str) -> Value {
     json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",

@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -142,11 +142,10 @@ pub fn run_hook_if_requested() -> Result<bool> {
         return Ok(true);
     }
 
-    let mut raw = Vec::new();
-    std::io::stdin()
-        .take(MAX_HOOK_INPUT_BYTES + 1)
-        .read_to_end(&mut raw)
-        .context("读取 Codex 子代理门禁 Hook 输入失败")?;
+    let raw = crate::hook_io::read_stdin_bounded(
+        MAX_HOOK_INPUT_BYTES,
+        "读取 Codex 子代理门禁 Hook 输入失败",
+    )?;
     let input = match parse_hook_input(&raw) {
         Ok(input) => input,
         Err(output) => {
@@ -196,7 +195,7 @@ fn undetermined_event_denial(detail: &str) -> Value {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": reason.clone(),
+            "permissionDecisionReason": reason,
         },
         "decision": "block",
         "reason": reason,
@@ -216,11 +215,7 @@ fn current_runtime_id() -> String {
 }
 
 fn write_hook_output(output: &Value) -> Result<()> {
-    let mut stdout = std::io::stdout().lock();
-    serde_json::to_writer(&mut stdout, output).context("序列化 Codex 子代理门禁 Hook 输出失败")?;
-    stdout.write_all(b"\n")?;
-    stdout.flush()?;
-    Ok(())
+    crate::hook_io::write_output(output, "序列化 Codex 子代理门禁 Hook 输出失败")
 }
 
 pub(crate) fn hook_commands() -> Result<HookCommands> {
@@ -463,7 +458,11 @@ fn record_hook_evaluation(
             .and_then(Value::as_str)
             .or_else(|| value.get("reason").and_then(Value::as_str))
     });
-    if decision == "allow" {
+    // Denials are always recorded. Allow decisions are sampled (about 1 in 50,
+    // keyed by the millisecond clock) so hook latency has a baseline without
+    // writing a trace line for every tool call.
+    let sampled_allow = decision == "allow";
+    if sampled_allow && !now_ms.is_multiple_of(50) {
         return;
     }
     let task_id = hook_task_identifier(input);
@@ -492,6 +491,9 @@ fn record_hook_evaluation(
         ),
         ("decision".into(), json!(decision)),
     ]);
+    if sampled_allow {
+        event.attributes.insert("sampled".into(), json!(true));
+    }
     if input.hook_event_name == "Stop" {
         let session_dir = session_state_dir(state_root, &input.session_id);
         let path = session_auxiliary_path(&session_dir, runtime_id, STOP_ABSOLUTE_SINCE_FILE);
@@ -856,7 +858,7 @@ fn pre_tool_use_output(
             return Ok(json!({}));
         };
         if let Some(reason) = runtime_subagent_attestation_denial(input, state_root, runtime_id)? {
-            return Ok(pre_tool_reason_denial(reason));
+            return Ok(pre_tool_reason_denial(&reason));
         }
         if let Some(agent_id) = child_agent_id {
             if let Some(reason) = crate::subagent_orchestrator::authorize_child_tool_with_context(
@@ -872,7 +874,7 @@ fn pre_tool_use_output(
                 },
                 now_ms,
             )? {
-                return Ok(pre_tool_reason_denial(reason));
+                return Ok(pre_tool_reason_denial(&reason));
             }
             return Ok(json!({}));
         }
@@ -899,7 +901,7 @@ fn pre_tool_use_output(
             return Ok(json!({}));
         }
         if is_collaboration_tool(tool_name) {
-            return Ok(pre_tool_reason_denial(format!(
+            return Ok(pre_tool_reason_denial(&format!(
                 "Codey 主体身份门禁：仍有 {active} 个活动子代理，但当前 PreToolUse 载荷既没有可信的 child 身份，也没有匹配本轮首个根派生调用的 turn_id，无法证明调用者是根代理。为防止匿名 child 派生、追派或中断，当前仅允许 agents.wait_agent 与不带筛选的 agents.list_agents 对账；其余编排调用已按 fail-closed 拒绝。"
             )));
         }
@@ -910,7 +912,7 @@ fn pre_tool_use_output(
         .is_some_and(is_followup_task_tool)
     {
         if let Some(reason) = protocol_issue_reason(state_root, runtime_id, &input.session_id)? {
-            return Ok(pre_tool_reason_denial(format!(
+            return Ok(pre_tool_reason_denial(&format!(
                 "CODEY_SUBAGENT_PROTOCOL_CIRCUIT_OPEN: {reason}。协议状态恢复前禁止追派；只可继续对账、中断或由根代理接管。"
             )));
         }
@@ -921,7 +923,7 @@ fn pre_tool_use_output(
             input.tool_input.as_ref(),
             now_ms,
         )? {
-            return Ok(pre_tool_reason_denial(reason));
+            return Ok(pre_tool_reason_denial(&reason));
         }
         return Ok(json!({}));
     }
@@ -931,14 +933,14 @@ fn pre_tool_use_output(
         .is_some_and(is_contract_spawn_tool)
     {
         if let Some(reason) = protocol_issue_reason(state_root, runtime_id, &input.session_id)? {
-            return Ok(pre_tool_reason_denial(format!(
+            return Ok(pre_tool_reason_denial(&format!(
                 "CODEY_SUBAGENT_PROTOCOL_CIRCUIT_OPEN: {reason}。当前无法可靠区分根代理和子代理，已停止继续派生；请先调用不带筛选的 agents.list_agents 对账。"
             )));
         }
         if let Some(role) = requested_spawn_role(input.tool_input.as_ref())
             && let Some(reason) = runtime_role_admission_denial(state_root, role)?
         {
-            return Ok(pre_tool_reason_denial(reason));
+            return Ok(pre_tool_reason_denial(&reason));
         }
         let process_cwd = std::env::current_dir()
             .ok()
@@ -951,7 +953,7 @@ fn pre_tool_use_output(
             input.tool_input.as_ref(),
             crate::subagent_orchestrator::RootHookContext::new(workspace_root, active, now_ms),
         )? {
-            return Ok(pre_tool_reason_denial(reason));
+            return Ok(pre_tool_reason_denial(&reason));
         }
         if active == 0
             && let Some(turn_id) = nonempty(input.turn_id.as_deref())
@@ -1467,7 +1469,7 @@ fn pre_tool_denial(active: usize, protocol_issue: Option<&str>) -> Value {
     })
 }
 
-fn pre_tool_reason_denial(reason: String) -> Value {
+fn pre_tool_reason_denial(reason: &str) -> Value {
     json!({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -2681,8 +2683,8 @@ mod tests {
                 "id": "receipt_reader",
                 "why": "independent_review",
                 "visual": false,
-                "root": workspace.clone(),
-                "read": [scope.clone()],
+                "root": workspace,
+                "read": [scope],
                 "write": [],
                 "checks": []
             }))
@@ -2692,7 +2694,7 @@ mod tests {
         let task_path = "/root/receipt_reader";
         let mut spawned = input("PostToolUse", session_id);
         spawned.tool_name = spawn.tool_name.clone();
-        spawned.tool_input = spawn.tool_input.clone();
+        spawned.tool_input = spawn.tool_input;
         spawned.tool_response = Some(Value::String(
             serde_json::to_string(&json!({ "task_name": task_path })).unwrap(),
         ));
@@ -2785,7 +2787,7 @@ mod tests {
 
         let mut spawned = input("PostToolUse", session_id);
         spawned.tool_name = spawn.tool_name.clone();
-        spawned.tool_input = spawn.tool_input.clone();
+        spawned.tool_input = spawn.tool_input;
         spawned.tool_response = Some(Value::String(
             r#"{"task_name":"/root/spoof_reader"}"#.to_string(),
         ));
@@ -2862,7 +2864,7 @@ mod tests {
 
         let mut spawned = input("PostToolUse", "contract-session");
         spawned.tool_name = spawn.tool_name.clone();
-        spawned.tool_input = spawn.tool_input.clone();
+        spawned.tool_input = spawn.tool_input;
         spawned.tool_response = Some(json!({ "agent_id": "agent-a" }));
         assert_eq!(handle_hook(&spawned, root).unwrap(), json!({}));
 
@@ -2943,7 +2945,7 @@ mod tests {
         let agent_id = "/root/followup_worker";
         let mut spawned = input("PostToolUse", session_id);
         spawned.tool_name = spawn.tool_name.clone();
-        spawned.tool_input = spawn.tool_input.clone();
+        spawned.tool_input = spawn.tool_input;
         spawned.tool_response = Some(json!({ "task_name": agent_id }));
         assert_eq!(handle_hook(&spawned, root).unwrap(), json!({}));
         let mut started = input("SubagentStart", session_id);
@@ -3012,7 +3014,7 @@ mod tests {
         );
         let mut spawned = input("PostToolUse", session_id);
         spawned.tool_name = spawn.tool_name.clone();
-        spawned.tool_input = spawn.tool_input.clone();
+        spawned.tool_input = spawn.tool_input;
         spawned.tool_response = Some(json!({ "agent_id": target }));
         handle_hook_for_runtime_at(&spawned, root, runtime_id, 20).unwrap();
         let mut started = input("SubagentStart", session_id);
@@ -3116,7 +3118,7 @@ mod tests {
         handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap();
         let mut spawned = input("PostToolUse", session_id);
         spawned.tool_name = spawn.tool_name.clone();
-        spawned.tool_input = spawn.tool_input.clone();
+        spawned.tool_input = spawn.tool_input;
         spawned.tool_response = Some(json!({ "agent_id": target }));
         handle_hook_for_runtime_at(&spawned, root, runtime_id, 20).unwrap();
         let mut started = input("SubagentStart", session_id);
@@ -3191,7 +3193,7 @@ mod tests {
         handle_hook_for_runtime_at(&spawn, root, old_runtime, 10).unwrap();
         let mut spawned = input("PostToolUse", session_id);
         spawned.tool_name = spawn.tool_name.clone();
-        spawned.tool_input = spawn.tool_input.clone();
+        spawned.tool_input = spawn.tool_input;
         spawned.tool_response = Some(json!({ "agent_id": target }));
         handle_hook_for_runtime_at(&spawned, root, old_runtime, 20).unwrap();
         let mut started = input("SubagentStart", session_id);
@@ -3286,7 +3288,7 @@ mod tests {
         handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap();
         let mut spawned = input("PostToolUse", session_id);
         spawned.tool_name = spawn.tool_name.clone();
-        spawned.tool_input = spawn.tool_input.clone();
+        spawned.tool_input = spawn.tool_input;
         spawned.tool_response = Some(json!({ "agent_id": target }));
         handle_hook_for_runtime_at(&spawned, root, runtime_id, 20).unwrap();
         let mut started = input("SubagentStart", session_id);
@@ -3357,7 +3359,7 @@ mod tests {
         handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap();
         let mut spawned = input("PostToolUse", session_id);
         spawned.tool_name = spawn.tool_name.clone();
-        spawned.tool_input = spawn.tool_input.clone();
+        spawned.tool_input = spawn.tool_input;
         spawned.tool_response = Some(json!({ "agent_id": target }));
         handle_hook_for_runtime_at(&spawned, root, runtime_id, 20).unwrap();
 
@@ -3423,7 +3425,7 @@ mod tests {
 
         let mut spawned = input("PostToolUse", "native-writer-session");
         spawned.tool_name = spawn.tool_name.clone();
-        spawned.tool_input = spawn.tool_input.clone();
+        spawned.tool_input = spawn.tool_input;
         spawned.tool_response = Some(json!({ "agent_id": "/root/native_worker" }));
         handle_hook(&spawned, state_root).unwrap();
 
@@ -4007,7 +4009,7 @@ mod tests {
             handle_hook_for_runtime_at(&spawn, root, runtime_id, now_ms).unwrap();
             let mut spawned = input("PostToolUse", session_id);
             spawned.tool_name = spawn.tool_name.clone();
-            spawned.tool_input = spawn.tool_input.clone();
+            spawned.tool_input = spawn.tool_input;
             spawned.tool_response = Some(json!({
                 "agent_id": format!("agent-{task_id}")
             }));
@@ -4138,7 +4140,7 @@ mod tests {
             let mut spawned = input("PostToolUse", session_id);
             spawned.turn_id = Some(root_turn.to_string());
             spawned.tool_name = spawn.tool_name.clone();
-            spawned.tool_input = spawn.tool_input.clone();
+            spawned.tool_input = spawn.tool_input;
             spawned.tool_response = Some(json!({ "agent_id": agent_id }));
             assert_eq!(
                 handle_hook_for_runtime_at(&spawned, root, runtime_id, now_ms + 1).unwrap(),
@@ -4636,7 +4638,7 @@ mod tests {
             let mut response = input("PostToolUse", session_id);
             response.turn_id = request.turn_id.clone();
             response.tool_name = request.tool_name.clone();
-            response.tool_input = request.tool_input.clone();
+            response.tool_input = request.tool_input;
             response.tool_response = Some(json!({ "agent_id": agent_id }));
             assert_eq!(
                 handle_hook_for_runtime_at(&response, root, runtime_id, now_ms + 1).unwrap(),
@@ -4922,7 +4924,7 @@ mod tests {
             handle_hook_for_runtime_at(&spawn, root, runtime_id, now_ms).unwrap();
             let mut spawned = input("PostToolUse", session_id);
             spawned.tool_name = spawn.tool_name.clone();
-            spawned.tool_input = spawn.tool_input.clone();
+            spawned.tool_input = spawn.tool_input;
             spawned.tool_response = Some(json!({ "agent_id": target }));
             handle_hook_for_runtime_at(&spawned, root, runtime_id, now_ms + 1).unwrap();
             let mut started = input("SubagentStart", session_id);
@@ -5060,7 +5062,7 @@ mod tests {
         handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap();
         let mut spawned = input("PostToolUse", session_id);
         spawned.tool_name = spawn.tool_name.clone();
-        spawned.tool_input = spawn.tool_input.clone();
+        spawned.tool_input = spawn.tool_input;
         spawned.tool_response = Some(json!({ "agent_id": target }));
         handle_hook_for_runtime_at(&spawned, root, runtime_id, 20).unwrap();
         let mut started = input("SubagentStart", session_id);

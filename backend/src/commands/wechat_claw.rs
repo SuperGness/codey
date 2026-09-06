@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use futures_util::stream::{self, StreamExt};
 use qrcode::{QrCode, render::svg};
-use reqwest::{Client, RequestBuilder, StatusCode, Url, header::HeaderMap, redirect};
+use reqwest::{Client, RequestBuilder, StatusCode, Url, redirect};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::{AppState, save_config_to_store};
 use crate::config::CodeyConfig;
+use crate::notifications::ilink;
 use crate::notifications::{
     NotificationChannelConfig, NotificationChannelKind, NotificationChannelSessionStatus,
 };
@@ -460,7 +461,7 @@ async fn notify_stop_wechat_claw_channels(client: &Client, channels: Vec<WechatC
                     &channel.base_url,
                     &channel.bot_token,
                     "ilink/bot/msg/notifystop",
-                    json!({"base_info": wechat_claw_base_info()}),
+                    &json!({"base_info": ilink::base_info()}),
                 )?
                 .timeout(SYNC_STOP_TIMEOUT);
                 activation_response_json(
@@ -491,7 +492,7 @@ async fn sync_wechat_claw_channel(
             &channel.base_url,
             &channel.bot_token,
             "ilink/bot/msg/notifystart",
-            json!({"base_info": wechat_claw_base_info()}),
+            &json!({"base_info": ilink::base_info()}),
         )?;
         activation_response_json(
             request,
@@ -510,9 +511,9 @@ async fn sync_wechat_claw_channel(
         &channel.base_url,
         &channel.bot_token,
         "ilink/bot/getupdates",
-        json!({
+        &json!({
             "get_updates_buf": channel.get_updates_buf,
-            "base_info": wechat_claw_base_info(),
+            "base_info": ilink::base_info(),
         }),
     )
     .map_err(|error| error.with_notify_started(notify_started))?;
@@ -589,14 +590,14 @@ fn sync_ilink_post_request(
     base_url: &Url,
     bot_token: &str,
     endpoint: &str,
-    body: Value,
+    body: &Value,
 ) -> Result<RequestBuilder, WechatClawSyncFailure> {
     let endpoint = base_url
         .join(endpoint)
         .map_err(|_| "微信 ClawBot 服务地址无效".to_string())?;
     Ok(client
         .post(endpoint)
-        .headers(ilink_headers(Some(bot_token)))
+        .headers(ilink::headers(Some(bot_token)))
         .json(&body))
 }
 
@@ -714,7 +715,7 @@ async fn refresh_wechat_claw_channel_context_locked(
         &sync_channel.base_url,
         &sync_channel.bot_token,
         "ilink/bot/msg/notifystart",
-        json!({"base_info": wechat_claw_base_info()}),
+        &json!({"base_info": ilink::base_info()}),
     )
     .map_err(|error| error.message)?
     .timeout(SYNC_RECOVERY_PREPARE_TIMEOUT);
@@ -898,7 +899,7 @@ async fn poll_wechat_claw_qr(
         .wechat_claw_login_http_client
         .get(url)
         .query(&[("qrcode", qr_code)])
-        .headers(ilink_headers(None))
+        .headers(ilink::headers(None))
         .send()
         .await
         .map_err(|_| "无法查询微信 ClawBot 扫码状态，请检查网络后重试".to_string())?;
@@ -1129,7 +1130,7 @@ fn notify_start_request(
         base_url,
         bot_token,
         "ilink/bot/msg/notifystart",
-        json!({"base_info": wechat_claw_base_info()}),
+        &json!({"base_info": ilink::base_info()}),
     )
 }
 
@@ -1144,9 +1145,9 @@ fn get_updates_request(
         base_url,
         bot_token,
         "ilink/bot/getupdates",
-        json!({
+        &json!({
             "get_updates_buf": get_updates_buf,
-            "base_info": wechat_claw_base_info(),
+            "base_info": ilink::base_info(),
         }),
     )
 }
@@ -1156,11 +1157,11 @@ fn ilink_post_request(
     base_url: &str,
     bot_token: &str,
     endpoint: &str,
-    body: Value,
+    body: &Value,
 ) -> Result<RequestBuilder, String> {
     Ok(client
         .post(endpoint_url(base_url, endpoint)?)
-        .headers(ilink_headers(Some(bot_token)))
+        .headers(ilink::headers(Some(bot_token)))
         .json(&body))
 }
 
@@ -1345,13 +1346,6 @@ fn bounded_remote_message(message: &str) -> String {
     }
 }
 
-fn wechat_claw_base_info() -> Value {
-    json!({
-        "channel_version": env!("CARGO_PKG_VERSION"),
-        "bot_agent": format!("Codey/{}", env!("CARGO_PKG_VERSION")),
-    })
-}
-
 impl WechatClawLoginState {
     fn remove_expired(&mut self) {
         self.sessions
@@ -1372,7 +1366,7 @@ fn get_bot_qrcode_request(client: &Client) -> Result<reqwest::RequestBuilder, St
     Ok(client
         .post(url)
         .query(&[("bot_type", "3")])
-        .headers(ilink_headers(None))
+        .headers(ilink::headers(None))
         // The official client accepts a list of known local bot tokens here.
         // Codey intentionally keeps this isolated notification binding stateless.
         .json(&json!({"local_token_list": []})))
@@ -1433,46 +1427,6 @@ fn qr_code_image_data_uri(value: &str) -> Result<String, String> {
         "data:image/svg+xml;base64,{}",
         STANDARD.encode(image)
     ))
-}
-
-fn ilink_headers(token: Option<&str>) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "AuthorizationType",
-        "ilink_bot_token".parse().expect("static header"),
-    );
-    headers.insert(
-        "X-WECHAT-UIN",
-        random_wechat_uin().parse().expect("base64 header"),
-    );
-    headers.insert("iLink-App-Id", "bot".parse().expect("static header"));
-    headers.insert(
-        "iLink-App-ClientVersion",
-        ilink_client_version().parse().expect("numeric header"),
-    );
-    if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
-        headers.insert(
-            "Authorization",
-            format!("Bearer {token}").parse().expect("token header"),
-        );
-    }
-    headers
-}
-
-fn random_wechat_uin() -> String {
-    let uuid = Uuid::new_v4();
-    let value = u32::from_be_bytes(uuid.as_bytes()[..4].try_into().expect("UUID prefix"));
-    STANDARD.encode(value.to_string())
-}
-
-fn ilink_client_version() -> String {
-    let mut components = env!("CARGO_PKG_VERSION")
-        .split('.')
-        .map(|part| part.parse::<u32>().unwrap_or(0));
-    let major = components.next().unwrap_or(0) & 0xff;
-    let minor = components.next().unwrap_or(0) & 0xff;
-    let patch = components.next().unwrap_or(0) & 0xff;
-    ((major << 16) | (minor << 8) | patch).to_string()
 }
 
 async fn login_response_json(response: reqwest::Response) -> Result<Value, String> {
@@ -1960,7 +1914,7 @@ mod tests {
 
     #[test]
     fn login_headers_include_the_required_ilink_identifiers() {
-        let headers = ilink_headers(None);
+        let headers = ilink::headers(None);
         assert_eq!(headers["authorizationtype"], "ilink_bot_token");
         assert_eq!(headers["ilink-app-id"], "bot");
         assert!(headers.contains_key("x-wechat-uin"));

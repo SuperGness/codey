@@ -101,7 +101,7 @@ impl SessionMetadataCache {
                 metadata
                     .catalog_titles
                     .into_iter()
-                    .filter_map(clean_session_name_candidate),
+                    .filter_map(|value| clean_session_name_candidate(&value)),
             );
         }
 
@@ -408,11 +408,11 @@ fn session_timestamp_rows(
 }
 
 fn clean_optional_session_name(value: Option<String>) -> Option<String> {
-    value.and_then(clean_session_name_candidate)
+    value.as_deref().and_then(clean_session_name_candidate)
 }
 
-fn clean_session_name_candidate(value: String) -> Option<String> {
-    let value = clean_session_name(&value);
+fn clean_session_name_candidate(value: &str) -> Option<String> {
+    let value = clean_session_name(value);
     (!value.is_empty()).then_some(value)
 }
 

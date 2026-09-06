@@ -204,7 +204,7 @@ pub(super) async fn spawn_windows_codex(
 ) -> Result<(SpawnedCodex, Option<WindowsPackageDebugSession>, bool)> {
     anyhow::ensure!(
         !require_wrapper_environment || !environment.is_empty(),
-        "Codex CLI 重试缺少运行环境，已停止启动"
+        "Codex CLI 兼容入口缺少运行环境，已停止启动"
     );
     if let Some(activation) =
         codey_runtime_core::launcher::build_packaged_activation(app_dir, debug_port, extra_args)
@@ -221,7 +221,8 @@ pub(super) async fn spawn_windows_codex(
                 Ok(session) => Some(session),
                 Err(error) => {
                     if require_wrapper_environment {
-                        return Err(error).context("Codex CLI 重试无法应用运行环境，已停止启动");
+                        return Err(error)
+                            .context("Codex CLI 兼容入口无法应用运行环境，已停止启动");
                     }
                     error_log::record_failure(
                         "compatibility_fallback",

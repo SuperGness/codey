@@ -281,8 +281,7 @@ fn rewrite_marketplace_name(root: &Path) -> anyhow::Result<()> {
     marketplace["name"] = serde_json::Value::String(CODEY_CURATED_MARKETPLACE.to_string());
     let encoded = serde_json::to_vec_pretty(&marketplace)
         .with_context(|| format!("failed to encode {}", path.display()))?;
-    crate::settings::atomic_write(&path, &encoded)
-        .with_context(|| format!("failed to write {}", path.display()))
+    atomic_write(&path, &encoded).with_context(|| format!("failed to write {}", path.display()))
 }
 
 fn install_openai_curated_remote_marketplace_zip(home: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -693,6 +692,32 @@ fn ensure_trailing_newline(mut contents: String) -> String {
         contents.push('\n');
     }
     contents
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::fs;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "marketplace".to_string());
+    let temp_path = path.with_file_name(format!(".{file_name}.{}.tmp", uuid::Uuid::new_v4()));
+    fs::write(&temp_path, bytes)
+        .with_context(|| format!("failed to write temp file {}", temp_path.display()))?;
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error).with_context(|| {
+            format!(
+                "failed to replace {} with {}",
+                path.display(),
+                temp_path.display()
+            )
+        });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

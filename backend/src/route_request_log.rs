@@ -1590,7 +1590,7 @@ impl BatchSink {
             )
             .map(Self::Ndjson),
             RouteRequestLogBackend::Sqlite => {
-                SqliteSink::open(config.root.join(SQLITE_FILE_NAME), config.retention_days)
+                SqliteSink::open(&config.root.join(SQLITE_FILE_NAME), config.retention_days)
                     .map(Self::Sqlite)
                     .map_err(std::io::Error::other)
             }
@@ -1694,9 +1694,9 @@ struct SqliteSink {
 }
 
 impl SqliteSink {
-    fn open(path: PathBuf, retention_days: u32) -> anyhow::Result<Self> {
-        ensure_private_sqlite_file(&path)?;
-        let connection = Connection::open(&path)?;
+    fn open(path: &Path, retention_days: u32) -> anyhow::Result<Self> {
+        ensure_private_sqlite_file(path)?;
+        let connection = Connection::open(path)?;
         connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -1755,7 +1755,6 @@ impl SqliteSink {
              CREATE INDEX IF NOT EXISTS idx_route_request_logs_status
                 ON route_request_logs(status, timestamp_unix_ms);",
         )?;
-        ensure_sqlite_log_columns(&connection)?;
         let retention_ms = u64::from(retention_days)
             .saturating_mul(24 * 60 * 60)
             .saturating_mul(1_000);
@@ -1885,12 +1884,12 @@ pub(crate) fn query_route_request_logs(
     if !path.is_file() {
         return Ok(empty_query_page(query.page, query.page_size));
     }
-    query_sqlite_route_request_logs(&path, query)
+    query_sqlite_route_request_logs(&path, &query)
 }
 
 fn query_sqlite_route_request_logs(
     path: &Path,
-    query: RouteRequestLogQuery,
+    query: &RouteRequestLogQuery,
 ) -> anyhow::Result<RouteRequestLogQueryPage> {
     let mut connection = Connection::open_with_flags(
         path,
@@ -1898,20 +1897,8 @@ fn query_sqlite_route_request_logs(
     )?;
     connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
     connection.pragma_update(None, "query_only", "ON")?;
-    let has_router_pre_upstream_ms =
-        sqlite_table_has_column(&connection, "router_pre_upstream_ms")?;
-    let has_upstream_first_byte_ms =
-        sqlite_table_has_column(&connection, "upstream_first_byte_ms")?;
-    let has_downstream_first_content_ms =
-        sqlite_table_has_column(&connection, "downstream_first_content_ms")?;
-    let has_upstream_error_summary =
-        sqlite_table_has_column(&connection, "upstream_error_summary")?;
-    let has_codex_session_id = sqlite_table_has_column(&connection, "codex_session_id")?;
-    let has_codex_session_is_parent =
-        sqlite_table_has_column(&connection, "codex_session_is_parent")?;
     let transaction = connection.transaction()?;
-    let (where_clause, filter_params) =
-        sqlite_query_filters(&query, has_upstream_error_summary, has_codex_session_id);
+    let (where_clause, filter_params) = sqlite_query_filters(query);
     let count_sql = format!("SELECT COUNT(*) FROM route_request_logs{where_clause}");
     let total_i64: i64 =
         transaction.query_row(&count_sql, params_from_iter(filter_params.iter()), |row| {
@@ -1920,42 +1907,12 @@ fn query_sqlite_route_request_logs(
     let total = u64::try_from(total_i64).unwrap_or_default();
     let total_pages = total.div_ceil(query.page_size);
     let offset = query.page.saturating_sub(1).saturating_mul(query.page_size);
-    let upstream_error_summary_column = if has_upstream_error_summary {
-        "upstream_error_summary"
-    } else {
-        "NULL AS upstream_error_summary"
-    };
-    let router_pre_upstream_ms_column = if has_router_pre_upstream_ms {
-        "router_pre_upstream_ms"
-    } else {
-        "NULL AS router_pre_upstream_ms"
-    };
-    let upstream_first_byte_ms_column = if has_upstream_first_byte_ms {
-        "upstream_first_byte_ms"
-    } else {
-        "NULL AS upstream_first_byte_ms"
-    };
-    let downstream_first_content_ms_column = if has_downstream_first_content_ms {
-        "downstream_first_content_ms"
-    } else {
-        "NULL AS downstream_first_content_ms"
-    };
-    let codex_session_id_column = if has_codex_session_id {
-        "codex_session_id"
-    } else {
-        "NULL AS codex_session_id"
-    };
-    let codex_session_is_parent_column = if has_codex_session_is_parent {
-        "codex_session_is_parent"
-    } else {
-        "0 AS codex_session_is_parent"
-    };
     let select_sql = format!(
         "SELECT
             request_id, trace_id, timestamp_unix_ms, provider, provider_name,
             requested_model, model, reasoning_effort, thinking_budget_tokens,
-            ttft_ms, {router_pre_upstream_ms_column}, {upstream_first_byte_ms_column},
-            {downstream_first_content_ms_column}, upstream_header_ms, total_duration_ms, queue_delay_ms,
+            ttft_ms, router_pre_upstream_ms, upstream_first_byte_ms,
+            downstream_first_content_ms, upstream_header_ms, total_duration_ms, queue_delay_ms,
             input_tokens, output_tokens, cached_input_tokens,
             cache_creation_input_tokens, reasoning_output_tokens, total_tokens,
             usage_reported, usage_unavailable_reason, request_protocol,
@@ -1963,8 +1920,8 @@ fn query_sqlite_route_request_logs(
             upstream_status_code, error_code, completion_reason, fallback_count,
             fallback_reason, upstream_authority,
             upstream_request_id, upstream_protocol, protocol_bridge,
-            first_byte_source, subagent, {upstream_error_summary_column},
-            {codex_session_id_column}, {codex_session_is_parent_column}
+            first_byte_source, subagent, upstream_error_summary,
+            codex_session_id, codex_session_is_parent
          FROM route_request_logs{where_clause}
          ORDER BY timestamp_unix_ms DESC, request_id DESC
          LIMIT ? OFFSET ?"
@@ -2006,16 +1963,12 @@ fn empty_query_page(page: u64, page_size: u64) -> RouteRequestLogQueryPage {
     }
 }
 
-fn sqlite_query_filters(
-    query: &RouteRequestLogQuery,
-    has_upstream_error_summary: bool,
-    has_codex_session_id: bool,
-) -> (String, Vec<SqlValue>) {
+fn sqlite_query_filters(query: &RouteRequestLogQuery) -> (String, Vec<SqlValue>) {
     let mut clauses: Vec<String> = Vec::new();
     let mut values = Vec::new();
     if let Some(search) = &query.search {
         let pattern = format!("%{}%", escape_like_pattern(search));
-        let mut search_clause = String::from(
+        let search_clause = String::from(
             "(request_id LIKE ? ESCAPE '\\'
               OR trace_id LIKE ? ESCAPE '\\'
               OR COALESCE(provider, '') LIKE ? ESCAPE '\\'
@@ -2023,18 +1976,11 @@ fn sqlite_query_filters(
               OR requested_model LIKE ? ESCAPE '\\'
               OR COALESCE(model, '') LIKE ? ESCAPE '\\'
               OR COALESCE(error_code, '') LIKE ? ESCAPE '\\'
-              OR COALESCE(upstream_request_id, '') LIKE ? ESCAPE '\\'",
+              OR COALESCE(upstream_request_id, '') LIKE ? ESCAPE '\\'
+              OR COALESCE(upstream_error_summary, '') LIKE ? ESCAPE '\\'
+              OR COALESCE(codex_session_id, '') LIKE ? ESCAPE '\\')",
         );
-        values.extend((0..8).map(|_| SqlValue::Text(pattern.clone())));
-        if has_upstream_error_summary {
-            search_clause.push_str(" OR COALESCE(upstream_error_summary, '') LIKE ? ESCAPE '\\'");
-            values.push(SqlValue::Text(pattern.clone()));
-        }
-        if has_codex_session_id {
-            search_clause.push_str(" OR COALESCE(codex_session_id, '') LIKE ? ESCAPE '\\'");
-            values.push(SqlValue::Text(pattern));
-        }
-        search_clause.push(')');
+        values.extend((0..10).map(|_| SqlValue::Text(pattern.clone())));
         clauses.push(search_clause);
     }
     if let Some(provider) = &query.provider {
@@ -2373,77 +2319,6 @@ fn ensure_private_sqlite_file(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn ensure_sqlite_log_columns(connection: &Connection) -> rusqlite::Result<()> {
-    let mut statement = connection.prepare("PRAGMA table_info(route_request_logs)")?;
-    let names = statement
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(statement);
-    if names.iter().any(|name| name == "retry_count") {
-        connection.execute_batch("ALTER TABLE route_request_logs DROP COLUMN retry_count;")?;
-    }
-    if !names.iter().any(|name| name == "usage_reported") {
-        connection.execute_batch(
-            "ALTER TABLE route_request_logs
-                ADD COLUMN usage_reported INTEGER NOT NULL DEFAULT 0;",
-        )?;
-        if names.iter().any(|name| name == "usage_complete") {
-            connection
-                .execute_batch("UPDATE route_request_logs SET usage_reported = usage_complete;")?;
-        }
-    }
-    if !names.iter().any(|name| name == "usage_unavailable_reason") {
-        connection.execute_batch(
-            "ALTER TABLE route_request_logs ADD COLUMN usage_unavailable_reason TEXT;",
-        )?;
-    }
-    if !names.iter().any(|name| name == "router_pre_upstream_ms") {
-        connection.execute_batch(
-            "ALTER TABLE route_request_logs ADD COLUMN router_pre_upstream_ms INTEGER;",
-        )?;
-    }
-    if !names.iter().any(|name| name == "upstream_first_byte_ms") {
-        connection.execute_batch(
-            "ALTER TABLE route_request_logs ADD COLUMN upstream_first_byte_ms INTEGER;",
-        )?;
-    }
-    if !names
-        .iter()
-        .any(|name| name == "downstream_first_content_ms")
-    {
-        connection.execute_batch(
-            "ALTER TABLE route_request_logs ADD COLUMN downstream_first_content_ms INTEGER;",
-        )?;
-    }
-    if !names.iter().any(|name| name == "upstream_error_summary") {
-        connection.execute_batch(
-            "ALTER TABLE route_request_logs ADD COLUMN upstream_error_summary TEXT;",
-        )?;
-    }
-    if !names.iter().any(|name| name == "codex_session_id") {
-        connection
-            .execute_batch("ALTER TABLE route_request_logs ADD COLUMN codex_session_id TEXT;")?;
-    }
-    if !names.iter().any(|name| name == "codex_session_is_parent") {
-        connection.execute_batch(
-            "ALTER TABLE route_request_logs
-                ADD COLUMN codex_session_is_parent INTEGER NOT NULL DEFAULT 0;",
-        )?;
-    }
-    Ok(())
-}
-
-fn sqlite_table_has_column(connection: &Connection, column: &str) -> rusqlite::Result<bool> {
-    let mut statement = connection.prepare("PRAGMA table_info(route_request_logs)")?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        if row.get::<_, String>(1)? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 fn prune_sqlite_logs(connection: &Connection, retention_ms: u64) -> rusqlite::Result<usize> {
     let cutoff = unix_timestamp_ms().saturating_sub(retention_ms);
     connection.execute(
@@ -2701,7 +2576,7 @@ mod tests {
     fn sqlite_sink_inserts_one_row_per_request() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(SQLITE_FILE_NAME);
-        let mut sink = SqliteSink::open(path.clone(), 30).unwrap();
+        let mut sink = SqliteSink::open(&path, 30).unwrap();
         sink.write_batch(&[queued(sample_entry("one")), queued(sample_entry("two"))])
             .unwrap();
         sink.finish().unwrap();
@@ -2730,121 +2605,10 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_sink_migrates_v4_retry_column_without_losing_rows() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join(SQLITE_FILE_NAME);
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE route_request_logs (
-                    request_id TEXT PRIMARY KEY,
-                    trace_id TEXT NOT NULL,
-                    timestamp_unix_ms INTEGER NOT NULL,
-                    provider TEXT,
-                    provider_name TEXT,
-                    requested_model TEXT NOT NULL,
-                    model TEXT,
-                    reasoning_effort TEXT,
-                    thinking_budget_tokens INTEGER,
-                    ttft_ms INTEGER,
-                    upstream_header_ms INTEGER,
-                    total_duration_ms INTEGER NOT NULL,
-                    queue_delay_ms INTEGER NOT NULL,
-                    input_tokens INTEGER,
-                    output_tokens INTEGER,
-                    cached_input_tokens INTEGER,
-                    cache_creation_input_tokens INTEGER,
-                    reasoning_output_tokens INTEGER,
-                    total_tokens INTEGER,
-                    usage_reported INTEGER NOT NULL,
-                    usage_unavailable_reason TEXT,
-                    request_protocol TEXT NOT NULL,
-                    upstream_transport TEXT,
-                    request_kind TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    status_code INTEGER,
-                    upstream_status_code INTEGER,
-                    error_code TEXT,
-                    upstream_error_summary TEXT,
-                    completion_reason TEXT,
-                    retry_count INTEGER NOT NULL,
-                    fallback_count INTEGER NOT NULL,
-                    fallback_reason TEXT,
-                    upstream_authority TEXT,
-                    upstream_request_id TEXT,
-                    upstream_protocol TEXT,
-                    protocol_bridge TEXT,
-                    first_byte_source TEXT,
-                    client_fingerprint TEXT,
-                    subagent INTEGER NOT NULL,
-                    schema_version INTEGER NOT NULL,
-                    codex_session_id TEXT,
-                    codex_session_is_parent INTEGER NOT NULL
-                );",
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO route_request_logs (
-                    request_id, trace_id, timestamp_unix_ms, requested_model,
-                    total_duration_ms, queue_delay_ms, usage_reported,
-                    request_protocol, request_kind, status, retry_count,
-                    fallback_count, subagent, schema_version, codex_session_is_parent
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                params![
-                    "legacy",
-                    "legacy",
-                    to_i64(unix_timestamp_ms()),
-                    "model",
-                    1,
-                    0,
-                    false,
-                    "http",
-                    "responses",
-                    "succeeded",
-                    7,
-                    0,
-                    false,
-                    4,
-                    false,
-                ],
-            )
-            .unwrap();
-        drop(connection);
-
-        let mut sink = SqliteSink::open(path.clone(), 30).unwrap();
-        assert!(!sqlite_table_has_column(&sink.connection, "retry_count").unwrap());
-        let mut current = sample_entry("current");
-        current.timestamp_unix_ms = unix_timestamp_ms();
-        sink.write_batch(&[queued(current)]).unwrap();
-        sink.finish().unwrap();
-        drop(sink);
-
-        let page = query_route_request_logs(
-            directory.path(),
-            RouteRequestLogBackend::Sqlite,
-            RouteRequestLogQuery {
-                page_size: 10,
-                ..RouteRequestLogQuery::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(page.total, 2);
-        assert_eq!(
-            page.items
-                .iter()
-                .map(|item| item.request_id.as_str())
-                .collect::<Vec<_>>(),
-            ["current", "legacy"]
-        );
-        assert!(!serde_json::to_string(&page).unwrap().contains("retryCount"));
-    }
-
-    #[test]
     fn sqlite_query_paginates_in_reverse_time_order() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(SQLITE_FILE_NAME);
-        let mut sink = SqliteSink::open(path, 30).unwrap();
+        let mut sink = SqliteSink::open(&path, 30).unwrap();
         let mut first = sample_entry("first");
         first.timestamp_unix_ms = 100;
         let mut second = sample_entry("second");
@@ -2894,7 +2658,7 @@ mod tests {
     fn sqlite_query_uses_bound_search_and_combined_filters() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join(SQLITE_FILE_NAME);
-        let mut sink = SqliteSink::open(path, 30).unwrap();
+        let mut sink = SqliteSink::open(&path, 30).unwrap();
         let mut matching = sample_entry("matching-request");
         matching.codex_session_id = Some("parent-session-42".into());
         matching.codex_session_is_parent = true;
@@ -2993,54 +2757,6 @@ mod tests {
         assert_eq!(ndjson.status, "unavailable");
         assert!(!ndjson.queryable);
         assert_eq!(ndjson.reason, Some("ndjson_not_queryable"));
-    }
-
-    #[test]
-    fn query_legacy_sqlite_without_optional_columns_returns_defaults() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join(SQLITE_FILE_NAME);
-        let mut sink = SqliteSink::open(path.clone(), 30).unwrap();
-        sink.write_batch(&[queued(sample_entry("legacy"))]).unwrap();
-        sink.finish().unwrap();
-        drop(sink);
-
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "ALTER TABLE route_request_logs DROP COLUMN upstream_error_summary;
-                 ALTER TABLE route_request_logs DROP COLUMN router_pre_upstream_ms;
-                 ALTER TABLE route_request_logs DROP COLUMN upstream_first_byte_ms;
-                 ALTER TABLE route_request_logs DROP COLUMN downstream_first_content_ms;
-                 ALTER TABLE route_request_logs DROP COLUMN codex_session_id;
-                 ALTER TABLE route_request_logs DROP COLUMN codex_session_is_parent;",
-            )
-            .unwrap();
-        drop(connection);
-
-        let page = query_route_request_logs(
-            directory.path(),
-            RouteRequestLogBackend::Sqlite,
-            RouteRequestLogQuery::default(),
-        )
-        .unwrap();
-        assert_eq!(page.total, 1);
-        assert_eq!(page.items[0].upstream_error_summary, None);
-        assert_eq!(page.items[0].router_pre_upstream_ms, None);
-        assert_eq!(page.items[0].upstream_first_byte_ms, None);
-        assert_eq!(page.items[0].downstream_first_content_ms, None);
-        assert_eq!(page.items[0].codex_session_id, None);
-        assert!(!page.items[0].codex_session_is_parent);
-
-        let searched = query_route_request_logs(
-            directory.path(),
-            RouteRequestLogBackend::Sqlite,
-            RouteRequestLogQuery {
-                search: Some("legacy".into()),
-                ..RouteRequestLogQuery::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(searched.total, 1);
     }
 
     #[test]
@@ -3154,7 +2870,7 @@ mod tests {
     fn sqlite_sink_uses_private_file_permissions() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("requests.sqlite3");
-        let sink = SqliteSink::open(path.clone(), 30).unwrap();
+        let sink = SqliteSink::open(&path, 30).unwrap();
         drop(sink);
         let mode = fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
@@ -3164,7 +2880,7 @@ mod tests {
     fn sqlite_sink_prunes_expired_rows_during_normal_writes() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("requests.sqlite3");
-        let mut sink = SqliteSink::open(path.clone(), 1).unwrap();
+        let mut sink = SqliteSink::open(&path, 1).unwrap();
         sink.write_batch(&[queued(sample_entry("expired"))])
             .unwrap();
         sink.next_prune_at = Instant::now();

@@ -293,3 +293,44 @@
 
 **阶段 4：持续监控**
 - hook latency_ms 分布（allow 采样）；请求日志查询 p95；本地路由锁毒化 panic 计数（错误日志 `panic` 记录）；配置保存耗时；注入脚本 observer 回调频率。
+
+---
+
+## 六、修复状态（2026-09-06 执行）
+
+| 项 | 状态 | 说明 |
+|---|---|---|
+| H2 配置保存备份 | 已修复 | `ConfigStore::save` 改为 rename 链，备份失败只记日志不阻断；内容未变或与 bak.1 相同时跳过滚动；主文件写入统一走 `fs_util::atomic_write_private_with_parent` |
+| H3 TOML hooks 链 | 已修复 | 删除 `enable_subagent_gate_hooks` 等 15 个函数与 `CODEY_HOOK_EVENTS`；`enable_subagent_optimization` 去掉 `config_path` 参数；tests.rs 删除 2 个只验证 TOML hooks 的测试并把第 3 个改为断言 TOML 无 hooks 表。已核实 `-c` 覆盖项为显式键列表，运行行为不变 |
+| H4 vendor 裁剪 | 已修复 | 删除 core 17 个源码模块 + install/upstream_worktree/zed_remote 目录、11 个测试文件、cdp_bridge.rs 中 50 个依赖已删模块的测试项、assets/inject 三个脚本副本；data 删除 provider_sync/markdown 及测试；launcher.rs 重写为仅含 backend 使用的命令构造与 Windows 进程函数；新增 `codey_runtime_core::default_codex_home_dir` 导出；`plugin_marketplace` 自带原子写；Cargo 依赖去掉 async-trait/base64/thiserror/toml（core）与 chrono/memchr（data） |
+| H7 别名解析 | 已修复 | `model_id.rs` 新增 `RouteAlias`/`parse_alias`/`model_alias`，`local_router::model_alias` 改为再导出；`codex_config::is_route_qualified_model` 与 `model_catalog::route_scoped_upstream_model_id` 统一用首个 `/` 切分并补含 `/` 模型名测试。config.rs 三处 provider 前缀匹配保留（语义为前缀比较） |
+| H8 原子写统一 | 已修复 | 删除 config.rs 的 `persist_private_bytes`/`write_private_temp`；`fs_io::write_private_file` 改为原子替换 |
+| L1 iLink 重复 | 已修复 | 新增 `notifications/ilink.rs`，命令层与渠道层共用 headers/base_info/client_version |
+| L2 config.rs 冗余 | 部分修复 | `parse_config_contents` 去掉二次 Value 解析；`RouteRequestLogConfig` 改容器级 `#[serde(default)]` 删 8 个函数。**修正**：`RuntimeModelTarget.request_provider_id/request_model` 实际被 commands/models.rs 1867-1889 与 2070 使用，原报告"死字段"结论有误，未删除；`migrate_provider_default` 有测试覆盖，保留 |
+| L5 SSE 同构 | 已修复 | 新增 `SseFrameAccumulator` trait 与 `collect_sse_frames`/`parse_sse_frames`，4 个具体函数变为薄封装；`ChatSseAccumulator` 增加 `done` 字段。行为差异：Anthropic 累积器在 `message_stop` 后忽略同一缓冲区内的后续帧（原实现会继续 ingest） |
+| L7 bench JSON | 已修复 | `git rm` 三个结果文件，INTERNAL_DEVELOPMENT.md 改为指向 Git 历史 |
+| L8 请求日志查询 | 部分修复 | 6 次 `PRAGMA table_info` 合并为 1 次（读侧仍需探测以兼容未迁移的旧库）；搜索策略与 COUNT 缓存未改动，属用户可见行为需单独决定 |
+| L10 main.tsx | 已修复 | DEV mock 移到 `src/dev/mockApi.ts`，main.tsx 动态导入；5 个读源码的测试改为读新文件 |
+| G2 锁毒化 | 已修复 | local_router.rs 21 处 `.expect("… poisoned")` 改为 `unwrap_or_else(PoisonError::into_inner)` |
+| G3 provider_models | 已修复 | 不变量提到循环外 |
+| G5 前端未引用导出 | 部分修复 | routeShortNames 3 项、runtimeStatusPresentation 2 个类型取消导出。**修正**：`uiClasses.ts` 被 11 个组件引用，原报告结论有误，已恢复 |
+| 文档 | 已更新 | INTERNAL_DEVELOPMENT.md 目录、hooks 说明、bench 引用 |
+| G6 models.rs 拆分 | 已完成 | `commands/models.rs`（3511 行）拆为 `models/{mod,sync,routes,selection,defaults,native,state,catalog_refresh,tests}.rs`，mod.rs 用 glob 再导出保持 commands.rs 的调用面不变；1 个读源码文本的 JS 测试改为合并读取目录下全部文件 |
+| H1 local_router 拆分 | 已完成 | 18808 行拆为 `local_router/` 下 22 个文件：server 826、responses 1407、request_meta 435、auth 99、upstream 524、chat_request 432、anthropic_request 504、chat_tools 1574、http 340、websocket_context 364、downstream 413、websocket 1144、upstream_response 234、request_log_tap 649、errors 253、adapt 239、sse_anthropic 694、sse_chat 641、sse 181、sse_responses 812、tests 6923、mod 183。mod.rs 保留导入与常量并 glob 再导出，三个 `#[path]` 测试模块改为 `../` 相对路径。因主工作树被另一会话未完成的 launcher/process.rs 修改阻塞编译，验证在隔离副本（还原对方两个 WIP 文件到 HEAD）中完成：workspace 测试全部通过，clippy 仅报对方尚未接线的 electron_fuses.rs |
+| H5 测试体系 | 未做 | 结构性工作，需与拆分同步规划 |
+| H6 Hook I/O | 部分完成 | `record_hook_evaluation` 现按 `now_ms % 50 == 0` 采样记录 allow 决策（属性 `sampled=true`），可从 trace 建立 hook 延迟基线；进程模型本身未改 |
+| L3 legacy lease | 已完成（高风险，已验证） | 删除隔离设计前的 AGENTS.md / default.toml 恢复路径与 5 个租约字段；旧版租约仍被读取并释放，新增回归测试 `pre_isolation_lease_is_released_without_the_removed_restore_path`。降级到旧版本时新租约会被旧代码按非隔离路径处理，属已知限制 |
+| L14 fastctx 独立入口 | 改为共享 | 核实 hooks.json 在“仅 FastCtx”模式下仍注册独立 fastctx 命令，入口不能删；改为两个 Hook 共用 `hook_io` 的 stdin/stdout 读写 |
+| L4 ConfigSnapshot 复用 | 已完成 | `read_codex_config_document` 复用 ConfigManager 已解析文档，`current_model_provider` 与 `fast_context_tools_status` 不再二次解析 |
+| L13 备份目录 | 已完成 | `fs_util::unique_timestamp_dir` / `prune_dirs` 供 session_index_cleanup 与 codex_config 租约备份共用 |
+| G7 changed 判定 | 已完成 | `sync_provider_profile` 改为比较序列化后的持久化形态，跳过 `#[serde(skip)]` 字段 |
+| H5 测试体系 | 部分完成 | 新增 `tests/pure-frontend-helpers.test.mjs` 为 urlValidation / formatters / appUtils / runtimeStatusSnapshot 补 import 级行为测试；源码文本断言测试的整体降级仍待做 |
+| `ccSwitch*` 别名 | 保留 | 别名负责读取旧配置中的 provider_id，删除会让旧配置的线路标识丢失，2 行收益不抵风险 |
+| G8 空备份目录 | 保留 | 恢复路径强依赖目录存在 |
+| L6 guidance 历史常量 | 已完成 | 按“只支持最近两个版本”策略（v0.10.2 与 v0.10.3 的三段提示词与当前完全一致）删除 36 个历史版本常量与对应迁移测试，三个版本列表只含当前文本，不再需要标记方案 |
+| 旧版迁移代码清理 | 已完成 | 同一策略下删除：`ccSwitch*` 别名、`defaultModelByProvider` 字段与迁移、`migrate_legacy_official_model_selections`、config.toml 子代理并发旧键迁移、请求日志 SQLite 列迁移与读侧探测（搜索固定覆盖 10 列）、`repair_legacy_model_catalog`、子代理账本 schema<15 升级（`MIN_LEDGER_SCHEMA_VERSION` 提升到当前）、`codey/` 旧模型前缀。所有引入时间均早于 v0.10.2 |
+| L11 前端 prop drilling | 撤回 | 复核后 ModelSection 实际 19 个 props（原报告 52 为把嵌套类型行计入的误报），且 `react-render-isolation` 测试明确要求以稳定 handler 逐个透传以隔离渲染，现有写法是刻意设计，不再改动 |
+| H6 Hook 进程模型、L12 observer 收敛 | 未做 | 等待本轮埋点（hook 采样 trace、`__codeyObserverStats`）的真实数据 |
+| G1 clippy | 部分完成 | `cargo clippy --fix` 清理 redundant_clone 与 needless_borrow；手工把 12 个函数改为引用传参（cdp/fastctx_route_gate/subagent_gate/session_metadata/local_router/models/wechat_claw/route_request_log）。剩余 30 处为结构体按值消费、线程入口、测试辅助与 launcher/process.rs（他人并行修改），属可接受写法 |
+| G4 模型目录回读 | 已修复 | `write_catalog` 返回落盘字节，刷新后只比对字节，不再二次 JSON 解析与逐模型 clone |
+| L12 observer 实测 | 部分完成 | 5 个 document 级 mutation 处理器与 `scanReactObjectGraph` 现由 `codeyTimed` 包装，调用次数、处理条目数、累计与最大耗时写入 `window.__codeyObserverStats`，无行为变化；下一步按该数据决定是否收敛 observer |

@@ -4,12 +4,20 @@ import test from "node:test";
 
 const root = new URL("../", import.meta.url);
 
+const readModelCommandSources = async () => {
+  const dir = new URL("backend/src/commands/models/", root);
+  const { readdir } = await import("node:fs/promises");
+  const names = (await readdir(dir)).filter((name) => name.endsWith(".rs")).sort();
+  const sources = await Promise.all(names.map((name) => readFile(new URL(name, dir), "utf8")));
+  return sources.join("\n");
+};
+
 test("third-party model sync can fall back to manual model support configuration", async () => {
   const [dialogSource, hookSource, commandSource, modelCommandSource] = await Promise.all([
     readFile(new URL("src/AppDialogs.tsx", root), "utf8"),
     readFile(new URL("src/useModelSelection.ts", root), "utf8"),
     readFile(new URL("backend/src/commands.rs", root), "utf8"),
-    readFile(new URL("backend/src/commands/models.rs", root), "utf8"),
+    readModelCommandSources(),
   ]);
 
   assert.match(dialogSource, /modelState\.officialModels\.length > 0/);

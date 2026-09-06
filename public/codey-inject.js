@@ -3725,7 +3725,31 @@
     ) clearConversationRichTooltipHandoff();
   };
 
-  const handleSessionToolMutations = (mutations) => {
+  // Lightweight observer telemetry: per-handler call count, mutation count and
+  // wall time, exposed on window.__codeyObserverStats for performance triage.
+  // No behavior change; timing falls back to Date.now() where performance is
+  // unavailable (test sandboxes).
+  const codeyTimed = (name, count, run) => {
+    const now = () =>
+      typeof performance === "object" && typeof performance.now === "function"
+        ? performance.now()
+        : Date.now();
+    const stats = (window.__codeyObserverStats ||= {});
+    const entry = (stats[name] ||= { calls: 0, items: 0, totalMs: 0, maxMs: 0 });
+    const startedAt = now();
+    try {
+      return run();
+    } finally {
+      const elapsed = now() - startedAt;
+      entry.calls += 1;
+      entry.items += count;
+      entry.totalMs += elapsed;
+      if (elapsed > entry.maxMs) entry.maxMs = elapsed;
+    }
+  };
+  const handleSessionToolMutations = (mutations) =>
+    codeyTimed("codey-inject.sessionToolMutations", mutations?.length ?? 0, () => handleSessionToolMutationsImpl(mutations));
+  const handleSessionToolMutationsImpl = (mutations) => {
     for (const mutation of mutations) {
       const target = mutation.target instanceof HTMLElement
         ? mutation.target

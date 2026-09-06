@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -35,13 +34,9 @@ pub struct ProviderProfile {
     #[serde(skip)]
     pub model_request_headers: BTreeMap<String, String>,
     /// Stable id of the provider in the source Codex configuration.
-    #[serde(
-        default,
-        alias = "ccSwitchProviderId",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_provider_id: Option<String>,
-    #[serde(default, alias = "ccSwitchReadOnly")]
+    #[serde(default)]
     pub official_account: bool,
     /// Preserve the exact Codex provider identity required for remote
     /// compaction when it was explicitly enabled by the source configuration.
@@ -484,28 +479,18 @@ pub enum RouteRequestLogBackend {
 /// Best-effort request observations for the built-in router. The feature is
 /// opt-in: when disabled the router does not create a queue or writer thread.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct RouteRequestLogConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default)]
     pub backend: RouteRequestLogBackend,
-    #[serde(default = "default_route_request_log_queue_capacity")]
     pub queue_capacity: usize,
-    #[serde(default = "default_route_request_log_batch_size")]
     pub batch_size: usize,
-    #[serde(default = "default_route_request_log_flush_interval_ms")]
     pub flush_interval_ms: u64,
-    #[serde(default = "default_route_request_log_shutdown_flush_timeout_ms")]
     pub shutdown_flush_timeout_ms: u64,
     /// Deterministic process-local sampling in parts per million.
-    #[serde(default = "default_route_request_log_sample_rate_per_million")]
     pub sample_rate_per_million: u32,
-    #[serde(default = "default_route_request_log_max_file_bytes")]
     pub max_file_bytes: u64,
-    #[serde(default = "default_route_request_log_retained_files")]
     pub retained_files: usize,
-    #[serde(default = "default_route_request_log_retention_days")]
     pub retention_days: u32,
 }
 
@@ -539,38 +524,6 @@ impl RouteRequestLogConfig {
         self.retained_files = self.retained_files.clamp(1, 100);
         self.retention_days = self.retention_days.clamp(1, 3_650);
     }
-}
-
-fn default_route_request_log_queue_capacity() -> usize {
-    DEFAULT_ROUTE_REQUEST_LOG_QUEUE_CAPACITY
-}
-
-fn default_route_request_log_batch_size() -> usize {
-    DEFAULT_ROUTE_REQUEST_LOG_BATCH_SIZE
-}
-
-fn default_route_request_log_flush_interval_ms() -> u64 {
-    DEFAULT_ROUTE_REQUEST_LOG_FLUSH_INTERVAL_MS
-}
-
-fn default_route_request_log_shutdown_flush_timeout_ms() -> u64 {
-    DEFAULT_ROUTE_REQUEST_LOG_SHUTDOWN_FLUSH_TIMEOUT_MS
-}
-
-fn default_route_request_log_sample_rate_per_million() -> u32 {
-    DEFAULT_ROUTE_REQUEST_LOG_SAMPLE_RATE_PER_MILLION
-}
-
-fn default_route_request_log_max_file_bytes() -> u64 {
-    DEFAULT_ROUTE_REQUEST_LOG_MAX_FILE_BYTES
-}
-
-fn default_route_request_log_retained_files() -> usize {
-    DEFAULT_ROUTE_REQUEST_LOG_RETAINED_FILES
-}
-
-fn default_route_request_log_retention_days() -> u32 {
-    DEFAULT_ROUTE_REQUEST_LOG_RETENTION_DAYS
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -627,11 +580,6 @@ pub struct CodeyConfig {
     /// unambiguous across suppliers.
     #[serde(default)]
     pub default_model: String,
-    /// Legacy per-provider defaults are read once and migrated into
-    /// `default_model`. They are intentionally never written again.
-    #[serde(default)]
-    #[serde(skip_serializing)]
-    pub default_model_by_provider: BTreeMap<String, String>,
     #[serde(default = "default_true")]
     pub disable_trace_log_writes: bool,
     /// Keeps Codex/ChatGPT Crashpad pending reports below a bounded disk
@@ -716,7 +664,6 @@ impl Default for CodeyConfig {
             upstream_models_by_provider: BTreeMap::new(),
             model_alias_history: BTreeMap::new(),
             default_model: String::new(),
-            default_model_by_provider: BTreeMap::new(),
             disable_trace_log_writes: true,
             protect_crashpad_pending: true,
             slim_codex_pet: true,
@@ -775,29 +722,14 @@ impl CodeyConfig {
         {
             self.active_profile_id = self.profiles[0].id.clone();
         }
-        let official_provider_ids = self
-            .profiles
-            .iter()
-            .filter(|profile| profile.official_account)
-            .map(|profile| profile.provider_id().to_string())
-            .collect::<BTreeSet<_>>();
         normalize_model_lists(&mut self.selected_models_by_provider);
         normalize_model_lists(&mut self.manual_third_party_models_by_provider);
         normalize_model_lists(&mut self.declared_official_models_by_provider);
-        if self.local_router_enabled {
-            migrate_legacy_official_model_selections(
-                &mut self.selected_models_by_provider,
-                &mut self.manual_third_party_models_by_provider,
-                &mut self.declared_official_models_by_provider,
-                &official_provider_ids,
-            );
-        }
         normalize_upstream_model_lists(&mut self.upstream_models_by_provider);
         merge_declared_official_models_into_upstream(
             &self.declared_official_models_by_provider,
             &mut self.upstream_models_by_provider,
         );
-        normalize_model_map(&mut self.default_model_by_provider);
         self.remember_model_aliases();
         self.normalize_global_default_model();
         normalize_subagent_config(
@@ -900,11 +832,6 @@ impl CodeyConfig {
         );
         migrate_provider_model_list(
             &mut self.upstream_models_by_provider,
-            previous_provider_id,
-            official_provider_id,
-        );
-        migrate_provider_default(
-            &mut self.default_model_by_provider,
             previous_provider_id,
             official_provider_id,
         );
@@ -1220,7 +1147,6 @@ impl CodeyConfig {
             && self.declared_official_models_by_provider.is_empty()
             && self.upstream_models_by_provider.is_empty()
             && self.default_model.trim().is_empty()
-            && self.default_model_by_provider.is_empty()
     }
 
     pub(crate) fn remember_model_aliases(&mut self) {
@@ -1273,35 +1199,6 @@ impl CodeyConfig {
 
     fn normalize_global_default_model(&mut self) {
         self.default_model = self.default_model.trim().to_string();
-        if self.default_model.is_empty() {
-            let mut provider_ids = Vec::new();
-            if let Some(provider_id) = self.current_provider_id() {
-                provider_ids.push(provider_id.to_string());
-            }
-            provider_ids.extend(
-                self.profiles
-                    .iter()
-                    .map(|profile| profile.provider_id().to_string()),
-            );
-            provider_ids.extend(self.default_model_by_provider.keys().cloned());
-            let mut seen = BTreeSet::new();
-            for provider_id in provider_ids {
-                if !seen.insert(provider_id.clone()) {
-                    continue;
-                }
-                let Some(model) = self.default_model_by_provider.get(&provider_id) else {
-                    continue;
-                };
-                self.default_model = self
-                    .profiles
-                    .iter()
-                    .find(|profile| profile.provider_id() == provider_id)
-                    .map(|_| local_router::model_alias(&provider_id, model))
-                    .unwrap_or_else(|| model.clone());
-                break;
-            }
-        }
-        self.default_model_by_provider.clear();
 
         let targets = self.configured_model_targets();
         if targets.is_empty() {
@@ -1562,22 +1459,6 @@ fn migrate_provider_model_list(
     normalize_model_list(destination);
 }
 
-fn migrate_provider_default(
-    defaults_by_provider: &mut BTreeMap<String, String>,
-    previous_provider_id: &str,
-    official_provider_id: &str,
-) {
-    if previous_provider_id == official_provider_id {
-        return;
-    }
-    let Some(model) = defaults_by_provider.remove(previous_provider_id) else {
-        return;
-    };
-    defaults_by_provider
-        .entry(official_provider_id.to_string())
-        .or_insert(model);
-}
-
 fn remap_model_provider_alias(
     model: &mut String,
     previous_provider_id: &str,
@@ -1665,45 +1546,6 @@ fn official_models_by_key() -> BTreeMap<String, String> {
         .collect()
 }
 
-fn migrate_legacy_official_model_selections(
-    selected_models_by_provider: &mut BTreeMap<String, Vec<String>>,
-    manual_third_party_models_by_provider: &mut BTreeMap<String, Vec<String>>,
-    declared_official_models_by_provider: &mut BTreeMap<String, Vec<String>>,
-    official_provider_ids: &BTreeSet<String>,
-) {
-    let official_models_by_key = official_models_by_key();
-    let provider_ids = selected_models_by_provider
-        .keys()
-        .chain(manual_third_party_models_by_provider.keys())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-
-    for provider_id in provider_ids {
-        if official_provider_ids.contains(&provider_id) {
-            continue;
-        }
-        let mut migrated_models = Vec::new();
-        if let Some(models) = selected_models_by_provider.get_mut(&provider_id) {
-            take_official_models(models, &official_models_by_key, &mut migrated_models);
-        }
-        if let Some(models) = manual_third_party_models_by_provider.get_mut(&provider_id) {
-            take_official_models(models, &official_models_by_key, &mut migrated_models);
-        }
-        if migrated_models.is_empty() {
-            continue;
-        }
-
-        let declared_models = declared_official_models_by_provider
-            .entry(provider_id)
-            .or_default();
-        declared_models.extend(migrated_models);
-        normalize_model_list(declared_models);
-    }
-
-    selected_models_by_provider.retain(|_, models| !models.is_empty());
-    manual_third_party_models_by_provider.retain(|_, models| !models.is_empty());
-}
-
 fn merge_declared_official_models_into_upstream(
     declared_official_models_by_provider: &BTreeMap<String, Vec<String>>,
     upstream_models_by_provider: &mut BTreeMap<String, Vec<String>>,
@@ -1720,27 +1562,6 @@ fn merge_declared_official_models_into_upstream(
         );
         normalize_model_list(upstream_models);
     }
-}
-
-fn take_official_models(
-    models: &mut Vec<String>,
-    official_models_by_key: &BTreeMap<String, String>,
-    migrated_models: &mut Vec<String>,
-) {
-    models.retain(|model| {
-        let Some(canonical_model) = official_models_by_key.get(&model_id::key(model)) else {
-            return true;
-        };
-        migrated_models.push(canonical_model.clone());
-        false
-    });
-}
-
-fn normalize_model_map(models_by_provider: &mut BTreeMap<String, String>) {
-    models_by_provider.retain(|provider_id, model| {
-        *model = model.trim().to_string();
-        !provider_id.trim().is_empty() && !model.is_empty()
-    });
 }
 
 fn default_true() -> bool {
@@ -1975,14 +1796,10 @@ impl ConfigStore {
 
     pub fn save(&self, config: &CodeyConfig) -> Result<()> {
         let config = config.clone().normalize();
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Codey 配置路径无父目录"))?;
-        fs::create_dir_all(parent)?;
         let bytes = serde_json::to_vec_pretty(&config)?;
-        self.rotate_valid_backups()?;
-        persist_private_bytes(&self.path, &bytes, "替换 Codey 配置")
+        self.rotate_backups_best_effort(&bytes);
+        crate::fs_util::atomic_write_private_with_parent(&self.path, &bytes)
+            .with_context(|| format!("替换 Codey 配置失败：{}", self.path.display()))
     }
 
     fn backup_path(&self, index: usize) -> PathBuf {
@@ -1994,32 +1811,44 @@ impl ConfigStore {
         self.path.with_file_name(format!("{file_name}.bak.{index}"))
     }
 
-    fn rotate_valid_backups(&self) -> Result<()> {
-        let mut snapshots = Vec::<Vec<u8>>::new();
-        for path in std::iter::once(self.path.clone())
-            .chain((1..=CONFIG_BACKUP_COUNT).map(|index| self.backup_path(index)))
-        {
-            let Ok(bytes) = fs::read(&path) else {
-                continue;
-            };
-            let Ok(contents) = std::str::from_utf8(&bytes) else {
-                continue;
-            };
-            if parse_config_contents(contents, &path).is_err()
-                || snapshots.iter().any(|snapshot| snapshot == &bytes)
-            {
+    /// Shift the current file into the backup chain with renames. Renames keep
+    /// the private file mode and avoid re-parsing every backup on each save.
+    /// Backups are best-effort: a failure here must never block persisting the
+    /// user's settings, so errors are logged instead of returned.
+    fn rotate_backups_best_effort(&self, next_bytes: &[u8]) {
+        let Ok(current) = fs::read(&self.path) else {
+            return;
+        };
+        // Saving identical content again would only push duplicates through
+        // the chain and evict an older distinct snapshot.
+        if current == next_bytes {
+            return;
+        }
+        if fs::read(self.backup_path(1)).is_ok_and(|newest| newest == current) {
+            return;
+        }
+        for index in (1..CONFIG_BACKUP_COUNT).rev() {
+            let from = self.backup_path(index);
+            if !from.exists() {
                 continue;
             }
-            snapshots.push(bytes);
-            if snapshots.len() == CONFIG_BACKUP_COUNT {
-                break;
+            if let Err(error) = fs::rename(&from, self.backup_path(index + 1)) {
+                crate::error_log::record_failure(
+                    "config_backup_rotate_failed",
+                    "rotate_codey_config_backups",
+                    format!("{error:#}"),
+                    serde_json::json!({ "from": from.display().to_string() }),
+                );
             }
         }
-        for (offset, bytes) in snapshots.iter().enumerate().rev() {
-            let path = self.backup_path(offset + 1);
-            persist_private_bytes(&path, bytes, "写入 Codey 配置备份")?;
+        if let Err(error) = fs::rename(&self.path, self.backup_path(1)) {
+            crate::error_log::record_failure(
+                "config_backup_rotate_failed",
+                "rotate_codey_config_backups",
+                format!("{error:#}"),
+                serde_json::json!({ "from": self.path.display().to_string() }),
+            );
         }
-        Ok(())
     }
 }
 
@@ -2030,63 +1859,11 @@ fn read_config_file(path: &Path) -> Result<CodeyConfig> {
 }
 
 fn parse_config_contents(contents: &str, path: &Path) -> Result<CodeyConfig> {
-    let raw = serde_json::from_str::<serde_json::Value>(contents)
+    // `normalize` marks non-empty legacy configs as imported, so the previous
+    // explicit marker probe (a second full JSON parse) was redundant.
+    let config = serde_json::from_str::<CodeyConfig>(contents)
         .with_context(|| format!("解析 Codey 配置失败：{}", path.display()))?;
-    let has_initial_import_marker = raw
-        .as_object()
-        .is_some_and(|object| object.contains_key("initialRouteImportCompleted"));
-    let mut config = serde_json::from_value::<CodeyConfig>(raw)
-        .with_context(|| format!("解析 Codey 配置失败：{}", path.display()))?;
-    if !has_initial_import_marker && !config.looks_like_empty_default_route() {
-        config.initial_route_import_completed = true;
-    }
     Ok(config.normalize())
-}
-
-fn persist_private_bytes(path: &Path, bytes: &[u8], operation: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Codey 配置路径无父目录"))?;
-    fs::create_dir_all(parent)?;
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("Codey 配置路径缺少文件名"))?
-        .to_string_lossy();
-    let temp = parent.join(format!(
-        ".{file_name}.codey-{}.tmp",
-        Uuid::new_v4().simple()
-    ));
-    let replace_result = write_private_temp(&temp, bytes).and_then(|()| {
-        crate::fs_util::persist_temp_file(&temp, path)
-            .with_context(|| format!("{operation}失败：{}", path.display()))
-    });
-    if replace_result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    replace_result?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
-}
-
-fn write_private_temp(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .with_context(|| format!("创建 Codey 配置临时文件失败：{}", path.display()))?;
-    file.write_all(bytes)
-        .with_context(|| format!("写入 Codey 配置临时文件失败：{}", path.display()))?;
-    file.sync_all()
-        .with_context(|| format!("同步 Codey 配置临时文件失败：{}", path.display()))
 }
 
 #[cfg(test)]
@@ -2172,14 +1949,21 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join(".config.json.codey-test.tmp");
+        let store = ConfigStore::new(directory.path().join("config.json"));
 
-        write_private_temp(&path, b"private-secret").unwrap();
+        store.save(&named_config("private")).unwrap();
 
         assert_eq!(
-            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            fs::metadata(store.path()).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        assert!(fs::read_dir(directory.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".tmp")
+        }));
     }
 
     #[test]
@@ -2303,27 +2087,6 @@ mod tests {
 
         assert!(serialized.get("modelRequestHeaders").is_none());
         assert!(!serialized.to_string().contains("secret"));
-    }
-
-    #[test]
-    fn legacy_profile_field_aliases_serialize_only_the_generic_schema() {
-        let profile = serde_json::from_value::<ProviderProfile>(serde_json::json!({
-            "id": "official-profile",
-            "name": "Official",
-            "baseUrl": "",
-            "apiKey": "",
-            "ccSwitchProviderId": "openai",
-            "ccSwitchReadOnly": true
-        }))
-        .unwrap();
-
-        assert_eq!(profile.source_provider_id.as_deref(), Some("openai"));
-        assert!(profile.official_account);
-        let serialized = serde_json::to_value(profile).unwrap();
-        assert_eq!(serialized["sourceProviderId"], "openai");
-        assert_eq!(serialized["officialAccount"], true);
-        assert!(serialized.get("ccSwitchProviderId").is_none());
-        assert!(serialized.get("ccSwitchReadOnly").is_none());
     }
 
     #[test]
@@ -2869,55 +2632,6 @@ mod tests {
     }
 
     #[test]
-    fn migrates_provider_defaults_to_one_route_aware_global_default() {
-        let mut route_a = ProviderProfile::new("Route A");
-        route_a.id = "route-a".into();
-        route_a.base_url = "https://route-a.example/v1".into();
-        route_a.api_key = "route-a-key".into();
-        route_a.normalize();
-        let mut route_b = ProviderProfile::new("Route B");
-        route_b.id = "route-b".into();
-        route_b.base_url = "https://route-b.example/v1".into();
-        route_b.api_key = "route-b-key".into();
-        route_b.normalize();
-
-        let mut config = CodeyConfig {
-            active_profile_id: route_b.id.clone(),
-            profiles: vec![route_a.clone(), route_b.clone()],
-            initial_route_import_completed: true,
-            ..CodeyConfig::default()
-        };
-        for provider_id in [route_a.provider_id(), route_b.provider_id()] {
-            config
-                .selected_models_by_provider
-                .insert(provider_id.to_string(), vec!["shared-model".into()]);
-            config
-                .default_model_by_provider
-                .insert(provider_id.to_string(), "shared-model".into());
-        }
-
-        let normalized = config.normalize();
-        let serialized = serde_json::to_value(&normalized).unwrap();
-        let target = normalized.effective_runtime_default_target().unwrap();
-
-        assert_eq!(normalized.default_model, "route-b/shared-model");
-        assert!(normalized.default_model_by_provider.is_empty());
-        assert_eq!(serialized["defaultModel"], "route-b/shared-model");
-        assert!(serialized.get("defaultModelByProvider").is_none());
-        assert_eq!(normalized.default_model_for_profile(&route_a), None,);
-        assert_eq!(
-            normalized.default_model_for_profile(&route_b).as_deref(),
-            Some("shared-model"),
-        );
-        assert_eq!(target.route_id, "route-b");
-        assert_eq!(target.provider_id, "route-b");
-        assert_eq!(target.request_provider_id, local_router::ROUTER_PROVIDER_ID);
-        assert_eq!(target.request_model, "shared-model");
-        assert_eq!(target.upstream_model, "shared-model");
-        assert!(!target.official);
-    }
-
-    #[test]
     fn non_empty_legacy_configs_are_marked_as_imported() {
         let mut route = ProviderProfile::new("Relay");
         route.id = "relay".into();
@@ -2953,9 +2667,7 @@ mod tests {
             initial_route_import_completed: true,
             ..CodeyConfig::default()
         };
-        config
-            .default_model_by_provider
-            .insert("openai".into(), "gpt-5.6-sol".into());
+        config.default_model = "openai/gpt-5.6-sol".into();
 
         config.apply_launch_official_profile(Some(official));
         config = config.normalize();
@@ -2964,7 +2676,6 @@ mod tests {
         assert_eq!(config.active_profile_id, "relay");
         assert_eq!(config.profiles[0].provider_id(), "openai");
         assert_eq!(config.default_model, "openai/gpt-5.6-sol");
-        assert!(config.default_model_by_provider.is_empty());
         assert_eq!(
             config.selected_models_by_provider["openai"],
             model_catalog::default_official_model_slugs(),
@@ -3016,9 +2727,7 @@ mod tests {
         config
             .upstream_models_by_provider
             .insert("local-official".into(), vec!["gpt-5.6-terra".into()]);
-        config
-            .default_model_by_provider
-            .insert("local-official".into(), "gpt-5.6-terra".into());
+        config.default_model = "local-official/gpt-5.6-terra".into();
 
         config.apply_launch_official_profile(Some(launched));
 
@@ -3042,7 +2751,6 @@ mod tests {
             config.upstream_models_by_provider["openai"],
             ["gpt-5.6-terra"]
         );
-        assert_eq!(config.default_model_by_provider["openai"], "gpt-5.6-terra");
         assert_eq!(config.default_model, "openai/gpt-5.6-terra");
         assert_eq!(config.subagent_model, "openai/gpt-5.6-luna");
         assert!(
@@ -3071,11 +2779,6 @@ mod tests {
                 .upstream_models_by_provider
                 .contains_key("local-official")
         );
-        assert!(
-            !config
-                .default_model_by_provider
-                .contains_key("local-official")
-        );
     }
 
     #[test]
@@ -3096,9 +2799,7 @@ mod tests {
             initial_route_import_completed: true,
             ..CodeyConfig::default()
         };
-        config
-            .default_model_by_provider
-            .insert("openai".into(), "gpt-5.6-sol".into());
+        config.default_model = "gpt-5.6-sol".into();
 
         config.apply_launch_official_profile(None);
         config = config.normalize();
@@ -3107,7 +2808,6 @@ mod tests {
         assert_eq!(config.profiles[0].id, "relay");
         assert_eq!(config.active_profile_id, "relay");
         assert_eq!(config.default_model, "gpt-5.6-sol");
-        assert!(config.default_model_by_provider.is_empty());
     }
 
     #[test]
@@ -3157,66 +2857,6 @@ mod tests {
         assert_eq!(
             normalized.declared_official_models_by_provider[&provider_id],
             ["GPT-5.6-SOL"]
-        );
-    }
-
-    #[test]
-    fn legacy_official_models_are_reclassified_and_survive_persistence() {
-        let mut config = CodeyConfig::default();
-        let provider_id = config.current_provider_id().unwrap().to_string();
-        config.selected_models_by_provider.insert(
-            provider_id.clone(),
-            vec![
-                "GPT-5.6-Luna".into(),
-                "provider-custom".into(),
-                "gpt-5.6-sol".into(),
-            ],
-        );
-        config.manual_third_party_models_by_provider.insert(
-            provider_id.clone(),
-            vec![
-                "GPT-5.6-Terra".into(),
-                "provider-custom".into(),
-                "manual-only".into(),
-            ],
-        );
-        config
-            .declared_official_models_by_provider
-            .insert(provider_id.clone(), vec!["GPT-5.6-SOL".into()]);
-        config
-            .upstream_models_by_provider
-            .insert(provider_id.clone(), Vec::new());
-
-        let normalized = config.normalize();
-
-        assert_eq!(
-            normalized.selected_models_by_provider[&provider_id],
-            ["provider-custom"]
-        );
-        assert_eq!(
-            normalized.manual_third_party_models_by_provider[&provider_id],
-            ["provider-custom", "manual-only"]
-        );
-        assert_eq!(
-            normalized.declared_official_models_by_provider[&provider_id],
-            ["GPT-5.6-SOL", "gpt-5.6-luna", "gpt-5.6-terra"]
-        );
-        assert_eq!(
-            normalized.upstream_models_by_provider[&provider_id],
-            ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"]
-        );
-
-        let directory = tempfile::tempdir().unwrap();
-        let store = ConfigStore::new(directory.path().join("config.json"));
-        store.save(&normalized).unwrap();
-        let reloaded = store.load().unwrap();
-        assert_eq!(
-            reloaded.declared_official_models_by_provider[&provider_id],
-            ["GPT-5.6-SOL", "gpt-5.6-luna", "gpt-5.6-terra"]
-        );
-        assert_eq!(
-            reloaded.upstream_models_by_provider[&provider_id],
-            ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra"]
         );
     }
 

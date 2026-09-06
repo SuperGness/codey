@@ -1891,7 +1891,7 @@ mod tests {
         }
 
         assert!(notifications.is_known(&in_flight));
-        assert!(!notifications.try_reserve(in_flight.clone(), &[]));
+        assert!(!notifications.try_reserve(in_flight, &[]));
         assert_eq!(
             notifications.settled.len(),
             WEBHOOK_NOTIFICATION_HISTORY_LIMIT

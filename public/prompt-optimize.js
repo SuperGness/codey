@@ -685,7 +685,31 @@
     );
   };
 
-  const handleComposerMutations = (mutations) => {
+  // Lightweight observer telemetry: per-handler call count, mutation count and
+  // wall time, exposed on window.__codeyObserverStats for performance triage.
+  // No behavior change; timing falls back to Date.now() where performance is
+  // unavailable (test sandboxes).
+  const codeyTimed = (name, count, run) => {
+    const now = () =>
+      typeof performance === "object" && typeof performance.now === "function"
+        ? performance.now()
+        : Date.now();
+    const stats = (window.__codeyObserverStats ||= {});
+    const entry = (stats[name] ||= { calls: 0, items: 0, totalMs: 0, maxMs: 0 });
+    const startedAt = now();
+    try {
+      return run();
+    } finally {
+      const elapsed = now() - startedAt;
+      entry.calls += 1;
+      entry.items += count;
+      entry.totalMs += elapsed;
+      if (elapsed > entry.maxMs) entry.maxMs = elapsed;
+    }
+  };
+  const handleComposerMutations = (mutations) =>
+    codeyTimed("prompt-optimize.composerMutations", mutations?.length ?? 0, () => handleComposerMutationsImpl(mutations));
+  const handleComposerMutationsImpl = (mutations) => {
     if (!enabled) return;
     const hasExternalMutation = mutations.some((mutation) => {
       const target = mutation.target;

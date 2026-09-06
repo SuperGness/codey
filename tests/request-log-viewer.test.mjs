@@ -9,7 +9,7 @@ test("request log controls are scoped to built-in routing and preserve logger se
     readFile(new URL("src/App.tsx", root), "utf8"),
     readFile(new URL("src/ModelSection.tsx", root), "utf8"),
     readFile(new URL("src/App.types.ts", root), "utf8"),
-    readFile(new URL("src/main.tsx", root), "utf8"),
+    readFile(new URL("src/dev/mockApi.ts", root), "utf8"),
   ]);
 
   assert.match(types, /export type RouteRequestLogConfig/);
@@ -148,7 +148,7 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
 });
 
 test("request log preview supports clearing all history", async () => {
-  const preview = await readFile(new URL("src/main.tsx", root), "utf8");
+  const preview = await readFile(new URL("src/dev/mockApi.ts", root), "utf8");
 
   assert.match(preview, /command === "clear_route_request_logs"/);
   assert.match(preview, /previewRouteRequestLogs\.length = 0/);

@@ -1,7 +1,6 @@
 use super::*;
 use crate::codex_config_guidance::{
-    CODEY_FASTCTX_GUIDANCE, DEFAULT_AGENT_CONFIG, PREVIOUS_CODEY_FASTCTX_GUIDANCE_V5,
-    PREVIOUS_SUBAGENT_GUIDANCE_V2, codey_fastctx_guidance_for_namespace,
+    CODEY_FASTCTX_GUIDANCE, CODEY_FASTCTX_GUIDANCE_VERSIONS, codey_fastctx_guidance_for_namespace,
     remove_codey_fastctx_guidance,
 };
 const LEGACY_GLOBAL_PROVIDER_ID: &str = "codey_global";
@@ -103,7 +102,7 @@ fn runtime_config_lock_serializes_codey_writers() {
     let marker = temp.path().join("codex-lease.json");
     let first = RuntimeConfigLock::acquire(&marker).unwrap();
     let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
-    let second_marker = marker.clone();
+    let second_marker = marker;
     let second = std::thread::spawn(move || {
         let _guard = RuntimeConfigLock::acquire(&second_marker).unwrap();
         acquired_tx.send(()).unwrap();
@@ -769,32 +768,6 @@ tool_namespace = "agents"
     );
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
     assert!(!home.join("config.toml.bak").exists());
-}
-
-#[test]
-fn default_agent_source_exactly_migrates_to_read_only() {
-    let temp = tempfile::tempdir().unwrap();
-    let constraints_dir = temp.path().join("codex-constraints");
-    fs::create_dir_all(&constraints_dir).unwrap();
-    let source_path = constraints_dir.join(CODEY_SUBAGENT_SOURCE_FILE);
-    fs::write(
-        &source_path,
-        crate::codex_config_guidance::previous_default_agent_config_without_sandbox(),
-    )
-    .unwrap();
-
-    let roles = crate::config::default_subagent_roles();
-    prepare_runtime_agent_files(&constraints_dir, &roles, None).unwrap();
-
-    assert_eq!(
-        fs::read_to_string(&source_path).unwrap(),
-        DEFAULT_AGENT_CONFIG
-    );
-    assert!(
-        fs::read_to_string(constraints_dir.join(CODEY_RUNTIME_DEFAULT_AGENT_FILE))
-            .unwrap()
-            .contains("sandbox_mode = \"read-only\"")
-    );
 }
 
 #[test]
@@ -1753,15 +1726,11 @@ direct_only_tool_namespaces = ["mcp__existing"]
         .as_str()
         .unwrap()
         .to_string();
-    let stale_guidance = CODEY_FASTCTX_GUIDANCE_VERSIONS[1..].join("\n\n");
-    stale["developer_instructions"] = value(format!(
-        "{guidance}\n\n{stale_guidance}\n\nConcurrent guidance."
-    ));
+    stale["developer_instructions"] = value(format!("{guidance}\n\nConcurrent guidance."));
     let features = ensure_root_table(&mut stale, "features").unwrap();
     let multi_agent = ensure_child_table(features, "multi_agent_v2").unwrap();
-    multi_agent["subagent_developer_instructions"] = value(format!(
-        "Subagent guidance.\n\n{guidance}\n\n{stale_guidance}"
-    ));
+    multi_agent["subagent_developer_instructions"] =
+        value(format!("Subagent guidance.\n\n{guidance}"));
 
     let disabled = patch_config_with_fastctx(
         &document_string(&stale).unwrap(),
@@ -1905,42 +1874,6 @@ fn fastctx_guidance_cleanup_requires_complete_paragraph_boundaries() {
 }
 
 #[test]
-fn enabling_fast_context_tools_replaces_stale_guidance_versions() {
-    let stale_guidance = CODEY_FASTCTX_GUIDANCE_VERSIONS[1..].join("\\n\\n");
-    let existing = format!(
-        r#"
-developer_instructions = "User guidance.\n\n{stale_guidance}\n\n{CODEY_FASTCTX_GUIDANCE}"
-"#
-    );
-
-    let result = patch_config_with_fastctx(
-        &existing,
-        relative_model_catalog_path(),
-        None,
-        Some(Path::new("/tmp/codey")),
-        false,
-    )
-    .unwrap();
-    let document = result.parse::<DocumentMut>().unwrap();
-    let guidance = document["developer_instructions"].as_str().unwrap();
-
-    assert_eq!(
-        guidance
-            .matches("Codey FastCtx context tools are enabled")
-            .count(),
-        1
-    );
-    assert!(guidance.contains(CODEY_FASTCTX_GUIDANCE));
-    for stale_guidance in &CODEY_FASTCTX_GUIDANCE_VERSIONS[1..] {
-        assert!(!guidance.contains(stale_guidance));
-    }
-    assert_eq!(
-        guidance,
-        format!("User guidance.\n\n{CODEY_FASTCTX_GUIDANCE}")
-    );
-}
-
-#[test]
 fn fast_context_tools_are_idempotent_and_default_the_host_output_limit() {
     let existing = r#"
 [features.code_mode]
@@ -1996,16 +1929,10 @@ direct_only_tool_namespaces = ["mcp__existing", "mcp__codey_fastctx", "mcp__code
         Some(CODEY_FASTCTX_HOST_TOKEN_LIMIT)
     );
     assert_eq!(document["features"]["hooks"].as_bool(), Some(true));
-    let route_hooks = document["hooks"]["PreToolUse"]
-        .as_array_of_tables()
-        .unwrap();
-    assert_eq!(route_hooks.len(), 1);
-    assert_eq!(
-        route_hooks.get(0).unwrap()["matcher"].as_str(),
-        Some(crate::fastctx_route_gate::HOOK_MATCHER)
-    );
-    assert!(first.contains(crate::fastctx_route_gate::HOOK_ARGUMENT));
-    assert_eq!(document["hooks"]["state"].as_table().unwrap().len(), 1);
+    // The FastCtx route hook itself is delivered via the runtime hooks.json,
+    // never through the TOML document.
+    assert!(document.get("hooks").is_none());
+    assert!(!first.contains(crate::fastctx_route_gate::HOOK_ARGUMENT));
 }
 
 #[test]
@@ -2090,14 +2017,12 @@ command = "echo preserve-user-hook"
     let agents = document["agents"].as_table().unwrap();
     let multi_agent = document["features"]["multi_agent_v2"].as_table().unwrap();
 
-    assert!(agents.get("max_threads").is_none());
-    assert!(agents.get("max_depth").is_none());
     assert_eq!(agents["interrupt_message"].as_bool(), Some(true));
     assert_eq!(agents["custom_setting"].as_str(), Some("preserved"));
     assert_eq!(agents["enabled"].as_bool(), Some(true));
     assert_eq!(
         agents["max_concurrent_threads_per_session"].as_integer(),
-        Some(6)
+        Some(DEFAULT_SUBAGENT_MAX_CONCURRENCY)
     );
     assert_eq!(
         agents["default_subagent_model"].as_str(),
@@ -2118,17 +2043,6 @@ command = "echo preserve-user-hook"
         Some(false)
     );
     assert_eq!(multi_agent["tool_namespace"].as_str(), Some("agents"));
-    assert!(
-        multi_agent
-            .get("max_concurrent_threads_per_session")
-            .is_none()
-    );
-    assert!(multi_agent.get("default_subagent_model").is_none());
-    assert!(
-        multi_agent
-            .get("default_subagent_reasoning_effort")
-            .is_none()
-    );
     assert_eq!(
         multi_agent["min_wait_timeout_ms"].as_integer(),
         Some(10_000)
@@ -2154,215 +2068,12 @@ command = "echo preserve-user-hook"
         multi_agent["multi_agent_mode_hint_text"].as_str(),
         Some(ROOT_AGENT_MULTI_AGENT_MODE_HINT)
     );
-    let pre_tool_use = document["hooks"]["PreToolUse"]
-        .as_array_of_tables()
-        .unwrap();
-    assert_eq!(pre_tool_use.len(), 2);
-    let preserved_handler = pre_tool_use.get(0).unwrap()["hooks"]
-        .as_array_of_tables()
-        .unwrap()
-        .get(0)
-        .unwrap();
-    assert_eq!(
-        preserved_handler["command"].as_str(),
-        Some("echo preserve-user-hook")
-    );
-    let gate_handler = pre_tool_use.get(1).unwrap()["hooks"]
-        .as_array_of_tables()
-        .unwrap()
-        .get(0)
-        .unwrap();
-    assert_eq!(gate_handler["type"].as_str(), Some("command"));
-    assert!(
-        gate_handler["command"]
-            .as_str()
-            .unwrap()
-            .contains(crate::subagent_gate::HOOK_ARGUMENT)
-    );
-    let windows_command = gate_handler["commandWindows"].as_str().unwrap();
-    assert!(windows_command.starts_with("& '"), "{windows_command}");
-    assert!(windows_command.contains(crate::subagent_gate::HOOK_ARGUMENT));
-    assert_eq!(
-        gate_handler["timeout"].as_integer(),
-        Some(crate::subagent_gate::HOOK_TIMEOUT_SECONDS as i64)
-    );
-    let post_tool_use = document["hooks"]["PostToolUse"]
-        .as_array_of_tables()
-        .unwrap();
-    assert_eq!(post_tool_use.len(), 1);
-    assert_eq!(
-        post_tool_use.get(0).unwrap()["matcher"].as_str(),
-        Some(crate::subagent_orchestrator::POST_TOOL_HOOK_MATCHER)
-    );
-    for event in [
-        "UserPromptSubmit",
-        "SubagentStart",
-        "SubagentStop",
-        "Stop",
-        "SessionEnd",
-    ] {
-        assert_eq!(
-            document["hooks"][event].as_array_of_tables().unwrap().len(),
-            1,
-            "{event}"
-        );
-    }
-    let hook_state = document["hooks"]["state"].as_table().unwrap();
-    assert_eq!(hook_state.len(), SUBAGENT_GATE_HOOKS.len());
-    let pre_tool_key = "/tmp/codey-codex/config.toml:pre_tool_use:1:0";
-    assert!(
-        hook_state[pre_tool_key]["trusted_hash"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
-    );
-}
-
-#[test]
-fn subagent_and_fastctx_share_one_pre_tool_hook() {
-    let config_path = Path::new("/tmp/codey-codex/config.toml");
-    let result = patch_config_with_fastctx_mode(
-        "",
-        RouterPatchOptions {
-            config_path,
-            model_catalog_path: relative_model_catalog_path(),
-            default_model: None,
-            fastctx_command: Some(Path::new("/tmp/codey-fastctx")),
-            subagent_optimization: true,
-            subagent_model: "gpt-5.6-sol",
-            subagent_reasoning_effort: "high",
-            local_router: Some(test_runtime_router_endpoint()),
-        },
-    )
-    .unwrap();
-    let document = result.parse::<DocumentMut>().unwrap();
+    // Hook definitions are delivered through the runtime hooks.json; the
+    // effective TOML keeps only the user's own hook group untouched.
     let pre_tool_use = document["hooks"]["PreToolUse"]
         .as_array_of_tables()
         .unwrap();
     assert_eq!(pre_tool_use.len(), 1);
-    assert_eq!(pre_tool_use.get(0).unwrap()["matcher"].as_str(), Some("*"));
-    let handler = pre_tool_use.get(0).unwrap()["hooks"]
-        .as_array_of_tables()
-        .unwrap()
-        .get(0)
-        .unwrap();
-    assert!(
-        handler["command"]
-            .as_str()
-            .unwrap()
-            .contains(crate::subagent_gate::COMBINED_HOOK_ARGUMENT)
-    );
-    assert!(
-        !handler["command"]
-            .as_str()
-            .unwrap()
-            .contains(crate::fastctx_route_gate::HOOK_ARGUMENT)
-    );
-    for event in [
-        "PostToolUse",
-        "UserPromptSubmit",
-        "SubagentStart",
-        "SubagentStop",
-        "Stop",
-        "SessionEnd",
-    ] {
-        assert_eq!(
-            document["hooks"][event].as_array_of_tables().unwrap().len(),
-            1,
-            "{event}"
-        );
-    }
-    assert_eq!(
-        document["hooks"]["state"].as_table().unwrap().len(),
-        SUBAGENT_GATE_HOOKS.len()
-    );
-
-    let combined_commands =
-        crate::subagent_gate::hook_commands_for(crate::subagent_gate::COMBINED_HOOK_ARGUMENT)
-            .unwrap();
-    let selected_command = if cfg!(windows) {
-        combined_commands.command_windows.as_str()
-    } else {
-        combined_commands.command.as_str()
-    };
-    let expected_hash = crate::subagent_gate::hook_trust_hash(
-        "pre_tool_use",
-        Some("*"),
-        selected_command,
-        crate::subagent_gate::HOOK_TIMEOUT_SECONDS,
-    );
-    let state_key = format!("{}:pre_tool_use:0:0", config_path.display());
-    assert_eq!(
-        document["hooks"]["state"][&state_key]["trusted_hash"].as_str(),
-        Some(expected_hash.as_str())
-    );
-}
-
-#[test]
-fn subagent_hook_upgrade_replaces_legacy_codey_groups_and_preserves_user_hook_state() {
-    let config_path = Path::new("/tmp/codey-codex/config.toml");
-    let existing = format!(
-        r#"
-[hooks.state."{config_path}:pre_tool_use:0:0"]
-trusted_hash = "sha256:legacy-codey-one"
-
-[hooks.state."{config_path}:pre_tool_use:1:0"]
-trusted_hash = "sha256:legacy-codey-two"
-
-[hooks.state."{config_path}:pre_tool_use:2:0"]
-trusted_hash = "sha256:user-hook"
-
-[[hooks.PreToolUse]]
-matcher = "*"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "'/old/codey' {hook_argument}"
-commandWindows = '"C:\\old\\codey.exe" {hook_argument}'
-timeout = 5
-
-[[hooks.PreToolUse]]
-matcher = "*"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "'/second/codey' {hook_argument}"
-commandWindows = '"C:\\second\\codey.exe" {hook_argument}'
-timeout = 5
-
-[[hooks.PreToolUse]]
-matcher = "Bash"
-
-[[hooks.PreToolUse.hooks]]
-type = "command"
-command = "echo preserve-user-hook"
-timeout = 2
-"#,
-        config_path = config_path.display(),
-        hook_argument = crate::subagent_gate::HOOK_ARGUMENT,
-    );
-    let result = patch_config_with_fastctx_mode(
-        &existing,
-        RouterPatchOptions {
-            config_path,
-            model_catalog_path: relative_model_catalog_path(),
-            default_model: None,
-            fastctx_command: Some(Path::new("/tmp/codey-fastctx")),
-            subagent_optimization: true,
-            subagent_model: "gpt-5.6-sol",
-            subagent_reasoning_effort: "high",
-            local_router: Some(test_runtime_router_endpoint()),
-        },
-    )
-    .unwrap();
-    let document = result.parse::<DocumentMut>().unwrap();
-    let pre_tool_use = document["hooks"]["PreToolUse"]
-        .as_array_of_tables()
-        .unwrap();
-    assert_eq!(pre_tool_use.len(), 2);
-    assert_eq!(
-        pre_tool_use.get(0).unwrap()["matcher"].as_str(),
-        Some("Bash")
-    );
     assert_eq!(
         pre_tool_use.get(0).unwrap()["hooks"]
             .as_array_of_tables()
@@ -2372,48 +2083,12 @@ timeout = 2
             .as_str(),
         Some("echo preserve-user-hook")
     );
-    let gate_command = pre_tool_use.get(1).unwrap()["hooks"]
-        .as_array_of_tables()
-        .unwrap()
-        .get(0)
-        .unwrap()["command"]
-        .as_str()
-        .unwrap();
-    assert!(gate_command.contains(crate::subagent_gate::COMBINED_HOOK_ARGUMENT));
-    assert!(!result.contains("/old/codey"));
-    assert!(!result.contains("/second/codey"));
-
-    let state = document["hooks"]["state"].as_table().unwrap();
-    assert_eq!(
-        state[&format!("{}:pre_tool_use:0:0", config_path.display())]["trusted_hash"].as_str(),
-        Some("sha256:user-hook")
-    );
     assert!(
-        state[&format!("{}:pre_tool_use:1:0", config_path.display())]["trusted_hash"]
-            .as_str()
-            .is_some_and(|hash| hash.starts_with("sha256:"))
+        !document
+            .to_string()
+            .contains(crate::subagent_gate::HOOK_ARGUMENT)
     );
-    assert!(
-        state
-            .get(&format!("{}:pre_tool_use:2:0", config_path.display()))
-            .is_none()
-    );
-
-    let repeated = patch_config_with_fastctx_mode(
-        &result,
-        RouterPatchOptions {
-            config_path,
-            model_catalog_path: relative_model_catalog_path(),
-            default_model: None,
-            fastctx_command: Some(Path::new("/tmp/codey-fastctx")),
-            subagent_optimization: true,
-            subagent_model: "gpt-5.6-sol",
-            subagent_reasoning_effort: "high",
-            local_router: Some(test_runtime_router_endpoint()),
-        },
-    )
-    .unwrap();
-    assert_eq!(repeated, result);
+    assert!(document["hooks"].get("state").is_none());
 }
 
 #[test]
@@ -2444,77 +2119,9 @@ default_subagent_reasoning_effort = "low"
     .unwrap();
     let document = result.parse::<DocumentMut>().unwrap();
 
-    assert!(
-        document["agents"]
-            .as_table()
-            .unwrap()
-            .get("max_threads")
-            .is_none()
-    );
     assert_eq!(
         document["agents"]["max_concurrent_threads_per_session"].as_integer(),
         Some(4)
-    );
-    assert!(
-        document["features"]["multi_agent_v2"]
-            .as_table()
-            .unwrap()
-            .get("max_concurrent_threads_per_session")
-            .is_none()
-    );
-    assert!(
-        document["features"]["multi_agent_v2"]
-            .as_table()
-            .unwrap()
-            .get("default_subagent_model")
-            .is_none()
-    );
-    assert!(
-        document["features"]["multi_agent_v2"]
-            .as_table()
-            .unwrap()
-            .get("default_subagent_reasoning_effort")
-            .is_none()
-    );
-}
-
-#[test]
-fn subagent_optimization_migrates_the_previous_codey_owned_concurrency_default() {
-    let existing = r#"
-[agents]
-max_concurrent_threads_per_session = 2
-
-[agents.codey_quick_scan]
-description = "Codey quick scan"
-config_file = "/tmp/codey-quick-scan.toml"
-
-[agents.codey_worker]
-description = "Codey worker"
-config_file = "/tmp/codey-worker.toml"
-
-[features.multi_agent_v2]
-enabled = true
-tool_namespace = "agents"
-"#;
-    let result = patch_config_with_fastctx_mode(
-        existing,
-        RouterPatchOptions {
-            config_path: Path::new("/tmp/codey-codex/config.toml"),
-            model_catalog_path: relative_model_catalog_path(),
-            default_model: None,
-            fastctx_command: None,
-            subagent_optimization: true,
-            subagent_model: "gpt-5.6-sol",
-            subagent_reasoning_effort: "high",
-            local_router: Some(test_runtime_router_endpoint()),
-        },
-    )
-    .unwrap();
-    let document = result.parse::<DocumentMut>().unwrap();
-
-    assert_eq!(
-        document["agents"]["max_concurrent_threads_per_session"].as_integer(),
-        Some(DEFAULT_SUBAGENT_MAX_CONCURRENCY)
     );
 }
 
@@ -2538,7 +2145,7 @@ fn subagent_optimization_keeps_a_standalone_explicit_lower_concurrency() {
 
     assert_eq!(
         document["agents"]["max_concurrent_threads_per_session"].as_integer(),
-        Some(PREVIOUS_DEFAULT_SUBAGENT_MAX_CONCURRENCY)
+        Some(2)
     );
 }
 
@@ -2570,13 +2177,6 @@ fn subagent_optimization_defaults_concurrency_for_new_or_invalid_configs() {
         assert_eq!(
             document["agents"]["max_concurrent_threads_per_session"].as_integer(),
             Some(DEFAULT_SUBAGENT_MAX_CONCURRENCY)
-        );
-        assert!(
-            document["agents"]
-                .as_table()
-                .unwrap()
-                .get("max_threads")
-                .is_none()
         );
     }
 }
@@ -3061,17 +2661,17 @@ wire_api = "responses"
     fs::create_dir_all(&seeded_constraints_dir).unwrap();
     fs::write(
         seeded_constraints_dir.join(CODEY_ROOT_INSTRUCTIONS_FILE),
-        PREVIOUS_SUBAGENT_GUIDANCE_V2,
+        SUBAGENT_GUIDANCE,
     )
     .unwrap();
     fs::write(
         seeded_constraints_dir.join(CODEY_FASTCTX_INSTRUCTIONS_FILE),
-        PREVIOUS_CODEY_FASTCTX_GUIDANCE_V5,
+        CODEY_FASTCTX_GUIDANCE,
     )
     .unwrap();
     fs::write(
         seeded_constraints_dir.join(CODEY_COLLABORATION_HINT_FILE),
-        PREVIOUS_ROOT_AGENT_COLLABORATION_USAGE_HINT,
+        ROOT_AGENT_COLLABORATION_USAGE_HINT,
     )
     .unwrap();
     let applied = apply_isolated_test_runtime_config(
@@ -3399,4 +2999,39 @@ developer_instructions = "CUSTOM SUBAGENT CONSTRAINT"
     assert!(runtime_agent.contains("CUSTOM SUBAGENT CONSTRAINT"));
     assert!(runtime_agent.contains("CUSTOM FASTCTX CONSTRAINT"));
     assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
+}
+
+#[test]
+fn pre_isolation_lease_is_released_without_the_removed_restore_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex-home");
+    let state_dir = temp.path().join("state");
+    let marker = state_dir.join("codex-lease.json");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    fs::write(home.join("AGENTS.md"), "user guidance\n").unwrap();
+    // Shape written by releases before isolated runtime constraints existed:
+    // the removed fields are simply ignored by serde.
+    fs::write(
+        &marker,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "backupDir": state_dir.join("backups").join("1-1"),
+            "localRouterApplied": false,
+            "subagentOptimizationApplied": true,
+            "isolatedRuntimeConstraints": false,
+            "independentPromptSources": false,
+            "originalAgentsMdExists": true,
+            "runtimeHooksApplied": false
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert!(restore_runtime_config_at(&home, &marker, false).unwrap());
+    assert!(!marker.exists(), "legacy lease marker must be released");
+    assert_eq!(
+        fs::read_to_string(home.join("AGENTS.md")).unwrap(),
+        "user guidance\n",
+        "user files are left untouched"
+    );
 }

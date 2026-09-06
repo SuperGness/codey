@@ -579,7 +579,6 @@ fn local_route_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> boo
             != next.declared_official_models_by_provider
         || previous.upstream_models_by_provider != next.upstream_models_by_provider
         || previous.default_model != next.default_model
-        || previous.default_model_by_provider != next.default_model_by_provider
         || previous.initial_route_import_completed != next.initial_route_import_completed
 }
 

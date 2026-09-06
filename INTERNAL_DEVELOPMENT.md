@@ -17,7 +17,7 @@
 - public/：注入 Codex 页面的轻量脚本。
 - backend/src/：启动器、配置、CDP、本地路由、会话、通知、诊断和更新实现。
 - backend/resources/：随二进制分发的运行时规则数据。
-- vendor/CodeyRuntime/：跨平台启动、配置和会话数据能力。
+- vendor/CodeyRuntime/：backend 实际消费的跨平台能力子集：应用位置发现、CDP 桥接、Codex config.toml 事务读写、Codex SQLite 会话发现与删除、插件市场快照、诊断日志、端口守卫、Windows 进程工具和启动命令构造。2026-09-06 起未被 backend 引用的旧模块（独立启动器、relay/settings 存储、Zed 远程、worktree、stepwise、更新器、旧注入脚本等）及其测试已删除，历史实现从 Git 获取。
 - scripts/：开发、构建、前端打包、更新清单和发布脚本。
 - tests/ 与 backend 各模块测试：JavaScript 集成测试和 Rust 测试。
 - .github/workflows/：质量检查与桌面安装包构建。
@@ -88,16 +88,18 @@ CODEY_UPDATE_BASE_URL 可在编译时覆盖客户端更新源。发布标签版�
 
 启动任一步失败都应走同一清理路径。会话数据的安全修复不会在退出时回滚；临时路由、Hook 和运行文件必须可恢复。初始 Trace/Crashpad 任务在 profile 与路由 Provider 校验通过后创建；应用定位、旧进程停止或维护失败时，仍等待已启动任务结束并更新状态，再返回原始错误。Trace 失败也会等待 Crashpad，避免丢弃 JoinHandle 后后台清理继续运行。旧 Codex 停止后，模型目录准备与会话维护并行；两者及存储保护全部结束后，才启动路由并写入最终运行配置。并行减少串行步骤，尚未测量问题设备上的冷启动耗时收益。
 
-Windows 的启动兼容安装最多尝试 2 次，仅超时、中断、WouldBlock 或明确的 Windows 文件共享/锁冲突（错误码 32、33）允许重试。目标程序无效、配置解析错误、权限拒绝、Inspector 响应不兼容和清理失败均不重试。首次同时等待 Inspector 和 CLI；若 Inspector 不可达而主进程停在 `--inspect-brk`，桌面也无法启动 app-server，CLI 握手会一并超时。首轮失败且包装器环境已应用时，先成功清理进程和 Store 临时环境，第二次重新准备包装器并移除 `--inspect-brk`，只等待认证后的 CLI 执行确认。重试若无法应用包装器环境，在激活应用前直接报错；保持运行配置和路由约束，不允许空配置直连。
+启动前先读取 Codex Electron 二进制的 fuse wire（`backend/src/electron_fuses.rs`，按 @electron/fuses 的 sentinel 与 v1 位序解析，结果按路径、大小和修改时间缓存在状态目录 `electron-fuses.json`）。`EnableNodeCliInspectArguments` 为关闭或移除时，Electron 会在解析命令行时丢弃 `--inspect-brk`，主进程 Inspector 永远不会出现：Windows 直接以 CLI 包装器作为唯一入口启动，不再传 `--inspect-brk`，也不等待 Inspector；macOS 保留该参数作为进程清理标记，但只等待 CLI 包装器。fuse 未知（二进制缺失、扫描失败）时保留 Inspector 尝试，由运行时证据决定是否放弃。2026-09-06 本机 ChatGPT.app 的 Codex Framework 读到 wire `010011001`，Inspect 位为关闭；Windows 商店包按同一打包配置，实机日志 `launcher.electron_fuses` 会记录实际值。
 
-每次系统激活返回后重新建立 44 秒兼容等待上限，第二次不会被首轮耗时及清理挤占。首次 Inspector 与 CLI 的就绪窗口各为 20 秒，后续补丁安装仍受该次 44 秒上限约束；无断点重试将完整 44 秒用于 CLI 认证及执行确认。进程清理保留独立的 20 秒上限；文件暂存和系统激活不通过取消 Future 强行中断，因此该数值不是整个启动过程的硬性耗时保证。回归模拟首轮 Inspector/CLI 均不可用、长清理等待、第二轮 28 秒后握手成功，并检查缺少包装器、不可重试错误和最多两次的限制。Windows Store 系统激活与环境继承仍需 Windows 实机验证。
+Windows 的启动兼容安装最多尝试 2 次，仅超时、中断、WouldBlock、启动等待期间进程退出，以及明确的 Windows 文件共享/锁冲突（错误码 32、33）允许重试。目标程序无效、配置解析错误、权限拒绝、Inspector 响应不兼容和清理失败均不重试。仍使用 Inspector 时首次同时等待 Inspector 和 CLI：渲染进程调试端口已应答而 Inspector 端口仍被拒绝，立即判定 Inspector 不可用并把整个预算留给 CLI，不杀进程；Inspector 发现窗口耗尽且调试端口也未就绪，判定主进程可能停在断点，立即结束本轮并在清理后去掉 `--inspect-brk` 重试。首轮失败后先成功清理进程和 Store 临时环境，第二次重新准备包装器，只等待 CLI 执行确认。Inspector 已关闭且包装器无法准备（暂存失败）或 Store 无法应用包装器环境时，不再启动一个随后必被停止的进程：存在运行配置或子代理约束直接报错，否则按基础参数启动并返回 `degraded`。
+
+每次系统激活返回后重新建立 60 秒的 CLI 确认上限；Inspector 发现窗口仍为 20 秒，补丁安装和 app-server 覆盖校验各 10/24 秒。等待期间每秒检查进程是否存活（直接子进程用 `try_wait`，Store 激活按 PID 快照），进程退出立即结束等待并允许重试一次，不会等到上限。进程清理保留独立的 20 秒上限；文件暂存和系统激活不通过取消 Future 强行中断，因此上述数值不是整个启动过程的硬性耗时保证。回归模拟首轮 Inspector/CLI 均不可用、长清理等待、第二轮 45 秒后握手成功、进程提前退出、渲染端口就绪时的 Inspector 放弃，并检查缺少包装器、不可重试错误和最多两次的限制。Windows Store 系统激活与环境继承仍需 Windows 实机验证。
 
 
-CLI 包装器在目标校验和创建进程前建立认证连接。令牌后的 EOF 仍只表示目标已执行；失败时发送 `!` 和最多 8 KiB 的结构化错误，保留具体原因与是否允许重试。收到明确失败立即结束兼容等待；创建进程不再使用独立的 750ms 确认窗口，改为共享启动截止时间。握手监听器只服务首次启动，其关闭后仍允许后续 app-server 调用 CLI。回归使用真实子进程覆盖目标缺失、配置无效、执行失败、参数和环境隔离、监听器关闭后的重启；退出码与监听器关闭后的重启回归复用测试程序作为固定返回 17 的原生子进程，避免让 CLI 配置参数参与 shell 命令解析；断言失败时保留子进程输出。Windows 测试另用独占文件句柄验证共享冲突分类。重试分类、截止时间和立即返回通过 Rust 行为测试覆盖，源码检查只保留平台清理顺序等约束。
+CLI 包装器在目标校验和创建进程前建立认证连接。回连单次 500ms，端口被拒绝（启动器已不再监听，例如 app-server 重启）立即放弃，超时等暂时性错误在 3 秒内重试，避免回环被安全软件或高负载拖慢时一次失败就静默放弃握手。除握手连接外，包装器还按 `CODEY_CODEX_CLI_WRAPPER_MARKER` 指定的路径（状态目录 `cli-wrapper/<令牌>.json`）写入记录文件：连接前写 `launching`，创建目标进程后写 `executed`，失败写 `failed` 并附原因与是否可重试；macOS 在 exec 前先写 `executed`。启动器同时监听握手端口和每 250ms 轮询记录文件，任一确认即成功，等待结束后删除记录，准备包装器时清理一小时以上的残留记录。令牌后的 EOF 仍只表示目标已执行；失败时发送 `!` 和最多 8 KiB 的结构化错误，保留具体原因与是否允许重试。收到明确失败立即结束兼容等待；创建进程不再使用独立的 750ms 确认窗口，改为共享启动截止时间。握手监听器只服务首次启动，其关闭后仍允许后续 app-server 调用 CLI。回归使用真实子进程覆盖目标缺失、配置无效、执行失败、参数和环境隔离、监听器关闭后的重启；退出码与监听器关闭后的重启回归复用测试程序作为固定返回 17 的原生子进程，避免让 CLI 配置参数参与 shell 命令解析；断言失败时保留子进程输出。Windows 测试另用独占文件句柄验证共享冲突分类。重试分类、截止时间和立即返回通过 Rust 行为测试覆盖，源码检查只保留平台清理顺序等约束。
 
 浏览器和计算机操作执行器会从 Codex 获取 `CODEX_CLI_PATH`，但其子进程环境可能过滤 `CODEY_CODEX_CLI_WRAPPER_*`。CLI 包装分流因此不能只依赖目标环境变量：辅助参数先由各自入口处理；其余带参数的调用从 Codey 保存的应用位置恢复真实内置 CLI，Windows Store 继续复用已校验的用户运行目录。找不到目标、配置损坏或执行失败时直接报错，禁止进入桌面启动及 Codex 进程清理流程。无参数启动、旧 watcher 的 `--debug-port` 和 macOS 的 `-psn_` 启动参数保留桌面行为。此恢复不依赖主进程 Inspector；现有兼容环境完整时仍优先使用本次启动指定的目标和运行配置。回归覆盖环境缺失、保存位置无效、参数及退出码转发和正常桌面分流；Windows 下的 Chrome 端到端行为仍需实机验证。
 
-诊断日志记录 Store 临时环境启用与清理、激活返回的 PID、线程恢复结果、Inspector 发现、尝试次数及是否为无断点 CLI 启动、CLI 认证和执行确认；环境只记录是否存在，不记录令牌或完整配置。CLI 超时区分未收到有效握手与已认证但未确认执行，便于识别桌面未启动包装器和目标程序启动缓慢。仅凭 Inspector 与 CLI 同时超时无法确定一次现场故障的根因，需结合这些阶段记录及报错机器的完整错误日志判断。
+诊断日志记录 fuse 探测结果与扫描耗时（`launcher.electron_fuses`）、Store 临时环境启用与清理、激活返回的 PID、线程恢复结果、Inspector 发现或探测汇总（`launcher.inspector_probe_summary`：拒绝/超时/其他错误次数、渲染端口是否就绪）、尝试次数及是否为无断点 CLI 启动、包装器自身的启动时间与回连结果（`launcher.cli_wrapper_started`、`launcher.cli_wrapper_handshake_connect`）、CLI 认证和执行确认、记录文件确认（`launcher.cli_wrapper_marker_*`）以及进程提前退出（`launcher.startup_process_exited`）；环境只记录是否存在，不记录令牌或完整配置。CLI 超时区分未收到有效握手与已认证但未确认执行，便于识别桌面未启动包装器和目标程序启动缓慢。Inspector 探测报「被拒绝」还是「超时」是关键区分：fuse 关闭时无人监听，应当立即被拒绝；连续超时说明回环连接被拖住，同一原因也会拖慢包装器回连。
 
 ### 启动与补丁核验基线（2026-09-05）
 
@@ -120,6 +122,19 @@ Inspector 与 CLI 包装器是内部启动路径，不是用户可切换的运�
 WMI 拦截自 0.2.0 存在；Git renderer 保护由 3280462 引入，主进程 IPC 由 1a0c4c7 引入。审查时上游 `worker.js` 已有 `sharedRuns` 去重、`repositoryRuns` 排队与 watcher 复用，缺少当前 Windows 实机证据。历史实现可从 Git 查询，当前代码不再保留兼容分支或等待命中状态。
 
 Windows Store 运行文件暂存、CLI 环境隔离、Inspector 启动时防止 Worker 继承调试参数，以及用户可选的 Trace/Crashpad 管理仍有独立用途，予以保留。
+
+### Windows 启动稳定性改造（2026-09-07）
+
+现场报错「Codex 启动补丁失败：等待 Codex 启动补丁超时 … operation timed out；CLI 兼容入口失败：等待 Codex CLI 兼容执行器超时」的结构性原因：Inspector 路径在当前 Codex 构建上不可能成功（fuse 关闭），却决定了等待结构；CLI 握手窗口固定 20 秒且包装器回连只尝试一次 500ms，冷启动、Defender 首次扫描未签名的 codey.exe 或安全软件拖慢回环连接时，健康的 Codex 会被当作失败杀掉重启。v0.10.2 还让两次尝试共用一个 44 秒总时限。本轮改动：
+
+- 启动前读取 Electron fuse，Inspect 位关闭时 Windows 不带 `--inspect-brk`、不等 Inspector；macOS 保留参数作为清理标记但只等 CLI。
+- 包装器回连可重试，并新增记录文件作为第二确认通道；启动器不会因握手丢失杀掉已执行目标的 Codex。
+- 等待按证据结束：进程退出立即失败并重试一次；渲染进程调试端口就绪而 Inspector 被拒绝时立即放弃 Inspector；单轮 CLI 确认上限 60 秒。
+- Inspector 关闭且没有可用包装器时在启动前决策，不再启动随后必被停止的进程。
+- Windows Store 运行文件暂存改为按包文件的大小与修改时间识别，复制时校验一次 SHA-256 并写入目录清单 `.codey-staged.json`，后续启动只核对清单与文件大小，不再每次对约 300 MB 的运行文件全量哈希；副本大小不符时重新暂存。
+- 补充探测与包装器阶段的诊断日志，见上文诊断段落。
+
+本机验证：`cargo test -p codey --lib`（electron_fuses、launcher、codex_startup_patch 相关用例，含读取已安装 ChatGPT.app 的真实 fuse wire）、`cargo test -p codey --test codex_cli_wrapper`、`cargo clippy -p codey --all-targets -- -D warnings`、`cargo fmt --check`、`pnpm test:js`。Windows 分支（Store 激活、PID 快照存活检查、`cfg(windows)` 代码）无法在本机编译验证，需要 Windows CI 与实机确认。未签名的 codey.exe 仍是 Defender「首次可见即阻止」拖慢启动的诱因，签名属于发布链路事项。
 
 依赖审查结合三个 Cargo 包、前端清单、构建脚本、平台 cfg 和源码调用；`cargo-machete .` 未发现未使用的直接依赖。`pnpm why @mantine/hooks` 确认它是 Mantine Core 的必需 peer，删除根声明不会减少安装树；`cargo tree --locked -i zopfli -e features` 确认 ZIP 的 deflate 特性同时由 FastCtx 启用，仅调整本项目不会移除 Zopfli。系统代理、系统证书、二维码、压缩包读取及原生平台依赖均保留，未改动依赖版本或锁文件。此次删除减少注入代码及随包资源，不宣称减少第三方依赖数量。
 
@@ -177,7 +192,7 @@ local_router.rs 维护不可变线路快照，按明确线路元数据、带线�
 
 ### 本地路由延迟与协议审查（2026-09-05）
 
-首轮只调整共享 SSE 分帧状态和请求日志计时，新增可重复的本地基准。不改变选路、认证、请求字段、工具映射、流式事件、错误码、超时、重试、连接上限或日志结构。维护性改动和性能证据保存在本节及 `backend/benches/local_router_results.json`；取消传播与终态处理的后续进展见下节。
+首轮只调整共享 SSE 分帧状态和请求日志计时，新增可重复的本地基准。不改变选路、认证、请求字段、工具映射、流式事件、错误码、超时、重试、连接上限或日志结构。维护性改动和性能证据保存在本节；原始基准数据文件已于 2026-09-06 从仓库移除，需要时从 Git 历史（v0.10.3 及之前的 `backend/benches/*.json`）获取。取消传播与终态处理的后续进展见下节。
 
 调用链与延迟边界：
 
@@ -214,7 +229,7 @@ local_router.rs 维护不可变线路快照，按明确线路元数据、带线�
 - 环境：Apple M4 / macOS 27.0 arm64 / rustc 1.96.0。基线生产代码来自 `a5a3a65a08a97860abcdf7c31d734db47ee4fab7`；先编译带相同基准的优化前二进制，再编译优化后二进制，两者交替执行。使用 release 优化、关闭 LTO、16 个 codegen units，两侧构建参数一致；运行期间不同时执行编译或其他本任务压测。
 - 四组端到端场景为 Native Responses SSE、Chat SSE、Anthropic SSE、Chat 非流式 JSON；每组覆盖 1/8/32/64 并发，4 次预热后每个 worker 连续发 8 次多轮请求。模拟上游在文本前等待 10 ms，在结束前再等待 10 ms。三轮合计每侧 10,080 次计入统计的请求，错误均为 0。
 - CPU 是当前进程每批请求的用户态与内核态 CPU 时间，包含 mock 上游和客户端；RSS 是该进程整轮运行的累计峰值，不能解释为单请求或仅路由的内存。日志在性能基准中关闭；开启日志后的语义通过日志和观察队列回归测试验证。本机 mock 每次关闭上游连接，连接池与 WS 复用由独立正确性测试验证，没有在该基准中测得握手收益。
-- 下列数值为三轮各自分位数/指标的中位数，原始各轮 P50/P95、吞吐、CPU、RSS 和错误数全部保存在 `backend/benches/local_router_results.json`，不能解释为所有样本合并后的分位数。
+- 下列数值为三轮各自分位数/指标的中位数，原始各轮 P50/P95、吞吐、CPU、RSS 和错误数见 Git 历史中的 `backend/benches/local_router_results.json`（已不再随仓库跟踪），不能解释为所有样本合并后的分位数。
 
 分帧微基准：同一个事件按 256 字节依次输入，每个大小运行 8 次。此表只测共享分帧器，不包含网络、模型生成或 UI。
 
@@ -273,7 +288,7 @@ pnpm check
 
 取消测量使用 release 构建，在 16 个场景中连续执行三轮，共 48 次取消；全部通过，且均收到及时 Pong 和关闭确认，没有额外失败终态。从客户端发起 Close 到 mock 观察到上游连接释放，P50 为 0.108 ms，P95 为 0.123 ms，最大 0.142 ms，包含本地任务调度时间。优化前未单独测得取消延迟，因此不提供虚构的前后加速比；代码审查确认旧实现会继续等待上游推进或超时。
 
-性能对比以首轮优化后的二进制为本轮基线，两侧继续采用相同 release 参数和相同 HTTP 下游 mock。先交替执行三轮 1/8/32/64 并发，再做 10 轮 64 并发复测，偶数轮交换执行顺序。每侧累计 30,560 次计入性能统计的请求，错误均为 0。以下为复测中各轮指标的中位数；P95 和所有原始样本保存在 `backend/benches/local_router_stability_results.json`。
+性能对比以首轮优化后的二进制为本轮基线，两侧继续采用相同 release 参数和相同 HTTP 下游 mock。先交替执行三轮 1/8/32/64 并发，再做 10 轮 64 并发复测，偶数轮交换执行顺序。每侧累计 30,560 次计入性能统计的请求，错误均为 0。以下为复测中各轮指标的中位数；P95 和所有原始样本见 Git 历史中的 `backend/benches/local_router_stability_results.json`（已不再随仓库跟踪）。
 
 | 64 并发场景 | 首正文 P50 ms，前 → 后 | 完整 P50 ms，前 → 后 | 成功请求/秒，前 → 后 | CPU ms / 512 请求，前 → 后 | 进程峰值 RSS MiB，前 → 后 |
 | --- | --- | --- | --- | --- | --- |
@@ -331,6 +346,31 @@ CODEY_BENCH_PROTOCOL=anthropicMessages CODEY_BENCH_CASE=text CODEY_BENCH_CONCURR
 
 `CODEY_BENCH_CASE` 还支持 `mixed`、`parallel_tools`。仍未处理的错误日志有界队列、HTTP 显式取消/连接复用、Anthropic 状态码统一和真实客户端性能采集，继续按前节边界推进；本轮不将这些改造混入文本收尾优化。
 
+### 本地路由复审与小修（2026-09-06）
+
+在前三节基础上再次通读请求热路径（连接接入 → 头/体读取 → 解压/解析 → 选路与绑定 → 协议转换 → 上游发送 → 首包嗅探 → 下游写回），未发现新的串行等待、重复请求或阻塞调用；选路为一次哈希查找加一段短临界区，官方登录态有 TTL 缓存，大 JSON 解析/改写已在 blocking worker 上执行。本轮只做四处不改变协议和选路行为的修改，均位于 `backend/src/local_router.rs`：
+
+- 上游 `reqwest::Client` 增加 HTTP/2 空闲 PING（间隔 30 s、超时 10 s、空闲时也发送）。目的：连接池里被 NAT 或供应商负载均衡静默丢弃的 HTTP/2 连接在下一次请求前被淘汰，避免该请求先在死连接上等待再重建 TLS。该收益是假设，尚未在真实供应商网络上测得；HTTP/1.1 上游继续依赖原有 TCP keepalive。
+- 本地错误响应的原因短语改用 `http` 标准表（`429 Too Many Requests` 等），旧固定表外的状态码不再写成 `429 OK`；未知状态码写 `Unknown`。客户端按数字状态码处理，属协议文本修正。
+- `RouterServer` 改为 `Arc` 共享，每个连接不再克隆两份 token 字符串与登录态路径。
+- 请求体在拿到内存配额后按 `content-length` 一次预留容量，替代分片读取中的多次倍增扩容；上限仍由 `MAX_REQUEST_BYTES` 与配额信号量约束。
+- 2026-09-07 精简：Chat Completions 与 Anthropic Messages 的成功响应写回合并为 `adapt.rs` 的 `write_adapted_upstream_as_responses`，按协议桥选择流式/汇总函数，错误文案与 502 转换错误契约不变；`ResponsesDownstream` 只保留带探针的 `proxy_response_with_probe` / `try_proxy_upstream_websocket_with_probe` 作为必需或默认方法，不带探针版本改为默认转调，HTTP、WebSocket 与观测包装三处实现各删去一份重复方法；透传响应状态行改用同一 `reason_phrase`。
+
+新增回归：原因短语映射、文本错误响应状态行、请求体单次预留、Anthropic 错误状态透传。检查通过：`cargo test -p codey --lib local_router`（181 项，另 3 项基准默认忽略）、`route_request_log::tests`（31 项）、`cargo clippy -p codey --lib --tests -- -D warnings`、`cargo fmt --check`、`git diff --check`。本轮没有性能基准数据，不声称 TTFT 改善；复现基准见前节命令。
+
+复审后处理结果与仍保留项：
+
+1. Anthropic 上游非 2xx 原先固��映射为 502 JSON，Chat 与原生路径则透传状态码并写文本错误体。Codex 对 5xx 会重试数次，上游 401/400/429 因此被重复请求后才呈现。现已统一：三种上游协议的非 2xx 都经 `write_upstream_http_error` 透传状态码、脱敏摘要、上游请求 ID 并写入错误日志；HTTP 下游为文本体，WebSocket 下游为 JSON 事件。回归 `anthropic_upstream_http_error_keeps_status_and_safe_text` 覆盖 401 与凭据脱敏。用户可见变化：Anthropic 线路错误不再显示 502，而是上游实际状态与摘要。
+2. 下游 HTTP 每请求一条连接并 `connection: close`。回环 TCP 建连开销远低于模型推理延迟，改造需重写请求边界与连接生命周期，收益未测，不建议单独推进。
+3. 上游 WebSocket 首次连接超时 3 s 后回退 HTTP 并进入 60 s 起的退避。慢网络下首轮请求最多多付 3 s，这是既有设计取舍；系统代理生效的线路已在配置层禁用 WebSocket。
+4. 第三方线路工具参数根节点被规范化时会丢弃原始字节并整体重新序列化。当前只在工具 schema 根不是 object 时触发，Codex 内置工具不会触发；如日后 MCP 工具普遍触发，可把 `tools` 加入原始字节改写的白名单字段。
+5. 单文件拆分、错误日志有界队列、真实客户端性能采集与前几节结论一致，继续作为独立迭代。
+
+cc-switch（farion1231/cc-switch，`src-tauri/src/proxy`）对照结论，仅基于其源码核实内容：
+
+- 值得借鉴：错误分类后再决定是否可重试、失败不污染健康度的「中性释放」、熔断 HalfOpen 只放一个探测请求、2xx 先取首包（Responses 流再校验首个语义事件）后才向下游提交流。其中「首包校验再提交」与 Codey 现有嗅探思路一致；熔断与故障转移属于跨线路容灾，Codey 明确不做，若将来引入应沿用其分类与单名额设计。
+- 不适合照搬：Anthropic 直连为保留头大小写每请求新建 TCP+TLS（无连接池）；请求体无上限整包缓冲并做 JSON 全量往返；401/403/429 也触发故障转移并异步改写「当前供应商」；无同线路重试、无退避；每请求多次同步读 SQLite 配置。其 reqwest 客户端未开 HTTP/2、TCP_NODELAY 与空闲回收，也没有 SSE 心跳，不能作为 TTFT 优化依据。Codey 现有连接池、NODELAY、原始字节透传、内存配额和取消传播均已优于该实现。
+
 ### 控制台与页面注入
 
 cdp.rs 负责准备嵌入资源、安装桥接、首次注入和健康复核。src/overlay.tsx 挂载 React 控制台；public/ 中的脚本分别处理模型、插件、会话、提示词和平台增强。
@@ -353,6 +393,8 @@ Computer Use 沿用 Codex 管理的 `unified-computer-use` 插件及其 `cua_rep
 
 ### 提示词、子代理与 FastCtx
 
+子代理门禁与 FastCtx 路由 Hook 的定义只写入运行期 hooks.json，并通过 `-c features.hooks=true` 与 `hooks.state.*.trusted_hash` 覆盖项交给 Codex；启动补丁生成的临时 config.toml 文档不再携带 `[[hooks.*]]` 表，相关 TOML 写入和旧组清理代码已于 2026-09-06 删除。同日移除了隔离运行时设计之前的租约恢复路径（AGENTS.md / agents/default.toml 快照回滚）：旧版本遗留的 codex-lease.json 仍会被读取并释放，hooks.json 与策略文件按当前流程回滚，但不再回写 AGENTS.md 与 default.toml。
+
 提示词优化可使用运行中的 Codey 路由，也可使用独立配置。地址、认证和模型由后端校验；日志不保存提示词正文或凭据。
 
 子代理增强只在原生 macOS 和 Windows 启用。五个用户角色与内部 default 角色的配置源位于 backend/src/codex_config_guidance.rs，默认规则数据位于 backend/resources/subagent-rules.default.json。关闭本地路由时，启动器会按当前 Codex Provider 的可用模型重新校正角色模型与思考深度，再生成本次运行配置。当前路径直接使用 Codex 原生 agents 工具和生命周期 Hook，不再使用旧版 sidecar、逐任务回执、prepare_delegation 或 resolve_batch 流程。只读任务最多并行三个；出现写入角色时最多两个，并由根代理在所有尝试结束后验收结果。活动 attempt 全部通过绑定、marker 和 `files.read` 能力校验时，可信根 turn 可继续使用规则确认的本地读取、网页检索、MCP Resource 与数据库 schema/只读 SQL 工具；SQL 只接受单条、可保守证明为只读的语句，写入、命令、视觉、未知工具以及 writer/mixed/unverified 批次仍保持关闭。角色名、词法 SQL 校验和 Hook 不是最终安全边界，真实权限仍由数据库只读账号以及 Codex sandbox 与 approval 设置决定。
@@ -374,6 +416,8 @@ Trace 与 Crashpad 保护由 Codey 的存储维护和后台任务执行，按用
 请求日志清空与重启的功能回归显式使用 10 秒写入线程停止期限，为 CI 文件 I/O 和线程调度留出余量；生产配置仍默认 1.5 秒，停止超时另有独立测试。清空断言失败时输出完整结果，以区分停止超时、文件删除失败和重启失败。
 
 ## 维护约束
+
+- 兼容窗口：只保证从最近两个已发布版本升级时的平滑迁移，更早版本的数据格式迁移代码不再保留。2026-09-06 据此删除了 v0.10.2 之前的迁移路径：历史 guidance 版本常量（三段提示词只识别当前文本）、`ccSwitch*` 配置别名、`defaultModelByProvider` 旧字段与迁移、API-key 线路中官方模型的重分类迁移、config.toml 子代理并发的旧键迁移、请求日志 SQLite 列迁移与读侧列探测、旧模型目录 description 修复、子代理账本 schema 升级（仅接受当前 schema）、`codey/` 旧模型前缀识别，以及隔离运行时之前的租约恢复路径。
 
 - README.md 只写用户能感知的功能与必要注意事项；实现、构建、发布、路径和限制写在本文档。
 - 新功能先复用现有配置事务、桥接、URL 校验、错误脱敏和原子文件工具，不建立第二套流程。

@@ -26,7 +26,9 @@ use identity::*;
 pub(crate) const POST_TOOL_HOOK_MATCHER: &str = "*";
 
 const LEDGER_SCHEMA_VERSION: u32 = 15;
-const MIN_LEDGER_SCHEMA_VERSION: u32 = 1;
+// Only ledgers written by the previous two releases (both already at the
+// current schema) are accepted; older schema upgrades were removed.
+const MIN_LEDGER_SCHEMA_VERSION: u32 = LEDGER_SCHEMA_VERSION;
 const LEDGER_FILE: &str = "orchestrator-ledger-v1.json";
 const LEDGER_LOCK_FILE: &str = "orchestrator-ledger-v1.lock";
 const READ_ONLY_CONCURRENCY_LIMIT: usize = 3;
@@ -568,118 +570,23 @@ impl SessionLedger {
     }
 }
 
-fn migrate_ledger(ledger: &mut SessionLedger, source_schema_version: u32) -> Result<bool> {
+fn migrate_ledger(ledger: &mut SessionLedger, _source_schema_version: u32) -> Result<bool> {
     let mut changed = false;
     let before = ledger.issued_task_ids.len();
     ledger
         .issued_task_ids
         .extend(ledger.reservations.keys().cloned());
     changed |= ledger.issued_task_ids.len() != before;
-    if source_schema_version < 4 {
-        let session_hash = ledger.session_id_hash.clone();
-        for (task_id, reservation) in &mut ledger.reservations {
-            if reservation.trace_id.is_empty() {
-                reservation.trace_id = hash_component(&format!("{session_hash}:{task_id}"));
-            }
-            reservation.started_at_ms = match reservation.state {
-                ReservationState::Running
-                | ReservationState::Terminal
-                | ReservationState::Recovered => Some(reservation.updated_at_ms),
-                ReservationState::Pending | ReservationState::Failed => None,
-            };
-            reservation.completed_at_ms = matches!(
-                reservation.state,
-                ReservationState::Terminal | ReservationState::Failed | ReservationState::Recovered
-            )
-            .then_some(reservation.updated_at_ms);
-        }
-        changed = true;
-    }
-    if source_schema_version < 5 {
-        let session_hash = ledger.session_id_hash.clone();
-        let mut next_fencing_token = 1_u64;
-        for (task_id, reservation) in &mut ledger.reservations {
-            if reservation.attempt_id.is_empty() {
-                reservation.attempt_id = hash_component(&format!(
-                    "{session_hash}:{task_id}:{}",
-                    reservation.created_at_ms
-                ));
-            }
-            if reservation.fencing_token == 0 {
-                reservation.fencing_token = next_fencing_token;
-            }
-            next_fencing_token = next_fencing_token
-                .max(reservation.fencing_token)
-                .saturating_add(1);
-            match reservation.state {
-                ReservationState::Failed => {
-                    reservation.state = ReservationState::Terminal;
-                    reservation.outcome = ExecutionOutcome::Failed;
-                    reservation.spawn_failed = true;
-                    reservation
-                        .completed_at_ms
-                        .get_or_insert(reservation.updated_at_ms);
-                    reservation
-                        .fenced_at_ms
-                        .get_or_insert(reservation.updated_at_ms);
-                }
-                ReservationState::Recovered => {
-                    if reservation.outcome == ExecutionOutcome::Unknown {
-                        reservation.outcome = ExecutionOutcome::Lost;
-                    }
-                    reservation
-                        .fenced_at_ms
-                        .get_or_insert(reservation.updated_at_ms);
-                }
-                ReservationState::Terminal => {
-                    // Schema v1-v4 did not persist an authoritative outcome. In
-                    // particular, errored/shutdown/not_found were folded into
-                    // the same phase as completed, so migration must not infer
-                    // success from the old terminal bit.
-                    reservation.outcome = ExecutionOutcome::Unknown;
-                    reservation
-                        .fenced_at_ms
-                        .get_or_insert(reservation.updated_at_ms);
-                }
-                ReservationState::Pending | ReservationState::Running => {}
-            }
-        }
-        ledger.next_fencing_token = ledger.next_fencing_token.max(next_fencing_token);
-        changed = true;
-    } else {
-        let required_next = ledger
-            .reservations
-            .values()
-            .map(|reservation| reservation.fencing_token)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1)
-            .max(1);
-        if ledger.next_fencing_token < required_next {
-            ledger.next_fencing_token = required_next;
-            changed = true;
-        }
-    }
-    if source_schema_version < 9 {
-        // Older ledgers did not track provider PendingInit observations per
-        // reservation. Do not infer a timestamp from created/updated time: an
-        // upgrade must never make an in-flight attempt immediately stale.
-        for reservation in ledger.reservations.values_mut() {
-            reservation.pending_init_observed_at_ms = None;
-        }
-        changed = true;
-    }
-    if source_schema_version < 10 {
-        // v1-v9 had only the current runtime hash. Treat every existing
-        // reservation as originating in generation 1; do not invent retired
-        // owners or discard identity/batch history during the schema upgrade.
-        ledger.runtime_generation = 1;
-        ledger.retired_runtime_id_hashes.clear();
-        let origin_runtime_id_hash = ledger.runtime_id_hash.clone();
-        for reservation in ledger.reservations.values_mut() {
-            reservation.runtime_generation = 1;
-            reservation.origin_runtime_id_hash = origin_runtime_id_hash.clone();
-        }
+    let required_next = ledger
+        .reservations
+        .values()
+        .map(|reservation| reservation.fencing_token)
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+        .max(1);
+    if ledger.next_fencing_token < required_next {
+        ledger.next_fencing_token = required_next;
         changed = true;
     }
     anyhow::ensure!(
@@ -2056,7 +1963,7 @@ pub(crate) fn settle_interrupt_acknowledgement(
     );
     if prior_outcome.is_none() {
         event.error_code = Some("root_interrupt_abandoned".into());
-        event.error_message = error_message.clone();
+        event.error_message = error_message;
     } else if !success {
         event.error_code = Some(
             match outcome {
@@ -2182,7 +2089,7 @@ pub(crate) fn authorize_child_tool_with_context(
             if reservation.state == ReservationState::Pending {
                 reservation.state = ReservationState::Running;
             }
-            reservation.agent_id_hash = Some(agent_hash.clone());
+            reservation.agent_id_hash = Some(agent_hash);
             reservation.pending_init_observed_at_ms = None;
             reservation.started_at_ms.get_or_insert(now_ms);
             reservation.updated_at_ms = now_ms;

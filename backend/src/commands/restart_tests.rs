@@ -568,7 +568,7 @@ fn restart_sensitive_config_changes_are_detected() {
         &changed_task_role
     ));
 
-    let mut two_routes = applied.clone();
+    let mut two_routes = applied;
     let mut second_route = crate::config::ProviderProfile::new("Route B");
     second_route.base_url = "https://route-b.example/v1".into();
     second_route.api_key = "route-b-key".into();

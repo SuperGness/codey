@@ -3,6 +3,7 @@ mod config;
 mod dispatcher;
 mod event;
 mod formatting;
+pub(crate) mod ilink;
 
 pub use config::{
     NotificationChannelConfig, NotificationChannelKind, NotificationChannelSessionStatus,

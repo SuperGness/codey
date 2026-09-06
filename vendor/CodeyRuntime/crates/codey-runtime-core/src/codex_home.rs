@@ -68,7 +68,7 @@ mod tests {
         let _guard = CodexHomeEnvGuard::set(&codex_home);
 
         assert_eq!(default_codex_home_dir(), codex_home);
-        assert_eq!(crate::relay_config::default_codex_home_dir(), codex_home);
+        assert_eq!(default_codex_home_dir(), codex_home);
         assert_eq!(crate::codex_sqlite::default_codex_home_dir(), codex_home);
     }
 
@@ -80,7 +80,7 @@ mod tests {
         {
             let _guard = CodexHomeEnvGuard::set_raw("   ");
             assert_eq!(default_codex_home_dir(), expected);
-            assert_eq!(crate::relay_config::default_codex_home_dir(), expected);
+            assert_eq!(default_codex_home_dir(), expected);
             assert_eq!(crate::codex_sqlite::default_codex_home_dir(), expected);
         }
     }
@@ -95,7 +95,7 @@ mod tests {
 
         assert!(!missing.exists());
         assert_eq!(default_codex_home_dir(), missing);
-        assert_eq!(crate::relay_config::default_codex_home_dir(), missing);
+        assert_eq!(default_codex_home_dir(), missing);
         assert_eq!(crate::codex_sqlite::default_codex_home_dir(), missing);
     }
 }

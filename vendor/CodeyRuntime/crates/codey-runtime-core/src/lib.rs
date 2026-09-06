@@ -1,37 +1,20 @@
 pub mod app_paths;
-pub mod assets;
 pub mod bridge;
 pub mod cdp;
 pub(crate) mod codex_home;
-pub(crate) mod codex_local_storage;
+pub use codex_home::default_codex_home_dir;
 pub mod codex_sqlite;
-mod computer_use_guard;
 pub mod config_manager;
 pub mod diagnostic_log;
-pub(crate) mod http_client;
-pub mod install;
 pub mod launcher;
-pub mod model_catalog;
 pub mod model_suffix;
 pub mod models;
-pub(crate) mod native_menu;
 pub mod paths;
 pub mod plugin_marketplace;
 pub mod ports;
-pub mod relay_config;
-pub mod routes;
-pub mod script_market;
-pub mod settings;
-pub mod status;
-pub(crate) mod stepwise;
-pub mod update;
-pub mod upstream_worktree;
-pub mod user_scripts;
 pub mod version;
-pub mod watcher;
 #[cfg(windows)]
 mod windows_integration;
-pub mod zed_remote;
 
 #[cfg(windows)]
 pub fn windows_create_no_window() -> u32 {

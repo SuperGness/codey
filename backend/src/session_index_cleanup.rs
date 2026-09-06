@@ -561,7 +561,7 @@ fn filtered_index_text(
 
 fn create_backup(home: &Path, plan: &CleanupPlan, removed_entries: usize) -> Result<PathBuf> {
     let backup_root = home.join("backups_state/provider-sync");
-    let backup_dir = unique_backup_dir(&backup_root);
+    let backup_dir = crate::fs_util::unique_timestamp_dir(&backup_root);
     fs::create_dir_all(&backup_dir)?;
     fs::write(backup_dir.join("session_index.jsonl"), &plan.original_bytes)?;
     fs::write(
@@ -584,42 +584,23 @@ fn create_backup(home: &Path, plan: &CleanupPlan, removed_entries: usize) -> Res
     Ok(backup_dir)
 }
 
-fn unique_backup_dir(root: &Path) -> PathBuf {
-    let base = timestamp_millis().to_string();
-    let mut path = root.join(&base);
-    let mut suffix = 0usize;
-    while path.exists() {
-        suffix += 1;
-        path = root.join(format!("{base}-{suffix}"));
-    }
-    path
-}
-
 fn prune_backups(home: &Path) -> Result<()> {
     let root = home.join("backups_state/provider-sync");
     if !root.exists() {
         return Ok(());
     }
-    let mut managed = Vec::new();
-    for entry in fs::read_dir(&root)? {
-        let path = entry?.path();
-        if !path.is_dir() {
-            continue;
+    // Only directories carrying our metadata are managed; the sort key is the
+    // millisecond timestamp in the directory name (suffix ignored).
+    crate::fs_util::prune_dirs(&root, BACKUP_KEEP_COUNT, |path| {
+        let bytes = fs::read(path.join("metadata.json")).ok()?;
+        let metadata = serde_json::from_slice::<Value>(&bytes).ok()?;
+        if metadata.get("managedBy").and_then(Value::as_str) != Some(MANAGED_BY) {
+            return None;
         }
-        let Ok(bytes) = fs::read(path.join("metadata.json")) else {
-            continue;
-        };
-        let Ok(metadata) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        if metadata.get("managedBy").and_then(Value::as_str) == Some(MANAGED_BY) {
-            managed.push(path);
-        }
-    }
-    managed.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
-    for path in managed.into_iter().skip(BACKUP_KEEP_COUNT) {
-        let _ = fs::remove_dir_all(path);
-    }
+        let name = path.file_name()?.to_str()?;
+        let digits = name.split('-').next()?;
+        digits.parse::<u128>().ok()
+    });
     Ok(())
 }
 

@@ -382,6 +382,7 @@ dependencies = [
  "futures-util",
  "hyper-util",
  "libc",
+ "memchr",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -408,8 +409,6 @@ name = "codey-runtime-core"
 version = "0.10.3"
 dependencies = [
  "anyhow",
- "async-trait",
- "base64",
  "directories",
  "fs2",
  "futures-util",
@@ -419,10 +418,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror",
  "tokio",
  "tokio-tungstenite",
- "toml 0.8.23",
  "toml_edit",
  "uuid",
  "windows 0.58.0",
@@ -435,9 +432,7 @@ version = "0.10.3"
 dependencies = [
  "anyhow",
  "base64",
- "chrono",
  "codey-runtime-core",
- "memchr",
  "rusqlite",
  "serde",
  "serde_json",
@@ -3086,18 +3081,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toml"
-version = "0.8.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
-dependencies = [
- "serde",
- "serde_spanned",
- "toml_datetime",
- "toml_edit",
-]
-
-[[package]]
 name = "toml_datetime"
 version = "0.6.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3813,7 +3796,7 @@ version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b68db261ef59e9e52806f688020631e987592bd83619edccda9c47d42cde4f6c"
 dependencies = [
- "toml 0.5.11",
+ "toml",
 ]
 
 [[package]]

@@ -1,10 +1,6 @@
 use std::fs;
 #[cfg(unix)]
-use std::fs::OpenOptions;
-#[cfg(unix)]
-use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -19,20 +15,9 @@ pub(super) fn create_private_dir_all(path: &Path) -> Result<()> {
 }
 
 pub(super) fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    #[cfg(unix)]
-    {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.write_all(bytes)?;
-    }
-    #[cfg(not(unix))]
-    fs::write(path, bytes)?;
-    Ok(())
+    // Atomic replace: a crash between truncate and write previously left a
+    // half-written constraint template behind.
+    crate::fs_util::atomic_write_private(path, bytes)
 }
 
 pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>> {

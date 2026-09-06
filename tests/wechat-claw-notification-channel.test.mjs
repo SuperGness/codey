@@ -19,7 +19,7 @@ const editorSource = readFileSync(
   "utf8",
 );
 const mainSource = readFileSync(
-  new URL("../src/main.tsx", import.meta.url),
+  new URL("../src/dev/mockApi.ts", import.meta.url),
   "utf8",
 );
 

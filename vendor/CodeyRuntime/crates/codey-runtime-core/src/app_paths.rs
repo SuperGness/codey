@@ -716,10 +716,6 @@ fn version_tuple(path: &Path) -> Option<Vec<u32>> {
     if parts.is_empty() { None } else { Some(parts) }
 }
 
-pub(crate) fn is_supported_windows_app_package_name(package_name: &str) -> bool {
-    codex_package_parts(package_name).is_some()
-}
-
 pub(crate) fn is_supported_app_executable_name(name: &str) -> bool {
     name.eq_ignore_ascii_case("Codex.exe") || name.eq_ignore_ascii_case("ChatGPT.exe")
 }

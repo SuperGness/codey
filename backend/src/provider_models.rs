@@ -60,19 +60,18 @@ pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<Str
         anyhow::bail!("API 地址不能为空");
     }
     let endpoints = model_endpoints(&base)?;
+    let anthropic_messages = profile.upstream_protocol == UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES;
+    let has_custom_header = |header: &str| {
+        profile
+            .model_request_headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case(header) && !value.trim().is_empty())
+    };
+    let has_custom_authorization = has_custom_header(AUTHORIZATION.as_str());
+    let has_custom_anthropic_key = has_custom_header("x-api-key");
+    let has_custom_anthropic_version = has_custom_header("anthropic-version");
     for (index, endpoint) in endpoints.iter().enumerate() {
         let mut request = client.get(endpoint).header(ACCEPT, "application/json");
-        let anthropic_messages = profile.upstream_protocol == UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES;
-        let has_custom_authorization = profile.model_request_headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case(AUTHORIZATION.as_str()) && !value.trim().is_empty()
-        });
-        let has_custom_anthropic_key = profile.model_request_headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("x-api-key") && !value.trim().is_empty()
-        });
-        let has_custom_anthropic_version =
-            profile.model_request_headers.iter().any(|(name, value)| {
-                name.eq_ignore_ascii_case("anthropic-version") && !value.trim().is_empty()
-            });
         if anthropic_messages && !profile.api_key.trim().is_empty() && !has_custom_anthropic_key {
             request = request.header("x-api-key", profile.api_key.trim());
         } else if !anthropic_messages

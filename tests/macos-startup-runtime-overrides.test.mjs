@@ -31,11 +31,16 @@ test("macOS startup patch requires app-server runtime override validation", asyn
   );
   assert.match(
     source,
-    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*!runtime_config_overrides\.is_empty\(\),\s*\)/,
+    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*!runtime_config_overrides\.is_empty\(\),\s*renderer_debug_port,\s*\)/,
   );
   assert.doesNotMatch(
     source,
-    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*false,\s*\)/,
+    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*false,/,
+  );
+  // A disabled fuse keeps the launch marker but waits on the CLI wrapper alone.
+  assert.match(
+    macosSpawn,
+    /install_startup_patch_with_cli_fallback\(\s*inspect_fuse\.inspector_possible\(\)\.then_some\(inspector_port\),/,
   );
 });
 

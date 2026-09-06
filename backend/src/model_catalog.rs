@@ -331,19 +331,13 @@ fn refresh_for_provider_with_transport_preferences(
     if !catalog_models.is_empty() {
         ensure_runtime_compatible_models(&catalog_models)?;
     }
-    write_catalog(home, &catalog_models)?;
-    let written_models = read_runtime_catalog_models(home)?;
-    let expected_model_keys = catalog_models
-        .iter()
-        .filter_map(|model| model.get("slug").and_then(Value::as_str))
-        .map(model_id::key)
-        .collect::<Vec<_>>();
-    let written_model_keys = written_models
-        .iter()
-        .filter_map(|model| model.get("slug").and_then(Value::as_str))
-        .map(model_id::key)
-        .collect::<Vec<_>>();
-    if written_model_keys != expected_model_keys {
+    let written = write_catalog(home, &catalog_models)?;
+    // Verify the bytes on disk instead of re-parsing the whole catalog; the
+    // serialized form already carries every slug in order.
+    let path = home.join(relative_path());
+    let on_disk = fs::read(&path)
+        .with_context(|| format!("读取 Codey 运行时模型目录失败：{}", path.display()))?;
+    if on_disk != written {
         bail!("写入后的 Codey 模型目录与本次生成结果不一致");
     }
     Ok(catalog_models.len())
@@ -558,68 +552,6 @@ pub(crate) fn prepare_cached_catalog_for_native_web_search(
 /// Repairs catalogs written by older Codey versions that copied model-cache
 /// entries without Codex's now-required `description` fields on models and
 /// their reasoning levels.
-pub(crate) fn repair_missing_descriptions(home: &Path) -> Result<bool> {
-    let path = home.join(relative_path());
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("读取待修复的 Codey 模型目录失败：{}", path.display()));
-        }
-    };
-    let mut catalog: Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("解析待修复的 Codey 模型目录失败：{}", path.display()))?;
-    let models = catalog
-        .get_mut("models")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow::anyhow!("待修复的 Codey 模型目录缺少 models 数组"))?;
-    if !models.iter().any(model_needs_description_repair) {
-        return Ok(false);
-    }
-    let mut repaired = false;
-    for model in models.iter_mut() {
-        if !model_has_runtime_description(model) {
-            let description = model
-                .get("display_name")
-                .and_then(Value::as_str)
-                .or_else(|| model.get("slug").and_then(Value::as_str))
-                .map(str::trim)
-                .filter(|description| !description.is_empty())
-                .map(ToString::to_string);
-            if let Some(description) = description {
-                model["description"] = json!(description);
-                repaired = true;
-            }
-        }
-        if let Some(levels) = model
-            .get_mut("supported_reasoning_levels")
-            .and_then(Value::as_array_mut)
-        {
-            for level in levels {
-                if level_has_runtime_description(level) {
-                    continue;
-                }
-                let effort = level.get("effort").and_then(Value::as_str);
-                if let Some(effort) = effort {
-                    level["description"] = json!(reasoning_level_description(effort));
-                    repaired = true;
-                }
-            }
-        }
-    }
-    if models.iter().any(model_needs_description_repair) {
-        bail!("旧版 Codey 模型目录存在无法自动补全 description 的条目");
-    }
-    debug_assert!(repaired);
-
-    let mut contents =
-        serde_json::to_vec_pretty(&catalog).context("序列化已修复的 Codey 模型目录失败")?;
-    contents.push(b'\n');
-    atomic_write(&path, &contents)?;
-    Ok(true)
-}
-
 pub fn is_runtime_model_cache_unavailable(error: &anyhow::Error) -> bool {
     error.is::<RuntimeModelCacheUnavailable>()
 }
@@ -926,10 +858,8 @@ fn fallback_third_party_reasoning_efforts() -> Vec<String> {
 
 fn route_scoped_upstream_model_id(model_id: &str) -> &str {
     let model_id = model_id.trim();
-    model_id
-        .split_once('/')
-        .map(|(_, upstream_model_id)| upstream_model_id.trim())
-        .filter(|upstream_model_id| !upstream_model_id.is_empty())
+    crate::model_id::parse_alias(model_id)
+        .map(|alias| alias.upstream_model)
         .unwrap_or(model_id)
 }
 
@@ -1081,26 +1011,6 @@ fn reasoning_level_description(effort: &str) -> String {
         .find(|(known_effort, _)| *known_effort == effort)
         .map(|(_, description)| (*description).to_string())
         .unwrap_or_else(|| format!("{effort} reasoning"))
-}
-
-fn level_has_runtime_description(level: &Value) -> bool {
-    level
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .is_some_and(|description| !description.is_empty())
-}
-
-fn model_needs_description_repair(model: &Value) -> bool {
-    !model_has_runtime_description(model)
-        || model
-            .get("supported_reasoning_levels")
-            .and_then(Value::as_array)
-            .is_some_and(|levels| {
-                levels
-                    .iter()
-                    .any(|level| !level_has_runtime_description(level))
-            })
 }
 
 fn clamp_reasoning_efforts(model: &mut Value) {
@@ -1321,16 +1231,18 @@ fn gate_cached_native_web_search(model: &mut Value, allowed_model_keys: &HashSet
     }
 }
 
-fn write_catalog(home: &Path, models: &[Value]) -> Result<()> {
+/// Writes the catalog and returns the exact bytes that now live on disk.
+fn write_catalog(home: &Path, models: &[Value]) -> Result<Vec<u8>> {
     let mut catalog = serde_json::to_vec_pretty(&json!({ "models": models }))
         .context("序列化 Codey 模型目录失败")?;
     catalog.push(b'\n');
     let path = home.join(relative_path());
     if fs::read(&path).is_ok_and(|current| current == catalog) {
         protect_catalog_file(&path)?;
-        return Ok(());
+        return Ok(catalog);
     }
-    atomic_write(&path, &catalog)
+    atomic_write(&path, &catalog)?;
+    Ok(catalog)
 }
 
 fn read_catalog_value(path: &Path) -> Option<Value> {
@@ -1365,6 +1277,15 @@ fn protect_catalog_file(path: &Path) -> Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
+}
+
+#[cfg(test)]
+fn level_has_runtime_description(level: &Value) -> bool {
+    level
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|description| !description.is_empty())
 }
 
 #[cfg(test)]
@@ -2558,81 +2479,6 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
 
         assert!(!is_available(home.path()));
-    }
-
-    #[test]
-    fn startup_repair_fills_legacy_catalog_descriptions_once() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-            &path,
-            serde_json::to_vec(&json!({
-                "models": [
-                    {
-                        "slug": "model-a",
-                        "display_name": "Model A",
-                        "base_instructions": "instructions",
-                        "supported_reasoning_levels": [
-                            { "effort": "low" },
-                            { "effort": "high", "description": "Existing level" }
-                        ]
-                    },
-                    {
-                        "slug": "model-b",
-                        "description": "   ",
-                        "base_instructions": "instructions"
-                    },
-                    {
-                        "slug": "model-c",
-                        "display_name": "Model C",
-                        "description": "Existing description",
-                        "base_instructions": "instructions"
-                    }
-                ]
-            }))
-            .unwrap(),
-        )
-        .unwrap();
-
-        assert!(repair_missing_descriptions(home.path()).unwrap());
-
-        let repaired: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(repaired["models"][0]["description"], "Model A");
-        assert_eq!(
-            repaired["models"][0]["supported_reasoning_levels"][0]["description"],
-            "Fast responses with lighter reasoning"
-        );
-        assert_eq!(
-            repaired["models"][0]["supported_reasoning_levels"][1]["description"],
-            "Existing level"
-        );
-        assert_eq!(repaired["models"][1]["description"], "model-b");
-        assert_eq!(repaired["models"][2]["description"], "Existing description");
-        assert!(is_available(home.path()));
-        let repaired_contents = fs::read(&path).unwrap();
-
-        assert!(!repair_missing_descriptions(home.path()).unwrap());
-        assert_eq!(fs::read(&path).unwrap(), repaired_contents);
-    }
-
-    #[test]
-    fn startup_repair_leaves_unrepairable_catalog_untouched() {
-        let home = tempfile::tempdir().unwrap();
-        let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        let original = serde_json::to_vec(&json!({
-            "models": [{
-                "base_instructions": "instructions"
-            }]
-        }))
-        .unwrap();
-        fs::write(&path, &original).unwrap();
-
-        let error = repair_missing_descriptions(home.path()).unwrap_err();
-
-        assert!(error.to_string().contains("无法自动补全 description"));
-        assert_eq!(fs::read(&path).unwrap(), original);
     }
 
     #[test]

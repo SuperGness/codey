@@ -1,13 +1,13 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
-use base64::{Engine, engine::general_purpose::STANDARD};
 use reqwest::{Client, RequestBuilder};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::{NotificationChannelAdapter, bounded_remote_message};
 use crate::notifications::formatting::{format_duration, format_timestamp, plain_text_value};
+use crate::notifications::ilink;
 use crate::notifications::{
     NotificationChannelConfig, NotificationChannelSessionStatus, NotificationEvent,
 };
@@ -23,7 +23,7 @@ impl<'a> WechatClawChannel<'a> {
         Self { config }
     }
 
-    fn ilink_post(&self, client: &Client, endpoint: &str, body: Value) -> Result<RequestBuilder> {
+    fn ilink_post(&self, client: &Client, endpoint: &str, body: &Value) -> Result<RequestBuilder> {
         let base_url = self
             .config
             .wechat_claw_base_url()
@@ -32,14 +32,7 @@ impl<'a> WechatClawChannel<'a> {
         Ok(client
             .post(endpoint)
             .header("Content-Type", "application/json")
-            .header("AuthorizationType", "ilink_bot_token")
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.config.bot_token.trim()),
-            )
-            .header("X-WECHAT-UIN", random_wechat_uin())
-            .header("iLink-App-Id", "bot")
-            .header("iLink-App-ClientVersion", ilink_client_version())
+            .headers(ilink::headers(Some(self.config.bot_token.trim())))
             .json(&body))
     }
 }
@@ -67,7 +60,7 @@ impl NotificationChannelAdapter for WechatClawChannel<'_> {
         self.ilink_post(
             client,
             "ilink/bot/sendmessage",
-            wechat_claw_body(event, &self.config.chat_id, &self.config.context_token),
+            &wechat_claw_body(event, &self.config.chat_id, &self.config.context_token),
         )
     }
 
@@ -109,29 +102,6 @@ impl NotificationChannelAdapter for WechatClawChannel<'_> {
     }
 }
 
-fn random_wechat_uin() -> String {
-    let bytes = Uuid::new_v4();
-    let value = u32::from_be_bytes(bytes.as_bytes()[..4].try_into().expect("UUID prefix"));
-    STANDARD.encode(value.to_string())
-}
-
-fn ilink_client_version() -> String {
-    let mut components = env!("CARGO_PKG_VERSION")
-        .split('.')
-        .map(|part| part.parse::<u32>().unwrap_or(0));
-    let major = components.next().unwrap_or(0) & 0xff;
-    let minor = components.next().unwrap_or(0) & 0xff;
-    let patch = components.next().unwrap_or(0) & 0xff;
-    ((major << 16) | (minor << 8) | patch).to_string()
-}
-
-fn wechat_claw_base_info() -> Value {
-    json!({
-        "channel_version": env!("CARGO_PKG_VERSION"),
-        "bot_agent": format!("Codey/{}", env!("CARGO_PKG_VERSION")),
-    })
-}
-
 fn wechat_claw_body(event: &NotificationEvent, recipient_id: &str, context_token: &str) -> Value {
     json!({
         "msg": {
@@ -146,7 +116,7 @@ fn wechat_claw_body(event: &NotificationEvent, recipient_id: &str, context_token
                 "text_item": { "text": wechat_claw_text(event) },
             }],
         },
-        "base_info": wechat_claw_base_info(),
+        "base_info": ilink::base_info(),
     })
 }
 

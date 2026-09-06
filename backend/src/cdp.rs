@@ -482,7 +482,7 @@ fn summarize_cdp_targets(targets: &[CdpTarget]) -> String {
         .map(|target| {
             format!(
                 "{{type:{},url:{:?},ws:{}}}",
-                truncate_chars(target.target_type.clone(), 20),
+                truncate_chars(&target.target_type, 20),
                 safe_target_url_shape(&target.url),
                 target.web_socket_debugger_url.is_some()
             )
@@ -503,7 +503,7 @@ fn safe_target_url_shape(url: &str) -> String {
             .char_indices()
             .find_map(|(index, character)| matches!(character, '?' | '#').then_some(index))
             .unwrap_or(trimmed.len());
-        return truncate_chars(trimmed[..end].to_string(), 100);
+        return truncate_chars(&trimmed[..end], 100);
     }
     trimmed
         .split_once(':')
@@ -525,7 +525,7 @@ fn safe_injection_error_summary(error: &anyhow::Error) -> String {
             .map(|(targets, _)| format!("{targets}]"))
             .unwrap_or_else(|| "[]".to_string());
         return truncate_chars(
-            format!("未发现匹配的 Codex renderer；CDP targets={targets}"),
+            &format!("未发现匹配的 Codex renderer；CDP targets={targets}"),
             MAX_INJECTION_ERROR_CHARS,
         );
     }
@@ -616,7 +616,8 @@ async fn inject_with_scripts(
 
 impl PreparedInjectionScripts {
     pub fn statuses_with_error(&self, error: impl Into<String>) -> Arc<[InjectionScriptStatus]> {
-        let error = truncate_chars(error.into(), MAX_INJECTION_ERROR_CHARS);
+        let error: String = error.into();
+        let error = truncate_chars(&error, MAX_INJECTION_ERROR_CHARS);
         Arc::from(
             self.descriptors
                 .iter()
@@ -924,7 +925,7 @@ fn reconcile_injection_statuses(
                 );
                 let normalized_detail = if valid_status {
                     detail
-                        .map(|detail| truncate_chars(detail, MAX_INJECTION_ERROR_CHARS))
+                        .map(|detail| truncate_chars(&detail, MAX_INJECTION_ERROR_CHARS))
                         .or_else(|| {
                             (reported_status == "executed").then(|| {
                                 if descriptor.source == "user" {
@@ -949,7 +950,7 @@ fn reconcile_injection_statuses(
                     },
                     detail: normalized_detail,
                     error: if valid_status {
-                        error.map(|error| truncate_chars(error, MAX_INJECTION_ERROR_CHARS))
+                        error.map(|error| truncate_chars(&error, MAX_INJECTION_ERROR_CHARS))
                     } else {
                         Some("脚本返回了未知注入状态".to_string())
                     },
@@ -959,7 +960,7 @@ fn reconcile_injection_statuses(
     )
 }
 
-fn truncate_chars(value: String, max_chars: usize) -> String {
+fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 

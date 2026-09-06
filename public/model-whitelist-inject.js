@@ -1288,7 +1288,31 @@
     for (const menu of menus) observeGroupedMenuText(menu);
   };
 
-  const handleGroupedMenuMutations = (mutations) => {
+  // Lightweight observer telemetry: per-handler call count, mutation count and
+  // wall time, exposed on window.__codeyObserverStats for performance triage.
+  // No behavior change; timing falls back to Date.now() where performance is
+  // unavailable (test sandboxes).
+  const codeyTimed = (name, count, run) => {
+    const now = () =>
+      typeof performance === "object" && typeof performance.now === "function"
+        ? performance.now()
+        : Date.now();
+    const stats = (window.__codeyObserverStats ||= {});
+    const entry = (stats[name] ||= { calls: 0, items: 0, totalMs: 0, maxMs: 0 });
+    const startedAt = now();
+    try {
+      return run();
+    } finally {
+      const elapsed = now() - startedAt;
+      entry.calls += 1;
+      entry.items += count;
+      entry.totalMs += elapsed;
+      if (elapsed > entry.maxMs) entry.maxMs = elapsed;
+    }
+  };
+  const handleGroupedMenuMutations = (mutations) =>
+    codeyTimed("model-whitelist.groupedMenuMutations", mutations?.length ?? 0, () => handleGroupedMenuMutationsImpl(mutations));
+  const handleGroupedMenuMutationsImpl = (mutations) => {
     if (disposed) return;
     const discoveredMenus = [];
     let relevant = false;
@@ -1360,7 +1384,13 @@
     return nodes.filter((node, index, all) => all.indexOf(node) === index);
   };
 
-  const scanReactObjectGraph = (forceScan = false, discover = false) => {
+  const scanReactObjectGraph = (forceScan = false, discover = false) =>
+    codeyTimed(
+      forceScan ? "model-whitelist.scanReactObjectGraph.force" : "model-whitelist.scanReactObjectGraph",
+      1,
+      () => scanReactObjectGraphImpl(forceScan, discover),
+    );
+  const scanReactObjectGraphImpl = (forceScan = false, discover = false) => {
     if (!forceScan && !discover && knownModelQueryClients.size > 0) {
       return {
         queryClients: [...knownModelQueryClients],

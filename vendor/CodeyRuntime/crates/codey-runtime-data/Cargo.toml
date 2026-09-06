@@ -7,9 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
 codey-runtime-core = { path = "../codey-runtime-core" }
-memchr = "2"
 rusqlite.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }

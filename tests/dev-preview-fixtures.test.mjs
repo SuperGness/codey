@@ -4,7 +4,7 @@ import test from "node:test";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
 const source = fs.readFileSync(
-  new URL("../src/main.tsx", import.meta.url),
+  new URL("../src/dev/mockApi.ts", import.meta.url),
   "utf8",
 );
 

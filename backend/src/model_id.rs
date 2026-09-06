@@ -9,20 +9,52 @@ pub(crate) fn equal(left: &str, right: &str) -> bool {
 }
 
 /// Call only after checking current aliases and raw ids. Model names may
-/// contain slashes; only recorded selectors and the legacy Codey prefix qualify.
+/// contain slashes, so only selectors recorded in the alias history qualify.
 pub(crate) fn historical_source<'a>(
     model: &'a str,
     aliases: &'a BTreeMap<String, String>,
 ) -> Option<&'a str> {
-    let model = model.trim();
-    aliases.get(&key(model)).map(String::as_str).or_else(|| {
-        model
-            .get(..6)
-            .filter(|prefix| prefix.eq_ignore_ascii_case("codey/"))
-            .and_then(|_| model.get(6..))
-            .map(str::trim)
-            .filter(|source| !source.is_empty())
+    aliases.get(&key(model.trim())).map(String::as_str)
+}
+
+/// A route-qualified model selector: `<encoded provider>/<upstream model>`.
+/// The provider segment is percent-encoded by [`model_alias`] and therefore
+/// never contains `/`, so the first slash always separates the two parts even
+/// when the upstream model id itself contains slashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RouteAlias<'a> {
+    pub provider_key: &'a str,
+    pub upstream_model: &'a str,
+}
+
+pub(crate) fn parse_alias(alias: &str) -> Option<RouteAlias<'_>> {
+    let (provider_key, upstream_model) = alias.trim().split_once('/')?;
+    let provider_key = provider_key.trim();
+    let upstream_model = upstream_model.trim();
+    (!provider_key.is_empty() && !upstream_model.is_empty()).then_some(RouteAlias {
+        provider_key,
+        upstream_model,
     })
+}
+
+/// Build the stable route-qualified selector shown in the model picker.
+pub(crate) fn model_alias(provider_id: &str, model: &str) -> String {
+    format!("{}/{}", encode_alias_component(provider_id), model.trim())
+}
+
+fn encode_alias_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.trim().bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+    encoded
 }
 
 pub(crate) fn dedupe_preserving_first<'a>(
@@ -57,11 +89,23 @@ mod tests {
     }
 
     #[test]
-    fn historical_selectors_require_a_record_or_the_legacy_codey_prefix() {
+    fn aliases_split_on_the_first_slash_so_upstream_models_may_contain_slashes() {
+        let alias = model_alias("my route", "org/model-v1");
+        assert_eq!(alias, "my%20route/org/model-v1");
+        let parsed = parse_alias(&alias).unwrap();
+        assert_eq!(parsed.provider_key, "my%20route");
+        assert_eq!(parsed.upstream_model, "org/model-v1");
+        assert_eq!(parse_alias("provider/"), None);
+        assert_eq!(parse_alias("/model"), None);
+        assert_eq!(parse_alias("plain-model"), None);
+    }
+
+    #[test]
+    fn historical_selectors_require_a_recorded_alias() {
         let aliases = BTreeMap::from([("old%2froute/vendor/model".into(), "vendor/model".into())]);
         for (input, expected) in [
             (" Old%2FRoute/vendor/model ", Some("vendor/model")),
-            ("CoDeY/vendor/model", Some("vendor/model")),
+            ("CoDeY/vendor/model", None),
             ("vendor/model", None),
             ("unknown/vendor/model", None),
             ("codey/", None),

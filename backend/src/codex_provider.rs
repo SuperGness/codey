@@ -266,7 +266,9 @@ fn sync_provider_profile(
     next.active_profile_id = active_profile_id;
     next.initial_route_import_completed = true;
     next = next.normalize();
-    let changed = &next != config;
+    // Compare the persisted shape only: `#[serde(skip)]` request headers and
+    // one-shot flags must not bump `settings_revision`.
+    let changed = serde_json::to_value(&next)? != serde_json::to_value(config)?;
     if changed {
         next.settings_revision = config.settings_revision.saturating_add(1);
     }
