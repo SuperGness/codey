@@ -18,7 +18,7 @@ pub(crate) const STARTUP_READY_TIMEOUT: std::time::Duration = std::time::Duratio
 const STARTUP_PATCH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(24);
-// 整个兼容启动复用一次发现与安装的预算，重试不重新计时。
+// 单次启动共用发现与安装预算；Windows 最多两次，清理后重新计时。
 pub(crate) const STARTUP_COMPATIBILITY_TIMEOUT: std::time::Duration =
     STARTUP_READY_TIMEOUT.saturating_add(STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT);
 

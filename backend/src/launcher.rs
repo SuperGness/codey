@@ -670,11 +670,15 @@ async fn await_initial_storage_guards(
     protect_crashpad_pending: bool,
     crashpad_pending_stats: &CrashpadPendingStatsHandle,
 ) -> Result<()> {
-    match initial_trace_guard.await {
-        Ok(Ok(report)) => trace_log_write_protection_active.store(
-            report.protection_active(disable_trace_log_writes),
-            Ordering::Release,
-        ),
+    let (trace_result, crashpad_result) = tokio::join!(initial_trace_guard, initial_crashpad_guard);
+    let trace_result = match trace_result {
+        Ok(Ok(report)) => {
+            trace_log_write_protection_active.store(
+                report.protection_active(disable_trace_log_writes),
+                Ordering::Release,
+            );
+            Ok(())
+        }
         Ok(Err(error)) => {
             error_log::record_failure(
                 "patch_failed",
@@ -684,7 +688,7 @@ async fn await_initial_storage_guards(
                     "disabled": disable_trace_log_writes,
                 }),
             );
-            return Err(error);
+            Err(error)
         }
         Err(error) => {
             let error = anyhow::Error::new(error).context("Trace 日志保护切换任务异常退出");
@@ -696,11 +700,11 @@ async fn await_initial_storage_guards(
                     "disabled": disable_trace_log_writes,
                 }),
             );
-            return Err(error);
+            Err(error)
         }
-    }
+    };
 
-    match initial_crashpad_guard.await {
+    match crashpad_result {
         Ok(run) => {
             if !run.cleanup.errors.is_empty() || run.cleanup.still_over_limit {
                 error_log::record_failure(
@@ -740,7 +744,7 @@ async fn await_initial_storage_guards(
             crashpad_pending_stats.replace(snapshot);
         }
     }
-    Ok(())
+    trace_result
 }
 
 type PetSlimTaskResult =
@@ -1136,32 +1140,51 @@ fn resolve_startup_profile(config: &CodeyConfig) -> Result<ProviderProfile> {
 async fn prepare_startup_storage(
     home: &std::path::Path,
     config: &CodeyConfig,
+    current_profile: Option<&ProviderProfile>,
     guards: InitialStorageGuards,
     trace_log_write_protection_active: &AtomicBool,
     crashpad_pending_stats: &CrashpadPendingStatsHandle,
-) -> Result<StartupStorageState> {
-    let app_dir = resolve_configured_codex_app_dir(config).await?;
-    // Session repair must never race a live Codex writer. Stopping the old
-    // runtime first also gives SQLite and rollout buffers a chance to flush
-    // before any permanent maintenance is applied.
-    prepare_codex_for_launch(&app_dir).await?;
+) -> Result<(StartupStorageState, Option<StartupModelCatalog>)> {
+    let preparation = async {
+        let app_dir = resolve_configured_codex_app_dir(config).await?;
+        // Session repair must never race a live Codex writer. Stopping the old
+        // runtime first also gives SQLite and rollout buffers a chance to flush
+        // before any permanent maintenance is applied.
+        prepare_codex_for_launch(&app_dir).await?;
 
-    // Keep each task's saved provider. A global rewrite to the persistent
-    // default can send a different route's model directly to that upstream.
-    let session_maintenance = run_startup_session_maintenance(home).await?;
-    await_initial_storage_guards(
+        // Keep each task's saved provider. The catalog touches separate files,
+        // so prepare it alongside session maintenance after Codex has stopped.
+        let (session_maintenance, startup_catalog) =
+            tokio::join!(run_startup_session_maintenance(home), async {
+                match current_profile {
+                    Some(profile) => prepare_startup_model_catalog(config, profile, home)
+                        .await
+                        .map(Some),
+                    None => Ok(None),
+                }
+            });
+        Ok::<_, anyhow::Error>((
+            StartupStorageState {
+                app_dir,
+                session_maintenance: session_maintenance?,
+            },
+            startup_catalog?,
+        ))
+    };
+    let storage_guards = await_initial_storage_guards(
         guards.trace,
         config.disable_trace_log_writes,
         trace_log_write_protection_active,
         guards.crashpad,
         config.protect_crashpad_pending,
         crashpad_pending_stats,
-    )
-    .await?;
-    Ok(StartupStorageState {
-        app_dir,
-        session_maintenance,
-    })
+    );
+    // A failed preparation must still finish the already-started blocking
+    // guards and publish their status before the caller can retry or exit.
+    let (preparation, storage_guards) = tokio::join!(preparation, storage_guards);
+    let prepared = preparation?;
+    storage_guards?;
+    Ok(prepared)
 }
 
 async fn prepare_runtime_provider_state(
@@ -1169,8 +1192,8 @@ async fn prepare_runtime_provider_state(
     config: &CodeyConfig,
     current_profile: &ProviderProfile,
     local_router: &LocalRouter,
+    startup_catalog: StartupModelCatalog,
 ) -> Result<PreparedProviderState> {
-    let startup_catalog = prepare_startup_model_catalog(config, current_profile, home).await?;
     let router_endpoint = local_router.endpoint();
     let prepared_startup = prepare_codex_startup_state(
         config,
@@ -1567,7 +1590,6 @@ impl CodeyRuntime {
             config.hide_full_access_warning,
             &config.user_scripts,
         );
-        let initial_storage_guards = spawn_initial_storage_guards(home, config);
         let startup_profile = config
             .local_router_enabled
             .then(|| resolve_startup_profile(config))
@@ -1577,9 +1599,11 @@ impl CodeyRuntime {
         if config.local_router_enabled {
             validate_startup_router_provider(home).await?;
         }
-        let storage = prepare_startup_storage(
+        let initial_storage_guards = spawn_initial_storage_guards(home, config);
+        let (storage, startup_catalog) = prepare_startup_storage(
             home,
             config,
+            startup_profile.as_ref(),
             initial_storage_guards,
             trace_log_write_protection_active,
             &crashpad_pending_stats,
@@ -1590,13 +1614,23 @@ impl CodeyRuntime {
         } else {
             None
         };
-        let prepared_provider_state = if let (Some(startup_profile), Some(local_router)) =
-            (startup_profile.as_ref(), local_router.as_ref())
-        {
-            prepare_runtime_provider_state(home, config, startup_profile, local_router).await
-        } else {
-            prepare_native_runtime_state(home, config).await
-        };
+        let prepared_provider_state =
+            if let (Some(startup_profile), Some(local_router), Some(startup_catalog)) = (
+                startup_profile.as_ref(),
+                local_router.as_ref(),
+                startup_catalog,
+            ) {
+                prepare_runtime_provider_state(
+                    home,
+                    config,
+                    startup_profile,
+                    local_router,
+                    startup_catalog,
+                )
+                .await
+            } else {
+                prepare_native_runtime_state(home, config).await
+            };
         let PreparedProviderState {
             runtime_config,
             runtime_config_overrides,

@@ -29,7 +29,7 @@ test("Windows startup compatibility failure cleans the process before compatible
     "stop_windows_spawned_codex(&mut spawned, app_dir).await",
   );
   const compatibleRestart = windowsSpawn.indexOf(
-    "match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[]).await",
+    "match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[], false)",
   );
 
   assert.ok(cleanupCall >= 0);
@@ -52,7 +52,7 @@ test("Windows startup compatibility failure cleans the process before compatible
   );
 });
 
-test("Windows retries the full compatible launch only after successful cleanup", async () => {
+test("Windows retries without a breakpoint only after successful cleanup with wrapper support", async () => {
   const { windowsSpawn } = await loadWindowsStartupSource();
   const loop = windowsSpawn.indexOf("loop {");
   const prepare = windowsSpawn.indexOf("prepare_cli_wrapper(");
@@ -60,15 +60,20 @@ test("Windows retries the full compatible launch only after successful cleanup",
   const launch = windowsSpawn.indexOf("spawn_windows_codex(");
   const cleanup = windowsSpawn.indexOf("if let Err(cleanup_error) =");
   const packageGuard = windowsSpawn.indexOf("if !package_cleanup_succeeded {");
-  const retry = windowsSpawn.indexOf("if should_retry_startup(&error, attempt, deadline) {");
+  const retry = windowsSpawn.indexOf("if should_retry_startup(&error, attempt) {");
   const requiredConfigGuard = windowsSpawn.indexOf("if !runtime_config_overrides.is_empty() {");
   assert.ok(loop >= 0 && prepare > loop && reservePort > prepare && launch > reservePort);
   assert.ok(cleanup > launch && packageGuard > cleanup && retry > packageGuard);
   assert.ok(requiredConfigGuard > retry);
-  assert.match(windowsSpawn, /let mut attempt = 0;\s*let mut startup_deadline = None;\s*loop \{\s*attempt \+= 1;/);
+  assert.match(windowsSpawn, /let mut attempt = 0;\s*let mut cli_only = false;\s*loop \{\s*attempt \+= 1;/);
+  assert.match(windowsSpawn, /let inspector_port = if cli_only \{\s*None/);
+  assert.match(windowsSpawn, /startup_launch_arguments\(&runtime_arguments, inspector_port\)/);
+  assert.doesNotMatch(windowsSpawn, /startup_deadline\.get_or_insert/);
+  const budget = windowsSpawn.indexOf("let deadline = tokio::time::Instant::now()");
+  assert.ok(budget > launch && budget < cleanup);
   assert.match(windowsSpawn.slice(cleanup, retry), /if let Err\(cleanup_error\)[\s\S]*?anyhow::bail!/);
   assert.match(windowsSpawn.slice(packageGuard, retry), /anyhow::bail!/);
-  assert.match(windowsSpawn.slice(retry, requiredConfigGuard), /if should_retry_startup\(&error, attempt, deadline\) \{\s*continue;\s*\}/);
+  assert.match(windowsSpawn.slice(retry, requiredConfigGuard), /if should_retry_startup\(&error, attempt\) \{\s*cli_only = wrapper_environment_applied;\s*continue;\s*\}/);
   assert.match(windowsSpawn, /return Ok\(spawned\);/);
 });
 
@@ -95,4 +100,7 @@ test("Windows startup patch requires app-server runtime override validation", as
   assert.match(launcherPlatform, /settings\.EnableDebugging\(/);
   assert.match(launcherPlatform, /settings\.DisableDebugging\(/);
   assert.match(launcherPlatform, /child_command\.envs\(environment/);
+  const packageSetup = launcherPlatform.indexOf("match WindowsPackageDebugSession::start(app_dir, environment)");
+  const activation = launcherPlatform.indexOf("codey_runtime_core::launcher::activate_packaged_app", packageSetup);
+  assert.match(launcherPlatform.slice(packageSetup, activation), /if require_wrapper_environment \{\s*return Err\(error\)/);
 });

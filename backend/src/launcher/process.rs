@@ -164,7 +164,7 @@ pub(super) async fn spawn_codex(
     #[cfg(windows)]
     {
         let mut attempt = 0;
-        let mut startup_deadline = None;
+        let mut cli_only = false;
         loop {
             attempt += 1;
 
@@ -183,37 +183,53 @@ pub(super) async fn spawn_codex(
                         (None, Some(error))
                     }
                 };
-            let deadline = *startup_deadline.get_or_insert_with(|| {
-                tokio::time::Instant::now()
-                    + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT
-            });
-            anyhow::ensure!(
-                tokio::time::Instant::now() < deadline,
-                "Codex 兼容启动总时限已用尽"
-            );
-            let inspector_port =
-                crate::codex_startup_patch::reserve_loopback_port().map_err(|error| {
-                    let error = error.context("为 Codex 启动补丁选择本地调试端口失败");
-                    error_log::record_failure(
-                        "patch_failed",
-                        "reserve_startup_patch_port",
-                        format!("{error:#}"),
-                        serde_json::json!({
-                            "platform": "windows",
-                        }),
-                    );
-                    error
-                })?;
-            let inspector_arg = crate::codex_startup_patch::inspector_argument(inspector_port);
-            let mut launch_arguments = vec![inspector_arg];
-            launch_arguments.extend(runtime_arguments.iter().cloned());
+            if cli_only && let Some(error) = wrapper_preparation_error.as_ref() {
+                anyhow::bail!("准备 Codex CLI 重试入口失败：{error:#}");
+            }
+            let inspector_port = if cli_only {
+                None
+            } else {
+                Some(
+                    crate::codex_startup_patch::reserve_loopback_port().map_err(|error| {
+                        let error = error.context("为 Codex 启动补丁选择本地调试端口失败");
+                        error_log::record_failure(
+                            "patch_failed",
+                            "reserve_startup_patch_port",
+                            format!("{error:#}"),
+                            serde_json::json!({
+                                "platform": "windows",
+                            }),
+                        );
+                        error
+                    })?,
+                )
+            };
+            let launch_arguments = startup_launch_arguments(&runtime_arguments, inspector_port);
             let wrapper_environment = wrapper
                 .as_ref()
                 .map(|wrapper| wrapper.environment.as_slice())
                 .unwrap_or_default();
             let (mut spawned, package_debug_session, wrapper_environment_applied) =
-                spawn_windows_codex(app_dir, debug_port, &launch_arguments, wrapper_environment)
-                    .await?;
+                spawn_windows_codex(
+                    app_dir,
+                    debug_port,
+                    &launch_arguments,
+                    wrapper_environment,
+                    cli_only,
+                )
+                .await?;
+            // Each of the two attempts gets its own readiness budget. Cleanup
+            // and Store activation must not consume the next attempt's window.
+            let deadline = tokio::time::Instant::now()
+                + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT;
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "launcher.windows_startup_attempt",
+                serde_json::json!({
+                    "attempt": attempt, "cliOnly": cli_only,
+                    "processId": spawned.process_id,
+                    "wrapperEnvironmentApplied": wrapper_environment_applied,
+                }),
+            );
             let wrapper_handshake = wrapper_environment_applied
                 .then(|| wrapper.expect("applied wrapper environment should have a listener"))
                 .map(CliWrapperLaunch::into_handshake);
@@ -269,6 +285,7 @@ pub(super) async fn spawn_codex(
                             "inspectorPort": inspector_port,
                             "processId": spawned.process_id,
                             "startupAttempt": attempt,
+                            "cliOnly": cli_only,
                             "retryable": retryable,
                             "remainingBudgetMs": deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis(),
                             "disablePet": patch_options.disable_pet,
@@ -287,8 +304,11 @@ pub(super) async fn spawn_codex(
                             "Codex 启动兼容环境未能安全清理，已停止重试：{startup_error}"
                         );
                     }
-                    // 每次重试都重新准备兼容握手和调试端口，清理完成后才能启动。
-                    if should_retry_startup(&error, attempt, deadline) {
+                    // An unreachable Inspector can leave --inspect-brk paused,
+                    // preventing Desktop from ever launching the CLI wrapper.
+                    // Retry without that breakpoint only with a usable wrapper.
+                    if should_retry_startup(&error, attempt) {
+                        cli_only = wrapper_environment_applied;
                         continue;
                     }
                     if !runtime_config_overrides.is_empty() {
@@ -301,7 +321,9 @@ pub(super) async fn spawn_codex(
                             "Codex 启动兼容方案未能安装；为避免丢失 Codey 运行时约束，已停止 Codex：{startup_error}"
                         );
                     }
-                    match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[]).await {
+                    match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[], false)
+                        .await
+                    {
                         Ok((mut fallback, _, _)) => {
                             fallback.performance_status = "degraded".to_string();
                             fallback.performance_detail =
@@ -362,7 +384,7 @@ pub(super) async fn spawn_codex(
         let mut spawned = spawn_command(command)?;
         spawned.inspector_argument = Some(inspector_arg.clone());
         let startup_result = install_startup_patch_with_cli_fallback(
-            inspector_port,
+            Some(inspector_port),
             patch_options,
             runtime_config_overrides,
             wrapper.map(CliWrapperLaunch::into_handshake),
@@ -759,12 +781,20 @@ fn startup_error_allows_retry(error: &anyhow::Error) -> bool {
 }
 
 #[cfg(any(windows, test))]
-fn should_retry_startup(
-    error: &anyhow::Error,
-    attempt: u32,
-    deadline: tokio::time::Instant,
-) -> bool {
-    attempt < 2 && tokio::time::Instant::now() < deadline && startup_error_allows_retry(error)
+fn should_retry_startup(error: &anyhow::Error, attempt: u32) -> bool {
+    attempt < 2 && startup_error_allows_retry(error)
+}
+
+#[cfg(any(windows, test))]
+fn startup_launch_arguments(
+    runtime_arguments: &[String],
+    inspector_port: Option<u16>,
+) -> Vec<String> {
+    inspector_port
+        .map(crate::codex_startup_patch::inspector_argument)
+        .into_iter()
+        .chain(runtime_arguments.iter().cloned())
+        .collect()
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -787,13 +817,17 @@ fn combined_startup_error(
 
 #[cfg(any(windows, target_os = "macos"))]
 async fn install_startup_patch_with_cli_fallback(
-    inspector_port: u16,
+    inspector_port: Option<u16>,
     patch_options: crate::codex_startup_patch::PatchOptions,
     runtime_config_overrides: &[String],
     wrapper_handshake: Option<(tokio::net::TcpListener, Vec<u8>)>,
     platform: &'static str,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
+    let Some(inspector_port) = inspector_port else {
+        let (listener, token) = wrapper_handshake.context("Codex CLI 重试缺少已配置的兼容入口")?;
+        return wait_for_cli_wrapper(listener, token, deadline).await;
+    };
     let mut patch_install = Box::pin(async {
         tokio::time::timeout_at(
             deadline,
@@ -810,7 +844,9 @@ async fn install_startup_patch_with_cli_fallback(
     let Some((listener, token)) = wrapper_handshake else {
         return patch_install.as_mut().await;
     };
-    let mut wrapper_ready = Box::pin(wait_for_cli_wrapper(listener, token, deadline));
+    let wrapper_deadline = deadline
+        .min(tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_READY_TIMEOUT);
+    let mut wrapper_ready = Box::pin(wait_for_cli_wrapper(listener, token, wrapper_deadline));
     tokio::select! {
         patch = &mut patch_install => match patch {
             Ok(()) => Ok(()),
@@ -877,12 +913,10 @@ async fn wait_for_cli_wrapper(
     expected_token: Vec<u8>,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
-    use crate::codex_startup_patch::{
-        CliWrapperFailure, MAX_CLI_WRAPPER_FAILURE_BYTES, STARTUP_READY_TIMEOUT,
-    };
+    use crate::codex_startup_patch::{CliWrapperFailure, MAX_CLI_WRAPPER_FAILURE_BYTES};
     use tokio::io::AsyncReadExt;
 
-    let deadline = deadline.min(tokio::time::Instant::now() + STARTUP_READY_TIMEOUT);
+    let mut authenticated = false;
     tokio::time::timeout_at(deadline, async {
         loop {
             let (mut stream, _) = listener.accept().await?;
@@ -892,6 +926,7 @@ async fn wait_for_cli_wrapper(
                 .is_ok_and(|result| result.is_ok())
                 && received == expected_token
             {
+                authenticated = true;
                 let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
                     "launcher.cli_wrapper_authenticated",
                     serde_json::json!({ "remainingBudgetMs": deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis() }),
@@ -933,7 +968,11 @@ async fn wait_for_cli_wrapper(
         }
     })
     .await
-    .context("等待 Codex CLI 兼容执行器超时")?
+    .with_context(|| if authenticated {
+        "Codex CLI 包装器已连接，但等待目标程序执行确认超时"
+    } else {
+        "等待 Codex CLI 兼容执行器超时：未收到有效的包装器握手"
+    })?
 }
 
 pub(super) async fn reap_child_after_cleanup(mut child: Child, operation: &'static str) {
@@ -1086,8 +1125,7 @@ mod cli_wrapper_tests {
     use super::*;
 
     #[tokio::test(start_paused = true)]
-    async fn startup_retry_requires_a_transient_error_and_remaining_budget() {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    async fn startup_retry_requires_a_transient_error_and_is_limited_to_two_attempts() {
         let timeout = || {
             anyhow::Error::from(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
@@ -1113,10 +1151,10 @@ mod cli_wrapper_tests {
             let error = std::io::Error::from_raw_os_error(code).into();
             assert_eq!(startup_error_allows_retry(&error), retryable);
         }
-        assert!(should_retry_startup(&timeout(), 1, deadline));
-        assert!(should_retry_startup(&transient, 1, deadline));
-        assert!(!should_retry_startup(&invalid, 1, deadline));
-        assert!(!should_retry_startup(&timeout(), 2, deadline));
+        assert!(should_retry_startup(&timeout(), 1));
+        assert!(should_retry_startup(&transient, 1));
+        assert!(!should_retry_startup(&invalid, 1));
+        assert!(!should_retry_startup(&timeout(), 2));
         assert!(!startup_error_allows_retry(&combined_startup_error(
             anyhow::anyhow!("invalid inspector response"),
             timeout()
@@ -1125,8 +1163,9 @@ mod cli_wrapper_tests {
             timeout(),
             timeout()
         )));
-        tokio::time::advance(Duration::from_secs(10)).await;
-        assert!(!should_retry_startup(&timeout(), 1, deadline));
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(should_retry_startup(&timeout(), 1));
+        assert!(!should_retry_startup(&timeout(), 2));
     }
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -1140,7 +1179,7 @@ mod cli_wrapper_tests {
         let result = tokio::time::timeout(
             Duration::from_millis(500),
             install_startup_patch_with_cli_fallback(
-                port,
+                Some(port),
                 crate::codex_startup_patch::PatchOptions {
                     disable_pet: false,
                     subagent_gate_active: true,
@@ -1155,6 +1194,75 @@ mod cli_wrapper_tests {
         .expect("neither compatibility path may reset the caller's deadline");
         assert!(startup_error_allows_retry(&result.unwrap_err()));
         assert!(tokio::time::Instant::now() >= deadline);
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn cli_retry_starts_without_a_breakpoint_and_gets_a_full_readiness_window() {
+        use tokio::io::AsyncWriteExt;
+
+        let runtime_args = vec!["--disable-gpu".to_string()];
+        let port = crate::codex_startup_patch::reserve_loopback_port().unwrap();
+        assert!(
+            startup_launch_arguments(&runtime_args, Some(port))[0].starts_with("--inspect-brk=")
+        );
+        let first_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let options = crate::codex_startup_patch::PatchOptions {
+            disable_pet: false,
+            subagent_gate_active: true,
+        };
+        let overrides = ["model_provider=\"codey_router\"".to_string()];
+        let error = install_startup_patch_with_cli_fallback(
+            Some(port),
+            options,
+            &overrides,
+            Some((first_listener, b"token".to_vec())),
+            "windows",
+            tokio::time::Instant::now() + Duration::from_millis(40),
+        )
+        .await
+        .unwrap_err();
+        assert!(should_retry_startup(&error, 1));
+
+        // Simulate slow process cleanup, then start the new readiness window.
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert_eq!(startup_launch_arguments(&runtime_args, None), runtime_args);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let sender = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(28)).await;
+            tokio::time::resume();
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            stream.write_all(b"token").await.unwrap();
+        });
+        install_startup_patch_with_cli_fallback(
+            None,
+            options,
+            &overrides,
+            Some((listener, b"token".to_vec())),
+            "windows",
+            tokio::time::Instant::now() + crate::codex_startup_patch::STARTUP_COMPATIBILITY_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        sender.await.unwrap();
+        assert!(
+            install_startup_patch_with_cli_fallback(
+                None,
+                options,
+                &overrides,
+                None,
+                "windows",
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .is_err()
+        );
     }
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -1185,7 +1293,7 @@ mod cli_wrapper_tests {
             let result = tokio::time::timeout(
                 Duration::from_secs(5),
                 install_startup_patch_with_cli_fallback(
-                    port,
+                    Some(port),
                     crate::codex_startup_patch::PatchOptions {
                         disable_pet: false,
                         subagent_gate_active: true,
@@ -1261,7 +1369,7 @@ mod cli_wrapper_tests {
             stream.write_all(b"token").await.unwrap();
         });
         install_startup_patch_with_cli_fallback(
-            inspector_port,
+            Some(inspector_port),
             crate::codex_startup_patch::PatchOptions {
                 disable_pet: false,
                 subagent_gate_active: true,

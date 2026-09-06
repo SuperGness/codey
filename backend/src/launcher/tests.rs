@@ -501,6 +501,81 @@ fn validate_router_provider_reads_legacy_codey_global_after_resume_shim() {
 }
 
 #[tokio::test]
+async fn initial_storage_guards_wait_for_crashpad_after_trace_failure() {
+    let trace = tokio::spawn(async { anyhow::bail!("trace guard failed") });
+    let (release, released) = oneshot::channel();
+    let crashpad = tokio::spawn(async move {
+        released.await.unwrap();
+        crashpad_pending_guard::CrashpadGuardRun {
+            cleanup: Default::default(),
+            snapshot: crashpad_pending_guard::CrashpadPendingStatsSnapshot {
+                files_found: 7,
+                ..crashpad_pending_guard::CrashpadPendingStatsSnapshot::idle(true)
+            },
+        }
+    });
+    let trace_active = AtomicBool::new(false);
+    let stats = CrashpadPendingStatsHandle::idle(true);
+    let wait = await_initial_storage_guards(trace, true, &trace_active, crashpad, true, &stats);
+    tokio::pin!(wait);
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut wait)
+            .await
+            .is_err()
+    );
+    release.send(()).unwrap();
+    assert_eq!(wait.await.unwrap_err().to_string(), "trace guard failed");
+    assert_eq!(serde_json::to_value(&stats).unwrap()["filesFound"], 7);
+}
+
+#[tokio::test]
+async fn startup_storage_waits_for_guards_when_app_resolution_fails() {
+    let home = tempfile::tempdir().unwrap();
+    let config = CodeyConfig {
+        codex_app_path: home
+            .path()
+            .join("missing-installation")
+            .display()
+            .to_string(),
+        ..CodeyConfig::default()
+    };
+    let trace = tokio::spawn(async { anyhow::bail!("secondary trace failure") });
+    let (release, released) = oneshot::channel();
+    let crashpad = tokio::spawn(async move {
+        released.await.unwrap();
+        crashpad_pending_guard::CrashpadGuardRun {
+            cleanup: Default::default(),
+            snapshot: crashpad_pending_guard::CrashpadPendingStatsSnapshot {
+                files_found: 9,
+                ..crashpad_pending_guard::CrashpadPendingStatsSnapshot::idle(true)
+            },
+        }
+    });
+    let trace_active = AtomicBool::new(false);
+    let stats = CrashpadPendingStatsHandle::idle(true);
+    let preparation = prepare_startup_storage(
+        home.path(),
+        &config,
+        None,
+        InitialStorageGuards { trace, crashpad },
+        &trace_active,
+        &stats,
+    );
+    tokio::pin!(preparation);
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut preparation)
+            .await
+            .is_err()
+    );
+    release.send(()).unwrap();
+    let error = preparation.await.err().expect("invalid app path must fail");
+    assert_eq!(error.to_string(), CODEX_APP_PATH_INVALID_ERROR);
+    assert_eq!(serde_json::to_value(&stats).unwrap()["filesFound"], 9);
+}
+
+#[tokio::test]
 async fn startup_maintenance_preserves_router_and_other_provider_threads() {
     let temp = tempfile::tempdir().unwrap();
     let config = "model_provider = \"yescode\"\n\n[model_providers.yescode]\nbase_url = \"https://first.example/v1\"\n";
