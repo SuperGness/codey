@@ -136,7 +136,7 @@ Windows Store 运行文件暂存、CLI 环境隔离、Inspector 启动时防止 
 - 包装器回连可重试，并新增记录文件作为第二确认通道；启动器不会因握手丢失杀掉已执行目标的 Codex。
 - 等待按证据结束：进程退出立即失败并重试一次；渲染进程调试端口就绪而 Inspector 被拒绝时立即放弃 Inspector；单轮 CLI 确认上限 60 秒。
 - Inspector 关闭且没有可用包装器时在启动前决策，不再启动随后必被停止的进程。
-- Windows Store 运行文件暂存改为按包文件的大小与修改时间识别，复制时校验一次 SHA-256 并写入目录清单 `.codey-staged.json`，后续启动只核对清单与文件大小，不再每次对约 300 MB 的运行文件全量哈希；副本大小不符时重新暂存。
+- Windows Store 运行文件存放于 `%LOCALAPPDATA%\Codey\codex-runtime\<哈希>`，临时复制目录也位于此根目录。Codex Desktop 会清理自身 `%LOCALAPPDATA%\OpenAI\Codex\bin` 下的旧 16 位哈希目录，因此 Codey 不再向该公共目录写入或复用副本；首次使用新位置时重新复制，旧目录留给 Codex 自身管理。回归模拟官方清理规则，确认四个运行文件及清单仍完整，后续启动能直接复用。运行文件暂存按包文件的大小与修改时间识别，复制时校验一次 SHA-256 并写入目录清单 `.codey-staged.json`，后续启动只核对清单与文件大小，不再每次对约 300 MB 的运行文件全量哈希；副本大小不符时重新暂存。
 - 补充探测与包装器阶段的诊断日志，见上文诊断段落。
 - Electron fuse 模块仅在 Windows、macOS 或单元测试中编译；诊断和异步探测入口仅在 Windows、macOS 编译，Linux 仍运行解析、扫描和缓存测试。`startup_launch_arguments` 仅在 Windows 及 macOS 单元测试中编译，与调用方保持一致，避免 Linux CI 在 `-D warnings` 下报告未使用代码。
 

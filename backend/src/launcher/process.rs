@@ -789,7 +789,8 @@ fn stage_windows_cli_runtime(
         cache_hasher.update([0]);
     }
     let cache_hash = format!("{:x}", cache_hasher.finalize());
-    let cache_root = local_app_data.join("OpenAI").join("Codex").join("bin");
+    // Codex 会清理自身 bin 中的旧哈希目录，Codey 的运行副本必须独立存放。
+    let cache_root = local_app_data.join("Codey").join("codex-runtime");
     let destination = cache_root.join(&cache_hash[..16]);
     if staged_runtime_ready(&destination, &sources) {
         return Ok(destination.join("codex.exe"));
@@ -2116,6 +2117,64 @@ mod cli_wrapper_tests {
     }
 
     #[test]
+    fn windows_cli_runtime_survives_codex_cache_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        for name in WINDOWS_CLI_RUNTIME_FILES {
+            std::fs::write(resources.join(name), format!("payload:{name}")).unwrap();
+        }
+        let local_app_data = temp.path().join("local-app-data");
+        let official_root = local_app_data.join("OpenAI/Codex/bin");
+        let current_hash = "0000000000000000";
+        let old_hash = "1111111111111111";
+        for hash in [current_hash, old_hash] {
+            let directory = official_root.join(hash);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("codex.exe"), "official runtime").unwrap();
+        }
+        let target = resources.join("codex.exe");
+        let staged = stage_windows_cli_runtime(&target, &local_app_data).unwrap();
+        let staged_dir = staged.parent().unwrap();
+        std::fs::write(staged_dir.join("reused.marker"), "1").unwrap();
+
+        // 模拟 Codex Desktop 清理自身 bin 下的旧哈希目录。
+        for entry in std::fs::read_dir(&official_root).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let name = name.to_str().unwrap();
+            if entry.file_type().unwrap().is_dir()
+                && (name.starts_with(&format!(".staging-{current_hash}-"))
+                    || (name != current_hash
+                        && name.len() == 16
+                        && name
+                            .bytes()
+                            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+                        && entry.path().join("codex.exe").exists()))
+            {
+                std::fs::remove_dir_all(entry.path()).unwrap();
+            }
+        }
+        assert!(!official_root.join(old_hash).exists());
+        assert!(official_root.join(current_hash).join("codex.exe").is_file());
+        for name in WINDOWS_CLI_RUNTIME_FILES {
+            assert_eq!(
+                std::fs::read(staged_dir.join(name)).unwrap(),
+                format!("payload:{name}").as_bytes()
+            );
+        }
+        assert!(staged_runtime_ready(
+            staged_dir,
+            &windows_cli_runtime_sources(&target).unwrap()
+        ));
+        assert_eq!(
+            stage_windows_cli_runtime(&target, &local_app_data).unwrap(),
+            staged
+        );
+        assert!(staged_dir.join("reused.marker").exists());
+    }
+
+    #[test]
     fn windows_cli_runtime_is_staged_once_and_repaired_when_a_copy_is_damaged() {
         let temp = tempfile::tempdir().unwrap();
         let resources = temp.path().join("resources");
@@ -2129,7 +2188,7 @@ mod cli_wrapper_tests {
         let local_app_data = temp.path().join("local-app-data");
         let staged = stage_windows_cli_runtime(&target, &local_app_data).unwrap();
         let staged_dir = staged.parent().unwrap().to_path_buf();
-        assert!(staged.starts_with(local_app_data.join("OpenAI/Codex/bin")));
+        assert!(staged.starts_with(local_app_data.join("Codey/codex-runtime")));
         let directory_name = staged_dir.file_name().unwrap().to_str().unwrap();
         assert_eq!(directory_name.len(), 16);
         assert!(directory_name.chars().all(|c| c.is_ascii_hexdigit()));
