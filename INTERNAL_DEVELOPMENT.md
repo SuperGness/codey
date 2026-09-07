@@ -137,6 +137,8 @@ Windows Store 运行文件暂存、CLI 环境隔离、Inspector 启动时防止 
 
 本机验证：`cargo test -p codey --lib`（electron_fuses、launcher、codex_startup_patch 相关用例，含读取已安装 ChatGPT.app 的真实 fuse wire）、`cargo test -p codey --test codex_cli_wrapper`、`cargo clippy -p codey --all-targets -- -D warnings`、`cargo fmt --check`、`pnpm test:js`。Windows 分支（Store 激活、PID 快照存活检查、`cfg(windows)` 代码）无法在本机编译验证，需要 Windows CI 与实机确认。未签名的 codey.exe 仍是 Defender「首次可见即阻止」拖慢启动的诱因，签名属于发布链路事项。
 
+启动连接测试不依赖关闭的本机端口及时返回 `ConnectionRefused`：Windows 在单次连接时限内可能只返回 `TimedOut`。握手测试通过可替换的连接函数分别验证拒绝时不重试、超时后重试成功和达到截止时间后结束；成功路径仍连接真实监听端口。Inspector 测试明确提供先超时后拒绝的探测结果，并使用真实渲染进程监听端口，验证超时本身不会触发 `InspectorUnavailable`。生产环境仍使用原有 TCP 和 HTTP 请求及超时配置。
+
 Windows 集成模块已删除无调用方且未对外导出的快捷方式创建、桌面目录查询、注册表写入与删除、仅按 PID 终止进程函数，以及这些函数专用的 COM 和注册表辅助代码。现有窗口操作、进程枚举及校验路径或创建时间后终止进程的入口保持不变，避免 Windows CI 在 `-D warnings` 下因遗留代码失败。
 
 依赖审查结合三个 Cargo 包、前端清单、构建脚本、平台 cfg 和源码调用；`cargo-machete .` 未发现未使用的直接依赖。`pnpm why @mantine/hooks` 确认它是 Mantine Core 的必需 peer，删除根声明不会减少安装树；`cargo tree --locked -i zopfli -e features` 确认 ZIP 的 deflate 特性同时由 FastCtx 启用，仅调整本项目不会移除 Zopfli。系统代理、系统证书、二维码、压缩包读取及原生平台依赖均保留，未改动依赖版本或锁文件。此次删除减少注入代码及随包资源，不宣称减少第三方依赖数量。

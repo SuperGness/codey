@@ -717,10 +717,22 @@ fn connect_loopback_with_retry(
     address: &std::net::SocketAddr,
     deadline: std::time::Instant,
 ) -> std::io::Result<std::net::TcpStream> {
+    connect_loopback_with_retry_using(address, deadline, std::net::TcpStream::connect_timeout)
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn connect_loopback_with_retry_using(
+    address: &std::net::SocketAddr,
+    deadline: std::time::Instant,
+    mut connect: impl FnMut(
+        &std::net::SocketAddr,
+        std::time::Duration,
+    ) -> std::io::Result<std::net::TcpStream>,
+) -> std::io::Result<std::net::TcpStream> {
     let mut attempts = 0_u32;
     loop {
         attempts += 1;
-        match std::net::TcpStream::connect_timeout(address, CLI_WRAPPER_HANDSHAKE_CONNECT_TIMEOUT) {
+        match connect(address, CLI_WRAPPER_HANDSHAKE_CONNECT_TIMEOUT) {
             Ok(stream) => return Ok(stream),
             Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
                 return Err(error);
@@ -869,16 +881,17 @@ pub async fn install(
 }
 
 /// 从 reqwest 错误链里找出底层 socket 错误类型，用于区分「被拒绝」与「被拖住」。
-fn connect_error_kind(error: &reqwest::Error) -> Option<std::io::ErrorKind> {
-    if error.is_timeout() {
-        return Some(std::io::ErrorKind::TimedOut);
-    }
-    let mut source = std::error::Error::source(error);
-    while let Some(current) = source {
+fn connect_error_kind(error: &anyhow::Error) -> Option<std::io::ErrorKind> {
+    for current in error.chain() {
+        if current
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+        {
+            return Some(std::io::ErrorKind::TimedOut);
+        }
         if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
             return Some(io_error.kind());
         }
-        source = current.source();
     }
     None
 }
@@ -894,6 +907,25 @@ async fn wait_for_inspector(port: u16, renderer_debug_port: Option<u16>) -> Resu
         .timeout(std::time::Duration::from_millis(750))
         .build()?;
     let endpoint = format!("http://127.0.0.1:{port}/json/list");
+    wait_for_inspector_with_probe(port, renderer_debug_port, || async {
+        client
+            .get(&endpoint)
+            .send()
+            .await
+            .map_err(anyhow::Error::from)
+    })
+    .await
+}
+
+async fn wait_for_inspector_with_probe<F, Fut>(
+    port: u16,
+    renderer_debug_port: Option<u16>,
+    mut probe: F,
+) -> Result<String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response>>,
+{
     let started = tokio::time::Instant::now();
     let deadline = started + STARTUP_READY_TIMEOUT;
     let mut last_error = "调试端口尚未响应".to_string();
@@ -904,7 +936,7 @@ async fn wait_for_inspector(port: u16, renderer_debug_port: Option<u16>) -> Resu
     let mut next_renderer_probe = started;
 
     while tokio::time::Instant::now() < deadline {
-        match client.get(&endpoint).send().await {
+        match probe().await {
             Ok(response) if response.status().is_success() => {
                 let targets = crate::http_response::read_bounded_body(
                     response,
@@ -969,7 +1001,7 @@ async fn wait_for_inspector(port: u16, renderer_debug_port: Option<u16>) -> Resu
                     Some(std::io::ErrorKind::TimedOut) => timed_out += 1,
                     _ => other_errors += 1,
                 }
-                last_error = format!("{:#}", anyhow::Error::new(error));
+                last_error = format!("{error:#}");
             }
         }
         tokio::time::sleep(retry_delay).await;
@@ -1780,15 +1812,29 @@ mod tests {
             .await
             .unwrap();
         let renderer_port = renderer.local_addr().unwrap().port();
-        let inspector_port = reserve_loopback_port().unwrap();
         let started = std::time::Instant::now();
-        let error = wait_for_inspector(inspector_port, Some(renderer_port))
-            .await
-            .unwrap_err();
+        // Closed loopback ports can time out on Windows before refusal arrives.
+        // Supply the error explicitly so this test exercises refusal handling.
+        let mut probes = 0;
+        let error = wait_for_inspector_with_probe(0, Some(renderer_port), || {
+            probes += 1;
+            let kind = if probes == 1 {
+                std::io::ErrorKind::TimedOut
+            } else {
+                std::io::ErrorKind::ConnectionRefused
+            };
+            std::future::ready(Err(std::io::Error::from(kind).into()))
+        })
+        .await
+        .unwrap_err();
         let unavailable = error
             .downcast_ref::<InspectorUnavailable>()
             .unwrap_or_else(|| panic!("expected InspectorUnavailable, got {error:#}"));
         assert!(unavailable.refused >= 1);
+        assert!(
+            probes >= 2,
+            "a timeout alone must not mark Inspector unavailable"
+        );
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "must not wait for the full discovery window"
@@ -1835,20 +1881,62 @@ mod tests {
     }
 
     #[test]
-    fn handshake_connect_fails_fast_when_refused_and_connects_when_listening() {
+    fn handshake_connect_connects_when_listening() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
         let deadline = std::time::Instant::now() + CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET;
         connect_loopback_with_retry(&address, deadline).unwrap();
-        drop(listener);
-        let started = std::time::Instant::now();
-        let error =
-            connect_loopback_with_retry(&address, started + CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET)
-                .unwrap_err();
+    }
+
+    #[test]
+    fn handshake_connect_does_not_retry_refusal() {
+        let address = "127.0.0.1:1".parse().unwrap();
+        let mut attempts = 0;
+        let error = connect_loopback_with_retry_using(
+            &address,
+            std::time::Instant::now() + CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET,
+            |_, _| {
+                attempts += 1;
+                Err(std::io::ErrorKind::ConnectionRefused.into())
+            },
+        )
+        .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "a refused port means the launcher is gone; never retry it"
-        );
+        assert_eq!(attempts, 1, "a refused connection must not be retried");
+    }
+
+    #[test]
+    fn handshake_connect_retries_timeout_and_connects_when_listening() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut attempts = 0;
+        connect_loopback_with_retry_using(
+            &address,
+            std::time::Instant::now() + CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET,
+            |address, timeout| {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(std::io::ErrorKind::TimedOut.into())
+                } else {
+                    std::net::TcpStream::connect_timeout(address, timeout)
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn handshake_connect_stops_retrying_timeout_at_deadline() {
+        let address = "127.0.0.1:1".parse().unwrap();
+        let mut attempts = 0;
+        let error =
+            connect_loopback_with_retry_using(&address, std::time::Instant::now(), |_, _| {
+                attempts += 1;
+                Err(std::io::ErrorKind::TimedOut.into())
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(attempts, 1);
     }
 }
