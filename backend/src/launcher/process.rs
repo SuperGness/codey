@@ -1020,7 +1020,7 @@ fn should_retry_startup(error: &anyhow::Error, attempt: u32) -> bool {
     attempt < 2 && startup_error_allows_retry(error)
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, all(target_os = "macos", test)))]
 fn startup_launch_arguments(
     runtime_arguments: &[String],
     inspector_port: Option<u16>,

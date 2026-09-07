@@ -10,6 +10,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(any(windows, target_os = "macos"))]
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -35,6 +36,7 @@ pub(crate) enum FuseState {
 }
 
 impl FuseState {
+    #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             FuseState::Enabled => "enabled",
@@ -183,6 +185,7 @@ struct FuseCacheEntry {
     states: Option<String>,
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 fn cache_path() -> PathBuf {
     codey_runtime_core::paths::default_app_state_dir().join(CACHE_FILE)
 }
@@ -253,6 +256,7 @@ pub(crate) fn cached_fuse_wire(binary: &Path, cache: &Path) -> Result<(Option<Fu
 }
 
 /// Resolves whether the Codex desktop app at `app_dir` honours `--inspect-brk`.
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn node_cli_inspect_state(app_dir: &Path) -> FuseState {
     let started = Instant::now();
     let Some(binary) = electron_binary_path(app_dir) else {
@@ -308,6 +312,7 @@ pub(crate) fn node_cli_inspect_state(app_dir: &Path) -> FuseState {
 
 /// Blocking-pool wrapper for [`node_cli_inspect_state`]; the first scan of a
 /// new Codex build reads the whole executable.
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) async fn detect_node_cli_inspect_state(app_dir: PathBuf) -> FuseState {
     tokio::task::spawn_blocking(move || node_cli_inspect_state(&app_dir))
         .await

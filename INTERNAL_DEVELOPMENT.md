@@ -133,6 +133,7 @@ Windows Store 运行文件暂存、CLI 环境隔离、Inspector 启动时防止 
 - Inspector 关闭且没有可用包装器时在启动前决策，不再启动随后必被停止的进程。
 - Windows Store 运行文件暂存改为按包文件的大小与修改时间识别，复制时校验一次 SHA-256 并写入目录清单 `.codey-staged.json`，后续启动只核对清单与文件大小，不再每次对约 300 MB 的运行文件全量哈希；副本大小不符时重新暂存。
 - 补充探测与包装器阶段的诊断日志，见上文诊断段落。
+- Electron fuse 模块仅在 Windows、macOS 或单元测试中编译；诊断和异步探测入口仅在 Windows、macOS 编译，Linux 仍运行解析、扫描和缓存测试。`startup_launch_arguments` 仅在 Windows 及 macOS 单元测试中编译，与调用方保持一致，避免 Linux CI 在 `-D warnings` 下报告未使用代码。
 
 本机验证：`cargo test -p codey --lib`（electron_fuses、launcher、codex_startup_patch 相关用例，含读取已安装 ChatGPT.app 的真实 fuse wire）、`cargo test -p codey --test codex_cli_wrapper`、`cargo clippy -p codey --all-targets -- -D warnings`、`cargo fmt --check`、`pnpm test:js`。Windows 分支（Store 激活、PID 快照存活检查、`cfg(windows)` 代码）无法在本机编译验证，需要 Windows CI 与实机确认。未签名的 codey.exe 仍是 Defender「首次可见即阻止」拖慢启动的诱因，签名属于发布链路事项。
 

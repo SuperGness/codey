@@ -7,6 +7,7 @@ mod codex_startup_patch;
 mod commands;
 mod config;
 mod crashpad_pending_guard;
+#[cfg(any(windows, target_os = "macos", test))]
 mod electron_fuses;
 mod error_log;
 pub mod fastctx;
