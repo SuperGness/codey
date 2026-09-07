@@ -602,8 +602,7 @@ pub(crate) fn append_responses_websocket_sse_event(
         return Ok(());
     }
     events.push(
-        serde_json::from_str::<Value>(&data)
-            .context("Responses 上游 SSE data 不是有效 JSON")?,
+        serde_json::from_str::<Value>(&data).context("Responses 上游 SSE data 不是有效 JSON")?,
     );
     Ok(())
 }

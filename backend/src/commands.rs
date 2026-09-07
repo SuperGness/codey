@@ -42,10 +42,10 @@ use models::{
 };
 use models::{
     current_model_state_async, current_provider_status_async, current_renderer_model_catalog_async,
-    hot_reload_runtime_models, official_route_snapshots, reconcile_subagent_models_for_mode,
-    remote_compaction_transport_requires_restart, runtime_supports_current_routes_for_hot_reload,
-    sync_current_third_party_provider_state, sync_provider_models_for_launch,
-    websocket_transport_requires_restart,
+    hot_reload_runtime_models, native_web_search_capability_requires_restart,
+    official_route_snapshots, reconcile_subagent_models_for_mode,
+    runtime_supports_current_routes_for_hot_reload, sync_current_third_party_provider_state,
+    sync_provider_models_for_launch, websocket_transport_requires_restart,
 };
 pub use models::{
     delete_route, fetch_route_models, save_default_model, save_official_route_models,
@@ -2175,13 +2175,13 @@ pub(super) fn config_requires_restart_with_route_status(
 }
 
 pub(super) fn provider_route_restart_required_for_runtime(
-    runtime: &CodeyRuntime,
+    applied: &CodeyConfig,
     current: &CodeyConfig,
 ) -> bool {
-    runtime.applied_config.local_router_enabled != current.local_router_enabled
-        || official_route_snapshots(&runtime.applied_config) != official_route_snapshots(current)
-        || websocket_transport_requires_restart(&runtime.applied_config, current)
-        || remote_compaction_transport_requires_restart(&runtime.applied_config, current)
+    !runtime_supports_current_routes_for_hot_reload(applied, current)
+        || official_route_snapshots(applied) != official_route_snapshots(current)
+        || websocket_transport_requires_restart(applied, current)
+        || native_web_search_capability_requires_restart(applied, current)
 }
 
 fn model_catalog_config_for_runtime<'a>(
@@ -2201,7 +2201,7 @@ async fn runtime_config_requires_restart(state: &Arc<AppState>, current: &CodeyC
     let applied_models = runtime.applied_model_config().await;
     let applied_subagent = runtime.applied_subagent_config().await;
     let provider_route_restart_required =
-        provider_route_restart_required_for_runtime(&runtime, current);
+        provider_route_restart_required_for_runtime(&runtime.applied_config, current);
     config_requires_restart_with_route_status(
         provider_route_restart_required,
         &runtime.applied_config,

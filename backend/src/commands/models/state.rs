@@ -45,8 +45,22 @@ pub(crate) fn runtime_supports_current_routes_for_hot_reload(
     if !current.local_router_enabled {
         return true;
     }
-    if websocket_transport_requires_restart(applied, current)
-        || native_web_search_capability_requires_restart(applied, current)
+    // Model membership can be delivered to the picker and router immediately.
+    // Keep startup capability differences separate from that delivery status.
+    let route_capabilities = |config: &CodeyConfig| {
+        config
+            .profiles
+            .iter()
+            .filter_map(|profile| {
+                let websockets = config.route_supports_websockets_this_launch(profile);
+                let web_search = config.route_supports_native_web_search_this_launch(profile);
+                (websockets || web_search)
+                    .then(|| (profile.provider_id().to_string(), websockets, web_search))
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    if route_capabilities(applied) != route_capabilities(current)
+        || applied.runtime_supports_websockets() != current.runtime_supports_websockets()
         || remote_compaction_transport_requires_restart(applied, current)
     {
         return false;

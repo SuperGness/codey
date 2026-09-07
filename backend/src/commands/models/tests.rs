@@ -1022,7 +1022,7 @@ fn built_in_router_hot_reloads_added_and_removed_third_party_routes() {
 }
 
 #[test]
-fn websocket_model_changes_require_restart_and_stop_hot_reload() {
+fn websocket_model_changes_hot_reload_with_capabilities_pending_restart() {
     let mut route = crate::config::ProviderProfile::new("WS Route");
     route.id = "route-ws".into();
     route.base_url = "https://route-ws.example/v1".into();
@@ -1046,7 +1046,7 @@ fn websocket_model_changes_require_restart_and_stop_hot_reload() {
         .push("model-b".into());
     assert!(websocket_transport_requires_restart(&applied, &after_add));
     assert!(provider_route_requires_restart(&applied, &after_add));
-    assert!(!runtime_supports_current_routes_for_hot_reload(
+    assert!(runtime_supports_current_routes_for_hot_reload(
         &applied, &after_add
     ));
 
@@ -1058,7 +1058,7 @@ fn websocket_model_changes_require_restart_and_stop_hot_reload() {
         &applied,
         &after_delete
     ));
-    assert!(!runtime_supports_current_routes_for_hot_reload(
+    assert!(runtime_supports_current_routes_for_hot_reload(
         &applied,
         &after_delete
     ));
@@ -1108,7 +1108,7 @@ fn websocket_switch_changes_require_restart_and_stop_hot_reload() {
 }
 
 #[test]
-fn native_web_search_switch_and_model_changes_require_restart() {
+fn native_web_search_models_hot_reload_but_capability_switch_requires_restart() {
     let mut route = crate::config::ProviderProfile::new("Search Route");
     route.id = "route-search".into();
     route.base_url = "https://route-search.example/v1".into();
@@ -1142,8 +1142,16 @@ fn native_web_search_switch_and_model_changes_require_restart() {
     assert!(native_web_search_capability_requires_restart(
         &enabled, &after_add
     ));
-    assert!(!runtime_supports_current_routes_for_hot_reload(
+    assert!(runtime_supports_current_routes_for_hot_reload(
         &enabled, &after_add
+    ));
+    let mut after_delete = after_add.clone();
+    after_delete
+        .selected_models_by_provider
+        .insert("route-search".into(), vec!["model-b".into()]);
+    assert!(runtime_supports_current_routes_for_hot_reload(
+        &enabled,
+        &after_delete
     ));
 }
 

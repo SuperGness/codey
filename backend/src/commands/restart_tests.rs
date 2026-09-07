@@ -462,6 +462,62 @@ fn renderer_catalog_uses_current_config_for_model_only_changes() {
 }
 
 #[test]
+fn model_hot_reload_keeps_startup_capabilities_pending_without_blocking_other_routes() {
+    for (websockets, web_search) in [(false, false), (true, false), (false, true)] {
+        let mut route = crate::config::ProviderProfile::new("Models");
+        route.id = "models".into();
+        route.base_url = "https://models.example/v1".into();
+        route.supports_websockets = websockets;
+        route.supports_native_web_search = web_search;
+        let mut other = crate::config::ProviderProfile::new("Other");
+        other.id = "other".into();
+        other.base_url = "https://other.example/v1".into();
+        let applied = CodeyConfig {
+            active_profile_id: route.id.clone(),
+            profiles: vec![route, other],
+            selected_models_by_provider: std::collections::BTreeMap::from([
+                ("models".into(), vec!["model-a".into()]),
+                ("other".into(), vec!["other-a".into()]),
+            ]),
+            ..CodeyConfig::default()
+        };
+        let mut current = applied.clone();
+        current
+            .selected_models_by_provider
+            .insert("models".into(), vec!["model-a".into(), "model-b".into()]);
+        current
+            .selected_models_by_provider
+            .insert("other".into(), vec!["other-b".into()]);
+        assert!(std::ptr::eq(
+            model_catalog_config_for_runtime(&current, Some(&applied)),
+            &current,
+        ));
+        // Publishing the picker updates only the model baseline. The app-server
+        // capability baseline must still be compared with the launch config.
+        assert_eq!(
+            config_requires_restart_with_route_status(
+                provider_route_restart_required_for_runtime(&applied, &current),
+                &applied,
+                &RuntimeModelConfig::from_config(&current),
+                &RuntimeSubagentConfig::from_config(&current),
+                &current,
+            ),
+            websockets || web_search,
+        );
+        let mut capability_change = applied.clone();
+        capability_change.profiles[0].supports_native_web_search = !web_search;
+        assert!(!runtime_supports_current_routes_for_hot_reload(
+            &applied,
+            &capability_change
+        ));
+        assert!(provider_route_restart_required_for_runtime(
+            &applied,
+            &capability_change
+        ));
+    }
+}
+
+#[test]
 fn restart_sensitive_config_changes_are_detected() {
     let applied = CodeyConfig::default();
     let applied_models = RuntimeModelConfig::from_config(&applied);

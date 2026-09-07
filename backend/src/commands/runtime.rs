@@ -93,7 +93,7 @@ pub(super) async fn runtime_status_with_options(
     ) {
         (Some(runtime), Some(applied_models), Some(applied_subagent)) => {
             config_requires_restart_with_route_status(
-                provider_route_restart_required_for_runtime(runtime, &config),
+                provider_route_restart_required_for_runtime(&runtime.applied_config, &config),
                 &runtime.applied_config,
                 applied_models,
                 applied_subagent,
