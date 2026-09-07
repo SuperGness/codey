@@ -13,8 +13,11 @@ pub mod paths;
 pub mod plugin_marketplace;
 pub mod ports;
 pub mod version;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 mod windows_integration;
+
+#[cfg(windows)]
+pub use windows_integration::WindowsProcessInfo;
 
 #[cfg(windows)]
 pub fn windows_create_no_window() -> u32 {
@@ -40,8 +43,14 @@ pub fn windows_apply_codey_icon_to_process_window(
 }
 
 #[cfg(windows)]
-pub fn windows_enumerate_processes() -> Vec<windows_integration::WindowsProcessInfo> {
+pub fn windows_enumerate_processes() -> anyhow::Result<Vec<windows_integration::WindowsProcessInfo>>
+{
     windows_integration::enumerate_processes()
+}
+
+#[cfg(windows)]
+pub fn windows_process_is_running(process_id: u32) -> anyhow::Result<bool> {
+    windows_integration::process_is_running(process_id)
 }
 
 #[cfg(windows)]

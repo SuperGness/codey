@@ -82,7 +82,8 @@ fn unix_codey_root_process_ids(
 async fn terminate_other_windows_codey_processes() -> Result<usize> {
     let current_pid = std::process::id();
     let executable_path = std::env::current_exe().context("读取当前 Codey 可执行文件路径失败")?;
-    let processes = codey_runtime_core::windows_enumerate_processes();
+    let processes = codey_runtime_core::windows_enumerate_processes()
+        .context("检测待清理的 Windows Codey 进程失败")?;
     let roots = processes
         .iter()
         .filter(|process| {

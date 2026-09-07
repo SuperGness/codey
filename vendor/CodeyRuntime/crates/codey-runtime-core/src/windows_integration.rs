@@ -11,7 +11,8 @@ use std::sync::OnceLock;
 
 #[cfg(windows)]
 use windows::Win32::Foundation::{
-    BOOL, CloseHandle, FILETIME, HANDLE, HWND, LPARAM, MAX_PATH, WPARAM,
+    BOOL, CloseHandle, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, FILETIME, HANDLE, HWND,
+    LPARAM, MAX_PATH, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT, WPARAM,
 };
 #[cfg(windows)]
 use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -19,8 +20,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 };
 #[cfg(windows)]
 use windows::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-    QueryFullProcessImageNameW, TerminateProcess,
+    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+    PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
 };
 #[cfg(windows)]
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
@@ -76,22 +77,35 @@ pub fn open_url(url: &str) -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
-pub fn enumerate_processes() -> Vec<WindowsProcessInfo> {
-    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
-        return Vec::new();
-    };
-    if snapshot.is_invalid() {
-        return Vec::new();
+pub fn enumerate_processes() -> anyhow::Result<Vec<WindowsProcessInfo>> {
+    retry_process_snapshot(enumerate_processes_once)
+}
+
+#[cfg(any(windows, test))]
+fn retry_process_snapshot<T>(mut snapshot: impl FnMut() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    // Discard incomplete snapshots and retry transient Windows query failures.
+    for attempt in 0..3 {
+        match snapshot() {
+            Ok(processes) => return Ok(processes),
+            Err(error) if attempt == 2 => return Err(error),
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
     }
+    unreachable!()
+}
+
+#[cfg(windows)]
+fn enumerate_processes_once() -> anyhow::Result<Vec<WindowsProcessInfo>> {
+    use anyhow::Context;
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
+        .context("创建 Windows 进程快照失败")?;
     let _guard = HandleGuard(snapshot);
     let mut entry = PROCESSENTRY32W {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
     };
     let mut processes = Vec::new();
-    if unsafe { Process32FirstW(snapshot, &mut entry) }.is_err() {
-        return Vec::new();
-    }
+    unsafe { Process32FirstW(snapshot, &mut entry) }.context("读取 Windows 进程快照首项失败")?;
     loop {
         let process_id = entry.th32ProcessID;
         let (executable_path, creation_time) = query_process_identity(process_id);
@@ -102,11 +116,32 @@ pub fn enumerate_processes() -> Vec<WindowsProcessInfo> {
             executable_path,
             creation_time,
         });
-        if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
-            break;
+        if let Err(error) = unsafe { Process32NextW(snapshot, &mut entry) } {
+            if error.code() == ERROR_NO_MORE_FILES.to_hresult() {
+                return Ok(processes);
+            }
+            return Err(error).context("读取 Windows 进程快照后续项失败");
         }
     }
-    processes
+}
+
+#[cfg(windows)]
+pub fn process_is_running(process_id: u32) -> anyhow::Result<bool> {
+    use anyhow::Context;
+    // Only a missing PID or a signaled process handle proves exit. Access
+    // denial and other query failures must remain unknown, never exited.
+    let handle = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, process_id) } {
+        Ok(handle) => handle,
+        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => return Ok(false),
+        Err(error) => return Err(error).context("打开 Windows 进程句柄失败"),
+    };
+    let _guard = HandleGuard(handle);
+    match unsafe { WaitForSingleObject(handle, 0) } {
+        WAIT_TIMEOUT => Ok(true),
+        WAIT_OBJECT_0 => Ok(false),
+        WAIT_FAILED => Err(windows::core::Error::from_win32()).context("检测 Windows 进程状态失败"),
+        status => anyhow::bail!("Windows 进程状态返回未知结果：{status:?}"),
+    }
 }
 
 #[cfg(windows)]
@@ -492,6 +527,25 @@ impl Drop for HandleGuard {
 mod tests {
     use super::*;
 
+    // 【自动化测试】Windows 进程 - 原生检测区分存活与退出
+    #[test]
+    fn native_process_probe_reports_current_and_exited_processes() {
+        assert!(process_is_running(std::process::id()).unwrap());
+        assert!(!process_is_running(u32::MAX).unwrap());
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        assert!(!process_is_running(child.id()).unwrap());
+        assert!(
+            enumerate_processes()
+                .unwrap()
+                .iter()
+                .any(|process| process.process_id == std::process::id())
+        );
+    }
+
     #[test]
     fn application_window_outranks_titled_ime_and_tool_windows() {
         let ime_score = process_window_score(true, 0, "IME");
@@ -516,5 +570,35 @@ mod tests {
             Path::new(r"C:\Program Files\Codey\codey.exe"),
             Path::new(r"D:\Program Files\Codey\codey.exe"),
         ));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    // 【自动化测试】Windows 进程 - 快照故障重试有界且不返回空成功
+    #[test]
+    fn snapshot_failure_is_retried_and_never_becomes_an_empty_success() {
+        let mut attempts = 0;
+        let snapshot = retry_process_snapshot(|| {
+            attempts += 1;
+            if attempts == 2 {
+                Ok(vec![7])
+            } else {
+                anyhow::bail!("snapshot unavailable")
+            }
+        })
+        .unwrap();
+        assert_eq!(snapshot, vec![7]);
+        assert_eq!(attempts, 2);
+
+        let mut attempts = 0;
+        let result: anyhow::Result<Vec<u32>> = retry_process_snapshot(|| {
+            attempts += 1;
+            anyhow::bail!("snapshot unavailable")
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts, 3);
     }
 }

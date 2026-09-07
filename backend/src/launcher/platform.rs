@@ -236,6 +236,7 @@ pub(super) async fn spawn_windows_codex(
         };
         let environment_applied = package_debug_session.is_some();
         let existing_process_ids = codey_runtime_core::windows_enumerate_processes()
+            .context("检测 Windows Store 激活前的已有进程失败")?
             .into_iter()
             .map(|process| process.process_id)
             .collect::<HashSet<_>>();
@@ -251,6 +252,7 @@ pub(super) async fn spawn_windows_codex(
                 .await
                 .context("停止被 Windows Store 激活复用的旧 Codex 实例失败")?;
             let retry_existing_process_ids = codey_runtime_core::windows_enumerate_processes()
+                .context("检测 Windows Store 重新激活前的已有进程失败")?
                 .into_iter()
                 .map(|process| process.process_id)
                 .collect::<HashSet<_>>();
@@ -617,7 +619,23 @@ async fn terminate_windows_codex_processes_with_timeout(
     process_id: Option<u32>,
     stop_timeout: Duration,
 ) -> Result<()> {
-    let processes = codey_runtime_core::windows_enumerate_processes();
+    terminate_windows_codex_processes_with_snapshot(
+        app_dir,
+        process_id,
+        stop_timeout,
+        codey_runtime_core::windows_enumerate_processes,
+    )
+    .await
+}
+
+#[cfg(windows)]
+async fn terminate_windows_codex_processes_with_snapshot(
+    app_dir: &Path,
+    process_id: Option<u32>,
+    stop_timeout: Duration,
+    mut snapshot: impl FnMut() -> Result<Vec<codey_runtime_core::WindowsProcessInfo>>,
+) -> Result<()> {
+    let processes = snapshot().context("检测待停止的 Windows Codex 进程失败")?;
     let mut process_ids = windows_owned_process_ids_from_snapshot(
         app_dir,
         process_id,
@@ -679,7 +697,7 @@ async fn terminate_windows_codex_processes_with_timeout(
     }
     let deadline = tokio::time::Instant::now() + stop_timeout;
     loop {
-        let current_processes = codey_runtime_core::windows_enumerate_processes();
+        let current_processes = snapshot().context("确认 Windows Codex 进程清理结果失败")?;
         let previous_process_ids = process_ids.clone();
         windows_extend_tracked_descendants_from_snapshot(
             &mut process_ids,
@@ -806,6 +824,30 @@ pub(super) fn windows_stop_failure_summary(remaining: &[(u32, String, Option<u64
 #[cfg(test)]
 mod compatibility_tests {
     use super::*;
+
+    // 【自动化测试】Windows 清理 - 初始或确认快照失败不得报告清理成功
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cleanup_snapshot_failure_is_not_success() {
+        for fail_on in [1, 2] {
+            let mut calls = 0;
+            let result = terminate_windows_codex_processes_with_snapshot(
+                Path::new(r"C:\CodeyTestMissingApp"),
+                None,
+                Duration::ZERO,
+                || {
+                    calls += 1;
+                    if calls == fail_on {
+                        anyhow::bail!("snapshot unavailable")
+                    }
+                    Ok(Vec::new())
+                },
+            )
+            .await;
+            assert!(format!("{:#}", result.unwrap_err()).contains("snapshot unavailable"));
+            assert_eq!(calls, fail_on);
+        }
+    }
 
     #[test]
     fn windows_packaged_cli_environment_is_valid_and_scoped_to_the_codex_package() {

@@ -138,13 +138,15 @@ Windows Store 运行文件暂存、CLI 环境隔离、Inspector 启动时防止 
 
 - 启动前读取 Electron fuse，Inspect 位关闭时 Windows 不带 `--inspect-brk`、不等 Inspector；macOS 保留参数作为清理标记但只等 CLI。
 - 包装器回连可重试，并新增记录文件作为第二确认通道；启动器不会因握手丢失杀掉已执行目标的 Codex。
-- 等待按证据结束：进程退出立即失败并重试一次；渲染进程调试端口就绪而 Inspector 被拒绝时立即放弃 Inspector；单轮 CLI 确认上限 60 秒。
+- 等待按证据结束：确认进程退出后失败并重试一次；渲染进程调试端口就绪而 Inspector 被拒绝时立即放弃 Inspector；单轮 CLI 确认上限 60 秒。
+- Windows Store 启动进程通过 `OpenProcess(PROCESS_SYNCHRONIZE)` 和 `WaitForSingleObject(0)` 检查存活状态。仅 PID 确实不存在或进程句柄已结束时报告退出；访问被拒绝等查询错误记录为 `launcher.process_probe_failed`，继续等待原有握手时限，不跳过运行时覆盖确认。退出监视与维护锁检查也保留查询不确定状态。
+- Windows 进程枚举返回 `Result`，快照创建、首项读取或后续项读取异常均不能转换为空列表或不完整列表；仅 `ERROR_NO_MORE_FILES` 表示遍历正常结束。查询最多尝试 3 次，间隔 50ms。激活前检测、旧实例清理及清理结果确认在持续查询失败时明确报错，避免误报清理成功。
 - Inspector 关闭且没有可用包装器时在启动前决策，不再启动随后必被停止的进程。
 - Windows Store 运行文件存放于 `%LOCALAPPDATA%\Codey\codex-runtime\<哈希>`，临时复制目录也位于此根目录。Codex Desktop 会清理自身 `%LOCALAPPDATA%\OpenAI\Codex\bin` 下的旧 16 位哈希目录，因此 Codey 不再向该公共目录写入或复用副本；首次使用新位置时重新复制，旧目录留给 Codex 自身管理。回归模拟官方清理规则，确认四个运行文件及清单仍完整，后续启动能直接复用。运行文件暂存按包文件的大小与修改时间识别，复制时校验一次 SHA-256 并写入目录清单 `.codey-staged.json`，后续启动只核对清单与文件大小，不再每次对约 300 MB 的运行文件全量哈希；副本大小不符时重新暂存。
 - 补充探测与包装器阶段的诊断日志，见上文诊断段落。
 - Electron fuse 模块仅在 Windows、macOS 或单元测试中编译；诊断和异步探测入口仅在 Windows、macOS 编译，Linux 仍运行解析、扫描和缓存测试。`startup_launch_arguments` 仅在 Windows 及 macOS 单元测试中编译，与调用方保持一致，避免 Linux CI 在 `-D warnings` 下报告未使用代码。
 
-本机验证：`cargo test -p codey --lib`（electron_fuses、launcher、codex_startup_patch 相关用例，含读取已安装 ChatGPT.app 的真实 fuse wire）、`cargo test -p codey --test codex_cli_wrapper`、`cargo clippy -p codey --all-targets -- -D warnings`、`cargo fmt --check`、`pnpm test:js`。Windows 分支（Store 激活、PID 快照存活检查、`cfg(windows)` 代码）无法在本机编译验证，需要 Windows CI 与实机确认。未签名的 codey.exe 仍是 Defender「首次可见即阻止」拖慢启动的诱因，签名属于发布链路事项。
+本机验证：`cargo test -p codey --lib`（electron_fuses、launcher、codex_startup_patch 相关用例，含读取已安装 ChatGPT.app 的真实 fuse wire）、`cargo test -p codey --test codex_cli_wrapper`、`cargo clippy -p codey --all-targets -- -D warnings`、`cargo fmt --check`、`pnpm test:js`。本次进程检测修复另通过 `cargo check --workspace --locked`、`cargo test --workspace --locked`（后端库 1077 项）及 14 项相关 JavaScript 测试。完整 `windows_integration.rs` 及其原生测试通过临时最小 crate 的 Windows 目标类型检查；完整 Windows 工作区交叉编译因本机缺少 Windows SDK 停在已有 C 依赖。Windows 原生存活检测、清理快照故障注入及 Store 实际启动仍需 Windows CI 与实机验证。未签名的 codey.exe 仍是 Defender「首次可见即阻止」拖慢启动的诱因，签名属于发布链路事项。
 
 启动连接测试不依赖关闭的本机端口及时返回 `ConnectionRefused`：Windows 在单次连接时限内可能只返回 `TimedOut`。握手测试通过可替换的连接函数分别验证拒绝时不重试、超时后重试成功和达到截止时间后结束；成功路径仍连接真实监听端口。Inspector 测试明确提供先超时后拒绝的探测结果，并使用真实渲染进程监听端口，验证超时本身不会触发 `InspectorUnavailable`。生产环境仍使用原有 TCP 和 HTTP 请求及超时配置。
 

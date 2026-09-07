@@ -100,9 +100,20 @@ pub(super) fn spawn_codex_exit_watcher(
                                 }),
                             );
                             eprintln!("等待 Windows Codex 进程退出失败：{error:#}");
-                            !codey_runtime_core::windows_enumerate_processes()
-                                .iter()
-                                .any(|process| process.process_id == process_id)
+                            let mut interval = tokio::time::interval(Duration::from_secs(1));
+                            loop {
+                                tokio::select! {
+                                    _ = &mut shutdown_rx => break false,
+                                    _ = interval.tick() => {
+                                        if process_probe_confirms_exit(
+                                            codey_runtime_core::windows_process_is_running(process_id),
+                                            Some(process_id),
+                                        ) {
+                                            break true;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1123,22 +1134,33 @@ async fn launch_windows_codex_without_compatibility(
 }
 
 #[cfg(any(windows, target_os = "macos"))]
-async fn spawned_codex_alive(spawned: &mut SpawnedCodex) -> bool {
+async fn spawned_codex_alive(spawned: &mut SpawnedCodex) -> Result<bool> {
     if let Some(child) = spawned.child.as_mut() {
-        return !matches!(child.try_wait(), Ok(Some(_)));
+        return child
+            .try_wait()
+            .map(|status| status.is_none())
+            .context("检测 Codex 子进程状态失败");
     }
     #[cfg(windows)]
     if let Some(process_id) = spawned.process_id {
         // Store activations hand back a PID without a child handle.
-        return tokio::task::spawn_blocking(move || {
-            codey_runtime_core::windows_enumerate_processes()
-                .iter()
-                .any(|process| process.process_id == process_id)
-        })
-        .await
-        .unwrap_or(true);
+        return codey_runtime_core::windows_process_is_running(process_id);
     }
-    true
+    Ok(true)
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn process_probe_confirms_exit(probe: Result<bool>, process_id: Option<u32>) -> bool {
+    match probe {
+        Ok(running) => !running,
+        Err(error) => {
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "launcher.process_probe_failed",
+                serde_json::json!({ "processId": process_id, "detail": format!("{error:#}") }),
+            );
+            false
+        }
+    }
 }
 
 /// Resolves once the launched process is gone; never resolves without one.
@@ -1153,7 +1175,7 @@ async fn startup_process_exited(
     interval.tick().await;
     loop {
         interval.tick().await;
-        if !spawned_codex_alive(spawned).await {
+        if process_probe_confirms_exit(spawned_codex_alive(spawned).await, spawned.process_id) {
             let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
                 "launcher.startup_process_exited",
                 serde_json::json!({ "processId": spawned.process_id }),
@@ -1550,19 +1572,20 @@ pub(super) async fn prepare_codex_for_launch(app_dir: &std::path::Path) -> Resul
     {
         let app_dir = app_dir.to_path_buf();
         let process_scan_app_dir = app_dir.clone();
-        let already_running = tokio::task::spawn_blocking(move || {
+        let already_running = tokio::task::spawn_blocking(move || -> Result<bool> {
             let executable =
                 codey_runtime_core::app_paths::build_codex_executable(&process_scan_app_dir);
             let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
             let executable = normalized_windows_path(&executable);
-            codey_runtime_core::windows_enumerate_processes()
+            Ok(codey_runtime_core::windows_enumerate_processes()?
                 .into_iter()
                 .filter_map(|process| process.executable_path)
                 .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
-                .any(|path| normalized_windows_path(&path) == executable)
+                .any(|path| normalized_windows_path(&path) == executable))
         })
         .await
-        .context("检测正在运行的 Codex 任务异常退出")?;
+        .context("检测正在运行的 Codex 任务异常退出")?
+        .context("检测正在运行的 Windows Codex 失败")?;
         if already_running {
             terminate_windows_codex_processes(&app_dir, None)
                 .await
@@ -1608,6 +1631,17 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
 #[cfg(test)]
 mod cli_wrapper_tests {
     use super::*;
+
+    // 【自动化测试】启动 - 查询失败不报告退出，真实退出仍立即识别
+    #[test]
+    fn process_probe_requires_confirmed_exit() {
+        assert!(!process_probe_confirms_exit(Ok(true), Some(7)));
+        assert!(!process_probe_confirms_exit(
+            Err(anyhow::anyhow!("access denied")),
+            Some(7)
+        ));
+        assert!(process_probe_confirms_exit(Ok(false), Some(7)));
+    }
 
     #[cfg(any(windows, target_os = "macos"))]
     fn test_handshake(

@@ -77,10 +77,7 @@ fn process_is_running(pid: u32) -> bool {
 
 #[cfg(windows)]
 fn process_is_running(pid: u32) -> bool {
-    pid != 0
-        && codey_runtime_core::windows_enumerate_processes()
-            .into_iter()
-            .any(|process| process.process_id == pid)
+    pid != 0 && codey_runtime_core::windows_process_is_running(pid).unwrap_or(true)
 }
 
 #[cfg(not(any(unix, windows)))]
