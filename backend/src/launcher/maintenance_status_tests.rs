@@ -1,5 +1,26 @@
 use super::*;
 
+#[tokio::test]
+async fn pet_state_failure_does_not_abort_startup_or_replace_state() {
+    for slim_codex_pet in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let primary = temp.path().join(".codex-global-state.json");
+        let backup = temp.path().join(".codex-global-state.json.bak");
+        std::fs::write(&primary, b"{broken").unwrap();
+        std::fs::write(&backup, b"{also broken").unwrap();
+        let config = CodeyConfig {
+            slim_codex_pet,
+            ..CodeyConfig::default()
+        };
+
+        let patch = prepare_startup_patches(temp.path(), &config).await;
+
+        assert_ne!(patch.debug_port, 0);
+        assert_eq!(std::fs::read(&primary).unwrap(), b"{broken");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"{also broken");
+    }
+}
+
 #[test]
 fn maintenance_status_exposes_structured_session_metrics() {
     let cleanup = Ok(SessionIndexCleanupReport {

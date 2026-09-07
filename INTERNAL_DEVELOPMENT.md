@@ -78,6 +78,8 @@ CODEY_UPDATE_BASE_URL 可在编译时覆盖客户端更新源。发布标签版�
 
 ## 运行流程
 
+宠物精简设置是可选启动步骤：读取 `.codex-global-state.json` 时使用 `serde_json::value::RawValue` 保留非目标字段的原始 JSON 值，兼容 Codex 保存的未配对 UTF-16 代理项，只修改 `electron-avatar-overlay-open`。主文件无法读取时沿用 `.bak` 回退；两者都无法读取时不覆盖文件。顶层字段名包含未配对代理项仍无法解析。解析、写入或后台任务失败均记录 `startup.pet_slim`、`recoverable: true` 和 `fallback: continue_startup`，继续启动，不触发运行配置恢复。回归测试覆盖特殊字符原样保留、备份恢复及宠物开关两种状态下读取失败仍可完成启动准备。
+
 1. 恢复上次异常退出留下的 Codey 自有临时状态，并执行启动更新检查。
 2. 加载 Codey 配置，只读检查 Codex 配置、登录状态和应用位置；首次空配置可导入当前第三方线路。
 3. 在 Codex 未运行时完成会话索引维护、旧版 Codey 状态清理和诊断保护准备。
@@ -86,7 +88,7 @@ CODEY_UPDATE_BASE_URL 可在编译时覆盖客户端更新源。发布标签版�
 6. 启动健康检查、退出监听、通知和平台保护任务。设置保存后，支持热更新的项目立即替换；影响启动参数、角色集合或能力目录的项目标记为需要重启。
 7. Codex 退出、系统信号或安装更新时，先确认受控 Codex 已停止，再关闭 watcher、回收 Child、恢复临时配置，最后停止路由。停止进程失败时保留 watcher、桥接、配置和路由；配置恢复失败时保留路由，使同一运行时可以重试。只有清理完成后才释放 Hook、租约及其他 Codey 自有运行状态。
 
-启动任一步失败都应走同一清理路径。会话数据的安全修复不会在退出时回滚；临时路由、Hook 和运行文件必须可恢复。初始 Trace/Crashpad 任务在 profile 与路由 Provider 校验通过后创建；应用定位、旧进程停止或维护失败时，仍等待已启动任务结束并更新状态，再返回原始错误。Trace 失败也会等待 Crashpad，避免丢弃 JoinHandle 后后台清理继续运行。旧 Codex 停止后，模型目录准备与会话维护并行；两者及存储保护全部结束后，才启动路由并写入最终运行配置。并行减少串行步骤，尚未测量问题设备上的冷启动耗时收益。
+启动必需步骤失败都应走同一清理路径。会话数据的安全修复不会在退出时回滚；临时路由、Hook 和运行文件必须可恢复。初始 Trace/Crashpad 任务在 profile 与路由 Provider 校验通过后创建；应用定位、旧进程停止或维护失败时，仍等待已启动任务结束并更新状态，再返回原始错误。Trace 失败也会等待 Crashpad，避免丢弃 JoinHandle 后后台清理继续运行。旧 Codex 停止后，模型目录准备与会话维护并行；两者及存储保护全部结束后，才启动路由并写入最终运行配置。并行减少串行步骤，尚未测量问题设备上的冷启动耗时收益。
 
 启动前先读取 Codex Electron 二进制的 fuse wire（`backend/src/electron_fuses.rs`，按 @electron/fuses 的 sentinel 与 v1 位序解析，结果按路径、大小和修改时间缓存在状态目录 `electron-fuses.json`）。`EnableNodeCliInspectArguments` 为关闭或移除时，Electron 会在解析命令行时丢弃 `--inspect-brk`，主进程 Inspector 永远不会出现：Windows 直接以 CLI 包装器作为唯一入口启动，不再传 `--inspect-brk`，也不等待 Inspector；macOS 保留该参数作为进程清理标记，但只等待 CLI 包装器。fuse 未知（二进制缺失、扫描失败）时保留 Inspector 尝试，由运行时证据决定是否放弃。2026-09-06 本机 ChatGPT.app 的 Codex Framework 读到 wire `010011001`，Inspect 位为关闭；Windows 商店包按同一打包配置，实机日志 `launcher.electron_fuses` 会记录实际值。
 

@@ -1,8 +1,9 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use serde_json::{Map, Value};
+use serde_json::value::{RawValue, to_raw_value};
 
 const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
 const PET_OPEN_KEY: &str = "electron-avatar-overlay-open";
@@ -21,11 +22,14 @@ pub fn configure(codex_home: &Path, slim_enabled: bool) -> Result<PetSlimReport>
     let backup_path = codex_home.join(format!("{GLOBAL_STATE_FILE}.bak"));
     let mut state = read_state(&state_path, &backup_path)?;
     let desired_open_state = !slim_enabled;
-    let changed = state.get(PET_OPEN_KEY).and_then(Value::as_bool) != Some(desired_open_state);
+    let changed = state
+        .get(PET_OPEN_KEY)
+        .and_then(|value| serde_json::from_str::<bool>(value.get()).ok())
+        != Some(desired_open_state);
 
     if changed || !state_path.exists() {
-        state.insert(PET_OPEN_KEY.to_string(), Value::Bool(desired_open_state));
-        let bytes = serde_json::to_vec(&Value::Object(state))?;
+        state.insert(PET_OPEN_KEY.to_string(), to_raw_value(&desired_open_state)?);
+        let bytes = serde_json::to_vec(&state)?;
         crate::fs_util::atomic_write_private(&state_path, &bytes)
             .with_context(|| format!("更新 Codex 宠物状态失败：{}", state_path.display()))?;
         crate::fs_util::atomic_write_private(&backup_path, &bytes)
@@ -39,7 +43,7 @@ pub fn configure(codex_home: &Path, slim_enabled: bool) -> Result<PetSlimReport>
     })
 }
 
-fn read_state(primary: &Path, backup: &Path) -> Result<Map<String, Value>> {
+fn read_state(primary: &Path, backup: &Path) -> Result<BTreeMap<String, Box<RawValue>>> {
     match read_state_file(primary) {
         Ok(Some(state)) => Ok(state),
         Ok(None) => read_state_file(backup).map(|state| state.unwrap_or_default()),
@@ -50,7 +54,7 @@ fn read_state(primary: &Path, backup: &Path) -> Result<Map<String, Value>> {
     }
 }
 
-fn read_state_file(path: &Path) -> Result<Option<Map<String, Value>>> {
+fn read_state_file(path: &Path) -> Result<Option<BTreeMap<String, Box<RawValue>>>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -59,18 +63,16 @@ fn read_state_file(path: &Path) -> Result<Option<Map<String, Value>>> {
                 .with_context(|| format!("读取 Codex 全局状态失败：{}", path.display()));
         }
     };
-    let value: Value = serde_json::from_slice(&bytes)
+    // Codex can store lone UTF-16 surrogates; preserve unrelated JSON values verbatim.
+    let state = serde_json::from_slice(&bytes)
         .with_context(|| format!("解析 Codex 全局状态失败：{}", path.display()))?;
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Codex 全局状态不是 JSON 对象：{}", path.display()))
-        .map(Some)
+    Ok(Some(state))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     #[test]
     fn defaults_to_a_closed_pet_without_losing_other_state() {
@@ -125,11 +127,51 @@ mod tests {
 
     #[test]
     fn refuses_to_replace_a_corrupt_state_when_no_backup_is_available() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join(GLOBAL_STATE_FILE), b"{broken").unwrap();
+        for original in ["{broken", "[]", r#"{"\ud800":1}"#] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join(GLOBAL_STATE_FILE);
+            fs::write(&path, original).unwrap();
 
-        let error = configure(temp.path(), true).unwrap_err();
+            let error = configure(temp.path(), true).unwrap_err();
 
-        assert!(error.to_string().contains("解析 Codex 全局状态失败"));
+            assert!(error.to_string().contains("解析 Codex 全局状态失败"));
+            assert_eq!(fs::read_to_string(path).unwrap(), original);
+            assert!(
+                !temp
+                    .path()
+                    .join(format!("{GLOBAL_STATE_FILE}.bak"))
+                    .exists()
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_raw_state_with_surrogates_in_primary_and_backup() {
+        let original = r#"{"high":"\ud800","low":"\udfff","normal":"中文😀\ud83d\ude00","nested": { "\ud800": ["\udfff", {"keep":1.00e+2}] },"electron-avatar-overlay-open":true}"#;
+        for from_backup in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let primary = temp.path().join(GLOBAL_STATE_FILE);
+            let backup = temp.path().join(format!("{GLOBAL_STATE_FILE}.bak"));
+            fs::write(if from_backup { &backup } else { &primary }, original).unwrap();
+            if from_backup {
+                fs::write(&primary, b"{broken").unwrap();
+            }
+
+            let before: BTreeMap<String, Box<RawValue>> = serde_json::from_str(original).unwrap();
+            assert!(configure(temp.path(), true).unwrap().changed);
+            let bytes = fs::read(&primary).unwrap();
+            let after: BTreeMap<String, Box<RawValue>> = serde_json::from_slice(&bytes).unwrap();
+            for (key, value) in before
+                .iter()
+                .filter(|(key, _)| key.as_str() != PET_OPEN_KEY)
+            {
+                assert_eq!(after[key].get(), value.get());
+            }
+            assert_eq!(after[PET_OPEN_KEY].get(), "false");
+            assert_eq!(bytes, fs::read(&backup).unwrap());
+            assert!(!configure(temp.path(), true).unwrap().changed);
+            assert_eq!(bytes, fs::read(&primary).unwrap());
+            assert!(configure(temp.path(), false).unwrap().changed);
+        }
     }
 }

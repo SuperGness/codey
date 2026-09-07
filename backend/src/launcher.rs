@@ -1336,47 +1336,45 @@ async fn prepare_native_runtime_state(
 async fn prepare_startup_patches(
     home: &std::path::Path,
     config: &CodeyConfig,
-) -> Result<StartupPatchState> {
+) -> StartupPatchState {
     let slim_codex_pet = config.slim_codex_pet;
     let pet_result = configure_startup_pet(home, slim_codex_pet).await;
     let debug_port = codey_runtime_core::ports::select_packaged_codex_debug_port(9229);
     match pet_result {
         Ok(Ok(_)) => {}
         Ok(Err(error)) => {
-            error_log::record_failure(
+            error_log::record_failure_with_metadata(
                 "patch_failed",
                 "configure_codex_pet_slim",
                 format!("{error:#}"),
+                error_log::FailureMetadata {
+                    stage: Some("startup.pet_slim".to_string()),
+                    recoverable: Some(true),
+                },
                 serde_json::json!({
                     "enabled": slim_codex_pet,
+                    "fallback": "continue_startup",
                 }),
             );
-            return Err(restore_runtime_config_after_error(
-                home,
-                config.local_router_enabled,
-                error.context("应用 Codex 宠物精简设置失败"),
-            )
-            .await);
         }
         Err(error) => {
-            error_log::record_failure(
+            error_log::record_failure_with_metadata(
                 "patch_failed",
                 "configure_codex_pet_slim",
                 error.to_string(),
+                error_log::FailureMetadata {
+                    stage: Some("startup.pet_slim".to_string()),
+                    recoverable: Some(true),
+                },
                 serde_json::json!({
                     "enabled": slim_codex_pet,
                     "taskJoinFailed": true,
+                    "fallback": "continue_startup",
                 }),
             );
-            return Err(restore_runtime_config_after_error(
-                home,
-                config.local_router_enabled,
-                anyhow::Error::new(error).context("Codex 宠物精简设置任务异常退出"),
-            )
-            .await);
         }
     };
-    Ok(StartupPatchState { debug_port })
+    StartupPatchState { debug_port }
 }
 
 async fn spawn_and_inject_runtime(
@@ -1645,7 +1643,7 @@ impl CodeyRuntime {
                 .await);
             }
         };
-        let patch = prepare_startup_patches(home, config).await?;
+        let patch = prepare_startup_patches(home, config).await;
         let SpawnedRenderer {
             app_dir,
             spawned,
