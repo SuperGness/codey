@@ -1660,6 +1660,60 @@ async fn unsupported_websocket_handshake_falls_back_to_http_until_config_changes
 }
 
 #[tokio::test]
+async fn websocket_entry_reports_http_only_route_failures_as_http() {
+    for (status, content_type, body, code, detail) in [
+        (
+            "200 OK",
+            "text/event-stream",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-cut\"}}\n\n",
+            "upstream_response_failed",
+            "终态事件前断开",
+        ),
+        (
+            "503 Service Unavailable",
+            "application/json",
+            "{\"error\":{\"message\":\"auth_unavailable: no auth available\"}}",
+            "upstream_http_error",
+            "auth_unavailable",
+        ),
+    ] {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/v1/responses");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&request.body).unwrap()["stream"],
+                true
+            );
+            stream.write_all(format!(
+                "HTTP/1.1 {status}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len(),
+            ).as_bytes()).await.unwrap();
+        });
+        let (mut config, provider_id, model) = router_config(format!("http://{address}/v1"));
+        config.profiles[0].supports_websockets = false;
+        let router = LocalRouter::start(&config).await.unwrap();
+        let mut socket = connect_router_websocket(&router.endpoint()).await;
+        let events =
+            send_router_websocket_request(&mut socket, &model_alias(&provider_id, &model), "hello")
+                .await;
+        let error = &events.last().unwrap()["response"]["error"];
+        assert_eq!(events.last().unwrap()["type"], "response.failed");
+        assert_eq!(error["code"], code);
+        let message = error["message"].as_str().unwrap();
+        assert!(message.contains(detail), "{message}");
+        assert!(!message.contains("WebSocket"), "{message}");
+        assert_eq!(error["codey"]["routeId"], provider_id);
+        upstream_task.await.unwrap();
+        socket.close(None).await.unwrap();
+        router.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn websocket_disconnect_after_response_create_is_not_replayed_over_http() {
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();

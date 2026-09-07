@@ -603,7 +603,7 @@ pub(crate) fn append_responses_websocket_sse_event(
     }
     events.push(
         serde_json::from_str::<Value>(&data)
-            .context("Responses WebSocket 上游 SSE data 不是有效 JSON")?,
+            .context("Responses 上游 SSE data 不是有效 JSON")?,
     );
     Ok(())
 }
@@ -901,7 +901,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
     let status = response.status().as_u16();
     let mut prepared = await_upstream(
         downstream,
-        prepare_upstream_response(response, "读取 Responses WebSocket 上游响应失败", probe),
+        prepare_upstream_response(response, "读取 Responses HTTP 上游响应失败", probe),
     )
     .await??;
     if prepared.is_sse {
@@ -914,7 +914,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
             downstream,
             read_prepared_upstream_chunk(
                 &mut prepared,
-                "读取 Responses WebSocket 上游 SSE 流失败",
+                "读取 Responses HTTP 上游 SSE 流失败",
                 probe,
             ),
         )
@@ -932,7 +932,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
                     break;
                 }
                 let event = serde_json::from_str::<Value>(&data)
-                    .context("Responses WebSocket 上游 SSE data 不是有效 JSON")?;
+                    .context("Responses HTTP 上游 SSE data 不是有效 JSON")?;
                 terminal |= responses_event_is_terminal(&event);
                 if let Some(probe) = probe {
                     probe.observe_event(&event);
@@ -956,7 +956,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
             && data.trim() != "[DONE]"
         {
             let event = serde_json::from_str::<Value>(&data)
-                .context("Responses WebSocket 上游 SSE 末尾 data 不是有效 JSON")?;
+                .context("Responses HTTP 上游 SSE 末尾 data 不是有效 JSON")?;
             terminal |= responses_event_is_terminal(&event);
             if let Some(probe) = probe {
                 probe.observe_event(&event);
@@ -984,7 +984,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
         read_bounded_prepared_upstream_body(
             prepared,
             limit,
-            "读取 Responses WebSocket 上游响应失败",
+            "读取 Responses HTTP 上游响应失败",
             probe,
         ),
     )
@@ -994,7 +994,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
         && responses_body_looks_like_sse(text)
     {
         let events = parse_responses_websocket_sse_events(text)
-            .context("解析 Responses WebSocket 上游未标记的 SSE 响应失败")?;
+            .context("解析 Responses HTTP 上游未标记的 SSE 响应失败")?;
         if !events.iter().any(responses_event_is_terminal) {
             anyhow::bail!("Responses HTTP/SSE 降级响应缺少终态事件");
         }

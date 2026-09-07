@@ -717,7 +717,7 @@ impl RouterServer {
                                 .write_error(
                                     502,
                                     "websocket_proxy_failed",
-                                    "Codey 本地路由处理 WebSocket 请求失败".to_string(),
+                                    format!("Codey 本地路由处理请求失败；请求 ID：{request_id}"),
                                     None,
                                 )
                                 .await?;
@@ -1372,7 +1372,7 @@ impl RouterServer {
             let upstream_request_id = upstream_request_id_from_headers(response.headers());
             probe.mark_upstream_headers(response.status().as_u16(), upstream_request_id.as_deref());
         }
-        match bridge {
+        let result = match bridge {
             // Every upstream protocol surfaces its real HTTP status. Mapping
             // Anthropic 4xx to 502 made Codex retry non-retryable failures.
             _ if !response.status().is_success() => {
@@ -1393,6 +1393,33 @@ impl RouterServer {
                 .await
             }
             _ => downstream.proxy_response(response).await,
+        };
+        if let Err(error) = &result
+            && downstream_websocket
+            && !error.is::<DownstreamClosed>()
+        {
+            // A local WebSocket can relay an HTTP-only route. Report the
+            // upstream response failure before the socket-level fallback.
+            record_router_failure_nonblocking(
+                "local_router_upstream_response_failed",
+                "proxy_local_router_request",
+                format!("{error:#}"),
+                json!({ "routeId": resolved.provider_id, "requestId": current_router_request_id() }),
+            );
+            let detail = sanitize_upstream_error_text(&error.to_string(), &resolved.route, 512)
+                .unwrap_or_else(|| "上游响应未能完成".to_string());
+            return downstream
+                .write_error(
+                    502,
+                    "upstream_response_failed",
+                    format!(
+                        "Codey 线路「{}」处理上游 HTTP 响应失败：{detail}",
+                        route_display_name(&resolved.route)
+                    ),
+                    Some(&resolved.route),
+                )
+                .await;
         }
+        result
     }
 }
