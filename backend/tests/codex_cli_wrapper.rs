@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 
@@ -124,6 +124,7 @@ async fn app_server_never_starts_without_its_runtime_configuration() {
 #[tokio::test]
 async fn router_wrapper_rewrites_stdin_without_inspector_and_preserves_exec_exit_status() {
     use std::os::unix::fs::PermissionsExt;
+    use tokio::io::AsyncWriteExt;
     let temp = tempfile::tempdir().unwrap();
     let target = temp.path().join("fake-codex");
     std::fs::write(&target, "#!/bin/sh\necho $$ >&2\ncat\nexit 17\n").unwrap();
