@@ -269,7 +269,7 @@ impl RouteRequestLogQuery {
         if self
             .protocol
             .as_deref()
-            .is_some_and(|protocol| !matches!(protocol, "http" | "sse" | "ws"))
+            .is_some_and(|protocol| !matches!(protocol, "http" | "http_sse" | "ws"))
         {
             anyhow::bail!("协议筛选无效");
         }
@@ -1998,7 +1998,7 @@ fn sqlite_query_filters(query: &RouteRequestLogQuery) -> (String, Vec<SqlValue>)
         values.push(SqlValue::Text(status.clone()));
     }
     if let Some(protocol) = &query.protocol {
-        clauses.push("request_protocol = ?".into());
+        clauses.push("upstream_transport = ?".into());
         values.push(SqlValue::Text(protocol.clone()));
     }
     if clauses.is_empty() {
@@ -2683,7 +2683,7 @@ mod tests {
                 provider: Some("PROVIDER-A".into()),
                 model: Some("MODEL".into()),
                 status: Some("SUCCEEDED".into()),
-                protocol: Some("SSE".into()),
+                protocol: Some("HTTP_SSE".into()),
                 ..RouteRequestLogQuery::default()
             },
         )
@@ -2732,6 +2732,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(injected.total, 0);
+    }
+
+    #[test]
+    fn sqlite_protocol_filter_uses_upstream_transport() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(SQLITE_FILE_NAME);
+        let mut sink = SqliteSink::open(&path, 30).unwrap();
+        let entries = [
+            ("http", Some(UpstreamTransport::Http)),
+            ("http_sse", Some(UpstreamTransport::HttpSse)),
+            ("ws", Some(UpstreamTransport::WebSocket)),
+            ("not-sent", None),
+        ]
+        .map(|(id, transport)| {
+            let mut entry = sample_entry(id);
+            entry.request_protocol = RequestProtocol::WebSocket;
+            entry.upstream_transport = transport;
+            queued(entry)
+        });
+        sink.write_batch(&entries).unwrap();
+        sink.finish().unwrap();
+        drop(sink);
+
+        for protocol in ["http", "http_sse", "ws"] {
+            let page = query_route_request_logs(
+                directory.path(),
+                RouteRequestLogBackend::Sqlite,
+                RouteRequestLogQuery {
+                    protocol: Some(protocol.into()),
+                    ..RouteRequestLogQuery::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(page.total, 1, "{protocol}");
+            assert_eq!(page.items[0].request_id, protocol);
+            assert_eq!(page.items[0].upstream_transport.as_deref(), Some(protocol));
+        }
     }
 
     #[test]

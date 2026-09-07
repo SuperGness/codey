@@ -867,15 +867,23 @@ fn stage_windows_cli_runtime(
 }
 
 #[cfg(any(windows, test))]
+fn windows_local_app_data(value: Option<std::ffi::OsString>) -> Result<PathBuf> {
+    value
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        // 浏览器辅助进程可能过滤 LOCALAPPDATA；Windows 已知文件夹查询不依赖该变量。
+        .or_else(|| directories::BaseDirs::new().map(|dirs| dirs.data_local_dir().to_path_buf()))
+        .context("无法定位 Windows 本地应用数据目录，无法准备 Codex 用户运行目录")
+}
+
+#[cfg(any(windows, test))]
 pub(crate) fn windows_cli_wrapper_target(app_dir: &std::path::Path) -> Result<PathBuf> {
     let target = codey_runtime_core::app_paths::codex_runtime_executable(app_dir)
         .ok_or_else(|| anyhow::anyhow!("Codex App 内未找到内置 CLI"))?;
     if codey_runtime_core::app_paths::packaged_app_user_model_id(app_dir).is_none() {
         return Ok(target);
     }
-    let local_app_data = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .context("Windows 未提供 LOCALAPPDATA，无法准备 Codex 用户运行目录")?;
+    let local_app_data = windows_local_app_data(std::env::var_os("LOCALAPPDATA"))?;
     stage_windows_cli_runtime(&target, &local_app_data)
 }
 
@@ -2047,6 +2055,22 @@ mod cli_wrapper_tests {
         assert_eq!(
             std::fs::metadata(wrapper).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+    }
+
+    #[test]
+    fn windows_local_app_data_recovers_filtered_environment() {
+        let system_directory = directories::BaseDirs::new().unwrap();
+        for value in [None, Some("".into()), Some("relative-directory".into())] {
+            assert_eq!(
+                windows_local_app_data(value).unwrap(),
+                system_directory.data_local_dir()
+            );
+        }
+        let custom_directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            windows_local_app_data(Some(custom_directory.path().as_os_str().to_owned())).unwrap(),
+            custom_directory.path()
         );
     }
 

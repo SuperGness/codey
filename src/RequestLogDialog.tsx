@@ -137,9 +137,9 @@ const statusOptions = [
 ];
 
 const protocolOptions = [
-  { label: "全部协议", value: "all" },
+  { label: "全部上游协议", value: "all" },
   { label: "HTTP", value: "http" },
-  { label: "SSE", value: "sse" },
+  { label: "SSE", value: "http_sse" },
   { label: "WebSocket", value: "ws" },
 ];
 
@@ -737,7 +737,7 @@ export function RequestLogDialog({
             }}
           />
           <Select
-            aria-label="按协议筛选请求日志"
+            aria-label="按上游协议筛选请求日志"
             getPopupContainer={() => container ?? document.body}
             optionList={protocolOptions}
             value={protocol}
@@ -809,7 +809,7 @@ export function RequestLogDialog({
                     <Table.Th className="whitespace-nowrap">供应商 / 上游</Table.Th>
                     <Table.Th className="whitespace-nowrap">模型</Table.Th>
                     <Table.Th className="whitespace-nowrap">思考强度</Table.Th>
-                    <Table.Th className="whitespace-nowrap">协议</Table.Th>
+                    <Table.Th className="whitespace-nowrap">上游协议</Table.Th>
                     <Table.Th className="whitespace-nowrap">状态</Table.Th>
                     <Table.Th className="whitespace-nowrap text-right">TTFT / 总耗时</Table.Th>
                     <Table.Th className="whitespace-nowrap text-right">输入 Token</Table.Th>
@@ -929,14 +929,14 @@ export function RequestLogDialog({
                             variant="secondary"
                             size="xs"
                             className={
-                              item.requestProtocol === "ws"
+                              item.upstreamTransport === "ws"
                                 ? "border-cyan-600/25 bg-cyan-50 text-cyan-700"
-                                : item.requestProtocol === "sse"
+                                : item.upstreamTransport === "http_sse"
                                   ? "border-purple-600/25 bg-purple-50 text-purple-700"
                                   : ""
                             }
                           >
-                            {(item.requestProtocol || "—").toUpperCase()}
+                            {item.upstreamTransport === "http_sse" ? "SSE" : (item.upstreamTransport || "—").toUpperCase()}
                           </Badge>
                         </Table.Td>
                         <Table.Td>

@@ -291,7 +291,7 @@ if (import.meta.env.DEV) {
         usageReported: !failed,
         usageUnavailableReason: failed ? "upstream_error" : undefined,
         requestProtocol: protocol,
-        upstreamTransport: protocol === "ws" ? "ws" : "http",
+        upstreamTransport: protocol === "sse" ? "http_sse" : protocol,
         requestKind: "responses",
         status: failed ? "failed" : "succeeded",
         statusCode: failed ? 502 : 200,
@@ -464,7 +464,7 @@ if (import.meta.env.DEV) {
           if (provider && item.provider !== provider && item.providerName !== provider) return false;
           if (model && item.model !== model && item.requestedModel !== model) return false;
           if (status && item.status !== status) return false;
-          if (protocol && item.requestProtocol !== protocol) return false;
+          if (protocol && item.upstreamTransport !== protocol) return false;
           if (!search) return true;
           return [
             item.requestId,

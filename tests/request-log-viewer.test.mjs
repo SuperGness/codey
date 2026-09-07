@@ -30,6 +30,9 @@ test("request log controls are scoped to built-in routing and preserve logger se
   assert.match(preview, /codexSessionIsParent,/);
   assert.match(preview, /item\.codexSessionId,/);
   assert.doesNotMatch(preview, /retryCount/);
+  assert.match(preview, /upstreamTransport: protocol === "sse" \? "http_sse" : protocol/);
+  assert.match(preview, /protocol && item\.upstreamTransport !== protocol/);
+  assert.doesNotMatch(preview, /protocol && item\.requestProtocol/);
 });
 
 test("request log viewer is hosted by the local router for the system browser", async () => {
@@ -58,7 +61,10 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /按供应商筛选请求日志/);
   assert.match(viewer, /按模型筛选请求日志/);
   assert.match(viewer, /按状态筛选请求日志/);
-  assert.match(viewer, /按协议筛选请求日志/);
+  assert.match(viewer, /按上游协议筛选请求日志/);
+  assert.match(viewer, /label: "SSE", value: "http_sse"/);
+  assert.match(viewer, /item\.upstreamTransport === "http_sse" \? "SSE" : \(item\.upstreamTransport \|\| "—"\)\.toUpperCase\(\)/);
+  assert.doesNotMatch(viewer, /item\.requestProtocol/);
   assert.match(viewer, /<Pagination/);
   assert.match(viewer, />\s*删除请求日志\s*</);
   assert.match(viewer, /"clear_route_request_logs"/);
@@ -82,7 +88,7 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
     "供应商 / 上游",
     "模型",
     "思考强度",
-    "协议",
+    "上游协议",
     "状态",
     "TTFT / 总耗时",
     "输入 Token",
