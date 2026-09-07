@@ -116,7 +116,8 @@ export function App({
     `${FEEDBACK_GROUP_QR_BASE_URL}?date=${localDateCacheKey(new Date())}`;
   const [config, setConfig] = useState<Config | null>(null);
   const persistedConfigRef = useRef<Config | null>(null);
-  const { status, setStatus, refreshStatus, refreshStatusForLoad } =
+  const { status, setStatus, refreshStatus, refreshStatusForLoad,
+    restartStatusError, setRestartStatusError } =
     useRuntimeStatus({
       active: !embedded || modalVisible,
       embedded,
@@ -142,6 +143,9 @@ export function App({
   const confirmationController = useConfirmationController();
   const setNotice = noticeController.setNotice;
   const setConfirmation = confirmationController.setConfirmation;
+  useEffect(() => {
+    if (restartStatusError) setNotice({ tone: "error", text: restartStatusError });
+  }, [restartStatusError, setNotice]);
 
   const provider = providerStatus?.provider;
   const isBusy = busy !== null;
@@ -805,6 +809,18 @@ export function App({
   }
 
   function askRestartCodex() {
+    if (restartStatusError) {
+      void runOperation("restart", async () => {
+        const next = await refreshStatus();
+        setNotice({
+          tone: next.startupError ? "error" : "info",
+          text: next.startupError || (next.restartInProgress
+            ? "Codex 仍在重启，请稍候"
+            : next.running ? "Codex 已运行" : "Codex 未运行"),
+        });
+      });
+      return;
+    }
     setConfirmation({
       action: "restart",
       title: "重启 Codex？",
@@ -835,7 +851,13 @@ export function App({
         tone: "info",
         text: "正在重启 Codex，Codey 将自动重新拉起客户端…",
       });
-      await invoke("restart_codey");
+      try {
+        await withTimeout(invoke("restart_codey"), 10_000,
+          "重启请求超时，暂时无法确认执行状态，请点击重新查询状态");
+      } catch (error) {
+        setRestartStatusError("暂时无法确认重启请求的执行状态，请点击重新查询状态");
+        throw error;
+      }
       setStatus((current) => ({
         ...current,
         restartInProgress: true,
@@ -1167,20 +1189,20 @@ export function App({
         <div className="flex items-center gap-2">
           {embedded && (
             <Button
-              aria-label={status.running ? "重启 Codex" : "Codex 未运行"}
+              aria-label={restartStatusError ? "重新查询状态" : status.running ? "重启 Codex" : "Codex 未运行"}
               className="max-[520px]:w-8! max-[520px]:px-0!"
-              disabled={isBusy || status.restartInProgress || !status.running}
+              disabled={isBusy || (!restartStatusError && (status.restartInProgress || !status.running))}
               onClick={handleRestartCodex}
               size="sm"
               variant="warning"
             >
-              {busy === "restart" || status.restartInProgress ? (
+              {busy === "restart" || (status.restartInProgress && !restartStatusError) ? (
                 <LoaderCircle className="animate-spin" aria-hidden="true" />
               ) : (
                 <RefreshCw aria-hidden="true" />
               )}
               <span className="max-[520px]:hidden">
-                {status.running ? "重启 Codex" : "未运行"}
+                {restartStatusError ? "重新查询状态" : status.running ? "重启 Codex" : "未运行"}
               </span>
             </Button>
           )}
@@ -1282,6 +1304,7 @@ export function App({
             pluginMarketplaceStatus={pluginMarketplaceStatus}
             onRepairPluginMarketplace={handleRepairPluginMarketplace}
             onRestart={handleRestartCodex}
+            restartStatusUnknown={Boolean(restartStatusError)}
             showRestartAction={!embedded}
           />
 

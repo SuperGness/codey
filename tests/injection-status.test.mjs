@@ -280,3 +280,57 @@ test("status poll scheduler never overlaps requests and clear cancels queued wor
   assert.equal(await fake.runNext(), false);
   assert.equal(requests, 1);
 });
+
+test("restart polling reports exhaustion and can resume after a manual status query", async () => {
+  const { createStatusPollScheduler, createStatusPollTask } =
+    await loadTypeScriptModule(new URL("src/runtimeStatusPollScheduler.ts", root));
+  for (const outcome of ["errors", "deadline", "completed"]) {
+    const fake = createFakeClock();
+    let exhausted = 0;
+    let completed = outcome === "completed";
+    const scheduler = createStatusPollScheduler(async () => {
+      if (outcome === "errors" && !completed) throw new Error("disconnected");
+      return { running: true, restartInProgress: !completed };
+    }, fake.clock);
+    const addRestart = () => scheduler.add(createStatusPollTask({
+      kind: "restart",
+      delays: [500],
+      pending: (next) => next.restartInProgress,
+      refreshesInjectionStatus: false,
+      onExhausted: () => { exhausted += 1; },
+    }, outcome === "errors" ? 300_000 : 1_000, fake.clock.now()));
+    addRestart();
+    for (let index = 0; index < 10 && await fake.runNext(); index += 1) {}
+    assert.equal(exhausted, outcome === "completed" ? 0 : 1, outcome);
+    assert.equal(await fake.runNext(), false);
+
+    completed = true;
+    addRestart();
+    assert.equal(await fake.runNext(), true);
+    assert.equal(await fake.runNext(), false);
+    assert.equal(exhausted, outcome === "completed" ? 0 : 1);
+  }
+});
+
+test("a timed-out status request cannot commit a late response", async () => {
+  const { withTimeout } = await loadTypeScriptModule(new URL("src/appUtils.ts", root));
+  const fake = createFakeClock();
+  const previousWindow = globalThis.window;
+  globalThis.window = fake.clock;
+  try {
+    let resolveRequest;
+    let committed = false;
+    const request = withTimeout(new Promise((resolve) => {
+      resolveRequest = resolve;
+    }), 10_000, "status timeout").then(() => { committed = true; });
+    const rejection = assert.rejects(request, /status timeout/);
+    await fake.runNext();
+    await rejection;
+    resolveRequest({ restartInProgress: true });
+    await flushMicrotasks();
+    assert.equal(committed, false);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});

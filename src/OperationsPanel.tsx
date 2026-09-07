@@ -80,6 +80,7 @@ type OperationsPanelProps = {
   onRepairPluginMarketplace: () => void;
   onRestart: () => void;
   showRestartAction?: boolean;
+  restartStatusUnknown?: boolean;
 };
 
 function OperationsPanelComponent({
@@ -92,6 +93,7 @@ function OperationsPanelComponent({
   onRepairPluginMarketplace,
   onRestart,
   showRestartAction = true,
+  restartStatusUnknown = false,
 }: OperationsPanelProps) {
   const operationsHubRef = useRef<HTMLElement>(null);
   const [activeCardTitle, setActiveCardTitle] = useState<string | null>(null);
@@ -466,15 +468,15 @@ function OperationsPanelComponent({
               <Button
                 variant="warning"
                 size="sm"
-                disabled={isBusy || status.restartInProgress || !status.running}
+                disabled={isBusy || (!restartStatusUnknown && (status.restartInProgress || !status.running))}
                 onClick={onRestart}
               >
-                {busy === "restart" || status.restartInProgress ? (
+                {busy === "restart" || (status.restartInProgress && !restartStatusUnknown) ? (
                   <LoaderCircle className="animate-spin" aria-hidden="true" />
                 ) : (
                   <RefreshCw aria-hidden="true" />
                 )}
-                {status.running ? "重启 Codex" : "未运行"}
+                {restartStatusUnknown ? "重新查询状态" : status.running ? "重启 Codex" : "未运行"}
               </Button>
             )}
           </div>

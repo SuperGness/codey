@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { invoke } from "./api";
+import { withTimeout } from "./appUtils";
 import type { RuntimeStatus } from "./App.types";
 import {
   createStatusPollScheduler,
@@ -31,6 +32,7 @@ export function useRuntimeStatus({
   embedded,
 }: UseRuntimeStatusOptions) {
   const [status, setStatus] = useState<RuntimeStatus>({ running: false });
+  const [restartStatusError, setRestartStatusError] = useState<string | null>(null);
   const runtimeStatusFlightRef = useRef<RuntimeStatusFlight | null>(null);
   const statusPollSchedulerRef = useRef<StatusPollScheduler | null>(null);
   const settingsOpenRefreshRequestedRef = useRef(false);
@@ -49,11 +51,12 @@ export function useRuntimeStatus({
         refreshesInjectionStatus: boolean,
         requestGeneration = requestGenerationRef.current,
       ) => {
-        return invoke<RuntimeStatus>("runtime_status", {
+        return withTimeout(invoke<RuntimeStatus>("runtime_status", {
           refreshInjectionStatus: refreshesInjectionStatus,
-        }).then((next) => {
+        }), 10_000, "运行状态查询超时，请重新查询").then((next) => {
           if (requestCanCommit(requestGeneration)) {
             setStatus((current) => reconcileRuntimeStatus(current, next));
+            setRestartStatusError(null);
           }
           return next;
         });
@@ -233,24 +236,29 @@ export function useRuntimeStatus({
   ]);
 
   useEffect(() => {
-    if (!active || !status.restartInProgress) return;
+    if (!active || !status.restartInProgress || restartStatusError) return;
     const task = createStatusPollTask(
       {
         kind: "restart",
         delays: [500],
         pending: (next) => Boolean(next.restartInProgress),
         refreshesInjectionStatus: false,
+        onExhausted: () => setRestartStatusError(
+          "暂时无法确认 Codex 是否重启完成，请点击重新查询状态",
+        ),
       },
       STATUS_POLL_MAX_DURATION_MS,
     );
     statusPollScheduler.add(task);
     return () => statusPollScheduler.remove(task);
-  }, [active, status.restartInProgress, statusPollScheduler]);
+  }, [active, status.restartInProgress, restartStatusError, statusPollScheduler]);
 
   return {
     status,
     setStatus,
     refreshStatus,
     refreshStatusForLoad,
+    restartStatusError,
+    setRestartStatusError,
   };
 }

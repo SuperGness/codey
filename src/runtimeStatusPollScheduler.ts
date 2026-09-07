@@ -17,6 +17,7 @@ export type StatusPollTask = {
   nextAt: number;
   pending: (next: RuntimeStatus) => boolean;
   refreshesInjectionStatus: boolean;
+  onExhausted?: () => void;
 };
 
 export type StatusPollScheduler = {
@@ -83,8 +84,10 @@ export function createStatusPollScheduler(
           task.delayIndex + 1,
           task.delays.length - 1,
         );
-        if (completedAt >= task.deadline || !task.pending(next)) {
+        const pending = task.pending(next);
+        if (completedAt >= task.deadline || !pending) {
           tasks.delete(task.kind);
+          if (pending) task.onExhausted?.();
           continue;
         }
         task.nextAt =
@@ -105,6 +108,7 @@ export function createStatusPollScheduler(
           task.errors >= STATUS_POLL_MAX_CONSECUTIVE_ERRORS
         ) {
           tasks.delete(task.kind);
+          task.onExhausted?.();
           continue;
         }
         task.nextAt =
