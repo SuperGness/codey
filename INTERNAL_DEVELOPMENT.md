@@ -406,6 +406,14 @@ Computer Use 沿用 Codex 管理的 `unified-computer-use` 插件及其 `cua_rep
 
 完整且无筛选的 agents 列表若只包含根代理，会精准回收从未绑定、从未启动的 pending spawn，覆盖 provider 在线程上限等失败后缺少 PostToolUse 回执的路径；已绑定或已启动 attempt 不受影响。顶层 wait 超时和仅根代理快照不算语义进展，不得重置 Stop 的 10 分钟停滞恢复窗口，只有带具体代理身份的状态或输出变化才会重置。
 
+2026-09-07 审查修复：全量快照恢复仅由无筛选的 `list_agents` 触发；`wait_agent` 即使返回 `agents` 数组，也只能结算明确提及的代理，不能把未出现的兄弟任务判为结束。wait/list 续行文案先给出全部门禁指令，再将工具原文放入明确标为不可信数据的 Markdown 围栏；围栏长度超过原文内最长的反引号连续段，防止原文提前结束围栏。该格式用于区分内容来源，不构成模型提示注入的完整防护。
+
+运行时策略缺失时，角色准入（含省略角色的默认派发）和尚未缓存成功证明的 child 数据工具均返回 `CODEY_SUBAGENT_RUNTIME_POLICY_MISSING`。已缓存的证明仍允许原任务结束；向 `/root` 回报异常的消息不依赖策略文件。pending 更新不能仅因时间经过而忽略：进程可能在角色文件、lease 和策略提交之间退出，旧策略未必与磁盘上的角色一致。需通过重新保存设置或由 Codey 重启 Codex，执行现有完整校验与重建；Hook 拒绝文案包含此恢复办法。
+
+SQL 词法检查拒绝引号内反斜杠、引号外的 `#`、方括号、美元引用、PostgreSQL `E` 字符串、嵌套块注释以及 `--` 后无空白的方言歧义。带引号的标识符同样检查禁用词；服务端文件访问、远程执行、延时和已知副作用函数不予放行。正常单条 SELECT、WITH、EXPLAIN 和元数据查询仍按原规则判断。该词法器不能证明自定义函数没有副作用，必须继续使用只读数据库账号。
+
+当前跨会话写冲突检查仅覆盖相同 runtime generation；不同 app-server 的写入互斥仍需调用方安排。损坏的其他会话账本可能隐藏活动 writer，不能直接跳过，也不能仅按文件年龄忽略。无可靠身份关联的 marker 与 reservation 保持分别计数；身份未确认时不适用三个只读代理的上限。Stop 自首次受阻起累计 60 分钟达到绝对上限后会 fence 遗留 attempt，原代理是否已在上游停止不能由此推断；下一轮用户输入会提示先调用无筛选 list 对账，后续派发拒绝文案保留真实的超时原因。
+
 视觉角色由原生任务胶囊授予 `visual.inspect`，受信的图像、截图、CUA 和 `open_in_codex` 工具只对视觉角色开放。Responses 工具结果中的图像在 Chat Completions 与 Anthropic 回退协议中会转换为紧随 tool result 的用户图像块，不能退化成 base64 JSON 文本。协作响应中的解密失败、空 payload 或任务体缺失统一触发一次活动代理任务重述恢复；Codey 不尝试本地解密 provider 载荷。
 
 内置 FastCtx 只提供文件读取、搜索、发现和批量替换。检测到用户已有 FastCtx 时不重复注册；内置版本通过本次进程覆盖加载，不写入用户 Codex 配置。版本与固定提交以 Cargo.toml 和 THIRD_PARTY_NOTICES.md 为准。
