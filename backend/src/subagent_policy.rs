@@ -45,23 +45,58 @@ pub(crate) fn reconcile_with_model_state(
     state: Option<&model_catalog::ModelSelectionState>,
 ) {
     prepare_subagent_roles(config);
-    let route_aliases = config
-        .runtime_model_targets()
-        .into_iter()
-        .map(|target| target.alias)
-        .collect::<Vec<_>>();
+    let route_targets = config.runtime_model_targets();
+    let current_provider_id = config.current_provider_id().map(str::to_string);
     let Some(state) = state else {
+        let route_aliases = route_targets
+            .into_iter()
+            .map(|target| target.alias)
+            .collect::<Vec<_>>();
         canonicalize_route_aliases(&mut config.subagent_roles, &route_aliases);
         sync_legacy_default(config);
         return;
     };
     for selection in config.subagent_roles.values_mut() {
         let requested = selection.model.trim();
-        if let Some(alias) = route_aliases
+        if let Some(target) = route_targets
             .iter()
-            .find(|alias| model_id::equal(alias, requested))
+            .find(|target| model_id::equal(&target.alias, requested))
         {
-            selection.model.clone_from(alias);
+            selection.model.clone_from(&target.alias);
+            let current_route = current_provider_id.as_deref() == Some(target.provider_id.as_str());
+            let metadata_model = if target.official {
+                state
+                    .official_models
+                    .iter()
+                    .find(|model| {
+                        model.supported && model_id::equal(&model.slug, &target.upstream_model)
+                    })
+                    .map(|model| model.slug.as_str())
+            } else {
+                state
+                    .third_party_model_metadata
+                    .iter()
+                    .find(|model| model_id::equal(&model.slug, &target.alias))
+                    .or_else(|| {
+                        state.third_party_model_metadata.iter().find(|model| {
+                            current_route && model_id::equal(&model.slug, &target.upstream_model)
+                        })
+                    })
+                    .map(|model| model.slug.as_str())
+                    .or_else(|| {
+                        state
+                            .third_party_models
+                            .iter()
+                            .find(|model| {
+                                current_route && model_id::equal(model, &target.upstream_model)
+                            })
+                            .map(String::as_str)
+                    })
+            };
+            if let Some(model) = metadata_model {
+                selection.reasoning_effort =
+                    reasoning_effort_for_model(state, model, &selection.reasoning_effort);
+            }
             continue;
         }
         let Some(model) = state
@@ -169,6 +204,10 @@ pub(crate) fn reasoning_effort_for_model(
         .third_party_models
         .iter()
         .any(|candidate| model_id::equal(candidate, model))
+        || state
+            .third_party_model_metadata
+            .iter()
+            .any(|candidate| model_id::equal(&candidate.slug, model))
     {
         let metadata = state
             .third_party_model_metadata
@@ -404,6 +443,41 @@ mod tests {
     }
 
     #[test]
+    fn route_aliases_reconcile_reasoning_using_the_upstream_model_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        for (model, preferred, expected) in [
+            ("gpt-5.4", "ultra", DEFAULT_SUBAGENT_REASONING_EFFORT),
+            ("gpt-5.6-luna", "ultra", "ultra"),
+            ("gpt-5.6-sol", "ultra", "ultra"),
+            (
+                "provider-special",
+                "ultra",
+                DEFAULT_SUBAGENT_REASONING_EFFORT,
+            ),
+            ("provider-special", "high", "high"),
+        ] {
+            let mut config = route_config("route-a");
+            config
+                .selected_models_by_provider
+                .insert("route-a".into(), vec![model.into()]);
+            config.subagent_model = format!("ROUTE-A/{model}");
+            config.subagent_reasoning_effort = preferred.into();
+            config.subagent_roles = uniform_subagent_roles(&config.subagent_model, preferred);
+
+            reconcile_for_current_provider(&mut config, home.path(), false);
+
+            assert_eq!(config.subagent_model, format!("route-a/{model}"));
+            assert_eq!(config.subagent_reasoning_effort, expected, "{model}");
+            assert!(
+                config
+                    .subagent_roles
+                    .values()
+                    .all(|role| role.reasoning_effort == expected)
+            );
+        }
+    }
+
+    #[test]
     fn route_qualified_model_is_preserved_outside_the_current_route_state() {
         let mut provider_a = ProviderProfile::new("A");
         provider_a.id = "route-a".into();
@@ -424,14 +498,41 @@ mod tests {
         }
         .normalize();
 
-        reconcile_with_model_state(&mut config, Some(&model_state()));
+        let mut state = model_state();
+        state.third_party_models.push("provider-special".into());
+        state
+            .third_party_model_metadata
+            .push(model_catalog::ThirdPartyModelAvailability {
+                slug: "provider-special".into(),
+                supported_reasoning_efforts: vec!["low".into()],
+                default_reasoning_effort: "low".into(),
+            });
+        reconcile_with_model_state(&mut config, Some(&state));
 
         assert_eq!(config.subagent_model, "route-b/provider-special");
+        assert_eq!(config.subagent_reasoning_effort, "high");
         assert!(
             config
                 .subagent_roles
                 .values()
                 .all(|selection| selection.model == "route-b/provider-special")
+        );
+
+        state
+            .third_party_model_metadata
+            .push(model_catalog::ThirdPartyModelAvailability {
+                slug: "route-b/provider-special".into(),
+                supported_reasoning_efforts: vec!["medium".into()],
+                default_reasoning_effort: "medium".into(),
+            });
+        reconcile_with_model_state(&mut config, Some(&state));
+        assert_eq!(config.subagent_model, "route-b/provider-special");
+        assert_eq!(config.subagent_reasoning_effort, "medium");
+        assert!(
+            config
+                .subagent_roles
+                .values()
+                .all(|selection| selection.reasoning_effort == "medium")
         );
     }
 

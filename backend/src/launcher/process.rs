@@ -904,6 +904,7 @@ async fn prepare_cli_wrapper(
     #[cfg(target_os = "macos")]
     let target = codey_runtime_core::app_paths::codex_runtime_executable(app_dir)
         .ok_or_else(|| anyhow::anyhow!("Codex App 内未找到内置 CLI"))?;
+    validate_code_mode_host(&target)?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .context("创建 Codex CLI 兼容校验端口失败")?;
@@ -964,6 +965,28 @@ async fn prepare_cli_wrapper(
         marker_path,
         environment,
     })
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn validate_code_mode_host(target: &std::path::Path) -> Result<()> {
+    // Codex Desktop enables features.code_mode_host in its app-server arguments.
+    let host = target.with_file_name(if cfg!(windows) {
+        "codex-code-mode-host.exe"
+    } else {
+        "codex-code-mode-host"
+    });
+    let metadata = std::fs::metadata(&host).with_context(|| {
+        format!(
+            "Codex code-mode 宿主不可用：{}；请修复或更新 Codex 安装后，通过 Codey 重新启动",
+            host.display()
+        )
+    })?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "Codex code-mode 宿主路径不是文件：{}",
+        host.display()
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -2075,6 +2098,24 @@ mod cli_wrapper_tests {
     }
 
     #[test]
+    fn code_mode_host_is_checked_before_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("codex");
+        let host = target.with_file_name(if cfg!(windows) {
+            "codex-code-mode-host.exe"
+        } else {
+            "codex-code-mode-host"
+        });
+        let error = validate_code_mode_host(&target).unwrap_err();
+        assert!(format!("{error:#}").contains(&host.to_string_lossy().to_string()));
+        std::fs::create_dir(&host).unwrap();
+        assert!(validate_code_mode_host(&target).is_err());
+        std::fs::remove_dir(&host).unwrap();
+        std::fs::write(&host, "test host").unwrap();
+        validate_code_mode_host(&target).unwrap();
+    }
+
+    #[test]
     fn windows_cli_runtime_is_staged_once_and_repaired_when_a_copy_is_damaged() {
         let temp = tempfile::tempdir().unwrap();
         let resources = temp.path().join("resources");
@@ -2122,6 +2163,19 @@ mod cli_wrapper_tests {
         );
         assert_eq!(std::fs::read(&staged).unwrap(), b"payload:codex.exe");
         assert!(!staged_dir.join("reused.marker").exists());
+
+        // Missing helper executables must also invalidate the cached directory.
+        for name in &WINDOWS_CLI_RUNTIME_FILES[1..] {
+            std::fs::remove_file(staged_dir.join(name)).unwrap();
+            assert_eq!(
+                stage_windows_cli_runtime(&target, &local_app_data).unwrap(),
+                staged
+            );
+            assert_eq!(
+                std::fs::read(staged_dir.join(name)).unwrap(),
+                format!("payload:{name}").as_bytes()
+            );
+        }
 
         // A new package build gets its own directory.
         std::fs::write(&target, "payload:codex.exe v2").unwrap();

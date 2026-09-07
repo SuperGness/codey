@@ -98,6 +98,8 @@ Windows 的启动兼容安装最多尝试 2 次，仅超时、中断、WouldBloc
 每次系统激活返回后重新建立 60 秒的 CLI 确认上限；Inspector 发现窗口仍为 20 秒，补丁安装和 app-server 覆盖校验各 10/24 秒。等待期间每秒检查进程是否存活（直接子进程用 `try_wait`，Store 激活按 PID 快照），进程退出立即结束等待并允许重试一次，不会等到上限。进程清理保留独立的 20 秒上限；文件暂存和系统激活不通过取消 Future 强行中断，因此上述数值不是整个启动过程的硬性耗时保证。回归模拟首轮 Inspector/CLI 均不可用、长清理等待、第二轮 45 秒后握手成功、进程提前退出、渲染端口就绪时的 Inspector 放弃，并检查缺少包装器、不可重试错误和最多两次的限制。Windows Store 系统激活与环境继承仍需 Windows 实机验证。
 
 
+准备 CLI 包装入口时，先确认真实内置 CLI 同目录的 `codex-code-mode-host`（Windows 为 `.exe`）存在且为普通文件，因为 Codex Desktop 会显式启用 `features.code_mode_host`。缺失时返回具体路径和修复安装提示，避免到工具调用阶段才发现宿主不可用；这项检查不代表宿主已成功执行。Windows Store 仍先校验并修复暂存副本，回归同时覆盖主程序损坏和各配套执行文件被删除。
+
 CLI 包装器在目标校验和创建进程前建立认证连接。回连单次 500ms，端口被拒绝（启动器已不再监听，例如 app-server 重启）立即放弃，超时等暂时性错误在 3 秒内重试，避免回环被安全软件或高负载拖慢时一次失败就静默放弃握手。除握手连接外，包装器还按 `CODEY_CODEX_CLI_WRAPPER_MARKER` 指定的路径（状态目录 `cli-wrapper/<令牌>.json`）写入记录文件：连接前写 `launching`，创建目标进程后写 `executed`，失败写 `failed` 并附原因与是否可重试；macOS 在 exec 前先写 `executed`。启动器同时监听握手端口和每 250ms 轮询记录文件，任一确认即成功，等待结束后删除记录，准备包装器时清理一小时以上的残留记录。令牌后的 EOF 仍只表示目标已执行；失败时发送 `!` 和最多 8 KiB 的结构化错误，保留具体原因与是否允许重试。收到明确失败立即结束兼容等待；创建进程不再使用独立的 750ms 确认窗口，改为共享启动截止时间。握手监听器只服务首次启动，其关闭后仍允许后续 app-server 调用 CLI。回归使用真实子进程覆盖目标缺失、配置无效、执行失败、参数和环境隔离、监听器关闭后的重启；退出码与监听器关闭后的重启回归复用测试程序作为固定返回 17 的原生子进程，避免让 CLI 配置参数参与 shell 命令解析；断言失败时保留子进程输出。Windows 测试另用独占文件句柄验证共享冲突分类。重试分类、截止时间和立即返回通过 Rust 行为测试覆盖，源码检查只保留平台清理顺序等约束。
 
 浏览器和计算机操作执行器会从 Codex 获取 `CODEX_CLI_PATH`，但其子进程环境可能过滤 `CODEY_CODEX_CLI_WRAPPER_*`。CLI 包装分流因此不能只依赖目标环境变量：辅助参数先由各自入口处理；其余带参数的调用从 Codey 保存的应用位置恢复真实内置 CLI，Windows Store 继续复用已校验的用户运行目录。定位该目录时优先采用绝对路径的 `LOCALAPPDATA`；变量被辅助进程过滤、为空或为相对路径时，通过现有 `directories` 依赖调用 Windows Known Folder API 获取本地应用数据目录，不拼接用户主目录，也不扩大子进程的环境变量集合。正常启动与 CLI 回退共用此解析，保留运行文件完整性校验；回归覆盖缺失、空值、相对路径及有效目录优先级。找不到目标、配置损坏或执行失败时直接报错，禁止进入桌面启动及 Codex 进程清理流程。无参数启动、旧 watcher 的 `--debug-port` 和 macOS 的 `-psn_` 启动参数保留桌面行为。此恢复不依赖主进程 Inspector；现有兼容环境完整时仍优先使用本次启动指定的目标和运行配置。回归覆盖环境缺失、保存位置无效、参数及退出码转发和正常桌面分流；Windows 下的 Chrome 端到端行为仍需实机验证。
@@ -404,6 +406,8 @@ Computer Use 沿用 Codex 管理的 `unified-computer-use` 插件及其 `cua_rep
 子代理门禁与 FastCtx 路由 Hook 的定义只写入运行期 hooks.json，并通过 `-c features.hooks=true` 与 `hooks.state.*.trusted_hash` 覆盖项交给 Codex；启动补丁生成的临时 config.toml 文档不再携带 `[[hooks.*]]` 表，相关 TOML 写入和旧组清理代码已于 2026-09-06 删除。同日移除了隔离运行时设计之前的租约恢复路径（AGENTS.md / agents/default.toml 快照回滚）：旧版本遗留的 codex-lease.json 仍会被读取并释放，hooks.json 与策略文件按当前流程回滚，但不再回写 AGENTS.md 与 default.toml。
 
 提示词优化可使用运行中的 Codey 路由，也可使用独立配置。地址、认证和模型由后端校验；日志不保存提示词正文或凭据。
+
+子代理模型校正保留线路别名，并校正对应的思考深度。第三方模型优先使用精确别名元数据；只有当前线路可以回退到原始模型名元数据，避免把另一线路的同名模型能力混用。官方模型使用官方能力列表。其他线路缺少对应元数据时保留原设置，由后续运行校验处理，不推断支持能力；实际模型与思考深度的严格校验保持不变。
 
 子代理增强只在原生 macOS 和 Windows 启用。五个用户角色与内部 default 角色的配置源位于 backend/src/codex_config_guidance.rs，默认规则数据位于 backend/resources/subagent-rules.default.json。关闭本地路由时，启动器会按当前 Codex Provider 的可用模型重新校正角色模型与思考深度，再生成本次运行配置。当前路径直接使用 Codex 原生 agents 工具和生命周期 Hook，不再使用旧版 sidecar、逐任务回执、prepare_delegation 或 resolve_batch 流程。只读任务最多并行三个；出现写入角色时最多两个，并由根代理在所有尝试结束后验收结果。活动 attempt 全部通过绑定、marker 和 `files.read` 能力校验时，可信根 turn 可继续使用规则确认的本地读取、网页检索、MCP Resource 与数据库 schema/只读 SQL 工具；SQL 只接受单条、可保守证明为只读的语句，写入、命令、视觉、未知工具以及 writer/mixed/unverified 批次仍保持关闭。角色名、词法 SQL 校验和 Hook 不是最终安全边界，真实权限仍由数据库只读账号以及 Codex sandbox 与 approval 设置决定。
 
