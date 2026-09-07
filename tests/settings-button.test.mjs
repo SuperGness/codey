@@ -395,15 +395,17 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   await window.__codeyRefreshAccountUsage();
   assert.equal(usage.dataset.windowCount, "1");
   assert.match(usage.innerHTML, /周额度/);
-  assert.doesNotMatch(usage.innerHTML, /5 小时/);
+  assert.doesNotMatch(usage.innerHTML, /data-window="five-hour"/);
 
   accountUsageResult = { status: "error", message: "官方额度接口返回 401" };
+  appServerUsageResult.rateLimits.primary.resetsAt = Math.floor(Date.now() / 1000) + 29.5 * 60 * 60;
   await window.__codeyRefreshAccountUsage();
   assert.equal(appServerUsageCalls, 1);
   assert.equal(usage.dataset.windowCount, "1");
   assert.match(usage.innerHTML, /周额度[\s\S]*?80%/);
-  assert.doesNotMatch(usage.innerHTML, /5 小时/);
-  assert.doesNotMatch(usage.getAttribute("aria-label"), /5 小时/);
+  assert.doesNotMatch(usage.innerHTML, /data-window="five-hour"/);
+  assert.doesNotMatch(usage.getAttribute("aria-label"), /5 小时额度/);
+  assert.match(usage.getAttribute("aria-label"), /1 天 5 小时后重置/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?77/);
   assert.match(usage.innerHTML, /class="codey-usage-plan-tag">Plus<\/span>/);
 
@@ -438,7 +440,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.equal(remountedUsage.nextElementSibling, nativeProfileFooter);
   assert.match(remountedUsage.innerHTML, /周额度/);
   const remountedSummaryHtml = remountedUsage.innerHTML.split('class="codey-usage-details"')[0];
-  assert.doesNotMatch(remountedSummaryHtml, /5 小时/);
+  assert.doesNotMatch(remountedSummaryHtml, /data-window="five-hour"/);
   assert.match(remountedSummaryHtml, /class="codey-usage-plan-tag">Plus<\/span>/);
 });
 

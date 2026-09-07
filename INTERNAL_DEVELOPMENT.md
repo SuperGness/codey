@@ -50,6 +50,10 @@ pnpm run dev 会先构建完整 Cargo 工作区，再启动 Codey，确保主程
     cargo clippy --workspace --all-targets -- -D warnings
     git diff --check
 
+侧栏额度测试通过 `data-window` 和完整的额度标签检查五小时窗口，避免误匹配重置倒计时中的 `5 小时`；回退场景固定使用约 29.5 小时后的重置时间覆盖该情况。重启测试需保留对 `withTimeout(invoke("restart_codey"), ...)` 调用的检查。
+
+`save_selected_models` 的参数逐项对应命令请求字段，因此仅在该函数上允许 `clippy::too_many_arguments`；工作区继续以 `-D warnings` 检查其他警告。
+
 完整构建使用：
 
     pnpm run build

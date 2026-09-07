@@ -1,5 +1,9 @@
 use super::*;
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "参数逐项对应模型保存命令的请求字段"
+)]
 pub async fn save_selected_models(
     state: &Arc<AppState>,
     requested_official_models: Vec<String>,
