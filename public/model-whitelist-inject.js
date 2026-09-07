@@ -413,7 +413,7 @@
       return null;
     }
     const models = uniqueModelNames(value.models);
-    if (nativeSelectionOnly && models.length === 0) return null;
+    if (nativeSelectionOnly && models.length === 0 && value.clear_models !== true) return null;
     const requestedDefault = [value.default_model, value.model]
       .map((model) => canonicalModelName(models, model))
       .find(Boolean);
@@ -645,13 +645,19 @@
 
   const modelDescriptor = (modelName, current = null) => {
     const metadata = catalog.modelMetadata[modelName];
+    const contextMetadata = {
+      supports1MContext: metadata?.supports_1m_context ?? current?.supports1MContext,
+      contextWindow: Object.hasOwn(metadata || {}, "context_window") ? metadata.context_window : current?.contextWindow,
+      maxContextWindow: Object.hasOwn(metadata || {}, "max_context_window") ? metadata.max_context_window : current?.maxContextWindow,
+    };
     const presentation = modelPresentation(modelName, current);
     const displayName = presentation.displayName;
     const supportedReasoningEfforts = reasoningEffortDescriptors(
       metadata?.supported_reasoning_efforts,
     );
     if (nativeSelectionOnly && current && supportedReasoningEfforts.length === 0) {
-      return current.hidden === true ? { ...current, hidden: false } : current;
+      return current.hidden !== true && Object.entries(contextMetadata).every(([key, value]) => current[key] === value)
+        ? current : { ...current, ...contextMetadata, hidden: false };
     }
     const currentReasoningEfforts = reasoningEffortDescriptors(
       current?.supportedReasoningEfforts,
@@ -676,6 +682,9 @@
       if (current) {
         return (
           current.hidden !== true
+          && current.supports1MContext === contextMetadata.supports1MContext
+          && current.contextWindow === contextMetadata.contextWindow
+          && current.maxContextWindow === contextMetadata.maxContextWindow
           && current.defaultReasoningEffort === defaultReasoningEffort
           && sameReasoningEffortNames(
             current.supportedReasoningEfforts,
@@ -683,6 +692,7 @@
           )
         ) ? current : {
           ...current,
+          ...contextMetadata,
           hidden: false,
           defaultReasoningEffort,
           supportedReasoningEfforts: resolvedReasoningEfforts,
@@ -690,6 +700,7 @@
       }
       return {
         model: modelName,
+        ...contextMetadata,
         id: modelName,
         slug: modelName,
         name: metadata?.display_name || modelName,
@@ -702,6 +713,7 @@
     }
     return {
       ...(current && typeof current === "object" ? current : {}),
+      ...contextMetadata,
       model: modelName,
       id: typeof current?.id === "string" && current.id ? current.id : modelName,
       slug: typeof current?.slug === "string" && current.slug ? current.slug : modelName,
@@ -746,6 +758,9 @@
     if (!leftMetadata || !rightMetadata) return leftMetadata === rightMetadata;
     return (
       leftMetadata.default_reasoning_effort === rightMetadata.default_reasoning_effort
+      && leftMetadata.supports_1m_context === rightMetadata.supports_1m_context
+      && leftMetadata.context_window === rightMetadata.context_window
+      && leftMetadata.max_context_window === rightMetadata.max_context_window
       && leftMetadata.display_name === rightMetadata.display_name
       && leftMetadata.route_name === rightMetadata.route_name
       && leftMetadata.route_prefix === rightMetadata.route_prefix
@@ -808,6 +823,9 @@
         && model?.hidden === false
         && model?.isDefault === nextModels[index]?.isDefault
         && model?.defaultReasoningEffort === nextModels[index]?.defaultReasoningEffort
+        && model?.supports1MContext === nextModels[index]?.supports1MContext
+        && model?.contextWindow === nextModels[index]?.contextWindow
+        && model?.maxContextWindow === nextModels[index]?.maxContextWindow
         && sameReasoningEfforts(
           model?.supportedReasoningEfforts,
           nextModels[index]?.supportedReasoningEfforts,
@@ -2363,6 +2381,13 @@
 
   const patchedNativeRequestParams = (method, params) => {
     if (!modelBoundRequestMethods.has(method) || !params || typeof params !== "object") return params;
+    if (method === "thread/settings/update" && params.model === null) return params;
+    if (catalog.loaded && catalog.models.length === 0) {
+      return markBlockedProviderRequest({ ...params }, {
+        reason: "provider_disabled",
+        message: "当前线路已禁用，请先在 Codey 中启用线路或切换到可用线路后重试。",
+      });
+    }
     const threadId = threadIdFromParams(params);
     const model = typeof params.model === "string" ? params.model.trim() : "";
     const binding = !Object.hasOwn(params, "model") ? threadRoutes.get(threadId) : null;
@@ -2371,7 +2396,6 @@
     const oldCarrier = modelKey(currentProvider) === localRouterProviderId
       || (modelKey(currentProvider) === "codey" && modelKey(catalog.nativeProviderId) !== "codey");
     if (!historicalSource && !binding && !oldCarrier) return params;
-    if (method === "thread/settings/update" && params.model === null) return params;
     const sourceModel = historicalSource || binding?.sourceModel || model;
     const canonical = catalog.modelNamesByKey.get(modelKey(sourceModel));
     const targetProvider = catalog.nativeProviderId;

@@ -400,8 +400,10 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   accountUsageResult = { status: "error", message: "官方额度接口返回 401" };
   await window.__codeyRefreshAccountUsage();
   assert.equal(appServerUsageCalls, 1);
-  assert.equal(usage.dataset.windowCount, "2");
-  assert.match(usage.innerHTML, /周额度[\s\S]*?80%[\s\S]*?5 小时[\s\S]*?65%/);
+  assert.equal(usage.dataset.windowCount, "1");
+  assert.match(usage.innerHTML, /周额度[\s\S]*?80%/);
+  assert.doesNotMatch(usage.innerHTML, /5 小时/);
+  assert.doesNotMatch(usage.getAttribute("aria-label"), /5 小时/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?77/);
   assert.match(usage.innerHTML, /class="codey-usage-plan-tag">Plus<\/span>/);
 

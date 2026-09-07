@@ -14,6 +14,8 @@ use crate::{local_router, model_catalog, model_id};
 #[serde(rename_all = "camelCase")]
 pub struct ProviderProfile {
     pub id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub name: String,
     #[serde(default)]
     pub short_name: String,
@@ -111,6 +113,7 @@ impl ProviderProfile {
         let name = name.into();
         Self {
             id: Uuid::new_v4().to_string(),
+            enabled: true,
             short_name: default_route_short_name(&name),
             name,
             base_url: String::new(),
@@ -556,6 +559,8 @@ pub struct CodeyConfig {
     /// the local Codex configuration.
     #[serde(default)]
     pub selected_models_by_provider: BTreeMap<String, Vec<String>>,
+    #[serde(default, rename = "supports1MContextByProvider")]
+    pub supports_1m_context_by_provider: BTreeMap<String, Vec<String>>,
     /// Third-party model IDs that were explicitly typed by the user. Synced
     /// provider models are intentionally excluded so only manual entries can be
     /// deleted from Codey's saved support list.
@@ -659,6 +664,7 @@ impl Default for CodeyConfig {
             codex_app_path: String::new(),
             user_scripts: Vec::new(),
             selected_models_by_provider: BTreeMap::new(),
+            supports_1m_context_by_provider: BTreeMap::new(),
             manual_third_party_models_by_provider: BTreeMap::new(),
             declared_official_models_by_provider: BTreeMap::new(),
             upstream_models_by_provider: BTreeMap::new(),
@@ -718,10 +724,17 @@ impl CodeyConfig {
         if !self
             .profiles
             .iter()
-            .any(|profile| profile.id == self.active_profile_id)
+            .any(|profile| profile.enabled && profile.id == self.active_profile_id)
         {
-            self.active_profile_id = self.profiles[0].id.clone();
+            self.active_profile_id = self
+                .profiles
+                .iter()
+                .find(|profile| profile.enabled)
+                .unwrap_or(&self.profiles[0])
+                .id
+                .clone();
         }
+        normalize_model_lists(&mut self.supports_1m_context_by_provider);
         normalize_model_lists(&mut self.selected_models_by_provider);
         normalize_model_lists(&mut self.manual_third_party_models_by_provider);
         normalize_model_lists(&mut self.declared_official_models_by_provider);
@@ -751,6 +764,12 @@ impl CodeyConfig {
         official_profile: Option<ProviderProfile>,
     ) {
         let previous_active_id = self.active_profile_id.clone();
+        let official_enabled = self
+            .profiles
+            .iter()
+            .find(|profile| profile.official_account)
+            .map(|profile| profile.enabled)
+            .unwrap_or(true);
         let previous_official_provider_ids = self
             .profiles
             .iter()
@@ -770,6 +789,7 @@ impl CodeyConfig {
         // empty placeholder owns route-scoped data that can be removed.
         if let Some(provider_id) = placeholder_provider_id {
             self.selected_models_by_provider.remove(&provider_id);
+            self.supports_1m_context_by_provider.remove(&provider_id);
             self.manual_third_party_models_by_provider
                 .remove(&provider_id);
             self.declared_official_models_by_provider
@@ -778,6 +798,7 @@ impl CodeyConfig {
         }
         if let Some(mut official_profile) = official_profile {
             official_profile.id = DERIVED_OFFICIAL_PROFILE_ID.to_string();
+            official_profile.enabled = official_enabled;
             official_profile.normalize();
             let official_provider_id = official_profile.provider_id().to_string();
             for previous_provider_id in previous_official_provider_ids {
@@ -815,6 +836,11 @@ impl CodeyConfig {
         if previous_provider_id == official_provider_id {
             return;
         }
+        migrate_provider_model_list(
+            &mut self.supports_1m_context_by_provider,
+            previous_provider_id,
+            official_provider_id,
+        );
         migrate_provider_model_list(
             &mut self.selected_models_by_provider,
             previous_provider_id,
@@ -876,6 +902,50 @@ impl CodeyConfig {
             .unwrap_or_default()
     }
 
+    pub(crate) fn model_supports_1m_context(&self, provider_id: &str, model: &str) -> bool {
+        self.supports_1m_context_by_provider
+            .get(provider_id)
+            .is_some_and(|models| {
+                models
+                    .iter()
+                    .any(|candidate| model_id::equal(candidate, model))
+            })
+    }
+
+    pub(crate) fn provider_is_disabled(&self, provider_id: &str) -> bool {
+        self.profiles
+            .iter()
+            .find(|profile| profile.id == provider_id || profile.provider_id() == provider_id)
+            .is_some_and(|profile| !profile.enabled)
+    }
+
+    pub(crate) fn runtime_1m_context_model_aliases(&self) -> Vec<String> {
+        self.profiles
+            .iter()
+            .filter(|profile| profile.enabled)
+            .filter(|profile| {
+                !profile.official_account || self.official_account_available_this_launch
+            })
+            .flat_map(|profile| {
+                self.supports_1m_context_by_provider
+                    .get(profile.provider_id())
+                    .into_iter()
+                    .flatten()
+                    .map(move |model| runtime_catalog_model_id(profile, model))
+            })
+            .collect()
+    }
+
+    pub(crate) fn retain_1m_context_models(&mut self, provider_id: &str, available: &[String]) {
+        if let Some(models) = self.supports_1m_context_by_provider.get_mut(provider_id) {
+            models.retain(|model| {
+                available
+                    .iter()
+                    .any(|candidate| model_id::equal(candidate, model))
+            });
+        }
+    }
+
     /// Models enabled on an API-key route. Legacy official-looking model IDs
     /// are stored separately for backward compatibility, but they still belong
     /// to this route and must be routed by provenance rather than by name.
@@ -915,7 +985,10 @@ impl CodeyConfig {
     /// forwarding third-party traffic.
     pub(crate) fn router_requires_openai_auth(&self) -> bool {
         self.official_account_available_this_launch
-            && self.profiles.iter().any(|profile| profile.official_account)
+            && self
+                .profiles
+                .iter()
+                .any(|profile| profile.enabled && profile.official_account)
     }
 
     pub(crate) fn runtime_gateway_provider_id(&self) -> &'static str {
@@ -937,7 +1010,7 @@ impl CodeyConfig {
         profile: &ProviderProfile,
         outbound_proxy_configured: bool,
     ) -> bool {
-        if outbound_proxy_configured {
+        if !profile.enabled || outbound_proxy_configured {
             return false;
         }
         if profile.official_account {
@@ -986,6 +1059,9 @@ impl CodeyConfig {
         &self,
         profile: &ProviderProfile,
     ) -> bool {
+        if !profile.enabled {
+            return false;
+        }
         if profile.official_account {
             return self.official_account_available_this_launch;
         }
@@ -1022,6 +1098,9 @@ impl CodeyConfig {
         &self,
         profile: &ProviderProfile,
     ) -> bool {
+        if !profile.enabled {
+            return false;
+        }
         if profile.official_account {
             return self.official_account_available_this_launch;
         }
@@ -1036,7 +1115,7 @@ impl CodeyConfig {
     pub(crate) fn runtime_supports_remote_compaction(&self) -> bool {
         let mut has_runtime_route = false;
         for profile in &self.profiles {
-            if profile.provider_id().trim().is_empty() {
+            if !profile.enabled || profile.provider_id().trim().is_empty() {
                 continue;
             }
             if profile.official_account {
@@ -1129,7 +1208,15 @@ impl CodeyConfig {
     pub fn has_third_party_route(&self) -> bool {
         self.profiles
             .iter()
-            .any(|profile| !profile.official_account)
+            .any(|profile| profile.enabled && !profile.official_account)
+    }
+
+    pub(crate) fn uses_builtin_official_model_catalog(&self) -> bool {
+        !self.has_third_party_route()
+            && self
+                .profiles
+                .iter()
+                .any(|profile| profile.enabled && profile.official_account)
     }
 
     pub(crate) fn looks_like_empty_default_route(&self) -> bool {
@@ -1168,6 +1255,9 @@ impl CodeyConfig {
     fn configured_model_targets(&self) -> Vec<RuntimeModelTarget> {
         let mut targets = Vec::new();
         for profile in &self.profiles {
+            if !profile.enabled {
+                continue;
+            }
             let provider_id = profile.provider_id().trim();
             if provider_id.is_empty() {
                 continue;
@@ -1244,6 +1334,9 @@ impl CodeyConfig {
         let mut upstream = Vec::new();
         let mut selected = Vec::new();
         for profile in &self.profiles {
+            if !profile.enabled {
+                continue;
+            }
             if profile.official_account {
                 if include_all_official {
                     let provider_id = profile.provider_id();
@@ -2629,6 +2722,35 @@ mod tests {
         };
         let normalized = config.normalize();
         assert_eq!(normalized.active_profile_id, normalized.profiles[0].id);
+    }
+
+    #[test]
+    fn disabled_routes_default_compatibility_and_active_fallback() {
+        let legacy: ProviderProfile = serde_json::from_value(serde_json::json!({
+            "id": "legacy", "name": "Legacy", "baseUrl": "https://example.com"
+        }))
+        .unwrap();
+        assert!(legacy.enabled);
+        let mut disabled = legacy.clone();
+        disabled.enabled = false;
+        let mut enabled = ProviderProfile::new("Enabled");
+        enabled.id = "enabled".into();
+        let mut config = CodeyConfig {
+            active_profile_id: disabled.id.clone(),
+            profiles: vec![disabled, enabled],
+            ..CodeyConfig::default()
+        };
+        config
+            .selected_models_by_provider
+            .insert("legacy".into(), vec!["old-model".into()]);
+        config = config.normalize();
+        assert_eq!(config.active_profile_id, "enabled");
+        assert!(config.runtime_catalog_models().1.is_empty());
+        assert!(config.runtime_model_targets().is_empty());
+        config.profiles[1].enabled = false;
+        let config = config.normalize();
+        assert!(config.runtime_model_targets().is_empty());
+        assert!(!config.has_third_party_route());
     }
 
     #[test]

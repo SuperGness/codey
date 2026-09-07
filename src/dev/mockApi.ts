@@ -50,6 +50,7 @@ if (import.meta.env.DEV) {
       profiles: [
         {
           id: "primary",
+          enabled: true,
           name: "主力代理 (ChatGPT)",
           shortName: "主",
           baseUrl: previewEndpoints.primary,
@@ -66,6 +67,7 @@ if (import.meta.env.DEV) {
         },
         {
           id: "backup",
+          enabled: true,
           name: "备用中转 (Claude)",
           shortName: "备",
           baseUrl: previewEndpoints.backup,
@@ -147,6 +149,7 @@ if (import.meta.env.DEV) {
         primary: ["provider-fast-coder", "claude-sonnet-4-5"],
         backup: ["claude-sonnet-4-5", "claude-opus-4-1"],
       },
+      supports1MContextByProvider: {},
       manualThirdPartyModelsByProvider: {
         primary: ["provider-fast-coder"],
       },
@@ -562,6 +565,7 @@ if (import.meta.env.DEV) {
         const providerId = routeProviderId(route);
         const profiles = previewConfig.profiles.filter((profile) => profile.id !== routeId);
         delete previewConfig.selectedModelsByProvider[providerId];
+        delete previewConfig.supports1MContextByProvider[providerId];
         delete previewConfig.manualThirdPartyModelsByProvider[providerId];
         delete previewConfig.declaredOfficialModelsByProvider[providerId];
         delete previewConfig.upstreamModelsByProvider[providerId];
@@ -588,6 +592,7 @@ if (import.meta.env.DEV) {
         const routeId = String(args.routeId || "");
         const route = previewConfig.profiles.find((profile) => profile.id === routeId);
         if (!route) return { status: "failed", message: "找不到要同步模型的线路" };
+        if (route.enabled === false) return { status: "failed", message: "线路已禁用，不能同步模型" };
         const providerId = routeProviderId(route);
         const fetchedModels = uniqueModelIds([
           ...previewUpstreamModels,
@@ -611,6 +616,10 @@ if (import.meta.env.DEV) {
           upstreamModelsByProvider: {
             ...previewConfig.upstreamModelsByProvider,
             [providerId]: models,
+          },
+          supports1MContextByProvider: {
+            ...previewConfig.supports1MContextByProvider,
+            [providerId]: (previewConfig.supports1MContextByProvider[providerId] || []).filter((model) => includesModelId(models, model)),
           },
         };
         refreshPreviewModelState();
@@ -693,6 +702,13 @@ if (import.meta.env.DEV) {
           ...officialModels,
           ...thirdPartyModels,
         ]).filter((model) => !modelIdsEqual(model, AUTO_REVIEW_MODEL));
+        const available1MModels = targetProfile?.authMode === "officialAccount"
+          ? previewOfficialModels.map((model) => model.slug)
+          : uniqueModelIds([
+              ...(previewConfig.upstreamModelsByProvider[providerId] || []),
+              ...supportedModels,
+            ]);
+        previewConfig.supports1MContextByProvider[providerId] = uniqueModelIds((args.supports1MContextModels as string[] | undefined) ?? previewConfig.supports1MContextByProvider[providerId] ?? []).filter((model) => includesModelId(available1MModels, model));
         previewConfig = {
           ...previewConfig,
           settingsRevision: previewConfig.settingsRevision + 1,
@@ -745,6 +761,7 @@ if (import.meta.env.DEV) {
         }
         previewConfig = {
           ...previewConfig,
+          settingsRevision: previewConfig.settingsRevision + 1,
           activeProfileId: targetProfile.id,
           defaultModel: routeModelAlias(targetProfile, model),
         };
@@ -769,13 +786,29 @@ if (import.meta.env.DEV) {
           return { status: "failed", message: "官方线路至少需要保留一个模型" };
         }
         const providerId = routeProviderId(targetProfile);
+        const available1MModels = previewOfficialModels.map((model) => model.slug);
+        previewConfig.supports1MContextByProvider[providerId] = uniqueModelIds((args.supports1MContextModels as string[] | undefined) ?? previewConfig.supports1MContextByProvider[providerId] ?? []).filter((model) => includesModelId(available1MModels, model));
         previewConfig = {
           ...previewConfig,
+          settingsRevision: previewConfig.settingsRevision + 1,
+          showAccountUsageInHeader: typeof args.showAccountUsageInHeader === "boolean"
+            ? args.showAccountUsageInHeader
+            : previewConfig.showAccountUsageInHeader,
+          profiles: previewConfig.profiles.map((profile) =>
+            profile.id === routeId && typeof args.enabled === "boolean"
+              ? { ...profile, enabled: args.enabled }
+              : profile
+          ),
           selectedModelsByProvider: {
             ...previewConfig.selectedModelsByProvider,
             [providerId]: models,
           },
         };
+        if (previewConfig.activeProfileId === routeId && args.enabled === false) {
+          previewConfig.activeProfileId = previewConfig.profiles.find(
+            (profile) => profile.enabled !== false,
+          )?.id || routeId;
+        }
         const defaultModel = models.find((candidate) =>
           modelIdsEqual(routeModelAlias(targetProfile, candidate), previewConfig.defaultModel),
         ) || models[0];

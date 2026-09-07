@@ -90,8 +90,9 @@ struct SessionMaintenanceSummary {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeModelConfig {
-    routes: Vec<(String, String, bool, bool)>,
+    routes: Vec<(String, String, bool, bool, bool)>,
     selected_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
+    supports_1m_context_by_provider: std::collections::BTreeMap<String, Vec<String>>,
     manual_third_party_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
     declared_official_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
     upstream_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
@@ -108,12 +109,14 @@ impl RuntimeModelConfig {
                     (
                         profile.provider_id().to_string(),
                         profile.name.clone(),
+                        profile.enabled,
                         profile.official_account,
                         profile.supports_auto_review,
                     )
                 })
                 .collect(),
             selected_models_by_provider: config.selected_models_by_provider.clone(),
+            supports_1m_context_by_provider: config.supports_1m_context_by_provider.clone(),
             manual_third_party_models_by_provider: config
                 .manual_third_party_models_by_provider
                 .clone(),
@@ -402,7 +405,14 @@ fn runtime_default_model(
                     target.alias
                 }
             })
-            .or_else(|| config.default_model().map(str::to_string))
+            .or_else(|| {
+                config
+                    .profiles
+                    .iter()
+                    .any(|profile| profile.enabled)
+                    .then(|| config.default_model().map(str::to_string))
+                    .flatten()
+            })
             .unwrap_or_else(|| model_state.default_model.clone())
     } else {
         // The built-in Codex catalog only contains native OpenAI model ids.
@@ -418,21 +428,32 @@ async fn prepare_startup_model_catalog(
     home: &std::path::Path,
 ) -> Result<StartupModelCatalog> {
     let catalog_home = home.to_path_buf();
-    let official_provider =
-        current_profile.official_account && config.official_account_available_this_launch;
-    let has_third_party_route = config.has_third_party_route();
+    let use_builtin_official_catalog =
+        current_profile.enabled && config.uses_builtin_official_model_catalog();
+    let official_provider = use_builtin_official_catalog
+        && current_profile.official_account
+        && config.official_account_available_this_launch;
     let (runtime_upstream_models, runtime_selected_models) = config.runtime_catalog_models();
     let runtime_websocket_models = config.runtime_websocket_model_aliases();
     let runtime_native_web_search_models = config.runtime_native_web_search_model_aliases();
+    let runtime_1m_context_models = config.runtime_1m_context_model_aliases();
     let refresh_official_provider =
-        config.official_account_available_this_launch && !has_third_party_route;
-    let refresh_upstream_models = has_third_party_route.then_some(runtime_upstream_models);
+        config.official_account_available_this_launch && use_builtin_official_catalog;
+    let refresh_upstream_models =
+        (!use_builtin_official_catalog).then_some(runtime_upstream_models);
     let current_provider_id = current_profile.provider_id();
-    let upstream_models = config
-        .upstream_models_by_provider
-        .get(current_provider_id)
-        .cloned();
-    let selected_models = if official_provider {
+    let upstream_models = current_profile
+        .enabled
+        .then(|| {
+            config
+                .upstream_models_by_provider
+                .get(current_provider_id)
+                .cloned()
+        })
+        .flatten();
+    let selected_models = if !current_profile.enabled {
+        Vec::new()
+    } else if official_provider {
         config
             .selected_models_by_provider
             .get(current_provider_id)
@@ -441,12 +462,20 @@ async fn prepare_startup_model_catalog(
     } else {
         config.enabled_route_models(current_provider_id)
     };
-    let manual_models = config
-        .manual_third_party_models_by_provider
-        .get(current_provider_id)
-        .cloned()
+    let manual_models = current_profile
+        .enabled
+        .then(|| {
+            config
+                .manual_third_party_models_by_provider
+                .get(current_provider_id)
+                .cloned()
+        })
+        .flatten()
         .unwrap_or_default();
-    let requested_default_model = config.default_model_for_profile(current_profile);
+    let requested_default_model = current_profile
+        .enabled
+        .then(|| config.default_model_for_profile(current_profile))
+        .flatten();
     let (refresh_result, cached_catalog_result, selection_result) =
         tokio::task::spawn_blocking(move || {
             let refresh = model_catalog::refresh_for_provider_with_capabilities(
@@ -456,11 +485,13 @@ async fn prepare_startup_model_catalog(
                 &runtime_selected_models,
                 &runtime_websocket_models,
                 &runtime_native_web_search_models,
+                &runtime_1m_context_models,
             );
             let cached_catalog = if refresh.is_err() {
-                model_catalog::prepare_cached_catalog_for_native_web_search(
+                model_catalog::prepare_cached_catalog_for_current_capabilities(
                     &catalog_home,
                     &runtime_native_web_search_models,
+                    &runtime_1m_context_models,
                 )
             } else {
                 Ok(false)
@@ -547,8 +578,10 @@ async fn prepare_startup_model_catalog(
     // including its context window and automatic-compaction defaults. Codey's
     // generated catalog remains necessary for third-party model filtering and
     // synthetic model entries.
-    let use_official_catalog =
-        should_install_codey_model_catalog(!has_third_party_route, catalog_available_for_runtime);
+    let use_official_catalog = should_install_codey_model_catalog(
+        use_builtin_official_catalog,
+        catalog_available_for_runtime,
+    );
     let model_state = match selection_result {
         Ok(state) => state,
         Err(error) => {
@@ -1128,12 +1161,21 @@ fn resolve_startup_profile(config: &CodeyConfig) -> Result<ProviderProfile> {
                 .find(|profile| profile.id == target.route_id)
                 .cloned()
         })
+        .or_else(|| {
+            config
+                .profiles
+                .iter()
+                .find(|profile| profile.enabled)
+                .cloned()
+        })
         .or_else(|| config.active_profile())
         .ok_or_else(|| anyhow::anyhow!("找不到全局默认模型所属的 Codex 线路"))?;
-    if current_profile.official_account && !config.official_account_available_this_launch {
-        anyhow::bail!("当前线路需要官方账号登录，但本次 Codex 启动未检测到可用的官方登录态");
+    if current_profile.enabled {
+        if current_profile.official_account && !config.official_account_available_this_launch {
+            anyhow::bail!("当前线路需要官方账号登录，但本次 Codex 启动未检测到可用的官方登录态");
+        }
+        current_profile.validate().map_err(anyhow::Error::msg)?;
     }
-    current_profile.validate().map_err(anyhow::Error::msg)?;
     Ok(current_profile)
 }
 

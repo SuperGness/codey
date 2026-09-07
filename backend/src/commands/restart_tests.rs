@@ -38,6 +38,12 @@ fn api_key_launch_rejects_new_or_active_official_account_routes() {
             .unwrap_err()
             .contains("不能启用")
     );
+
+    let mut disabled = activated;
+    disabled.profiles[1].enabled = false;
+    assert!(
+        validate_official_account_config_change(&previous_with_saved_official, &disabled).is_ok()
+    );
 }
 
 #[test]
@@ -304,6 +310,9 @@ fn renderer_model_catalog_keeps_supported_models_before_configured_models() {
             "model_display_name": "gpt-5.6-sol",
             "supported_reasoning_efforts": ["low", "medium", "high", "xhigh"],
             "default_reasoning_effort": "low",
+            "supports_1m_context": false,
+            "context_window": null,
+            "max_context_window": null,
         })
     );
     assert_eq!(
@@ -321,6 +330,9 @@ fn renderer_model_catalog_keeps_supported_models_before_configured_models() {
             "model_display_name": "provider-fast-coder",
             "supported_reasoning_efforts": ["low", "medium", "high", "xhigh"],
             "default_reasoning_effort": "low",
+            "supports_1m_context": false,
+            "context_window": null,
+            "max_context_window": null,
         })
     );
     assert_eq!(catalog["model_metadata"].as_array().unwrap().len(), 6);
@@ -424,6 +436,9 @@ fn renderer_model_catalog_routes_official_account_models_through_the_codey_route
             "model_display_name": "gpt-5.6-sol",
             "supported_reasoning_efforts": ["low", "medium"],
             "default_reasoning_effort": "low",
+            "supports_1m_context": false,
+            "context_window": null,
+            "max_context_window": null,
         })
     );
 }

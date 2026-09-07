@@ -443,6 +443,65 @@ test("native selection leaves Codex unchanged until a usable native catalog is a
   runtime.patch.dispose();
 });
 
+test("native selection clears mounted model lists only when explicitly requested", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol", "gpt-5.5"]);
+  const runtime = await loadPatch({
+    status: "ok",
+    native_selection_only: true,
+    clear_models: true,
+    models: [],
+    default_model: "",
+  }, [client], { queryClient, nativeSelectionOnly: true });
+
+  assert.deepEqual(runtime.patch.snapshot(), {
+    loaded: true,
+    models: [],
+    defaultModel: "",
+  });
+  assert.deepEqual(queryClient.models(), []);
+  assert.deepEqual(client.external.value.available_models, []);
+  runtime.patch.dispose();
+});
+
+test("native selection blocks model requests while the current provider is disabled", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    native_selection_only: true,
+    native_model_provider: "disabled-provider",
+    clear_models: true,
+    models: [],
+    default_model: "",
+  }, [statsigClient()], { nativeSelectionOnly: true });
+
+  for (const method of [
+    "thread/start",
+    "thread/resume",
+    "thread/fork",
+    "thread/settings/update",
+    "turn/start",
+  ]) {
+    const request = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request",
+      request: {
+        method,
+        params: { threadId: "disabled-thread", model: "stale-model" },
+      },
+    });
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(request), true, method);
+    assert.equal(request.request.params.model, "stale-model");
+  }
+  const clearSelection = {
+    type: "mcp-request",
+    request: {
+      method: "thread/settings/update",
+      params: { threadId: "disabled-thread", model: null },
+    },
+  };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(clearSelection), clearSelection);
+  runtime.patch.dispose();
+});
+
 test("runtime whitelist keeps Spark and removes unsupported channel models", async () => {
   const firstClient = statsigClient();
   const secondClient = statsigClient(["gpt-5.6-terra"]);
@@ -480,6 +539,20 @@ test("runtime whitelist keeps Spark and removes unsupported channel models", asy
   }
   assert.equal(expected.includes("gpt-5.3-codex"), false);
   assert.equal(expected.includes("gpt-5.6-terra"), false);
+  patch.dispose();
+});
+
+test("context capability changes update existing model descriptors", async () => {
+  const queryClient = activeModelQueryClient(["route/model"]);
+  const catalog = { status: "ok", models: ["route/model"], default_model: "route/model", model_metadata: [{ model: "route/model", supports_1m_context: true, context_window: 1_000_000, max_context_window: 1_000_000 }] };
+  const { patch } = await loadPatch(catalog, [statsigClient()], { queryClient });
+  assert.equal(queryClient.model("route/model").supports1MContext, true);
+  assert.equal(queryClient.model("route/model").contextWindow, 1_000_000);
+  assert.equal(queryClient.model("route/model").maxContextWindow, 1_000_000);
+  await patch.setCatalog({ ...catalog, model_metadata: [{ model: "route/model", supports_1m_context: false, context_window: null, max_context_window: null }] });
+  assert.equal(queryClient.model("route/model").supports1MContext, false);
+  assert.equal(queryClient.model("route/model").contextWindow, null);
+  assert.equal(queryClient.model("route/model").maxContextWindow, null);
   patch.dispose();
 });
 

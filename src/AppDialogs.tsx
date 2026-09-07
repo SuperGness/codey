@@ -45,6 +45,8 @@ type ModelPickerDialogProps = {
   thirdPartyModelOptions: string[];
   modelState: ModelState;
   draftModelSet: Set<string>;
+  draft1MModelSet: Set<string>;
+  onToggleDraft1MModel: (model: string, checked: boolean) => void;
   manualThirdPartyModelKeys: Set<string>;
   onOpenChange: (open: boolean) => void;
   onCustomModelInputChange: (model: string) => void;
@@ -68,6 +70,8 @@ function ModelPickerDialogComponent({
   thirdPartyModelOptions,
   modelState,
   draftModelSet,
+  draft1MModelSet,
+  onToggleDraft1MModel,
   manualThirdPartyModelKeys,
   onOpenChange,
   onCustomModelInputChange,
@@ -198,7 +202,14 @@ function ModelPickerDialogComponent({
                     <strong className="break-words text-xs font-semibold text-[#1d1d1f]">{model.displayName}</strong>
                     <small className="break-words text-[11px] text-[#86868b]">{model.slug}</small>
                   </div>
-                  <Badge className="ml-auto" variant="info">官方模型</Badge>
+                  <Checkbox
+                    checked={draft1MModelSet.has(modelKey(model.slug))}
+                    disabled={isBusy}
+                    onCheckedChange={(checked) =>
+                      onToggleDraft1MModel(model.slug, checked === true)}
+                    label="1M"
+                    aria-label={`${model.slug} 支持 1M 上下文`}
+                  />
                 </div>
               ))}
             </>
@@ -249,6 +260,14 @@ function ModelPickerDialogComponent({
                   aria-label={`当前线路支持 ${model}`}
                 />
                 <span className="min-w-0 flex-1 break-words text-xs font-semibold text-[#1d1d1f]">{model}</span>
+                <Checkbox
+                  checked={draft1MModelSet.has(modelKey(model))}
+                  disabled={isBusy}
+                  onCheckedChange={(checked) =>
+                    onToggleDraft1MModel(model, checked === true)}
+                  label="1M"
+                  aria-label={`${model} 支持 1M 上下文`}
+                />
                 {added && manual && (
                   <Button
                     variant="ghost"

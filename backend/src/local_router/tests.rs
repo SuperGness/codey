@@ -2,6 +2,28 @@ use super::*;
 use crate::config::ProviderProfile;
 
 #[test]
+fn disabled_route_has_no_request_target() {
+    let mut route = ProviderProfile::new("Disabled");
+    route.id = "disabled".into();
+    route.base_url = "https://example.com/v1".into();
+    route.enabled = false;
+    let mut config = CodeyConfig {
+        profiles: vec![route],
+        ..CodeyConfig::default()
+    };
+    config
+        .selected_models_by_provider
+        .insert("disabled".into(), vec!["model".into()]);
+    let snapshot = RouterSnapshot::from_config(&config);
+    assert!(snapshot.routes.is_empty());
+    assert!(
+        snapshot
+            .target_for_request("disabled/model", None, None)
+            .is_err()
+    );
+}
+
+#[test]
 fn fragmented_sse_preserves_frames_tail_and_scan_progress() {
     for large in [false, true] {
         let first = if large {

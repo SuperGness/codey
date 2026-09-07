@@ -118,6 +118,50 @@ fn third_party_provider_installs_the_codey_model_catalog_when_available() {
 }
 
 #[tokio::test]
+async fn disabled_official_route_installs_an_empty_model_catalog() {
+    let home = tempfile::tempdir().unwrap();
+    let mut official = ProviderProfile::new("Official");
+    official.source_provider_id = Some("openai".into());
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+    official.enabled = false;
+    official.normalize();
+    let config = CodeyConfig {
+        active_profile_id: official.id.clone(),
+        profiles: vec![official],
+        official_account_available_this_launch: true,
+        selected_models_by_provider: std::collections::BTreeMap::from([(
+            "openai".into(),
+            vec!["gpt-5.6-sol".into()],
+        )]),
+        upstream_models_by_provider: std::collections::BTreeMap::from([(
+            "openai".into(),
+            vec!["gpt-5.6-sol".into()],
+        )]),
+        default_model: "openai/gpt-5.6-sol".into(),
+        ..CodeyConfig::default()
+    }
+    .normalize();
+
+    let startup = prepare_startup_model_catalog(&config, &config.profiles[0], home.path())
+        .await
+        .unwrap();
+
+    assert!(startup.use_official_catalog);
+    assert!(startup.model_state.official_models.is_empty());
+    assert!(startup.model_state.third_party_models.is_empty());
+    assert!(runtime_default_model(&config, true, &startup.model_state).is_none());
+    let catalog: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(home.path().join(model_catalog::relative_path())).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(catalog["models"], serde_json::json!([]));
+
+    let mut unavailable = config;
+    unavailable.official_account_available_this_launch = false;
+    assert!(!resolve_startup_profile(&unavailable).unwrap().enabled);
+}
+
+#[tokio::test]
 async fn startup_fallback_removes_search_from_a_stale_chat_route_catalog() {
     let home = tempfile::tempdir().unwrap();
     let path = home.path().join(model_catalog::relative_path());

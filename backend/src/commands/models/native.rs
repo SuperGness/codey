@@ -78,6 +78,9 @@ pub(crate) fn native_model_state_for_provider(
     provider: &codex_provider::CurrentProvider,
     home: &std::path::Path,
 ) -> Result<model_catalog::ModelSelectionState, String> {
+    if config.provider_is_disabled(&provider.id) {
+        return Ok(model_catalog::ModelSelectionState::default());
+    }
     let upstream_models = config
         .upstream_models_by_provider
         .get(provider.id.as_str())

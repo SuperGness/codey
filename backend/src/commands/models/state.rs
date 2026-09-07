@@ -45,6 +45,17 @@ pub(crate) fn runtime_supports_current_routes_for_hot_reload(
     if !current.local_router_enabled {
         return true;
     }
+    let mut capability_config = current.clone();
+    for profile in &mut capability_config.profiles {
+        if !profile.enabled
+            && applied
+                .profiles
+                .iter()
+                .any(|previous| previous.id == profile.id && previous.enabled)
+        {
+            profile.enabled = true;
+        }
+    }
     // Model membership can be delivered to the picker and router immediately.
     // Keep startup capability differences separate from that delivery status.
     let route_capabilities = |config: &CodeyConfig| {
@@ -59,9 +70,9 @@ pub(crate) fn runtime_supports_current_routes_for_hot_reload(
             })
             .collect::<std::collections::BTreeSet<_>>()
     };
-    if route_capabilities(applied) != route_capabilities(current)
-        || applied.runtime_supports_websockets() != current.runtime_supports_websockets()
-        || remote_compaction_transport_requires_restart(applied, current)
+    if route_capabilities(applied) != route_capabilities(&capability_config)
+        || applied.runtime_supports_websockets() != capability_config.runtime_supports_websockets()
+        || remote_compaction_transport_requires_restart(applied, &capability_config)
     {
         return false;
     }
@@ -125,11 +136,33 @@ pub(crate) fn renderer_model_catalog_value(
     if !config.local_router_enabled {
         let mut catalog = renderer_native_model_catalog_value(model_state);
         catalog["legacy_model_aliases"] = json!(config.model_alias_history);
-        catalog["native_model_provider"] = json!(
-            codex_provider::current_provider(codex_home())
-                .map(|provider| provider.id)
-                .unwrap_or_default()
-        );
+        let provider_id = codex_provider::current_provider(codex_home())
+            .map(|provider| provider.id)
+            .unwrap_or_default();
+        catalog["native_model_provider"] = json!(provider_id.clone());
+        if config.provider_is_disabled(&provider_id) {
+            catalog["status"] = json!("ok");
+            catalog["clear_models"] = json!(true);
+        }
+        if let Some(metadata) = catalog["model_metadata"].as_array_mut() {
+            for entry in metadata {
+                let supported = config.model_supports_1m_context(
+                    &provider_id,
+                    entry["model"].as_str().unwrap_or_default(),
+                );
+                entry["supports_1m_context"] = json!(supported);
+                entry["context_window"] = if supported {
+                    json!(1_000_000)
+                } else {
+                    Value::Null
+                };
+                entry["max_context_window"] = if supported {
+                    json!(1_000_000)
+                } else {
+                    Value::Null
+                };
+            }
+        }
         return catalog;
     }
     let route_catalog = renderer_route_model_catalog(config, model_state);
@@ -154,6 +187,18 @@ pub(crate) fn renderer_model_catalog_value(
             metadata["route_provider_id"] = Value::String(entry.provider_id.clone());
             metadata["upstream_model"] = Value::String(entry.model.clone());
             metadata["model_display_name"] = Value::String(entry.model.clone());
+            let supported = config.model_supports_1m_context(&entry.provider_id, &entry.model);
+            metadata["supports_1m_context"] = json!(supported);
+            metadata["context_window"] = if supported {
+                json!(1_000_000)
+            } else {
+                Value::Null
+            };
+            metadata["max_context_window"] = if supported {
+                json!(1_000_000)
+            } else {
+                Value::Null
+            };
             metadata
         })
         .collect::<Vec<_>>();
@@ -162,7 +207,7 @@ pub(crate) fn renderer_model_catalog_value(
         .find(|entry| entry.is_default)
         .or_else(|| route_catalog.first())
         .map(|entry| entry.alias.clone())
-        .unwrap_or_else(|| model_state.default_model.clone());
+        .unwrap_or_default();
     let default_entry = route_catalog
         .iter()
         .find(|entry| entry.alias == default_model);
@@ -258,6 +303,9 @@ pub(crate) fn renderer_route_model_catalog(
     let mut entries = Vec::new();
     let mut aliases = HashSet::new();
     for profile in &config.profiles {
+        if !profile.enabled {
+            continue;
+        }
         if profile.official_account && !config.official_account_available_this_launch {
             continue;
         }

@@ -12,6 +12,9 @@ use crate::fs_util::atomic_write_private_with_parent as atomic_write;
 use crate::model_id;
 
 const MODEL_CATALOG_RELATIVE_PATH: &str = "model-catalogs/codey-official.json";
+const CONTEXT_1M_WINDOW: u64 = 1_000_000;
+const DEFAULT_CONTEXT_WINDOW: u64 = 272_000;
+const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
 pub(crate) const THIRD_PARTY_REASONING_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 const THIRD_PARTY_REASONING_EFFORT_ALLOWLIST: [&str; 6] =
     ["low", "medium", "high", "xhigh", "max", "ultra"];
@@ -175,6 +178,7 @@ pub fn refresh_for_provider(
         selected_models,
         None,
         None,
+        None,
     )
 }
 
@@ -193,6 +197,7 @@ pub(crate) fn refresh_for_provider_with_websocket_models(
         selected_models,
         Some(websocket_models),
         None,
+        None,
     )
 }
 
@@ -203,6 +208,7 @@ pub(crate) fn refresh_for_provider_with_capabilities(
     selected_models: &[String],
     websocket_models: &[String],
     native_web_search_models: &[String],
+    context_1m_models: &[String],
 ) -> Result<usize> {
     refresh_for_provider_with_transport_preferences(
         home,
@@ -211,6 +217,7 @@ pub(crate) fn refresh_for_provider_with_capabilities(
         selected_models,
         Some(websocket_models),
         Some(native_web_search_models),
+        Some(context_1m_models),
     )
 }
 
@@ -221,7 +228,14 @@ fn refresh_for_provider_with_transport_preferences(
     selected_models: &[String],
     websocket_models: Option<&[String]>,
     native_web_search_models: Option<&[String]>,
+    context_1m_models: Option<&[String]>,
 ) -> Result<usize> {
+    if !official_provider
+        && upstream_models.is_some_and(|models| models.is_empty())
+        && selected_models.is_empty()
+    {
+        return write_verified_catalog(home, &[]);
+    }
     let official_models = read_official_entries(home)?;
     if official_models
         .iter()
@@ -326,21 +340,20 @@ fn refresh_for_provider_with_transport_preferences(
     for model in &mut catalog_models {
         gate_synthetic_native_web_search(model, &native_web_search_model_keys);
     }
+    let context_1m_model_keys = context_1m_models
+        .unwrap_or_default()
+        .iter()
+        .map(|model| model_id::key(model))
+        .collect::<HashSet<_>>();
+    for model in &mut catalog_models {
+        configure_1m_context_window(model, &context_1m_model_keys);
+    }
     // Validate the selected models so a newly bundled model without a local
     // runtime template cannot block routes that still use older models.
     if !catalog_models.is_empty() {
         ensure_runtime_compatible_models(&catalog_models)?;
     }
-    let written = write_catalog(home, &catalog_models)?;
-    // Verify the bytes on disk instead of re-parsing the whole catalog; the
-    // serialized form already carries every slug in order.
-    let path = home.join(relative_path());
-    let on_disk = fs::read(&path)
-        .with_context(|| format!("读取 Codey 运行时模型目录失败：{}", path.display()))?;
-    if on_disk != written {
-        bail!("写入后的 Codey 模型目录与本次生成结果不一致");
-    }
-    Ok(catalog_models.len())
+    write_verified_catalog(home, &catalog_models)
 }
 
 #[cfg(test)]
@@ -511,13 +524,12 @@ pub fn is_available(home: &Path) -> bool {
 }
 
 /// Makes a previously generated catalog safe to reuse when the upstream model
-/// cache cannot be refreshed. Older catalogs may still advertise native Web
-/// Search for a route whose protocol or capability setting has since changed.
-/// This fallback is intentionally subtractive: it can remove stale capability
-/// metadata, but never invent support that was absent from the cached source.
-pub(crate) fn prepare_cached_catalog_for_native_web_search(
+/// cache cannot be refreshed. Older catalogs may still advertise capabilities
+/// whose route settings have since changed.
+pub(crate) fn prepare_cached_catalog_for_current_capabilities(
     home: &Path,
     native_web_search_models: &[String],
+    context_1m_models: &[String],
 ) -> Result<bool> {
     if !is_available(home) {
         return Ok(false);
@@ -528,10 +540,15 @@ pub(crate) fn prepare_cached_catalog_for_native_web_search(
         .iter()
         .map(|model| model_id::key(model))
         .collect::<HashSet<_>>();
+    let context_1m_model_keys = context_1m_models
+        .iter()
+        .map(|model| model_id::key(model))
+        .collect::<HashSet<_>>();
     let mut changed = false;
     for model in &mut models {
         let previous = model.clone();
         gate_cached_native_web_search(model, &allowed_model_keys);
+        configure_1m_context_window(model, &context_1m_model_keys);
         changed |= *model != previous;
     }
     if changed {
@@ -542,9 +559,10 @@ pub(crate) fn prepare_cached_catalog_for_native_web_search(
     let mut safely_gated_models = written_models.clone();
     for model in &mut safely_gated_models {
         gate_cached_native_web_search(model, &allowed_model_keys);
+        configure_1m_context_window(model, &context_1m_model_keys);
     }
     if safely_gated_models != written_models {
-        bail!("复用的 Codey 模型目录仍包含与当前线路不匹配的原生网页搜索能力");
+        bail!("复用的 Codey 模型目录仍包含与当前线路不匹配的模型能力");
     }
     Ok(true)
 }
@@ -1231,6 +1249,26 @@ fn gate_cached_native_web_search(model: &mut Value, allowed_model_keys: &HashSet
     }
 }
 
+fn configure_1m_context_window(model: &mut Value, allowed_model_keys: &HashSet<String>) {
+    let allowed = model
+        .get("slug")
+        .and_then(Value::as_str)
+        .is_some_and(|slug| allowed_model_keys.contains(&model_id::key(slug)));
+    if allowed {
+        model["context_window"] = json!(CONTEXT_1M_WINDOW);
+        model["max_context_window"] = json!(CONTEXT_1M_WINDOW);
+        model["effective_context_window_percent"] = json!(100);
+        model["auto_compact_token_limit"] = Value::Null;
+    } else if model.get("context_window").and_then(Value::as_u64) == Some(CONTEXT_1M_WINDOW) {
+        // A reused Codey catalog can be the only available template. Reset the
+        // exact override written above so clearing the setting cannot inherit it.
+        model["context_window"] = json!(DEFAULT_CONTEXT_WINDOW);
+        model["max_context_window"] = json!(DEFAULT_CONTEXT_WINDOW);
+        model["effective_context_window_percent"] = json!(DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT);
+        model["auto_compact_token_limit"] = Value::Null;
+    }
+}
+
 /// Writes the catalog and returns the exact bytes that now live on disk.
 fn write_catalog(home: &Path, models: &[Value]) -> Result<Vec<u8>> {
     let mut catalog = serde_json::to_vec_pretty(&json!({ "models": models }))
@@ -1243,6 +1281,19 @@ fn write_catalog(home: &Path, models: &[Value]) -> Result<Vec<u8>> {
     }
     atomic_write(&path, &catalog)?;
     Ok(catalog)
+}
+
+fn write_verified_catalog(home: &Path, models: &[Value]) -> Result<usize> {
+    let written = write_catalog(home, models)?;
+    // Verify the bytes on disk instead of re-parsing the whole catalog; the
+    // serialized form already carries every slug in order.
+    let path = home.join(relative_path());
+    let on_disk = fs::read(&path)
+        .with_context(|| format!("读取 Codey 运行时模型目录失败：{}", path.display()))?;
+    if on_disk != written {
+        bail!("写入后的 Codey 模型目录与本次生成结果不一致");
+    }
+    Ok(models.len())
 }
 
 fn read_catalog_value(path: &Path) -> Option<Value> {
@@ -2149,6 +2200,60 @@ mod tests {
     }
 
     #[test]
+    fn configured_models_receive_and_clear_the_1m_context_window() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let selected = vec!["route/gpt-5.6-sol".to_string(), "route/gpt-5.5".to_string()];
+
+        refresh_for_provider_with_capabilities(
+            home.path(),
+            false,
+            Some(&selected),
+            &selected,
+            &[],
+            &[],
+            &["route/gpt-5.6-sol".to_string()],
+        )
+        .unwrap();
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
+        )
+        .unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        let supported = models
+            .iter()
+            .find(|model| model["slug"] == "route/gpt-5.6-sol")
+            .unwrap();
+        assert_eq!(supported["context_window"], 1_000_000);
+        assert_eq!(supported["max_context_window"], 1_000_000);
+        assert_eq!(supported["effective_context_window_percent"], 100);
+        assert!(supported["auto_compact_token_limit"].is_null());
+
+        refresh_for_provider_with_capabilities(
+            home.path(),
+            false,
+            Some(&selected),
+            &selected,
+            &[],
+            &[],
+            &[],
+        )
+        .unwrap();
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
+        )
+        .unwrap();
+        let cleared = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["slug"] == "route/gpt-5.6-sol")
+            .unwrap();
+        assert_ne!(cleared["context_window"], 1_000_000);
+        assert_ne!(cleared["max_context_window"], 1_000_000);
+    }
+
+    #[test]
     fn websocket_preference_is_isolated_per_route_model_alias() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
@@ -2205,6 +2310,7 @@ mod tests {
             &selected,
             &[],
             &native_web_search_models,
+            &[],
         )
         .unwrap();
         let catalog: Value = serde_json::from_slice(
@@ -2234,7 +2340,7 @@ mod tests {
     }
 
     #[test]
-    fn cached_catalog_fallback_removes_stale_native_web_search_metadata() {
+    fn cached_catalog_fallback_removes_stale_capability_metadata() {
         let home = tempfile::tempdir().unwrap();
         write_cache_with_native_web_search(home.path());
         let selected = vec!["route-search/gpt-5.6-sol".to_string()];
@@ -2246,12 +2352,14 @@ mod tests {
             &selected,
             &[],
             &selected,
+            &selected,
         )
         .unwrap();
         let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
         let mut stale: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(stale["models"][0]["supports_search_tool"], true);
         assert!(stale["models"][0]["web_search_tool_type"].is_string());
+        assert_eq!(stale["models"][0]["context_window"], CONTEXT_1M_WINDOW);
         stale["models"][0]
             .as_object_mut()
             .unwrap()
@@ -2259,15 +2367,19 @@ mod tests {
         fs::write(&path, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
 
         assert!(
-            prepare_cached_catalog_for_native_web_search(home.path(), &[]).unwrap(),
+            prepare_cached_catalog_for_current_capabilities(home.path(), &[], &[]).unwrap(),
             "a valid cached catalog should remain usable after stale capabilities are removed"
         );
         let sanitized: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(sanitized["models"][0].get("supports_search_tool").is_none());
         assert!(sanitized["models"][0].get("web_search_tool_type").is_none());
+        assert_eq!(
+            sanitized["models"][0]["context_window"],
+            DEFAULT_CONTEXT_WINDOW
+        );
         let sanitized_bytes = fs::read(&path).unwrap();
 
-        assert!(prepare_cached_catalog_for_native_web_search(home.path(), &[]).unwrap());
+        assert!(prepare_cached_catalog_for_current_capabilities(home.path(), &[], &[]).unwrap());
         assert_eq!(fs::read(&path).unwrap(), sanitized_bytes);
     }
 

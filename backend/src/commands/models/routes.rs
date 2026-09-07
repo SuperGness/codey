@@ -48,6 +48,9 @@ pub(crate) fn config_after_route_deletion(
         .ok_or_else(|| "找不到要删除的线路".to_string())?;
     let mut config = previous.clone();
     config.remember_model_aliases();
+    config
+        .supports_1m_context_by_provider
+        .remove(&removed_provider_id);
     config.profiles.retain(|profile| profile.id != route_id);
     config
         .selected_models_by_provider
@@ -94,6 +97,9 @@ pub async fn fetch_route_models(
         .find(|profile| profile.id == route_id)
         .cloned()
         .ok_or_else(|| "找不到要同步模型的线路".to_string())?;
+    if !profile.enabled {
+        return Err("线路已禁用，不能同步模型".to_string());
+    }
     if profile.official_account {
         return Err("官方账号线路使用官方模型目录，无需同步第三方模型".to_string());
     }
@@ -180,6 +186,7 @@ pub(crate) fn config_with_provider_model_sync(
     preserve_declared_official_models(&mut supported_models, declared_models);
 
     let mut next = config.clone();
+    next.retain_1m_context_models(provider_id, &supported_models);
     set_provider_auto_review_support(&mut next, provider_id, supports_auto_review);
     next.upstream_models_by_provider
         .insert(provider_id.to_string(), supported_models);

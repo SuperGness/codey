@@ -224,6 +224,8 @@ export function App({
     draftAutoReviewSupported,
     setDraftAutoReviewSupported,
     draftModelSet,
+    draft1MModelSet,
+    toggleDraft1MModel,
     draftManualThirdPartyModelKeys,
     thirdPartyModelOptions,
     openModelPicker,
@@ -540,6 +542,19 @@ export function App({
     return saved;
   }
 
+  async function reorderRoute(sourceId: string, targetId: string) {
+    if (!config || dirty || isBusy || !config.localRouterEnabled) return;
+    const profiles = [...config.profiles];
+    const sourceIndex = profiles.findIndex((profile) => profile.id === sourceId);
+    const targetIndex = profiles.findIndex((profile) => profile.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
+    profiles.splice(targetIndex, 0, profiles.splice(sourceIndex, 1)[0]);
+    await runOperation("reorder-routes", async () => {
+      await persist({ ...config, profiles });
+      setNotice({ tone: "success", text: "线路顺序已保存" });
+    });
+  }
+
   async function deleteRoute(routeId: string) {
     if (!config || dirty) return;
     await runOperation("delete-route", async () => {
@@ -656,6 +671,8 @@ export function App({
     routeId: string,
     models: string[],
     showAccountUsageInHeader: boolean,
+    supports1MContextModels: string[],
+    enabled: boolean,
   ) {
     if (!config) return false;
     const profile = config.profiles.find((candidate) => candidate.id === routeId);
@@ -671,18 +688,18 @@ export function App({
         modelState: ModelState;
         restartRequired?: boolean;
         modelHotReloaded?: boolean;
-      }>("save_official_route_models", { routeId, models });
+      }>("save_official_route_models", {
+        routeId,
+        models,
+        supports1MContextModels,
+        enabled,
+        showAccountUsageInHeader,
+      });
       applyRouteResult(modelResult);
-      const result = modelResult.config.showAccountUsageInHeader === showAccountUsageInHeader
-        ? modelResult
-        : await persist({
-            ...modelResult.config,
-            showAccountUsageInHeader,
-          });
       saved = true;
       setNotice({
-        tone: result.restartRequired ? "info" : "success",
-        text: result.restartRequired
+        tone: modelResult.restartRequired ? "info" : "success",
+        text: modelResult.restartRequired
           ? "官方账号设置已保存，重启 Codex 后完全生效"
           : "官方账号设置已保存，模型与额度展示已更新",
       });
@@ -952,6 +969,7 @@ export function App({
     (checked: boolean) => setSubagentOptimization(checked),
   );
   const handleSaveRoute = useStableEvent(saveRoute);
+  const handleReorderRoute = useStableEvent(reorderRoute);
   const handleDeleteRoute = useStableEvent(requestDeleteRoute);
   const handleFetchRouteModels = useStableEvent((route: Profile) => {
     void fetchRouteModels(route);
@@ -1283,6 +1301,7 @@ export function App({
               onToggleLocalRouter={handleToggleLocalRouter}
               onToggleRouteRequestLog={handleToggleRouteRequestLog}
               onSaveRoute={handleSaveRoute}
+              onReorderRoute={handleReorderRoute}
               onDeleteRoute={handleDeleteRoute}
               onFetchRouteModels={handleFetchRouteModels}
               onToggleAccountUsage={handleToggleAccountUsage}
@@ -1382,6 +1401,8 @@ export function App({
         thirdPartyModelOptions={thirdPartyModelOptions}
         modelState={modelEditorState}
         draftModelSet={draftModelSet}
+        draft1MModelSet={draft1MModelSet}
+        onToggleDraft1MModel={toggleDraft1MModel}
         manualThirdPartyModelKeys={draftManualThirdPartyModelKeys}
         onOpenChange={handleModelPickerOpenChange}
         onCustomModelInputChange={updateCustomModelInput}

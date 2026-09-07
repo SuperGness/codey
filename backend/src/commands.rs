@@ -103,7 +103,6 @@ use crate::error_log;
 use crate::launcher::{CODEX_APP_NOT_FOUND_ERROR, CODEX_APP_PATH_INVALID_ERROR};
 use crate::launcher::{CodeyRuntime, RuntimeModelConfig, RuntimeSubagentConfig};
 use crate::message_delete::delete_messages_persistently;
-#[cfg(test)]
 use crate::model_catalog;
 use crate::model_id;
 use crate::notifications::NotificationChannelConfig;
@@ -578,6 +577,7 @@ fn local_route_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> boo
         || previous.declared_official_models_by_provider
             != next.declared_official_models_by_provider
         || previous.upstream_models_by_provider != next.upstream_models_by_provider
+        || previous.supports_1m_context_by_provider != next.supports_1m_context_by_provider
         || previous.default_model != next.default_model
         || previous.initial_route_import_completed != next.initial_route_import_completed
 }
@@ -604,7 +604,7 @@ pub(super) fn validate_official_account_config_change(
     }
     if next
         .active_profile()
-        .is_some_and(|profile| profile.official_account)
+        .is_some_and(|profile| profile.enabled && profile.official_account)
     {
         return Err(
             "本次 Codex 由 API Key 线路启动，不能启用官方账号线路；请先在 Codex 中完成官方账号登录并重新启动 Codey"
@@ -741,7 +741,10 @@ fn apply_unavailable_official_probe(
     mut next: CodeyConfig,
     reason: String,
 ) -> Result<CodeyConfig, String> {
-    let has_official_route = next.profiles.iter().any(|profile| profile.official_account);
+    let has_official_route = next
+        .profiles
+        .iter()
+        .any(|profile| profile.enabled && profile.official_account);
     let fallback = if next.has_third_party_route() {
         "third_party_route"
     } else if has_official_route {
@@ -819,12 +822,15 @@ fn official_auth_route_diagnostics(
 }
 
 fn should_attempt_official_launch_when_auth_unknown(config: &CodeyConfig) -> bool {
+    if !config.profiles.iter().any(|profile| profile.enabled) {
+        return false;
+    }
     if config.looks_like_empty_default_route() {
         return true;
     }
     if config
         .active_profile()
-        .is_some_and(|profile| profile.official_account)
+        .is_some_and(|profile| profile.enabled && profile.official_account)
     {
         return true;
     }
@@ -835,7 +841,8 @@ fn should_attempt_official_launch_when_auth_unknown(config: &CodeyConfig) -> boo
         return false;
     };
     config.profiles.iter().any(|profile| {
-        profile.official_account
+        profile.enabled
+            && profile.official_account
             && default_model
                 .starts_with(&crate::local_router::model_alias(profile.provider_id(), ""))
     })
@@ -896,6 +903,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             optional_argument::<Vec<String>>(&args, "deletedThirdPartyModels"),
             optional_argument::<bool>(&args, "supportsAutoReview"),
             optional_argument::<Option<String>>(&args, "routeId").map(Option::flatten),
+            optional_argument::<Vec<String>>(&args, "supports1MContextModels"),
         ) {
             (
                 Ok(official_models),
@@ -904,6 +912,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 Ok(deleted_third_party_models),
                 Ok(supports_auto_review),
                 Ok(route_id),
+                Ok(supports_1m_context_models),
             ) => {
                 save_selected_models(
                     state,
@@ -913,15 +922,17 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                     deleted_third_party_models.unwrap_or_default(),
                     supports_auto_review,
                     route_id,
+                    supports_1m_context_models,
                 )
                 .await
             }
-            (Err(error), _, _, _, _, _)
-            | (_, Err(error), _, _, _, _)
-            | (_, _, Err(error), _, _, _)
-            | (_, _, _, Err(error), _, _)
-            | (_, _, _, _, Err(error), _)
-            | (_, _, _, _, _, Err(error)) => Err(error),
+            (Err(error), _, _, _, _, _, _)
+            | (_, Err(error), _, _, _, _, _)
+            | (_, _, Err(error), _, _, _, _)
+            | (_, _, _, Err(error), _, _, _)
+            | (_, _, _, _, Err(error), _, _)
+            | (_, _, _, _, _, Err(error), _)
+            | (_, _, _, _, _, _, Err(error)) => Err(error),
         },
         "save_default_model" => match (
             string_argument(&args, "model"),
@@ -933,9 +944,26 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         "save_official_route_models" => match (
             string_argument(&args, "routeId"),
             argument::<Vec<String>>(&args, "models"),
+            optional_argument::<Vec<String>>(&args, "supports1MContextModels"),
+            optional_argument::<bool>(&args, "enabled"),
+            optional_argument::<bool>(&args, "showAccountUsageInHeader"),
         ) {
-            (Ok(route_id), Ok(models)) => save_official_route_models(state, route_id, models).await,
-            (Err(error), _) | (_, Err(error)) => Err(error),
+            (Ok(route_id), Ok(models), Ok(context_models), Ok(enabled), Ok(show_usage)) => {
+                save_official_route_models(
+                    state,
+                    route_id,
+                    models,
+                    context_models,
+                    enabled,
+                    show_usage,
+                )
+                .await
+            }
+            (Err(error), _, _, _, _)
+            | (_, Err(error), _, _, _)
+            | (_, _, Err(error), _, _)
+            | (_, _, _, Err(error), _)
+            | (_, _, _, _, Err(error)) => Err(error),
         },
         "runtime_status" => {
             let refresh_injection_status = args
@@ -1261,6 +1289,7 @@ pub async fn save_codey_config(
 
 struct CodeyConfigSaveInput {
     config: CodeyConfig,
+    supports_1m_context_present: bool,
     local_router_enabled_present: bool,
     route_request_log_present: bool,
     subagent_roles_present: bool,
@@ -1273,6 +1302,7 @@ impl CodeyConfigSaveInput {
     fn complete(config: CodeyConfig) -> Self {
         Self {
             config,
+            supports_1m_context_present: true,
             local_router_enabled_present: true,
             route_request_log_present: true,
             subagent_roles_present: true,
@@ -1291,6 +1321,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         .as_object()
         .ok_or_else(|| "参数 config 无效：必须是 object".to_string())?;
     let local_router_enabled_present = fields.contains_key("localRouterEnabled");
+    let supports_1m_context_present = fields.contains_key("supports1MContextByProvider");
     let route_request_log_present = fields.contains_key("routeRequestLog");
     let subagent_roles_present = fields.contains_key("subagentRoles");
     let subagent_model_present = fields.contains_key("subagentModel");
@@ -1299,6 +1330,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         .map_err(|error| format!("参数 config 无效：{error}"))?;
     Ok(CodeyConfigSaveInput {
         config,
+        supports_1m_context_present,
         local_router_enabled_present,
         route_request_log_present,
         subagent_roles_present,
@@ -1330,6 +1362,7 @@ async fn save_codey_config_locked(
 ) -> Result<SavedCodeyConfig, String> {
     let CodeyConfigSaveInput {
         config: mut config_input,
+        supports_1m_context_present,
         local_router_enabled_present,
         route_request_log_present,
         subagent_roles_present,
@@ -1344,6 +1377,55 @@ async fn save_codey_config_locked(
     config.remember_model_aliases();
     config.profiles = merge_profile_secrets(config_input.profiles, &previous)?;
     config.active_profile_id = config_input.active_profile_id;
+    if supports_1m_context_present
+        && config_input.supports_1m_context_by_provider != previous.supports_1m_context_by_provider
+    {
+        for (provider_id, models) in &config_input.supports_1m_context_by_provider {
+            let profile = config
+                .profiles
+                .iter()
+                .find(|profile| profile.provider_id() == provider_id)
+                .ok_or_else(|| format!("找不到 1M 上下文配置所属线路：{provider_id}"))?;
+            let available = if profile.official_account {
+                model_catalog::default_official_model_slugs()
+            } else {
+                config
+                    .upstream_models_by_provider
+                    .get(provider_id)
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        config
+                            .selected_models_by_provider
+                            .get(provider_id)
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .chain(
+                        config
+                            .manual_third_party_models_by_provider
+                            .get(provider_id)
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .cloned()
+                    .collect()
+            };
+            models::set_supports_1m_context_models(
+                &mut config,
+                provider_id,
+                Some(models),
+                &available,
+            )?;
+        }
+        config
+            .supports_1m_context_by_provider
+            .retain(|provider_id, _| {
+                config_input
+                    .supports_1m_context_by_provider
+                    .contains_key(provider_id)
+            });
+    }
     if local_router_enabled_present {
         config.local_router_enabled = config_input.local_router_enabled;
     }
@@ -1572,6 +1654,9 @@ fn retain_route_scoped_config(config: &mut CodeyConfig) {
                 .to_string()
         })
         .collect::<std::collections::HashSet<_>>();
+    config
+        .supports_1m_context_by_provider
+        .retain(|provider_id, _| provider_ids.contains(provider_id));
     config
         .selected_models_by_provider
         .retain(|provider_id, _| provider_ids.contains(provider_id));
@@ -2136,7 +2221,7 @@ fn account_usage_enabled_for_config(config: &CodeyConfig) -> bool {
     config
         .profiles
         .iter()
-        .any(|profile| profile.official_account)
+        .any(|profile| profile.enabled && profile.official_account)
 }
 
 #[cfg(test)]

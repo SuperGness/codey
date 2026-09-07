@@ -23,6 +23,7 @@ import {
   withoutModelId,
 } from "./modelIds";
 import { buildSubagentModelOptions } from "./subagentModels";
+import { routeProviderId } from "./modelRoutes";
 import { modelSelectionNotice, type ModelRuntimeUpdate } from "./modelSelectionNotice";
 
 const MAX_MODEL_ID_BYTES = 512;
@@ -69,6 +70,11 @@ export function useModelSelection({
   const [modelPickerRouteId, setModelPickerRouteId] = useState<string | null>(null);
   const [modelPickerState, setModelPickerState] = useState<ModelState | null>(null);
   const [draftModels, setDraftModels] = useState<string[]>([]);
+  const [draft1MModels, setDraft1MModels] = useState<string[]>([]);
+  const draft1MModelSet = useMemo(() => new Set(draft1MModels.map(modelKey)), [draft1MModels]);
+  const toggleDraft1MModel = useCallback((model: string, checked: boolean) => {
+    setDraft1MModels((current) => checked ? uniqueModelIds([...current, model]) : withoutModelId(current, model));
+  }, []);
   const [draftManualThirdPartyModels, setDraftManualThirdPartyModels] = useState<string[]>([]);
   const [deletedThirdPartyModels, setDeletedThirdPartyModels] = useState<string[]>([]);
   const [customModelInput, setCustomModelInput] = useState("");
@@ -149,6 +155,9 @@ export function useModelSelection({
     autoReviewSupported = false,
   ) => {
     setDraftModels(pickerSelection(state));
+    const profile = config?.profiles.find((candidate) => candidate.id === (routeId ?? config.activeProfileId));
+    const providerId = routeId && profile ? routeProviderId(profile) : currentProvider?.id || (profile ? routeProviderId(profile) : "");
+    setDraft1MModels(config?.supports1MContextByProvider?.[providerId] || []);
     setDraftManualThirdPartyModels(state.manualThirdPartyModels);
     setDeletedThirdPartyModels([]);
     setCustomModelInput("");
@@ -158,7 +167,7 @@ export function useModelSelection({
     setModelPickerState(state);
     setDraftAutoReviewSupported(autoReviewSupported);
     setModelPickerVisible(true);
-  }, []);
+  }, [config, currentProvider]);
 
   const toggleDraftModel = useCallback((model: string, checked: boolean) => {
     if (checked) {
@@ -174,11 +183,17 @@ export function useModelSelection({
         : withoutModelId(current, model),
     );
     if (!checked) {
+      if (
+        !includesModelId(modelEditorState.upstreamModels, model) &&
+        !officialSlugKeys.has(modelKey(model))
+      ) {
+        setDraft1MModels((current) => withoutModelId(current, model));
+      }
       setDraftManualThirdPartyModels((current) =>
         withoutModelId(current, model),
       );
     }
-  }, []);
+  }, [modelEditorState.upstreamModels, officialSlugKeys]);
 
   const updateCustomModelInput = useCallback((value: string) => {
     setCustomModelInput(value);
@@ -252,6 +267,7 @@ export function useModelSelection({
     const normalizedKey = modelKey(normalized);
     const wasManual = draftManualThirdPartyModelKeys.has(normalizedKey);
     if (!wasManual) return;
+    setDraft1MModels((current) => withoutModelId(current, normalized));
     setDraftModels((current) =>
       withoutModelId(current, normalized),
     );
@@ -288,6 +304,11 @@ export function useModelSelection({
       manualThirdPartyModels,
       deletedThirdPartyModels: deletedModels,
       supportsAutoReview,
+      supports1MContextModels: draft1MModels.filter(
+        (model) =>
+          includesModelId(modelEditorState.officialModelIds, model) ||
+          includesModelId(thirdPartyModelOptions, model),
+      ),
       ...(modelPickerRouteId == null ? {} : { routeId: modelPickerRouteId }),
     });
     setPersistedConfig(result.config);
@@ -308,6 +329,9 @@ export function useModelSelection({
     setPersistedConfig,
     setStatus,
     modelPickerRouteId,
+    draft1MModels,
+    modelEditorState.officialModelIds,
+    thirdPartyModelOptions,
   ]);
 
   const saveModelSelection = useCallback(async () => {
@@ -354,6 +378,8 @@ export function useModelSelection({
     draftAutoReviewSupported,
     setDraftAutoReviewSupported,
     draftModelSet,
+    draft1MModelSet,
+    toggleDraft1MModel,
     draftManualThirdPartyModelKeys,
     manualThirdPartyModelKeys,
     thirdPartyModelOptions,

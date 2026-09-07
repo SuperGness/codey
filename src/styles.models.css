@@ -120,6 +120,20 @@
     0 8px 16px -8px rgba(0, 122, 255, 0.08);
 }
 
+.route-list-item.is-disabled {
+  border-color: rgba(215, 0, 21, 0.35);
+  background: #fff5f5;
+}
+
+.route-list-item.is-disabled .route-item-names strong {
+  color: #d70015;
+}
+
+.route-list-item.is-drop-target {
+  outline: 2px solid #007aff;
+  outline-offset: 2px;
+}
+
 .route-item-header {
   display: flex;
   align-items: center;

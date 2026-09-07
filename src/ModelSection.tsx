@@ -5,6 +5,7 @@ import {
   IconEdit as Edit,
   IconEye,
   IconEyeOff,
+  IconGripVertical,
   IconInfoCircle,
   IconListDetails,
   IconPlus as Plus,
@@ -54,6 +55,7 @@ type ModelSectionProps = {
   onToggleLocalRouter: (checked: boolean) => void;
   onToggleRouteRequestLog: (checked: boolean) => void;
   onSaveRoute: (route: Profile) => Promise<boolean>;
+  onReorderRoute: (sourceId: string, targetId: string) => Promise<void>;
   onDeleteRoute: (routeId: string) => void;
   onFetchRouteModels: (route: Profile) => void;
   onToggleAccountUsage?: (checked: boolean) => void;
@@ -61,6 +63,8 @@ type ModelSectionProps = {
     routeId: string,
     models: string[],
     showAccountUsageInHeader: boolean,
+    supports1MContextModels: string[],
+    enabled: boolean,
   ) => Promise<boolean>;
   onSetDefaultModel: (routeId: string, model: string) => void;
 };
@@ -84,6 +88,7 @@ function createRoute(profiles: Profile[]): Profile {
   const id = `route-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   return {
     id,
+    enabled: true,
     name: newRouteName(profiles),
     shortName: "",
     baseUrl: "",
@@ -147,6 +152,7 @@ function ModelSectionComponent({
   onToggleLocalRouter,
   onToggleRouteRequestLog,
   onSaveRoute,
+  onReorderRoute,
   onDeleteRoute,
   onFetchRouteModels,
   onToggleAccountUsage,
@@ -154,10 +160,13 @@ function ModelSectionComponent({
   onSetDefaultModel,
 }: ModelSectionProps) {
   const [routeDialogOpen, setRouteDialogOpen] = useState(false);
+  const [draggedRouteId, setDraggedRouteId] = useState<string | null>(null);
+  const [dropRouteId, setDropRouteId] = useState<string | null>(null);
   const [routeDraft, setRouteDraft] = useState<Profile | null>(null);
   const [routeValidationAttempted, setRouteValidationAttempted] = useState(false);
   const [routeApiKeyVisible, setRouteApiKeyVisible] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
+  const [official1MModelDraft, setOfficial1MModelDraft] = useState<string[]>([]);
   const routeConfigReadOnly = !config.localRouterEnabled;
 
   useEffect(() => {
@@ -175,6 +184,7 @@ function ModelSectionComponent({
         routeProviderId(profile) === currentProvider.id,
     );
     const official = currentProvider.official;
+    if (matchingProfile?.enabled === false) return null;
     return {
       id: matchingProfile?.id || currentProvider.id,
       name:
@@ -202,7 +212,7 @@ function ModelSectionComponent({
       if (routeConfigReadOnly) return nativeProfile ? [nativeProfile] : [];
       return config.profiles.filter(
         (profile) =>
-          profile.authMode !== "officialAccount" || officialAccountAvailable,
+          profile.enabled === false || profile.authMode !== "officialAccount" || officialAccountAvailable,
       );
     },
     [config.profiles, nativeProfile, officialAccountAvailable, routeConfigReadOnly],
@@ -231,7 +241,7 @@ function ModelSectionComponent({
   );
   const modelGroups = useMemo<RouteModelGroup[]>(
     () =>
-      visibleProfiles.map((profile) => {
+      visibleProfiles.filter((profile) => profile.enabled !== false).map((profile) => {
         const providerId = routeProviderId(profile);
         const official = profile.authMode === "officialAccount";
         const configuredModels = config.selectedModelsByProvider[providerId] || [];
@@ -300,6 +310,7 @@ function ModelSectionComponent({
     if (official) {
       const providerId = routeProviderId(profile);
       const configuredModels = config.selectedModelsByProvider[providerId] || [];
+      setOfficial1MModelDraft(config.supports1MContextByProvider?.[providerId] || []);
       setOfficialModelDraft(
         configuredModels.length > 0
           ? configuredModels
@@ -332,6 +343,8 @@ function ModelSectionComponent({
               routeDraft.id,
               officialModelDraft,
               showAccountUsageInHeader,
+              official1MModelDraft,
+              routeDraft.enabled !== false,
             )
           : true)
       : await onSaveRoute(routeDraft);
@@ -432,11 +445,49 @@ function ModelSectionComponent({
                 const isOfficial = profile.authMode === "officialAccount";
                 return (
                   <div
-                    className="route-list-item"
+                    className={`route-list-item${profile.enabled === false ? " is-disabled" : ""}${dropRouteId === profile.id ? " is-drop-target" : ""}`}
                     key={profile.id}
+                    onDragOver={(event) => {
+                      if (!draggedRouteId || draggedRouteId === profile.id || isBusy || dirty) return;
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                      setDropRouteId(profile.id);
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      if (draggedRouteId) void onReorderRoute(draggedRouteId, profile.id);
+                      setDraggedRouteId(null);
+                      setDropRouteId(null);
+                    }}
                   >
                     <div className="route-item-header">
                       <div className="route-item-title-wrap">
+                        <button
+                          type="button"
+                          className="cursor-grab text-gray-500 active:cursor-grabbing disabled:cursor-default"
+                          disabled={isBusy || dirty}
+                          draggable={!isBusy && !dirty}
+                          aria-label={`调整线路 ${profile.name} 的顺序`}
+                          title="拖动排序，也可按上下方向键调整"
+                          onDragStart={(event) => {
+                            event.dataTransfer.setData("text/plain", profile.id);
+                            event.dataTransfer.effectAllowed = "move";
+                            setDraggedRouteId(profile.id);
+                          }}
+                          onDragEnd={() => {
+                            setDraggedRouteId(null);
+                            setDropRouteId(null);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                            event.preventDefault();
+                            const index = visibleProfiles.findIndex((route) => route.id === profile.id);
+                            const target = visibleProfiles[index + (event.key === "ArrowUp" ? -1 : 1)];
+                            if (target) void onReorderRoute(profile.id, target.id);
+                          }}
+                        >
+                          <IconGripVertical size={15} aria-hidden="true" />
+                        </button>
                         <div
                           className={`route-item-icon-pill ${isOfficial ? "official" : "custom"}`}
                           aria-hidden="true"
@@ -464,19 +515,19 @@ function ModelSectionComponent({
                           </small>
                         </div>
                       </div>
-                      {!isOfficial && (
-                        <div className="route-item-actions">
-                          <Button
-                            className="route-action-button route-edit-button"
-                            variant="ghost"
-                            size="xs"
-                            disabled={routeConfigReadOnly || isBusy || dirty}
-                            onClick={() => openEditRouteDialog(profile)}
-                            aria-label={`编辑线路 ${profile.name}`}
-                            title={`编辑线路 ${profile.name}`}
-                          >
-                            <Edit size={13} aria-hidden="true" />
-                          </Button>
+                      <div className="route-item-actions">
+                        <Button
+                          className="route-action-button route-edit-button"
+                          variant="ghost"
+                          size="xs"
+                          disabled={routeConfigReadOnly || isBusy || dirty}
+                          onClick={() => openEditRouteDialog(profile)}
+                          aria-label={`编辑线路 ${profile.name}`}
+                          title={`编辑线路 ${profile.name}`}
+                        >
+                          <Edit size={13} aria-hidden="true" />
+                        </Button>
+                        {!isOfficial && (
                           <Button
                             className="route-action-button route-delete-button"
                             variant="ghost"
@@ -497,11 +548,14 @@ function ModelSectionComponent({
                           >
                             <Trash size={13} aria-hidden="true" />
                           </Button>
-                        </div>
-                      )}
+                        )}
+                      </div>
                     </div>
                     <div className="route-item-footer">
                       <div className="route-item-badges">
+                        {profile.enabled === false && (
+                          <span className="text-xs font-semibold text-[#d70015]">已禁用</span>
+                        )}
                         <Badge variant="secondary" size="xs">
                           {group?.models.length || 0} 模型
                         </Badge>
@@ -518,6 +572,8 @@ function ModelSectionComponent({
                           >
                             {routeConfigReadOnly
                               ? "配置只读"
+                              : profile.enabled === false
+                                ? "未接入路由"
                               : group?.models.length
                                 ? "已接入路由"
                                 : "待配置模型"}
@@ -787,6 +843,16 @@ function ModelSectionComponent({
               </DialogDescription>
             </DialogHeader>
 
+            <div className="route-option-item">
+              <strong>启用线路</strong>
+              <Switch
+                checked={routeDraft.enabled !== false}
+                disabled={isBusy}
+                onCheckedChange={(enabled) => updateRouteDraft({ enabled })}
+                aria-label="启用线路"
+              />
+            </div>
+
             {routeDraft.authMode === "officialAccount" ? (
               <div className="official-route-editor">
                 <div className="official-route-summary">
@@ -811,7 +877,7 @@ function ModelSectionComponent({
                     {officialCatalog.map((model) => {
                       const checked = officialModelDraftKeys.has(modelKey(model));
                       return (
-                        <label className="official-model-option" key={model}>
+                        <div className="official-model-option" key={model}>
                           <Checkbox
                             checked={checked}
                             disabled={isBusy || (checked && officialModelDraft.length <= 1)}
@@ -832,7 +898,21 @@ function ModelSectionComponent({
                             </strong>
                             <small>{model}</small>
                           </span>
-                        </label>
+                          <Checkbox
+                            checked={official1MModelDraft.some((candidate) =>
+                              modelIdsEqual(candidate, model))}
+                            disabled={isBusy}
+                            onCheckedChange={(nextChecked) =>
+                              setOfficial1MModelDraft((current) =>
+                                nextChecked === true
+                                  ? uniqueModelIds([...current, model])
+                                  : current.filter((candidate) =>
+                                      !modelIdsEqual(candidate, model)),
+                              )}
+                            label="1M"
+                            aria-label={`${model} 支持 1M 上下文`}
+                          />
+                        </div>
                       );
                     })}
                   </div>

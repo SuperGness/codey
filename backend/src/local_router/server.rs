@@ -503,6 +503,9 @@ impl RouterSnapshot {
         let mut aliases = HashMap::new();
         let mut raw_models = HashMap::<String, Vec<AliasTarget>>::new();
         for profile in &config.profiles {
+            if !profile.enabled {
+                continue;
+            }
             if profile.official_account && !config.official_account_available_this_launch {
                 continue;
             }

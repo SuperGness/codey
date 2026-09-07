@@ -241,6 +241,8 @@ fn sync_provider_profile(
         next.profiles = vec![profile];
         next.selected_models_by_provider
             .remove(&placeholder_provider_id);
+        next.supports_1m_context_by_provider
+            .remove(&placeholder_provider_id);
         next.manual_third_party_models_by_provider
             .remove(&placeholder_provider_id);
         next.declared_official_models_by_provider
@@ -254,6 +256,7 @@ fn sync_provider_profile(
         // has a different runtime provider id.
         active_profile_id = existing.id.clone();
         let mut replacement = profile;
+        replacement.enabled = existing.enabled;
         replacement.short_name.clone_from(&existing.short_name);
         if replacement.id != active_profile_id {
             replacement.id = active_profile_id.clone();
@@ -309,6 +312,7 @@ fn profile_from_provider(
 ) -> ProviderProfile {
     ProviderProfile {
         id: provider.id.clone(),
+        enabled: true,
         name: provider.name.clone(),
         short_name: String::new(),
         base_url: provider.base_url.clone(),

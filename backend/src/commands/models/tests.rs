@@ -1,5 +1,70 @@
 use super::*;
 
+#[test]
+fn context_capability_validates_membership_and_sync_preserves_intersection() {
+    let home = tempfile::tempdir().unwrap();
+    let route = configured_route("route", Some("kept"));
+    let mut config = CodeyConfig {
+        profiles: vec![route],
+        active_profile_id: "route".into(),
+        ..CodeyConfig::default()
+    };
+    let available = vec!["kept".into(), "removed".into()];
+    set_supports_1m_context_models(&mut config, "route", Some(&available), &available).unwrap();
+    assert!(
+        set_supports_1m_context_models(&mut config, "route", Some(&["unknown".into()]), &available)
+            .is_err()
+    );
+    let config = config_with_provider_model_sync(
+        &config,
+        "route",
+        vec!["kept".into(), "new".into()],
+        home.path(),
+    );
+    assert_eq!(
+        config.supports_1m_context_by_provider["route"],
+        vec!["kept"]
+    );
+}
+
+#[test]
+fn disabled_route_is_absent_from_renderer_catalog() {
+    let mut route = configured_route("route", Some("model"));
+    route.enabled = false;
+    let config = CodeyConfig {
+        profiles: vec![route],
+        selected_models_by_provider: BTreeMap::from([("route".into(), vec!["model".into()])]),
+        ..CodeyConfig::default()
+    };
+    assert!(renderer_route_model_catalog(&config, &Default::default()).is_empty());
+    assert_eq!(current_model_state(&config).unwrap(), Default::default());
+}
+
+#[test]
+fn model_state_fallback_reads_the_enabled_routes_models() {
+    let mut disabled = configured_route("disabled", Some("old-model"));
+    disabled.enabled = false;
+    let enabled = configured_route("enabled", Some("live-model"));
+    let config = CodeyConfig {
+        active_profile_id: disabled.id.clone(),
+        profiles: vec![disabled, enabled],
+        selected_models_by_provider: BTreeMap::from([
+            ("disabled".into(), vec!["old-model".into()]),
+            ("enabled".into(), vec!["live-model".into()]),
+        ]),
+        upstream_models_by_provider: BTreeMap::from([
+            ("disabled".into(), vec!["old-model".into()]),
+            ("enabled".into(), vec!["live-model".into()]),
+        ]),
+        ..CodeyConfig::default()
+    };
+
+    let state = current_model_state(&config).unwrap();
+
+    assert_eq!(state.third_party_models, ["live-model"]);
+    assert_eq!(state.upstream_models, ["live-model"]);
+}
+
 fn configured_route(id: &str, model: Option<&str>) -> ProviderProfile {
     let mut profile = ProviderProfile::new(id);
     profile.id = id.to_string();
@@ -62,6 +127,40 @@ fn native_model_state_and_subagent_defaults_follow_only_the_current_provider() {
             .values()
             .all(|selection| selection.model == "model-a")
     );
+}
+
+#[test]
+fn disabled_native_provider_returns_an_explicit_empty_renderer_catalog() {
+    let home = tempfile::tempdir().unwrap();
+    let mut route = configured_route("route-a", Some("model-a"));
+    route.enabled = false;
+    let provider = codex_provider::CurrentProvider {
+        id: route.id.clone(),
+        name: route.name.clone(),
+        official: false,
+        supports_remote_compaction: false,
+        base_url: route.base_url.clone(),
+    };
+    let config = CodeyConfig {
+        local_router_enabled: false,
+        profiles: vec![route],
+        selected_models_by_provider: BTreeMap::from([(
+            provider.id.clone(),
+            vec!["model-a".into()],
+        )]),
+        ..CodeyConfig::default()
+    };
+
+    let state = native_model_state_for_provider(&config, &provider, home.path()).unwrap();
+    assert_eq!(state, Default::default());
+
+    let current_provider = codex_provider::current_provider(codex_home()).unwrap();
+    let mut renderer_config = config;
+    renderer_config.profiles[0].id = current_provider.id;
+    let catalog = renderer_model_catalog_value(&renderer_config, &state);
+    assert_eq!(catalog["status"], "ok");
+    assert_eq!(catalog["clear_models"], true);
+    assert_eq!(catalog["models"], json!([]));
 }
 
 #[test]
@@ -533,14 +632,21 @@ fn manual_model_selection_keeps_first_case_insensitive_duplicate() {
 #[test]
 fn model_changes_accept_only_the_known_builtin_catalog_fallback() {
     let home = tempfile::tempdir().unwrap();
+    let models = vec!["provider-model".to_string()];
     let missing_cache =
-        model_catalog::refresh_for_provider(home.path(), false, Some(&[]), &[]).unwrap_err();
+        model_catalog::refresh_for_provider(home.path(), false, Some(&models), &models)
+            .unwrap_err();
 
-    assert!(model_catalog_fallback(Err(missing_cache), home.path(), &[]).unwrap());
-    assert!(!model_catalog_fallback(Ok(()), home.path(), &[]).unwrap());
+    assert!(model_catalog_fallback(Err(missing_cache), home.path(), &[], &[]).unwrap());
+    assert!(!model_catalog_fallback(Ok(()), home.path(), &[], &[]).unwrap());
     assert_eq!(
-        model_catalog_fallback(Err(anyhow::anyhow!("模型目录写入失败")), home.path(), &[],)
-            .unwrap_err(),
+        model_catalog_fallback(
+            Err(anyhow::anyhow!("模型目录写入失败")),
+            home.path(),
+            &[],
+            &[],
+        )
+        .unwrap_err(),
         "模型目录写入失败"
     );
 }

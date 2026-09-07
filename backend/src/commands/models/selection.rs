@@ -8,6 +8,7 @@ pub async fn save_selected_models(
     requested_deleted_third_party_models: Vec<String>,
     requested_supports_auto_review: Option<bool>,
     requested_route_id: Option<String>,
+    requested_supports_1m_context_models: Option<Vec<String>>,
 ) -> Result<Value, String> {
     validate_requested_model_list_bounds("官方模型", &requested_official_models)?;
     validate_requested_model_list_bounds("其他模型", &requested_third_party_models)?;
@@ -31,6 +32,7 @@ pub async fn save_selected_models(
             requested_manual_third_party_models,
             requested_deleted_third_party_models,
             requested_route_id,
+            requested_supports_1m_context_models,
         )
         .await;
     }
@@ -101,6 +103,12 @@ pub async fn save_selected_models(
     if let Some(supported) = requested_supports_auto_review {
         set_provider_auto_review_support(&mut config, &provider_id, supported);
     }
+    set_supports_1m_context_models(
+        &mut config,
+        &provider_id,
+        requested_supports_1m_context_models.as_deref(),
+        &supported_models,
+    )?;
     config
         .upstream_models_by_provider
         .insert(provider_id.clone(), supported_models);
@@ -136,6 +144,7 @@ pub async fn save_selected_models(
     let (catalog_refresh, model_state) = refreshed_model_state_async(&config, false).await?;
     subagent_policy::reconcile_with_model_state(&mut config, Some(&model_state));
     config = config.normalize();
+    config.settings_revision = config.settings_revision.saturating_add(1);
     if let Err(error) = save_config_to_store(state, &config).await {
         return Err(rollback_model_catalog_after_config_save_async(catalog_refresh, error).await);
     }
@@ -167,6 +176,7 @@ pub(crate) async fn save_native_selected_models(
     requested_manual_third_party_models: Vec<String>,
     requested_deleted_third_party_models: Vec<String>,
     requested_route_id: Option<String>,
+    requested_supports_1m_context_models: Option<Vec<String>>,
 ) -> Result<Value, String> {
     let previous = state.config.read().await.clone();
     if previous.local_router_enabled {
@@ -202,6 +212,20 @@ pub(crate) async fn save_native_selected_models(
         &requested_third_party_models,
         &requested_manual_third_party_models,
         &requested_deleted_third_party_models,
+    )?;
+    let available = if context.provider.official {
+        model_catalog::default_official_model_slugs()
+    } else {
+        next.upstream_models_by_provider
+            .get(&context.provider.id)
+            .cloned()
+            .unwrap_or_default()
+    };
+    set_supports_1m_context_models(
+        &mut next,
+        &context.provider.id,
+        requested_supports_1m_context_models.as_deref(),
+        &available,
     )?;
     let model_state = native_model_state_for_provider(&next, &context.provider, codex_home())?;
     reconcile_subagent_models_for_mode(&mut next, &model_state);
@@ -327,6 +351,37 @@ pub(crate) fn config_with_native_selected_models(
             .insert(provider_id, manual_third_party_models);
     }
     Ok(next.normalize())
+}
+
+pub(crate) fn set_supports_1m_context_models(
+    config: &mut CodeyConfig,
+    provider_id: &str,
+    requested: Option<&[String]>,
+    available: &[String],
+) -> Result<(), String> {
+    if let Some(requested) = requested {
+        validate_requested_model_list_bounds("1M 上下文模型", requested)?;
+        validate_regular_route_model_list("1M 上下文模型", requested)?;
+        let mut models = Vec::new();
+        for model in requested
+            .iter()
+            .map(|model| model.trim())
+            .filter(|model| !model.is_empty())
+        {
+            let canonical = available
+                .iter()
+                .find(|candidate| model_id::equal(candidate, model))
+                .ok_or_else(|| format!("模型 {model} 不在该线路的可用模型列表中"))?;
+            if !models.contains(canonical) {
+                models.push(canonical.clone());
+            }
+        }
+        config
+            .supports_1m_context_by_provider
+            .insert(provider_id.to_string(), models);
+    }
+    config.retain_1m_context_models(provider_id, available);
+    Ok(())
 }
 
 pub(crate) fn validate_requested_model_list_bounds(

@@ -442,6 +442,30 @@ fn inconclusive_official_auth_probe_keeps_active_third_party_route() {
     assert_eq!(next.default_model, "custom/gpt-5.6-sol");
 }
 
+#[test]
+fn unavailable_official_auth_ignores_disabled_official_routes() {
+    let mut official = ProviderProfile::new("OpenAI 官方直登");
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    official.source_provider_id = Some("openai".to_string());
+    official.enabled = false;
+    official.normalize();
+    let config = CodeyConfig {
+        active_profile_id: official.id.clone(),
+        profiles: vec![official],
+        ..CodeyConfig::default()
+    };
+
+    let next = apply_unavailable_official_probe(config, "not logged in".into()).unwrap();
+
+    assert!(!next.official_account_available_this_launch);
+    assert_eq!(
+        next.official_account_status_this_launch,
+        LaunchOfficialAccountStatus::Unauthenticated
+    );
+    assert_eq!(next.profiles.len(), 1);
+    assert!(!next.profiles[0].enabled);
+}
+
 #[tokio::test]
 async fn settings_bridge_matches_the_redacted_config_contract() {
     let state = Arc::new(AppState::default());

@@ -142,6 +142,7 @@ export function buildSubagentModelOptions(
         profile.id === currentProvider.id ||
         routeProviderId(profile) === currentProvider.id)
       : config.profiles.find((profile) => profile.id === config.activeProfileId);
+    if (matchingProfile?.enabled === false) return [];
     const providerId = currentProvider?.id ||
       (matchingProfile ? routeProviderId(matchingProfile) : "");
     if (!providerId) return [];
@@ -178,6 +179,7 @@ export function buildSubagentModelOptions(
   }
 
   for (const profile of config.profiles) {
+    if (profile.enabled === false) continue;
     const official = profile.authMode === "officialAccount";
     if (official && !officialAccountAvailable) continue;
 

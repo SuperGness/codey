@@ -8,6 +8,7 @@ export type UpstreamProtocol =
   | "anthropicMessages";
 
 export type Profile = {
+  enabled?: boolean;
   id: string;
   name: string;
   shortName: string;
@@ -79,6 +80,7 @@ export type Config = {
   codexAppPath: string;
   userScripts: string[];
   selectedModelsByProvider: Record<string, string[]>;
+  supports1MContextByProvider: Record<string, string[]>;
   manualThirdPartyModelsByProvider: Record<string, string[]>;
   declaredOfficialModelsByProvider: Record<string, string[]>;
   upstreamModelsByProvider: Record<string, string[]>;

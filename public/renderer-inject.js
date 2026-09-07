@@ -375,16 +375,10 @@
     if (!payload || typeof payload !== "object") {
       throw new Error("Codex 官方额度响应格式无效");
     }
+    // 账号摘要只读取通用额度，不能合并模型专属的 rateLimitsByLimitId。
     const buckets = [];
     if (payload.rateLimits && typeof payload.rateLimits === "object") {
       buckets.push(payload.rateLimits);
-    }
-    if (payload.rateLimitsByLimitId && typeof payload.rateLimitsByLimitId === "object") {
-      for (const bucket of Object.values(payload.rateLimitsByLimitId)) {
-        if (bucket && typeof bucket === "object" && !buckets.includes(bucket)) {
-          buckets.push(bucket);
-        }
-      }
     }
     const windowsByKind = new Map();
     for (const bucket of buckets) {
