@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "52";
+  const patchVersion = "53";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -310,10 +310,10 @@
       ? (threadId ? knownThreadProvider(source) : paramsProviderId(source))
       : "";
     const routedProviderId = localRouterProviderId;
-    // Route-qualified ids are UI selectors, not valid ChatGPT-account model
-    // ids. Keep the route in metadata while every official request uses the
-    // upstream model id.
+    // Turns carry the route in metadata and send the upstream model id.
+    // Keep third-party selectors on thread requests without route metadata.
     const routedModel = isOfficialRoute(route)
+      || (method === "turn/start" && routeProviderId)
       ? cleanText(route?.sourceModel) || model
       : model;
     const next = { ...source };
@@ -1989,7 +1989,7 @@
   const routeForThreadDisplayModel = (thread) => {
     if (!catalog.loaded || !thread || typeof thread !== "object") return null;
     const model = typeof thread.model === "string" ? thread.model.trim() : "";
-    if (!model || catalog.modelNamesByKey.has(modelKey(model))) return null;
+    if (!model) return null;
     const threadId = typeof thread.id === "string" ? thread.id.trim() : "";
     const providerId = providerFromThread(thread);
     const routeHint = requestProviderId(thread[routeMetadataParam]?.[routeMetadataKey]);
@@ -1999,6 +1999,9 @@
     }
     const threadRoute = routeForThreadModel(threadId, model);
     if (threadRoute?.selectorModel) return threadRoute;
+    // A third-party raw id can also be an official catalog entry. Resolve
+    // its known route before treating the model as an existing selector.
+    if (catalog.modelNamesByKey.has(modelKey(model))) return null;
     const providerModel = (() => {
       if (!providerId || !model) return model;
       const prefix = `${providerId}/`;

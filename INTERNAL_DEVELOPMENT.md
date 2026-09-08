@@ -7,7 +7,7 @@
 - Codey 是 Rust 桌面辅助进程，负责启动、监控和停止官方 Codex Electron 客户端。
 - 配置界面由 React 实现，构建后嵌入 Codey，并通过 CDP 注入 Codex 页面；通常没有独立常驻配置窗口。
 - 本地路由开启时，Codex 只连接本次启动的回环网关。官方账号沿用 Codex 登录，第三方线路使用 Codey 保存的凭据。
-- 线路、模型和上游格式分别识别。模型选择器使用带线路信息的稳定 ID，由本地路由在转发前还原为供应商原始模型 ID；关闭本地路由后，历史标识由会话恢复入口还原。
+- 线路、模型和上游格式分别识别。模型选择器使用带线路信息的稳定 ID；页面 `turn/start` 使用供应商原始模型 ID，通过独立元数据传递线路，其他入口的别名由本地路由在转发前还原；关闭本地路由后，历史标识由会话恢复入口还原。
 - Codey 配置与 Codex 配置分开保存。用户 Codex 配置原则上只读，只允许维护 Codey 自有的路由恢复桩和清理旧版 Codey 遗留项。
 - 无法确认线路、模型归属或兼容能力时应停止请求并给出错误，不猜测、不跨线路自动切换，也不重放可能已经送达的请求。
 - 账号额度摘要在 `/account/usage` 返回错误时回退到 `account/rateLimits/read`，仅使用顶层 `rateLimits`，不合并 `rateLimitsByLimitId` 中的模型专属额度。5 小时窗口是否显示取决于账号通用额度实际返回的窗口，不按套餐名称隐藏。
@@ -286,6 +286,8 @@ local_router.rs 维护不可变线路快照，按明确线路元数据、带线�
 页面脚本 v50 移除旧官方任务直连例外；模型目录未加载、未知模型和缺少模型的恢复请求也经过统一供应商检查。新建、恢复和分支任务统一使用 `codey_router`，清除请求配置中可覆盖供应商及其端点的字段，保留其余配置和原始模型。升级脚本版本使已有页面重新注入时替换旧闭包，不能只刷新旧实现的模型目录。回归覆盖官方任务、目录加载失败、未知模型、任务配置覆盖、共享后台服务和启动配置缺失。使用临时 HOME/CODEX_HOME 与两个本地测试服务启动实际 Codex CLI，确认旧默认供应商及冲突父表存在时，有效供应商仍为 `codey_router`，错误端点收到 0 个请求，指定回环端点收到 1 个 `/v1/responses` 请求；此检查不使用真实账号，不代表问题机型已完成验证。
 
 模型选择器采用 `percent_encode(provider_id)/upstream_model`，用于区分不同线路上的同名模型；显示名称和短名称不参与标识。`modelAliasHistory` 在配置规范化、线路保存和删除前记录已发布别名与原始模型的对应关系，删除线路或关闭路由后继续保留，不保存凭据。旧配置缺少该字段时自动补齐当前已知别名；升级前已经删除且没有记录的任意前缀不做推断，仅对旧 `codey/` 格式保留兼容入口。
+
+页面脚本 v53 对已解析线路的 `turn/start` 使用目录中的原始模型名，并通过 `responsesapiClientMetadata.codey_route` 传递线路；保留其他元数据，覆盖旧线路提示。第三方模型的线程启动、恢复、分叉和设置请求，以及默认模型和子代理配置继续保留内部别名。目录未加载或无法确定线路时不猜测模型前缀。线程回复先按明确线路提示或已有绑定恢复选择器，再检查原始模型是否已在目录中，避免官方与第三方同名时丢失线路展示。后端沿用现有元数据提取与路由解析，转发前删除 Codey 专用元数据；本次不调整官方候选优先规则及自动请求的线路选择。页面回归覆盖同名线路切换、序列化后再次处理、历史恢复、元数据保留及含 `/` 的原始模型。
 
 解析先匹配当前有效别名及原始模型，再按完整历史别名还原一次，使用现有线路提示、官方模型优先规则、会话绑定和唯一候选规则选择同一模型。比较沿用模型目录的大小写无关规则，转发保留该线路配置的原始拼写。真实模型名称可以含 `/`，历史还原结果只按原始模型查询，避免递归解释成另一条线路。无候选或存在无法消除的歧义时返回可操作的错误，不替换成无关默认模型。默认模型和子代理配置在原线路失效时也优先迁移到同一模型。
 
@@ -604,7 +606,7 @@ SQLite 批次失败时最多尝试 3 次，间隔 25/50 ms，重试期间保留�
 | 线路同步与选择 | [sync_current_provider_command](/Users/kim/Desktop/codey-f/backend/src/commands/models/sync.rs:66)、[模型保存调用](/Users/kim/Desktop/codey-f/src/useModelSelection.ts:295) | 同步可选模型和配置；不是上下文同步 |
 | 模型目录生成 | [synthetic_model](/Users/kim/Desktop/codey-f/backend/src/model_catalog.rs:1184)、[configure_1m_context_window](/Users/kim/Desktop/codey-f/backend/src/model_catalog.rs:1252) | 第三方模型克隆模板；有条件清理模型能力，但保留窗口信息；1M 开关覆盖窗口 |
 | 启动配置 | [launcher](/Users/kim/Desktop/codey-f/backend/src/launcher.rs:577)、[local_router_provider_table](/Users/kim/Desktop/codey-f/backend/src/codex_config.rs:2546) | 官方模式可继承 Codex 内置目录；同步路由使用生成目录和统一 provider。启动时根据全部线路决定远程压缩身份 |
-| 页面切换模型 | [routedRequestParams](/Users/kim/Desktop/codey-f/public/model-whitelist-inject.js:305) | thread 请求使用 Codey provider；turn/start 写模型和线路元数据；官方线路使用上游原始模型名，第三方保留线路限定别名 |
+| 页面切换模型 | [routedRequestParams](/Users/kim/Desktop/codey-f/public/model-whitelist-inject.js:306) | thread 请求使用 Codey provider；已解析线路的 turn/start 写上游原始模型名和线路元数据；官方线路始终使用原始模型名，第三方其他模型请求保留线路限定别名 |
 | 压缩触发，Codex 层 | 上游 `session/context_window.rs`、`session/turn.rs`，来源 S1 | 在轮次前以及还需工具后续调用时检查；V2 经 `/responses` 的 `compaction_trigger`，旧版经 `/responses/compact`；不支持原生压缩时用普通模型请求生成文字摘要 |
 | 入口和解析 | [responses.rs](/Users/kim/Desktop/codey-f/backend/src/local_router/responses.rs:216)、[解析流程](/Users/kim/Desktop/codey-f/backend/src/local_router/responses.rs:748) | 校验请求、解码、解析 JSON；旧 Compact 与普通 Create 分类不同，V2 仍被归类为 Create |
 | 路由选择 | [proxy_parsed_responses_inner](/Users/kim/Desktop/codey-f/backend/src/local_router/responses.rs:909)、[RouteResolver](/Users/kim/Desktop/codey-f/backend/src/local_router/server.rs:610) | 每个请求持有一个 `Arc<RouterSnapshot>`；显式 provider/model 优先，原始模型名再看线路提示、官方候选、绑定或唯一候选；歧义拒绝 |
