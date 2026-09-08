@@ -504,6 +504,8 @@ Computer Use 沿用 Codex 管理的 `unified-computer-use` 插件及其 `cua_rep
 
 ### 提示词、子代理与 FastCtx
 
+子代理详情标题栏由 `public/renderer-inject.js` 在页面增强阶段添加，不依赖启动期原生资源改写。通过原生标题组件的 `seed` 与父组件 `conversationId` 一致性识别子会话，复用现有会话控制器，等待 `manager.readThread(id, { includeTurns: false })` 的异步结果后读取 `thread.model` 和 `thread.reasoningEffort`。详情页缓存的 `latestModel` 可能为空，不能作为唯一数据源，也不能把 RPC Promise 当作同步状态。打开或交互时刷新，合并同一请求并限制一秒内重复读取，不新增定时轮询；切换和关闭详情时移除标识并丢弃旧响应。标题右侧显示模型名和推理强度，悬停提供完整模型标识；数据缺失时显示待获取，不回退到父任务或角色默认配置。回归位于 `tests/subagent-header.test.mjs`，覆盖异步读取、切换竞争、缺失值和关闭清理。本机已在现有 Codex 子代理详情实测显示 `gpt-5.6-luna · xhigh`。
+
 子代理门禁与 FastCtx 路由 Hook 的定义只写入运行期 hooks.json，并通过 `-c features.hooks=true` 与 `hooks.state.*.trusted_hash` 覆盖项交给 Codex；启动补丁生成的临时 config.toml 文档不再携带 `[[hooks.*]]` 表，相关 TOML 写入和旧组清理代码已于 2026-09-06 删除。同日移除了隔离运行时设计之前的租约恢复路径（AGENTS.md / agents/default.toml 快照回滚）：旧版本遗留的 codex-lease.json 仍会被读取并释放，hooks.json 与策略文件按当前流程回滚，但不再回写 AGENTS.md 与 default.toml。
 
 提示词优化可使用运行中的 Codey 路由，也可使用独立配置。地址、认证和模型由后端校验；日志不保存提示词正文或凭据。

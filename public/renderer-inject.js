@@ -33,6 +33,7 @@
     "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
   ].join(", ");
   const headerSelector = "header, nav";
+  const subagentHeaderSelector = ".h-12.shrink-0.border-b";
   const bootstrapProbeSelector = `${headerSelector}, ${sidebarSelector}`;
   const settingsIcon = `
     <svg viewBox="0 0 350 350" aria-hidden="true" focusable="false">
@@ -1019,9 +1020,86 @@
     window.setTimeout(run, 1_000);
   };
 
+  const subagentHeaders = new Map();
+  const subagentConversationId = (header) => {
+    const key = Object.keys(header).find((key) => key.startsWith("__reactFiber$"));
+    let seed = null;
+    for (let fiber = header[key], depth = 0; fiber && depth < 16; fiber = fiber.return, depth += 1) {
+      const props = fiber.memoizedProps;
+      if (typeof props?.backAriaLabel === "string" && typeof props?.onBack === "function") seed = props.seed;
+      if (seed && props?.conversationId === seed) return seed;
+    }
+    return null;
+  };
+  const syncSubagentHeaders = () => {
+    for (const [header, binding] of subagentHeaders) {
+      if (header.isConnected && subagentConversationId(header) === binding.id) continue;
+      binding.element?.remove();
+      subagentHeaders.delete(header);
+    }
+    for (const header of document.querySelectorAll(subagentHeaderSelector)) {
+      const id = subagentConversationId(header);
+      if (!id) continue;
+      if (subagentHeaders.has(header)) {
+        subagentHeaders.get(header).refresh?.();
+        continue;
+      }
+      const binding = { id };
+      subagentHeaders.set(header, binding);
+      void loadSessionTools().then(() => window.__codeyLoadCodexSessionController?.()).then((controller) => {
+        if (subagentHeaders.get(header) !== binding || !header.isConnected) return;
+        const manager = controller?.manager;
+        if (typeof manager?.readThread !== "function") {
+          subagentHeaders.delete(header);
+          return;
+        }
+        const element = document.createElement("span");
+        element.setAttribute("data-codey-subagent-model", "true");
+        element.className = "text-xs text-secondary";
+        element.style.cssText = "display:inline-flex;gap:6px;min-width:0;max-width:65%;flex-shrink:0;margin-inline-start:auto;white-space:nowrap;font-weight:400";
+        const modelLabel = document.createElement("span");
+        modelLabel.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis";
+        const effortLabel = document.createElement("span");
+        effortLabel.style.flexShrink = "0";
+        element.append(modelLabel, effortLabel);
+        binding.element = element;
+        const update = (thread) => {
+          const model = typeof thread?.model === "string" && thread.model.trim() || "待获取";
+          const effort = typeof thread?.reasoningEffort === "string" && thread.reasoningEffort.trim() || "待获取";
+          const description = `模型：${model} · 推理强度：${effort}`;
+          if (element.title === description) return;
+          element.title = description;
+          element.setAttribute("aria-label", description);
+          modelLabel.textContent = model.split("/").at(-1) || model;
+          effortLabel.textContent = `· ${effort}`;
+        };
+        update();
+        header.append(element);
+        binding.refresh = async () => {
+          if (binding.pending || Date.now() - (binding.updatedAt || 0) < 1000) return;
+          binding.pending = true;
+          try {
+            const result = await manager.readThread(id, { includeTurns: false });
+            if (subagentHeaders.get(header) === binding && header.isConnected && subagentConversationId(header) === id) update(result?.thread);
+          } catch {
+            // Retry on the next panel interaction; never guess from role defaults.
+          } finally {
+            binding.pending = false;
+            binding.updatedAt = Date.now();
+          }
+        };
+        void binding.refresh();
+      }).catch(() => {
+        if (subagentHeaders.get(header) === binding) subagentHeaders.delete(header);
+      });
+    }
+  };
+  window.__codeySyncSubagentHeaders = syncSubagentHeaders;
+
   const scan = (root = document) => {
     mountButton();
     syncAccountUsageMount();
+    syncSubagentHeaders();
   };
 
   const scheduleScan = (root = document) => {
@@ -1036,6 +1114,41 @@
     headerMountDirty = true;
     scheduleScan(root || document);
   };
+
+  window.__codeySubagentHeaderCleanup?.();
+  let subagentHeaderTimer = 0;
+  const onSubagentHeaderMutations = (mutations) => {
+    if (!mutations.some((mutation) => {
+      const target = mutation.target instanceof HTMLElement ? mutation.target : mutation.target?.parentElement;
+      if (target?.closest?.("[data-codey-subagent-model]")) return false;
+      return target?.closest?.(subagentHeaderSelector) || [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])].some((node) =>
+        node instanceof HTMLElement && (node.matches?.(subagentHeaderSelector) || node.querySelector?.(subagentHeaderSelector)));
+    })) return;
+    window.clearTimeout(subagentHeaderTimer);
+    subagentHeaderTimer = window.setTimeout(syncSubagentHeaders, 60);
+  };
+  const subagentMutationOptions = { childList: true, subtree: true };
+  let unsubscribeSubagentHeaders = window.__codeyMutationDispatcher?.subscribe?.(onSubagentHeaderMutations, subagentMutationOptions);
+  if (!unsubscribeSubagentHeaders) {
+    const observer = new MutationObserver(onSubagentHeaderMutations);
+    observer.observe(document.documentElement, subagentMutationOptions);
+    unsubscribeSubagentHeaders = () => observer.disconnect();
+  }
+  const onSubagentHeaderClick = () => {
+    window.clearTimeout(subagentHeaderTimer);
+    subagentHeaderTimer = window.setTimeout(syncSubagentHeaders, 60);
+  };
+  document.addEventListener?.("click", onSubagentHeaderClick, true);
+  window.__codeySubagentHeaderCleanup = () => {
+    unsubscribeSubagentHeaders();
+    document.removeEventListener?.("click", onSubagentHeaderClick, true);
+    window.clearTimeout(subagentHeaderTimer);
+    for (const binding of subagentHeaders.values()) {
+      binding.element?.remove();
+    }
+    subagentHeaders.clear();
+  };
+  syncSubagentHeaders();
 
   if (rendererCoreAlreadyLoaded) return;
   window.addEventListener?.(updateAvailableEvent, (event) => {

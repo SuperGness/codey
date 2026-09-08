@@ -792,6 +792,7 @@ test("ignores sidebar nav and main content until top chrome is available", () =>
     location: { pathname: "/", search: "" },
     MutationObserver: class {
       observe() {}
+      disconnect() {}
     },
     URLSearchParams,
     window,
@@ -857,6 +858,7 @@ test("repeated scans fast-path an already mounted button without layout reads", 
       }
 
       observe() {}
+      disconnect() {}
     },
     URLSearchParams,
     window,

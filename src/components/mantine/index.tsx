@@ -338,9 +338,9 @@ function selectClassNames(
   sectionClassName?: string,
 ) {
   return {
-    dropdown: dropdownClassName,
-    input: inputClassName,
-    option: optionClassName,
+    dropdown: classNames("w-max! min-w-full! max-w-[calc(100vw-32px)]", dropdownClassName),
+    input: classNames("whitespace-nowrap", inputClassName),
+    option: classNames("whitespace-nowrap", optionClassName),
     section: sectionClassName,
   };
 }
@@ -392,6 +392,7 @@ export function Select({
         portalProps: portalTarget ? { target: portalTarget } : undefined,
         withinPortal: Boolean(portalTarget),
         zIndex,
+        width: "max-content",
       }}
       data={data}
       leftSection={prefix}
