@@ -6,6 +6,84 @@ import { FakeElementCore } from "./helpers/fake-element.mjs";
 
 const MODEL_CONFIG_ID = "107580212";
 
+test("third-party Fast works without the Inspector and restores native account restrictions", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const trigger = body.appendChild(new FakeElementCore("button", {
+    attributes: { "aria-haspopup": "menu" },
+  }));
+  const model = { model: "relay/gpt-6-astra", serviceTiers: [{ id: "priority", name: "Fast" }] };
+  const uiCache = [], requestCache = [], alternateCache = [];
+  let loading = false, selectedTier = "priority";
+  // The native compiled hook caches its return object separately from its
+  // account-derived boolean. An API-key account keeps that boolean false.
+  const nativePermission = (cache) => {
+    const allowed = false;
+    if (cache[3] !== loading || cache[4] !== allowed) {
+      cache[3] = loading;
+      cache[4] = allowed;
+      cache[5] = { isServiceTierAllowed: allowed, isLoading: loading };
+    }
+    return cache[5];
+  };
+  const nativePicker = {
+    model: model.model,
+    models: [model, { model: "openai-model", serviceTiers: model.serviceTiers }],
+    onSelectServiceTier: undefined,
+  };
+  const renderNative = () => {
+    const allowed = nativePermission(uiCache).isServiceTierAllowed;
+    nativePermission(alternateCache);
+    nativePicker.onSelectServiceTier = allowed ? (tier) => { selectedTier = tier; } : undefined;
+    return {
+      showFast: allowed && model.serviceTiers.length > 0,
+      serviceTierForRequest: nativePermission(requestCache).isServiceTierAllowed ? selectedTier : null,
+    };
+  };
+  const composer = {
+    memoizedProps: { conversationId: "thread", hideLabel: false },
+    updateQueue: { memoCache: { data: [uiCache, requestCache] } },
+    alternate: { updateQueue: { memoCache: { data: [alternateCache] } } },
+  };
+  const unrelated = { isServiceTierAllowed: false, isLoading: false };
+  composer.return = { updateQueue: { memoCache: { data: [[unrelated]] } } };
+  trigger.__reactFiber$fastTest = { memoizedProps: nativePicker, return: composer };
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [model.model, "openai-model"],
+    default_model: model.model,
+  }, [statsigClient()], { documentBody: body });
+  assert.deepEqual(renderNative(), { showFast: false, serviceTierForRequest: null });
+
+  runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
+  assert.deepEqual(renderNative(), { showFast: true, serviceTierForRequest: "priority" });
+  assert.equal(uiCache[4], false, "keep the native account-derived cache key unchanged");
+  assert.equal(alternateCache[5].isServiceTierAllowed, true);
+  assert.equal(unrelated.isServiceTierAllowed, false);
+  nativePicker.onSelectServiceTier(null);
+  assert.equal(renderNative().serviceTierForRequest, null);
+  nativePicker.onSelectServiceTier("priority");
+  runtime.dispatchDocumentEvent("keydown", { target: trigger, key: "Enter" });
+  assert.equal(renderNative().serviceTierForRequest, "priority");
+
+  nativePicker.model = "openai-model";
+  runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
+  assert.deepEqual(renderNative(), { showFast: false, serviceTierForRequest: null });
+  nativePicker.model = model.model;
+  model.serviceTiers = [];
+  runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
+  assert.equal(renderNative().showFast, false);
+
+  model.serviceTiers = [{ id: "priority", name: "Fast" }];
+  loading = true;
+  renderNative();
+  runtime.dispatchDocumentEvent("keydown", { target: trigger, key: "ArrowDown" });
+  assert.equal(uiCache[5].isLoading, true);
+  runtime.patch.dispose();
+  assert.equal(uiCache[5].isServiceTierAllowed, false);
+  assert.equal(requestCache[5].isServiceTierAllowed, false);
+  assert.equal(alternateCache[5].isServiceTierAllowed, false);
+});
+
 async function loadPatch(
   catalogResponse,
   clients,
@@ -549,6 +627,14 @@ test("context capability changes update existing model descriptors", async () =>
   assert.equal(queryClient.model("route/model").supports1MContext, true);
   assert.equal(queryClient.model("route/model").contextWindow, 1_000_000);
   assert.equal(queryClient.model("route/model").maxContextWindow, 1_000_000);
+  const customMetadata = { model: "route/model", context_window: 100000, max_context_window: 100000, effective_context_window_percent: 87, auto_compact_token_limit: 80000, codey_context_source: "user_declared" };
+  await patch.setCatalog({ ...catalog, model_metadata: [customMetadata] });
+  assert.equal(queryClient.model("route/model").contextWindow, 100000);
+  assert.equal(queryClient.model("route/model").effectiveContextWindowPercent, 87);
+  assert.equal(queryClient.model("route/model").autoCompactTokenLimit, 80000);
+  assert.equal(queryClient.model("route/model").contextSource, "user_declared");
+  await patch.setCatalog({ ...catalog, model_metadata: [{ ...customMetadata, auto_compact_token_limit: 70000 }] });
+  assert.equal(queryClient.model("route/model").autoCompactTokenLimit, 70000);
   await patch.setCatalog({ ...catalog, model_metadata: [{ model: "route/model", supports_1m_context: false, context_window: null, max_context_window: null }] });
   assert.equal(queryClient.model("route/model").supports1MContext, false);
   assert.equal(queryClient.model("route/model").contextWindow, null);
@@ -593,7 +679,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "50");
+  assert.equal(patch.version, "52");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],

@@ -47,6 +47,9 @@ pub(crate) fn config_after_route_deletion(
         .map(|profile| profile.provider_id().to_string())
         .ok_or_else(|| "找不到要删除的线路".to_string())?;
     let mut config = previous.clone();
+    config
+        .model_context_by_provider
+        .remove(&removed_provider_id);
     config.remember_model_aliases();
     config
         .supports_1m_context_by_provider

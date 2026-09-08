@@ -463,48 +463,6 @@ impl ConfigManager {
         result
     }
 
-    pub fn restore_latest_backup(
-        &self,
-        reason: impl Into<String>,
-        caller: impl Into<String>,
-    ) -> Result<Arc<ConfigSnapshot>> {
-        let reason = reason.into();
-        let caller = caller.into();
-        validate_audit_metadata(&reason, &caller)?;
-        let result = self.with_lock(|| {
-            let backup = backup_path(&self.inner.path, 0);
-            let bytes = self
-                .inner
-                .fs
-                .read_optional(&backup)?
-                .ok_or_else(|| anyhow::anyhow!("没有可恢复的 config.toml.bak"))?;
-            let candidate = build_snapshot(&self.inner.path, true, bytes)?;
-            let current = self.load_locked()?;
-            self.commit_locked(&current, &candidate)?;
-            let candidate = Arc::new(candidate);
-            *self
-                .inner
-                .snapshot
-                .write()
-                .expect("config snapshot lock poisoned") = Some(candidate.clone());
-            Ok(candidate)
-        });
-        match &result {
-            Ok(snapshot) => self.record(ConfigAuditEvent {
-                operation: "restore_backup".to_string(),
-                path: self.inner.path.to_string_lossy().into_owned(),
-                status: "ok".to_string(),
-                reason: Some(reason),
-                caller: Some(caller),
-                revision: Some(snapshot.revision.as_hex()),
-                base_url_changed: false,
-                error: None,
-            }),
-            Err(error) => self.record_failure("restore_backup", Some(reason), Some(caller), error),
-        }
-        result
-    }
-
     fn load_locked(&self) -> Result<Arc<ConfigSnapshot>> {
         let bytes = self
             .inner
@@ -712,28 +670,6 @@ impl ConfigEditor {
         set_base_url_item(provider, base_url)?;
         self.recorded_base_url_paths
             .insert(format!("model_providers.{provider_id}.base_url"));
-        Ok(())
-    }
-
-    pub fn set_provider_wire_api(
-        &mut self,
-        provider_id: &str,
-        wire_api: Option<&str>,
-    ) -> Result<()> {
-        let providers = ensure_root_table(&mut self.document, "model_providers")?;
-        if providers.get(provider_id).is_none() {
-            providers[provider_id] = Item::Table(Table::new());
-        }
-        let provider = providers
-            .get_mut(provider_id)
-            .and_then(Item::as_table_mut)
-            .ok_or_else(|| anyhow::anyhow!("model_providers.{provider_id} 必须是 table"))?;
-        match wire_api.map(str::trim).filter(|value| !value.is_empty()) {
-            Some(wire_api) => provider["wire_api"] = value(wire_api),
-            None => {
-                provider.remove("wire_api");
-            }
-        }
         Ok(())
     }
 

@@ -12,16 +12,32 @@ pub(crate) trait ResponsesDownstream: Send {
     fn is_websocket(&self) -> bool {
         false
     }
+    fn event_stream_started(&self) -> bool {
+        false
+    }
 
     fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
         None
     }
 
-    fn prepare_adapted_response_context(&mut self, _body: &mut Value) -> bool {
-        false
+    fn select_route(&mut self, _route: &RouteTarget) {}
+
+    fn prepare_native_http_fallback(
+        &mut self,
+        _route: &RouteTarget,
+        _headers: &HeaderMap,
+        _body: &mut Value,
+    ) -> Result<bool> {
+        Ok(false)
     }
 
-    fn remember_adapted_response(&mut self, _response_id: &str, _output: &[Value]) {}
+    fn prepare_adapted_response_context(&mut self, _body: &mut Value) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn remember_adapted_response(&mut self, _response_id: &str, _output: &[Value]) -> Result<()> {
+        Ok(())
+    }
 
     async fn write_error(
         &mut self,
@@ -80,7 +96,7 @@ where
     T: Send,
     F: std::future::Future<Output = T> + Send,
 {
-    if downstream.is_websocket() {
+    if downstream.is_websocket() || downstream.event_stream_started() {
         downstream.wait_for_upstream(future).await
     } else {
         Ok(future.await)
@@ -92,7 +108,7 @@ pub(crate) struct DownstreamClosed;
 
 impl std::fmt::Display for DownstreamClosed {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("下游 WebSocket 已关闭")
+        formatter.write_str("下游连接已关闭")
     }
 }
 
@@ -120,9 +136,16 @@ where
         };
         if result.is_ok() {
             probe.finish_success();
-        } else {
+        } else if result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<DownstreamClosed>())
+        {
             probe.mark_cancelled(operation);
             probe.finish_cancelled();
+        } else {
+            probe.mark_error(502, "upstream_response_failed");
+            probe.finish_failed();
         }
     }
 }
@@ -150,17 +173,34 @@ where
     fn is_websocket(&self) -> bool {
         self.inner.is_websocket()
     }
+    fn event_stream_started(&self) -> bool {
+        self.inner.event_stream_started()
+    }
 
     fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
         self.probe.as_ref()
     }
 
-    fn prepare_adapted_response_context(&mut self, body: &mut Value) -> bool {
+    fn select_route(&mut self, route: &RouteTarget) {
+        self.inner.select_route(route);
+    }
+
+    fn prepare_native_http_fallback(
+        &mut self,
+        route: &RouteTarget,
+        headers: &HeaderMap,
+        body: &mut Value,
+    ) -> Result<bool> {
+        self.inner
+            .prepare_native_http_fallback(route, headers, body)
+    }
+
+    fn prepare_adapted_response_context(&mut self, body: &mut Value) -> Result<bool> {
         self.inner.prepare_adapted_response_context(body)
     }
 
-    fn remember_adapted_response(&mut self, response_id: &str, output: &[Value]) {
-        self.inner.remember_adapted_response(response_id, output);
+    fn remember_adapted_response(&mut self, response_id: &str, output: &[Value]) -> Result<()> {
+        self.inner.remember_adapted_response(response_id, output)
     }
 
     async fn write_error(
@@ -292,16 +332,36 @@ where
 
 pub(crate) struct HttpResponsesDownstream {
     pub(crate) stream: TcpStream,
+    event_stream_started: bool,
 }
 
 impl HttpResponsesDownstream {
     pub(crate) fn new(stream: TcpStream) -> Self {
-        Self { stream }
+        Self {
+            stream,
+            event_stream_started: false,
+        }
     }
 }
 
 #[async_trait]
 impl ResponsesDownstream for HttpResponsesDownstream {
+    fn event_stream_started(&self) -> bool {
+        self.event_stream_started
+    }
+
+    async fn wait_for_upstream<T, F>(&mut self, future: F) -> Result<T>
+    where
+        T: Send,
+        F: std::future::Future<Output = T> + Send,
+    {
+        if self.event_stream_started {
+            await_http_stream_upstream(&mut self.stream, future).await
+        } else {
+            Ok(future.await)
+        }
+    }
+
     async fn write_error(
         &mut self,
         status: u16,
@@ -330,7 +390,9 @@ impl ResponsesDownstream for HttpResponsesDownstream {
             header.as_bytes(),
             "写入 Responses SSE 响应头失败",
         )
-        .await
+        .await?;
+        self.event_stream_started = true;
+        Ok(())
     }
 
     async fn write_event(&mut self, event: &Value) -> Result<()> {
@@ -346,7 +408,7 @@ impl ResponsesDownstream for HttpResponsesDownstream {
         response: reqwest::Response,
         probe: Option<&RouteRequestLogProbe>,
     ) -> Result<()> {
-        write_proxy_response(&mut self.stream, response, probe).await
+        write_proxy_response(&mut self.stream, response, probe, true).await
     }
 }
 
@@ -356,66 +418,118 @@ pub(crate) struct WebSocketResponsesDownstream {
     pub(crate) websocket_backoffs: Arc<Mutex<UpstreamWebSocketBackoffs>>,
     pub(crate) stream_id: Option<String>,
     pub(crate) adapted_history: AdaptedResponsesHistory,
+    pub(crate) native_history: NativeResponsesHistory,
     pub(crate) terminal_started: bool,
     pub(crate) pending_messages: VecDeque<(WebSocketMessage, Option<OwnedSemaphorePermit>)>,
     pub(crate) pending_budget_blocked: bool,
     pub(crate) request_body_budget: Arc<Semaphore>,
+    pub(crate) config_changes: tokio::sync::watch::Receiver<u64>,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct AdaptedResponsesHistory {
     pub(crate) last: Option<(String, Vec<Value>)>,
     pub(crate) pending_input: Option<Vec<Value>>,
+    last_bytes: usize,
+    budget: RetainedMemoryBudget,
 }
 
 impl AdaptedResponsesHistory {
-    pub(crate) fn prepare(&mut self, body: &mut Value) -> bool {
+    pub(crate) fn clear_pending(&mut self) {
         self.pending_input = None;
+        self.budget
+            .resize(self.last_bytes)
+            .expect("releasing retained history budget cannot fail");
+    }
+
+    pub(crate) fn prepare(&mut self, body: &mut Value) -> Result<bool> {
+        self.prepare_context(body, false, true)
+    }
+
+    pub(crate) fn stage_native(&mut self, body: &mut Value) -> Result<bool> {
+        self.prepare_context(body, true, false)
+    }
+
+    fn prepare_context(&mut self, body: &mut Value, native: bool, expand: bool) -> Result<bool> {
+        self.pending_input = None;
+        self.budget.resize(self.last_bytes)?;
+        // Count without allocating a second encoded request. Reserve before
+        // cloning history into pending state and the expanded request body.
+        let request_bytes = bounded_json_bytes(body, MAX_REQUEST_BYTES)?;
         let Some(object) = body.as_object_mut() else {
-            return false;
-        };
-        let input = match object.get("input") {
-            None | Some(Value::Null) => Vec::new(),
-            Some(Value::Array(input)) => input.clone(),
-            Some(input @ (Value::String(_) | Value::Object(_))) => vec![input.clone()],
-            Some(_) => return false,
+            return Ok(false);
         };
         let previous_response_id = object
             .get("previous_response_id")
             .filter(|value| !value.is_null())
             .and_then(Value::as_str)
             .map(str::trim);
-        let mut context = if let Some(previous_response_id) = previous_response_id {
-            if !is_codey_synthetic_response_id(previous_response_id) {
-                return false;
+        let previous = if let Some(previous_response_id) = previous_response_id {
+            if !native && !is_codey_synthetic_response_id(previous_response_id) {
+                return Ok(false);
             }
             let Some((_, context)) = self
                 .last
                 .as_ref()
                 .filter(|(response_id, _)| response_id == previous_response_id)
             else {
-                return false;
+                anyhow::bail!("会话历史已失效，请压缩上下文后重新发送完整输入");
             };
-            context.clone()
+            Some(context)
         } else {
-            Vec::new()
+            None
         };
-        context.extend(input);
-        self.pending_input = Some(context.clone());
-        if previous_response_id.is_none() {
-            return false;
+        let expanded_bytes = request_bytes.saturating_add(if previous.is_some() {
+            self.last_bytes
+        } else {
+            0
+        });
+        if expanded_bytes > MAX_REQUEST_BYTES {
+            anyhow::bail!("展开后的会话历史超过上限，请先压缩上下文");
         }
+        self.budget.resize(
+            self.last_bytes
+                .saturating_add(expanded_bytes.saturating_mul(2)),
+        )?;
+        let input = match object.get("input") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(input)) => input.clone(),
+            Some(Value::String(input)) if native => vec![json!({"role":"user","content":input})],
+            Some(input @ (Value::String(_) | Value::Object(_))) => vec![input.clone()],
+            Some(_) => return Ok(false),
+        };
+        let mut context = previous.cloned().unwrap_or_default();
+        context.extend(input);
+        if !expand || previous_response_id.is_none() {
+            self.pending_input = Some(context);
+            return Ok(false);
+        }
+        self.pending_input = Some(context.clone());
         object.remove("previous_response_id");
         object.insert("input".to_string(), Value::Array(context));
-        true
+        Ok(true)
     }
 
-    pub(crate) fn remember(&mut self, response_id: &str, output: &[Value]) {
-        let Some(mut context) = self.pending_input.take() else {
-            return;
+    pub(crate) fn remember(&mut self, response_id: &str, output: &[Value]) -> Result<()> {
+        let Some(context) = self.pending_input.as_ref() else {
+            return Ok(());
         };
+        let bytes = bounded_json_bytes(context, MAX_REQUEST_BYTES)?
+            .saturating_add(bounded_json_bytes(&output, MAX_REQUEST_BYTES)?);
+        if bytes > MAX_REQUEST_BYTES {
+            anyhow::bail!("会话历史超过上限，请先压缩上下文");
+        }
+        self.budget
+            .resize(self.last_bytes.saturating_add(bytes.saturating_mul(2)))?;
+        let mut context = self
+            .pending_input
+            .take()
+            .expect("pending input was checked");
         context.extend(output.iter().cloned());
         // ponytail: Codex continuations are linear; retain branches only if a client needs them.
         self.last = Some((response_id.to_string(), context));
+        self.last_bytes = bytes;
+        self.budget.resize(bytes)?;
+        Ok(())
     }
 }

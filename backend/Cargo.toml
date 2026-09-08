@@ -37,7 +37,7 @@ hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system
 memchr = "2"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { version = "0.12", features = ["http2", "json", "socks", "stream", "rustls-tls", "rustls-tls-native-roots", "system-proxy"], default-features = false }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

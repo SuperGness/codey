@@ -56,6 +56,14 @@ impl RouterServer {
             return Ok(());
         }
         if !self.authorized(&pending.request) {
+            if !pending.request.path.starts_with("/codey/") {
+                self.record_rejected_request(
+                    &pending.request,
+                    "http_rejected",
+                    401,
+                    "invalid_router_token",
+                );
+            }
             write_error_response(
                 &mut stream,
                 401,
@@ -131,6 +139,10 @@ impl RouterServer {
                     .collect::<Vec<_>>();
                 write_json_response(&mut stream, 200, &json!({"object":"list","data":data}))
                     .await?;
+                if let Some(probe) = self.begin_basic_request_log(&request, "models") {
+                    probe.mark_response_started(200);
+                    probe.finish_success();
+                }
             }
             ("POST", "/codey/api/load_codey_config") => {
                 let catalog = self
@@ -141,7 +153,11 @@ impl RouterServer {
                     .clone();
                 write_json_response(&mut stream, 200, &json!({"config": catalog})).await?;
             }
-            ("POST", "/codey/api/query_route_request_logs") => {
+            (
+                "POST",
+                "/codey/api/query_route_request_logs" | "/codey/api/query_route_request_log_stats",
+            ) => {
+                let statistics = route_path.ends_with("query_route_request_log_stats");
                 let query = match serde_json::from_slice::<RouteRequestLogQuery>(&request.body) {
                     Ok(query) => query,
                     Err(error) => {
@@ -161,19 +177,29 @@ impl RouterServer {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .request_log_backend;
-                let root = codey_runtime_core::paths::default_app_state_dir();
+                let root = self.request_log.root().to_path_buf();
                 match tokio::task::spawn_blocking(move || {
-                    crate::route_request_log::query_route_request_logs(&root, backend, query)
+                    let value = if statistics {
+                        serde_json::to_value(
+                            crate::route_request_log::query_route_request_log_stats(
+                                &root, backend, query,
+                            )?,
+                        )
+                    } else {
+                        serde_json::to_value(crate::route_request_log::query_route_request_logs(
+                            &root, backend, query,
+                        )?)
+                    };
+                    value.map_err(anyhow::Error::from)
                 })
                 .await
                 {
-                    Ok(Ok(page)) => {
-                        write_json_response(
-                            &mut stream,
-                            200,
-                            &serde_json::to_value(page).context("序列化请求日志查询结果失败")?,
-                        )
-                        .await?;
+                    Ok(Ok(mut page)) => {
+                        if statistics {
+                            page["recordingHealth"] =
+                                serde_json::to_value(self.request_log.health().await)?;
+                        }
+                        write_json_response(&mut stream, 200, &page).await?;
                     }
                     Ok(Err(error)) => {
                         write_error_response(
@@ -221,6 +247,9 @@ impl RouterServer {
                     .await?;
             }
             _ => {
+                if !request.path.starts_with("/codey/") {
+                    self.record_rejected_request(&request, "http_rejected", 404, "not_found");
+                }
                 write_error_response(
                     &mut stream,
                     404,
@@ -239,9 +268,17 @@ impl RouterServer {
         mut request: HttpRequest,
         mut stream: TcpStream,
     ) -> Result<()> {
+        let probe = self.begin_basic_request_log(&request, "images_generations");
+        let _log_guard = RouteRequestLogGuard::new(probe.clone());
+        let mark_error = |status, code: &str| {
+            if let Some(probe) = &probe {
+                probe.mark_error(status, code);
+            }
+        };
         let mut body = match serde_json::from_slice::<Value>(&request.body) {
             Ok(body) if body.is_object() => body,
             Ok(_) => {
+                mark_error(400, "invalid_request_body");
                 write_error_response(
                     &mut stream,
                     400,
@@ -253,6 +290,7 @@ impl RouterServer {
                 return Ok(());
             }
             Err(error) => {
+                mark_error(400, "invalid_request_body");
                 write_error_response(
                     &mut stream,
                     400,
@@ -267,6 +305,7 @@ impl RouterServer {
         let (route_hint, body_mutated) = match take_codey_route_metadata(&mut request, &mut body) {
             Ok(extracted) => extracted,
             Err(error) => {
+                mark_error(400, "route_metadata_invalid");
                 write_error_response(
                     &mut stream,
                     400,
@@ -295,6 +334,7 @@ impl RouterServer {
         {
             Ok(route) => route,
             Err(error) => {
+                mark_error(404, "route_not_enabled");
                 write_error_response(
                     &mut stream,
                     404,
@@ -306,7 +346,24 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        if let Some(probe) = &probe {
+            let model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            probe.resolve_route(
+                &route.provider_id,
+                &route.route_name,
+                model,
+                model,
+                &route.upstream_authority,
+                route.protocol.label(),
+                "images",
+                false,
+            );
+        }
         if route.protocol == UpstreamProtocol::AnthropicMessages {
+            mark_error(400, "image_generation_not_supported");
             write_error_response(
                 &mut stream,
                 400,
@@ -323,6 +380,7 @@ impl RouterServer {
         let upstream_base_url = match &route.upstream_url {
             Ok(url) => url,
             Err(error) => {
+                mark_error(502, "route_configuration_error");
                 write_error_response(
                     &mut stream,
                     502,
@@ -337,6 +395,7 @@ impl RouterServer {
         let upstream_url = match image_generation_endpoint(upstream_base_url) {
             Ok(url) => url,
             Err(error) => {
+                mark_error(502, "route_configuration_error");
                 write_error_response(
                     &mut stream,
                     502,
@@ -357,11 +416,24 @@ impl RouterServer {
         {
             Ok(headers) => headers,
             Err((status, code, message)) => {
+                mark_error(status, code);
                 write_error_response(&mut stream, status, code, message, Some(&route)).await?;
                 return Ok(());
             }
         };
         let stream_requested = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+        if let Some(probe) = &probe {
+            probe.set_request_protocol(if stream_requested {
+                RequestProtocol::Sse
+            } else {
+                RequestProtocol::Http
+            });
+            probe.mark_upstream_send(if stream_requested {
+                UpstreamTransport::HttpSse
+            } else {
+                UpstreamTransport::Http
+            });
+        }
         let request_builder = self
             .client
             .post(&upstream_url)
@@ -401,10 +473,12 @@ impl RouterServer {
                             ),
                         )
                     };
+                    mark_error(status, code);
                     write_text_error_response(&mut stream, status, code, message).await?;
                     return Ok(());
                 }
                 Err(_) => {
+                    mark_error(504, "upstream_header_timeout");
                     write_text_error_response(
                         &mut stream,
                         504,
@@ -418,7 +492,61 @@ impl RouterServer {
                     return Ok(());
                 }
             };
-        write_proxy_response(&mut stream, response, None).await
+        if let Some(probe) = &probe {
+            probe.mark_upstream_headers(
+                response.status().as_u16(),
+                response
+                    .headers()
+                    .get("x-request-id")
+                    .and_then(|value| value.to_str().ok()),
+            );
+        }
+        let result = write_proxy_response(&mut stream, response, probe.as_ref(), false).await;
+        if let Some(probe) = &probe {
+            if result.is_ok() {
+                probe.finish_success();
+            } else if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.is::<DownstreamClosed>())
+            {
+                probe.mark_cancelled("downstream_image_response_closed");
+                probe.finish_cancelled();
+            } else {
+                probe.mark_error(502, "upstream_image_response_failed");
+                probe.finish_failed();
+            }
+        }
+        result
+    }
+
+    fn begin_basic_request_log(
+        &self,
+        request: &HttpRequest,
+        kind: &str,
+    ) -> Option<RouteRequestLogProbe> {
+        self.request_log.begin(|producer| {
+            let request_id = current_router_request_id().unwrap_or_default();
+            let (session, parent) = request_log_codex_session(request);
+            producer.begin(RouteRequestLogStart {
+                request_id: &request_id,
+                started_at: current_router_request_started_at().unwrap_or_else(Instant::now),
+                request_protocol: RequestProtocol::Http,
+                request_kind: kind,
+                requested_model: "",
+                reasoning_effort: None,
+                thinking_budget_tokens: None,
+                codex_session_id: session,
+                codex_session_is_parent: parent,
+            })
+        })
+    }
+
+    fn record_rejected_request(&self, request: &HttpRequest, kind: &str, status: u16, code: &str) {
+        if let Some(probe) = self.begin_basic_request_log(request, kind) {
+            probe.mark_error(status, code);
+            probe.finish_failed();
+        }
     }
 
     pub(crate) async fn prepare_upstream_request_headers(
@@ -695,6 +823,8 @@ impl RouterServer {
                             ),
                         )
                         .await;
+                    downstream.adapted_history.clear_pending();
+                    downstream.native_history.clear_pending();
                     if let Err(error) = result {
                         if error.is::<DownstreamClosed>() {
                             // Reading a Close queues tungstenite's close reply.
@@ -760,6 +890,12 @@ impl RouterServer {
                         .is_some() =>
                 {
                     let mut downstream = HttpResponsesDownstream::new(stream);
+                    self.record_rejected_request(
+                        &request,
+                        request_kind.label(),
+                        503,
+                        "router_memory_busy",
+                    );
                     downstream
                         .write_error(
                             503,
@@ -776,6 +912,12 @@ impl RouterServer {
                         .is_some() =>
                 {
                     let mut downstream = HttpResponsesDownstream::new(stream);
+                    self.record_rejected_request(
+                        &request,
+                        request_kind.label(),
+                        415,
+                        "unsupported_content_encoding",
+                    );
                     downstream
                         .write_error(415, "unsupported_content_encoding", error.to_string(), None)
                         .await?;
@@ -783,6 +925,12 @@ impl RouterServer {
                 }
                 Err(error) => {
                     let mut downstream = HttpResponsesDownstream::new(stream);
+                    self.record_rejected_request(
+                        &request,
+                        request_kind.label(),
+                        400,
+                        "invalid_request_body",
+                    );
                     downstream
                         .write_error(
                             400,
@@ -798,6 +946,12 @@ impl RouterServer {
         let (encoded_body, parsed_body) = match parse_responses_request_body(encoded_body).await {
             Ok(parsed) => parsed,
             Err(error) => {
+                self.record_rejected_request(
+                    &request,
+                    request_kind.label(),
+                    500,
+                    "request_parse_failed",
+                );
                 downstream
                     .write_error(
                         500,
@@ -812,6 +966,12 @@ impl RouterServer {
         let body = match parsed_body {
             Ok(body) if body.is_object() => body,
             Ok(_) => {
+                self.record_rejected_request(
+                    &request,
+                    request_kind.label(),
+                    400,
+                    "invalid_request_body",
+                );
                 downstream
                     .write_error(
                         400,
@@ -823,6 +983,12 @@ impl RouterServer {
                 return Ok(());
             }
             Err(error) => {
+                self.record_rejected_request(
+                    &request,
+                    request_kind.label(),
+                    400,
+                    "invalid_request_body",
+                );
                 downstream
                     .write_error(
                         400,
@@ -887,7 +1053,13 @@ impl RouterServer {
                 request_id: &request_id,
                 started_at: current_router_request_started_at().unwrap_or_else(Instant::now),
                 request_protocol,
-                request_kind: request_kind.label(),
+                request_kind: if request_kind == ResponsesRequestKind::Create
+                    && is_compaction_request(&body, request_kind)
+                {
+                    "responses_compact_v2"
+                } else {
+                    request_kind.label()
+                },
                 requested_model,
                 reasoning_effort,
                 thinking_budget_tokens,
@@ -897,12 +1069,12 @@ impl RouterServer {
         });
         if probe.is_none() {
             return self
-                .proxy_parsed_responses_inner(request, body, encoded_body, request_kind, downstream)
+                .proxy_with_compaction_budget(request, body, encoded_body, request_kind, downstream)
                 .await;
         }
         let _request_log_guard = RouteRequestLogGuard::new(probe.clone());
         let mut observed = ObservedResponsesDownstream::new(downstream, probe);
-        self.proxy_parsed_responses_inner(request, body, encoded_body, request_kind, &mut observed)
+        self.proxy_with_compaction_budget(request, body, encoded_body, request_kind, &mut observed)
             .await
     }
 
@@ -918,6 +1090,7 @@ impl RouterServer {
         D: ResponsesDownstream + ?Sized,
     {
         let downstream_websocket = downstream.is_websocket();
+        let compacting = is_compaction_request(&body, request_kind);
         if downstream_websocket {
             debug_assert_eq!(request_kind, ResponsesRequestKind::Create);
             body.as_object_mut()
@@ -1042,6 +1215,38 @@ impl RouterServer {
             });
         }
         let bridge = ProtocolBridge::from_upstream_protocol(resolved.protocol);
+        if compacting && !resolved.route.supports_remote_compaction {
+            return downstream
+                .write_error(
+                    400,
+                    "compaction_unsupported",
+                    "当前线路未启用原生远程压缩，请使用 Codex 本地摘要".into(),
+                    Some(&resolved.route),
+                )
+                .await;
+        }
+        if bridge != ProtocolBridge::NativeResponses {
+            if compacting {
+                return downstream
+                    .write_error(
+                        400,
+                        "compaction_unsupported",
+                        "当前线路不支持原生远程压缩，请使用 Codex 本地摘要".into(),
+                        Some(&resolved.route),
+                    )
+                    .await;
+            }
+            if let Err(error) = validate_portable_context(&body) {
+                return downstream
+                    .write_error(
+                        400,
+                        "context_not_portable",
+                        error.to_string(),
+                        Some(&resolved.route),
+                    )
+                    .await;
+            }
+        }
         if let Some(probe) = downstream.request_log_probe() {
             probe.resolve_route(
                 &resolved.provider_id,
@@ -1054,13 +1259,40 @@ impl RouterServer {
                 subagent_request,
             );
         }
-        if bridge != ProtocolBridge::NativeResponses {
-            downstream.prepare_adapted_response_context(&mut body);
+        downstream.select_route(&resolved.route);
+        if bridge != ProtocolBridge::NativeResponses
+            && let Err(error) = downstream.prepare_adapted_response_context(&mut body)
+        {
+            downstream
+                .write_error(
+                    413,
+                    "context_budget_exceeded",
+                    error.to_string(),
+                    Some(&resolved.route),
+                )
+                .await?;
+            return Ok(());
         }
         if bridge == ProtocolBridge::NativeResponses
-            && remove_codey_synthetic_previous_response_id(&mut body)
+            && has_codey_synthetic_previous_response_id(&body)
         {
+            match downstream.prepare_adapted_response_context(&mut body) {
+                Ok(true) => {}
+                _ => {
+                    return downstream
+                        .write_error(
+                            400,
+                            "context_not_portable",
+                            "无法恢复旧线路的会话历史，请重新发送完整上下文；未删除历史引用".into(),
+                            Some(&resolved.route),
+                        )
+                        .await;
+                }
+            }
             body_mutated = true;
+            // Expansion changed the input too; do not reuse its original raw
+            // JSON slice, which would contain only the latest delta.
+            encoded_body = None;
         }
         let force_upstream_stream = should_force_upstream_streaming(
             bridge,
@@ -1171,10 +1403,10 @@ impl RouterServer {
         // therefore keep incremental `previous_response_id` state on their own
         // upstream connection without sharing the main agent's connection.
         if downstream_websocket
+            && !compacting
             && request_kind == ResponsesRequestKind::Create
             && stream_requested
             && bridge == ProtocolBridge::NativeResponses
-            && resolved.route.supports_websockets
         {
             let websocket_attempt = downstream
                 .try_proxy_upstream_websocket(&resolved.route, &headers, &mut upstream_body)
@@ -1182,17 +1414,41 @@ impl RouterServer {
             if websocket_attempt == UpstreamWebSocketAttempt::Completed {
                 return Ok(());
             }
-            if let Some(probe) = downstream.request_log_probe() {
+            if resolved.route.supports_websockets
+                && let Some(probe) = downstream.request_log_probe()
+            {
                 probe.mark_fallback("websocket_to_http_sse");
+            }
+            match downstream.prepare_native_http_fallback(
+                &resolved.route,
+                &headers,
+                &mut upstream_body,
+            ) {
+                Ok(true) => {
+                    body_mutated = true;
+                    encoded_body = None;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return downstream
+                        .write_error(
+                            400,
+                            "context_not_recoverable",
+                            error.to_string(),
+                            Some(&resolved.route),
+                        )
+                        .await;
+                }
             }
         }
         let upstream_stream_requested = upstream_body
             .get("stream")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let fallback_headers =
-            (subagent_request && upstream_stream_requested).then(|| headers.clone());
         let mut request_builder = self.client.post(upstream_url).headers(headers);
+        if compacting {
+            request_builder = request_builder.timeout(COMPACTION_TIMEOUT);
+        }
         request_builder = if bridge == ProtocolBridge::NativeResponses {
             // Native HTTP requests keep large input/tool fields as their raw
             // JSON slices. Only the small top-level fields that Codey can
@@ -1234,54 +1490,23 @@ impl RouterServer {
                 UpstreamTransport::Http
             });
         }
-        let initial_response = await_upstream(
+        let response_result = await_upstream(
             downstream,
             tokio::time::timeout(response_header_timeout, request_builder.send()),
         )
         .await?;
-        let (response_result, effective_upstream_stream, effective_header_timeout) =
-            match initial_response {
-                Ok(Err(error))
-                    if subagent_request && upstream_stream_requested && error.is_connect() =>
-                {
-                    if let Some(probe) = downstream.request_log_probe() {
-                        probe.mark_fallback("stream_connect_to_non_stream_http");
-                        probe.set_upstream_transport(UpstreamTransport::Http);
-                    }
-                    // A connect error happens before the request reaches the
-                    // provider, so retrying once as a non-streaming HTTP
-                    // request cannot duplicate model or tool side effects.
-                    // Errors after the request was sent are never replayed.
-                    let mut fallback_body = upstream_body.clone();
-                    fallback_body
-                        .as_object_mut()
-                        .expect("validated Responses body must remain an object")
-                        .insert("stream".to_string(), Value::Bool(false));
-                    let fallback_request = self
-                        .client
-                        .post(upstream_url)
-                        .headers(
-                            fallback_headers
-                                .expect("streaming subagent fallback headers must be prepared"),
-                        )
-                        .json(&fallback_body);
-                    (
-                        await_upstream(
-                            downstream,
-                            tokio::time::timeout(
-                                UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT,
-                                fallback_request.send(),
-                            ),
-                        )
-                        .await?,
-                        false,
-                        UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT,
-                    )
-                }
-                response => (response, upstream_stream_requested, response_header_timeout),
-            };
         let response = match response_result {
             Ok(Ok(response)) => response,
+            Ok(Err(error)) if compacting && error.is_timeout() => {
+                return downstream
+                    .write_error(
+                        504,
+                        "compaction_timeout",
+                        "远程压缩超过总时限，原始会话历史未被 Codey 修改，请稍后重试".into(),
+                        Some(&resolved.route),
+                    )
+                    .await;
+            }
             Ok(Err(error)) => {
                 let timeout = error.is_timeout();
                 let connect = error.is_connect();
@@ -1301,8 +1526,8 @@ impl RouterServer {
                         "upstreamProtocol": bridge.upstream_protocol().label(),
                         "protocolBridge": bridge.label(),
                         "requestKind": request_kind.label(),
-                        "upstreamStream": effective_upstream_stream,
-                        "responseHeaderTimeoutSeconds": effective_header_timeout.as_secs(),
+                        "upstreamStream": upstream_stream_requested,
+                        "responseHeaderTimeoutSeconds": response_header_timeout.as_secs(),
                         "requestId": current_router_request_id(),
                     }),
                 );
@@ -1349,8 +1574,8 @@ impl RouterServer {
                         "upstreamProtocol": bridge.upstream_protocol().label(),
                         "protocolBridge": bridge.label(),
                         "requestKind": request_kind.label(),
-                        "upstreamStream": effective_upstream_stream,
-                        "responseHeaderTimeoutSeconds": effective_header_timeout.as_secs(),
+                        "upstreamStream": upstream_stream_requested,
+                        "responseHeaderTimeoutSeconds": response_header_timeout.as_secs(),
                         "requestId": current_router_request_id(),
                     }),
                 );
@@ -1378,6 +1603,16 @@ impl RouterServer {
             _ if !response.status().is_success() => {
                 write_upstream_http_error(downstream, response, &resolved, bridge, request_kind)
                     .await
+            }
+            _ if compacting => {
+                write_validated_compaction(
+                    downstream,
+                    response,
+                    request_kind == ResponsesRequestKind::Create,
+                    stream_requested,
+                    &resolved.route,
+                )
+                .await
             }
             ProtocolBridge::ResponsesToAnthropicMessages
             | ProtocolBridge::ResponsesToChatCompletions => {

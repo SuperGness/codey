@@ -10,7 +10,8 @@ import {
   IconTrash as Trash2,
 } from "@tabler/icons-react";
 
-import type { Confirmation, ModelState } from "./App.types";
+import type { Confirmation, ModelContextConfig, ModelState } from "./App.types";
+import { ModelContextFields } from "./ModelSection";
 import {
   filterModelOptions,
   MODEL_PICKER_PAGE_SIZE,
@@ -46,6 +47,8 @@ type ModelPickerDialogProps = {
   modelState: ModelState;
   draftModelSet: Set<string>;
   draft1MModelSet: Set<string>;
+  draftModelContexts: Record<string, ModelContextConfig>;
+  onUpdateDraftModelContext: (model: string, policy: ModelContextConfig | undefined) => void;
   onToggleDraft1MModel: (model: string, checked: boolean) => void;
   manualThirdPartyModelKeys: Set<string>;
   onOpenChange: (open: boolean) => void;
@@ -71,6 +74,8 @@ function ModelPickerDialogComponent({
   modelState,
   draftModelSet,
   draft1MModelSet,
+  draftModelContexts,
+  onUpdateDraftModelContext,
   onToggleDraft1MModel,
   manualThirdPartyModelKeys,
   onOpenChange,
@@ -190,7 +195,7 @@ function ModelPickerDialogComponent({
                 <Badge variant="info">{modelState.officialModels.length} 个</Badge>
               </div>
               {modelState.officialModels.map((model) => (
-                <div className="flex items-center gap-2.5 rounded-md bg-blue-500/[0.025] px-3 py-2 hover:bg-blue-500/[0.07]" key={model.slug}>
+                <div className="flex flex-wrap items-center gap-2.5 rounded-md bg-blue-500/[0.025] px-3 py-2 hover:bg-blue-500/[0.07]" key={model.slug}>
                   <Checkbox
                     checked={draftModelSet.has(modelKey(model.slug))}
                     disabled={isBusy}
@@ -210,6 +215,8 @@ function ModelPickerDialogComponent({
                     label="1M"
                     aria-label={`${model.slug} 支持 1M 上下文`}
                   />
+                  {!routeConfigReadOnly && <ModelContextFields model={model.slug} policy={draftModelContexts[model.slug]} disabled={isBusy}
+                    onChange={(policy) => onUpdateDraftModelContext(model.slug, policy)} />}
                 </div>
               ))}
             </>
@@ -252,7 +259,7 @@ function ModelPickerDialogComponent({
               selectedThirdPartyModelKeys.has(modelKey(model));
             const manual = manualThirdPartyModelKeys.has(modelKey(model));
             return (
-              <div className="flex items-center gap-2.5 rounded-md px-3 py-2 hover:bg-blue-500/6" key={model}>
+              <div className="flex flex-wrap items-center gap-2.5 rounded-md px-3 py-2 hover:bg-blue-500/6" key={model}>
                 <Checkbox
                   checked={draftModelSet.has(modelKey(model))}
                   disabled={isBusy}
@@ -281,6 +288,8 @@ function ModelPickerDialogComponent({
                     删除
                   </Button>
                 )}
+                {!routeConfigReadOnly && <ModelContextFields model={model} policy={draftModelContexts[model]} disabled={isBusy}
+                  onChange={(policy) => onUpdateDraftModelContext(model, policy)} />}
               </div>
             );
           })}

@@ -462,7 +462,7 @@ impl<'a> ResponsesSseState<'a> {
         } else {
             "completed"
         };
-        downstream.remember_adapted_response(&self.response_id, &output);
+        downstream.remember_adapted_response(&self.response_id, &output)?;
         let mut response = json!({
             "id":self.response_id,
             "object":"response",

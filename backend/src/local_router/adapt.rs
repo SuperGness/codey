@@ -30,7 +30,7 @@ where
         )
     };
     let probe = downstream.request_log_probe().cloned();
-    let prepared = match await_upstream(
+    let mut prepared = match await_upstream(
         downstream,
         prepare_upstream_response(response, read_operation, probe.as_ref()),
     )
@@ -41,7 +41,11 @@ where
             return downstream
                 .write_error(
                     502,
-                    "upstream_protocol_error",
+                    if error.is::<ContextLengthExceeded>() {
+                        CONTEXT_LENGTH_EXCEEDED
+                    } else {
+                        "upstream_protocol_error"
+                    },
                     conversion_error(error),
                     Some(route),
                 )
@@ -60,13 +64,13 @@ where
     let collected = if anthropic {
         await_upstream(
             downstream,
-            read_anthropic_messages_as_responses(prepared, model, tool_bridge, probe.as_ref()),
+            read_anthropic_messages_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()),
         )
         .await?
     } else {
         await_upstream(
             downstream,
-            read_chat_completions_as_responses(prepared, model, tool_bridge, probe.as_ref()),
+            read_chat_completions_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()),
         )
         .await?
     };
@@ -76,7 +80,11 @@ where
             return downstream
                 .write_error(
                     502,
-                    "upstream_protocol_error",
+                    if error.is::<ContextLengthExceeded>() {
+                        CONTEXT_LENGTH_EXCEEDED
+                    } else {
+                        "upstream_protocol_error"
+                    },
                     conversion_error(error),
                     Some(route),
                 )
@@ -91,13 +99,13 @@ where
 }
 
 pub(crate) async fn read_chat_completions_as_responses(
-    mut prepared: PreparedUpstreamResponse,
+    prepared: &mut PreparedUpstreamResponse,
     model: &str,
     tool_bridge: &ResponsesToolBridge,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Value> {
     let chat = if prepared.is_sse {
-        collect_chat_completion_sse(&mut prepared, model, probe).await?
+        collect_chat_completion_sse(prepared, model, probe).await?
     } else {
         let body = read_bounded_prepared_upstream_body(
             prepared,
@@ -140,13 +148,13 @@ pub(crate) async fn read_bounded_upstream_error_body(
 }
 
 pub(crate) async fn read_anthropic_messages_as_responses(
-    mut prepared: PreparedUpstreamResponse,
+    prepared: &mut PreparedUpstreamResponse,
     model: &str,
     tool_bridge: &ResponsesToolBridge,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Value> {
     let message = if prepared.is_sse {
-        collect_anthropic_message_sse(&mut prepared, model, probe).await?
+        collect_anthropic_message_sse(prepared, model, probe).await?
     } else {
         let body = read_bounded_prepared_upstream_body(
             prepared,

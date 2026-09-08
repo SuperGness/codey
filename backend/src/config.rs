@@ -561,6 +561,8 @@ pub struct CodeyConfig {
     pub selected_models_by_provider: BTreeMap<String, Vec<String>>,
     #[serde(default, rename = "supports1MContextByProvider")]
     pub supports_1m_context_by_provider: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub model_context_by_provider: BTreeMap<String, BTreeMap<String, ModelContextConfig>>,
     /// Third-party model IDs that were explicitly typed by the user. Synced
     /// provider models are intentionally excluded so only manual entries can be
     /// deleted from Codey's saved support list.
@@ -650,6 +652,43 @@ pub struct CodeyConfig {
     pub update_manifest_url: String,
 }
 
+/// User-declared operating budget, never proof of upstream model capacity.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelContextConfig {
+    pub context_window_tokens: u64,
+    #[serde(default)]
+    pub auto_compact_token_limit: Option<u64>,
+    #[serde(default)]
+    pub reserve_output_tokens: Option<u64>,
+}
+
+impl ModelContextConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        let window = self.context_window_tokens;
+        if !(1_024..=10_000_000).contains(&window) {
+            return Err("上下文窗口必须是 1024 到 10000000 之间的整数 Token".into());
+        }
+        let reserve = self.reserve_output_tokens.unwrap_or(0);
+        if self.reserve_output_tokens == Some(0)
+            || reserve >= window
+            || (window - reserve) * 100 / window == 0
+        {
+            return Err("输出预留必须为正整数，并至少保留 1% 的上下文输入空间".into());
+        }
+        let effective = window * ((window - reserve) * 100 / window) / 100;
+        if self
+            .auto_compact_token_limit
+            .is_some_and(|limit| limit == 0 || limit > effective.min(window * 9 / 10))
+        {
+            return Err(
+                "压缩阈值必须为正整数，且不超过窗口的 90% 和扣除输出预留后的有效窗口".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 impl Default for CodeyConfig {
     fn default() -> Self {
         let profile = ProviderProfile::new("默认配置");
@@ -665,6 +704,7 @@ impl Default for CodeyConfig {
             user_scripts: Vec::new(),
             selected_models_by_provider: BTreeMap::new(),
             supports_1m_context_by_provider: BTreeMap::new(),
+            model_context_by_provider: BTreeMap::new(),
             manual_third_party_models_by_provider: BTreeMap::new(),
             declared_official_models_by_provider: BTreeMap::new(),
             upstream_models_by_provider: BTreeMap::new(),
@@ -790,6 +830,7 @@ impl CodeyConfig {
         if let Some(provider_id) = placeholder_provider_id {
             self.selected_models_by_provider.remove(&provider_id);
             self.supports_1m_context_by_provider.remove(&provider_id);
+            self.model_context_by_provider.remove(&provider_id);
             self.manual_third_party_models_by_provider
                 .remove(&provider_id);
             self.declared_official_models_by_provider
@@ -835,6 +876,15 @@ impl CodeyConfig {
     ) {
         if previous_provider_id == official_provider_id {
             return;
+        }
+        if let Some(models) = self.model_context_by_provider.remove(previous_provider_id) {
+            let target = self
+                .model_context_by_provider
+                .entry(official_provider_id.to_string())
+                .or_default();
+            for (model, policy) in models {
+                target.entry(model).or_insert(policy);
+            }
         }
         migrate_provider_model_list(
             &mut self.supports_1m_context_by_provider,
@@ -912,6 +962,38 @@ impl CodeyConfig {
             })
     }
 
+    pub(crate) fn model_context(
+        &self,
+        provider_id: &str,
+        model: &str,
+    ) -> Option<&ModelContextConfig> {
+        self.model_context_by_provider
+            .get(provider_id)?
+            .iter()
+            .find(|(candidate, _)| model_id::equal(candidate, model))
+            .map(|(_, policy)| policy)
+    }
+
+    pub(crate) fn runtime_model_contexts(&self) -> BTreeMap<String, ModelContextConfig> {
+        self.profiles
+            .iter()
+            .filter(|profile| profile.enabled)
+            .filter(|profile| {
+                !profile.official_account || self.official_account_available_this_launch
+            })
+            .flat_map(|profile| {
+                self.model_context_by_provider
+                    .get(profile.provider_id())
+                    .into_iter()
+                    .flat_map(move |models| {
+                        models.iter().map(move |(model, policy)| {
+                            (runtime_catalog_model_id(profile, model), policy.clone())
+                        })
+                    })
+            })
+            .collect()
+    }
+
     pub(crate) fn provider_is_disabled(&self, provider_id: &str) -> bool {
         self.profiles
             .iter()
@@ -937,6 +1019,13 @@ impl CodeyConfig {
     }
 
     pub(crate) fn retain_1m_context_models(&mut self, provider_id: &str, available: &[String]) {
+        if let Some(models) = self.model_context_by_provider.get_mut(provider_id) {
+            models.retain(|model, _| {
+                available
+                    .iter()
+                    .any(|candidate| model_id::equal(candidate, model))
+            });
+        }
         if let Some(models) = self.supports_1m_context_by_provider.get_mut(provider_id) {
             models.retain(|model| {
                 available

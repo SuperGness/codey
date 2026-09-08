@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -850,6 +850,98 @@ fn json_nonempty_string(payload: &Map<String, Value>, keys: &[&str]) -> Option<S
     })
 }
 
+// A desktop resume can start a new turn without UserPromptSubmit. Only the
+// session's own root rollout may repair that binding; an arbitrary new turn
+// ID (including an anonymous child's) remains insufficient.
+fn trusted_root_turn_matches(
+    input: &HookInput,
+    state_root: &Path,
+    runtime_id: &str,
+    now_ms: u64,
+) -> Result<bool> {
+    if input_has_subagent_context(input) {
+        return Ok(false);
+    }
+    let Some(turn_id) = nonempty(input.turn_id.as_deref()) else {
+        return Ok(false);
+    };
+    if root_turn_matches(state_root, runtime_id, &input.session_id, Some(turn_id))? {
+        return Ok(true);
+    }
+    let Some(transcript) = input.transcript_path.as_deref().map(Path::new) else {
+        return Ok(false);
+    };
+    let Some(home) = state_root.parent() else {
+        return Ok(false);
+    };
+    let (Ok(sessions), Ok(path), Ok(metadata)) = (
+        fs::canonicalize(home.join("sessions")),
+        fs::canonicalize(transcript),
+        fs::symlink_metadata(transcript),
+    ) else {
+        return Ok(false);
+    };
+    if !transcript.is_absolute()
+        || !metadata.is_file()
+        || !path.starts_with(sessions)
+        || !path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(&format!("-{}.jsonl", input.session_id)))
+    {
+        return Ok(false);
+    }
+    let mut file = fs::File::open(path)?;
+    let mut header = String::new();
+    BufReader::new((&mut file).take(64 * 1024)).read_line(&mut header)?;
+    let Ok(meta) = serde_json::from_str::<Value>(&header) else {
+        return Ok(false);
+    };
+    if meta["type"] != "session_meta"
+        || meta["payload"]["id"].as_str() != Some(input.session_id.as_str())
+        || !matches!(meta["payload"]["source"].as_str(), Some("cli" | "vscode"))
+    {
+        return Ok(false);
+    }
+    let length = file.metadata()?.len();
+    let start = length.saturating_sub(MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut records = BufReader::new(file.take(MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES));
+    if start > 0 {
+        records.skip_until(b'\n')?;
+    }
+    let mut previous_aborted = false;
+    let mut current_started = false;
+    for line in records.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(&line?) else {
+            continue;
+        };
+        if record["type"] != "event_msg" {
+            continue;
+        }
+        let payload = &record["payload"];
+        let event_turn = payload["turn_id"].as_str();
+        match payload["type"].as_str() {
+            Some("turn_aborted") => {
+                previous_aborted |=
+                    root_turn_matches(state_root, runtime_id, &input.session_id, event_turn)?;
+                if event_turn == Some(turn_id) {
+                    current_started = false;
+                }
+            }
+            Some("task_started") => {
+                current_started = previous_aborted && event_turn == Some(turn_id);
+            }
+            Some("task_complete") if event_turn == Some(turn_id) => current_started = false,
+            _ => {}
+        }
+    }
+    if current_started {
+        bind_root_turn(state_root, runtime_id, &input.session_id, turn_id, now_ms)?;
+    }
+    Ok(current_started)
+}
+
 fn pre_tool_use_output(
     input: &HookInput,
     state_root: &Path,
@@ -891,12 +983,8 @@ fn pre_tool_use_output(
         return Ok(subagent_identity_missing_denial());
     }
     let active = active_agent_count_for_runtime(state_root, runtime_id, &input.session_id)?;
-    let trusted_root_turn = root_turn_matches(
-        state_root,
-        runtime_id,
-        &input.session_id,
-        nonempty(input.turn_id.as_deref()),
-    )?;
+    let trusted_root_turn =
+        active > 0 && trusted_root_turn_matches(input, state_root, runtime_id, now_ms)?;
     if active > 0 && !trusted_root_turn {
         let Some(tool_name) = input.tool_name.as_deref() else {
             return Ok(pre_tool_denial(active, None));
@@ -1201,17 +1289,14 @@ fn post_tool_use_output(
         remove_session_state(state_root, runtime_id, &input.session_id)?;
         return Ok(json!({}));
     }
-    let root_local_reads_allowed = root_turn_matches(
-        state_root,
-        runtime_id,
-        &input.session_id,
-        nonempty(input.turn_id.as_deref()),
-    )? && verified_local_read_only_active_count(
-        state_root,
-        runtime_id,
-        &input.session_id,
-        now_ms,
-    )? == Some(active);
+    let root_local_reads_allowed =
+        trusted_root_turn_matches(input, state_root, runtime_id, now_ms)?
+            && verified_local_read_only_active_count(
+                state_root,
+                runtime_id,
+                &input.session_id,
+                now_ms,
+            )? == Some(active);
     let protocol_issue = protocol_issue_reason(state_root, runtime_id, &input.session_id)?;
     if is_wait_agent_tool(tool_name) {
         Ok(post_wait_continuation(
@@ -3828,6 +3913,121 @@ mod tests {
             "message": "status?"
         }));
         assert_eq!(handle_hook(&root_message, root).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn resumed_root_recovers_binding_from_its_aborted_turn_without_cancelling_children() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(STATE_DIRECTORY);
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let session_id = "resume-session";
+        let runtime_id = "runtime-a";
+        let transcript = sessions.join(format!("rollout-{session_id}.jsonl"));
+        create_active_marker(&root, runtime_id, session_id, "child-a").unwrap();
+        let mut interrupt = input("PreToolUse", session_id);
+        interrupt.turn_id = Some("new-turn".into());
+        interrupt.transcript_path = Some(transcript.to_string_lossy().into_owned());
+        interrupt.tool_name = Some("agents.interrupt_agent".into());
+        interrupt.tool_input = Some(json!({"target": "/root/child-a"}));
+
+        for (source, meta_id, aborted_turn, started_turn, completed, allowed) in [
+            (
+                json!("vscode"),
+                session_id,
+                "old-turn",
+                "new-turn",
+                false,
+                true,
+            ),
+            (
+                json!("cli"),
+                session_id,
+                "old-turn",
+                "new-turn",
+                false,
+                true,
+            ),
+            (
+                json!({"subagent": {}}),
+                session_id,
+                "old-turn",
+                "new-turn",
+                false,
+                false,
+            ),
+            (
+                json!("vscode"),
+                "other-session",
+                "old-turn",
+                "new-turn",
+                false,
+                false,
+            ),
+            (
+                json!("vscode"),
+                session_id,
+                "unbound-turn",
+                "new-turn",
+                false,
+                false,
+            ),
+            (
+                json!("vscode"),
+                session_id,
+                "old-turn",
+                "child-turn",
+                false,
+                false,
+            ),
+            (
+                json!("vscode"),
+                session_id,
+                "old-turn",
+                "new-turn",
+                true,
+                false,
+            ),
+        ] {
+            bind_root_turn(&root, runtime_id, session_id, "old-turn", 10).unwrap();
+            let mut records = vec![
+                json!({"type": "session_meta", "payload": {"id": meta_id, "source": source}}),
+                json!({"type": "event_msg", "payload": {"type": "turn_aborted", "turn_id": aborted_turn}}),
+                json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": started_turn}}),
+            ];
+            if completed {
+                records.push(json!({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": started_turn}}));
+            }
+            fs::write(
+                &transcript,
+                records
+                    .iter()
+                    .map(|value| format!("{value}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+            let output = handle_hook_for_runtime_at(&interrupt, &root, runtime_id, 20).unwrap();
+            assert_eq!(output == json!({}), allowed, "{records:?}: {output}");
+            assert_eq!(
+                active_agent_count_for_runtime(&root, runtime_id, session_id).unwrap(),
+                1
+            );
+            assert_eq!(
+                root_turn_matches(&root, runtime_id, session_id, Some("new-turn")).unwrap(),
+                allowed
+            );
+        }
+
+        // A missing rollout or missing turn ID must not grant orchestration rights.
+        fs::remove_file(transcript).unwrap();
+        for turn in [Some("new-turn".into()), None] {
+            interrupt.turn_id = turn;
+            assert_eq!(
+                handle_hook_for_runtime_at(&interrupt, &root, runtime_id, 30).unwrap()["hookSpecificOutput"]
+                    ["permissionDecision"],
+                "deny"
+            );
+        }
     }
 
     #[test]

@@ -18,7 +18,12 @@ if (overlay.status !== 0) process.exit(overlay.status ?? 1);
 const cargo = spawnSync(
   "cargo",
   ["build", "--release", "--manifest-path", join(root, "Cargo.toml")],
-  { cwd: root, stdio: "inherit" },
+  {
+    cwd: root,
+    stdio: "inherit",
+    // 上面已经生成 dist-overlay，告知 backend/build.rs 不必再跑一次 Vite。
+    env: { ...process.env, CODEY_SKIP_OVERLAY_BUILD: "1" },
+  },
 );
 
 if (cargo.status !== 0) process.exit(cargo.status ?? 1);

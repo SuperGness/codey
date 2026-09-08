@@ -54,10 +54,6 @@ impl BridgePumpHandle {
             let _ = task.await;
         }
     }
-
-    pub fn detach(mut self) {
-        let _ = self.task.take();
-    }
 }
 
 impl Drop for BridgePumpHandle {
@@ -181,51 +177,6 @@ pub async fn evaluate_script_with_await_promise(
         )
         .await?;
     ensure_runtime_evaluate_succeeded(response)
-}
-
-pub async fn run_periodic_evaluations<F>(
-    websocket_url: &str,
-    period: Duration,
-    mut next_expression: F,
-) -> anyhow::Result<()>
-where
-    F: FnMut() -> anyhow::Result<Option<String>>,
-{
-    let socket = connect_cdp_websocket(websocket_url).await?;
-    let mut session = CdpSession::new(socket);
-    let mut interval = tokio::time::interval(period);
-    loop {
-        interval.tick().await;
-        let Some(expression) = next_expression()? else {
-            return Ok(());
-        };
-        let response = session
-            .send_command(
-                next_message_id(),
-                "Runtime.evaluate",
-                runtime_evaluate_params(&expression),
-            )
-            .await?;
-        let response = ensure_runtime_evaluate_succeeded(response)?;
-        if runtime_evaluate_result_is_false(&response) {
-            bail!("periodic Runtime.evaluate reported unavailable capability");
-        }
-    }
-}
-
-pub async fn add_script_to_new_documents(
-    websocket_url: &str,
-    script: &str,
-) -> anyhow::Result<Value> {
-    let socket = connect_cdp_websocket(websocket_url).await?;
-    let mut session = CdpSession::new(socket);
-    session
-        .send_command(
-            1,
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({ "source": script }),
-        )
-        .await
 }
 
 pub async fn install_bridge(
@@ -746,14 +697,6 @@ fn ensure_runtime_evaluate_succeeded(response: Value) -> anyhow::Result<Value> {
         bail!("Runtime.evaluate raised an exception: {exception}");
     }
     Ok(response)
-}
-
-fn runtime_evaluate_result_is_false(response: &Value) -> bool {
-    response
-        .get("result")
-        .and_then(|result| result.get("result"))
-        .and_then(|result| result.get("value"))
-        .is_some_and(|value| value == false)
 }
 
 fn extract_string_field(input: &str, field: &str) -> Option<String> {

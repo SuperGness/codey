@@ -434,10 +434,8 @@ dependencies = [
  "base64",
  "codey-runtime-core",
  "rusqlite",
- "serde",
  "serde_json",
  "tempfile",
- "uuid",
 ]
 
 [[package]]

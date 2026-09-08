@@ -25,7 +25,15 @@ pub(crate) fn refresh_model_catalog_or_fallback(
         &context_1m_models,
     );
     match result {
-        Ok(fallback) => Ok(ModelCatalogRefresh { fallback, snapshot }),
+        Ok(fallback) => {
+            if model_catalog::is_available(home)
+                && let Err(error) =
+                    model_catalog::apply_catalog_contexts(home, &config.runtime_model_contexts())
+            {
+                return Err(rollback_model_catalog_snapshot(snapshot, error.to_string()));
+            }
+            Ok(ModelCatalogRefresh { fallback, snapshot })
+        }
         Err(error) => Err(rollback_model_catalog_snapshot(snapshot, error)),
     }
 }

@@ -58,6 +58,7 @@ pub(crate) async fn collect_sse_frames<A: SseFrameAccumulator>(
     accumulator: &mut A,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<()> {
+    prepared.retained.get_or_insert_with(Default::default);
     let mut buffer = Vec::new();
     let mut cursor = SseCursor::default();
     while let Some(chunk) = read_prepared_upstream_chunk(prepared, A::READ_OPERATION, probe).await?
@@ -94,6 +95,9 @@ pub(crate) fn parse_sse_frames<A: SseFrameAccumulator>(
     bytes: &[u8],
     accumulator: &mut A,
 ) -> Result<()> {
+    if bytes.len() > MAX_UPSTREAM_RESPONSE_BYTES {
+        anyhow::bail!("上游响应累计大小超过 Codey 安全上限");
+    }
     let mut cursor = SseCursor::default();
     while let Some(frame) = take_next_sse_frame(bytes, &mut cursor) {
         let Some(data) = sse_frame_data(frame)? else {
@@ -112,16 +116,102 @@ pub(crate) fn parse_sse_frames<A: SseFrameAccumulator>(
     Ok(())
 }
 
+/// Validate native SSE completion while forwarding the original bytes. Only
+/// one event is retained; unknown JSON fields are skipped without building a tree.
+#[derive(Default)]
+pub(crate) struct NativeSseTerminal {
+    buffer: Vec<u8>,
+    cursor: SseCursor,
+    terminal: bool,
+    budget: RetainedMemoryBudget,
+}
+
+impl NativeSseTerminal {
+    fn ingest(&mut self, frame: &[u8]) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct EventKind {
+            #[serde(rename = "type")]
+            kind: String,
+        }
+        if let Some(data) = sse_frame_data(frame)? {
+            if data.trim() == "[DONE]" {
+                if !self.terminal {
+                    anyhow::bail!("Responses SSE 在终态事件前结束");
+                }
+                return Ok(());
+            }
+            let event: EventKind =
+                serde_json::from_str(&data).context("Responses SSE data 无效")?;
+            self.terminal |= matches!(
+                event.kind.as_str(),
+                "response.completed" | "response.failed" | "response.incomplete" | "error"
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn observe(&mut self, bytes: &[u8]) -> Result<bool> {
+        compact_sse_buffer(&mut self.buffer, &mut self.cursor);
+        let size = self.buffer.len().saturating_add(bytes.len());
+        if size > MAX_UPSTREAM_RESPONSE_BYTES {
+            anyhow::bail!("Responses SSE 单帧超过上限");
+        }
+        // Clearing consumed bytes does not release Vec capacity.
+        self.budget.resize(size.max(self.buffer.capacity()))?;
+        self.buffer.extend_from_slice(bytes);
+        // Split borrows: the frame is borrowed from the buffer, while ingest
+        // only needs the terminal flag. Move the bounded buffer temporarily.
+        let buffer = std::mem::take(&mut self.buffer);
+        let result = (|| {
+            while let Some(frame) = take_next_sse_frame(&buffer, &mut self.cursor) {
+                self.ingest(frame)?;
+                if self.terminal {
+                    break;
+                }
+            }
+            Ok(self.terminal)
+        })();
+        self.buffer = buffer;
+        result
+    }
+
+    pub(crate) fn finish(&mut self) -> Result<()> {
+        if !self.terminal {
+            let buffer = std::mem::take(&mut self.buffer);
+            let tail = &buffer[self.cursor.consumed..];
+            if !tail.iter().all(u8::is_ascii_whitespace) {
+                self.ingest(tail)?;
+            }
+        }
+        if !self.terminal {
+            anyhow::bail!("Responses SSE 在终态事件前断开");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SseCursor {
     pub(crate) consumed: usize,
     pub(crate) scanned: usize,
+    started: bool,
 }
 
 pub(crate) fn take_next_sse_frame<'a>(
     buffer: &'a [u8],
     cursor: &mut SseCursor,
 ) -> Option<&'a [u8]> {
+    if !cursor.started {
+        const BOM: &[u8] = b"\xef\xbb\xbf";
+        if buffer.len() < BOM.len() && BOM.starts_with(buffer) {
+            return None;
+        }
+        cursor.started = true;
+        if buffer.starts_with(BOM) {
+            cursor.consumed = BOM.len();
+            cursor.scanned = BOM.len();
+        }
+    }
     for index in cursor.scanned..buffer.len() {
         let length = if buffer.get(index..index + 4) == Some(b"\r\n\r\n") {
             4
@@ -146,7 +236,8 @@ pub(crate) fn compact_sse_buffer(buffer: &mut Vec<u8>, cursor: &mut SseCursor) {
     }
     if cursor.consumed == buffer.len() {
         buffer.clear();
-        *cursor = SseCursor::default();
+        cursor.consumed = 0;
+        cursor.scanned = 0;
         return;
     }
     if cursor.consumed >= 64 * 1024 || cursor.consumed.saturating_mul(2) >= buffer.len() {
@@ -184,4 +275,36 @@ pub(crate) fn current_unix_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bom_is_removed_once_even_across_chunks_and_buffer_compaction() {
+        let input = b"\xef\xbb\xbfdata: first\n\ndata: second\r\n\r\n\xef\xbb\xbfdata: ignored\n\n";
+        for chunk_size in 1..=input.len() {
+            let mut buffer = Vec::new();
+            let mut cursor = SseCursor::default();
+            let mut data = Vec::new();
+            for chunk in input.chunks(chunk_size) {
+                compact_sse_buffer(&mut buffer, &mut cursor);
+                buffer.extend_from_slice(chunk);
+                while let Some(frame) = take_next_sse_frame(&buffer, &mut cursor) {
+                    if let Some(value) = sse_frame_data(frame).unwrap() {
+                        data.push(value.into_owned());
+                    }
+                }
+            }
+            assert_eq!(data, ["first", "second"], "chunk size {chunk_size}");
+        }
+        let mut cursor = SseCursor::default();
+        let tail = b"\xef\xbb\xbfdata: tail";
+        assert!(take_next_sse_frame(tail, &mut cursor).is_none());
+        assert_eq!(
+            sse_frame_data(&tail[cursor.consumed..]).unwrap().as_deref(),
+            Some("tail")
+        );
+    }
 }

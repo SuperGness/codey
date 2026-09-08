@@ -3,7 +3,6 @@ import {
   Alert,
   Loader,
   Modal,
-  Pagination,
 } from "@mantine/core";
 import {
   IconAlertCircle,
@@ -21,6 +20,7 @@ import {
 
 import type { Config, Profile } from "./App.types";
 import { invoke } from "./api";
+import { formatTimestamp } from "./formatters";
 import {
   Badge,
   Button,
@@ -94,6 +94,43 @@ type RouteRequestLogQueryPage = {
   total: number;
   totalPages: number;
   items: RouteRequestLogItem[];
+  nextCursor: LogCursor | null;
+  hasMore: boolean;
+};
+
+type LogCursor = { timestampUnixMs: number; requestId: string };
+type LogSummary = {
+  total: number;
+  succeededCount: number;
+  failedCount: number;
+  incompleteCount: number;
+  cancelledCount: number;
+  successRate: number | null;
+  avgDuration: number | null;
+  avgTtft: number | null;
+  inputTokensSum: number | null;
+  outputTokensSum: number | null;
+  totalTokensSum: number | null;
+  cachedTokensSum: number | null;
+  usageReportedCount: number;
+  totalTokensKnownCount: number;
+};
+type LogAnalytics = LogSummary & {
+  queryable: boolean;
+  fromUnixMs: number;
+  toUnixMs: number;
+  groups: Array<LogSummary & { key: string }>;
+  groupsTruncated: boolean;
+  trend: Array<{ timestampUnixMs: number; total: number; totalTokensSum: number | null; avgDuration: number | null }>;
+  bucketMs: number;
+  databaseBytes?: number;
+  walBytes?: number;
+  recordingHealth?: {
+    enabled: boolean; active: boolean; sampleRatePerMillion: number; pendingEntries: number;
+    accepted: number; entriesWritten: number; sampledOut: number;
+    droppedFull: number; droppedClosed: number; writeDropped: number; writeFailures: number;
+    observerPanics: number; writerPanics: number; shutdownTimeouts: number;
+  } | null;
 };
 
 type ClearRouteRequestLogsResult = {
@@ -206,22 +243,9 @@ function optionalFilter(value: string) {
   return value === "all" ? undefined : value;
 }
 
-function formatTimestamp(value: number) {
-  if (!Number.isFinite(value)) return "—";
-  return new Intl.DateTimeFormat("zh-CN", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(new Date(value));
-}
-
 function formatDuration(value?: number | null) {
   if (value == null || !Number.isFinite(value)) return "—";
-  if (value < 1_000) return `${value.toLocaleString()} ms`;
+  if (value < 1_000) return `${Math.round(value).toLocaleString()} ms`;
   return `${(value / 1_000).toFixed(value < 10_000 ? 2 : 1)} s`;
 }
 
@@ -302,6 +326,16 @@ export function RequestLogDialog({
   const [protocol, setProtocol] = useState("all");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
+  const [cursors, setCursors] = useState<Array<LogCursor | null>>([null]);
+  const [timeRange, setTimeRange] = useState("24h");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const [searchMode, setSearchMode] = useState("contains");
+  const [requestKind, setRequestKind] = useState("all");
+  const [groupBy, setGroupBy] = useState("model");
+  const [stats, setStats] = useState<LogAnalytics | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState("");
   const [refreshRevision, setRefreshRevision] = useState(0);
   const [result, setResult] = useState<RouteRequestLogQueryPage | null>(null);
   const [loading, setLoading] = useState(false);
@@ -316,6 +350,8 @@ export function RequestLogDialog({
   } | null>(null);
   const copyToastTimer = useRef<number | null>(null);
   const requestRevision = useRef(0);
+  const listTask = useRef(Promise.resolve());
+  const statsTask = useRef(Promise.resolve());
   const clearInFlight = useRef(false);
 
   const handleCopyId = (requestId: string, customLabel?: string) => {
@@ -342,59 +378,26 @@ export function RequestLogDialog({
     );
   };
 
-  const stats = useMemo(() => {
-    if (!result || result.items.length === 0) return null;
-    let succeededCount = 0;
-    let failedCount = 0;
-    let totalDurationSum = 0;
-    let durationCount = 0;
-    let ttftSum = 0;
-    let ttftCount = 0;
-    let totalTokensSum = 0;
-    let cachedTokensSum = 0;
-
-    for (const item of result.items) {
-      if (item.status === "succeeded") succeededCount += 1;
-      else if (item.status === "failed") failedCount += 1;
-
-      if (Number.isFinite(item.totalDurationMs) && item.totalDurationMs > 0) {
-        totalDurationSum += item.totalDurationMs;
-        durationCount += 1;
-      }
-      const ttft = item.downstreamFirstContentMs ?? item.ttftMs;
-      if (ttft != null && Number.isFinite(ttft) && ttft > 0) {
-        ttftSum += ttft;
-        ttftCount += 1;
-      }
-      if (item.totalTokens != null && Number.isFinite(item.totalTokens)) {
-        totalTokensSum += item.totalTokens;
-      }
-      if (item.cachedInputTokens != null && Number.isFinite(item.cachedInputTokens)) {
-        cachedTokensSum += item.cachedInputTokens;
-      }
-    }
-
-    const successRate = result.items.length > 0
-      ? Math.round((succeededCount / result.items.length) * 100)
-      : null;
-    const avgDuration = durationCount > 0
-      ? Math.round(totalDurationSum / durationCount)
-      : null;
-    const avgTtft = ttftCount > 0
-      ? Math.round(ttftSum / ttftCount)
-      : null;
-
-    return {
-      total: result.total,
-      successRate,
-      succeededCount,
-      failedCount,
-      avgDuration,
-      avgTtft,
-      totalTokensSum,
-      cachedTokensSum,
-    };
-  }, [result]);
+  const rangeEnd = useMemo(() => Date.now(), [opened, refreshRevision, timeRange, customTo]);
+  const toUnixMs = timeRange === "custom" ? new Date(customTo).getTime() : rangeEnd;
+  const fromUnixMs = timeRange === "custom" ? new Date(customFrom).getTime()
+    : toUnixMs - ({ "24h": 1, "7d": 7, "30d": 30 }[timeRange] ?? 1) * 86_400_000;
+  const validRange = Number.isFinite(fromUnixMs) && Number.isFinite(toUnixMs)
+    && fromUnixMs >= 0 && fromUnixMs < toUnixMs && toUnixMs - fromUnixMs <= 366 * 86_400_000;
+  const filters = useMemo(() => ({
+    cursorMode: true, fromUnixMs, toUnixMs,
+    ...(search ? { [searchMode === "requestId" ? "requestId" : searchMode === "sessionId" ? "sessionId" : "search"]: search } : {}),
+    ...(optionalFilter(provider) ? { provider } : {}),
+    ...(optionalFilter(model) ? { model } : {}),
+    ...(optionalFilter(status) ? { status } : {}),
+    ...(optionalFilter(protocol) ? { protocol } : {}),
+    ...(optionalFilter(requestKind) ? { requestKind } : {}),
+  }), [fromUnixMs, toUnixMs, search, searchMode, provider, model, status, protocol, requestKind]);
+  const cursor = page === 1 ? null : cursors[page - 1] ?? null;
+  const health = stats?.recordingHealth;
+  const dropped = health ? health.droppedFull + health.droppedClosed + health.writeDropped : 0;
+  const healthWarning = health && (dropped > 0 || !health.active || health.sampleRatePerMillion < 1_000_000
+    || health.writeFailures > 0 || health.observerPanics > 0 || health.writerPanics > 0 || health.shutdownTimeouts > 0);
 
   const providerOptions = useMemo(() => {
     const providers = new Map<string, string>();
@@ -443,39 +446,54 @@ export function RequestLogDialog({
 
   useEffect(() => {
     if (!opened) return;
-    const currentRequest = ++requestRevision.current;
+    const revision = ++requestRevision.current;
+    let active = true;
+    if (!validRange) {
+      setError("请选择有效的开始与结束时间，范围不能超过 366 天。");
+      setResult(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError("");
-    void invoke<RouteRequestLogQueryPage>("query_route_request_logs", {
-      page,
-      pageSize,
-      ...(search ? { search } : {}),
-      ...(optionalFilter(provider) ? { provider } : {}),
-      ...(optionalFilter(model) ? { model } : {}),
-      ...(optionalFilter(status) ? { status } : {}),
-      ...(optionalFilter(protocol) ? { protocol } : {}),
-    }).then((nextResult) => {
-      if (requestRevision.current !== currentRequest) return;
-      if (
-        nextResult.queryable &&
-        nextResult.totalPages > 0 &&
-        page > nextResult.totalPages
-      ) {
-        setPage(nextResult.totalPages);
-        return;
+    setResult(null);
+    // Keep one list query in flight; superseded queued queries never reach SQLite.
+    listTask.current = listTask.current.then(async () => {
+      if (!active || revision !== requestRevision.current) return;
+      try {
+        const nextResult = await invoke<RouteRequestLogQueryPage>("query_route_request_logs", {
+          ...filters, pageSize, cursor,
+        });
+        if (active && revision === requestRevision.current) setResult(nextResult);
+      } catch (nextError) {
+        if (active) setError(nextError instanceof Error ? nextError.message : String(nextError));
+      } finally {
+        if (active) setLoading(false);
       }
-      setResult(nextResult);
-    }).catch((nextError: unknown) => {
-      if (requestRevision.current !== currentRequest) return;
-      setResult(null);
-      setError(nextError instanceof Error ? nextError.message : String(nextError));
-    }).finally(() => {
-      if (requestRevision.current === currentRequest) setLoading(false);
     });
-    return () => {
-      requestRevision.current += 1;
-    };
-  }, [opened, page, pageSize, protocol, provider, model, refreshRevision, search, status]);
+    return () => { active = false; };
+  }, [opened, filters, pageSize, cursor, validRange, refreshRevision]);
+
+  useEffect(() => {
+    if (!opened) return;
+    let active = true;
+    setStats(null);
+    setStatsError("");
+    setStatsLoading(validRange);
+    if (!validRange) return;
+    statsTask.current = statsTask.current.then(async () => {
+      if (!active) return;
+      try {
+        const nextStats = await invoke<LogAnalytics>("query_route_request_log_stats", { ...filters, groupBy });
+        if (active) setStats(nextStats.queryable ? nextStats : null);
+      } catch (nextError) {
+        if (active) setStatsError(nextError instanceof Error ? nextError.message : String(nextError));
+      } finally {
+        if (active) setStatsLoading(false);
+      }
+    });
+    return () => { active = false; };
+  }, [opened, filters, groupBy, validRange, refreshRevision]);
 
   const resetFilters = () => {
     setSearchInput("");
@@ -484,6 +502,8 @@ export function RequestLogDialog({
     setModel("all");
     setStatus("all");
     setProtocol("all");
+    setRequestKind("all");
+    setSearchMode("contains");
     setPage(1);
   };
 
@@ -503,6 +523,8 @@ export function RequestLogDialog({
       requestRevision.current += 1;
       setLoading(false);
       setPage(1);
+      setCursors([null]);
+      setRefreshRevision((value) => value + 1);
       setResult((current) => current
         ? {
             ...current,
@@ -532,10 +554,10 @@ export function RequestLogDialog({
   };
 
   const hasFilters = Boolean(
-    search || provider !== "all" || model !== "all" || status !== "all" || protocol !== "all",
+    search || provider !== "all" || model !== "all" || status !== "all" || protocol !== "all" || requestKind !== "all",
   );
-  const firstVisible = result && result.total > 0 ? (result.page - 1) * result.pageSize + 1 : 0;
-  const lastVisible = result ? Math.min(result.page * result.pageSize, result.total) : 0;
+  const firstVisible = result?.items.length ? (page - 1) * pageSize + 1 : 0;
+  const lastVisible = result?.items.length ? firstVisible + result.items.length - 1 : 0;
 
   return (
     <Modal
@@ -558,18 +580,14 @@ export function RequestLogDialog({
       withinPortal={Boolean(container)}
       zIndex={SETTINGS_OVERLAY_Z_INDEX}
     >
-      <div className="flex min-h-0 flex-1 flex-col gap-3 p-4 max-[760px]:p-2.5">
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4 max-[760px]:p-2.5">
         <div className="flex flex-none items-center justify-between gap-3 max-[640px]:flex-col max-[640px]:items-start">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <span className="relative flex h-2 w-2">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
-              </span>
-              <span className="text-xs font-semibold text-[#1d1d1f]">内置路由请求审计</span>
+              <span className="text-xs font-semibold text-[#1d1d1f]">内置路由请求日志</span>
               {result?.status === "ok" ? (
                 <span className="rounded-full border border-emerald-600/15 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
-                  {result.backend === "sqlite" ? "SQLite 实时存储" : "NDJSON 存储"}
+                  按筛选范围统计
                 </span>
               ) : null}
             </div>
@@ -596,6 +614,8 @@ export function RequestLogDialog({
               disabled={loading || clearing}
               onClick={() => {
                 setActionNotice(null);
+                setPage(1);
+                setCursors([null]);
                 setRefreshRevision((value) => value + 1);
               }}
             >
@@ -620,7 +640,17 @@ export function RequestLogDialog({
           </Alert>
         ) : null}
 
-        {stats && result?.queryable && result.status === "ok" ? (
+        {statsLoading ? <p className="m-0 text-xs text-[#6e6e73]" role="status">正在统计所选范围…</p> : null}
+        {statsError ? <Alert color="red" title="统计加载失败">{statsError}</Alert> : null}
+        {health ? <div role={healthWarning ? "alert" : "status"}
+          className={`flex-none rounded-lg px-3 py-2 text-xs ${healthWarning ? "bg-amber-50 text-amber-900" : "bg-white text-[#6e6e73]"}`}>
+          {health.active ? "日志记录中" : health.enabled ? "日志记录已停止，请重新开启记录并检查存储" : "日志记录未开启"}
+          {` · 当前记录周期已处理 ${health.entriesWritten.toLocaleString()} 条 · 待写入 ${health.pendingEntries.toLocaleString()} 条`}
+          {healthWarning ? ` · 丢弃 ${dropped} 条 · 写入失败 ${health.writeFailures} 次 · 采样省略 ${health.sampledOut} 条 · 记录器异常 ${health.observerPanics + health.writerPanics + health.shutdownTimeouts} 次` : ""}
+          {health.sampleRatePerMillion < 1_000_000 ? " · 已配置采样，统计不代表全部请求" : ""}
+          <span className="ml-2">异步记录；异常退出可能丢失尚未落盘的日志。</span>
+        </div> : null}
+        {stats ? (
           <div className="grid flex-none grid-cols-2 gap-2.5 sm:grid-cols-4">
             <div className="flex flex-col justify-between rounded-xl border border-black/8 bg-white p-3 shadow-xs">
               <span className="text-[11px] font-medium text-[#8e8e93]">总请求数</span>
@@ -631,7 +661,7 @@ export function RequestLogDialog({
                 <span className="text-[10px] text-[#8e8e93]">条</span>
               </div>
               <span className="mt-0.5 text-[10px] text-[#6e6e73]">
-                当前显示 {firstVisible.toLocaleString()}–{lastVisible.toLocaleString()} 条
+                {loading ? "列表加载中" : `当前显示 ${firstVisible.toLocaleString()}–${lastVisible.toLocaleString()} 条`}
               </span>
             </div>
             <div className="flex flex-col justify-between rounded-xl border border-black/8 bg-white p-3 shadow-xs">
@@ -646,11 +676,11 @@ export function RequestLogDialog({
                         : "text-rose-600"
                   }`}
                 >
-                  {stats.successRate != null ? `${stats.successRate}%` : "—"}
+                  {stats.successRate != null ? `${stats.successRate.toFixed(1)}%` : "—"}
                 </span>
               </div>
               <span className="mt-0.5 text-[10px] text-[#6e6e73]">
-                当前页 成功 {stats.succeededCount} · 失败 {stats.failedCount}
+                成功 {stats.succeededCount} · 失败 {stats.failedCount} · 其他 {stats.incompleteCount + stats.cancelledCount}
               </span>
             </div>
             <div className="flex flex-col justify-between rounded-xl border border-black/8 bg-white p-3 shadow-xs">
@@ -665,7 +695,7 @@ export function RequestLogDialog({
               </span>
             </div>
             <div className="flex flex-col justify-between rounded-xl border border-black/8 bg-white p-3 shadow-xs">
-              <span className="text-[11px] font-medium text-[#8e8e93]">当前页 Token 消耗</span>
+              <span className="text-[11px] font-medium text-[#8e8e93]">所选范围 Token 消耗</span>
               <div className="mt-1 flex items-baseline gap-1.5">
                 <span className="text-lg font-bold text-[#1d1d1f] tabular-nums">
                   {formatTokens(stats.totalTokensSum)}
@@ -673,13 +703,68 @@ export function RequestLogDialog({
                 <span className="text-[10px] text-[#8e8e93]">tokens</span>
               </div>
               <span className="mt-0.5 text-[10px] font-medium text-purple-600">
-                {stats.cachedTokensSum > 0
-                  ? `已缓存命中 ${formatTokens(stats.cachedTokensSum)}`
-                  : "全量计算"}
+                输入 {formatTokens(stats.inputTokensSum)} · 输出 {formatTokens(stats.outputTokensSum)}
+                <br />总量已知 {stats.totalTokensKnownCount.toLocaleString()} / {stats.total.toLocaleString()} 条
               </span>
             </div>
           </div>
         ) : null}
+
+        <div className="grid flex-none grid-cols-4 gap-2 max-[760px]:grid-cols-2">
+          <Select aria-label="请求日志时间范围" value={timeRange}
+            getPopupContainer={() => container ?? document.body} zIndex={SETTINGS_OVERLAY_Z_INDEX}
+            optionList={[{ label: "最近 24 小时", value: "24h" }, { label: "最近 7 天", value: "7d" }, { label: "最近 30 天", value: "30d" }, { label: "自定义时间", value: "custom" }]}
+            onChange={(value) => { setTimeRange(String(value)); setPage(1); }} />
+          <Select aria-label="搜索方式" value={searchMode}
+            getPopupContainer={() => container ?? document.body} zIndex={SETTINGS_OVERLAY_Z_INDEX}
+            optionList={[{ label: "关键词搜索", value: "contains" }, { label: "精确请求 ID", value: "requestId" }, { label: "精确会话 ID", value: "sessionId" }]}
+            onChange={(value) => { setSearchMode(String(value)); setPage(1); }} />
+          <Select aria-label="请求类型" value={requestKind}
+            getPopupContainer={() => container ?? document.body} zIndex={SETTINGS_OVERLAY_Z_INDEX}
+            optionList={[{ label: "全部请求类型", value: "all" }, { label: "模型请求", value: "responses" }, { label: "上下文压缩", value: "responses_compact" }, { label: "新版上下文压缩", value: "responses_compact_v2" }, { label: "图像生成", value: "images_generations" }, { label: "模型列表", value: "models" }, { label: "拒绝的请求", value: "http_rejected" }]}
+            onChange={(value) => { setRequestKind(String(value)); setPage(1); }} />
+          <Select aria-label="统计分组" value={groupBy}
+            getPopupContainer={() => container ?? document.body} zIndex={SETTINGS_OVERLAY_Z_INDEX}
+            optionList={[{ label: "按实际模型统计", value: "model" }, { label: "按供应商统计", value: "provider" }, { label: "按状态统计", value: "status" }, { label: "按协议统计", value: "protocol" }, { label: "按请求类型统计", value: "request_kind" }, { label: "按会话统计", value: "session" }]}
+            onChange={(value) => setGroupBy(String(value))} />
+          {timeRange === "custom" ? <>
+            <label className="text-xs text-[#6e6e73]">开始时间（本地）
+              <Input type="datetime-local" aria-label="开始时间" value={customFrom}
+                onChange={(event) => { setCustomFrom(event.currentTarget.value); setPage(1); }} />
+            </label>
+            <label className="text-xs text-[#6e6e73]">结束时间（不包含）
+              <Input type="datetime-local" aria-label="结束时间" value={customTo}
+                onChange={(event) => { setCustomTo(event.currentTarget.value); setPage(1); }} />
+            </label>
+          </> : null}
+        </div>
+
+        {stats ? <details className="flex-none rounded-xl border border-black/8 bg-white p-3 text-xs">
+          <summary className="cursor-pointer font-medium">趋势与分组统计 · 成功率包含失败、未完成和中断请求</summary>
+          <p className="mb-0 text-[#6e6e73]">请求时间范围：{new Date(stats.fromUnixMs).toLocaleString()} 至 {new Date(stats.toUnixMs).toLocaleString()}（不含结束时间）
+            {stats.databaseBytes != null ? ` · 日志存储约 ${((stats.databaseBytes + (stats.walBytes ?? 0)) / 1_048_576).toFixed(1)} MiB` : ""}
+          </p>
+          <div className="mt-2 grid max-h-40 grid-cols-2 gap-5 overflow-auto max-[640px]:grid-cols-1">
+            <div>
+              <p className="m-0 mb-1 text-[#6e6e73]">{stats.bucketMs === 3_600_000 ? "每小时" : "每天"}趋势 · 时间桶按 UTC 划分，显示本地时间；未列出的时间桶无请求</p>
+              <table className="w-full text-left"><thead><tr><th>时间</th><th>请求数</th><th>Token</th><th>平均耗时</th></tr></thead>
+                <tbody>{stats.trend.map((bucket) => <tr key={bucket.timestampUnixMs}>
+                  <td>{new Date(bucket.timestampUnixMs).toLocaleString()}</td><td>{bucket.total}</td>
+                  <td>{formatTokens(bucket.totalTokensSum)}</td><td>{formatDuration(bucket.avgDuration)}</td>
+                </tr>)}</tbody>
+              </table>
+            </div>
+            <div>
+              <p className="m-0 mb-1 text-[#6e6e73]">{stats.groupsTruncated ? "请求数最多的 50 组，其余分组已省略" : "所选维度统计"}</p>
+              <table className="w-full text-left"><thead><tr><th>分组</th><th>请求数</th><th>Token</th><th>成功率</th></tr></thead>
+                <tbody>{stats.groups.map((group) => <tr key={group.key}>
+                  <td className="max-w-48 truncate" title={group.key}>{group.key || "未知"}</td><td>{group.total}</td>
+                  <td>{formatTokens(group.totalTokensSum)}</td><td>{group.successRate?.toFixed(1) ?? "—"}%</td>
+                </tr>)}</tbody>
+              </table>
+            </div>
+          </div>
+        </details> : null}
 
         <div className="grid flex-none grid-cols-[minmax(220px,1.6fr)_repeat(4,minmax(132px,1fr))_auto] gap-2 rounded-xl border border-black/8 bg-white p-3 shadow-sm max-[1100px]:grid-cols-3 max-[640px]:grid-cols-1">
           <Input
@@ -714,7 +799,7 @@ export function RequestLogDialog({
             }}
           />
           <Select
-            aria-label="按模型筛选请求日志"
+            aria-label="按实际模型筛选请求日志"
             filter
             getPopupContainer={() => container ?? document.body}
             optionList={modelOptions}
@@ -758,7 +843,7 @@ export function RequestLogDialog({
           </Button>
         </div>
 
-        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-black/8 bg-white shadow-sm">
+        <div className="relative flex min-h-64 flex-1 flex-col overflow-hidden rounded-xl border border-black/8 bg-white shadow-sm max-[760px]:min-h-96">
           {error ? (
             <div className="grid min-h-48 flex-1 place-items-center p-6">
               <Alert
@@ -1077,7 +1162,7 @@ export function RequestLogDialog({
           {result?.queryable && result.status === "ok" ? (
             <div className="flex flex-none items-center justify-between gap-3 border-t border-black/8 bg-[#fafafa] px-3 py-2 max-[760px]:flex-col max-[760px]:items-stretch">
               <span className="text-[11px] text-[#6e6e73]">
-                共 {result.total.toLocaleString()} 条，当前显示 {firstVisible.toLocaleString()}–{lastVisible.toLocaleString()}
+                第 {page} 页，当前显示 {firstVisible.toLocaleString()}–{lastVisible.toLocaleString()} 条
               </span>
               <div className="flex items-center justify-end gap-3 max-[520px]:flex-col max-[520px]:items-stretch">
                 <Select
@@ -1092,14 +1177,13 @@ export function RequestLogDialog({
                     setPage(1);
                   }}
                 />
-                <Pagination
-                  size="sm"
-                  total={Math.max(result.totalPages, 1)}
-                  value={page}
-                  onChange={setPage}
-                  disabled={loading || result.totalPages <= 1}
-                  withEdges
-                />
+                <Button size="sm" variant="outline" disabled={loading || page <= 1}
+                  onClick={() => setPage((value) => value - 1)}>上一页</Button>
+                <Button size="sm" variant="outline" disabled={loading || !result.hasMore || !result.nextCursor}
+                  onClick={() => {
+                    setCursors((current) => [...current.slice(0, page), result.nextCursor]);
+                    setPage((value) => value + 1);
+                  }}>下一页</Button>
               </div>
             </div>
           ) : null}

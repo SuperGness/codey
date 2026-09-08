@@ -142,6 +142,8 @@ pub(super) fn spawn_codex_exit_watcher(
 pub(super) struct SpawnedCodex {
     pub(super) child: Option<Child>,
     pub(super) process_id: Option<u32>,
+    #[cfg(windows)]
+    pub(super) startup_process: Option<WindowsStartupProcess>,
     #[cfg(unix)]
     pub(super) process_group_id: Option<u32>,
     #[cfg(target_os = "macos")]
@@ -244,15 +246,31 @@ pub(super) async fn spawn_codex(
             // that carries runtime constraints must not proceed unless Store
             // accepts the wrapper environment; an unconstrained launch may.
             let constrained = !runtime_config_overrides.is_empty() || subagent_gate_active;
-            let (mut spawned, package_debug_session, wrapper_environment_applied) =
-                spawn_windows_codex(
-                    app_dir,
-                    debug_port,
-                    &launch_arguments,
-                    wrapper_environment,
-                    cli_only && constrained,
-                )
-                .await?;
+            let launch = spawn_windows_codex(
+                app_dir,
+                debug_port,
+                &launch_arguments,
+                wrapper_environment,
+                cli_only && constrained,
+            )
+            .await;
+            let (mut spawned, package_debug_session, wrapper_environment_applied) = match launch {
+                Ok(launch) => launch,
+                Err(error) => {
+                    let retry = should_retry_startup(&error, attempt);
+                    error_log::record_failure(
+                        "launch_failed",
+                        "spawn_windows_codex",
+                        format!("启动尝试 {attempt}/2：{error:#}"),
+                        serde_json::json!({ "startupAttempt": attempt, "retryable": retry }),
+                    );
+                    if retry {
+                        cli_only = true;
+                        continue;
+                    }
+                    return Err(error).context(format!("启动尝试 {attempt}/2：启动 Codex 失败"));
+                }
+            };
             // Each attempt gets its own readiness budget. Cleanup and Store
             // activation must not consume the next attempt's window.
             let deadline =
@@ -354,6 +372,7 @@ pub(super) async fn spawn_codex(
                             "inspectorFuse": inspect_fuse.as_str(),
                             "processId": spawned.process_id,
                             "startupAttempt": attempt,
+                            "processes": windows_startup_process_details(app_dir, spawned.process_id),
                             "cliOnly": cli_only,
                             "retryable": retryable,
                             "remainingBudgetMs": deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis(),
@@ -1051,6 +1070,14 @@ fn startup_error_allows_retry(error: &anyhow::Error) -> bool {
     if let Some(failure) = error.downcast_ref::<crate::codex_startup_patch::CliWrapperFailure>() {
         return failure.retryable;
     }
+    #[cfg(windows)]
+    if let Some(error) = error.downcast_ref::<windows::core::Error>() {
+        // Store activation reports HRESULTs rather than std::io::Error.
+        return error.code() == windows::Win32::Foundation::E_APPLICATION_ACTIVATION_TIMED_OUT
+            || [32, 33, 1460]
+                .into_iter()
+                .any(|code| error.code() == windows::core::HRESULT::from_win32(code));
+    }
     error.is::<tokio::time::error::Elapsed>()
         || error.is::<crate::codex_startup_patch::StartupProcessExited>()
         || error
@@ -1143,7 +1170,10 @@ async fn spawned_codex_alive(spawned: &mut SpawnedCodex) -> Result<bool> {
     }
     #[cfg(windows)]
     if let Some(process_id) = spawned.process_id {
-        // Store activations hand back a PID without a child handle.
+        if let Some(process) = &spawned.startup_process {
+            return process.exit_code().map(|code| code.is_none());
+        }
+        // If opening the activation handle failed, keep the conservative PID probe.
         return codey_runtime_core::windows_process_is_running(process_id);
     }
     Ok(true)
@@ -1176,12 +1206,32 @@ async fn startup_process_exited(
     loop {
         interval.tick().await;
         if process_probe_confirms_exit(spawned_codex_alive(spawned).await, spawned.process_id) {
+            let exit_code = spawned.child.as_mut().and_then(|child| {
+                child
+                    .try_wait()
+                    .ok()
+                    .flatten()
+                    .and_then(|status| status.code())
+                    .map(|code| code as u32)
+            });
+            #[cfg(windows)]
+            let exit_code = exit_code.or_else(|| {
+                spawned
+                    .startup_process
+                    .as_ref()
+                    .and_then(|process| process.exit_code().ok().flatten())
+            });
             let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
                 "launcher.startup_process_exited",
-                serde_json::json!({ "processId": spawned.process_id }),
+                serde_json::json!({
+                    "processId": spawned.process_id,
+                    "exitCode": exit_code,
+                    "exitCodeHex": exit_code.map(|code| format!("0x{code:08X}")),
+                }),
             );
             return crate::codex_startup_patch::StartupProcessExited {
                 process_id: spawned.process_id,
+                exit_code,
             };
         }
     }
@@ -1643,6 +1693,67 @@ mod cli_wrapper_tests {
         assert!(process_probe_confirms_exit(Ok(false), Some(7)));
     }
 
+    #[test]
+    fn activation_failure_retries_only_after_both_cleanup_steps_succeed() {
+        for (process_stopped, environment_cleared) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let cleanup = |ok| {
+                if ok {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("cleanup failed"))
+                }
+            };
+            let error = startup_activation_error_after_cleanup(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "activation timed out").into(),
+                cleanup(process_stopped),
+                cleanup(environment_cleared),
+            );
+            assert_eq!(
+                should_retry_startup(&error, 1),
+                process_stopped && environment_cleared
+            );
+            assert!(!should_retry_startup(&error, 2));
+            assert!(format!("{error:#}").contains("activation timed out"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn store_hresult_retry_classification_preserves_permanent_failures() {
+        for (code, retryable) in [
+            (32, true),
+            (33, true),
+            (1460, true),
+            (5, false),
+            (193, false),
+        ] {
+            let error = anyhow::Error::from(windows::core::Error::from_hresult(
+                windows::core::HRESULT::from_win32(code),
+            ))
+            .context("Store activation failed");
+            assert_eq!(should_retry_startup(&error, 1), retryable);
+            assert!(!should_retry_startup(&error, 2));
+        }
+        let error = windows::core::Error::from_hresult(
+            windows::Win32::Foundation::E_APPLICATION_ACTIVATION_TIMED_OUT,
+        )
+        .into();
+        assert!(should_retry_startup(&error, 1));
+        assert!(!should_retry_startup(&error, 2));
+    }
+
+    #[test]
+    fn startup_exit_message_preserves_native_exit_code() {
+        let error = crate::codex_startup_patch::StartupProcessExited {
+            process_id: Some(42),
+            exit_code: Some(0xC0000005),
+        };
+        assert!(error.to_string().contains("PID 42"));
+        assert!(error.to_string().contains("0xC0000005"));
+    }
+
     #[cfg(any(windows, target_os = "macos"))]
     fn test_handshake(
         listener: tokio::net::TcpListener,
@@ -1699,6 +1810,7 @@ mod cli_wrapper_tests {
         .into();
         let exited: anyhow::Error = crate::codex_startup_patch::StartupProcessExited {
             process_id: Some(7),
+            exit_code: Some(1),
         }
         .into();
         for (code, retryable) in [
@@ -1955,19 +2067,21 @@ mod cli_wrapper_tests {
     #[tokio::test]
     async fn startup_wait_ends_as_soon_as_the_codex_process_exits() {
         #[cfg(target_os = "macos")]
-        let mut command = tokio::process::Command::new("sleep");
+        let mut command = tokio::process::Command::new("sh");
         #[cfg(target_os = "macos")]
-        command.arg("30");
+        command.args(["-c", "exit 17"]);
         #[cfg(windows)]
         let mut command = tokio::process::Command::new("cmd");
         #[cfg(windows)]
-        command.args(["/c", "ping -n 30 127.0.0.1 > NUL"]);
+        command.args(["/d", "/c", "exit /b 17"]);
         let mut child = command.spawn().unwrap();
         let process_id = child.id();
-        child.kill().await.unwrap();
+        child.wait().await.unwrap();
         let mut spawned = SpawnedCodex {
             child: Some(child),
             process_id,
+            #[cfg(windows)]
+            startup_process: None,
             #[cfg(unix)]
             process_group_id: process_id,
             #[cfg(target_os = "macos")]
@@ -2000,6 +2114,13 @@ mod cli_wrapper_tests {
             "{error:#}"
         );
         assert!(startup_error_allows_retry(&error));
+        assert_eq!(
+            error
+                .downcast_ref::<crate::codex_startup_patch::StartupProcessExited>()
+                .unwrap()
+                .exit_code,
+            Some(17),
+        );
         assert!(started.elapsed() < Duration::from_secs(10));
         let _ = std::fs::remove_file(marker_path);
     }

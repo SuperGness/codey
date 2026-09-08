@@ -35,6 +35,19 @@ test("formatBytes picks a unit and one decimal below ten", () => {
   assert.equal(formatBytes(4096 * 1024 ** 4), "4096 TB");
 });
 
+test("formatTimestamp preserves local Chinese date formatting and invalid-value behavior", () => {
+  const { formatTimestamp } = formatters;
+  const reference = new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  });
+  for (const value of [0, -1, Date.UTC(2024, 1, 29), Date.UTC(2026, 8, 8, 23, 59, 59)]) {
+    assert.equal(formatTimestamp(value), reference.format(new Date(value)));
+  }
+  for (const value of [NaN, Infinity, -Infinity]) assert.equal(formatTimestamp(value), "—");
+  assert.throws(() => formatTimestamp(8.64e15 + 1), RangeError);
+});
+
 test("errorText unwraps Error messages and stringifies everything else", () => {
   const { errorText } = appUtils;
   assert.equal(errorText(new Error("boom")), "boom");

@@ -256,6 +256,7 @@ impl std::error::Error for InspectorUnavailable {}
 #[derive(Debug)]
 pub(crate) struct StartupProcessExited {
     pub process_id: Option<u32>,
+    pub exit_code: Option<u32>,
 }
 
 impl std::fmt::Display for StartupProcessExited {
@@ -266,7 +267,11 @@ impl std::fmt::Display for StartupProcessExited {
                 "Codex 进程在启动兼容等待期间已退出（PID {process_id}）"
             ),
             None => write!(formatter, "Codex 进程在启动兼容等待期间已退出"),
+        }?;
+        if let Some(exit_code) = self.exit_code {
+            write!(formatter, "，退出码 {exit_code}（0x{exit_code:08X}）")?;
         }
+        Ok(())
     }
 }
 

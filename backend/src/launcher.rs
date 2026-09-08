@@ -93,6 +93,10 @@ pub struct RuntimeModelConfig {
     routes: Vec<(String, String, bool, bool, bool)>,
     selected_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
     supports_1m_context_by_provider: std::collections::BTreeMap<String, Vec<String>>,
+    model_context_by_provider: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, crate::config::ModelContextConfig>,
+    >,
     manual_third_party_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
     declared_official_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
     upstream_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
@@ -117,6 +121,7 @@ impl RuntimeModelConfig {
                 .collect(),
             selected_models_by_provider: config.selected_models_by_provider.clone(),
             supports_1m_context_by_provider: config.supports_1m_context_by_provider.clone(),
+            model_context_by_provider: config.model_context_by_provider.clone(),
             manual_third_party_models_by_provider: config
                 .manual_third_party_models_by_provider
                 .clone(),
@@ -386,8 +391,20 @@ fn route_subagent_model(
     }
 }
 
-fn should_install_codey_model_catalog(official_only: bool, catalog_available: bool) -> bool {
-    !official_only && catalog_available
+fn should_install_codey_model_catalog(
+    official_only: bool,
+    catalog_available: bool,
+    custom_context: bool,
+) -> bool {
+    (!official_only || custom_context) && catalog_available
+}
+
+#[test]
+fn model_context_explicit_official_budget_requires_generated_catalog() {
+    assert!(!should_install_codey_model_catalog(true, true, false));
+    assert!(should_install_codey_model_catalog(true, true, true));
+    assert!(!should_install_codey_model_catalog(true, false, true));
+    assert!(should_install_codey_model_catalog(false, true, false));
 }
 
 fn runtime_default_model(
@@ -437,6 +454,8 @@ async fn prepare_startup_model_catalog(
     let runtime_websocket_models = config.runtime_websocket_model_aliases();
     let runtime_native_web_search_models = config.runtime_native_web_search_model_aliases();
     let runtime_1m_context_models = config.runtime_1m_context_model_aliases();
+    let runtime_model_contexts = config.runtime_model_contexts();
+    let custom_context = !runtime_model_contexts.is_empty();
     let refresh_official_provider =
         config.official_account_available_this_launch && use_builtin_official_catalog;
     let refresh_upstream_models =
@@ -478,7 +497,7 @@ async fn prepare_startup_model_catalog(
         .flatten();
     let (refresh_result, cached_catalog_result, selection_result) =
         tokio::task::spawn_blocking(move || {
-            let refresh = model_catalog::refresh_for_provider_with_capabilities(
+            let refresh = model_catalog::refresh_for_provider_with_contexts(
                 &catalog_home,
                 refresh_official_provider,
                 refresh_upstream_models.as_deref(),
@@ -486,6 +505,7 @@ async fn prepare_startup_model_catalog(
                 &runtime_websocket_models,
                 &runtime_native_web_search_models,
                 &runtime_1m_context_models,
+                &runtime_model_contexts,
             );
             let cached_catalog = if refresh.is_err() {
                 model_catalog::prepare_cached_catalog_for_current_capabilities(
@@ -493,6 +513,15 @@ async fn prepare_startup_model_catalog(
                     &runtime_native_web_search_models,
                     &runtime_1m_context_models,
                 )
+                .and_then(|available| {
+                    if available {
+                        model_catalog::apply_catalog_contexts(
+                            &catalog_home,
+                            &runtime_model_contexts,
+                        )?;
+                    }
+                    Ok(available)
+                })
             } else {
                 Ok(false)
             };
@@ -574,13 +603,15 @@ async fn prepare_startup_model_catalog(
             false
         }
     };
-    // Official OpenAI routes should inherit Codex's built-in model metadata,
-    // including its context window and automatic-compaction defaults. Codey's
-    // generated catalog remains necessary for third-party model filtering and
-    // synthetic model entries.
+    // Official-only launches inherit Codex metadata unless the user explicitly
+    // configured a budget, in which case the generated catalog must be used.
+    if custom_context && !catalog_available_for_runtime {
+        anyhow::bail!("无法生成带有自定义上下文预算的模型目录，请恢复默认预算或重新同步模型");
+    }
     let use_official_catalog = should_install_codey_model_catalog(
         use_builtin_official_catalog,
         catalog_available_for_runtime,
+        custom_context,
     );
     let model_state = match selection_result {
         Ok(state) => state,
@@ -1554,6 +1585,12 @@ impl CodeyRuntime {
     pub(crate) async fn clear_request_logs(&self) -> Option<RouteRequestLogClearResult> {
         let local_router = self.local_router.as_ref()?;
         Some(local_router.clear_request_logs().await)
+    }
+
+    pub(crate) async fn request_log_health(
+        &self,
+    ) -> Option<crate::route_request_log::RouteRequestLogHealth> {
+        Some(self.local_router.as_ref()?.request_log_health().await)
     }
 
     pub(crate) fn local_router_endpoint(&self) -> Option<RuntimeRouterEndpoint> {

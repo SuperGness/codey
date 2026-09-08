@@ -243,6 +243,8 @@ fn sync_provider_profile(
             .remove(&placeholder_provider_id);
         next.supports_1m_context_by_provider
             .remove(&placeholder_provider_id);
+        next.model_context_by_provider
+            .remove(&placeholder_provider_id);
         next.manual_third_party_models_by_provider
             .remove(&placeholder_provider_id);
         next.declared_official_models_by_provider

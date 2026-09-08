@@ -42,6 +42,12 @@ pub(crate) fn runtime_supports_current_routes_for_hot_reload(
     if applied.local_router_enabled != current.local_router_enabled {
         return false;
     }
+    // Renderer refresh cannot change the app-server's resolved context budget.
+    if applied.model_context_by_provider != current.model_context_by_provider
+        || applied.supports_1m_context_by_provider != current.supports_1m_context_by_provider
+    {
+        return false;
+    }
     if !current.local_router_enabled {
         return true;
     }
@@ -166,6 +172,13 @@ pub(crate) fn renderer_model_catalog_value(
         return catalog;
     }
     let route_catalog = renderer_route_model_catalog(config, model_state);
+    let context_metadata = if !config.uses_builtin_official_model_catalog()
+        || !config.runtime_model_contexts().is_empty()
+    {
+        model_catalog::runtime_context_metadata(codex_home())
+    } else {
+        BTreeMap::new()
+    };
     let models = route_catalog
         .iter()
         .map(|entry| entry.alias.clone())
@@ -199,6 +212,15 @@ pub(crate) fn renderer_model_catalog_value(
             } else {
                 Value::Null
             };
+            if let Some(context) = context_metadata.get(&entry.alias) {
+                for (key, value) in context {
+                    metadata[key] = value.clone();
+                }
+            }
+            let _ = model_catalog::apply_model_context(
+                &mut metadata,
+                config.model_context(&entry.provider_id, &entry.model),
+            );
             metadata
         })
         .collect::<Vec<_>>();

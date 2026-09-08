@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" />
+  <title>模型列表回归验证</title>
+  <div id="root"></div>
+  <script type="module">
+    import React from "react";
+    import { createRoot } from "react-dom/client";
+    import { MantineProvider } from "@mantine/core";
+    import "@mantine/core/styles.css";
+    import "../src/tailwind.css";
+    import { ModelCombobox } from "../src/components/ModelCombobox.tsx";
+    const options = Array.from({ length: 10000 }, (_, index) => ({
+      value: `route-${Math.floor(index / 1000)}/model-${index}`,
+      modelId: `model-${index}`, label: `测试模型 ${index}`,
+      routeId: `route-${Math.floor(index / 1000)}`, routeName: `线路 ${Math.floor(index / 1000)}`,
+      routePrefix: `R${Math.floor(index / 1000)}`, providerId: `provider-${Math.floor(index / 1000)}`,
+    }));
+    function App() {
+      const [value, setValue] = React.useState(options[9999].value);
+      return React.createElement(MantineProvider, null,
+        React.createElement("main", { style: { width: 420, padding: 32 } },
+          React.createElement("h1", null, "10,000 个模型"),
+          React.createElement(ModelCombobox, { "aria-label": "测试模型", options, value, onChange: setValue }),
+          React.createElement("p", { "data-testid": "selection" }, `已选：${value}`),
+          React.createElement("button", { onClick: () => setValue("missing-model") }, "设置不可用模型")
+        )
+      );
+    }
+    createRoot(document.getElementById("root")).render(React.createElement(App));
+  </script>
+</html>

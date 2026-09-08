@@ -57,6 +57,7 @@ pub async fn save_official_route_models(
     requested_supports_1m_context_models: Option<Vec<String>>,
     requested_enabled: Option<bool>,
     requested_show_account_usage: Option<bool>,
+    requested_model_contexts: Option<BTreeMap<String, crate::config::ModelContextConfig>>,
 ) -> Result<Value, String> {
     validate_requested_model_list_bounds("官方模型", &requested_models)?;
     let _config_write_guard = state.config_write_lock.lock().await;
@@ -84,6 +85,12 @@ pub async fn save_official_route_models(
         &mut config,
         &provider_id,
         requested_supports_1m_context_models.as_deref(),
+        &official_models,
+    )?;
+    set_model_contexts(
+        &mut config,
+        &provider_id,
+        requested_model_contexts.as_ref(),
         &official_models,
     )?;
     let official_by_key = official_models
@@ -144,11 +151,11 @@ pub(crate) async fn hot_reload_runtime_models(
     let Some(runtime) = runtime else {
         return ModelHotReloadOutcome::default();
     };
-    if config.local_router_enabled {
-        runtime.sync_local_router_routes(config);
-    }
     if !runtime_supports_current_routes_for_hot_reload(&runtime.applied_config, config) {
         return ModelHotReloadOutcome::default();
+    }
+    if config.local_router_enabled {
+        runtime.sync_local_router_routes(config);
     }
     let expected_catalog = renderer_model_catalog_value(config, model_state);
     let expected_models = expected_catalog

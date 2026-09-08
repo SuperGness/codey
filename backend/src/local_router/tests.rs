@@ -666,7 +666,7 @@ async fn upstream_websocket_normalizes_sse_wrapped_events_to_json_frames() {
             .as_ref()
             .unwrap()
             .response_ids
-            .contains("resp-sse-wrapped")
+            .contains(&Sha256::digest(b"resp-sse-wrapped").into())
     );
     upstream_task.await.unwrap();
 }
@@ -859,13 +859,15 @@ fn upstream_websocket_backoff_is_shared_and_scoped_to_route_and_auth() {
     assert!(!backoffs.is_backing_off(&key, now));
 
     backoffs.record_unsupported(key.clone(), now);
-    assert!(backoffs.is_backing_off(&key, now + Duration::from_secs(365 * 24 * 60 * 60)));
-    backoffs.clear();
-    assert!(!backoffs.is_backing_off(&key, now));
+    assert!(backoffs.is_backing_off(
+        &key,
+        now + UPSTREAM_WEBSOCKET_UNSUPPORTED_TTL - Duration::from_secs(1)
+    ));
+    assert!(!backoffs.is_backing_off(&key, now + UPSTREAM_WEBSOCKET_UNSUPPORTED_TTL));
 }
 
 #[test]
-fn only_endpoint_capability_statuses_make_websocket_degradation_permanent() {
+fn only_endpoint_capability_statuses_use_long_websocket_backoff() {
     for status in [
         WebSocketStatusCode::NOT_FOUND,
         WebSocketStatusCode::METHOD_NOT_ALLOWED,
@@ -896,12 +898,14 @@ fn only_endpoint_capability_statuses_make_websocket_degradation_permanent() {
 }
 
 #[tokio::test]
-async fn router_config_update_clears_websocket_negative_cache() {
-    let (config, provider_id, _) = router_config("http://127.0.0.1:9/v1".into());
+async fn router_config_update_invalidates_only_changed_websocket_routes() {
+    let (mut config, provider_id, _) = router_config("http://127.0.0.1:9/v1".into());
+    config.profiles[0].supports_websockets = true;
     let router = LocalRouter::start(&config).await.unwrap();
     let now = Instant::now();
-    let key = UpstreamWebSocketBackoffKey::new(
-        &provider_id,
+    let snapshot = RouterSnapshot::from_config(&config);
+    let key = UpstreamWebSocketBackoffKey::for_route(
+        &snapshot.routes[&provider_id],
         "ws://127.0.0.1:9/v1/responses",
         UpstreamWebSocketAuthIdentity::default(),
     );
@@ -910,14 +914,20 @@ async fn router_config_update_clears_websocket_negative_cache() {
         .lock()
         .unwrap()
         .record_unsupported(key.clone(), now);
+    assert!(router.websocket_backoffs.lock().unwrap().is_backing_off(
+        &key,
+        now + UPSTREAM_WEBSOCKET_UNSUPPORTED_TTL - Duration::from_secs(1)
+    ));
+
+    router.update_config(&config);
     assert!(
         router
             .websocket_backoffs
             .lock()
             .unwrap()
-            .is_backing_off(&key, now + Duration::from_secs(24 * 60 * 60))
+            .is_backing_off(&key, now)
     );
-
+    config.profiles[0].supports_websockets = false;
     router.update_config(&config);
 
     assert!(
@@ -940,7 +950,8 @@ async fn idle_cached_upstream_heartbeat_confirms_socket_before_next_request() {
         route_id: "route-a".to_string(),
         url: "ws://upstream.example/responses".to_string(),
         auth_identity: UpstreamWebSocketAuthIdentity::default(),
-        response_ids: HashSet::new(),
+        response_ids: VecDeque::new(),
+        config_identity: [0; 32],
         liveness: UpstreamWebSocketLiveness::new(heartbeat_due_at),
         socket: upstream_socket,
     });
@@ -992,7 +1003,8 @@ async fn idle_cached_upstream_pong_timeout_drops_socket_before_next_request() {
         route_id: "route-a".to_string(),
         url: "ws://upstream.example/responses".to_string(),
         auth_identity: UpstreamWebSocketAuthIdentity::default(),
-        response_ids: HashSet::new(),
+        response_ids: VecDeque::new(),
+        config_identity: [0; 32],
         liveness,
         socket: upstream_socket,
     });
@@ -1658,8 +1670,8 @@ async fn unsupported_websocket_handshake_falls_back_to_http_until_config_changes
             .unwrap()
             .entries
             .values()
-            .any(|backoff| backoff.permanent),
-        "404 handshake should permanently suppress WebSocket retries for this config"
+            .any(|backoff| backoff.unsupported),
+        "404 handshake should suppress WebSocket retries until the capability TTL expires"
     );
     socket.close(None).await.unwrap();
     let mut second_socket = connect_router_websocket(&endpoint).await;
@@ -3027,20 +3039,20 @@ fn codey_synthetic_previous_response_ids_are_not_forwardable() {
     assert!(!is_codey_synthetic_response_id("resp_real_upstream"));
     assert!(!is_codey_synthetic_response_id("resp-1"));
 
-    let mut synthetic = json!({
+    let synthetic = json!({
         "model": "gpt-5.4",
         "input": "continue",
         "previous_response_id": "resp_codey_wrapped",
     });
-    assert!(remove_codey_synthetic_previous_response_id(&mut synthetic));
-    assert!(synthetic.get("previous_response_id").is_none());
+    assert!(has_codey_synthetic_previous_response_id(&synthetic));
+    assert_eq!(synthetic["previous_response_id"], "resp_codey_wrapped");
 
-    let mut upstream = json!({
+    let upstream = json!({
         "model": "gpt-5.4",
         "input": "continue",
         "previous_response_id": "resp_upstream",
     });
-    assert!(!remove_codey_synthetic_previous_response_id(&mut upstream));
+    assert!(!has_codey_synthetic_previous_response_id(&upstream));
     assert_eq!(upstream["previous_response_id"], "resp_upstream");
 }
 
@@ -3048,14 +3060,14 @@ fn codey_synthetic_previous_response_ids_are_not_forwardable() {
 fn adapted_websocket_continuation_reuses_the_previous_response_context() {
     let mut history = AdaptedResponsesHistory::default();
     let mut first = json!({"input":"hello"});
-    assert!(!history.prepare(&mut first));
+    assert!(!history.prepare(&mut first).unwrap());
     let first_output = vec![json!({
         "type":"function_call",
         "call_id":"call-1",
         "name":"lookup",
         "arguments":"{}"
     })];
-    history.remember("resp_codey_first", &first_output);
+    history.remember("resp_codey_first", &first_output).unwrap();
 
     let tool_output = json!({
         "type":"function_call_output",
@@ -3067,7 +3079,7 @@ fn adapted_websocket_continuation_reuses_the_previous_response_context() {
         "input":[tool_output],
         "previous_response_id":"resp_codey_first"
     });
-    assert!(history.prepare(&mut continuation));
+    assert!(history.prepare(&mut continuation).unwrap());
     assert!(continuation.get("previous_response_id").is_none());
     assert_eq!(
         continuation["input"],
@@ -3495,7 +3507,6 @@ fn opaque_responses_content_parts_are_ignored_during_chat_fallback_conversion() 
                 "content":[
                     {"encrypted_content":"opaque-user-state"},
                     {"type":"reasoning","encrypted_content":"opaque-reasoning-part"},
-                    {"type":"compaction","encrypted_content":"opaque-compaction-part"},
                     {"type":"input_text","text":"try again"}
                 ]
             },
@@ -3542,7 +3553,7 @@ fn opaque_responses_content_parts_are_ignored_during_chat_fallback_conversion() 
 }
 
 #[test]
-fn nonportable_responses_history_items_are_ignored_during_chat_fallback_conversion() {
+fn nonportable_compaction_history_is_rejected_without_losing_visible_context() {
     let body = json!({
         "model":"provider-model",
         "input":[
@@ -3558,20 +3569,21 @@ fn nonportable_responses_history_items_are_ignored_during_chat_fallback_conversi
         ]
     });
 
-    let chat = responses_to_chat_completions_body(&body).unwrap();
-    assert_eq!(
-        chat["messages"],
-        json!([{"role":"user","content":"continue"}])
+    assert!(
+        responses_to_chat_completions_body(&body)
+            .unwrap_err()
+            .to_string()
+            .contains("context_not_portable")
     );
-    assert!(!chat.to_string().contains("opaque"));
-    assert!(!chat.to_string().contains("provider-side query"));
+    assert!(responses_to_anthropic_messages_body(&body).is_err());
+    assert_eq!(body["input"][0]["content"], "continue");
 
     let missing = responses_to_chat_completions_body(&json!({
         "model":"provider-model",
         "input":[{"type":"compaction","encrypted_content":"opaque-window"}]
     }))
     .unwrap_err();
-    assert!(missing.to_string().contains("缺少可转换"));
+    assert!(missing.to_string().contains("context_not_portable"));
 
     let trigger = responses_to_chat_completions_body(&json!({
         "model":"provider-model",
@@ -3581,7 +3593,7 @@ fn nonportable_responses_history_items_are_ignored_during_chat_fallback_conversi
         ]
     }))
     .unwrap_err();
-    assert!(trigger.to_string().contains("compaction_trigger"));
+    assert!(trigger.to_string().contains("context_not_portable"));
 
     let active_search = responses_to_chat_completions_body(&json!({
         "model":"provider-model",
@@ -5029,7 +5041,7 @@ fn websocket_failure_event_keeps_provider_codes_and_adds_route_context() {
     assert!(message.contains("bad_response_status_code"));
     assert_eq!(
         error_summary.as_deref(),
-        Some("openai_error（类型：bad_response_status_code；代码：bad_response_status_code）")
+        Some("type=bad_response_status_code; code=bad_response_status_code")
     );
 }
 
@@ -5096,7 +5108,7 @@ async fn native_responses_upstream_http_error_is_preserved_as_safe_text() {
 async fn responses_compact_restores_route_identity_and_proxies_the_window_unchanged() {
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();
-    let compacted_window = br#"{ "model":"provider-model", "input":[{"type":"compaction","encrypted_content":"opaque-window"}] }"#.to_vec();
+    let compacted_window = br#"{ "id":"cmp_response", "object":"response.compaction", "output":[{"type":"compaction","encrypted_content":"opaque-window"}] }"#.to_vec();
     let expected_window = compacted_window.clone();
     let upstream_task = tokio::spawn(async move {
         let (mut stream, _) = upstream.accept().await.unwrap();
@@ -5141,7 +5153,10 @@ async fn responses_compact_restores_route_identity_and_proxies_the_window_unchan
         .unwrap();
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(response.bytes().await.unwrap().as_ref(), expected_window);
+    assert_eq!(
+        response.json::<Value>().await.unwrap(),
+        serde_json::from_slice::<Value>(&expected_window).unwrap()
+    );
     let (path, authorization, account_id, body) = upstream_task.await.unwrap();
     assert_eq!(path, "/v1/responses/compact");
     assert_eq!(authorization.as_deref(), Some("Bearer sk-upstream"));
@@ -5160,7 +5175,7 @@ async fn responses_v2_compaction_trigger_passes_through_the_native_route() {
         "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-window\"}}\n\n",
         "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_compact\",\"object\":\"response\",\"output\":[{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-window\"}]}}\n\n"
     );
-    let expected_sse = sse.to_string();
+
     let upstream_task = tokio::spawn(async move {
         let (mut stream, _) = upstream.accept().await.unwrap();
         let request = read_http_request(&mut stream).await.unwrap();
@@ -5177,8 +5192,9 @@ async fn responses_v2_compaction_trigger_passes_through_the_native_route() {
             .unwrap();
         (request.path, body)
     });
-    let (config, provider_id, model) =
+    let (mut config, provider_id, model) =
         router_config(format!("http://{upstream_address}/v1/responses"));
+    config.profiles[0].supports_remote_compaction = true;
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
 
@@ -5198,7 +5214,10 @@ async fn responses_v2_compaction_trigger_passes_through_the_native_route() {
         .unwrap();
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    assert_eq!(response.text().await.unwrap(), expected_sse);
+    let events = response.text().await.unwrap();
+    assert!(events.contains("response.completed"));
+    assert!(events.contains("opaque-window"));
+    assert!(!events.contains("response.failed"));
     let (path, body) = upstream_task.await.unwrap();
     assert_eq!(path, "/v1/responses");
     assert_eq!(body["model"], model);
@@ -5207,59 +5226,212 @@ async fn responses_v2_compaction_trigger_passes_through_the_native_route() {
 }
 
 #[tokio::test]
-async fn responses_compact_uses_the_chat_conversion_pipeline() {
+async fn responses_compact_rejects_adapted_routes_before_sending() {
+    for protocol in [
+        crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+        crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+    ] {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (mut config, provider_id, model) =
+            router_config(format!("http://{}/v1", upstream.local_addr().unwrap()));
+        config.profiles[0].upstream_protocol = protocol.into();
+        config.profiles[0].normalize();
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        for (path, input, code) in [
+            (
+                "responses/compact",
+                json!("full context"),
+                "compaction_unsupported",
+            ),
+            (
+                "responses",
+                json!([{"type":"compaction_trigger"}]),
+                "compaction_unsupported",
+            ),
+            (
+                "responses",
+                json!([{"role":"user","content":"continue"},{"type":"compaction","encrypted_content":"opaque"}]),
+                "context_not_portable",
+            ),
+        ] {
+            let response = reqwest::Client::new()
+                .post(format!("{}/{path}", endpoint.base_url))
+                .bearer_auth(&endpoint.token)
+                .json(&json!({"model":model_alias(&provider_id, &model),"input":input}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), 400);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["error"]["code"],
+                code
+            );
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), upstream.accept())
+                .await
+                .is_err()
+        );
+        router.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn context_limit_http_errors_are_structured_on_every_protocol() {
+    for protocol in [
+        crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+        crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+        crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+    ] {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (mut config, provider_id, model) =
+            router_config(format!("http://{}/v1", upstream.local_addr().unwrap()));
+        config.profiles[0].upstream_protocol = protocol.into();
+        config.profiles[0].normalize();
+        let upstream_task = tokio::spawn(async move {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            read_http_request(&mut socket).await.unwrap();
+            write_json_response(
+                &mut socket,
+                400,
+                &json!({"error":{"code":"context_length_exceeded","message":"context full"}}),
+            )
+            .await
+            .unwrap();
+        });
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let response = reqwest::Client::new()
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .json(&json!({"model":model_alias(&provider_id, &model),"input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 400);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["error"]["code"],
+            CONTEXT_LENGTH_EXCEEDED
+        );
+        upstream_task.await.unwrap();
+        router.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn compaction_timeout_releases_session_and_model_switch_keeps_request_snapshot() {
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let upstream_address = upstream.local_addr().unwrap();
-    let upstream_task = tokio::spawn(async move {
-        let (mut stream, _) = upstream.accept().await.unwrap();
-        let request = read_http_request(&mut stream).await.unwrap();
-        let body = serde_json::from_slice::<Value>(&request.body).unwrap();
-        write_json_response(
-            &mut stream,
-            200,
-            &json!({
-                "id":"chatcmpl-compact",
-                "created":123,
-                "model":body["model"],
-                "choices":[{
-                    "message":{"role":"assistant","content":"compacted context"},
-                    "finish_reason":"stop"
-                }],
-                "usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}
-            }),
-        )
-        .await
-        .unwrap();
-        (request.path, body)
-    });
-    let (mut config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
-    config.profiles[0].upstream_protocol =
-        crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
-    config.profiles[0].normalize();
+    let (mut config, provider_id, model) = router_config(format!(
+        "http://{}/v1/responses",
+        upstream.local_addr().unwrap()
+    ));
+    config.profiles[0].supports_remote_compaction = true;
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
-    assert!(!endpoint.supports_remote_compaction);
-
-    let response = reqwest::Client::new()
-        .post(format!("{}/responses/compact", endpoint.base_url))
-        .bearer_auth(&endpoint.token)
-        .json(&json!({
-            "model": model_alias(&provider_id, &model),
-            "input": "full context"
-        }))
+    let (received, request_received) = oneshot::channel();
+    let upstream_task = tokio::spawn(async move {
+        let (mut socket, _) = upstream.accept().await.unwrap();
+        let request = read_http_request(&mut socket).await.unwrap();
+        received.send(request).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let url = format!("{}/responses/compact", endpoint.base_url);
+    let token = endpoint.token.clone();
+    let request_body = json!({"model":model_alias(&provider_id, &model),"input":"full context"});
+    let request = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(&token)
+        .header("thread-id", "compaction-test")
+        .json(&request_body);
+    let pending = tokio::spawn(async move { request.send().await.unwrap() });
+    let sent = request_received.await.unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&sent.body).unwrap()["model"],
+        model
+    );
+    // A concurrent request never reaches either upstream, including while the
+    // configured route changes. The first request keeps its captured route.
+    config.profiles[0].base_url = "http://127.0.0.1:9/v1/responses".into();
+    router.update_config(&config);
+    let duplicate = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(&token)
+        .header("thread-id", "compaction-test")
+        .json(&request_body)
         .send()
         .await
         .unwrap();
-
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(duplicate.status().as_u16(), 409);
     assert_eq!(
-        response.json::<Value>().await.unwrap()["output_text"],
-        "compacted context"
+        duplicate.json::<Value>().await.unwrap()["error"]["code"],
+        "compaction_in_progress"
     );
-    let (path, body) = upstream_task.await.unwrap();
-    assert_eq!(path, "/v1/chat/completions");
-    assert_eq!(body["model"], model);
-    assert_eq!(body["messages"][0]["content"], "full context");
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(121)).await;
+    tokio::time::resume();
+    let timeout = tokio::time::timeout(Duration::from_secs(2), pending)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(timeout.status().as_u16(), 504);
+    assert_eq!(
+        timeout.json::<Value>().await.unwrap()["error"]["code"],
+        "compaction_timeout"
+    );
+    let retry = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(&token)
+        .header("thread-id", "compaction-test")
+        .json(&request_body)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(retry.status().as_u16(), 409);
+    upstream_task.abort();
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn invalid_compaction_result_does_not_prevent_a_later_valid_request() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (mut config, provider_id, model) = router_config(format!(
+        "http://{}/v1/responses",
+        upstream.local_addr().unwrap()
+    ));
+    config.profiles[0].supports_remote_compaction = true;
+    let upstream_task = tokio::spawn(async move {
+        for value in [
+            json!({"output":[{"type":"message","content":"not a compaction"}]}),
+            json!({"output":[{"type":"compaction","encrypted_content":"valid"}]}),
+        ] {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            read_http_request(&mut socket).await.unwrap();
+            write_json_response(&mut socket, 200, &value).await.unwrap();
+        }
+    });
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let body = json!({"model":model_alias(&provider_id, &model),"input":"full context"});
+    for status in [502, 200] {
+        let response = reqwest::Client::new()
+            .post(format!("{}/responses/compact", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .header("thread-id", "same-history")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        let value = response.json::<Value>().await.unwrap();
+        if status == 502 {
+            assert_eq!(value["error"]["code"], "invalid_compaction_response");
+        } else {
+            assert_eq!(value["output"][0]["encrypted_content"], "valid");
+        }
+    }
+    assert_eq!(body["input"], "full context");
+    upstream_task.await.unwrap();
     router.stop().await.unwrap();
 }
 
@@ -5617,12 +5789,12 @@ async fn responses_route_passes_web_search_through_without_chat_conversion() {
 }
 
 #[tokio::test]
-async fn native_responses_route_drops_only_codey_synthetic_previous_response_id() {
+async fn native_responses_route_rejects_unrecoverable_synthetic_history_and_preserves_real_ids() {
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async move {
         let mut forwarded = Vec::new();
-        for _ in 0..2 {
+        for _ in 0..1 {
             let (mut stream, _) = upstream.accept().await.unwrap();
             let request = read_http_request(&mut stream).await.unwrap();
             let body = serde_json::from_slice::<Value>(&request.body).unwrap();
@@ -5660,14 +5832,88 @@ async fn native_responses_route_drops_only_codey_synthetic_previous_response_id(
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.status().as_u16(),
+            if is_codey_synthetic_response_id(previous_response_id) {
+                400
+            } else {
+                200
+            }
+        );
     }
 
     let forwarded = upstream_task.await.unwrap();
-    assert_eq!(forwarded.len(), 2);
+    assert_eq!(forwarded.len(), 1);
     assert_eq!(forwarded[0]["model"], "provider-model");
-    assert!(forwarded[0].get("previous_response_id").is_none());
-    assert_eq!(forwarded[1]["previous_response_id"], "resp_upstream");
+    assert_eq!(forwarded[0]["previous_response_id"], "resp_upstream");
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn model_switch_from_chat_to_native_expands_synthetic_history_in_order() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (mut config, provider_id, model) =
+        router_config(format!("http://{}/v1", upstream.local_addr().unwrap()));
+    let mut native = config.profiles[0].clone();
+    native.id = "route-native".into();
+    native.source_provider_id = Some("route-native".into());
+    native.normalize();
+    config
+        .selected_models_by_provider
+        .insert("route-native".into(), vec![model.clone()]);
+    config.profiles[0].upstream_protocol =
+        crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+    config.profiles[0].normalize();
+    config.profiles.push(native);
+    let upstream_task = tokio::spawn(async move {
+        let (mut first, _) = upstream.accept().await.unwrap();
+        read_http_request(&mut first).await.unwrap();
+        let sse = "data: {\"id\":\"chat-first\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"remembered answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        first.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}", sse.len()).as_bytes()).await.unwrap();
+        let (mut second, _) = upstream.accept().await.unwrap();
+        let request = read_http_request(&mut second).await.unwrap();
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        write_json_response(
+            &mut second,
+            200,
+            &json!({"id":"resp-native","object":"response","status":"completed","output":[]}),
+        )
+        .await
+        .unwrap();
+        body
+    });
+    let router = LocalRouter::start(&config).await.unwrap();
+    let mut socket = connect_router_websocket(&router.endpoint()).await;
+    let mut previous: Option<String> = None;
+    for (provider, input) in [
+        (provider_id.as_str(), "original task"),
+        ("route-native", "continue"),
+    ] {
+        socket.send(WebSocketMessage::Text(json!({"type":"response.create","model":model_alias(provider, &model),"input":input,"previous_response_id":previous}).to_string().into())).await.unwrap();
+        previous = Some(
+            tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let message = socket.next().await.unwrap().unwrap();
+                    if let WebSocketMessage::Text(text) = message {
+                        let event: Value = serde_json::from_str(&text).unwrap();
+                        assert_ne!(event["type"], "response.failed", "{event}");
+                        if event["type"] == "response.completed" {
+                            break event["response"]["id"].as_str().unwrap().to_string();
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap(),
+        );
+    }
+    let sent = upstream_task.await.unwrap();
+    assert!(sent.get("previous_response_id").is_none());
+    assert_eq!(sent["input"][0], "original task");
+    assert_eq!(sent["input"][1]["role"], "assistant");
+    assert_eq!(sent["input"][1]["content"][0]["text"], "remembered answer");
+    assert_eq!(sent["input"][2], "continue");
+    socket.close(None).await.unwrap();
     router.stop().await.unwrap();
 }
 
@@ -6529,7 +6775,7 @@ async fn route_updates_affect_only_later_requests_and_keep_inflight_streams_pinn
             )
             .await
             .unwrap();
-        let first = b"data: {\"source\":\"a\",\"phase\":1}\n\n";
+        let first = b"data: {\"type\":\"response.created\",\"source\":\"a\",\"phase\":1}\n\n";
         stream
             .write_all(format!("{:x}\r\n", first.len()).as_bytes())
             .await
@@ -6538,7 +6784,7 @@ async fn route_updates_affect_only_later_requests_and_keep_inflight_streams_pinn
         stream.write_all(b"\r\n").await.unwrap();
         stream.flush().await.unwrap();
         wait_for_release_a.await.unwrap();
-        let second = b"data: {\"source\":\"a\",\"phase\":2}\n\n";
+        let second = b"data: {\"type\":\"response.completed\",\"source\":\"a\",\"phase\":2}\n\n";
         stream
             .write_all(format!("{:x}\r\n", second.len()).as_bytes())
             .await
@@ -6648,6 +6894,7 @@ async fn transport_error_response_is_plain_text_and_non_retryable() {
 
 #[tokio::test]
 async fn router_proxies_image_generation_to_the_default_openai_route() {
+    let logs = tempfile::tempdir().unwrap();
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async move {
@@ -6671,7 +6918,17 @@ async fn router_proxies_image_generation_to_the_default_openai_route() {
     let (mut config, provider_id, model) =
         router_config(format!("http://{upstream_address}/v1/responses"));
     config.default_model = model_alias(&provider_id, &model);
-    let router = LocalRouter::start(&config).await.unwrap();
+    config.route_request_log.enabled = true;
+    config.route_request_log.backend = RouteRequestLogBackend::Sqlite;
+    config.route_request_log.batch_size = 1;
+    let router = LocalRouter::start_with_logger(
+        &config,
+        Arc::new(RouteRequestLogController::with_root(
+            logs.path().to_path_buf(),
+        )),
+    )
+    .await
+    .unwrap();
     let endpoint = router.endpoint();
 
     let response = reqwest::Client::new()
@@ -6689,7 +6946,57 @@ async fn router_proxies_image_generation_to_the_default_openai_route() {
     assert_eq!(authorization.as_deref(), Some("Bearer sk-upstream"));
     assert_eq!(body["model"], "gpt-image-2");
     assert_eq!(body["prompt"], "draw an otter");
+    let invalid = reqwest::Client::new()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .body("not-json")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while router.request_log_health().await.stats.entries_written < 2 && Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    let stats = reqwest::Client::new()
+        .post(format!(
+            "{}/codey/api/query_route_request_log_stats",
+            endpoint.base_url.trim_end_matches("/v1")
+        ))
+        .header(ROUTER_AUTH_HEADER, &endpoint.token)
+        .json(&json!({"groupBy":"request_kind"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stats.status(), reqwest::StatusCode::OK);
+    let stats = stats.json::<Value>().await.unwrap();
+    assert_eq!(stats["total"], 2);
+    assert_eq!(stats["succeededCount"], 1);
+    assert_eq!(stats["failedCount"], 1);
+    assert_eq!(stats["recordingHealth"]["entriesWritten"], 2);
     router.stop().await.unwrap();
+    let page = crate::route_request_log::query_route_request_logs(
+        logs.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(page.total, 2);
+    let image = page
+        .items
+        .iter()
+        .find(|item| item.request_kind == "images_generations")
+        .unwrap();
+    assert_eq!(image.status, "succeeded");
+    assert_eq!(image.model.as_deref(), Some("gpt-image-2"));
+    assert_eq!(image.total_tokens, None);
+    let rejected = page
+        .items
+        .iter()
+        .find(|item| item.request_kind == "responses")
+        .unwrap();
+    assert_eq!(rejected.status, "failed");
+    assert_eq!(rejected.error_code.as_deref(), Some("invalid_request_body"));
 }
 
 #[tokio::test]
@@ -6796,13 +7103,19 @@ async fn request_log_page_is_public_but_its_api_requires_the_launch_token() {
         format!("{gateway_root}{REQUEST_LOG_PAGE_PATH}#{}", endpoint.token)
     );
 
-    let unauthorized = client
-        .post(format!("{gateway_root}/codey/api/load_codey_config"))
-        .json(&json!({}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+    for command in [
+        "load_codey_config",
+        "query_route_request_logs",
+        "query_route_request_log_stats",
+    ] {
+        let unauthorized = client
+            .post(format!("{gateway_root}/codey/api/{command}"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
 
     let catalog = client
         .post(format!("{gateway_root}/codey/api/load_codey_config"))

@@ -1,5 +1,54 @@
 use super::*;
 
+pub(crate) const CONTEXT_LENGTH_EXCEEDED: &str = "context_length_exceeded";
+
+// Normalize only documented error codes and narrow provider messages. An HTTP
+// 400/413 on its own can mean an invalid image or request, not a full context.
+pub(crate) fn is_context_length_error(value: &Value) -> bool {
+    let code = first_string_at(
+        value,
+        &[
+            "/response/error/code",
+            "/error/code",
+            "/error/type",
+            "/code",
+        ],
+    );
+    if code.is_some_and(|code| {
+        matches!(
+            code,
+            "context_length_exceeded" | "context_window_exceeded" | "prompt_too_long"
+        )
+    }) {
+        return true;
+    }
+    let message = first_string_at(
+        value,
+        &["/response/error/message", "/error/message", "/message"],
+    )
+    .unwrap_or_default()
+    .to_ascii_lowercase();
+    message.starts_with("prompt is too long:")
+        || message.starts_with("input is too long for requested model")
+        || message.contains("maximum context length")
+}
+
+#[derive(Debug)]
+pub(crate) struct ContextLengthExceeded;
+impl std::fmt::Display for ContextLengthExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("上下文超过目标模型限制，请压缩后重试")
+    }
+}
+impl std::error::Error for ContextLengthExceeded {}
+
+pub(crate) fn check_context_length_error(value: &Value) -> Result<()> {
+    if is_context_length_error(value) {
+        return Err(ContextLengthExceeded.into());
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct UpstreamErrorSummary {
     pub(crate) message: Option<String>,
@@ -65,7 +114,8 @@ pub(crate) fn upstream_error_summary(value: &Value, route: &RouteTarget) -> Upst
         value,
         &["/response/error/type", "/error/error/type", "/error/type"],
     )
-    .and_then(|kind| sanitize_upstream_error_text(kind, route, 128));
+    .and_then(|kind| sanitize_upstream_error_text(kind, route, 128))
+    .and_then(|kind| safe_upstream_error_identifier(&kind));
     let code = first_string_at(
         value,
         &[
@@ -75,12 +125,32 @@ pub(crate) fn upstream_error_summary(value: &Value, route: &RouteTarget) -> Upst
             "/code",
         ],
     )
-    .and_then(|code| sanitize_upstream_error_text(code, route, 128));
+    .and_then(|code| sanitize_upstream_error_text(code, route, 128))
+    .and_then(|code| safe_upstream_error_identifier(&code));
     UpstreamErrorSummary {
         message,
         error_type,
         code,
     }
+}
+
+fn safe_upstream_error_identifier(value: &str) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')))
+    .then(|| value.to_string())
+}
+
+fn upstream_error_log_detail(summary: &UpstreamErrorSummary) -> String {
+    // Provider messages can echo prompts, images or credentials unknown to
+    // Codey. Persist classification only; detailed messages stay in the reply.
+    format!(
+        "type={}; code={}",
+        summary.error_type.as_deref().unwrap_or("unknown"),
+        summary.code.as_deref().unwrap_or("unknown")
+    )
 }
 
 pub(crate) fn upstream_error_detail(summary: &UpstreamErrorSummary) -> Option<String> {
@@ -138,13 +208,14 @@ where
     )
     .await??;
     let parsed = serde_json::from_slice::<Value>(&body).ok();
+    let context_exceeded = parsed.as_ref().is_some_and(is_context_length_error);
     let summary = parsed
         .as_ref()
         .map(|value| upstream_error_summary(value, &resolved.route))
         .unwrap_or_default();
     let detail = upstream_error_detail(&summary);
-    if let (Some(probe), Some(detail)) = (probe.as_ref(), detail.as_deref()) {
-        probe.mark_upstream_error_summary(detail);
+    if let Some(probe) = probe.as_ref() {
+        probe.mark_upstream_error_summary(&upstream_error_log_detail(&summary));
     }
     let mut message = format!(
         "Codey 线路「{}」请求模型 {} 时，上游返回 HTTP {status}",
@@ -160,7 +231,10 @@ where
     record_router_failure_nonblocking(
         "local_router_upstream_http_error",
         "proxy_local_router_response",
-        message.clone(),
+        format!(
+            "上游返回 HTTP {status}；{}",
+            upstream_error_log_detail(&summary)
+        ),
         serde_json::json!({
             "routeId": resolved.provider_id.as_str(),
             "routeName": resolved.route.route_name.as_str(),
@@ -177,11 +251,15 @@ where
             "requestId": current_router_request_id(),
         }),
     );
-    if downstream.is_websocket() {
+    if context_exceeded || downstream.is_websocket() {
         downstream
             .write_error(
                 status,
-                "upstream_http_error",
+                if context_exceeded {
+                    CONTEXT_LENGTH_EXCEEDED
+                } else {
+                    "upstream_http_error"
+                },
                 message,
                 Some(&resolved.route),
             )
@@ -218,7 +296,10 @@ pub(crate) fn annotate_upstream_websocket_failure(
     record_router_failure_nonblocking(
         "local_router_upstream_websocket_error",
         "proxy_responses_websocket_event",
-        message.clone(),
+        format!(
+            "Responses WebSocket 上游返回错误；{}",
+            upstream_error_log_detail(&summary)
+        ),
         serde_json::json!({
             "routeId": route.provider_id.as_str(),
             "routeName": route.route_name.as_str(),
@@ -249,5 +330,5 @@ pub(crate) fn annotate_upstream_websocket_failure(
     if !updated && let Some(object) = event.as_object_mut() {
         object.insert("message".to_string(), Value::String(message));
     }
-    error_summary
+    Some(upstream_error_log_detail(&summary))
 }

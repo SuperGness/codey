@@ -14,6 +14,7 @@ pub(crate) fn anthropic_message_to_responses_body_with_tool_bridge(
     fallback_model: &str,
     tool_bridge: &ResponsesToolBridge,
 ) -> Result<Value> {
+    check_context_length_error(message)?;
     if message.get("type").and_then(Value::as_str) == Some("error") {
         let detail = message
             .get("error")
@@ -191,6 +192,7 @@ pub(crate) struct AnthropicSseBlock {
 
 #[derive(Debug)]
 pub(crate) struct AnthropicSseAccumulator {
+    retain_text: bool,
     pub(crate) id: String,
     pub(crate) model: String,
     pub(crate) blocks: BTreeMap<usize, AnthropicSseBlock>,
@@ -202,6 +204,7 @@ pub(crate) struct AnthropicSseAccumulator {
 impl AnthropicSseAccumulator {
     pub(crate) fn new(model: &str) -> Self {
         Self {
+            retain_text: true,
             id: format!("msg_codey_{}", Uuid::new_v4()),
             model: model.to_string(),
             blocks: BTreeMap::new(),
@@ -211,7 +214,15 @@ impl AnthropicSseAccumulator {
         }
     }
 
+    pub(crate) fn for_streaming(model: &str) -> Self {
+        Self {
+            retain_text: false,
+            ..Self::new(model)
+        }
+    }
+
     pub(crate) fn ingest(&mut self, event: &Value) -> Result<()> {
+        check_context_length_error(event)?;
         let event_type = event
             .get("type")
             .and_then(Value::as_str)
@@ -250,8 +261,10 @@ impl AnthropicSseAccumulator {
                 }
                 if let Some(content) = message.get("content").and_then(Value::as_array) {
                     for (index, block) in content.iter().enumerate() {
-                        self.blocks
-                            .insert(index, anthropic_sse_block_from_value(block)?);
+                        self.blocks.insert(
+                            index,
+                            anthropic_sse_block_from_value(block, self.retain_text)?,
+                        );
                     }
                 }
             }
@@ -260,8 +273,10 @@ impl AnthropicSseAccumulator {
                 let block = event
                     .get("content_block")
                     .ok_or_else(|| anyhow::anyhow!("content_block_start 缺少 content_block"))?;
-                self.blocks
-                    .insert(index, anthropic_sse_block_from_value(block)?);
+                self.blocks.insert(
+                    index,
+                    anthropic_sse_block_from_value(block, self.retain_text)?,
+                );
             }
             "content_block_delta" => {
                 let index = anthropic_sse_index(event)?;
@@ -279,12 +294,14 @@ impl AnthropicSseAccumulator {
                         if block.block_type.is_empty() {
                             block.block_type = "text".to_string();
                         }
-                        block.text.push_str(
-                            delta
-                                .get("text")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default(),
-                        );
+                        if self.retain_text {
+                            block.text.push_str(
+                                delta
+                                    .get("text")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default(),
+                            );
+                        }
                     }
                     "input_json_delta" => {
                         if block.block_type.is_empty() {
@@ -301,12 +318,14 @@ impl AnthropicSseAccumulator {
                         if block.block_type.is_empty() {
                             block.block_type = "thinking".to_string();
                         }
-                        block.text.push_str(
-                            delta
-                                .get("thinking")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default(),
-                        );
+                        if self.retain_text {
+                            block.text.push_str(
+                                delta
+                                    .get("thinking")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default(),
+                            );
+                        }
                     }
                     "signature_delta" | "citations_delta" => {}
                     other => anyhow::bail!("不支持的 Anthropic content delta 类型 {other}"),
@@ -365,20 +384,24 @@ pub(crate) fn anthropic_sse_index(event: &Value) -> Result<usize> {
         .ok_or_else(|| anyhow::anyhow!("Anthropic SSE 事件缺少有效 index"))
 }
 
-pub(crate) fn anthropic_sse_block_from_value(block: &Value) -> Result<AnthropicSseBlock> {
+fn anthropic_sse_block_from_value(block: &Value, retain_text: bool) -> Result<AnthropicSseBlock> {
     let block_type = block
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("Anthropic content block 缺少 type"))?;
     Ok(AnthropicSseBlock {
         block_type: block_type.to_string(),
-        text: block
-            .get("text")
-            .or_else(|| block.get("thinking"))
-            .or_else(|| block.get("refusal"))
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        text: if retain_text {
+            block
+                .get("text")
+                .or_else(|| block.get("thinking"))
+                .or_else(|| block.get("refusal"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            String::new()
+        },
         id: block
             .get("id")
             .and_then(Value::as_str)
@@ -452,8 +475,9 @@ where
     D: ResponsesDownstream + ?Sized,
 {
     let mut output = ResponsesSseState::new(model, tool_bridge);
+    prepared.retained.get_or_insert_with(Default::default);
     output.start(downstream).await?;
-    let mut accumulator = AnthropicSseAccumulator::new(model);
+    let mut accumulator = AnthropicSseAccumulator::for_streaming(model);
     let request_log_probe = downstream.request_log_probe().cloned();
     let result: Result<()> = async {
         let mut buffer = Vec::new();
@@ -653,7 +677,9 @@ pub(crate) fn streaming_failure_message(
     error: &anyhow::Error,
     route: &RouteTarget,
 ) -> (&'static str, String) {
-    if error.downcast_ref::<UpstreamReadIdleTimeout>().is_some() {
+    if error.is::<ContextLengthExceeded>() {
+        (CONTEXT_LENGTH_EXCEEDED, ContextLengthExceeded.to_string())
+    } else if error.downcast_ref::<UpstreamReadIdleTimeout>().is_some() {
         (
             "upstream_idle_timeout",
             format!(

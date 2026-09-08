@@ -121,27 +121,10 @@ pub(crate) fn should_passthrough_native_responses(
         && !body_mutated
 }
 
-pub(crate) fn remove_codey_synthetic_previous_response_id(body: &mut Value) -> bool {
-    let Some(object) = body.as_object_mut() else {
-        return false;
-    };
-    let Some(previous_response_id) = object
-        .get("previous_response_id")
+pub(crate) fn has_codey_synthetic_previous_response_id(body: &Value) -> bool {
+    body.get("previous_response_id")
         .and_then(Value::as_str)
-        .map(str::trim)
-    else {
-        return false;
-    };
-    if !is_codey_synthetic_response_id(previous_response_id) {
-        return false;
-    }
-    remove_previous_response_id(body)
-}
-
-pub(crate) fn remove_previous_response_id(body: &mut Value) -> bool {
-    body.as_object_mut()
-        .and_then(|object| object.remove("previous_response_id"))
-        .is_some()
+        .is_some_and(is_codey_synthetic_response_id)
 }
 
 pub(crate) fn is_codey_synthetic_response_id(response_id: &str) -> bool {

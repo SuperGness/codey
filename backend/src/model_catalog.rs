@@ -221,6 +221,97 @@ pub(crate) fn refresh_for_provider_with_capabilities(
     )
 }
 
+// Extends the existing capability entry point without changing its callers' API.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refresh_for_provider_with_contexts(
+    home: &Path,
+    official_provider: bool,
+    upstream_models: Option<&[String]>,
+    selected_models: &[String],
+    websocket_models: &[String],
+    native_web_search_models: &[String],
+    context_1m_models: &[String],
+    contexts: &std::collections::BTreeMap<String, crate::config::ModelContextConfig>,
+) -> Result<usize> {
+    let count = refresh_for_provider_with_capabilities(
+        home,
+        official_provider,
+        upstream_models,
+        selected_models,
+        websocket_models,
+        native_web_search_models,
+        context_1m_models,
+    )?;
+    apply_catalog_contexts(home, contexts)?;
+    Ok(count)
+}
+
+pub(crate) fn apply_catalog_contexts(
+    home: &Path,
+    contexts: &std::collections::BTreeMap<String, crate::config::ModelContextConfig>,
+) -> Result<()> {
+    let mut models = read_runtime_catalog_models(home)?;
+    for model in &mut models {
+        let policy = model.get("slug").and_then(Value::as_str).and_then(|slug| {
+            contexts
+                .iter()
+                .find(|(key, _)| model_id::equal(key, slug))
+                .map(|(_, policy)| policy)
+        });
+        apply_model_context(model, policy)?;
+    }
+    write_verified_catalog(home, &models)?;
+    Ok(())
+}
+
+pub(crate) fn runtime_context_metadata(
+    home: &Path,
+) -> std::collections::BTreeMap<String, serde_json::Map<String, Value>> {
+    read_runtime_catalog_models(home)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|model| {
+            let slug = model["slug"].as_str()?.to_string();
+            let fields = [
+                "context_window",
+                "max_context_window",
+                "effective_context_window_percent",
+                "auto_compact_token_limit",
+                "codey_context_source",
+            ];
+            Some((
+                slug,
+                fields
+                    .into_iter()
+                    .map(|field| (field.to_string(), model[field].clone()))
+                    .collect(),
+            ))
+        })
+        .collect()
+}
+
+pub(crate) fn apply_model_context(
+    model: &mut Value,
+    policy: Option<&crate::config::ModelContextConfig>,
+) -> Result<()> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    policy.validate().map_err(anyhow::Error::msg)?;
+    let window = policy.context_window_tokens;
+    let percent = (window - policy.reserve_output_tokens.unwrap_or(0)) * 100 / window;
+    model["context_window"] = json!(window);
+    model["max_context_window"] = json!(window);
+    model["effective_context_window_percent"] = json!(percent);
+    model["auto_compact_token_limit"] = json!(
+        policy
+            .auto_compact_token_limit
+            .unwrap_or((window * 9 / 10).min(window * percent / 100))
+    );
+    model["codey_context_source"] = json!("user_declared");
+    Ok(())
+}
+
 fn refresh_for_provider_with_transport_preferences(
     home: &Path,
     official_provider: bool,
@@ -1193,6 +1284,25 @@ fn synthetic_model(
     if !preserve_source_runtime_metadata {
         codey_runtime_core::model_suffix::sanitize_generic_model_metadata(&mut model);
     }
+    if !preserve_source_runtime_metadata
+        || model
+            .get("context_window")
+            .and_then(Value::as_u64)
+            .is_none_or(|window| window == 0)
+    {
+        // ponytail: unknown providers use a conservative operating budget; an
+        // explicit provider/model setting replaces it when capacity is known.
+        model["context_window"] = json!(32_768);
+        model["max_context_window"] = json!(32_768);
+        model["effective_context_window_percent"] = json!(95);
+        model["auto_compact_token_limit"] = Value::Null;
+        model["codey_context_source"] = json!("conservative_fallback");
+        if let Some(object) = model.as_object_mut() {
+            object.remove("codey_context_base");
+        }
+    } else {
+        model["codey_context_source"] = json!("official_catalog");
+    }
     model["slug"] = json!(model_id);
     model["display_name"] = json!(model_id);
     model["description"] = json!("Third-party API model");
@@ -1250,23 +1360,127 @@ fn gate_cached_native_web_search(model: &mut Value, allowed_model_keys: &HashSet
 }
 
 fn configure_1m_context_window(model: &mut Value, allowed_model_keys: &HashSet<String>) {
-    let allowed = model
-        .get("slug")
-        .and_then(Value::as_str)
-        .is_some_and(|slug| allowed_model_keys.contains(&model_id::key(slug)));
-    if allowed {
-        model["context_window"] = json!(CONTEXT_1M_WINDOW);
-        model["max_context_window"] = json!(CONTEXT_1M_WINDOW);
-        model["effective_context_window_percent"] = json!(100);
+    if model.get("codey_source").and_then(Value::as_str) == Some("third_party")
+        && model.get("codey_context_source").is_none()
+        && !model
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|slug| {
+                let upstream = slug.split_once('/').map_or(slug, |(_, model)| model);
+                default_official_model_slugs()
+                    .iter()
+                    .any(|official| model_id::equal(official, upstream))
+            })
+    {
+        model["context_window"] = json!(32_768);
+        model["max_context_window"] = json!(32_768);
+        model["effective_context_window_percent"] = json!(95);
         model["auto_compact_token_limit"] = Value::Null;
-    } else if model.get("context_window").and_then(Value::as_u64) == Some(CONTEXT_1M_WINDOW) {
-        // A reused Codey catalog can be the only available template. Reset the
-        // exact override written above so clearing the setting cannot inherit it.
+        model["codey_context_source"] = json!("conservative_fallback");
+    }
+    // Preserve the unmodified declaration so cached catalogs can remove an
+    // override without inheriting stale window/threshold values.
+    const FIELDS: [&str; 5] = [
+        "context_window",
+        "max_context_window",
+        "effective_context_window_percent",
+        "auto_compact_token_limit",
+        "codey_context_source",
+    ];
+    if model.get("codey_context_base").is_none()
+        && matches!(
+            model.get("codey_context_source").and_then(Value::as_str),
+            None | Some("legacy_1m")
+        )
+        && model.get("context_window").and_then(Value::as_u64) == Some(CONTEXT_1M_WINDOW)
+    {
+        // Migrate a pre-baseline Codey override once. A source explicitly
+        // identified as official metadata must retain its declared window.
         model["context_window"] = json!(DEFAULT_CONTEXT_WINDOW);
         model["max_context_window"] = json!(DEFAULT_CONTEXT_WINDOW);
         model["effective_context_window_percent"] = json!(DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT);
         model["auto_compact_token_limit"] = Value::Null;
     }
+    if let Some(base) = model.get("codey_context_base").cloned() {
+        for field in FIELDS {
+            if let Some(value) = base.get(field) {
+                model[field] = value.clone();
+            } else if let Some(object) = model.as_object_mut() {
+                object.remove(field);
+            }
+        }
+    } else {
+        let mut base = serde_json::Map::new();
+        for field in FIELDS {
+            if let Some(value) = model.get(field) {
+                base.insert(field.to_string(), value.clone());
+            }
+        }
+        model["codey_context_base"] = Value::Object(base);
+    }
+    let allowed = model
+        .get("slug")
+        .and_then(Value::as_str)
+        .is_some_and(|slug| allowed_model_keys.contains(&model_id::key(slug)));
+    if allowed {
+        model["codey_context_source"] = json!("legacy_1m");
+        model["context_window"] = json!(CONTEXT_1M_WINDOW);
+        model["max_context_window"] = json!(CONTEXT_1M_WINDOW);
+        model["effective_context_window_percent"] = json!(100);
+        model["auto_compact_token_limit"] = Value::Null;
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn cached_context_projection_preserves_missing_fields_and_is_idempotent() {
+    for mut model in [
+        json!({"slug": "route/gpt-5.6-sol", "codey_source": "third_party"}),
+        json!({"slug": "gpt-5.6-sol", "context_window": 272000, "auto_compact_token_limit": null}),
+    ] {
+        let original = model.clone();
+        configure_1m_context_window(&mut model, &HashSet::new());
+        let projected = model.clone();
+        configure_1m_context_window(&mut model, &HashSet::new());
+        assert_eq!(model, projected);
+        model.as_object_mut().unwrap().remove("codey_context_base");
+        assert_eq!(model, original);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn model_context_projection_restores_cache_and_explicit_overrides_legacy() {
+    use crate::config::ModelContextConfig;
+    let mut model = json!({ "slug": "route/custom", "codey_source": "third_party", "context_window": 272000, "max_context_window": 872000 });
+    configure_1m_context_window(&mut model, &HashSet::new());
+    assert_eq!(model["context_window"], 32768);
+    assert_eq!(model["codey_context_source"], "conservative_fallback");
+    configure_1m_context_window(&mut model, &HashSet::from(["route/custom".into()]));
+    assert_eq!(model["context_window"], 1_000_000);
+    let policy = ModelContextConfig {
+        context_window_tokens: 100_000,
+        auto_compact_token_limit: Some(80_000),
+        reserve_output_tokens: Some(12_345),
+    };
+    apply_model_context(&mut model, Some(&policy)).unwrap();
+    assert_eq!(model["context_window"], 100_000);
+    assert_eq!(model["max_context_window"], 100_000);
+    assert_eq!(model["effective_context_window_percent"], 87);
+    assert_eq!(model["auto_compact_token_limit"], 80_000);
+    assert_eq!(model["codey_context_source"], "user_declared");
+    configure_1m_context_window(&mut model, &HashSet::new());
+    assert_eq!(model["context_window"], 32768);
+    assert_eq!(model["max_context_window"], 32768);
+    assert_eq!(model["effective_context_window_percent"], 95);
+    assert!(model["auto_compact_token_limit"].is_null());
+    let mut trusted = json!({ "slug": "gpt-5.5", "context_window": 272000, "max_context_window": 872000, "effective_context_window_percent": 95 });
+    configure_1m_context_window(&mut trusted, &HashSet::new());
+    assert_eq!(trusted["max_context_window"], 872000);
+    let mut native_large = json!({"slug":"official", "context_window":1000000, "max_context_window":1000000, "effective_context_window_percent":95, "codey_context_source":"official_catalog"});
+    configure_1m_context_window(&mut native_large, &HashSet::new());
+    assert_eq!(native_large["context_window"], 1000000);
+    assert_eq!(native_large["effective_context_window_percent"], 95);
 }
 
 /// Writes the catalog and returns the exact bytes that now live on disk.
@@ -2373,10 +2587,7 @@ mod tests {
         let sanitized: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(sanitized["models"][0].get("supports_search_tool").is_none());
         assert!(sanitized["models"][0].get("web_search_tool_type").is_none());
-        assert_eq!(
-            sanitized["models"][0]["context_window"],
-            DEFAULT_CONTEXT_WINDOW
-        );
+        assert_eq!(sanitized["models"][0]["context_window"], 32_768);
         let sanitized_bytes = fs::read(&path).unwrap();
 
         assert!(prepare_cached_catalog_for_current_capabilities(home.path(), &[], &[]).unwrap());

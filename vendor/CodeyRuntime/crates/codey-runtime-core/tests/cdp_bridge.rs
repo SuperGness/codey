@@ -1,7 +1,7 @@
 use codey_runtime_core::bridge::{self, BRIDGE_BINDING_NAME};
 use codey_runtime_core::cdp::{
     CdpTarget, is_avatar_overlay_page_target, is_primary_codex_page_target, list_targets,
-    pick_injectable_codex_page_target, pick_page_target,
+    pick_injectable_codex_page_target,
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -106,90 +106,6 @@ fn bridge_result_expressions_json_escape_inputs() {
     assert_eq!(
         reject,
         r#"window.__codexSessionDeleteReject("request\"1", "bad \"value\"")"#
-    );
-}
-
-#[test]
-fn pick_page_target_prefers_codex_title_or_url() {
-    let targets = vec![
-        target(
-            "first",
-            "page",
-            "Other",
-            "https://example.test",
-            Some("ws://first"),
-        ),
-        target(
-            "second",
-            "page",
-            "Codex",
-            "https://example.test",
-            Some("ws://second"),
-        ),
-        target(
-            "third",
-            "page",
-            "Other",
-            "https://codex.test",
-            Some("ws://third"),
-        ),
-    ];
-
-    let picked = pick_page_target(&targets).expect("target should be selected");
-
-    assert_eq!(picked.id, "second");
-}
-
-#[test]
-fn pick_page_target_leniently_falls_back_to_first_injectable_page() {
-    let targets = vec![
-        target(
-            "browser",
-            "browser",
-            "Codex",
-            "https://codex.test",
-            Some("ws://browser"),
-        ),
-        target(
-            "first",
-            "page",
-            "Other",
-            "https://example.test",
-            Some("ws://first"),
-        ),
-        target(
-            "second",
-            "page",
-            "Other 2",
-            "https://example.test/2",
-            Some("ws://second"),
-        ),
-    ];
-
-    let picked = pick_page_target(&targets).expect("target should be selected");
-
-    assert_eq!(picked.id, "first");
-}
-
-#[test]
-fn pick_page_target_rejects_non_pages_and_pages_without_websocket() {
-    let targets = vec![
-        target(
-            "browser",
-            "browser",
-            "Codex",
-            "https://codex.test",
-            Some("ws://browser"),
-        ),
-        target("page-no-ws", "page", "Codex", "https://codex.test", None),
-    ];
-
-    let error = pick_page_target(&targets).expect_err("no injectable page should be selected");
-
-    assert!(
-        error
-            .to_string()
-            .contains("No injectable page target found")
     );
 }
 

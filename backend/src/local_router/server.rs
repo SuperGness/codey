@@ -8,9 +8,14 @@ pub(crate) fn record_router_failure_nonblocking(
 ) {
     let error = error.into();
     if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        // ponytail: router concurrency/backoff bounds task volume; use a shared bounded
-        // error-log queue if failure storms ever make this measurable.
+        static LOG_BUDGET: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+        let budget = LOG_BUDGET.get_or_init(|| Arc::new(Semaphore::new(128)));
+        let Ok(permit) = Arc::clone(budget).try_acquire_owned() else {
+            return;
+        };
+        // Drop excess diagnostics instead of queuing unbounded blocking work.
         drop(runtime.spawn_blocking(move || {
+            let _permit = permit;
             crate::error_log::record_failure(event, operation, error, context);
         }));
     } else {
@@ -90,6 +95,13 @@ pub(crate) struct LocalRouter {
 
 impl LocalRouter {
     pub(crate) async fn start(config: &CodeyConfig) -> Result<Self> {
+        Self::start_with_logger(config, Arc::new(RouteRequestLogController::new())).await
+    }
+
+    pub(super) async fn start_with_logger(
+        config: &CodeyConfig,
+        request_log: Arc<RouteRequestLogController>,
+    ) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
             .context("启动 Codey 本地路由失败")?;
@@ -109,7 +121,10 @@ impl LocalRouter {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let official_auth_path = crate::codex_config::codex_home().join("auth.json");
         let websocket_backoffs = Arc::new(Mutex::new(UpstreamWebSocketBackoffs::default()));
-        let request_log = Arc::new(RouteRequestLogController::new());
+        websocket_backoffs
+            .lock()
+            .unwrap()
+            .update_routes(&snapshot.read().unwrap());
         if let Err(error) = request_log.reconfigure(&config.route_request_log).await {
             record_router_failure_nonblocking(
                 "route_request_log_start_failed",
@@ -283,11 +298,11 @@ impl LocalRouter {
         *self
             .snapshot
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&next);
         self.websocket_backoffs
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
+            .update_routes(&next);
     }
 
     pub(crate) async fn reconfigure_request_log(
@@ -299,6 +314,12 @@ impl LocalRouter {
 
     pub(crate) async fn clear_request_logs(&self) -> RouteRequestLogClearResult {
         self.request_log.clear().await
+    }
+
+    pub(crate) async fn request_log_health(
+        &self,
+    ) -> crate::route_request_log::RouteRequestLogHealth {
+        self.request_log.health().await
     }
 
     pub(crate) async fn stop(&self) -> Result<()> {
@@ -411,6 +432,7 @@ impl ResponsesRequestKind {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RouteBindings {
+    pub(crate) compacting: HashSet<String>,
     pub(crate) routes: HashMap<String, RouteBinding>,
     pub(crate) order: VecDeque<(String, u64)>,
     pub(crate) next_generation: u64,
@@ -537,8 +559,14 @@ impl RouterSnapshot {
                 official_account: profile.official_account,
                 supports_websockets: protocol == UpstreamProtocol::OpenAiResponses
                     && config.route_supports_websockets_this_launch(profile),
+                supports_remote_compaction: config
+                    .route_supports_remote_compaction_this_launch(profile),
                 models: HashSet::new(),
+                websocket_config: [0; 32],
+                context_config: [0; 32],
             };
+            target.context_config = target.context_config_fingerprint();
+            target.websocket_config = target.websocket_config_fingerprint();
             for model in route_models(config, profile, provider_id) {
                 let alias_target = AliasTarget {
                     provider_id: provider_id.to_string(),
@@ -774,7 +802,43 @@ pub(crate) struct RouteTarget {
     pub(crate) protocol: UpstreamProtocol,
     pub(crate) official_account: bool,
     pub(crate) supports_websockets: bool,
+    pub(crate) supports_remote_compaction: bool,
     pub(crate) models: HashSet<String>,
+    pub(crate) websocket_config: [u8; 32],
+    pub(crate) context_config: [u8; 32],
+}
+
+impl RouteTarget {
+    fn websocket_config_fingerprint(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update([u8::from(self.supports_websockets)]);
+        digest.update(self.context_config);
+        digest.finalize().into()
+    }
+
+    fn context_config_fingerprint(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update([u8::from(self.official_account)]);
+        if let Ok(url) = &self.upstream_url {
+            update_length_prefixed_digest(&mut digest, url.as_bytes());
+        }
+        if let Ok(url) = &self.upstream_websocket_url {
+            update_length_prefixed_digest(&mut digest, url.as_bytes());
+        }
+        if let Ok(headers) = &self.upstream_headers {
+            let mut headers = headers.iter().collect::<Vec<_>>();
+            headers.sort_unstable_by(|(a, av), (b, bv)| {
+                a.as_str()
+                    .cmp(b.as_str())
+                    .then_with(|| av.as_bytes().cmp(bv.as_bytes()))
+            });
+            for (name, value) in headers {
+                update_length_prefixed_digest(&mut digest, name.as_str().as_bytes());
+                update_length_prefixed_digest(&mut digest, value.as_bytes());
+            }
+        }
+        digest.finalize().into()
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -12,7 +12,6 @@ pub mod models;
 pub mod paths;
 pub mod plugin_marketplace;
 pub mod ports;
-pub mod version;
 #[cfg(any(windows, test))]
 mod windows_integration;
 

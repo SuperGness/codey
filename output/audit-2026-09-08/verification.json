@@ -1,0 +1,251 @@
+{
+  "platform": "macOS arm64",
+  "tools": {
+    "node": "22.22.3",
+    "pnpm": "11.5.2",
+    "rustc": "1.96.0",
+    "vite": "6.4.3"
+  },
+  "logs_directory": "/tmp/codey-audit-20260908",
+  "baseline": {
+    "check": {
+      "name": "check",
+      "command": [
+        "pnpm",
+        "run",
+        "check"
+      ],
+      "seconds": 3.191,
+      "exit_code": 0
+    },
+    "js-tests": {
+      "name": "js-tests",
+      "command": [
+        "pnpm",
+        "run",
+        "test:js"
+      ],
+      "seconds": 4.076,
+      "exit_code": 1
+    },
+    "fmt": {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "seconds": 1.628,
+      "exit_code": 1
+    },
+    "rust-tests": {
+      "name": "rust-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--locked"
+      ],
+      "seconds": 29.485,
+      "exit_code": 101
+    },
+    "clippy": {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "seconds": 17.359,
+      "exit_code": 101
+    },
+    "build": {
+      "name": "build",
+      "command": [
+        "pnpm",
+        "run",
+        "build"
+      ],
+      "seconds": 169.369,
+      "exit_code": 0
+    },
+    "build-warm": {
+      "name": "build-warm",
+      "command": [
+        "pnpm",
+        "run",
+        "build"
+      ],
+      "seconds": 116.772,
+      "exit_code": 0
+    }
+  },
+  "final_checks": {
+    "rust-tests": {
+      "name": "rust-tests",
+      "command": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--locked"
+      ],
+      "seconds": 41.846,
+      "exit_code": 0,
+      "source_changes": []
+    },
+    "clippy": {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "seconds": 12.12,
+      "exit_code": 0,
+      "source_changes": [
+        "src/dev/mockApi.ts",
+        "src/RequestLogDialog.tsx"
+      ]
+    },
+    "check-verified": {
+      "name": "check-verified",
+      "exit_code": 0,
+      "seconds": 2.4523332500830293
+    },
+    "js-tests-verified": {
+      "name": "js-tests-verified",
+      "exit_code": 0,
+      "seconds": 3.814
+    },
+    "machete": {
+      "name": "machete",
+      "command": [
+        "cargo-machete",
+        "."
+      ],
+      "seconds": 0.092,
+      "exit_code": 0
+    },
+    "js-syntax": {
+      "files": 15,
+      "failed": [],
+      "seconds": 0.362
+    },
+    "rustfmt": {
+      "exit_code": 0
+    },
+    "diff-check": {
+      "exit_code": 0
+    },
+    "codesign": {
+      "exit_code": 0
+    }
+  },
+  "no_change_builds": [
+    {
+      "name": "build-warm-2",
+      "command": [
+        "pnpm",
+        "run",
+        "build"
+      ],
+      "seconds": 3.336,
+      "exit_code": 0,
+      "source_changes": []
+    },
+    {
+      "name": "build-warm-3",
+      "seconds": 2.77,
+      "exit_code": 0,
+      "asset_mtimes_preserved": true
+    },
+    {
+      "name": "build-warm-4",
+      "seconds": 2.972,
+      "exit_code": 0,
+      "asset_mtimes_preserved": true
+    }
+  ],
+  "date_format_benchmark": {
+    "unit": "ms per 100 rows",
+    "samples": [
+      [
+        2.57194667,
+        2.5607058399999993,
+        3.2579308300000003,
+        2.2607574999999995,
+        2.3071550000000003,
+        2.285138340000001,
+        2.7632925,
+        2.5470462499999984,
+        2.2847995800000036
+      ],
+      [
+        0.08503832999999986,
+        0.06623999999999967,
+        0.06533916999999974,
+        0.06854041999999935,
+        0.06669499999999971,
+        0.06580124999999953,
+        0.08867165999999997,
+        0.14480749999999717,
+        0.06469000000000051
+      ]
+    ],
+    "median": [
+      2.5470462499999984,
+      0.06669499999999971
+    ],
+    "speedup": 38.18946322812818,
+    "checksum": 3420000
+  },
+  "build_api_equivalence": [
+    {
+      "name": "legacy-vite",
+      "seconds": 3.846851332928054,
+      "exit_code": 0
+    },
+    {
+      "name": "new-vite",
+      "seconds": 3.2144939169520512,
+      "exit_code": 0
+    },
+    {
+      "source_unchanged": true,
+      "overlay_identical": true
+    }
+  ],
+  "final_source_changes": [],
+  "baseline_sizes_bytes": {
+    "overlay": 977899,
+    "inject": 186501,
+    "codey": 20259264,
+    "fastctx": 42352240,
+    "app": 62891336
+  },
+  "final_sizes_bytes": {
+    "overlay": 978536,
+    "inject": 186501,
+    "codey": 20275792,
+    "fastctx": 42352240,
+    "app": 62908589
+  },
+  "notes": [
+    "The worktree already contained uncommitted changes; concurrent tasks updated files during baseline collection.",
+    "Baseline and final bundle size differences cannot be attributed solely to this audit.",
+    "Build API and legacy CLI output were byte-identical for an unchanged source snapshot.",
+    "Only macOS arm64 package was built; no real Codex restart was performed."
+  ]
+}

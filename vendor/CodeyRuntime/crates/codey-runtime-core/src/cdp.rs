@@ -69,25 +69,6 @@ async fn query_targets_url(client: &reqwest::Client, url: &str) -> anyhow::Resul
         .context("failed to deserialize CDP targets")
 }
 
-pub fn pick_page_target(targets: &[CdpTarget]) -> anyhow::Result<CdpTarget> {
-    let mut first_page = None;
-    for target in targets
-        .iter()
-        .filter(|target| is_injectable_page_target(target))
-    {
-        first_page.get_or_insert(target);
-        if is_primary_codex_page_target(target) {
-            return Ok(target.clone());
-        }
-    }
-
-    if let Some(target) = first_page {
-        return Ok(target.clone());
-    }
-
-    bail!("No injectable page target found")
-}
-
 pub fn pick_injectable_codex_page_target(targets: &[CdpTarget]) -> anyhow::Result<CdpTarget> {
     for target in targets
         .iter()

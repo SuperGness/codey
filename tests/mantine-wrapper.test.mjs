@@ -67,8 +67,9 @@ test("subagent model picker uses the shared Mantine combobox primitives", async 
   assert.match(wrapper, /export \{ Combobox, InputBase, useCombobox \}/);
   assert.match(
     picker,
-    /import \{ Combobox, InputBase, useCombobox \} from "\.\/mantine"/,
+    /import \{ Combobox, InputBase \} from "\.\/mantine"/,
   );
+  assert.match(picker, /import \{ useVirtualizedCombobox \} from "@mantine\/core"/);
   assert.match(picker, /portalProps=\{portalTarget \? \{ target: portalTarget \} : undefined\}/);
   assert.match(picker, /withinPortal=\{Boolean\(portalTarget\)\}/);
   assert.match(picker, /middlewares=\{\{ flip: true, shift: true \}\}/);

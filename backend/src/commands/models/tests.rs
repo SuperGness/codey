@@ -1,6 +1,65 @@
 use super::*;
 
 #[test]
+fn model_context_policy_validates_budgets_membership_and_restart() {
+    use crate::config::ModelContextConfig;
+    let policy = ModelContextConfig {
+        context_window_tokens: 100_000,
+        auto_compact_token_limit: Some(80_000),
+        reserve_output_tokens: Some(12_345),
+    };
+    assert!(policy.validate().is_ok());
+    for invalid in [
+        ModelContextConfig {
+            context_window_tokens: 0,
+            ..policy.clone()
+        },
+        ModelContextConfig {
+            context_window_tokens: 10_000_001,
+            ..policy.clone()
+        },
+        ModelContextConfig {
+            reserve_output_tokens: Some(100_000),
+            ..policy.clone()
+        },
+        ModelContextConfig {
+            reserve_output_tokens: Some(0),
+            ..policy.clone()
+        },
+        ModelContextConfig {
+            auto_compact_token_limit: Some(0),
+            ..policy.clone()
+        },
+        ModelContextConfig {
+            auto_compact_token_limit: Some(87_001),
+            ..policy.clone()
+        },
+    ] {
+        assert!(invalid.validate().is_err());
+    }
+    let mut config = CodeyConfig::default();
+    let before = config.clone();
+    let requested = BTreeMap::from([("model".into(), policy.clone())]);
+    assert!(set_model_contexts(&mut config, "route", Some(&requested), &[]).is_err());
+    assert_eq!(config, before);
+    set_model_contexts(&mut config, "route", Some(&requested), &["Model".into()]).unwrap();
+    assert_eq!(config.model_context("route", "MODEL"), Some(&policy));
+    assert!(!runtime_supports_current_routes_for_hot_reload(
+        &before, &config
+    ));
+    let encoded = serde_json::to_value(&config).unwrap();
+    assert_eq!(
+        encoded["modelContextByProvider"]["route"]["Model"]["contextWindowTokens"],
+        100_000
+    );
+    config.retain_1m_context_models("route", &[]);
+    assert!(config.model_context_by_provider["route"].is_empty());
+    config.local_router_enabled = false;
+    assert!(set_model_contexts(&mut config, "route", Some(&requested), &["Model".into()]).is_err());
+    assert!(set_model_contexts(&mut config, "route", Some(&BTreeMap::new()), &[]).is_ok());
+}
+
+#[test]
 fn context_capability_validates_membership_and_sync_preserves_intersection() {
     let home = tempfile::tempdir().unwrap();
     let route = configured_route("route", Some("kept"));

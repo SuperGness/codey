@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "50";
+  const patchVersion = "52";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -24,7 +24,7 @@
   const modelCatalogPath = "/codex-model-catalog";
   const fastServiceTierId = "priority";
   const fastSpeedTierId = "fast";
-  const interactionEvents = ["pointerdown", "click", "focusin"];
+  const interactionEvents = ["pointerdown", "click", "focusin", "keydown"];
   const routeSelectionEvents = new Set(["pointerdown", "click"]);
   const groupedMenuStyleId = "codey-model-route-menu-style";
   const groupedMenuSelector = "[role='menu'], [role='listbox']";
@@ -84,6 +84,7 @@
   let nextFullReactDiscoveryAt = 0;
   const modelListRequestIds = new Set();
   const knownModelQueryClients = new Set();
+  const nativeFastPermissions = new Map();
   let originalDispatchEvent = null;
   let patchedDispatchEvent = null;
   let groupedMenuTimer = 0;
@@ -649,6 +650,9 @@
       supports1MContext: metadata?.supports_1m_context ?? current?.supports1MContext,
       contextWindow: Object.hasOwn(metadata || {}, "context_window") ? metadata.context_window : current?.contextWindow,
       maxContextWindow: Object.hasOwn(metadata || {}, "max_context_window") ? metadata.max_context_window : current?.maxContextWindow,
+      effectiveContextWindowPercent: Object.hasOwn(metadata || {}, "effective_context_window_percent") ? metadata.effective_context_window_percent : current?.effectiveContextWindowPercent,
+      autoCompactTokenLimit: Object.hasOwn(metadata || {}, "auto_compact_token_limit") ? metadata.auto_compact_token_limit : current?.autoCompactTokenLimit,
+      contextSource: metadata?.codey_context_source ?? current?.contextSource,
     };
     const presentation = modelPresentation(modelName, current);
     const displayName = presentation.displayName;
@@ -685,6 +689,9 @@
           && current.supports1MContext === contextMetadata.supports1MContext
           && current.contextWindow === contextMetadata.contextWindow
           && current.maxContextWindow === contextMetadata.maxContextWindow
+          && current.effectiveContextWindowPercent === contextMetadata.effectiveContextWindowPercent
+          && current.autoCompactTokenLimit === contextMetadata.autoCompactTokenLimit
+          && current.contextSource === contextMetadata.contextSource
           && current.defaultReasoningEffort === defaultReasoningEffort
           && sameReasoningEffortNames(
             current.supportedReasoningEfforts,
@@ -761,6 +768,9 @@
       && leftMetadata.supports_1m_context === rightMetadata.supports_1m_context
       && leftMetadata.context_window === rightMetadata.context_window
       && leftMetadata.max_context_window === rightMetadata.max_context_window
+      && leftMetadata.effective_context_window_percent === rightMetadata.effective_context_window_percent
+      && leftMetadata.auto_compact_token_limit === rightMetadata.auto_compact_token_limit
+      && leftMetadata.codey_context_source === rightMetadata.codey_context_source
       && leftMetadata.display_name === rightMetadata.display_name
       && leftMetadata.route_name === rightMetadata.route_name
       && leftMetadata.route_prefix === rightMetadata.route_prefix
@@ -826,6 +836,9 @@
         && model?.supports1MContext === nextModels[index]?.supports1MContext
         && model?.contextWindow === nextModels[index]?.contextWindow
         && model?.maxContextWindow === nextModels[index]?.maxContextWindow
+        && model?.effectiveContextWindowPercent === nextModels[index]?.effectiveContextWindowPercent
+        && model?.autoCompactTokenLimit === nextModels[index]?.autoCompactTokenLimit
+        && model?.contextSource === nextModels[index]?.contextSource
         && sameReasoningEfforts(
           model?.supportedReasoningEfforts,
           nextModels[index]?.supportedReasoningEfforts,
@@ -1386,6 +1399,67 @@
 
   const reactFiberKeys = (element) =>
     window.__codeySharedRuntime.reactInternalKeys(element, { includeContainer: true });
+
+  const restoreNativeFastPermissions = () => {
+    for (const [permission, allowed] of nativeFastPermissions) {
+      try { permission.isServiceTierAllowed = allowed; } catch {}
+    }
+    nativeFastPermissions.clear();
+  };
+
+  const repairNativeFastControls = (target) => {
+    if (!catalog.loaded || disposed) return;
+    let fiber;
+    for (let node = target, hops = 0; node && !fiber && hops < 8; node = node.parentElement, hops += 1) {
+      fiber = reactFiberKeys(node).map((key) => node[key]).find(Boolean);
+    }
+    let picker;
+    const permissions = new Set();
+    for (let hops = 0; fiber && hops < 80; fiber = fiber.return, hops += 1) {
+      const props = fiber.memoizedProps;
+      if (!picker && typeof props?.model === "string"
+        && Array.isArray(props.models) && Object.hasOwn(props, "onSelectServiceTier")) {
+        picker = props;
+      }
+      if (!picker) continue;
+      for (const node of [fiber, fiber.alternate]) {
+        for (const cells of node?.updateQueue?.memoCache?.data || []) {
+          if (!Array.isArray(cells)) continue;
+          for (const value of cells) {
+            if (value && typeof value.isServiceTierAllowed === "boolean"
+              && typeof value.isLoading === "boolean") permissions.add(value);
+          }
+        }
+      }
+      if (props && Object.hasOwn(props, "conversationId") && Object.hasOwn(props, "hideLabel")) break;
+    }
+    if (!picker) return;
+    const selectedItem = target?.closest?.(groupedMenuItemSelector);
+    const modelName = selectedItem?.dataset?.codeyRouteModel || picker.model;
+    const route = routeForModel(modelName);
+    const thirdParty = nativeSelectionOnly
+      ? catalog.nativeProviderId && !legacyOfficialRouteProviderIds.has(modelKey(catalog.nativeProviderId))
+      : route && !route.officialAccount && !legacyOfficialRouteProviderIds.has(modelKey(route.routeProviderId));
+    const model = picker.models.find((value) => modelKey(value?.model) === modelKey(modelName));
+    const supportsFast = model?.serviceTiers?.some((tier) => tier?.id === fastServiceTierId);
+
+    // Windows builds can disable the main-process Inspector. Repair only the
+    // native picker's cached permission results, before its own opening/selection
+    // event renders again. Both the UI and its serviceTierForRequest resolver then
+    // consume the same model-aware permission; no replacement control or state.
+    // Keep loading state and official-account restrictions unchanged.
+    restoreNativeFastPermissions();
+    if (!thirdParty || !supportsFast) return;
+    for (const permission of permissions) {
+      if (permission.isServiceTierAllowed || nativeFastPermissions.size >= 64) continue;
+      try {
+        permission.isServiceTierAllowed = true;
+        if (permission.isServiceTierAllowed) nativeFastPermissions.set(permission, false);
+      } catch {
+        // An incompatible immutable renderer result must not break the menu.
+      }
+    }
+  };
 
   const reactModelStateNodes = (forceScan = false) => {
     const nodes = [
@@ -2582,6 +2656,9 @@
     const pickerInteraction = Boolean(
       event?.target?.closest?.(`${groupedMenuSelector}, [aria-haspopup]`),
     );
+    if (event?.type === "keydown"
+      && (!pickerInteraction || !["Enter", " ", "ArrowDown"].includes(event.key))) return;
+    if (pickerInteraction) repairNativeFastControls(event.target);
     if (nativeSelectionOnly && !pickerInteraction) return;
     if (!nativeSelectionOnly) {
       installGroupedModelMenuObserver();
@@ -2651,6 +2728,7 @@
     }),
     dispose() {
       disposed = true;
+      restoreNativeFastPermissions();
       window.clearTimeout(refreshTimer);
       refreshTimer = 0;
       window.clearTimeout(groupedMenuTimer);

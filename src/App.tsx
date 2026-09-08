@@ -229,6 +229,8 @@ export function App({
     setDraftAutoReviewSupported,
     draftModelSet,
     draft1MModelSet,
+    draftModelContexts,
+    updateDraftModelContext,
     toggleDraft1MModel,
     draftManualThirdPartyModelKeys,
     thirdPartyModelOptions,
@@ -677,6 +679,7 @@ export function App({
     showAccountUsageInHeader: boolean,
     supports1MContextModels: string[],
     enabled: boolean,
+    modelContexts: Record<string, import("./App.types").ModelContextConfig>,
   ) {
     if (!config) return false;
     const profile = config.profiles.find((candidate) => candidate.id === routeId);
@@ -696,6 +699,7 @@ export function App({
         routeId,
         models,
         supports1MContextModels,
+        modelContexts,
         enabled,
         showAccountUsageInHeader,
       });
@@ -1425,6 +1429,8 @@ export function App({
         modelState={modelEditorState}
         draftModelSet={draftModelSet}
         draft1MModelSet={draft1MModelSet}
+        draftModelContexts={draftModelContexts}
+        onUpdateDraftModelContext={updateDraftModelContext}
         onToggleDraft1MModel={toggleDraft1MModel}
         manualThirdPartyModelKeys={draftManualThirdPartyModelKeys}
         onOpenChange={handleModelPickerOpenChange}

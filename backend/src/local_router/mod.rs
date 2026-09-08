@@ -65,6 +65,9 @@ const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_UPSTREAM_ERROR_BYTES: usize = 64 * 1024;
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_UPSTREAM_SSE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+const RETAINED_RESPONSE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+const MAX_CACHED_RESPONSE_IDS: usize = 1024;
+const DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UPSTREAM_SSE_SNIFF_BYTES: usize = 1024;
 const REQUEST_JSON_OFFLOAD_BYTES: usize = 256 * 1024;
 const MAX_CUSTOM_TOOL_BRIDGE_DESCRIPTION_BYTES: usize = 8 * 1024;
@@ -88,6 +91,7 @@ const UPSTREAM_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(30);
 // complete, so its header wait is also the model's total generation budget.
 const UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UPSTREAM_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const UPSTREAM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const DOWNSTREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const UPSTREAM_HTTP_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const UPSTREAM_HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
@@ -96,6 +100,7 @@ const UPSTREAM_TCP_KEEPALIVE_IDLE: Duration = Duration::from_secs(15);
 const UPSTREAM_TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const UPSTREAM_TCP_KEEPALIVE_RETRIES: u32 = 3;
 const UPSTREAM_WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const UPSTREAM_WEBSOCKET_UNSUPPORTED_TTL: Duration = Duration::from_secs(60 * 60);
 const UPSTREAM_WEBSOCKET_BACKOFF_STEPS: [Duration; 3] = [
     Duration::from_secs(60),
     Duration::from_secs(5 * 60),
@@ -131,11 +136,14 @@ mod anthropic_request;
 mod auth;
 mod chat_request;
 mod chat_tools;
+mod compaction;
 mod downstream;
 mod errors;
 mod http;
+mod native_history;
 mod request_log_tap;
 mod request_meta;
+mod resource_budget;
 mod responses;
 mod server;
 mod sse;
@@ -152,11 +160,14 @@ pub(crate) use anthropic_request::*;
 pub(crate) use auth::*;
 pub(crate) use chat_request::*;
 pub(crate) use chat_tools::*;
+pub(crate) use compaction::*;
 pub(crate) use downstream::*;
 pub(crate) use errors::*;
 pub(crate) use http::*;
+pub(crate) use native_history::*;
 pub(crate) use request_log_tap::*;
 pub(crate) use request_meta::*;
+pub(crate) use resource_budget::*;
 pub(crate) use server::*;
 pub(crate) use sse::*;
 pub(crate) use sse_anthropic::*;
@@ -181,3 +192,6 @@ mod tail_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod safety_tests;

@@ -1,10 +1,18 @@
-import { useMemo, useRef, useState } from "react";
+import { useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizedCombobox } from "@mantine/core";
 import { IconAlertTriangle, IconCheck, IconSearch } from "@tabler/icons-react";
 
 import type { SubagentModelOption } from "../subagentModels";
 import { resolveSubagentModelOption } from "../subagentModels";
+import {
+  MODEL_GROUP_HEIGHT,
+  MODEL_LIST_HEIGHT,
+  MODEL_OPTION_HEIGHT,
+  modelComboboxLayout,
+  visibleModelGroups,
+} from "../modelComboboxWindow";
 import { compactSelectInputClass } from "../uiClasses";
-import { Combobox, InputBase, useCombobox } from "./mantine";
+import { Combobox, InputBase } from "./mantine";
 
 type ModelComboboxProps = {
   "aria-label": string;
@@ -16,13 +24,6 @@ type ModelComboboxProps = {
   preferredProviderId?: string;
   value: string;
   zIndex?: number;
-};
-
-type ModelOptionGroup = {
-  key: string;
-  routeName: string;
-  providerId: string;
-  options: SubagentModelOption[];
 };
 
 function normalizedSearchText(value: string) {
@@ -41,16 +42,10 @@ export function ModelCombobox({
   zIndex,
 }: ModelComboboxProps) {
   const [search, setSearch] = useState("");
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  const combobox = useCombobox({
-    onDropdownClose: () => {
-      combobox.resetSelectedOption();
-      setSearch("");
-    },
-    onDropdownOpen: () => {
-      requestAnimationFrame(() => searchInputRef.current?.focus());
-    },
-  });
+  const [selectedIndex, setSelectedIndex] = useState(-1);
+  const [scrollTop, setScrollTop] = useState(0);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const optionId = useId();
   const selectedOption = useMemo(
     () => resolveSubagentModelOption(options, value, preferredProviderId),
     [options, preferredProviderId, value],
@@ -85,26 +80,49 @@ export function ModelCombobox({
         : options,
     [normalizedSearch, options, searchableOptions],
   );
-  const groups = useMemo(
-    () => {
-      const grouped = new Map<string, ModelOptionGroup>();
-      for (const option of filteredOptions) {
-        const existing = grouped.get(option.routeId);
-        if (existing) {
-          existing.options.push(option);
-        } else {
-          grouped.set(option.routeId, {
-            key: option.routeId,
-            routeName: option.routeName,
-            providerId: option.providerId,
-            options: [option],
-          });
-        }
-      }
-      return [...grouped.values()];
-    },
-    [filteredOptions],
+  const layout = useMemo(() => modelComboboxLayout(filteredOptions), [filteredOptions]);
+  const visibleGroups = visibleModelGroups(layout.groups, scrollTop);
+  const activeOptionIndex = useMemo(
+    () => Math.max(0, layout.options.findIndex((option) => option.value === selectedOption?.value)),
+    [layout, selectedOption],
   );
+  const selectedOptionMounted = visibleGroups.some(({ group, start, end }) =>
+    selectedIndex >= group.startIndex + start && selectedIndex < group.startIndex + end,
+  );
+  const combobox = useVirtualizedCombobox({
+    totalOptionsCount: layout.options.length,
+    selectedOptionIndex: selectedIndex,
+    activeOptionIndex,
+    getOptionId: (index) => `${optionId}-${index}`,
+    setSelectedOptionIndex: (index) => {
+      setSelectedIndex(index);
+      const top = layout.offsets[index];
+      if (top === undefined) return;
+      const current = viewportRef.current?.scrollTop ?? scrollTop;
+      if (top < current) setScrollTop(top);
+      else if (top + MODEL_OPTION_HEIGHT > current + MODEL_LIST_HEIGHT) {
+        setScrollTop(top + MODEL_OPTION_HEIGHT - MODEL_LIST_HEIGHT);
+      }
+    },
+    onSelectedOptionSubmit: (index) => {
+      const option = layout.options[index];
+      if (option) onChange(option.value);
+      combobox.closeDropdown();
+    },
+    onDropdownClose: () => {
+      setSelectedIndex(-1);
+      setSearch("");
+      setScrollTop(0);
+    },
+    onDropdownOpen: () => combobox.focusSearchInput(),
+  });
+  useLayoutEffect(() => {
+    if (viewportRef.current) viewportRef.current.scrollTop = scrollTop;
+  }, [combobox.dropdownOpened, scrollTop]);
+  useLayoutEffect(() => {
+    setSelectedIndex(-1);
+    setScrollTop(0);
+  }, [filteredOptions]);
   const portalTarget = getPopupContainer?.();
   const unavailableValue = value.trim() && !selectedOption ? value.trim() : "";
   const triggerText = selectedOption
@@ -171,7 +189,7 @@ export function ModelCombobox({
 
       <Combobox.Dropdown>
         <Combobox.Search
-          ref={searchInputRef}
+          aria-activedescendant={selectedOptionMounted ? `${optionId}-${selectedIndex}` : undefined}
           aria-label={`搜索${ariaLabel}`}
           classNames={{
             input:
@@ -182,46 +200,63 @@ export function ModelCombobox({
           placeholder="搜索模型或线路"
           value={search}
         />
-        <Combobox.Options className="max-h-[280px] overflow-y-auto py-1.5">
-          {groups.map((group) => (
-            <Combobox.Group
-              key={group.key}
-              label={
-                <span className="flex min-w-0 items-center justify-between gap-2 px-1 text-[10px] font-semibold text-[#8e8e93]">
-                  <span className="truncate">{group.routeName}</span>
-                  <span className="shrink-0 font-mono font-normal text-[#aeaeb2]">
-                    {group.providerId}
-                  </span>
-                </span>
-              }
-            >
-              {group.options.map((option) => {
-                const selected = selectedOption?.value === option.value;
-                return (
-                  <Combobox.Option
-                    active={selected}
-                    key={option.value}
-                    value={option.value}
-                  >
-                    <span className="flex min-w-0 items-center gap-2">
-                      <span className="grid min-w-0 flex-1 gap-0.5">
-                        <span className="truncate font-semibold text-[#3a3a3c]">
-                          {option.label}
-                        </span>
-                        <span className="truncate text-[10px] text-[#8e8e93]">
-                          {option.routeName} · {option.modelId}
-                        </span>
-                      </span>
-                      <span className="grid w-4 shrink-0 place-items-center text-blue-600">
-                        {selected && <IconCheck size={14} aria-hidden="true" />}
-                      </span>
+        <Combobox.Options
+          ref={viewportRef}
+          className="max-h-[280px] overflow-y-auto"
+          onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        >
+          <div style={{ position: "relative", height: layout.height }}>
+            {combobox.dropdownOpened && visibleGroups.map(({ group, start, end }) => (
+              <Combobox.Group
+                key={group.key}
+                style={{ position: "absolute", top: group.top, left: 0, right: 0, height: group.height }}
+                styles={{ groupLabel: { height: MODEL_GROUP_HEIGHT, margin: 0, padding: "4px 8px" } }}
+                label={
+                  <span className="flex min-w-0 items-center justify-between gap-2 px-1 text-[10px] font-semibold text-[#8e8e93]">
+                    <span className="truncate">{group.routeName}</span>
+                    <span className="shrink-0 font-mono font-normal text-[#aeaeb2]">
+                      {group.providerId}
                     </span>
-                  </Combobox.Option>
-                );
-              })}
-            </Combobox.Group>
-          ))}
-          {groups.length === 0 && (
+                  </span>
+                }
+              >
+                <div style={{ paddingTop: start * MODEL_OPTION_HEIGHT }}>
+                  {group.options.slice(start, end).map((option, offset) => {
+                    const selected = selectedOption?.value === option.value;
+                    const index = group.startIndex + start + offset;
+                    return (
+                      <Combobox.Option
+                        active={selected}
+                        selected={selectedIndex === index}
+                        aria-selected={selected}
+                        aria-posinset={index + 1}
+                        aria-setsize={layout.options.length}
+                        id={`${optionId}-${index}`}
+                        style={{ height: MODEL_OPTION_HEIGHT }}
+                        key={option.value}
+                        value={option.value}
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          <span className="grid min-w-0 flex-1 gap-0.5">
+                            <span className="truncate font-semibold text-[#3a3a3c]">
+                              {option.label}
+                            </span>
+                            <span className="truncate text-[10px] text-[#8e8e93]">
+                              {option.routeName} · {option.modelId}
+                            </span>
+                          </span>
+                          <span className="grid w-4 shrink-0 place-items-center text-blue-600">
+                            {selected && <IconCheck size={14} aria-hidden="true" />}
+                          </span>
+                        </span>
+                      </Combobox.Option>
+                    );
+                  })}
+                </div>
+              </Combobox.Group>
+            ))}
+          </div>
+          {layout.groups.length === 0 && (
             <Combobox.Empty className="py-6 text-xs text-[#8e8e93]">
               {options.length === 0 ? "还没有可用于子代理的模型" : "没有匹配的模型或线路"}
             </Combobox.Empty>

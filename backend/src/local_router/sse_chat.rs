@@ -11,6 +11,7 @@ pub(crate) fn chat_completion_to_responses_body_with_tool_bridge(
     model: &str,
     tool_bridge: &ResponsesToolBridge,
 ) -> Result<Value> {
+    check_context_length_error(&chat)?;
     let response_id = chat
         .get("id")
         .and_then(Value::as_str)
@@ -236,6 +237,7 @@ pub(crate) struct ChatSseToolCall {
 
 #[derive(Debug)]
 pub(crate) struct ChatSseAccumulator {
+    retain_text: bool,
     pub(crate) id: String,
     pub(crate) created: i64,
     pub(crate) model: String,
@@ -251,6 +253,7 @@ pub(crate) struct ChatSseAccumulator {
 impl ChatSseAccumulator {
     pub(crate) fn new(model: &str) -> Self {
         Self {
+            retain_text: true,
             id: format!("chatcmpl_codey_{}", Uuid::new_v4()),
             created: current_unix_timestamp(),
             model: model.to_string(),
@@ -263,7 +266,15 @@ impl ChatSseAccumulator {
         }
     }
 
+    pub(crate) fn for_streaming(model: &str) -> Self {
+        Self {
+            retain_text: false,
+            ..Self::new(model)
+        }
+    }
+
     pub(crate) fn ingest(&mut self, chunk: &Value) -> Result<()> {
+        check_context_length_error(chunk)?;
         if let Some(error) = chunk.get("error") {
             anyhow::bail!("Chat Completions 流返回错误：{error}");
         }
@@ -304,11 +315,14 @@ impl ChatSseAccumulator {
             else {
                 continue;
             };
-            if let Some(content) = delta.get("content") {
-                self.content.push_str(&chat_message_content_text(content));
-            }
-            if let Some(refusal) = delta.get("refusal").and_then(Value::as_str) {
-                self.refusal.push_str(refusal);
+            // ResponsesSseState already retains text for the final streaming events.
+            if self.retain_text {
+                if let Some(content) = delta.get("content") {
+                    self.content.push_str(&chat_message_content_text(content));
+                }
+                if let Some(refusal) = delta.get("refusal").and_then(Value::as_str) {
+                    self.refusal.push_str(refusal);
+                }
             }
             if let Some(tool_calls) = delta
                 .get("tool_calls")
@@ -462,8 +476,9 @@ where
     D: ResponsesDownstream + ?Sized,
 {
     let mut output = ResponsesSseState::new(model, tool_bridge);
+    prepared.retained.get_or_insert_with(Default::default);
     output.start(downstream).await?;
-    let mut accumulator = ChatSseAccumulator::new(model);
+    let mut accumulator = ChatSseAccumulator::for_streaming(model);
     let request_log_probe = downstream.request_log_probe().cloned();
     let result: Result<()> = async {
         let mut buffer = Vec::new();
@@ -513,10 +528,6 @@ where
                 emit_chat_stream_event(&mut output, downstream, &event).await?;
             }
         }
-        // The final conversion is needed for tool validation, not visible text.
-        // Release duplicate text before building its temporary response objects.
-        accumulator.content = String::new();
-        accumulator.refusal = String::new();
         let chat = accumulator.into_chat_completion(done)?;
         let completed =
             chat_completion_to_responses_body_with_tool_bridge(chat, model, tool_bridge)?;
@@ -556,6 +567,7 @@ where
     D: ResponsesDownstream + ?Sized,
 {
     let mut events = Vec::new();
+    check_context_length_error(event)?;
     let Some(choices) = event.get("choices").and_then(Value::as_array) else {
         return Ok(());
     };

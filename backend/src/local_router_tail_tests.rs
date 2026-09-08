@@ -1,6 +1,68 @@
 //! Long-response regression fixtures and an opt-in loopback benchmark.
 use super::*;
 
+#[test]
+fn streaming_accumulators_skip_duplicate_text_and_preserve_tools() {
+    for protocol in [
+        UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+        UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+    ] {
+        for case in ["mixed", "refusal", "thinking"] {
+            let fixture = fixture(protocol, case, 1024 * 1024);
+            let bytes = fixture.frames.concat();
+            if protocol == UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS {
+                let mut collected = ChatSseAccumulator::new("model");
+                let mut streamed = ChatSseAccumulator::for_streaming("model");
+                parse_sse_frames(bytes.as_bytes(), &mut collected).unwrap();
+                parse_sse_frames(bytes.as_bytes(), &mut streamed).unwrap();
+                assert_eq!(collected.content.len(), fixture.text_bytes);
+                assert_eq!(streamed.content.capacity() + streamed.refusal.capacity(), 0);
+                assert_eq!(streamed.finish_reason, collected.finish_reason);
+                assert_eq!(streamed.usage, collected.usage);
+                let collected = collected.into_chat_completion(false).unwrap();
+                let streamed = streamed.into_chat_completion(false).unwrap();
+                assert_eq!(
+                    streamed["choices"][0]["message"]["tool_calls"],
+                    collected["choices"][0]["message"]["tool_calls"]
+                );
+            } else {
+                let mut collected = AnthropicSseAccumulator::new("model");
+                let mut streamed = AnthropicSseAccumulator::for_streaming("model");
+                parse_sse_frames(bytes.as_bytes(), &mut collected).unwrap();
+                parse_sse_frames(bytes.as_bytes(), &mut streamed).unwrap();
+                assert_eq!(collected.blocks[&0].text.len(), fixture.text_bytes);
+                assert!(
+                    streamed
+                        .blocks
+                        .values()
+                        .all(|block| block.text.capacity() == 0)
+                );
+                assert_eq!(streamed.stop_reason, collected.stop_reason);
+                assert_eq!(streamed.usage, collected.usage);
+                let tools = |message: Value| {
+                    message["content"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|block| block["type"] == "tool_use")
+                        .cloned()
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(
+                    tools(streamed.into_message().unwrap()),
+                    tools(collected.into_message().unwrap())
+                );
+            }
+        }
+    }
+    // Initial message content uses the same retention policy as later block starts.
+    let event =
+        json!({"type":"message_start","message":{"content":[{"type":"text","text":"initial"}]}});
+    let mut streamed = AnthropicSseAccumulator::for_streaming("model");
+    streamed.ingest(&event).unwrap();
+    assert_eq!(streamed.blocks[&0].text.capacity(), 0);
+}
+
 struct Fixture {
     request: Value,
     frames: Arc<Vec<String>>,

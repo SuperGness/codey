@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, SystemTime};
@@ -147,10 +149,7 @@ pub fn start_export_transfer(home: &Path, session_id: &str) -> Result<SessionExp
     let transfer_id = Uuid::new_v4().to_string();
     let path = transfer_path(home, TransferKind::Export, &transfer_id)?;
     let result = (|| -> Result<u64> {
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
+        let mut file = create_transfer_file(&path)
             .with_context(|| format!("创建会话导出临时文件失败：{}", path.display()))?;
         let size = {
             let mut writer = LimitedWriter::new(
@@ -223,10 +222,7 @@ pub fn start_import_transfer(home: &Path) -> Result<SessionImportStartResult> {
     ensure_transfer_capacity(usage, 1, 0)?;
     let transfer_id = Uuid::new_v4().to_string();
     let path = transfer_path(home, TransferKind::Import, &transfer_id)?;
-    fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&path)
+    create_transfer_file(&path)
         .with_context(|| format!("创建会话导入临时文件失败：{}", path.display()))?;
     Ok(SessionImportStartResult {
         status: "ready",
@@ -1151,10 +1147,26 @@ impl TransferKind {
     }
 }
 
+fn create_transfer_file(path: &Path) -> std::io::Result<File> {
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.open(path)
+}
+
 fn prepare_transfer_directory(home: &Path) -> Result<PathBuf> {
     let directory = home.join(SESSION_TRANSFER_DIR);
-    fs::create_dir_all(&directory)
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder
+        .create(&directory)
         .with_context(|| format!("创建会话传输目录失败：{}", directory.display()))?;
+    #[cfg(unix)]
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .context("限制会话传输目录权限失败")?;
     let now = SystemTime::now();
     for entry in fs::read_dir(&directory)
         .with_context(|| format!("扫描会话传输目录失败：{}", directory.display()))?
@@ -1347,6 +1359,36 @@ mod tests {
     use base64::Engine;
     use rusqlite::params;
     use tempfile::tempdir;
+
+    #[test]
+    #[cfg(unix)]
+    fn transfer_files_and_existing_directory_are_private() {
+        let home = tempdir().unwrap();
+        create_thread_db(home.path(), "private-thread", home.path(), "Private");
+        let directory = home.path().join(SESSION_TRANSFER_DIR);
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+        let export = start_export_transfer(home.path(), "private-thread").unwrap();
+        let import = start_import_transfer(home.path()).unwrap();
+        assert_eq!(
+            fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        for (kind, id) in [
+            (TransferKind::Export, export.transfer_id),
+            (TransferKind::Import, import.transfer_id),
+        ] {
+            let path = transfer_path(home.path(), kind, &id).unwrap();
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert!(
+                create_transfer_file(&path).is_err(),
+                "existing transfer must not be truncated"
+            );
+        }
+    }
 
     #[test]
     fn streaming_bundle_reader_keeps_rollout_out_of_the_metadata_allocation() {

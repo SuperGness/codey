@@ -1,14 +1,12 @@
-use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
 
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use std::process::Command;
 
 #[derive(Debug, Clone, Copy)]
 struct AppPackageSpec {
@@ -20,21 +18,6 @@ struct AppPackageSpec {
 
 const CODEX_PACKAGE_EXECUTABLES: &[&str] = &["ChatGPT.exe", "Codex.exe"];
 const STANDALONE_CODEX_EXECUTABLES: &[&str] = &["ChatGPT.exe", "Codex.exe"];
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct RuntimeExecutableSignature {
-    len: u64,
-    modified: Option<SystemTime>,
-}
-
-#[derive(Clone)]
-struct RuntimeVersionCacheEntry {
-    signature: RuntimeExecutableSignature,
-    version: Option<String>,
-}
-
-static RUNTIME_VERSION_CACHE: OnceLock<Mutex<HashMap<PathBuf, RuntimeVersionCacheEntry>>> =
-    OnceLock::new();
 
 const APP_PACKAGE_SPECS: &[AppPackageSpec] = &[
     AppPackageSpec {
@@ -135,24 +118,6 @@ fn windows_app_package_roots() -> Vec<PathBuf> {
     roots.sort();
     roots.dedup();
     roots
-}
-
-pub fn user_data_candidates() -> Vec<PathBuf> {
-    user_data_candidates_from(
-        std::env::var_os("LOCALAPPDATA").as_deref().map(Path::new),
-        std::env::var_os("APPDATA").as_deref().map(Path::new),
-    )
-}
-
-pub fn user_data_candidates_from(local: Option<&Path>, roaming: Option<&Path>) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(local) = local {
-        append_user_data_variants(&mut candidates, local);
-    }
-    if let Some(roaming) = roaming {
-        append_user_data_variants(&mut candidates, roaming);
-    }
-    candidates
 }
 
 pub fn find_macos_codex_app(search_roots: &[PathBuf]) -> Option<PathBuf> {
@@ -517,69 +482,6 @@ pub fn codex_runtime_executable(app_dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().find(|path| path.is_file())
 }
 
-pub fn codex_runtime_version(app_dir: &Path) -> Option<String> {
-    let executable = codex_runtime_executable(app_dir)?;
-    let metadata = std::fs::metadata(&executable).ok()?;
-    let signature = RuntimeExecutableSignature {
-        len: metadata.len(),
-        modified: metadata.modified().ok(),
-    };
-    let cache = RUNTIME_VERSION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(cache) = cache.lock()
-        && let Some(entry) = cache.get(&executable)
-        && entry.signature == signature
-    {
-        return entry.version.clone();
-    }
-
-    let mut version = None;
-    let mut cacheable = false;
-    for attempt in 0..2 {
-        if let Ok(output) = Command::new(&executable).arg("--version").output()
-            && output.status.success()
-        {
-            version = parse_codex_runtime_version(&String::from_utf8_lossy(&output.stdout))
-                .or_else(|| parse_codex_runtime_version(&String::from_utf8_lossy(&output.stderr)));
-            cacheable = true;
-            break;
-        }
-        if attempt == 0 {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-    if cacheable && let Ok(mut cache) = cache.lock() {
-        cache.insert(
-            executable,
-            RuntimeVersionCacheEntry {
-                signature,
-                version: version.clone(),
-            },
-        );
-    }
-    version
-}
-
-pub fn resolve_codex_runtime_version(
-    app_dir: Option<&Path>,
-    saved_app_path: Option<&str>,
-) -> Option<String> {
-    let app_dir = resolve_codex_app_dir_with_saved(app_dir, saved_app_path)?;
-    codex_runtime_version(&app_dir)
-}
-
-fn parse_codex_runtime_version(output: &str) -> Option<String> {
-    let mut parts = output.split_whitespace();
-    while let Some(part) = parts.next() {
-        if part.eq_ignore_ascii_case("codex-cli") {
-            return parts
-                .next()
-                .map(|version| version.trim_start_matches('v').to_string())
-                .filter(|version| !version.is_empty());
-        }
-    }
-    None
-}
-
 pub fn packaged_app_user_model_id(app_dir: &Path) -> Option<String> {
     let package_name = package_name_from_app_dir(app_dir)?;
     let (spec, _, publisher_id) = codex_package_parts(&package_name)?;
@@ -679,15 +581,6 @@ fn plist_string_value(plist: &str, key: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
-}
-
-fn append_user_data_variants(candidates: &mut Vec<PathBuf>, base: &Path) {
-    candidates.push(base.join("OpenAI").join("ChatGPT"));
-    candidates.push(base.join("OpenAI.ChatGPT-Desktop"));
-    candidates.push(base.join("ChatGPT"));
-    candidates.push(base.join("OpenAI").join("Codex"));
-    candidates.push(base.join("OpenAI.Codex"));
-    candidates.push(base.join("Codex"));
 }
 
 fn macos_app_candidates(root: &Path) -> Vec<PathBuf> {

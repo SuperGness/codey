@@ -1,29 +1,26 @@
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { build, transformWithEsbuild } from "vite";
+import { writeBuildOutputs } from "./build-output.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const vite = join(root, "node_modules", "vite", "bin", "vite.js");
-
-const result = spawnSync(
-  process.execPath,
-  [vite, "build", "--config", "vite.overlay.config.ts"],
-  {
-    cwd: root,
-    stdio: "inherit",
-  },
+const result = await build({
+  root,
+  configFile: join(root, "vite.overlay.config.ts"),
+  build: { write: false },
+});
+const outputs = new Map(
+  [result].flat().flatMap(({ output }) => output.map((asset) => [
+    asset.fileName,
+    asset.type === "chunk" ? asset.code : asset.source,
+  ])),
 );
-if (result.error) throw result.error;
-if (result.status !== 0) process.exit(result.status ?? 1);
 
 // public/ 下的注入脚本以源码形态维护，但会被逐字节嵌入 Codey 二进制并在
 // Codex 渲染进程内求值。这里统一压缩到 dist-overlay/inject/，cdp.rs 只嵌入
 // 压缩产物。
-const { transformWithEsbuild } = await import("vite");
 const publicDir = join(root, "public");
-const injectDir = join(root, "dist-overlay", "inject");
-mkdirSync(injectDir, { recursive: true });
 let rawTotal = 0;
 let minifiedTotal = 0;
 for (const name of readdirSync(publicDir).filter((entry) => entry.endsWith(".js"))) {
@@ -44,10 +41,11 @@ for (const name of readdirSync(publicDir).filter((entry) => entry.endsWith(".js"
       `[overlay] kept ${name} unminified (folded markers: ${lostMarkers.join(", ")})`,
     );
   }
-  writeFileSync(join(injectDir, name), output);
+  outputs.set(`inject/${name}`, output);
   rawTotal += Buffer.byteLength(source);
   minifiedTotal += Buffer.byteLength(output);
 }
+writeBuildOutputs(join(root, "dist-overlay"), outputs);
 console.log(
   `[overlay] minified inject scripts: ${rawTotal} -> ${minifiedTotal} bytes`,
 );

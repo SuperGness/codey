@@ -19,6 +19,83 @@ const WINDOWS_CODEX_STOP_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(windows)]
 const WINDOWS_STARTUP_PATCH_FAILURE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
+#[cfg(windows)]
+pub(super) struct WindowsStartupProcess(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+impl WindowsStartupProcess {
+    pub(super) fn open(process_id: u32) -> Result<Self> {
+        use std::os::windows::io::FromRawHandle;
+        use windows::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        };
+
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                process_id,
+            )
+        }
+        .context("打开 Windows Codex 启动进程句柄失败")?;
+        // Keep the process object alive through startup so PID reuse cannot
+        // change the process being observed and its exit code remains readable.
+        Ok(Self(unsafe {
+            std::os::windows::io::OwnedHandle::from_raw_handle(handle.0)
+        }))
+    }
+
+    pub(super) fn exit_code(&self) -> Result<Option<u32>> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+
+        let handle = HANDLE(self.0.as_raw_handle());
+        match unsafe { WaitForSingleObject(handle, 0) } {
+            WAIT_TIMEOUT => Ok(None),
+            WAIT_OBJECT_0 => {
+                let mut code = 0;
+                unsafe { GetExitCodeProcess(handle, &mut code) }
+                    .context("读取 Windows Codex 退出码失败")?;
+                Ok(Some(code))
+            }
+            _ => Err(windows::core::Error::from_win32())
+                .context("检测 Windows Codex 启动进程状态失败"),
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(super) fn windows_startup_process_details(
+    app_dir: &Path,
+    process_id: Option<u32>,
+) -> serde_json::Value {
+    match codey_runtime_core::windows_enumerate_processes() {
+        Ok(processes) => serde_json::Value::Array(
+            processes
+                .iter()
+                .filter(|process| {
+                    Some(process.process_id) == process_id
+                        || process
+                            .executable_path
+                            .as_deref()
+                            .is_some_and(|path| windows_path_is_within(path, app_dir))
+                })
+                .map(|process| {
+                    serde_json::json!({
+                        "processId": process.process_id,
+                        "parentProcessId": process.parent_process_id,
+                        "executableName": process.exe_file,
+                        "executablePath": process.executable_path,
+                        "creationTime": process.creation_time,
+                    })
+                })
+                .collect(),
+        ),
+        Err(error) => serde_json::json!({ "queryError": format!("{error:#}") }),
+    }
+}
+
 #[cfg(any(windows, test))]
 fn windows_package_full_name(app_dir: &Path) -> Option<String> {
     codey_runtime_core::app_paths::packaged_app_user_model_id(app_dir)?;
@@ -220,6 +297,15 @@ pub(super) async fn spawn_windows_codex(
             match WindowsPackageDebugSession::start(app_dir, environment) {
                 Ok(session) => Some(session),
                 Err(error) => {
+                    let package_name = windows_package_full_name(app_dir)
+                        .context("无法识别待清理的 Windows Store Codex 包全名")?;
+                    if let Err(cleanup) = disable_windows_packaged_environment(&package_name) {
+                        return Err(startup_activation_error_after_cleanup(
+                            error,
+                            Ok(()),
+                            Err(cleanup),
+                        ));
+                    }
                     if require_wrapper_environment {
                         return Err(error)
                             .context("Codex CLI 兼容入口无法应用运行环境，已停止启动");
@@ -235,48 +321,83 @@ pub(super) async fn spawn_windows_codex(
             }
         };
         let environment_applied = package_debug_session.is_some();
-        let existing_process_ids = codey_runtime_core::windows_enumerate_processes()
-            .context("检测 Windows Store 激活前的已有进程失败")?
-            .into_iter()
-            .map(|process| process.process_id)
-            .collect::<HashSet<_>>();
-        let mut process_id =
-            codey_runtime_core::launcher::activate_packaged_app(&app_user_model_id, &arguments)
-                .await?;
-        if activation_reused_existing_process(&existing_process_ids, process_id) {
-            // ActivateApplication returns the instance that fulfills the launch
-            // contract; that can be an already-running single instance. Electron
-            // only consumes Chromium/Node command-line switches at process start,
-            // so a reused instance cannot be trusted to own either debug port.
-            terminate_windows_codex_processes(app_dir, Some(process_id))
-                .await
-                .context("停止被 Windows Store 激活复用的旧 Codex 实例失败")?;
-            let retry_existing_process_ids = codey_runtime_core::windows_enumerate_processes()
-                .context("检测 Windows Store 重新激活前的已有进程失败")?
+        let activation_result = async {
+            let existing_process_ids = codey_runtime_core::windows_enumerate_processes()
+                .context("检测 Windows Store 激活前的已有进程失败")?
                 .into_iter()
                 .map(|process| process.process_id)
                 .collect::<HashSet<_>>();
-            process_id =
+            let mut process_id =
                 codey_runtime_core::launcher::activate_packaged_app(&app_user_model_id, &arguments)
+                    .await?;
+            if activation_reused_existing_process(&existing_process_ids, process_id) {
+                // ActivateApplication can return an existing single instance.
+                // Its original command line cannot carry this launch's ports.
+                terminate_windows_codex_processes(app_dir, Some(process_id))
                     .await
-                    .context("重新激活 Windows Store Codex 失败")?;
-            if activation_reused_existing_process(&retry_existing_process_ids, process_id) {
-                anyhow::bail!(
-                    "Windows Store Codex 再次复用了已有进程 {process_id}，本次 CDP 启动参数未能可靠生效"
-                );
+                    .context("停止被 Windows Store 激活复用的旧 Codex 实例失败")?;
+                let retry_existing_process_ids = codey_runtime_core::windows_enumerate_processes()
+                    .context("检测 Windows Store 重新激活前的已有进程失败")?
+                    .into_iter()
+                    .map(|process| process.process_id)
+                    .collect::<HashSet<_>>();
+                process_id = codey_runtime_core::launcher::activate_packaged_app(
+                    &app_user_model_id, &arguments,
+                ).await.context("重新激活 Windows Store Codex 失败")?;
+                if activation_reused_existing_process(&retry_existing_process_ids, process_id) {
+                    anyhow::bail!(
+                        "Windows Store Codex 再次复用了已有进程 {process_id}，本次 CDP 启动参数未能可靠生效"
+                    );
+                }
             }
+            Ok::<_, anyhow::Error>(process_id)
         }
+        .await;
+        let process_id = match activation_result {
+            Ok(process_id) => process_id,
+            Err(error) => {
+                // Activation may start a process even when it returns an error.
+                // Cleanup must be confirmed before the outer loop can retry.
+                let stopped = terminate_windows_codex_processes_with_timeout(
+                    app_dir,
+                    None,
+                    WINDOWS_STARTUP_PATCH_FAILURE_STOP_TIMEOUT,
+                )
+                .await;
+                let cleared = package_debug_session
+                    .map(WindowsPackageDebugSession::finish)
+                    .transpose();
+                return Err(startup_activation_error_after_cleanup(
+                    error,
+                    stopped,
+                    cleared.map(|_| ()),
+                ));
+            }
+        };
+        let startup_process = match WindowsStartupProcess::open(process_id) {
+            Ok(process) => Some(process),
+            Err(error) => {
+                let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                    "launcher.process_probe_failed",
+                    serde_json::json!({ "processId": process_id, "detail": format!("{error:#}") }),
+                );
+                None
+            }
+        };
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
             "launcher.windows_package_activated",
             serde_json::json!({
                 "processId": process_id,
                 "wrapperEnvironmentApplied": environment_applied,
+                "processHandleCaptured": startup_process.is_some(),
+                "processes": windows_startup_process_details(app_dir, Some(process_id)),
             }),
         );
         return Ok((
             SpawnedCodex {
                 child: None,
                 process_id: Some(process_id),
+                startup_process,
                 performance_status: String::new(),
                 performance_detail: String::new(),
             },
@@ -304,12 +425,35 @@ pub(super) async fn spawn_windows_codex(
         SpawnedCodex {
             child: Some(child),
             process_id,
+            startup_process: None,
             performance_status: String::new(),
             performance_detail: String::new(),
         },
         None,
         !environment.is_empty(),
     ))
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn startup_activation_error_after_cleanup(
+    error: anyhow::Error,
+    stopped: Result<()>,
+    cleared: Result<()>,
+) -> anyhow::Error {
+    match (stopped, cleared) {
+        (Ok(()), Ok(())) => error,
+        (stopped, cleared) => anyhow::anyhow!(
+            "{error:#}；Windows 启动清理未完成，已停止重试；进程：{}；兼容环境：{}",
+            stopped
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_else(|| "已清理".into()),
+            cleared
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_else(|| "已清理".into()),
+        ),
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -824,6 +968,27 @@ pub(super) fn windows_stop_failure_summary(remaining: &[(u32, String, Option<u64
 #[cfg(test)]
 mod compatibility_tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn store_process_handle_retains_exit_code_after_child_is_reaped() {
+        use std::io::Write;
+        for code in [37, 259] {
+            let mut child = std::process::Command::new("cmd")
+                .args(["/d", "/c", &format!("set /p value= & exit /b {code}")])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let process = WindowsStartupProcess::open(child.id()).unwrap();
+            assert_eq!(process.exit_code().unwrap(), None);
+            child.stdin.take().unwrap().write_all(b"done\r\n").unwrap();
+            child.wait().unwrap();
+            drop(child);
+            // 259 is STILL_ACTIVE only for a running process; it is also a valid exit code.
+            assert_eq!(process.exit_code().unwrap(), Some(code));
+        }
+    }
 
     // 【自动化测试】Windows 清理 - 初始或确认快照失败不得报告清理成功
     #[cfg(windows)]

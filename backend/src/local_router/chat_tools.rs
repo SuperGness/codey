@@ -29,6 +29,9 @@ pub(crate) fn append_chat_message_item(
     match item {
         Value::String(text) => push_chat_text_message(messages, "user", text),
         Value::Object(object) => match object.get("type").and_then(Value::as_str) {
+            Some("compaction" | "compaction_trigger") => anyhow::bail!(
+                "context_not_portable: compaction 历史不能转换到当前线路；请回到原线路完成本地摘要后再切换"
+            ),
             Some("message") => append_responses_message_object(object, messages, tool_bridge),
             Some("agent_message") => {
                 append_responses_agent_message_object(object, messages, tool_bridge)
@@ -493,13 +496,32 @@ pub(crate) fn responses_tool_output_content(
         Value::Object(_) => std::slice::from_ref(output),
         _ => return Ok(None),
     };
+    // Arbitrary JSON remains a supported tool result. Once a known content
+    // part is present, reject mixed/unknown entries instead of serializing the
+    // original array and accidentally restoring filtered encrypted content.
+    let typed = parts.iter().any(|part| {
+        part.get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "input_text" | "output_text" | "text" | "refusal" | "input_image" | "image_url"
+                ) || is_opaque_responses_content_part_type(kind)
+            })
+    });
+    if !typed {
+        return Ok(None);
+    }
     let mut text = Vec::new();
     let mut images = Vec::new();
     for part in parts {
         let Some(part) = part.as_object() else {
-            return Ok(None);
+            anyhow::bail!("工具结构化内容不能混合未识别的条目");
         };
         match part.get("type").and_then(Value::as_str) {
+            Some("compaction" | "compaction_trigger") => {
+                anyhow::bail!("context_not_portable: 工具输出包含无法转换的 compaction 内容")
+            }
             Some("input_text" | "output_text" | "text" | "refusal") => {
                 text.push(
                     first_visible_content_part_text(part)
@@ -512,7 +534,7 @@ pub(crate) fn responses_tool_output_content(
                 "image_url": responses_image_url_to_chat_image_url(part)?,
             })),
             Some(part_type) if is_opaque_responses_content_part_type(part_type) => {}
-            _ => return Ok(None),
+            _ => anyhow::bail!("工具结构化内容包含无法转换的类型"),
         }
     }
     Ok(Some((text.join("\n"), images)))

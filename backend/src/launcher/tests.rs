@@ -107,14 +107,14 @@ fn windows_stop_tracking_absorbs_late_descendants() {
 
 #[test]
 fn official_provider_inherits_the_codex_builtin_model_catalog() {
-    assert!(!should_install_codey_model_catalog(true, true));
-    assert!(!should_install_codey_model_catalog(true, false));
+    assert!(!should_install_codey_model_catalog(true, true, false));
+    assert!(!should_install_codey_model_catalog(true, false, false));
 }
 
 #[test]
 fn third_party_provider_installs_the_codey_model_catalog_when_available() {
-    assert!(should_install_codey_model_catalog(false, true));
-    assert!(!should_install_codey_model_catalog(false, false));
+    assert!(should_install_codey_model_catalog(false, true, false));
+    assert!(!should_install_codey_model_catalog(false, false, false));
 }
 
 #[tokio::test]

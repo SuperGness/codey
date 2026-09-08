@@ -13,6 +13,7 @@ pub async fn save_selected_models(
     requested_supports_auto_review: Option<bool>,
     requested_route_id: Option<String>,
     requested_supports_1m_context_models: Option<Vec<String>>,
+    requested_model_contexts: Option<BTreeMap<String, crate::config::ModelContextConfig>>,
 ) -> Result<Value, String> {
     validate_requested_model_list_bounds("官方模型", &requested_official_models)?;
     validate_requested_model_list_bounds("其他模型", &requested_third_party_models)?;
@@ -37,6 +38,7 @@ pub async fn save_selected_models(
             requested_deleted_third_party_models,
             requested_route_id,
             requested_supports_1m_context_models,
+            requested_model_contexts,
         )
         .await;
     }
@@ -113,6 +115,12 @@ pub async fn save_selected_models(
         requested_supports_1m_context_models.as_deref(),
         &supported_models,
     )?;
+    set_model_contexts(
+        &mut config,
+        &provider_id,
+        requested_model_contexts.as_ref(),
+        &supported_models,
+    )?;
     config
         .upstream_models_by_provider
         .insert(provider_id.clone(), supported_models);
@@ -173,6 +181,8 @@ pub async fn save_selected_models(
     ))
 }
 
+// Keep the existing command fields explicit, as in save_selected_models.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn save_native_selected_models(
     state: &Arc<AppState>,
     requested_official_models: Vec<String>,
@@ -181,6 +191,7 @@ pub(crate) async fn save_native_selected_models(
     requested_deleted_third_party_models: Vec<String>,
     requested_route_id: Option<String>,
     requested_supports_1m_context_models: Option<Vec<String>>,
+    requested_model_contexts: Option<BTreeMap<String, crate::config::ModelContextConfig>>,
 ) -> Result<Value, String> {
     let previous = state.config.read().await.clone();
     if previous.local_router_enabled {
@@ -232,6 +243,12 @@ pub(crate) async fn save_native_selected_models(
         &available,
     )?;
     let model_state = native_model_state_for_provider(&next, &context.provider, codex_home())?;
+    set_model_contexts(
+        &mut next,
+        &context.provider.id,
+        requested_model_contexts.as_ref(),
+        &available,
+    )?;
     reconcile_subagent_models_for_mode(&mut next, &model_state);
     next = next.normalize();
     if next != latest {
@@ -355,6 +372,44 @@ pub(crate) fn config_with_native_selected_models(
             .insert(provider_id, manual_third_party_models);
     }
     Ok(next.normalize())
+}
+
+pub(crate) fn set_model_contexts(
+    config: &mut CodeyConfig,
+    provider_id: &str,
+    requested: Option<&BTreeMap<String, crate::config::ModelContextConfig>>,
+    available: &[String],
+) -> Result<(), String> {
+    if let Some(requested) = requested {
+        if !config.local_router_enabled {
+            let current = config.model_context_by_provider.get(provider_id);
+            if current != Some(requested) && !(current.is_none() && requested.is_empty()) {
+                return Err(
+                    "自定义上下文预算需要启用本地路由，当前模式使用 Codex 内置上下文设置".into(),
+                );
+            }
+            return Ok(());
+        }
+        validate_requested_model_list_bounds(
+            "上下文配置模型",
+            &requested.keys().cloned().collect::<Vec<_>>(),
+        )?;
+        let mut canonical = BTreeMap::new();
+        for (model, policy) in requested {
+            policy.validate()?;
+            let model = available
+                .iter()
+                .find(|candidate| model_id::equal(candidate, model))
+                .ok_or_else(|| format!("上下文配置模型 {model} 不在该线路的可用列表中"))?;
+            if canonical.insert(model.clone(), policy.clone()).is_some() {
+                return Err(format!("模型 {model} 的上下文配置重复"));
+            }
+        }
+        config
+            .model_context_by_provider
+            .insert(provider_id.to_string(), canonical);
+    }
+    Ok(())
 }
 
 pub(crate) fn set_supports_1m_context_models(

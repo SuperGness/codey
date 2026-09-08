@@ -6,6 +6,7 @@ pub(crate) enum IdleWebSocketEvent {
     ),
     Upstream(Option<std::result::Result<WebSocketMessage, tokio_tungstenite::tungstenite::Error>>),
     MaintainUpstream,
+    ConfigurationChanged,
 }
 
 impl WebSocketResponsesDownstream {
@@ -23,16 +24,23 @@ impl WebSocketResponsesDownstream {
         websocket_backoffs: Arc<Mutex<UpstreamWebSocketBackoffs>>,
         request_body_budget: Arc<Semaphore>,
     ) -> Self {
+        let config_changes = websocket_backoffs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .changes
+            .subscribe();
         Self {
             socket,
             upstream: None,
             websocket_backoffs,
             stream_id: None,
             adapted_history: AdaptedResponsesHistory::default(),
+            native_history: NativeResponsesHistory::default(),
             terminal_started: false,
             pending_messages: VecDeque::new(),
             pending_budget_blocked: false,
             request_body_budget,
+            config_changes,
         }
     }
 
@@ -46,7 +54,17 @@ impl WebSocketResponsesDownstream {
     }
 
     pub(crate) async fn next_message(&mut self) -> Result<Option<WebSocketMessage>> {
+        let idle_deadline = tokio::time::Instant::now() + DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT;
         loop {
+            if self.upstream.as_ref().is_some_and(|cached| {
+                !self
+                    .websocket_backoffs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .route_is_current(&cached.route_id, &cached.config_identity)
+            }) {
+                self.upstream.take();
+            }
             if !self.pending_messages.is_empty()
                 && self.upstream.as_ref().is_none_or(|upstream| {
                     upstream.liveness.heartbeat_sent_at.is_none()
@@ -60,12 +78,25 @@ impl WebSocketResponsesDownstream {
                 return Ok(Some(message));
             }
             let Some(upstream) = self.upstream.as_ref() else {
-                return self
-                    .socket
-                    .next()
-                    .await
-                    .transpose()
-                    .context("读取 Codey Responses WebSocket 消息失败");
+                // A synthetic previous_response_id only exists in this socket's
+                // history. Closing it on idle would silently lose resumability.
+                if self.adapted_history.last.is_some() || self.native_history.has_history() {
+                    return self
+                        .socket
+                        .next()
+                        .await
+                        .transpose()
+                        .context("读取 Codey Responses WebSocket 消息失败");
+                }
+                return match tokio::time::timeout_at(idle_deadline, self.socket.next()).await {
+                    Ok(message) => message
+                        .transpose()
+                        .context("读取 Codey Responses WebSocket 消息失败"),
+                    Err(_) => {
+                        let _ = self.close(None).await;
+                        Ok(None)
+                    }
+                };
             };
             let maintenance_deadline = upstream.liveness.maintenance_deadline();
             let event = {
@@ -83,6 +114,7 @@ impl WebSocketResponsesDownstream {
                     // new request, so a stale socket is never used merely
                     // because the request and heartbeat deadline raced.
                     biased;
+                    _ = self.config_changes.changed() => IdleWebSocketEvent::ConfigurationChanged,
                     message = upstream_socket.next() => IdleWebSocketEvent::Upstream(message),
                     _ = &mut maintenance => IdleWebSocketEvent::MaintainUpstream,
                     message = downstream_socket.next(), if self.pending_messages.is_empty() => IdleWebSocketEvent::Downstream(message),
@@ -90,6 +122,7 @@ impl WebSocketResponsesDownstream {
             };
 
             match event {
+                IdleWebSocketEvent::ConfigurationChanged => continue,
                 IdleWebSocketEvent::Downstream(message) => {
                     let message = message
                         .transpose()
@@ -213,6 +246,15 @@ impl WebSocketResponsesDownstream {
         probe: Option<&RouteRequestLogProbe>,
     ) -> Result<UpstreamWebSocketAttempt> {
         if !route.supports_websockets {
+            self.native_history.prepare(
+                native_history_key(
+                    route,
+                    UpstreamWebSocketAuthIdentity::from_headers(headers),
+                    body,
+                ),
+                body,
+            );
+            self.upstream.take();
             return Ok(UpstreamWebSocketAttempt::UseHttp);
         }
         let upstream_url = route
@@ -222,11 +264,14 @@ impl WebSocketResponsesDownstream {
         let now = Instant::now();
         let auth_identity = UpstreamWebSocketAuthIdentity::from_headers(headers);
         let backoff_key =
-            UpstreamWebSocketBackoffKey::new(&route.provider_id, upstream_url, auth_identity);
+            UpstreamWebSocketBackoffKey::for_route(route, upstream_url, auth_identity);
         let previous_response_id = responses_previous_response_id(body);
+        let previous_response_key: Option<[u8; 32]> =
+            previous_response_id.map(|id| Sha256::digest(id.as_bytes()).into());
         let cached_available = self.upstream.as_ref().is_some_and(|cached| {
             cached.route_id == route.provider_id
                 && cached.url == *upstream_url
+                && cached.config_identity == route.websocket_config
                 && cached.liveness.heartbeat_sent_at.is_none()
                 && cached.liveness.maintenance_action(now)
                     != UpstreamWebSocketMaintenanceAction::Drop
@@ -237,12 +282,19 @@ impl WebSocketResponsesDownstream {
         let cached_matches =
             self.upstream
                 .as_ref()
-                .is_some_and(|cached| match previous_response_id {
-                    Some(response_id) => cached.response_ids.contains(response_id),
+                .is_some_and(|cached| match previous_response_key {
+                    Some(response_id) => cached.response_ids.contains(&response_id),
                     None => cached.auth_identity == auth_identity,
                 });
+        let effective_auth = self
+            .upstream
+            .as_ref()
+            .filter(|_| cached_matches)
+            .map_or(auth_identity, |cached| cached.auth_identity);
+        self.native_history
+            .prepare(native_history_key(route, effective_auth, body), body);
         if !cached_matches {
-            if previous_response_id.is_some() {
+            if previous_response_key.is_some() {
                 return Ok(UpstreamWebSocketAttempt::UseHttp);
             }
             self.upstream.take();
@@ -259,6 +311,11 @@ impl WebSocketResponsesDownstream {
         let mut upstream = if let Some(cached) = self.upstream.take() {
             cached
         } else {
+            let Some(_probe_guard) =
+                UpstreamWebSocketProbe::acquire(&self.websocket_backoffs, &backoff_key)
+            else {
+                return Ok(UpstreamWebSocketAttempt::UseHttp);
+            };
             match self
                 .wait_for_upstream(connect_upstream_responses_websocket(upstream_url, headers))
                 .await?
@@ -272,7 +329,8 @@ impl WebSocketResponsesDownstream {
                         route_id: route.provider_id.clone(),
                         url: upstream_url.clone(),
                         auth_identity,
-                        response_ids: HashSet::new(),
+                        response_ids: VecDeque::new(),
+                        config_identity: route.websocket_config,
                         liveness: UpstreamWebSocketLiveness::new(Instant::now()),
                         socket,
                     }
@@ -293,6 +351,7 @@ impl WebSocketResponsesDownstream {
                                 "upstream": route.upstream_authority.as_str(),
                                 "fallback": "http_sse",
                                 "unsupportedEndpoint": true,
+                                "backoffSeconds": UPSTREAM_WEBSOCKET_UNSUPPORTED_TTL.as_secs(),
                                 "requestId": current_router_request_id(),
                             }),
                         );
@@ -364,10 +423,18 @@ impl WebSocketResponsesDownstream {
         }
 
         let mut produced_response_id = None;
+        let response_deadline = tokio::time::Instant::now() + UPSTREAM_RESPONSE_TIMEOUT;
+        let mut response_bytes = 0_usize;
         loop {
+            if tokio::time::Instant::now() >= response_deadline {
+                anyhow::bail!("上游响应超过总时限");
+            }
             let next = match self
-                .wait_for_upstream(tokio::time::timeout(
-                    UPSTREAM_READ_IDLE_TIMEOUT,
+                .wait_for_upstream(tokio::time::timeout_at(
+                    std::cmp::min(
+                        response_deadline,
+                        tokio::time::Instant::now() + UPSTREAM_READ_IDLE_TIMEOUT,
+                    ),
                     upstream.socket.next(),
                 ))
                 .await?
@@ -391,6 +458,10 @@ impl WebSocketResponsesDownstream {
             };
             match message {
                 WebSocketMessage::Text(text) => {
+                    response_bytes = response_bytes.saturating_add(text.len());
+                    if response_bytes > MAX_UPSTREAM_RESPONSE_BYTES {
+                        anyhow::bail!("上游响应累计大小超过 Codey 安全上限");
+                    }
                     if !text.is_empty()
                         && let Some(probe) = probe
                     {
@@ -432,7 +503,8 @@ impl WebSocketResponsesDownstream {
                         }
                         let terminal = responses_event_is_terminal(&event);
                         if let Some(response_id) = responses_event_response_id(&event) {
-                            produced_response_id = Some(response_id.to_string());
+                            produced_response_id =
+                                Some(Sha256::digest(response_id.as_bytes()).into());
                         }
                         if self.event_needs_stream_id(&event) {
                             self.write_event(&event).await?;
@@ -442,6 +514,7 @@ impl WebSocketResponsesDownstream {
                             // WebSocket frames must be normalized to bare JSON
                             // before they are sent to Codex.
                             self.terminal_started |= terminal;
+                            self.native_history.observe(&event);
                             self.write_text(text).await?;
                         } else {
                             self.write_event(&event).await?;
@@ -452,13 +525,16 @@ impl WebSocketResponsesDownstream {
                             probe.mark_first_downstream_content();
                         }
                         if terminal {
-                            let successful_backoff_key = UpstreamWebSocketBackoffKey::new(
-                                &route.provider_id,
+                            let successful_backoff_key = UpstreamWebSocketBackoffKey::for_route(
+                                route,
                                 upstream_url,
                                 upstream.auth_identity,
                             );
                             if let Some(response_id) = produced_response_id {
-                                upstream.response_ids.insert(response_id);
+                                if upstream.response_ids.len() >= MAX_CACHED_RESPONSE_IDS {
+                                    upstream.response_ids.pop_front();
+                                }
+                                upstream.response_ids.push_back(response_id);
                             }
                             if responses_websocket_connection_is_reusable(&event) {
                                 self.upstream = Some(upstream);
@@ -756,12 +832,38 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
         true
     }
 
-    fn prepare_adapted_response_context(&mut self, body: &mut Value) -> bool {
+    fn select_route(&mut self, route: &RouteTarget) {
+        if self.upstream.as_ref().is_some_and(|cached| {
+            cached.route_id != route.provider_id
+                || cached.config_identity != route.websocket_config
+                || !route.supports_websockets
+        }) {
+            self.upstream.take();
+        }
+    }
+
+    fn prepare_adapted_response_context(&mut self, body: &mut Value) -> Result<bool> {
         self.adapted_history.prepare(body)
     }
 
-    fn remember_adapted_response(&mut self, response_id: &str, output: &[Value]) {
-        self.adapted_history.remember(response_id, output);
+    fn prepare_native_http_fallback(
+        &mut self,
+        route: &RouteTarget,
+        headers: &HeaderMap,
+        body: &mut Value,
+    ) -> Result<bool> {
+        self.native_history.restore(
+            native_history_key(
+                route,
+                UpstreamWebSocketAuthIdentity::from_headers(headers),
+                body,
+            ),
+            body,
+        )
+    }
+
+    fn remember_adapted_response(&mut self, response_id: &str, output: &[Value]) -> Result<()> {
+        self.adapted_history.remember(response_id, output)
     }
 
     async fn write_error(
@@ -806,6 +908,7 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
                 return Ok(());
             }
             self.terminal_started = true;
+            self.native_history.observe(event);
         }
         let encoded = if self.event_needs_stream_id(event) {
             let mut event = event.clone();
@@ -942,8 +1045,11 @@ pub(crate) async fn proxy_native_response_to_websocket(
                 {
                     probe.mark_first_downstream_content();
                 }
+                if terminal {
+                    break;
+                }
             }
-            if done {
+            if done || terminal {
                 break;
             }
         }
@@ -981,7 +1087,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
     let body = await_upstream(
         downstream,
         read_bounded_prepared_upstream_body(
-            prepared,
+            &mut prepared,
             limit,
             "读取 Responses HTTP 上游响应失败",
             probe,

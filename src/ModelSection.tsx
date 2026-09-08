@@ -16,7 +16,7 @@ import {
   IconWorld,
 } from "@tabler/icons-react";
 
-import type { Config, ModelState, Profile, ProviderStatus } from "./App.types";
+import type { Config, ModelContextConfig, ModelState, Profile, ProviderStatus } from "./App.types";
 import {
   Badge,
   Button,
@@ -40,6 +40,35 @@ import { validateThirdPartyRouteShortName } from "./routeShortNames";
 import { flushCardClass } from "./uiClasses";
 import { validateOutboundApiUrl } from "./urlValidation";
 import { invoke } from "./api";
+
+export function ModelContextFields({ model, policy, disabled, onChange }: {
+  model: string;
+  policy?: ModelContextConfig;
+  disabled: boolean;
+  onChange: (policy: ModelContextConfig | undefined) => void;
+}) {
+  return <details className="w-full text-xs">
+    <summary className="cursor-pointer">上下文预算{policy ? ` · ${policy.contextWindowTokens} Token` : " · 默认"}</summary>
+    <p className="my-2 text-xs text-[#6e6e73]">自定义值优先于 1M；清空窗口恢复默认。未知模型默认使用 32768 Token 保守预算，不代表服务端容量。修改后重启 Codex 生效。</p>
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+      {([
+        ["contextWindowTokens", "窗口", 1024, "默认"],
+        ["autoCompactTokenLimit", "压缩阈值", 1, "自动"],
+        ["reserveOutputTokens", "输出预留", 1, "不单独预留"],
+      ] as const).map(([field, label, min, placeholder]) => <label key={field}>
+        <span>{label}（Token）</span>
+        <Input type="number" min={min} max={10_000_000} step={1} disabled={disabled}
+          aria-label={`${model} ${label} Token`} placeholder={placeholder} value={policy?.[field] ?? ""}
+          onChange={(event) => {
+            const raw = event.target.value;
+            if (field === "contextWindowTokens" && raw === "") { onChange(undefined); return; }
+            onChange({ contextWindowTokens: 32768, ...policy, [field]: raw === "" ? undefined : Number(raw) });
+          }} />
+      </label>)}
+    </div>
+    <p className="my-2 text-xs text-[#6e6e73]">阈值不能超过窗口的 90% 和预留后的有效空间；预留按整百分比向下取整，不是输出长度上限。</p>
+  </details>;
+}
 
 type ModelSectionProps = {
   config: Config;
@@ -65,6 +94,7 @@ type ModelSectionProps = {
     showAccountUsageInHeader: boolean,
     supports1MContextModels: string[],
     enabled: boolean,
+    modelContexts: Record<string, ModelContextConfig>,
   ) => Promise<boolean>;
   onSetDefaultModel: (routeId: string, model: string) => void;
 };
@@ -167,6 +197,7 @@ function ModelSectionComponent({
   const [routeApiKeyVisible, setRouteApiKeyVisible] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
   const [official1MModelDraft, setOfficial1MModelDraft] = useState<string[]>([]);
+  const [officialContextDraft, setOfficialContextDraft] = useState<Record<string, ModelContextConfig>>({});
   const routeConfigReadOnly = !config.localRouterEnabled;
 
   useEffect(() => {
@@ -240,14 +271,14 @@ function ModelSectionComponent({
     [officialModelDraft],
   );
   const modelGroups = useMemo<RouteModelGroup[]>(
-    () =>
-      visibleProfiles.filter((profile) => profile.enabled !== false).map((profile) => {
+    () => {
+      const nativeOfficialModels = routeConfigReadOnly
+        ? modelState.officialModels.filter((model) => model.supported).map((model) => model.slug)
+        : [];
+      return visibleProfiles.filter((profile) => profile.enabled !== false).map((profile) => {
         const providerId = routeProviderId(profile);
         const official = profile.authMode === "officialAccount";
         const configuredModels = config.selectedModelsByProvider[providerId] || [];
-        const nativeOfficialModels = modelState.officialModels
-          .filter((model) => model.supported)
-          .map((model) => model.slug);
         const models = routeConfigReadOnly
           ? official
             ? uniqueModelIds(
@@ -273,7 +304,8 @@ function ModelSectionComponent({
             : globalDefaultForRoute(config, profile, models),
           official,
         };
-      }),
+      });
+    },
     [config, modelState, officialCatalog, routeConfigReadOnly, visibleProfiles],
   );
   const modelGroupByProviderId = useMemo(
@@ -311,6 +343,7 @@ function ModelSectionComponent({
       const providerId = routeProviderId(profile);
       const configuredModels = config.selectedModelsByProvider[providerId] || [];
       setOfficial1MModelDraft(config.supports1MContextByProvider?.[providerId] || []);
+      setOfficialContextDraft(config.modelContextByProvider?.[providerId] || {});
       setOfficialModelDraft(
         configuredModels.length > 0
           ? configuredModels
@@ -345,6 +378,7 @@ function ModelSectionComponent({
               showAccountUsageInHeader,
               official1MModelDraft,
               routeDraft.enabled !== false,
+              officialContextDraft,
             )
           : true)
       : await onSaveRoute(routeDraft);
@@ -877,7 +911,7 @@ function ModelSectionComponent({
                     {officialCatalog.map((model) => {
                       const checked = officialModelDraftKeys.has(modelKey(model));
                       return (
-                        <div className="official-model-option" key={model}>
+                        <div className="official-model-option" style={{ flexWrap: "wrap" }} key={model}>
                           <Checkbox
                             checked={checked}
                             disabled={isBusy || (checked && officialModelDraft.length <= 1)}
@@ -912,6 +946,12 @@ function ModelSectionComponent({
                             label="1M"
                             aria-label={`${model} 支持 1M 上下文`}
                           />
+                          {!routeConfigReadOnly && <ModelContextFields model={model} policy={officialContextDraft[model]} disabled={isBusy}
+                            onChange={(policy) => setOfficialContextDraft((current) => {
+                              const next = { ...current };
+                              if (policy) next[model] = policy; else delete next[model];
+                              return next;
+                            })} />}
                         </div>
                       );
                     })}
@@ -1022,7 +1062,7 @@ function ModelSectionComponent({
                       <div className="route-option-content">
                         <strong className="route-option-title">WebSocket</strong>
                         <small className="route-field-hint">
-                          启用 WebSocket 双向长连接，降低流式首字延迟
+                          优先尝试复用长连接；使用代理或连接失败时转为流式 HTTP。能力变更需重启 Codex，实际速度取决于上游和网络。
                         </small>
                       </div>
                       <Switch

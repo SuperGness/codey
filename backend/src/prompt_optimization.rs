@@ -49,22 +49,11 @@ impl fmt::Display for ModelListBodyError {
 #[derive(Debug)]
 struct OptimizedResponseError {
     message: String,
-    retryable_with_v1: bool,
 }
 
 impl OptimizedResponseError {
     fn fatal(message: String) -> Self {
-        Self {
-            message,
-            retryable_with_v1: false,
-        }
-    }
-
-    fn retryable(message: String) -> Self {
-        Self {
-            message,
-            retryable_with_v1: true,
-        }
+        Self { message }
     }
 }
 
@@ -541,20 +530,11 @@ pub async fn optimize_prompt_resolved(
             .map_err(|error| error.message);
     }
 
-    match parse_optimized_response(response, &endpoint, config, protocol).await {
-        Ok(optimized) => Ok(optimized),
-        Err(error) if error.retryable_with_v1 => {
-            let Some(v1_endpoint) = v1_retry_endpoint(base_url, protocol) else {
-                return Err(error.message);
-            };
-            let v1_response =
-                post_optimization_request(client, &v1_endpoint, config, &payload).await?;
-            parse_optimized_response(v1_response, &v1_endpoint, config, protocol)
-                .await
-                .map_err(|error| error.message)
-        }
-        Err(error) => Err(error.message),
-    }
+    // A successful HTTP response may already represent a billed generation.
+    // Invalid output is not evidence that trying another URL is safe.
+    parse_optimized_response(response, &endpoint, config, protocol)
+        .await
+        .map_err(|error| error.message)
 }
 
 /// Sends a minimal Responses request to verify connectivity and
@@ -721,7 +701,7 @@ async fn parse_optimized_response(
     {
         let optimized = extract_responses_stream_optimized_text(&body).map_err(|error| {
             let preview = sanitize_resolved_error(&error, config);
-            OptimizedResponseError::retryable(format!(
+            OptimizedResponseError::fatal(format!(
                 "优化 API 流式响应无法解析（{endpoint}）：{preview}"
             ))
         })?;
@@ -742,13 +722,12 @@ async fn parse_optimized_response(
         } else {
             preview
         };
-        OptimizedResponseError::retryable(format!(
+        OptimizedResponseError::fatal(format!(
             "优化 API 返回的不是有效 JSON（{endpoint}）。响应摘要：{preview}"
         ))
     })?;
-    let optimized = extract_optimized_text(&value, protocol).ok_or_else(|| {
-        OptimizedResponseError::retryable("优化 API 响应中缺少优化结果".to_string())
-    })?;
+    let optimized = extract_optimized_text(&value, protocol)
+        .ok_or_else(|| OptimizedResponseError::fatal("优化 API 响应中缺少优化结果".to_string()))?;
     let optimized = optimized.trim();
     if optimized.is_empty() {
         return Err(OptimizedResponseError::fatal(
@@ -759,6 +738,7 @@ async fn parse_optimized_response(
 }
 
 fn extract_responses_stream_optimized_text(body: &[u8]) -> Result<String, String> {
+    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
     let mut cursor = 0;
     let mut text = String::new();
     let mut final_text = None;
@@ -1005,6 +985,56 @@ fn sanitize_resolved_error(error: &str, config: &ResolvedPromptOptimizationConfi
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn successful_http_with_invalid_output_is_never_replayed() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        for (stream, body) in [
+            (false, "<html>invalid output</html>"),
+            (false, "{\"output\":[]}"),
+            (
+                true,
+                "data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"failed\"}}}\n\n",
+            ),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 8192];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                drop(socket);
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
+            let mut config = configured();
+            config.base_url = format!("http://{address}");
+            let mut resolved = ResolvedPromptOptimizationConfig::from_custom(&config);
+            resolved.response_stream = Some(stream);
+            let result = optimize_prompt_resolved(
+                &Client::builder().no_proxy().build().unwrap(),
+                &resolved,
+                "test",
+            )
+            .await;
+            assert!(result.is_err());
+            server.await.unwrap();
+        }
+    }
+
+    #[test]
+    fn responses_stream_preserves_first_delta_after_bom() {
+        let body = "\u{feff}data: {\"type\":\"response.output_text.delta\",\"delta\":\"优化\"}\n\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"结果\"}";
+        assert_eq!(
+            super::extract_responses_stream_optimized_text(body.as_bytes()).unwrap(),
+            "优化结果"
+        );
+    }
+
     use super::*;
 
     fn configured() -> PromptOptimizationConfig {
@@ -1720,70 +1750,6 @@ mod tests {
         let client = Client::new();
         let result = optimize_prompt(&client, &config, "写个博客").await.unwrap();
         assert_eq!(result, "优化后的提示词");
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn optimize_prompt_retries_v1_after_successful_non_json_response() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move {
-            for (expected_path, body) in [
-                ("/responses", "<html>missing API prefix</html>"),
-                ("/v1/responses", r#"{"output_text":"回退后的优化结果"}"#),
-            ] {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                loop {
-                    let mut chunk = [0_u8; 4096];
-                    let bytes_read = socket.read(&mut chunk).await.unwrap();
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&chunk[..bytes_read]);
-                    let Some(header_end) =
-                        request.windows(4).position(|window| window == b"\r\n\r\n")
-                    else {
-                        continue;
-                    };
-                    let headers = String::from_utf8_lossy(&request[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            let (name, value) = line.split_once(':')?;
-                            name.eq_ignore_ascii_case("content-length")
-                                .then(|| value.trim().parse::<usize>().ok())
-                                .flatten()
-                        })
-                        .unwrap_or_default();
-                    if request.len() >= header_end + 4 + content_length {
-                        break;
-                    }
-                }
-                let request = String::from_utf8_lossy(&request);
-                assert!(
-                    request.starts_with(&format!("POST {expected_path} ")),
-                    "{request}"
-                );
-                assert!(request.contains("\"stream\":false"), "{request}");
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                socket.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-
-        let mut config = configured();
-        config.base_url = format!("http://{address}");
-        let result = optimize_prompt(&Client::new(), &config, "写个博客")
-            .await
-            .unwrap();
-        assert_eq!(result, "回退后的优化结果");
         server.await.unwrap();
     }
 

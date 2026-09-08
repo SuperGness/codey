@@ -207,7 +207,8 @@ pub(crate) struct CachedUpstreamWebSocket {
     pub(crate) route_id: String,
     pub(crate) url: String,
     pub(crate) auth_identity: UpstreamWebSocketAuthIdentity,
-    pub(crate) response_ids: HashSet<String>,
+    pub(crate) response_ids: VecDeque<[u8; 32]>,
+    pub(crate) config_identity: [u8; 32],
     pub(crate) liveness: UpstreamWebSocketLiveness,
     pub(crate) socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
 }
@@ -238,6 +239,7 @@ pub(crate) struct UpstreamWebSocketBackoffKey {
     pub(crate) route_id: String,
     pub(crate) url: String,
     pub(crate) auth_identity: UpstreamWebSocketAuthIdentity,
+    pub(crate) config_identity: [u8; 32],
 }
 
 impl UpstreamWebSocketBackoffKey {
@@ -250,7 +252,18 @@ impl UpstreamWebSocketBackoffKey {
             route_id: route_id.to_string(),
             url: url.to_string(),
             auth_identity,
+            config_identity: [0; 32],
         }
+    }
+
+    pub(crate) fn for_route(
+        route: &RouteTarget,
+        url: &str,
+        auth: UpstreamWebSocketAuthIdentity,
+    ) -> Self {
+        let mut key = Self::new(&route.provider_id, url, auth);
+        key.config_identity = route.websocket_config;
+        key
     }
 }
 
@@ -258,22 +271,118 @@ impl UpstreamWebSocketBackoffKey {
 pub(crate) struct UpstreamWebSocketBackoff {
     pub(crate) failure_count: u32,
     pub(crate) until: Instant,
-    pub(crate) permanent: bool,
+    pub(crate) unsupported: bool,
     pub(crate) generation: u64,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct UpstreamWebSocketBackoffs {
     pub(crate) entries: HashMap<UpstreamWebSocketBackoffKey, UpstreamWebSocketBackoff>,
     pub(crate) order: VecDeque<(UpstreamWebSocketBackoffKey, u64)>,
     pub(crate) next_generation: u64,
+    routes: Option<HashMap<String, [u8; 32]>>,
+    pub(crate) changes: tokio::sync::watch::Sender<u64>,
+    probing: HashMap<UpstreamWebSocketBackoffKey, u64>,
+    supported: HashSet<UpstreamWebSocketBackoffKey>,
+}
+
+impl Default for UpstreamWebSocketBackoffs {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            next_generation: 0,
+            routes: None,
+            changes: tokio::sync::watch::channel(0).0,
+            probing: HashMap::new(),
+            supported: HashSet::new(),
+        }
+    }
+}
+
+pub(crate) struct UpstreamWebSocketProbe {
+    shared: Arc<Mutex<UpstreamWebSocketBackoffs>>,
+    key: UpstreamWebSocketBackoffKey,
+    generation: Option<u64>,
+}
+
+impl UpstreamWebSocketProbe {
+    pub(crate) fn acquire(
+        shared: &Arc<Mutex<UpstreamWebSocketBackoffs>>,
+        key: &UpstreamWebSocketBackoffKey,
+    ) -> Option<Self> {
+        let mut state = shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.route_is_current(&key.route_id, &key.config_identity) {
+            return None;
+        }
+        let generation = if state.supported.contains(key) {
+            None
+        } else {
+            if state.probing.contains_key(key) {
+                return None;
+            }
+            state.next_generation = state.next_generation.wrapping_add(1);
+            let generation = state.next_generation;
+            state.probing.insert(key.clone(), generation);
+            Some(generation)
+        };
+        Some(Self {
+            shared: Arc::clone(shared),
+            key: key.clone(),
+            generation,
+        })
+    }
+}
+
+impl Drop for UpstreamWebSocketProbe {
+    fn drop(&mut self) {
+        let Some(generation) = self.generation else {
+            return;
+        };
+        let mut state = self
+            .shared
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.probing.get(&self.key) == Some(&generation) {
+            state.probing.remove(&self.key);
+        }
+    }
 }
 
 impl UpstreamWebSocketBackoffs {
+    pub(crate) fn route_is_current(&self, route_id: &str, identity: &[u8; 32]) -> bool {
+        self.routes
+            .as_ref()
+            .is_none_or(|routes| routes.get(route_id) == Some(identity))
+    }
+
+    pub(crate) fn update_routes(&mut self, snapshot: &RouterSnapshot) {
+        let routes = snapshot
+            .routes
+            .iter()
+            .filter(|(_, route)| route.supports_websockets)
+            .map(|(id, route)| (id.clone(), route.websocket_config))
+            .collect::<HashMap<_, _>>();
+        if self.routes.as_ref() == Some(&routes) {
+            return;
+        }
+        let current = |key: &UpstreamWebSocketBackoffKey| {
+            routes.get(&key.route_id) == Some(&key.config_identity)
+        };
+        self.entries.retain(|key, _| current(key));
+        self.order.retain(|(key, _)| current(key));
+        self.probing.retain(|key, _| current(key));
+        self.supported.retain(current);
+        self.routes = Some(routes);
+        self.changes
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
     pub(crate) fn is_backing_off(&self, key: &UpstreamWebSocketBackoffKey, now: Instant) -> bool {
         self.entries
             .get(key)
-            .is_some_and(|backoff| backoff.permanent || backoff.until > now)
+            .is_some_and(|backoff| backoff.until > now)
     }
 
     pub(crate) fn record_failure(
@@ -281,13 +390,17 @@ impl UpstreamWebSocketBackoffs {
         key: UpstreamWebSocketBackoffKey,
         now: Instant,
     ) -> (u32, Duration) {
+        self.supported.remove(&key);
+        if !self.route_is_current(&key.route_id, &key.config_identity) {
+            return (1, upstream_websocket_backoff_duration(1));
+        }
         let reset_after = *UPSTREAM_WEBSOCKET_BACKOFF_STEPS
             .last()
             .expect("WebSocket backoff steps must not be empty");
         let failure_count = self
             .entries
             .get(&key)
-            .filter(|backoff| !backoff.permanent && now <= backoff.until + reset_after)
+            .filter(|backoff| !backoff.unsupported && now <= backoff.until + reset_after)
             .map(|backoff| backoff.failure_count.saturating_add(1))
             .unwrap_or(1);
         let duration = upstream_websocket_backoff_duration(failure_count);
@@ -298,7 +411,7 @@ impl UpstreamWebSocketBackoffs {
             UpstreamWebSocketBackoff {
                 failure_count,
                 until: now + duration,
-                permanent: false,
+                unsupported: false,
                 generation,
             },
         );
@@ -308,14 +421,18 @@ impl UpstreamWebSocketBackoffs {
     }
 
     pub(crate) fn record_unsupported(&mut self, key: UpstreamWebSocketBackoffKey, now: Instant) {
+        self.supported.remove(&key);
+        if !self.route_is_current(&key.route_id, &key.config_identity) {
+            return;
+        }
         self.next_generation = self.next_generation.wrapping_add(1);
         let generation = self.next_generation;
         self.entries.insert(
             key.clone(),
             UpstreamWebSocketBackoff {
                 failure_count: 0,
-                until: now,
-                permanent: true,
+                until: now + UPSTREAM_WEBSOCKET_UNSUPPORTED_TTL,
+                unsupported: true,
                 generation,
             },
         );
@@ -325,11 +442,12 @@ impl UpstreamWebSocketBackoffs {
 
     pub(crate) fn record_success(&mut self, key: &UpstreamWebSocketBackoffKey) {
         self.entries.remove(key);
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.entries.clear();
-        self.order.clear();
+        if self.route_is_current(&key.route_id, &key.config_identity) {
+            if self.supported.len() >= MAX_UPSTREAM_WEBSOCKET_BACKOFFS {
+                self.supported.clear();
+            }
+            self.supported.insert(key.clone());
+        }
     }
 
     pub(crate) fn enforce_limit(&mut self) {

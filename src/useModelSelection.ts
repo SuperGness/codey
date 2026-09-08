@@ -10,6 +10,7 @@ import { invoke } from "./api";
 import type {
   Config,
   ModelState,
+  ModelContextConfig,
   Notice,
   ProviderStatus,
   RuntimeStatus,
@@ -71,6 +72,15 @@ export function useModelSelection({
   const [modelPickerState, setModelPickerState] = useState<ModelState | null>(null);
   const [draftModels, setDraftModels] = useState<string[]>([]);
   const [draft1MModels, setDraft1MModels] = useState<string[]>([]);
+  const [draftModelContexts, setDraftModelContexts] = useState<Record<string, ModelContextConfig>>({});
+  const updateDraftModelContext = useCallback((model: string, policy: ModelContextConfig | undefined) => {
+    setDraftModelContexts((current) => {
+      const next = { ...current };
+      for (const key of Object.keys(next)) if (modelKey(key) === modelKey(model)) delete next[key];
+      if (policy) next[model] = policy;
+      return next;
+    });
+  }, []);
   const draft1MModelSet = useMemo(() => new Set(draft1MModels.map(modelKey)), [draft1MModels]);
   const toggleDraft1MModel = useCallback((model: string, checked: boolean) => {
     setDraft1MModels((current) => checked ? uniqueModelIds([...current, model]) : withoutModelId(current, model));
@@ -158,6 +168,7 @@ export function useModelSelection({
     const profile = config?.profiles.find((candidate) => candidate.id === (routeId ?? config.activeProfileId));
     const providerId = routeId && profile ? routeProviderId(profile) : currentProvider?.id || (profile ? routeProviderId(profile) : "");
     setDraft1MModels(config?.supports1MContextByProvider?.[providerId] || []);
+    setDraftModelContexts(config?.modelContextByProvider?.[providerId] || {});
     setDraftManualThirdPartyModels(state.manualThirdPartyModels);
     setDeletedThirdPartyModels([]);
     setCustomModelInput("");
@@ -304,6 +315,8 @@ export function useModelSelection({
       manualThirdPartyModels,
       deletedThirdPartyModels: deletedModels,
       supportsAutoReview,
+      modelContexts: Object.fromEntries(Object.entries(draftModelContexts).filter(([model]) =>
+        includesModelId(modelEditorState.officialModelIds, model) || includesModelId(thirdPartyModelOptions, model))),
       supports1MContextModels: draft1MModels.filter(
         (model) =>
           includesModelId(modelEditorState.officialModelIds, model) ||
@@ -330,6 +343,7 @@ export function useModelSelection({
     setStatus,
     modelPickerRouteId,
     draft1MModels,
+    draftModelContexts,
     modelEditorState.officialModelIds,
     thirdPartyModelOptions,
   ]);
@@ -379,6 +393,8 @@ export function useModelSelection({
     setDraftAutoReviewSupported,
     draftModelSet,
     draft1MModelSet,
+    draftModelContexts,
+    updateDraftModelContext,
     toggleDraft1MModel,
     draftManualThirdPartyModelKeys,
     manualThirdPartyModelKeys,

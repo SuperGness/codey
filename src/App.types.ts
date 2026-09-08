@@ -68,6 +68,12 @@ export type RouteRequestLogConfig = {
   retentionDays: number;
 };
 
+export type ModelContextConfig = {
+  contextWindowTokens: number;
+  autoCompactTokenLimit?: number | null;
+  reserveOutputTokens?: number | null;
+};
+
 export type Config = {
   settingsRevision: number;
   localRouterEnabled: boolean;
@@ -81,6 +87,7 @@ export type Config = {
   userScripts: string[];
   selectedModelsByProvider: Record<string, string[]>;
   supports1MContextByProvider: Record<string, string[]>;
+  modelContextByProvider?: Record<string, Record<string, ModelContextConfig>>;
   manualThirdPartyModelsByProvider: Record<string, string[]>;
   declaredOfficialModelsByProvider: Record<string, string[]>;
   upstreamModelsByProvider: Record<string, string[]>;

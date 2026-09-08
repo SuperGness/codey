@@ -150,6 +150,7 @@ if (import.meta.env.DEV) {
         backup: ["claude-sonnet-4-5", "claude-opus-4-1"],
       },
       supports1MContextByProvider: {},
+      modelContextByProvider: {},
       manualThirdPartyModelsByProvider: {
         primary: ["provider-fast-coder"],
       },
@@ -285,12 +286,12 @@ if (import.meta.env.DEV) {
         upstreamHeaderMs: 120 + index * 8,
         totalDurationMs: failed ? 1_640 + index * 31 : 2_350 + index * 91,
         queueDelayMs: index % 5,
-        inputTokens,
+        inputTokens: failed ? undefined : inputTokens,
         outputTokens,
-        cachedInputTokens,
+        cachedInputTokens: failed ? undefined : cachedInputTokens,
         cacheCreationInputTokens: undefined,
         reasoningOutputTokens: outputTokens ? Math.floor(outputTokens / 4) : undefined,
-        totalTokens: outputTokens == null ? inputTokens : inputTokens + outputTokens,
+        totalTokens: failed ? undefined : inputTokens + (outputTokens ?? 0),
         usageReported: !failed,
         usageUnavailableReason: failed ? "upstream_error" : undefined,
         requestProtocol: protocol,
@@ -455,7 +456,7 @@ if (import.meta.env.DEV) {
         previewTraceStats = previewTraceLogStats;
         return { status: "ok", traceLogStats: previewTraceStats };
       }
-      if (command === "query_route_request_logs") {
+      if (command === "query_route_request_logs" || command === "query_route_request_log_stats") {
         const page = Math.max(1, Number(args.page) || 1);
         const pageSize = Math.min(100, Math.max(1, Number(args.pageSize) || 20));
         const search = String(args.search || "").trim().toLocaleLowerCase();
@@ -463,7 +464,13 @@ if (import.meta.env.DEV) {
         const model = String(args.model || "");
         const status = String(args.status || "");
         const protocol = String(args.protocol || "");
+        const toUnixMs = Number(args.toUnixMs) || Date.now();
+        const fromUnixMs = Number(args.fromUnixMs) || toUnixMs - 86_400_000;
         const filtered = previewRouteRequestLogs.filter((item) => {
+          if (item.timestampUnixMs < fromUnixMs || item.timestampUnixMs >= toUnixMs) return false;
+          if (args.requestId && item.requestId !== args.requestId) return false;
+          if (args.sessionId && item.codexSessionId !== args.sessionId) return false;
+          if (args.requestKind && item.requestKind !== args.requestKind) return false;
           if (provider && item.provider !== provider && item.providerName !== provider) return false;
           if (model && item.model !== model && item.requestedModel !== model) return false;
           if (status && item.status !== status) return false;
@@ -480,6 +487,58 @@ if (import.meta.env.DEV) {
             item.upstreamErrorSummary,
           ].some((value) => value?.toLocaleLowerCase().includes(search));
         });
+        filtered.sort((left, right) => right.timestampUnixMs - left.timestampUnixMs || right.requestId.localeCompare(left.requestId));
+        if (command === "query_route_request_log_stats") {
+          const aggregate = (rows: typeof filtered) => {
+            const sum = (values: Array<number | null | undefined>) => {
+              const known = values.filter((value): value is number => value != null);
+              return known.length ? known.reduce((total, value) => total + value, 0) : null;
+            };
+            const total = rows.length;
+            const succeededCount = rows.filter((item) => item.status === "succeeded").length;
+            const durations = rows.map((item) => item.totalDurationMs);
+            const ttfts = rows.map((item) => item.downstreamFirstContentMs ?? item.ttftMs).filter((value): value is number => value != null);
+            return {
+              total, succeededCount, failedCount: total - succeededCount, incompleteCount: 0, cancelledCount: 0,
+              successRate: total ? succeededCount / total * 100 : null,
+              avgDuration: total ? sum(durations)! / total : null,
+              avgTtft: ttfts.length ? sum(ttfts)! / ttfts.length : null,
+              inputTokensSum: sum(rows.map((item) => item.inputTokens)),
+              outputTokensSum: sum(rows.map((item) => item.outputTokens)),
+              totalTokensSum: sum(rows.map((item) => item.totalTokens)),
+              cachedTokensSum: sum(rows.map((item) => item.cachedInputTokens)),
+              usageReportedCount: rows.filter((item) => item.usageReported).length,
+              totalTokensKnownCount: rows.filter((item) => item.totalTokens != null).length,
+            };
+          };
+          const bucketMs = toUnixMs - fromUnixMs <= 7 * 86_400_000 ? 3_600_000 : 86_400_000;
+          const grouped = new Map<string, typeof filtered>();
+          const buckets = new Map<number, typeof filtered>();
+          for (const item of filtered) {
+            const key = args.groupBy === "provider" ? item.provider : args.groupBy === "status" ? item.status
+              : args.groupBy === "protocol" ? item.upstreamTransport : args.groupBy === "request_kind" ? item.requestKind
+              : args.groupBy === "session" ? item.codexSessionId ?? "" : item.model ?? item.requestedModel;
+            const bucket = Math.floor(item.timestampUnixMs / bucketMs) * bucketMs;
+            grouped.set(key, [...(grouped.get(key) ?? []), item]);
+            buckets.set(bucket, [...(buckets.get(bucket) ?? []), item]);
+          }
+          const groups = [...grouped].map(([key, rows]) => ({ key, ...aggregate(rows) })).sort((a, b) => b.total - a.total || a.key.localeCompare(b.key));
+          return {
+            status: "ok", backend: "sqlite", queryable: true, fromUnixMs, toUnixMs,
+            ...aggregate(filtered), groups: groups.slice(0, 50), groupsTruncated: groups.length > 50, bucketMs,
+            trend: [...buckets].sort(([a], [b]) => a - b).map(([timestampUnixMs, rows]) => ({ timestampUnixMs, ...aggregate(rows) })),
+            recordingHealth: { enabled: true, active: true, sampleRatePerMillion: 1_000_000, pendingEntries: 0,
+              accepted: previewRouteRequestLogs.length, entriesWritten: previewRouteRequestLogs.length,
+              sampledOut: 0, droppedFull: 0, droppedClosed: 0, writeDropped: 0, writeFailures: 0, observerPanics: 0, writerPanics: 0, shutdownTimeouts: 0 },
+          };
+        }
+        const cursor = args.cursor as { timestampUnixMs: number; requestId: string } | null;
+        const remaining = args.cursorMode && cursor ? filtered.filter((item) => item.timestampUnixMs < cursor.timestampUnixMs
+          || (item.timestampUnixMs === cursor.timestampUnixMs && item.requestId < cursor.requestId)) : filtered;
+        const offset = args.cursorMode ? 0 : (page - 1) * pageSize;
+        const items = remaining.slice(offset, offset + pageSize);
+        const hasMore = remaining.length > offset + pageSize;
+        const last = items[items.length - 1];
         const totalPages = Math.ceil(filtered.length / pageSize);
         return {
           status: "ok",
@@ -489,7 +548,8 @@ if (import.meta.env.DEV) {
           pageSize,
           total: filtered.length,
           totalPages,
-          items: filtered.slice((page - 1) * pageSize, page * pageSize),
+          items, hasMore,
+          nextCursor: hasMore && last ? { timestampUnixMs: last.timestampUnixMs, requestId: last.requestId } : null,
         };
       }
       if (command === "clear_route_request_logs") {
@@ -566,6 +626,7 @@ if (import.meta.env.DEV) {
         const profiles = previewConfig.profiles.filter((profile) => profile.id !== routeId);
         delete previewConfig.selectedModelsByProvider[providerId];
         delete previewConfig.supports1MContextByProvider[providerId];
+        if (previewConfig.modelContextByProvider) delete previewConfig.modelContextByProvider[providerId];
         delete previewConfig.manualThirdPartyModelsByProvider[providerId];
         delete previewConfig.declaredOfficialModelsByProvider[providerId];
         delete previewConfig.upstreamModelsByProvider[providerId];
@@ -708,6 +769,9 @@ if (import.meta.env.DEV) {
               ...(previewConfig.upstreamModelsByProvider[providerId] || []),
               ...supportedModels,
             ]);
+        previewConfig.modelContextByProvider = { ...previewConfig.modelContextByProvider,
+          [providerId]: Object.fromEntries(Object.entries((args.modelContexts as Record<string, import("../App.types").ModelContextConfig> | undefined)
+            ?? previewConfig.modelContextByProvider?.[providerId] ?? {}).filter(([model]) => includesModelId(available1MModels, model))) };
         previewConfig.supports1MContextByProvider[providerId] = uniqueModelIds((args.supports1MContextModels as string[] | undefined) ?? previewConfig.supports1MContextByProvider[providerId] ?? []).filter((model) => includesModelId(available1MModels, model));
         previewConfig = {
           ...previewConfig,
@@ -787,6 +851,9 @@ if (import.meta.env.DEV) {
         }
         const providerId = routeProviderId(targetProfile);
         const available1MModels = previewOfficialModels.map((model) => model.slug);
+        previewConfig.modelContextByProvider = { ...previewConfig.modelContextByProvider,
+          [providerId]: Object.fromEntries(Object.entries((args.modelContexts as Record<string, import("../App.types").ModelContextConfig> | undefined)
+            ?? previewConfig.modelContextByProvider?.[providerId] ?? {}).filter(([model]) => includesModelId(available1MModels, model))) };
         previewConfig.supports1MContextByProvider[providerId] = uniqueModelIds((args.supports1MContextModels as string[] | undefined) ?? previewConfig.supports1MContextByProvider[providerId] ?? []).filter((model) => includesModelId(available1MModels, model));
         previewConfig = {
           ...previewConfig,

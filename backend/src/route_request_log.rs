@@ -34,6 +34,14 @@ const MAX_QUERY_PAGE: u64 = 1_000_000;
 const MAX_QUERY_PAGE_SIZE: u64 = 100;
 const MAX_QUERY_SEARCH_BYTES: usize = 256;
 const MAX_QUERY_FILTER_BYTES: usize = 128;
+const DAY_MS: u64 = 86_400_000;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RouteRequestLogCursor {
+    pub timestamp_unix_ms: u64,
+    pub request_id: String,
+}
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -230,6 +238,14 @@ pub(crate) struct RouteRequestLogQuery {
     pub model: Option<String>,
     pub status: Option<String>,
     pub protocol: Option<String>,
+    pub from_unix_ms: Option<u64>,
+    pub to_unix_ms: Option<u64>,
+    pub cursor_mode: bool,
+    pub cursor: Option<RouteRequestLogCursor>,
+    pub request_id: Option<String>,
+    pub request_kind: Option<String>,
+    pub session_id: Option<String>,
+    pub group_by: Option<String>,
 }
 
 impl Default for RouteRequestLogQuery {
@@ -242,6 +258,14 @@ impl Default for RouteRequestLogQuery {
             model: None,
             status: None,
             protocol: None,
+            from_unix_ms: None,
+            to_unix_ms: None,
+            cursor_mode: false,
+            cursor: None,
+            request_id: None,
+            request_kind: None,
+            session_id: None,
+            group_by: None,
         }
     }
 }
@@ -259,6 +283,37 @@ impl RouteRequestLogQuery {
         normalize_query_value(&mut self.model, MAX_QUERY_FILTER_BYTES, "模型筛选")?;
         normalize_query_value(&mut self.status, MAX_QUERY_FILTER_BYTES, "状态筛选")?;
         normalize_query_value(&mut self.protocol, MAX_QUERY_FILTER_BYTES, "协议筛选")?;
+        normalize_query_value(&mut self.request_id, MAX_LOG_STRING_BYTES, "请求 ID")?;
+        normalize_query_value(&mut self.request_kind, MAX_QUERY_FILTER_BYTES, "请求类型")?;
+        normalize_query_value(&mut self.session_id, MAX_LOG_STRING_BYTES, "会话 ID")?;
+        normalize_query_value(&mut self.group_by, MAX_QUERY_FILTER_BYTES, "统计维度")?;
+        if self.group_by.as_deref().is_some_and(|value| {
+            !matches!(
+                value,
+                "model" | "provider" | "status" | "protocol" | "request_kind" | "session"
+            )
+        }) {
+            anyhow::bail!("统计维度无效");
+        }
+        if self.cursor_mode || self.from_unix_ms.is_some() || self.to_unix_ms.is_some() {
+            let to = self.to_unix_ms.unwrap_or_else(unix_timestamp_ms);
+            let from = self
+                .from_unix_ms
+                .unwrap_or_else(|| to.saturating_sub(DAY_MS));
+            if from >= to || to > i64::MAX as u64 || to - from > 366 * DAY_MS {
+                anyhow::bail!("时间范围必须有效，且不能超过 366 天");
+            }
+            self.from_unix_ms = Some(from);
+            self.to_unix_ms = Some(to);
+        }
+        if let Some(cursor) = &self.cursor
+            && (!self.cursor_mode
+                || cursor.timestamp_unix_ms > i64::MAX as u64
+                || cursor.request_id.is_empty()
+                || cursor.request_id.len() > MAX_LOG_STRING_BYTES)
+        {
+            anyhow::bail!("分页游标无效");
+        }
         self.status = self.status.map(|status| status.to_ascii_lowercase());
         self.protocol = self.protocol.map(|protocol| protocol.to_ascii_lowercase());
         if self.status.as_deref().is_some_and(|status| {
@@ -290,6 +345,63 @@ pub(crate) struct RouteRequestLogQueryPage {
     pub total: u64,
     pub total_pages: u64,
     pub items: Vec<RouteRequestLogQueryItem>,
+    pub next_cursor: Option<RouteRequestLogCursor>,
+    pub has_more: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RouteRequestLogSummary {
+    pub total: u64,
+    pub succeeded_count: u64,
+    pub failed_count: u64,
+    pub incomplete_count: u64,
+    pub cancelled_count: u64,
+    pub avg_duration: Option<f64>,
+    pub avg_ttft: Option<f64>,
+    pub success_rate: Option<f64>,
+    pub input_tokens_sum: Option<u64>,
+    pub output_tokens_sum: Option<u64>,
+    pub total_tokens_sum: Option<u64>,
+    pub cached_tokens_sum: Option<u64>,
+    pub usage_reported_count: u64,
+    pub total_tokens_known_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RouteRequestLogGroup {
+    pub key: String,
+    #[serde(flatten)]
+    pub summary: RouteRequestLogSummary,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RouteRequestLogTrend {
+    pub timestamp_unix_ms: u64,
+    pub total: u64,
+    pub total_tokens_sum: Option<u64>,
+    pub avg_duration: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RouteRequestLogAnalytics {
+    pub status: &'static str,
+    pub backend: &'static str,
+    pub queryable: bool,
+    pub reason: Option<&'static str>,
+    pub from_unix_ms: u64,
+    pub to_unix_ms: u64,
+    #[serde(flatten)]
+    pub summary: RouteRequestLogSummary,
+    pub groups: Vec<RouteRequestLogGroup>,
+    pub groups_truncated: bool,
+    pub trend: Vec<RouteRequestLogTrend>,
+    pub bucket_ms: u64,
+    pub database_bytes: u64,
+    pub wal_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -421,6 +533,17 @@ pub(crate) struct RouteRequestLogStatsSnapshot {
     pub observer_panics: u64,
     pub writer_panics: u64,
     pub shutdown_timeouts: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RouteRequestLogHealth {
+    pub enabled: bool,
+    pub active: bool,
+    pub sample_rate_per_million: u32,
+    pub pending_entries: u64,
+    #[serde(flatten)]
+    pub stats: RouteRequestLogStatsSnapshot,
 }
 
 impl RouteRequestLogStatsSnapshot {
@@ -778,14 +901,6 @@ impl RouteRequestLogProbe {
         });
     }
 
-    /// Updates the effective transport after a pre-send retry without moving
-    /// the original upstream start instant used by TTFT/header latency.
-    pub(crate) fn set_upstream_transport(&self, transport: UpstreamTransport) {
-        self.shield(|| {
-            lock_unpoisoned(&self.shared.entry).upstream_transport = Some(transport);
-        });
-    }
-
     pub(crate) fn mark_upstream_headers(
         &self,
         status_code: u16,
@@ -983,6 +1098,10 @@ impl RouteRequestLogProbe {
         self.finish(RequestStatus::Cancelled, "scope_dropped");
     }
 
+    pub(crate) fn finish_failed(&self) {
+        self.finish(RequestStatus::Failed, "upstream_response_failed");
+    }
+
     fn finish(&self, default_status: RequestStatus, default_reason: &'static str) {
         self.shield(|| self.finish_inner(default_status, default_reason));
     }
@@ -1119,12 +1238,16 @@ impl RouteRequestLogController {
         Self::with_root(codey_runtime_core::paths::default_app_state_dir())
     }
 
-    fn with_root(root: PathBuf) -> Self {
+    pub(crate) fn with_root(root: PathBuf) -> Self {
         Self {
             active: ArcSwapOption::empty(),
             state: AsyncMutex::new(RouteRequestLogControllerState::default()),
             root,
         }
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
     }
 
     /// The disabled fast path is a single atomic load. The start closure is
@@ -1264,6 +1387,29 @@ impl RouteRequestLogController {
             return Some(runtime.stats_snapshot());
         }
         None
+    }
+
+    pub(crate) async fn health(&self) -> RouteRequestLogHealth {
+        let state = self.state.lock().await;
+        let config = state.config.as_ref();
+        let stats = state
+            .runtime
+            .as_ref()
+            .map(RouteRequestLogRuntime::stats_snapshot)
+            .unwrap_or_default();
+        RouteRequestLogHealth {
+            enabled: config.is_some_and(|config| config.enabled),
+            active: self
+                .active
+                .load_full()
+                .is_some_and(|producer| producer.accepting.load(Ordering::Acquire)),
+            sample_rate_per_million: config.map_or(0, |config| config.sample_rate_per_million),
+            pending_entries: stats
+                .accepted
+                .saturating_sub(stats.entries_written)
+                .saturating_sub(stats.write_dropped),
+            stats,
+        }
     }
 }
 
@@ -1505,9 +1651,15 @@ fn writer_loop(
                 && !flush_batch(&mut sink, &mut batch, stats, &mut consecutive_failures)
             {
                 accepting.store(false, Ordering::Release);
+                stats
+                    .write_dropped
+                    .fetch_add(receiver.try_iter().count() as u64, Ordering::Relaxed);
                 return;
             }
             deadline = Instant::now() + config.flush_interval;
+        }
+        if let BatchSink::Sqlite(sqlite) = &mut sink {
+            sqlite.prune_if_due();
         }
     }
 }
@@ -1541,6 +1693,9 @@ fn drain_writer_for_shutdown(
         }
         thread::yield_now();
     }
+    stats
+        .write_dropped
+        .fetch_add(receiver.try_iter().count() as u64, Ordering::Relaxed);
     let _ = sink.finish();
 }
 
@@ -1555,7 +1710,25 @@ fn flush_batch(
         queued.entry.queue_delay_ms =
             duration_millis(now.saturating_duration_since(queued.enqueued_at));
     }
-    match sink.write_batch(batch) {
+    // SQLite batches are atomic and request IDs make retries idempotent. NDJSON
+    // can have a partially written batch, so it must not be blindly replayed.
+    let attempts = if matches!(sink, BatchSink::Sqlite(_)) {
+        3
+    } else {
+        1
+    };
+    let mut outcome = Ok(());
+    for attempt in 0..attempts {
+        outcome = sink.write_batch(batch);
+        if outcome.is_ok() {
+            break;
+        }
+        stats.write_failures.fetch_add(1, Ordering::Relaxed);
+        if attempt + 1 < attempts {
+            thread::sleep(Duration::from_millis(25 * (attempt + 1)));
+        }
+    }
+    match outcome {
         Ok(()) => {
             stats
                 .entries_written
@@ -1563,7 +1736,6 @@ fn flush_batch(
             *consecutive_failures = 0;
         }
         Err(_) => {
-            stats.write_failures.fetch_add(1, Ordering::Relaxed);
             stats
                 .write_dropped
                 .fetch_add(batch.len() as u64, Ordering::Relaxed);
@@ -1748,21 +1920,33 @@ impl SqliteSink {
                 codex_session_id TEXT,
                 codex_session_is_parent INTEGER NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS idx_route_request_logs_time
-                ON route_request_logs(timestamp_unix_ms);
-             CREATE INDEX IF NOT EXISTS idx_route_request_logs_provider_model
-                ON route_request_logs(provider, model, timestamp_unix_ms);
+             CREATE INDEX IF NOT EXISTS idx_route_request_logs_time_id
+                ON route_request_logs(timestamp_unix_ms DESC, request_id DESC);
+             CREATE INDEX IF NOT EXISTS idx_route_request_logs_provider_time
+                ON route_request_logs(provider COLLATE NOCASE, timestamp_unix_ms DESC, request_id DESC);
+             CREATE INDEX IF NOT EXISTS idx_route_request_logs_model_time
+                ON route_request_logs(COALESCE(model, requested_model) COLLATE NOCASE,
+                    timestamp_unix_ms DESC, request_id DESC);
+             CREATE INDEX IF NOT EXISTS idx_route_request_logs_session_time
+                ON route_request_logs(codex_session_id, timestamp_unix_ms DESC, request_id DESC);
+             DROP INDEX IF EXISTS idx_route_request_logs_time;
+             DROP INDEX IF EXISTS idx_route_request_logs_provider_model;
              CREATE INDEX IF NOT EXISTS idx_route_request_logs_status
                 ON route_request_logs(status, timestamp_unix_ms);",
         )?;
         let retention_ms = u64::from(retention_days)
             .saturating_mul(24 * 60 * 60)
             .saturating_mul(1_000);
-        prune_sqlite_logs(&connection, retention_ms)?;
+        let removed = prune_sqlite_logs(&connection, retention_ms)?;
         Ok(Self {
             connection,
             retention_ms,
-            next_prune_at: Instant::now() + SQLITE_PRUNE_INTERVAL,
+            next_prune_at: Instant::now()
+                + if removed == 1_000 {
+                    Duration::from_secs(1)
+                } else {
+                    SQLITE_PRUNE_INTERVAL
+                },
         })
     }
 
@@ -1790,7 +1974,7 @@ impl SqliteSink {
                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
                     ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
                     ?41, ?42, ?43, ?44, ?45
-                )",
+                ) ON CONFLICT(request_id) DO NOTHING",
             )?;
             for queued in batch {
                 let entry = &queued.entry;
@@ -1844,13 +2028,22 @@ impl SqliteSink {
             }
         }
         transaction.commit()?;
+        self.prune_if_due();
+        Ok(())
+    }
+
+    fn prune_if_due(&mut self) {
         if Instant::now() >= self.next_prune_at {
             // Retention is maintenance, not part of accepting the current
             // batch. A prune failure must not misreport committed rows as lost.
-            let _ = prune_sqlite_logs(&self.connection, self.retention_ms);
-            self.next_prune_at = Instant::now() + SQLITE_PRUNE_INTERVAL;
+            let removed = prune_sqlite_logs(&self.connection, self.retention_ms);
+            self.next_prune_at = Instant::now()
+                + match removed {
+                    Ok(1_000) => Duration::from_secs(1),
+                    Err(_) => Duration::from_secs(60),
+                    _ => SQLITE_PRUNE_INTERVAL,
+                };
         }
-        Ok(())
     }
 
     fn finish(&mut self) -> anyhow::Result<()> {
@@ -1877,6 +2070,8 @@ pub(crate) fn query_route_request_logs(
             total: 0,
             total_pages: 0,
             items: Vec::new(),
+            next_cursor: None,
+            has_more: false,
         });
     }
 
@@ -1891,22 +2086,31 @@ fn query_sqlite_route_request_logs(
     path: &Path,
     query: &RouteRequestLogQuery,
 ) -> anyhow::Result<RouteRequestLogQueryPage> {
-    let mut connection = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
-    connection.pragma_update(None, "query_only", "ON")?;
+    let mut connection = open_query_connection(path)?;
     let transaction = connection.transaction()?;
-    let (where_clause, filter_params) = sqlite_query_filters(query);
-    let count_sql = format!("SELECT COUNT(*) FROM route_request_logs{where_clause}");
-    let total_i64: i64 =
-        transaction.query_row(&count_sql, params_from_iter(filter_params.iter()), |row| {
-            row.get(0)
-        })?;
-    let total = u64::try_from(total_i64).unwrap_or_default();
+    let (mut where_clause, mut filter_params) = sqlite_query_filters(query);
+    // Legacy page-number callers still receive a precise count. The UI uses cursors.
+    let total = if query.cursor_mode {
+        0
+    } else {
+        transaction.query_row(
+            &format!("SELECT COUNT(*) FROM route_request_logs{where_clause}"),
+            params_from_iter(filter_params.iter()),
+            |row| row_u64(row, 0),
+        )?
+    };
     let total_pages = total.div_ceil(query.page_size);
     let offset = query.page.saturating_sub(1).saturating_mul(query.page_size);
+    if let Some(cursor) = &query.cursor {
+        where_clause.push_str(" AND (timestamp_unix_ms, request_id) < (?, ?)");
+        filter_params.push(SqlValue::Integer(to_i64(cursor.timestamp_unix_ms)));
+        filter_params.push(SqlValue::Text(cursor.request_id.clone()));
+    }
+    let pagination = if query.cursor_mode {
+        "LIMIT ?"
+    } else {
+        "LIMIT ? OFFSET ?"
+    };
     let select_sql = format!(
         "SELECT
             request_id, trace_id, timestamp_unix_ms, provider, provider_name,
@@ -1924,17 +2128,35 @@ fn query_sqlite_route_request_logs(
             codex_session_id, codex_session_is_parent
          FROM route_request_logs{where_clause}
          ORDER BY timestamp_unix_ms DESC, request_id DESC
-         LIMIT ? OFFSET ?"
+         {pagination}"
     );
     let mut page_params = filter_params;
-    page_params.push(SqlValue::Integer(to_i64(query.page_size)));
-    page_params.push(SqlValue::Integer(to_i64(offset)));
+    page_params.push(SqlValue::Integer(to_i64(
+        query.page_size + u64::from(query.cursor_mode),
+    )));
+    if !query.cursor_mode {
+        page_params.push(SqlValue::Integer(to_i64(offset)));
+    }
     let mut statement = transaction.prepare(&select_sql)?;
-    let items = statement
+    let mut items = statement
         .query_map(params_from_iter(page_params), query_item_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     transaction.commit()?;
+    let has_more = if query.cursor_mode {
+        items.len() > query.page_size as usize
+    } else {
+        query.page < total_pages
+    };
+    items.truncate(query.page_size as usize);
+    let next_cursor = if has_more {
+        items.last().map(|item| RouteRequestLogCursor {
+            timestamp_unix_ms: item.timestamp_unix_ms,
+            request_id: item.request_id.clone(),
+        })
+    } else {
+        None
+    };
 
     Ok(RouteRequestLogQueryPage {
         status: "ok",
@@ -1946,6 +2168,8 @@ fn query_sqlite_route_request_logs(
         total,
         total_pages,
         items,
+        next_cursor,
+        has_more,
     })
 }
 
@@ -1960,12 +2184,31 @@ fn empty_query_page(page: u64, page_size: u64) -> RouteRequestLogQueryPage {
         total: 0,
         total_pages: 0,
         items: Vec::new(),
+        next_cursor: None,
+        has_more: false,
     }
 }
 
 fn sqlite_query_filters(query: &RouteRequestLogQuery) -> (String, Vec<SqlValue>) {
     let mut clauses: Vec<String> = Vec::new();
     let mut values = Vec::new();
+    if let (Some(from), Some(to)) = (query.from_unix_ms, query.to_unix_ms) {
+        clauses.push("timestamp_unix_ms >= ? AND timestamp_unix_ms < ?".into());
+        values.extend([
+            SqlValue::Integer(to_i64(from)),
+            SqlValue::Integer(to_i64(to)),
+        ]);
+    }
+    for (column, value) in [
+        ("request_id", &query.request_id),
+        ("request_kind", &query.request_kind),
+        ("codex_session_id", &query.session_id),
+    ] {
+        if let Some(value) = value {
+            clauses.push(format!("{column} = ?"));
+            values.push(SqlValue::Text(value.clone()));
+        }
+    }
     if let Some(search) = &query.search {
         let pattern = format!("%{}%", escape_like_pattern(search));
         let search_clause = String::from(
@@ -1984,13 +2227,22 @@ fn sqlite_query_filters(query: &RouteRequestLogQuery) -> (String, Vec<SqlValue>)
         clauses.push(search_clause);
     }
     if let Some(provider) = &query.provider {
-        clauses.push("(provider = ? COLLATE NOCASE OR provider_name = ? COLLATE NOCASE)".into());
-        values.push(SqlValue::Text(provider.clone()));
+        if query.cursor_mode {
+            clauses.push("provider = ? COLLATE NOCASE".into());
+        } else {
+            clauses
+                .push("(provider = ? COLLATE NOCASE OR provider_name = ? COLLATE NOCASE)".into());
+            values.push(SqlValue::Text(provider.clone()));
+        }
         values.push(SqlValue::Text(provider.clone()));
     }
     if let Some(model) = &query.model {
-        clauses.push("(model = ? COLLATE NOCASE OR requested_model = ? COLLATE NOCASE)".into());
-        values.push(SqlValue::Text(model.clone()));
+        if query.cursor_mode {
+            clauses.push("COALESCE(model, requested_model) = ? COLLATE NOCASE".into());
+        } else {
+            clauses.push("(model = ? COLLATE NOCASE OR requested_model = ? COLLATE NOCASE)".into());
+            values.push(SqlValue::Text(model.clone()));
+        }
         values.push(SqlValue::Text(model.clone()));
     }
     if let Some(status) = &query.status {
@@ -2006,6 +2258,139 @@ fn sqlite_query_filters(query: &RouteRequestLogQuery) -> (String, Vec<SqlValue>)
     } else {
         (format!(" WHERE {}", clauses.join(" AND ")), values)
     }
+}
+
+const SUMMARY_COLUMNS: &str = "COUNT(*),
+    COALESCE(SUM(status = 'succeeded'), 0), COALESCE(SUM(status = 'failed'), 0),
+    COALESCE(SUM(status = 'incomplete'), 0), COALESCE(SUM(status = 'cancelled'), 0),
+    AVG(CASE WHEN total_duration_ms >= 0 THEN total_duration_ms END),
+    AVG(CASE WHEN COALESCE(downstream_first_content_ms, ttft_ms) >= 0
+        THEN COALESCE(downstream_first_content_ms, ttft_ms) END),
+    SUM(input_tokens), SUM(output_tokens), SUM(total_tokens), SUM(cached_input_tokens),
+    COALESCE(SUM(usage_reported != 0), 0), COUNT(total_tokens)";
+
+fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequestLogSummary> {
+    let total = row_u64(row, 0)?;
+    let succeeded_count = row_u64(row, 1)?;
+    Ok(RouteRequestLogSummary {
+        total,
+        succeeded_count,
+        failed_count: row_u64(row, 2)?,
+        incomplete_count: row_u64(row, 3)?,
+        cancelled_count: row_u64(row, 4)?,
+        avg_duration: row.get(5)?,
+        avg_ttft: row.get(6)?,
+        success_rate: (total > 0).then(|| succeeded_count as f64 * 100.0 / total as f64),
+        input_tokens_sum: row_optional_u64(row, 7)?,
+        output_tokens_sum: row_optional_u64(row, 8)?,
+        total_tokens_sum: row_optional_u64(row, 9)?,
+        cached_tokens_sum: row_optional_u64(row, 10)?,
+        usage_reported_count: row_u64(row, 11)?,
+        total_tokens_known_count: row_u64(row, 12)?,
+    })
+}
+
+pub(crate) fn query_route_request_log_stats(
+    root: &Path,
+    backend: RouteRequestLogBackend,
+    mut query: RouteRequestLogQuery,
+) -> anyhow::Result<RouteRequestLogAnalytics> {
+    query.cursor_mode = true;
+    query.cursor = None;
+    let query = query.normalize()?;
+    let from = query.from_unix_ms.expect("normalized time range");
+    let to = query.to_unix_ms.expect("normalized time range");
+    let queryable = backend == RouteRequestLogBackend::Sqlite;
+    let bucket_ms = if to - from <= 7 * DAY_MS {
+        DAY_MS / 24
+    } else {
+        DAY_MS
+    };
+    let mut result = RouteRequestLogAnalytics {
+        status: if queryable { "ok" } else { "unavailable" },
+        backend: if queryable { "sqlite" } else { "ndjson" },
+        queryable,
+        reason: (!queryable).then_some("ndjson_not_queryable"),
+        from_unix_ms: from,
+        to_unix_ms: to,
+        summary: RouteRequestLogSummary::default(),
+        groups: Vec::new(),
+        groups_truncated: false,
+        trend: Vec::new(),
+        bucket_ms,
+        database_bytes: fs::metadata(root.join(SQLITE_FILE_NAME))
+            .map_or(0, |metadata| metadata.len()),
+        wal_bytes: fs::metadata(root.join(format!("{SQLITE_FILE_NAME}-wal")))
+            .map_or(0, |metadata| metadata.len()),
+    };
+    let path = root.join(SQLITE_FILE_NAME);
+    if !queryable || !path.is_file() {
+        return Ok(result);
+    }
+    let mut connection = open_query_connection(&path)?;
+    let transaction = connection.transaction()?;
+    let (where_clause, values) = sqlite_query_filters(&query);
+    result.summary = transaction.query_row(
+        &format!("SELECT {SUMMARY_COLUMNS} FROM route_request_logs{where_clause}"),
+        params_from_iter(values.iter()),
+        summary_from_row,
+    )?;
+    if let Some(group_by) = &query.group_by {
+        let column = match group_by.as_str() {
+            "model" => "COALESCE(model, requested_model)",
+            "provider" => "provider",
+            "status" => "status",
+            "protocol" => "upstream_transport",
+            "request_kind" => "request_kind",
+            "session" => "codex_session_id",
+            _ => unreachable!("validated grouping"),
+        };
+        let sql = format!(
+            "SELECT {SUMMARY_COLUMNS}, COALESCE({column}, '') AS group_key
+            FROM route_request_logs{where_clause} GROUP BY group_key
+            ORDER BY COUNT(*) DESC, group_key LIMIT 51"
+        );
+        result.groups = transaction
+            .prepare(&sql)?
+            .query_map(params_from_iter(values.iter()), |row| {
+                Ok(RouteRequestLogGroup {
+                    key: row.get(13)?,
+                    summary: summary_from_row(row)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        result.groups_truncated = result.groups.len() > 50;
+        result.groups.truncate(50);
+    }
+    // The validated range produces at most 367 daily or 169 hourly buckets.
+    let sql = format!("SELECT timestamp_unix_ms / {bucket_ms} * {bucket_ms} AS bucket,
+        COUNT(*), SUM(total_tokens), AVG(CASE WHEN total_duration_ms >= 0 THEN total_duration_ms END)
+        FROM route_request_logs{where_clause} GROUP BY bucket ORDER BY bucket");
+    result.trend = transaction
+        .prepare(&sql)?
+        .query_map(params_from_iter(values.iter()), |row| {
+            Ok(RouteRequestLogTrend {
+                timestamp_unix_ms: row_u64(row, 0)?,
+                total: row_u64(row, 1)?,
+                total_tokens_sum: row_optional_u64(row, 2)?,
+                avg_duration: row.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    transaction.commit()?;
+    Ok(result)
+}
+
+fn open_query_connection(path: &Path) -> rusqlite::Result<Connection> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+    connection.pragma_update(None, "query_only", "ON")?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    connection.progress_handler(10_000, Some(move || Instant::now() >= deadline));
+    Ok(connection)
 }
 
 fn query_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequestLogQueryItem> {
@@ -2322,7 +2707,9 @@ fn ensure_private_sqlite_file(path: &Path) -> std::io::Result<()> {
 fn prune_sqlite_logs(connection: &Connection, retention_ms: u64) -> rusqlite::Result<usize> {
     let cutoff = unix_timestamp_ms().saturating_sub(retention_ms);
     connection.execute(
-        "DELETE FROM route_request_logs WHERE timestamp_unix_ms < ?1",
+        "DELETE FROM route_request_logs WHERE rowid IN (
+            SELECT rowid FROM route_request_logs WHERE timestamp_unix_ms < ?1
+            ORDER BY timestamp_unix_ms LIMIT 1000)",
         [to_i64(cutoff)],
     )
 }
@@ -2515,6 +2902,212 @@ mod tests {
         assert_eq!(usage.cached_input_tokens, Some(2));
         assert_eq!(usage.reasoning_output_tokens, Some(1));
         assert_eq!(usage.total_tokens, Some(15));
+    }
+
+    #[test]
+    fn sqlite_cursor_and_range_statistics_preserve_boundaries_and_unknown_usage() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(SQLITE_FILE_NAME);
+        let mut sink = SqliteSink::open(&path, 30).unwrap();
+        let mut a = sample_entry("a");
+        a.timestamp_unix_ms = 100;
+        a.total_duration_ms = 0;
+        a.downstream_first_content_ms = Some(0);
+        a.token_usage.input_tokens = Some(5);
+        a.token_usage.total_tokens = Some(10);
+        let mut b = a.clone();
+        b.request_id = "b".into();
+        b.total_duration_ms = 30;
+        b.status = RequestStatus::Failed;
+        b.token_usage = RequestTokenUsage::default();
+        b.usage_reported = false;
+        b.downstream_first_content_ms = None;
+        b.ttft_ms = None;
+        let mut c = sample_entry("c");
+        c.timestamp_unix_ms = 100;
+        c.total_duration_ms = 60;
+        c.status = RequestStatus::Incomplete;
+        c.token_usage.output_tokens = Some(10);
+        c.token_usage.total_tokens = Some(20);
+        let mut outside = sample_entry("outside");
+        outside.timestamp_unix_ms = 200;
+        sink.write_batch(&[queued(a), queued(b), queued(c.clone()), queued(outside)])
+            .unwrap();
+        sink.write_batch(&[queued(c)]).unwrap(); // Delivery replay must not duplicate statistics.
+        let query = RouteRequestLogQuery {
+            cursor_mode: true,
+            page_size: 1,
+            from_unix_ms: Some(100),
+            to_unix_ms: Some(200),
+            group_by: Some("status".into()),
+            ..Default::default()
+        };
+        let first = query_route_request_logs(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            query.clone(),
+        )
+        .unwrap();
+        assert_eq!(first.items[0].request_id, "c");
+        assert!(first.has_more);
+        let second_query = RouteRequestLogQuery {
+            cursor: first.next_cursor,
+            ..query.clone()
+        };
+        let second = query_route_request_logs(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            second_query.clone(),
+        )
+        .unwrap();
+        assert_eq!(second.items[0].request_id, "b");
+        let third = query_route_request_logs(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery {
+                cursor: second.next_cursor,
+                ..query.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(third.items[0].request_id, "a");
+        assert!(!third.has_more);
+        let stats = query_route_request_log_stats(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            second_query,
+        )
+        .unwrap();
+        assert_eq!(stats.summary.total, 3);
+        assert_eq!(stats.summary.succeeded_count, 1);
+        assert_eq!(stats.summary.failed_count, 1);
+        assert_eq!(stats.summary.incomplete_count, 1);
+        assert_eq!(stats.summary.avg_duration, Some(30.0));
+        assert_eq!(stats.summary.avg_ttft, Some(7.0));
+        assert_eq!(stats.summary.input_tokens_sum, Some(15));
+        assert_eq!(stats.summary.output_tokens_sum, Some(15));
+        assert_eq!(stats.summary.total_tokens_sum, Some(30));
+        assert_eq!(stats.summary.total_tokens_known_count, 2);
+        assert_eq!(stats.summary.usage_reported_count, 2);
+        assert_eq!(stats.groups.len(), 3);
+        assert_eq!(stats.trend[0].total, 3);
+        let missing = query_route_request_log_stats(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery {
+                request_id: Some("b".into()),
+                ..query.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(missing.summary.total, 1);
+        assert_eq!(missing.summary.total_tokens_sum, None);
+        let empty = query_route_request_log_stats(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery {
+                request_id: Some("absent".into()),
+                ..query.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(empty.summary.total, 0);
+        assert_eq!(empty.summary.avg_duration, None);
+        assert_eq!(empty.summary.success_rate, None);
+        let normalized = RouteRequestLogQuery {
+            provider: Some("PROVIDER-A".into()),
+            ..query
+        }
+        .normalize()
+        .unwrap();
+        let (filter, params) = sqlite_query_filters(&normalized);
+        let plan = sink
+            .connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN SELECT request_id FROM route_request_logs{filter}
+            ORDER BY timestamp_unix_ms DESC, request_id DESC LIMIT 2"
+            ))
+            .unwrap()
+            .query_map(params_from_iter(params.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join(" ");
+        assert!(
+            plan.contains("idx_route_request_logs_provider_time"),
+            "{plan}"
+        );
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
+
+    #[test]
+    fn sqlite_retry_keeps_the_batch_and_retention_deletes_bounded_chunks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(SQLITE_FILE_NAME);
+        let sqlite = SqliteSink::open(&path, 30).unwrap();
+        sqlite.connection.busy_timeout(Duration::ZERO).unwrap();
+        let blocker = Connection::open(&path).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let stats = Arc::new(RouteRequestLogStats::default());
+        let observed = Arc::clone(&stats);
+        let release = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while observed.write_failures.load(Ordering::Acquire) == 0 && Instant::now() < deadline
+            {
+                thread::yield_now();
+            }
+            blocker.execute_batch("COMMIT").unwrap();
+        });
+        let mut sink = BatchSink::Sqlite(sqlite);
+        let mut batch = vec![queued(sample_entry("retry"))];
+        assert!(flush_batch(&mut sink, &mut batch, &stats, &mut 0));
+        release.join().unwrap();
+        assert!(stats.snapshot().write_failures >= 1);
+        assert_eq!(stats.snapshot().entries_written, 1);
+        assert_eq!(stats.snapshot().write_dropped, 0);
+        let BatchSink::Sqlite(sqlite) = &mut sink else {
+            unreachable!()
+        };
+        sqlite
+            .write_batch(
+                &(0..1_500)
+                    .map(|index| queued(sample_entry(&format!("old-{index}"))))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert_eq!(prune_sqlite_logs(&sqlite.connection, 0).unwrap(), 1_000);
+        assert_eq!(prune_sqlite_logs(&sqlite.connection, 0).unwrap(), 501);
+    }
+
+    #[test]
+    fn sqlite_analytics_rejects_invalid_ranges_and_grouping() {
+        for query in [
+            RouteRequestLogQuery {
+                from_unix_ms: Some(200),
+                to_unix_ms: Some(100),
+                ..Default::default()
+            },
+            RouteRequestLogQuery {
+                from_unix_ms: Some(0),
+                to_unix_ms: Some(367 * DAY_MS),
+                ..Default::default()
+            },
+            RouteRequestLogQuery {
+                group_by: Some("model; DROP TABLE route_request_logs".into()),
+                ..Default::default()
+            },
+            RouteRequestLogQuery {
+                cursor: Some(RouteRequestLogCursor {
+                    timestamp_unix_ms: 1,
+                    request_id: "".into(),
+                }),
+                ..Default::default()
+            },
+        ] {
+            assert!(query.normalize().is_err());
+        }
     }
 
     #[test]
@@ -3357,7 +3950,7 @@ mod tests {
             .unwrap();
         probe.mark_upstream_send(UpstreamTransport::HttpSse);
         let original_start = *probe.shared.upstream_started_at.get().unwrap();
-        probe.set_upstream_transport(UpstreamTransport::Http);
+        probe.mark_upstream_send(UpstreamTransport::Http);
         assert_eq!(
             *probe.shared.upstream_started_at.get().unwrap(),
             original_start

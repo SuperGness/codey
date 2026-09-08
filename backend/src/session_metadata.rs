@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
-use codey_runtime_core::codex_sqlite::codex_session_db_paths_from_home;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use codey_runtime_core::codex_sqlite::CodexSessionDbDiscoveryCache;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 
 use crate::sqlite_util::table_columns;
 
@@ -35,6 +35,7 @@ struct CachedConnection {
 #[derive(Debug, Default)]
 pub(crate) struct SessionMetadataCache {
     connections: HashMap<PathBuf, CachedConnection>,
+    discovery: CodexSessionDbDiscoveryCache,
 }
 
 /// 会话 ID 归一：允许 `local:` 前缀与两侧空白。此前 5 处各自实现，trim
@@ -170,7 +171,9 @@ impl SessionMetadataCache {
     }
 
     fn active_database_paths(&mut self, home: &Path) -> Vec<PathBuf> {
-        let paths = codex_session_db_paths_from_home(home)
+        let paths = self
+            .discovery
+            .session_db_paths_from_home(home)
             .into_iter()
             .filter(|path| path.exists())
             .collect::<Vec<_>>();
@@ -364,6 +367,9 @@ fn session_timestamp_rows(
     connection: &Connection,
     session_ids: &[String],
 ) -> Result<HashMap<String, u64>> {
+    if session_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
     let columns = table_columns(connection, "threads")?;
     if !columns.contains("id") {
         return Ok(HashMap::new());
@@ -387,21 +393,25 @@ fn session_timestamp_rows(
         return Ok(HashMap::new());
     }
 
-    let sql = format!(
-        "SELECT COALESCE({}) FROM threads WHERE id=?1 LIMIT 1",
-        timestamp_candidates.join(", ")
-    );
-    let mut statement = connection.prepare(&sql)?;
     let mut timestamps = HashMap::new();
-    for session_id in session_ids {
-        let timestamp = statement
-            .query_row(params![session_id], |row| row.get::<_, Option<i64>>(0))
-            .optional()?
-            .flatten()
-            .and_then(|timestamp| u64::try_from(timestamp).ok())
-            .filter(|timestamp| *timestamp > 0);
-        if let Some(timestamp) = timestamp {
-            timestamps.insert(session_id.clone(), timestamp);
+    // Stay below SQLite's legacy parameter limit for internal callers too.
+    for ids in session_ids.chunks(200) {
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let mut statement = connection.prepare(&format!(
+            "SELECT id, COALESCE({}, NULL) FROM threads WHERE id IN ({placeholders})",
+            timestamp_candidates.join(", ")
+        ))?;
+        let rows = statement.query_map(params_from_iter(ids), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?;
+        for row in rows {
+            let (session_id, timestamp) = row?;
+            if let Some(timestamp) = timestamp
+                .and_then(|timestamp| u64::try_from(timestamp).ok())
+                .filter(|timestamp| *timestamp > 0)
+            {
+                timestamps.insert(session_id, timestamp);
+            }
         }
     }
     Ok(timestamps)
@@ -435,6 +445,97 @@ mod tests {
     use super::*;
     use rusqlite::params;
     use tempfile::tempdir;
+
+    #[test]
+    fn timestamp_batches_support_single_column_missing_and_invalid_values() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, updated_at INTEGER)")
+            .unwrap();
+        let ids: Vec<String> = (0..405).map(|id| format!("thread-{id}")).collect();
+        let tx = connection.transaction().unwrap();
+        for (index, id) in ids.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO threads VALUES (?1, ?2)",
+                params![id, index as i64 - 1],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        let mut requested = ids.clone();
+        requested.extend([ids[2].clone(), "missing' OR 1=1 --".to_string()]);
+        let timestamps = session_timestamp_rows(&connection, &requested).unwrap();
+        assert_eq!(timestamps.len(), 403);
+        assert!(!timestamps.contains_key(&ids[0]));
+        assert!(!timestamps.contains_key(&ids[1]));
+        for (index, id) in ids.iter().enumerate().skip(2) {
+            assert_eq!(timestamps[id], (index as u64 - 1) * 1_000);
+        }
+        assert!(session_timestamp_rows(&connection, &[]).unwrap().is_empty());
+    }
+
+    #[test]
+    #[ignore = "opt-in session timestamp query benchmark"]
+    fn timestamp_query_benchmark() {
+        use std::{hint::black_box, time::Instant};
+        let home = tempdir().unwrap();
+        let connection = Connection::open(home.path().join("bench.sqlite")).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, updated_at INTEGER, created_at INTEGER);
+             WITH RECURSIVE ids(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM ids WHERE n<5000)
+             INSERT INTO threads SELECT 'thread-' || n, n, 1 FROM ids;"
+        ).unwrap();
+        let ids: Vec<_> = (1..=200).map(|id| format!("thread-{}", id * 23)).collect();
+        let legacy = || {
+            let columns = table_columns(&connection, "threads").unwrap();
+            assert!(columns.contains("updated_at"));
+            let mut statement = connection.prepare(
+                "SELECT COALESCE(NULLIF(CAST(updated_at AS INTEGER) * 1000, 0), NULLIF(CAST(created_at AS INTEGER) * 1000, 0)) FROM threads WHERE id=?1 LIMIT 1"
+            ).unwrap();
+            let mut result = HashMap::new();
+            for id in &ids {
+                let value = statement
+                    .query_row(params![id], |row| row.get::<_, Option<i64>>(0))
+                    .optional()
+                    .unwrap()
+                    .flatten()
+                    .and_then(|value| u64::try_from(value).ok())
+                    .filter(|value| *value > 0);
+                if let Some(value) = value {
+                    result.insert(id.clone(), value);
+                }
+            }
+            result
+        };
+        assert_eq!(legacy(), session_timestamp_rows(&connection, &ids).unwrap());
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        for sample in 0..9 {
+            for batched in if sample % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            } {
+                let start = Instant::now();
+                for _ in 0..100 {
+                    black_box(if batched {
+                        session_timestamp_rows(&connection, &ids).unwrap()
+                    } else {
+                        legacy()
+                    });
+                }
+                if batched { &mut after } else { &mut before }.push(start.elapsed().as_secs_f64());
+            }
+        }
+        before.sort_by(f64::total_cmp);
+        after.sort_by(f64::total_cmp);
+        eprintln!(
+            "timestamp query: 5000 rows, 200 IDs, median of 9 x 100 batches; legacy={:.3}ms batch={:.3}ms speedup={:.2}x",
+            before[4] * 10.0,
+            after[4] * 10.0,
+            before[4] / after[4]
+        );
+    }
 
     #[test]
     fn resolves_the_saved_thread_title() {

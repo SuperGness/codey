@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 #[cfg(all(test, windows))]
 use std::fs;
 #[cfg(windows)]
@@ -578,6 +578,7 @@ fn local_route_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> boo
             != next.declared_official_models_by_provider
         || previous.upstream_models_by_provider != next.upstream_models_by_provider
         || previous.supports_1m_context_by_provider != next.supports_1m_context_by_provider
+        || previous.model_context_by_provider != next.model_context_by_provider
         || previous.default_model != next.default_model
         || previous.initial_route_import_completed != next.initial_route_import_completed
 }
@@ -904,6 +905,10 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             optional_argument::<bool>(&args, "supportsAutoReview"),
             optional_argument::<Option<String>>(&args, "routeId").map(Option::flatten),
             optional_argument::<Vec<String>>(&args, "supports1MContextModels"),
+            optional_argument::<BTreeMap<String, crate::config::ModelContextConfig>>(
+                &args,
+                "modelContexts",
+            ),
         ) {
             (
                 Ok(official_models),
@@ -913,6 +918,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 Ok(supports_auto_review),
                 Ok(route_id),
                 Ok(supports_1m_context_models),
+                Ok(model_contexts),
             ) => {
                 save_selected_models(
                     state,
@@ -923,16 +929,18 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                     supports_auto_review,
                     route_id,
                     supports_1m_context_models,
+                    model_contexts,
                 )
                 .await
             }
-            (Err(error), _, _, _, _, _, _)
-            | (_, Err(error), _, _, _, _, _)
-            | (_, _, Err(error), _, _, _, _)
-            | (_, _, _, Err(error), _, _, _)
-            | (_, _, _, _, Err(error), _, _)
-            | (_, _, _, _, _, Err(error), _)
-            | (_, _, _, _, _, _, Err(error)) => Err(error),
+            (Err(error), _, _, _, _, _, _, _)
+            | (_, Err(error), _, _, _, _, _, _)
+            | (_, _, Err(error), _, _, _, _, _)
+            | (_, _, _, Err(error), _, _, _, _)
+            | (_, _, _, _, Err(error), _, _, _)
+            | (_, _, _, _, _, Err(error), _, _)
+            | (_, _, _, _, _, _, Err(error), _)
+            | (_, _, _, _, _, _, _, Err(error)) => Err(error),
         },
         "save_default_model" => match (
             string_argument(&args, "model"),
@@ -947,8 +955,19 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             optional_argument::<Vec<String>>(&args, "supports1MContextModels"),
             optional_argument::<bool>(&args, "enabled"),
             optional_argument::<bool>(&args, "showAccountUsageInHeader"),
+            optional_argument::<BTreeMap<String, crate::config::ModelContextConfig>>(
+                &args,
+                "modelContexts",
+            ),
         ) {
-            (Ok(route_id), Ok(models), Ok(context_models), Ok(enabled), Ok(show_usage)) => {
+            (
+                Ok(route_id),
+                Ok(models),
+                Ok(context_models),
+                Ok(enabled),
+                Ok(show_usage),
+                Ok(model_contexts),
+            ) => {
                 save_official_route_models(
                     state,
                     route_id,
@@ -956,14 +975,16 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                     context_models,
                     enabled,
                     show_usage,
+                    model_contexts,
                 )
                 .await
             }
-            (Err(error), _, _, _, _)
-            | (_, Err(error), _, _, _)
-            | (_, _, Err(error), _, _)
-            | (_, _, _, Err(error), _)
-            | (_, _, _, _, Err(error)) => Err(error),
+            (Err(error), _, _, _, _, _)
+            | (_, Err(error), _, _, _, _)
+            | (_, _, Err(error), _, _, _)
+            | (_, _, _, Err(error), _, _)
+            | (_, _, _, _, Err(error), _)
+            | (_, _, _, _, _, Err(error)) => Err(error),
         },
         "runtime_status" => {
             let refresh_injection_status = args
@@ -979,6 +1000,12 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             match serde_json::from_value::<RouteRequestLogQuery>(args.clone()) {
                 Ok(query) => query_route_request_logs(state, query).await,
                 Err(error) => Err(format!("请求日志查询参数无效：{error}")),
+            }
+        }
+        "query_route_request_log_stats" => {
+            match serde_json::from_value::<RouteRequestLogQuery>(args.clone()) {
+                Ok(query) => query_route_request_log_stats(state, query).await,
+                Err(error) => Err(format!("请求日志统计参数无效：{error}")),
             }
         }
         "clear_route_request_logs" => clear_route_request_logs(state).await,
@@ -1071,6 +1098,28 @@ pub async fn query_route_request_logs(
     .map_err(|error| format!("请求日志查询任务异常退出：{error}"))?
     .map_err(|error| format!("查询请求日志失败：{error:#}"))?;
     serde_json::to_value(page).map_err(|error| format!("请求日志查询结果序列化失败：{error}"))
+}
+
+async fn query_route_request_log_stats(
+    state: &Arc<AppState>,
+    query: RouteRequestLogQuery,
+) -> Result<Value, String> {
+    let backend = state.config.read().await.route_request_log.backend;
+    let root = codey_runtime_core::paths::default_app_state_dir();
+    let stats = tokio::task::spawn_blocking(move || {
+        crate::route_request_log::query_route_request_log_stats(&root, backend, query)
+    })
+    .await
+    .map_err(|error| format!("请求日志统计任务异常退出：{error}"))?
+    .map_err(|error| format!("查询请求日志统计失败：{error:#}"))?;
+    let mut value =
+        serde_json::to_value(stats).map_err(|error| format!("请求日志统计序列化失败：{error}"))?;
+    let runtime = state.runtime.lock().await.clone();
+    if let Some(runtime) = runtime {
+        value["recordingHealth"] = serde_json::to_value(runtime.request_log_health().await)
+            .map_err(|error| format!("请求日志状态序列化失败：{error}"))?;
+    }
+    Ok(value)
 }
 
 pub async fn clear_route_request_logs(state: &Arc<AppState>) -> Result<Value, String> {
@@ -1290,6 +1339,7 @@ pub async fn save_codey_config(
 struct CodeyConfigSaveInput {
     config: CodeyConfig,
     supports_1m_context_present: bool,
+    model_context_present: bool,
     local_router_enabled_present: bool,
     route_request_log_present: bool,
     subagent_roles_present: bool,
@@ -1303,6 +1353,7 @@ impl CodeyConfigSaveInput {
         Self {
             config,
             supports_1m_context_present: true,
+            model_context_present: true,
             local_router_enabled_present: true,
             route_request_log_present: true,
             subagent_roles_present: true,
@@ -1322,6 +1373,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         .ok_or_else(|| "参数 config 无效：必须是 object".to_string())?;
     let local_router_enabled_present = fields.contains_key("localRouterEnabled");
     let supports_1m_context_present = fields.contains_key("supports1MContextByProvider");
+    let model_context_present = fields.contains_key("modelContextByProvider");
     let route_request_log_present = fields.contains_key("routeRequestLog");
     let subagent_roles_present = fields.contains_key("subagentRoles");
     let subagent_model_present = fields.contains_key("subagentModel");
@@ -1331,6 +1383,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
     Ok(CodeyConfigSaveInput {
         config,
         supports_1m_context_present,
+        model_context_present,
         local_router_enabled_present,
         route_request_log_present,
         subagent_roles_present,
@@ -1363,6 +1416,7 @@ async fn save_codey_config_locked(
     let CodeyConfigSaveInput {
         config: mut config_input,
         supports_1m_context_present,
+        model_context_present,
         local_router_enabled_present,
         route_request_log_present,
         subagent_roles_present,
@@ -1377,6 +1431,48 @@ async fn save_codey_config_locked(
     config.remember_model_aliases();
     config.profiles = merge_profile_secrets(config_input.profiles, &previous)?;
     config.active_profile_id = config_input.active_profile_id;
+    if model_context_present
+        && config_input.model_context_by_provider != previous.model_context_by_provider
+    {
+        for (provider_id, policies) in &config_input.model_context_by_provider {
+            let profile = config
+                .profiles
+                .iter()
+                .find(|profile| profile.provider_id() == provider_id)
+                .ok_or_else(|| format!("找不到上下文配置所属线路：{provider_id}"))?;
+            let available = if profile.official_account {
+                model_catalog::default_official_model_slugs()
+            } else {
+                config
+                    .upstream_models_by_provider
+                    .get(provider_id)
+                    .into_iter()
+                    .flatten()
+                    .chain(
+                        config
+                            .selected_models_by_provider
+                            .get(provider_id)
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .chain(
+                        config
+                            .manual_third_party_models_by_provider
+                            .get(provider_id)
+                            .into_iter()
+                            .flatten(),
+                    )
+                    .cloned()
+                    .collect()
+            };
+            models::set_model_contexts(&mut config, provider_id, Some(policies), &available)?;
+        }
+        config.model_context_by_provider.retain(|provider, _| {
+            config_input
+                .model_context_by_provider
+                .contains_key(provider)
+        });
+    }
     if supports_1m_context_present
         && config_input.supports_1m_context_by_provider != previous.supports_1m_context_by_provider
     {
@@ -1654,6 +1750,9 @@ fn retain_route_scoped_config(config: &mut CodeyConfig) {
                 .to_string()
         })
         .collect::<std::collections::HashSet<_>>();
+    config
+        .model_context_by_provider
+        .retain(|provider_id, _| provider_ids.contains(provider_id));
     config
         .supports_1m_context_by_provider
         .retain(|provider_id, _| provider_ids.contains(provider_id));

@@ -67,20 +67,6 @@ pub fn ensure_openai_curated_remote_marketplace_available(
     })
 }
 
-pub fn preserve_openai_curated_remote_marketplace_config(
-    home: &Path,
-    config_text: &str,
-) -> anyhow::Result<String> {
-    let Some(marketplace_root) = local_openai_curated_remote_marketplace_root(home)? else {
-        return Ok(config_text.to_string());
-    };
-    merge_marketplace_configs_into_text(
-        config_text,
-        &[CODEY_CURATED_MARKETPLACE],
-        &marketplace_root,
-    )
-}
-
 pub fn openai_curated_marketplace_status(home: &Path) -> MarketplaceStatus {
     let marketplace_root = local_openai_curated_marketplace_root(home).ok().flatten();
     let remote_marketplace_root = local_openai_curated_remote_marketplace_root(home)
@@ -563,19 +549,6 @@ fn marketplace_table_points_to_root(table: &Table, root: &Path) -> bool {
         .and_then(Item::as_str)
         .unwrap_or_default();
     source_type == "local" && managed_marketplace_path_matches(source, root)
-}
-
-fn merge_marketplace_configs_into_text(
-    config_text: &str,
-    marketplace_names: &[&str],
-    marketplace_root: &Path,
-) -> anyhow::Result<String> {
-    merge_marketplace_configs_and_plugins_into_text(
-        config_text,
-        marketplace_names,
-        marketplace_root,
-        &[],
-    )
 }
 
 fn merge_marketplace_configs_and_plugins_into_text(

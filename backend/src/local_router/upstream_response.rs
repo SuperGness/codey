@@ -17,6 +17,9 @@ pub(crate) struct PreparedUpstreamResponse {
     pub(crate) response: reqwest::Response,
     pub(crate) prefix: VecDeque<Bytes>,
     pub(crate) is_sse: bool,
+    pub(crate) bytes_read: usize,
+    pub(crate) retained: Option<RetainedMemoryBudget>,
+    pub(crate) deadline: tokio::time::Instant,
 }
 
 pub(crate) async fn prepare_upstream_response(
@@ -24,6 +27,7 @@ pub(crate) async fn prepare_upstream_response(
     operation: &'static str,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<PreparedUpstreamResponse> {
+    let deadline = tokio::time::Instant::now() + UPSTREAM_RESPONSE_TIMEOUT;
     if response
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -34,17 +38,29 @@ pub(crate) async fn prepare_upstream_response(
             response,
             prefix: VecDeque::new(),
             is_sse: true,
+            bytes_read: 0,
+            retained: None,
+            deadline,
         });
     }
 
     let mut prefix = VecDeque::new();
     let mut sniff = Vec::with_capacity(UPSTREAM_SSE_SNIFF_BYTES);
     loop {
-        let Some(chunk) = read_upstream_chunk(&mut response, operation, probe).await? else {
+        let Some(chunk) = tokio::time::timeout_at(
+            deadline,
+            read_upstream_chunk(&mut response, operation, probe),
+        )
+        .await
+        .context("上游响应超过总时限")??
+        else {
             return Ok(PreparedUpstreamResponse {
                 response,
                 prefix,
                 is_sse: false,
+                bytes_read: 0,
+                retained: None,
+                deadline,
             });
         };
         if chunk.is_empty() {
@@ -58,6 +74,9 @@ pub(crate) async fn prepare_upstream_response(
                 response,
                 prefix,
                 is_sse,
+                bytes_read: 0,
+                retained: None,
+                deadline,
             });
         }
         if sniff.len() == UPSTREAM_SSE_SNIFF_BYTES {
@@ -65,6 +84,9 @@ pub(crate) async fn prepare_upstream_response(
                 response,
                 prefix,
                 is_sse: false,
+                bytes_read: 0,
+                retained: None,
+                deadline,
             });
         }
     }
@@ -101,20 +123,41 @@ pub(crate) async fn read_prepared_upstream_chunk(
     operation: &'static str,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Option<Bytes>> {
-    if let Some(chunk) = prepared.prefix.pop_front() {
-        return Ok(Some(chunk));
+    if tokio::time::Instant::now() >= prepared.deadline {
+        anyhow::bail!("上游响应超过总时限");
     }
-    read_upstream_chunk(&mut prepared.response, operation, probe).await
+    let chunk = if let Some(chunk) = prepared.prefix.pop_front() {
+        Some(chunk)
+    } else {
+        tokio::time::timeout_at(
+            prepared.deadline,
+            read_upstream_chunk(&mut prepared.response, operation, probe),
+        )
+        .await
+        .context("上游响应超过总时限")??
+    };
+    if let Some(chunk) = &chunk {
+        let total = prepared.bytes_read.saturating_add(chunk.len());
+        if total > MAX_UPSTREAM_RESPONSE_BYTES {
+            anyhow::bail!("上游响应累计大小超过 Codey 安全上限");
+        }
+        if let Some(budget) = &mut prepared.retained {
+            budget.resize(total)?;
+        }
+        prepared.bytes_read = total;
+    }
+    Ok(chunk)
 }
 
 pub(crate) async fn read_bounded_prepared_upstream_body(
-    mut prepared: PreparedUpstreamResponse,
+    prepared: &mut PreparedUpstreamResponse,
     limit: usize,
     operation: &'static str,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Vec<u8>> {
+    prepared.retained.get_or_insert_with(Default::default);
     let mut body = Vec::new();
-    while let Some(chunk) = read_prepared_upstream_chunk(&mut prepared, operation, probe).await? {
+    while let Some(chunk) = read_prepared_upstream_chunk(prepared, operation, probe).await? {
         if body.len().saturating_add(chunk.len()) > limit {
             anyhow::bail!("{operation}超过 Codey 安全上限");
         }
@@ -152,6 +195,25 @@ where
         .await
         .with_context(|| format!("{operation}超过写入期限"))?
         .with_context(|| operation)
+        .context(DownstreamClosed)
+}
+
+/// SSE comments keep intermediaries alive and expose a closed reader without
+/// treating a legal TCP write-half shutdown as cancellation.
+pub(crate) async fn await_http_stream_upstream<T, F>(stream: &mut TcpStream, future: F) -> Result<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut future => return Ok(result),
+            _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                write_chunked_frame(stream, b": keep-alive\n\n", "写入 SSE 心跳失败").await?;
+            }
+        }
+    }
 }
 
 /// Writes one `transfer-encoding: chunked` frame with a single `write_all`.
@@ -176,6 +238,7 @@ pub(crate) async fn write_proxy_response(
     stream: &mut TcpStream,
     response: reqwest::Response,
     probe: Option<&RouteRequestLogProbe>,
+    validate_responses: bool,
 ) -> Result<()> {
     let status = response.status().as_u16();
     let reason = reason_phrase(status);
@@ -187,6 +250,7 @@ pub(crate) async fn write_proxy_response(
         .to_string();
     let mut prepared = prepare_upstream_response(response, "读取上游响应失败", probe).await?;
     let upstream_is_sse = prepared.is_sse;
+    let mut terminal = (upstream_is_sse && validate_responses).then(NativeSseTerminal::default);
     let content_type = if upstream_is_sse {
         "text/event-stream"
     } else {
@@ -206,12 +270,23 @@ pub(crate) async fn write_proxy_response(
     if let Some(probe) = probe {
         probe.mark_response_started(status);
     }
-    while let Some(chunk) =
-        read_prepared_upstream_chunk(&mut prepared, "读取上游响应失败", probe).await?
-    {
+    loop {
+        let next = read_prepared_upstream_chunk(&mut prepared, "读取上游响应失败", probe);
+        let chunk = if upstream_is_sse {
+            await_http_stream_upstream(stream, next).await??
+        } else {
+            next.await?
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
         if chunk.is_empty() {
             continue;
         }
+        let finished = match terminal.as_mut() {
+            Some(terminal) => terminal.observe(&chunk)?,
+            None => false,
+        };
         write_chunked_frame(stream, &chunk, "写入上游响应块失败").await?;
         if let Some(tap) = log_tap.as_mut() {
             tap.observe(&chunk);
@@ -219,6 +294,12 @@ pub(crate) async fn write_proxy_response(
         if !upstream_is_sse && let Some(probe) = probe {
             probe.mark_first_downstream_content();
         }
+        if finished {
+            break;
+        }
+    }
+    if let Some(terminal) = terminal.as_mut() {
+        terminal.finish()?;
     }
     if let Some(tap) = log_tap.as_mut() {
         tap.finish();
