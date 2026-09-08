@@ -43,7 +43,8 @@ The primary frontend dependencies are:
 
 | Package | Version | License | Copyright or project |
 | --- | --- | --- | --- |
-| `@mantine/core`, `@mantine/hooks` | 9.5.2 | MIT | Mantine contributors |
+| `antd` | 6.6.2 | MIT | Ant Design contributors |
+| `@ant-design/cssinjs` | 2.1.2 | MIT | Ant Design contributors |
 | `@tabler/icons-react` | 3.45.0 | MIT | Paweł Kuna and Tabler contributors |
 | `tailwindcss`, `@tailwindcss/vite` | 4.3.0 | MIT | Tailwind Labs, Inc. |
 | `@vitejs/plugin-react` | 4.3.4 | MIT | Vite and Babel contributors |
@@ -59,7 +60,6 @@ licenses are not MIT:
 | `baseline-browser-mapping` | 2.10.43 | Apache-2.0 | Web Platform DX Community Group contributors |
 | `detect-libc` | 2.1.2 | Apache-2.0 | Lovell Fuller and contributors |
 | `typescript` | 5.8.2 | Apache-2.0 | Microsoft Corporation |
-| `@ungap/structured-clone` | 1.3.3 | ISC | Andrea Giammarchi |
 | `electron-to-chromium` | 1.5.393 | ISC | Kilian Valkhof and contributors |
 | `lru-cache` | 5.1.1 | ISC | Isaac Z. Schlueter and contributors |
 | `picocolors` | 1.1.1 | ISC | Alexey Raspopov |

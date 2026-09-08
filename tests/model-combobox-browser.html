@@ -6,8 +6,7 @@
   <script type="module">
     import React from "react";
     import { createRoot } from "react-dom/client";
-    import { MantineProvider } from "@mantine/core";
-    import "@mantine/core/styles.css";
+    import { UiProvider } from "../src/UiProvider.tsx";
     import "../src/tailwind.css";
     import { ModelCombobox } from "../src/components/ModelCombobox.tsx";
     const options = Array.from({ length: 10000 }, (_, index) => ({
@@ -18,7 +17,7 @@
     }));
     function App() {
       const [value, setValue] = React.useState(options[9999].value);
-      return React.createElement(MantineProvider, null,
+      return React.createElement(UiProvider, null,
         React.createElement("main", { style: { width: 420, padding: 32 } },
           React.createElement("h1", null, "10,000 个模型"),
           React.createElement(ModelCombobox, { "aria-label": "测试模型", options, value, onChange: setValue }),

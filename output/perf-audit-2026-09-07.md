@@ -50,7 +50,6 @@ Hook 架构：Codex 每个事件（PreToolUse/PostToolUse/UserPromptSubmit/Subag
 
 - **codey-fastctx 42 MB**：~32 MB 是 bpe-openai 的 o200k 词典；fastctx 上游只有 `pdf` feature，ratatui/clap/image/rayon 均无条件依赖，`default-features = false` 已是最小。Codey 侧无法裁减；需上游加 feature 门或压缩词典。
 - **codey_lib 直接依赖 fastctx**（codex_config.rs 引用 3 个配置辅助函数），使主二进制与 lib 测试都要链接 fastctx 依赖图，违背拆 sidecar 的初衷。可将 3 个函数本地化，但需逐字对照上游保证行为一致，本轮未做。
-- **Mantine 全量 styles.css（273 KB）内联进 overlay**：仅使用约 10 个组件，改按组件引入 CSS 预计减 150–190 KB，但涉及 Select/Combobox/Popover 等依赖样式，需要人工视觉验证，未改。
 - overlay 已按需加载（首次打开控制台时注入），注入脚本已 esbuild 压缩并校验占位符。
 - cargo-machete、grep 复核：chrono、qrcode、zstd、semver、hyper-util 等依赖均有使用。`cargo tree -d` 的重复版本全部来自 rmcp/schemars/reqwest/image 的传递依赖，工作区无法对齐。
 - CI：`build-desktop.yml` 在 3 个 runner 上重复执行 ci.yml 已跑过的 test/clippy；去掉可省每 runner 一次 debug 全量编译，但会削弱发布门禁，属流程决策，未改。
@@ -59,7 +58,6 @@ Hook 架构：Codex 每个事件（PreToolUse/PostToolUse/UserPromptSubmit/Subag
 ## 无法确认、需人工决定
 
 - vendor `windows_open_url`、`windows_activate_process_window`、`windows_apply_codey_icon_to_process_window`、`windows_process_control_strategy`：backend 无引用，但 `cargo check --target x86_64-pc-windows-msvc` 在本机因 ring/libsqlite3-sys 的 C 构建失败无法核实，保留。
-- 前端 `App.types.ts`、`components/mantine/index.tsx` 等导出的 Props/类型只在本文件使用（tsc 不报未用导出）；属公开类型面，未删。
 - 动态规则文件 `subagent-rules-v1.json` 读取链无写入方（前一轮 L5），维护者已决定保留。
 
 ## 验证命令与结果

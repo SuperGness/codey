@@ -7,7 +7,7 @@ import {
 
 import { invoke } from "../api";
 import { errorText } from "../appUtils";
-import { Button, Input } from "../components/mantine";
+import { Button, Input } from "../components/antd";
 import { inputShellClass, insetInputClass } from "../uiClasses";
 import type { NotificationChannelEditorProps } from "./types";
 
@@ -241,10 +241,9 @@ function WechatClawChannelEditorComponent({
         ) : null}
       </div>
 
-      <label className="field">
-        <span>接收通知的 iLink 用户 ID</span>
+      <label className="field notification-field-row">
+        <span>iLink 用户 ID</span>
         <div className={inputShellClass}>
-          <IconBrandWechat size={15} aria-hidden="true" />
           <Input
             className={insetInputClass}
             value={channel.chatId}

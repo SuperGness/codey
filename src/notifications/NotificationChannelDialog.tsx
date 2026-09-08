@@ -17,8 +17,7 @@ import {
   DialogTitle,
   Select,
   Switch,
-} from "../components/mantine";
-import { SETTINGS_OVERLAY_Z_INDEX } from "../overlay.constants";
+} from "../components/antd";
 import {
   createNotificationChannel,
   getNotificationChannelDefinition,
@@ -176,11 +175,13 @@ function NotificationChannelDialogComponent({
               </DialogTitle>
               <DialogDescription>
                 {isEditing
-                  ? "已保存的敏感字段保持隐藏；留空会保留，输入新值可替换。"
+                  ? draft.kind === "wechatClaw"
+                    ? "已绑定的接收用户会直接显示；重新扫码可更换绑定。"
+                    : "已保存的配置可直接查看和修改；地址或 Token 留空会保留。"
                   : "选择发送渠道，并填写该渠道需要的专属配置。"}
               </DialogDescription>
             </DialogHeader>
-            <div className="mt-[18px] grid gap-[7px]">
+            <div className="notification-channel-select-row mt-[18px]">
               <span
                 id="notification-channel-select-label"
                 className="text-[11px] font-semibold text-[#6e6e73]"
@@ -190,8 +191,6 @@ function NotificationChannelDialogComponent({
               <div className="relative w-[min(100%,260px)]">
                 <Select
                   className="w-full"
-                  inputClassName="h-10! rounded-lg! border-black/15! bg-white! text-xs font-semibold hover:border-blue-500/40! focus:border-blue-500/40! focus:ring-3 focus:ring-blue-500/8"
-                  sectionClassName="text-[#8e8e93] data-[position=right]:mr-2.5"
                   value={draft.kind}
                   disabled={isEditing || formBusy}
                   aria-labelledby="notification-channel-select-label"
@@ -199,33 +198,23 @@ function NotificationChannelDialogComponent({
                   dropdownClassName="rounded-[10px]"
                   showClear={false}
                   filter={false}
-                  leftSectionPointerEvents="none"
-                  leftSectionWidth={38}
                   prefix={
                     <span className="grid size-[22px] shrink-0 place-items-center">
                       <SelectedChannelIcon size={20} aria-hidden="true" />
                     </span>
                   }
                   getPopupContainer={() => popupContainer ?? document.body}
-                  zIndex={SETTINGS_OVERLAY_Z_INDEX}
                   renderOptionItem={(option) => {
                     const optionDefinition = notificationChannelDefinitions.find(
                       (item) => item.kind === option.value,
                     );
                     const OptionIcon = optionDefinition?.Icon;
-                    const selected = option.selected === true;
-                    const focused = option.focused === true;
                     const label =
                       optionDefinition?.displayName ?? option.label;
                     if (!OptionIcon) return label;
                     return (
                       <div
-                        className={`flex min-h-[34px] w-full items-center gap-2 rounded-md px-2.5 text-left text-xs font-semibold text-[#1d1d1f] ${option.className ?? ""} ${(selected || focused) ? "bg-blue-500/8" : ""}`}
-                        role="option"
-                        aria-selected={selected}
-                        style={option.style}
-                        onMouseEnter={option.onMouseEnter}
-                        onClick={option.onClick}
+                        className="flex items-center gap-2"
                       >
                         <span className="grid size-[22px] shrink-0 place-items-center">
                           <OptionIcon size={20} aria-hidden="true" />

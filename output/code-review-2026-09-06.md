@@ -248,7 +248,6 @@
 - 位置：backend/src/model_catalog.rs 336-350、524-559、995-1012。`write_catalog` 后重新读文件解析仅为比对 slug 顺序，`prepare_cached_catalog_for_native_web_search` 两次全量回读。建议比对内存中刚序列化的字节。置信度：中。
 
 ### G5. 前端未被引用的导出
-- src/uiClasses.ts：`inputShellClass`、`insetInputClass`、`compactSelectInputClass`、`flushCardClass`、`surfaceCardPaddingClass`；src/runtimeStatusPresentation.ts：`OptimizationFeatureIcon`、`InjectionStatusSummary`；src/routeShortNames.ts：`OFFICIAL_ROUTE_SHORT_NAME`、`MAX_ROUTE_SHORT_NAME_CHARACTERS`、`routeShortNameCharacterCount`；另有 20 余个仅类型导出（无运行时影响）。删除前跑 `pnpm run test:js`，因 tests/mantine-wrapper.test.mjs 等读取这些文件文本。置信度：高。
 
 ### G6. commands/models.rs 3512 行拆分
 - 建议按现有函数群拆为 `models/{sync,selection,defaults,catalog_refresh,renderer_catalog}.rs`：88-335 provider 同步、838-1335 选择保存与校验、1335-1500 默认模型、1539-1730 native 模型状态、1911-2110 renderer 目录、2116-2280 目录刷新与回滚。置信度：高（结构）。

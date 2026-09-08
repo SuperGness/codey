@@ -1,3 +1,4 @@
+import { Table } from "antd";
 import { memo, type CSSProperties } from "react";
 import { IconAdjustmentsHorizontal, IconInfoCircle, IconUsersGroup } from "@tabler/icons-react";
 
@@ -7,22 +8,20 @@ import type {
   SubagentRoleId,
 } from "./App.types";
 import {
-  ActionIcon,
+  Button,
   Badge,
   Card,
   Select,
   Switch,
-  Table,
   Tooltip,
-} from "./components/mantine";
+} from "./components/antd";
 import { ModelCombobox } from "./components/ModelCombobox";
 import { routeProviderId } from "./modelRoutes";
 import {
   resolveSubagentModelOption,
   type SubagentModelOption,
 } from "./subagentModels";
-import { compactSelectInputClass, surfaceCardPaddingClass } from "./uiClasses";
-import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
+import { surfaceCardPaddingClass } from "./uiClasses";
 
 const GPU_LAUNCH_MODES = [
   { value: "off", label: "关闭" },
@@ -151,54 +150,21 @@ export function SubagentPolicyCardComponent({
             <>
               <div className="subagent-table-container">
                 <Table
-                  withRowBorders
-                  className="subagent-table"
-                >
-                  <Table.Thead>
-                    <Table.Tr>
-                      <Table.Th style={{ width: "44px" }}>启用</Table.Th>
-                      <Table.Th style={{ width: "135px" }}>任务角色</Table.Th>
-                      <Table.Th>指定模型</Table.Th>
-                      <Table.Th style={{ width: "115px" }}>思考深度</Table.Th>
-                    </Table.Tr>
-                  </Table.Thead>
-                  <Table.Tbody>
-                    {SUBAGENT_TASK_TYPES.map((task) => {
-                      const selection = config.subagentRoles[task.id] ?? {
-                        enabled: true,
-                        model: config.subagentModel,
-                        reasoningEffort: config.subagentReasoningEffort,
-                      };
-                      const selectedModel = resolveSubagentModelOption(
-                        subagentModelOptions,
-                        selection.model,
-                        preferredProviderId,
-                      );
-                      const reasoningEfforts =
-                        selectedModel?.supportedReasoningEfforts ?? [];
-                      const reasoningOptions = reasoningEfforts.map((effort) => ({
-                        label: REASONING_EFFORT_LABELS[effort] ?? effort,
-                        value: effort,
-                      }));
-                      const updateRole = (
-                        next: Partial<typeof selection>,
-                      ) => {
-                        onConfigChange({
-                          ...config,
-                          subagentRoles: {
-                            ...config.subagentRoles,
-                            [task.id]: { ...selection, ...next },
-                          },
-                        });
-                      };
-                      const roleDisabled = !selection.enabled;
+ className="subagent-table"
+ size="small" pagination={false} bordered={false}
 
-                      return (
-                        <Table.Tr
-                          key={task.id}
-                          className={roleDisabled ? "subagent-role-disabled" : undefined}
-                        >
-                          <Table.Td>
+ columns={[{ title: <>启用</>, width: 64, render: (_value, record) => record.cells[0] },
+{ title: <>任务角色</>, width: 170, render: (_value, record) => record.cells[1] },
+{ title: <>指定模型</>, width: undefined, render: (_value, record) => record.cells[2] },
+{ title: <>思考深度</>, width: 130, render: (_value, record) => record.cells[3] }]}
+ dataSource={SUBAGENT_TASK_TYPES.map((task) => {
+   const selection = config.subagentRoles[task.id] ?? { enabled: true, model: config.subagentModel, reasoningEffort: config.subagentReasoningEffort };
+   const selectedModel = resolveSubagentModelOption(subagentModelOptions, selection.model, preferredProviderId);
+   const reasoningEfforts = selectedModel?.supportedReasoningEfforts ?? [];
+   const reasoningOptions = reasoningEfforts.map((effort) => ({ label: REASONING_EFFORT_LABELS[effort] ?? effort, value: effort }));
+   const updateRole = (next: Partial<typeof selection>) => onConfigChange({ ...config, subagentRoles: { ...config.subagentRoles, [task.id]: { ...selection, ...next } } });
+   const roleDisabled = !selection.enabled;
+return { key: task.id, roleDisabled, cells: [<div>
                             <Switch
                               checked={selection.enabled}
                               disabled={
@@ -208,8 +174,8 @@ export function SubagentPolicyCardComponent({
                               onCheckedChange={(enabled) => updateRole({ enabled })}
                               aria-label={`${selection.enabled ? "关闭" : "启用"}${task.name}角色`}
                             />
-                          </Table.Td>
-                          <Table.Td>
+                          </div>,
+<div>
                             <div className="subagent-role-name">
                               <span>{task.name}</span>
                               <Badge
@@ -224,22 +190,19 @@ export function SubagentPolicyCardComponent({
                                   popupContainer ?? tooltipContainer ?? document.body
                                 }
                                 position="top"
-                                zIndex={SETTINGS_OVERLAY_Z_INDEX}
                               >
-                                <ActionIcon
-                                  variant="subtle"
-                                  color="gray"
+                                <Button
+                                  variant="ghost"
                                   size="xs"
-                                  radius="sm"
                                   className="subagent-role-info-btn"
                                   aria-label={`${task.name}：${task.description}`}
                                 >
                                   <IconInfoCircle size={13} aria-hidden="true" />
-                                </ActionIcon>
+                                </Button>
                               </Tooltip>
                             </div>
-                          </Table.Td>
-                          <Table.Td>
+                          </div>,
+<div>
                             <ModelCombobox
                               aria-label={`${task.name}模型`}
                               value={selection.model}
@@ -256,7 +219,6 @@ export function SubagentPolicyCardComponent({
                               options={subagentModelOptions}
                               preferredProviderId={preferredProviderId}
                               getPopupContainer={() => popupContainer ?? document.body}
-                              zIndex={SETTINGS_OVERLAY_Z_INDEX}
                               onChange={(value) => {
                                 const option = subagentModelOptions.find(
                                   (candidate) => candidate.value === value,
@@ -274,12 +236,10 @@ export function SubagentPolicyCardComponent({
                                 });
                               }}
                             />
-                          </Table.Td>
-                          <Table.Td>
+                          </div>,
+<div>
                             <Select
                               className="w-full min-w-0"
-                              inputClassName={compactSelectInputClass}
-                              sectionClassName="text-[#6e6e73]"
                               aria-label={`${task.name}思考深度`}
                               value={
                                 reasoningEfforts.includes(selection.reasoningEffort)
@@ -297,7 +257,6 @@ export function SubagentPolicyCardComponent({
                               showClear={false}
                               filter={false}
                               getPopupContainer={() => popupContainer ?? document.body}
-                              zIndex={SETTINGS_OVERLAY_Z_INDEX}
                               onChange={(value) =>
                                 updateRole({
                                   model: selectedModel?.value ?? selection.model,
@@ -305,12 +264,9 @@ export function SubagentPolicyCardComponent({
                                 })
                               }
                             />
-                          </Table.Td>
-                        </Table.Tr>
-                      );
-                    })}
-                  </Table.Tbody>
-                </Table>
+                          </div>] };})}
+ rowClassName={(record) => record.roleDisabled ? "subagent-role-disabled" : ""}
+ />
               </div>
               <div className="subagent-policy-callout">
                 <IconInfoCircle size={14} className="subagent-callout-icon" aria-hidden="true" />
@@ -502,7 +458,6 @@ function FeaturePolicyCardComponent({
                     popupContainer ?? tooltipContainer ?? document.body
                   }
                   position="top"
-                  zIndex={SETTINGS_OVERLAY_Z_INDEX}
                 >
                   <span
                     className="fastctx-disabled-switch-tooltip"

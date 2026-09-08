@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
+import { Button as AntButton, Input as AntInput } from "antd";
 import {
   IconAlertTriangle as AlertTriangle,
   IconCheck as Check,
@@ -29,9 +30,8 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  Input,
   Switch,
-} from "./components/mantine";
+} from "./components/antd";
 
 type ModelPickerDialogProps = {
   open: boolean;
@@ -54,7 +54,7 @@ type ModelPickerDialogProps = {
   onOpenChange: (open: boolean) => void;
   onCustomModelInputChange: (model: string) => void;
   onAddCustomModel: () => void;
-  onToggleDraftModel: (model: string, checked: boolean) => void;
+  onToggleDraftModel: (model: string | readonly string[], checked: boolean) => void;
   onDeleteThirdPartyModel: (model: string) => void;
   onAutoReviewSupportedChange: (checked: boolean) => void;
   onSave: () => void;
@@ -86,19 +86,43 @@ function ModelPickerDialogComponent({
   onAutoReviewSupportedChange,
   onSave,
 }: ModelPickerDialogProps) {
-  const [modelQuery, setModelQuery] = useState("");
   const [visibleThirdPartyCount, setVisibleThirdPartyCount] = useState(
     MODEL_PICKER_PAGE_SIZE,
   );
   useEffect(() => {
     if (!open) return;
-    setModelQuery("");
     setVisibleThirdPartyCount(MODEL_PICKER_PAGE_SIZE);
-  }, [open]);
+  }, [open, customModelInput]);
   const filteredThirdPartyModels = useMemo(() => {
     if (!open) return [];
-    return filterModelOptions(thirdPartyModelOptions, modelQuery);
-  }, [modelQuery, open, thirdPartyModelOptions]);
+    return filterModelOptions(thirdPartyModelOptions, customModelInput);
+  }, [customModelInput, open, thirdPartyModelOptions]);
+  const filteredOfficialModels = useMemo(() => {
+    if (!open) return [];
+    const query = customModelInput.trim().toLowerCase();
+    return modelState.officialModels.filter((model) =>
+      `${model.slug} ${model.displayName}`.toLowerCase().includes(query));
+  }, [customModelInput, modelState.officialModels, open]);
+  const matchingModels = useMemo(
+    () => [
+      ...filteredOfficialModels.map((model) => model.slug),
+      ...filteredThirdPartyModels,
+    ],
+    [filteredOfficialModels, filteredThirdPartyModels],
+  );
+  const selectedMatchingCount = useMemo(
+    () => matchingModels.filter((model) => draftModelSet.has(modelKey(model))).length,
+    [matchingModels, draftModelSet],
+  );
+  const allMatchingSelected =
+    matchingModels.length > 0 && selectedMatchingCount === matchingModels.length;
+  const someMatchingSelected =
+    selectedMatchingCount > 0 && !allMatchingSelected;
+  const checkAllState: boolean | "indeterminate" = allMatchingSelected
+    ? true
+    : someMatchingSelected
+      ? "indeterminate"
+      : false;
   const visibleThirdPartyModels = visibleModelOptions(
     filteredThirdPartyModels,
     visibleThirdPartyCount,
@@ -138,38 +162,7 @@ function ModelPickerDialogComponent({
             <span className="min-w-0 break-words">{modelSyncWarning}</span>
           </div>
         )}
-        <div className="mt-3.5 flex items-center gap-3">
-          <div className="min-w-0 flex-1">
-            <Input
-              value={customModelInput}
-              onChange={(event) => onCustomModelInputChange(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  onAddCustomModel();
-                }
-              }}
-              placeholder="输入当前线路模型 ID，例如 provider-model-v2"
-              spellCheck={false}
-              aria-label="输入线路模型 ID"
-              aria-invalid={Boolean(modelInputError)}
-              disabled={isBusy}
-            />
-          </div>
-          <Button
-            variant="secondary"
-            size="sm"
-            disabled={isBusy || !customModelInput.trim()}
-            onClick={onAddCustomModel}
-          >
-            <Plus aria-hidden="true" />
-            添加
-          </Button>
-        </div>
-        {modelInputError && (
-          <p className="mt-1.5 text-[11px] leading-[1.45] text-[#d70015]" role="alert">{modelInputError}</p>
-        )}
-        {!routeConfigReadOnly && <div className="mt-3 flex items-center justify-between gap-4 rounded-[9px] border border-black/8 bg-[#f7f7f8] px-3 py-2.5">
+        {!routeConfigReadOnly && <div className="mt-3 flex items-center justify-between gap-4 rounded-[9px] border border-black/8 bg-[#f7f7f8] px-3.5 py-2.5">
           <div className="grid min-w-0 gap-0.5">
             <strong className="text-xs font-semibold text-[#1d1d1f]">Auto Review</strong>
             <small className="text-[10px] leading-[1.45] text-[#6e6e73]">
@@ -184,7 +177,41 @@ function ModelPickerDialogComponent({
             aria-label="当前线路支持 auto-review"
           />
         </div>}
-        <div className="my-3 max-h-[360px] overflow-y-auto rounded-[10px] border border-black/8 bg-[#fbfbfc] py-1 pl-1 pr-0.5 [scrollbar-color:rgba(99,99,104,0.46)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-button]:hidden [&::-webkit-scrollbar-thumb]:min-h-11 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-transparent [&::-webkit-scrollbar-thumb]:bg-black/40 [&::-webkit-scrollbar-thumb]:bg-clip-padding">
+        <div className="mt-3">
+          <AntInput.Search
+            value={customModelInput}
+            onChange={(event) => onCustomModelInputChange(event.target.value)}
+            onSearch={(value, _event, info) => { if (!isBusy && info?.source !== "clear" && value.trim()) onAddCustomModel(); }}
+            enterButton={<AntButton type="primary" disabled={isBusy || !customModelInput.trim()} icon={<Plus size={16} aria-hidden="true" />}>添加</AntButton>}
+            allowClear
+            placeholder="搜索模型，或输入模型 ID 添加"
+            spellCheck={false}
+            aria-label="搜索或添加模型"
+            aria-invalid={Boolean(modelInputError)}
+            status={modelInputError ? "error" : undefined}
+            disabled={isBusy}
+          />
+        </div>
+        {modelInputError && (
+          <p className="mt-1.5 text-[11px] leading-[1.45] text-[#d70015]" role="alert">{modelInputError}</p>
+        )}
+        <div className="mt-3 mb-1 flex items-center justify-between gap-3 px-1">
+          <Checkbox
+            checked={checkAllState}
+            disabled={isBusy || matchingModels.length === 0}
+            onCheckedChange={(checked) =>
+              onToggleDraftModel(matchingModels, checked === true)}
+            aria-label={allMatchingSelected ? "取消全选模型" : "全选模型"}
+          >
+            <span className="select-none text-xs font-medium text-[#1d1d1f]">
+              全选{customModelInput.trim() ? "搜索结果" : ""}
+            </span>
+          </Checkbox>
+          <span className="text-[11.5px] text-[#6e6e73]">
+            已选 <strong className="font-semibold text-[#1d1d1f]">{draftModelSet.size}</strong> 个模型
+          </span>
+        </div>
+        <div className="my-2 max-h-[360px] overflow-y-auto rounded-[10px] border border-black/8 bg-[#fbfbfc] py-1 pl-1 pr-0.5 [scrollbar-color:rgba(99,99,104,0.46)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-button]:hidden [&::-webkit-scrollbar-thumb]:min-h-11 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-transparent [&::-webkit-scrollbar-thumb]:bg-black/40 [&::-webkit-scrollbar-thumb]:bg-clip-padding">
           {modelState.officialModels.length > 0 && (
             <>
               <div className="m-0.5 flex items-center justify-between gap-3 rounded-[7px] bg-[#f1f5fb] px-2.5 py-2">
@@ -194,7 +221,7 @@ function ModelPickerDialogComponent({
                 </div>
                 <Badge variant="info">{modelState.officialModels.length} 个</Badge>
               </div>
-              {modelState.officialModels.map((model) => (
+              {filteredOfficialModels.map((model) => (
                 <div className="flex flex-wrap items-center gap-2.5 rounded-md bg-blue-500/[0.025] px-3 py-2 hover:bg-blue-500/[0.07]" key={model.slug}>
                   <Checkbox
                     checked={draftModelSet.has(modelKey(model.slug))}
@@ -238,21 +265,6 @@ function ModelPickerDialogComponent({
                 : `${filteredThirdPartyModels.length} / ${thirdPartyModelOptions.length} 个`}
             </Badge>
           </div>
-          {thirdPartyModelOptions.length > 0 && (
-            <div className="px-2 pb-1.5 pt-1">
-              <Input
-                value={modelQuery}
-                onChange={(event) => {
-                  setModelQuery(event.target.value);
-                  setVisibleThirdPartyCount(MODEL_PICKER_PAGE_SIZE);
-                }}
-                placeholder="搜索其他模型"
-                spellCheck={false}
-                aria-label="搜索其他模型"
-                disabled={isBusy}
-              />
-            </div>
-          )}
           {visibleThirdPartyModels.map((model) => {
             const added =
               draftModelSet.has(modelKey(model)) ||
@@ -333,7 +345,7 @@ function ModelPickerDialogComponent({
               <p className="mt-1 text-[11px] leading-relaxed text-[#86868b]">
                 {thirdPartyModelOptions.length === 0
                   ? "可在上方输入模型 ID 手动添加"
-                  : "请尝试更换关键词后重试"}
+                  : "可更换关键词，或点击上方添加按钮添加此模型 ID"}
               </p>
             </div>
           )}

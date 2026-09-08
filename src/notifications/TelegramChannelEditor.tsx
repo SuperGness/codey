@@ -1,10 +1,6 @@
 import { memo } from "react";
-import {
-  IconBrandTelegram,
-  IconKey,
-} from "@tabler/icons-react";
 
-import { Button, Input } from "../components/mantine";
+import { Button, Input } from "../components/antd";
 import { inputShellClass, insetInputClass } from "../uiClasses";
 import type { NotificationChannelEditorProps } from "./types";
 
@@ -15,13 +11,12 @@ function TelegramChannelEditorComponent({
 }: NotificationChannelEditorProps) {
   return (
     <>
-      <label className="field">
+      <label className="field notification-field-row">
         <span>Bot Token</span>
         <div className={inputShellClass}>
-          <IconKey size={15} aria-hidden="true" />
           <Input
             className={insetInputClass}
-            type="password"
+            type="text"
             value={channel.botToken}
             disabled={disabled}
             onChange={(event) =>
@@ -35,7 +30,7 @@ function TelegramChannelEditorComponent({
                 ? "已保存；输入新 Token 可替换"
                 : "从 BotFather 获取"
             }
-            autoComplete="new-password"
+            autoComplete="off"
             spellCheck={false}
           />
         </div>
@@ -59,10 +54,9 @@ function TelegramChannelEditorComponent({
           </Button>
         </div>
       ) : null}
-      <label className="field">
+      <label className="field notification-field-row">
         <span>Chat ID</span>
         <div className={inputShellClass}>
-          <IconBrandTelegram size={15} aria-hidden="true" />
           <Input
             className={insetInputClass}
             value={channel.chatId}

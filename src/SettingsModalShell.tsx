@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
-import { Modal } from "@mantine/core";
+import { Modal } from "antd";
 
-import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
 
 type SettingsModalShellProps = {
   afterClose?: () => void;
@@ -64,32 +63,43 @@ export function SettingsModalShell({
 }: SettingsModalShellProps) {
   return (
     <Modal
-      centered
-      classNames={{
-        body: "m-0 flex min-h-0 flex-1 flex-col overflow-hidden! p-0",
-        content:
-          "flex! h-[min(860px,calc(100dvh_-_24px))]! max-h-[calc(100dvh_-_24px)]! max-w-[calc(100vw_-_24px)] flex-col overflow-hidden! p-0 max-[760px]:h-[calc(100dvh_-_12px)]! max-[760px]:max-h-[calc(100dvh_-_12px)]! max-[760px]:max-w-[calc(100vw_-_12px)]",
-        header:
-          "m-0 min-h-0! flex-none border-b border-gray-200 px-5! py-2.5! max-[760px]:px-3.5! max-[760px]:py-2!",
-        inner: "p-3! max-[760px]:p-1.5!",
-        root: "[-webkit-app-region:no-drag]",
-        title: "min-w-0 flex-1",
-      }}
-      closeButtonProps={{ "aria-label": "关闭配置" }}
-      closeOnClickOutside={false}
-      closeOnEscape={false}
-      data-codey-settings-shell="true"
-      onClose={onCancel}
-      onExitTransitionEnd={afterClose}
-      opened={visible}
-      padding={0}
-      lockScroll={false}
-      portalProps={container ? { target: container } : undefined}
-      size={1040}
+      open={visible}
+      onCancel={onCancel}
+      afterClose={afterClose}
+      mask={{ closable: false }}
+      keyboard={false}
+      footer={null}
+      closable={header === undefined}
       title={header ?? title}
-      withCloseButton={header === undefined}
-      withinPortal={Boolean(container)}
-      zIndex={SETTINGS_OVERLAY_Z_INDEX}
+      getContainer={container ?? undefined}
+      width={1040}
+      centered
+      styles={{
+        container: {
+          height: "min(860px, calc(100dvh - 24px))",
+          display: "flex",
+          flexDirection: "column",
+          padding: 0,
+          overflow: "hidden",
+          borderRadius: 14,
+        },
+        header: {
+          padding: "12px 20px",
+          marginBottom: 0,
+          borderTopLeftRadius: 14,
+          borderTopRightRadius: 14,
+        },
+        body: {
+          display: "flex",
+          flex: 1,
+          minHeight: 0,
+          flexDirection: "column",
+          overflow: "hidden",
+          borderBottomLeftRadius: 14,
+          borderBottomRightRadius: 14,
+        },
+      }}
+      className="settings-modal-shell"
     >
       {children}
     </Modal>

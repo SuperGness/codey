@@ -8,28 +8,6 @@
   }
 }
 
-@media (max-width: 900px) {
-  .route-manager {
-    grid-template-columns: 1fr;
-  }
-
-  .route-list-pane {
-    border-right: 0;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-  }
-
-  .route-list {
-    max-height: 320px;
-  }
-
-  .route-catalog-pane {
-    padding-top: 14px;
-  }
-
-  .provider-model-groups {
-    max-height: 320px;
-  }
-}
 
 @media (max-width: 768px) {
   .notification-channel-list {
@@ -87,6 +65,22 @@
 
   .provider-model-group-actions {
     justify-content: flex-start;
+    padding-left: 34px;
+  }
+
+  .route-catalog-pane {
+    padding: 12px;
+  }
+
+  .provider-model-tags,
+  .route-manager-current .provider-model-tags,
+  .provider-model-group .provider-model-empty,
+  .route-manager-current .provider-model-group .provider-model-empty {
+    padding-left: 10px;
+  }
+
+  .route-manager-current .provider-model-group-actions {
+    padding-left: 0;
   }
 
   .section-title.trace-section-title {

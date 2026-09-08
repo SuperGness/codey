@@ -51,7 +51,7 @@ test("user FastCtx blocks embedded tools across the backend and settings", async
   assert.match(uiSource, /aria-label="启用 FastCtx 上下文工具"/);
   assert.match(
     uiSource,
-    /<Tooltip[\s\S]*content=\{fastctxBlockedReason\}[\s\S]*getPopupContainer=\{\(\) =>\s*popupContainer \?\? tooltipContainer \?\? document\.body\s*\}[\s\S]*zIndex=\{SETTINGS_OVERLAY_Z_INDEX\}/,
+    /<Tooltip[\s\S]*content=\{fastctxBlockedReason\}[\s\S]*getPopupContainer=\{\(\) =>\s*popupContainer \?\? tooltipContainer \?\? document\.body\s*\}/,
   );
   assert.match(uiSource, /className="fastctx-disabled-switch-tooltip"[\s\S]*tabIndex=\{0\}/);
 });

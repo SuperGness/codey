@@ -54,7 +54,7 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
     "utf8",
   );
 
-  assert.match(viewer, /<Modal[\s\S]*fullScreen/);
+  assert.match(viewer, /<Modal[\s\S]*width="100vw"[\s\S]*height: "100dvh"/);
   assert.match(viewer, /invoke<RouteRequestLogQueryPage>\("query_route_request_logs", \{/);
   assert.match(viewer, /pageSize/);
   assert.match(viewer, /window\.setTimeout\([\s\S]*300/);
@@ -103,7 +103,7 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
     "缓存 Token",
     "总 Token",
   ]) {
-    assert.match(viewer, new RegExp(`>${heading}<`));
+    assert.match(viewer, new RegExp(`title: "${heading}", width: \\d+`));
   }
   assert.doesNotMatch(viewer, />重试</);
   assert.doesNotMatch(viewer, /retryCount/);
@@ -114,7 +114,7 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /路由前置/);
   assert.match(viewer, /上游首包/);
   assert.match(viewer, /upstreamErrorSummary\?: string \| null/);
-  assert.match(viewer, /\[\s*item\.statusCode,\s*item\.upstreamStatusCode,[\s\S]*\.some/);
+  assert.match(viewer, /\[\s*item\.statusCode,\s*item\.upstreamStatusCode\s*\]\.some/);
   assert.match(viewer, /statusCode < 200 \|\| statusCode >= 300/);
   assert.match(viewer, /<IconQuestionMark/);
   assert.match(viewer, /查看上游错误信息/);
@@ -143,7 +143,6 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /codexSessionId\?: string \| null/);
   assert.match(viewer, /codexSessionIsParent\?: boolean \| null/);
   assert.match(viewer, /item\.codexSessionIsParent[\s\S]*父/);
-  assert.match(viewer, /w-40 max-w-40 whitespace-nowrap">会话 ID/);
   assert.match(viewer, /flex w-36 max-w-36 items-center gap-1\.5 overflow-hidden/);
   assert.match(viewer, /className="shrink-0 whitespace-nowrap"/);
   assert.match(viewer, /onClick=\{\(\) => handleCopyId\(item\.codexSessionId!\)\}/);

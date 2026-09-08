@@ -477,6 +477,64 @@ fn renderer_catalog_uses_current_config_for_model_only_changes() {
 }
 
 #[test]
+fn model_hot_reload_ignores_empty_context_entries_but_keeps_budget_changes_pending() {
+    let applied = CodeyConfig::default();
+    let mut current = applied.clone();
+    current.default_model = "new-model".into();
+    current
+        .model_context_by_provider
+        .insert("route".into(), Default::default());
+    current
+        .supports_1m_context_by_provider
+        .insert("route".into(), Vec::new());
+
+    for (baseline, saved) in [(&applied, &current), (&current, &applied)] {
+        assert!(runtime_supports_current_routes_for_hot_reload(
+            baseline, saved
+        ));
+        assert!(std::ptr::eq(
+            model_catalog_config_for_runtime(saved, Some(baseline)),
+            saved,
+        ));
+        assert!(!provider_route_restart_required_for_runtime(
+            baseline, saved
+        ));
+    }
+
+    for one_m in [false, true] {
+        let mut changed = current.clone();
+        if one_m {
+            changed
+                .supports_1m_context_by_provider
+                .insert("route".into(), vec!["new-model".into()]);
+        } else {
+            changed
+                .model_context_by_provider
+                .get_mut("route")
+                .unwrap()
+                .insert(
+                    "new-model".into(),
+                    crate::config::ModelContextConfig {
+                        context_window_tokens: 100_000,
+                        auto_compact_token_limit: None,
+                        reserve_output_tokens: None,
+                    },
+                );
+        }
+        for (baseline, saved) in [(&current, &changed), (&changed, &current)] {
+            assert!(!runtime_supports_current_routes_for_hot_reload(
+                baseline, saved
+            ));
+            assert!(std::ptr::eq(
+                model_catalog_config_for_runtime(saved, Some(baseline)),
+                baseline,
+            ));
+            assert!(provider_route_restart_required_for_runtime(baseline, saved));
+        }
+    }
+}
+
+#[test]
 fn model_hot_reload_keeps_startup_capabilities_pending_without_blocking_other_routes() {
     for (websockets, web_search) in [(false, false), (true, false), (false, true)] {
         let mut route = crate::config::ProviderProfile::new("Models");

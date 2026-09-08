@@ -1,4 +1,5 @@
-:root {
+:root,
+:host {
   color-scheme: light;
   font-family:
     -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
@@ -48,15 +49,6 @@ textarea {
 button,
 [role="button"] {
   touch-action: manipulation;
-}
-
-button:focus-visible,
-input:focus-visible,
-[role="button"]:focus-visible,
-[role="switch"]:focus-visible,
-[role="checkbox"]:focus-visible {
-  outline: 2px solid var(--mac-blue);
-  outline-offset: 2px;
 }
 
 .app-shell {
@@ -160,101 +152,6 @@ input:focus-visible,
 .header-update-btn-wrap {
   display: inline-flex;
   align-items: center;
-}
-
-.header-update-pill {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  position: relative;
-  height: 22px;
-  padding: 0 7px;
-  border: 1px solid rgba(0, 0, 0, 0.09);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.85);
-  color: #8e8e93;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: all 160ms ease;
-}
-
-.header-update-pill:not(.has-update):not(.has-downloaded):hover:not(:disabled) {
-  background: #ffffff;
-  color: var(--mac-blue);
-  border-color: rgba(0, 122, 255, 0.35);
-  box-shadow: 0 1px 3px rgba(0, 122, 255, 0.15);
-}
-
-.header-update-pill:disabled {
-  opacity: 0.65;
-  cursor: not-allowed;
-}
-
-.header-update-pill-label {
-  color: inherit;
-  letter-spacing: 0.01em;
-  opacity: 1;
-}
-
-.header-update-pill > svg {
-  color: inherit;
-  opacity: 1;
-  stroke: currentColor;
-}
-
-/* 有可升级版本：蓝色 pill + 轻微呼吸，全页唯一强调位 */
-.header-update-pill.has-update {
-  background: rgba(0, 122, 255, 0.09);
-  border-color: rgba(0, 122, 255, 0.32);
-  color: #0068d9;
-  animation: update-pill-pulse 2.4s infinite ease-in-out;
-}
-
-.header-update-pill.has-update:hover:not(:disabled) {
-  background: rgba(0, 122, 255, 0.16);
-  border-color: var(--mac-blue);
-  color: #0057b8;
-  box-shadow: 0 2px 6px rgba(0, 122, 255, 0.22);
-  animation: none;
-}
-
-.header-update-pill.has-update:active:not(:disabled) {
-  background: #0062cc;
-  border-color: #0062cc;
-  color: #ffffff;
-}
-
-.header-update-pill.has-downloaded {
-  background: rgba(52, 199, 89, 0.13);
-  border-color: rgba(52, 199, 89, 0.42);
-  color: #248a3d;
-}
-
-.header-update-pill.has-downloaded:hover:not(:disabled),
-.header-update-pill.has-downloaded:hover {
-  background: rgba(52, 199, 89, 0.2);
-  border-color: var(--mac-green);
-  color: #176c2e;
-  box-shadow: 0 2px 6px rgba(52, 199, 89, 0.22);
-}
-
-.header-update-pill.has-downloaded:active:not(:disabled) {
-  background: #28a745;
-  border-color: #28a745;
-  color: #ffffff;
-}
-
-@keyframes update-pill-pulse {
-  0%, 100% {
-    box-shadow: 0 0 0 0 rgba(0, 122, 255, 0.22);
-  }
-  50% {
-    box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.08);
-  }
 }
 
 .macos-titlebar-right {
@@ -410,12 +307,4 @@ input:focus-visible,
   font-size: 11px;
   font-weight: 650;
   white-space: nowrap;
-}
-
-.badge-secondary,
-.mantine-Badge-root[data-variant="light"][data-color="gray"] {
-  background: rgba(0, 0, 0, 0.07);
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  color: #3a3a3c;
-  font-weight: 500;
 }

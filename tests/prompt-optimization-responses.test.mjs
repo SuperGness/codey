@@ -6,10 +6,6 @@ const cardSource = readFileSync(
   new URL("../src/PromptOptimizationCard.tsx", import.meta.url),
   "utf8",
 );
-const mantineWrapperSource = readFileSync(
-  new URL("../src/components/mantine/index.tsx", import.meta.url),
-  "utf8",
-);
 const backendSource = readFileSync(
   new URL("../backend/src/prompt_optimization.rs", import.meta.url),
   "utf8",
@@ -47,11 +43,11 @@ test("prompt optimization renders the searchable manual model combobox without r
   );
   assert.match(
     manualComboboxSource,
-    /useCombobox\(/,
+    /<AutoComplete/,
   );
   assert.match(
     manualComboboxSource,
-    /Combobox\.EventsTarget/,
+    /onChange=\{onChange\}/,
   );
   assert.match(
     manualComboboxSource,

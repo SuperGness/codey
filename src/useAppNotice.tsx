@@ -15,7 +15,7 @@ import {
 } from "@tabler/icons-react";
 
 import type { Notice } from "./App.types";
-import { Button } from "./components/mantine";
+import { Button } from "./components/antd";
 
 const NOTICE_AUTO_DISMISS_MS = 5_000;
 const INITIAL_NOTICE: Notice = {

@@ -11,7 +11,7 @@ import {
   IconTrash as Trash2,
 } from "@tabler/icons-react";
 
-import { Badge, Button, Card } from "./components/mantine";
+import { Badge, Button, Card } from "./components/antd";
 import { formatBytes } from "./formatters";
 import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
 import { surfaceCardPaddingClass } from "./uiClasses";
@@ -132,14 +132,13 @@ function TraceLogModuleComponent({
                 : "存储保护关闭"}
           </Badge>
           <Button
-            className="trace-refresh-button"
             variant="outline"
             size="sm"
             disabled={disabled}
             onClick={onRefresh}
           >
-            <RefreshCw className={loading ? "animate-spin" : ""} aria-hidden="true" />
-            刷新统计
+            <RefreshCw size={12} className={loading ? "animate-spin" : ""} aria-hidden="true" />
+            <span>刷新统计</span>
           </Button>
           <Button
             variant="destructive-light"
@@ -148,9 +147,9 @@ function TraceLogModuleComponent({
             onClick={onClear}
           >
             {clearBusy
-              ? <LoaderCircle className="animate-spin" aria-hidden="true" />
-              : <Trash2 aria-hidden="true" />}
-            清理诊断存储
+              ? <LoaderCircle size={12} className="animate-spin" aria-hidden="true" />
+              : <Trash2 size={12} aria-hidden="true" />}
+            <span>清理诊断存储</span>
           </Button>
         </div>
       </div>

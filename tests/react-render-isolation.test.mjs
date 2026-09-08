@@ -84,7 +84,8 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.equal(sections.match(/<Select\s/g)?.length, 2);
   assert.equal(sections.match(/<ModelCombobox\s/g)?.length, 1);
   assert.doesNotMatch(sections, /<select|route-native-select/);
-  assert.match(sections, /route-manager route-manager-balanced/);
+  assert.match(sections, /visibleProfiles\.map\(\(profile\) =>/);
+  assert.doesNotMatch(sections, /route-list-pane|route-manager-balanced|<Listy/);
   assert.match(sections, /route-manager-current/);
   assert.match(sections, /className="provider-model-groups"/);
   assert.match(sections, /modelState\.officialModelIds/);
@@ -95,7 +96,7 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(sections, /额度显示/);
   assert.match(
     sections,
-    /routeConfigReadOnly && group\.official && \([\s\S]*provider-model-usage-toggle[\s\S]*checked=\{showAccountUsageInHeader\}/,
+    /isOfficial && !disabled && \([\s\S]*provider-model-usage-toggle[\s\S]*checked=\{showAccountUsageInHeader\}/,
   );
   assert.match(sections, /<DialogTitle>/);
   assert.match(sections, /config\.localRouterEnabled && \(/);
@@ -116,9 +117,9 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
     sections,
     /disabled=\{\s*routeConfigReadOnly \|\|\s*isBusy \|\|\s*dirty \|\|\s*config\.profiles\.length <= 1\s*\}/,
   );
-  assert.match(sections, /统一模型目录/);
+  assert.match(sections, /供应商与模型/);
   assert.doesNotMatch(sections, /catalog-search|searchQuery|搜索模型\.\.\./);
-  assert.match(sections, /第三方线路同时接入统一路由/);
+  assert.match(sections, /点击模型设为全局默认/);
   assert.match(sections, /已接入路由/);
   assert.doesNotMatch(sections, /aria-pressed|route-list-select/);
   assert.doesNotMatch(sections, /role="radiogroup"/);

@@ -90,7 +90,7 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 后续修复（同日）：
 
 - 会话永久删除在一次操作内按 Codex home 复用 rollout 扫描结果，数据库记录中的路径仍逐库校验；扫描失败不缓存，已成功删除的孤立文件从缓存移除，避免后续空数据库重复计为删除成功。缓存不跨操作存活。2,000 个文件、3 个数据库、9 组交替测量的中位数为 78.254 ms → 25.968 ms，约 3.01 倍；目录遍历从每库一次降为每个 home 一次。重跑：`cargo test -p codey-runtime-data rollout_discovery_benchmark --locked -- --ignored --nocapture`。
-- ModelCombobox 使用已有 Mantine `useVirtualizedCombobox`，保留完整搜索与线路分组，只挂载视口附近的选项，无新增依赖。10,000 个模型的浏览器实测，列表首尾均挂载 10 个 option；布局回归在分组边界和中段验证最多 16 个，相比全量渲染减少至少 99.84%。键盘循环导航、远端搜索、Enter 提交、鼠标选择、空结果和不可用模型均已验证。测试页面为 `tests/model-combobox-browser.html`，开发服务器 base 下访问；滚动只更新可见窗口，已选模型索引按输入变化缓存。
+- 模型选择器使用 Ant Design Select 的分组、搜索、键盘导航和虚拟滚动；手动模型使用 AutoComplete，保留任意输入与列表补全。10,000 个模型的人工回归页面为 `tests/model-combobox-browser.html`。线路模型配置弹窗使用 Ant Design `Input.Search` 合并搜索与手动添加，输入同步筛选官方及线路模型，回车或添加按钮沿用原有校验。全选和取消全选覆盖所有匹配结果（包括尚未展开的分页项），通过同一选择回调批量更新草稿，保留原有取消选择时的清理规则，不会批量启用 Auto Review 或 1M 上下文。
 - Chat 和 Anthropic 流式转换不再在校验用 accumulator 内重复拼接正文、拒绝信息或 thinking 内容；非流式收集仍保留全文，工具参数、类型检查、结束原因、用量与错误顺序不变。1 MiB 正文回归验证重复正文缓冲区 capacity 从至少 1 MiB 降至 0；这只衡量被移除的重复副本，不代表进程总内存减少比例。完整输出仍由 Responses 状态保留以生成既有终态事件。18 组长响应事件、工具与错误场景的标准化全文摘要保持一致。重跑：`cargo test -p codey local_router::tail_tests --locked`。
 
 日志游标分页和筛选索引由同工作区的日志任务并行实现；协议任务另行调整响应预算和超时。本轮保留这些修改，不将其列为上述三项优化的行为兼容结论。旧页码接口和关键词包含匹配仍有深页或全表扫描成本，需要在日志任务的端到端验证中单独衡量。
@@ -123,7 +123,7 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 | `backend/src/prompt_optimization.rs` | 测试服务器明确断言读取到请求字节，修复忽略读取量的检查错误。 |
 | `tests/build-output.test.mjs`、`tests/pure-frontend-helpers.test.mjs`、`backend/src/model_catalog.rs` | 新增产物时间戳保留、内容更新、失效文件和空目录清理、符号链接隔离、日期格式兼容、缓存投影重复执行一致性回归。Rust 文件同时统一为项目 rustfmt 格式。 |
 
-没有删除源码文件、前端资源、依赖或配置项。`@mantine/hooks` 是 Mantine 的 peer 依赖；全部 public 注入脚本均由动态嵌入入口使用；开发 Vite 配置和人工模型选择器验证页面仍保留。旧 ignored 构建产物不进入当前安装包，未把它们计为产物体积优化。
+没有删除源码文件、前端资源、依赖或配置项。全部 public 注入脚本均由动态嵌入入口使用；开发 Vite 配置和人工模型选择器验证页面仍保留。旧 ignored 构建产物不进入当前安装包，未把它们计为产物体积优化。
 
 日期基准先断言新旧输出一致，再交替执行 9 组、每组 100 次，每次处理 100 个时间戳。每 100 条中位耗时为 2.547 ms → 0.0667 ms，约 38.2 倍；这是格式化函数的合成基准，不代表页面整体速度。可运行 `node output/audit-2026-09-08/format-timestamp-bench.mjs` 复核。日期回归另在 UTC 和 America/New_York 环境执行通过。
 
@@ -189,7 +189,7 @@ Windows 的启动兼容安装最多尝试 2 次，仅超时、中断、WouldBloc
 
 CLI 包装器在目标校验和创建进程前建立认证连接。回连单次 500ms，端口被拒绝（启动器已不再监听，例如 app-server 重启）立即放弃，超时等暂时性错误在 3 秒内重试，避免回环被安全软件或高负载拖慢时一次失败就静默放弃握手。除握手连接外，包装器还按 `CODEY_CODEX_CLI_WRAPPER_MARKER` 指定的路径（状态目录 `cli-wrapper/<令牌>.json`）写入记录文件：连接前写 `launching`，创建目标进程后写 `executed`，失败写 `failed` 并附原因与是否可重试；macOS 在 exec 前先写 `executed`。启动器同时监听握手端口和每 250ms 轮询记录文件，任一确认即成功，等待结束后删除记录，准备包装器时清理一小时以上的残留记录。令牌后的 EOF 仍只表示目标已执行；失败时发送 `!` 和最多 8 KiB 的结构化错误，保留具体原因与是否允许重试。收到明确失败立即结束兼容等待；创建进程不再使用独立的 750ms 确认窗口，改为共享启动截止时间。握手监听器只服务首次启动，其关闭后仍允许后续 app-server 调用 CLI。回归使用真实子进程覆盖目标缺失、配置无效、执行失败、参数和环境隔离、监听器关闭后的重启；退出码与监听器关闭后的重启回归复用测试程序作为固定返回 17 的原生子进程，避免让 CLI 配置参数参与 shell 命令解析；断言失败时保留子进程输出。Windows 测试另用独占文件句柄验证共享冲突分类。重试分类、截止时间和立即返回通过 Rust 行为测试覆盖，源码检查只保留平台清理顺序等约束。
 
-浏览器和计算机操作执行器会从 Codex 获取 `CODEX_CLI_PATH`，但其子进程环境可能过滤 `CODEY_CODEX_CLI_WRAPPER_*`。CLI 包装分流因此不能只依赖目标环境变量：辅助参数先由各自入口处理；其余带参数的调用从 Codey 保存的应用位置恢复真实内置 CLI，Windows Store 继续复用已校验的用户运行目录。定位该目录时优先采用绝对路径的 `LOCALAPPDATA`；变量被辅助进程过滤、为空或为相对路径时，通过现有 `directories` 依赖调用 Windows Known Folder API 获取本地应用数据目录，不拼接用户主目录，也不扩大子进程的环境变量集合。正常启动与 CLI 回退共用此解析，保留运行文件完整性校验；回归覆盖缺失、空值、相对路径及有效目录优先级。找不到目标、配置损坏或执行失败时直接报错，禁止进入桌面启动及 Codex 进程清理流程。无参数启动、旧 watcher 的 `--debug-port` 和 macOS 的 `-psn_` 启动参数保留桌面行为。此恢复不依赖主进程 Inspector；现有兼容环境完整时仍优先使用本次启动指定的目标和运行配置。回归覆盖环境缺失、保存位置无效、参数及退出码转发和正常桌面分流；Windows 下的 Chrome 端到端行为仍需实机验证。
+浏览器和计算机操作执行器会从 Codex 获取 `CODEX_CLI_PATH`，但其子进程环境可能过滤 `CODEY_CODEX_CLI_WRAPPER_*`。CLI 包装分流因此不能只依赖目标环境变量：辅助参数先由各自入口处理；其余带参数的调用从 Codey 保存的应用位置恢复真实内置 CLI，Windows Store 继续复用已校验的用户运行目录。定位该目录时优先采用绝对路径的 `LOCALAPPDATA`；变量被辅助进程过滤、为空或为相对路径时，通过现有 `directories` 依赖调用 Windows Known Folder API 获取本地应用数据目录，不拼接用户主目录，也不扩大子进程的环境变量集合。正常启动与 CLI 回退共用此解析，保留运行文件完整性校验；回归覆盖缺失、空值、相对路径及有效目录优先级。找不到目标、配置损坏或执行失败时直接报错，禁止进入桌面启动及 Codex 进程清理流程。无参数启动、旧 watcher 的 `--debug-port` 和 macOS 的 `-psn_` 启动参数保留桌面行为。此恢复不依赖主进程 Inspector；现有兼容环境完整时仍优先使用本次启动指定的目标和运行配置。未携带 `CODEY_CODEX_CLI_WRAPPER_TARGET` 和运行配置的独立浏览器调用（含 `app-server`）原样转发参数给恢复出的内置 CLI，不注入 Codey 配置；携带本次启动目标的受控 `app-server` 仍必须提供运行配置，缺失时继续拒绝启动。回归覆盖环境缺失、保存位置无效、参数及退出码转发和正常桌面分流；Windows 下的 Chrome 端到端行为仍需实机验证。
 
 诊断日志记录 fuse 探测结果与扫描耗时（`launcher.electron_fuses`）、Store 临时环境启用与清理、激活返回的 PID、线程恢复结果、Inspector 发现或探测汇总（`launcher.inspector_probe_summary`：拒绝/超时/其他错误次数、渲染端口是否就绪）、尝试次数及是否为无断点 CLI 启动、包装器自身的启动时间与回连结果（`launcher.cli_wrapper_started`、`launcher.cli_wrapper_handshake_connect`）、CLI 认证和执行确认、记录文件确认（`launcher.cli_wrapper_marker_*`）以及进程提前退出（`launcher.startup_process_exited`）；环境只记录是否存在，不记录令牌或完整配置。CLI 超时区分未收到有效握手与已认证但未确认执行，便于识别桌面未启动包装器和目标程序启动缓慢。Inspector 探测报「被拒绝」还是「超时」是关键区分：fuse 关闭时无人监听，应当立即被拒绝；连续超时说明回环连接被拖住，同一原因也会拖慢包装器回连。
 
@@ -237,7 +237,7 @@ Windows Store 运行文件暂存、CLI 环境隔离、Inspector 启动时防止 
 
 Windows 集成模块已删除无调用方且未对外导出的快捷方式创建、桌面目录查询、注册表写入与删除、仅按 PID 终止进程函数，以及这些函数专用的 COM 和注册表辅助代码。现有窗口操作、进程枚举及校验路径或创建时间后终止进程的入口保持不变，避免 Windows CI 在 `-D warnings` 下因遗留代码失败。
 
-依赖审查结合三个 Cargo 包、前端清单、构建脚本、平台 cfg 和源码调用；`cargo-machete .` 未发现未使用的直接依赖。`pnpm why @mantine/hooks` 确认它是 Mantine Core 的必需 peer，删除根声明不会减少安装树；`cargo tree --locked -i zopfli -e features` 确认 ZIP 的 deflate 特性同时由 FastCtx 启用，仅调整本项目不会移除 Zopfli。系统代理、系统证书、二维码、压缩包读取及原生平台依赖均保留，未改动依赖版本或锁文件。此次删除减少注入代码及随包资源，不宣称减少第三方依赖数量。
+依赖审查结合三个 Cargo 包、前端清单、构建脚本、平台 cfg 和源码调用；`cargo-machete .` 未发现未使用的直接依赖。`cargo tree --locked -i zopfli -e features` 确认 ZIP 的 deflate 特性同时由 FastCtx 启用，仅调整本项目不会移除 Zopfli。系统代理、系统证书、二维码、压缩包读取及原生平台依赖均保留，未改动依赖版本或锁文件。此次删除减少注入代码及随包资源，不宣称减少第三方依赖数量。
 
 上轮审查清理复用 `http_response::read_bounded_body`，删除模型列表的重复限长读取实现；保留声明长度和分块读取的双重限制。发布脚本及标签打包流程均执行带锁定依赖的 Rust 测试和 Clippy，不能假设只监听 master/PR 的 CI 已验证标签。
 
@@ -262,7 +262,7 @@ release 应用通过 `plutil -lint`、`codesign --verify --deep --strict` 和可
 - auth.json 只读，Codey 不修改官方登录凭据。
 - config.toml 在启动准备和正式启动前做快照复核。除 Codey 自有 codey_router 恢复桩和明确识别的旧版污染外，不改写用户 Provider、MCP、模型或未知字段。
 - codex-lease.json、hooks.json 中的 Codey 组、角色运行副本和证明状态均属于临时运行资产，异常退出后由下次启动恢复。
-- 第三方 API Key、通知地址和机器人令牌目前仍以明文保存在 Codey 私有配置及备份中；后端不会把已保存值返回前端。后续若迁移系统凭据库，应同时处理备份格式和升级兼容。
+- 第三方 API Key、通知地址和机器人令牌目前仍以明文保存在 Codey 私有配置及备份中；配置响应保留 API Key、飞书和企业微信的 Webhook 地址及 Telegram Bot Token 供编辑回显；ClawBot 显示已绑定的接收用户 ID，其机器人令牌、上下文令牌及其他渠道地址仍会清空。后续若迁移系统凭据库，应同时处理备份格式和升级兼容。
 - codey-errors.log 只记录脱敏后的失败信息。不要把提示词、响应正文、认证值或完整敏感地址写入日志。
 
 ## 主要子系统
@@ -486,13 +486,15 @@ cc-switch（farion1231/cc-switch，`src-tauri/src/proxy`）对照结论，仅基
 
 ### 控制台与页面注入
 
+`ModelSection` 按 `visibleProfiles` 渲染紧凑单列供应商列表（无独立卡片边框与内边距浪费，通过列表项下边框分割），线路信息、管理按钮、状态和模型共用一个滚动区域。标题行整合线路名称与状态徽章，官方额度开关与操作按钮右对齐，模型标签内联紧凑展示。禁用线路保留编辑入口，但不展示可选模型或计入模型总数；关闭本地路由后仅展示当前线路，保留同步和官方额度开关。排序支持拖动及手柄上的上下方向键。控制台各模块的行内微操作按钮（如线路列表与通知渠道卡片的编辑、删除操作）采用统一无边框纯图标规范（26px × 26px，透明背景，编辑统一为 macOS 品牌蓝 `#007aff`、删除为警示红 `#ff3b30`，悬浮呈现微透明背景色，操作间隙收窄至 2px），以保持轻盈扁平的 macOS 交互一致性。模型配置弹框（`ModelPickerDialog`）将 Auto Review 线路能力置顶，搜索框下移紧邻模型操作栏，全选采用带半选支持的标准 Checkbox，且模型上下文预算（`ModelContextFields`）采用旋转折叠徽章与卡片式参数面板。开发预览入口为 `/codey/tests/antd-browser.html`，使用 mock 数据验证默认模型切换、排序、禁用线路及 600px 窄窗口布局。
+
 cdp.rs 负责准备嵌入资源、安装桥接、首次注入和健康复核。src/overlay.tsx 挂载 React 控制台；public/ 中的脚本分别处理模型、插件、会话、提示词和平台增强。
 
 控制台首次打开时再加载完整界面。轻量健康探针持续确认桥接状态，只有确定桥接缺失时才重注入；页面忙或探测超时保持保守状态。
 
 用户脚本在同一文档成功执行后不会因桥接恢复而重复运行，失败可重试，新文档正常运行。内置脚本保留自身的恢复逻辑。桥接安装检查 Runtime.evaluate 的 exceptionDetails；失败释放新连接，成功替换后关闭旧 pump。new-document 注册随各次 CDP 会话维护，不使用跨连接 target 缓存。
 
-模型列表热更新通过 QueryClient 发布新结果，不直接修改 React 共享查询对象，确保已挂载的对话模型选择器收到通知。模型增删立即同步本地路由与页面列表，包括 WebSocket 和原生网页搜索线路；对应的 app-server 模型能力仍按启动配置判断是否需要重启，不能因页面刷新成功而清除重启状态。热更新检查只阻止线路能力开关、远程压缩身份、官方线路连接和路由模式等不兼容变更，不再因模型集合变化阻止所有线路刷新。保存提示分别报告模型投递、能力待重启和子代理配置失败，未执行热更新不再显示为刷新失败。
+模型列表热更新通过 QueryClient 发布新结果，不直接修改 React 共享查询对象，确保已挂载的对话模型选择器收到通知。上下文兼容性检查忽略没有模型条目的供应商配置，避免保存模型时生成的空上下文表被误判为预算变化，导致热更新跳过、目录读取退回启动时配置；新增、修改或清除实际上下文预算及 1M 能力仍要求重启。回归入口：`cargo test -p codey --lib model_hot_reload_ignores_empty_context_entries_but_keeps_budget_changes_pending`。模型增删立即同步本地路由与页面列表，包括 WebSocket 和原生网页搜索线路；对应的 app-server 模型能力仍按启动配置判断是否需要重启，不能因页面刷新成功而清除重启状态。热更新检查只阻止线路能力开关、远程压缩身份、官方线路连接和路由模式等不兼容变更，不再因模型集合变化阻止所有线路刷新。保存提示分别报告模型投递、能力待重启和子代理配置失败，未执行热更新不再显示为刷新失败。
 
 Codex 更新后，优先检查启动补丁、app-server 参数结构、入口资源和页面语义选择器。兼容判断必须唯一命中，不能用宽泛文本或 DOM 位置猜测。
 
@@ -1063,3 +1065,21 @@ git diff --check
 新增回归在 `native_history.rs`：真实回环 WS 生成工具调用后主动关闭，等待路由释放连接，再连续提交两轮工具结果；覆盖 function/custom × HTTP/SSE、HTTP/JSON 四种组合，严格断言完整 input 顺序、无旧响应引用及本轮指令保留。另验证未知响应引用不产生任何上游连接、终态缺少 output、孤立工具结果和身份变化。`cargo test -p codey --lib local_router --quiet -- --test-threads=2`：209 项通过、3 项默认忽略；严格 `cargo clippy -p codey --lib -- -D warnings` 通过。
 
 另一台电脑同时运行 Codey 和 Codex 时，需要部署包含本补丁的 Codey 并重启相关进程。此历史仅在那台电脑的路由进程和当前下游 WS 会话内存在，无法补回旧版本已经丢失的内容，也不提供跨机器/跨下游连接的共享历史。客户端是否会根据 `context_not_recoverable` 自动重发完整上下文，无法从当前仓库确认；未进行受影响电脑或真实供应商的现场验证。
+
+## UI 组件与验证
+
+前端统一使用 `antd` 6.6.2。共用业务控件位于 `src/components/antd`；模型选择器、表格、折叠面板和弹窗使用 Ant Design 原生组件。`UiProvider` 配置简体中文，并使用 `@ant-design/cssinjs` 的 `StyleProvider` 将动态样式写入对应的 ShadowRoot；内嵌弹层挂载在 overlay 的容器内。历史组件目录、依赖、依赖修补和控件覆盖样式已删除，业务布局样式保留。
+
+`src/tailwind.css` 声明 theme、base、antd、components、utilities 样式层级；`StyleProvider layer` 让组件库样式服从该顺序。模型选择器通过数字形式的 `popupMatchSelectWidth` 设置弹层宽度，不能设为 `false`，否则会关闭虚拟滚动。两行模型选项的 `listItemHeight` 与行高一致，保留完整搜索及线路分组。
+
+`tests/antd-controls.test.mjs` 检查输入值、密码可见性、复选框、禁用状态、单一组件库依赖及内嵌样式容器。
+
+供应商与模型、通知及诊断界面的组件与按钮规范：
+- 状态标签、添加、同步、编辑和诊断操作使用 Ant Design 的颜色、变体及尺寸配置；删除操作使用 `destructive-light` 保留危险操作提示，不再通过 CSS 覆盖组件颜色、边框、悬浮和禁用状态；
+- 供应商与模型外壳沿用 Ant Design Card 外观，仅保留内容裁剪；内部列表 `.provider-model-groups` 使用 `overscroll-behavior-y: auto`，支持内部滚动到底后继续滚动外层页面；底栏 `.readonly-note` 保留业务布局与背景；
+- 模型药丸（`.model-tag-pill`）：高度调整为 31px、字体 12.5px、内边距 4px 11px、药丸间距 8x10px、圆点 6px，兼顾列表轻盈度与点击舒适度；
+- 内嵌配置弹窗（`SettingsModalShell`）：通过 Modal 的 `styles` 配置高度、布局、圆角与内容裁剪，删除重复的 `.ant-modal-*` CSS 覆盖。
+
+`src/styles*.css` 均包含独立入口和内嵌入口使用的业务布局，因此保留文件；已删除无调用的 `.route-websocket-option` 规则及组件外观覆盖，不保留空样式文件。
+
+运行 `pnpm check` 和 `pnpm test:js` 验证类型与回归；`pnpm vite:build` 构建嵌入产物，`pnpm exec vite build` 构建独立页面。开发服务下，`tests/antd-browser.html` 验证真实 Shadow DOM 设置入口，`?view=logs` 使用模拟数据验证日志筛选、详情与布局；`tests/model-combobox-browser.html` 验证万条模型列表。这些页面不连接真实模型服务。

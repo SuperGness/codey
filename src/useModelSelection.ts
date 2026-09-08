@@ -180,28 +180,24 @@ export function useModelSelection({
     setModelPickerVisible(true);
   }, [config, currentProvider]);
 
-  const toggleDraftModel = useCallback((model: string, checked: boolean) => {
+  const toggleDraftModel = useCallback((model: string | readonly string[], checked: boolean) => {
+    const models = typeof model === "string" ? [model] : model;
+    const keys = new Set(models.map(modelKey));
     if (checked) {
       setDeletedThirdPartyModels((current) =>
-        withoutModelId(current, model),
+        current.filter((item) => !keys.has(modelKey(item))),
       );
     }
     setDraftModels((current) =>
       checked
-        ? includesModelId(current, model)
-          ? current
-          : [...current, model]
-        : withoutModelId(current, model),
+        ? uniqueModelIds([...current, ...models])
+        : current.filter((item) => !keys.has(modelKey(item))),
     );
     if (!checked) {
-      if (
-        !includesModelId(modelEditorState.upstreamModels, model) &&
-        !officialSlugKeys.has(modelKey(model))
-      ) {
-        setDraft1MModels((current) => withoutModelId(current, model));
-      }
+      const retainedKeys = new Set([...modelEditorState.upstreamModels.map(modelKey), ...officialSlugKeys]);
+      setDraft1MModels((current) => current.filter((item) => !keys.has(modelKey(item)) || retainedKeys.has(modelKey(item))));
       setDraftManualThirdPartyModels((current) =>
-        withoutModelId(current, model),
+        current.filter((item) => !keys.has(modelKey(item))),
       );
     }
   }, [modelEditorState.upstreamModels, officialSlugKeys]);

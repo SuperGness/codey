@@ -1,8 +1,6 @@
 import { memo, useEffect, useId, useRef, useState } from "react";
 
 import {
-  IconEye,
-  IconEyeOff,
   IconKey,
   IconPlugConnected,
   IconSparkles,
@@ -14,8 +12,7 @@ import { invoke } from "./api";
 import { errorText, withTimeout } from "./appUtils";
 import { ManualModelCombobox } from "./components/ManualModelCombobox";
 import { ModelCombobox } from "./components/ModelCombobox";
-import { Button, Card, Input, PasswordInput, Select, Switch } from "./components/mantine";
-import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
+import { Button, Card, Input, PasswordInput, Select, Switch } from "./components/antd";
 import type { SubagentModelOption } from "./subagentModels";
 import {
   inputShellClass,
@@ -324,7 +321,6 @@ function PromptOptimizationCardComponent({
                         }
                         options={subagentModelOptions}
                         getPopupContainer={() => popupContainer ?? document.body}
-                        zIndex={SETTINGS_OVERLAY_Z_INDEX}
                         onChange={(model) => updateOptimization({ model })}
                       />
                       {!codeyRouteAvailable ? (
@@ -389,7 +385,6 @@ function PromptOptimizationCardComponent({
                         filter={false}
                         dropdownClassName="rounded-[10px]"
                         getPopupContainer={() => popupContainer ?? document.body}
-                        zIndex={SETTINGS_OVERLAY_Z_INDEX}
                         onChange={(value) => {
                           clearModelSuggestions();
                           updateOptimization({
@@ -435,14 +430,8 @@ function PromptOptimizationCardComponent({
                         <IconKey size={15} aria-hidden="true" />
                         <PasswordInput
                           id={apiKeyInputId}
-                          variant="unstyled"
                           className="min-w-0 flex-1"
-                          classNames={{
-                            input: insetInputClass + " pr-11!",
-                            visibilityToggle:
-                              "h-7! w-7! min-w-7! rounded-[7px]! text-[#6e6e73]! hover:bg-black/6! hover:text-[#1d1d1f]!",
-                          }}
-                          visible={apiKeyVisible}
+                          visibility={apiKeyVisible}
                           onVisibilityChange={() => setApiKeyVisible((visible) => !visible)}
                           value={optimization.apiKey}
                           disabled={isBusy}
@@ -460,20 +449,6 @@ function PromptOptimizationCardComponent({
                           }
                           autoComplete="new-password"
                           spellCheck={false}
-                          visibilityToggleIcon={({ reveal }) =>
-                            reveal ? (
-                              <IconEyeOff size={15} aria-hidden="true" />
-                            ) : (
-                              <IconEye size={15} aria-hidden="true" />
-                            )
-                          }
-                          visibilityToggleButtonProps={{
-                            disabled: isBusy || !optimization.apiKey.trim(),
-                            title: apiKeyVisible ? "隐藏 API Key" : "显示 API Key",
-                            "aria-label": apiKeyVisible
-                              ? "隐藏 API Key"
-                              : "显示 API Key",
-                          }}
                         />
                       </div>
                       {apiKeyError ? (
@@ -505,7 +480,6 @@ function PromptOptimizationCardComponent({
                             options={cloudModels}
                             placeholder="例如 gpt-4o-mini 或 deepseek-chat"
                             getPopupContainer={() => popupContainer ?? document.body}
-                            zIndex={SETTINGS_OVERLAY_Z_INDEX}
                             onChange={(model) => updateOptimization({ model })}
                           />
                         </div>

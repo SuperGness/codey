@@ -1,9 +1,57 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import ts from "typescript";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
 const root = new URL("../", import.meta.url);
+
+test("bulk model selection includes every filtered page and preserves unrelated selections", async () => {
+  const ids = await loadTypeScriptModule(new URL("src/modelIds.ts", root));
+  const { filterModelOptions } = await loadTypeScriptModule(new URL("src/modelPickerPagination.ts", root));
+  const state = [];
+  let cursor = 0;
+  const react = {
+    useCallback: (callback) => callback,
+    useMemo: (factory) => factory(),
+    useState(initial) {
+      const index = cursor++;
+      if (!(index in state)) state[index] = initial;
+      return [state[index], (value) => { state[index] = typeof value === "function" ? value(state[index]) : value; }];
+    },
+  };
+  const source = await readFile(new URL("src/useModelSelection.ts", root), "utf8");
+  const exports = {};
+  new Function("require", "exports", ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText)((name) => {
+    if (name === "react") return react;
+    if (name === "./modelIds") return ids;
+    if (name === "./subagentModels") return { buildSubagentModelOptions: () => [] };
+    return {};
+  }, exports);
+  const render = () => {
+    cursor = 0;
+    return exports.useModelSelection({ config: null, currentProvider: null });
+  };
+  const upstream = Array.from({ length: 450 }, (_, index) => `provider-${index}`);
+  render().openModelPicker({
+    officialModels: [{ slug: "official", supported: true }], officialModelIds: ["official"],
+    upstreamModels: upstream, thirdPartyModels: ["manual"], manualThirdPartyModels: ["manual"],
+  });
+  render().toggleDraft1MModel("provider-0", true);
+  const matching = filterModelOptions(render().thirdPartyModelOptions, " PROVIDER- ");
+  render().toggleDraftModel(matching, true);
+  assert.equal(render().draftModelSet.size, 452);
+  render().toggleDraftModel(["PROVIDER-0"], true);
+  assert.equal(render().draftModelSet.size, 452);
+  render().toggleDraftModel(matching, false);
+  assert.deepEqual([...render().draftModelSet], ["official", "manual"]);
+  assert.ok(render().draft1MModelSet.has("provider-0"));
+  assert.ok(render().draftManualThirdPartyModelKeys.has("manual"));
+  render().toggleDraftModel("manual", false);
+  assert.ok(!render().draftManualThirdPartyModelKeys.has("manual"));
+});
 
 const readModelCommandSources = async () => {
   const dir = new URL("backend/src/commands/models/", root);
@@ -23,8 +71,8 @@ test("third-party model sync can fall back to manual model support configuration
 
   assert.match(dialogSource, /modelState\.officialModels\.length > 0/);
   assert.match(dialogSource, /本次官方账号登录可用的模型/);
-  assert.match(dialogSource, /modelState\.officialModels\.map/);
-  assert.match(dialogSource, /placeholder="输入当前线路模型 ID/);
+  assert.match(dialogSource, /filteredOfficialModels\.map/);
+  assert.match(dialogSource, /placeholder="搜索模型，或输入模型 ID 添加/);
   assert.match(dialogSource, /当前线路支持 auto-review/);
   assert.match(dialogSource, /<Switch/);
   assert.match(dialogSource, /manualThirdPartyModelKeys\.has/);

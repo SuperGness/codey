@@ -112,49 +112,6 @@
   scrollbar-width: thin;
 }
 
-.subagent-table {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  border-radius: 9px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  overflow: hidden;
-  background: #ffffff;
-}
-
-.subagent-table th {
-  padding: 7px 10px;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: #8e8e93;
-  background: #f8f8fa;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-  text-align: left;
-  white-space: nowrap;
-}
-
-.subagent-table td {
-  padding: 5px 8px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.04);
-  vertical-align: middle;
-}
-
-.subagent-table tr:last-child td {
-  border-bottom: 0;
-}
-
-.subagent-table tr:hover td {
-  background: rgba(0, 122, 255, 0.02);
-}
-
-.subagent-table tr.subagent-role-disabled td {
-  background: rgba(0, 0, 0, 0.018);
-}
-
-.subagent-table tr.subagent-role-disabled .subagent-role-name {
-  color: #8e8e93;
-}
-
 .subagent-role-name {
   display: flex;
   align-items: center;
@@ -163,19 +120,6 @@
   font-weight: 600;
   color: #3a3a3c;
   white-space: nowrap;
-}
-
-.subagent-role-info-btn {
-  height: 16px;
-  width: 16px;
-  min-height: 0;
-  min-width: 0;
-  padding: 0;
-  color: #8e8e93;
-}
-
-.subagent-role-info-btn:hover {
-  color: #007aff;
 }
 
 .subagent-policy-callout {
@@ -326,10 +270,16 @@
 .notification-channel-controls {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.notification-item-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .notification-card.active {
@@ -354,27 +304,6 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-}
-
-.notification-edit-button {
-  background: #ffffff;
-  border: 1px solid rgba(0, 0, 0, 0.14);
-  color: #1d1d1f;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-}
-
-.notification-edit-button:hover:not(:disabled) {
-  background: #f5f5f7;
-  border-color: rgba(0, 0, 0, 0.22);
-  color: #1d1d1f;
-}
-
-.notification-remove-button {
-  color: #8e8e93;
-}
-
-.notification-remove-button:hover {
-  color: var(--mac-red);
 }
 
 .notification-empty {
@@ -469,6 +398,14 @@
 
 .notification-dialog-fields {
   margin-top: 18px;
+}
+
+.notification-channel-select-row,
+.notification-fields label.notification-field-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
 }
 
 .notification-dialog-actions {
@@ -636,13 +573,6 @@
   justify-content: flex-end;
   gap: 8px;
   margin-left: auto;
-}
-
-.prompt-test-btn {
-  height: 28px;
-  font-size: 11.5px;
-  font-weight: 500;
-  border-radius: 7px;
 }
 
 .prompt-optimization-form-fields {

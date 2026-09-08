@@ -1,11 +1,11 @@
+import { Table } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
-  Loader,
+  Spin,
   Modal,
-} from "@mantine/core";
+} from "antd";
 import {
-  IconAlertCircle,
   IconAlertTriangle,
   IconChartBar,
   IconCheck,
@@ -27,7 +27,6 @@ import { formatTimestamp } from "./formatters";
 import {
   Badge,
   Button,
-  ActionIcon,
   Dialog,
   DialogContent,
   DialogDescription,
@@ -36,10 +35,8 @@ import {
   DialogTitle,
   Input,
   Select,
-  Table,
   Tooltip,
-} from "./components/mantine";
-import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
+} from "./components/antd";
 
 type RouteRequestLogItem = {
   requestId: string;
@@ -624,25 +621,18 @@ export function RequestLogDialog({
 
   return (
     <Modal
-      fullScreen
-      opened={opened}
-      onClose={onClose}
+      open={opened}
+      onCancel={onClose}
       title="请求日志"
-      withCloseButton={!standalone}
-      closeButtonProps={{ "aria-label": "关闭请求日志" }}
-      closeOnClickOutside={false}
-      classNames={{
-        body: "flex h-full min-h-0 flex-1 flex-col overflow-hidden! p-0!",
-        content: "flex! h-[100dvh]! max-h-[100dvh]! min-h-0 flex-col overflow-hidden! bg-[#f5f5f7]",
-        header: "m-0 flex-none border-b border-black/8 bg-white/90 px-5! py-3! backdrop-blur-xl",
-        inner: "h-full! max-h-full! p-0!",
-        title: "text-base font-bold text-[#1d1d1f]",
-      }}
-      lockScroll={false}
-      padding={0}
-      portalProps={container ? { target: container } : undefined}
-      withinPortal={Boolean(container)}
-      zIndex={SETTINGS_OVERLAY_Z_INDEX}
+      closable={!standalone}
+      mask={{ closable: false }}
+      keyboard={!standalone}
+      footer={null}
+      getContainer={container ?? undefined}
+      className="request-log-modal"
+      width="100vw"
+      style={{ height: "100dvh", maxWidth: "100vw", margin: 0, top: 0, paddingBottom: 0 }}
+      styles={{ container: { height: "100%", display: "flex", flexDirection: "column", padding: 0 }, header: { padding: "12px 24px", marginBottom: 0 }, body: { display: "flex", flex: 1, minHeight: 0, flexDirection: "column", overflow: "hidden" } }}
     >
       <div className="flex h-full min-h-0 flex-1 flex-col gap-2.5 overflow-hidden p-4 max-[760px]:p-2">
         <div className="flex flex-none items-center justify-between gap-3">
@@ -727,20 +717,16 @@ export function RequestLogDialog({
         {actionNotice ? (
           <Alert
             className="flex-none"
-            color={actionNotice.tone === "success" ? "green" : "red"}
-            icon={actionNotice.tone === "success"
-              ? <IconCheck size={18} aria-hidden="true" />
-              : <IconAlertCircle size={18} aria-hidden="true" />}
+            type={actionNotice.tone === "success" ? "success" : "error"}
             title={actionNotice.tone === "success" ? "删除成功" : "删除失败"}
-            withCloseButton
+            closable
             onClose={() => setActionNotice(null)}
-          >
-            {actionNotice.text}
-          </Alert>
+            description={actionNotice.text}
+          />
         ) : null}
 
         {statsLoading ? <p className="m-0 text-xs text-[#6e6e73]" role="status">正在统计所选范围…</p> : null}
-        {statsError ? <Alert color="red" title="统计加载失败">{statsError}</Alert> : null}
+        {statsError ? <Alert type="error" title="统计加载失败" description={statsError} /> : null}
 
         {stats && !showStats ? (
           <div className="flex flex-none flex-wrap items-center justify-between gap-2 rounded-xl border border-black/8 bg-white px-3.5 py-1.5 text-xs shadow-2xs">
@@ -819,7 +805,6 @@ export function RequestLogDialog({
                   aria-label="统计分组"
                   className="w-36"
                   getPopupContainer={() => container ?? document.body}
-                  zIndex={SETTINGS_OVERLAY_Z_INDEX}
                   optionList={[
                     { label: "按实际模型统计", value: "model" },
                     { label: "按供应商统计", value: "provider" },
@@ -999,10 +984,13 @@ export function RequestLogDialog({
                         ) : (
                           stats.groups.map((group) => {
                             const rate = group.successRate;
+                            const label = (groupBy === "provider"
+                              ? providerOptions.find((option) => option.value === group.key)?.label
+                              : undefined) || group.key || "未知";
                             return (
                               <tr key={group.key} className="transition-colors hover:bg-blue-50/30">
-                                <td className="py-1 px-2.5 text-[#1d1d1f] max-w-[150px] truncate" title={group.key || "未知"}>
-                                  {group.key || "未知"}
+                                <td className="py-1 px-2.5 text-[#1d1d1f] max-w-[150px] truncate" title={label}>
+                                  {label}
                                 </td>
                                 <td className="py-1 px-2.5 text-right font-semibold text-[#1d1d1f] tabular-nums">
                                   {group.total.toLocaleString()}
@@ -1044,7 +1032,6 @@ export function RequestLogDialog({
                 className="w-36 shrink-0"
                 value={searchMode}
                 getPopupContainer={() => container ?? document.body}
-                zIndex={SETTINGS_OVERLAY_Z_INDEX}
                 optionList={[
                   { label: "关键词搜索", value: "contains" },
                   { label: "精确请求 ID", value: "requestId" },
@@ -1088,7 +1075,6 @@ export function RequestLogDialog({
               className="w-32 shrink-0"
               value={timeRange}
               getPopupContainer={() => container ?? document.body}
-              zIndex={SETTINGS_OVERLAY_Z_INDEX}
               optionList={[
                 { label: "最近 24 小时", value: "24h" },
                 { label: "最近 7 天", value: "7d" },
@@ -1108,7 +1094,6 @@ export function RequestLogDialog({
               getPopupContainer={() => container ?? document.body}
               optionList={providerOptions}
               value={provider}
-              zIndex={SETTINGS_OVERLAY_Z_INDEX}
               onChange={(value) => {
                 setProvider(String(value ?? "all"));
                 setPage(1);
@@ -1122,7 +1107,6 @@ export function RequestLogDialog({
               getPopupContainer={() => container ?? document.body}
               optionList={modelOptions}
               value={model}
-              zIndex={SETTINGS_OVERLAY_Z_INDEX}
               onChange={(value) => {
                 setModel(String(value ?? "all"));
                 setPage(1);
@@ -1135,7 +1119,6 @@ export function RequestLogDialog({
               getPopupContainer={() => container ?? document.body}
               optionList={statusOptions}
               value={status}
-              zIndex={SETTINGS_OVERLAY_Z_INDEX}
               onChange={(value) => {
                 setStatus(String(value ?? "all"));
                 setPage(1);
@@ -1148,7 +1131,6 @@ export function RequestLogDialog({
               getPopupContainer={() => container ?? document.body}
               optionList={protocolOptions}
               value={protocol}
-              zIndex={SETTINGS_OVERLAY_Z_INDEX}
               onChange={(value) => {
                 setProtocol(String(value ?? "all"));
                 setPage(1);
@@ -1190,7 +1172,6 @@ export function RequestLogDialog({
                   aria-label="请求类型"
                   className="w-40"
                   getPopupContainer={() => container ?? document.body}
-                  zIndex={SETTINGS_OVERLAY_Z_INDEX}
                   optionList={[
                     { label: "全部请求类型", value: "all" },
                     { label: "模型请求", value: "responses" },
@@ -1251,15 +1232,14 @@ export function RequestLogDialog({
           {error ? (
             <div className="grid min-h-48 flex-1 place-items-center p-6">
               <Alert
-                color="red"
-                icon={<IconAlertCircle size={18} aria-hidden="true" />}
+                type="error"
                 title="请求日志加载失败"
-              >
+                description={<>
                 <p className="m-0 mb-3 text-sm">{error}</p>
                 <Button size="xs" variant="outline" onClick={() => setRefreshRevision((value) => value + 1)}>
                   重试
                 </Button>
-              </Alert>
+               </>} />
             </div>
           ) : result?.status === "unavailable" || result?.queryable === false ? (
             <div className="grid min-h-48 flex-1 place-items-center p-6 text-center">
@@ -1272,7 +1252,7 @@ export function RequestLogDialog({
           ) : !result && loading ? (
             <div className="grid min-h-48 flex-1 place-items-center" role="status">
               <div className="flex items-center gap-2 text-xs text-[#6e6e73]">
-                <Loader size="sm" />
+                <Spin size="small" />
                 正在加载请求日志…
               </div>
             </div>
@@ -1290,60 +1270,35 @@ export function RequestLogDialog({
             </div>
           ) : (
             <div className={`min-h-0 flex-1 overflow-auto ${loading && result ? "opacity-75 transition-opacity" : ""}`} aria-busy={loading}>
-              <Table highlightOnHover withColumnBorders withRowBorders className="min-w-[1360px] text-xs">
-                <Table.Thead className="sticky top-0 z-[1] bg-[#f8f8fa] shadow-[0_1px_0_rgba(0,0,0,0.08)]">
-                  <Table.Tr>
-                    <Table.Th className="whitespace-nowrap">时间 / 请求 ID</Table.Th>
-                    <Table.Th className="w-40 max-w-40 whitespace-nowrap">会话 ID</Table.Th>
-                    <Table.Th className="whitespace-nowrap">供应商 / 上游</Table.Th>
-                    <Table.Th className="whitespace-nowrap">模型</Table.Th>
-                    <Table.Th className="whitespace-nowrap">思考强度</Table.Th>
-                    <Table.Th className="whitespace-nowrap">上游协议</Table.Th>
-                    <Table.Th className="whitespace-nowrap">状态</Table.Th>
-                    <Table.Th className="whitespace-nowrap text-right">TTFT / 总耗时</Table.Th>
-                    <Table.Th className="whitespace-nowrap text-right">输入 Token</Table.Th>
-                    <Table.Th className="whitespace-nowrap text-right">输出 Token</Table.Th>
-                    <Table.Th className="whitespace-nowrap text-right">缓存 Token</Table.Th>
-                    <Table.Th className="whitespace-nowrap text-right">总 Token</Table.Th>
-                  </Table.Tr>
-                </Table.Thead>
-                <Table.Tbody>
-                  {result?.items.map((item) => {
-                    const presentation = statusPresentation[item.status] ?? {
-                      label: item.status || "未知",
-                      variant: "secondary" as const,
-                    };
-                    const hasUpstreamError = [
-                      item.statusCode,
-                      item.upstreamStatusCode,
-                    ].some(
-                      (statusCode) =>
-                        statusCode != null &&
-                        (statusCode < 200 || statusCode >= 300),
-                    );
-                    const upstreamErrorSummary =
-                      item.upstreamErrorSummary ||
-                      item.errorCode ||
-                      "上游未提供具体错误信息";
-                    const usageUnavailable = usageUnavailablePresentation(
-                      item.usageUnavailableReason,
-                    );
-                    const cancellation = cancellationPresentation(item);
-                    const displayedTtft = item.downstreamFirstContentMs ?? item.ttftMs;
-                    const timingTitle = item.downstreamFirstContentMs == null
-                      ? `首字耗时 (旧指标，上游首包): ${formatDuration(item.ttftMs)}`
-                      : `端到端首内容: ${formatDuration(item.downstreamFirstContentMs)} · 路由前置: ${formatDuration(item.routerPreUpstreamMs)} · 上游首包: ${formatDuration(item.upstreamFirstByteMs)}`;
-                    return (
-                      <Table.Tr
-                        key={`${item.timestampUnixMs}:${item.requestId}`}
-                        className="cursor-pointer transition-colors hover:bg-blue-50/40"
-                        onClick={(event) => {
-                          const target = event.target as HTMLElement | null;
-                          if (target?.closest("button") || target?.closest("[data-prevent-row-click]")) return;
-                          setSelectedItem(item);
-                        }}
-                      >
-                        <Table.Td>
+              <Table
+ className="request-log-table"
+ size="small" pagination={false} bordered
+                scroll={{ x: 1700 }}
+                columns={[
+                  { title: "时间 / 请求 ID", width: 180, render: (_value, record) => record.cells[0] },
+                  { title: "会话 ID", width: 190, render: (_value, record) => record.cells[1] },
+                  { title: "供应商 / 上游", width: 180, render: (_value, record) => record.cells[2] },
+                  { title: "模型", width: 180, render: (_value, record) => record.cells[3] },
+                  { title: "思考强度", width: 100, render: (_value, record) => record.cells[4] },
+                  { title: "上游协议", width: 100, render: (_value, record) => record.cells[5] },
+                  { title: "状态", width: 120, render: (_value, record) => record.cells[6] },
+                  { title: "TTFT / 总耗时", width: 150, render: (_value, record) => record.cells[7] },
+                  { title: "输入 Token", width: 110, render: (_value, record) => record.cells[8] },
+                  { title: "输出 Token", width: 110, render: (_value, record) => record.cells[9] },
+                  { title: "缓存 Token", width: 110, render: (_value, record) => record.cells[10] },
+                  { title: "总 Token", width: 110, render: (_value, record) => record.cells[11] },
+                ]}
+ dataSource={result?.items.map((item) => {
+   const presentation = statusPresentation[item.status] ?? { label: item.status || "未知", variant: "secondary" as const };
+   const hasUpstreamError = [item.statusCode, item.upstreamStatusCode].some((statusCode) => statusCode != null && (statusCode < 200 || statusCode >= 300));
+   const upstreamErrorSummary = item.upstreamErrorSummary || item.errorCode || "上游未提供具体错误信息";
+   const usageUnavailable = usageUnavailablePresentation(item.usageUnavailableReason);
+   const cancellation = cancellationPresentation(item);
+   const displayedTtft = item.downstreamFirstContentMs ?? item.ttftMs;
+   const timingTitle = item.downstreamFirstContentMs == null
+     ? `首字耗时 (旧指标，上游首包): ${formatDuration(item.ttftMs)}`
+     : `端到端首内容: ${formatDuration(item.downstreamFirstContentMs)} · 路由前置: ${formatDuration(item.routerPreUpstreamMs)} · 上游首包: ${formatDuration(item.upstreamFirstByteMs)}`;
+return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                           <div className="grid min-w-36 max-w-44 gap-0.5 font-mono">
                             <span className="whitespace-nowrap text-[11px] text-[#1d1d1f]">
                               {formatTimestamp(item.timestampUnixMs)}
@@ -1364,8 +1319,8 @@ export function RequestLogDialog({
                               )}
                             </div>
                           </div>
-                        </Table.Td>
-                        <Table.Td className="w-40 max-w-40 overflow-hidden">
+                        </div>,
+<div className="w-40 max-w-40 overflow-hidden">
                           {item.codexSessionId ? (
                             <div className="flex w-36 max-w-36 items-center gap-1.5 overflow-hidden">
                               {item.codexSessionIsParent ? (
@@ -1397,8 +1352,8 @@ export function RequestLogDialog({
                           ) : (
                             <span className="text-[#8e8e93]">—</span>
                           )}
-                        </Table.Td>
-                        <Table.Td>
+                        </div>,
+<div>
                           <div className="grid min-w-32 max-w-56 gap-0.5">
                             <strong
                               className="truncate font-semibold text-[#1d1d1f]"
@@ -1415,14 +1370,14 @@ export function RequestLogDialog({
                               </span>
                             ) : null}
                           </div>
-                        </Table.Td>
-                        <Table.Td className="max-w-56 truncate" title={item.model || item.requestedModel}>
+                        </div>,
+<div className="max-w-56 truncate" title={item.model || item.requestedModel}>
                           <span className="font-medium text-[#1d1d1f]">
                             {item.model || item.requestedModel || "—"}
                           </span>
-                        </Table.Td>
-                        <Table.Td className="whitespace-nowrap text-[#48484a]">{reasoningLabel(item)}</Table.Td>
-                        <Table.Td>
+                        </div>,
+<div className="whitespace-nowrap text-[#48484a]">{reasoningLabel(item)}</div>,
+<div>
                           <Badge
                             variant="secondary"
                             size="xs"
@@ -1436,8 +1391,8 @@ export function RequestLogDialog({
                           >
                             {item.upstreamTransport === "http_sse" ? "SSE" : (item.upstreamTransport || "—").toUpperCase()}
                           </Badge>
-                        </Table.Td>
-                        <Table.Td>
+                        </div>,
+<div>
                           <div className="grid min-w-20 gap-1">
                             <div className="flex items-center gap-1">
                               <Badge variant={presentation.variant} size="xs">
@@ -1453,16 +1408,14 @@ export function RequestLogDialog({
                                   getPopupContainer={() => container ?? document.body}
                                   position="top"
                                   autoAdjustOverflow
-                                  zIndex={SETTINGS_OVERLAY_Z_INDEX}
                                 >
-                                  <ActionIcon
+                                  <Button
                                     size="xs"
-                                    variant="subtle"
-                                    color="red"
+                                    variant="ghost"
                                     aria-label={`查看上游错误信息：${upstreamErrorSummary}`}
                                   >
                                     <IconQuestionMark size={12} aria-hidden="true" />
-                                  </ActionIcon>
+                                  </Button>
                                 </Tooltip>
                               ) : null}
                               {cancellation ? (
@@ -1475,16 +1428,14 @@ export function RequestLogDialog({
                                   getPopupContainer={() => container ?? document.body}
                                   position="top"
                                   autoAdjustOverflow
-                                  zIndex={SETTINGS_OVERLAY_Z_INDEX}
                                 >
-                                  <ActionIcon
+                                  <Button
                                     size="xs"
-                                    variant="subtle"
-                                    color="gray"
+                                    variant="ghost"
                                     aria-label={`查看中断原因：${cancellation.message}`}
                                   >
                                     <IconQuestionMark size={12} aria-hidden="true" />
-                                  </ActionIcon>
+                                  </Button>
                                 </Tooltip>
                               ) : null}
                             </div>
@@ -1499,8 +1450,8 @@ export function RequestLogDialog({
                               </small>
                             ) : null}
                           </div>
-                        </Table.Td>
-                        <Table.Td className="whitespace-nowrap text-right font-mono">
+                        </div>,
+<div className="whitespace-nowrap text-right font-mono">
                           <div className="grid justify-items-end gap-0.5 leading-tight">
                             <div
                               className="flex items-center justify-end gap-1.5"
@@ -1521,10 +1472,10 @@ export function RequestLogDialog({
                               </span>
                             </div>
                           </div>
-                        </Table.Td>
-                        <Table.Td className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">{formatTokens(item.inputTokens)}</Table.Td>
-                        <Table.Td className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">{formatTokens(item.outputTokens)}</Table.Td>
-                        <Table.Td className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">
+                        </div>,
+<div className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">{formatTokens(item.inputTokens)}</div>,
+<div className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">{formatTokens(item.outputTokens)}</div>,
+<div className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">
                           {item.cachedInputTokens && item.cachedInputTokens > 0 ? (
                             <span className="font-medium text-purple-600">
                               {formatTokens(item.cachedInputTokens)}
@@ -1532,8 +1483,8 @@ export function RequestLogDialog({
                           ) : (
                             formatTokens(item.cachedInputTokens)
                           )}
-                        </Table.Td>
-                        <Table.Td className="whitespace-nowrap text-right font-mono font-medium text-[#1d1d1f] tabular-nums">
+                        </div>,
+<div className="whitespace-nowrap text-right font-mono font-medium text-[#1d1d1f] tabular-nums">
                           {item.totalTokens == null ? (
                             <div className="flex min-w-20 items-center justify-end gap-1">
                               <span className="text-[10px] font-medium text-[#8e8e93]">
@@ -1548,27 +1499,22 @@ export function RequestLogDialog({
                                 getPopupContainer={() => container ?? document.body}
                                 position="top"
                                 autoAdjustOverflow
-                                zIndex={SETTINGS_OVERLAY_Z_INDEX}
                               >
-                                <ActionIcon
+                                <Button
                                   size="xs"
-                                  variant="subtle"
-                                  color="gray"
+                                  variant="ghost"
                                   aria-label={`Token 使用量不可用：${usageUnavailable.message}`}
                                 >
                                   <IconQuestionMark size={12} aria-hidden="true" />
-                                </ActionIcon>
+                                </Button>
                               </Tooltip>
                             </div>
                           ) : (
                             formatTokens(item.totalTokens)
                           )}
-                        </Table.Td>
-                      </Table.Tr>
-                    );
-                  })}
-                </Table.Tbody>
-              </Table>
+                        </div>] };})}
+ onRow={(record) => ({ onClick: (event) => { const target = event.target as HTMLElement | null; if (target?.closest("button") || target?.closest("[data-prevent-row-click]")) return; setSelectedItem(record.item); } })}
+ />
             </div>
           )}
 
@@ -1594,7 +1540,6 @@ export function RequestLogDialog({
                   getPopupContainer={() => container ?? document.body}
                   optionList={pageSizeOptions}
                   value={pageSize}
-                  zIndex={SETTINGS_OVERLAY_Z_INDEX}
                   onChange={(value) => {
                     setPageSize(Number(value) || 20);
                     setPage(1);
@@ -1671,7 +1616,6 @@ export function RequestLogDialog({
           <DialogContent
             className="w-[min(460px,calc(100vw-32px))]"
             container={standalone ? document.body : container}
-            zIndex={SETTINGS_OVERLAY_Z_INDEX}
             onEscapeKeyDown={(event) => {
               if (clearing) event.preventDefault();
             }}

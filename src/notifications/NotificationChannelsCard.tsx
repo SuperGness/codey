@@ -1,13 +1,13 @@
 import { memo, useState } from "react";
 import {
   IconBell,
-  IconPencil,
+  IconEdit,
   IconPlus,
   IconTrash,
 } from "@tabler/icons-react";
 
 import type { Config } from "../App.types";
-import { Badge, Button, Card } from "../components/mantine";
+import { Badge, Button, Card } from "../components/antd";
 import { surfaceCardPaddingClass } from "../uiClasses";
 import { getNotificationChannelDefinition } from "./channelRegistry";
 import { NotificationChannelDialog } from "./NotificationChannelDialog";
@@ -92,8 +92,8 @@ function NotificationChannelsCardComponent({
           </div>
           <div className="notification-add-actions">
             <Button
-              variant="secondary"
-              size="xs"
+              variant="default"
+              size="sm"
               disabled={isBusy || channelLimitReached}
               title={
                 channelLimitReached
@@ -102,8 +102,8 @@ function NotificationChannelsCardComponent({
               }
               onClick={openAddDialog}
             >
-              <IconPlus aria-hidden="true" />
-              添加渠道
+              <IconPlus size={13} strokeWidth={2.2} aria-hidden="true" />
+              <span>添加渠道</span>
             </Button>
           </div>
         </div>
@@ -137,31 +137,32 @@ function NotificationChannelsCardComponent({
                         </span>
                         <div>
                           <strong>{definition.title}</strong>
-                          <small>{definition.description}</small>
                         </div>
                       </div>
                       <div className="notification-channel-controls">
                         <Badge variant={status.variant}>{status.label}</Badge>
-                        <Button
-                          className="notification-edit-button"
-                          variant="outline"
-                          size="xs"
-                          disabled={isBusy}
-                          onClick={() => openEditDialog(channel.id)}
-                        >
-                          <IconPencil aria-hidden="true" />
-                          编辑
-                        </Button>
-                        <Button
-                          className="notification-remove-button"
-                          variant="ghost"
-                          size="icon-sm"
-                          disabled={isBusy}
-                          onClick={() => onRequestRemoveChannel(channel)}
-                          aria-label={`删除${definition.addLabel}通知渠道`}
-                        >
-                          <IconTrash size={15} aria-hidden="true" />
-                        </Button>
+                        <div className="notification-item-actions">
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            disabled={isBusy}
+                            onClick={() => openEditDialog(channel.id)}
+                            aria-label={`编辑${definition.title}通知渠道`}
+                            title={`编辑${definition.title}`}
+                          >
+                            <IconEdit size={13} aria-hidden="true" />
+                          </Button>
+                          <Button
+                            variant="destructive-light"
+                            size="xs"
+                            disabled={isBusy}
+                            onClick={() => onRequestRemoveChannel(channel)}
+                            aria-label={`删除${definition.addLabel}通知渠道`}
+                            title={`删除${definition.title}`}
+                          >
+                            <IconTrash size={13} aria-hidden="true" />
+                          </Button>
+                        </div>
                       </div>
                     </div>
                   </Card>

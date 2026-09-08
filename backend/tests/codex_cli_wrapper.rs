@@ -55,38 +55,44 @@ async fn detached_browser_cli_uses_saved_target_without_wrapper_environment() {
         serde_json::json!({"codexAppPath": app}).to_string(),
     )
     .unwrap();
-    let args = [
+    let prefix = [
         "--exact",
         "detached_browser_cli_uses_saved_target_without_wrapper_environment",
         "--",
-        "sandbox",
-        "macos",
-        "--",
-        "node",
-        "argument with spaces",
     ];
-    let mut command = Command::new(std::env::current_exe().unwrap());
-    command
-        .env_clear()
-        .env("HOME", temp.path())
-        .env("CODEX_HOME", temp.path())
-        .env("PATH", "/usr/bin:/bin")
-        .env("CODEX_CLI_PATH", env!("CARGO_BIN_EXE_codey"))
-        .env(CHILD_ENV, "1")
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_secs(5), command.output())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(17), "{output:?}");
-    assert!(
-        String::from_utf8(output.stdout)
+    for cli_args in [
+        vec!["sandbox", "macos", "--", "node", "argument with spaces"],
+        vec![
+            "app-server",
+            "--analytics-default-enabled",
+            "-c",
+            "model=\"browser-model\"",
+        ],
+    ] {
+        let args = [&prefix[..], &cli_args[..]].concat();
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .env_clear()
+            .env("HOME", temp.path())
+            .env("CODEX_HOME", temp.path())
+            .env("PATH", "/usr/bin:/bin")
+            .env("CODEX_CLI_PATH", env!("CARGO_BIN_EXE_codey"))
+            .env(CHILD_ENV, "1")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output())
+            .await
             .unwrap()
-            .ends_with(&format!("{}\n", args.join("\n")))
-    );
+            .unwrap();
+        assert_eq!(output.status.code(), Some(17), "{output:?}");
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .ends_with(&format!("{}\n", args.join("\n")))
+        );
+    }
 }
 
 async fn handshake(listener: TcpListener, child: &mut Child) -> Vec<u8> {
@@ -104,7 +110,7 @@ async fn handshake(listener: TcpListener, child: &mut Child) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn app_server_never_starts_without_its_runtime_configuration() {
+async fn managed_app_server_never_starts_without_its_runtime_configuration() {
     let temp = tempfile::tempdir().unwrap();
     let target = temp.path().join("unused-cli");
     std::fs::write(&target, "must not execute").unwrap();

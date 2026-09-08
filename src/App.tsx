@@ -51,7 +51,7 @@ import type {
   Profile,
   TraceLogCleanup,
 } from "./App.types";
-import { Badge, Button, Tooltip } from "./components/mantine";
+import { Badge, Button, Tooltip } from "./components/antd";
 
 const Check = IconCheck;
 const X = IconX;
@@ -1119,15 +1119,9 @@ export function App({
               position="bottom"
             >
               <span className="header-update-btn-wrap">
-                <button
-                  type="button"
-                  className={`header-update-pill ${
-                    hasUpdate
-                      ? "has-update"
-                      : downloadedUpdate
-                        ? "has-downloaded"
-                        : ""
-                  }`}
+                <Button
+                  size="xs"
+                  variant={downloadedUpdate ? "default" : hasUpdate ? "brand-outline" : "ghost"}
                   disabled={isBusy}
                   aria-label={updateTooltipText}
                   onClick={() => {
@@ -1148,15 +1142,15 @@ export function App({
                     <IconCircleArrowUp size={13} aria-hidden="true" />
                   )}
                   {downloadedUpdate ? (
-                    <span className="header-update-pill-label">
+                    <span>
                       v{downloadedUpdate.latestVersion} 已下载
                     </span>
                   ) : hasUpdate ? (
-                    <span className="header-update-pill-label">
+                    <span>
                       v{updateCheck?.latestVersion} 可更新
                     </span>
                   ) : null}
-                </button>
+                </Button>
               </span>
             </Tooltip>
 
@@ -1175,12 +1169,11 @@ export function App({
           <Button
             aria-describedby="codey-feedback-qr-description"
             aria-label="问题反馈群，悬浮或聚焦查看二维码"
-            className="whitespace-nowrap max-[520px]:w-8! max-[520px]:px-0!"
-            size="sm"
+            className="h-8! whitespace-nowrap px-3.5 text-xs max-[760px]:w-8! max-[760px]:px-0!"
             variant="brand-outline"
           >
             <IconMessageCircleQuestion aria-hidden="true" />
-            <span className="max-[520px]:hidden">问题反馈群</span>
+            <span className="max-[760px]:hidden">问题反馈群</span>
           </Button>
           <div className="feedback-qr-popover" role="tooltip">
             <img src={feedbackGroupQrUrl} alt="问题反馈群二维码" />
@@ -1194,10 +1187,9 @@ export function App({
           {embedded && (
             <Button
               aria-label={restartStatusError ? "重新查询状态" : status.running ? "重启 Codex" : "Codex 未运行"}
-              className="max-[520px]:w-8! max-[520px]:px-0!"
+              className="h-8! whitespace-nowrap px-3.5 text-xs max-[520px]:w-8! max-[520px]:px-0!"
               disabled={isBusy || (!restartStatusError && (status.restartInProgress || !status.running))}
               onClick={handleRestartCodex}
-              size="sm"
               variant="warning"
             >
               {busy === "restart" || (status.restartInProgress && !restartStatusError) ? (
@@ -1212,10 +1204,9 @@ export function App({
           )}
           <Button
             aria-label={dirty ? "保存更改" : "已保存"}
-            className="h-8 min-w-[88px] px-3.5 text-xs max-[520px]:min-w-8! max-[520px]:w-8! max-[520px]:px-0!"
+            className="h-8! min-w-[88px] px-3.5 text-xs max-[520px]:min-w-8! max-[520px]:w-8! max-[520px]:px-0!"
             disabled={!dirty || isBusy}
             onClick={handleSaveCurrent}
-            size="sm"
             variant={dirty ? "default" : "secondary"}
           >
             {busy === "save" ? (
@@ -1232,10 +1223,10 @@ export function App({
           {embedded && (
             <Button
               aria-label="关闭配置"
-              className="flex-none max-[520px]:h-8! max-[520px]:w-8! max-[520px]:p-0!"
+              className="size-8! flex-none p-0! max-[520px]:size-8! max-[520px]:p-0!"
               disabled={isBusy}
               onClick={handleCloseSettings}
-              size="icon-sm"
+              size="icon"
               variant="ghost"
             >
               <X aria-hidden="true" />
@@ -1420,7 +1411,7 @@ export function App({
         routeConfigReadOnly={config?.localRouterEnabled === false}
         isBusy={isBusy}
         busy={busy}
-        container={portalContainer}
+        container={popupContainer}
         customModelInput={customModelInput}
         modelInputError={modelInputError}
         modelSyncWarning={modelSyncWarning}
@@ -1443,7 +1434,7 @@ export function App({
       />
 
       <ConfirmationDialogHost
-        container={portalContainer}
+        container={popupContainer}
         controller={confirmationController}
       />
     </main>
@@ -1453,7 +1444,7 @@ export function App({
       afterClose={onAfterClose}
       container={modalContainer}
       header={
-        <div className="relative z-[2] flex w-full items-center overflow-visible">
+        <div className="flex w-full items-center overflow-visible">
           {configHeaderContent}
         </div>
       }

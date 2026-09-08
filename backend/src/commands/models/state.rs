@@ -42,9 +42,23 @@ pub(crate) fn runtime_supports_current_routes_for_hot_reload(
     if applied.local_router_enabled != current.local_router_enabled {
         return false;
     }
-    // Renderer refresh cannot change the app-server's resolved context budget.
-    if applied.model_context_by_provider != current.model_context_by_provider
-        || applied.supports_1m_context_by_provider != current.supports_1m_context_by_provider
+    // 空的供应商配置不改变上下文预算；实际预算变化仍需重启 app-server。
+    if applied
+        .model_context_by_provider
+        .iter()
+        .filter(|(_, models)| !models.is_empty())
+        .ne(current
+            .model_context_by_provider
+            .iter()
+            .filter(|(_, models)| !models.is_empty()))
+        || applied
+            .supports_1m_context_by_provider
+            .iter()
+            .filter(|(_, models)| !models.is_empty())
+            .ne(current
+                .supports_1m_context_by_provider
+                .iter()
+                .filter(|(_, models)| !models.is_empty()))
     {
         return false;
     }

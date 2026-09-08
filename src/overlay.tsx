@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
-import { MantineProvider } from "@mantine/core";
-import mantineStyles from "@mantine/core/styles.css?inline";
+import { UiProvider } from "./UiProvider";
+import utilityStyles from "./tailwind.css?inline";
 import { App } from "./App";
 import coreStyles from "./styles.css?inline";
 import operationsStyles from "./styles.operations.css?inline";
@@ -12,8 +12,6 @@ import responsiveStyles from "./styles.responsive.css?inline";
 import { codeyApiPath, invoke } from "./api";
 import { SETTINGS_OVERLAY_Z_INDEX_CSS } from "./overlay.constants";
 import { SETTINGS_OPENED_EVENT } from "./useRuntimeStatus";
-import { codeyMantineTheme } from "./mantine";
-import tailwindStyles from "./tailwind.css?inline";
 import {
   RequestLogDialog,
   type RequestLogCatalog,
@@ -100,11 +98,9 @@ function getOverlayMountTarget() {
 if (window.location.pathname === REQUEST_LOG_PATH) {
   installBrowserBridge();
   document.title = "Codey 请求日志";
-  document.documentElement.setAttribute("data-mantine-color-scheme", "light");
   const style = document.createElement("style");
   style.textContent = [
-    mantineStyles,
-    tailwindStyles,
+    utilityStyles,
     coreStyles,
     operationsStyles,
     modelStyles,
@@ -115,9 +111,9 @@ if (window.location.pathname === REQUEST_LOG_PATH) {
   document.head.appendChild(style);
   const root = document.getElementById("root") ?? document.body.appendChild(document.createElement("div"));
   ReactDOM.createRoot(root).render(
-    <MantineProvider forceColorScheme="light" theme={codeyMantineTheme}>
+    <UiProvider>
       <RequestLogPage />
-    </MantineProvider>,
+    </UiProvider>,
   );
 } else {
   window.__codeyInvokeApi = async (command, args) => {
@@ -143,13 +139,11 @@ if (!window.__codeySettingsOverlay) {
     "important",
   );
   host.style.setProperty("background", "transparent", "important");
-  host.setAttribute("data-mantine-color-scheme", "light");
   host.setAttribute("aria-hidden", "true");
   const shadow = host.attachShadow({ mode: "open" });
   const style = document.createElement("style");
   style.textContent = [
-    mantineStyles,
-    tailwindStyles,
+    utilityStyles,
     coreStyles,
     operationsStyles,
     modelStyles,
@@ -163,13 +157,11 @@ if (!window.__codeySettingsOverlay) {
   rootElement.style.pointerEvents = "none";
   rootElement.style.position = "fixed";
   rootElement.style.width = "100%";
-  rootElement.setAttribute("data-mantine-color-scheme", "light");
   const modalContainer = document.createElement("div");
   modalContainer.id = "codey-overlay-modal-container";
   modalContainer.style.inset = "0";
   modalContainer.style.position = "fixed";
   modalContainer.style.width = "100%";
-  modalContainer.setAttribute("data-mantine-color-scheme", "light");
   shadow.append(style, rootElement, modalContainer);
   getOverlayMountTarget().appendChild(host);
 
@@ -185,12 +177,7 @@ if (!window.__codeySettingsOverlay) {
   const reactRoot = ReactDOM.createRoot(rootElement);
   const render = (visible: boolean) => {
     reactRoot.render(
-      <MantineProvider
-        cssVariablesSelector=":host"
-        forceColorScheme="light"
-        getRootElement={() => host}
-        theme={codeyMantineTheme}
-      >
+      <UiProvider container={modalContainer} styleContainer={shadow}>
         <App
           embedded
           modalContainer={modalContainer}
@@ -198,7 +185,7 @@ if (!window.__codeySettingsOverlay) {
           onAfterClose={hide}
           onClose={close}
         />
-      </MantineProvider>,
+      </UiProvider>,
     );
   };
   const close = () => {
@@ -206,7 +193,7 @@ if (!window.__codeySettingsOverlay) {
     visible = false;
     render(false);
     window.clearTimeout(hideTimer);
-    hideTimer = window.setTimeout(hide, 250);
+    hideTimer = window.setTimeout(hide, 450);
   };
   const open = () => {
     if (visible) return;

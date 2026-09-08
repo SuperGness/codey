@@ -341,6 +341,7 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     }
 
     let original_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let managed_launch = std::env::var_os(CLI_WRAPPER_TARGET_ENV).is_some();
     let Some(target) = cli_wrapper_target(
         &original_args,
         std::env::var_os(CLI_WRAPPER_TARGET_ENV),
@@ -355,8 +356,7 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         .count()
         == 1;
     // 启动器只接收首次握手；之后 app-server 重启时仍必须能执行 CLI。
-    let readiness = (app_server && std::env::var_os(CLI_WRAPPER_TARGET_ENV).is_some())
-        .then(CliWrapperReadiness::begin);
+    let readiness = (app_server && managed_launch).then(CliWrapperReadiness::begin);
     let mut input_router: Option<std::process::Child> = None;
     let launch = (|| -> Result<std::process::Child> {
         anyhow::ensure!(
@@ -382,11 +382,15 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
             .transpose()
             .context("解析 Codex CLI 兼容运行时配置失败")?;
         anyhow::ensure!(
-            !app_server || runtime_overrides.is_some(),
+            !app_server || !managed_launch || runtime_overrides.is_some(),
             "Codex app-server 缺少本次启动配置，已停止启动；请通过 Codey 重新启动 Codex"
         );
+        // 独立浏览器调用没有启动配置，原样转发给 Codex 内置 CLI。
+        let rewritten_args = match runtime_overrides.as_ref() {
+            Some(overrides) => rewrite_app_server_args(&original_args, overrides)?,
+            None => original_args,
+        };
         let runtime_overrides = runtime_overrides.unwrap_or_default();
-        let rewritten_args = rewrite_app_server_args(&original_args, &runtime_overrides)?;
         let mut command = std::process::Command::new(&target);
         command.args(rewritten_args);
         for name in [

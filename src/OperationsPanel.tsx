@@ -21,7 +21,8 @@ import type {
   PluginMarketplaceStatus,
   RuntimeStatus,
 } from "./App.types";
-import { Badge, Button, Card, Collapse } from "./components/mantine";
+import { Collapse } from "antd";
+import { Badge, Button, Card } from "./components/antd";
 import { flushCardClass } from "./uiClasses";
 import {
   buildEnabledOptimizationFeatures,
@@ -172,11 +173,6 @@ function OperationsPanelComponent({
     ? `Codex v${codexVersion}`
     : "Codex 版本未知";
 
-  const handleCollapseTransitionEnd = () => {
-    if (!activeCardTitle) {
-      setExpandedCardTitle(null);
-    }
-  };
 
   type MetricItem = {
     id: string;
@@ -482,14 +478,10 @@ function OperationsPanelComponent({
           </div>
         </div>
 
-        <Collapse
-          animateOpacity
-          className="operations-expanded-collapse"
-          expanded={Boolean(activeCardTitle)}
-          keepMounted
-          onTransitionEnd={handleCollapseTransitionEnd}
-          transitionDuration={180}
-        >
+        <Collapse bordered={false} activeKey={activeCardTitle ? ["details"] : []} items={[{
+          key: "details", label: null, showArrow: false,
+          styles: { header: { display: "none" }, body: { padding: 0 } },
+          children: <>
           {expandedStatusCard && ExpandedStatusIcon && (
             <div
               className="operations-expanded-grid"
@@ -629,7 +621,8 @@ function OperationsPanelComponent({
               </article>
             </div>
           )}
-        </Collapse>
+          </>,
+        }]} />
 
       </Card>
     </section>
