@@ -14,6 +14,19 @@
 - 内置目录模式下，只要启动时启用了子代理增强，线路与模型映射在重启前保持不变。路由更新与角色热更新共用前置校验，拒绝映射变化时均保留原运行配置，避免旧角色及运行中的子代理被父任务线路元数据重新定向；即使同时保存关闭子代理增强也不提前解除保护。角色模型、思考深度和列表排序仍可在映射不变时热更新，自定义目录模式不受此限制。
 - 账号额度摘要在 `/account/usage` 返回错误时回退到 `account/rateLimits/read`，仅使用顶层 `rateLimits`，不合并 `rateLimitsByLimitId` 中的模型专属额度。5 小时窗口是否显示取决于账号通用额度实际返回的窗口，不按套餐名称隐藏。
 
+## 官方线路额度估算
+
+- `QuotaEstimateDialog.tsx` 复用现有 Dialog、LinkButton 和 Ant Design Table。仅请求日志 header 提供周限额度估算按钮，配置页不再提供入口；提示集中在一个 Alert，详细说明使用原生 details 折叠；表格合并档位与上下文及计价依据，并将 Token、缓存、费用明细和额度估算各自分组展示，仅以现有 `officialAccountAvailable === true` 官方登录状态控制显示；删除线路名称及供应商分组旧入口，不依赖 profile、分组方式或额度显示开关。独立日志页的 `RequestLogCatalog.officialAccountAvailable` 来自后端登录探测结果，`request_log_catalog_exposes_login_status_independently_of_profiles` 覆盖有官方配置但未登录和已登录无保存线路的目录序列化。弹窗固定统计官方账号 `openai` 的当前周周期全部模型，不沿用日志筛选时间。关闭或刷新弹窗不修改原页面筛选和记录。
+- `quotaEstimate.ts` 内置 OpenAI Standard、Fast、Batch、Flex 各档独立 Token 单价，来源为 https://developers.openai.com/api/docs/pricing 及对应模型文档，2026-09-09 核对；GPT-5.6 Sol 使用官方当日公开促销价。金额为 USD API 等值估算，不是订阅真实扣费。按模型、档位、长短上下文、计价依据分别聚合；Fast 不使用统一倍数。未知档位或缺少对应费率时保留用量，金额显示不可计价，合计排除并警告；全部未计价时结果显示不可计算。新增价格需重新核对官方来源。
+- 请求日志 schema 7 增加 `requested_service_tier` 和 `service_tier`，对外为 `requestedServiceTier` / `serviceTier`。共享 Responses 代理链路记录请求档位；JSON、SSE、WebSocket 响应记录实际档位，实际响应优先，priority/fast 等价，default/standard 等价。仅有明确请求档位时单独标注推定；未记录档位或仅有 auto 时按默认 Standard 计价，来源单独标为默认档位（未记录），计入推定请求数；其他未知响应档位不猜价。旧 SQLite 库写入时迁移，迁移前只读查询以 NULL 补列；NDJSON 保留相同字段。第三方协议转换可能缺失实际档位；重启开发版后才采集新增字段，历史记录不补造。
+- 通过 `query_route_request_log_stats` 读取日志健康状态，再复用 `query_route_request_logs` 每页 100 条游标分页，逐请求计价后按模型及各计费规则分别累加，避免分组统计 50 条上限及汇总后无法区分长上下文的问题。关闭后停止后续分页并忽略迟到响应；分页失败不提交部分结果。大量历史记录查询可能较慢，必要时再改后端聚合；分页期间发生日志补写或清理时不保证跨页事务快照，更新时间表示本轮读取完成时间。
+- 缓存读取与写入视为输入 Token 的子集，按请求限制到输入总量，防止重复计费；新版 `usage.input_tokens_details.cache_write_tokens` 优先于旧写入字段，并由有界流式投影保留。Chat 与 Anthropic 转 Responses 时保留缓存写入量，缺失字段不生成伪零值；额度表按模型和合计标注未记录写入量的请求数，缺失部分仍按普通输入价估算，额外写入费用可能未计入。读写费用单独展示，所在档位没有独立缓存价时使用该档位输入价。缓存节省仅作为参考，不从总价重复扣除。支持长上下文的模型单请求输入超过 272,000 时使用该档长价；未公布长价的组合保持未计价，不借用 Standard 价格。输出包含推理 Token，不另加一次。
+- 额度估算不使用地区规则：不按上游域名分组、不加收地区费用、不因地区拒绝计价。日志缺少工具调用完整计量、搜索内容特殊计价、容器容量与时长、账户存储数据，因此这些费用尚未计入，弹窗明确说明。
+- `renderer-inject.js` 提供 `__codeyReadQuotaAccountUsage`，优先复用开启显示时 60 秒内且周窗未过期的 `accountUsageLastResult`；配置变化清除复用数据。关闭显示、数据过期或主动刷新时调用 `query_official_account_usage({forceRefresh:true})`，错误时沿用 AppServer 通用额度回退，查询不启用显示或轮询。独立日志页通过同名认证 POST API 主动获取。后端共用现有缓存实现，强制刷新绕过成功缓存但保留失败退避；原 `/account/usage` 仍遵守显示开关。
+- 从 `primary/secondary` 选取 `windowMinutes=10080` 的周窗，使用官方 `usedPercent`，上次重置 = `resetsAt × 1000 − 7天`，请求截止 = `fetchedAt × 1000`；区分秒与毫秒，校验比例、更新时间和周期边界。缺少周窗、数据无效或已经重置时提示错误，不回退到手填比例或最近24小时。
+- 设本周期已记录消耗为 C、从上次重置到额度更新时间的时长为 T、官方已用比例为 p：预估周限 L = C / p，当前预估剩余 = L − C；按当前速度预计的整周消耗 W = C × 7 天 / T 单独展示，不用于周限反推。p 为 0 时周限及剩余显示不可计算。官方比例可能包含其他设备或渠道用量，缺失日志和跨账号历史可能使反推不准确，界面明确提示。
+- 缺失用量按 0，已知输入或输出仍分别计费；不按采样率补推。计算保留原始精度，金额显示 4 位、Token 显示整数、占比显示 2 位。`tests/antd-browser.html?view=quota` 提供大数值、缺失数据与未计价模型的分组布局预览；`node --test tests/quota-estimate.test.mjs` 覆盖各档独立价格、Fast 回退与推定、缓存读写、长上下文边界与未公布费率、缺失数据、未知模型、比例边界、周换算、完整分页、异常与取消。`cargo test -p codey --lib --no-default-features request_log` 覆盖档位迁移、字段往返及分块流式提取。
+
 ## 诊断存储手动清理
 
 - Trace 与 Crashpad 卡片分别传入 `clear_diagnostic_storage` 的 `target: trace | crashpad`，缺省和其他值在执行前拒绝，仅分析并清理指定目标。沿用诊断操作互斥锁、日志库压缩和 Crashpad 文件白名单及静默期保护，不修改用户的保护开关。
@@ -270,6 +283,7 @@ release 应用通过 `plutil -lint`、`codesign --verify --deep --strict` 和可
 - Codey 配置由 directories crate 放在系统配置目录的 config.json，并保留三份有效滚动备份。Unix 下配置、备份、日志和本地请求日志应限制为当前用户可读写。
 - CODEX_HOME 非空时始终优先；否则使用 Codex 默认目录。
 - auth.json 只读，Codey 不修改官方登录凭据。
+- 官方账号识别：当前 Provider 优先读取选中 profile 的 model_provider。API 凭据及其环境变量声明、自定义 Authorization 头、requires_openai_auth=false 均排除官方直登；显式端点只接受 HTTPS 的 chatgpt.com/backend-api/codex，OpenAI API 地址和相似域名不算官方账号线路。原生探针须成功退出并返回独立状态行 Logged in using ChatGPT，普通 ChatGPT/OAuth/bearer token 字样不作为已登录证据。第三方线路在原生探针无法确认时不使用 auth.json 残留凭据补判官方账号；原生明确确认的官方登录仍支持与第三方线路并存。回归覆盖旧凭据、模糊命令输出、相似域名、未设置的认证环境变量和 profile 选择；`cargo test -p codey --lib` 验证通过（1126 passed，4 ignored）。
 - config.toml 在启动准备和正式启动前做快照复核。除 Codey 自有 codey_router 恢复桩和明确识别的旧版污染外，不改写用户 Provider、MCP、模型或未知字段。
 - codex-lease.json、hooks.json 中的 Codey 组、角色运行副本和证明状态均属于临时运行资产，异常退出后由下次启动恢复。
 - 第三方 API Key、通知地址和机器人令牌目前仍以明文保存在 Codey 私有配置及备份中；配置响应保留 API Key、飞书和企业微信的 Webhook 地址及 Telegram Bot Token 供编辑回显；ClawBot 显示已绑定的接收用户 ID，其机器人令牌、上下文令牌及其他渠道地址仍会清空。后续若迁移系统凭据库，应同时处理备份格式和升级兼容。

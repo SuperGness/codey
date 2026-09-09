@@ -77,6 +77,8 @@ impl RequestLogResponseTap {
 
 #[derive(Default)]
 pub(crate) struct RequestLogMetadataProjector {
+    response_depth: Option<usize>,
+    awaiting_response: bool,
     pub(crate) depth: usize,
     pub(crate) in_string: bool,
     pub(crate) escaped: bool,
@@ -93,6 +95,8 @@ pub(crate) struct RequestLogMetadataProjector {
 
 #[derive(Clone, Copy)]
 pub(crate) enum ProjectedMetadataKey {
+    Response,
+    ServiceTier,
     Usage,
     Type,
     Delta,
@@ -102,6 +106,7 @@ pub(crate) enum ProjectedMetadataKey {
 
 #[derive(Clone, Copy)]
 pub(crate) enum ProjectedMetadataScalar {
+    ServiceTier,
     EventType,
     Delta,
     ResponseStatus,
@@ -472,13 +477,13 @@ pub(crate) fn projected_usage_key(context: UsageObjectContext, value: &[u8]) -> 
         (UsageObjectContext::Root, b"cache_read_tokens") => KeyField(Field::CachedInput, 3),
         (UsageObjectContext::Root, b"cached_input_tokens") => KeyField(Field::CachedInput, 4),
         (UsageObjectContext::Root, b"cache_creation_input_tokens") => {
-            KeyField(Field::CacheCreationInput, 0)
+            KeyField(Field::CacheCreationInput, 2)
         }
         (UsageObjectContext::Root, b"cache_creation_tokens") => {
-            KeyField(Field::CacheCreationInput, 1)
+            KeyField(Field::CacheCreationInput, 3)
         }
         (UsageObjectContext::Root, b"cache_write_input_tokens") => {
-            KeyField(Field::CacheCreationInput, 2)
+            KeyField(Field::CacheCreationInput, 4)
         }
         (UsageObjectContext::Root, b"output_tokens_details") => {
             Object(UsageObjectContext::ReasoningDetails(0))
@@ -491,6 +496,9 @@ pub(crate) fn projected_usage_key(context: UsageObjectContext, value: &[u8]) -> 
         (UsageObjectContext::Root, b"totalTokens") => KeyField(Field::Total, 1),
         (UsageObjectContext::CachedDetails(priority), b"cached_tokens") => {
             KeyField(Field::CachedInput, priority)
+        }
+        (UsageObjectContext::CachedDetails(priority), b"cache_write_tokens") => {
+            KeyField(Field::CacheCreationInput, priority)
         }
         (UsageObjectContext::ReasoningDetails(priority), b"reasoning_tokens") => {
             KeyField(Field::ReasoningOutput, priority)
@@ -525,6 +533,9 @@ impl RequestLogMetadataProjector {
                     self.in_string = false;
                     if let Some(field) = self.capturing_scalar.take() {
                         match field {
+                            ProjectedMetadataScalar::ServiceTier if !self.string_overflow => {
+                                probe.observe_service_tier(&String::from_utf8_lossy(&self.string));
+                            }
                             ProjectedMetadataScalar::Delta => {
                                 self.event_delta_has_content =
                                     self.string_overflow || !self.string.is_empty();
@@ -552,6 +563,7 @@ impl RequestLogMetadataProjector {
                                 probe.observe_terminal_projection(None, None, Some(&value))
                             }
                             ProjectedMetadataScalar::EventType
+                            | ProjectedMetadataScalar::ServiceTier
                             | ProjectedMetadataScalar::ResponseStatus
                             | ProjectedMetadataScalar::ErrorCode => {}
                         }
@@ -580,9 +592,16 @@ impl RequestLogMetadataProjector {
                 }
                 b':' => {
                     let key = self.last_key.take();
+                    self.awaiting_response =
+                        self.depth == 1 && matches!(key, Some(ProjectedMetadataKey::Response));
                     self.awaiting_usage =
                         self.depth <= 2 && matches!(key, Some(ProjectedMetadataKey::Usage));
                     self.awaiting_scalar = match (self.depth, key) {
+                        (depth, Some(ProjectedMetadataKey::ServiceTier))
+                            if depth == 1 || self.response_depth == Some(depth) =>
+                        {
+                            Some(ProjectedMetadataScalar::ServiceTier)
+                        }
                         (1, Some(ProjectedMetadataKey::Type)) => {
                             Some(ProjectedMetadataScalar::EventType)
                         }
@@ -609,17 +628,25 @@ impl RequestLogMetadataProjector {
                         self.event_delta_has_content = false;
                     }
                     self.depth += 1;
+                    if self.awaiting_response {
+                        self.response_depth = Some(self.depth);
+                    }
+                    self.awaiting_response = false;
                     self.awaiting_usage = false;
                     self.awaiting_scalar = None;
                     self.last_key = None;
                 }
                 b'[' => {
+                    self.awaiting_response = false;
                     self.depth += 1;
                     self.awaiting_usage = false;
                     self.awaiting_scalar = None;
                     self.last_key = None;
                 }
                 b'}' | b']' => {
+                    if self.response_depth == Some(self.depth) {
+                        self.response_depth = None;
+                    }
                     self.depth = self.depth.saturating_sub(1);
                     self.awaiting_usage = false;
                     self.awaiting_scalar = None;
@@ -627,6 +654,7 @@ impl RequestLogMetadataProjector {
                 }
                 byte if byte.is_ascii_whitespace() => {}
                 _ => {
+                    self.awaiting_response = false;
                     self.awaiting_usage = false;
                     self.awaiting_scalar = None;
                     self.last_key = None;
@@ -639,11 +667,48 @@ impl RequestLogMetadataProjector {
 
 pub(crate) fn projected_metadata_key(value: &[u8]) -> Option<ProjectedMetadataKey> {
     match value {
+        b"response" => Some(ProjectedMetadataKey::Response),
+        b"service_tier" => Some(ProjectedMetadataKey::ServiceTier),
         b"usage" => Some(ProjectedMetadataKey::Usage),
         b"type" => Some(ProjectedMetadataKey::Type),
         b"delta" => Some(ProjectedMetadataKey::Delta),
         b"status" => Some(ProjectedMetadataKey::Status),
         b"code" => Some(ProjectedMetadataKey::Code),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod billing_tests {
+    use super::*;
+
+    #[test]
+    fn service_tier_projects_chunked_long_sse_without_reading_nested_content() {
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        let mut projector = RequestLogMetadataProjector::default();
+        let content = "x".repeat(256 * 1024);
+        let event = format!(
+            "data: {{\"type\":\"response.completed\",\"response\":{{\"output\":[{{\"text\":\"{content}\",\"service_tier\":\"wrong\"}}],\"service_tier\":\"default\"}}}}\n\n"
+        );
+        for bytes in event.as_bytes().chunks(13) {
+            projector.observe(bytes, &probe, Instant::now()).unwrap();
+        }
+        assert_eq!(probe.service_tier_for_test().as_deref(), Some("default"));
+        projector
+            .observe(
+                b"data: {\"metadata\":{\"service_tier\":\"wrong\"}}\n\n",
+                &probe,
+                Instant::now(),
+            )
+            .unwrap();
+        assert_eq!(probe.service_tier_for_test().as_deref(), Some("default"));
+        for chunk in b"data: {\"usage\":{\"input_tokens_details\":{\"cache_write_tokens\":1500},\"cache_creation_input_tokens\":999}}\n\n".chunks(3) {
+            projector.observe(chunk, &probe, Instant::now()).unwrap();
+        }
+        assert_eq!(
+            probe.token_usage_for_test().cache_creation_input_tokens,
+            Some(1500)
+        );
+        assert!(projector.string.len() <= 64);
     }
 }

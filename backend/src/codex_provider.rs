@@ -89,8 +89,16 @@ fn current_official_account_profile_status_with_probe(
     native_probe: impl FnOnce(&Path) -> NativeLoginStatus,
 ) -> Result<OfficialAccountProfileStatus> {
     let mut snapshot = local_provider_with_auth_policy(codex_home, AuthProbePolicy::Lenient)?;
-    snapshot.official_account_auth =
-        official_auth_probe_from_native(snapshot.official_account_auth, native_probe(codex_home));
+    let native_status = native_probe(codex_home);
+    snapshot.official_account_auth = if !snapshot.provider.official
+        && let NativeLoginStatus::Unknown(reason) = &native_status
+    {
+        OfficialAccountAuthProbe::Unavailable(format!(
+            "当前使用 API Key 或第三方线路，原生探针未确认 ChatGPT 登录，不使用残留凭据推断官方账号；{reason}"
+        ))
+    } else {
+        official_auth_probe_from_native(snapshot.official_account_auth, native_status)
+    };
     let profile = official_profile_from_snapshot(&snapshot);
     Ok(match snapshot.official_account_auth {
         OfficialAccountAuthProbe::Available(_) => OfficialAccountProfileStatus::Available(profile),
@@ -404,8 +412,25 @@ fn local_provider_with_auth_policy(
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let config_api_key = provider_config_api_key(document, table);
-    let has_provider_scoped_api_key = config_api_key.is_some();
-    let official_endpoint = base_url.is_empty() || is_official_base_url(&base_url);
+    let has_provider_scoped_api_key = config_api_key.is_some()
+        || PROVIDER_KEYS.iter().chain(PROVIDER_ENV_KEYS).any(|key| {
+            table
+                .and_then(|provider| provider.get(key))
+                .and_then(Item::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+        || ["http_headers", "env_http_headers"].iter().any(|key| {
+            table
+                .and_then(|provider| provider.get(key))
+                .and_then(Item::as_table_like)
+                .is_some_and(|headers| {
+                    headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+                })
+        });
+    let official_endpoint = (base_url.is_empty() && provider_id == BUILTIN_OPENAI_PROVIDER_ID)
+        || is_official_base_url(&base_url);
     // A provider-scoped token describes the active route and must win over a
     // long-lived auth.json login retained alongside it.
     let api_key = config_api_key
@@ -413,7 +438,12 @@ fn local_provider_with_auth_policy(
         .unwrap_or_default();
     let official = official_endpoint
         && !has_provider_scoped_api_key
-        && (auth_mode == Some("chatgpt") || api_key.is_empty());
+        && table
+            .and_then(|provider| provider.get("requires_openai_auth"))
+            .and_then(Item::as_bool)
+            != Some(false)
+        && matches!(auth_mode, None | Some("chatgpt"))
+        && api_key.is_empty();
     if !official && base_url.is_empty() {
         base_url = "https://api.openai.com/v1".to_string();
     }
@@ -529,8 +559,13 @@ fn builtin_official_provider() -> CurrentProvider {
 }
 
 fn active_provider_id(document: &DocumentMut) -> &str {
-    document
-        .get("model_provider")
+    let profile = document
+        .get("profile")
+        .and_then(Item::as_str)
+        .and_then(|name| document.get("profiles")?.get(name));
+    profile
+        .and_then(|profile| profile.get("model_provider"))
+        .or_else(|| document.get("model_provider"))
         .and_then(Item::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -759,9 +794,9 @@ fn parse_native_login_status_output(
                 .to_string(),
         )
     } else if success
-        && (normalized.contains("chatgpt")
-            || normalized.contains("oauth")
-            || normalized.contains("bearer token"))
+        && normalized
+            .lines()
+            .any(|line| line.trim() == "logged in using chatgpt")
     {
         NativeLoginStatus::ChatGpt
     } else if success {
@@ -778,25 +813,26 @@ fn provider_config_api_key(
     provider_config_api_key_with_env(document, provider, &|name| std::env::var(name).ok())
 }
 
+const PROVIDER_KEYS: &[&str] = &[
+    "experimental_bearer_token",
+    "api_key",
+    "apikey",
+    "bearer_token",
+    "token",
+];
+const PROVIDER_ENV_KEYS: &[&str] = &[
+    "env_key",
+    "api_key_env",
+    "api_key_env_var",
+    "key_env",
+    "bearer_token_env",
+];
+
 fn provider_config_api_key_with_env(
     document: &DocumentMut,
     provider: Option<&dyn TableLike>,
     env_value: &impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    const PROVIDER_KEYS: &[&str] = &[
-        "experimental_bearer_token",
-        "api_key",
-        "apikey",
-        "bearer_token",
-        "token",
-    ];
-    const PROVIDER_ENV_KEYS: &[&str] = &[
-        "env_key",
-        "api_key_env",
-        "api_key_env_var",
-        "key_env",
-        "bearer_token_env",
-    ];
     PROVIDER_KEYS
         .iter()
         .find_map(|key| {
@@ -884,8 +920,17 @@ fn insert_model_request_header(headers: &mut BTreeMap<String, String>, name: &st
 }
 
 fn is_official_base_url(base_url: &str) -> bool {
-    let base_url = base_url.to_ascii_lowercase();
-    base_url.contains("chatgpt.com/backend-api/codex") || base_url.contains("api.openai.com")
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some("chatgpt.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port_or_known_default() == Some(443)
+        && url.path().trim_end_matches('/') == "/backend-api/codex"
+        && url.query().is_none()
+        && url.fragment().is_none()
 }
 
 fn upstream_protocol_from_wire_api(value: &str) -> Result<&'static str> {
@@ -1099,6 +1144,28 @@ experimental_bearer_token = "sk-relay"
             parse_native_login_status_output(true, "Unexpected auth mode", "", "exit status: 0"),
             NativeLoginStatus::Unknown(_)
         ));
+        for output in [
+            "ChatGPT login is available",
+            "OAuth bearer token configured",
+            "warning: ChatGPT authentication failed",
+            "warning: Logged in using ChatGPT",
+        ] {
+            assert!(
+                matches!(
+                    parse_native_login_status_output(true, "", output, "exit status: 0"),
+                    NativeLoginStatus::Unknown(_)
+                ),
+                "{output}"
+            );
+        }
+        assert_eq!(
+            parse_native_login_status_output(true, "", "Logged in using ChatGPT\n", "0"),
+            NativeLoginStatus::ChatGpt
+        );
+        assert!(matches!(
+            parse_native_login_status_output(false, "Logged in using ChatGPT", "", "1"),
+            NativeLoginStatus::Unknown(_)
+        ));
     }
 
     #[test]
@@ -1186,7 +1253,7 @@ experimental_bearer_token = "sk-relay"
     }
 
     #[test]
-    fn official_capability_survives_ccswitch_selected_provider() {
+    fn third_party_provider_requires_native_confirmation_of_retained_chatgpt_login() {
         let home = TempDir::new().unwrap();
         write_config(home.path(), &third_party_config("responses"));
         write_auth(
@@ -1197,10 +1264,17 @@ experimental_bearer_token = "sk-relay"
             }),
         );
 
+        assert!(matches!(
+            status_with_unknown_native(home.path()).unwrap(),
+            OfficialAccountProfileStatus::Unavailable { .. }
+        ));
         let OfficialAccountProfileStatus::Available(profile) =
-            status_with_unknown_native(home.path()).unwrap()
+            current_official_account_profile_status_with_probe(home.path(), |_| {
+                NativeLoginStatus::ChatGpt
+            })
+            .unwrap()
         else {
-            panic!("retained ChatGPT tokens should make official auth available");
+            panic!("confirmed ChatGPT login should remain available alongside third-party routes");
         };
 
         assert!(profile.official_account);
@@ -1235,13 +1309,10 @@ experimental_bearer_token = "sk-relay"
             }),
         );
 
-        let OfficialAccountProfileStatus::Available(official) =
-            status_with_unknown_native(home.path()).unwrap()
-        else {
-            panic!("retained ChatGPT login should remain available");
-        };
-        assert_eq!(official.provider_id(), "openai");
-        assert!(official.official_account);
+        assert!(matches!(
+            status_with_unknown_native(home.path()).unwrap(),
+            OfficialAccountProfileStatus::Unavailable { .. }
+        ));
 
         let (imported, status) =
             sync_current_third_party_provider(&CodeyConfig::default(), home.path()).unwrap();
@@ -1266,6 +1337,74 @@ experimental_bearer_token = "sk-relay"
         let (config, _) = sync_current_provider(&CodeyConfig::default(), home.path()).unwrap();
         assert_eq!(config.profiles[0].api_key, "sk-relay");
         assert!(!config.profiles[0].official_account);
+    }
+
+    #[test]
+    fn official_route_detection_rejects_api_credentials_and_lookalike_urls() {
+        let home = TempDir::new().unwrap();
+        write_auth(
+            home.path(),
+            serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": { "access_token": "retained-token" }
+            }),
+        );
+        for base_url in [
+            "https://api.openai.com/v1",
+            "https://api.openai.com.relay.example/v1",
+            "https://relay.example/api.openai.com",
+            "https://relay.example/?upstream=chatgpt.com/backend-api/codex",
+            "https://chatgpt.com@relay.example/backend-api/codex",
+            "http://chatgpt.com/backend-api/codex",
+            "https://chatgpt.com/backend-api/codex-proxy",
+            "https://chatgpt.com:8443/backend-api/codex",
+        ] {
+            write_config(
+                home.path(),
+                &format!("[model_providers.openai]\nbase_url = {base_url:?}\n"),
+            );
+            assert!(
+                !current_provider(home.path()).unwrap().official,
+                "{base_url}"
+            );
+            assert!(matches!(
+                status_with_unknown_native(home.path()).unwrap(),
+                OfficialAccountProfileStatus::Unavailable { .. }
+            ));
+        }
+        for extra in [
+            "env_key = 'CODEY_TEST_UNSET_OFFICIAL_AUTH_KEY'",
+            "requires_openai_auth = false",
+            "http_headers = { Authorization = 'Bearer custom-token' }",
+            "env_http_headers = { Authorization = 'CODEY_TEST_UNSET_OFFICIAL_AUTH_KEY' }",
+        ] {
+            write_config(home.path(), &format!("[model_providers.openai]\n{extra}\n"));
+            assert!(!current_provider(home.path()).unwrap().official, "{extra}");
+        }
+        write_config(home.path(), "model_provider = 'relay'");
+        assert!(!current_provider(home.path()).unwrap().official);
+        write_config(
+            home.path(),
+            "profile = 'relay-profile'\n[profiles.relay-profile]\nmodel_provider = 'relay'",
+        );
+        assert_eq!(current_provider(home.path()).unwrap().id, "relay");
+        assert!(!current_provider(home.path()).unwrap().official);
+        for config in [
+            "",
+            "[model_providers.openai]\nbase_url = 'https://chatgpt.com/backend-api/codex/'",
+        ] {
+            write_config(home.path(), config);
+            assert!(current_provider(home.path()).unwrap().official);
+        }
+        write_auth(
+            home.path(),
+            serde_json::json!({
+                "auth_mode": "chatgpt",
+                "OPENAI_API_KEY": "api-key",
+                "tokens": { "access_token": "retained-token" }
+            }),
+        );
+        assert!(!current_provider(home.path()).unwrap().official);
     }
 
     #[test]

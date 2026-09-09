@@ -436,6 +436,12 @@ if (import.meta.env.DEV) {
             previewConfig.protectCrashpadPending,
         };
       }
+      if (command === "query_official_account_usage") {
+        const fetchedAt = Math.floor(Date.now() / 1000);
+        return { status: "ok", fetchedAt, secondary: {
+          usedPercent: 40, windowMinutes: 10080, resetsAt: fetchedAt + 3 * 86400,
+        } };
+      }
       if (command === "query_route_request_logs" || command === "query_route_request_log_stats") {
         const page = Math.max(1, Number(args.page) || 1);
         const pageSize = Math.min(100, Math.max(1, Number(args.pageSize) || 20));

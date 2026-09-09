@@ -878,6 +878,10 @@ async fn resolve_session_name_cached(
 pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Value {
     let result = match command {
         "load_codey_config" => load_codey_config(state).await,
+        "query_official_account_usage" => match optional_argument::<bool>(&args, "forceRefresh") {
+            Ok(force) => Ok(query_official_account_usage(state, force.unwrap_or(false)).await),
+            Err(error) => Err(error),
+        },
         "save_codey_config" => match codey_config_save_input(&args) {
             Ok(input) => save_codey_config_input(state, input).await,
             Err(error) => Err(error),
@@ -2292,12 +2296,16 @@ fn redacted_config(config: &CodeyConfig) -> CodeyConfig {
 }
 
 async fn account_usage_snapshot(state: &Arc<AppState>) -> Value {
+    if !state.config.read().await.show_account_usage_in_header {
+        return json!({"status": "disabled"});
+    }
+    query_official_account_usage(state, false).await
+}
+
+async fn query_official_account_usage(state: &Arc<AppState>, force_refresh: bool) -> Value {
     {
         let config = state.config.read().await;
-        if !config.show_account_usage_in_header {
-            return json!({"status": "disabled"});
-        }
-        if !account_usage_enabled_for_config(&config) {
+        if !official_account_available_for_usage(&config) {
             return json!({
                 "status": "unavailable",
                 "reason": "official_account_missing",
@@ -2308,26 +2316,15 @@ async fn account_usage_snapshot(state: &Arc<AppState>) -> Value {
 
     let home = codex_home();
     let mut cache = state.account_usage_cache.lock().await;
-    match cache.fetch(home).await {
-        Ok(snapshot) => {
-            let mut value = serde_json::to_value(snapshot)
-                .expect("account usage snapshots must be JSON-serializable");
-            if let Some(object) = value.as_object_mut() {
-                object.insert("status".into(), Value::String("ok".into()));
-            }
-            value
-        }
-        Err(error) => json!({
-            "status": "error",
-            "message": error.to_string(),
-        }),
-    }
+    account_usage::query_snapshot(&mut cache, home, force_refresh).await
 }
 
+#[cfg(test)]
 fn account_usage_enabled_for_config(config: &CodeyConfig) -> bool {
-    if !config.show_account_usage_in_header {
-        return false;
-    }
+    config.show_account_usage_in_header && official_account_available_for_usage(config)
+}
+
+fn official_account_available_for_usage(config: &CodeyConfig) -> bool {
     if !config.local_router_enabled {
         return config.official_account_available_this_launch;
     }

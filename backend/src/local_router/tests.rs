@@ -2,6 +2,26 @@ use super::*;
 use crate::config::ProviderProfile;
 
 #[test]
+fn request_log_catalog_exposes_login_status_independently_of_profiles() {
+    let mut official = ProviderProfile::new("OpenAI 官方直登");
+    official.source_provider_id = Some("openai".into());
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+    official.normalize();
+    let mut config = CodeyConfig {
+        profiles: vec![official, ProviderProfile::new("Third party")],
+        ..CodeyConfig::default()
+    };
+    let response = serde_json::to_value(RequestLogCatalog::from_config(&config)).unwrap();
+    assert_eq!(response["officialAccountAvailable"], false);
+    assert_eq!(response["profiles"][0]["sourceProviderId"], "openai");
+    assert!(response["profiles"][0].get("apiKey").is_none());
+    config.official_account_available_this_launch = true;
+    config.profiles.clear();
+    let response = serde_json::to_value(RequestLogCatalog::from_config(&config)).unwrap();
+    assert_eq!(response["officialAccountAvailable"], true);
+}
+
+#[test]
 fn disabled_route_has_no_request_target() {
     let mut route = ProviderProfile::new("Disabled");
     route.id = "disabled".into();
@@ -4828,6 +4848,45 @@ fn streaming_waits_for_a_complete_declared_function_name() {
 }
 
 #[test]
+fn request_log_adapters_preserve_cache_write_usage_and_missing_values() {
+    for writes in [None, Some(0_u64), Some(7)] {
+        for protocol in ["chat", "anthropic"] {
+            let response = if protocol == "chat" {
+                chat_completion_to_responses_body(json!({
+                    "choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+                    "usage":{"prompt_tokens":20,"completion_tokens":2,
+                        "prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":writes}}
+                }), "test-model").unwrap()
+            } else {
+                anthropic_message_to_responses_body(&json!({
+                    "content":[{"type":"text","text":"ok"}], "stop_reason":"end_turn",
+                    "usage":{"input_tokens":10,"output_tokens":2,
+                        "cache_read_input_tokens":3,"cache_creation_input_tokens":writes}
+                }), "test-model").unwrap()
+            };
+            let details = &response["usage"]["input_tokens_details"];
+            assert_eq!(details.get("cache_write_tokens").and_then(Value::as_u64), writes);
+            assert_eq!(details.get("cache_write_tokens").is_some(), writes.is_some());
+            let probe = RouteRequestLogProbe::detached_test_probe();
+            let mut projector = RequestLogMetadataProjector::default();
+            let event = format!("data: {}\n\n", json!({"type":"response.completed","response":response}));
+            for chunk in event.as_bytes().chunks(3) {
+                projector.observe(chunk, &probe, Instant::now()).unwrap();
+            }
+            assert_eq!(probe.token_usage_for_test().cache_creation_input_tokens, writes);
+        }
+    }
+    for field in ["cache_creation_input_tokens", "cache_creation_tokens", "cache_write_input_tokens"] {
+        let mut usage = json!({"input_tokens":20,"output_tokens":2});
+        usage[field] = json!(7);
+        let converted = sse_chat::chat_usage_to_responses_usage(&usage);
+        assert_eq!(converted["input_tokens_details"]["cache_write_tokens"], 7);
+        usage["input_tokens_details"] = json!({"cache_write_tokens":0});
+        assert_eq!(sse_chat::chat_usage_to_responses_usage(&usage)["input_tokens_details"]["cache_write_tokens"], 0);
+    }
+}
+
+#[test]
 fn chat_response_converts_parallel_tools_and_usage_to_responses() {
     let responses = chat_completion_to_responses_body(
         json!({
@@ -7235,6 +7294,7 @@ async fn request_log_page_is_public_but_its_api_requires_the_launch_token() {
         "load_codey_config",
         "query_route_request_logs",
         "query_route_request_log_stats",
+        "query_official_account_usage",
     ] {
         let unauthorized = client
             .post(format!("{gateway_root}/codey/api/{command}"))
@@ -7261,6 +7321,21 @@ async fn request_log_page_is_public_but_its_api_requires_the_launch_token() {
     );
     assert!(catalog["config"]["profiles"][0].get("apiKey").is_none());
     assert!(catalog["config"]["profiles"][0].get("baseUrl").is_none());
+
+    let usage = client
+        .post(format!(
+            "{gateway_root}/codey/api/query_official_account_usage"
+        ))
+        .header(ROUTER_AUTH_HEADER, &endpoint.token)
+        .json(&json!({"forceRefresh": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(usage.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        usage.json::<Value>().await.unwrap()["status"],
+        "unavailable"
+    );
 
     router.stop().await.unwrap();
 }

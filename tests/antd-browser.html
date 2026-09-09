@@ -9,14 +9,26 @@
     import { UiProvider } from "../src/UiProvider.tsx";
     import "../src/dev/mockApi";
     const mock = window.__codeyInvokeApi;
-    if (new URLSearchParams(location.search).get("view") === "logs") {
+    const view = new URLSearchParams(location.search).get("view");
+    if (view === "quota") {
+      window.__codeyInvokeApi = async (command, args) => {
+        if (command !== "query_route_request_logs" || args.provider !== "openai") return mock(command, args);
+        return { queryable: true, hasMore: false, items: [
+          { model: "gpt-6-astra", inputTokens: 191090068, outputTokens: 2048123, totalTokens: 193138191, cachedInputTokens: 180000000 },
+          { model: "gpt-6-astra", serviceTier: "default", inputTokens: 21349800, outputTokens: 341000, totalTokens: 21690800, cachedInputTokens: 19000000, cacheCreationInputTokens: 50000 },
+          { model: "gpt-5.6-luna", inputTokens: 240000, outputTokens: 16000, totalTokens: 256000 },
+          { model: "unknown-model", inputTokens: 1000 },
+        ] };
+      };
+    }
+    if (view === "logs" || view === "quota") {
       await import("../src/tailwind.css");
       await import("../src/styles.css");
       const { RequestLogDialog } = await import("../src/RequestLogDialog.tsx");
       const { config } = await mock("load_codey_config", {});
       createRoot(document.getElementById("root")).render(
         React.createElement(UiProvider, null,
-          React.createElement(RequestLogDialog, { catalog: config, opened: true, standalone: true, onClose() {} }))
+          React.createElement(RequestLogDialog, { catalog: { ...config, officialAccountAvailable: true }, opened: true, standalone: true, onClose() {} }))
       );
     } else {
       window.__codexSessionDeleteBridge = (path, args) => mock(path.split("/").pop(), args);

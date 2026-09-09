@@ -142,6 +142,41 @@ impl RouterServer {
                     probe.finish_success();
                 }
             }
+            ("POST", "/codey/api/query_official_account_usage") => {
+                #[derive(serde::Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct UsageQuery {
+                    force_refresh: Option<bool>,
+                }
+                let args = match serde_json::from_slice::<UsageQuery>(&request.body) {
+                    Ok(args) => args,
+                    Err(error) => {
+                        write_json_response(&mut stream, 400, &json!({"status": "error", "message": format!("额度查询参数无效：{error}")})).await?;
+                        return Ok(());
+                    }
+                };
+                let available = self
+                    .snapshot
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .routes
+                    .values()
+                    .any(|route| route.official_account);
+                let value = if !available {
+                    json!({"status": "unavailable", "reason": "official_account_missing", "message": "当前线路列表中没有可用的官方账号线路"})
+                } else if let Some(home) = self.official_auth_path.parent() {
+                    let mut cache = self.account_usage_cache.lock().await;
+                    crate::account_usage::query_snapshot(
+                        &mut cache,
+                        home,
+                        args.force_refresh.unwrap_or(false),
+                    )
+                    .await
+                } else {
+                    json!({"status": "error", "message": "官方账号目录无效"})
+                };
+                write_json_response(&mut stream, 200, &value).await?;
+            }
             ("POST", "/codey/api/load_codey_config") => {
                 let catalog = self
                     .snapshot
@@ -1086,6 +1121,9 @@ impl RouterServer {
             return self
                 .proxy_with_compaction_budget(request, body, encoded_body, request_kind, downstream)
                 .await;
+        }
+        if let Some(probe) = &probe {
+            probe.set_requested_service_tier(body.get("service_tier").and_then(Value::as_str));
         }
         let _request_log_guard = RouteRequestLogGuard::new(probe.clone());
         let mut observed = ObservedResponsesDownstream::new(downstream, probe);

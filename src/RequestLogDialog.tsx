@@ -20,6 +20,7 @@ import type { Config, Profile } from "./App.types";
 import requestLogStyles from "./styles.request-log.css?inline";
 import { invoke } from "./api";
 import { formatTimestamp } from "./formatters";
+import { QuotaEstimateDialog } from "./QuotaEstimateDialog";
 import {
   Badge,
   Button,
@@ -41,6 +42,8 @@ type RouteRequestLogItem = {
   provider?: string | null;
   providerName?: string | null;
   requestedModel: string;
+  requestedServiceTier?: string | null;
+  serviceTier?: string | null;
   model?: string | null;
   reasoningEffort?: string | null;
   thinkingBudgetTokens?: number | null;
@@ -147,6 +150,7 @@ type ActionNotice = {
 };
 
 export type RequestLogCatalog = {
+  officialAccountAvailable: boolean;
   profiles: Array<Pick<Profile, "id" | "name" | "sourceProviderId">>;
   selectedModelsByProvider: Config["selectedModelsByProvider"];
   declaredOfficialModelsByProvider: Config["declaredOfficialModelsByProvider"];
@@ -326,6 +330,7 @@ export function RequestLogDialog({
   standalone = false,
 }: RequestLogDialogProps) {
   const [searchInput, setSearchInput] = useState("");
+  const [quotaOpen, setQuotaOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [provider, setProvider] = useState("all");
   const [model, setModel] = useState("all");
@@ -642,6 +647,7 @@ export function RequestLogDialog({
   return (
     <div className="request-log-workspace relative flex h-full min-h-0 flex-1 flex-col">
       <style>{requestLogStyles}</style>
+      {quotaOpen && catalog.officialAccountAvailable === true && <QuotaEstimateDialog container={standalone ? document.body : container} onClose={() => setQuotaOpen(false)} />}
       <div className="request-log-header">
         <div className="request-log-heading">
           <div><p className="request-log-eyebrow">CODEY / 内置路由</p><h1>请求日志</h1></div>
@@ -679,6 +685,9 @@ export function RequestLogDialog({
         </div>
 
         <div className="request-log-actions">
+          {catalog.officialAccountAvailable === true && (
+            <Button variant="link" color="primary" size="sm" onClick={() => setQuotaOpen(true)}>周限额度估算</Button>
+          )}
           <AntButton
             size="small"
             icon={<IconRefresh size={14} aria-hidden="true" />}
@@ -1114,8 +1123,10 @@ export function RequestLogDialog({
                                   : undefined) || group.key || "未知";
                                 return (
                                   <tr key={group.key} className="transition-colors hover:bg-blue-50/30">
-                                    <td className="py-1 px-2.5 text-[#1d1d1f] max-w-[150px] truncate" title={label}>
-                                      {label}
+                                    <td className="py-1 px-2.5 text-[#1d1d1f]" title={label}>
+                                      <div className="flex flex-wrap items-center gap-x-2">
+                                      <span className="max-w-[240px] truncate">{label}</span>
+                                      </div>
                                     </td>
                                     <td className="py-1 px-2.5 text-right font-semibold text-[#1d1d1f] tabular-nums">
                                       {group.total.toLocaleString()}
@@ -1684,6 +1695,12 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                     <dt className="text-[11px] text-[#8e8e93]">实际使用模型</dt>
                     <dd className="m-0 mt-0.5 font-medium text-[#1d1d1f]">
                       {selectedItem.model || selectedItem.requestedModel}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt className="text-[11px] text-[#8e8e93]">计费档位（请求 / 实际）</dt>
+                    <dd className="m-0 mt-0.5 font-medium text-[#1d1d1f]">
+                      {selectedItem.requestedServiceTier || "未记录"} / {selectedItem.serviceTier || "未确认"}
                     </dd>
                   </div>
                   <div>

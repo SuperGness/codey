@@ -21,7 +21,7 @@ use tokio::sync::oneshot;
 
 use crate::config::{RouteRequestLogBackend, RouteRequestLogConfig};
 
-const SCHEMA_VERSION: u8 = 6;
+const SCHEMA_VERSION: u8 = 7;
 const MAX_LOG_STRING_BYTES: usize = 512;
 pub(crate) const MAX_LOG_ERROR_BYTES: usize = 64 * 1024;
 const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 3;
@@ -150,6 +150,8 @@ impl RequestTokenUsage {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RouteRequestLogEntry {
+    pub requested_service_tier: Option<String>,
+    pub service_tier: Option<String>,
     pub schema_version: u8,
     pub request_id: String,
     pub trace_id: String,
@@ -408,6 +410,8 @@ pub(crate) struct RouteRequestLogAnalytics {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RouteRequestLogQueryItem {
+    pub requested_service_tier: Option<String>,
+    pub service_tier: Option<String>,
     pub request_id: String,
     pub trace_id: String,
     pub timestamp_unix_ms: u64,
@@ -603,6 +607,8 @@ impl RouteRequestLogProducer {
         }
         let request_id = bounded_string(start.request_id);
         let entry = PendingEntry {
+            requested_service_tier: None,
+            service_tier: None,
             request_id: request_id.clone(),
             trace_id: request_id,
             timestamp_unix_ms: unix_timestamp_ms_at(start.started_at),
@@ -746,6 +752,8 @@ impl Drop for RouteRequestLogFinishGuard {
 }
 
 struct PendingEntry {
+    requested_service_tier: Option<String>,
+    service_tier: Option<String>,
     request_id: String,
     trace_id: String,
     timestamp_unix_ms: u64,
@@ -780,6 +788,17 @@ struct PendingEntry {
 }
 
 impl RouteRequestLogProbe {
+    pub(crate) fn set_requested_service_tier(&self, tier: Option<&str>) {
+        self.shield(|| {
+            lock_unpoisoned(&self.shared.entry).requested_service_tier = tier.map(bounded_string);
+        });
+    }
+
+    pub(crate) fn observe_service_tier(&self, tier: &str) {
+        self.shield(|| {
+            lock_unpoisoned(&self.shared.entry).service_tier = Some(bounded_string(tier));
+        });
+    }
     /// Defers final submission while a best-effort response observer drains.
     /// The request path never waits for the observer; dropping the guard
     /// releases the deferred exactly-once finish.
@@ -829,6 +848,11 @@ impl RouteRequestLogProbe {
             codex_session_is_parent: false,
         })
         .expect("test request log probe must be sampled")
+    }
+
+    #[cfg(test)]
+    pub(crate) fn service_tier_for_test(&self) -> Option<String> {
+        lock_unpoisoned(&self.shared.entry).service_tier.clone()
     }
 
     #[cfg(test)]
@@ -1062,6 +1086,7 @@ impl RouteRequestLogProbe {
             let event_type = event.get("type").and_then(Value::as_str);
             let contains_usage = usage_value(event).is_some();
             if !contains_usage
+                && response_service_tier(event).is_none()
                 && !matches!(
                     event_type,
                     Some(
@@ -1157,6 +1182,8 @@ impl RouteRequestLogProbe {
             matches!(status, RequestStatus::Succeeded | RequestStatus::Incomplete).then_some(200)
         });
         let entry = RouteRequestLogEntry {
+            requested_service_tier: pending.requested_service_tier.take(),
+            service_tier: pending.service_tier.take(),
             schema_version: SCHEMA_VERSION,
             request_id: std::mem::take(&mut pending.request_id),
             trace_id: std::mem::take(&mut pending.trace_id),
@@ -1927,7 +1954,9 @@ impl SqliteSink {
                 subagent INTEGER NOT NULL,
                 schema_version INTEGER NOT NULL,
                 codex_session_id TEXT,
-                codex_session_is_parent INTEGER NOT NULL
+                codex_session_is_parent INTEGER NOT NULL,
+                requested_service_tier TEXT,
+                service_tier TEXT
              );
              CREATE INDEX IF NOT EXISTS idx_route_request_logs_time_id
                 ON route_request_logs(timestamp_unix_ms DESC, request_id DESC);
@@ -1943,6 +1972,17 @@ impl SqliteSink {
              CREATE INDEX IF NOT EXISTS idx_route_request_logs_status
                 ON route_request_logs(status, timestamp_unix_ms);",
         )?;
+        for column in ["requested_service_tier", "service_tier"] {
+            let exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('route_request_logs') WHERE name = ?1)",
+                [column], |row| row.get(0),
+            )?;
+            if !exists {
+                connection.execute_batch(&format!(
+                    "ALTER TABLE route_request_logs ADD COLUMN {column} TEXT"
+                ))?;
+            }
+        }
         let retention_ms = u64::from(retention_days)
             .saturating_mul(24 * 60 * 60)
             .saturating_mul(1_000);
@@ -1976,13 +2016,14 @@ impl SqliteSink {
                     fallback_count, fallback_reason, upstream_authority,
                     upstream_request_id, upstream_protocol, protocol_bridge,
                     first_byte_source, client_fingerprint, subagent, schema_version,
-                    upstream_error_summary, codex_session_id, codex_session_is_parent
+                    upstream_error_summary, codex_session_id, codex_session_is_parent,
+                    requested_service_tier, service_tier
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                     ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
                     ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-                    ?41, ?42, ?43, ?44, ?45
+                    ?41, ?42, ?43, ?44, ?45, ?46, ?47
                 ) ON CONFLICT(request_id) DO NOTHING",
             )?;
             for queued in batch {
@@ -2033,6 +2074,8 @@ impl SqliteSink {
                     entry.upstream_error_summary,
                     entry.codex_session_id,
                     entry.codex_session_is_parent,
+                    entry.requested_service_tier,
+                    entry.service_tier,
                 ])?;
             }
         }
@@ -2120,6 +2163,15 @@ fn query_sqlite_route_request_logs(
     } else {
         "LIMIT ? OFFSET ?"
     };
+    let has_tiers: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('route_request_logs') WHERE name = 'service_tier')",
+        [], |row| row.get(0),
+    )?;
+    let tier_columns = if has_tiers {
+        "requested_service_tier, service_tier"
+    } else {
+        "NULL, NULL"
+    };
     let select_sql = format!(
         "SELECT
             request_id, trace_id, timestamp_unix_ms, provider, provider_name,
@@ -2134,7 +2186,7 @@ fn query_sqlite_route_request_logs(
             fallback_reason, upstream_authority,
             upstream_request_id, upstream_protocol, protocol_bridge,
             first_byte_source, subagent, upstream_error_summary,
-            codex_session_id, codex_session_is_parent
+            codex_session_id, codex_session_is_parent, {tier_columns}
          FROM route_request_logs{where_clause}
          ORDER BY timestamp_unix_ms DESC, request_id DESC
          {pagination}"
@@ -2404,6 +2456,8 @@ fn open_query_connection(path: &Path) -> rusqlite::Result<Connection> {
 
 fn query_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequestLogQueryItem> {
     Ok(RouteRequestLogQueryItem {
+        requested_service_tier: row.get(43)?,
+        service_tier: row.get(44)?,
         request_id: row.get(0)?,
         trace_id: row.get(1)?,
         timestamp_unix_ms: row_u64(row, 2)?,
@@ -2500,7 +2554,17 @@ fn row_optional_u16(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<O
         .map(|value| value.map(|value| u16::try_from(value).unwrap_or_default()))
 }
 
+fn response_service_tier(value: &Value) -> Option<&str> {
+    value
+        .pointer("/response/service_tier")
+        .or_else(|| value.get("service_tier"))
+        .and_then(Value::as_str)
+}
+
 fn observe_terminal_value(entry: &mut PendingEntry, value: &Value) {
+    if let Some(tier) = response_service_tier(value) {
+        entry.service_tier = Some(bounded_string(tier));
+    }
     let event_type = value.get("type").and_then(Value::as_str);
     let response_status = value
         .pointer("/response/status")
@@ -2568,6 +2632,8 @@ fn merge_usage(target: &mut RequestTokenUsage, value: &Value) {
     target.cache_creation_input_tokens = first_u64(
         usage,
         &[
+            "/input_tokens_details/cache_write_tokens",
+            "/prompt_tokens_details/cache_write_tokens",
             "/cache_creation_input_tokens",
             "/cache_creation_tokens",
             "/cache_write_input_tokens",
@@ -2832,6 +2898,8 @@ mod tests {
 
     fn sample_entry(request_id: &str) -> RouteRequestLogEntry {
         RouteRequestLogEntry {
+            requested_service_tier: None,
+            service_tier: None,
             schema_version: SCHEMA_VERSION,
             request_id: request_id.to_string(),
             trace_id: request_id.to_string(),
@@ -2887,6 +2955,89 @@ mod tests {
             entry,
             enqueued_at: Instant::now(),
         }
+    }
+
+    #[test]
+    fn billing_tiers_preserve_request_and_actual_fallback() {
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        assert_eq!(lock_unpoisoned(&probe.shared.entry).service_tier, None);
+        probe.set_requested_service_tier(Some("priority"));
+        probe.observe_event(
+            &serde_json::json!({"type":"response.created","response":{"service_tier":"fast"}}),
+        );
+        assert_eq!(
+            lock_unpoisoned(&probe.shared.entry).service_tier.as_deref(),
+            Some("fast")
+        );
+        probe.observe_response(
+            200,
+            &serde_json::json!({"service_tier":"default", "usage": {
+                "input_tokens": 2000, "input_tokens_details": {"cache_write_tokens": 1500},
+                "cache_creation_input_tokens": 999
+            }}),
+        );
+        let entry = lock_unpoisoned(&probe.shared.entry);
+        assert_eq!(entry.requested_service_tier.as_deref(), Some("priority"));
+        assert_eq!(entry.service_tier.as_deref(), Some("default"));
+        assert_eq!(entry.token_usage.cache_creation_input_tokens, Some(1500));
+    }
+
+    #[test]
+    fn billing_tiers_migrate_history_and_roundtrip() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(SQLITE_FILE_NAME);
+        let mut sink = SqliteSink::open(&path, 30).unwrap();
+        let mut old = sample_entry("old");
+        old.timestamp_unix_ms = unix_timestamp_ms();
+        sink.write_batch(&[queued(old)]).unwrap();
+        sink.connection.execute_batch("ALTER TABLE route_request_logs DROP COLUMN requested_service_tier; ALTER TABLE route_request_logs DROP COLUMN service_tier;").unwrap();
+        drop(sink);
+        let page = query_route_request_logs(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery::default(),
+        )
+        .unwrap();
+        assert_eq!(page.items[0].service_tier, None);
+        let mut sink = SqliteSink::open(&path, 30).unwrap();
+        let mut entry = sample_entry("new");
+        entry.timestamp_unix_ms = unix_timestamp_ms();
+        entry.requested_service_tier = Some("flex".into());
+        entry.service_tier = Some("default".into());
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["requestedServiceTier"], "flex");
+        assert_eq!(json["serviceTier"], "default");
+        sink.write_batch(&[queued(entry)]).unwrap();
+        let page = query_route_request_logs(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery::default(),
+        )
+        .unwrap();
+        let old = page
+            .items
+            .iter()
+            .find(|item| item.request_id == "old")
+            .unwrap();
+        assert_eq!(
+            (
+                old.requested_service_tier.as_deref(),
+                old.service_tier.as_deref()
+            ),
+            (None, None)
+        );
+        let new = page
+            .items
+            .iter()
+            .find(|item| item.request_id == "new")
+            .unwrap();
+        assert_eq!(
+            (
+                new.requested_service_tier.as_deref(),
+                new.service_tier.as_deref()
+            ),
+            (Some("flex"), Some("default"))
+        );
     }
 
     #[test]
@@ -3433,6 +3584,8 @@ mod tests {
     #[test]
     fn query_items_serialize_with_camel_case_fields() {
         let value = serde_json::to_value(RouteRequestLogQueryItem {
+            requested_service_tier: None,
+            service_tier: None,
             request_id: "request".into(),
             trace_id: "trace".into(),
             timestamp_unix_ms: 1,

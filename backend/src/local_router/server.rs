@@ -48,6 +48,7 @@ impl RuntimeRouterEndpoint {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RequestLogCatalog {
+    pub(crate) official_account_available: bool,
     pub(crate) profiles: Vec<RequestLogProfile>,
     pub(crate) selected_models_by_provider: BTreeMap<String, Vec<String>>,
     pub(crate) declared_official_models_by_provider: BTreeMap<String, Vec<String>>,
@@ -66,6 +67,7 @@ pub(crate) struct RequestLogProfile {
 impl RequestLogCatalog {
     pub(crate) fn from_config(config: &CodeyConfig) -> Self {
         Self {
+            official_account_available: config.official_account_available_this_launch,
             profiles: config
                 .profiles
                 .iter()
@@ -166,6 +168,9 @@ impl LocalRouter {
                 .build()
                 .context("创建 Codey 本地路由 HTTP 客户端失败")?,
             official_auth_path,
+            account_usage_cache: tokio::sync::Mutex::new(
+                crate::account_usage::AccountUsageCache::default(),
+            ),
             official_auth_cache: Arc::new(Mutex::new(
                 crate::account_usage::OfficialAuthCache::default(),
             )),
@@ -413,6 +418,7 @@ pub(crate) struct RouterServer {
     pub(crate) native_history_cache: Arc<Mutex<NativeHistoryCache>>,
     pub(crate) client: reqwest::Client,
     pub(crate) official_auth_path: PathBuf,
+    pub(crate) account_usage_cache: tokio::sync::Mutex<crate::account_usage::AccountUsageCache>,
     pub(crate) official_auth_cache: Arc<Mutex<crate::account_usage::OfficialAuthCache>>,
     pub(crate) request_log: Arc<RouteRequestLogController>,
 }

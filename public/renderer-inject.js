@@ -756,6 +756,36 @@
     return normalizeAppServerAccountUsage(response);
   };
 
+  let quotaUsageRequest = null;
+  window.__codeyReadQuotaAccountUsage = ({ forceRefresh = false } = {}) => {
+    const displayed = accountUsagePollingEnabled && accountUsageLastResult?.status === "ok"
+      ? accountUsageLastResult : null;
+    const now = Date.now();
+    const age = now - Number(displayed?.fetchedAt) * 1000;
+    const weekly = [displayed?.primary, displayed?.secondary]
+      .find((value) => Number(value?.windowMinutes) === 10080);
+    if (!forceRefresh && displayed && age >= 0 && age < accountUsageRefreshIntervalMs
+      && Number(weekly?.resetsAt) * 1000 > now) return Promise.resolve(displayed);
+    if (quotaUsageRequest) return quotaUsageRequest;
+    quotaUsageRequest = (async () => {
+      let result = await withTimeout(
+        callBridge("/api/query_official_account_usage", { forceRefresh: true }, { timeoutMs: accountUsageTimeoutMs }),
+        accountUsageTimeoutMs, "读取官方周额度超时",
+      );
+      if (result?.status === "error") {
+        try {
+          result = await withTimeout(readAccountUsageFromAppServer(), accountUsageTimeoutMs, "读取 Codex 周额度超时");
+        } catch { /* Keep the backend error when the fallback is unavailable. */ }
+      }
+      // A dialog query never enables the account display or its polling.
+      if (displayed && accountUsagePollingEnabled && accountUsageLastResult === displayed && result?.status === "ok") {
+        renderAccountUsage(result);
+      }
+      return result;
+    })().finally(() => { quotaUsageRequest = null; });
+    return quotaUsageRequest;
+  };
+
   const checkAccountUsage = async () => {
     if (accountUsageCheckInFlight || document.visibilityState === "hidden") return null;
     accountUsageCheckInFlight = true;
@@ -1159,6 +1189,7 @@
     if (!hasDetectedUpdate()) scheduleUpdateCheck();
   });
   window.addEventListener?.(configChangedEvent, () => {
+    accountUsageLastResult = null;
     accountUsagePollingEnabled = true;
     scheduleAccountUsageCheck(0);
   });

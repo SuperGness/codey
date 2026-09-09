@@ -381,6 +381,7 @@ fn account_usage_requires_both_the_display_setting_and_an_official_route() {
         ..CodeyConfig::default()
     };
     assert!(!account_usage_enabled_for_config(&disabled));
+    assert!(official_account_available_for_usage(&disabled));
 }
 
 #[test]

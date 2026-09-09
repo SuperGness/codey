@@ -130,7 +130,18 @@ pub struct AccountUsageCache {
 
 impl AccountUsageCache {
     pub async fn fetch(&mut self, codex_home: &Path) -> Result<AccountUsageSnapshot> {
+        self.fetch_with_refresh(codex_home, false).await
+    }
+
+    pub async fn fetch_with_refresh(
+        &mut self,
+        codex_home: &Path,
+        force_refresh: bool,
+    ) -> Result<AccountUsageSnapshot> {
         self.observe_auth_fingerprint(official_auth_fingerprint(&codex_home.join("auth.json")));
+        if force_refresh {
+            self.expires_at = None;
+        }
         if let Some(cached) = self.cached_result(Instant::now()) {
             return cached.map_err(anyhow::Error::msg);
         }
@@ -199,6 +210,27 @@ impl AccountUsageCache {
         self.expires_at = None;
         self.consecutive_failures = 0;
         self.retry = None;
+    }
+}
+
+pub(crate) async fn query_snapshot(
+    cache: &mut AccountUsageCache,
+    home: &Path,
+    force_refresh: bool,
+) -> Value {
+    let result = if force_refresh {
+        cache.fetch_with_refresh(home, true).await
+    } else {
+        cache.fetch(home).await
+    };
+    match result {
+        Ok(snapshot) => {
+            let mut value = serde_json::to_value(snapshot)
+                .expect("account usage snapshots must be JSON-serializable");
+            value["status"] = Value::String("ok".into());
+            value
+        }
+        Err(error) => serde_json::json!({"status": "error", "message": error.to_string()}),
     }
 }
 
@@ -551,6 +583,26 @@ mod tests {
                 .cached_result(started_at + ACCOUNT_USAGE_CACHE_TTL)
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn forced_usage_refresh_bypasses_success_and_preserves_failure_backoff() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut cache = AccountUsageCache::default();
+        cache.record_success(sample_snapshot(), Instant::now());
+        let cached = query_snapshot(&mut cache, directory.path(), false).await;
+        assert_eq!(cached["status"], "ok");
+        assert_eq!(cached["fetchedAt"], 1_700_000_000_u64);
+        // No auth file: a forced refresh must fetch instead of returning the snapshot.
+        let failed = query_snapshot(&mut cache, directory.path(), true).await;
+        assert_eq!(failed["status"], "error");
+        assert!(failed["message"].as_str().unwrap().contains("官方登录信息"));
+        assert_eq!(cache.consecutive_failures, 1);
+        assert_eq!(
+            query_snapshot(&mut cache, directory.path(), true).await,
+            failed
+        );
+        assert_eq!(cache.consecutive_failures, 1);
     }
 
     #[test]

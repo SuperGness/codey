@@ -158,22 +158,25 @@ pub(crate) fn anthropic_usage_to_responses_usage(usage: &Value) -> Value {
         .unwrap_or(0);
     let cache_creation_tokens = usage
         .get("cache_creation_input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+        .and_then(Value::as_u64);
     let cached_tokens = usage
         .get("cache_read_input_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
     let input_tokens = uncached_input_tokens
-        .saturating_add(cache_creation_tokens)
+        .saturating_add(cache_creation_tokens.unwrap_or(0))
         .saturating_add(cached_tokens);
     let output_tokens = usage
         .get("output_tokens")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let mut input_details = json!({"cached_tokens": cached_tokens});
+    if let Some(writes) = cache_creation_tokens {
+        input_details["cache_write_tokens"] = json!(writes);
+    }
     json!({
         "input_tokens":input_tokens,
-        "input_tokens_details":{"cached_tokens":cached_tokens},
+        "input_tokens_details":input_details,
         "output_tokens":output_tokens,
         "output_tokens_details":{"reasoning_tokens":0},
         "total_tokens":input_tokens.saturating_add(output_tokens),

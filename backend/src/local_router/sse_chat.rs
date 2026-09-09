@@ -219,9 +219,22 @@ pub(crate) fn chat_usage_to_responses_usage(usage: &Value) -> Value {
         .and_then(|details| details.get("reasoning_tokens"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let mut input_details = json!({"cached_tokens": cached_tokens});
+    if let Some(writes) = [
+        "/input_tokens_details/cache_write_tokens",
+        "/prompt_tokens_details/cache_write_tokens",
+        "/cache_creation_input_tokens",
+        "/cache_creation_tokens",
+        "/cache_write_input_tokens",
+    ]
+    .iter()
+    .find_map(|path| usage.pointer(path).and_then(Value::as_u64))
+    {
+        input_details["cache_write_tokens"] = json!(writes);
+    }
     json!({
         "input_tokens": input_tokens,
-        "input_tokens_details": {"cached_tokens": cached_tokens},
+        "input_tokens_details": input_details,
         "output_tokens": output_tokens,
         "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
         "total_tokens": total_tokens,

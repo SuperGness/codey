@@ -259,6 +259,8 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
     },
   };
   let accountUsageCalls = 0;
+  let quotaUsageCalls = 0;
+  let quotaUsageResult = accountUsageResult;
   let appServerUsageCalls = 0;
   const appServerUsageResult = {
     rateLimits: {
@@ -293,7 +295,12 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
       return appServerUsageResult;
     },
     __codeySessionToolsInjectLoaded: true,
-    __codexSessionDeleteBridge: async (path) => {
+    __codexSessionDeleteBridge: async (path, args) => {
+      if (path === "/api/query_official_account_usage") {
+        assert.equal(args.forceRefresh, true);
+        quotaUsageCalls += 1;
+        return quotaUsageResult;
+      }
       if (path === "/account/usage") {
         accountUsageCalls += 1;
         return accountUsageResult;
@@ -332,6 +339,11 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   });
 
   await window.__codeyRefreshAccountUsage();
+
+  assert.equal(await window.__codeyReadQuotaAccountUsage(), accountUsageResult);
+  assert.equal(quotaUsageCalls, 0, "reuse the account display without another query");
+  await window.__codeyReadQuotaAccountUsage({ forceRefresh: true });
+  assert.equal(quotaUsageCalls, 1, "manual refresh bypasses the display cache");
 
   const usage = findById("codey-account-usage");
   const settingsButton = findById("codey-settings-button");
@@ -442,6 +454,31 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   const remountedSummaryHtml = remountedUsage.innerHTML.split('class="codey-usage-details"')[0];
   assert.doesNotMatch(remountedSummaryHtml, /data-window="five-hour"/);
   assert.match(remountedSummaryHtml, /class="codey-usage-plan-tag">Plus<\/span>/);
+
+  accountUsageResult = { status: "disabled" };
+  await window.__codeyRefreshAccountUsage();
+  const pollsBeforeDialog = scheduledDelays.filter(delay => delay === 60000).length;
+  const [first, second] = await Promise.all([
+    window.__codeyReadQuotaAccountUsage(), window.__codeyReadQuotaAccountUsage(),
+  ]);
+  assert.equal(first, quotaUsageResult); assert.equal(second, quotaUsageResult);
+  assert.equal(quotaUsageCalls, 2, "closed display queries once and coalesces overlapping reads");
+  assert.equal(findById("codey-account-usage"), null);
+  assert.equal(scheduledDelays.filter(delay => delay === 60000).length, pollsBeforeDialog);
+  quotaUsageResult = { status: "error", message: "offline" };
+  const fallback = await window.__codeyReadQuotaAccountUsage();
+  assert.equal(fallback.status, "ok");
+  assert.equal(fallback.primary.usedPercent, 20);
+  assert.equal(appServerUsageCalls, 2);
+  assert.equal(findById("codey-account-usage"), null);
+  accountUsageResult = { ...first, fetchedAt: Math.floor(Date.now() / 1000) - 120 };
+  await window.__codeyRefreshAccountUsage();
+  quotaUsageResult = { ...first, fetchedAt: Math.floor(Date.now() / 1000) };
+  assert.equal(await window.__codeyReadQuotaAccountUsage(), quotaUsageResult);
+  assert.equal(quotaUsageCalls, 4, "expired display data triggers a fresh query");
+  dispatchWindowEvent({ type: "codey:config-changed" });
+  await window.__codeyReadQuotaAccountUsage();
+  assert.equal(quotaUsageCalls, 5, "configuration changes invalidate reuse");
 });
 
 const createStartupUpdateFixture = (bridge) => {
