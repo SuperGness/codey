@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   IconActivity as Activity,
   IconCode as Code,
@@ -96,7 +96,6 @@ function OperationsPanelComponent({
   showRestartAction = true,
   restartStatusUnknown = false,
 }: OperationsPanelProps) {
-  const operationsHubRef = useRef<HTMLElement>(null);
   const [activeCardTitle, setActiveCardTitle] = useState<string | null>(null);
   const [expandedCardTitle, setExpandedCardTitle] = useState<string | null>(
     null,
@@ -381,7 +380,6 @@ function OperationsPanelComponent({
 
   return (
     <section
-      ref={operationsHubRef}
       className={`operations-hub${restartPending ? " pending" : status.running ? " running" : ""}`}
       aria-labelledby="operations-title"
     >
@@ -445,6 +443,7 @@ function OperationsPanelComponent({
             </div>
 
             <Badge
+              className="operations-running-badge"
               variant={
                 restartPending
                   ? "warning"

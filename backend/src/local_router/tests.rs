@@ -388,7 +388,7 @@ pub(super) async fn connect_router_websocket(
     connect_router_websocket_with_headers(endpoint, &[]).await
 }
 
-async fn connect_router_websocket_with_headers(
+pub(super) async fn connect_router_websocket_with_headers(
     endpoint: &RuntimeRouterEndpoint,
     headers: &[(&str, &str)],
 ) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
@@ -817,21 +817,27 @@ fn upstream_websocket_backoff_is_shared_and_scoped_to_route_and_auth() {
         "wss://a.example/responses",
         UpstreamWebSocketAuthIdentity::default(),
     );
-    let (first_count, first_duration) = backoffs.record_failure(key.clone(), now);
-    assert_eq!(first_count, 1);
-    assert_eq!(first_duration, Duration::from_secs(60));
-    assert!(backoffs.is_backing_off(&key, now));
-
-    let (second_count, second_duration) = backoffs.record_failure(key.clone(), now);
-    assert_eq!(second_count, 2);
-    assert_eq!(second_duration, Duration::from_secs(5 * 60));
-
-    let (third_count, third_duration) = backoffs.record_failure(key.clone(), now);
-    assert_eq!(third_count, 3);
-    assert_eq!(third_duration, Duration::from_secs(15 * 60));
-    let (fourth_count, fourth_duration) = backoffs.record_failure(key.clone(), now);
-    assert_eq!(fourth_count, 4);
-    assert_eq!(fourth_duration, Duration::from_secs(15 * 60));
+    let mut retry_at = now;
+    for (index, seconds) in [5, 15, 30, 60, 60].into_iter().enumerate() {
+        let expected = (index as u32 + 1, Duration::from_secs(seconds));
+        assert_eq!(backoffs.record_failure(key.clone(), retry_at), expected);
+        let deadline = retry_at + expected.1;
+        assert!(backoffs.is_backing_off(&key, retry_at));
+        // A burst of failures must neither escalate nor extend this interval.
+        for _ in 0..16 {
+            assert_eq!(
+                backoffs.record_failure(key.clone(), retry_at + Duration::from_secs(1)),
+                (expected.0, expected.1 - Duration::from_secs(1))
+            );
+        }
+        assert_eq!(backoffs.entries[&key].until, deadline);
+        assert!(!backoffs.is_backing_off(&key, deadline));
+        retry_at = deadline;
+    }
+    assert_eq!(
+        backoffs.record_failure(key.clone(), retry_at + Duration::from_secs(61)),
+        (1, Duration::from_secs(5))
+    );
 
     let changed_url = UpstreamWebSocketBackoffKey::new(
         "route-a",
@@ -859,6 +865,12 @@ fn upstream_websocket_backoff_is_shared_and_scoped_to_route_and_auth() {
     assert!(!backoffs.is_backing_off(&key, now));
 
     backoffs.record_unsupported(key.clone(), now);
+    backoffs.record_failure(key.clone(), now + Duration::from_secs(1));
+    assert!(backoffs.entries[&key].unsupported);
+    assert_eq!(
+        backoffs.entries[&key].until,
+        now + UPSTREAM_WEBSOCKET_UNSUPPORTED_TTL
+    );
     assert!(backoffs.is_backing_off(
         &key,
         now + UPSTREAM_WEBSOCKET_UNSUPPORTED_TTL - Duration::from_secs(1)

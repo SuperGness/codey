@@ -88,6 +88,10 @@ export function SettingsModalShell({
           marginBottom: 0,
           borderTopLeftRadius: 14,
           borderTopRightRadius: 14,
+          position: "relative",
+          zIndex: 10,
+          borderBottom: "1px solid rgba(0, 0, 0, 0.06)",
+          boxShadow: "0 3px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02)",
         },
         body: {
           display: "flex",

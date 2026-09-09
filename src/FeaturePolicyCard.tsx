@@ -1,5 +1,5 @@
 import { Table } from "antd";
-import { memo, type CSSProperties } from "react";
+import { memo, useState, type CSSProperties } from "react";
 import { IconAdjustmentsHorizontal, IconInfoCircle, IconUsersGroup } from "@tabler/icons-react";
 
 import type {
@@ -21,7 +21,11 @@ import {
   resolveSubagentModelOption,
   type SubagentModelOption,
 } from "./subagentModels";
-import { surfaceCardPaddingClass } from "./uiClasses";
+import { flushCardClass, surfaceCardPaddingClass } from "./uiClasses";
+import { invoke } from "./api";
+import type { DiagnosticStorageTarget } from "./diagnosticStorage";
+import { NotificationChannelsCard } from "./notifications/NotificationChannelsCard";
+import type { NotificationChannel } from "./notifications/types";
 
 const GPU_LAUNCH_MODES = [
   { value: "off", label: "关闭" },
@@ -125,148 +129,151 @@ export function SubagentPolicyCardComponent({
 
   return (
     <section className="secondary-section subagent-section" aria-labelledby="subagent-title">
-      <div className="section-title compact">
-        <div className="section-heading">
-          <span className="section-icon" aria-hidden="true">
-            <IconUsersGroup size={15} />
-          </span>
-          <div>
-            <h2 id="subagent-title">Codey 子代理角色与调度增强</h2>
-            <p>基于 Codex 原生子代理的多角色调度与模型配置。</p>
+      <Card className={`secondary-card subagent-card ${flushCardClass}`}>
+        <div className="module-card-header">
+          <div className="module-card-heading">
+            <span className="module-card-icon" aria-hidden="true">
+              <IconUsersGroup size={15} />
+            </span>
+            <div className="module-card-titles">
+              <h2 id="subagent-title">Codey 子代理角色与调度增强</h2>
+              <p>基于 Codex 原生子代理的多角色调度与模型配置。</p>
+            </div>
+          </div>
+          <div className="module-card-action">
+            <Switch
+              checked={config.subagentOptimization}
+              disabled={isBusy}
+              onCheckedChange={(checked) =>
+                onSubagentOptimizationChange(checked)
+              }
+              aria-label="启用 Codey 子代理角色与调度增强"
+            />
           </div>
         </div>
-        <Switch
-          checked={config.subagentOptimization}
-          disabled={isBusy}
-          onCheckedChange={(checked) =>
-            onSubagentOptimizationChange(checked)
-          }
-          aria-label="启用 Codey 子代理角色与调度增强"
-        />
-      </div>
-      <Card className={`secondary-card subagent-card ${surfaceCardPaddingClass}`}>
-        <div className="subagent-policy-body">
+        <div className="module-card-body subagent-policy-body">
           {config.subagentOptimization ? (
             <>
               <div className="subagent-table-container">
                 <Table
- className="subagent-table"
- size="small" pagination={false} bordered={false}
-
- columns={[{ title: <>启用</>, width: 64, render: (_value, record) => record.cells[0] },
-{ title: <>任务角色</>, width: 170, render: (_value, record) => record.cells[1] },
-{ title: <>指定模型</>, width: undefined, render: (_value, record) => record.cells[2] },
-{ title: <>思考深度</>, width: 130, render: (_value, record) => record.cells[3] }]}
- dataSource={SUBAGENT_TASK_TYPES.map((task) => {
-   const selection = config.subagentRoles[task.id] ?? { enabled: true, model: config.subagentModel, reasoningEffort: config.subagentReasoningEffort };
-   const selectedModel = resolveSubagentModelOption(subagentModelOptions, selection.model, preferredProviderId);
-   const reasoningEfforts = selectedModel?.supportedReasoningEfforts ?? [];
-   const reasoningOptions = reasoningEfforts.map((effort) => ({ label: REASONING_EFFORT_LABELS[effort] ?? effort, value: effort }));
-   const updateRole = (next: Partial<typeof selection>) => onConfigChange({ ...config, subagentRoles: { ...config.subagentRoles, [task.id]: { ...selection, ...next } } });
-   const roleDisabled = !selection.enabled;
-return { key: task.id, roleDisabled, cells: [<div>
-                            <Switch
-                              checked={selection.enabled}
-                              disabled={
-                                subagentPolicyControlsDisabled ||
-                                (selection.enabled && enabledRoleCount <= 1)
-                              }
-                              onCheckedChange={(enabled) => updateRole({ enabled })}
-                              aria-label={`${selection.enabled ? "关闭" : "启用"}${task.name}角色`}
-                            />
-                          </div>,
-<div>
-                            <div className="subagent-role-name">
-                              <span>{task.name}</span>
-                              <Badge
-                                variant={task.access === "write" ? "warning" : "secondary"}
-                                size="xs"
-                              >
-                                {task.access === "write" ? "可写" : "只读"}
-                              </Badge>
-                              <Tooltip
-                                content={task.description}
-                                getPopupContainer={() =>
-                                  popupContainer ?? tooltipContainer ?? document.body
-                                }
-                                position="top"
-                              >
-                                <Button
-                                  variant="ghost"
-                                  size="xs"
-                                  className="subagent-role-info-btn"
-                                  aria-label={`${task.name}：${task.description}`}
-                                >
-                                  <IconInfoCircle size={13} aria-hidden="true" />
-                                </Button>
-                              </Tooltip>
-                            </div>
-                          </div>,
-<div>
-                            <ModelCombobox
-                              aria-label={`${task.name}模型`}
-                              value={selection.model}
-                              placeholder={
-                                subagentModelOptions.length === 0
-                                  ? "所有线路均暂无模型"
-                                  : "请选择模型"
-                              }
-                              disabled={
-                                subagentPolicyControlsDisabled ||
-                                roleDisabled ||
-                                subagentModelOptions.length === 0
-                              }
-                              options={subagentModelOptions}
-                              preferredProviderId={preferredProviderId}
-                              getPopupContainer={() => popupContainer ?? document.body}
-                              onChange={(value) => {
-                                const option = subagentModelOptions.find(
-                                  (candidate) => candidate.value === value,
-                                );
-                                if (!option) return;
-                                const reasoningEffort =
-                                  option.supportedReasoningEfforts.includes(
-                                    selection.reasoningEffort,
-                                  )
-                                    ? selection.reasoningEffort
-                                    : option.defaultReasoningEffort;
-                                updateRole({
-                                  model: option.value,
-                                  reasoningEffort,
-                                });
-                              }}
-                            />
-                          </div>,
-<div>
-                            <Select
-                              className="w-full min-w-0"
-                              aria-label={`${task.name}思考深度`}
-                              value={
-                                reasoningEfforts.includes(selection.reasoningEffort)
-                                  ? selection.reasoningEffort
-                                  : undefined
-                              }
-                              placeholder="暂无可选深度"
-                              disabled={
-                                subagentPolicyControlsDisabled ||
-                                roleDisabled ||
-                                reasoningEfforts.length === 0
-                              }
-                              optionList={reasoningOptions}
-                              dropdownClassName="rounded-[10px]"
-                              showClear={false}
-                              filter={false}
-                              getPopupContainer={() => popupContainer ?? document.body}
-                              onChange={(value) =>
-                                updateRole({
-                                  model: selectedModel?.value ?? selection.model,
-                                  reasoningEffort: String(value ?? ""),
-                                })
-                              }
-                            />
-                          </div>] };})}
- rowClassName={(record) => record.roleDisabled ? "subagent-role-disabled" : ""}
- />
+                  className="subagent-table"
+                  size="small" pagination={false} bordered={false}
+                  columns={[
+                    { title: <>启用</>, width: 52, render: (_value, record) => record.cells[0] },
+                    { title: <>任务角色</>, width: 128, render: (_value, record) => record.cells[1] },
+                    { title: <>指定模型</>, width: undefined, render: (_value, record) => record.cells[2] },
+                    { title: <>思考深度</>, width: 108, render: (_value, record) => record.cells[3] }
+                  ]}
+                  dataSource={SUBAGENT_TASK_TYPES.map((task) => {
+                    const selection = config.subagentRoles[task.id] ?? { enabled: true, model: config.subagentModel, reasoningEffort: config.subagentReasoningEffort };
+                    const selectedModel = resolveSubagentModelOption(subagentModelOptions, selection.model, preferredProviderId);
+                    const reasoningEfforts = selectedModel?.supportedReasoningEfforts ?? [];
+                    const reasoningOptions = reasoningEfforts.map((effort) => ({ label: REASONING_EFFORT_LABELS[effort] ?? effort, value: effort }));
+                    const updateRole = (next: Partial<typeof selection>) => onConfigChange({ ...config, subagentRoles: { ...config.subagentRoles, [task.id]: { ...selection, ...next } } });
+                    const roleDisabled = !selection.enabled;
+                    return { key: task.id, roleDisabled, cells: [<div>
+                      <Switch
+                        checked={selection.enabled}
+                        disabled={
+                          subagentPolicyControlsDisabled ||
+                          (selection.enabled && enabledRoleCount <= 1)
+                        }
+                        onCheckedChange={(enabled) => updateRole({ enabled })}
+                        aria-label={`${selection.enabled ? "关闭" : "启用"}${task.name}角色`}
+                      />
+                    </div>,
+                    <div>
+                      <div className="subagent-role-name">
+                        <span>{task.name}</span>
+                        <Badge
+                          variant={task.access === "write" ? "warning" : "brand"}
+                          size="xs"
+                        >
+                          {task.access === "write" ? "可写" : "只读"}
+                        </Badge>
+                        <Tooltip
+                          content={task.description}
+                          getPopupContainer={() =>
+                            popupContainer ?? tooltipContainer ?? document.body
+                          }
+                          position="top"
+                        >
+                          <Button
+                            variant="ghost"
+                            size="xs"
+                            className="subagent-role-info-btn"
+                            aria-label={`${task.name}：${task.description}`}
+                          >
+                            <IconInfoCircle size={13} aria-hidden="true" />
+                          </Button>
+                        </Tooltip>
+                      </div>
+                    </div>,
+                    <div>
+                      <ModelCombobox
+                        aria-label={`${task.name}模型`}
+                        value={selection.model}
+                        placeholder={
+                          subagentModelOptions.length === 0
+                            ? "所有线路均暂无模型"
+                            : "请选择模型"
+                        }
+                        disabled={
+                          subagentPolicyControlsDisabled ||
+                          roleDisabled ||
+                          subagentModelOptions.length === 0
+                        }
+                        options={subagentModelOptions}
+                        preferredProviderId={preferredProviderId}
+                        getPopupContainer={() => popupContainer ?? document.body}
+                        onChange={(value) => {
+                          const option = subagentModelOptions.find(
+                            (candidate) => candidate.value === value,
+                          );
+                          if (!option) return;
+                          const reasoningEffort =
+                            option.supportedReasoningEfforts.includes(
+                              selection.reasoningEffort,
+                            )
+                              ? selection.reasoningEffort
+                              : option.defaultReasoningEffort;
+                          updateRole({
+                            model: option.value,
+                            reasoningEffort,
+                          });
+                        }}
+                      />
+                    </div>,
+                    <div>
+                      <Select
+                        className="w-full min-w-0"
+                        aria-label={`${task.name}思考深度`}
+                        value={
+                          reasoningEfforts.includes(selection.reasoningEffort)
+                            ? selection.reasoningEffort
+                            : undefined
+                        }
+                        placeholder="暂无可选深度"
+                        disabled={
+                          subagentPolicyControlsDisabled ||
+                          roleDisabled ||
+                          reasoningEfforts.length === 0
+                        }
+                        optionList={reasoningOptions}
+                        dropdownClassName="rounded-[10px]"
+                        showClear={false}
+                        filter={false}
+                        getPopupContainer={() => popupContainer ?? document.body}
+                        onChange={(value) =>
+                          updateRole({
+                            model: selectedModel?.value ?? selection.model,
+                            reasoningEffort: String(value ?? ""),
+                          })
+                        }
+                      />
+                    </div>] };})}
+                  rowClassName={(record) => record.roleDisabled ? "subagent-role-disabled" : ""}
+                />
               </div>
               <div className="subagent-policy-callout">
                 <IconInfoCircle size={14} className="subagent-callout-icon" aria-hidden="true" />
@@ -280,11 +287,11 @@ return { key: task.id, roleDisabled, cells: [<div>
               </div>
             </>
           ) : (
-            <div className="feature-disabled-placeholder">
-              <div className="feature-disabled-icon">
-                <IconUsersGroup size={22} aria-hidden="true" />
+            <div className="module-disabled-placeholder">
+              <div className="module-disabled-icon">
+                <IconUsersGroup size={20} aria-hidden="true" />
               </div>
-              <div className="feature-disabled-text">
+              <div className="module-disabled-text">
                 <strong>子代理角色与调度增强已关闭</strong>
                 <p>开启后仅在宽范围、可并行或需要专门证据时选择性委派，并提供五类专用角色与汇合门禁。</p>
               </div>
@@ -303,10 +310,18 @@ type FeaturePolicyCardProps = {
   fastContextToolsStatus: FastContextToolsStatus;
   isMacClient: boolean;
   isWindowsClient: boolean;
+  cleanupBusy: boolean;
+  onAnalyzeDiagnosticStorage: (target: DiagnosticStorageTarget) => void;
   popupContainer: HTMLElement | null;
   tooltipContainer: HTMLElement | null;
   isBusy: boolean;
   onConfigChange: (config: Config) => void;
+  onAddChannel?: (channel: NotificationChannel) => Promise<boolean>;
+  onChannelChange?: (
+    channelId: string,
+    patch: Partial<NotificationChannel>,
+  ) => Promise<boolean>;
+  onRequestRemoveChannel?: (channel: NotificationChannel) => void;
 };
 
 function FeaturePolicyCardComponent({
@@ -314,11 +329,30 @@ function FeaturePolicyCardComponent({
   fastContextToolsStatus,
   isMacClient,
   isWindowsClient,
+  cleanupBusy,
+  onAnalyzeDiagnosticStorage,
   popupContainer,
   tooltipContainer,
   isBusy,
   onConfigChange,
+  onAddChannel,
+  onChannelChange,
+  onRequestRemoveChannel,
 }: FeaturePolicyCardProps) {
+  const [repairingOverlay, setRepairingOverlay] = useState(false);
+  const [overlayRepairMessage, setOverlayRepairMessage] = useState("");
+  async function repairOverlay() {
+    setRepairingOverlay(true);
+    setOverlayRepairMessage("请松开鼠标，等待浮窗恢复完成。");
+    try {
+      const result = await invoke<{ message: string }>("repair_codex_overlays");
+      setOverlayRepairMessage(result.message);
+    } catch (error) {
+      setOverlayRepairMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRepairingOverlay(false);
+    }
+  }
   const configuredGpuLaunchModeIndex = GPU_LAUNCH_MODES.findIndex(
     ({ value }) => value === config.gpuLaunchMode,
   );
@@ -443,13 +477,33 @@ function FeaturePolicyCardComponent({
             </div>
           </div>
 
+          {isWindowsClient && (
+            <div className="feature-card">
+              <div className="feature-card-header">
+                <strong>浮窗点击与拖动恢复</strong>
+                <Button
+                  className="feature-action-btn"
+                  size="xs"
+                  disabled={isBusy || repairingOverlay}
+                  onClick={() => void repairOverlay()}
+                >
+                  {repairingOverlay ? "正在恢复…" : "立即恢复"}
+                </Button>
+              </div>
+              <div className="feature-card-body">
+                <small>适用于 Windows 商店版。只保留需要恢复的一个宠物或语音浮窗；恢复时请松开鼠标，浮窗可能短暂闪烁。</small>
+                <small role="status">{overlayRepairMessage}</small>
+              </div>
+            </div>
+          )}
+
           <div
             className={`feature-card ${fastContextToolsEnabled ? "active" : ""}`}
           >
             <div className="feature-card-header">
               <div className="feature-card-title">
                 <strong>FastCtx 上下文工具</strong>
-                <Badge variant="secondary">v0.2.6</Badge>
+                <Badge variant="brand">v0.2.6</Badge>
               </div>
               {fastctxStatusBlocksEmbedded ? (
                 <Tooltip
@@ -489,20 +543,32 @@ function FeaturePolicyCardComponent({
           >
             <div className="feature-card-header">
               <strong>Trace 日志写盘保护</strong>
-              <Switch
-                checked={config.disableTraceLogWrites}
-                disabled={isBusy}
-                onCheckedChange={(checked) =>
-                  onConfigChange({
-                    ...config,
-                    disableTraceLogWrites: checked,
-                  })
-                }
-                aria-label="启用 Codex Trace 日志写盘保护"
-              />
+              <div className="feature-card-actions">
+                <Button
+                  className="feature-action-btn"
+                  size="xs"
+                  disabled={isBusy}
+                  loading={cleanupBusy}
+                  onClick={() => onAnalyzeDiagnosticStorage("trace")}
+                  aria-label="分析并清理 Trace 日志"
+                >
+                  分析并清理
+                </Button>
+                <Switch
+                  checked={config.disableTraceLogWrites}
+                  disabled={isBusy}
+                  onCheckedChange={(checked) =>
+                    onConfigChange({
+                      ...config,
+                      disableTraceLogWrites: checked,
+                    })
+                  }
+                  aria-label="启用 Codex Trace 日志写盘保护"
+                />
+              </div>
             </div>
             <div className="feature-card-body">
-              <small>阻止Trace日志持续写入数据库影响硬盘寿命</small>
+              <small>阻止 Trace 日志持续写入数据库影响硬盘寿命</small>
             </div>
           </div>
 
@@ -512,16 +578,28 @@ function FeaturePolicyCardComponent({
             >
               <div className="feature-card-header">
                 <strong>Crashpad 磁盘保护</strong>
-                <Switch
-                  checked={config.protectCrashpadPending}
-                  disabled={isBusy}
-                  onCheckedChange={(checked) =>
-                    onConfigChange({
-                      ...config,
-                      protectCrashpadPending: checked,
-                    })}
-                  aria-label="启用 Codex Crashpad 磁盘保护"
-                />
+                <div className="feature-card-actions">
+                  <Button
+                    className="feature-action-btn"
+                    size="xs"
+                    disabled={isBusy}
+                    loading={cleanupBusy}
+                    onClick={() => onAnalyzeDiagnosticStorage("crashpad")}
+                    aria-label="分析并清理 Crashpad 报告"
+                  >
+                    分析并清理
+                  </Button>
+                  <Switch
+                    checked={config.protectCrashpadPending}
+                    disabled={isBusy}
+                    onCheckedChange={(checked) =>
+                      onConfigChange({
+                        ...config,
+                        protectCrashpadPending: checked,
+                      })}
+                    aria-label="启用 Codex Crashpad 磁盘保护"
+                  />
+                </div>
               </div>
               <div className="feature-card-body">
                 <small>
@@ -555,6 +633,18 @@ function FeaturePolicyCardComponent({
               </small>
             </div>
           </div>
+
+          {onAddChannel && onChannelChange && onRequestRemoveChannel && (
+            <NotificationChannelsCard
+              config={config}
+              container={popupContainer ?? null}
+              popupContainer={popupContainer ?? null}
+              isBusy={isBusy}
+              onAddChannel={onAddChannel}
+              onChannelChange={onChannelChange}
+              onRequestRemoveChannel={onRequestRemoveChannel}
+            />
+          )}
         </div>
       </Card>
     </section>

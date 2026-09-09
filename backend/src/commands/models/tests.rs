@@ -325,13 +325,18 @@ fn native_renderer_catalog_and_hot_reload_do_not_require_local_routes() {
         ..CodeyConfig::default()
     };
     let model_state = model_catalog::ModelSelectionState {
-        third_party_models: vec!["org/model-a".into()],
+        third_party_models: vec![
+            " CODEX-AUTO-REVIEW ".into(),
+            "org/model-a".into(),
+            "org/model-b".into(),
+        ],
         upstream_models: vec!["org/model-a".into(), "unchecked-model".into()],
         default_model: "org/model-a".into(),
         ..Default::default()
     };
     let catalog = renderer_model_catalog_value(&config, &model_state);
-    assert_eq!(catalog["models"], json!(["org/model-a"]));
+    assert_eq!(catalog["models"], json!(["org/model-a", "org/model-b"]));
+    assert_eq!(catalog["default_model"], "org/model-a");
     assert!(catalog["model_metadata"][0].get("provider_id").is_none());
     assert!(runtime_supports_current_routes_for_hot_reload(
         &config, &config

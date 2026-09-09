@@ -10,7 +10,7 @@ export function UiProvider({ children, container, styleContainer }: {
 }) {
   return (
     <StyleProvider container={styleContainer} layer>
-      <ConfigProvider locale={zhCN} getPopupContainer={container ? () => container : undefined}>
+      <ConfigProvider locale={zhCN} button={{ autoInsertSpace: false }} getPopupContainer={container ? () => container : undefined}>
         {children}
       </ConfigProvider>
     </StyleProvider>

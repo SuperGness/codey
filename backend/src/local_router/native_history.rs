@@ -1,10 +1,89 @@
 use super::*;
 
-/// ponytail: retain only the latest linear continuation in this downstream
-/// socket. Cross-socket recovery needs a client-owned full-history resend.
+const NATIVE_HISTORY_CACHE_BYTES: usize = 16 * 1024 * 1024;
+const NATIVE_HISTORY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+
+struct NativeHistoryEntry {
+    scope: [u8; 32],
+    owner: [u8; 32],
+    expires_at: Instant,
+    history: Arc<AdaptedResponsesHistory>,
+}
+
+#[derive(Default)]
+pub(crate) struct NativeHistoryCache {
+    entries: VecDeque<NativeHistoryEntry>,
+    bytes: usize,
+}
+
+impl NativeHistoryCache {
+    fn prune(&mut self, now: Instant) {
+        while self
+            .entries
+            .front()
+            .is_some_and(|entry| entry.expires_at <= now)
+        {
+            self.remove_oldest();
+        }
+    }
+
+    fn remove_oldest(&mut self) {
+        if let Some(entry) = self.entries.pop_front() {
+            self.bytes -= entry.history.retained_bytes();
+        }
+    }
+
+    fn get(
+        &mut self,
+        scope: [u8; 32],
+        owner: [u8; 32],
+        id: &str,
+    ) -> Option<Arc<AdaptedResponsesHistory>> {
+        self.prune(Instant::now());
+        // ponytail: scan at most 64 snapshots; use a map if this bound grows.
+        self.entries
+            .iter()
+            .rev()
+            .find(|entry| {
+                entry.scope == scope
+                    && entry.owner == owner
+                    && entry
+                        .history
+                        .last
+                        .as_ref()
+                        .is_some_and(|(response_id, _)| response_id == id)
+            })
+            .map(|entry| Arc::clone(&entry.history))
+    }
+
+    fn insert(&mut self, scope: [u8; 32], owner: [u8; 32], history: Arc<AdaptedResponsesHistory>) {
+        let now = Instant::now();
+        self.prune(now);
+        let bytes = history.retained_bytes();
+        if bytes > NATIVE_HISTORY_CACHE_BYTES {
+            return;
+        }
+        while self.entries.len() >= MAX_CONCURRENT_CONNECTIONS
+            || self.bytes.saturating_add(bytes) > NATIVE_HISTORY_CACHE_BYTES
+        {
+            self.remove_oldest();
+        }
+        self.bytes += bytes;
+        self.entries.push_back(NativeHistoryEntry {
+            scope,
+            owner,
+            expires_at: now + NATIVE_HISTORY_CACHE_TTL,
+            history,
+        });
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct NativeResponsesHistory {
     owner: Option<[u8; 32]>,
+    scope: Option<[u8; 32]>,
+    cache: Arc<Mutex<NativeHistoryCache>>,
+    latest: Option<Arc<AdaptedResponsesHistory>>,
     history: AdaptedResponsesHistory,
     unavailable: Option<String>,
 }
@@ -34,8 +113,26 @@ pub(crate) fn native_history_key(
 }
 
 impl NativeResponsesHistory {
+    pub(crate) fn with_cache(
+        cache: Arc<Mutex<NativeHistoryCache>>,
+        headers: &[(String, String)],
+    ) -> Self {
+        let scope = ["thread-id", "session-id"].into_iter().find_map(|name| {
+            headers
+                .iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .and_then(|(_, value)| valid_codex_session_id(value))
+                .map(|value| Sha256::digest(value.as_bytes()).into())
+        });
+        Self {
+            cache,
+            scope,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn has_history(&self) -> bool {
-        self.history.last.is_some()
+        self.latest.is_some()
     }
 
     pub(crate) fn clear_pending(&mut self) {
@@ -44,14 +141,34 @@ impl NativeResponsesHistory {
 
     pub(crate) fn prepare(&mut self, owner: [u8; 32], body: &mut Value) {
         if self.owner != Some(owner) {
-            *self = Self::default();
+            self.history = AdaptedResponsesHistory::default();
+            self.latest = None;
             self.owner = Some(owner);
         }
+        let previous = responses_previous_response_id(body).and_then(|id| {
+            self.latest
+                .as_ref()
+                .filter(|history| {
+                    history
+                        .last
+                        .as_ref()
+                        .is_some_and(|(response_id, _)| response_id == id)
+                })
+                .cloned()
+                .or_else(|| {
+                    self.scope.and_then(|scope| {
+                        self.cache
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .get(scope, owner, id)
+                    })
+                })
+        });
         // A cache miss must not prevent a healthy native WS continuation.
-        // Require a complete local history only if HTTP fallback is needed.
+        // Require complete history when reopening WS or falling back to HTTP.
         self.unavailable = self
             .history
-            .stage_native(body)
+            .stage_native(body, previous.as_deref())
             .err()
             .map(|error| error.to_string());
         if self.unavailable.is_some() {
@@ -112,6 +229,16 @@ impl NativeResponsesHistory {
                 .map(|error| error.to_string());
         }
         self.history.clear_pending();
+        if self.history.last.is_some() {
+            let history = Arc::new(std::mem::take(&mut self.history));
+            if let (Some(scope), Some(owner)) = (self.scope, self.owner) {
+                self.cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(scope, owner, Arc::clone(&history));
+            }
+            self.latest = Some(history);
+        }
     }
 }
 
@@ -164,7 +291,9 @@ fn validate_native_tool_history(input: &[Value], restoring: bool) -> Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{connect_router_websocket, router_config};
+    use super::super::tests::{
+        connect_router_websocket, connect_router_websocket_with_headers, router_config,
+    };
     use super::*;
 
     fn call(custom: bool, id: &str) -> Value {
@@ -200,7 +329,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disconnected_native_ws_restores_two_tool_rounds_over_http_sse_and_json() {
+    async fn reconnected_native_ws_restores_tool_rounds_and_older_branch_over_http_sse_and_json() {
         for custom in [false, true] {
             for sse in [false, true] {
                 let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -225,7 +354,16 @@ mod tests {
                         .await
                         .unwrap();
                     closed_tx.send(()).unwrap();
-                    for round in 1..=2 {
+                    // The fresh WS handshake fails before any model request is sent.
+                    // HTTP must receive the expanded body, never the old encoded delta.
+                    let (mut rejected, _) = listener.accept().await.unwrap();
+                    assert_eq!(
+                        read_http_request(&mut rejected).await.unwrap().method,
+                        "GET"
+                    );
+                    rejected.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await.unwrap();
+                    drop(rejected);
+                    for round in 1..=3 {
                         let (mut socket, _) =
                             tokio::time::timeout(Duration::from_secs(5), listener.accept())
                                 .await
@@ -274,7 +412,11 @@ mod tests {
                 let (mut config, provider, model) = router_config(format!("http://{address}/v1"));
                 config.profiles[0].supports_websockets = true;
                 let router = LocalRouter::start(&config).await.unwrap();
-                let mut client = connect_router_websocket(&router.endpoint()).await;
+                let mut client = connect_router_websocket_with_headers(
+                    &router.endpoint(),
+                    &[("session-id", "history-session")],
+                )
+                .await;
                 let model = model_alias(&provider, &model);
                 client
                     .send(WebSocketMessage::Text(
@@ -286,7 +428,17 @@ mod tests {
                     .unwrap();
                 assert_eq!(terminal(&mut client).await["response"]["id"], "resp-first");
                 closed_rx.await.unwrap();
-                for (id, call_id) in [("resp-first", "call-1"), ("resp-second", "call-2")] {
+                client.close(None).await.unwrap();
+                let mut client = connect_router_websocket_with_headers(
+                    &router.endpoint(),
+                    &[("session-id", "history-session")],
+                )
+                .await;
+                for (id, call_id) in [
+                    ("resp-first", "call-1"),
+                    ("resp-second", "call-2"),
+                    ("resp-first", "call-1"),
+                ] {
                     client.send(WebSocketMessage::Text(json!({"type":"response.create","model":model,"previous_response_id":id,"input":[result(custom, call_id)],"instructions":"keep this instruction"}).to_string().into())).await.unwrap();
                     assert_eq!(terminal(&mut client).await["type"], "response.completed");
                 }
@@ -295,6 +447,104 @@ mod tests {
                 router.stop().await.unwrap();
             }
         }
+    }
+
+    #[tokio::test]
+    async fn recovered_history_reconnects_ws_then_returns_to_incremental_requests() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (closed_tx, closed_rx) = oneshot::channel();
+        let reasoning = json!({"type":"reasoning","encrypted_content":"encrypted-test-history"});
+        let upstream = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut first = tokio_tungstenite::accept_async(stream).await.unwrap();
+            assert!(matches!(
+                first.next().await.unwrap().unwrap(),
+                WebSocketMessage::Text(_)
+            ));
+            first
+                .send(WebSocketMessage::Text(
+                    completed("resp-first", vec![reasoning.clone(), call(false, "call-1")])
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            first.close(None).await.unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(3), first.next())
+                .await
+                .unwrap();
+            closed_tx.send(()).unwrap();
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut recovered = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for round in 1..=2 {
+                let WebSocketMessage::Text(text) = recovered.next().await.unwrap().unwrap() else {
+                    panic!("expected response.create");
+                };
+                let body: Value = serde_json::from_str(&text).unwrap();
+                if round == 1 {
+                    assert!(body.get("previous_response_id").is_none());
+                    assert_eq!(
+                        body["input"],
+                        json!([
+                            {"role":"user","content":"original task"}, reasoning,
+                            call(false,"call-1"), result(false,"call-1")
+                        ])
+                    );
+                } else {
+                    assert_eq!(body["previous_response_id"], "resp-second");
+                    assert_eq!(body["input"], json!([result(false, "call-2")]));
+                }
+                assert_eq!(body["instructions"], "keep this instruction");
+                recovered
+                    .send(WebSocketMessage::Text(
+                        completed(
+                            if round == 1 {
+                                "resp-second"
+                            } else {
+                                "resp-final"
+                            },
+                            if round == 1 {
+                                vec![call(false, "call-2")]
+                            } else {
+                                vec![]
+                            },
+                        )
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+        let (mut config, provider, model) = router_config(format!("http://{address}/v1"));
+        config.profiles[0].supports_websockets = true;
+        let router = LocalRouter::start(&config).await.unwrap();
+        let model = model_alias(&provider, &model);
+        let mut client =
+            connect_router_websocket_with_headers(&router.endpoint(), &[("thread-id", "task")])
+                .await;
+        client
+            .send(WebSocketMessage::Text(
+                json!({"type":"response.create","model":model,"input":"original task"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(terminal(&mut client).await["response"]["id"], "resp-first");
+        closed_rx.await.unwrap();
+        client.close(None).await.unwrap();
+        let mut client =
+            connect_router_websocket_with_headers(&router.endpoint(), &[("thread-id", "task")])
+                .await;
+        for (id, call_id) in [("resp-first", "call-1"), ("resp-second", "call-2")] {
+            client.send(WebSocketMessage::Text(json!({"type":"response.create","model":model,"previous_response_id":id,"input":[result(false,call_id)],"instructions":"keep this instruction"}).to_string().into())).await.unwrap();
+            assert_eq!(terminal(&mut client).await["type"], "response.completed");
+        }
+        upstream.await.unwrap();
+        client.close(None).await.unwrap();
+        router.stop().await.unwrap();
     }
 
     #[tokio::test]
@@ -345,6 +595,99 @@ mod tests {
             history.prepare(key, &mut orphan);
             assert!(history.restore(key, &mut orphan).is_err());
         }
+    }
+
+    #[test]
+    fn shared_native_history_is_scoped_and_expires_without_retaining_snapshots() {
+        let cache = Arc::new(Mutex::new(NativeHistoryCache::default()));
+        let headers = vec![("session-id".into(), "task-a".into())];
+        let mut first = NativeResponsesHistory::with_cache(Arc::clone(&cache), &headers);
+        first.prepare([1; 32], &mut json!({"input":"task"}));
+        first.observe(&completed("resp-shared", vec![call(false, "call-1")]));
+        let weak = Arc::downgrade(first.latest.as_ref().unwrap());
+        drop(first);
+        for (headers, owner, allowed) in [
+            (headers.clone(), [1; 32], true),
+            (vec![("session-id".into(), "task-b".into())], [1; 32], false),
+            (vec![], [1; 32], false),
+            (
+                vec![
+                    ("thread-id".into(), "task-b".into()),
+                    ("session-id".into(), "task-a".into()),
+                ],
+                [1; 32],
+                false,
+            ),
+            (headers.clone(), [2; 32], false),
+        ] {
+            let mut history = NativeResponsesHistory::with_cache(Arc::clone(&cache), &headers);
+            let mut body =
+                json!({"previous_response_id":"resp-shared","input":[result(false,"call-1")]});
+            history.prepare(owner, &mut body);
+            assert_eq!(history.restore(owner, &mut body).is_ok(), allowed);
+            if allowed {
+                assert_eq!(
+                    body["input"],
+                    json!([
+                        {"role":"user","content":"task"}, call(false,"call-1"), result(false,"call-1")
+                    ])
+                );
+            } else {
+                assert_eq!(body["previous_response_id"], "resp-shared");
+                assert_eq!(body["input"].as_array().unwrap().len(), 1);
+            }
+        }
+        cache
+            .lock()
+            .unwrap()
+            .prune(Instant::now() + NATIVE_HISTORY_CACHE_TTL);
+        assert_eq!(cache.lock().unwrap().bytes, 0);
+        assert!(weak.upgrade().is_none());
+        let mut expired = NativeResponsesHistory::with_cache(cache, &headers);
+        let mut body =
+            json!({"previous_response_id":"resp-shared","input":[result(false,"call-1")]});
+        expired.prepare([1; 32], &mut body);
+        assert!(expired.restore([1; 32], &mut body).is_err());
+    }
+
+    #[test]
+    fn shared_native_history_bounds_snapshot_count_and_bytes() {
+        let cache = Arc::new(Mutex::new(NativeHistoryCache::default()));
+        let mut history = NativeResponsesHistory::with_cache(
+            Arc::clone(&cache),
+            &[("session-id".into(), "task".into())],
+        );
+        for index in 0..=MAX_CONCURRENT_CONNECTIONS {
+            history.prepare([1; 32], &mut json!({"input":"task"}));
+            history.observe(&completed(&format!("resp-{index}"), vec![]));
+        }
+        let scope = history.scope.unwrap();
+        assert_eq!(
+            cache.lock().unwrap().entries.len(),
+            MAX_CONCURRENT_CONNECTIONS
+        );
+        assert!(
+            cache
+                .lock()
+                .unwrap()
+                .get(scope, [1; 32], "resp-0")
+                .is_none()
+        );
+        for index in 0..3 {
+            history.prepare([1; 32], &mut json!({"input":"task"}));
+            history.observe(&completed(
+                &format!("large-{index}"),
+                vec![json!({
+                    "role":"assistant", "content":"x".repeat(6 * 1024 * 1024)
+                })],
+            ));
+            assert!(history.unavailable.is_none());
+        }
+        let mut cache = cache.lock().unwrap();
+        assert!(cache.bytes <= NATIVE_HISTORY_CACHE_BYTES);
+        assert!(cache.get(scope, [1; 32], "large-0").is_none());
+        assert!(cache.get(scope, [1; 32], "large-1").is_some());
+        assert!(cache.get(scope, [1; 32], "large-2").is_some());
     }
 
     #[test]

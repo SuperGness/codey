@@ -235,6 +235,9 @@ fn unknown_websocket_capability_has_one_probe_and_cancellation_releases_it() {
         .lock()
         .unwrap()
         .record_failure(key.clone(), Instant::now());
+    // Acquisition must recheck cooldown under the same lock as probe ownership.
+    assert!(UpstreamWebSocketProbe::acquire(&shared, &key).is_none());
+    shared.lock().unwrap().entries.get_mut(&key).unwrap().until = Instant::now();
     let retry = UpstreamWebSocketProbe::acquire(&shared, &key).unwrap();
     drop(known);
     assert!(UpstreamWebSocketProbe::acquire(&shared, &key).is_none());

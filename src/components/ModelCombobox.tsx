@@ -50,7 +50,7 @@ export function ModelCombobox({ "aria-label": ariaLabel, disabled = false, getPo
     status={unavailableValue ? "warning" : undefined}
     suffixIcon={unavailableValue ? <IconAlertTriangle size={14} aria-hidden="true" /> : undefined}
     getPopupContainer={getPopupContainer}
-    popupMatchSelectWidth={360}
+    popupMatchSelectWidth
     styles={{ popup: { root: { maxWidth: "calc(100vw - 24px)", zIndex } } }}
     virtual
     listHeight={280}

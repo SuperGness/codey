@@ -28,7 +28,7 @@ import type { NotificationChannel, NotificationChannelKind } from "./types";
 const defaultNotificationChannelKind = notificationChannelDefinitions[0].kind;
 
 type NotificationChannelDialogProps = {
-  container: HTMLElement | null;
+  container?: HTMLElement | null;
   popupContainer: HTMLElement | null;
   editingChannel: NotificationChannel | null;
   isBusy: boolean;
@@ -159,7 +159,7 @@ function NotificationChannelDialogComponent({
     }}>
       <DialogContent
         className="notification-channel-dialog"
-        container={container}
+        container={container ?? popupContainer ?? undefined}
         onEscapeKeyDown={(event) => {
           if (isBusy || isTesting || isSaving) event.preventDefault();
         }}
@@ -198,6 +198,7 @@ function NotificationChannelDialogComponent({
                   dropdownClassName="rounded-[10px]"
                   showClear={false}
                   filter={false}
+                  zIndex={1100}
                   prefix={
                     <span className="grid size-[22px] shrink-0 place-items-center">
                       <SelectedChannelIcon size={20} aria-hidden="true" />

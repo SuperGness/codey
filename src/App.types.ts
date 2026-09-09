@@ -1,4 +1,3 @@
-import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
 import type { NotificationChannel } from "./notifications/types";
 
 export type UpstreamProtocol =
@@ -175,8 +174,6 @@ export type RuntimeStatus = {
   activeNotificationChannelCount?: number;
   traceLogWriteProtectionActive?: boolean;
   crashpadDiskProtectionActive?: boolean;
-  traceLogStats?: TraceLogStats;
-  crashpadPendingStats?: CrashpadPendingStats;
 };
 
 export type PluginMarketplaceStatus = {
@@ -213,7 +210,6 @@ export type InlineResult = {
 
 export type Confirmation = {
   action:
-    | "clear"
     | "restart"
     | "install-update"
     | "delete-notification-channel"

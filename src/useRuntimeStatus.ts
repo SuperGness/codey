@@ -6,7 +6,6 @@ import type { RuntimeStatus } from "./App.types";
 import {
   createStatusPollScheduler,
   createStatusPollTask,
-  DIAGNOSTIC_PROBE_DELAYS_MS,
   INJECTION_PROBE_DELAYS_MS,
   INJECTION_PROBE_MAX_DURATION_MS,
   STATUS_POLL_MAX_DURATION_MS,
@@ -205,35 +204,6 @@ export function useRuntimeStatus({
     statusPollScheduler.add(task);
     return () => statusPollScheduler.remove(task);
   }, [active, builtinInjectionProbePending, statusPollScheduler]);
-
-  useEffect(() => {
-    if (
-      !active ||
-      (!status.traceLogStats?.pending &&
-        !status.crashpadPendingStats?.pending)
-    )
-      return;
-    const task = createStatusPollTask(
-      {
-        kind: "diagnostics",
-        delays: DIAGNOSTIC_PROBE_DELAYS_MS,
-        pending: (next) =>
-          Boolean(
-            next.traceLogStats?.pending ||
-              next.crashpadPendingStats?.pending,
-          ),
-        refreshesInjectionStatus: false,
-      },
-      STATUS_POLL_MAX_DURATION_MS,
-    );
-    statusPollScheduler.add(task);
-    return () => statusPollScheduler.remove(task);
-  }, [
-    active,
-    status.crashpadPendingStats?.pending,
-    status.traceLogStats?.pending,
-    statusPollScheduler,
-  ]);
 
   useEffect(() => {
     if (!active || !status.restartInProgress || restartStatusError) return;

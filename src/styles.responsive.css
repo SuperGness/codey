@@ -5,6 +5,22 @@
 @media (max-width: 980px) {
   .prompt-subagent-grid {
     grid-template-columns: 1fr;
+    min-height: 0;
+  }
+  .subagent-column {
+    border-left: 0;
+    border-top: 1px solid rgba(0, 0, 0, 0.07);
+    min-height: 0;
+  }
+  .prompt-column {
+    position: static;
+    height: auto;
+    min-height: 0;
+  }
+  .prompt-column-inner {
+    position: static;
+    height: auto;
+    min-height: 0;
   }
 }
 
@@ -57,15 +73,9 @@
 
   .route-heading-actions,
   .catalog-aggregate-heading,
-  .provider-model-group-heading,
   .provider-model-empty {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .provider-model-group-actions {
-    justify-content: flex-start;
-    padding-left: 34px;
   }
 
   .route-catalog-pane {
@@ -77,15 +87,6 @@
   .provider-model-group .provider-model-empty,
   .route-manager-current .provider-model-group .provider-model-empty {
     padding-left: 10px;
-  }
-
-  .route-manager-current .provider-model-group-actions {
-    padding-left: 0;
-  }
-
-  .section-title.trace-section-title {
-    align-items: stretch;
-    flex-direction: column;
   }
 
   .section-title:has(+ .notification-channel-list),
@@ -109,36 +110,6 @@
   .notification-dialog-test {
     border-top: 1px solid rgba(0, 0, 0, 0.08);
     border-left: 0;
-  }
-
-  .trace-module-actions {
-    flex-wrap: wrap;
-    justify-content: flex-start;
-  }
-
-  .trace-snapshot-row {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 10px;
-  }
-
-  .trace-snapshot-info {
-    flex-wrap: wrap;
-  }
-
-  .trace-empty {
-    max-width: 520px;
-    grid-template-columns: 1fr;
-    justify-items: center;
-    text-align: center;
-  }
-
-  .trace-metrics-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .trace-metric-card {
-    grid-column: span 1;
   }
 
 }

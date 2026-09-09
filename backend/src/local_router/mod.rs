@@ -101,10 +101,11 @@ const UPSTREAM_TCP_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const UPSTREAM_TCP_KEEPALIVE_RETRIES: u32 = 3;
 const UPSTREAM_WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const UPSTREAM_WEBSOCKET_UNSUPPORTED_TTL: Duration = Duration::from_secs(60 * 60);
-const UPSTREAM_WEBSOCKET_BACKOFF_STEPS: [Duration; 3] = [
+const UPSTREAM_WEBSOCKET_BACKOFF_STEPS: [Duration; 4] = [
+    Duration::from_secs(5),
+    Duration::from_secs(15),
+    Duration::from_secs(30),
     Duration::from_secs(60),
-    Duration::from_secs(5 * 60),
-    Duration::from_secs(15 * 60),
 ];
 const UPSTREAM_WEBSOCKET_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const UPSTREAM_WEBSOCKET_PONG_TIMEOUT: Duration = Duration::from_secs(10);

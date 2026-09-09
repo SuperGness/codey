@@ -266,21 +266,22 @@ function ModelPickerDialogComponent({
             </Badge>
           </div>
           {visibleThirdPartyModels.map((model) => {
+            const key = modelKey(model);
+            const selected = draftModelSet.has(key);
             const added =
-              draftModelSet.has(modelKey(model)) ||
-              selectedThirdPartyModelKeys.has(modelKey(model));
-            const manual = manualThirdPartyModelKeys.has(modelKey(model));
+              selected || selectedThirdPartyModelKeys.has(key);
+            const manual = manualThirdPartyModelKeys.has(key);
             return (
               <div className="flex flex-wrap items-center gap-2.5 rounded-md px-3 py-2 hover:bg-blue-500/6" key={model}>
                 <Checkbox
-                  checked={draftModelSet.has(modelKey(model))}
+                  checked={selected}
                   disabled={isBusy}
                   onCheckedChange={(checked) => onToggleDraftModel(model, checked === true)}
                   aria-label={`当前线路支持 ${model}`}
                 />
                 <span className="min-w-0 flex-1 break-words text-xs font-semibold text-[#1d1d1f]">{model}</span>
                 <Checkbox
-                  checked={draft1MModelSet.has(modelKey(model))}
+                  checked={draft1MModelSet.has(key)}
                   disabled={isBusy}
                   onCheckedChange={(checked) =>
                     onToggleDraft1MModel(model, checked === true)}
@@ -383,7 +384,6 @@ function ConfirmationDialogComponent({
   onConfirm,
 }: ConfirmationDialogProps) {
   const destructive =
-    confirmation?.action === "clear" ||
     confirmation?.action === "delete-notification-channel";
   return (
     <Dialog open={Boolean(confirmation)} onOpenChange={(open) => !open && onClose()}>

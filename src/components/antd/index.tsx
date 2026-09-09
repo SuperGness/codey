@@ -23,22 +23,31 @@ export function Tooltip({ content, position, zIndex, autoAdjustOverflow = true, 
   return <AntTooltip {...props} title={content} placement={position} zIndex={zIndex == null ? undefined : Number(zIndex)} autoAdjustOverflow={autoAdjustOverflow} arrow={{ pointAtCenter: arrowPointAtCenter }} />;
 }
 
-type ButtonVariant = "default" | "light" | "brand-outline" | "warning" | "destructive" | "destructive-light" | "outline" | "secondary" | "ghost";
+type ButtonVariant = "default" | "light" | "brand-outline" | "warning" | "destructive" | "destructive-light" | "outline" | "secondary" | "ghost" | "link";
 type ButtonSize = "default" | "sm" | "xs" | "lg" | "icon" | "icon-sm";
 export interface ButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "color" | "onClick"> {
   onClick?: AntButtonProps["onClick"];
-  variant?: ButtonVariant;
+  color?: AntButtonProps["color"];
+  variant?: ButtonVariant | AntButtonProps["variant"];
   size?: ButtonSize;
+  loading?: AntButtonProps["loading"];
+  autoInsertSpace?: boolean;
 }
 const buttonAppearance: Record<ButtonVariant, Pick<AntButtonProps, "color" | "variant">> = {
   default: { color: "primary", variant: "solid" }, light: { color: "primary", variant: "filled" }, "brand-outline": { color: "primary", variant: "outlined" },
   warning: { color: "orange", variant: "solid" }, destructive: { color: "danger", variant: "solid" },
   "destructive-light": { color: "danger", variant: "filled" }, outline: { color: "default", variant: "outlined" }, secondary: { color: "default", variant: "filled" }, ghost: { color: "default", variant: "text" },
+  link: { color: "primary", variant: "link" },
 };
 const buttonSize = { default: "middle", sm: "small", xs: "small", lg: "large", icon: "middle", "icon-sm": "small" } as const;
-export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function Button({ variant = "default", size = "default", type = "button", children, ...props }, ref) {
-  return <AntButton {...props} {...buttonAppearance[variant]} ref={ref} htmlType={type} size={buttonSize[size]}>
-    <span className="inline-flex items-center justify-center gap-1.5 [&_svg]:max-h-4 [&_svg]:max-w-4 [&_svg]:shrink-0">{children}</span>
+export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function Button({ variant = "default", color, size = "default", type = "button", loading, autoInsertSpace, children, ...props }, ref) {
+  const preset = variant && variant in buttonAppearance ? buttonAppearance[variant as ButtonVariant] : undefined;
+  const resolvedColor = color ?? preset?.color;
+  const resolvedVariant = color
+    ? (variant === "default" ? "solid" : (variant as AntButtonProps["variant"]))
+    : (preset?.variant ?? (variant as AntButtonProps["variant"]));
+  return <AntButton autoInsertSpace={autoInsertSpace ?? false} {...props} color={resolvedColor} variant={resolvedVariant} ref={ref} htmlType={type} size={buttonSize[size]} loading={loading}>
+    <span className="inline-flex items-center justify-center gap-1 [&_svg]:max-h-4 [&_svg]:max-w-4 [&_svg]:shrink-0">{children}</span>
   </AntButton>;
 });
 
@@ -48,6 +57,8 @@ const badgeColors = { default: undefined, secondary: undefined, destructive: "er
 export function Badge({ variant = "default", size: _size, className, ...props }: BadgeProps) {
   return <Tag {...props} className={className} color={badgeColors[variant]} variant={variant === "outline" ? "outlined" : "filled"} />;
 }
+export { Tag } from "antd";
+export type { TagProps } from "antd";
 
 export type CardProps = React.HTMLAttributes<HTMLDivElement> & { bodyStyle?: React.CSSProperties; loading?: boolean };
 export function Card({ bodyStyle, loading, ...props }: CardProps) {

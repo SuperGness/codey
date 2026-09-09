@@ -55,17 +55,5 @@ export function reconcileRuntimeStatus(
       next.injectionScripts,
     );
   }
-  if (next.traceLogStats !== undefined) {
-    reconciled.traceLogStats = reuseEqualValue(
-      current.traceLogStats,
-      next.traceLogStats,
-    );
-  }
-  if (next.crashpadPendingStats !== undefined) {
-    reconciled.crashpadPendingStats = reuseEqualValue(
-      current.crashpadPendingStats,
-      next.crashpadPendingStats,
-    );
-  }
   return reconciled;
 }

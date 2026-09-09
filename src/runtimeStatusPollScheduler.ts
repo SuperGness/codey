@@ -4,16 +4,13 @@ export const STATUS_POLL_MAX_DURATION_MS = 5 * 60 * 1_000;
 export const STATUS_POLL_MAX_CONSECUTIVE_ERRORS = 5;
 export const INJECTION_PROBE_DELAYS_MS = [500, 1_000, 2_000, 5_000] as const;
 export const INJECTION_PROBE_MAX_DURATION_MS = 60_000;
-export const DIAGNOSTIC_PROBE_DELAYS_MS = [
-  250, 500, 1_000, 2_000, 5_000,
-] as const;
 
 export type StatusPollTask = {
   deadline: number;
   delayIndex: number;
   delays: readonly number[];
   errors: number;
-  kind: "injection" | "diagnostics" | "restart";
+  kind: "injection" | "restart";
   nextAt: number;
   pending: (next: RuntimeStatus) => boolean;
   refreshesInjectionStatus: boolean;

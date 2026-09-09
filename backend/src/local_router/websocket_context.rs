@@ -314,7 +314,9 @@ impl UpstreamWebSocketProbe {
         let mut state = shared
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !state.route_is_current(&key.route_id, &key.config_identity) {
+        if !state.route_is_current(&key.route_id, &key.config_identity)
+            || state.is_backing_off(key, Instant::now())
+        {
             return None;
         }
         let generation = if state.supported.contains(key) {
@@ -393,6 +395,13 @@ impl UpstreamWebSocketBackoffs {
         self.supported.remove(&key);
         if !self.route_is_current(&key.route_id, &key.config_identity) {
             return (1, upstream_websocket_backoff_duration(1));
+        }
+        // Concurrent failures belong to the same outage; only a failed retry
+        // after the deadline advances backoff. Preserve unsupported endpoints too.
+        if let Some(backoff) = self.entries.get(&key)
+            && backoff.until > now
+        {
+            return (backoff.failure_count, backoff.until.duration_since(now));
         }
         let reset_after = *UPSTREAM_WEBSOCKET_BACKOFF_STEPS
             .last()

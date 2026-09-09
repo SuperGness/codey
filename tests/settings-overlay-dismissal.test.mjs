@@ -75,6 +75,14 @@ test("settings controls and popups share the modal busy and portal boundaries", 
     channelCardSource,
     /<NotificationChannelDialog[\s\S]*popupContainer=\{popupContainer\}/,
   );
+  assert.match(
+    featurePolicySource,
+    /<NotificationChannelsCard[\s\S]*container=\{popupContainer \?\? null\}[\s\S]*popupContainer=\{popupContainer \?\? null\}/,
+  );
+  assert.doesNotMatch(
+    featurePolicySource,
+    /<NotificationChannelsCard[\s\S]*container=\{tooltipContainer/,
+  );
   for (const source of [featurePolicySource, promptSource, channelDialogSource]) {
     assert.match(source, /getPopupContainer=\{\(\) => popupContainer \?\? document\.body\}/);
   }

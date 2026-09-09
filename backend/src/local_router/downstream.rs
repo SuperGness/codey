@@ -443,14 +443,28 @@ impl AdaptedResponsesHistory {
     }
 
     pub(crate) fn prepare(&mut self, body: &mut Value) -> Result<bool> {
-        self.prepare_context(body, false, true)
+        self.prepare_context(body, false, true, None)
     }
 
-    pub(crate) fn stage_native(&mut self, body: &mut Value) -> Result<bool> {
-        self.prepare_context(body, true, false)
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.last_bytes
     }
 
-    fn prepare_context(&mut self, body: &mut Value, native: bool, expand: bool) -> Result<bool> {
+    pub(crate) fn stage_native(
+        &mut self,
+        body: &mut Value,
+        previous: Option<&Self>,
+    ) -> Result<bool> {
+        self.prepare_context(body, true, false, previous)
+    }
+
+    fn prepare_context(
+        &mut self,
+        body: &mut Value,
+        native: bool,
+        expand: bool,
+        previous_history: Option<&Self>,
+    ) -> Result<bool> {
         self.pending_input = None;
         self.budget.resize(self.last_bytes)?;
         // Count without allocating a second encoded request. Reserve before
@@ -464,12 +478,15 @@ impl AdaptedResponsesHistory {
             .filter(|value| !value.is_null())
             .and_then(Value::as_str)
             .map(str::trim);
+        let (last, previous_bytes) = previous_history
+            .map_or((&self.last, self.last_bytes), |history| {
+                (&history.last, history.last_bytes)
+            });
         let previous = if let Some(previous_response_id) = previous_response_id {
             if !native && !is_codey_synthetic_response_id(previous_response_id) {
                 return Ok(false);
             }
-            let Some((_, context)) = self
-                .last
+            let Some((_, context)) = last
                 .as_ref()
                 .filter(|(response_id, _)| response_id == previous_response_id)
             else {
@@ -480,7 +497,7 @@ impl AdaptedResponsesHistory {
             None
         };
         let expanded_bytes = request_bytes.saturating_add(if previous.is_some() {
-            self.last_bytes
+            previous_bytes
         } else {
             0
         });

@@ -1,13 +1,6 @@
 export type TraceLogStats = {
-  pending: boolean;
   capturedAt: number;
-  databasesFound: number;
-  databasesScanned: number;
   databaseBytes: number;
-  rowCount: number;
-  estimatedLogBytes: number;
-  oldestTimestamp?: number;
-  newestTimestamp?: number;
   errors: string[];
 };
 

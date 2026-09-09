@@ -22,7 +22,7 @@ export function ManualModelCombobox({ ariaDescribedBy, ariaInvalid, ariaLabel = 
     const matched = options.filter((option) => option.toLocaleLowerCase().includes(query));
     const suggestions = (matched.length ? matched : options).map((option) => ({ value: option, label: option }));
     return trimmed && !options.some((option) => option.toLocaleLowerCase() === query)
-      ? [{ value: trimmed, label: `使用自定义模型 ${trimmed}` }, ...suggestions]
+      ? [{ value: trimmed, label: `使用 ${trimmed}` }, ...suggestions]
       : suggestions;
   }, [options, value]);
   return <AutoComplete

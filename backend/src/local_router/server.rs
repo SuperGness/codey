@@ -142,6 +142,7 @@ impl LocalRouter {
             request_body_budget: Arc::new(Semaphore::new(REQUEST_BODY_BUDGET_PERMITS)),
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
             websocket_backoffs: Arc::clone(&websocket_backoffs),
+            native_history_cache: Arc::new(Mutex::new(NativeHistoryCache::default())),
             client: reqwest::Client::builder()
                 .user_agent(format!("Codey-Router/{}", env!("CARGO_PKG_VERSION")))
                 .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
@@ -409,6 +410,7 @@ pub(crate) struct RouterServer {
     pub(crate) request_body_budget: Arc<Semaphore>,
     pub(crate) bindings: Arc<Mutex<RouteBindings>>,
     pub(crate) websocket_backoffs: Arc<Mutex<UpstreamWebSocketBackoffs>>,
+    pub(crate) native_history_cache: Arc<Mutex<NativeHistoryCache>>,
     pub(crate) client: reqwest::Client,
     pub(crate) official_auth_path: PathBuf,
     pub(crate) official_auth_cache: Arc<Mutex<crate::account_usage::OfficialAuthCache>>,

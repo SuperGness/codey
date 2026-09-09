@@ -13,6 +13,19 @@ those lockfiles. Upstream package metadata and license files are authoritative.
 `vendor/CodeyRuntime` is distributed as source under `AGPL-3.0-only`. Its
 license text is also preserved at `vendor/CodeyRuntime/LICENSE`.
 
+## Windows overlay recovery
+
+The Windows overlay recovery helper adapts MIT-licensed code from
+[BaoZiFly-233/codex-tweaks-pet-drag-recovery](https://github.com/BaoZiFly-233/codex-tweaks-pet-drag-recovery)
+at commit `3d16eebe50eebee62e37bee97301e28411f6bbd8`, using the native layered-window
+reset technique also documented by
+[FoegiUpdate/ChatGPT-Overlay-Fix](https://github.com/FoegiUpdate/ChatGPT-Overlay-Fix)
+at commit `633323f537cd862d8c83d619d5f755a56966765b`.
+Copyright (c) 2026 ct-pet-drag-recovery contributors; Copyright (c) 2026 FoegiUpdate.
+The complete MIT notices are preserved in `licenses/PetDragRecovery/LICENSE`
+and `licenses/ChatGPTOverlayFix/LICENSE`. Codey's adaptation provides one-shot
+recovery through its Rust backend, without the upstream Node host or watcher.
+
 ## Bundled context tool
 
 Codey's optional built-in context tool sidecar includes FastCtx.

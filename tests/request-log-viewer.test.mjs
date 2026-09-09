@@ -1,8 +1,23 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import ts from "typescript";
 
 const root = new URL("../", import.meta.url);
+
+test("request log cache hit rate uses input tokens and preserves unknown usage", async () => {
+  const viewer = await readFile(new URL("src/RequestLogDialog.tsx", root), "utf8");
+  const source = viewer.match(/function formatCacheHitRate\([\s\S]*?\n\}/)?.[0];
+  assert.ok(source);
+  const compiled = ts.transpileModule(source, {}).outputText;
+  const format = new Function(`${compiled}; return formatCacheHitRate;`)();
+  assert.equal(format(64268, 32000), "49.8%");
+  assert.equal(format(100, 0), "0.0%");
+  assert.equal(format(100, 100), "100.0%");
+  for (const [input, cached] of [[null, 0], [100, null], [undefined, undefined], [0, 0], [-1, 0], [100, -1], [100, 101], [Infinity, 1], [100, NaN]]) {
+    assert.equal(format(input, cached), "—");
+  }
+});
 
 test("request log controls are scoped to built-in routing and preserve logger settings", async () => {
   const [app, modelSection, types, preview] = await Promise.all([
@@ -54,7 +69,8 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
     "utf8",
   );
 
-  assert.match(viewer, /<Modal[\s\S]*width="100vw"[\s\S]*height: "100dvh"/);
+  assert.doesNotMatch(viewer, /<Modal/);
+  assert.match(viewer, /className="[^"]*flex h-full min-h-0 flex-1 flex-col/);
   assert.match(viewer, /invoke<RouteRequestLogQueryPage>\("query_route_request_logs", \{/);
   assert.match(viewer, /pageSize/);
   assert.match(viewer, /window\.setTimeout\([\s\S]*300/);
@@ -65,7 +81,10 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /label: "SSE", value: "http_sse"/);
   assert.match(viewer, /item\.upstreamTransport === "http_sse" \? "SSE" : \(item\.upstreamTransport \|\| "—"\)\.toUpperCase\(\)/);
   assert.doesNotMatch(viewer, /item\.requestProtocol/);
-  assert.doesNotMatch(viewer, /<Pagination/);
+  assert.match(viewer, /<Pagination/);
+  assert.match(viewer, /<Drawer[\s\S]*onClose=\{\(\) => setSelectedItem\(null\)\}/);
+  assert.match(viewer, /tabIndex: 0[\s\S]*event\.key === "Enter" \|\| event\.key === " "/);
+  assert.match(viewer, /aria-label=\{`复制请求 ID：\$\{item\.requestId\}`\}/);
   assert.match(viewer, /cursorMode: true/);
   assert.match(viewer, /result\.nextCursor/);
   assert.match(viewer, /query_route_request_log_stats/);
@@ -97,11 +116,9 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
     "思考强度",
     "上游协议",
     "状态",
-    "TTFT / 总耗时",
-    "输入 Token",
-    "输出 Token",
+    "耗时",
+    "Token 用量",
     "缓存 Token",
-    "总 Token",
   ]) {
     assert.match(viewer, new RegExp(`title: "${heading}", width: \\d+`));
   }
@@ -138,6 +155,8 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /item\.totalTokens == null[\s\S]*usageUnavailable\.label/);
   assert.match(viewer, /Token 使用量不可用：\$\{usageUnavailable\.message\}/);
   assert.match(viewer, /formatTokens\(item\.totalTokens\)/);
+  assert.match(viewer, /formatTokens\(item\.reasoningOutputTokens\)/);
+  assert.match(viewer, /formatCacheHitRate\(item\.inputTokens, item\.cachedInputTokens\)/);
   assert.match(viewer, /formatTimestamp\(item\.timestampUnixMs\)/);
   assert.match(viewer, /item\.requestId/);
   assert.match(viewer, /codexSessionId\?: string \| null/);

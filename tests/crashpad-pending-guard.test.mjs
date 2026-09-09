@@ -11,7 +11,6 @@ test("Crashpad pending protection is bounded, allowlisted, and surfaced with Tra
     diagnosticCommands,
     runtime,
     app,
-    diagnostics,
     api,
   ] = await Promise.all([
     readFile(
@@ -30,7 +29,6 @@ test("Crashpad pending protection is bounded, allowlisted, and surfaced with Tra
       "utf8",
     ),
     readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/TraceLogModule.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/api.ts", import.meta.url), "utf8"),
   ]);
 
@@ -57,28 +55,19 @@ test("Crashpad pending protection is bounded, allowlisted, and surfaced with Tra
   assert.match(config, /protect_crashpad_pending: true/);
   assert.match(launcher, /enforce_system_limit/);
   assert.match(launcher, /spawn_crashpad_guard_watcher/);
-  assert.match(commands, /"refresh_diagnostic_storage_stats"/);
   assert.match(commands, /"clear_diagnostic_storage"/);
   assert.match(
     diagnosticCommands,
-    /refresh_diagnostic_storage_stats[\s\S]*?diagnostic_storage_operation\.lock\(\)\.await/,
+    /clear_diagnostic_storage[\s\S]*?diagnostic_storage_operation\.lock\(\)\.await/,
   );
   assert.doesNotMatch(
     diagnosticCommands,
-    /refresh_diagnostic_storage_stats[\s\S]*?diagnostic_storage_operation\.try_lock\(\)/,
+    /clear_diagnostic_storage[\s\S]*?diagnostic_storage_operation\.try_lock\(\)/,
   );
   assert.match(diagnosticCommands, /"status": if errors\.is_empty\(\) \{ "ok" \} else \{ "partial" \}/);
-  assert.match(runtime, /"crashpadPendingStats"/);
+  assert.doesNotMatch(runtime, /"crashpadPendingStats"|"traceLogStats"/);
 
-  assert.match(app, /invoke<\{[\s\S]*?\}>\("clear_diagnostic_storage"\)/);
-  assert.match(app, /refresh_diagnostic_storage_stats/);
-  assert.match(diagnostics, /诊断存储保护/);
-  assert.match(
-    diagnostics,
-    /Boolean\(traceSnapshot\) &&[\s\S]*?!crashpadSupported \|\| Boolean\(crashpadSnapshot\)/,
-  );
-  assert.match(diagnostics, /Crashpad 报告/);
-  assert.match(diagnostics, /Crashpad 占用/);
-  assert.match(api, /"refresh_diagnostic_storage_stats"/);
+  assert.match(app, /invoke<DiagnosticStorageCleanup>\("clear_diagnostic_storage", \{ target \}\)/);
+  assert.doesNotMatch(api, /"refresh_diagnostic_storage_stats"|"refresh_trace_log_stats"/);
   assert.match(api, /"clear_diagnostic_storage"/);
 });

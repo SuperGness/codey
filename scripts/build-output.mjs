@@ -6,15 +6,19 @@ export function writeBuildOutputs(directory, outputs) {
   const keep = new Set([...outputs.keys()].map((name) => join(directory, name)));
   mkdirSync(directory, { recursive: true });
   function prune(path) {
+    let empty = true;
     for (const entry of readdirSync(path, { withFileTypes: true })) {
       const child = join(path, entry.name);
       if (entry.isDirectory()) {
-        prune(child);
-        if (readdirSync(child).length === 0) rmdirSync(child);
+        if (prune(child)) rmdirSync(child);
+        else empty = false;
       } else if (entry.isSymbolicLink() || !keep.has(child)) {
         unlinkSync(child);
+      } else {
+        empty = false;
       }
     }
+    return empty;
   }
   prune(directory);
   for (const [name, source] of outputs) {

@@ -35,6 +35,8 @@ test("Ant Design controls preserve native input values, labels and disabled stat
   assert.match(render(Switch, { checked: true, loading: true }), /disabled=""/);
   assert.match(render(Button, { variant: "destructive", type: "submit", children: "删除" }), /type="submit"/);
   assert.match(render(Button, { variant: "destructive", children: "删除" }), /ant-btn-color-dangerous/);
+  assert.match(render(Button, { color: "primary", variant: "filled", children: "查看请求日志" }), /ant-btn-color-primary/);
+  assert.match(render(Button, { color: "primary", variant: "filled", children: "查看请求日志" }), /ant-btn-variant-filled/);
 });
 
 test("frontend uses a single component library and keeps popups inside the overlay", () => {

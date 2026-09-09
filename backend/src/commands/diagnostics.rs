@@ -9,7 +9,15 @@ use crate::error_log;
 use crate::trace_log_guard;
 use crate::trace_log_stats::{self, TraceLogStatsSnapshot};
 
-pub(super) async fn clear_diagnostic_storage(state: &Arc<AppState>) -> Result<Value, String> {
+pub(super) async fn clear_diagnostic_storage(
+    state: &Arc<AppState>,
+    args: &Value,
+) -> Result<Value, String> {
+    let (clear_trace, clear_crashpad) = match args.get("target") {
+        Some(Value::String(target)) if target == "trace" => (true, false),
+        Some(Value::String(target)) if target == "crashpad" => (false, true),
+        _ => return Err("无效的诊断清理目标".to_string()),
+    };
     let _operation = state.diagnostic_storage_operation.lock().await;
     let config = state.config.read().await;
     let disable_trace_writes = config.disable_trace_log_writes;
@@ -17,26 +25,49 @@ pub(super) async fn clear_diagnostic_storage(state: &Arc<AppState>) -> Result<Va
     drop(config);
 
     let trace_home = codex_home();
+    let previous_protection_active = state
+        .trace_log_write_protection_active
+        .load(std::sync::atomic::Ordering::Acquire);
     let trace_task = tokio::task::spawn_blocking(move || {
+        if !clear_trace {
+            return (
+                Ok(Default::default()),
+                TraceLogStatsSnapshot::idle(),
+                previous_protection_active,
+                TraceLogStatsSnapshot::idle(),
+            );
+        }
+        let before = trace_log_stats::snapshot(trace_home);
         let guard = trace_log_guard::configure(trace_home, disable_trace_writes);
         let trace_log_write_protection_active = guard
             .as_ref()
             .is_ok_and(|report| report.protection_active(disable_trace_writes));
         let cleanup = guard.and_then(|_| trace_log_guard::clear(trace_home));
         let snapshot = trace_log_stats::snapshot(trace_home);
-        (cleanup, snapshot, trace_log_write_protection_active)
+        (cleanup, snapshot, trace_log_write_protection_active, before)
     });
     let crashpad_task = tokio::task::spawn_blocking(move || {
-        crashpad_pending_guard::clear_system(protect_crashpad_pending)
+        if clear_crashpad {
+            crashpad_pending_guard::clear_system(protect_crashpad_pending)
+        } else {
+            crashpad_pending_guard::CrashpadGuardRun {
+                cleanup: Default::default(),
+                snapshot: CrashpadPendingStatsSnapshot::idle(protect_crashpad_pending),
+            }
+        }
     });
     let (trace_result, crashpad_result) = tokio::join!(trace_task, crashpad_task);
 
     let mut errors = Vec::new();
+    let trace_before = trace_result
+        .as_ref()
+        .ok()
+        .map(|(_, _, _, before)| before.clone());
     let (trace_cleanup, trace_snapshot, trace_log_write_protection_active) = match trace_result {
-        Ok((Ok(cleanup), snapshot, protection_active)) => {
+        Ok((Ok(cleanup), snapshot, protection_active, _)) => {
             (Some(cleanup), snapshot, protection_active)
         }
-        Ok((Err(error), snapshot, protection_active)) => {
+        Ok((Err(error), snapshot, protection_active, _)) => {
             let error = format!("{error:#}");
             error_log::record_failure(
                 "cleanup_failed",
@@ -66,7 +97,9 @@ pub(super) async fn clear_diagnostic_storage(state: &Arc<AppState>) -> Result<Va
             (None, snapshot, false)
         }
     };
-    state.trace_log_stats.replace(trace_snapshot);
+    if clear_trace {
+        errors.extend(trace_snapshot.errors.iter().cloned());
+    }
     state.trace_log_write_protection_active.store(
         trace_log_write_protection_active,
         std::sync::atomic::Ordering::Release,
@@ -111,100 +144,43 @@ pub(super) async fn clear_diagnostic_storage(state: &Arc<AppState>) -> Result<Va
             (cleanup, snapshot)
         }
     };
-    state.crashpad_pending_stats.replace(crashpad_snapshot);
+    if clear_crashpad {
+        state
+            .crashpad_pending_stats
+            .replace(crashpad_snapshot.clone());
+    }
 
     Ok(json!({
         "status": if errors.is_empty() { "ok" } else { "partial" },
         "traceCleanup": trace_cleanup,
+        "traceLogStatsBefore": trace_before,
         "crashpadCleanup": crashpad_cleanup,
         "traceProtectionEnabled": disable_trace_writes,
         "traceLogWriteProtectionActive": trace_log_write_protection_active,
         "crashpadProtectionEnabled": protect_crashpad_pending,
         "errors": errors,
-        "traceLogStats": &state.trace_log_stats,
-        "crashpadPendingStats": &state.crashpad_pending_stats,
+        "traceLogStats": trace_snapshot,
+        "crashpadPendingStats": crashpad_snapshot,
     }))
 }
 
-pub(super) async fn refresh_diagnostic_storage_stats(
-    state: &Arc<AppState>,
-) -> Result<Value, String> {
-    let _operation = state.diagnostic_storage_operation.lock().await;
-    let protect_crashpad_pending = state.config.read().await.protect_crashpad_pending;
-    if !state.trace_log_stats.begin_refresh() {
-        return Ok(json!({
-            "status": "pending",
-            "traceLogStats": &state.trace_log_stats,
-            "crashpadPendingStats": &state.crashpad_pending_stats,
-        }));
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cleanup_requires_an_explicit_single_target() {
+        let state = Arc::new(AppState::default());
+        for args in [
+            json!({}),
+            json!({"target": null}),
+            json!({"target": "all"}),
+            json!({"target": 1}),
+        ] {
+            assert_eq!(
+                clear_diagnostic_storage(&state, &args).await.unwrap_err(),
+                "无效的诊断清理目标"
+            );
+        }
     }
-    let _ = state
-        .crashpad_pending_stats
-        .begin_refresh(protect_crashpad_pending);
-
-    let trace_home = codex_home();
-    let trace_task = tokio::task::spawn_blocking(move || trace_log_stats::snapshot(trace_home));
-    let crashpad_task = tokio::task::spawn_blocking(move || {
-        crashpad_pending_guard::snapshot_system(protect_crashpad_pending)
-    });
-    let (trace_result, crashpad_result) = tokio::join!(trace_task, crashpad_task);
-
-    let trace_snapshot = match trace_result {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            let mut snapshot = TraceLogStatsSnapshot::idle();
-            snapshot
-                .errors
-                .push(format!("Trace 日志统计任务异常退出：{error}"));
-            snapshot
-        }
-    };
-    state.trace_log_stats.replace(trace_snapshot);
-
-    let crashpad_snapshot = match crashpad_result {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            let mut snapshot = CrashpadPendingStatsSnapshot::idle(protect_crashpad_pending);
-            snapshot
-                .errors
-                .push(format!("Crashpad 待处理报告统计任务异常退出：{error}"));
-            snapshot
-        }
-    };
-    state.crashpad_pending_stats.replace(crashpad_snapshot);
-
-    Ok(json!({
-        "status": "ok",
-        "traceLogStats": &state.trace_log_stats,
-        "crashpadPendingStats": &state.crashpad_pending_stats,
-    }))
-}
-
-pub(super) async fn refresh_trace_log_stats(state: &Arc<AppState>) -> Result<Value, String> {
-    let _operation = state.diagnostic_storage_operation.lock().await;
-    if !state.trace_log_stats.begin_refresh() {
-        return Ok(json!({
-            "status": "pending",
-            "traceLogStats": &state.trace_log_stats,
-        }));
-    }
-
-    let home = codex_home();
-    let snapshot = match tokio::task::spawn_blocking(move || trace_log_stats::snapshot(home)).await
-    {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            let mut snapshot = TraceLogStatsSnapshot::idle();
-            snapshot
-                .errors
-                .push(format!("Trace 日志统计任务异常退出：{error}"));
-            snapshot
-        }
-    };
-    state.trace_log_stats.replace(snapshot);
-
-    Ok(json!({
-        "status": "ok",
-        "traceLogStats": &state.trace_log_stats,
-    }))
 }

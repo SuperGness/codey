@@ -3,7 +3,10 @@
    ========================================================================== */
 
 .route-card {
-  overflow: hidden;
+  border-radius: 14px !important;
+  overflow: hidden !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
 }
 
 .route-manager {
@@ -17,8 +20,6 @@
 }
 
 .catalog-aggregate-heading,
-.provider-model-group-heading,
-.provider-model-group-actions,
 .route-editor-footer {
   display: flex;
   align-items: center;
@@ -89,6 +90,11 @@
 }
 
 .provider-model-group {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px 12px 12px;
   overflow: hidden;
   border: none;
   border-bottom: 1px solid rgba(0, 0, 0, 0.06);
@@ -120,12 +126,12 @@
   box-shadow: inset 0 2px 0 0 var(--mac-blue);
 }
 
-.provider-model-group-heading {
+.provider-model-group-left {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 10px 14px 4px 12px;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: 6px;
 }
 
 .provider-heading-main {
@@ -207,17 +213,41 @@
 
 .provider-model-group-actions {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: flex-start;
+  align-self: flex-start;
   flex-shrink: 0;
+  gap: 5px;
+}
+
+.provider-model-group-actions-top {
+  display: flex;
+  align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 4px;
+  min-height: 22px;
+}
+
+.provider-model-group-actions-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .route-item-manage-actions {
   display: inline-flex;
   align-items: center;
   gap: 2px;
+}
+
+.route-item-manage-actions .ant-btn {
+  padding: 0 4px;
+  height: 24px;
+  min-width: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .route-item-badges {
@@ -231,7 +261,6 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-right: 6px;
 }
 
 .route-item-usage-label {
@@ -249,7 +278,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 10px;
-  padding: 5px 14px 14px 54px;
+  padding: 4px 0 0 58px;
   border-top: none;
   background: transparent;
 }
@@ -382,7 +411,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 4px 14px 12px 54px;
+  padding: 4px 0 0 58px;
   color: var(--mac-text-secondary);
   font-size: 11.5px;
   background: transparent;

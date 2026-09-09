@@ -286,11 +286,15 @@ pub(crate) fn renderer_native_model_catalog_value(
             })
         })
         .collect::<Vec<_>>();
-    for model in regular_route_models(model_state.third_party_models.clone()) {
+    for model in model_state
+        .third_party_models
+        .iter()
+        .filter(|model| !model_id::equal(model, local_router::CODEX_AUTO_REVIEW_MODEL))
+    {
         let details = model_state
             .third_party_model_metadata
             .iter()
-            .find(|details| model_id::equal(&details.slug, &model));
+            .find(|details| model_id::equal(&details.slug, model));
         let mut entry = json!({ "model": model, "display_name": model });
         if let Some(details) = details {
             entry["supported_reasoning_efforts"] = json!(details.supported_reasoning_efforts);

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { notification } from "antd";
 import {
   IconCheck,
   IconCircleArrowUp,
@@ -10,7 +11,6 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import { invoke } from "./api";
-import { TraceLogModule } from "./TraceLogModule";
 import { ModelPickerDialog } from "./AppDialogs";
 import { FeaturePolicyCard, SubagentPolicyCard } from "./FeaturePolicyCard";
 import { ModelSection } from "./ModelSection";
@@ -18,16 +18,15 @@ import { OperationsPanel } from "./OperationsPanel";
 import { PromptOptimizationCard } from "./PromptOptimizationCard";
 import {
   getNotificationChannelDefinition,
-  NotificationChannelsCard,
 } from "./notifications";
 import type { NotificationChannel } from "./notifications";
 import { errorText, withTimeout } from "./appUtils";
-import { formatBytes } from "./formatters";
+import type { DiagnosticStorageCleanup, DiagnosticStorageTarget } from "./diagnosticStorage";
+import { DiagnosticCleanupNotice } from "./DiagnosticCleanupNotice";
 import { modelIdsEqual, uniqueModelIds } from "./modelIds";
 import { globalDefaultForRoute, routeProviderId } from "./modelRoutes";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { useModelSelection } from "./useModelSelection";
-import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
 import { useRuntimeStatus } from "./useRuntimeStatus";
 import { useAppUpdates } from "./useAppUpdates";
 import {
@@ -44,14 +43,12 @@ import type {
   AppProps,
   ProviderStatus,
   Config,
-  CrashpadCleanup,
   FastContextToolsStatus,
   ModelState,
   PluginMarketplaceStatus,
   Profile,
-  TraceLogCleanup,
 } from "./App.types";
-import { Badge, Button, Tooltip } from "./components/antd";
+import { Badge, Button, Tag, Tooltip } from "./components/antd";
 
 const Check = IconCheck;
 const X = IconX;
@@ -140,6 +137,11 @@ export function App({
     [popupContainer, portalContainer],
   );
   const noticeController = useAppNoticeController();
+  const [cleanupNotification, cleanupNotificationHolder] = notification.useNotification({
+    getContainer: getTooltipContainer,
+    placement: "bottomRight",
+    duration: 5,
+  });
   const confirmationController = useConfirmationController();
   const setNotice = noticeController.setNotice;
   const setConfirmation = confirmationController.setConfirmation;
@@ -801,17 +803,6 @@ export function App({
     onClose?.();
   }
 
-  function askClearTraceLogs() {
-    setConfirmation({
-      action: "clear",
-      title: "清理 Codex 诊断存储？",
-      description:
-        "将清空并压缩 logs_*.sqlite，同时删除已稳定写入的 Crashpad 待处理报告。最近写入、未知文件和其他 Crashpad 目录会保留；聊天历史、账号、配置及插件不受影响。清理后的诊断记录无法恢复。",
-      confirmLabel: "确认清理",
-      run: () => void clearTraceLogs(),
-    });
-  }
-
   function askRestartCodex() {
     if (restartStatusError) {
       void runOperation("restart", async () => {
@@ -896,79 +887,39 @@ export function App({
     });
   }
 
-  async function clearTraceLogs() {
-    await runOperation("clear-trace-logs", async () => {
-      const result = await invoke<{
-        status: "ok" | "partial";
-        traceCleanup?: TraceLogCleanup;
-        crashpadCleanup: CrashpadCleanup;
-        traceProtectionEnabled: boolean;
-        traceLogWriteProtectionActive: boolean;
-        crashpadProtectionEnabled: boolean;
-        errors: string[];
-        traceLogStats: TraceLogStats;
-        crashpadPendingStats: CrashpadPendingStats;
-      }>("clear_diagnostic_storage");
-      setStatus((current) => ({
-        ...current,
-        traceLogStats: result.traceLogStats,
-        crashpadPendingStats: result.crashpadPendingStats,
-        traceLogWriteProtectionActive:
-          result.traceLogWriteProtectionActive,
-      }));
-      const traceCleanup = result.traceCleanup;
-      const crashpadCleanup = result.crashpadCleanup;
-      if (
-        (traceCleanup?.databasesFound ?? 0) === 0 &&
-        crashpadCleanup.reportsFound === 0
-      ) {
-        setNotice({
-          tone: "info",
-          text: "未发现可清理的 Trace 日志或 Crashpad 待处理报告",
-        });
-        return;
-      }
-      const traceDetail = traceCleanup
-        ? `${traceCleanup.databasesCleaned} 个日志库、${traceCleanup.rowsDeleted} 条记录`
-        : "Trace 日志清理未完成";
-      const crashpadDetail =
-        `${crashpadCleanup.reportsDeleted} 份 Crashpad 报告、` +
-        `${crashpadCleanup.filesDeleted} 个文件`;
-      const reclaimed =
-        (traceCleanup?.bytesReclaimed ?? 0) + crashpadCleanup.bytesReclaimed;
-      const protectionDetail =
-        result.traceProtectionEnabled && result.crashpadProtectionEnabled
-          ? "双重保护保持开启"
-          : "当前仅启用了部分保护";
-      setNotice({
-        tone: result.errors.length ? "error" : "success",
-        text: `已处理 ${traceDetail}；${crashpadDetail}，释放 ${formatBytes(reclaimed)}；${protectionDetail}${result.errors.length ? `，另有 ${result.errors.length} 项未完成` : ""}`,
+  async function analyzeDiagnosticStorage(target: DiagnosticStorageTarget) {
+    await runOperation("clear-diagnostic-storage", async () => {
+      const key = "diagnostic-storage-cleanup";
+      const title = target === "trace" ? "Trace 日志" : "Crashpad";
+      cleanupNotification.info({
+        key,
+        duration: 0,
+        className: "cleanup-notification-card",
+        title: `${title}：正在分析并清理`,
+        description: "正在统计占用并清理，请稍候…",
       });
-    });
-  }
-
-  async function updateTraceLogStatsSnapshot() {
-    const result = await invoke<{
-      status: "ok" | "pending";
-      traceLogStats: TraceLogStats;
-      crashpadPendingStats: CrashpadPendingStats;
-    }>("refresh_diagnostic_storage_stats");
-    setStatus((current) => ({
-      ...current,
-      traceLogStats: result.traceLogStats,
-      crashpadPendingStats: result.crashpadPendingStats,
-    }));
-    return result;
-  }
-
-  async function refreshTraceLogStats() {
-    await runOperation("refresh-trace-stats", async () => {
-      const result = await updateTraceLogStatsSnapshot();
-      if (result.status === "pending") {
-        setNotice({ tone: "info", text: "诊断存储正在统计，请稍候" });
-        return;
+      try {
+        const result = await invoke<DiagnosticStorageCleanup>("clear_diagnostic_storage", { target });
+        setStatus((current) => ({
+          ...current,
+          traceLogWriteProtectionActive: result.traceLogWriteProtectionActive,
+        }));
+        const incomplete = result.status === "partial" || result.errors.length > 0;
+        cleanupNotification.open({
+          key,
+          className: "cleanup-notification-card",
+          type: incomplete ? "warning" : "success",
+          title: `${title}：${incomplete ? "部分项目未完成" : "分析并清理完成"}`,
+          description: <DiagnosticCleanupNotice result={result} target={target} />,
+        });
+      } catch (error) {
+        cleanupNotification.error({
+          key,
+          className: "cleanup-notification-card",
+          title: `${title}：清理结果未能确认`,
+          description: `无法确认清理前后占用及清理情况：${errorText(error)}`,
+        });
       }
-      setNotice({ tone: "success", text: "诊断存储统计已更新" });
     });
   }
 
@@ -1045,9 +996,8 @@ export function App({
       void setRouteDefaultModel(routeId, model);
     },
   );
-  const handleClearTraceLogs = useStableEvent(askClearTraceLogs);
-  const handleRefreshTraceLogStats = useStableEvent(
-    () => void refreshTraceLogStats(),
+  const handleAnalyzeDiagnosticStorage = useStableEvent(
+    (target: DiagnosticStorageTarget) => void analyzeDiagnosticStorage(target),
   );
   const handleModelPickerOpenChange = useStableEvent((open: boolean) => {
     if (!isBusy || open) setModelPickerVisible(open);
@@ -1109,9 +1059,9 @@ export function App({
         <div className="flex min-w-0 flex-col">
           <div className="flex min-w-0 items-center gap-2">
             <h1 className="m-0 whitespace-nowrap text-base font-bold tracking-[-0.02em] text-[#1d1d1f]">Codey 控制台</h1>
-            <span className="whitespace-nowrap text-[11px] font-medium tracking-[0.01em] text-[#8e8e93]">
-              v{status.appVersion || "0.2.0"}
-            </span>
+            <Tag color="volcano" className="header-version-tag">
+              v{status.appVersion || "0.0.1"}
+            </Tag>
 
             <Tooltip
               content={updateTooltipText}
@@ -1121,6 +1071,7 @@ export function App({
               <span className="header-update-btn-wrap">
                 <Button
                   size="xs"
+                  className="header-update-btn"
                   variant={downloadedUpdate ? "default" : hasUpdate ? "brand-outline" : "ghost"}
                   disabled={isBusy}
                   aria-label={updateTooltipText}
@@ -1282,7 +1233,7 @@ export function App({
       )}
 
       {!embedded && (
-        <header className="z-30 flex flex-col border-b border-black/8 bg-white/75 px-5 py-2.5 backdrop-blur-xl">
+        <header className="z-30 flex flex-col border-b border-black/8 bg-white/75 px-5 py-2.5 backdrop-blur-xl shadow-[0_3px_8px_rgba(0,0,0,0.04),0_1px_2px_rgba(0,0,0,0.02)]">
           {configHeaderContent}
         </header>
       )}
@@ -1363,44 +1314,22 @@ export function App({
               fastContextToolsStatus={fastContextToolsStatus}
               isMacClient={status.clientPlatform === "macos"}
               isWindowsClient={status.clientPlatform === "windows"}
+              cleanupBusy={busy === "clear-diagnostic-storage"}
+              onAnalyzeDiagnosticStorage={handleAnalyzeDiagnosticStorage}
               popupContainer={popupContainer}
               tooltipContainer={portalContainer}
               isBusy={isBusy}
               onConfigChange={handleConfigChange}
-            />
-          </div>
-
-          {/* 消息通知：整行排列，每个渠道 item 占一半 */}
-          <div className="full-row-section">
-            <NotificationChannelsCard
-              config={config}
-              container={portalContainer}
-              popupContainer={popupContainer}
-              isBusy={isBusy}
               onAddChannel={handleAddNotificationChannel}
               onChannelChange={handleNotificationChannelChange}
               onRequestRemoveChannel={handleRequestRemoveNotificationChannel}
             />
           </div>
 
-          {/* 诊断存储保护：整行独占排布 */}
-          <div className="full-row-section">
-            <TraceLogModule
-              stats={status.traceLogStats}
-              crashpadStats={status.crashpadPendingStats}
-              crashpadSupported={status.clientPlatform === "macos"}
-              traceProtectionEnabled={config.disableTraceLogWrites}
-              crashpadProtectionEnabled={config.protectCrashpadPending}
-              clearBusy={busy === "clear-trace-logs"}
-              refreshing={busy === "refresh-trace-stats"}
-              disabled={isBusy}
-              onClear={handleClearTraceLogs}
-              onRefresh={handleRefreshTraceLogStats}
-            />
-          </div>
         </div>
       </div>
 
+      {cleanupNotificationHolder}
       <NoticeToast
         autoDismissEnabled
         controller={noticeController}

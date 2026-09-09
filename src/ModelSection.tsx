@@ -253,8 +253,6 @@ function ModelSectionComponent({
   const [routeValidationAttempted, setRouteValidationAttempted] = useState(false);
   const [routeApiKeyVisible, setRouteApiKeyVisible] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
-  const [official1MModelDraft, setOfficial1MModelDraft] = useState<string[]>([]);
-  const [officialContextDraft, setOfficialContextDraft] = useState<Record<string, ModelContextConfig>>({});
   const routeConfigReadOnly = !config.localRouterEnabled;
 
   useEffect(() => {
@@ -397,8 +395,6 @@ function ModelSectionComponent({
     if (official) {
       const providerId = routeProviderId(profile);
       const configuredModels = config.selectedModelsByProvider[providerId] || [];
-      setOfficial1MModelDraft(config.supports1MContextByProvider?.[providerId] || []);
-      setOfficialContextDraft(config.modelContextByProvider?.[providerId] || {});
       setOfficialModelDraft(
         configuredModels.length > 0
           ? configuredModels
@@ -431,9 +427,9 @@ function ModelSectionComponent({
               routeDraft.id,
               officialModelDraft,
               showAccountUsageInHeader,
-              official1MModelDraft,
+              [],
               routeDraft.enabled !== false,
-              officialContextDraft,
+              {},
             )
           : true)
       : await onSaveRoute(routeDraft);
@@ -483,8 +479,8 @@ function ModelSectionComponent({
                 />
               </div>
               <Button
-                variant="outline"
-                size="sm"
+                color="primary"
+                variant="filled"
                 onClick={() => void invoke("open_route_request_logs")}
               >
                 <IconListDetails size={14} aria-hidden="true" />
@@ -562,7 +558,7 @@ function ModelSectionComponent({
                       setDropRouteId(null);
                     }}
                   >
-                    <div className="provider-model-group-heading">
+                    <div className="provider-model-group-left">
                       <div className="provider-heading-main">
                         {!routeConfigReadOnly && (
                           <button
@@ -618,16 +614,103 @@ function ModelSectionComponent({
                           </small>
                         </div>
                       </div>
-                      <div className="provider-model-group-actions">
+                      {group && (group.models.length > 0 ? (
+                        <div className="provider-model-tags">
+                          {group.models.map((model) => {
+                            const isDefault = !routeConfigReadOnly && modelIdsEqual(group.defaultModel, model);
+                            const displayName = group.official ? officialDisplayNames.get(modelKey(model)) || model : model;
+                            return (
+                              <button
+                                type="button"
+                                key={`${group.providerId}:${model}`}
+                                className={`model-tag-pill${isDefault ? " is-default" : ""}`}
+                                disabled={routeConfigReadOnly || isBusy || dirty || isDefault}
+                                onClick={() => onSetDefaultModel(profile.id, model)}
+                                title={routeConfigReadOnly ? displayName : isDefault ? `${displayName}（当前默认模型）` : `点击设为默认模型：${displayName}`}
+                                aria-label={routeConfigReadOnly ? displayName : isDefault ? `${displayName}，当前默认模型` : `设 ${displayName} 为默认模型`}
+                              >
+                                <span className="model-tag-indicator" aria-hidden="true">
+                                  {isDefault ? <Check size={11} strokeWidth={2.5} /> : <span className="model-tag-dot" />}
+                                </span>
+                                <span className="model-tag-name">{displayName}</span>
+                                {isDefault && <span className="model-tag-badge">默认</span>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="provider-model-empty">
+                          <div className="provider-empty-content">
+                            <IconCpu size={16} className="provider-empty-icon" aria-hidden="true" />
+                            <span>尚未配置模型</span>
+                          </div>
+                          <Button
+                            variant="secondary"
+                            size="xs"
+                            disabled={!canSyncCurrentProvider || isBusy}
+                            onClick={syncModels}
+                          >
+                            <Plus size={12} aria-hidden="true" />
+                            <span>{routeConfigReadOnly ? "同步模型" : isOfficial ? "配置官方模型" : "同步或手动添加"}</span>
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="provider-model-group-actions">
+                      <div className="provider-model-group-actions-top">
                         {isOfficial && !disabled && (
                           <div className="route-item-usage-toggle provider-model-usage-toggle">
                             <span className="route-item-usage-label">额度显示</span>
                             <Switch size="xs" checked={showAccountUsageInHeader} disabled={isBusy} onCheckedChange={(checked) => onToggleAccountUsage?.(checked)} aria-label="在账户区域显示额度" />
                           </div>
                         )}
+                        {!routeConfigReadOnly && !isOfficial && (
+                          <div className="route-item-manage-actions">
+                            <Button
+                              variant="link"
+                              color="primary"
+                              size="xs"
+                              disabled={isBusy || dirty}
+                              onClick={() => openEditRouteDialog(profile)}
+                              aria-label={`编辑线路 ${profile.name}`}
+                              title={`编辑线路 ${profile.name}`}
+                            >
+                              <Edit size={14} aria-hidden="true" />
+                            </Button>
+                            <Button
+                              variant="link"
+                              color="danger"
+                              size="xs"
+                              disabled={routeConfigReadOnly || isBusy || dirty || config.profiles.length <= 1}
+                              onClick={() => onDeleteRoute(profile.id)}
+                              aria-label={`删除线路 ${profile.name}`}
+                              title={config.profiles.length <= 1 ? "至少需要保留一条线路" : `删除线路 ${profile.name}`}
+                            >
+                              <Trash size={14} aria-hidden="true" />
+                            </Button>
+                          </div>
+                        )}
+                        {!routeConfigReadOnly && isOfficial && disabled && (
+                          <div className="route-item-manage-actions">
+                            <Button
+                              variant="link"
+                              color="primary"
+                              size="xs"
+                              disabled={isBusy || dirty}
+                              onClick={() => openEditRouteDialog(profile)}
+                              aria-label={`编辑线路 ${profile.name}`}
+                              title={`编辑线路 ${profile.name}`}
+                            >
+                              <Edit size={14} aria-hidden="true" />
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                      <div className="provider-model-group-actions-bottom">
                         {!disabled && (
                           <Button
-                            variant="secondary"
+                            color="primary"
+                            variant="filled"
                             size="xs"
                             disabled={!canSyncCurrentProvider || isBusy}
                             onClick={syncModels}
@@ -638,77 +721,8 @@ function ModelSectionComponent({
                             <span>同步</span>
                           </Button>
                         )}
-                        {!routeConfigReadOnly && (
-                          <div className="route-item-manage-actions">
-                            {(!isOfficial || disabled) && (
-                              <Button
-                                variant="ghost"
-                                size="xs"
-                                disabled={isBusy || dirty}
-                                onClick={() => openEditRouteDialog(profile)}
-                                aria-label={`编辑线路 ${profile.name}`}
-                                title={`编辑线路 ${profile.name}`}
-                              >
-                                <Edit size={13} aria-hidden="true" />
-                              </Button>
-                            )}
-                            {!isOfficial && (
-                              <Button
-                                variant="destructive-light"
-                                size="xs"
-                                disabled={routeConfigReadOnly || isBusy || dirty || config.profiles.length <= 1}
-                                onClick={() => onDeleteRoute(profile.id)}
-                                aria-label={`删除线路 ${profile.name}`}
-                                title={config.profiles.length <= 1 ? "至少需要保留一条线路" : `删除线路 ${profile.name}`}
-                              >
-                                <Trash size={13} aria-hidden="true" />
-                              </Button>
-                            )}
-                          </div>
-                        )}
                       </div>
                     </div>
-                    {group && (group.models.length > 0 ? (
-                      <div className="provider-model-tags">
-                        {group.models.map((model) => {
-                          const isDefault = !routeConfigReadOnly && modelIdsEqual(group.defaultModel, model);
-                          const displayName = group.official ? officialDisplayNames.get(modelKey(model)) || model : model;
-                          return (
-                            <button
-                              type="button"
-                              key={`${group.providerId}:${model}`}
-                              className={`model-tag-pill${isDefault ? " is-default" : ""}`}
-                              disabled={routeConfigReadOnly || isBusy || dirty || isDefault}
-                              onClick={() => onSetDefaultModel(profile.id, model)}
-                              title={routeConfigReadOnly ? displayName : isDefault ? `${displayName}（当前默认模型）` : `点击设为默认模型：${displayName}`}
-                              aria-label={routeConfigReadOnly ? displayName : isDefault ? `${displayName}，当前默认模型` : `设 ${displayName} 为默认模型`}
-                            >
-                              <span className="model-tag-indicator" aria-hidden="true">
-                                {isDefault ? <Check size={11} strokeWidth={2.5} /> : <span className="model-tag-dot" />}
-                              </span>
-                              <span className="model-tag-name">{displayName}</span>
-                              {isDefault && <span className="model-tag-badge">默认</span>}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div className="provider-model-empty">
-                        <div className="provider-empty-content">
-                          <IconCpu size={16} className="provider-empty-icon" aria-hidden="true" />
-                          <span>尚未配置模型</span>
-                        </div>
-                        <Button
-                          variant="secondary"
-                          size="xs"
-                          disabled={!canSyncCurrentProvider || isBusy}
-                          onClick={syncModels}
-                        >
-                          <Plus size={12} aria-hidden="true" />
-                          <span>{routeConfigReadOnly ? "同步模型" : isOfficial ? "配置官方模型" : "同步或手动添加"}</span>
-                        </Button>
-                      </div>
-                    ))}
                   </section>
                 );
               })}
@@ -825,26 +839,7 @@ function ModelSectionComponent({
                             </strong>
                             <small>{model}</small>
                           </span>
-                          <Checkbox
-                            checked={official1MModelDraft.some((candidate) =>
-                              modelIdsEqual(candidate, model))}
-                            disabled={isBusy}
-                            onCheckedChange={(nextChecked) =>
-                              setOfficial1MModelDraft((current) =>
-                                nextChecked === true
-                                  ? uniqueModelIds([...current, model])
-                                  : current.filter((candidate) =>
-                                      !modelIdsEqual(candidate, model)),
-                              )}
-                            label="1M"
-                            aria-label={`${model} 支持 1M 上下文`}
-                          />
-                          {!routeConfigReadOnly && <ModelContextFields model={model} policy={officialContextDraft[model]} disabled={isBusy}
-                            onChange={(policy) => setOfficialContextDraft((current) => {
-                              const next = { ...current };
-                              if (policy) next[model] = policy; else delete next[model];
-                              return next;
-                            })} />}
+
                         </div>
                       );
                     })}
@@ -925,6 +920,7 @@ function ModelSectionComponent({
                     aria-labelledby="route-protocol-label"
                     value={routeDraft.upstreamProtocol}
                     disabled={isBusy}
+                    zIndex={1100}
                     getPopupContainer={() => popupContainer ?? document.body}
                     onChange={(value) => {
                       if (value == null) return;

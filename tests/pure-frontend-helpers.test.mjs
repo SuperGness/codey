@@ -61,19 +61,17 @@ test("reconcileRuntimeStatus keeps referential identity for unchanged nested sec
     status: "ok",
     maintenance: { scanned: 1, items: [1, 2] },
     injectionScripts: [{ id: "a", state: "ready" }],
-    traceLogStats: { files: 2 },
   };
   assert.equal(reconcileRuntimeStatus(current, structuredClone(current)), current);
   const next = {
     ...structuredClone(current),
     status: "degraded",
-    traceLogStats: { files: 3 },
+    injectionScripts: [{ id: "a", state: "error" }],
   };
   const reconciled = reconcileRuntimeStatus(current, next);
   assert.notEqual(reconciled, current);
   assert.equal(reconciled.status, "degraded");
   assert.equal(reconciled.maintenance, current.maintenance, "equal nested object is reused");
-  assert.equal(reconciled.injectionScripts, current.injectionScripts);
-  assert.notEqual(reconciled.traceLogStats, current.traceLogStats);
-  assert.deepEqual(reconciled.traceLogStats, { files: 3 });
+  assert.notEqual(reconciled.injectionScripts, current.injectionScripts);
+  assert.deepEqual(reconciled.injectionScripts, [{ id: "a", state: "error" }]);
 });

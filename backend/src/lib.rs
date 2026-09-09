@@ -24,6 +24,7 @@ mod model_id;
 mod model_list;
 mod native_update_ui;
 mod notifications;
+mod overlay_recovery;
 mod pending_approval;
 mod pet_slim_patch;
 mod plugin_marketplace;
@@ -72,6 +73,10 @@ pub fn run_error_log_helper_if_requested() -> Result<bool> {
 
 pub fn run_codex_cli_wrapper_if_requested() -> Result<bool> {
     codex_startup_patch::run_cli_wrapper_if_requested()
+}
+
+pub fn run_overlay_recovery_if_requested() -> Result<bool> {
+    overlay_recovery::run_if_requested()
 }
 
 pub fn install_crash_log_hook(component: &'static str, stage: &'static str) {

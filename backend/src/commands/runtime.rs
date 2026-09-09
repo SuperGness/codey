@@ -191,18 +191,6 @@ pub(super) async fn runtime_status_with_options(
                 .expect("injection statuses must be JSON-serializable"),
         );
     }
-    if let Some(object) = status.as_object_mut() {
-        object.insert(
-            "traceLogStats".into(),
-            serde_json::to_value(&state.trace_log_stats)
-                .expect("trace log stats must be JSON-serializable"),
-        );
-        object.insert(
-            "crashpadPendingStats".into(),
-            serde_json::to_value(&state.crashpad_pending_stats)
-                .expect("Crashpad stats must be JSON-serializable"),
-        );
-    }
     Ok(status)
 }
 

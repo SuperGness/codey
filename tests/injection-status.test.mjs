@@ -213,7 +213,7 @@ test("status poll scheduler coalesces due work and stops after bounded failures"
       refreshesInjectionStatus: true,
     }, 1_000, fake.clock.now()));
     scheduler.add(createStatusPollTask({
-      kind: "diagnostics",
+      kind: "restart",
       delays: [10],
       pending: () => false,
       refreshesInjectionStatus: false,

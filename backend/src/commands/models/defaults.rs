@@ -54,10 +54,10 @@ pub async fn save_official_route_models(
     state: &Arc<AppState>,
     route_id: String,
     requested_models: Vec<String>,
-    requested_supports_1m_context_models: Option<Vec<String>>,
+    _requested_supports_1m_context_models: Option<Vec<String>>,
     requested_enabled: Option<bool>,
     requested_show_account_usage: Option<bool>,
-    requested_model_contexts: Option<BTreeMap<String, crate::config::ModelContextConfig>>,
+    _requested_model_contexts: Option<BTreeMap<String, crate::config::ModelContextConfig>>,
 ) -> Result<Value, String> {
     validate_requested_model_list_bounds("官方模型", &requested_models)?;
     let _config_write_guard = state.config_write_lock.lock().await;
@@ -81,18 +81,7 @@ pub async fn save_official_route_models(
         config.show_account_usage_in_header = show_usage;
     }
     let official_models = model_catalog::default_official_model_slugs();
-    set_supports_1m_context_models(
-        &mut config,
-        &provider_id,
-        requested_supports_1m_context_models.as_deref(),
-        &official_models,
-    )?;
-    set_model_contexts(
-        &mut config,
-        &provider_id,
-        requested_model_contexts.as_ref(),
-        &official_models,
-    )?;
+    // 官方线路不接受上下文预算或 1M 设置变更，保留已有配置。
     let official_by_key = official_models
         .iter()
         .map(|model| (model_id::key(model), model.as_str()))

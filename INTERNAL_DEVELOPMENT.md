@@ -12,6 +12,12 @@
 - 无法确认线路、模型归属或兼容能力时应停止请求并给出错误，不猜测、不跨线路自动切换，也不重放可能已经送达的请求。
 - 账号额度摘要在 `/account/usage` 返回错误时回退到 `account/rateLimits/read`，仅使用顶层 `rateLimits`，不合并 `rateLimitsByLimitId` 中的模型专属额度。5 小时窗口是否显示取决于账号通用额度实际返回的窗口，不按套餐名称隐藏。
 
+## 诊断存储手动清理
+
+- Trace 与 Crashpad 卡片分别传入 `clear_diagnostic_storage` 的 `target: trace | crashpad`，缺省和其他值在执行前拒绝，仅分析并清理指定目标。沿用诊断操作互斥锁、日志库压缩和 Crashpad 文件白名单及静默期保护，不修改用户的保护开关。
+- 独立诊断存储面板、统计刷新 API、联合清理入口及诊断统计轮询已移除。运行状态不再携带诊断占用快照；Trace 清理通知仅扫描日志库及附属文件大小，不再读取日志条数、内容估算和时间范围。Crashpad 自动保护继续使用原有内部状态。
+- Ant Design Notification 通过 `DiagnosticCleanupNotice` 组件呈现卡片式清理结果：包含顶部释放空间汇总与清理前后占用变化对比、处理库/记录/报告删除数量胶囊标签、保留项提示及未完成项告警，结果在 5 秒后自动关闭，也可手动关闭；处理中提示持续显示至操作完成。Trace 中途失败时返回清理前快照和清理后统计，不将缺失统计显示成零占用。
+- `tests/diagnostic-cleanup-notification.test.mjs` 覆盖分别展示、空数据、保留项、失败提示以及 `DiagnosticCleanupNotice` 组件渲染结果；本地预览使用模拟数据验证按钮和通知，不清理真实诊断文件。
 ## 目录
 
 - src/：Codey 控制台、请求日志页和前端状态逻辑。
@@ -114,7 +120,7 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 
 | 文件 | 修改与理由 |
 | --- | --- |
-| `scripts/build-overlay.mjs`、`scripts/build-output.mjs`、`backend/build.rs` | 使用 Vite 现有构建 API 在内存生成产物，统一比较 overlay 与注入脚本的字节内容，仅更新变化文件，清理过期文件和空目录。产物目录中的符号链接先移除，避免写入链接指向的位置；新增脚本纳入 Cargo 构建输入。没有引入内容缓存、额外依赖或修改编译优化等级。 |
+| `scripts/build-overlay.mjs`、`scripts/build-output.mjs`、`backend/build.rs` | 使用 Vite 现有构建 API 在内存生成产物，统一比较 overlay 与注入脚本的字节内容，仅更新变化文件，清理过期文件和空目录。每个目录只扫描一次，递归返回清理后是否为空；产物目录中的符号链接先移除，避免写入链接指向的位置；新增脚本纳入 Cargo 构建输入。没有引入内容缓存、额外依赖或修改编译优化等级。 |
 | `src/formatters.ts`、`src/RequestLogDialog.tsx` | 日期格式器移入现有格式化模块并复用，避免每行日志重新创建 `Intl.DateTimeFormat`。保留本地时区、中文日期格式、无效数值占位和超范围日期异常。 |
 | `backend/src/route_request_log.rs`、`backend/src/local_router/websocket_context.rs`、`backend/src/local_router/tests.rs` | 删除无生产调用的 `set_upstream_transport`、`UpstreamWebSocketBackoffs::clear` 及相应过时注释。传输切换测试改用已有的 `mark_upstream_send`，继续检查首次发送时间不被覆盖；删除仅验证已废弃 clear 方法的断言。 |
 | `backend/src/model_catalog.rs` | 合并合成模型的两处相同保守上下文配置；修复缓存恢复将缺失字段转成 null 导致重复校验失败的问题，保留字段缺失与显式 null 的区别。 |
@@ -179,6 +185,8 @@ CODEY_UPDATE_BASE_URL 可在编译时覆盖客户端更新源。发布标签版�
 启动必需步骤失败都应走同一清理路径。会话数据的安全修复不会在退出时回滚；临时路由、Hook 和运行文件必须可恢复。初始 Trace/Crashpad 任务在 profile 与路由 Provider 校验通过后创建；应用定位、旧进程停止或维护失败时，仍等待已启动任务结束并更新状态，再返回原始错误。Trace 失败也会等待 Crashpad，避免丢弃 JoinHandle 后后台清理继续运行。旧 Codex 停止后，模型目录准备与会话维护并行；两者及存储保护全部结束后，才启动路由并写入最终运行配置。并行减少串行步骤，尚未测量问题设备上的冷启动耗时收益。
 
 启动前先读取 Codex Electron 二进制的 fuse wire（`backend/src/electron_fuses.rs`，按 @electron/fuses 的 sentinel 与 v1 位序解析，结果按路径、大小和修改时间缓存在状态目录 `electron-fuses.json`）。`EnableNodeCliInspectArguments` 为关闭或移除时，Electron 会在解析命令行时丢弃 `--inspect-brk`，主进程 Inspector 永远不会出现：Windows 直接以 CLI 包装器作为唯一入口启动，不再传 `--inspect-brk`，也不等待 Inspector；macOS 保留该参数作为进程清理标记，但只等待 CLI 包装器。fuse 未知（二进制缺失、扫描失败）时保留 Inspector 尝试，由运行时证据决定是否放弃。2026-09-06 本机 ChatGPT.app 的 Codex Framework 读到 wire `010011001`，Inspect 位为关闭；Windows 商店包按同一打包配置，实机日志 `launcher.electron_fuses` 会记录实际值。
+
+Windows Store 自动定位优先读取当前用户 `Get-AppxPackage` 返回的已注册 `InstallLocation`，查询失败或位置无效时才扫描 `ProgramFiles` 下的包目录；显式指定和已保存的应用位置仍优先。避免跨盘迁移或更新后，C 盘残留目录被用于 CLI、fuse 和完整包名，而系统按 AUMID 激活 D 盘的已注册应用。2026-09-08 的故障日志同时出现 C 盘认证探测拒绝访问、D 盘实际进程，以及 CLI 无握手、无执行记录；这能确认路径不一致，不能单独证明所有握手超时均由路径引起。修复后仍需 Windows 实机核对所选目录、实际进程路径和包装器执行确认；不得以跳过确认或忽略 Store 清理失败替代验证。
 
 Windows 的启动兼容安装最多尝试 2 次，仅超时、中断、WouldBlock、启动等待期间进程退出，以及明确的 Windows 文件共享/锁冲突（错误码 32、33）允许重试。目标程序无效、配置解析错误、权限拒绝、Inspector 响应不兼容和清理失败均不重试。仍使用 Inspector 时首次同时等待 Inspector 和 CLI：渲染进程调试端口已应答而 Inspector 端口仍被拒绝，立即判定 Inspector 不可用并把整个预算留给 CLI，不杀进程；Inspector 发现窗口耗尽且调试端口也未就绪，判定主进程可能停在断点，立即结束本轮并在清理后去掉 `--inspect-brk` 重试。首轮失败后先成功清理进程和 Store 临时环境，第二次重新准备包装器，只等待 CLI 执行确认。Inspector 已关闭且包装器无法准备（暂存失败）或 Store 无法应用包装器环境时，不再启动一个随后必被停止的进程：存在运行配置或子代理约束直接报错，否则按基础参数启动并返回 `degraded`。
 
@@ -475,7 +483,7 @@ CODEY_BENCH_PROTOCOL=anthropicMessages CODEY_BENCH_CASE=text CODEY_BENCH_CONCURR
 
 1. Anthropic 上游非 2xx 原先固��映射为 502 JSON，Chat 与原生路径则透传状态码并写文本错误体。Codex 对 5xx 会重试数次，上游 401/400/429 因此被重复请求后才呈现。现已统一：三种上游协议的非 2xx 都经 `write_upstream_http_error` 透传状态码、脱敏摘要、上游请求 ID 并写入错误日志；HTTP 下游为文本体，WebSocket 下游为 JSON 事件。回归 `anthropic_upstream_http_error_keeps_status_and_safe_text` 覆盖 401 与凭据脱敏。用户可见变化：Anthropic 线路错误不再显示 502，而是上游实际状态与摘要。
 2. 下游 HTTP 每请求一条连接并 `connection: close`。回环 TCP 建连开销远低于模型推理延迟，改造需重写请求边界与连接生命周期，收益未测，不建议单独推进。
-3. 上游 WebSocket 首次连接超时 3 s 后回退 HTTP 并进入 60 s 起的退避。慢网络下首轮请求最多多付 3 s，这是既有设计取舍；系统代理生效的线路已在配置层禁用 WebSocket。
+3. 上游 WebSocket 首次连接超时 3 s 后回退 HTTP 并进入 5 s 起、最长 60 s 的退避。慢网络下首轮请求最多多付 3 s，这是既有设计取舍；系统代理生效的线路已在配置层禁用 WebSocket。
 4. 第三方线路工具参数根节点被规范化时会丢弃原始字节并整体重新序列化。当前只在工具 schema 根不是 object 时触发，Codex 内置工具不会触发；如日后 MCP 工具普遍触发，可把 `tools` 加入原始字节改写的白名单字段。
 5. 单文件拆分、错误日志有界队列、真实客户端性能采集与前几节结论一致，继续作为独立迭代。
 
@@ -546,7 +554,11 @@ Trace 与 Crashpad 保护由 Codey 的存储维护和后台任务执行，按用
 
 #### 请求日志查询、统计与维护
 
-独立日志页默认最近 24 小时，支持 7 天、30 天和本地时间输入的自定义范围。后端统一使用 UTC 毫秒与半开区间 `[fromUnixMs, toUnixMs)`，交互查询最长 366 天。列表调用 `query_route_request_logs` 并设置 `cursorMode=true`，按 `(timestamp_unix_ms DESC, request_id DESC)` 游标读取，额外取一条判断 `hasMore`，不执行 COUNT 或 OFFSET。旧页码接口保留兼容，但新页面不使用其总数。刷新返回第一页并更新时间上界；翻页保持时间范围不变。迟到日志及保留清理仍可能改变后续页，这不是跨多次 HTTP 请求的数据库快照。
+列表将耗时、Token 用量和缓存分列展示：首字与总用时上下排列；总 Token 下列出输入、输出和推理明细；缓存 Token 下显示命中率。命中率按 `cachedInputTokens / inputTokens` 计算并保留一位小数，仅在输入大于零、两项有限且缓存位于零至输入总量之间时显示；缺失或异常值显示 `—`，已知零缓存显示 `0.0%`。沿用后端总 Token，不重复累加缓存或推理子项。`tests/request-log-viewer.test.mjs` 覆盖参考数值、零缓存、全部命中及缺失、异常数据。
+
+该布局已通过内置浏览器的桌面预览检查，使用参考数值验证总计 64,336、输入 64,268、输出 68、推理 24、缓存 32,000 与 49.8% 命中；检查了总量与明细的字号层次、对齐和间距、状态与命中率配色、缺失值文案及详情打开和关闭，浏览器未报告错误。沿用产品字体和耗时单位，无新增图片资源。参考图未标注的百分比、数字及左侧图标未映射为新指标。预览使用模拟数据，不代表真实上游验证。
+
+独立日志页默认最近 24 小时，支持 7 天、30 天和本地时间输入的自定义范围。后端统一使用 UTC 毫秒与半开区间 `[fromUnixMs, toUnixMs)`，交互查询最长 366 天。列表调用 `query_route_request_logs` 并设置 `cursorMode=true`，按 `(timestamp_unix_ms DESC, request_id DESC)` 游标读取，额外取一条判断 `hasMore`，不执行 COUNT 或 OFFSET。前端使用 Ant Design Pagination 组件与游标状态同步，支持条数切换、按序翻页与历史页回跳；页面采用独立全屏布局，顶部依次为页头、常用筛选、平面指标栏和请求列表，高级筛选及趋势分组按需展开。列表使用横向分隔线与独立滚动，窄屏下筛选自动换行、指标改为两列。请求详情复用 Ant Design Drawer 的焦点管理和 Escape 关闭，日志行支持 Enter/空格打开，ID 复制使用原生按钮。专属样式由 `styles.request-log.css?inline` 注入当前组件所在树，兼容独立页面与 Shadow DOM。类型检查和 5 项请求日志测试通过，浏览器已检查 1440px、600px 预览及详情打开；预览使用模拟数据。旧页码接口保留兼容，但新页面不使用其总数。刷新返回第一页并更新时间上界；翻页保持时间范围不变。迟到日志及保留清理仍可能改变后续页，这不是跨多次 HTTP 请求的数据库快照。
 
 统计单独调用 `query_route_request_log_stats`，不受当前页或游标影响。整体汇总、前 50 个分组和时间桶在同一只读事务中查询。7 天以内按 UTC 小时分桶，更长范围按 UTC 日期分桶，缺少的桶表示无请求；边界桶仅包含所选范围内记录。支持供应商、实际模型、状态、上游协议、请求类型、会话分组，并显式返回分组是否截断。成功率以所有已记录状态为分母；有效零耗时参与平均，TTFT 优先使用下游首内容。Token SUM 保留 NULL，另外返回 usage 已上报数和总 Token 已知数，不能把未上报当成零，也不把缓存、推理子项再次叠加到总 Token。
 
@@ -1014,7 +1026,9 @@ HTTP 入口沿用 HTTP 上游；WS 入口且线路为原生 Responses、有效 W
 
 - WS 配置摘要涵盖有效能力、目标 URL、官方身份和已保存的上游头。修改自定义认证或租户头会使旧连接失效；仅修改显示名称保留能力缓存。热更新通知空闲连接回收过时上游，无须等待下一条请求。
 - 未知能力同一线路和身份只允许一个握手探测，其他请求直接走 HTTP；确认支持后，各有状态会话可独立建连。探测守卫在取消和失败时释放，代次校验防止旧任务删除重新启用线路的新探测状态。
-- 404/405/410/501 的不支持结果缓存一小时，然后允许新请求重新探测；其他失败沿用 60 秒、5 分钟、15 分钟退避。配置变化只清理受影响线路，缓存不超过既有限额。
+- 404/405/410/501 的不支持结果缓存一小时，然后允许新请求重新探测；其他失败按 5、15、30、60 秒退避，后续失败最多等待 60 秒。退避期限之后超过 60 秒仍没有新失败时，下一次失败重新从 5 秒开始。配置变化只清理受影响线路，缓存不超过既有限额。
+- 同一退避期内的并发失败不增加失败次数，也不延后截止时间；较晚到达的普通失败不覆盖尚未过期的不支持结果。退避检查和探测名额申请在同一把锁内完成，避免检查后另一请求写入退避、当前请求仍发起握手。到期后由下一条符合条件的请求探测，其他请求继续 HTTP；健康的缓存 WS 可继续使用。
+- 2026-09-09 的现场问题为连接重置后握手超时，旧策略令多个任务共同等待 5 分钟。缩短退避减少恢复等待，但故障持续时探测更频繁，探测请求仍可能多等待最多 3 秒握手时限；没有后台轮询或并发提交模型请求。`context_not_recoverable` 的历史完整性检查保持不变，跨下游连接的历史恢复另见下文原生 WS 续接补充。验证：`cargo test -p codey --lib websocket --quiet -- --test-threads=2` 42 项通过；完整 `local_router` 测试 209 项通过、3 项默认忽略；格式与差异检查通过。回归覆盖并发失败不累加或延长退避、到期逐级重试与上限、长期无失败后重置、不支持结果保留，以及探测名额内的退避检查。
 - 每条原生 WS 最多保留最近 1024 个响应 ID 的 SHA-256 摘要，固定约 32 KiB 标识载荷。连接池和现有 WS 心跳继续复用；无续接状态的下游 WS 空闲 5 分钟关闭，有历史的连接保留续接能力。
 
 ### 流式结束、资源与 Token
@@ -1054,17 +1068,22 @@ git diff --check
 
 此前的资源和退避修复没有覆盖原生 WS 的完整上下文恢复：真实 `previous_response_id` 找不到缓存连接时，仍会把增量工具结果交给 HTTP，依赖上游共享状态。现已补充 `native_history.rs`，每个下游 WS 使用既有预算和线性历史容器，保存完整 input 及有效 `response.completed` 中的 id/output。正常上游 WS 仍发送原始增量，不展开历史。
 
-调用链为 `proxy_upstream_websocket → NativeResponsesHistory::prepare → 转发/记录终态`；发生发送前 HTTP 回退时，`prepare_native_http_fallback → NativeResponsesHistory::restore` 校验历史和身份，拼接本轮输入，删除 `previous_response_id`，并使旧 `encoded_body` 失效。恢复后的 HTTP/SSE 和 HTTP/JSON 终态都会记录下一轮历史，因此连续工具调用不依赖上游 WS 与 HTTP 共享内存。当前 instructions/tools 等顶层字段保留本轮值，不从旧请求重复添加。
+调用链为 `proxy_upstream_websocket → NativeResponsesHistory::prepare → 转发/记录终态`。响应引用不属于可复用的上游 WS 时，先通过 `NativeResponsesHistory::restore` 校验历史和身份，拼接本轮输入并删除 `previous_response_id`；允许探测时以完整历史建立新 WS，退避或握手失败时转 HTTP。若恢复失败则保留原有健康缓存连接，由公共 HTTP 回退入口返回明确错误。`prepare_native_http_fallback` 继续覆盖 WS 能力关闭等路径；历史展开后旧 `encoded_body` 必须失效，包括 WS 重连握手失败再走 HTTP 的情况。恢复后的 HTTP/SSE 和 HTTP/JSON 终态都会记录下一轮历史，新 WS 成功后后续轮次恢复增量发送。当前 instructions/tools 等顶层字段保留本轮值，不从旧请求重复添加。
 
 - 恢复身份包含线路、上游地址、模型、已保存的上游请求头及实际认证摘要。显示名称和 WS 开关变化不改变上下文身份；健康的旧账号 WS 续接保留既有绑定，但不能把该历史回退到新账号的 HTTP 请求。
 - 恢复时检查 function/custom 工具结果是否有同类型、同 call_id 的前置调用。工具结果不被删除；缺失、重复结果、跨身份历史、预算不足或不完整终态导致 400 `context_not_recoverable`，请求不会提交到 HTTP 上游。
 - 对无法独立展开的 item_reference、压缩项和缺少 encrypted_content 的推理项，不猜测或删除内容；需要恢复时明确报错。远程压缩请求不参与该历史记录。
-- 只缓存最近一条线性历史，继续使用 32 MiB 请求限制及共享 256 MiB 估算预算；保留 native 历史的空闲下游连接沿用有状态会话生命周期。缓存预算不足不把已经完成的生成改为失败，但后续无法恢复时会明确要求完整上下文。
+- 每条下游连接保留最近一个完整历史快照，并通过同一路由进程内的 `NativeHistoryCache` 保存近期分支。共享缓存最多 64 个快照、16 MiB 序列化估算大小，按既有 4 倍规则占用共享 256 MiB 缓冲预算；当前连接与缓存通过 Arc 引用同一快照，不重复复制。共享快照保存 5 分钟，读写时清理到期记录，超出数量或大小限制时先移除最旧记录；进程退出时全部释放。
+- 跨连接缓存以握手中的有效 `thread-id`（优先）或 `session-id`、上游身份摘要和响应 ID 隔离，不使用父任务 ID。缺少有效任务标识时仅使用当前连接的最近历史。历史恢复仍受 32 MiB 请求限制；共享缓存不保证保留所有旧分支，缓存预算不足不把已完成的生成改为失败，无法恢复时明确要求完整上下文。
 - 已发送 WS 请求后的断线仍禁止自动 HTTP 重放。这里恢复的是下一轮尚未发送的请求，不能据此声称模型调用具有跨连接的 exactly-once 保证。
 
 新增回归在 `native_history.rs`：真实回环 WS 生成工具调用后主动关闭，等待路由释放连接，再连续提交两轮工具结果；覆盖 function/custom × HTTP/SSE、HTTP/JSON 四种组合，严格断言完整 input 顺序、无旧响应引用及本轮指令保留。另验证未知响应引用不产生任何上游连接、终态缺少 output、孤立工具结果和身份变化。`cargo test -p codey --lib local_router --quiet -- --test-threads=2`：209 项通过、3 项默认忽略；严格 `cargo clippy -p codey --lib -- -D warnings` 通过。
 
-另一台电脑同时运行 Codey 和 Codex 时，需要部署包含本补丁的 Codey 并重启相关进程。此历史仅在那台电脑的路由进程和当前下游 WS 会话内存在，无法补回旧版本已经丢失的内容，也不提供跨机器/跨下游连接的共享历史。客户端是否会根据 `context_not_recoverable` 自动重发完整上下文，无法从当前仓库确认；未进行受影响电脑或真实供应商的现场验证。
+另一台电脑同时运行 Codey 和 Codex 时，需要部署包含本补丁的 Codey 并重启相关进程。此历史只存在于那台电脑的当前路由进程中；允许同任务、同身份在近期缓存仍有效时跨下游 WS 连接恢复，无法补回旧版本或进程退出时已丢失的内容，也不跨机器共享。
+
+2026-09-09 补充：原实现只匹配 `history.last`，重建下游连接后没有历史，引用更早响应也无法恢复；现在成功终态保存有界快照，准备请求时优先当前连接、其次同任务共享缓存。只有完整 `response.completed` 可写入，失败、不完整、缺少 output、孤立工具结果和身份变化仍保留原保护。`context_not_recoverable` 同时记录脱敏的恢复失败原因与请求 ID，便于区分历史失效、预算不足及无法展开的内容；不记录输入、输出或凭据。
+
+扩展回环测试覆盖 function/custom × HTTP/SSE、HTTP/JSON：上游断线后重建下游连接，新的 WS 握手失败时回退 HTTP，连续恢复两轮工具结果，再引用较早响应分支，核对完整 input 的顺序和本轮指令。另验证 WS 重连成功后恢复增量发送并保留加密推理历史、任务与身份隔离、无任务标识不共享、过期及淘汰释放、数量和字节上限。`cargo test -p codey --lib local_router --quiet -- --test-threads=2` 212 项通过、3 项默认忽略；`cargo clippy -p codey --lib -- -D warnings`、格式与差异检查通过。真实供应商网络行为尚未用本次构建现场验证。
 
 ## UI 组件与验证
 
@@ -1075,11 +1094,15 @@ git diff --check
 `tests/antd-controls.test.mjs` 检查输入值、密码可见性、复选框、禁用状态、单一组件库依赖及内嵌样式容器。
 
 供应商与模型、通知及诊断界面的组件与按钮规范：
-- 状态标签、添加、同步、编辑和诊断操作使用 Ant Design 的颜色、变体及尺寸配置；删除操作使用 `destructive-light` 保留危险操作提示，不再通过 CSS 覆盖组件颜色、边框、悬浮和禁用状态；
+- 供应商卡片（`.provider-model-group`）采用左右分栏布局：左侧展示线路标识、标题、状态与模型列表（`.provider-model-group-left`），右侧为顶部紧凑上下两行操作区（`.provider-model-group-actions`，整体顶对齐避免纵向大空白）。官方线路上面展示额度开关、下面展示同步按钮；第三方线路上面展示编辑与删除图标按钮（使用 `variant="link"`，编辑为 `primary`，删除为 `danger`）、下面展示同步按钮（使用 `<Button color="primary" variant="filled">`）；按钮全局禁用两字中文自动插入空格，保持文字紧凑；
 - 供应商与模型外壳沿用 Ant Design Card 外观，仅保留内容裁剪；内部列表 `.provider-model-groups` 使用 `overscroll-behavior-y: auto`，支持内部滚动到底后继续滚动外层页面；底栏 `.readonly-note` 保留业务布局与背景；
 - 模型药丸（`.model-tag-pill`）：高度调整为 31px、字体 12.5px、内边距 4px 11px、药丸间距 8x10px、圆点 6px，兼顾列表轻盈度与点击舒适度；
-- 内嵌配置弹窗（`SettingsModalShell`）：通过 Modal 的 `styles` 配置高度、布局、圆角与内容裁剪，删除重复的 `.ant-modal-*` CSS 覆盖。
+- 内嵌配置弹窗（`SettingsModalShell`）：通过 Modal 的 `styles` 配置高度、布局、圆角与内容裁剪，删除重复的 `.ant-modal-*` CSS 覆盖；次级弹窗（如通知渠道、模型配置等）必须挂载至 `popupContainer`（即 `modalContainer`），不得挂载至作为页面主体的 `portalContainer`，确保遮罩与弹窗正确覆盖包括 Header 在内的完整外壳。
 
 `src/styles*.css` 均包含独立入口和内嵌入口使用的业务布局，因此保留文件；已删除无调用的 `.route-websocket-option` 规则及组件外观覆盖，不保留空样式文件。
 
 运行 `pnpm check` 和 `pnpm test:js` 验证类型与回归；`pnpm vite:build` 构建嵌入产物，`pnpm exec vite build` 构建独立页面。开发服务下，`tests/antd-browser.html` 验证真实 Shadow DOM 设置入口，`?view=logs` 使用模拟数据验证日志筛选、详情与布局；`tests/model-combobox-browser.html` 验证万条模型列表。这些页面不连接真实模型服务。
+
+### 官方线路上下文设置限制
+
+官方模型编辑弹窗不展示上下文预算和 1M 入口。`save_official_route_models` 忽略兼容参数中的上下文预算和 1M 变更，保留已有配置；第三方线路的设置流程不变。

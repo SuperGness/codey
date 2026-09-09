@@ -259,13 +259,22 @@ fn renderer_settings_keep_editable_credentials_but_clear_clawbot_tokens() {
     assert!(public["profiles"][0].get("clearApiKey").is_none());
     assert_eq!(public["hideFullAccessWarning"], true);
     assert!(public["webhook"].get("url").is_none());
-    assert_eq!(public["webhook"]["channels"][0]["url"], config.webhook.channels[0].url);
+    assert_eq!(
+        public["webhook"]["channels"][0]["url"],
+        config.webhook.channels[0].url
+    );
     assert_eq!(public["webhook"]["channels"][0]["urlConfigured"], true);
-    assert_eq!(public["webhook"]["channels"][1]["botToken"], "telegram-secret");
+    assert_eq!(
+        public["webhook"]["channels"][1]["botToken"],
+        "telegram-secret"
+    );
     assert_eq!(public["webhook"]["channels"][1]["chatId"], "-100123");
     assert_eq!(public["webhook"]["channels"][3]["chatId"], "user@im.wechat");
     assert_eq!(public["webhook"]["channels"][1]["botTokenConfigured"], true);
-    assert_eq!(public["webhook"]["channels"][2]["url"], config.webhook.channels[2].url);
+    assert_eq!(
+        public["webhook"]["channels"][2]["url"],
+        config.webhook.channels[2].url
+    );
     assert_eq!(public["webhook"]["channels"][2]["urlConfigured"], true);
     assert_eq!(public["webhook"]["channels"][3]["botToken"], "");
     assert_eq!(public["webhook"]["channels"][3]["botTokenConfigured"], true);
@@ -473,11 +482,11 @@ async fn settings_bridge_matches_the_redacted_config_contract() {
     let state = Arc::new(AppState::default());
     let mut config = state.config.read().await.clone();
     config.profiles[0].api_key = "bridge-provider-secret".to_string();
-    config.webhook.channels.push(NotificationChannelConfig {
+    config.webhook.channels = vec![NotificationChannelConfig {
         id: "bridge-feishu".to_string(),
         url: "https://open.feishu.cn/open-apis/bot/v2/hook/bridge-secret".to_string(),
         ..NotificationChannelConfig::default()
-    });
+    }];
     let expected = serde_json::to_value(redacted_config(&config)).unwrap();
     *state.config.write().await = config;
 
@@ -487,7 +496,10 @@ async fn settings_bridge_matches_the_redacted_config_contract() {
 
     assert_eq!(actual, expected);
     assert!(actual.to_string().contains("bridge-provider-secret"));
-    assert!(!actual.to_string().contains("bridge-secret"));
+    assert_eq!(
+        actual["webhook"]["channels"][0]["url"],
+        "https://open.feishu.cn/open-apis/bot/v2/hook/bridge-secret"
+    );
 }
 
 #[tokio::test]

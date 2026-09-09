@@ -51,7 +51,7 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(appUpdates, /invoke<UpdateDownload>\("download_update"\)/);
   assert.match(appUpdates, /invoke\("install_downloaded_update"/);
   assert.match(app, /onRepairPluginMarketplace=\{handleRepairPluginMarketplace\}/);
-  assert.match(app, /onRefresh=\{handleRefreshTraceLogStats\}/);
+  assert.match(app, /onAnalyzeDiagnosticStorage=\{handleAnalyzeDiagnosticStorage\}/);
   assert.match(app, /onToggleDraftModel=\{toggleDraftModel\}/);
   assert.match(app, /onSaveRoute=\{handleSaveRoute\}/);
   assert.doesNotMatch(app, /onActivateRoute|handleActivateRoute/);
@@ -143,8 +143,6 @@ test("runtime polling preserves referentially stable status slices", async () =>
     appVersion: "1.0.0",
     maintenance: { sessionStatus: "ready", sessionFilesFixed: 2 },
     injectionScripts: [{ id: "bridge", status: "effective" }],
-    traceLogStats: { pending: false, rows: 3 },
-    crashpadPendingStats: { pending: false, reports: 1 },
   };
 
   const equalSnapshot = structuredClone(current);
@@ -157,8 +155,6 @@ test("runtime polling preserves referentially stable status slices", async () =>
   assert.notEqual(changedRoot, current);
   assert.equal(changedRoot.maintenance, current.maintenance);
   assert.equal(changedRoot.injectionScripts, current.injectionScripts);
-  assert.equal(changedRoot.traceLogStats, current.traceLogStats);
-  assert.equal(changedRoot.crashpadPendingStats, current.crashpadPendingStats);
 
   const changedMaintenance = reconcileRuntimeStatus(current, {
     ...structuredClone(current),

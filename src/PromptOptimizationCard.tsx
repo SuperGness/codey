@@ -1,10 +1,7 @@
 import { memo, useEffect, useId, useRef, useState } from "react";
 
 import {
-  IconKey,
-  IconPlugConnected,
   IconSparkles,
-  IconWorld,
 } from "@tabler/icons-react";
 
 import type { Config, InlineResult, Notice } from "./App.types";
@@ -14,11 +11,7 @@ import { ManualModelCombobox } from "./components/ManualModelCombobox";
 import { ModelCombobox } from "./components/ModelCombobox";
 import { Button, Card, Input, PasswordInput, Select, Switch } from "./components/antd";
 import type { SubagentModelOption } from "./subagentModels";
-import {
-  inputShellClass,
-  insetInputClass,
-  surfaceCardPaddingClass,
-} from "./uiClasses";
+import { flushCardClass } from "./uiClasses";
 import { validateOutboundApiUrl } from "./urlValidation";
 
 const TEST_TIMEOUT_MS = 65_000;
@@ -220,189 +213,187 @@ function PromptOptimizationCardComponent({
 
   return (
     <section
-      className="secondary-section prompt-optimization-section"
+      className="secondary-section prompt-optimization-section prompt-column-inner"
       aria-labelledby="prompt-optimization-title"
     >
-      <div className="section-title compact">
-        <div className="section-heading">
-          <span className="section-icon" aria-hidden="true">
-            <IconSparkles size={15} />
-          </span>
-          <div>
-            <h2 id="prompt-optimization-title">提示词优化</h2>
-            <p>在 Codex 输入框旁一键重写与优化提示词。</p>
+      <Card className={`secondary-card prompt-optimization-card ${flushCardClass}`}>
+        <div className="module-card-header">
+          <div className="module-card-heading">
+            <span className="module-card-icon" aria-hidden="true">
+              <IconSparkles size={15} />
+            </span>
+            <div className="module-card-titles">
+              <h2 id="prompt-optimization-title">提示词优化</h2>
+              <p>在 Codex 输入框旁一键重写与优化提示词。</p>
+            </div>
+          </div>
+          <div className="module-card-action">
+            <Switch
+              checked={optimization.enabled}
+              disabled={isBusy}
+              aria-label="启用提示词优化"
+              onCheckedChange={(checked) =>
+                updateOptimization({ enabled: checked })
+              }
+            />
           </div>
         </div>
-        <Switch
-          checked={optimization.enabled}
-          disabled={isBusy}
-          aria-label="启用提示词优化"
-          onCheckedChange={(checked) =>
-            updateOptimization({ enabled: checked })
-          }
-        />
-      </div>
-      <Card className={"secondary-card prompt-optimization-card " + surfaceCardPaddingClass}>
-        {optimization.enabled ? (
-          <div className="prompt-optimization-content">
-            <div className="prompt-optimization-toolbar">
-              <div className="prompt-optimization-mode-tabs" role="tablist" aria-label="提示词优化配置方式">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={usesCodeyRoute}
-                  className={
-                    "prompt-optimization-mode-tab" +
-                    (usesCodeyRoute ? " active" : "")
-                  }
-                  disabled={isBusy || !codeyRouteAvailable}
-                  title={
-                    codeyRouteAvailable
-                      ? undefined
-                      : "本地路由已关闭"
-                  }
-                  onClick={() => changeMode("codeyRoute")}
-                >
-                  使用 Codey 路由
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={!usesCodeyRoute}
-                  className={
-                    "prompt-optimization-mode-tab" +
-                    (!usesCodeyRoute ? " active" : "")
-                  }
-                  disabled={isBusy}
-                  onClick={() => changeMode("manual")}
-                >
-                  手动配置
-                </button>
-              </div>
+        <div className="module-card-body prompt-optimization-body">
+          {optimization.enabled ? (
+            <div className="prompt-optimization-content">
+              <div className="prompt-optimization-toolbar">
+                <div className="prompt-optimization-mode-tabs" role="tablist" aria-label="提示词优化配置方式">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={usesCodeyRoute}
+                    className={
+                      "prompt-optimization-mode-tab" +
+                      (usesCodeyRoute ? " active" : "")
+                    }
+                    disabled={isBusy || !codeyRouteAvailable}
+                    title={
+                      codeyRouteAvailable
+                        ? undefined
+                        : "本地路由已关闭"
+                    }
+                    onClick={() => changeMode("codeyRoute")}
+                  >
+                    使用 Codey 路由
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={!usesCodeyRoute}
+                    className={
+                      "prompt-optimization-mode-tab" +
+                      (!usesCodeyRoute ? " active" : "")
+                    }
+                    disabled={isBusy}
+                    onClick={() => changeMode("manual")}
+                  >
+                    手动配置
+                  </button>
+                </div>
 
-              <div className="prompt-optimization-toolbar-actions">
-                <Button
-                  variant="light"
-                  size="xs"
-                  className="prompt-test-btn"
-                  disabled={isBusy || testing || fetchingModels || !testDraftValid}
-                  onClick={() => void runTest()}
-                >
-                  <IconPlugConnected size={13} aria-hidden="true" />
-                  <span>
-                    {testing
-                      ? "测试中…"
-                      : usesCodeyRoute
+                <div className="prompt-optimization-toolbar-actions">
+                  <Button
+                    variant="light"
+                    size="xs"
+                    className="prompt-test-btn"
+                    loading={testing}
+                    disabled={isBusy || fetchingModels || !testDraftValid}
+                    onClick={() => void runTest()}
+                  >
+                    <span>
+                      {usesCodeyRoute
                         ? "测试路由连通性"
                         : "测试 API 连通性"}
-                  </span>
-                </Button>
-              </div>
-            </div>
-
-            <div className="prompt-optimization-form-fields">
-              {usesCodeyRoute ? (
-                <div className="prompt-form-group">
-                  <div className="field prompt-optimization-model-field">
-                    <label htmlFor={modelInputId} className="field-label">模型</label>
-                    <div className="field-control">
-                      <ModelCombobox
-                        aria-label="提示词优化 Codey 路由模型"
-                        value={optimization.model}
-                        placeholder={
-                          subagentModelOptions.length === 0
-                            ? "所有线路均暂无模型"
-                            : "请选择模型"
-                        }
-                        disabled={
-                          isBusy ||
-                          !codeyRouteAvailable ||
-                          subagentModelOptions.length === 0
-                        }
-                        options={subagentModelOptions}
-                        getPopupContainer={() => popupContainer ?? document.body}
-                        onChange={(model) => updateOptimization({ model })}
-                      />
-                      {!codeyRouteAvailable ? (
-                        <small className="field-hint">
-                          本地路由已关闭。请启用并重启 Codex，或改用手动配置。
-                        </small>
-                      ) : null}
-                      {modelError ? (
-                        <small id={modelInputId + "-error"} className="field-error" role="alert">
-                          {modelError}
-                        </small>
-                      ) : null}
-                      <small className="field-hint">
-                        {subagentModelOptions.length === 0
-                          ? "请先在模型管理中为任一可用线路启用模型。"
-                          : "可搜索并选择模型管理中已启用的任意线路模型。"}
-                      </small>
-                    </div>
-                  </div>
-
-                  <div className="field prompt-optimization-instruction-field">
-                    <div className="field-label-wrap">
-                      <label htmlFor={controlId + "-instruction"} className="field-label">优化指令</label>
-                      {optimization.instruction && optimization.instruction !== DEFAULT_OPTIMIZER_INSTRUCTION ? (
-                        <button
-                          type="button"
-                          className="reset-instruction-btn"
-                          onClick={() => updateOptimization({ instruction: DEFAULT_OPTIMIZER_INSTRUCTION })}
-                        >
-                          恢复默认
-                        </button>
-                      ) : null}
-                    </div>
-                    <div className="field-control">
-                      <textarea
-                        id={controlId + "-instruction"}
-                        className="prompt-optimization-instruction"
-                        value={optimization.instruction || DEFAULT_OPTIMIZER_INSTRUCTION}
-                        disabled={isBusy}
-                        onChange={(event) =>
-                          updateOptimization({ instruction: event.target.value })
-                        }
-                        placeholder="自定义优化指令…"
-                        spellCheck={false}
-                      />
-                    </div>
-                  </div>
+                    </span>
+                  </Button>
                 </div>
-              ) : (
-                <div className="prompt-form-group">
-                  <div className="field prompt-optimization-protocol-field">
-                    <label htmlFor={controlId + "-protocol"} className="field-label">上游协议</label>
-                    <div className="field-control">
-                      <Select
-                        id={controlId + "-protocol"}
-                        className="w-full min-w-0"
-                        value={optimization.upstreamProtocol}
-                        disabled={isBusy}
-                        aria-label="提示词优化上游协议"
-                        optionList={[...MANUAL_PROTOCOL_OPTIONS]}
-                        showClear={false}
-                        filter={false}
-                        dropdownClassName="rounded-[10px]"
-                        getPopupContainer={() => popupContainer ?? document.body}
-                        onChange={(value) => {
-                          clearModelSuggestions();
-                          updateOptimization({
-                            upstreamProtocol: String(value ?? "openaiResponses") as Config["promptOptimization"]["upstreamProtocol"],
-                          });
-                        }}
-                      />
+              </div>
+
+              <div className="prompt-optimization-form-fields">
+                {usesCodeyRoute ? (
+                  <div className="prompt-form-group">
+                    <div className="field prompt-optimization-model-field">
+                      <label htmlFor={modelInputId} className="field-label">模型</label>
+                      <div className="field-control">
+                        <ModelCombobox
+                          aria-label="提示词优化 Codey 路由模型"
+                          value={optimization.model}
+                          placeholder={
+                            subagentModelOptions.length === 0
+                              ? "所有线路均暂无模型"
+                              : "请选择模型"
+                          }
+                          disabled={
+                            isBusy ||
+                            !codeyRouteAvailable ||
+                            subagentModelOptions.length === 0
+                          }
+                          options={subagentModelOptions}
+                          getPopupContainer={() => popupContainer ?? document.body}
+                          onChange={(model) => updateOptimization({ model })}
+                        />
+                        {!codeyRouteAvailable ? (
+                          <small className="field-hint">
+                            本地路由已关闭。请启用并重启 Codex，或改用手动配置。
+                          </small>
+                        ) : null}
+                        {modelError ? (
+                          <small id={modelInputId + "-error"} className="field-error" role="alert">
+                            {modelError}
+                          </small>
+                        ) : null}
+                        {subagentModelOptions.length === 0 ? (
+                          <small className="field-hint">
+                            请先在模型管理中为任一可用线路启用模型。
+                          </small>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="field prompt-optimization-instruction-field">
+                      <div className="field-label-wrap">
+                        <label htmlFor={controlId + "-instruction"} className="field-label">优化指令</label>
+                        {optimization.instruction && optimization.instruction !== DEFAULT_OPTIMIZER_INSTRUCTION ? (
+                          <button
+                            type="button"
+                            className="reset-instruction-btn"
+                            onClick={() => updateOptimization({ instruction: DEFAULT_OPTIMIZER_INSTRUCTION })}
+                          >
+                            恢复默认
+                          </button>
+                        ) : null}
+                      </div>
+                      <div className="field-control">
+                        <textarea
+                          id={controlId + "-instruction"}
+                          className="prompt-optimization-instruction"
+                          value={optimization.instruction || DEFAULT_OPTIMIZER_INSTRUCTION}
+                          disabled={isBusy}
+                          onChange={(event) =>
+                            updateOptimization({ instruction: event.target.value })
+                          }
+                          placeholder="自定义优化指令…"
+                          spellCheck={false}
+                        />
+                      </div>
                     </div>
                   </div>
+                ) : (
+                  <div className="prompt-form-group">
+                    <div className="field prompt-optimization-protocol-field">
+                      <label htmlFor={controlId + "-protocol"} className="field-label">上游协议</label>
+                      <div className="field-control">
+                        <Select
+                          id={controlId + "-protocol"}
+                          className="w-full min-w-0"
+                          value={optimization.upstreamProtocol}
+                          disabled={isBusy}
+                          aria-label="提示词优化上游协议"
+                          optionList={[...MANUAL_PROTOCOL_OPTIONS]}
+                          showClear={false}
+                          filter={false}
+                          dropdownClassName="rounded-[10px]"
+                          getPopupContainer={() => popupContainer ?? document.body}
+                          onChange={(value) => {
+                            clearModelSuggestions();
+                            updateOptimization({
+                              upstreamProtocol: String(value ?? "openaiResponses") as Config["promptOptimization"]["upstreamProtocol"],
+                            });
+                          }}
+                        />
+                      </div>
+                    </div>
 
-                  <div className="field prompt-optimization-address-field">
-                    <label htmlFor={baseUrlInputId} className="field-label">API 地址</label>
-                    <div className="field-control">
-                      <div className={inputShellClass}>
-                        <IconWorld size={15} aria-hidden="true" />
+                    <div className="field prompt-optimization-address-field">
+                      <label htmlFor={baseUrlInputId} className="field-label">API 地址</label>
+                      <div className="field-control">
                         <Input
                           id={baseUrlInputId}
-                          className={insetInputClass}
                           value={optimization.baseUrl}
                           disabled={isBusy}
                           aria-invalid={Boolean(baseUrlError)}
@@ -414,23 +405,20 @@ function PromptOptimizationCardComponent({
                           placeholder="https://api.openai.com/v1"
                           spellCheck={false}
                         />
+                        {baseUrlError ? (
+                          <small id={baseUrlInputId + "-error"} className="field-error" role="alert">
+                            {baseUrlError}
+                          </small>
+                        ) : null}
                       </div>
-                      {baseUrlError ? (
-                        <small id={baseUrlInputId + "-error"} className="field-error" role="alert">
-                          {baseUrlError}
-                        </small>
-                      ) : null}
                     </div>
-                  </div>
 
-                  <div className="field prompt-optimization-key-field">
-                    <label htmlFor={apiKeyInputId} className="field-label">API Key</label>
-                    <div className="field-control">
-                      <div className={inputShellClass}>
-                        <IconKey size={15} aria-hidden="true" />
+                    <div className="field prompt-optimization-key-field">
+                      <label htmlFor={apiKeyInputId} className="field-label">API Key</label>
+                      <div className="field-control">
                         <PasswordInput
                           id={apiKeyInputId}
-                          className="min-w-0 flex-1"
+                          className="w-full"
                           visibility={apiKeyVisible}
                           onVisibilityChange={() => setApiKeyVisible((visible) => !visible)}
                           value={optimization.apiKey}
@@ -450,109 +438,109 @@ function PromptOptimizationCardComponent({
                           autoComplete="new-password"
                           spellCheck={false}
                         />
+                        {apiKeyError ? (
+                          <small id={apiKeyInputId + "-error"} className="field-error" role="alert">
+                            {apiKeyError}
+                          </small>
+                        ) : optimization.apiKeyConfigured &&
+                          !optimization.clearApiKey &&
+                          !optimization.apiKey.trim() ? (
+                          <small className="field-hint">
+                            Key 已保存；直接输入可替换。
+                          </small>
+                        ) : null}
                       </div>
-                      {apiKeyError ? (
-                        <small id={apiKeyInputId + "-error"} className="field-error" role="alert">
-                          {apiKeyError}
-                        </small>
-                      ) : optimization.apiKeyConfigured &&
-                        !optimization.clearApiKey &&
-                        !optimization.apiKey.trim() ? (
-                        <small className="field-hint">
-                          Key 已保存；直接输入可替换。
-                        </small>
-                      ) : null}
                     </div>
-                  </div>
 
-                  <div className="field prompt-optimization-model-field">
-                    <label htmlFor={modelInputId} className="field-label">模型</label>
-                    <div className="field-control">
-                      <div className="flex min-w-0 items-center gap-2 max-[680px]:flex-col max-[680px]:items-stretch">
-                        <div className="relative min-w-0 flex-1 max-[680px]:w-full">
-                          <ManualModelCombobox
-                            id={modelInputId}
-                            value={optimization.model}
-                            disabled={isBusy || fetchingModels}
-                            ariaLabel="提示词优化模型"
-                            ariaInvalid={Boolean(modelError)}
-                            ariaDescribedBy={modelError ? modelInputId + "-error" : undefined}
-                            options={cloudModels}
-                            placeholder="例如 gpt-4o-mini 或 deepseek-chat"
-                            getPopupContainer={() => popupContainer ?? document.body}
-                            onChange={(model) => updateOptimization({ model })}
-                          />
+                    <div className="field prompt-optimization-model-field">
+                      <label htmlFor={modelInputId} className="field-label">模型</label>
+                      <div className="field-control">
+                        <div className="flex min-w-0 items-center gap-2 max-[680px]:flex-col max-[680px]:items-stretch">
+                          <div className="relative min-w-0 flex-1 max-[680px]:w-full">
+                            <ManualModelCombobox
+                              id={modelInputId}
+                              value={optimization.model}
+                              disabled={isBusy || fetchingModels}
+                              ariaLabel="提示词优化模型"
+                              ariaInvalid={Boolean(modelError)}
+                              ariaDescribedBy={modelError ? modelInputId + "-error" : undefined}
+                              options={cloudModels}
+                              placeholder="例如 gpt-4o-mini 或 deepseek-chat"
+                              getPopupContainer={() => popupContainer ?? document.body}
+                              onChange={(model) => updateOptimization({ model })}
+                            />
+                          </div>
+                          <Button
+                            className="h-[32px]! min-w-[76px] shrink-0 max-[680px]:w-full!"
+                            variant="light"
+                            size="xs"
+                            loading={fetchingModels}
+                            disabled={
+                              isBusy ||
+                              testing ||
+                              !connectionDraftValid
+                            }
+                            onClick={() => void runFetchModels()}
+                          >
+                            获取列表
+                          </Button>
                         </div>
-                        <Button
-                          className="h-[38px]! min-w-[76px] shrink-0 max-[680px]:w-full!"
-                          variant="light"
-                          size="xs"
-                          disabled={
-                            isBusy ||
-                            fetchingModels ||
-                            testing ||
-                            !connectionDraftValid
-                          }
-                          onClick={() => void runFetchModels()}
-                        >
-                          {fetchingModels ? "获取中…" : "获取列表"}
-                        </Button>
+                        {modelsResult.text ? (
+                          <span className={"inline-result " + modelsResult.tone}>
+                            {modelsResult.text}
+                          </span>
+                        ) : null}
+                        {modelError ? (
+                          <small id={modelInputId + "-error"} className="field-error" role="alert">
+                            {modelError}
+                          </small>
+                        ) : null}
                       </div>
-                      {modelsResult.text ? (
-                        <span className={"inline-result " + modelsResult.tone}>
-                          {modelsResult.text}
-                        </span>
-                      ) : null}
-                      {modelError ? (
-                        <small id={modelInputId + "-error"} className="field-error" role="alert">
-                          {modelError}
-                        </small>
-                      ) : null}
                     </div>
-                  </div>
 
-                  <div className="field prompt-optimization-instruction-field">
-                    <div className="field-label-wrap">
-                      <label htmlFor={controlId + "-instruction"} className="field-label">优化指令</label>
-                      {optimization.instruction && optimization.instruction !== DEFAULT_OPTIMIZER_INSTRUCTION ? (
-                        <button
-                          type="button"
-                          className="reset-instruction-btn"
-                          onClick={() => updateOptimization({ instruction: DEFAULT_OPTIMIZER_INSTRUCTION })}
-                        >
-                          恢复默认
-                        </button>
-                      ) : null}
-                    </div>
-                    <div className="field-control">
-                      <textarea
-                        id={controlId + "-instruction"}
-                        className="prompt-optimization-instruction"
-                        value={optimization.instruction || DEFAULT_OPTIMIZER_INSTRUCTION}
-                        disabled={isBusy}
-                        onChange={(event) =>
-                          updateOptimization({ instruction: event.target.value })
-                        }
-                        placeholder="自定义优化指令…"
-                        spellCheck={false}
-                      />
+                    <div className="field prompt-optimization-instruction-field">
+                      <div className="field-label-wrap">
+                        <label htmlFor={controlId + "-instruction"} className="field-label">优化指令</label>
+                        {optimization.instruction && optimization.instruction !== DEFAULT_OPTIMIZER_INSTRUCTION ? (
+                          <button
+                            type="button"
+                            className="reset-instruction-btn"
+                            onClick={() => updateOptimization({ instruction: DEFAULT_OPTIMIZER_INSTRUCTION })}
+                          >
+                            恢复默认
+                          </button>
+                        ) : null}
+                      </div>
+                      <div className="field-control">
+                        <textarea
+                          id={controlId + "-instruction"}
+                          className="prompt-optimization-instruction"
+                          value={optimization.instruction || DEFAULT_OPTIMIZER_INSTRUCTION}
+                          disabled={isBusy}
+                          onChange={(event) =>
+                            updateOptimization({ instruction: event.target.value })
+                          }
+                          placeholder="自定义优化指令…"
+                          spellCheck={false}
+                        />
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
+              </div>
             </div>
-          </div>
-        ) : (
-          <div className="feature-disabled-placeholder">
-            <div className="feature-disabled-icon">
-              <IconSparkles size={22} aria-hidden="true" />
+          ) : (
+            <div className="module-disabled-placeholder">
+              <div className="module-disabled-icon">
+                <IconSparkles size={20} aria-hidden="true" />
+              </div>
+              <div className="module-disabled-text">
+                <strong>提示词优化已关闭</strong>
+                <p>开启后，在 Codex 输入框旁可通过快捷按钮一键将自然语言重写为高质量提示词。</p>
+              </div>
             </div>
-            <div className="feature-disabled-text">
-              <strong>提示词优化已关闭</strong>
-              <p>开启后，在 Codex 输入框旁可通过快捷按钮一键将自然语言重写为高质量提示词。</p>
-            </div>
-          </div>
-        )}
+          )}
+        </div>
       </Card>
     </section>
   );

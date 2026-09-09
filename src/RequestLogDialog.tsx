@@ -1,15 +1,11 @@
-import { Table } from "antd";
+import { Table, Alert, Spin, Button as AntButton, Pagination, Drawer } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Alert,
-  Spin,
-  Modal,
-} from "antd";
 import {
   IconAlertTriangle,
   IconChartBar,
   IconCheck,
-  IconChevronRight,
+  IconChevronDown,
+  IconChevronUp,
   IconCopy,
   IconDatabaseOff,
   IconFilter,
@@ -22,6 +18,7 @@ import {
 } from "@tabler/icons-react";
 
 import type { Config, Profile } from "./App.types";
+import requestLogStyles from "./styles.request-log.css?inline";
 import { invoke } from "./api";
 import { formatTimestamp } from "./formatters";
 import {
@@ -180,10 +177,7 @@ const protocolOptions = [
   { label: "WebSocket", value: "ws" },
 ];
 
-const pageSizeOptions = [20, 50, 100].map((value) => ({
-  label: `${value} 条 / 页`,
-  value,
-}));
+const pageSizeOptions = [20, 50, 100];
 
 const groupByLabels: Record<string, string> = {
   model: "实际模型",
@@ -262,6 +256,11 @@ function formatTokens(value?: number | null) {
   return value == null ? "—" : value.toLocaleString();
 }
 
+function formatCacheHitRate(input?: number | null, cached?: number | null) {
+  if (input == null || cached == null || !Number.isFinite(input) || !Number.isFinite(cached) || input <= 0 || cached < 0 || cached > input) return "—";
+  return `${(cached / input * 100).toFixed(1)}%`;
+}
+
 const usageUnavailablePresentations: Record<string, { label: string; message: string }> = {
   not_reported_by_upstream: {
     label: "未上报",
@@ -324,7 +323,7 @@ export function RequestLogDialog({
   catalog,
   container,
   opened,
-  onClose,
+  onClose: _onClose,
   standalone = false,
 }: RequestLogDialogProps) {
   const [searchInput, setSearchInput] = useState("");
@@ -366,17 +365,6 @@ export function RequestLogDialog({
   const listTask = useRef(Promise.resolve());
   const statsTask = useRef(Promise.resolve());
   const clearInFlight = useRef(false);
-
-  useEffect(() => {
-    if (!selectedItem) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setSelectedItem(null);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedItem]);
 
   const handleCopyId = (requestId: string, customLabel?: string) => {
     if (!navigator.clipboard) return;
@@ -483,6 +471,10 @@ export function RequestLogDialog({
   }, [searchInput]);
 
   useEffect(() => {
+    setCursors([null]);
+  }, [filters, pageSize, refreshRevision]);
+
+  useEffect(() => {
     if (!opened) return;
     const revision = ++requestRevision.current;
     let active = true;
@@ -501,7 +493,16 @@ export function RequestLogDialog({
         const nextResult = await invoke<RouteRequestLogQueryPage>("query_route_request_logs", {
           ...filters, pageSize, cursor,
         });
-        if (active && revision === requestRevision.current) setResult(nextResult);
+        if (active && revision === requestRevision.current) {
+          setResult(nextResult);
+          if (nextResult?.nextCursor) {
+            setCursors((prev) => {
+              const next = [...prev];
+              next[page] = nextResult.nextCursor;
+              return next;
+            });
+          }
+        }
       } catch (nextError) {
         if (active) setError(nextError instanceof Error ? nextError.message : String(nextError));
       } finally {
@@ -619,100 +620,76 @@ export function RequestLogDialog({
   const totalCount = stats?.total ?? result?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
-  return (
-    <Modal
-      open={opened}
-      onCancel={onClose}
-      title="请求日志"
-      closable={!standalone}
-      mask={{ closable: false }}
-      keyboard={!standalone}
-      footer={null}
-      getContainer={container ?? undefined}
-      className="request-log-modal"
-      width="100vw"
-      style={{ height: "100dvh", maxWidth: "100vw", margin: 0, top: 0, paddingBottom: 0 }}
-      styles={{ container: { height: "100%", display: "flex", flexDirection: "column", padding: 0 }, header: { padding: "12px 24px", marginBottom: 0 }, body: { display: "flex", flex: 1, minHeight: 0, flexDirection: "column", overflow: "hidden" } }}
-    >
-      <div className="flex h-full min-h-0 flex-1 flex-col gap-2.5 overflow-hidden p-4 max-[760px]:p-2">
-        <div className="flex flex-none items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2.5">
-            <span className="text-xs font-semibold text-[#1d1d1f]">内置路由请求日志</span>
-            {result?.status === "ok" ? (
-              <span className="shrink-0 rounded-full border border-emerald-600/15 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
-                按筛选范围统计
-              </span>
-            ) : null}
-            {health ? (
-              <div
-                role={healthWarning ? "alert" : "status"}
-                className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-medium ${
-                  healthWarning
-                    ? "border border-amber-500/30 bg-amber-50 text-amber-900"
-                    : "border border-black/8 bg-white text-[#6e6e73]"
-                }`}
-                title={`当前记录周期已处理 ${health.entriesWritten.toLocaleString()} 条 · 待写入 ${health.pendingEntries.toLocaleString()} 条 · 异步记录；异常退出可能丢失尚未落盘的日志。${
-                  healthWarning
-                    ? ` · 丢弃 ${dropped} 条 · 写入失败 ${health.writeFailures} 次 · 采样省略 ${health.sampledOut} 条 · 记录器异常 ${health.observerPanics + health.writerPanics + health.shutdownTimeouts} 次`
-                    : ""
-                }${health.sampleRatePerMillion < 1_000_000 ? " · 已配置采样，统计不代表全部请求" : ""}`}
-              >
-                <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    healthWarning ? "bg-amber-500 animate-pulse" : "bg-emerald-500"
-                  }`}
-                />
-                <span>
-                  {health.active
-                    ? "日志记录中"
-                    : health.enabled
-                      ? "日志记录已停止，请重新开启记录并检查存储"
-                      : "日志记录未开启"}
-                </span>
-                <span className="hidden text-[10px] text-[#8e8e93] md:inline">
-                  · 已处理 {health.entriesWritten.toLocaleString()} 条
-                </span>
-              </div>
-            ) : null}
-          </div>
+  if (!opened) return null;
 
-          <div className="flex shrink-0 items-center gap-2">
-            <Button
-              size="sm"
-              variant={showStats ? "secondary" : "outline"}
-              onClick={() => setShowStats((prev) => !prev)}
+  return (
+    <div className="request-log-workspace relative flex h-full min-h-0 flex-1 flex-col">
+      <style>{requestLogStyles}</style>
+      <div className="request-log-header">
+        <div className="request-log-heading">
+          <div><p className="request-log-eyebrow">CODEY / 内置路由</p><h1>请求日志</h1></div>
+          {health ? (
+            <div
+              role={healthWarning ? "alert" : "status"}
+              className={`flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] font-medium ${
+                healthWarning
+                  ? "border border-amber-500/30 bg-amber-50 text-amber-900"
+                  : "border border-black/8 bg-white text-[#6e6e73]"
+              }`}
+              title={`当前记录周期已处理 ${health.entriesWritten.toLocaleString()} 条 · 待写入 ${health.pendingEntries.toLocaleString()} 条 · 异步记录；异常退出可能丢失尚未落盘的日志。${
+                healthWarning
+                  ? ` · 丢弃 ${dropped} 条 · 写入失败 ${health.writeFailures} 次 · 采样省略 ${health.sampledOut} 条 · 记录器异常 ${health.observerPanics + health.writerPanics + health.shutdownTimeouts} 次`
+                  : ""
+              }${health.sampleRatePerMillion < 1_000_000 ? " · 已配置采样，统计不代表全部请求" : ""}`}
             >
-              <IconChartBar size={14} aria-hidden="true" />
-              {showStats ? "收起看板" : "统计看板"}
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={loading || clearing}
-              onClick={() => {
-                setActionNotice(null);
-                setPage(1);
-                setCursors([null]);
-                setRefreshRevision((value) => value + 1);
-              }}
-            >
-              <IconRefresh className={loading ? "animate-spin" : ""} aria-hidden="true" />
-              刷新
-            </Button>
-            <Button
-              size="sm"
-              variant="destructive-light"
-              disabled={loading || clearing}
-              onClick={() => {
-                setActionNotice(null);
-                setClearConfirmationOpened(true);
-              }}
-            >
-              <IconTrash aria-hidden="true" />
-              删除请求日志
-            </Button>
-          </div>
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  healthWarning ? "bg-amber-500 animate-pulse" : "bg-emerald-500"
+                }`}
+              />
+              <span>
+                {health.active
+                  ? "日志记录中"
+                  : health.enabled
+                    ? "日志记录已停止，请重新开启记录并检查存储"
+                    : "日志记录未开启"}
+              </span>
+              <span className="hidden text-[10px] text-[#8e8e93] md:inline">
+                · 已处理 {health.entriesWritten.toLocaleString()} 条
+              </span>
+            </div>
+          ) : null}
         </div>
+
+        <div className="request-log-actions">
+          <AntButton
+            size="small"
+            icon={<IconRefresh size={14} aria-hidden="true" />}
+            loading={loading}
+            disabled={clearing}
+            onClick={() => {
+              setActionNotice(null);
+              setPage(1);
+              setCursors([null]);
+              setRefreshRevision((value) => value + 1);
+            }}
+          >
+            刷新
+          </AntButton>
+          <AntButton
+            size="small"
+            danger
+            icon={<IconTrash size={14} aria-hidden="true" />}
+            disabled={loading || clearing}
+            onClick={() => {
+              setActionNotice(null);
+              setClearConfirmationOpened(true);
+            }}
+          >
+            删除请求日志
+          </AntButton>
+        </div>
+      </div>
 
         {actionNotice ? (
           <Alert
@@ -725,109 +702,252 @@ export function RequestLogDialog({
           />
         ) : null}
 
+        <div className="request-log-filters">
+          <div className="request-log-filter-controls">
+            <div className="request-log-search">
+              <Select
+                aria-label="搜索方式"
+                className="w-36 shrink-0"
+                value={searchMode}
+                getPopupContainer={() => container ?? document.body}
+                optionList={[
+                  { label: "关键词搜索", value: "contains" },
+                  { label: "精确请求 ID", value: "requestId" },
+                  { label: "精确会话 ID", value: "sessionId" },
+                ]}
+                onChange={(value) => {
+                  setSearchMode(String(value));
+                  setPage(1);
+                }}
+              />
+              <Input
+                className="min-w-0 flex-1"
+                aria-label="搜索请求 ID、会话 ID、供应商、模型或上游"
+                placeholder={
+                  searchMode === "requestId"
+                    ? "输入精确请求 ID 搜索…"
+                    : searchMode === "sessionId"
+                      ? "输入精确会话 ID 搜索…"
+                      : "搜索请求 ID、会话 ID、供应商、模型或上游"
+                }
+                value={searchInput}
+                leftSection={<IconSearch size={15} className="text-[#8e8e93]" aria-hidden="true" />}
+                rightSection={
+                  searchInput ? (
+                    <button
+                      type="button"
+                      className="flex h-5 w-5 cursor-pointer items-center justify-center rounded-full text-[#8e8e93] hover:bg-black/5 hover:text-[#1d1d1f]"
+                      onClick={() => setSearchInput("")}
+                      aria-label="清空搜索"
+                    >
+                      <IconX size={12} aria-hidden="true" />
+                    </button>
+                  ) : undefined
+                }
+                onChange={(event) => setSearchInput(event.currentTarget.value)}
+              />
+            </div>
+
+            <Select
+              aria-label="请求日志时间范围"
+              className="w-32 shrink-0"
+              value={timeRange}
+              getPopupContainer={() => container ?? document.body}
+              optionList={[
+                { label: "最近 24 小时", value: "24h" },
+                { label: "最近 7 天", value: "7d" },
+                { label: "最近 30 天", value: "30d" },
+                { label: "自定义时间", value: "custom" },
+              ]}
+              onChange={(value) => {
+                setTimeRange(String(value));
+                setPage(1);
+              }}
+            />
+
+            <Select
+              aria-label="按供应商筛选请求日志"
+              className="w-36 shrink-0"
+              filter
+              getPopupContainer={() => container ?? document.body}
+              optionList={providerOptions}
+              value={provider}
+              onChange={(value) => {
+                setProvider(String(value ?? "all"));
+                setPage(1);
+              }}
+            />
+
+            <Select
+              aria-label="按实际模型筛选请求日志"
+              className="w-40 shrink-0"
+              filter
+              getPopupContainer={() => container ?? document.body}
+              optionList={modelOptions}
+              value={model}
+              onChange={(value) => {
+                setModel(String(value ?? "all"));
+                setPage(1);
+              }}
+            />
+
+            <Select
+              aria-label="按状态筛选请求日志"
+              className="w-28 shrink-0"
+              getPopupContainer={() => container ?? document.body}
+              optionList={statusOptions}
+              value={status}
+              onChange={(value) => {
+                setStatus(String(value ?? "all"));
+                setPage(1);
+              }}
+            />
+
+            <Select
+              aria-label="按上游协议筛选请求日志"
+              className="w-36 shrink-0"
+              getPopupContainer={() => container ?? document.body}
+              optionList={protocolOptions}
+              value={protocol}
+              onChange={(value) => {
+                setProtocol(String(value ?? "all"));
+                setPage(1);
+              }}
+            />
+
+            <AntButton
+              size="small"
+              type={showAdvancedFilters || requestKind !== "all" ? "primary" : "default"}
+              icon={<IconFilter size={13} aria-hidden="true" />}
+              onClick={() => setShowAdvancedFilters((v) => !v)}
+              aria-expanded={showAdvancedFilters}
+              className="shrink-0 text-xs"
+            >
+              高级
+              {requestKind !== "all" ? (
+                <span className="ml-1 rounded-full bg-blue-100 px-1.5 py-0.2 text-[10px] font-semibold text-blue-700">
+                  1
+                </span>
+              ) : null}
+            </AntButton>
+
+            <AntButton
+              size="small"
+              type="link"
+              disabled={!hasFilters}
+              onClick={resetFilters}
+              className={`shrink-0 ${hasFilters ? "text-blue-600 hover:text-blue-700 font-medium" : ""}`}
+            >
+              清除筛选
+              {activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
+            </AntButton>
+          </div>
+
+          {(showAdvancedFilters || timeRange === "custom" || requestKind !== "all") ? (
+            <div className="flex flex-wrap items-center gap-3 border-t border-black/6 pt-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="text-[#6e6e73]">请求类型：</span>
+                <Select
+                  aria-label="请求类型"
+                  className="w-40"
+                  getPopupContainer={() => container ?? document.body}
+                  optionList={[
+                    { label: "全部请求类型", value: "all" },
+                    { label: "模型请求", value: "responses" },
+                    { label: "上下文压缩", value: "responses_compact" },
+                    { label: "新版上下文压缩", value: "responses_compact_v2" },
+                    { label: "图像生成", value: "images_generations" },
+                    { label: "模型列表", value: "models" },
+                    { label: "拒绝的请求", value: "http_rejected" },
+                  ]}
+                  value={requestKind}
+                  onChange={(value) => {
+                    setRequestKind(String(value));
+                    setPage(1);
+                  }}
+                />
+              </div>
+
+              {timeRange === "custom" ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="flex items-center gap-1.5 text-xs text-[#6e6e73]">
+                    <span>开始时间</span>
+                    <Input
+                      type="datetime-local"
+                      aria-label="开始时间"
+                      className="w-44"
+                      value={customFrom}
+                      onChange={(event) => {
+                        setCustomFrom(event.currentTarget.value);
+                        setPage(1);
+                      }}
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs text-[#6e6e73]">
+                    <span>结束时间</span>
+                    <Input
+                      type="datetime-local"
+                      aria-label="结束时间"
+                      className="w-44"
+                      value={customTo}
+                      onChange={(event) => {
+                        setCustomTo(event.currentTarget.value);
+                        setPage(1);
+                      }}
+                    />
+                  </label>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+
+
         {statsLoading ? <p className="m-0 text-xs text-[#6e6e73]" role="status">正在统计所选范围…</p> : null}
         {statsError ? <Alert type="error" title="统计加载失败" description={statsError} /> : null}
 
-        {stats && !showStats ? (
-          <div className="flex flex-none flex-wrap items-center justify-between gap-2 rounded-xl border border-black/8 bg-white px-3.5 py-1.5 text-xs shadow-2xs">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-[11px] font-medium text-[#8e8e93]">总请求数</span>
-                <span className="font-mono text-xs font-bold tabular-nums text-[#1d1d1f]">
-                  {stats.total.toLocaleString()}
-                </span>
-                <span className="text-[10px] text-[#8e8e93]">条</span>
-              </div>
-              <div className="h-3 w-px bg-black/10" />
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-[11px] font-medium text-[#8e8e93]">请求成功率</span>
-                <span
-                  className={`font-mono text-xs font-bold tabular-nums ${
-                    stats.successRate != null && stats.successRate >= 95
-                      ? "text-emerald-600"
-                      : stats.successRate != null && stats.successRate >= 80
-                        ? "text-amber-600"
-                        : "text-rose-600"
-                  }`}
-                >
-                  {stats.successRate != null ? `${stats.successRate.toFixed(1)}%` : "—"}
-                </span>
-                <span className="hidden text-[10px] text-[#8e8e93] sm:inline">
-                  (成 {stats.succeededCount} · 败 {stats.failedCount})
-                </span>
-              </div>
-              <div className="h-3 w-px bg-black/10" />
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-[11px] font-medium text-[#8e8e93]">平均首字耗时 (TTFT)</span>
-                <span className="font-mono text-xs font-bold tabular-nums text-[#1d1d1f]">
-                  {formatDuration(stats.avgTtft)}
-                </span>
-                <span className="hidden text-[10px] text-[#8e8e93] sm:inline">
-                  (总 {formatDuration(stats.avgDuration)})
-                </span>
-              </div>
-              <div className="h-3 w-px bg-black/10" />
-              <div className="flex items-baseline gap-1.5">
-                <span className="text-[11px] font-medium text-[#8e8e93]">Token 消耗</span>
-                <span className="font-mono text-xs font-bold tabular-nums text-[#1d1d1f]">
-                  {formatTokens(stats.totalTokensSum)}
-                </span>
-                <span className="hidden text-[10px] font-medium text-purple-600 sm:inline">
-                  (入 {formatTokens(stats.inputTokensSum)} · 出 {formatTokens(stats.outputTokensSum)})
-                </span>
-                <span className="hidden text-[10px] text-[#8e8e93] lg:inline">
-                  · 总量已知 {stats.totalTokensKnownCount.toLocaleString()} / {stats.total.toLocaleString()} 条
-                </span>
-              </div>
-            </div>
-            <button
-              type="button"
-              className="flex shrink-0 cursor-pointer items-center gap-1 font-medium text-blue-600 transition-colors hover:text-blue-700"
-              onClick={() => setShowStats(true)}
-            >
-              <span>展开统计与趋势</span>
-              <IconChevronRight size={13} aria-hidden="true" />
-            </button>
-          </div>
-        ) : null}
-
-        {showStats && stats ? (
-          <div className="flex flex-none flex-col gap-2 rounded-xl border border-black/8 bg-white p-3 shadow-xs">
-            <div className="flex items-center justify-between pb-1.5 border-b border-black/6">
+        {stats ? (
+          <div className="request-log-overview">
+            <div className="request-log-overview-heading">
               <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-[#1d1d1f]">统计概览与趋势</span>
-                <span className="rounded-full border border-emerald-600/15 bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+                <IconChartBar size={15} className="text-[#1d1d1f]" aria-hidden="true" />
+                <span className="text-xs font-bold text-[#1d1d1f]">范围概览</span>
+                <span className="text-xs text-[#6e6e73]">
                   按筛选范围统计
                 </span>
               </div>
               <div className="flex items-center gap-2">
-                <Select
-                  aria-label="统计分组"
-                  className="w-36"
-                  getPopupContainer={() => container ?? document.body}
-                  optionList={[
-                    { label: "按实际模型统计", value: "model" },
-                    { label: "按供应商统计", value: "provider" },
-                    { label: "按状态统计", value: "status" },
-                    { label: "按协议统计", value: "protocol" },
-                    { label: "按请求类型统计", value: "request_kind" },
-                    { label: "按会话统计", value: "session" },
-                  ]}
-                  value={groupBy}
-                  onChange={(value) => setGroupBy(String(value))}
-                />
-                <Button
-                  size="xs"
-                  variant="ghost"
-                  onClick={() => setShowStats(false)}
+                {showStats ? (
+                  <Select
+                    aria-label="统计分组"
+                    className="w-36"
+                    getPopupContainer={() => container ?? document.body}
+                    optionList={[
+                      { label: "按实际模型统计", value: "model" },
+                      { label: "按供应商统计", value: "provider" },
+                      { label: "按状态统计", value: "status" },
+                      { label: "按协议统计", value: "protocol" },
+                      { label: "按请求类型统计", value: "request_kind" },
+                      { label: "按会话统计", value: "session" },
+                    ]}
+                    value={groupBy}
+                    onChange={(value) => setGroupBy(String(value))}
+                  />
+                ) : null}
+                <AntButton
+                  size="small"
+                  type={showStats ? "text" : "link"}
+                  icon={showStats ? <IconChevronUp size={14} aria-hidden="true" /> : <IconChevronDown size={14} aria-hidden="true" />}
+                  onClick={() => setShowStats((prev) => !prev)}
+                  aria-expanded={showStats}
                 >
-                  收起看板
-                </Button>
+                  {showStats ? "收起看板" : "展开统计与趋势"}
+                </AntButton>
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              <div className="flex flex-col justify-between rounded-lg border border-black/6 bg-[#fafafa] p-2.5 shadow-2xs">
+            <div className="request-log-metrics">
+              <div className="request-log-metric">
                 <span className="text-[11px] font-medium text-[#8e8e93]">总请求数</span>
                 <div className="mt-1 flex items-baseline gap-1.5">
                   <span className="text-base font-bold text-[#1d1d1f] tabular-nums">
@@ -839,7 +959,7 @@ export function RequestLogDialog({
                   {loading ? "列表加载中" : `当前显示 ${firstVisible.toLocaleString()}–${lastVisible.toLocaleString()} 条`}
                 </span>
               </div>
-              <div className="flex flex-col justify-between rounded-lg border border-black/6 bg-[#fafafa] p-2.5 shadow-2xs">
+              <div className="request-log-metric">
                 <span className="text-[11px] font-medium text-[#8e8e93]">请求成功率</span>
                 <div className="mt-1 flex items-baseline gap-1.5">
                   <span
@@ -858,7 +978,7 @@ export function RequestLogDialog({
                   成功 {stats.succeededCount} · 失败 {stats.failedCount} · 其他 {stats.incompleteCount + stats.cancelledCount}
                 </span>
               </div>
-              <div className="flex flex-col justify-between rounded-lg border border-black/6 bg-[#fafafa] p-2.5 shadow-2xs">
+              <div className="request-log-metric">
                 <span className="text-[11px] font-medium text-[#8e8e93]">平均首字耗时 (TTFT)</span>
                 <div className="mt-1 flex items-baseline gap-1.5">
                   <span className="text-base font-bold text-[#1d1d1f] tabular-nums">
@@ -869,7 +989,7 @@ export function RequestLogDialog({
                   平均总耗时 {formatDuration(stats.avgDuration)}
                 </span>
               </div>
-              <div className="flex flex-col justify-between rounded-lg border border-black/6 bg-[#fafafa] p-2.5 shadow-2xs">
+              <div className="request-log-metric">
                 <span className="text-[11px] font-medium text-[#8e8e93]">所选范围 Token 消耗</span>
                 <div className="mt-1 flex items-baseline gap-1.5">
                   <span className="text-base font-bold text-[#1d1d1f] tabular-nums">
@@ -884,7 +1004,8 @@ export function RequestLogDialog({
               </div>
             </div>
 
-            <div className="flex flex-col gap-2 rounded-lg border border-black/8 bg-[#fafafa] p-2.5 text-xs">
+            {showStats ? (
+              <div className="flex flex-col gap-2 rounded-lg border border-black/8 bg-[#fafafa] p-2.5 text-xs">
               <div className="flex flex-wrap items-center justify-between gap-1 text-[#6e6e73]">
                 <div className="flex items-center gap-1.5 font-medium text-[#1d1d1f]">
                   <span>趋势与分组统计</span>
@@ -1021,209 +1142,12 @@ export function RequestLogDialog({
                 </div>
               </div>
             </div>
-          </div>
-        ) : null}
-
-        <div className="flex flex-none flex-col gap-2 rounded-xl border border-black/8 bg-white p-2.5 shadow-2xs">
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="flex min-w-[290px] flex-1 items-center gap-1.5">
-              <Select
-                aria-label="搜索方式"
-                className="w-36 shrink-0"
-                value={searchMode}
-                getPopupContainer={() => container ?? document.body}
-                optionList={[
-                  { label: "关键词搜索", value: "contains" },
-                  { label: "精确请求 ID", value: "requestId" },
-                  { label: "精确会话 ID", value: "sessionId" },
-                ]}
-                onChange={(value) => {
-                  setSearchMode(String(value));
-                  setPage(1);
-                }}
-              />
-              <Input
-                className="min-w-0 flex-1"
-                aria-label="搜索请求 ID、会话 ID、供应商、模型或上游"
-                placeholder={
-                  searchMode === "requestId"
-                    ? "输入精确请求 ID 搜索…"
-                    : searchMode === "sessionId"
-                      ? "输入精确会话 ID 搜索…"
-                      : "搜索请求 ID、会话 ID、供应商、模型或上游"
-                }
-                value={searchInput}
-                leftSection={<IconSearch size={15} className="text-[#8e8e93]" aria-hidden="true" />}
-                rightSection={
-                  searchInput ? (
-                    <button
-                      type="button"
-                      className="flex h-5 w-5 cursor-pointer items-center justify-center rounded-full text-[#8e8e93] hover:bg-black/5 hover:text-[#1d1d1f]"
-                      onClick={() => setSearchInput("")}
-                      aria-label="清空搜索"
-                    >
-                      <IconX size={12} aria-hidden="true" />
-                    </button>
-                  ) : undefined
-                }
-                onChange={(event) => setSearchInput(event.currentTarget.value)}
-              />
-            </div>
-
-            <Select
-              aria-label="请求日志时间范围"
-              className="w-32 shrink-0"
-              value={timeRange}
-              getPopupContainer={() => container ?? document.body}
-              optionList={[
-                { label: "最近 24 小时", value: "24h" },
-                { label: "最近 7 天", value: "7d" },
-                { label: "最近 30 天", value: "30d" },
-                { label: "自定义时间", value: "custom" },
-              ]}
-              onChange={(value) => {
-                setTimeRange(String(value));
-                setPage(1);
-              }}
-            />
-
-            <Select
-              aria-label="按供应商筛选请求日志"
-              className="w-36 shrink-0"
-              filter
-              getPopupContainer={() => container ?? document.body}
-              optionList={providerOptions}
-              value={provider}
-              onChange={(value) => {
-                setProvider(String(value ?? "all"));
-                setPage(1);
-              }}
-            />
-
-            <Select
-              aria-label="按实际模型筛选请求日志"
-              className="w-40 shrink-0"
-              filter
-              getPopupContainer={() => container ?? document.body}
-              optionList={modelOptions}
-              value={model}
-              onChange={(value) => {
-                setModel(String(value ?? "all"));
-                setPage(1);
-              }}
-            />
-
-            <Select
-              aria-label="按状态筛选请求日志"
-              className="w-28 shrink-0"
-              getPopupContainer={() => container ?? document.body}
-              optionList={statusOptions}
-              value={status}
-              onChange={(value) => {
-                setStatus(String(value ?? "all"));
-                setPage(1);
-              }}
-            />
-
-            <Select
-              aria-label="按上游协议筛选请求日志"
-              className="w-36 shrink-0"
-              getPopupContainer={() => container ?? document.body}
-              optionList={protocolOptions}
-              value={protocol}
-              onChange={(value) => {
-                setProtocol(String(value ?? "all"));
-                setPage(1);
-              }}
-            />
-
-            <Button
-              size="sm"
-              variant={showAdvancedFilters || requestKind !== "all" ? "secondary" : "ghost"}
-              onClick={() => setShowAdvancedFilters((v) => !v)}
-              className="shrink-0 text-xs"
-            >
-              <IconFilter size={13} aria-hidden="true" />
-              高级
-              {requestKind !== "all" ? (
-                <span className="ml-1 rounded-full bg-blue-100 px-1.5 py-0.2 text-[10px] font-semibold text-blue-700">
-                  1
-                </span>
-              ) : null}
-            </Button>
-
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={!hasFilters}
-              onClick={resetFilters}
-              className={`shrink-0 ${hasFilters ? "text-blue-600 hover:text-blue-700 font-medium" : ""}`}
-            >
-              清除筛选
-              {activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
-            </Button>
-          </div>
-
-          {(showAdvancedFilters || timeRange === "custom" || requestKind !== "all") ? (
-            <div className="flex flex-wrap items-center gap-3 border-t border-black/6 pt-2 text-xs">
-              <div className="flex items-center gap-2">
-                <span className="text-[#6e6e73]">请求类型：</span>
-                <Select
-                  aria-label="请求类型"
-                  className="w-40"
-                  getPopupContainer={() => container ?? document.body}
-                  optionList={[
-                    { label: "全部请求类型", value: "all" },
-                    { label: "模型请求", value: "responses" },
-                    { label: "上下文压缩", value: "responses_compact" },
-                    { label: "新版上下文压缩", value: "responses_compact_v2" },
-                    { label: "图像生成", value: "images_generations" },
-                    { label: "模型列表", value: "models" },
-                    { label: "拒绝的请求", value: "http_rejected" },
-                  ]}
-                  value={requestKind}
-                  onChange={(value) => {
-                    setRequestKind(String(value));
-                    setPage(1);
-                  }}
-                />
-              </div>
-
-              {timeRange === "custom" ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  <label className="flex items-center gap-1.5 text-xs text-[#6e6e73]">
-                    <span>开始时间</span>
-                    <Input
-                      type="datetime-local"
-                      aria-label="开始时间"
-                      className="w-44"
-                      value={customFrom}
-                      onChange={(event) => {
-                        setCustomFrom(event.currentTarget.value);
-                        setPage(1);
-                      }}
-                    />
-                  </label>
-                  <label className="flex items-center gap-1.5 text-xs text-[#6e6e73]">
-                    <span>结束时间</span>
-                    <Input
-                      type="datetime-local"
-                      aria-label="结束时间"
-                      className="w-44"
-                      value={customTo}
-                      onChange={(event) => {
-                        setCustomTo(event.currentTarget.value);
-                        setPage(1);
-                      }}
-                    />
-                  </label>
-                </div>
-              ) : null}
-            </div>
           ) : null}
         </div>
+      ) : null}
 
-        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-black/8 bg-white shadow-sm">
+        <div className="request-log-results relative flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="request-log-results-heading"><strong>请求记录 <span>{totalCount.toLocaleString()}</span></strong><span>最新在前 · 点击记录查看详情</span></div>
           {loading && result ? (
             <div className="absolute top-0 left-0 right-0 z-10 h-0.5 overflow-hidden bg-blue-100">
               <div className="h-full w-full bg-blue-600 animate-pulse" />
@@ -1272,8 +1196,8 @@ export function RequestLogDialog({
             <div className={`min-h-0 flex-1 overflow-auto ${loading && result ? "opacity-75 transition-opacity" : ""}`} aria-busy={loading}>
               <Table
  className="request-log-table"
- size="small" pagination={false} bordered
-                scroll={{ x: 1700 }}
+ size="small" pagination={false}
+                scroll={{ x: 1600 }}
                 columns={[
                   { title: "时间 / 请求 ID", width: 180, render: (_value, record) => record.cells[0] },
                   { title: "会话 ID", width: 190, render: (_value, record) => record.cells[1] },
@@ -1282,17 +1206,16 @@ export function RequestLogDialog({
                   { title: "思考强度", width: 100, render: (_value, record) => record.cells[4] },
                   { title: "上游协议", width: 100, render: (_value, record) => record.cells[5] },
                   { title: "状态", width: 120, render: (_value, record) => record.cells[6] },
-                  { title: "TTFT / 总耗时", width: 150, render: (_value, record) => record.cells[7] },
-                  { title: "输入 Token", width: 110, render: (_value, record) => record.cells[8] },
-                  { title: "输出 Token", width: 110, render: (_value, record) => record.cells[9] },
-                  { title: "缓存 Token", width: 110, render: (_value, record) => record.cells[10] },
-                  { title: "总 Token", width: 110, render: (_value, record) => record.cells[11] },
+                  { title: "耗时", width: 150, render: (_value, record) => record.cells[7] },
+                  { title: "Token 用量", width: 230, render: (_value, record) => record.cells[8] },
+                  { title: "缓存 Token", width: 130, render: (_value, record) => record.cells[9] },
                 ]}
  dataSource={result?.items.map((item) => {
    const presentation = statusPresentation[item.status] ?? { label: item.status || "未知", variant: "secondary" as const };
    const hasUpstreamError = [item.statusCode, item.upstreamStatusCode].some((statusCode) => statusCode != null && (statusCode < 200 || statusCode >= 300));
    const upstreamErrorSummary = item.upstreamErrorSummary || item.errorCode || "上游未提供具体错误信息";
    const usageUnavailable = usageUnavailablePresentation(item.usageUnavailableReason);
+   const cacheHitRate = formatCacheHitRate(item.inputTokens, item.cachedInputTokens);
    const cancellation = cancellationPresentation(item);
    const displayedTtft = item.downstreamFirstContentMs ?? item.ttftMs;
    const timingTitle = item.downstreamFirstContentMs == null
@@ -1303,7 +1226,9 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                             <span className="whitespace-nowrap text-[11px] text-[#1d1d1f]">
                               {formatTimestamp(item.timestampUnixMs)}
                             </span>
-                            <div
+                            <button
+                              type="button"
+                              aria-label={`复制请求 ID：${item.requestId}`}
                               className="group flex cursor-pointer items-center gap-1 text-[10px] text-[#8e8e93] transition-colors hover:text-[#1d1d1f]"
                               data-prevent-row-click="true"
                               title={`请求 ID: ${item.requestId}（点击复制）`}
@@ -1317,7 +1242,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                               ) : (
                                 <IconCopy size={11} className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden="true" />
                               )}
-                            </div>
+                            </button>
                           </div>
                         </div>,
 <div className="w-40 max-w-40 overflow-hidden">
@@ -1381,13 +1306,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                           <Badge
                             variant="secondary"
                             size="xs"
-                            className={
-                              item.upstreamTransport === "ws"
-                                ? "border-cyan-600/25 bg-cyan-50 text-cyan-700"
-                                : item.upstreamTransport === "http_sse"
-                                  ? "border-purple-600/25 bg-purple-50 text-purple-700"
-                                  : ""
-                            }
+                            className="request-log-protocol"
                           >
                             {item.upstreamTransport === "http_sse" ? "SSE" : (item.upstreamTransport || "—").toUpperCase()}
                           </Badge>
@@ -1395,7 +1314,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
 <div>
                           <div className="grid min-w-20 gap-1">
                             <div className="flex items-center gap-1">
-                              <Badge variant={presentation.variant} size="xs">
+                              <Badge variant={presentation.variant} size="xs" className="request-log-status">
                                 {presentation.label}
                               </Badge>
                               {hasUpstreamError ? (
@@ -1451,42 +1370,33 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                             ) : null}
                           </div>
                         </div>,
-<div className="whitespace-nowrap text-right font-mono">
-                          <div className="grid justify-items-end gap-0.5 leading-tight">
+<div className="whitespace-nowrap tabular-nums">
+                          <div className="grid gap-0.5 text-[11px] leading-4">
                             <div
-                              className="flex items-center justify-end gap-1.5"
+                              className="flex items-center gap-1"
                               title={timingTitle}
                             >
-                              <span className="rounded bg-blue-50 px-1 py-0.2 text-[9px] font-semibold text-blue-600">TTFT</span>
+                              <span className="text-[#6e6e73]">首字</span>
                               <span className="text-[11px] font-medium text-[#1d1d1f] tabular-nums">
                                 {formatDuration(displayedTtft)}
                               </span>
                             </div>
                             <div
-                              className="flex items-center justify-end gap-1.5"
+                              className="flex items-center gap-1"
                               title={`总耗时: ${formatDuration(item.totalDurationMs)}`}
                             >
-                              <span className="text-[10px] text-[#8e8e93]">总</span>
+                              <span className="text-[#6e6e73]">总用时</span>
                               <span className="text-[11px] text-[#48484a] tabular-nums">
                                 {formatDuration(item.totalDurationMs)}
                               </span>
                             </div>
                           </div>
                         </div>,
-<div className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">{formatTokens(item.inputTokens)}</div>,
-<div className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">{formatTokens(item.outputTokens)}</div>,
-<div className="whitespace-nowrap text-right font-mono text-[#48484a] tabular-nums">
-                          {item.cachedInputTokens && item.cachedInputTokens > 0 ? (
-                            <span className="font-medium text-purple-600">
-                              {formatTokens(item.cachedInputTokens)}
-                            </span>
-                          ) : (
-                            formatTokens(item.cachedInputTokens)
-                          )}
-                        </div>,
-<div className="whitespace-nowrap text-right font-mono font-medium text-[#1d1d1f] tabular-nums">
+<div className="grid gap-0.5 whitespace-nowrap tabular-nums">
+                          <div className="flex items-center gap-1">
+                            <span className="text-[11px] text-[#6e6e73]">总计:</span>
                           {item.totalTokens == null ? (
-                            <div className="flex min-w-20 items-center justify-end gap-1">
+                            <div className="flex min-w-20 items-center gap-1">
                               <span className="text-[10px] font-medium text-[#8e8e93]">
                                 {usageUnavailable.label}
                               </span>
@@ -1510,16 +1420,27 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                               </Tooltip>
                             </div>
                           ) : (
-                            formatTokens(item.totalTokens)
+                            <strong className="text-sm font-bold text-[#1d1d1f]">{formatTokens(item.totalTokens)}</strong>
                           )}
+                          </div>
+                          <div className="text-[10px] leading-4 text-[#6e6e73]">
+                            输入: {formatTokens(item.inputTokens)} <span aria-hidden="true" className="text-[#c7c7cc]">|</span> 输出: {formatTokens(item.outputTokens)}
+                          </div>
+                          <div className="text-[10px] leading-4 text-[#6e6e73]">推理: {formatTokens(item.reasoningOutputTokens)}</div>
+                        </div>,
+<div className="grid gap-0.5 whitespace-nowrap tabular-nums" title="缓存命中率 = 缓存输入 Token / 输入 Token；未上报或无法计算时显示 —">
+                          <strong className="text-sm font-bold text-[#1d1d1f]">{formatTokens(item.cachedInputTokens)}</strong>
+                          <span className={`text-[10px] font-semibold leading-4 ${cacheHitRate === "—" ? "text-[#6e6e73]" : "text-[#c74735]"}`}>
+                            {cacheHitRate} 命中
+                          </span>
                         </div>] };})}
- onRow={(record) => ({ onClick: (event) => { const target = event.target as HTMLElement | null; if (target?.closest("button") || target?.closest("[data-prevent-row-click]")) return; setSelectedItem(record.item); } })}
+ onRow={(record) => ({ tabIndex: 0, "aria-label": `查看请求详情：${record.item.requestId}`, onKeyDown: (event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); setSelectedItem(record.item); } }, onClick: (event) => { const target = event.target as HTMLElement | null; if (target?.closest("button") || target?.closest("[data-prevent-row-click]")) return; setSelectedItem(record.item); } })}
  />
             </div>
           )}
 
           {result?.queryable && result.status === "ok" ? (
-            <div className="flex flex-none items-center justify-between gap-3 border-t border-black/8 bg-[#fafafa] px-3.5 py-2 text-xs max-[760px]:flex-col max-[760px]:items-stretch">
+            <div className="request-log-pagination flex flex-none items-center justify-between gap-3 border-t border-black/8 px-3.5 py-2 text-xs max-[760px]:flex-col max-[760px]:items-stretch">
               <div className="flex flex-wrap items-center gap-2 text-[#6e6e73]">
                 <span className="font-semibold text-[#1d1d1f]">
                   共 {totalCount.toLocaleString()} 条
@@ -1533,78 +1454,47 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                   第 {page} / {totalPages} 页
                 </span>
               </div>
-              <div className="flex items-center justify-end gap-2 max-[520px]:flex-wrap">
-                <Select
-                  aria-label="请求日志每页条数"
-                  className="w-28"
-                  getPopupContainer={() => container ?? document.body}
-                  optionList={pageSizeOptions}
-                  value={pageSize}
-                  onChange={(value) => {
-                    setPageSize(Number(value) || 20);
+              <Pagination
+                size="small"
+                current={page}
+                pageSize={pageSize}
+                total={totalCount}
+                pageSizeOptions={pageSizeOptions}
+                showSizeChanger
+                disabled={loading}
+                onChange={(newPage, newPageSize) => {
+                  if (newPageSize !== pageSize) {
+                    setPageSize(newPageSize);
                     setPage(1);
-                  }}
-                />
-                <div className="flex items-center gap-1">
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    disabled={loading || page <= 1}
-                    onClick={() => setPage(1)}
-                  >
-                    首页
-                  </Button>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    disabled={loading || page <= 1}
-                    onClick={() => setPage((value) => value - 1)}
-                  >
-                    上一页
-                  </Button>
-                  {page > 2 ? (
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      disabled={loading}
-                      onClick={() => setPage(1)}
-                      className="h-7 min-w-7 px-1.5 font-mono text-xs"
-                    >
-                      1
-                    </Button>
-                  ) : null}
-                  {page > 3 ? <span className="px-0.5 font-mono text-[#8e8e93]">…</span> : null}
-                  {page > 1 ? (
-                    <Button
-                      size="xs"
-                      variant="ghost"
-                      disabled={loading}
-                      onClick={() => setPage(page - 1)}
-                      className="h-7 min-w-7 px-1.5 font-mono text-xs"
-                    >
-                      {page - 1}
-                    </Button>
-                  ) : null}
-                  <span className="flex h-7 min-w-7 items-center justify-center rounded bg-[#1d1d1f] px-2 font-mono text-xs font-bold text-white shadow-2xs">
-                    {page}
-                  </span>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    disabled={loading || !result.hasMore || !result.nextCursor}
-                    onClick={() => {
-                      setCursors((current) => [...current.slice(0, page), result.nextCursor]);
-                      setPage((value) => value + 1);
-                    }}
-                  >
-                    下一页
-                  </Button>
-                </div>
-              </div>
+                    setCursors([null]);
+                    return;
+                  }
+                  if (newPage === page) return;
+                  if (newPage <= cursors.length) {
+                    setPage(newPage);
+                  }
+                }}
+                itemRender={(itemPage, type, originalElement) => {
+                  if (type === "page" && itemPage > cursors.length) {
+                    return (
+                      <span
+                        className="ant-pagination-item opacity-40 cursor-not-allowed"
+                        title="游标翻页模式下请按序浏览"
+                        aria-disabled="true"
+                      >
+                        {itemPage}
+                      </span>
+                    );
+                  }
+                  if (type === "next" && (!result?.hasMore || !result.nextCursor)) {
+                    return <span className="ant-pagination-disabled">{originalElement}</span>;
+                  }
+                  return originalElement;
+                }}
+              />
             </div>
           ) : null}
         </div>
-      </div>
 
       <Dialog
         open={clearConfirmationOpened}
@@ -1663,17 +1553,16 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
       </Dialog>
 
       {selectedItem ? (
-        <div className="fixed inset-0 z-[1050] flex justify-end">
+        <Drawer
+          open
+          title="请求详情"
+          onClose={() => setSelectedItem(null)}
+          getContainer={standalone ? document.body : container ?? document.body}
+          size={580}
+          styles={{ header: { display: "none" }, body: { padding: 0 } }}
+        >
           <div
-            className="fixed inset-0 bg-black/25 backdrop-blur-xs transition-opacity"
-            onClick={() => setSelectedItem(null)}
-            aria-hidden="true"
-          />
-          <div
-            className="relative z-10 flex h-full w-full max-w-[580px] flex-col bg-white shadow-2xl transition-transform"
-            role="dialog"
-            aria-modal="true"
-            aria-label="请求详情"
+            className="request-log-detail relative z-10 flex h-full w-full max-w-[580px] flex-col bg-white shadow-2xl transition-transform"
           >
             {/* 抽屉头部 */}
             <div className="flex flex-none items-center justify-between border-b border-black/8 bg-[#fbfbfd] px-5 py-3.5">
@@ -1990,7 +1879,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
               </Button>
             </div>
           </div>
-        </div>
+        </Drawer>
       ) : null}
 
       {copyToast ? (
@@ -2020,6 +1909,6 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
           </button>
         </div>
       ) : null}
-    </Modal>
+    </div>
   );
 }

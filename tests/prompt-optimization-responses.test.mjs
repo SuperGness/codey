@@ -51,7 +51,7 @@ test("prompt optimization renders the searchable manual model combobox without r
   );
   assert.match(
     manualComboboxSource,
-    /使用自定义模型/,
+    /使用 \$\{trimmed\}/,
   );
   assert.doesNotMatch(cardSource, /prompt-optimization-model-create-option/);
 });

@@ -685,6 +685,10 @@ impl RouterServer {
             Arc::clone(&self.websocket_backoffs),
             Arc::clone(&self.request_body_budget),
         );
+        downstream.native_history = NativeResponsesHistory::with_cache(
+            Arc::clone(&self.native_history_cache),
+            &context.headers,
+        );
 
         while let Some(message) = downstream.next_message().await? {
             downstream.clear_stream_id();
@@ -1408,11 +1412,17 @@ impl RouterServer {
             && stream_requested
             && bridge == ProtocolBridge::NativeResponses
         {
+            let had_previous_response = responses_previous_response_id(&upstream_body).is_some();
             let websocket_attempt = downstream
                 .try_proxy_upstream_websocket(&resolved.route, &headers, &mut upstream_body)
                 .await?;
             if websocket_attempt == UpstreamWebSocketAttempt::Completed {
                 return Ok(());
+            }
+            if had_previous_response && responses_previous_response_id(&upstream_body).is_none() {
+                // Reconnection may have expanded history before its handshake failed.
+                body_mutated = true;
+                encoded_body = None;
             }
             if resolved.route.supports_websockets
                 && let Some(probe) = downstream.request_log_probe()
@@ -1430,6 +1440,12 @@ impl RouterServer {
                 }
                 Ok(false) => {}
                 Err(error) => {
+                    record_router_failure_nonblocking(
+                        "local_router_context_not_recoverable",
+                        "restore_native_response_history",
+                        error.to_string(),
+                        json!({"requestId": current_router_request_id(), "routeId": resolved.route.provider_id}),
+                    );
                     return downstream
                         .write_error(
                             400,

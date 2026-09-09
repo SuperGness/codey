@@ -6,7 +6,13 @@
   margin-bottom: 24px;
 }
 
-
+.operations-panel {
+  border-radius: 14px !important;
+  overflow: hidden !important;
+  border: 1px solid rgba(0, 0, 0, 0.08) !important;
+  background: #ffffff !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
+}
 
 .operations-header {
   display: flex;
@@ -15,7 +21,6 @@
   justify-content: space-between;
   gap: 16px;
   padding: 18px 22px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
   background: linear-gradient(180deg, #ffffff 0%, #fafafa 100%);
 }
 
@@ -95,6 +100,15 @@
   background: currentColor;
   display: inline-block;
   margin-right: 4px;
+}
+
+.operations-running-badge.ant-tag-success,
+.operations-actions .ant-tag.ant-tag-success,
+.operations-expanded-card .ant-tag.ant-tag-success {
+  background: rgba(52, 199, 89, 0.13) !important;
+  color: #248a3d !important;
+  border-color: transparent !important;
+  font-weight: 500;
 }
 
 .operations-status-chips {
@@ -466,35 +480,73 @@
   white-space: nowrap;
 }
 
-/* Prompt Optimization + Subagent Policy Matrix Row: 4:6 布局 (40% / 60%) */
+/* Prompt Optimization + Subagent Policy Matrix Row: 一体化外壳，中缝线分隔，高度与子代理区域保持一致 */
 .prompt-subagent-grid {
   display: grid;
-  grid-template-columns: minmax(0, 4fr) minmax(0, 6fr);
-  gap: 24px;
+  grid-template-columns: minmax(0, 4.2fr) minmax(0, 5.8fr);
+  gap: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  margin-bottom: 20px;
   align-items: stretch;
-  margin-bottom: 24px;
+  min-height: 420px;
 }
 
-.prompt-column,
-.subagent-column {
+.prompt-column {
   min-width: 0;
+  position: relative;
+  height: 100%;
+  min-height: 420px;
+}
+
+.prompt-column-inner {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  inset: 0;
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
 }
 
+.subagent-column {
+  min-width: 0;
+  height: 100%;
+  min-height: 420px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid rgba(0, 0, 0, 0.07);
+}
+
+.prompt-column > section,
+.subagent-column > section,
 .prompt-column > .secondary-section,
 .subagent-column > .secondary-section {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-height: 0;
+  border: 0;
+  background: transparent;
 }
 
+.prompt-column > section > .secondary-card,
+.subagent-column > section > .secondary-card,
 .prompt-column > .secondary-section > .secondary-card,
 .subagent-column > .secondary-section > .secondary-card {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  border: 0 !important;
+  box-shadow: none !important;
+  background: transparent !important;
 }
 
 .operations-status-chip-wrap {

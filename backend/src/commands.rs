@@ -28,9 +28,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
 
-use diagnostics::{
-    clear_diagnostic_storage, refresh_diagnostic_storage_stats, refresh_trace_log_stats,
-};
+use diagnostics::clear_diagnostic_storage;
 pub(crate) use models::native_subagent_model_state;
 #[cfg(test)]
 use models::{
@@ -114,7 +112,6 @@ use crate::session_delete;
 use crate::session_metadata;
 use crate::session_transfer;
 use crate::trace_log_guard;
-use crate::trace_log_stats::TraceLogStatsHandle;
 
 const STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_VISIBLE_SESSION_TIMESTAMPS: usize = 200;
@@ -132,7 +129,6 @@ pub struct AppState {
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     runtime_operation: Mutex<()>,
     diagnostic_storage_operation: Mutex<()>,
-    pub trace_log_stats: TraceLogStatsHandle,
     trace_log_write_protection_active: AtomicBool,
     pub crashpad_pending_stats: CrashpadPendingStatsHandle,
     pub startup_error: RwLock<Option<String>>,
@@ -220,7 +216,6 @@ impl Default for AppState {
             runtime: Mutex::new(None),
             runtime_operation: Mutex::new(()),
             diagnostic_storage_operation: Mutex::new(()),
-            trace_log_stats: TraceLogStatsHandle::idle(),
             trace_log_write_protection_active: AtomicBool::new(false),
             crashpad_pending_stats: CrashpadPendingStatsHandle::idle(protect_crashpad_pending),
             startup_error: RwLock::new(config_load_error),
@@ -993,8 +988,6 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 .unwrap_or(false);
             runtime_status_with_options(state, refresh_injection_status).await
         }
-        "refresh_diagnostic_storage_stats" => refresh_diagnostic_storage_stats(state).await,
-        "refresh_trace_log_stats" => refresh_trace_log_stats(state).await,
         "open_route_request_logs" => open_route_request_logs(state).await,
         "query_route_request_logs" => {
             match serde_json::from_value::<RouteRequestLogQuery>(args.clone()) {
@@ -1010,7 +1003,8 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         }
         "clear_route_request_logs" => clear_route_request_logs(state).await,
         "restart_codey" => schedule_restart_codey_runtime(state).await,
-        "clear_diagnostic_storage" => clear_diagnostic_storage(state).await,
+        "clear_diagnostic_storage" => clear_diagnostic_storage(state, &args).await,
+        "repair_codex_overlays" => crate::overlay_recovery::repair().await,
         "test_notification_channel" => {
             match argument::<NotificationChannelConfig>(&args, "channel") {
                 Ok(channel) => test_notification_channel(state, channel).await,

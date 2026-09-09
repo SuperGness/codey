@@ -434,27 +434,7 @@ if (import.meta.env.DEV) {
           crashpadDiskProtectionActive:
             previewClientPlatform === "macos" &&
             previewConfig.protectCrashpadPending,
-          ...(previewTraceStats ? { traceLogStats: previewTraceStats } : {}),
-          ...(previewCrashpadStats
-            ? { crashpadPendingStats: previewCrashpadStats }
-            : {}),
         };
-      }
-      if (command === "refresh_diagnostic_storage_stats") {
-        previewTraceStats = previewTraceLogStats;
-        previewCrashpadStats = {
-          ...previewCrashpadPendingStats,
-          protectionEnabled: previewConfig.protectCrashpadPending,
-        };
-        return {
-          status: "ok",
-          traceLogStats: previewTraceStats,
-          crashpadPendingStats: previewCrashpadStats,
-        };
-      }
-      if (command === "refresh_trace_log_stats") {
-        previewTraceStats = previewTraceLogStats;
-        return { status: "ok", traceLogStats: previewTraceStats };
       }
       if (command === "query_route_request_logs" || command === "query_route_request_log_stats") {
         const page = Math.max(1, Number(args.page) || 1);
@@ -696,14 +676,19 @@ if (import.meta.env.DEV) {
         };
       }
       if (command === "clear_diagnostic_storage") {
-        previewTraceStats = {
-          ...previewTraceLogStats,
+        if (args.target !== "trace" && args.target !== "crashpad") {
+          throw new Error("无效的诊断清理目标");
+        }
+        previewTraceStats ??= previewTraceLogStats;
+        previewCrashpadStats ??= previewCrashpadPendingStats;
+        const traceBefore = previewTraceStats;
+        const crashpadBefore = previewCrashpadStats;
+        if (args.target !== "crashpad") previewTraceStats = {
+          ...traceBefore,
           databaseBytes: 49152,
-          rowCount: 0,
-          estimatedLogBytes: 0,
         };
-        previewCrashpadStats = {
-          ...previewCrashpadPendingStats,
+        if (args.target !== "trace") previewCrashpadStats = {
+          ...crashpadBefore,
           protectionEnabled: previewConfig.protectCrashpadPending,
           reportsFound: 0,
           completeReports: 0,
@@ -718,26 +703,27 @@ if (import.meta.env.DEV) {
           traceLogWriteProtectionActive: previewConfig.disableTraceLogWrites,
           crashpadProtectionEnabled: previewConfig.protectCrashpadPending,
           errors: [],
+          traceLogStatsBefore: traceBefore,
           traceCleanup: {
             databasesFound: 1,
             databasesCleaned: 1,
-            rowsDeleted: 30141,
-            bytesBefore: 406921216,
-            bytesAfter: 49152,
-            bytesReclaimed: 406872064,
+            rowsDeleted: traceBefore.databaseBytes > previewTraceStats.databaseBytes ? 318757 : 0,
+            bytesBefore: traceBefore.databaseBytes,
+            bytesAfter: previewTraceStats.databaseBytes,
+            bytesReclaimed: Math.max(0, traceBefore.databaseBytes - previewTraceStats.databaseBytes),
           },
           crashpadCleanup: {
             directoriesFound: 2,
-            reportsFound: 13,
-            reportsDeleted: 13,
-            filesFound: 26,
-            filesDeleted: 26,
+            reportsFound: crashpadBefore.reportsFound,
+            reportsDeleted: crashpadBefore.completeReports - previewCrashpadStats.completeReports,
+            filesFound: crashpadBefore.filesFound,
+            filesDeleted: crashpadBefore.filesFound - previewCrashpadStats.filesFound,
             orphanFilesDeleted: 0,
             unmanagedFiles: 0,
             skippedRecentReports: 0,
-            bytesBefore: 3448832,
-            bytesAfter: 0,
-            bytesReclaimed: 3448832,
+            bytesBefore: crashpadBefore.pendingBytes,
+            bytesAfter: previewCrashpadStats.pendingBytes,
+            bytesReclaimed: Math.max(0, crashpadBefore.pendingBytes - previewCrashpadStats.pendingBytes),
             limitApplied: false,
             stillOverLimit: false,
             errors: [],

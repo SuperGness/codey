@@ -149,9 +149,45 @@ button,
   border-radius: 999px;
 }
 
+.settings-modal-shell .ant-modal-header {
+  position: relative;
+  z-index: 10;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+}
+
+.header-version-tag {
+  margin: 0 !important;
+  font-size: 11px !important;
+  line-height: 18px !important;
+  font-weight: 550 !important;
+  padding: 0 6px !important;
+  border-radius: 6px !important;
+}
+
 .header-update-btn-wrap {
   display: inline-flex;
   align-items: center;
+}
+
+.header-update-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  height: 22px !important;
+  min-width: 22px !important;
+  padding: 0 4px !important;
+  border-radius: 6px !important;
+  background: rgba(0, 0, 0, 0.05) !important;
+  color: #6e6e73 !important;
+  border: 0 !important;
+  box-shadow: none !important;
+  transition: all 120ms ease !important;
+}
+
+.header-update-btn:hover:not(:disabled) {
+  background: rgba(0, 0, 0, 0.09) !important;
+  color: #1d1d1f !important;
 }
 
 .macos-titlebar-right {

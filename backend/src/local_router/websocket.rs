@@ -294,19 +294,17 @@ impl WebSocketResponsesDownstream {
         self.native_history
             .prepare(native_history_key(route, effective_auth, body), body);
         if !cached_matches {
-            if previous_response_key.is_some() {
+            // A response ID belongs to its original upstream socket. Reconnect
+            // with full history only before sending this new request.
+            if previous_response_key.is_some()
+                && self
+                    .native_history
+                    .restore(native_history_key(route, auth_identity, body), body)
+                    .is_err()
+            {
                 return Ok(UpstreamWebSocketAttempt::UseHttp);
             }
             self.upstream.take();
-        }
-        if self.upstream.is_none()
-            && self
-                .websocket_backoffs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_backing_off(&backoff_key, now)
-        {
-            return Ok(UpstreamWebSocketAttempt::UseHttp);
         }
         let mut upstream = if let Some(cached) = self.upstream.take() {
             cached
