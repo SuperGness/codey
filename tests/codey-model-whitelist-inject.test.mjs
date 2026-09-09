@@ -6,7 +6,8 @@ import { FakeElementCore } from "./helpers/fake-element.mjs";
 
 const MODEL_CONFIG_ID = "107580212";
 
-test("third-party Fast works without the Inspector and restores native account restrictions", async () => {
+for (const nativeSelectionOnly of [false, true]) {
+test(`Fast stays available across routes and models (native selection: ${nativeSelectionOnly})`, async () => {
   const body = new FakeElementCore("body", { connected: true });
   const trigger = body.appendChild(new FakeElementCore("button", {
     attributes: { "aria-haspopup": "menu" },
@@ -49,9 +50,10 @@ test("third-party Fast works without the Inspector and restores native account r
   trigger.__reactFiber$fastTest = { memoizedProps: nativePicker, return: composer };
   const runtime = await loadPatch({
     status: "ok",
+    native_selection_only: nativeSelectionOnly,
     models: [model.model, "openai-model"],
     default_model: model.model,
-  }, [statsigClient()], { documentBody: body });
+  }, [statsigClient()], { documentBody: body, nativeSelectionOnly });
   assert.deepEqual(renderNative(), { showFast: false, serviceTierForRequest: null });
 
   runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
@@ -67,11 +69,11 @@ test("third-party Fast works without the Inspector and restores native account r
 
   nativePicker.model = "openai-model";
   runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
-  assert.deepEqual(renderNative(), { showFast: false, serviceTierForRequest: null });
+  assert.deepEqual(renderNative(), { showFast: true, serviceTierForRequest: "priority" });
   nativePicker.model = model.model;
   model.serviceTiers = [];
   runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
-  assert.equal(renderNative().showFast, false);
+  assert.equal(uiCache[5].isServiceTierAllowed, true, "permission does not depend on model tiers");
 
   model.serviceTiers = [{ id: "priority", name: "Fast" }];
   loading = true;
@@ -83,6 +85,7 @@ test("third-party Fast works without the Inspector and restores native account r
   assert.equal(requestCache[5].isServiceTierAllowed, false);
   assert.equal(alternateCache[5].isServiceTierAllowed, false);
 });
+}
 
 async function loadPatch(
   catalogResponse,
@@ -466,8 +469,12 @@ test("native selection filters seven models to the five checked without changing
   assert.deepEqual(queryClient.models(), selectedModels);
   assert.deepEqual(client.external.value.available_models, selectedModels);
   assert.equal(client.external.value.default_model, "gpt-5.4");
-  assert.equal(queryClient.model("gpt-5.6-sol"), originalDescriptor);
-  assert.deepEqual(queryClient.model("gpt-5.6-sol").serviceTiers, ["default"]);
+  assert.notEqual(queryClient.model("gpt-5.6-sol"), originalDescriptor);
+  assert.deepEqual(originalDescriptor.serviceTiers, ["default"]);
+  for (const name of selectedModels) {
+    assert.ok(queryClient.model(name).serviceTiers.some(tier => tier.id === "priority"));
+    assert.ok(queryClient.model(name).additionalSpeedTiers.includes("fast"));
+  }
   assert.equal(runtime.dispatchWasWrapped(), false);
   for (const method of ["thread/start", "thread/resume", "thread/fork", "thread/settings/update", "turn/start"]) {
     const request = { type: "mcp-request", request: { method, params: { model: "gpt-5.4", modelProvider: "openai", threadId: "native-thread" } } };
@@ -679,7 +686,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "53");
+  assert.equal(patch.version, "54");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],

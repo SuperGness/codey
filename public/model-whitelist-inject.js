@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "53";
+  const patchVersion = "54";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -646,7 +646,12 @@
 
   const modelDescriptor = (modelName, current = null) => {
     const metadata = catalog.modelMetadata[modelName];
-    const contextMetadata = {
+    const descriptorMetadata = {
+      serviceTiers: nativeFastServiceTiers(current?.serviceTiers),
+      additionalSpeedTiers: nativeFastSpeedTiers(current?.additionalSpeedTiers),
+      defaultServiceTier: Object.hasOwn(current || {}, "defaultServiceTier")
+        ? current.defaultServiceTier
+        : null,
       supports1MContext: metadata?.supports_1m_context ?? current?.supports1MContext,
       contextWindow: Object.hasOwn(metadata || {}, "context_window") ? metadata.context_window : current?.contextWindow,
       maxContextWindow: Object.hasOwn(metadata || {}, "max_context_window") ? metadata.max_context_window : current?.maxContextWindow,
@@ -660,8 +665,8 @@
       metadata?.supported_reasoning_efforts,
     );
     if (nativeSelectionOnly && current && supportedReasoningEfforts.length === 0) {
-      return current.hidden !== true && Object.entries(contextMetadata).every(([key, value]) => current[key] === value)
-        ? current : { ...current, ...contextMetadata, hidden: false };
+      return current.hidden !== true && Object.entries(descriptorMetadata).every(([key, value]) => current[key] === value)
+        ? current : { ...current, ...descriptorMetadata, hidden: false };
     }
     const currentReasoningEfforts = reasoningEffortDescriptors(
       current?.supportedReasoningEfforts,
@@ -686,12 +691,7 @@
       if (current) {
         return (
           current.hidden !== true
-          && current.supports1MContext === contextMetadata.supports1MContext
-          && current.contextWindow === contextMetadata.contextWindow
-          && current.maxContextWindow === contextMetadata.maxContextWindow
-          && current.effectiveContextWindowPercent === contextMetadata.effectiveContextWindowPercent
-          && current.autoCompactTokenLimit === contextMetadata.autoCompactTokenLimit
-          && current.contextSource === contextMetadata.contextSource
+          && Object.entries(descriptorMetadata).every(([key, value]) => current[key] === value)
           && current.defaultReasoningEffort === defaultReasoningEffort
           && sameReasoningEffortNames(
             current.supportedReasoningEfforts,
@@ -699,7 +699,7 @@
           )
         ) ? current : {
           ...current,
-          ...contextMetadata,
+          ...descriptorMetadata,
           hidden: false,
           defaultReasoningEffort,
           supportedReasoningEfforts: resolvedReasoningEfforts,
@@ -707,7 +707,7 @@
       }
       return {
         model: modelName,
-        ...contextMetadata,
+        ...descriptorMetadata,
         id: modelName,
         slug: modelName,
         name: metadata?.display_name || modelName,
@@ -720,7 +720,7 @@
     }
     return {
       ...(current && typeof current === "object" ? current : {}),
-      ...contextMetadata,
+      ...descriptorMetadata,
       model: modelName,
       id: typeof current?.id === "string" && current.id ? current.id : modelName,
       slug: typeof current?.slug === "string" && current.slug ? current.slug : modelName,
@@ -740,11 +740,6 @@
       isDefault: modelName === catalog.defaultModel,
       defaultReasoningEffort,
       supportedReasoningEfforts: resolvedReasoningEfforts,
-      serviceTiers: nativeFastServiceTiers(current?.serviceTiers),
-      additionalSpeedTiers: nativeFastSpeedTiers(current?.additionalSpeedTiers),
-      defaultServiceTier: Object.hasOwn(current || {}, "defaultServiceTier")
-        ? current.defaultServiceTier
-        : null,
     };
   };
 
@@ -1434,22 +1429,11 @@
       if (props && Object.hasOwn(props, "conversationId") && Object.hasOwn(props, "hideLabel")) break;
     }
     if (!picker) return;
-    const selectedItem = target?.closest?.(groupedMenuItemSelector);
-    const modelName = selectedItem?.dataset?.codeyRouteModel || picker.model;
-    const route = routeForModel(modelName);
-    const thirdParty = nativeSelectionOnly
-      ? catalog.nativeProviderId && !legacyOfficialRouteProviderIds.has(modelKey(catalog.nativeProviderId))
-      : route && !route.officialAccount && !legacyOfficialRouteProviderIds.has(modelKey(route.routeProviderId));
-    const model = picker.models.find((value) => modelKey(value?.model) === modelKey(modelName));
-    const supportsFast = model?.serviceTiers?.some((tier) => tier?.id === fastServiceTierId);
-
     // Windows builds can disable the main-process Inspector. Repair only the
     // native picker's cached permission results, before its own opening/selection
     // event renders again. Both the UI and its serviceTierForRequest resolver then
-    // consume the same model-aware permission; no replacement control or state.
-    // Keep loading state and official-account restrictions unchanged.
+    // consume the same permission for every route and model. Keep loading state.
     restoreNativeFastPermissions();
-    if (!thirdParty || !supportsFast) return;
     for (const permission of permissions) {
       if (permission.isServiceTierAllowed || nativeFastPermissions.size >= 64) continue;
       try {
