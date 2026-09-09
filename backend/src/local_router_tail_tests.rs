@@ -385,12 +385,13 @@ async fn long_response_tail_preserves_events_tools_and_errors() {
     if let Ok(path) = std::env::var("CODEY_TAIL_SNAPSHOT") {
         std::fs::write(path, &encoded).unwrap();
     }
-    // Full normalized transcripts captured before the optimization at f396fabc.
+    // Baseline from f396fabc, updated for cache_write_tokens added in 9833dde.
+    // Removing those six usage fields reproduces the original transcript digest.
     // CODEY_TAIL_SNAPSHOT exports them for inspection when this assertion fails.
     use sha2::Digest;
     assert_eq!(
         format!("{:x}", sha2::Sha256::digest(&encoded)),
-        "8413d292f4b1d9136d376050c21545c5eb087c5a92f4fd5ba7f5440f55aaea9b"
+        "b8f0d7e93687b32b80886fad9b117cdea5a1229b08db21fb733de925b857e4f9"
     );
 }
 
