@@ -56,14 +56,12 @@ impl RouterServer {
             return Ok(());
         }
         if !self.authorized(&pending.request) {
-            if !pending.request.path.starts_with("/codey/") {
-                self.record_rejected_request(
-                    &pending.request,
-                    "http_rejected",
-                    401,
-                    "invalid_router_token",
-                );
-            }
+            self.record_rejected_request(
+                &pending.request,
+                "http_rejected",
+                401,
+                "invalid_router_token",
+            );
             write_error_response(
                 &mut stream,
                 401,
@@ -247,9 +245,7 @@ impl RouterServer {
                     .await?;
             }
             _ => {
-                if !request.path.starts_with("/codey/") {
-                    self.record_rejected_request(&request, "http_rejected", 404, "not_found");
-                }
+                self.record_rejected_request(&request, "http_rejected", 404, "not_found");
                 write_error_response(
                     &mut stream,
                     404,
@@ -543,6 +539,21 @@ impl RouterServer {
     }
 
     fn record_rejected_request(&self, request: &HttpRequest, kind: &str, status: u16, code: &str) {
+        if !matches!(
+            request.path.as_str(),
+            "/v1/models"
+                | "/models"
+                | "/v1/responses"
+                | "/responses"
+                | "/v1/images/generations"
+                | "/images/generations"
+                | "/v1/responses/compact"
+                | "/responses/compact"
+                | "/v1/v1/responses/compact"
+                | "/codex/v1/responses/compact"
+        ) {
+            return;
+        }
         if let Some(probe) = self.begin_basic_request_log(request, kind) {
             probe.mark_error(status, code);
             probe.finish_failed();

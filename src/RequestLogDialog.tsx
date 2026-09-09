@@ -8,7 +8,6 @@ import {
   IconChevronUp,
   IconCopy,
   IconDatabaseOff,
-  IconFilter,
   IconLoader2,
   IconQuestionMark,
   IconRefresh,
@@ -357,13 +356,12 @@ export function RequestLogDialog({
     subtext?: string;
   } | null>(null);
   const [selectedItem, setSelectedItem] = useState<RouteRequestLogItem | null>(null);
-  const [showStats, setShowStats] = useState(false);
-  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [overviewCollapsed, setOverviewCollapsed] = useState(() => {
     try {
-      return window.sessionStorage.getItem("codey_request_logs_overview_collapsed") === "1";
+      const stored = window.sessionStorage.getItem("codey_request_logs_overview_collapsed");
+      return stored === null ? true : stored === "1";
     } catch {
-      return false;
+      return true;
     }
   });
 
@@ -834,21 +832,25 @@ export function RequestLogDialog({
               }}
             />
 
-            <AntButton
-              size="small"
-              type={showAdvancedFilters || requestKind !== "all" ? "primary" : "default"}
-              icon={<IconFilter size={13} aria-hidden="true" />}
-              onClick={() => setShowAdvancedFilters((v) => !v)}
-              aria-expanded={showAdvancedFilters}
-              className="shrink-0 text-xs"
-            >
-              高级
-              {requestKind !== "all" ? (
-                <span className="ml-1 rounded-full bg-blue-100 px-1.5 py-0.2 text-[10px] font-semibold text-blue-700">
-                  1
-                </span>
-              ) : null}
-            </AntButton>
+            <Select
+              aria-label="按请求类型筛选请求日志"
+              className="w-32 shrink-0"
+              getPopupContainer={() => container ?? document.body}
+              optionList={[
+                { label: "全部请求类型", value: "all" },
+                { label: "模型请求", value: "responses" },
+                { label: "上下文压缩", value: "responses_compact" },
+                { label: "新版上下文压缩", value: "responses_compact_v2" },
+                { label: "图像生成", value: "images_generations" },
+                { label: "模型列表", value: "models" },
+                { label: "拒绝的请求", value: "http_rejected" },
+              ]}
+              value={requestKind}
+              onChange={(value) => {
+                setRequestKind(String(value));
+                setPage(1);
+              }}
+            />
 
             <AntButton
               size="small"
@@ -862,61 +864,34 @@ export function RequestLogDialog({
             </AntButton>
           </div>
 
-          {(showAdvancedFilters || timeRange === "custom" || requestKind !== "all") ? (
-            <div className="flex flex-wrap items-center gap-3 border-t border-black/6 pt-2 text-xs">
-              <div className="flex items-center gap-2">
-                <span className="text-[#6e6e73]">请求类型：</span>
-                <Select
-                  aria-label="请求类型"
-                  className="w-40"
-                  getPopupContainer={() => container ?? document.body}
-                  optionList={[
-                    { label: "全部请求类型", value: "all" },
-                    { label: "模型请求", value: "responses" },
-                    { label: "上下文压缩", value: "responses_compact" },
-                    { label: "新版上下文压缩", value: "responses_compact_v2" },
-                    { label: "图像生成", value: "images_generations" },
-                    { label: "模型列表", value: "models" },
-                    { label: "拒绝的请求", value: "http_rejected" },
-                  ]}
-                  value={requestKind}
-                  onChange={(value) => {
-                    setRequestKind(String(value));
+          {timeRange === "custom" ? (
+            <div className="flex flex-wrap items-center gap-2 border-t border-black/6 pt-2 text-xs">
+              <label className="flex items-center gap-1.5 text-xs text-[#6e6e73]">
+                <span>开始时间</span>
+                <Input
+                  type="datetime-local"
+                  aria-label="开始时间"
+                  className="w-44"
+                  value={customFrom}
+                  onChange={(event) => {
+                    setCustomFrom(event.currentTarget.value);
                     setPage(1);
                   }}
                 />
-              </div>
-
-              {timeRange === "custom" ? (
-                <div className="flex flex-wrap items-center gap-2">
-                  <label className="flex items-center gap-1.5 text-xs text-[#6e6e73]">
-                    <span>开始时间</span>
-                    <Input
-                      type="datetime-local"
-                      aria-label="开始时间"
-                      className="w-44"
-                      value={customFrom}
-                      onChange={(event) => {
-                        setCustomFrom(event.currentTarget.value);
-                        setPage(1);
-                      }}
-                    />
-                  </label>
-                  <label className="flex items-center gap-1.5 text-xs text-[#6e6e73]">
-                    <span>结束时间</span>
-                    <Input
-                      type="datetime-local"
-                      aria-label="结束时间"
-                      className="w-44"
-                      value={customTo}
-                      onChange={(event) => {
-                        setCustomTo(event.currentTarget.value);
-                        setPage(1);
-                      }}
-                    />
-                  </label>
-                </div>
-              ) : null}
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-[#6e6e73]">
+                <span>结束时间</span>
+                <Input
+                  type="datetime-local"
+                  aria-label="结束时间"
+                  className="w-44"
+                  value={customTo}
+                  onChange={(event) => {
+                    setCustomTo(event.currentTarget.value);
+                    setPage(1);
+                  }}
+                />
+              </label>
             </div>
           ) : null}
         </div>
@@ -942,37 +917,23 @@ export function RequestLogDialog({
                   <span className="text-[11px] text-[#73767d] shrink-0 hidden sm:inline">按筛选范围统计</span>
                 )}
               </div>
-              <div className="flex items-center gap-1.5 shrink-0">
+              <div className="flex items-center gap-2 shrink-0">
                 {!overviewCollapsed ? (
-                  <>
-                    {showStats ? (
-                      <Select
-                        aria-label="统计分组"
-                        className="w-32"
-                        getPopupContainer={() => container ?? document.body}
-                        optionList={[
-                          { label: "按实际模型统计", value: "model" },
-                          { label: "按供应商统计", value: "provider" },
-                          { label: "按状态统计", value: "status" },
-                          { label: "按协议统计", value: "protocol" },
-                          { label: "按请求类型统计", value: "request_kind" },
-                          { label: "按会话统计", value: "session" },
-                        ]}
-                        value={groupBy}
-                        onChange={(value) => setGroupBy(String(value))}
-                      />
-                    ) : null}
-                    <AntButton
-                      size="small"
-                      type={showStats ? "primary" : "default"}
-                      icon={showStats ? <IconChevronUp size={13} aria-hidden="true" /> : <IconChevronDown size={13} aria-hidden="true" />}
-                      onClick={() => setShowStats((prev) => !prev)}
-                      aria-expanded={showStats}
-                      className="text-xs"
-                    >
-                      {showStats ? "收起看板" : "展开统计与趋势"}
-                    </AntButton>
-                  </>
+                  <Select
+                    aria-label="统计分组"
+                    className="w-32"
+                    getPopupContainer={() => container ?? document.body}
+                    optionList={[
+                      { label: "按实际模型统计", value: "model" },
+                      { label: "按供应商统计", value: "provider" },
+                      { label: "按状态统计", value: "status" },
+                      { label: "按协议统计", value: "protocol" },
+                      { label: "按请求类型统计", value: "request_kind" },
+                      { label: "按会话统计", value: "session" },
+                    ]}
+                    value={groupBy}
+                    onChange={(value) => setGroupBy(String(value))}
+                  />
                 ) : null}
                 <AntButton
                   size="small"
@@ -981,7 +942,7 @@ export function RequestLogDialog({
                   onClick={toggleOverviewCollapsed}
                   aria-expanded={!overviewCollapsed}
                   className="text-xs text-[#6e6e73] hover:text-[#1d1d1f]"
-                  title={overviewCollapsed ? "展开概览面板" : "收起概览面板以扩大列表区域"}
+                  title={overviewCollapsed ? "展开概览" : "收起概览以扩大列表区域"}
                 >
                   {overviewCollapsed ? "展开概览" : "收起概览"}
                 </AntButton>
@@ -1001,9 +962,6 @@ export function RequestLogDialog({
                         <span className="text-[10px] text-[#8e8e93]">条</span>
                       </div>
                     </div>
-                    <span className="text-[10px] text-[#8e8e93] truncate">
-                      {loading ? "列表加载中" : `当前显示 ${firstVisible.toLocaleString()}–${lastVisible.toLocaleString()} 条`}
-                    </span>
                   </div>
                   <div className="request-log-metric">
                     <div className="flex items-baseline justify-between gap-1">
@@ -1051,145 +1009,143 @@ export function RequestLogDialog({
                   </div>
                 </div>
 
-                {showStats ? (
-                  <div className="flex flex-col gap-2 rounded-lg border border-black/8 bg-[#fafafa] p-2.5 text-xs">
-                    <div className="flex flex-wrap items-center justify-between gap-1 text-[#6e6e73]">
-                      <div className="flex items-center gap-1.5 font-medium text-[#1d1d1f]">
-                        <span>趋势与分组统计</span>
-                        <span className="text-[10px] font-normal text-[#8e8e93]">
-                          · 成功率包含失败、未完成和中断请求
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-[#8e8e93]">
-                        {new Date(stats.fromUnixMs).toLocaleString()} 至 {new Date(stats.toUnixMs).toLocaleString()}（不含结束时间）
-                        {stats.databaseBytes != null ? ` · 存储约 ${((stats.databaseBytes + (stats.walBytes ?? 0)) / 1_048_576).toFixed(1)} MiB` : ""}
+                <div className="flex flex-col gap-2 rounded-lg border border-black/8 bg-[#fafafa] p-2.5 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-1 text-[#6e6e73]">
+                    <div className="flex items-center gap-1.5 font-medium text-[#1d1d1f]">
+                      <span>趋势与分组统计</span>
+                      <span className="text-[10px] font-normal text-[#8e8e93]">
+                        · 成功率包含失败、未完成和中断请求
                       </span>
                     </div>
+                    <span className="text-[10px] text-[#8e8e93]">
+                      {new Date(stats.fromUnixMs).toLocaleString()} 至 {new Date(stats.toUnixMs).toLocaleString()}（不含结束时间）
+                      {stats.databaseBytes != null ? ` · 存储约 ${((stats.databaseBytes + (stats.walBytes ?? 0)) / 1_048_576).toFixed(1)} MiB` : ""}
+                    </span>
+                  </div>
 
-                    <div className="grid grid-cols-2 gap-3 max-[820px]:grid-cols-1">
-                      {/* 时间趋势卡片 */}
-                      <div className="flex flex-col overflow-hidden rounded-lg border border-black/6 bg-white shadow-2xs">
-                        <div className="flex items-center justify-between border-b border-black/6 bg-[#f8f8fa] px-3 py-1.5">
-                          <span className="text-[11px] font-semibold text-[#1d1d1f]">
-                            {stats.bucketMs === 3_600_000 ? "每小时" : "每天"}趋势
-                          </span>
-                          <span className="text-[10px] text-[#8e8e93]">
-                            UTC 划分，本地时间显示
-                          </span>
-                        </div>
-                        <div className="max-h-36 overflow-auto">
-                          <table className="w-full text-left text-[11px]">
-                            <thead className="sticky top-0 z-[1] bg-[#f8f8fa] text-[10px] font-medium text-[#6e6e73] shadow-[0_1px_0_rgba(0,0,0,0.06)]">
+                  <div className="grid grid-cols-2 gap-3 max-[820px]:grid-cols-1">
+                    {/* 时间趋势卡片 */}
+                    <div className="flex flex-col overflow-hidden rounded-lg border border-black/6 bg-white shadow-2xs">
+                      <div className="flex items-center justify-between border-b border-black/6 bg-[#f8f8fa] px-3 py-1.5">
+                        <span className="text-[11px] font-semibold text-[#1d1d1f]">
+                          {stats.bucketMs === 3_600_000 ? "每小时" : "每天"}趋势
+                        </span>
+                        <span className="text-[10px] text-[#8e8e93]">
+                          UTC 划分，本地时间显示
+                        </span>
+                      </div>
+                      <div className="max-h-36 overflow-auto">
+                        <table className="w-full text-left text-[11px]">
+                          <thead className="sticky top-0 z-[1] bg-[#f8f8fa] text-[10px] font-medium text-[#6e6e73] shadow-[0_1px_0_rgba(0,0,0,0.06)]">
+                            <tr>
+                              <th className="py-1.5 px-2.5 font-medium">时间</th>
+                              <th className="py-1.5 px-2.5 text-right font-medium">请求数</th>
+                              <th className="py-1.5 px-2.5 text-right font-medium">Token</th>
+                              <th className="py-1.5 px-2.5 text-right font-medium">平均耗时</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-black/4 font-mono">
+                            {stats.trend.length === 0 ? (
                               <tr>
-                                <th className="py-1.5 px-2.5 font-medium">时间</th>
-                                <th className="py-1.5 px-2.5 text-right font-medium">请求数</th>
-                                <th className="py-1.5 px-2.5 text-right font-medium">Token</th>
-                                <th className="py-1.5 px-2.5 text-right font-medium">平均耗时</th>
+                                <td colSpan={4} className="py-4 text-center text-xs text-[#8e8e93] font-sans">
+                                  所选时间范围暂无趋势数据
+                                </td>
                               </tr>
-                            </thead>
-                            <tbody className="divide-y divide-black/4 font-mono">
-                              {stats.trend.length === 0 ? (
-                                <tr>
-                                  <td colSpan={4} className="py-4 text-center text-xs text-[#8e8e93] font-sans">
-                                    所选时间范围暂无趋势数据
+                            ) : (
+                              stats.trend.map((bucket) => (
+                                <tr key={bucket.timestampUnixMs} className="transition-colors hover:bg-blue-50/30">
+                                  <td className="py-1 px-2.5 whitespace-nowrap text-[#1d1d1f]">
+                                    {new Date(bucket.timestampUnixMs).toLocaleString(undefined, {
+                                      month: "2-digit",
+                                      day: "2-digit",
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    })}
+                                  </td>
+                                  <td className="py-1 px-2.5 text-right font-semibold text-[#1d1d1f] tabular-nums">
+                                    {bucket.total.toLocaleString()}
+                                  </td>
+                                  <td className="py-1 px-2.5 text-right text-[#48484a] tabular-nums">
+                                    {formatTokens(bucket.totalTokensSum)}
+                                  </td>
+                                  <td className="py-1 px-2.5 text-right text-[#48484a] tabular-nums">
+                                    {formatDuration(bucket.avgDuration)}
                                   </td>
                                 </tr>
-                              ) : (
-                                stats.trend.map((bucket) => (
-                                  <tr key={bucket.timestampUnixMs} className="transition-colors hover:bg-blue-50/30">
-                                    <td className="py-1 px-2.5 whitespace-nowrap text-[#1d1d1f]">
-                                      {new Date(bucket.timestampUnixMs).toLocaleString(undefined, {
-                                        month: "2-digit",
-                                        day: "2-digit",
-                                        hour: "2-digit",
-                                        minute: "2-digit",
-                                      })}
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+
+                    {/* 分组统计卡片 */}
+                    <div className="flex flex-col overflow-hidden rounded-lg border border-black/6 bg-white shadow-2xs">
+                      <div className="flex items-center justify-between border-b border-black/6 bg-[#f8f8fa] px-3 py-1.5">
+                        <span className="text-[11px] font-semibold text-[#1d1d1f]">
+                          {groupByLabels[groupBy] || "所选维度"}统计
+                        </span>
+                        <span className="text-[10px] text-[#8e8e93]">
+                          {stats.groupsTruncated ? "最多展示 50 组" : `共 ${stats.groups.length} 组`}
+                        </span>
+                      </div>
+                      <div className="max-h-36 overflow-auto">
+                        <table className="w-full text-left text-[11px]">
+                          <thead className="sticky top-0 z-[1] bg-[#f8f8fa] text-[10px] font-medium text-[#6e6e73] shadow-[0_1px_0_rgba(0,0,0,0.06)]">
+                            <tr>
+                              <th className="py-1.5 px-2.5 font-medium">分组</th>
+                              <th className="py-1.5 px-2.5 text-right font-medium">请求数</th>
+                              <th className="py-1.5 px-2.5 text-right font-medium">Token</th>
+                              <th className="py-1.5 px-2.5 text-right font-medium">成功率</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-black/4 font-mono">
+                            {stats.groups.length === 0 ? (
+                              <tr>
+                                <td colSpan={4} className="py-4 text-center text-xs text-[#8e8e93] font-sans">
+                                  所选分组暂无数据
+                                </td>
+                              </tr>
+                            ) : (
+                              stats.groups.map((group) => {
+                                const rate = group.successRate;
+                                const label = (groupBy === "provider"
+                                  ? providerOptions.find((option) => option.value === group.key)?.label
+                                  : undefined) || group.key || "未知";
+                                return (
+                                  <tr key={group.key} className="transition-colors hover:bg-blue-50/30">
+                                    <td className="py-1 px-2.5 text-[#1d1d1f] max-w-[150px] truncate" title={label}>
+                                      {label}
                                     </td>
                                     <td className="py-1 px-2.5 text-right font-semibold text-[#1d1d1f] tabular-nums">
-                                      {bucket.total.toLocaleString()}
+                                      {group.total.toLocaleString()}
                                     </td>
                                     <td className="py-1 px-2.5 text-right text-[#48484a] tabular-nums">
-                                      {formatTokens(bucket.totalTokensSum)}
+                                      {formatTokens(group.totalTokensSum)}
                                     </td>
-                                    <td className="py-1 px-2.5 text-right text-[#48484a] tabular-nums">
-                                      {formatDuration(bucket.avgDuration)}
+                                    <td className="py-1 px-2.5 text-right tabular-nums">
+                                      <span
+                                        className={`font-semibold ${
+                                          rate != null && rate >= 95
+                                            ? "text-emerald-600"
+                                            : rate != null && rate >= 80
+                                              ? "text-amber-600"
+                                              : "text-rose-600"
+                                        }`}
+                                      >
+                                        {rate != null ? `${rate.toFixed(1)}%` : "—"}
+                                      </span>
                                     </td>
                                   </tr>
-                                ))
-                              )}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-
-                      {/* 分组统计卡片 */}
-                      <div className="flex flex-col overflow-hidden rounded-lg border border-black/6 bg-white shadow-2xs">
-                        <div className="flex items-center justify-between border-b border-black/6 bg-[#f8f8fa] px-3 py-1.5">
-                          <span className="text-[11px] font-semibold text-[#1d1d1f]">
-                            {groupByLabels[groupBy] || "所选维度"}统计
-                          </span>
-                          <span className="text-[10px] text-[#8e8e93]">
-                            {stats.groupsTruncated ? "最多展示 50 组" : `共 ${stats.groups.length} 组`}
-                          </span>
-                        </div>
-                        <div className="max-h-36 overflow-auto">
-                          <table className="w-full text-left text-[11px]">
-                            <thead className="sticky top-0 z-[1] bg-[#f8f8fa] text-[10px] font-medium text-[#6e6e73] shadow-[0_1px_0_rgba(0,0,0,0.06)]">
-                              <tr>
-                                <th className="py-1.5 px-2.5 font-medium">分组</th>
-                                <th className="py-1.5 px-2.5 text-right font-medium">请求数</th>
-                                <th className="py-1.5 px-2.5 text-right font-medium">Token</th>
-                                <th className="py-1.5 px-2.5 text-right font-medium">成功率</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-black/4 font-mono">
-                              {stats.groups.length === 0 ? (
-                                <tr>
-                                  <td colSpan={4} className="py-4 text-center text-xs text-[#8e8e93] font-sans">
-                                    所选分组暂无数据
-                                  </td>
-                                </tr>
-                              ) : (
-                                stats.groups.map((group) => {
-                                  const rate = group.successRate;
-                                  const label = (groupBy === "provider"
-                                    ? providerOptions.find((option) => option.value === group.key)?.label
-                                    : undefined) || group.key || "未知";
-                                  return (
-                                    <tr key={group.key} className="transition-colors hover:bg-blue-50/30">
-                                      <td className="py-1 px-2.5 text-[#1d1d1f] max-w-[150px] truncate" title={label}>
-                                        {label}
-                                      </td>
-                                      <td className="py-1 px-2.5 text-right font-semibold text-[#1d1d1f] tabular-nums">
-                                        {group.total.toLocaleString()}
-                                      </td>
-                                      <td className="py-1 px-2.5 text-right text-[#48484a] tabular-nums">
-                                        {formatTokens(group.totalTokensSum)}
-                                      </td>
-                                      <td className="py-1 px-2.5 text-right tabular-nums">
-                                        <span
-                                          className={`font-semibold ${
-                                            rate != null && rate >= 95
-                                              ? "text-emerald-600"
-                                              : rate != null && rate >= 80
-                                                ? "text-amber-600"
-                                                : "text-rose-600"
-                                          }`}
-                                        >
-                                          {rate != null ? `${rate.toFixed(1)}%` : "—"}
-                                        </span>
-                                      </td>
-                                    </tr>
-                                  );
-                                })
-                              )}
-                            </tbody>
-                          </table>
-                        </div>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
                       </div>
                     </div>
                   </div>
-                ) : null}
+                </div>
               </>
             ) : null}
           </div>
@@ -1263,6 +1219,9 @@ export function RequestLogDialog({
    const presentation = statusPresentation[item.status] ?? { label: item.status || "未知", variant: "secondary" as const };
    const hasUpstreamError = [item.statusCode, item.upstreamStatusCode].some((statusCode) => statusCode != null && (statusCode < 200 || statusCode >= 300));
    const upstreamErrorSummary = item.upstreamErrorSummary || item.errorCode || "上游未提供具体错误信息";
+   const upstreamErrorPreview = upstreamErrorSummary.length > 512
+     ? `${upstreamErrorSummary.slice(0, 512)}…（完整内容见详情）`
+     : upstreamErrorSummary;
    const usageUnavailable = usageUnavailablePresentation(item.usageUnavailableReason);
    const cacheHitRate = formatCacheHitRate(item.inputTokens, item.cachedInputTokens);
    const cancellation = cancellationPresentation(item);
@@ -1370,7 +1329,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                                 <Tooltip
                                   content={(
                                     <span className="block max-w-[420px] break-words whitespace-normal">
-                                      {upstreamErrorSummary}
+                                      {upstreamErrorPreview}
                                     </span>
                                   )}
                                   getPopupContainer={() => container ?? document.body}
@@ -1380,7 +1339,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                                   <Button
                                     size="xs"
                                     variant="ghost"
-                                    aria-label={`查看上游错误信息：${upstreamErrorSummary}`}
+                                    aria-label="查看上游错误信息"
                                   >
                                     <IconQuestionMark size={12} aria-hidden="true" />
                                   </Button>
@@ -1865,10 +1824,10 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                     ) : null}
                     {selectedItem.upstreamErrorSummary ? (
                       <div>
-                        <span className="text-[11px] font-medium text-red-800">上游错误：</span>
-                        <p className="m-0 mt-1 rounded-lg bg-white p-2 text-[11px] leading-relaxed text-red-900 break-words">
+                        <span className="text-[11px] font-medium text-red-800">上游错误内容（已脱敏）：</span>
+                        <pre className="m-0 mt-1 max-h-80 overflow-auto whitespace-pre-wrap rounded-lg bg-white p-2 text-[11px] leading-relaxed text-red-900 break-words">
                           {selectedItem.upstreamErrorSummary}
-                        </p>
+                        </pre>
                       </div>
                     ) : null}
                     {(() => {

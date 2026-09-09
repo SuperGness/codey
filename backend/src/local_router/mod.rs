@@ -62,7 +62,7 @@ pub(crate) const CODEX_AUTO_REVIEW_MODEL: &str = "codex-auto-review";
 
 const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
-const MAX_UPSTREAM_ERROR_BYTES: usize = 64 * 1024;
+const MAX_UPSTREAM_ERROR_BYTES: usize = crate::route_request_log::MAX_LOG_ERROR_BYTES;
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_UPSTREAM_SSE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 const RETAINED_RESPONSE_BUDGET_BYTES: usize = 256 * 1024 * 1024;

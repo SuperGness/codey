@@ -23,6 +23,7 @@ use crate::config::{RouteRequestLogBackend, RouteRequestLogConfig};
 
 const SCHEMA_VERSION: u8 = 6;
 const MAX_LOG_STRING_BYTES: usize = 512;
+pub(crate) const MAX_LOG_ERROR_BYTES: usize = 64 * 1024;
 const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 3;
 const PARTS_PER_MILLION: u64 = 1_000_000;
 const NDJSON_FILE_NAME: &str = "route-requests.ndjson";
@@ -994,7 +995,15 @@ impl RouteRequestLogProbe {
         self.shield(|| {
             let mut entry = lock_unpoisoned(&self.shared.entry);
             if entry.upstream_error_summary.is_none() {
-                let summary = bounded_string(summary);
+                let mut end = summary.len().min(MAX_LOG_ERROR_BYTES);
+                while !summary.is_char_boundary(end) {
+                    end -= 1;
+                }
+                let at_limit = summary.len() >= MAX_LOG_ERROR_BYTES;
+                let mut summary = summary[..end].to_string();
+                if at_limit {
+                    summary.push_str("\n[错误内容达到记录上限，内容可能不完整]");
+                }
                 if !summary.is_empty() {
                     entry.upstream_error_summary = Some(summary);
                 }
@@ -3814,7 +3823,9 @@ mod tests {
         probe.mark_upstream_send(UpstreamTransport::HttpSse);
         probe.mark_first_upstream_data(FirstByteSource::UpstreamHttpBody);
         probe.mark_first_downstream_content();
-        probe.mark_upstream_error_summary("provider detail");
+        let original_error = format!("{}末尾", "错".repeat(MAX_LOG_ERROR_BYTES / 3));
+        probe.mark_upstream_error_summary(&original_error);
+        probe.mark_upstream_error_summary("later classification must not replace the original");
         probe.observe_event(&serde_json::json!({
             "type":"response.completed",
             "response":{"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}
@@ -3834,7 +3845,13 @@ mod tests {
         assert!(!queued.entry.codex_session_is_parent);
         assert_eq!(
             queued.entry.upstream_error_summary.as_deref(),
-            Some("provider detail")
+            Some(
+                format!(
+                    "{}\n[错误内容达到记录上限，内容可能不完整]",
+                    "错".repeat(MAX_LOG_ERROR_BYTES / 3),
+                )
+                .as_str()
+            )
         );
         assert!(receiver.try_recv().is_err());
     }

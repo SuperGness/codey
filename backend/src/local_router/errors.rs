@@ -69,6 +69,20 @@ pub(crate) fn sanitize_upstream_error_text(
     route: &RouteTarget,
     max_chars: usize,
 ) -> Option<String> {
+    let sanitized = redact_upstream_error_text(value, route);
+    let collapsed = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let mut chars = collapsed.chars();
+    let mut bounded = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        bounded.push('…');
+    }
+    Some(bounded)
+}
+
+pub(crate) fn redact_upstream_error_text(value: &str, route: &RouteTarget) -> String {
     let mut sanitized = value.to_string();
     if let Ok(headers) = route.upstream_headers.as_ref() {
         for secret in headers.values().filter_map(|value| value.to_str().ok()) {
@@ -85,16 +99,7 @@ pub(crate) fn sanitize_upstream_error_text(
             }
         }
     }
-    let collapsed = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.is_empty() {
-        return None;
-    }
-    let mut chars = collapsed.chars();
-    let mut bounded = chars.by_ref().take(max_chars).collect::<String>();
-    if chars.next().is_some() {
-        bounded.push('…');
-    }
-    Some(bounded)
+    sanitized
 }
 
 pub(crate) fn upstream_error_summary(value: &Value, route: &RouteTarget) -> UpstreamErrorSummary {
@@ -144,8 +149,8 @@ fn safe_upstream_error_identifier(value: &str) -> Option<String> {
 }
 
 fn upstream_error_log_detail(summary: &UpstreamErrorSummary) -> String {
-    // Provider messages can echo prompts, images or credentials unknown to
-    // Codey. Persist classification only; detailed messages stay in the reply.
+    // General diagnostic logs retain classification only. Request logs also
+    // retain the bounded upstream error body after route credential redaction.
     format!(
         "type={}; code={}",
         summary.error_type.as_deref().unwrap_or("unknown"),
@@ -215,7 +220,12 @@ where
         .unwrap_or_default();
     let detail = upstream_error_detail(&summary);
     if let Some(probe) = probe.as_ref() {
-        probe.mark_upstream_error_summary(&upstream_error_log_detail(&summary));
+        let mut original =
+            redact_upstream_error_text(&String::from_utf8_lossy(&body), &resolved.route);
+        if body.len() == MAX_UPSTREAM_ERROR_BYTES {
+            original.push_str("\n[上游错误正文达到读取上限，内容可能不完整]");
+        }
+        probe.mark_upstream_error_summary(&original);
     }
     let mut message = format!(
         "Codey 线路「{}」请求模型 {} 时，上游返回 HTTP {status}",

@@ -4995,6 +4995,11 @@ fn upstream_error_summary_extracts_context_and_redacts_route_credentials() {
     let (config, provider_id, _) = router_config("https://relay.example/v1".into());
     let snapshot = RouterSnapshot::from_config(&config);
     let route = snapshot.routes.get(&provider_id).unwrap();
+    let original = "  <html>\n  gateway error: Bearer sk-upstream\n</html>\n";
+    assert_eq!(
+        redact_upstream_error_text(original, route),
+        "  <html>\n  gateway error: ***\n</html>\n"
+    );
     let summary = upstream_error_summary(
         &json!({
             "error": {
@@ -5059,12 +5064,18 @@ fn websocket_failure_event_keeps_provider_codes_and_adds_route_context() {
 
 #[tokio::test]
 async fn native_responses_upstream_http_error_is_preserved_as_safe_text() {
+    let logs = tempfile::tempdir().unwrap();
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();
+    let original = format!(
+        "  {{\n  \"error\":{{\"message\":\"image exceeds the provider limit for sk-upstream\",\"type\":\"invalid_request_error\",\"code\":\"image_too_large\"}},\n  \"detail\":\"{}\"\n}}\n",
+        "供应商诊断 ".repeat(100)
+    );
+    let expected = original.replace("sk-upstream", "***");
     let upstream_task = tokio::spawn(async move {
         let (mut stream, _) = upstream.accept().await.unwrap();
         let request = read_http_request(&mut stream).await.unwrap();
-        let body = r#"{"error":{"message":"image exceeds the provider limit for sk-upstream","type":"invalid_request_error","code":"image_too_large"}}"#;
+        let body = original;
         stream
             .write_all(
                 format!(
@@ -5077,9 +5088,18 @@ async fn native_responses_upstream_http_error_is_preserved_as_safe_text() {
             .unwrap();
         request.path
     });
-    let (config, provider_id, model) =
+    let (mut config, provider_id, model) =
         router_config(format!("http://{upstream_address}/v1/responses"));
-    let router = LocalRouter::start(&config).await.unwrap();
+    config.route_request_log.enabled = true;
+    config.route_request_log.backend = crate::config::RouteRequestLogBackend::Sqlite;
+    let router = LocalRouter::start_with_logger(
+        &config,
+        Arc::new(RouteRequestLogController::with_root(
+            logs.path().to_path_buf(),
+        )),
+    )
+    .await
+    .unwrap();
     let endpoint = router.endpoint();
 
     let response = reqwest::Client::new()
@@ -5114,6 +5134,17 @@ async fn native_responses_upstream_http_error_is_preserved_as_safe_text() {
     assert!(!body.contains("sk-upstream"));
     assert_eq!(upstream_task.await.unwrap(), "/v1/responses");
     router.stop().await.unwrap();
+    let page = crate::route_request_log::query_route_request_logs(
+        logs.path(),
+        crate::config::RouteRequestLogBackend::Sqlite,
+        crate::route_request_log::RouteRequestLogQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(
+        page.items[0].upstream_error_summary.as_deref(),
+        Some(expected.as_str())
+    );
 }
 
 #[tokio::test]
@@ -7086,6 +7117,91 @@ async fn router_rejects_unauthorized_request_before_reading_its_body() {
     assert!(response.starts_with("HTTP/1.1 401 Unauthorized\r\n"));
     assert!(response.contains("invalid_router_token"));
     router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn request_log_excludes_non_model_paths_but_keeps_rejected_model_requests() {
+    let logs = tempfile::tempdir().unwrap();
+    let (mut config, _, _) = router_config("http://127.0.0.1:9/v1".to_string());
+    config.route_request_log.enabled = true;
+    config.route_request_log.backend = RouteRequestLogBackend::Sqlite;
+    let router = LocalRouter::start_with_logger(
+        &config,
+        Arc::new(RouteRequestLogController::with_root(
+            logs.path().to_path_buf(),
+        )),
+    )
+    .await
+    .unwrap();
+    let endpoint = router.endpoint();
+    let root = endpoint.base_url.trim_end_matches("/v1");
+    let client = reqwest::Client::new();
+
+    for path in [
+        "/favicon.ico",
+        "/apple-touch-icon.png",
+        "/robots.txt",
+        "/.well-known/appspecific/com.chrome.devtools.json",
+        "/",
+        "/codey/missing.js",
+    ] {
+        for authenticated in [false, true] {
+            let mut request = client.get(format!("{root}{path}"));
+            if authenticated {
+                request = request.bearer_auth(&endpoint.token);
+            }
+            let response = request.send().await.unwrap();
+            assert_eq!(
+                response.status().as_u16(),
+                if authenticated { 404 } else { 401 }
+            );
+        }
+    }
+    let model_paths = [
+        "/v1/models",
+        "/models",
+        "/v1/responses",
+        "/responses",
+        "/v1/images/generations",
+        "/images/generations",
+        "/v1/responses/compact",
+        "/responses/compact",
+        "/v1/v1/responses/compact",
+        "/codex/v1/responses/compact",
+    ];
+    for path in model_paths {
+        let response = client.post(format!("{root}{path}")).send().await.unwrap();
+        assert_eq!(response.status().as_u16(), 401);
+    }
+    let response = client
+        .get(format!("{root}/v1/responses"))
+        .bearer_auth(&endpoint.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 404);
+    router.stop().await.unwrap();
+    let page = crate::route_request_log::query_route_request_logs(
+        logs.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(page.total, (model_paths.len() + 1) as u64);
+    assert_eq!(
+        page.items
+            .iter()
+            .filter(|entry| entry.error_code.as_deref() == Some("invalid_router_token"))
+            .count(),
+        model_paths.len()
+    );
+    assert_eq!(
+        page.items
+            .iter()
+            .filter(|entry| entry.error_code.as_deref() == Some("not_found"))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

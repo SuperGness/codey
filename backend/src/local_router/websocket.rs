@@ -483,6 +483,16 @@ impl WebSocketResponsesDownstream {
                     let mut raw_json_text = raw_json_text;
                     for mut event in events {
                         if responses_event_is_failure(&event) {
+                            if let Some(probe) = probe {
+                                let original = raw_json_text
+                                    .as_deref()
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| event.to_string());
+                                probe.mark_upstream_error_summary(&redact_upstream_error_text(
+                                    &original,
+                                    route,
+                                ));
+                            }
                             let error_summary = annotate_upstream_websocket_failure(
                                 &mut event,
                                 route,
