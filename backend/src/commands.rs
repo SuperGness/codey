@@ -2198,7 +2198,10 @@ pub(super) async fn hot_reload_runtime_subagent_config(
         );
     }
 
-    let runtime_config = runtime.subagent_reconcile_config(&current_config);
+    let runtime_config = match runtime.subagent_reconcile_config(&current_config) {
+        Ok(config) => config,
+        Err(error) => return SubagentHotReloadOutcome::failed(format!("{error:#}")),
+    };
     let result = tokio::task::spawn_blocking(move || {
         reconcile_runtime_subagent_roles(&runtime_config).map_err(|error| format!("{error:#}"))
     })
