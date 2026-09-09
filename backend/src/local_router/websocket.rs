@@ -489,8 +489,7 @@ impl WebSocketResponsesDownstream {
                                     .map(str::to_owned)
                                     .unwrap_or_else(|| event.to_string());
                                 probe.mark_upstream_error_summary(&redact_upstream_error_text(
-                                    &original,
-                                    route,
+                                    &original, route,
                                 ));
                             }
                             let error_summary = annotate_upstream_websocket_failure(
