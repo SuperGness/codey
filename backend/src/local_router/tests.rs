@@ -4858,31 +4858,54 @@ fn request_log_adapters_preserve_cache_write_usage_and_missing_values() {
                         "prompt_tokens_details":{"cached_tokens":3,"cache_write_tokens":writes}}
                 }), "test-model").unwrap()
             } else {
-                anthropic_message_to_responses_body(&json!({
-                    "content":[{"type":"text","text":"ok"}], "stop_reason":"end_turn",
-                    "usage":{"input_tokens":10,"output_tokens":2,
-                        "cache_read_input_tokens":3,"cache_creation_input_tokens":writes}
-                }), "test-model").unwrap()
+                anthropic_message_to_responses_body(
+                    &json!({
+                        "content":[{"type":"text","text":"ok"}], "stop_reason":"end_turn",
+                        "usage":{"input_tokens":10,"output_tokens":2,
+                            "cache_read_input_tokens":3,"cache_creation_input_tokens":writes}
+                    }),
+                    "test-model",
+                )
+                .unwrap()
             };
             let details = &response["usage"]["input_tokens_details"];
-            assert_eq!(details.get("cache_write_tokens").and_then(Value::as_u64), writes);
-            assert_eq!(details.get("cache_write_tokens").is_some(), writes.is_some());
+            assert_eq!(
+                details.get("cache_write_tokens").and_then(Value::as_u64),
+                writes
+            );
+            assert_eq!(
+                details.get("cache_write_tokens").is_some(),
+                writes.is_some()
+            );
             let probe = RouteRequestLogProbe::detached_test_probe();
             let mut projector = RequestLogMetadataProjector::default();
-            let event = format!("data: {}\n\n", json!({"type":"response.completed","response":response}));
+            let event = format!(
+                "data: {}\n\n",
+                json!({"type":"response.completed","response":response})
+            );
             for chunk in event.as_bytes().chunks(3) {
                 projector.observe(chunk, &probe, Instant::now()).unwrap();
             }
-            assert_eq!(probe.token_usage_for_test().cache_creation_input_tokens, writes);
+            assert_eq!(
+                probe.token_usage_for_test().cache_creation_input_tokens,
+                writes
+            );
         }
     }
-    for field in ["cache_creation_input_tokens", "cache_creation_tokens", "cache_write_input_tokens"] {
+    for field in [
+        "cache_creation_input_tokens",
+        "cache_creation_tokens",
+        "cache_write_input_tokens",
+    ] {
         let mut usage = json!({"input_tokens":20,"output_tokens":2});
         usage[field] = json!(7);
         let converted = sse_chat::chat_usage_to_responses_usage(&usage);
         assert_eq!(converted["input_tokens_details"]["cache_write_tokens"], 7);
         usage["input_tokens_details"] = json!({"cache_write_tokens":0});
-        assert_eq!(sse_chat::chat_usage_to_responses_usage(&usage)["input_tokens_details"]["cache_write_tokens"], 0);
+        assert_eq!(
+            sse_chat::chat_usage_to_responses_usage(&usage)["input_tokens_details"]["cache_write_tokens"],
+            0
+        );
     }
 }
 
