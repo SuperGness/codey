@@ -330,8 +330,17 @@ impl AppState {
             "/codex-model-catalog" => {
                 let current_config = self.config.read().await.clone();
                 let runtime = self.runtime.lock().await.clone();
+                let current_config = runtime
+                    .as_ref()
+                    .filter(|runtime| {
+                        runtime
+                            .validate_subagent_route_hot_reload(&current_config)
+                            .is_err()
+                    })
+                    .map(|runtime| &runtime.applied_config)
+                    .unwrap_or(&current_config);
                 let catalog_config = model_catalog_config_for_runtime(
-                    &current_config,
+                    current_config,
                     runtime.as_ref().map(|runtime| &runtime.applied_config),
                 )
                 .clone();
@@ -2192,7 +2201,10 @@ pub(super) async fn hot_reload_runtime_subagent_config(
         );
     }
 
-    let runtime_config = runtime.subagent_reconcile_config(&current_config);
+    let runtime_config = match runtime.subagent_reconcile_config(&current_config) {
+        Ok(config) => config,
+        Err(error) => return SubagentHotReloadOutcome::failed(format!("{error:#}")),
+    };
     let result = tokio::task::spawn_blocking(move || {
         reconcile_runtime_subagent_roles(&runtime_config).map_err(|error| format!("{error:#}"))
     })

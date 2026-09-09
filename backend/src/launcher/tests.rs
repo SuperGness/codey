@@ -835,6 +835,7 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
         },
         applied_model_config: RwLock::new(RuntimeModelConfig::from_config(&config)),
         applied_subagent_config: RwLock::new(RuntimeSubagentConfig::from_config(&config)),
+        subagent_route_catalog_installed: false,
         applied_config: config,
         injection_statuses: Arc::new(RwLock::new(Arc::from([]))),
         injection_scripts: cdp::prepare_injection_scripts(false, false, false, &[]),

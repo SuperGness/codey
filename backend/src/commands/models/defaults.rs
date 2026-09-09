@@ -143,8 +143,13 @@ pub(crate) async fn hot_reload_runtime_models(
     if !runtime_supports_current_routes_for_hot_reload(&runtime.applied_config, config) {
         return ModelHotReloadOutcome::default();
     }
-    if config.local_router_enabled {
-        runtime.sync_local_router_routes(config);
+    if config.local_router_enabled
+        && let Err(error) = runtime.sync_local_router_routes(config)
+    {
+        return ModelHotReloadOutcome {
+            error: Some(format!("{error:#}")),
+            ..ModelHotReloadOutcome::default()
+        };
     }
     let expected_catalog = renderer_model_catalog_value(config, model_state);
     let expected_models = expected_catalog

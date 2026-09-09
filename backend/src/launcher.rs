@@ -157,6 +157,7 @@ pub struct CodeyRuntime {
     pub applied_config: CodeyConfig,
     applied_model_config: RwLock<RuntimeModelConfig>,
     applied_subagent_config: RwLock<RuntimeSubagentConfig>,
+    subagent_route_catalog_installed: bool,
     pub injection_statuses: Arc<RwLock<Arc<[cdp::InjectionScriptStatus]>>>,
     injection_scripts: cdp::PreparedInjectionScripts,
     injection_websocket_url: Arc<RwLock<Arc<str>>>,
@@ -397,6 +398,47 @@ fn should_install_codey_model_catalog(
     custom_context: bool,
 ) -> bool {
     (!official_only || custom_context) && catalog_available
+}
+
+fn router_subagent_runtime_config(
+    config: &CodeyConfig,
+    route_catalog_installed: bool,
+) -> Result<CodeyConfig> {
+    let mut runtime = config.clone();
+    if !config.subagent_optimization {
+        return Ok(runtime);
+    }
+    let targets = config.runtime_model_targets();
+    let provider = config.current_provider_id().unwrap_or_default();
+    for (role, selection) in &mut runtime.subagent_roles {
+        if !selection.enabled {
+            continue;
+        }
+        let routed = route_subagent_model(provider, &selection.model, &targets, false);
+        selection.model = if route_catalog_installed {
+            routed
+        } else {
+            let model = native_subagent_model(config, &targets, &routed);
+            // Without a custom catalog Codex validates native slugs before the
+            // router sees the request. Only strip a route when raw-id routing
+            // is unambiguous, including inherited thread route metadata.
+            let mut matching = targets
+                .iter()
+                .filter(|target| model_id::equal(&target.upstream_model, &model));
+            anyhow::ensure!(
+                matching.next().is_some() && matching.next().is_none(),
+                "子代理角色 {role} 的模型 {routed} 无法在内置模型目录模式下安全派发：模型线路不存在或存在同名线路；请补齐 Codex 模型缓存并重启，或只启用一条提供该模型的线路"
+            );
+            model
+        };
+    }
+    if let Some(default) = runtime
+        .subagent_roles
+        .get(crate::config::SUBAGENT_ROLE_DEFAULT)
+    {
+        runtime.subagent_model.clone_from(&default.model);
+    }
+    Ok(runtime)
 }
 
 #[test]
@@ -647,32 +689,17 @@ async fn prepare_codex_startup_state(
     } = startup_catalog;
     let runtime_config_home = home.to_path_buf();
     let runtime_local_router = local_router.clone();
-    let router_route_provider = current_profile.provider_id().to_string();
     let runtime_default_model = runtime_default_model(config, use_official_catalog, &model_state);
     let fast_context_tools = config.fast_context_tools;
     let mut runtime_subagent_config = config.clone();
     runtime_subagent_config.active_profile_id = current_profile.id.clone();
     subagent_policy::reconcile_with_model_state(&mut runtime_subagent_config, Some(&model_state));
-    let route_model_targets = runtime_subagent_config.runtime_model_targets();
-    let builtin_official_catalog =
-        !use_official_catalog && !runtime_subagent_config.has_third_party_route();
+    let runtime_roles_config =
+        router_subagent_runtime_config(&runtime_subagent_config, use_official_catalog)?;
     let subagent_optimization = runtime_subagent_config.subagent_optimization;
-    let subagent_model = route_subagent_model(
-        &router_route_provider,
-        &runtime_subagent_config.subagent_model,
-        &route_model_targets,
-        builtin_official_catalog,
-    );
+    let subagent_model = runtime_roles_config.subagent_model.clone();
     let subagent_reasoning_effort = runtime_subagent_config.subagent_reasoning_effort.clone();
-    let mut subagent_roles = runtime_subagent_config.subagent_roles.clone();
-    for selection in subagent_roles.values_mut() {
-        selection.model = route_subagent_model(
-            &router_route_provider,
-            &selection.model,
-            &route_model_targets,
-            builtin_official_catalog,
-        );
-    }
+    let subagent_roles = runtime_roles_config.subagent_roles.clone();
     let runtime_config = tokio::task::spawn_blocking(move || {
         apply_runtime_router_config(
             &runtime_config_home,
@@ -1566,10 +1593,34 @@ impl CodeyRuntime {
         *self.applied_model_config.write().await = RuntimeModelConfig::from_config(config);
     }
 
-    pub fn sync_local_router_routes(&self, config: &CodeyConfig) {
+    pub(crate) fn validate_subagent_route_hot_reload(&self, config: &CodeyConfig) -> Result<()> {
+        if self.applied_config.local_router_enabled
+            && self.applied_config.subagent_optimization
+            && !self.subagent_route_catalog_installed
+        {
+            // ponytail: raw-ID roles (including running children) pin the route map
+            // until restart; live changes need explicit per-child route identity.
+            let routes = |config: &CodeyConfig| {
+                config
+                    .runtime_model_targets()
+                    .into_iter()
+                    .map(|target| (target.provider_id, target.upstream_model, target.official))
+                    .collect::<std::collections::BTreeSet<_>>()
+            };
+            anyhow::ensure!(
+                routes(&self.applied_config) == routes(config),
+                "当前子代理使用内置模型目录，线路或模型变化需重启 Codex 后生效；已保留当前路由和角色配置"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn sync_local_router_routes(&self, config: &CodeyConfig) -> Result<()> {
+        self.validate_subagent_route_hot_reload(config)?;
         if let Some(local_router) = self.local_router.as_ref() {
             local_router.update_config(config);
         }
+        Ok(())
     }
 
     pub(crate) async fn reconfigure_request_log(
@@ -1613,11 +1664,12 @@ impl CodeyRuntime {
             && self.applied_config.active_profile() == config.active_profile()
     }
 
-    pub(crate) fn subagent_reconcile_config(&self, config: &CodeyConfig) -> CodeyConfig {
+    pub(crate) fn subagent_reconcile_config(&self, config: &CodeyConfig) -> Result<CodeyConfig> {
+        self.validate_subagent_route_hot_reload(config)?;
         if self.applied_config.local_router_enabled {
-            config.clone()
+            router_subagent_runtime_config(config, self.subagent_route_catalog_installed)
         } else {
-            native_subagent_runtime_config(config)
+            Ok(native_subagent_runtime_config(config))
         }
     }
 
@@ -1771,6 +1823,9 @@ impl CodeyRuntime {
                 applied_subagent_config: RwLock::new(RuntimeSubagentConfig::from_config(
                     &runtime_config,
                 )),
+                subagent_route_catalog_installed: runtime_config_overrides
+                    .iter()
+                    .any(|entry| entry.starts_with("model_catalog_json=")),
                 applied_config: runtime_config,
                 injection_statuses,
                 injection_scripts,
@@ -2052,6 +2107,9 @@ async fn restore_runtime_config_after_error(
 
 #[cfg(test)]
 mod gpu_launch_argument_tests;
+
+#[cfg(test)]
+mod subagent_model_tests;
 
 #[cfg(all(test, unix))]
 mod tests;
