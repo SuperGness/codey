@@ -24,7 +24,7 @@ pub struct ProviderProfile {
     pub api_key: String,
     #[serde(default = "default_upstream_protocol")]
     pub upstream_protocol: String,
-    #[serde(default = "default_auth_mode")]
+    #[serde(default)]
     pub auth_mode: String,
     #[serde(default)]
     pub api_key_configured: bool,
@@ -181,6 +181,14 @@ impl ProviderProfile {
             .map(|provider_id| provider_id.trim().to_string())
             .filter(|provider_id| !provider_id.is_empty());
         self.upstream_protocol = normalize_upstream_protocol(&self.upstream_protocol);
+        // 旧配置没有认证类型，仅为无 API Key 的官方端点恢复账号线路。
+        if self.auth_mode.trim().is_empty()
+            && self.api_key.is_empty()
+            && !self.api_key_configured
+            && crate::codex_provider::is_official_base_url(&self.base_url)
+        {
+            self.official_account = true;
+        }
         self.auth_mode = normalize_auth_mode(&self.auth_mode, self.official_account);
         if self.auth_mode == AUTH_MODE_OFFICIAL_ACCOUNT {
             self.official_account = true;
@@ -2287,6 +2295,48 @@ mod tests {
 
         assert!(serialized.get("protocol").is_none());
         assert!(serialized.get("chatCompletionsModels").is_none());
+    }
+
+    #[test]
+    fn legacy_official_route_without_auth_mode_is_normalized_on_load() {
+        let legacy = serde_json::json!({
+            "activeProfileId": "codey_global",
+            "profiles": [{
+                "id": "codey_global",
+                "name": "OpenAI 官方直登",
+                "baseUrl": "https://chatgpt.com/backend-api/codex",
+                "apiKey": ""
+            }]
+        });
+        let loaded = parse_config_contents(&legacy.to_string(), Path::new("config.json")).unwrap();
+        let profile = &loaded.profiles[0];
+        assert!(profile.official_account);
+        assert_eq!(profile.auth_mode, AUTH_MODE_OFFICIAL_ACCOUNT);
+        assert_eq!(profile.upstream_protocol, UPSTREAM_PROTOCOL_OFFICIAL);
+        assert_eq!(profile.short_name, OFFICIAL_ROUTE_SHORT_NAME);
+        assert!(profile.validate().is_ok());
+        assert_eq!(loaded.clone().normalize(), loaded);
+
+        for (field, value) in [
+            ("authMode", serde_json::json!(AUTH_MODE_API_KEY)),
+            ("apiKey", serde_json::json!("sk-test")),
+            ("apiKeyConfigured", serde_json::json!(true)),
+            ("baseUrl", serde_json::json!("https://api.openai.com/v1")),
+            (
+                "baseUrl",
+                serde_json::json!("https://chatgpt.com.relay.example/backend-api/codex"),
+            ),
+            (
+                "baseUrl",
+                serde_json::json!("http://chatgpt.com/backend-api/codex"),
+            ),
+        ] {
+            let mut config = legacy.clone();
+            config["profiles"][0][field] = value;
+            let loaded =
+                parse_config_contents(&config.to_string(), Path::new("config.json")).unwrap();
+            assert!(!loaded.profiles[0].official_account, "{field}");
+        }
     }
 
     #[test]

@@ -1209,6 +1209,74 @@ async fn declared_responses_route_reuses_upstream_websocket() {
     router.stop().await.unwrap();
 }
 
+#[tokio::test]
+async fn websocket_service_tier_survives_forwarding_and_connection_reuse() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (stream, _) = upstream.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        for tier in ["priority", "default", "priority"] {
+            let message = socket.next().await.unwrap().unwrap();
+            let WebSocketMessage::Text(text) = message else {
+                panic!("expected response.create text message");
+            };
+            let request: Value = serde_json::from_str(text.as_str()).unwrap();
+            assert_eq!(request["type"], "response.create");
+            assert_eq!(request["service_tier"], tier);
+            socket
+                .send(WebSocketMessage::Text(
+                    json!({
+                        "type":"response.completed",
+                        "response":{
+                            "id":format!("resp-{tier}"),
+                            "status":"completed",
+                            "service_tier":"default",
+                            "output":[],
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        }
+    });
+    let (mut config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
+    config.profiles[0].supports_websockets = true;
+    let router = LocalRouter::start(&config).await.unwrap();
+    let mut socket = connect_router_websocket(&router.endpoint()).await;
+    for tier in ["priority", "default", "priority"] {
+        socket
+            .send(WebSocketMessage::Text(
+                json!({
+                    "type":"response.create",
+                    "model":model_alias(&provider_id, &model),
+                    "input":"hello",
+                    "service_tier":tier,
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let WebSocketMessage::Text(text) = message else {
+            panic!("expected response.completed text message");
+        };
+        let event: Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(event["type"], "response.completed");
+        assert_eq!(event["response"]["service_tier"], "default");
+    }
+    socket.close(None).await.unwrap();
+    upstream_task.await.unwrap();
+    router.stop().await.unwrap();
+}
+
 #[allow(clippy::result_large_err)]
 #[tokio::test]
 async fn subagents_use_isolated_upstream_websockets() {

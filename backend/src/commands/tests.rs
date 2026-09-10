@@ -412,6 +412,56 @@ fn native_account_usage_follows_the_current_official_provider_without_a_saved_ro
 }
 
 #[test]
+fn official_probe_migrates_legacy_account_route_to_current_provider() {
+    let previous = serde_json::from_value::<CodeyConfig>(json!({
+        "activeProfileId": "codey_global",
+        "profiles": [{
+            "id": "codey_global",
+            "name": "OpenAI 官方直登",
+            "baseUrl": "https://chatgpt.com/backend-api/codex",
+            "apiKey": ""
+        }],
+        "selectedModelsByProvider": { "codey_global": ["gpt-5.6-sol"] },
+        "defaultModel": "codey_global/gpt-5.6-sol"
+    }))
+    .unwrap()
+    .normalize();
+    let mut official = ProviderProfile::new("OpenAI 官方直登");
+    official.source_provider_id = Some("openai".into());
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+    official.normalize();
+    for available in [true, false] {
+        let status = if available {
+            OfficialAccountProfileStatus::Available(official.clone())
+        } else {
+            OfficialAccountProfileStatus::Unknown {
+                profile: official.clone(),
+                reason: "WindowsApps access denied".into(),
+            }
+        };
+        let next = route_config_for_official_probe(&previous, status).unwrap();
+        assert_eq!(next.profiles.len(), 1);
+        assert!(next.profiles[0].official_account);
+        assert_eq!(next.profiles[0].provider_id(), "openai");
+        assert!(next.profiles[0].validate().is_ok());
+        assert!(!next.has_third_party_route());
+        assert!(next.official_account_available_this_launch);
+        assert_eq!(next.selected_models_by_provider["openai"], ["gpt-5.6-sol"]);
+        assert_eq!(next.default_model, "openai/gpt-5.6-sol");
+    }
+    assert!(
+        route_config_for_official_probe(
+            &previous,
+            OfficialAccountProfileStatus::Unavailable {
+                reason: "not logged in".into()
+            },
+        )
+        .unwrap_err()
+        .contains("完成官方账号登录")
+    );
+}
+
+#[test]
 fn inconclusive_official_auth_probe_keeps_active_third_party_route() {
     let mut third_party = ProviderProfile::new("第三方线路");
     third_party.id = "custom".to_string();

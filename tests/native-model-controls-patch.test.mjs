@@ -625,6 +625,32 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       undefined,
     );
 
+    // Current bundles dropped rowLabel/showFastServiceTierIndicator and put
+    // compiled hook caches between the availability flag and trigger config.
+    const memoizedTriggerSource = [
+      "const marker=`composer.intelligenceDropdown.model.title`;",
+      "function triggerConfig(workMode,hideLabel,tier){",
+      "let enabled=workMode&&!hideLabel,cache=[];",
+      "cache[0]=null;".repeat(340),
+      "let config;cache[1]!==enabled?(config=enabled?{selectedServiceTierIconKind:tier,",
+      "showDaybreakIndicator:false}:void 0,cache[1]=enabled,cache[2]=config):config=cache[2];",
+      "return {modelPickerTriggerConfig:config}}",
+      "function picker(input,workMode){let {modelPickerTriggerConfig:config,selectedServiceTierIconKind:icon}=input;",
+      "if(workMode&&config!=null)return {kind:`modern`,icon:config.selectedServiceTierIconKind};",
+      "return {kind:`legacy`,icon}}",
+    ].join("");
+    const patchedMemoizedTrigger = await patchAsset(memoizedTriggerSource);
+    const modernPicker = Function(`${patchedMemoizedTrigger};return {triggerConfig,picker};`)();
+    for (const workMode of [false, true]) {
+      for (const tier of [null, "fast"]) {
+        assert.deepEqual(
+          modernPicker.picker(modernPicker.triggerConfig(workMode, false, tier), workMode),
+          { kind: "modern", icon: tier },
+        );
+      }
+      assert.equal(modernPicker.triggerConfig(workMode, true, "fast").modelPickerTriggerConfig, undefined);
+    }
+
     for (const url of [
       "app://-/assets/app-initial.js",
       "app://-/assets/app-initial-windows.js",

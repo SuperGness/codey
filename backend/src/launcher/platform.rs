@@ -24,6 +24,28 @@ pub(super) struct WindowsStartupProcess(std::os::windows::io::OwnedHandle);
 
 #[cfg(windows)]
 impl WindowsStartupProcess {
+    fn package_full_name(&self) -> Result<String> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::Packaging::Appx::{
+            GetPackageFullName, PACKAGE_FULL_NAME_MAX_LENGTH,
+        };
+        use windows::core::PWSTR;
+
+        let mut name = vec![0u16; PACKAGE_FULL_NAME_MAX_LENGTH as usize + 1];
+        let mut length = name.len() as u32;
+        unsafe {
+            GetPackageFullName(
+                HANDLE(self.0.as_raw_handle()),
+                &mut length,
+                PWSTR(name.as_mut_ptr()),
+            )
+        }
+        .ok()
+        .context("读取实际启动的 Windows Store Codex 包标识失败")?;
+        String::from_utf16(&name[..length as usize - 1]).map_err(Into::into)
+    }
+
     pub(super) fn open(process_id: u32) -> Result<Self> {
         use std::os::windows::io::FromRawHandle;
         use windows::Win32::System::Threading::{
@@ -106,6 +128,135 @@ fn windows_package_full_name(app_dir: &Path) -> Option<String> {
         package_name = parts.next_back()?;
     }
     Some(package_name.to_string())
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug)]
+pub(super) struct WindowsPackageChanged;
+
+#[cfg(any(windows, test))]
+impl std::fmt::Display for WindowsPackageChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Windows Store Codex 包已更新，需要重新准备启动环境")
+    }
+}
+
+#[cfg(any(windows, test))]
+impl std::error::Error for WindowsPackageChanged {}
+
+#[cfg(windows)]
+fn registered_windows_packages(package_full_name: &str) -> Result<Vec<String>> {
+    use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+    use windows::Win32::Storage::Packaging::Appx::{
+        FindPackagesByPackageFamily, PACKAGE_FILTER_HEAD,
+    };
+    use windows::core::{PCWSTR, PWSTR};
+
+    let app_id =
+        codey_runtime_core::app_paths::packaged_app_user_model_id(Path::new(package_full_name))
+            .context("无法识别 Windows Store Codex 包标识")?;
+    let (family, _) = app_id
+        .split_once('!')
+        .context("Windows Store Codex 包标识无效")?;
+    let family = family.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mut count = 0;
+    let mut length = 0;
+    let status = unsafe {
+        FindPackagesByPackageFamily(
+            PCWSTR(family.as_ptr()),
+            PACKAGE_FILTER_HEAD,
+            &mut count,
+            None,
+            &mut length,
+            PWSTR::null(),
+            None,
+        )
+    };
+    if status != ERROR_INSUFFICIENT_BUFFER {
+        status.ok().context("查询当前用户的 Codex 注册包失败")?;
+        return Ok(Vec::new());
+    }
+    let mut names = vec![PWSTR::null(); count as usize];
+    let mut buffer = vec![0u16; length as usize];
+    unsafe {
+        FindPackagesByPackageFamily(
+            PCWSTR(family.as_ptr()),
+            PACKAGE_FILTER_HEAD,
+            &mut count,
+            Some(names.as_mut_ptr()),
+            &mut length,
+            PWSTR(buffer.as_mut_ptr()),
+            None,
+        )
+    }
+    .ok()
+    .context("读取当前用户的 Codex 注册包失败")?;
+    names[..count as usize]
+        .iter()
+        .map(|name| unsafe { name.to_string() }.map_err(Into::into))
+        .collect()
+}
+
+#[cfg(windows)]
+pub(super) fn refresh_windows_packaged_app_dir(app_dir: &Path) -> Result<std::path::PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+    use windows::Win32::Storage::Packaging::Appx::GetPackagePathByFullName;
+    use windows::core::{PCWSTR, PWSTR};
+
+    let Some(previous) = windows_package_full_name(app_dir) else {
+        return Ok(app_dir.to_path_buf());
+    };
+    let packages = registered_windows_packages(&previous)?;
+    anyhow::ensure!(
+        packages.len() == 1,
+        "无法唯一确定当前用户的 Windows Store Codex 注册包"
+    );
+    let current = &packages[0];
+    let name = current.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mut length = 0;
+    let status =
+        unsafe { GetPackagePathByFullName(PCWSTR(name.as_ptr()), &mut length, PWSTR::null()) };
+    if status != ERROR_INSUFFICIENT_BUFFER {
+        status
+            .ok()
+            .context("查询 Windows Store Codex 安装路径失败")?;
+    }
+    anyhow::ensure!(length > 1, "Windows Store Codex 安装路径为空");
+    let mut buffer = vec![0u16; length as usize];
+    unsafe {
+        GetPackagePathByFullName(
+            PCWSTR(name.as_ptr()),
+            &mut length,
+            PWSTR(buffer.as_mut_ptr()),
+        )
+    }
+    .ok()
+    .context("读取 Windows Store Codex 安装路径失败")?;
+    let path = std::path::PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..length as usize - 1],
+    ));
+    let path = codey_runtime_core::app_paths::normalize_codex_app_path(&path)
+        .context("当前 Windows Store Codex 包中未找到启动程序")?;
+    if previous != *current {
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.windows_package_refreshed",
+            serde_json::json!({ "previousPackage": previous, "package": current }),
+        );
+    }
+    Ok(path)
+}
+
+#[cfg(any(windows, test))]
+fn windows_package_was_replaced(previous: &str, registered: &[String]) -> bool {
+    let family = codey_runtime_core::app_paths::packaged_app_user_model_id(Path::new(previous));
+    family.is_some()
+        && !registered.is_empty()
+        && registered.iter().all(|current| {
+            current != previous
+                && codey_runtime_core::app_paths::packaged_app_user_model_id(Path::new(current))
+                    == family
+        })
 }
 
 #[cfg(any(windows, test))]
@@ -253,14 +404,33 @@ fn enable_windows_packaged_environment(
 fn disable_windows_packaged_environment(package_full_name: &str) -> Result<()> {
     use windows::core::PCWSTR;
 
-    let package_full_name = package_full_name
+    let name = package_full_name
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    with_windows_package_debug_settings(|settings| unsafe {
-        settings.DisableDebugging(PCWSTR(package_full_name.as_ptr()))
-    })
-    .context("清理 Windows Store Codex 一次性 CLI 兼容环境失败")
+    let result = with_windows_package_debug_settings(|settings| unsafe {
+        settings.DisableDebugging(PCWSTR(name.as_ptr()))
+    });
+    if result
+        .as_ref()
+        .err()
+        .and_then(|error| error.downcast_ref::<windows::core::Error>())
+        .is_some_and(|error| {
+            error.code() == windows::Win32::Foundation::ERROR_NOT_FOUND.to_hresult()
+        })
+    {
+        // An update can unregister the old package between EnableDebugging and cleanup.
+        // Query failures and an unchanged registration must remain fatal.
+        let registered = registered_windows_packages(package_full_name)?;
+        if windows_package_was_replaced(package_full_name, &registered) {
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "launcher.windows_package_cleanup_after_update",
+                serde_json::json!({ "previousPackage": package_full_name, "registeredPackages": registered }),
+            );
+            return Ok(());
+        }
+    }
+    result.context("清理 Windows Store Codex 一次性 CLI 兼容环境失败")
 }
 
 #[cfg(any(windows, test))]
@@ -305,6 +475,12 @@ pub(super) async fn spawn_windows_codex(
                             Ok(()),
                             Err(cleanup),
                         ));
+                    }
+                    if windows_package_was_replaced(
+                        &package_name,
+                        &registered_windows_packages(&package_name)?,
+                    ) {
+                        return Err(WindowsPackageChanged.into());
                     }
                     if require_wrapper_environment {
                         return Err(error)
@@ -384,6 +560,36 @@ pub(super) async fn spawn_windows_codex(
                 None
             }
         };
+        let package_check = startup_process.as_ref()
+            .context("无法确认实际启动的 Windows Store Codex 包")
+            .and_then(WindowsStartupProcess::package_full_name)
+            .and_then(|actual| {
+                if windows_package_full_name(app_dir).as_deref() == Some(actual.as_str()) {
+                    Ok(())
+                } else {
+                    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                        "launcher.windows_package_changed_during_activation",
+                        serde_json::json!({ "expectedPackage": windows_package_full_name(app_dir), "actualPackage": actual, "processId": process_id }),
+                    );
+                    Err(WindowsPackageChanged.into())
+                }
+            });
+        if let Err(error) = package_check {
+            let stopped = terminate_windows_codex_processes_with_timeout(
+                app_dir,
+                Some(process_id),
+                WINDOWS_STARTUP_PATCH_FAILURE_STOP_TIMEOUT,
+            )
+            .await;
+            let cleared = package_debug_session
+                .map(WindowsPackageDebugSession::finish)
+                .transpose();
+            return Err(startup_activation_error_after_cleanup(
+                error,
+                stopped,
+                cleared.map(|_| ()),
+            ));
+        }
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
             "launcher.windows_package_activated",
             serde_json::json!({
@@ -968,6 +1174,27 @@ pub(super) fn windows_stop_failure_summary(remaining: &[(u32, String, Option<u64
 #[cfg(test)]
 mod compatibility_tests {
     use super::*;
+
+    #[test]
+    fn package_cleanup_requires_confirmed_replacement_in_the_same_family() {
+        let old = "OpenAI.Codex_26.901.6511.0_x64__2p2nqsd0c76g0";
+        let new = "OpenAI.Codex_26.903.8094.0_x64__2p2nqsd0c76g0";
+        assert!(windows_package_was_replaced(old, &[new.into()]));
+        assert!(!windows_package_was_replaced(
+            old,
+            &[old.into(), new.into()]
+        ));
+        assert!(!windows_package_was_replaced(old, &[]));
+        assert!(!windows_package_was_replaced(
+            old,
+            &[new.replace("Codex_", "CodexBeta_")]
+        ));
+        assert!(!windows_package_was_replaced(
+            old,
+            &[new.replace("2p2nqsd0c76g0", "otherpublisher")]
+        ));
+        assert!(!windows_package_was_replaced(old, &["invalid".into()]));
+    }
 
     #[cfg(windows)]
     #[test]

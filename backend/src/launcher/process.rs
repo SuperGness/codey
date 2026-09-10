@@ -153,7 +153,7 @@ pub(super) struct SpawnedCodex {
 }
 
 pub(super) async fn spawn_codex(
-    app_dir: &std::path::Path,
+    app_dir: &mut PathBuf,
     debug_port: u16,
     disable_codex_pet: bool,
     subagent_gate_active: bool,
@@ -176,15 +176,18 @@ pub(super) async fn spawn_codex(
 
     #[cfg(windows)]
     {
-        let inspect_fuse =
-            crate::electron_fuses::detect_node_cli_inspect_state(app_dir.to_path_buf()).await;
         // Electron drops `--inspect-brk` when the fuse is off, so the Inspector
         // patch can never attach on such builds. Start on the CLI wrapper right
         // away instead of waiting for a debug port that will never answer.
-        let mut cli_only = !inspect_fuse.inspector_possible();
+        let mut retry_without_inspector = false;
         let mut attempt = 0;
         loop {
             attempt += 1;
+            *app_dir = refresh_windows_packaged_app_dir(app_dir)?;
+            error_log::refresh_codex_app_version(Some(app_dir), None);
+            let inspect_fuse =
+                crate::electron_fuses::detect_node_cli_inspect_state(app_dir.to_path_buf()).await;
+            let cli_only = retry_without_inspector || !inspect_fuse.inspector_possible();
 
             let (wrapper, wrapper_preparation_error) =
                 match prepare_cli_wrapper(app_dir, subagent_gate_active, runtime_config_overrides)
@@ -265,7 +268,9 @@ pub(super) async fn spawn_codex(
                         serde_json::json!({ "startupAttempt": attempt, "retryable": retry }),
                     );
                     if retry {
-                        cli_only = true;
+                        if !error.is::<WindowsPackageChanged>() {
+                            retry_without_inspector = true;
+                        }
                         continue;
                     }
                     return Err(error).context(format!("启动尝试 {attempt}/2：启动 Codex 失败"));
@@ -396,7 +401,7 @@ pub(super) async fn spawn_codex(
                     // a lost handshake or an early exit all get one more attempt
                     // without the breakpoint; the wrapper is prepared again.
                     if should_retry_startup(&error, attempt) {
-                        cli_only = true;
+                        retry_without_inspector = true;
                         continue;
                     }
                     if !runtime_config_overrides.is_empty() {
@@ -1067,6 +1072,10 @@ fn add_macos_cli_wrapper(
 
 #[cfg(any(windows, target_os = "macos", test))]
 fn startup_error_allows_retry(error: &anyhow::Error) -> bool {
+    #[cfg(any(windows, test))]
+    if error.is::<WindowsPackageChanged>() {
+        return true;
+    }
     if let Some(failure) = error.downcast_ref::<crate::codex_startup_patch::CliWrapperFailure>() {
         return failure.retryable;
     }
@@ -1792,6 +1801,18 @@ mod cli_wrapper_tests {
 
     #[tokio::test(start_paused = true)]
     async fn startup_retry_requires_a_transient_error_and_is_limited_to_two_attempts() {
+        let updated = || anyhow::Error::new(WindowsPackageChanged);
+        assert!(should_retry_startup(&updated(), 1));
+        assert!(!should_retry_startup(&updated(), 2));
+        for (stopped, cleared) in [
+            (Err(anyhow::anyhow!("process still running")), Ok(())),
+            (Ok(()), Err(anyhow::anyhow!("cleanup failed"))),
+        ] {
+            assert!(!should_retry_startup(
+                &startup_activation_error_after_cleanup(updated(), stopped, cleared),
+                1,
+            ));
+        }
         let timeout = || {
             anyhow::Error::from(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,

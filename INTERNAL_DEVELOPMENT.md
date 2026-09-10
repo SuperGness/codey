@@ -27,6 +27,8 @@
 - 设本周期已记录消耗为 C、从上次重置到额度更新时间的时长为 T、官方已用比例为 p：预估周限 L = C / p，当前预估剩余 = L − C；按当前速度预计的整周消耗 W = C × 7 天 / T 单独展示，不用于周限反推。p 为 0 时周限及剩余显示不可计算。官方比例可能包含其他设备或渠道用量，缺失日志和跨账号历史可能使反推不准确，界面明确提示。
 - 缺失用量按 0，已知输入或输出仍分别计费；不按采样率补推。计算保留原始精度，金额显示 4 位、Token 显示整数、占比显示 2 位。`tests/antd-browser.html?view=quota` 提供大数值、缺失数据与未计价模型的分组布局预览；`node --test tests/quota-estimate.test.mjs` 覆盖各档独立价格、Fast 回退与推定、缓存读写、长上下文边界与未公布费率、缺失数据、未知模型、比例边界、周换算、完整分页、异常与取消。`cargo test -p codey --lib --no-default-features request_log` 覆盖档位迁移、字段往返及分块流式提取。
 
+- Fast WebSocket 转发核验：`websocket_service_tier_survives_forwarding_and_connection_reuse` 使用本地模拟上游，确认新建及复用同一连接时，`priority → default → priority` 请求档位逐次原样送达，上游返回的 `default` 也原样传回客户端。通过 `cargo test -p codey --lib --no-default-features websocket_service_tier_survives_forwarding_and_connection_reuse` 与 `cargo test -p codey --lib --no-default-features billing_tiers` 验证。此测试覆盖当前代码的字段透传，不代表历史运行实例的原始发送内容，也不能验证官方账号权限或服务端调度。
+
 ## 诊断存储手动清理
 
 - Trace 与 Crashpad 卡片分别传入 `clear_diagnostic_storage` 的 `target: trace | crashpad`，缺省和其他值在执行前拒绝，仅分析并清理指定目标。沿用诊断操作互斥锁、日志库压缩和 Crashpad 文件白名单及静默期保护，不修改用户的保护开关。
@@ -203,7 +205,9 @@ CODEY_UPDATE_BASE_URL 可在编译时覆盖客户端更新源。发布标签版�
 
 Windows Store 自动定位优先读取当前用户 `Get-AppxPackage` 返回的已注册 `InstallLocation`，查询失败或位置无效时才扫描 `ProgramFiles` 下的包目录；显式指定和已保存的应用位置仍优先。避免跨盘迁移或更新后，C 盘残留目录被用于 CLI、fuse 和完整包名，而系统按 AUMID 激活 D 盘的已注册应用。2026-09-08 的故障日志同时出现 C 盘认证探测拒绝访问、D 盘实际进程，以及 CLI 无握手、无执行记录；这能确认路径不一致，不能单独证明所有握手超时均由路径引起。修复后仍需 Windows 实机核对所选目录、实际进程路径和包装器执行确认；不得以跳过确认或忽略 Store 清理失败替代验证。
 
-Windows 的启动兼容安装最多尝试 2 次，仅超时、中断、WouldBlock、启动等待期间进程退出，以及明确的 Windows 文件共享/锁冲突（错误码 32、33）允许重试。目标程序无效、配置解析错误、权限拒绝、Inspector 响应不兼容和清理失败均不重试。仍使用 Inspector 时首次同时等待 Inspector 和 CLI：渲染进程调试端口已应答而 Inspector 端口仍被拒绝，立即判定 Inspector 不可用并把整个预算留给 CLI，不杀进程；Inspector 发现窗口耗尽且调试端口也未就绪，判定主进程可能停在断点，立即结束本轮并在清理后去掉 `--inspect-brk` 重试。首轮失败后先成功清理进程和 Store 临时环境，第二次重新准备包装器，只等待 CLI 执行确认。Inspector 已关闭且包装器无法准备（暂存失败）或 Store 无法应用包装器环境时，不再启动一个随后必被停止的进程：存在运行配置或子代理约束直接报错，否则按基础参数启动并返回 `degraded`。
+2026-09-10 补充商店更新期间的包切换处理：每次启动尝试都按原应用的 package family 调用 `FindPackagesByPackageFamily(PACKAGE_FILTER_HEAD)` 查询当前用户注册的主包，再用 `GetPackagePathByFullName` 刷新安装路径；不切换正式版/Beta 或发布者，不影响独立安装版。CLI 暂存、fuse 检测和后续进程管理使用刷新后的路径。激活后通过保留的进程句柄调用 `GetPackageFullName` 核对实际包，无法确认身份时先清理再报错；版本变化时先停止本次进程、完成临时环境清理，再按原有两次上限重新准备。此类重试保留 Inspector 选择，不强制退到 CLI。`DisableDebugging` 的 `0x80070490` 只有在查询成功、旧包已不再注册且同一 family 存在替代包时才可视为更新后的清理完成；旧包仍注册、包被卸载且无替代包、权限或查询失败仍中止启动。新增诊断事件记录路径刷新、激活期间包切换及更新后的清理。本次 macOS 上运行 63 项启动模块 Rust 测试和 4 项 Windows 启动 JavaScript 检查通过，覆盖旧包仍在、无替代包、跨 family/发布者及清理失败禁止重试；新增原生 API 代码通过临时最小 crate 的 Windows 目标类型检查。完整 Windows 交叉检查仍因缺少 Windows SDK 在 `ring` 的 `assert.h` 处失败，真实商店更新过程与打包运行待 Windows 实机验证。
+
+Windows 的启动兼容安装最多尝试 2 次，仅超时、中断、WouldBlock、启动等待期间进程退出、确认的应用包切换，以及明确的 Windows 文件共享/锁冲突（错误码 32、33）允许重试。目标程序无效、配置解析错误、权限拒绝、Inspector 响应不兼容和清理失败均不重试。仍使用 Inspector 时首次同时等待 Inspector 和 CLI：渲染进程调试端口已应答而 Inspector 端口仍被拒绝，立即判定 Inspector 不可用并把整个预算留给 CLI，不杀进程；Inspector 发现窗口耗尽且调试端口也未就绪，判定主进程可能停在断点，立即结束本轮并在清理后去掉 `--inspect-brk` 重试。首轮失败后先成功清理进程和 Store 临时环境，第二次重新准备包装器，只等待 CLI 执行确认。Inspector 已关闭且包装器无法准备（暂存失败）或 Store 无法应用包装器环境时，不再启动一个随后必被停止的进程：存在运行配置或子代理约束直接报错，否则按基础参数启动并返回 `degraded`。
 
 每次系统激活返回后重新建立 60 秒的 CLI 确认上限；Inspector 发现窗口仍为 20 秒，补丁安装和 app-server 覆盖校验各 10/24 秒。等待期间每秒检查进程是否存活（直接子进程用 `try_wait`，Store 激活优先使用保留的进程句柄，打开句柄失败时按 PID 检查），进程退出立即结束等待并允许重试一次，不会等到上限。进程清理保留独立的 20 秒上限；文件暂存和系统激活不通过取消 Future 强行中断，因此上述数值不是整个启动过程的硬性耗时保证。回归模拟首轮 Inspector/CLI 均不可用、长清理等待、第二轮 45 秒后握手成功、进程提前退出、渲染端口就绪时的 Inspector 放弃，并检查缺少包装器、不可重试错误和最多两次的限制。Windows Store 系统激活与环境继承仍需 Windows 实机验证。
 
@@ -229,6 +233,8 @@ Codey 当前声明版本为 0.9.18，不固定安装某一版 Codex。macOS 根�
 当前保留 renderer CDP 页面增强和 CLI 包装器运行配置；主进程 Inspector 可用时还会安装桌面统计上报和定时状态采集精简、窗口聚焦触发的插件刷新去重、任务标题模型处理，以及模型/页面控件兼容等可选修改。CLI 包装入口不安装这些主进程修改。
 
 Fast 控件使用统一的页面侧兼容（模型注入脚本 v54）：所有线路和模型都补充 `priority` 服务档位与 `fast` 速度选项，包括关闭本地路由后的直连模式。模型菜单的鼠标或键盘交互在原生处理前修正选择器的原生权限缓存，不再检查线路归属或模型是否声明 Fast；菜单及 `serviceTierForRequest` 使用同一修正结果，由原生控件和回调保存设置。保留加载状态，卸载脚本时恢复权限原值；React 父节点查找最多 80 层，待恢复的权限对象最多 64 个，不扫描全页、不改写安装包。回归覆盖路由及直连模式、官方与第三方模型切换、未声明 Fast 的模型、React alternate 缓存、开关、键盘交互、加载状态和卸载恢复。选项展示不代表上游服务承诺支持加速。
+
+Fast 新版控件兼容不再依赖已移除的 `composer.intelligenceDropdown.model.rowLabel` 和 `showFastServiceTierIndicator` 字段；通过模型选择器与档位图标字段定位，支持编译后的 React 缓存将控件配置与显示条件分开的结构。所有线路和模型统一采用新版原生控件，仍保留 `hideLabel` 和实际选中档位的显示语义。回归覆盖旧结构、新缓存结构、入口能力开关及 Fast 开关；本机安装包的 `app-primary` 资源已验证两处新旧控件切换条件均成功替换，未修改安装包。
 
 Inspector 与 CLI 包装器是内部启动路径，不是用户可切换的运行模式。任一入口安装成功即返回 `ready`；页面继续按实际功能探针显示正常、待确认或异常，不再把 CLI 路径显示为兼容模式或声称所有优化均已生效。只有 Windows 在两条入口均失败、且没有必须的运行时约束时，才可按基础参数重新启动并返回 `degraded`，界面显示需检查和具体原因。必要配置或子代理约束无法确认时仍中止启动。`performanceStatus`/`performanceDetail` 保留现有接口名称，当前表达启动健康状态。官方文档公开的 [codex app](https://developers.openai.com/codex/cli/reference) 用于打开客户端，[app-server](https://developers.openai.com/codex/app-server) 用于客户端协议；`CODEX_CLI_PATH` 按当前 bundle 的兼容入口维护，不标为官方稳定扩展 API。
 
@@ -282,7 +288,7 @@ release 应用通过 `plutil -lint`、`codesign --verify --deep --strict` 和可
 
 - Codey 配置由 directories crate 放在系统配置目录的 config.json，并保留三份有效滚动备份。Unix 下配置、备份、日志和本地请求日志应限制为当前用户可读写。
 - CODEX_HOME 非空时始终优先；否则使用 Codex 默认目录。
-- auth.json 只读，Codey 不修改官方登录凭据。
+- auth.json 只读，Codey 不修改官方登录凭据。兼容旧文件缺少或使用 null 的 auth_mode：存在非空 ChatGPT token 时可作为文件探针的登录依据；显式其他认证模式仍不接受，原生明确未登录或 API Key 状态仍优先。加载旧线路时，缺失或为空的 authMode 暂留为空；仅对严格匹配官方 ChatGPT HTTPS 端点且未配置 API Key 的线路恢复官方账号类型，再复用启动时的官方线路及模型配置迁移，不要求旧 Provider ID 与当前 ID 相同。显式 apiKey 认证模式、已有 API Key、OpenAI API 地址及相似域名均不自动转换。新建线路仍默认使用 API Key。回归命令：`cargo test -p codey --lib config::tests`、`cargo test -p codey --lib official`、`cargo test -p codey --lib codex_provider`。
 - 官方账号识别：当前 Provider 优先读取选中 profile 的 model_provider。API 凭据及其环境变量声明、自定义 Authorization 头、requires_openai_auth=false 均排除官方直登；显式端点只接受 HTTPS 的 chatgpt.com/backend-api/codex，OpenAI API 地址和相似域名不算官方账号线路。原生探针须成功退出并返回独立状态行 Logged in using ChatGPT，普通 ChatGPT/OAuth/bearer token 字样不作为已登录证据。第三方线路在原生探针无法确认时不使用 auth.json 残留凭据补判官方账号；原生明确确认的官方登录仍支持与第三方线路并存。回归覆盖旧凭据、模糊命令输出、相似域名、未设置的认证环境变量和 profile 选择；`cargo test -p codey --lib` 验证通过（1126 passed，4 ignored）。
 - config.toml 在启动准备和正式启动前做快照复核。除 Codey 自有 codey_router 恢复桩和明确识别的旧版污染外，不改写用户 Provider、MCP、模型或未知字段。
 - codex-lease.json、hooks.json 中的 Codey 组、角色运行副本和证明状态均属于临时运行资产，异常退出后由下次启动恢复。
@@ -561,6 +567,8 @@ SQL 词法检查拒绝引号内反斜杠、引号外的 `#`、方括号、美元
 ### 通知与诊断
 
 通知支持飞书、企业微信、Telegram 和微信 ClawBot，最多保存 32 个渠道。完成、失败和等待介入事件由真实任务状态触发；不确定是否已送达时不盲目重发。
+
+等待介入解析同时覆盖 `request_user_input` 和 `request_user_input_async`。异步提问返回 `accepted: true` 只表示问题已发布，不能按同步工具结果清除等待；后续按用户回复中的 `questionItemId` 匹配调用和题号，全部答完后清除。工具失败、任务完成或中断也会释放等待状态，通知继续复用原有渠道与去重记录。`pending_approval::tests` 覆盖立即确认、多题与重复回复、无关回复、工具失败及终态清理。
 
 Trace 与 Crashpad 保护由 Codey 的存储维护和后台任务执行，按用户设置及平台支持启用，不依赖主进程 Inspector；只处理各自允许范围内的诊断数据，不触碰会话和账号数据。
 

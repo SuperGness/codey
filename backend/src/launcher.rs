@@ -1482,12 +1482,12 @@ async fn spawn_and_inject_runtime(
     config: &CodeyConfig,
     handler: &codey_runtime_core::bridge::BridgeHandler,
     injection_scripts: &cdp::PreparedInjectionScripts,
-    storage: StartupStorageState,
+    mut storage: StartupStorageState,
     patch: &StartupPatchState,
     runtime_config_overrides: &[String],
 ) -> Result<SpawnedRenderer> {
     let mut spawned = match spawn_codex(
-        &storage.app_dir,
+        &mut storage.app_dir,
         patch.debug_port,
         config.slim_codex_pet,
         config.subagent_optimization,

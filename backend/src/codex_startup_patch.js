@@ -787,15 +787,11 @@
     }
     if (
       source.includes("composer.intelligenceDropdown.model.title") &&
-      source.includes("composer.intelligenceDropdown.model.rowLabel") &&
       source.includes("modelPickerTriggerConfig:") &&
-      source.includes("selectedServiceTierIconKind:") &&
-      source.includes("showFastServiceTierIndicator:")
+      source.includes("selectedServiceTierIconKind:")
     ) {
-      // Third-party catalogs can expose fewer power selections than Codex's
-      // native threshold even though model, effort, and Fast are all available.
-      // Keep the modern native trigger in that case: it owns the filled Fast
-      // indicator and avoids falling back to the legacy outlined model icon.
+      // Use the modern trigger for every route and model. Newer builds removed
+      // rowLabel/showFastServiceTierIndicator and memoize the trigger config.
       patched = replaceUniqueRendererGate(
         patched,
         [
@@ -809,7 +805,7 @@
             ) => `${assignment}!${hideLabelName}`,
           },
           {
-            pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*!\s*([$A-Z_a-z][$\w]*)(?=\s*,[\s\S]{0,4096}?\b([$A-Z_a-z][$\w]*)\s*=\s*\2\s*\?\s*\{[\s\S]{0,1024}?selectedServiceTierIconKind\s*:[\s\S]{0,1024}?showFastServiceTierIndicator\s*:[\s\S]{0,8192}?modelPickerTriggerConfig\s*:\s*\4\b)/g,
+            pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*!\s*([$A-Z_a-z][$\w]*)(?=\s*,[\s\S]{0,12288}?\b([$A-Z_a-z][$\w]*)\s*=\s*\2\s*\?\s*\{[\s\S]{0,2048}?selectedServiceTierIconKind\s*:[\s\S]{0,8192}?modelPickerTriggerConfig\s*:\s*\4\b)/g,
             replacement: (
               _match,
               assignment,

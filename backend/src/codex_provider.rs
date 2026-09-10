@@ -581,7 +581,8 @@ fn provider_table<'a>(document: &'a DocumentMut, provider_id: &str) -> Option<&'
 }
 
 fn auth_has_chatgpt_tokens(auth: &Value) -> bool {
-    auth.get("auth_mode").and_then(Value::as_str) == Some("chatgpt")
+    (matches!(auth.get("auth_mode"), None | Some(Value::Null))
+        || auth.get("auth_mode").and_then(Value::as_str) == Some("chatgpt"))
         && auth
             .get("tokens")
             .and_then(Value::as_object)
@@ -919,7 +920,7 @@ fn insert_model_request_header(headers: &mut BTreeMap<String, String>, name: &st
     headers.insert(name.to_string(), value.to_string());
 }
 
-fn is_official_base_url(base_url: &str) -> bool {
+pub(crate) fn is_official_base_url(base_url: &str) -> bool {
     let Ok(url) = reqwest::Url::parse(base_url) else {
         return false;
     };
@@ -1053,6 +1054,37 @@ experimental_bearer_token = "sk-relay"
         };
         assert!(reason.contains("凭据存储策略为 file"));
         assert!(reason.contains("auth.json 不存在"));
+    }
+
+    #[test]
+    fn legacy_chatgpt_tokens_work_without_auth_mode_when_native_probe_fails() {
+        let home = TempDir::new().unwrap();
+        write_config(home.path(), "");
+        let mut auth = serde_json::json!({
+            "OPENAI_API_KEY": null,
+            "tokens": { "access_token": "legacy-token" }
+        });
+        for mode in [None, Some(Value::Null), Some(serde_json::json!("chatgpt"))] {
+            if let Some(mode) = mode {
+                auth["auth_mode"] = mode;
+            }
+            write_auth(home.path(), auth.clone());
+            assert!(matches!(
+                status_with_unknown_native(home.path()).unwrap(),
+                OfficialAccountProfileStatus::Available(_)
+            ));
+        }
+        for mode in [
+            serde_json::json!("apikey"),
+            serde_json::json!("other"),
+            serde_json::json!(42),
+        ] {
+            auth["auth_mode"] = mode;
+            assert!(!auth_has_chatgpt_tokens(&auth));
+        }
+        assert!(!auth_has_chatgpt_tokens(&serde_json::json!({
+            "tokens": { "access_token": "  ", "refresh_token": null }
+        })));
     }
 
     #[test]

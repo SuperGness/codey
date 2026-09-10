@@ -186,6 +186,7 @@ struct RolloutParseState {
     replaying_fork_history: bool,
     current_turn_id: String,
     waiting_calls: HashMap<String, String>,
+    async_questions: HashMap<String, HashSet<usize>>,
     terminal_turns: HashSet<String>,
     terminal_turn_order: VecDeque<String>,
     active_turns: HashSet<String>,
@@ -347,13 +348,52 @@ impl RolloutParseState {
                         .and_then(|metadata| metadata.get("turn_id"))
                         .and_then(Value::as_str)
                         .unwrap_or(&self.current_turn_id);
+                    if payload.get("name").and_then(Value::as_str)
+                        == Some("request_user_input_async")
+                    {
+                        let arguments = match payload.get("arguments") {
+                            Some(Value::String(text)) => serde_json::from_str::<Value>(text).ok(),
+                            arguments => arguments.cloned(),
+                        };
+                        let Some(questions) = arguments
+                            .as_ref()
+                            .and_then(|args| args.get("questions"))
+                            .and_then(Value::as_array)
+                            .filter(|questions| !questions.is_empty())
+                        else {
+                            return;
+                        };
+                        self.async_questions
+                            .insert(call_id.to_string(), (0..questions.len()).collect());
+                    }
                     self.waiting_calls
                         .insert(call_id.to_string(), turn_id.to_string());
                 }
                 Some("function_call_output") => {
                     if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
+                        if self.async_questions.contains_key(call_id) {
+                            let output = match payload.get("output") {
+                                Some(Value::String(text)) => {
+                                    serde_json::from_str::<Value>(text).ok()
+                                }
+                                output => output.cloned(),
+                            };
+                            // Acceptance publishes the question; the user's reply arrives separately.
+                            if output
+                                .as_ref()
+                                .and_then(|value| value.get("accepted"))
+                                .and_then(Value::as_bool)
+                                == Some(true)
+                            {
+                                return;
+                            }
+                            self.async_questions.remove(call_id);
+                        }
                         self.waiting_calls.remove(call_id);
                     }
+                }
+                Some("message") if payload.get("role").and_then(Value::as_str) == Some("user") => {
+                    self.resolve_async_questions(payload);
                 }
                 _ => {}
             },
@@ -361,10 +401,59 @@ impl RolloutParseState {
         }
     }
 
+    fn resolve_async_questions(&mut self, payload: &Value) {
+        if self.async_questions.is_empty() {
+            return;
+        }
+        for content in payload
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(text) = content
+                .get("text")
+                .and_then(Value::as_str)
+                .and_then(|text| {
+                    text.trim()
+                        .strip_prefix("<send_user_message_question_reply>")
+                })
+                .and_then(|text| text.strip_suffix("</send_user_message_question_reply>"))
+            else {
+                continue;
+            };
+            let Ok(replies) = serde_json::from_str::<Vec<Value>>(text) else {
+                continue;
+            };
+            for reply in replies {
+                let Some(id) = reply.get("questionItemId").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Ok((tool, call_id, index)) =
+                    serde_json::from_str::<(String, String, usize)>(id)
+                else {
+                    continue;
+                };
+                if tool != "request_user_input_async" {
+                    continue;
+                }
+                if let Some(questions) = self.async_questions.get_mut(&call_id) {
+                    questions.remove(&index);
+                    if questions.is_empty() {
+                        self.async_questions.remove(&call_id);
+                        self.waiting_calls.remove(&call_id);
+                    }
+                }
+            }
+        }
+    }
+
     fn finish_turn(&mut self, turn_id: &str) -> bool {
         self.active_turns.remove(turn_id);
         self.waiting_calls
             .retain(|_, waiting_turn_id| waiting_turn_id != turn_id);
+        self.async_questions
+            .retain(|call_id, _| self.waiting_calls.contains_key(call_id));
         self.terminal_turns.insert(turn_id.to_string())
     }
 
@@ -951,7 +1040,7 @@ fn task_completion_error(payload: &Value) -> Option<String> {
 
 fn function_call_requires_approval(payload: &Value) -> bool {
     match payload.get("name").and_then(Value::as_str) {
-        Some("request_permissions" | "request_user_input") => true,
+        Some("request_permissions" | "request_user_input" | "request_user_input_async") => true,
         Some("exec_command") => {
             let Some(arguments) = payload.get("arguments") else {
                 return false;
@@ -1070,6 +1159,72 @@ mod tests {
             pending_approvals_in_rollout(rollout),
             vec![("turn-1".to_string(), "pending".to_string())]
         );
+    }
+
+    #[test]
+    fn async_questions_remain_pending_after_acceptance_until_all_answers_arrive() {
+        let mut state = RolloutParseState::default();
+        state.consume(r#"
+{"type":"turn_context","payload":{"turn_id":"turn-async"}}
+{"type":"event_msg","payload":{"type":"task_started","turn_id":"turn-async"}}
+{"type":"response_item","payload":{"type":"function_call","name":"request_user_input_async","arguments":"{\"questions\":[{\"title\":\"First?\"},{\"title\":\"Second?\"}]}","call_id":"ask"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"ask","output":"{\"accepted\":true}"}}
+"#);
+        let pending = vec![("turn-async".to_string(), "ask".to_string())];
+        assert_eq!(state.pending_approvals(), pending);
+        assert_eq!(
+            state.lifecycle_status(&pending),
+            SessionLifecycleStatus::Waiting
+        );
+
+        let reply = |call_id: &str, index: usize| {
+            let replies = serde_json::json!([{
+                "questionItemId": serde_json::json!(["request_user_input_async", call_id, index]).to_string(),
+                "answer": "Answer"
+            }]);
+            serde_json::json!({"type":"response_item","payload":{
+                "type":"message","role":"user","content":[{"type":"input_text",
+                "text":format!("<send_user_message_question_reply>\n{replies}\n</send_user_message_question_reply>")}]
+            }})
+        };
+        state.apply(&reply("other", 0));
+        state.apply(&reply("ask", 9));
+        let mut assistant_reply = reply("ask", 1);
+        assistant_reply["payload"]["role"] = Value::String("assistant".to_string());
+        state.apply(&assistant_reply);
+        state.consume(r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<send_user_message_question_reply>invalid</send_user_message_question_reply>"}]}}"#);
+        state.apply(&reply("ask", 0));
+        state.apply(&reply("ask", 0));
+        assert_eq!(state.pending_approvals(), pending);
+        state.apply(&reply("ask", 1));
+        assert!(state.pending_approvals().is_empty());
+        assert!(state.async_questions.is_empty());
+        assert_eq!(state.lifecycle_status(&[]), SessionLifecycleStatus::Running);
+    }
+
+    #[test]
+    fn async_questions_clear_on_failure_or_terminal_events() {
+        for resolution in [
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"ask","output":"{\"accepted\":false}"}}),
+            serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"ask","output":"tool failed"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-async"}}),
+            serde_json::json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"turn-async"}}),
+        ] {
+            let mut state = RolloutParseState::default();
+            // Exercise object arguments/output and a turn ID carried by the call itself.
+            state.apply(&serde_json::json!({"type":"response_item","payload":{
+                "type":"function_call","name":"request_user_input_async","call_id":"ask",
+                "arguments":{"questions":[{"title":"Reply?"}]},
+                "internal_chat_message_metadata_passthrough":{"turn_id":"turn-async"}
+            }}));
+            state.apply(&serde_json::json!({"type":"response_item","payload":{
+                "type":"function_call_output","call_id":"ask","output":{"accepted":true}
+            }}));
+            assert_eq!(state.pending_approvals().len(), 1);
+            state.apply(&resolution);
+            assert!(state.pending_approvals().is_empty(), "{resolution}");
+            assert!(state.async_questions.is_empty(), "{resolution}");
+        }
     }
 
     #[test]

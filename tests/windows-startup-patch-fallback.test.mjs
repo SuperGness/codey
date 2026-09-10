@@ -72,9 +72,10 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
   const retry = windowsSpawn.indexOf("if should_retry_startup(&error, attempt) {");
   const requiredConfigGuard = windowsSpawn.indexOf("if !runtime_config_overrides.is_empty() {");
 
-  // The fuse is read once before the attempt loop; every attempt re-prepares the wrapper.
-  assert.ok(fuseProbe >= 0 && fuseProbe < loop);
-  assert.match(windowsSpawn, /let mut cli_only = !inspect_fuse\.inspector_possible\(\);/);
+  // Store updates can change the executable between attempts; refresh before probing it.
+  const refresh = windowsSpawn.indexOf("refresh_windows_packaged_app_dir(app_dir)");
+  assert.ok(loop >= 0 && loop < refresh && refresh < fuseProbe && fuseProbe < prepare);
+  assert.match(windowsSpawn, /let cli_only = retry_without_inspector \|\| !inspect_fuse\.inspector_possible\(\);/);
   assert.ok(loop < prepare && prepare < reservePort && reservePort < noEntry && noEntry < launch);
   assert.match(windowsSpawn, /let inspector_port = if cli_only \{\s*None/);
   assert.match(windowsSpawn, /startup_launch_arguments\(&runtime_arguments, inspector_port\)/);
@@ -97,7 +98,7 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
   assert.match(windowsSpawn.slice(packageGuard, retry), /anyhow::bail!/);
   assert.match(
     windowsSpawn.slice(retry, requiredConfigGuard),
-    /if should_retry_startup\(&error, attempt\) \{\s*cli_only = true;\s*continue;\s*\}/,
+    /if should_retry_startup\(&error, attempt\) \{\s*retry_without_inspector = true;\s*continue;\s*\}/,
   );
   assert.match(windowsSpawn, /return Ok\(spawned\);/);
 
