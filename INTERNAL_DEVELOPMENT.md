@@ -530,7 +530,7 @@ cc-switch（farion1231/cc-switch，`src-tauri/src/proxy`）对照结论，仅基
 
 ### 控制台与页面注入
 
-`ModelSection` 按 `visibleProfiles` 渲染紧凑单列供应商列表（无独立卡片边框与内边距浪费，通过列表项下边框分割），线路信息、管理按钮、状态和模型共用一个滚动区域。标题行整合线路名称与状态徽章，官方额度开关与操作按钮右对齐，模型标签内联紧凑展示。禁用线路保留编辑入口，但不展示可选模型或计入模型总数；关闭本地路由后仅展示当前线路，保留同步和官方额度开关。排序支持拖动及手柄上的上下方向键。控制台各模块的行内微操作按钮（如线路列表与通知渠道卡片的编辑、删除操作）采用统一无边框纯图标规范（26px × 26px，透明背景，编辑统一为 macOS 品牌蓝 `#007aff`、删除为警示红 `#ff3b30`，悬浮呈现微透明背景色，操作间隙收窄至 2px），以保持轻盈扁平的 macOS 交互一致性。模型配置弹框（`ModelPickerDialog`）将 Auto Review 线路能力置顶，搜索框下移紧邻模型操作栏，全选采用带半选支持的标准 Checkbox，且模型上下文预算（`ModelContextFields`）采用旋转折叠徽章与卡片式参数面板。开发预览入口为 `/codey/tests/ui-browser.html`，使用 mock 数据验证默认模型切换、排序、禁用线路及 600px 窄窗口布局。
+`ModelSection` 按 `visibleProfiles` 渲染紧凑单列供应商列表（无独立卡片边框与内边距浪费，通过列表项下边框分割），线路信息、管理按钮、状态和模型共用一个滚动区域。标题行整合线路名称与状态徽章，官方额度开关与操作按钮右对齐，模型标签内联紧凑展示。禁用线路保留编辑入口，但不展示可选模型或计入模型总数；关闭本地路由后仅展示当前线路，保留同步和官方额度开关。排序支持拖动及手柄上的上下方向键。控制台各模块的行内微操作按钮（如线路列表与通知渠道卡片的编辑、删除操作）采用统一无边框纯图标规范（26px × 26px，透明背景，编辑统一为 macOS 品牌蓝 `#007aff`、删除为警示红 `#ff3b30`，悬浮呈现微透明背景色，操作间隙收窄至 2px），以保持轻盈扁平的 macOS 交互一致性。线路编辑弹窗（`route-editor-dialog`）将「启用线路」开关从独立占位的表单行上移至弹窗标题行（紧邻「编辑线路」/「新增线路」标题右侧），并采用红绿状态配色（启用呈现绿色 `#34c759`、停用呈现警示红 `#ff3b30`），大幅节省弹窗纵向空间并提供醒目的状态视觉反馈。模型配置弹框（`ModelPickerDialog`）将 Auto Review 线路能力置顶，搜索框下移紧邻模型操作栏，全选采用带半选支持的标准 Checkbox，且模型上下文预算（`ModelContextFields`）采用旋转折叠徽章与卡片式参数面板。开发预览入口为 `/codey/tests/ui-browser.html`，使用 mock 数据验证默认模型切换、排序、禁用线路及 600px 窄窗口布局。
 
 cdp.rs 负责准备嵌入资源、安装桥接、首次注入和健康复核。src/overlay.tsx 挂载 React 控制台；public/ 中的脚本分别处理模型、插件、会话、提示词和平台增强。
 
@@ -1154,7 +1154,7 @@ git diff --check
 
 `src/styles*.css` 均包含独立入口和内嵌入口使用的业务布局，因此保留文件；已删除无调用的 `.route-websocket-option`、`.notification-empty`、`.feature-disabled-*` 规则及组件外观覆盖，不保留空样式文件。`src/components/ui` 封装层只保留有调用方的 prop；`useAppNotice` 与 `useConfirmationDialog` 共用 `src/externalStore.ts` 的 `createExternalStore`。
 
-第三方线路模型同步成功后直接打开模型配置，不再弹出模型数量提示。`NoticeToast` 展示提示时清空已消费的消息，避免配置弹窗重新挂载后重复显示旧提示；同步失败提示继续保留。`tests/app-notice.test.mjs` 验证消息消费、重新挂载和相同内容的新通知。`UiProvider` 在注销弹窗的 Toast 容器前清空全局提示队列，避免未到期的提示随挂载点切换到外层页面。`tests/ui-browser.html?check=toast-close` 逐帧验证嵌套弹窗和设置弹窗关闭时提示不会移到外层，并检查重新打开后的旧提示清理和新提示展示。
+第三方线路模型同步成功后直接打开模型配置，不再弹出模型数量提示。`NoticeToast` 展示提示时清空已消费的消息，避免配置弹窗重新挂载后重复显示旧提示；同步失败提示继续保留。`tests/app-notice.test.mjs` 验证消息消费、重新挂载和相同内容的新通知。`UiProvider` 在注册和注销弹窗的 Toast 容器前清空全局提示队列，避免未到期的提示随挂载点移入新弹窗或移回外层页面。`tests/ui-browser.html?check=toast-close` 逐帧验证打开嵌套弹窗时旧提示不会移入，以及嵌套弹窗和设置弹窗关闭时提示不会移到外层，并检查新弹窗及重新打开后的新提示展示。
 
 运行 `pnpm check` 和 `pnpm test:js` 验证类型与回归；`pnpm vite:build` 构建嵌入产物，`pnpm exec vite build` 构建独立页面。开发服务下，`tests/ui-browser.html` 验证真实 Shadow DOM 设置入口，`?view=logs` 使用模拟数据验证日志筛选、详情与布局；`tests/model-combobox-browser.html` 验证万条模型列表。这些页面不连接真实模型服务。
 

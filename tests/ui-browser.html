@@ -52,8 +52,16 @@
         await waitFor(() => shadow.querySelector('button[aria-label="删除Telegram通知渠道"]'));
         for (const nested of [true, false]) {
           if (nested) {
+            toast.info("打开前的外层提示", { timeout: 0 });
+            await waitFor(() => [...shadow.querySelectorAll('.settings-modal-shell [data-slot="toast"]')].some(t => t.textContent.includes("打开前的外层提示")));
             shadow.querySelector('button[aria-label="删除Telegram通知渠道"]').click();
+            const deadline = performance.now() + 650;
+            while (performance.now() < deadline) {
+              await nextFrame();
+              if ([...shadow.querySelectorAll('.confirmation-dialog [data-slot="toast"]')].some(t => t.textContent.includes("打开前的外层提示"))) throw new Error("打开嵌套弹窗时旧 Toast 移到了新弹窗");
+            }
             await waitFor(() => shadow.querySelector(".confirmation-dialog .toast-portal-host"));
+            if (toast.getQueue().visibleToasts.some(t => t.content.title === "打开前的外层提示")) throw new Error("打开嵌套弹窗后仍有旧 Toast");
           }
           const dialog = shadow.querySelector(nested ? ".confirmation-dialog" : ".settings-modal-shell");
           toast.info("关闭弹窗提示回归验证", { timeout: 0 });
@@ -76,7 +84,7 @@
         await waitFor(() => shadow.querySelector('.settings-modal-shell [data-slot="toast"]'));
         const result = document.createElement("pre");
         result.id = "toast-close-result";
-        result.textContent = "PASS：嵌套弹窗和设置弹窗关闭时提示未移到外层，重新打开后新提示正常";
+        result.textContent = "PASS：打开嵌套弹窗时旧提示未移入，关闭弹窗时提示未移到外层，新提示正常";
         shadow.querySelector(".settings-modal-body").prepend(result);
       }
       if (new URLSearchParams(location.search).get("check") === "notification-close") {

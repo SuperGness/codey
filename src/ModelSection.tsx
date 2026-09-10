@@ -770,29 +770,33 @@ function ModelSectionComponent({
             }}
           >
             <DialogHeader>
-              <DialogTitle>
-                {routeDraft.authMode === "officialAccount"
-                  ? "配置官方账号模型"
-                  : config.profiles.some((profile) => profile.id === routeDraft.id)
-                    ? "编辑线路"
-                    : "新增线路"}
-              </DialogTitle>
+              <div className="route-editor-dialog-title-row">
+                <DialogTitle>
+                  {routeDraft.authMode === "officialAccount"
+                    ? "配置官方账号模型"
+                    : config.profiles.some((profile) => profile.id === routeDraft.id)
+                      ? "编辑线路"
+                      : "新增线路"}
+                </DialogTitle>
+                <div
+                  title={routeDraft.enabled !== false ? "线路已启用（点击停用）" : "线路已停用（点击启用）"}
+                  className="flex items-center"
+                >
+                  <Switch
+                    checked={routeDraft.enabled !== false}
+                    disabled={isBusy}
+                    onCheckedChange={(enabled) => updateRouteDraft({ enabled })}
+                    aria-label="启用线路"
+                    className="route-status-switch"
+                  />
+                </div>
+              </div>
               <DialogDescription>
                 {routeDraft.authMode === "officialAccount"
                   ? "选择允许在 Codex 中使用的官方候选模型。未勾选的模型不会在模型目录和选择器中出现。"
                   : "配置第三方服务的接入信息。保存后可在模型目录中同步模型。"}
               </DialogDescription>
             </DialogHeader>
-
-            <div className="route-option-item">
-              <strong>启用线路</strong>
-              <Switch
-                checked={routeDraft.enabled !== false}
-                disabled={isBusy}
-                onCheckedChange={(enabled) => updateRouteDraft({ enabled })}
-                aria-label="启用线路"
-              />
-            </div>
 
             {routeDraft.authMode === "officialAccount" ? (
               <div className="official-route-editor">

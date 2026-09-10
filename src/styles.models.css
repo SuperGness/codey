@@ -445,6 +445,45 @@
   width: min(540px, calc(100vw - 32px));
 }
 
+.route-editor-dialog-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.route-status-switch {
+  --switch-control-bg: var(--danger, #ff3b30);
+  --switch-control-bg-hover: color-mix(in oklab, var(--danger, #ff3b30), black 8%);
+  --switch-control-bg-pressed: color-mix(in oklab, var(--danger, #ff3b30), black 15%);
+  --switch-control-bg-checked: var(--success, #34c759);
+  --switch-control-bg-checked-hover: color-mix(in oklab, var(--success, #34c759), black 8%);
+}
+
+.route-status-switch .switch__control {
+  background-color: var(--switch-control-bg, #ff3b30);
+}
+
+.route-status-switch[data-selected="true"] .switch__control,
+.route-status-switch[aria-checked="true"] .switch__control {
+  background-color: var(--switch-control-bg-checked, #34c759);
+}
+
+.route-status-switch:hover:not([data-selected="true"]) .switch__control {
+  background-color: var(--switch-control-bg-hover, #e0342a);
+}
+
+.route-status-switch[data-selected="true"]:hover .switch__control {
+  background-color: var(--switch-control-bg-checked-hover, #2db84d);
+}
+
+.route-status-switch:active:not([data-selected="true"]) .switch__control {
+  background-color: var(--switch-control-bg-pressed, #c72e25);
+}
+
+.route-status-switch[data-selected="true"]:active .switch__control {
+  background-color: var(--switch-control-bg-checked-hover, #2db84d);
+}
+
 .route-editor-form {
   display: grid;
   gap: 12px;

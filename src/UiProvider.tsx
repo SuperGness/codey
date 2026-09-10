@@ -13,6 +13,8 @@ export function UiProvider({ children, container }: {
   const [containerStack, setContainerStack] = useState<HTMLElement[]>([]);
   const registerContainer = useCallback((element: HTMLElement | null) => {
     if (!element) return () => {};
+    // 新弹窗接管挂载点前清空旧提示，避免外层提示随之移动。
+    toast.clear();
     setContainerStack((prev) => [...prev, element]);
     return () => {
       // 先清空提示，再切换挂载点，避免关闭弹窗时旧提示被移到外层。
