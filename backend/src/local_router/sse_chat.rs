@@ -43,6 +43,13 @@ pub(crate) fn chat_completion_to_responses_body_with_tool_bridge(
         .unwrap_or_default();
     let annotations = chat_message_annotations(message);
     let mut output = Vec::new();
+    if let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) {
+        output.push(chat_reasoning_item(
+            &format!("rs_codey_{}", Uuid::new_v4()),
+            reasoning,
+            "completed",
+        ));
+    }
     if !text.is_empty() || !refusal.is_empty() {
         let mut content = Vec::new();
         if !text.is_empty() {
@@ -118,6 +125,13 @@ pub(crate) fn chat_completion_to_responses_body_with_tool_bridge(
             .insert("usage".to_string(), chat_usage_to_responses_usage(&usage));
     }
     Ok(response)
+}
+
+pub(crate) fn chat_reasoning_item(id: &str, text: &str, status: &str) -> Value {
+    json!({
+        "id":id, "type":"reasoning", "status":status, "summary":[],
+        "content":[{"type":"reasoning_text", "text":text}],
+    })
 }
 
 pub(crate) fn append_chat_tool_calls_to_responses_output(
@@ -255,6 +269,7 @@ pub(crate) struct ChatSseAccumulator {
     pub(crate) created: i64,
     pub(crate) model: String,
     pub(crate) content: String,
+    pub(crate) reasoning_content: Option<String>,
     pub(crate) refusal: String,
     pub(crate) tool_calls: BTreeMap<usize, ChatSseToolCall>,
     pub(crate) finish_reason: Option<String>,
@@ -271,6 +286,7 @@ impl ChatSseAccumulator {
             created: current_unix_timestamp(),
             model: model.to_string(),
             content: String::new(),
+            reasoning_content: None,
             refusal: String::new(),
             tool_calls: BTreeMap::new(),
             finish_reason: None,
@@ -330,6 +346,11 @@ impl ChatSseAccumulator {
             };
             // ResponsesSseState already retains text for the final streaming events.
             if self.retain_text {
+                if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+                    self.reasoning_content
+                        .get_or_insert_default()
+                        .push_str(reasoning);
+                }
                 if let Some(content) = delta.get("content") {
                     self.content.push_str(&chat_message_content_text(content));
                 }
@@ -422,6 +443,9 @@ impl ChatSseAccumulator {
         }
         if !self.refusal.is_empty() {
             message.insert("refusal".to_string(), Value::String(self.refusal));
+        }
+        if let Some(reasoning) = self.reasoning_content {
+            message.insert("reasoning_content".to_string(), Value::String(reasoning));
         }
         if !self.tool_calls.is_empty() {
             let tool_calls = self
@@ -595,6 +619,9 @@ where
         else {
             continue;
         };
+        if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+            events.extend(output.reasoning_delta(reasoning));
+        }
         if let Some(content) = delta.get("content") {
             events.extend(output.text_delta(&chat_message_content_text(content)));
         }

@@ -1071,6 +1071,7 @@ HTTP 入口沿用 HTTP 上游；WS 入口且线路为原生 Responses、有效 W
 
 ### 流式结束、资源与 Token
 
+- Chat Completions 适配保留上游 `message.reasoning_content` 和分片 `delta.reasoning_content`，通过标准 Responses `reasoning.content` 的 `reasoning_text` 项传递；流式 `output_item.done` 与终态历史保存完整内容。下一轮转换还原 assistant 的 `reasoning_content`，同轮文本与并行工具调用共用该字段，避免 OpenCode 等 thinking 模式线路在工具结果返回后拒绝续接。空字符串按原样保存，未返回字段时不补造；推理摘要和原生加密状态不作为原始推理回传。已有对话中先前丢失的推理内容无法恢复，需在新版运行后重新生成对应轮次。回归覆盖普通响应、分片累计、实时 SSE、完整输入和 WS 历史展开，可运行 `cargo test -p codey --lib local_router --quiet -- --test-threads=2`。
 - HTTP 接收体、zstd 解压输出和本地 WebSocket 单消息上限为 64 MiB；请求工作集估算预算保持 256 MiB。zstd 按输出容量增长、在扩容前增量申请配额，采用压缩输入容量与输出目标容量较大值的四倍；解压结束释放压缩输入并收缩输出容量和配额。解压窗口仍独立限制为 32 MiB，较大窗口的压缩帧会被拒绝。此预算不等于进程 RSS 上限。
 - HTTP 声明体积或解压输出超限返回 413 `request_too_large`，提示大小限制和减少上下文的方法；临时配额不足仍返回 503 `router_memory_busy`，损坏的压缩数据返回 400。解压超限诊断仅保存传输大小、已解压大小下界和上限，不继续解压以统计完整大小，也不记录正文。
 - 解压、JSON 解析、协议转换和原生请求改写的后台任务持有对应请求配额，取消等待不会提前释放后台任务的配额。协议转换后释放原始 JSON，序列化后释放目标 JSON，WebSocket 解析后释放原始文本。HTTP 发送结束后，无工具名称映射需要保留的请求归还配额；适配线路仍需保留的映射继续计费，原生 WebSocket 转发期间仍持有请求配额。

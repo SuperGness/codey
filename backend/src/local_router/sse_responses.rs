@@ -2,8 +2,16 @@ use super::*;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum StreamOutputKind {
+    Reasoning,
     Message,
     Tool(usize),
+}
+
+#[derive(Debug)]
+pub(crate) struct ResponsesStreamReasoning {
+    item_id: String,
+    output_index: usize,
+    text: String,
 }
 
 #[derive(Debug)]
@@ -39,6 +47,7 @@ pub(crate) struct ResponsesSseState<'a> {
     pub(crate) created_at: i64,
     pub(crate) next_output_index: usize,
     pub(crate) message: Option<ResponsesStreamMessage>,
+    pub(crate) reasoning: Option<ResponsesStreamReasoning>,
     pub(crate) tools: BTreeMap<usize, ResponsesStreamTool>,
     pub(crate) output_order: Vec<StreamOutputKind>,
     pub(crate) terminal_started: bool,
@@ -53,6 +62,7 @@ impl<'a> ResponsesSseState<'a> {
             created_at: current_unix_timestamp(),
             next_output_index: 0,
             message: None,
+            reasoning: None,
             tools: BTreeMap::new(),
             output_order: Vec::new(),
             terminal_started: false,
@@ -79,6 +89,32 @@ impl<'a> ResponsesSseState<'a> {
                 }
             }))
             .await
+    }
+
+    pub(crate) fn reasoning_delta(&mut self, delta: &str) -> Vec<Value> {
+        let mut events = Vec::new();
+        if self.reasoning.is_none() {
+            let output_index = self.next_output_index;
+            self.next_output_index += 1;
+            let item_id = format!("rs_codey_{}", Uuid::new_v4());
+            events.push(json!({
+                "type":"response.output_item.added", "response_id":self.response_id,
+                "output_index":output_index,
+                "item":chat_reasoning_item(&item_id, "", "in_progress"),
+            }));
+            self.reasoning = Some(ResponsesStreamReasoning {
+                item_id,
+                output_index,
+                text: String::new(),
+            });
+            self.output_order.push(StreamOutputKind::Reasoning);
+        }
+        self.reasoning
+            .as_mut()
+            .expect("reasoning exists")
+            .text
+            .push_str(delta);
+        events
     }
 
     pub(crate) fn ensure_message(&mut self) -> Vec<Value> {
@@ -310,6 +346,13 @@ impl<'a> ResponsesSseState<'a> {
             return Ok(());
         }
         let mut events = Vec::new();
+        if let Some(reasoning) = self.reasoning.as_ref() {
+            events.push(json!({
+                "type":"response.output_item.done", "response_id":self.response_id,
+                "output_index":reasoning.output_index,
+                "item":chat_reasoning_item(&reasoning.item_id, &reasoning.text, "completed"),
+            }));
+        }
         if let Some(message) = self.message.as_ref() {
             if let Some(content_index) = message.text_content_index {
                 events.push(json!({
@@ -450,6 +493,13 @@ impl<'a> ResponsesSseState<'a> {
             .output_order
             .iter()
             .filter_map(|kind| match kind {
+                StreamOutputKind::Reasoning => self.reasoning.as_ref().map(|reasoning| {
+                    Ok(chat_reasoning_item(
+                        &reasoning.item_id,
+                        &reasoning.text,
+                        "completed",
+                    ))
+                }),
                 StreamOutputKind::Message => self
                     .message
                     .as_ref()

@@ -33,6 +33,28 @@ pub(crate) fn append_chat_message_item(
                 "context_not_portable: compaction 历史不能转换到当前线路；请回到原线路完成本地摘要后再切换"
             ),
             Some("message") => append_responses_message_object(object, messages, tool_bridge),
+            Some("reasoning") => {
+                // Only raw reasoning is replayable; summaries and encrypted provider state are not.
+                if let Some(parts) = object.get("content").and_then(Value::as_array) {
+                    let mut reasoning = String::new();
+                    let mut present = false;
+                    for part in parts {
+                        if part.get("type").and_then(Value::as_str) == Some("reasoning_text")
+                            && let Some(text) = part.get("text").and_then(Value::as_str)
+                        {
+                            reasoning.push_str(text);
+                            present = true;
+                        }
+                    }
+                    if present {
+                        messages.push(json!({
+                            "role":"assistant", "content":Value::Null,
+                            "reasoning_content":reasoning,
+                        }));
+                    }
+                }
+                Ok(())
+            }
             Some("agent_message") => {
                 append_responses_agent_message_object(object, messages, tool_bridge)
             }
@@ -113,8 +135,27 @@ pub(crate) fn append_responses_message_object(
     }
     let mut message = serde_json::Map::new();
     message.insert("role".to_string(), Value::String(role.to_string()));
+    if role == "assistant" {
+        if messages.last().is_some_and(|last| {
+            last["role"] == "assistant"
+                && last.get("reasoning_content").is_some()
+                && last["content"].is_null()
+                && last.get("tool_calls").is_none()
+                && last.get("function_call").is_none()
+        }) {
+            let mut reasoning = messages.pop().expect("reasoning message exists");
+            message.insert(
+                "reasoning_content".to_string(),
+                reasoning["reasoning_content"].take(),
+            );
+        }
+        if let Some(reasoning) = object.get("reasoning_content").and_then(Value::as_str) {
+            message.insert("reasoning_content".to_string(), json!(reasoning));
+        }
+    }
     let chat_content = object
         .get("content")
+        .filter(|content| role != "assistant" || !content.is_null())
         .map(|content| responses_content_to_chat_content(content, role))
         .transpose()?
         .flatten();
@@ -140,7 +181,9 @@ pub(crate) fn append_responses_message_object(
     if message.contains_key("content")
         || message.contains_key("tool_calls")
         || message.contains_key("function_call")
+        || message.contains_key("reasoning_content")
     {
+        message.entry("content".to_string()).or_insert(Value::Null);
         messages.push(Value::Object(message));
     }
     Ok(())
@@ -171,10 +214,9 @@ pub(crate) fn first_visible_content_part_text(
     first_text_field(object).or_else(|| object.get("refusal").and_then(Value::as_str))
 }
 
-// These items are provider-maintained state from Responses history. They are not
-// visible model-facing text, and Chat Completions has no field that can carry them.
+// Encrypted provider state cannot be represented by Chat Completions.
 pub(crate) fn is_opaque_responses_input_item_type(item_type: &str) -> bool {
-    matches!(item_type, "encrypted_content" | "reasoning" | "compaction")
+    matches!(item_type, "encrypted_content" | "compaction")
 }
 
 pub(crate) fn is_opaque_responses_content_part_type(part_type: &str) -> bool {
@@ -427,9 +469,11 @@ pub(crate) fn append_chat_assistant_tool_call(
     });
     if let Some(last) = messages.last_mut().and_then(Value::as_object_mut)
         && last.get("role").and_then(Value::as_str) == Some("assistant")
-        && last
-            .get("content")
-            .is_none_or(|content| content.is_null() || content.as_str() == Some(""))
+        && last.get("content").is_none_or(|content| {
+            content.is_null()
+                || content.as_str() == Some("")
+                || last.contains_key("reasoning_content")
+        })
         && !last.contains_key("function_call")
     {
         last.entry("content".to_string()).or_insert(Value::Null);

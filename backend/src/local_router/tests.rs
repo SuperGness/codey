@@ -3201,6 +3201,95 @@ fn adapted_websocket_continuation_reuses_the_previous_response_context() {
 }
 
 #[test]
+fn chat_reasoning_content_round_trips_through_tool_history() {
+    for reasoning in ["", "先读取文件。\nThen check 🙂"] {
+        for text in [Value::Null, json!("checking")] {
+            for tools in [false, true] {
+                let mut message = json!({
+                    "role":"assistant", "content":text, "reasoning_content":reasoning,
+                });
+                if tools {
+                    message["tool_calls"] = json!([
+                        {"id":"call-1","type":"function","function":{"name":"lookup","arguments":"{}"}},
+                        {"id":"call-2","type":"function","function":{"name":"lookup","arguments":"{}"}}
+                    ]);
+                }
+                let direct = responses_to_chat_completions_body(&json!({
+                    "model":"provider-model", "input":[message.clone()],
+                }))
+                .unwrap();
+                assert_eq!(direct["messages"][0], message);
+                let response = chat_completion_to_responses_body(
+                    json!({
+                        "choices":[{"message":message,"finish_reason":"stop"}]
+                    }),
+                    "provider-model",
+                )
+                .unwrap();
+                assert_eq!(response["output"][0]["type"], "reasoning");
+                assert_eq!(response["output"][0]["content"][0]["text"], reasoning);
+                assert_eq!(response["output_text"], text.as_str().unwrap_or_default());
+
+                let mut history = AdaptedResponsesHistory::default();
+                history.prepare(&mut json!({"input":"inspect"})).unwrap();
+                history
+                    .remember(
+                        "resp_codey_reasoning",
+                        response["output"].as_array().unwrap(),
+                    )
+                    .unwrap();
+                let followup = if tools {
+                    json!([
+                        {"type":"function_call_output","call_id":"call-1","output":"one"},
+                        {"type":"function_call_output","call_id":"call-2","output":"two"}
+                    ])
+                } else {
+                    json!([{"role":"user","content":"continue"}])
+                };
+                let mut next = json!({
+                    "model":"provider-model", "previous_response_id":"resp_codey_reasoning",
+                    "input":followup,
+                });
+                assert!(history.prepare(&mut next).unwrap());
+                // The expanded input is also the full-history HTTP/reconnect representation.
+                let converted = responses_to_chat_completions_body(&next).unwrap();
+                let assistant = &converted["messages"][1];
+                assert_eq!(assistant["reasoning_content"], reasoning);
+                assert_eq!(assistant["content"], text);
+                if tools {
+                    assert_eq!(assistant["tool_calls"].as_array().unwrap().len(), 2);
+                    assert_eq!(converted["messages"][2]["tool_call_id"], "call-1");
+                    assert_eq!(converted["messages"][3]["tool_call_id"], "call-2");
+                }
+                assert!(converted["messages"][0].get("reasoning_content").is_none());
+                assert!(converted["messages"][2].get("reasoning_content").is_none());
+            }
+        }
+    }
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先读取\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"文件。\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let chat = parse_chat_completion_sse_bytes(sse.as_bytes(), "provider-model").unwrap();
+    assert_eq!(
+        chat["choices"][0]["message"]["reasoning_content"],
+        "先读取文件。"
+    );
+    let response = chat_completion_to_responses_body(chat, "provider-model").unwrap();
+    let converted = responses_to_chat_completions_body(&json!({
+        "model":"provider-model", "input":response["output"],
+    }))
+    .unwrap();
+    assert_eq!(
+        converted["messages"][0]["reasoning_content"],
+        "先读取文件。"
+    );
+    assert_eq!(converted["messages"][0]["content"], "done");
+}
+
+#[test]
 fn native_responses_rewrite_preserves_large_raw_fields() {
     let original = br#"{
         "model" : "route-a/gpt-5.4",
@@ -5748,6 +5837,8 @@ async fn chat_completions_route_uses_its_path_key_and_returns_responses_sse() {
         let authorization = incoming_header(&request, "authorization").map(str::to_string);
         let body = serde_json::from_slice::<Value>(&request.body).unwrap();
         let sse = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"inspect \"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"the file\"}},{\"index\":1,\"delta\":{\"reasoning_content\":\"ignored\"}}]}\n\n",
             "data: {\"id\":\"chatcmpl-stream\",\"created\":123,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello \",\"tool_calls\":null},\"finish_reason\":null}]}\n\n",
             "data: {\"id\":\"chatcmpl-stream\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-stream\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\"}}]},\"finish_reason\":null}]}\n\n",
             "data: {\"id\":\"chatcmpl-stream\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"1}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -5801,6 +5892,33 @@ async fn chat_completions_route_uses_its_path_key_and_returns_responses_sse() {
     assert!(events.contains("\"call_id\":\"call-stream\""));
     assert!(events.contains("\"input_tokens\":4"));
     assert!(events.contains("response.completed"));
+
+    let parsed = events
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let output = parsed
+        .iter()
+        .filter(|event| event["type"] == "response.output_item.done")
+        .map(|event| event["item"].clone())
+        .collect::<Vec<_>>();
+    let completed = parsed
+        .iter()
+        .find(|event| event["type"] == "response.completed")
+        .unwrap();
+    assert_eq!(completed["response"]["output"], json!(output));
+    assert_eq!(output[0]["content"][0]["text"], "inspect the file");
+    assert_eq!(completed["response"]["output_text"], "hello ");
+    let mut next_input = output;
+    next_input.push(json!({"type":"function_call_output","call_id":"call-stream","output":"done"}));
+    let next = responses_to_chat_completions_body(&json!({
+        "model":"provider-model", "input":next_input,
+    }))
+    .unwrap();
+    assert_eq!(next["messages"][0]["reasoning_content"], "inspect the file");
+    assert_eq!(next["messages"][0]["tool_calls"][0]["id"], "call-stream");
+    assert_eq!(next["messages"][1]["tool_call_id"], "call-stream");
 
     let (path, authorization, body) = upstream_task.await.unwrap();
     assert_eq!(path, "/v1/chat/completions");
