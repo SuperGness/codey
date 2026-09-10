@@ -136,14 +136,13 @@ pub(crate) fn append_responses_message_object(
     let mut message = serde_json::Map::new();
     message.insert("role".to_string(), Value::String(role.to_string()));
     if role == "assistant" {
-        if messages.last().is_some_and(|last| {
+        if let Some(mut reasoning) = messages.pop_if(|last| {
             last["role"] == "assistant"
                 && last.get("reasoning_content").is_some()
                 && last["content"].is_null()
                 && last.get("tool_calls").is_none()
                 && last.get("function_call").is_none()
         }) {
-            let mut reasoning = messages.pop().expect("reasoning message exists");
             message.insert(
                 "reasoning_content".to_string(),
                 reasoning["reasoning_content"].take(),
