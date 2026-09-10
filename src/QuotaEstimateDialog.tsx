@@ -36,13 +36,12 @@ export function QuotaEstimateDialog({ container, onClose }: {
   const [loading, setLoading] = useState(true);
   const [loaded, setLoaded] = useState(0);
   const [error, setError] = useState("");
-  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
   const [healthWarning, setHealthWarning] = useState(false);
   const [usageWarning, setUsageWarning] = useState("");
   const provider = "openai";
   useEffect(() => {
     let active = true;
-    setLoading(true); setRows(null); setPeriod(null); setError(""); setLoaded(0); setUpdatedAt(null); setHealthWarning(false);
+    setLoading(true); setRows(null); setPeriod(null); setError(""); setLoaded(0); setHealthWarning(false);
     setUsageWarning("");
     void (async () => {
       try {
@@ -64,7 +63,7 @@ export function QuotaEstimateDialog({ container, onClose }: {
         const next = await loadQuotaRows(cursor => invoke<QuotaPage>("query_route_request_logs", {
           provider, fromUnixMs, toUnixMs, cursorMode: true, cursor, pageSize: 100,
         }), () => active, setLoaded);
-        if (active && next) { setRows(next); setUpdatedAt(Date.now()); }
+        if (active && next) setRows(next);
       } catch (cause) {
         if (active) setError(`无法完成额度估算：${errorText(cause)}`);
       } finally { if (active) setLoading(false); }
