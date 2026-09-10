@@ -147,13 +147,8 @@ pub(crate) fn snapshot(home: &Path) -> Result<CatalogSnapshot> {
 pub(crate) fn restore_snapshot(snapshot: CatalogSnapshot) -> Result<()> {
     match snapshot.contents {
         Some(contents) => atomic_write(&snapshot.path, &contents),
-        None => match fs::remove_file(&snapshot.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| {
-                format!("移除新建的 Codey 模型目录失败：{}", snapshot.path.display())
-            }),
-        },
+        None => crate::fs_util::remove_file_if_exists(&snapshot.path)
+            .with_context(|| format!("移除新建的 Codey 模型目录失败：{}", snapshot.path.display())),
     }
 }
 

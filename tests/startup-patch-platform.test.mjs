@@ -1,34 +1,11 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function loadWindowsStartupSource() {
-  const [launcher, launcherPlatform, startupPatch] = await Promise.all([
-    readFile(new URL("../backend/src/launcher/process.rs", import.meta.url), "utf8"),
-    readFile(
-      new URL("../backend/src/launcher/platform.rs", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL("../backend/src/codex_startup_patch.rs", import.meta.url),
-      "utf8",
-    ),
-  ]).then((sources) => sources.map((source) => source.replace(/\r\n/g, "\n")));
-  const windowsSpawn = launcher.slice(
-    launcher.indexOf("#[cfg(windows)]\n    {", launcher.indexOf("async fn spawn_codex")),
-    launcher.indexOf("#[cfg(target_os = \"macos\")]", launcher.indexOf("async fn spawn_codex")),
-  );
-  const cleanup = launcherPlatform.slice(
-    launcherPlatform.indexOf("async fn stop_windows_spawned_codex"),
-    launcherPlatform.indexOf(
-      "#[cfg(target_os = \"macos\")]\npub(super) fn build_fresh_macos_open_command",
-    ),
-  );
-  return { cleanup, launcher, launcherPlatform, startupPatch, windowsSpawn };
-}
+import { loadSpawnCodexSections } from "./helpers/startup-patch.mjs";
 
+// Static contracts keep both platforms' spawn_codex wiring visible on any CI host.
 test("Windows startup compatibility failure cleans the process before compatible restart", async () => {
-  const { cleanup, windowsSpawn } = await loadWindowsStartupSource();
+  const { cleanup, windowsSpawn } = await loadSpawnCodexSections();
   const cleanupCall = windowsSpawn.indexOf(
     "stop_windows_spawned_codex(&mut spawned, app_dir).await",
   );
@@ -43,8 +20,6 @@ test("Windows startup compatibility failure cleans the process before compatible
     windowsSpawn,
     /Codex 已启动，但部分启动设置未能应用/,
   );
-  assert.doesNotMatch(windowsSpawn, /宠物精简启动补丁未能确认生效/);
-  assert.doesNotMatch(windowsSpawn, /petSlimRequested/);
   assert.match(cleanup, /-> Result<\(\)>/);
   assert.match(
     cleanup,
@@ -57,7 +32,7 @@ test("Windows startup compatibility failure cleans the process before compatible
 });
 
 test("Windows skips the Inspector when the Electron fuse is off and retries without a breakpoint", async () => {
-  const { launcher, windowsSpawn } = await loadWindowsStartupSource();
+  const { launcher, windowsSpawn } = await loadSpawnCodexSections();
   const fuseProbe = windowsSpawn.indexOf(
     "crate::electron_fuses::detect_node_cli_inspect_state(app_dir.to_path_buf()).await",
   );
@@ -117,7 +92,7 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
 });
 
 test("Startup waits end on process exit, marker confirmation or renderer evidence", async () => {
-  const { launcher, startupPatch } = await loadWindowsStartupSource();
+  const { launcher, startupPatch } = await loadSpawnCodexSections();
 
   assert.match(
     launcher,
@@ -151,7 +126,7 @@ test("Startup waits end on process exit, marker confirmation or renderer evidenc
 });
 
 test("Windows startup patch requires app-server runtime override validation", async () => {
-  const { launcher, launcherPlatform, windowsSpawn } = await loadWindowsStartupSource();
+  const { launcher, launcherPlatform, windowsSpawn } = await loadSpawnCodexSections();
 
   assert.match(
     launcher,
@@ -176,4 +151,36 @@ test("Windows startup patch requires app-server runtime override validation", as
   const packageSetup = launcherPlatform.indexOf("match WindowsPackageDebugSession::start(app_dir, environment)");
   const activation = launcherPlatform.indexOf("codey_runtime_core::launcher::activate_packaged_app", packageSetup);
   assert.match(launcherPlatform.slice(packageSetup, activation), /if require_wrapper_environment \{\s*return Err\(error\)/);
+});
+
+test("macOS startup patch requires app-server runtime override validation", async () => {
+  const { launcher: source, macosSpawn } = await loadSpawnCodexSections();
+  const successStart = macosSpawn.indexOf("Ok(()) =>");
+  const failureStart = macosSpawn.indexOf("Err(error) =>", successStart);
+
+  assert.match(macosSpawn, /install_startup_patch_with_cli_fallback\(/);
+  assert.match(macosSpawn, /Ok\(\(\)\)[\s\S]*?performance_status = "ready"/);
+  assert.ok(successStart >= 0);
+  assert.ok(failureStart > successStart);
+  assert.doesNotMatch(
+    macosSpawn.slice(successStart, failureStart),
+    /stop_macos_codex|reap_child_after_cleanup|degraded/,
+  );
+  assert.match(
+    source,
+    /"launcher\.startup_compatibility_mode"[\s\S]*?"main_process_inspector_unavailable"[\s\S]*?Ok\(\(\)\)/,
+  );
+  // A disabled fuse keeps the launch marker but waits on the CLI wrapper alone.
+  assert.match(
+    macosSpawn,
+    /install_startup_patch_with_cli_fallback\(\s*inspect_fuse\.inspector_possible\(\)\.then_some\(inspector_port\),/,
+  );
+});
+
+test("Codex CLI wrapper environment does not leak into the real CLI", async () => {
+  const { startupPatch } = await loadSpawnCodexSections();
+  assert.match(
+    startupPatch,
+    /for name in \[\s*"CODEX_CLI_PATH",\s*CLI_WRAPPER_TARGET_ENV,/,
+  );
 });

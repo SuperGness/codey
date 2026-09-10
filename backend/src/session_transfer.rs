@@ -1251,13 +1251,8 @@ fn transfer_path(home: &Path, kind: TransferKind, transfer_id: &str) -> Result<P
 
 fn remove_transfer_file(home: &Path, kind: TransferKind, transfer_id: &str) -> Result<()> {
     let path = transfer_path(home, kind, transfer_id)?;
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => {
-            Err(error).with_context(|| format!("清理会话传输临时文件失败：{}", path.display()))
-        }
-    }
+    crate::fs_util::remove_file_if_exists(&path)
+        .with_context(|| format!("清理会话传输临时文件失败：{}", path.display()))
 }
 
 fn checked_rollout_path(home: &Path, rollout_path: &Path) -> Result<PathBuf> {

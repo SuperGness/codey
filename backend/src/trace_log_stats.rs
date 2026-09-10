@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -21,10 +20,7 @@ impl TraceLogStatsSnapshot {
 
 pub fn snapshot(home: &Path) -> TraceLogStatsSnapshot {
     let mut snapshot = TraceLogStatsSnapshot {
-        captured_at: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs(),
+        captured_at: crate::fs_util::timestamp_secs(),
         ..TraceLogStatsSnapshot::default()
     };
     match trace_log_guard::log_database_paths(home) {

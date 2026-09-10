@@ -152,6 +152,10 @@ pub(super) struct SpawnedCodex {
     pub(super) performance_detail: String,
 }
 
+#[cfg_attr(
+    not(windows),
+    allow(clippy::ptr_arg, reason = "Windows 启动重试需要替换调用方的应用目录")
+)]
 pub(super) async fn spawn_codex(
     app_dir: &mut PathBuf,
     debug_port: u16,
@@ -896,9 +900,7 @@ fn stage_windows_cli_runtime(
         }
         Ok(destination.join("codex.exe"))
     })();
-    if staging.exists() {
-        let _ = std::fs::remove_dir_all(&staging);
-    }
+    let _ = std::fs::remove_dir_all(&staging);
     result
 }
 

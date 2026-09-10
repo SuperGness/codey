@@ -13,10 +13,6 @@ class FakeElement extends FakeElementCore {
     this.innerHTML = "";
   }
 
-  append(...children) {
-    children.forEach((child) => this.appendChild(child));
-  }
-
   click() {
     const event = {
       composedPath: () => [this],
@@ -30,8 +26,6 @@ class FakeElement extends FakeElementCore {
   dispatch(type) {
     for (const listener of this.listeners.get(type) || []) listener({ type });
   }
-
-  focus() {}
 
   getBoundingClientRect() {
     if (this.hasAttribute("data-codey-session-delete")) {
@@ -48,16 +42,6 @@ class FakeElement extends FakeElementCore {
 
   getClientRects() {
     return [this.getBoundingClientRect()];
-  }
-
-  insertAdjacentElement(position, element) {
-    assert.ok(position === "beforebegin" || position === "afterend");
-    const siblings = this.parentElement.children;
-    const index = siblings.indexOf(this);
-    element.remove();
-    element.parentElement = this.parentElement;
-    siblings.splice(position === "beforebegin" ? index : index + 1, 0, element);
-    return element;
   }
 
 }

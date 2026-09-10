@@ -2,30 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
-
-async function loadStartupPatchExpression(
-  disablePet = true,
-  errorLoggerExecutable = null,
-) {
-  const template = normalizeLineEndings(
-    await readFile(
-      new URL("../backend/src/codex_startup_patch.js", import.meta.url),
-      "utf8",
-    ),
-  );
-  assert.ok(template);
-  const expression = template.replaceAll(
-    "__DISABLE_PET__",
-    disablePet ? "true" : "false",
-  ).replaceAll("__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__", "false");
-  return errorLoggerExecutable == null
-    ? expression
-    : expression.replaceAll(
-        '"__CODEY_ERROR_LOGGER_EXECUTABLE__"',
-        JSON.stringify(errorLoggerExecutable),
-      );
-}
+import { loadStartupPatchTemplate } from "./helpers/startup-patch.mjs";
 
 test("an incompatible optional renderer patch never blocks the Codex module response", async () => {
   const Module = process.getBuiltinModule("module");
@@ -170,7 +147,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
 
   try {
     assert.equal(
-      (0, eval)(await loadStartupPatchExpression(true, "C:\\Codey\\codey.exe")),
+      (0, eval)(await loadStartupPatchTemplate({ disablePet: true, errorLoggerExecutable: "C:\\Codey\\codey.exe" })),
       "codey-startup-patch-installed-v39",
     );
     const electron = Module._load("electron", undefined, false);

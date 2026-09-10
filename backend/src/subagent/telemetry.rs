@@ -169,7 +169,7 @@ fn acquire_trace_lock(lock: &std::fs::File, lock_path: &Path, timeout: Duration)
     loop {
         match lock.try_lock_exclusive() {
             Ok(()) => return Ok(()),
-            Err(error) if trace_lock_is_contended(&error) => {
+            Err(error) if crate::fs_util::file_lock_is_contended(&error) => {
                 if started.elapsed() >= timeout {
                     anyhow::bail!(
                         "获取子代理 trace 锁超时（{} ms，遥测已丢弃）：{}",
@@ -185,11 +185,6 @@ fn acquire_trace_lock(lock: &std::fs::File, lock_path: &Path, timeout: Duration)
             }
         }
     }
-}
-
-fn trace_lock_is_contended(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::WouldBlock
-        || (cfg!(windows) && error.raw_os_error() == Some(33))
 }
 
 fn rotate_if_needed(state_root: &Path, path: &Path, incoming_bytes: u64) -> Result<()> {
@@ -240,11 +235,8 @@ fn replace_trace_archive(state_root: &Path, path: &Path, archive: &Path) -> Resu
 }
 
 fn remove_if_present(path: &Path, context: &str) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("{context}：{}", path.display())),
-    }
+    crate::fs_util::remove_file_if_exists(path)
+        .with_context(|| format!("{context}：{}", path.display()))
 }
 
 pub(crate) fn trace_file(state_root: &Path) -> PathBuf {

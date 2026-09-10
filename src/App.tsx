@@ -143,8 +143,8 @@ export function App({
     duration: 5,
   });
   const confirmationController = useConfirmationController();
-  const setNotice = noticeController.setNotice;
-  const setConfirmation = confirmationController.setConfirmation;
+  const setNotice = noticeController.set;
+  const setConfirmation = confirmationController.set;
   useEffect(() => {
     if (restartStatusError) setNotice({ tone: "error", text: restartStatusError });
   }, [restartStatusError, setNotice]);
@@ -799,7 +799,7 @@ export function App({
     }
     setDirty(false);
     setModelPickerVisible(false);
-    confirmationController.clear();
+    setConfirmation(null);
     onClose?.();
   }
 

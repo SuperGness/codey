@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Alert, Table } from "antd";
 import { invoke } from "./api";
+import { errorText } from "./appUtils";
 import { formatTimestamp } from "./formatters";
 import { Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./components/antd";
 import { loadQuotaRows, PRICING_CHECKED, PRICING_SOURCE, projectQuota, quotaPeriod, sumQuotaRows } from "./quotaEstimate";
@@ -61,7 +62,7 @@ export function QuotaEstimateDialog({ container, onClose }: {
         }), () => active, setLoaded);
         if (active && next) { setRows(next); setUpdatedAt(Date.now()); }
       } catch (cause) {
-        if (active) setError(`无法完成额度估算：${cause instanceof Error ? cause.message : String(cause)}`);
+        if (active) setError(`无法完成额度估算：${errorText(cause)}`);
       } finally { if (active) setLoading(false); }
     })();
     return () => { active = false; };
@@ -153,7 +154,7 @@ export function QuotaEstimateDialog({ container, onClose }: {
                   <p>缓存读写从输入中拆分，均已包含在当前消耗内；该档位无单独缓存价格时按输入价计算。新版模型按公开缓存写入价计费。缓存节省与普通输入价比较，负数表示写入增加费用，仅供参考，不重复加减。</p>
                   <p>适用模型单次输入超过 272K 时，整次请求使用该档位的长上下文价，表格与短上下文分开。未公布价格的组合不借用其他档位价格。</p>
                   <p>估算仅覆盖本线路已记录的 Token，不按采样率补推。官方已用比例可能包含其他设备用量，缺失日志或跨账号历史会影响推算准确性。工具调用、搜索内容特殊计价、容器和存储等缺少完整计费数据，尚未计入。合计中的未计价请求不代表实际免费。</p>
-                  <p>价格核对：{PRICING_CHECKED} · <a className="text-blue-600 underline" href={PRICING_SOURCE} target="_blank" rel="noreferrer">OpenAI 官方价格</a>；Codex 历史模型价格见对应官方模型页。GPT-5.6 Sol 使用当前公开促销价。</p>
+                  <p>价格核对：{PRICING_CHECKED} · <a className="text-blue-600 underline" href={PRICING_SOURCE} target="_blank" rel="noreferrer">OpenAI 官方价格</a>；Codex 历史模型价格见对应官方模型页。GPT-5.6 Sol 使用当前公开促销价。gpt-6-astra 缓存读取单价按自定义规则乘以 2，适用于所有档位及长短上下文。</p>
                 </div>
             </details>
           </div>} />

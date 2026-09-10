@@ -400,9 +400,7 @@ pub(super) fn normalized_identifier(value: &str) -> String {
     protocol::normalize_identifier(value)
 }
 
-pub(super) fn hash_component(value: &str) -> String {
-    crate::fs_util::sha256_hex(value.as_bytes())
-}
+pub(super) use crate::fs_util::sha256_hex_str as hash_component;
 
 pub(super) fn hash_component_bytes(value: &[u8]) -> String {
     crate::fs_util::sha256_hex(value)

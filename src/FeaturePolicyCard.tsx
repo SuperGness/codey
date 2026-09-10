@@ -23,6 +23,7 @@ import {
 } from "./subagentModels";
 import { flushCardClass, surfaceCardPaddingClass } from "./uiClasses";
 import { invoke } from "./api";
+import { errorText } from "./appUtils";
 import type { DiagnosticStorageTarget } from "./diagnosticStorage";
 import { NotificationChannelsCard } from "./notifications/NotificationChannelsCard";
 import type { NotificationChannel } from "./notifications/types";
@@ -187,7 +188,6 @@ export function SubagentPolicyCardComponent({
                         <span>{task.name}</span>
                         <Badge
                           variant={task.access === "write" ? "warning" : "brand"}
-                          size="xs"
                         >
                           {task.access === "write" ? "可写" : "只读"}
                         </Badge>
@@ -261,7 +261,6 @@ export function SubagentPolicyCardComponent({
                         }
                         optionList={reasoningOptions}
                         dropdownClassName="rounded-[10px]"
-                        showClear={false}
                         filter={false}
                         getPopupContainer={() => popupContainer ?? document.body}
                         onChange={(value) =>
@@ -348,7 +347,7 @@ function FeaturePolicyCardComponent({
       const result = await invoke<{ message: string }>("repair_codex_overlays");
       setOverlayRepairMessage(result.message);
     } catch (error) {
-      setOverlayRepairMessage(error instanceof Error ? error.message : String(error));
+      setOverlayRepairMessage(errorText(error));
     } finally {
       setRepairingOverlay(false);
     }

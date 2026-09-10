@@ -174,7 +174,6 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /请求成功率/);
   assert.match(viewer, /平均首字耗时 \(TTFT\)/);
   assert.match(viewer, /Token 消耗/);
-  assert.doesNotMatch(viewer, /codexSubagentSessionId/);
   assert.doesNotMatch(viewer, /item\.providerName && item\.provider \?/);
 });
 

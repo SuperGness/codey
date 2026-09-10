@@ -143,12 +143,6 @@ struct LedgerStore {
     ledger_path: PathBuf,
 }
 
-fn ledger_lock_is_contended(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::WouldBlock
-        // LockFileEx reports ERROR_LOCK_VIOLATION for an occupied byte range.
-        || (cfg!(windows) && error.raw_os_error() == Some(33))
-}
-
 impl LedgerStore {
     fn open(state_root: &Path, session_id: &str) -> Result<Self> {
         fs::create_dir_all(state_root).with_context(|| {
@@ -170,7 +164,7 @@ impl LedgerStore {
         loop {
             match lock.try_lock_exclusive() {
                 Ok(()) => break,
-                Err(error) if ledger_lock_is_contended(&error) => {
+                Err(error) if crate::fs_util::file_lock_is_contended(&error) => {
                     if lock_started.elapsed() >= Duration::from_millis(LEDGER_LOCK_TIMEOUT_MILLIS) {
                         anyhow::bail!(
                             "获取 Codey 子代理编排账本锁超时（{} ms）：{}",

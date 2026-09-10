@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+
+import { flushMicrotasks } from "./helpers/flush.mjs";
 import { TextEncoder } from "node:util";
 import vm from "node:vm";
 
@@ -61,10 +63,6 @@ class FakeElement extends FakeElementCore {
   }
 
   appendChild() {}
-
-  addEventListener(...args) {
-    return FakeElementCore.prototype.addEventListener.apply(this, args);
-  }
 
   remove() {
     this.removed = true;
@@ -350,10 +348,6 @@ const createRecoveryController = (events, overrides = {}) => ({
   async resumeConversation() {},
   ...overrides,
 });
-
-const flushMicrotasks = async () => {
-  await new Promise((resolve) => setImmediate(resolve));
-};
 
 test("reconciles the current session through AppServerManager without a completion bridge", async () => {
   const events = [];

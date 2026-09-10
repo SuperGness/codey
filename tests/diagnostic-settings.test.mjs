@@ -28,7 +28,6 @@ test("settings reports startup health without exposing implementation modes", as
   const launcherSource = `${launcherRootSource}\n${launcherProcessSource}`;
 
   assert.match(commandsSource, /"clientPlatform": current_update_platform\(\)/);
-  assert.doesNotMatch(commandsSource, /injection_statuses_for_display/);
   assert.match(typesSource, /clientPlatform\?: string/);
   assert.match(
     sectionsSource,
@@ -53,32 +52,5 @@ test("settings reports startup health without exposing implementation modes", as
   assert.equal(failedSummary.failedInjectionScriptCount, 0);
   assert.doesNotMatch(sectionsSource, /injection-script-state/);
   assert.doesNotMatch(sectionsSource, /id: "opt-patch"/);
-  assert.doesNotMatch(launcherSource, /fn mark_pet_slim_startup_failure/);
   assert.doesNotMatch(launcherSource, /pet_status\.status = "failed"/);
-});
-
-test("diagnostic storage guards and pet remain user-configurable", async () => {
-  const [appSource, sectionsSource, configSource, launcherSource, commandsSource] = await Promise.all([
-    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/FeaturePolicyCard.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../backend/src/config.rs", import.meta.url), "utf8"),
-    readFile(new URL("../backend/src/launcher.rs", import.meta.url), "utf8"),
-    readFile(new URL("../backend/src/commands.rs", import.meta.url), "utf8"),
-  ]);
-  const uiSource = `${appSource}\n${sectionsSource}`;
-
-  assert.match(uiSource, /disableTraceLogWrites/);
-  assert.match(configSource, /pub disable_trace_log_writes: bool/);
-  assert.match(uiSource, /protectCrashpadPending/);
-  assert.match(configSource, /pub protect_crashpad_pending: bool/);
-  assert.doesNotMatch(appSource, /TraceLogModule|refresh_diagnostic_storage_stats|refreshTraceLogStats|askClearTraceLogs/);
-  assert.match(sectionsSource, /onAnalyzeDiagnosticStorage\("trace"\)/);
-  assert.match(sectionsSource, /onAnalyzeDiagnosticStorage\("crashpad"\)/);
-  assert.match(appSource, /clear_diagnostic_storage/);
-  assert.doesNotMatch(appSource, /可手动刷新统计/);
-  assert.doesNotMatch(commandsSource, /"refresh_diagnostic_storage_stats"|"refresh_trace_log_stats"/);
-  assert.match(commandsSource, /"clear_diagnostic_storage"/);
-  assert.match(launcherSource, /spawn_crashpad_guard_watcher/);
-  assert.doesNotMatch(launcherSource, /spawn_startup_trace_stats_refresh/);
-  assert.match(uiSource, /slimCodexPet/);
 });

@@ -8,38 +8,12 @@ import { createInterface } from "node:readline";
 import test from "node:test";
 import vm from "node:vm";
 
-const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
+import { loadStartupPatchTemplate } from "./helpers/startup-patch.mjs";
 // Desktop's shared transport applies its own transform before serialization.
 const appServerTransportFixture = `globalThis.Transport=class {
   constructor(options){this.options=options}
   sendMessage(e){let n=this.options.getConnection(),a=this.options.transformOutgoingMessage==null?e:this.options.transformOutgoingMessage(e);n.send(JSON.stringify(a))}
 };`;
-
-async function loadPatchExpression(
-  runtimeConfigOverrides = [],
-  subagentGateActive = runtimeConfigOverrides.includes("features.hooks=true"),
-  requireAppServerRuntimeOverrideValidation = false,
-) {
-  const template = normalizeLineEndings(await readFile(
-    new URL("../backend/src/codex_startup_patch.js", import.meta.url),
-    "utf8",
-  ));
-  assert.ok(template, "startup patch template should be readable by the regression test");
-  return template
-    .replaceAll(
-      '"__CODEY_RUNTIME_CONFIG_OVERRIDES__"',
-      JSON.stringify(runtimeConfigOverrides),
-    )
-    .replaceAll("__DISABLE_PET__", "false")
-    .replaceAll(
-      "__SUBAGENT_GATE_ACTIVE__",
-      subagentGateActive ? "true" : "false",
-    )
-    .replaceAll(
-      "__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__",
-      requireAppServerRuntimeOverrideValidation ? "true" : "false",
-    );
-}
 
 async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrides = {}, installMessagePatch = true) {
   const Module = process.getBuiltinModule("module");
@@ -73,11 +47,10 @@ async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrid
   };
   try {
     const result = vm.runInNewContext(
-      await loadPatchExpression(
+      await loadStartupPatchTemplate({
         runtimeConfigOverrides,
-        runtimeConfigOverrides.includes("features.hooks=true"),
-        true,
-      ),
+        requireAppServerRuntimeOverrides: true,
+      }),
       context,
     );
     if (installMessagePatch) {
@@ -430,7 +403,7 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
       `hooks.PreToolUse=[{ hooks = [{ type = "command", command = "'C:\\\\Program Files\\\\Codey\\\\codey.exe' --codey-subagent-gate-hook" }] }]`,
     ];
     const nativeRuntimeConfigOverrides = runtimeConfigOverrides;
-    const expression = await loadPatchExpression(runtimeConfigOverrides);
+    const expression = await loadStartupPatchTemplate({ runtimeConfigOverrides });
     assert.equal((0, eval)(expression), "codey-startup-patch-installed-v39");
 
     const patchedElectron = Module._load("electron");
@@ -788,7 +761,11 @@ test("startup patch fails closed when app-server runtime override injection is n
 
   try {
     assert.match(
-      await loadPatchExpression(runtimeConfigOverrides, false, true),
+      await loadStartupPatchTemplate({
+        runtimeConfigOverrides,
+        subagentGateActive: false,
+        requireAppServerRuntimeOverrides: true,
+      }),
       /appServerRuntimeOverrideTimeoutMs = 20_000/,
     );
     assert.equal(runtime.result, "codey-startup-patch-installed-v39");

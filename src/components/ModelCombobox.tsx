@@ -38,13 +38,14 @@ export function ModelCombobox({ "aria-label": ariaLabel, disabled = false, getPo
       })),
     }));
   }, [options]);
-  const unavailableValue = value.trim() && !selectedOption ? value.trim() : "";
+  const trimmedValue = value.trim();
+  const unavailableValue = selectedOption ? "" : trimmedValue;
   return <Select
     aria-label={ariaLabel}
     aria-invalid={Boolean(unavailableValue) || undefined}
     className="w-full min-w-0"
     disabled={disabled}
-    showSearch={{ filterOption: (input, option) => String(option?.searchText ?? option?.label ?? "").toLocaleLowerCase().includes(input.trim().toLocaleLowerCase()) }}
+    showSearch={{ filterOption: (input, option) => String(option?.searchText ?? "").includes(input.trim().toLocaleLowerCase()) }}
     placeholder={placeholder}
     value={selectedOption?.value ?? (unavailableValue || undefined)}
     status={unavailableValue ? "warning" : undefined}

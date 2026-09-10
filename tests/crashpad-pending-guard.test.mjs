@@ -12,6 +12,7 @@ test("Crashpad pending protection is bounded, allowlisted, and surfaced with Tra
     runtime,
     app,
     api,
+    featurePolicy,
   ] = await Promise.all([
     readFile(
       new URL("../backend/src/crashpad_pending_guard.rs", import.meta.url),
@@ -30,6 +31,7 @@ test("Crashpad pending protection is bounded, allowlisted, and surfaced with Tra
     ),
     readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/FeaturePolicyCard.tsx", import.meta.url), "utf8"),
   ]);
 
   assert.match(
@@ -53,6 +55,15 @@ test("Crashpad pending protection is bounded, allowlisted, and surfaced with Tra
 
   assert.match(config, /pub protect_crashpad_pending: bool/);
   assert.match(config, /protect_crashpad_pending: true/);
+  assert.match(config, /pub disable_trace_log_writes: bool/);
+  // Diagnostic guards and the pet stay user-configurable from the feature policy card.
+  assert.match(`${app}\n${featurePolicy}`, /protectCrashpadPending/);
+  assert.match(`${app}\n${featurePolicy}`, /disableTraceLogWrites/);
+  assert.match(`${app}\n${featurePolicy}`, /slimCodexPet/);
+  assert.match(featurePolicy, /onAnalyzeDiagnosticStorage\("trace"\)/);
+  assert.match(featurePolicy, /onAnalyzeDiagnosticStorage\("crashpad"\)/);
+  assert.doesNotMatch(app, /可手动刷新统计/);
+  assert.doesNotMatch(app, /TraceLogModule|refresh_diagnostic_storage_stats|refreshTraceLogStats|askClearTraceLogs/);
   assert.match(launcher, /enforce_system_limit/);
   assert.match(launcher, /spawn_crashpad_guard_watcher/);
   assert.match(commands, /"clear_diagnostic_storage"/);

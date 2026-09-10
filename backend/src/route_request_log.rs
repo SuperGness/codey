@@ -1871,7 +1871,7 @@ impl NdjsonSink {
         }
         if self.retained_files > 0 {
             let oldest = rotated_path(&self.path, self.retained_files);
-            remove_file_if_exists(&oldest)?;
+            crate::fs_util::remove_file_if_exists(&oldest)?;
             for index in (1..self.retained_files).rev() {
                 let source = rotated_path(&self.path, index);
                 let destination = rotated_path(&self.path, index + 1);
@@ -1879,7 +1879,7 @@ impl NdjsonSink {
             }
             rename_if_exists(&self.path, &rotated_path(&self.path, 1))?;
         } else {
-            remove_file_if_exists(&self.path)?;
+            crate::fs_util::remove_file_if_exists(&self.path)?;
         }
         let file = open_private_append_file(&self.path)?;
         self.writer = Some(BufWriter::new(file));
@@ -2691,10 +2691,7 @@ fn bounded_string(value: &str) -> String {
 }
 
 fn unix_timestamp_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
+    crate::fs_util::timestamp_millis()
         .try_into()
         .unwrap_or(u64::MAX)
 }
@@ -2796,14 +2793,6 @@ fn rotated_path(path: &Path, index: usize) -> PathBuf {
         .unwrap_or_else(|| OsString::from(NDJSON_FILE_NAME));
     name.push(format!(".{index}"));
     path.with_file_name(name)
-}
-
-fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
 }
 
 pub(crate) fn clear_route_request_log_files(

@@ -2,25 +2,20 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { readSource } from "./helpers/read-source.mjs";
+
 const root = new URL("../", import.meta.url);
-const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
 
 test("plugin marketplace repair is explicit and status checks stay read-only", async () => {
   const [marketplaceSource, coreMarketplaceSource, embeddedSnapshot, pluginCommands, launcherSource, appSource, sectionsSource] =
     await Promise.all([
-      readFile(new URL("backend/src/plugin_marketplace.rs", root), "utf8")
-        .then(normalizeLineEndings),
-      readFile(new URL("vendor/CodeyRuntime/crates/codey-runtime-core/src/plugin_marketplace.rs", root), "utf8")
-        .then(normalizeLineEndings),
+      readSource("backend/src/plugin_marketplace.rs"),
+      readSource("vendor/CodeyRuntime/crates/codey-runtime-core/src/plugin_marketplace.rs"),
       readFile(new URL("vendor/CodeyRuntime/assets/plugin-marketplaces/openai-curated-remote.zip", root)),
-      readFile(new URL("backend/src/commands/plugins.rs", root), "utf8")
-        .then(normalizeLineEndings),
-      readFile(new URL("backend/src/launcher.rs", root), "utf8")
-        .then(normalizeLineEndings),
-      readFile(new URL("src/App.tsx", root), "utf8")
-        .then(normalizeLineEndings),
-      readFile(new URL("src/OperationsPanel.tsx", root), "utf8")
-        .then(normalizeLineEndings),
+      readSource("backend/src/commands/plugins.rs"),
+      readSource("backend/src/launcher.rs"),
+      readSource("src/App.tsx"),
+      readSource("src/OperationsPanel.tsx"),
     ]);
 
   const statusFunction = pluginCommands.match(

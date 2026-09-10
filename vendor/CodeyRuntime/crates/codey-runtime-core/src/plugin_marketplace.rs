@@ -408,9 +408,7 @@ fn replace_directory_with_backup_name(
     }
     match std::fs::rename(source, destination) {
         Ok(()) => {
-            if backup.exists() {
-                let _ = std::fs::remove_dir_all(&backup);
-            }
+            let _ = std::fs::remove_dir_all(&backup);
             Ok(())
         }
         Err(error) => {

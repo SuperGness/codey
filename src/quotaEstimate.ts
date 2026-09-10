@@ -6,7 +6,8 @@ type Tier = "standard" | "fast" | "flex" | "batch";
 // null cache rates retain normal input billing. Missing tiers/long rates must never inherit another price.
 type Rates = readonly [number, number | null, number | null, number, ...Array<number | null>];
 export const MODEL_PRICES: Record<string, Partial<Record<Tier, Rates>>> = {
-  "gpt-6-astra": {"standard":[10,1,12.5,50,20,2,25,75],"batch":[5,0.5,6.25,25,10,1,12.5,37.5],"flex":[5,0.5,6.25,25,10,1,12.5,37.5],"fast":[20,2,25,100,40,4,50,150]},
+  // User adjustment: Astra cache reads are 2x the checked price across tiers and context lengths.
+  "gpt-6-astra": {"standard":[10,2,12.5,50,20,4,25,75],"batch":[5,1,6.25,25,10,2,12.5,37.5],"flex":[5,1,6.25,25,10,2,12.5,37.5],"fast":[20,4,25,100,40,8,50,150]},
   "gpt-5.6-sol": {"standard":[4,0.4,5,20,8,0.8,10,30],"batch":[2,0.2,2.5,10,4,0.4,5,15],"flex":[2,0.2,2.5,10,4,0.4,5,15],"fast":[8,0.8,10,40,16,1.6,20,60]},
   "gpt-5.6-terra": {"standard":[2,0.2,2.5,12,4,0.4,5,18],"batch":[1,0.1,1.25,6,2,0.2,2.5,9],"flex":[1,0.1,1.25,6,2,0.2,2.5,9],"fast":[4,0.4,5,24,8,0.8,10,36]},
   "gpt-5.6-luna": {"standard":[0.2,0.02,0.25,1.2,0.4,0.04,0.5,1.8],"batch":[0.1,0.01,0.125,0.6,0.2,0.02,0.25,0.9],"flex":[0.1,0.01,0.125,0.6,0.2,0.02,0.25,0.9],"fast":[0.4,0.04,0.5,2.4,0.8,0.08,1,3.6]},

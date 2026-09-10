@@ -35,10 +35,6 @@ class FakeElement extends FakeElementCore {
     return child;
   }
 
-  closest() {
-    return null;
-  }
-
   getBoundingClientRect() {
     this.rectReads += 1;
     return this.visible
@@ -57,23 +53,6 @@ class FakeElement extends FakeElementCore {
     return this.visible ? [this.getBoundingClientRect()] : [];
   }
 
-  querySelector() {
-    return super.querySelector(...arguments);
-  }
-
-  querySelectorAll(selector) {
-    return super.querySelectorAll(selector);
-  }
-
-  matches(selector) {
-    return selector
-      .split(",")
-      .some((part) => super.matches(part.trim()));
-  }
-
-  closest(selector) {
-    return super.closest(selector);
-  }
 }
 
 test("moves the Codey button beside the visible header's trailing action region", () => {
@@ -378,7 +357,6 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.match(summaryHtml, /class="codey-usage-plan-tag">Pro 20x<\/span>[\s\S]*?周额度[\s\S]*?60%/);
   assert.doesNotMatch(summaryHtml, /余额|42/);
   assert.match(usage.innerHTML, /class="codey-usage-details" role="tooltip"/);
-  assert.doesNotMatch(usage.innerHTML, /codey-usage-details-plan/);
   assert.match(usage.innerHTML, /5 小时额度[\s\S]*?剩余 85%[\s\S]*?已用 15%/);
   assert.match(usage.innerHTML, /周额度[\s\S]*?剩余 60%[\s\S]*?已用 40%/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?42/);

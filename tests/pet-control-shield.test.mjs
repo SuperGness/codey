@@ -38,10 +38,6 @@ class FakeElement extends FakeElementCore {
     return this.isControl;
   }
 
-  querySelector() {
-    return this.querySelectorAll()[0] ?? null;
-  }
-
   querySelectorAll() {
     const controls = [];
     const visit = (node) => {

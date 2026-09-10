@@ -1,12 +1,4 @@
-import {
-  memo,
-  type Dispatch,
-  type SetStateAction,
-  useEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from "react";
+import { memo, useEffect, useState, useSyncExternalStore } from "react";
 import {
   IconActivity as Activity,
   IconAlertCircle as CircleAlert,
@@ -16,6 +8,11 @@ import {
 
 import type { Notice } from "./App.types";
 import { Button } from "./components/antd";
+import {
+  createExternalStore,
+  type ExternalStore,
+  useExternalStore,
+} from "./externalStore";
 
 const NOTICE_AUTO_DISMISS_MS = 5_000;
 const INITIAL_NOTICE: Notice = {
@@ -23,37 +20,10 @@ const INITIAL_NOTICE: Notice = {
   text: "正在连接 Codey…",
 };
 
-export type AppNoticeController = {
-  getSnapshot: () => Notice;
-  setNotice: Dispatch<SetStateAction<Notice>>;
-  subscribe: (listener: () => void) => () => void;
-};
-
-function createAppNoticeController(): AppNoticeController {
-  let notice = INITIAL_NOTICE;
-  const listeners = new Set<() => void>();
-  return {
-    getSnapshot: () => notice,
-    setNotice: (update) => {
-      const next =
-        typeof update === "function"
-          ? (update as (current: Notice) => Notice)(notice)
-          : update;
-      if (Object.is(next, notice)) return;
-      notice = next;
-      listeners.forEach((listener) => listener());
-    },
-    subscribe: (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-  };
-}
+export type AppNoticeController = ExternalStore<Notice>;
 
 export function useAppNoticeController(): AppNoticeController {
-  const controllerRef = useRef<AppNoticeController | null>(null);
-  controllerRef.current ??= createAppNoticeController();
-  return controllerRef.current;
+  return useExternalStore(() => createExternalStore(INITIAL_NOTICE));
 }
 
 type NoticeSubscriberProps = {
@@ -96,7 +66,7 @@ export const NoticeToast = memo(function NoticeToast({
     }
     const timeout = window.setTimeout(() => {
       setAutoDismissPaused(false);
-      controller.setNotice((current) =>
+      controller.set((current) =>
         current.text === notice.text && current.tone === notice.tone
           ? { tone: "info", text: "" }
           : current,
@@ -142,7 +112,7 @@ export const NoticeToast = memo(function NoticeToast({
         aria-label="关闭提示"
         onClick={() => {
           setAutoDismissPaused(false);
-          controller.setNotice({ tone: "info", text: "" });
+          controller.set({ tone: "info", text: "" });
         }}
       >
         <X aria-hidden="true" />

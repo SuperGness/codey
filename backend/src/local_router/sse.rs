@@ -271,10 +271,7 @@ pub(crate) fn sse_frame_data(frame: &[u8]) -> Result<Option<Cow<'_, str>>> {
 }
 
 pub(crate) fn current_unix_timestamp() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+    crate::fs_util::timestamp_secs() as i64
 }
 
 #[cfg(test)]

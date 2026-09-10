@@ -1,19 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
-
-async function loadPatchExpression() {
-  const template = normalizeLineEndings(await readFile(
-    new URL("../backend/src/codex_startup_patch.js", import.meta.url),
-    "utf8",
-  ));
-  assert.ok(template, "startup patch template should be readable");
-  return template
-    .replaceAll("__DISABLE_PET__", "false")
-    .replaceAll("__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__", "false");
-}
+import { readSource } from "./helpers/read-source.mjs";
+import { loadStartupPatchTemplate } from "./helpers/startup-patch.mjs";
 
 test("API and ChatGPT auth share model-aware native service-tier controls", async () => {
   const Module = process.getBuiltinModule("module");
@@ -40,7 +29,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
 
   try {
     assert.equal(
-      (0, eval)(await loadPatchExpression()),
+      (0, eval)(await loadStartupPatchTemplate()),
       "codey-startup-patch-installed-v39",
     );
     Module._load("electron", undefined, false).protocol.handle(
@@ -698,19 +687,11 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
 test("starting or restarting Codex replaces the old runtime with one managed by Codey", async () => {
   const [runtimeSource, launcherSource, launcherProcessSource, launcherPlatformSource, appSource] =
     await Promise.all([
-    readFile(new URL("../backend/src/commands/runtime.rs", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
-    readFile(new URL("../backend/src/launcher.rs", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/launcher/process.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/launcher/platform.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
+    readSource("backend/src/commands/runtime.rs"),
+    readSource("backend/src/launcher.rs"),
+    readSource("backend/src/launcher/process.rs"),
+    readSource("backend/src/launcher/platform.rs"),
+    readSource("src/App.tsx"),
   ]);
   const launcherModules =
     `${launcherSource}\n${launcherProcessSource}\n${launcherPlatformSource}`;

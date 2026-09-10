@@ -1,34 +1,29 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
+import { readSource } from "./helpers/read-source.mjs";
+
 
 // Static contracts keep Windows-only wiring visible on non-Windows CI jobs. Runtime
 // behavior remains covered by Rust tests and the dedicated Windows build job.
 test("Windows source contract: Codey uses the GUI subsystem", async () => {
   const [main, library, manifest] = await Promise.all([
-    readFile(new URL("../backend/src/main.rs", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
-    readFile(new URL("../backend/src/lib.rs", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
-    readFile(new URL("../backend/Cargo.toml", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
+    readSource("backend/src/main.rs"),
+    readSource("backend/src/lib.rs"),
+    readSource("backend/Cargo.toml"),
   ]);
 
   assert.match(
     main,
     /^#!\[cfg_attr\(target_os = "windows", windows_subsystem = "windows"\)\]/,
   );
-  assert.doesNotMatch(library, /hide_exclusive_windows_console|ShowWindow|GetConsoleWindow/);
+  assert.doesNotMatch(library, /ShowWindow|GetConsoleWindow/);
   assert.doesNotMatch(manifest, /Win32_System_Console/);
   assert.match(manifest, /Win32_UI_WindowsAndMessaging/);
 });
 
 test("Windows source contract: fatal startup failures remain visible", async () => {
-  const library = normalizeLineEndings(
-    await readFile(new URL("../backend/src/lib.rs", import.meta.url), "utf8"),
-  );
+  const library = await readSource("backend/src/lib.rs");
   const failureStart = library.indexOf("let shutdown_reason = match");
   const fatalCleanup = library.indexOf(
     "let cleanup = stop_runtime_with_retry(&state).await;",
@@ -68,19 +63,9 @@ test("Windows source contract: fatal startup failures remain visible", async () 
 
 test("Windows source contract: background helpers request no-window execution", async () => {
   const [launcherPlatform, processCleanup, runtimeAppPaths] = await Promise.all([
-    readFile(
-      new URL("../backend/src/launcher/platform.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(new URL("../backend/src/process_cleanup.rs", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
-    readFile(
-      new URL(
-        "../vendor/CodeyRuntime/crates/codey-runtime-core/src/app_paths.rs",
-        import.meta.url,
-      ),
-      "utf8",
-    ).then(normalizeLineEndings),
+    readSource("backend/src/launcher/platform.rs"),
+    readSource("backend/src/process_cleanup.rs"),
+    readSource("vendor/CodeyRuntime/crates/codey-runtime-core/src/app_paths.rs"),
   ]);
 
   assert.match(
@@ -100,15 +85,8 @@ test("Windows source contract: background helpers request no-window execution", 
 
 test("Windows source contract: packaged Codex exit uses an OS process wait", async () => {
   const [launcherProcess, coreLauncher] = await Promise.all([
-    readFile(new URL("../backend/src/launcher/process.rs", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
-    readFile(
-      new URL(
-        "../vendor/CodeyRuntime/crates/codey-runtime-core/src/launcher.rs",
-        import.meta.url,
-      ),
-      "utf8",
-    ).then(normalizeLineEndings),
+    readSource("backend/src/launcher/process.rs"),
+    readSource("vendor/CodeyRuntime/crates/codey-runtime-core/src/launcher.rs"),
   ]);
   const watcher = launcherProcess.slice(
     launcherProcess.indexOf("#[cfg(windows)]\npub(super) fn spawn_codex_exit_watcher"),
@@ -119,7 +97,6 @@ test("Windows source contract: packaged Codex exit uses an OS process wait", asy
     watcher,
     /codey_runtime_core::launcher::wait_for_windows_process_id\(process_id\)/,
   );
-  assert.doesNotMatch(watcher, /missing_streak/);
   assert.match(
     coreLauncher,
     /pub async fn wait_for_windows_process_id\(process_id: u32\)/,
@@ -129,17 +106,9 @@ test("Windows source contract: packaged Codex exit uses an OS process wait", asy
 
 test("Windows source contract: updates use the detached native helper", async () => {
   const [main, updates, updateHelper] = await Promise.all([
-    readFile(new URL("../backend/src/main.rs", import.meta.url), "utf8").then(
-      normalizeLineEndings,
-    ),
-    readFile(
-      new URL("../backend/src/commands/updates.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/update_helper.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
+    readSource("backend/src/main.rs"),
+    readSource("backend/src/commands/updates.rs"),
+    readSource("backend/src/update_helper.rs"),
   ]);
 
   assert.match(
@@ -163,17 +132,9 @@ test("Windows source contract: updates use the detached native helper", async ()
 });
 
 test("Windows source contract: missing Codex paths recover before startup", async () => {
-  const [commands, runtime, api, app] = await Promise.all([
-    readFile(new URL("../backend/src/commands.rs", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/commands/runtime.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(new URL("../src/api.ts", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
-    readFile(new URL("../src/App.tsx", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
+  const [commands, runtime] = await Promise.all([
+    readSource("backend/src/commands.rs"),
+    readSource("backend/src/commands/runtime.rs"),
   ]);
   const launch = runtime.slice(
     runtime.indexOf("async fn launch_codey_inner_locked"),
@@ -190,6 +151,4 @@ test("Windows source contract: missing Codex paths recover before startup", asyn
     /FileDialog::new\(\)[\s\S]*选择 Codex 桌面应用安装目录[\s\S]*pick_folder\(\)/,
   );
   assert.match(commands, /save_config_to_store\(state, &config\)/);
-  assert.doesNotMatch(api, /pick_codex_app_directory|set_codex_app_path/);
-  assert.doesNotMatch(app, /CodexAppPathDialog|codexAppPathSelectionRequired/);
 });

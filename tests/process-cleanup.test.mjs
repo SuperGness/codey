@@ -1,39 +1,19 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
+import { readSource } from "./helpers/read-source.mjs";
+
 
 test("every shutdown path reaps Codex and Codey process trees", async () => {
   const [library, launcher, launcherProcess, launcherPlatform, commands, cleanup, processTree] =
     await Promise.all([
-    readFile(new URL("../backend/src/lib.rs", import.meta.url), "utf8").then(
-      normalizeLineEndings,
-    ),
-    readFile(
-      new URL("../backend/src/launcher.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/launcher/process.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/launcher/platform.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/commands/runtime.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/process_cleanup.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/process_tree.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
+    readSource("backend/src/lib.rs"),
+    readSource("backend/src/launcher.rs"),
+    readSource("backend/src/launcher/process.rs"),
+    readSource("backend/src/launcher/platform.rs"),
+    readSource("backend/src/commands/runtime.rs"),
+    readSource("backend/src/process_cleanup.rs"),
+    readSource("backend/src/process_tree.rs"),
     ]);
   const launcherModules = `${launcher}\n${launcherProcess}\n${launcherPlatform}`;
 
@@ -87,10 +67,7 @@ test("every shutdown path reaps Codex and Codey process trees", async () => {
 });
 
 test("startup stops the old Codex before permanent session maintenance", async () => {
-  const launcher = await readFile(
-    new URL("../backend/src/launcher.rs", import.meta.url),
-    "utf8",
-  ).then(normalizeLineEndings);
+  const launcher = await readSource("backend/src/launcher.rs");
   const startup = launcher.slice(
     launcher.indexOf("pub async fn start("),
     launcher.indexOf("pub async fn stop(&self)"),

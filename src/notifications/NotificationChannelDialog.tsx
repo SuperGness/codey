@@ -196,7 +196,6 @@ function NotificationChannelDialogComponent({
                   aria-labelledby="notification-channel-select-label"
                   optionList={notificationChannelOptions}
                   dropdownClassName="rounded-[10px]"
-                  showClear={false}
                   filter={false}
                   zIndex={1100}
                   prefix={

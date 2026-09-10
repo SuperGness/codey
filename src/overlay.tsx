@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { UiProvider } from "./UiProvider";
 import utilityStyles from "./tailwind.css?inline";
 import { App } from "./App";
+import { errorText } from "./appUtils";
 import coreStyles from "./styles.css?inline";
 import operationsStyles from "./styles.operations.css?inline";
 import modelStyles from "./styles.models.css?inline";
@@ -45,7 +46,7 @@ function RequestLogPage() {
     void invoke<{ config: RequestLogCatalog }>("load_codey_config")
       .then((result) => setCatalog(result.config))
       .catch((nextError: unknown) => {
-        setError(nextError instanceof Error ? nextError.message : String(nextError));
+        setError(errorText(nextError));
       });
   }, []);
 

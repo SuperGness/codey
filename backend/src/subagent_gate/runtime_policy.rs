@@ -120,10 +120,6 @@ pub(super) fn read_optional_runtime_policy_file(path: &Path) -> Result<Option<Ve
 }
 
 fn remove_optional_runtime_policy_file(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error)
-            .with_context(|| format!("清理 Codey 子代理运行时策略状态失败：{}", path.display())),
-    }
+    crate::fs_util::remove_file_if_exists(path)
+        .with_context(|| format!("清理 Codey 子代理运行时策略状态失败：{}", path.display()))
 }

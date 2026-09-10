@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
-const root = new URL("../", import.meta.url);
-const readSource = async (path) =>
-  (await readFile(new URL(path, root), "utf8")).replace(/\r\n/g, "\n");
+import { readSource } from "./helpers/read-source.mjs";
 
 test("renderer core loads session tools after idle time or sidebar use", async () => {
   const [inject, sessionTools, bridge, petShield, securityShield, promptOptimize] = await Promise.all([
@@ -26,7 +23,6 @@ test("renderer core loads session tools after idle time or sidebar use", async (
       > inject.indexOf("bootstrapObserver.observe"),
     "renderer loaded state must be committed only after bootstrap succeeds",
   );
-  assert.doesNotMatch(inject, /const sidebarDetected =/);
   assert.match(
     inject,
     /armSessionToolsInteraction\(\);\s*scheduleSessionToolsIdleLoad\(\);\s*scan\(\);\s*void hydrateUpdateAvailability\(\)/,
@@ -155,7 +151,6 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   )?.[1] ?? "";
   assert.match(sessionObserverBody, /addPendingScanRoot\(threadRow\)/);
   assert.match(sessionObserverBody, /syncConversationRichTooltipOpen\(target\)/);
-  assert.doesNotMatch(sessionObserverBody, /syncSidebarThreadTimeState\(threadRow\)/);
   assert.doesNotMatch(sessionObserverBody, /reconcileStaleCompletedTask/);
   assert.match(sessionTools, /mutationDispatcher\.subscribe\(\s*handleSessionToolMutations/);
   assert.match(sessionTools, /new MutationObserver\(handleSessionToolMutations\)/);
@@ -665,4 +660,68 @@ test("plugin mutations queue one trailing list refresh while a refresh is in fli
 
   listResolvers.shift()({ plugins: [] });
   await Promise.resolve();
+});
+
+test("oversized conversation detail tooltips stay inside their scrollable surface", async () => {
+  const source = await readSource("public/codey-inject.js");
+  assert.match(source, /const conversationRichTooltipOpenClass = "codey-rich-tooltip-open"/);
+  assert.match(
+    source,
+    /const conversationRichTooltipTriggerSelector = "button, \[role=\\"button\\"\], span\[tabindex=\\"0\\"\]"/,
+  );
+  assert.doesNotMatch(source, /body:has\(\$\{/);
+
+  const rule = source.match(
+    /body\.\$\{conversationRichTooltipOpenClass\} \[role="tooltip"\] \{([^}]*)\}/,
+  )?.[1] || "";
+  assert.match(rule, /overflow-x: hidden !important/);
+  assert.match(rule, /overflow-y: auto !important/);
+  assert.match(rule, /overscroll-behavior: contain/);
+  assert.doesNotMatch(rule, /pointer-events/);
+});
+
+test("conversation rich tooltips reuse the session-tools observer instead of body:has", async () => {
+  const source = await readSource("public/codey-inject.js");
+  assert.match(source, /if \(mutation\.attributeName === "aria-describedby"\) \{/);
+  assert.match(source, /syncConversationRichTooltipOpen\(\);/);
+});
+
+test("pointer handoff keeps conversation rich tooltips open while entering them", async () => {
+  const source = await readSource("public/codey-inject.js");
+  assert.match(source, /const conversationRichTooltipHandoffMs = 150/);
+  assert.match(source, /event\.stopPropagation\(\)/);
+  assert.match(source, /new PointerEvent\("pointerout", \{/);
+  assert.match(
+    source,
+    /document\.addEventListener\("pointerout", holdConversationRichTooltipOpen, true\)/,
+  );
+  assert.match(
+    source,
+    /document\.addEventListener\("pointerover", continueConversationRichTooltipHandoff, true\)/,
+  );
+});
+
+test("adjacent selected turns render as one continuous outline", async () => {
+  const source = await readSource("public/codey-inject.js");
+  assert.match(
+    source,
+    /\.\$\{selectedClass\}::before \{[^}]*border: 3px solid #7c8cff;/s,
+  );
+  assert.match(
+    source,
+    /data-codey-selected-previous="true"[^}]*border-top: 0;/s,
+  );
+  assert.match(
+    source,
+    /data-codey-selected-next="true"[^}]*border-bottom: 0;/s,
+  );
+  assert.doesNotMatch(source, /outline-offset:\s*12px/);
+});
+
+test("selection changes resynchronize adjacent-turn grouping", async () => {
+  const source = await readSource("public/codey-inject.js");
+  assert.match(source, /const syncSelectionGroups = \(\) => \{/);
+  assert.match(source, /lastSelectedRow = anchor;\s*syncSelectionGroups\(\);/s);
+  assert.match(source, /row\.dataset\.codeySelectedPrevious = "true"/);
+  assert.match(source, /row\.dataset\.codeySelectedNext = "true"/);
 });

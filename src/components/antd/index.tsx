@@ -11,16 +11,13 @@ function classNames(...names: Array<string | false | null | undefined>) {
   return names.filter(Boolean).join(" ");
 }
 
-export interface TooltipProps extends Omit<AntTooltipProps, "title" | "children" | "zIndex"> {
+export interface TooltipProps extends Omit<AntTooltipProps, "title" | "children"> {
   children: React.ReactElement;
   content?: React.ReactNode;
   position?: AntTooltipProps["placement"];
-  zIndex?: number | string;
-  autoAdjustOverflow?: boolean;
-  arrowPointAtCenter?: boolean;
 }
-export function Tooltip({ content, position, zIndex, autoAdjustOverflow = true, arrowPointAtCenter, ...props }: TooltipProps) {
-  return <AntTooltip {...props} title={content} placement={position} zIndex={zIndex == null ? undefined : Number(zIndex)} autoAdjustOverflow={autoAdjustOverflow} arrow={{ pointAtCenter: arrowPointAtCenter }} />;
+export function Tooltip({ content, position, autoAdjustOverflow = true, ...props }: TooltipProps) {
+  return <AntTooltip {...props} title={content} placement={position} autoAdjustOverflow={autoAdjustOverflow} />;
 }
 
 type ButtonVariant = "default" | "light" | "brand-outline" | "warning" | "destructive" | "destructive-light" | "outline" | "secondary" | "ghost" | "link";
@@ -41,7 +38,7 @@ const buttonAppearance: Record<ButtonVariant, Pick<AntButtonProps, "color" | "va
 };
 const buttonSize = { default: "middle", sm: "small", xs: "small", lg: "large", icon: "middle", "icon-sm": "small" } as const;
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function Button({ variant = "default", color, size = "default", type = "button", loading, autoInsertSpace, children, ...props }, ref) {
-  const preset = variant && variant in buttonAppearance ? buttonAppearance[variant as ButtonVariant] : undefined;
+  const preset = variant in buttonAppearance ? buttonAppearance[variant as ButtonVariant] : undefined;
   const resolvedColor = color ?? preset?.color;
   const resolvedVariant = color
     ? (variant === "default" ? "solid" : (variant as AntButtonProps["variant"]))
@@ -52,27 +49,25 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(function 
 });
 
 type BadgeVariant = "default" | "secondary" | "destructive" | "outline" | "success" | "warning" | "info" | "brand";
-export type BadgeProps = Omit<React.HTMLAttributes<HTMLDivElement>, "color"> & { variant?: BadgeVariant; size?: "xs" | "sm" | "md" | "lg" };
+export type BadgeProps = Omit<React.HTMLAttributes<HTMLDivElement>, "color"> & { variant?: BadgeVariant };
 const badgeColors = { default: undefined, secondary: undefined, destructive: "error", outline: undefined, success: "success", warning: "warning", info: "processing", brand: "blue" };
-export function Badge({ variant = "default", size: _size, className, ...props }: BadgeProps) {
-  return <Tag {...props} className={className} color={badgeColors[variant]} variant={variant === "outline" ? "outlined" : "filled"} />;
+export function Badge({ variant = "default", ...props }: BadgeProps) {
+  return <Tag {...props} color={badgeColors[variant]} variant={variant === "outline" ? "outlined" : "filled"} />;
 }
 export { Tag } from "antd";
-export type { TagProps } from "antd";
 
-export type CardProps = React.HTMLAttributes<HTMLDivElement> & { bodyStyle?: React.CSSProperties; loading?: boolean };
-export function Card({ bodyStyle, loading, ...props }: CardProps) {
-  return <AntCard {...props} loading={loading} styles={{ body: { padding: 0, display: "contents", ...bodyStyle } }} />;
+export type CardProps = React.HTMLAttributes<HTMLDivElement> & { loading?: boolean };
+export function Card(props: CardProps) {
+  return <AntCard {...props} styles={{ body: { padding: 0, display: "contents" } }} />;
 }
 
 export interface InputProps extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "size" | "prefix"> {
   error?: boolean;
   leftSection?: React.ReactNode;
   rightSection?: React.ReactNode;
-  wrapperClassName?: string;
 }
-function inputProps({ className, wrapperClassName, leftSection, rightSection, onChange, value, defaultValue, error, ...props }: InputProps): AntInputProps {
-  return { ...props, className: classNames("min-w-0 flex-1", wrapperClassName, className), prefix: leftSection, suffix: rightSection,
+function inputProps({ className, leftSection, rightSection, onChange, value, defaultValue, error, ...props }: InputProps): AntInputProps {
+  return { ...props, className: classNames("min-w-0 flex-1", className), prefix: leftSection, suffix: rightSection,
     value: value == null ? undefined : String(value), defaultValue: defaultValue == null ? undefined : String(defaultValue),
     status: error || props["aria-invalid"] === true ? "error" : undefined,
     onChange,
@@ -97,7 +92,6 @@ export interface SelectProps {
   className?: string;
   disabled?: boolean;
   dropdownClassName?: string;
-  emptyContent?: React.ReactNode;
   filter?: boolean;
   getPopupContainer?: () => HTMLElement;
   id?: string;
@@ -106,25 +100,23 @@ export interface SelectProps {
   placeholder?: string;
   prefix?: React.ReactNode;
   renderOptionItem?: (option: SelectOption & { selected?: boolean }) => React.ReactNode;
-  showClear?: boolean;
   value?: string | number;
   zIndex?: number;
 }
-export function Select({ optionList = [], onChange, filter = false, showClear = false, dropdownClassName, emptyContent, renderOptionItem, zIndex, ...props }: SelectProps) {
+export function Select({ optionList = [], onChange, filter = false, dropdownClassName, renderOptionItem, zIndex, ...props }: SelectProps) {
   return <AntSelect {...props} showSearch={filter ? { filterOption: (input, option) => String(option?.label ?? "").toLocaleLowerCase().includes(input.trim().toLocaleLowerCase()) } : false}
-    allowClear={showClear} onChange={(value) => onChange?.(value ?? null)} options={optionList}
-    classNames={{ popup: { root: dropdownClassName } }} styles={{ popup: { root: { zIndex } } }} notFoundContent={emptyContent}
+    allowClear={false} onChange={(value) => onChange?.(value ?? null)} options={optionList}
+    classNames={{ popup: { root: dropdownClassName } }} styles={{ popup: { root: { zIndex } } }}
     optionRender={renderOptionItem ? (option) => renderOptionItem({ ...option.data, selected: option.value === props.value }) : undefined} />;
 }
 
 export interface CheckboxProps extends Omit<React.ComponentProps<typeof AntCheckbox>, "checked" | "defaultChecked" | "onChange" | "indeterminate"> {
   label?: React.ReactNode;
   checked?: boolean | "indeterminate";
-  defaultChecked?: boolean | "indeterminate";
   onCheckedChange?: (checked: boolean | "indeterminate") => void;
 }
-export function Checkbox({ checked, defaultChecked, onCheckedChange, label, ...props }: CheckboxProps) {
-  return <AntCheckbox {...props} checked={checked === undefined ? undefined : checked === true} defaultChecked={defaultChecked === true} indeterminate={checked === "indeterminate" || defaultChecked === "indeterminate"} onChange={(event) => onCheckedChange?.(event.target.checked)}>{label ?? props.children}</AntCheckbox>;
+export function Checkbox({ checked, onCheckedChange, label, ...props }: CheckboxProps) {
+  return <AntCheckbox {...props} checked={checked === undefined ? undefined : checked === true} indeterminate={checked === "indeterminate"} onChange={(event) => onCheckedChange?.(event.target.checked)}>{label ?? props.children}</AntCheckbox>;
 }
 export interface SwitchProps extends Omit<AntSwitchProps, "onChange" | "size"> {
   size?: "sm" | "xs";
@@ -139,11 +131,10 @@ export function Switch({ size, onCheckedChange, loading, disabled, "aria-busy": 
 type DialogContextValue = { open: boolean; setOpen: (open: boolean) => void };
 const DialogContext = React.createContext<DialogContextValue | null>(null);
 const DialogLabelContext = React.createContext<{ descriptionId: string; titleId: string } | null>(null);
-export interface DialogProps { children?: React.ReactNode; defaultOpen?: boolean; onOpenChange?: (open: boolean) => void; open?: boolean }
-export function Dialog({ children, defaultOpen = false, onOpenChange, open }: DialogProps) {
-  const [internalOpen, setInternalOpen] = React.useState(defaultOpen);
-  const setOpen = React.useCallback((nextOpen: boolean) => { if (open === undefined) setInternalOpen(nextOpen); onOpenChange?.(nextOpen); }, [onOpenChange, open]);
-  const value = React.useMemo(() => ({ open: open ?? internalOpen, setOpen }), [open, internalOpen, setOpen]);
+export interface DialogProps { children?: React.ReactNode; onOpenChange?: (open: boolean) => void; open: boolean }
+export function Dialog({ children, onOpenChange, open }: DialogProps) {
+  const setOpen = React.useCallback((nextOpen: boolean) => { onOpenChange?.(nextOpen); }, [onOpenChange]);
+  const value = React.useMemo(() => ({ open, setOpen }), [open, setOpen]);
   return <DialogContext.Provider value={value}>{children}</DialogContext.Provider>;
 }
 export interface DialogDismissEvent { readonly defaultPrevented: boolean; preventDefault: () => void }
@@ -185,6 +176,3 @@ export const DialogDescription = React.forwardRef<HTMLParagraphElement, React.HT
   const labels = React.useContext(DialogLabelContext);
   return <p {...props} ref={ref} id={id ?? labels?.descriptionId} className={classNames("m-0 text-xs leading-relaxed text-gray-500", className)} />;
 });
-
-export { Listy } from "antd";
-export type { ListyProps } from "antd";

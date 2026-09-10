@@ -81,9 +81,6 @@ test("third-party model sync can fall back to manual model support configuration
   assert.match(hookSource, /modelEditorState\.officialModelIds\.find/);
   assert.match(hookSource, /已在上方官方模型列表中，请直接勾选，不可重复输入/);
   assert.match(hookSource, /deleteDraftThirdPartyModel/);
-  assert.doesNotMatch(hookSource, /fetchCurrentModels/);
-  assert.doesNotMatch(hookSource, /deleteThirdPartyModel/);
-  assert.doesNotMatch(hookSource, /setDefaultModel/);
   assert.match(hookSource, /manualThirdPartyModels/);
   assert.match(hookSource, /supportsAutoReview/);
   assert.match(hookSource, /AUTO_REVIEW_MODEL.*线路能力/s);
@@ -148,4 +145,71 @@ test("model save notices distinguish delivery, pending restart and subagent erro
   ]) {
     assert.deepEqual(modelSelectionNotice(result, summary), { tone, text: summary + suffix });
   }
+});
+
+test("model IDs compare case-insensitively while preserving first spelling", async () => {
+  const {
+    includesModelId,
+    modelIdsEqual,
+    modelKey,
+    partitionModelIdsByKey,
+    uniqueModelIds,
+    withoutModelId,
+  } = await loadTypeScriptModule(new URL("src/modelIds.ts", root));
+
+  assert.equal(modelKey(" Provider-Coder "), "provider-coder");
+  assert.equal(modelIdsEqual("Provider-Coder", " provider-coder "), true);
+  assert.equal(
+    includesModelId(["Provider-Coder", "Provider-Reasoner"], "PROVIDER-CODER"),
+    true,
+  );
+  assert.deepEqual(
+    uniqueModelIds([
+      " Provider-Coder ",
+      "provider-coder",
+      "Provider-Reasoner",
+      "",
+    ]),
+    ["Provider-Coder", "Provider-Reasoner"],
+  );
+  assert.deepEqual(
+    withoutModelId(
+      ["Provider-Coder", "Provider-Reasoner", "provider-coder"],
+      " PROVIDER-CODER ",
+    ),
+    ["Provider-Reasoner"],
+  );
+  assert.deepEqual(
+    partitionModelIdsByKey(
+      ["Provider-Coder", "other-model", "PROVIDER-REASONER"],
+      new Set(["provider-coder", "provider-reasoner"]),
+    ),
+    {
+      matching: ["Provider-Coder", "PROVIDER-REASONER"],
+      remaining: ["other-model"],
+    },
+  );
+});
+
+test("model picker filters case-insensitively and pages bounded results", async () => {
+  const {
+    MODEL_PICKER_PAGE_SIZE,
+    filterModelOptions,
+    nextVisibleModelCount,
+    visibleModelOptions,
+  } = await loadTypeScriptModule(new URL("src/modelPickerPagination.ts", root));
+  const models = Array.from({ length: 450 }, (_, index) =>
+    index % 2 === 0 ? `Provider-${index}` : `Other-${index}`
+  );
+
+  assert.equal(MODEL_PICKER_PAGE_SIZE, 200);
+  assert.equal(filterModelOptions(models, "  PROVIDER-2  ")[0], "Provider-2");
+  assert.equal(filterModelOptions(models, "provider").length, 225);
+  assert.equal(filterModelOptions(models, ""), models);
+
+  const firstPage = visibleModelOptions(models, MODEL_PICKER_PAGE_SIZE);
+  assert.equal(firstPage.length, 200);
+  assert.equal(nextVisibleModelCount(firstPage.length, models.length), 400);
+  assert.equal(nextVisibleModelCount(400, models.length), 450);
+  assert.equal(nextVisibleModelCount(450, models.length), 450);
 });

@@ -17,7 +17,7 @@
 ## 官方线路额度估算
 
 - `QuotaEstimateDialog.tsx` 复用现有 Dialog、LinkButton 和 Ant Design Table。仅请求日志 header 提供周限额度估算按钮，配置页不再提供入口；提示集中在一个 Alert，详细说明使用原生 details 折叠；表格合并档位与上下文及计价依据，并将 Token、缓存、费用明细和额度估算各自分组展示，仅以现有 `officialAccountAvailable === true` 官方登录状态控制显示；删除线路名称及供应商分组旧入口，不依赖 profile、分组方式或额度显示开关。独立日志页的 `RequestLogCatalog.officialAccountAvailable` 来自后端登录探测结果，`request_log_catalog_exposes_login_status_independently_of_profiles` 覆盖有官方配置但未登录和已登录无保存线路的目录序列化。弹窗固定统计官方账号 `openai` 的当前周周期全部模型，不沿用日志筛选时间。关闭或刷新弹窗不修改原页面筛选和记录。
-- `quotaEstimate.ts` 内置 OpenAI Standard、Fast、Batch、Flex 各档独立 Token 单价，来源为 https://developers.openai.com/api/docs/pricing 及对应模型文档，2026-09-09 核对；GPT-5.6 Sol 使用官方当日公开促销价。金额为 USD API 等值估算，不是订阅真实扣费。按模型、档位、长短上下文、计价依据分别聚合；Fast 不使用统一倍数。未知档位或缺少对应费率时保留用量，金额显示不可计价，合计排除并警告；全部未计价时结果显示不可计算。新增价格需重新核对官方来源。
+- `quotaEstimate.ts` 内置 OpenAI Standard、Fast、Batch、Flex 各档独立 Token 单价，来源为 https://developers.openai.com/api/docs/pricing 及对应模型文档，2026-09-09 核对；GPT-5.6 Sol 使用官方当日公开促销价。2026-09-10 按用户要求将 gpt-6-astra 所有档位及长短上下文的缓存读取单价设为已核对价格的 2 倍，弹窗标注为自定义规则；其他费率保持原值。金额为 USD API 等值估算，不是订阅真实扣费。按模型、档位、长短上下文、计价依据分别聚合；Fast 不使用统一倍数。未知档位或缺少对应费率时保留用量，金额显示不可计价，合计排除并警告；全部未计价时结果显示不可计算。新增价格需重新核对官方来源。
 - 请求日志 schema 7 增加 `requested_service_tier` 和 `service_tier`，对外为 `requestedServiceTier` / `serviceTier`。共享 Responses 代理链路记录请求档位；JSON、SSE、WebSocket 响应记录实际档位，实际响应优先，priority/fast 等价，default/standard 等价。仅有明确请求档位时单独标注推定；未记录档位或仅有 auto 时按默认 Standard 计价，来源单独标为默认档位（未记录），计入推定请求数；其他未知响应档位不猜价。旧 SQLite 库写入时迁移，迁移前只读查询以 NULL 补列；NDJSON 保留相同字段。第三方协议转换可能缺失实际档位；重启开发版后才采集新增字段，历史记录不补造。
 - 通过 `query_route_request_log_stats` 读取日志健康状态，再复用 `query_route_request_logs` 每页 100 条游标分页，逐请求计价后按模型及各计费规则分别累加，避免分组统计 50 条上限及汇总后无法区分长上下文的问题。关闭后停止后续分页并忽略迟到响应；分页失败不提交部分结果。大量历史记录查询可能较慢，必要时再改后端聚合；分页期间发生日志补写或清理时不保证跨页事务快照，更新时间表示本轮读取完成时间。
 - 缓存读取与写入视为输入 Token 的子集，按请求限制到输入总量，防止重复计费；新版 `usage.input_tokens_details.cache_write_tokens` 优先于旧写入字段，并由有界流式投影保留。Chat 与 Anthropic 转 Responses 时保留缓存写入量，缺失字段不生成伪零值；额度表按模型和合计标注未记录写入量的请求数，缺失部分仍按普通输入价估算，额外写入费用可能未计入。读写费用单独展示，所在档位没有独立缓存价时使用该档位输入价。缓存节省仅作为参考，不从总价重复扣除。支持长上下文的模型单请求输入超过 272,000 时使用该档长价；未公布长价的组合保持未计价，不借用 Standard 价格。输出包含推理 Token，不另加一次。
@@ -75,7 +75,11 @@ pnpm run dev 会先构建完整 Cargo 工作区，再启动 Codey，确保主程
 
 侧栏额度测试通过 `data-window` 和完整的额度标签检查五小时窗口，避免误匹配重置倒计时中的 `5 小时`；回退场景固定使用约 29.5 小时后的重置时间覆盖该情况。重启测试需保留对 `withTimeout(invoke("restart_codey"), ...)` 调用的检查。
 
+JavaScript 源码合同测试共用 `tests/helpers/`：`read-source.mjs` 读取仓库文件并统一换行；`startup-patch.mjs` 提供 `loadStartupPatchTemplate` 渲染 `codex_startup_patch.js` 占位符，以及 `loadSpawnCodexSections` 按 `#[cfg]` 切分 `spawn_codex` 的各平台段落；`flush.mjs` 提供微任务与定时器刷新；`fake-element.mjs` 的 `FakeElementCore` 已内置 `append`、`focus`、`insertAdjacentElement`，测试文件只覆盖各自需要的特殊语义。新测试不要再复制这些辅助函数。`assert.doesNotMatch` 只用于锁定近期刻意删除的实现；被删代码从未存在或已超出兼容窗口时应连同守卫一起删除。
+
 `save_selected_models` 的参数逐项对应命令请求字段，因此仅在该函数上允许 `clippy::too_many_arguments`；工作区继续以 `-D warnings` 检查其他警告。
+
+`spawn_codex` 在 Windows 启动重试时需要替换调用方的应用目录，因此保留 `&mut PathBuf`，仅在非 Windows 平台对该函数允许 `clippy::ptr_arg`。
 
 完整构建使用：
 
@@ -601,7 +605,7 @@ SQLite 批次失败时最多尝试 3 次，间隔 25/50 ms，重试期间保留�
 - 兼容窗口：只保证从最近两个已发布版本升级时的平滑迁移，更早版本的数据格式迁移代码不再保留。2026-09-06 据此删除了 v0.10.2 之前的迁移路径：历史 guidance 版本常量（三段提示词只识别当前文本）、`ccSwitch*` 配置别名、`defaultModelByProvider` 旧字段与迁移、API-key 线路中官方模型的重分类迁移、config.toml 子代理并发的旧键迁移、请求日志 SQLite 列迁移与读侧列探测、旧模型目录 description 修复、子代理账本 schema 升级（仅接受当前 schema）、`codey/` 旧模型前缀识别，以及隔离运行时之前的租约恢复路径。
 
 - README.md 只写用户能感知的功能与必要注意事项；实现、构建、发布、路径和限制写在本文档。
-- 新功能先复用现有配置事务、桥接、URL 校验、错误脱敏和原子文件工具，不建立第二套流程。
+- 新功能先复用现有配置事务、桥接、URL 校验、错误脱敏和原子文件工具，不建立第二套流程。backend 内的时间戳、删除可选文件、文件锁占用判定和 SHA-256 统一使用 `fs_util`，不要在模块内再写一份。
 - 对 Codex 持久数据的写入必须有所有权证据、快照复核、备份和原子替换；不确定时保持只读。
 - 网络请求必须有输入与响应上限，凭据不能进入错误文本、URL、前端状态或请求日志。
 - 本文档描述当前稳定结构，不记录调参历史、已删除方案或逐版本迁移过程。
@@ -1123,7 +1127,7 @@ git diff --check
 - 模型药丸（`.model-tag-pill`）：高度调整为 31px、字体 12.5px、内边距 4px 11px、药丸间距 8x10px、圆点 6px，兼顾列表轻盈度与点击舒适度；
 - 内嵌配置弹窗（`SettingsModalShell`）：通过 Modal 的 `styles` 配置高度、布局、圆角与内容裁剪，删除重复的 `.ant-modal-*` CSS 覆盖；次级弹窗（如通知渠道、模型配置等）必须挂载至 `popupContainer`（即 `modalContainer`），不得挂载至作为页面主体的 `portalContainer`，确保遮罩与弹窗正确覆盖包括 Header 在内的完整外壳。
 
-`src/styles*.css` 均包含独立入口和内嵌入口使用的业务布局，因此保留文件；已删除无调用的 `.route-websocket-option` 规则及组件外观覆盖，不保留空样式文件。
+`src/styles*.css` 均包含独立入口和内嵌入口使用的业务布局，因此保留文件；已删除无调用的 `.route-websocket-option`、`.notification-empty`、`.feature-disabled-*` 规则及组件外观覆盖，不保留空样式文件。`src/components/antd` 封装层只保留有调用方的 prop；`useAppNotice` 与 `useConfirmationDialog` 共用 `src/externalStore.ts` 的 `createExternalStore`。
 
 运行 `pnpm check` 和 `pnpm test:js` 验证类型与回归；`pnpm vite:build` 构建嵌入产物，`pnpm exec vite build` 构建独立页面。开发服务下，`tests/antd-browser.html` 验证真实 Shadow DOM 设置入口，`?view=logs` 使用模拟数据验证日志筛选、详情与布局；`tests/model-combobox-browser.html` 验证万条模型列表。这些页面不连接真实模型服务。
 

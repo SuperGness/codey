@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+
+import { flushMicrotasks } from "./helpers/flush.mjs";
 import vm from "node:vm";
 
 const cdpSource = readFileSync(
@@ -13,7 +15,7 @@ const loaderMatch = cdpSource.match(
 assert.ok(loaderMatch, "lazy settings overlay loader script must be discoverable");
 const loaderScript = loaderMatch[1];
 
-const flushPromises = () => new Promise((resolve) => setImmediate(resolve));
+const flushPromises = flushMicrotasks;
 
 test("settings overlay loads once on first click and opens the real controller", async () => {
   let bridgeCalls = 0;

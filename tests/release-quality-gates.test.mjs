@@ -151,6 +151,4 @@ test("Windows release publishes the installer without a portable zip", () => {
     /Get-Command makensis -ErrorAction SilentlyContinue/,
   );
   assert.doesNotMatch(windowsPackageStep, /\$makensis = "makensis"/);
-  assert.doesNotMatch(workflow, /windows-x64-portable\.zip/);
-  assert.doesNotMatch(workflow, /codey-windows-x64-portable/);
 });

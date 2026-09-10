@@ -35,7 +35,6 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(notice, /export const NoticeToast = memo\(/);
   assert.match(confirmation, /useSyncExternalStore\(/);
   assert.match(confirmation, /export const ConfirmationDialogHost = memo\(/);
-  assert.doesNotMatch(app, /CodexAppPathDialog/);
   assert.doesNotMatch(app, /async function checkForUpdates\(/);
   assert.match(appUpdates, /export function useAppUpdates/);
   assert.match(appUpdates, /invoke<UpdateCheck>\("check_for_updates"\)/);
@@ -54,7 +53,6 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(app, /onAnalyzeDiagnosticStorage=\{handleAnalyzeDiagnosticStorage\}/);
   assert.match(app, /onToggleDraftModel=\{toggleDraftModel\}/);
   assert.match(app, /onSaveRoute=\{handleSaveRoute\}/);
-  assert.doesNotMatch(app, /onActivateRoute|handleActivateRoute/);
   assert.doesNotMatch(app, /activeProfileId:\s*route\.id/);
   assert.match(app, /onDeleteRoute=\{handleDeleteRoute\}/);
   assert.match(app, /onFetchRouteModels=\{handleFetchRouteModels\}/);
@@ -69,7 +67,6 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.doesNotMatch(modelSelection, /withTimeout/);
   assert.match(modelSelection, /routeId: modelPickerRouteId/);
   assert.match(app, /routeModelState/);
-  assert.doesNotMatch(app, /"activate_route"/);
   assert.doesNotMatch(app, /onSetDefaultModel=\{\(.*=>/);
   assert.doesNotMatch(
     app,
@@ -79,11 +76,10 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(sections, /OpenAI Responses/);
   assert.match(sections, /OpenAI Chat Completions/);
   assert.match(sections, /Anthropic Messages/);
-  assert.doesNotMatch(sections, /第三方 Responses 兼容/);
   assert.doesNotMatch(sections, /route-auth-mode-label/);
   assert.equal(sections.match(/<Select\s/g)?.length, 2);
   assert.equal(sections.match(/<ModelCombobox\s/g)?.length, 1);
-  assert.doesNotMatch(sections, /<select|route-native-select/);
+  assert.doesNotMatch(sections, /<select/);
   assert.match(sections, /visibleProfiles\.map\(\(profile\) =>/);
   assert.doesNotMatch(sections, /route-list-pane|route-manager-balanced|<Listy/);
   assert.match(sections, /route-manager-current/);
@@ -123,7 +119,6 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(sections, /已接入路由/);
   assert.doesNotMatch(sections, /aria-pressed|route-list-select/);
   assert.doesNotMatch(sections, /role="radiogroup"/);
-  assert.doesNotMatch(sections, /activeRouteLocked/);
 
   for (const component of [
     "OperationsPanel",

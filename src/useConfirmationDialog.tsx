@@ -1,50 +1,17 @@
-import {
-  memo,
-  type Dispatch,
-  type SetStateAction,
-  useRef,
-  useSyncExternalStore,
-} from "react";
+import { memo, useSyncExternalStore } from "react";
 
 import type { Confirmation } from "./App.types";
 import { ConfirmationDialog } from "./AppDialogs";
+import {
+  createExternalStore,
+  type ExternalStore,
+  useExternalStore,
+} from "./externalStore";
 
-export type ConfirmationController = {
-  clear: () => void;
-  getSnapshot: () => Confirmation | null;
-  setConfirmation: Dispatch<SetStateAction<Confirmation | null>>;
-  subscribe: (listener: () => void) => () => void;
-};
-
-function createConfirmationController(): ConfirmationController {
-  let confirmation: Confirmation | null = null;
-  const listeners = new Set<() => void>();
-  const setConfirmation: ConfirmationController["setConfirmation"] = (update) => {
-    const next =
-      typeof update === "function"
-        ? (update as (current: Confirmation | null) => Confirmation | null)(
-            confirmation,
-          )
-        : update;
-    if (Object.is(next, confirmation)) return;
-    confirmation = next;
-    listeners.forEach((listener) => listener());
-  };
-  return {
-    clear: () => setConfirmation(null),
-    getSnapshot: () => confirmation,
-    setConfirmation,
-    subscribe: (listener) => {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-  };
-}
+export type ConfirmationController = ExternalStore<Confirmation | null>;
 
 export function useConfirmationController(): ConfirmationController {
-  const controllerRef = useRef<ConfirmationController | null>(null);
-  controllerRef.current ??= createConfirmationController();
-  return controllerRef.current;
+  return useExternalStore(() => createExternalStore<Confirmation | null>(null));
 }
 
 type ConfirmationDialogHostProps = {
@@ -65,9 +32,9 @@ export const ConfirmationDialogHost = memo(function ConfirmationDialogHost({
     <ConfirmationDialog
       confirmation={confirmation}
       container={container}
-      onClose={controller.clear}
+      onClose={() => controller.set(null)}
       onConfirm={(pending) => {
-        controller.clear();
+        controller.set(null);
         pending.run();
       }}
     />

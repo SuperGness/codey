@@ -61,6 +61,25 @@ export class FakeElementCore {
     return child;
   }
 
+  append(...children) {
+    children.forEach((child) => this.appendChild(child));
+  }
+
+  insertAdjacentElement(position, element) {
+    if (position !== "beforebegin" && position !== "afterend") {
+      throw new Error(`unsupported insertAdjacentElement position: ${position}`);
+    }
+    const siblings = this.parentElement.children;
+    const index = siblings.indexOf(this);
+    element.remove();
+    element.parentElement = this.parentElement;
+    element.isConnected = this.isConnected;
+    siblings.splice(position === "beforebegin" ? index : index + 1, 0, element);
+    return element;
+  }
+
+  focus() {}
+
   insertBefore(child, reference) {
     child.remove?.();
     const index = this.children.indexOf(reference);

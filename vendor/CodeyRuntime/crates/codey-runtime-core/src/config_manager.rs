@@ -270,10 +270,6 @@ impl ConfigManager {
         &self.inner.path
     }
 
-    pub fn lock_path(&self) -> &Path {
-        &self.inner.lock_path
-    }
-
     pub fn cached_snapshot(&self) -> Option<Arc<ConfigSnapshot>> {
         self.inner
             .snapshot
@@ -399,68 +395,6 @@ impl ConfigManager {
         self.update(expected_revision, reason, caller, |editor| {
             editor.set_root_base_url(base_url)
         })
-    }
-
-    pub fn set_provider_base_url(
-        &self,
-        expected_revision: Option<&ConfigRevision>,
-        provider_id: &str,
-        base_url: Option<&str>,
-        reason: impl Into<String>,
-        caller: impl Into<String>,
-    ) -> Result<Arc<ConfigSnapshot>> {
-        self.update(expected_revision, reason, caller, |editor| {
-            editor.set_provider_base_url(provider_id, base_url)
-        })
-    }
-
-    pub fn remove(
-        &self,
-        expected_revision: Option<&ConfigRevision>,
-        reason: impl Into<String>,
-        caller: impl Into<String>,
-    ) -> Result<Arc<ConfigSnapshot>> {
-        let reason = reason.into();
-        let caller = caller.into();
-        validate_audit_metadata(&reason, &caller)?;
-        let result = self.with_lock(|| {
-            let current = self.load_locked()?;
-            if expected_revision.is_some_and(|expected| expected != current.revision()) {
-                bail!("config.toml 已被其他写者修改；请 reload 后重试");
-            }
-            if current.exists {
-                if self.inner.backup_limit > 0 {
-                    self.rotate_backups_locked()?;
-                    self.write_atomic_copy_locked(
-                        &backup_path(&self.inner.path, 0),
-                        current.raw(),
-                    )?;
-                }
-                self.inner.fs.remove_optional(&self.inner.path)?;
-                self.inner.fs.sync_parent(&self.inner.path)?;
-            }
-            let candidate = Arc::new(build_snapshot(&self.inner.path, false, Vec::new())?);
-            *self
-                .inner
-                .snapshot
-                .write()
-                .expect("config snapshot lock poisoned") = Some(candidate.clone());
-            self.record(ConfigAuditEvent {
-                operation: "remove".to_string(),
-                path: self.inner.path.to_string_lossy().into_owned(),
-                status: "ok".to_string(),
-                reason: Some(reason.clone()),
-                caller: Some(caller.clone()),
-                revision: Some(candidate.revision.as_hex()),
-                base_url_changed: !collect_base_urls(current.document()).is_empty(),
-                error: None,
-            });
-            Ok(candidate)
-        });
-        if let Err(error) = &result {
-            self.record_failure("remove", Some(reason), Some(caller), error);
-        }
-        result
     }
 
     fn load_locked(&self) -> Result<Arc<ConfigSnapshot>> {
@@ -650,33 +584,6 @@ impl ConfigEditor {
         Ok(())
     }
 
-    pub fn set_provider_base_url(
-        &mut self,
-        provider_id: &str,
-        base_url: Option<&str>,
-    ) -> Result<()> {
-        let provider_id = provider_id.trim();
-        if provider_id.is_empty() {
-            bail!("provider id 不能为空");
-        }
-        let providers = ensure_root_table(&mut self.document, "model_providers")?;
-        if providers.get(provider_id).is_none() {
-            providers[provider_id] = Item::Table(Table::new());
-        }
-        let provider = providers
-            .get_mut(provider_id)
-            .and_then(Item::as_table_mut)
-            .ok_or_else(|| anyhow::anyhow!("model_providers.{provider_id} 必须是 table"))?;
-        set_base_url_item(provider, base_url)?;
-        self.recorded_base_url_paths
-            .insert(format!("model_providers.{provider_id}.base_url"));
-        Ok(())
-    }
-
-    pub fn document(&self) -> &DocumentMut {
-        &self.document
-    }
-
     fn finish(self) -> Result<DocumentMut> {
         let current = collect_base_urls(&self.document);
         let changed = changed_base_url_paths(&self.original_base_urls, &current);
@@ -781,16 +688,6 @@ fn optional_non_empty_string<'a>(
             .ok_or_else(|| anyhow::anyhow!("{field} 必须是非空字符串")),
         None => Ok(None),
     }
-}
-
-fn ensure_root_table<'a>(document: &'a mut DocumentMut, key: &str) -> Result<&'a mut Table> {
-    if document.get(key).is_none() {
-        document[key] = Item::Table(Table::new());
-    }
-    document
-        .get_mut(key)
-        .and_then(Item::as_table_mut)
-        .ok_or_else(|| anyhow::anyhow!("{key} 必须是 table"))
 }
 
 fn set_base_url_item(table: &mut Table, base_url: Option<&str>) -> Result<()> {

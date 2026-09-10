@@ -14,6 +14,29 @@ pub(crate) fn timestamp_millis() -> u128 {
         .as_millis()
 }
 
+pub(crate) fn timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// 删除文件；文件本就不存在视为成功。
+pub(crate) fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// `try_lock_*` 失败是否表示锁被其他进程占用（Windows 的 LockFileEx 以
+/// ERROR_LOCK_VIOLATION 报告，fs2 已按平台封装）。
+pub(crate) fn file_lock_is_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
 /// 以毫秒时间戳命名的唯一子目录（不创建）。同一毫秒内的重复调用追加 `-n` 后缀。
 /// 此前 session_index_cleanup 与 codex_config 各自实现了一份备份目录命名。
 pub(crate) fn unique_timestamp_dir(root: &Path) -> PathBuf {
@@ -55,6 +78,10 @@ pub(crate) fn prune_dirs(root: &Path, keep: usize, sort_key: impl Fn(&Path) -> O
 
 /// 小写十六进制 SHA-256。此前 subagent_gate、subagent_orchestrator、
 /// session_index_cleanup 各有一份逐字节相同的实现。
+pub(crate) fn sha256_hex_str(value: &str) -> String {
+    sha256_hex(value.as_bytes())
+}
+
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }

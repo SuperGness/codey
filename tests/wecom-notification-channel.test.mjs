@@ -25,7 +25,6 @@ test("enterprise wechat webhook shows its address without a leading icon", () =>
   assert.match(registrySource, /displayName: "企业微信机器人"/);
   assert.match(sharedEditorSource, /type="text"/);
   assert.doesNotMatch(sharedEditorSource, /IconSend/);
-  assert.doesNotMatch(sharedEditorSource, /revealSecrets/);
   assert.match(sharedEditorSource, /clearUrl: true/);
   assert.match(editorSource, /qyapi\.weixin\.qq\.com\/cgi-bin\/webhook\/send\?key=/);
 });

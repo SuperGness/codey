@@ -3,7 +3,7 @@ use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -380,10 +380,7 @@ impl WebhookTurnTracker {
 }
 
 fn unix_timestamp_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+    crate::fs_util::timestamp_secs() as i64
 }
 
 fn initialize_waiting_notifications(path: &Path, baseline: HashSet<String>) -> WaitingLedgerState {

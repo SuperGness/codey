@@ -38,10 +38,7 @@ impl HookStateLock {
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => return Ok(Self(file)),
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        || (cfg!(windows) && error.raw_os_error() == Some(33)) =>
-                {
+                Err(error) if crate::fs_util::file_lock_is_contended(&error) => {
                     anyhow::ensure!(
                         started.elapsed() < Duration::from_secs(2),
                         "获取 Codex 子代理 Hook 状态锁超时：{}",
@@ -656,9 +653,7 @@ pub(super) fn runtime_file_has_prefix(path: &Path, prefix: &str) -> bool {
         .is_some_and(|name| name.starts_with(prefix))
 }
 
-pub(super) fn hash_component(value: &str) -> String {
-    crate::fs_util::sha256_hex(value.as_bytes())
-}
+pub(super) use crate::fs_util::sha256_hex_str as hash_component;
 
 pub(super) fn canonical_json(value: &Value) -> Value {
     match value {

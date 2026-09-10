@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+
+import { flushTimers } from "./helpers/flush.mjs";
 import vm from "node:vm";
 
 import { FakeElementCore } from "./helpers/fake-element.mjs";
@@ -75,8 +77,6 @@ class FakeElement extends FakeElementCore {
       this.isContentEditable = String(value) === "true";
     }
   }
-
-  focus() {}
 }
 
 let latestMutationObserver = null;
@@ -109,7 +109,7 @@ class FakeEvent {
   }
 }
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
+const flush = flushTimers;
 
 const createEnvironment = (options = {}) => {
   const calls = [];

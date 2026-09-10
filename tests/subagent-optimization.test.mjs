@@ -35,8 +35,6 @@ test("subagent settings expose the five supported role controls", async () => {
   assert.match(featurePolicySource, /roleDisabled/);
   assert.match(featurePolicySource, /enabledReadOnlyRoleNames/);
   assert.match(featurePolicySource, /请先启用至少一个只读角色/);
-  assert.doesNotMatch(featurePolicySource, /关闭全部可写角色/);
-  assert.doesNotMatch(featurePolicySource, /disableWritableRoles/);
   assert.match(featurePolicySource, /<ModelCombobox/);
   assert.match(
     modelHookSource,

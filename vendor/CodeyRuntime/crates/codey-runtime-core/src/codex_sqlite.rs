@@ -130,11 +130,6 @@ impl CodexSessionDbDiscoveryCache {
     }
 }
 
-/// codex 客户端日志数据库路径（固定文件名）。
-pub fn codex_logs_db_path_from_home(home: &Path) -> PathBuf {
-    home.join("logs_2.sqlite")
-}
-
 pub fn codex_sqlite_sidecar_paths(db_path: &Path) -> [PathBuf; 3] {
     [
         db_path.to_path_buf(),

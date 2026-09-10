@@ -1,15 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { flushMicrotasks } from "./helpers/flush.mjs";
+
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
 const root = new URL("../", import.meta.url);
-
-async function flushMicrotasks() {
-  for (let index = 0; index < 8; index += 1) {
-    await Promise.resolve();
-  }
-}
 
 function createFakeClock() {
   let currentTime = 0;

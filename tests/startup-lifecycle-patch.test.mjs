@@ -1,23 +1,11 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
-
-async function loadStartupPatchExpression() {
-  const template = normalizeLineEndings(await readFile(
-    new URL("../backend/src/codex_startup_patch.js", import.meta.url),
-    "utf8",
-  ));
-  assert.ok(template);
-  return template
-    .replaceAll("__DISABLE_PET__", "false")
-    .replaceAll("__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__", "false");
-}
+import { loadStartupPatchTemplate } from "./helpers/startup-patch.mjs";
 
 test("main bundle detection accepts renamed CommonJS entry chunks by signature", async () => {
-  const source = await loadStartupPatchExpression();
+  const source = await loadStartupPatchTemplate();
 
   assert.match(source, /const hasMainBundleSignature =/);
   assert.match(source, /source\.includes\("checkout-webview-presentation-changed"\)/);
@@ -61,7 +49,7 @@ test("startup patch preserves native child processes and ordinary BrowserWindows
   try {
     Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
     assert.equal(
-      (0, eval)(await loadStartupPatchExpression()),
+      (0, eval)(await loadStartupPatchTemplate()),
       "codey-startup-patch-installed-v39",
     );
 

@@ -209,10 +209,7 @@ function validateRouteDraft(route: Profile, profiles: readonly Profile[]): Route
     apiKey: "",
   };
   errors.baseUrl = validateOutboundApiUrl(route.baseUrl);
-  const hasApiKey =
-    route.apiKey.trim() !== "" ||
-    Boolean(route.apiKeyConfigured);
-  if (!hasApiKey) errors.apiKey = "请输入 API Key";
+  if (route.apiKey.trim() === "" && !route.apiKeyConfigured) errors.apiKey = "请输入 API Key";
   return errors;
 }
 
@@ -498,8 +495,8 @@ function ModelSectionComponent({
               <div className="catalog-aggregate-title-wrap">
                 <div className="catalog-aggregate-title">
                   <strong>{routeConfigReadOnly ? "当前线路模型" : "供应商与模型"}</strong>
-                  <Badge variant="secondary" size="xs">{visibleProfiles.length} 条线路</Badge>
-                  <Badge variant="secondary" size="xs">{totalModelCount} 个模型</Badge>
+                  <Badge variant="secondary">{visibleProfiles.length} 条线路</Badge>
+                  <Badge variant="secondary">{totalModelCount} 个模型</Badge>
                 </div>
                 <small>
                   {routeConfigReadOnly
@@ -595,15 +592,15 @@ function ModelSectionComponent({
                           <div className="provider-heading-title-row">
                             <strong id={`provider-model-${profile.id}`} title={profile.name}>{profile.name || "未命名线路"}</strong>
                             <div className="route-item-badges">
-                              {disabled ? <Badge variant="destructive" size="xs">已禁用</Badge> : (
+                              {disabled ? <Badge variant="destructive">已禁用</Badge> : (
                                 <>
-                                  <Badge variant="secondary" size="xs">{group?.models.length || 0} 模型</Badge>
+                                  <Badge variant="secondary">{group?.models.length || 0} 模型</Badge>
                                   {!routeConfigReadOnly && !isOfficial && (
-                                    <Badge variant={group?.models.length ? "brand" : "secondary"} size="xs">
+                                    <Badge variant={group?.models.length ? "brand" : "secondary"}>
                                       {group?.models.length ? "已接入路由" : "待配置模型"}
                                     </Badge>
                                   )}
-                                  {(isOfficial || profile.supportsWebsockets) && <Badge variant="brand" size="xs">WS</Badge>}
+                                  {(isOfficial || profile.supportsWebsockets) && <Badge variant="brand">WS</Badge>}
                                 </>
                               )}
                               {disabled && <span className="route-disabled-hint">启用后可使用此线路的模型</span>}

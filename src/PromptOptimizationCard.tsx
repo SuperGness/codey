@@ -375,7 +375,6 @@ function PromptOptimizationCardComponent({
                           disabled={isBusy}
                           aria-label="提示词优化上游协议"
                           optionList={[...MANUAL_PROTOCOL_OPTIONS]}
-                          showClear={false}
                           filter={false}
                           dropdownClassName="rounded-[10px]"
                           getPopupContainer={() => popupContainer ?? document.body}

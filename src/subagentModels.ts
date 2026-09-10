@@ -56,11 +56,11 @@ function enabledModelsForRoute(
     ]);
   }
 
-  const fallbackModels = uniqueModelIds([
-    ...modelState.officialModelIds,
-    ...modelState.officialModels.map((model) => model.slug),
-  ]);
-  return uniqueModelIds(configuredModels.length > 0 ? configuredModels : fallbackModels);
+  return uniqueModelIds(
+    configuredModels.length > 0
+      ? configuredModels
+      : [...modelState.officialModelIds, ...modelState.officialModels.map((model) => model.slug)],
+  );
 }
 
 export function buildSubagentModelOptions(

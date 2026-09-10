@@ -19,6 +19,7 @@ import {
 import type { Config, Profile } from "./App.types";
 import requestLogStyles from "./styles.request-log.css?inline";
 import { invoke } from "./api";
+import { errorText } from "./appUtils";
 import { formatTimestamp } from "./formatters";
 import { QuotaEstimateDialog } from "./QuotaEstimateDialog";
 import {
@@ -448,12 +449,11 @@ export function RequestLogDialog({
   const modelOptions = useMemo(() => {
     const models = new Set<string>(usedModels);
     result?.items?.forEach((item) => {
-      if (item.model?.trim()) models.add(item.model.trim());
-      else if (item.requestedModel?.trim()) models.add(item.requestedModel.trim());
+      const name = item.model?.trim() || item.requestedModel?.trim();
+      if (name) models.add(name);
     });
-    if (model !== "all" && model.trim()) {
-      models.add(model.trim());
-    }
+    const current = model === "all" ? "" : model.trim();
+    if (current) models.add(current);
     return [
       { label: "全部模型", value: "all" },
       ...[...models]
@@ -472,11 +472,8 @@ export function RequestLogDialog({
       ...(optionalFilter(provider) ? { provider } : {}),
     })
       .then((res) => {
-        if (!active || !res?.groups) return;
-        const models = res.groups
-          .map((g) => g.key)
-          .filter((k): k is string => Boolean(k && k.trim()));
-        setUsedModels(models);
+        if (!active) return;
+        setUsedModels(res.groups.map((g) => g.key).filter((k) => k.trim()));
       })
       .catch(() => undefined);
     return () => {
@@ -526,7 +523,7 @@ export function RequestLogDialog({
           }
         }
       } catch (nextError) {
-        if (active) setError(nextError instanceof Error ? nextError.message : String(nextError));
+        if (active) setError(errorText(nextError));
       } finally {
         if (active) setLoading(false);
       }
@@ -547,7 +544,7 @@ export function RequestLogDialog({
         const nextStats = await invoke<LogAnalytics>("query_route_request_log_stats", { ...filters, groupBy });
         if (active) setStats(nextStats.queryable ? nextStats : null);
       } catch (nextError) {
-        if (active) setStatsError(nextError instanceof Error ? nextError.message : String(nextError));
+        if (active) setStatsError(errorText(nextError));
       } finally {
         if (active) setStatsLoading(false);
       }
@@ -607,7 +604,7 @@ export function RequestLogDialog({
     } catch (nextError) {
       setActionNotice({
         tone: "error",
-        text: nextError instanceof Error ? nextError.message : String(nextError),
+        text: errorText(nextError),
       });
       setClearConfirmationOpened(false);
     } finally {
@@ -1270,7 +1267,6 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                               {item.codexSessionIsParent ? (
                                 <Badge
                                   variant="secondary"
-                                  size="xs"
                                   className="shrink-0 whitespace-nowrap"
                                 >
                                   父
@@ -1324,7 +1320,6 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
 <div>
                           <Badge
                             variant="secondary"
-                            size="xs"
                             className="request-log-protocol"
                           >
                             {item.upstreamTransport === "http_sse" ? "SSE" : (item.upstreamTransport || "—").toUpperCase()}
@@ -1333,7 +1328,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
 <div>
                           <div className="grid min-w-20 gap-1">
                             <div className="flex items-center gap-1">
-                              <Badge variant={presentation.variant} size="xs" className="request-log-status">
+                              <Badge variant={presentation.variant} className="request-log-status">
                                 {presentation.label}
                               </Badge>
                               {hasUpstreamError ? (
@@ -1594,7 +1589,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                       variant: "secondary" as const,
                     };
                     return (
-                      <Badge variant={pres.variant} size="xs">
+                      <Badge variant={pres.variant}>
                         {pres.label}
                       </Badge>
                     );
@@ -1712,7 +1707,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                   <div>
                     <dt className="text-[11px] text-[#8e8e93]">上游传输方式</dt>
                     <dd className="m-0 mt-0.5 font-medium text-[#1d1d1f]">
-                      <Badge variant="secondary" size="xs">
+                      <Badge variant="secondary">
                         {selectedItem.upstreamTransport === "http_sse" ? "SSE" : (selectedItem.upstreamTransport || "—").toUpperCase()}
                       </Badge>
                     </dd>
@@ -1736,7 +1731,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                       <dt className="text-[11px] text-[#8e8e93]">Codex 会话 ID</dt>
                       <dd className="m-0 mt-0.5 flex items-center gap-1.5 font-mono text-[11px] text-[#48484a]">
                         {selectedItem.codexSessionIsParent ? (
-                          <Badge variant="secondary" size="xs">父会话</Badge>
+                          <Badge variant="secondary">父会话</Badge>
                         ) : null}
                         <span className="truncate">{selectedItem.codexSessionId}</span>
                         <button
