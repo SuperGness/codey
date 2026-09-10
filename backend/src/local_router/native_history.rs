@@ -246,8 +246,9 @@ fn validate_native_tool_history(input: &[Value], restoring: bool) -> Result<()> 
     let mut calls = HashSet::new();
     for item in input {
         let kind = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        // compaction_trigger is a request instruction, not a history reference.
         match kind {
-            "item_reference" | "compaction" | "compaction_trigger" if restoring => {
+            "item_reference" | "compaction" if restoring => {
                 anyhow::bail!("历史包含无法在协议切换时展开的引用，请重新发送完整上下文");
             }
             "reasoning"
@@ -543,6 +544,69 @@ mod tests {
             assert_eq!(terminal(&mut client).await["type"], "response.completed");
         }
         upstream.await.unwrap();
+        client.close(None).await.unwrap();
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_compaction_restores_history_before_switching_to_http() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (mut config, provider, model) =
+            router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
+        config.profiles[0].supports_websockets = true;
+        config.profiles[0].supports_remote_compaction = true;
+        let upstream = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket.next().await.unwrap().unwrap();
+            socket
+                .send(WebSocketMessage::Text(
+                    completed("resp-first", vec![]).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            let (mut http, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut http).await.unwrap();
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert!(body.get("previous_response_id").is_none(), "{body}");
+            assert_eq!(
+                body["input"],
+                json!([{"role":"user","content":"original task"},{"type":"compaction_trigger"}])
+            );
+            write_json_response(
+                &mut http,
+                200,
+                &completed(
+                    "resp-compact",
+                    vec![json!({"type":"compaction","encrypted_content":"opaque"})],
+                )["response"],
+            )
+            .await
+            .unwrap();
+        });
+        let router = LocalRouter::start(&config).await.unwrap();
+        let mut client = connect_router_websocket(&router.endpoint()).await;
+        let model = model_alias(&provider, &model);
+        client
+            .send(WebSocketMessage::Text(
+                json!({"type":"response.create","model":model,"input":"original task"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(terminal(&mut client).await["response"]["id"], "resp-first");
+        client.send(WebSocketMessage::Text(json!({"type":"response.create","model":model,"previous_response_id":"resp-first","input":[{"type":"compaction_trigger"}]}).to_string().into())).await.unwrap();
+        assert_eq!(
+            terminal(&mut client).await["response"]["id"],
+            "resp-compact"
+        );
+        upstream.await.unwrap();
+        client.send(WebSocketMessage::Text(json!({"type":"response.create","model":model,"previous_response_id":"resp-missing","input":[{"type":"compaction_trigger"}]}).to_string().into())).await.unwrap();
+        assert_eq!(
+            terminal(&mut client).await["response"]["error"]["code"],
+            "context_not_recoverable"
+        );
         client.close(None).await.unwrap();
         router.stop().await.unwrap();
     }

@@ -146,7 +146,7 @@ pub(crate) fn validate_compaction_result(value: &Value, v2: bool) -> Result<()> 
         }
     }
     if count != 1 {
-        anyhow::bail!("远程压缩必须返回且仅返回一个 compaction 项");
+        anyhow::bail!("远程压缩必须返回且仅返回一个 compaction 项，实际收到 {count} 个");
     }
     Ok(())
 }
@@ -194,6 +194,113 @@ mod tests {
         );
         let oversized = json!({"status":"completed","output":[{"type":"compaction","encrypted_content":"x".repeat(MAX_REQUEST_BYTES)}]});
         assert!(validate_compaction_result(&oversized, true).is_err());
+    }
+
+    #[test]
+    fn compaction_sse_restores_done_items_only_after_successful_completion() {
+        let item = json!({"type":"compaction","encrypted_content":"opaque"});
+        let message = json!({"type":"message","role":"user","content":[]});
+        for response in [json!({"id":"resp"}), json!({"id":"resp","output":[]})] {
+            let mut accumulator = CompactionAccumulator::default();
+            // Preserve output order even when done events arrive out of order.
+            for (index, value) in [(1, &item), (0, &message)] {
+                accumulator.ingest_frame(&json!({"type":"response.output_item.done","output_index":index,"item":value}).to_string(), false).unwrap();
+            }
+            assert!(!accumulator.finished());
+            accumulator
+                .ingest_frame(
+                    &json!({"type":"response.completed","response":response}).to_string(),
+                    false,
+                )
+                .unwrap();
+            let result = accumulator.response.unwrap();
+            assert_eq!(result["status"], "completed");
+            assert_eq!(result["output"], json!([message, item]));
+        }
+        for (event_type, items, terminal) in [
+            (
+                "response.output_item.added",
+                vec![item.clone()],
+                json!({"type":"response.completed","response":{"output":[]}}),
+            ),
+            (
+                "response.output_item.done",
+                vec![item.clone(), item.clone()],
+                json!({"type":"response.completed","response":{"output":[]}}),
+            ),
+            (
+                "response.output_item.done",
+                vec![json!({"type":"compaction","encrypted_content":""})],
+                json!({"type":"response.completed","response":{"output":[]}}),
+            ),
+            (
+                "response.output_item.done",
+                vec![item.clone()],
+                json!({"type":"response.incomplete","response":{}}),
+            ),
+            (
+                "response.output_item.done",
+                vec![item.clone()],
+                json!({"type":"response.completed","response":null}),
+            ),
+            (
+                "response.output_item.done",
+                vec![item.clone()],
+                json!({"type":"response.completed","response":{"output":[message]}}),
+            ),
+        ] {
+            let mut accumulator = CompactionAccumulator::default();
+            for (index, value) in items.iter().enumerate() {
+                accumulator
+                    .ingest_frame(
+                        &json!({"type":event_type,"output_index":index,"item":value}).to_string(),
+                        false,
+                    )
+                    .unwrap();
+            }
+            assert!(
+                accumulator
+                    .ingest_frame(&terminal.to_string(), false)
+                    .is_err()
+            );
+            assert!(!accumulator.finished());
+        }
+        let mut accumulator = CompactionAccumulator::default();
+        accumulator
+            .ingest_frame(
+                &json!({"type":"response.completed","response":{"output":[item]}}).to_string(),
+                false,
+            )
+            .unwrap();
+        assert!(accumulator.finished());
+    }
+
+    #[test]
+    fn compaction_sse_rejects_conflicting_or_missing_output_items() {
+        let item = json!({"type":"compaction","encrypted_content":"opaque"});
+        let done = |index, item: Value| {
+            json!({"type":"response.output_item.done","output_index":index,"item":item}).to_string()
+        };
+        let complete = json!({"type":"response.completed","response":{"output":[]}}).to_string();
+        let mut duplicate = CompactionAccumulator::default();
+        duplicate
+            .ingest_frame(&done(0, item.clone()), false)
+            .unwrap();
+        duplicate
+            .ingest_frame(&done(0, item.clone()), false)
+            .unwrap();
+        assert!(
+            duplicate
+                .ingest_frame(&done(0, json!({"type":"message"})), false)
+                .is_err()
+        );
+        let mut missing = CompactionAccumulator::default();
+        missing.ingest_frame(&done(1, item.clone()), false).unwrap();
+        assert!(missing.ingest_frame(&complete, false).is_err());
+        let mut unfinished = CompactionAccumulator::default();
+        unfinished.ingest_frame(&done(0, item), false).unwrap();
+        unfinished.ingest_frame(&json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message"}}).to_string(), false).unwrap();
+        assert!(unfinished.ingest_frame(&complete, false).is_err());
     }
 
     #[test]
@@ -257,16 +364,54 @@ mod tests {
 #[derive(Default)]
 struct CompactionAccumulator {
     response: Option<Value>,
+    output: BTreeMap<u64, Value>,
+    output_count: u64,
 }
 impl SseFrameAccumulator for CompactionAccumulator {
     const PROTOCOL_LABEL: &'static str = "Responses compaction";
     const READ_OPERATION: &'static str = "读取远程压缩响应失败";
+    // A compaction item carries the complete encrypted snapshot in one frame.
+    // collect_sse_frames still enforces the cumulative response/memory budgets.
+    const MAX_BUFFER_BYTES: usize = MAX_UPSTREAM_RESPONSE_BYTES;
     fn ingest_frame(&mut self, data: &str, trailing: bool) -> Result<()> {
         let event = sse_json_frame(data, Self::PROTOCOL_LABEL, trailing)?;
         check_context_length_error(&event)?;
         match event.get("type").and_then(Value::as_str) {
+            Some("response.output_item.added" | "response.output_item.done") => {
+                let index = event["output_index"]
+                    .as_u64()
+                    .ok_or_else(|| anyhow::anyhow!("远程压缩输出项缺少有效的 output_index"))?;
+                self.output_count = self.output_count.max(
+                    index
+                        .checked_add(1)
+                        .ok_or_else(|| anyhow::anyhow!("远程压缩 output_index 超过上限"))?,
+                );
+                if event["type"] == "response.output_item.added" {
+                    return Ok(());
+                }
+                if let Some(previous) = self.output.get(&index)
+                    && previous != &event["item"]
+                {
+                    anyhow::bail!("远程压缩包含冲突的 output_index");
+                }
+                self.output.insert(index, event["item"].clone());
+            }
             Some("response.completed") => {
                 let mut response = event["response"].clone();
+                if !response.is_object() {
+                    anyhow::bail!("远程压缩完成事件缺少有效的 response");
+                }
+                // Completed events may omit the output already sent in item.done.
+                // Never restore item.added: its encrypted content may be incomplete.
+                if response.get("output").is_none()
+                    || response["output"].as_array().is_some_and(Vec::is_empty)
+                {
+                    if self.output.keys().copied().ne(0..self.output_count) {
+                        anyhow::bail!("远程压缩输出项不连续，无法恢复完整结果");
+                    }
+                    response["output"] =
+                        Value::Array(std::mem::take(&mut self.output).into_values().collect());
+                }
                 // The event itself establishes completion, even if a provider
                 // omits the redundant response.status field.
                 if response.get("status").is_none() {
@@ -329,20 +474,15 @@ pub(crate) async fn write_validated_compaction<D: ResponsesDownstream + ?Sized>(
                 .downcast_ref::<reqwest::Error>()
                 .is_some_and(reqwest::Error::is_timeout)
                 || error.is::<UpstreamReadIdleTimeout>();
-            let code = if timeout {
-                "compaction_timeout"
+            let (status, code) = if timeout {
+                (504, "compaction_timeout")
             } else if error.is::<ContextLengthExceeded>() {
-                CONTEXT_LENGTH_EXCEEDED
+                (400, CONTEXT_LENGTH_EXCEEDED)
             } else {
-                "invalid_compaction_response"
+                (502, "invalid_compaction_response")
             };
             downstream
-                .write_error(
-                    if timeout { 504 } else { 502 },
-                    code,
-                    error.to_string(),
-                    Some(route),
-                )
+                .write_error(status, code, error.to_string(), Some(route))
                 .await
         }
     }

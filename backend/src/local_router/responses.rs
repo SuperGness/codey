@@ -1504,27 +1504,30 @@ impl RouterServer {
         // therefore keep incremental `previous_response_id` state on their own
         // upstream connection without sharing the main agent's connection.
         if downstream_websocket
-            && !compacting
             && request_kind == ResponsesRequestKind::Create
             && stream_requested
             && bridge == ProtocolBridge::NativeResponses
         {
-            let had_previous_response = responses_previous_response_id(&upstream_body).is_some();
-            let websocket_attempt = downstream
-                .try_proxy_upstream_websocket(&resolved.route, &headers, &mut upstream_body)
-                .await?;
-            if websocket_attempt == UpstreamWebSocketAttempt::Completed {
-                return Ok(());
-            }
-            if had_previous_response && responses_previous_response_id(&upstream_body).is_none() {
-                // Reconnection may have expanded history before its handshake failed.
-                body_mutated = true;
-                encoded_body = None;
-            }
-            if resolved.route.supports_websockets
-                && let Some(probe) = downstream.request_log_probe()
-            {
-                probe.mark_fallback("websocket_to_http_sse");
+            if !compacting {
+                let had_previous_response =
+                    responses_previous_response_id(&upstream_body).is_some();
+                let websocket_attempt = downstream
+                    .try_proxy_upstream_websocket(&resolved.route, &headers, &mut upstream_body)
+                    .await?;
+                if websocket_attempt == UpstreamWebSocketAttempt::Completed {
+                    return Ok(());
+                }
+                if had_previous_response && responses_previous_response_id(&upstream_body).is_none()
+                {
+                    // Reconnection may have expanded history before its handshake failed.
+                    body_mutated = true;
+                    encoded_body = None;
+                }
+                if resolved.route.supports_websockets
+                    && let Some(probe) = downstream.request_log_probe()
+                {
+                    probe.mark_fallback("websocket_to_http_sse");
+                }
             }
             match downstream.prepare_native_http_fallback(
                 &resolved.route,
@@ -1599,7 +1602,9 @@ impl RouterServer {
             request_builder.json(&upstream_body)
         };
         drop(upstream_body);
-        let response_header_timeout = if upstream_stream_requested {
+        let response_header_timeout = if compacting {
+            COMPACTION_TIMEOUT
+        } else if upstream_stream_requested {
             UPSTREAM_RESPONSE_HEADER_TIMEOUT
         } else {
             UPSTREAM_NON_STREAM_RESPONSE_HEADER_TIMEOUT

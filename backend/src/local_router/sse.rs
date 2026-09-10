@@ -7,6 +7,7 @@ use super::*;
 pub(crate) trait SseFrameAccumulator {
     const PROTOCOL_LABEL: &'static str;
     const READ_OPERATION: &'static str;
+    const MAX_BUFFER_BYTES: usize = MAX_UPSTREAM_SSE_BUFFER_BYTES;
     fn ingest_frame(&mut self, data: &str, trailing: bool) -> Result<()>;
     fn finished(&self) -> bool;
 }
@@ -65,7 +66,9 @@ pub(crate) async fn collect_sse_frames<A: SseFrameAccumulator>(
     {
         compact_sse_buffer(&mut buffer, &mut cursor);
         buffer.extend_from_slice(&chunk);
-        ensure_sse_buffer_within_limit(&buffer, cursor.consumed)?;
+        if buffer.len().saturating_sub(cursor.consumed) > A::MAX_BUFFER_BYTES {
+            anyhow::bail!("上游 SSE 单帧超过 Codey 安全上限");
+        }
         while let Some(frame) = take_next_sse_frame(&buffer, &mut cursor) {
             let Some(data) = sse_frame_data(frame)? else {
                 continue;

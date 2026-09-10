@@ -5463,8 +5463,9 @@ async fn responses_v2_compaction_trigger_passes_through_the_native_route() {
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();
     let sse = concat!(
-        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-window\"}}\n\n",
-        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_compact\",\"object\":\"response\",\"output\":[{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-window\"}]}}\n\n"
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"\"}}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"id\":\"cmp_1\",\"encrypted_content\":\"opaque-window\"}}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_compact\",\"object\":\"response\",\"output\":[]}}\n\n"
     );
 
     let upstream_task = tokio::spawn(async move {
@@ -5680,6 +5681,82 @@ async fn compaction_timeout_releases_session_and_model_switch_keeps_request_snap
         .unwrap();
     assert_ne!(retry.status().as_u16(), 409);
     upstream_task.abort();
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn compaction_stream_can_wait_for_headers_within_its_total_budget() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (mut config, provider_id, model) = router_config(format!("http://{}/v1/responses", upstream.local_addr().unwrap()));
+    config.profiles[0].supports_remote_compaction = true;
+    let (received, wait_received) = oneshot::channel();
+    let (release, wait_release) = oneshot::channel();
+    let upstream_task = tokio::spawn(async move {
+        let (mut socket, _) = upstream.accept().await.unwrap();
+        read_http_request(&mut socket).await.unwrap();
+        received.send(()).unwrap();
+        wait_release.await.unwrap();
+        write_json_response(&mut socket, 200, &json!({"status":"completed","output":[{"type":"compaction","encrypted_content":"opaque"}]})).await.unwrap();
+    });
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let request = reqwest::Client::new().post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .json(&json!({"model":model_alias(&provider_id, &model),"stream":true,"input":[{"type":"compaction_trigger"}]}));
+    let mut pending = tokio::spawn(async move { request.send().await.unwrap() });
+    wait_received.await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(31)).await;
+    tokio::time::resume();
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut pending).await.is_err());
+    release.send(()).unwrap();
+    let response = pending.await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert!(response.text().await.unwrap().contains("opaque"));
+    upstream_task.await.unwrap();
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn compaction_large_sse_and_context_errors_keep_their_meaning() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (mut config, provider_id, model) = router_config(format!("http://{}/v1/responses", upstream.local_addr().unwrap()));
+    config.profiles[0].supports_remote_compaction = true;
+    let encrypted = "x".repeat(MAX_UPSTREAM_SSE_BUFFER_BYTES + 1);
+    let large = format!("data: {}\n\ndata: {}\n\n",
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","encrypted_content":encrypted}}),
+        json!({"type":"response.completed","response":{"status":"completed","output":[]}}));
+    let error = json!({"error":{"code":"context_length_exceeded","message":"context full"}});
+    let sse_error = format!("data: {}\n\n", json!({"type":"response.failed","response":error}));
+    let upstream_task = tokio::spawn(async move {
+        for (content_type, body) in [
+            ("text/event-stream", large),
+            ("application/json", error.to_string()),
+            ("text/event-stream", sse_error),
+        ] {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            read_http_request(&mut socket).await.unwrap();
+            socket.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }
+    });
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    for expected in [200, 400, 400] {
+        let response = reqwest::Client::new()
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .json(&json!({"model":model_alias(&provider_id, &model),"input":[{"type":"compaction_trigger"}],"stream":true}))
+            .send().await.unwrap();
+        assert_eq!(response.status().as_u16(), expected);
+        if expected == 200 {
+            let body = response.text().await.unwrap();
+            assert!(body.contains(&encrypted));
+            assert!(body.contains("response.completed"));
+        } else {
+            assert_eq!(response.json::<Value>().await.unwrap()["error"]["code"], CONTEXT_LENGTH_EXCEEDED);
+        }
+    }
+    upstream_task.await.unwrap();
     router.stop().await.unwrap();
 }
 
