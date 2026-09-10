@@ -39,6 +39,12 @@ pub(crate) const CLI_WRAPPER_TOKEN_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TOKEN";
 /// 包装器执行记录文件的绝对路径；回环握手丢失时启动器据此确认目标已执行。
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) const CLI_WRAPPER_MARKER_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_MARKER";
+/// When Inspector installation may win the startup race, the wrapper records
+/// progress through its marker only and does not connect a listener that the
+/// launcher can drop after Inspector success.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) const CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV: &str =
+    "CODEY_CODEX_CLI_WRAPPER_HANDSHAKE_OPTIONAL";
 #[cfg(any(windows, target_os = "macos", test))]
 const CLI_WRAPPER_HANDSHAKE_CONNECT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(500);
@@ -401,6 +407,7 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
             CLI_WRAPPER_PORT_ENV,
             CLI_WRAPPER_TOKEN_ENV,
             CLI_WRAPPER_MARKER_ENV,
+            CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV,
         ] {
             command.env_remove(name);
         }
@@ -613,11 +620,43 @@ impl CliWrapperReadiness {
     fn begin() -> Self {
         let started = std::time::Instant::now();
         let marker = cli_wrapper_marker_path_from_env(std::env::var_os(CLI_WRAPPER_MARKER_ENV));
+        let handshake_required = cli_wrapper_handshake_required(
+            std::env::var_os(CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV).as_deref(),
+        );
+        Self::begin_with_diagnostics(
+            marker,
+            handshake_required,
+            started,
+            connect_cli_wrapper_handshake,
+        )
+    }
+
+    #[cfg(test)]
+    fn begin_with(
+        marker: Option<std::path::PathBuf>,
+        handshake_required: bool,
+        connect: impl FnOnce() -> Result<std::net::TcpStream>,
+    ) -> Self {
+        Self::begin_with_diagnostics(
+            marker,
+            handshake_required,
+            std::time::Instant::now(),
+            connect,
+        )
+    }
+
+    fn begin_with_diagnostics(
+        marker: Option<std::path::PathBuf>,
+        handshake_required: bool,
+        started: std::time::Instant,
+        connect: impl FnOnce() -> Result<std::net::TcpStream>,
+    ) -> Self {
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
             "launcher.cli_wrapper_started",
             serde_json::json!({
                 "pid": std::process::id(),
                 "markerPresent": marker.is_some(),
+                "handshakeRequired": handshake_required,
             }),
         );
         let readiness = Self {
@@ -625,22 +664,26 @@ impl CliWrapperReadiness {
             marker,
         };
         readiness.mark(CliWrapperMarkerStatus::Launching, None);
-        let stream = match connect_cli_wrapper_handshake() {
-            Ok(stream) => Some(stream),
-            Err(error) => {
-                // 端口被拒绝说明启动器已不再监听（例如 app-server 重启），属正常情况。
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_none_or(|error| error.kind() != std::io::ErrorKind::ConnectionRefused)
-                {
-                    crate::error_log::record_failure(
-                        "compatibility_fallback",
-                        "connect_cli_wrapper_handshake",
-                        format!("{error:#}"),
-                        serde_json::json!({ "markerPresent": readiness.marker.is_some() }),
-                    );
+        let stream = if !handshake_required {
+            None
+        } else {
+            match connect() {
+                Ok(stream) => Some(stream),
+                Err(error) => {
+                    // 端口被拒绝说明启动器已不再监听（例如 app-server 重启），属正常情况。
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_none_or(|error| error.kind() != std::io::ErrorKind::ConnectionRefused)
+                    {
+                        crate::error_log::record_failure(
+                            "compatibility_fallback",
+                            "connect_cli_wrapper_handshake",
+                            format!("{error:#}"),
+                            serde_json::json!({ "markerPresent": readiness.marker.is_some() }),
+                        );
+                    }
+                    None
                 }
-                None
             }
         };
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
@@ -691,6 +734,11 @@ impl CliWrapperReadiness {
     fn executed(self) {
         self.mark_executed();
     }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn cli_wrapper_handshake_required(optional: Option<&OsStr>) -> bool {
+    optional != Some(OsStr::new("1"))
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -1216,6 +1264,25 @@ fn ensure_protocol_success(payload: &serde_json::Value, method: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_cli_wrapper_handshake_writes_marker_without_connecting() {
+        let temporary = tempfile::tempdir().unwrap();
+        let marker_path = temporary.path().join("wrapper.json");
+        let readiness = CliWrapperReadiness::begin_with(Some(marker_path.clone()), false, || {
+            panic!("an Inspector-capable launch must not open a discarded handshake listener")
+        });
+        assert!(readiness.stream.is_none());
+        assert_eq!(
+            CliWrapperMarker::read(&marker_path)
+                .unwrap()
+                .unwrap()
+                .status,
+            CliWrapperMarkerStatus::Launching
+        );
+        assert!(cli_wrapper_handshake_required(Some(OsStr::new("0"))));
+        assert!(!cli_wrapper_handshake_required(Some(OsStr::new("1"))));
+    }
 
     #[test]
     fn cli_input_routes_thread_requests_and_preserves_other_protocol_messages() {

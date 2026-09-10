@@ -193,21 +193,25 @@ pub(super) async fn spawn_codex(
                 crate::electron_fuses::detect_node_cli_inspect_state(app_dir.to_path_buf()).await;
             let cli_only = retry_without_inspector || !inspect_fuse.inspector_possible();
 
-            let (wrapper, wrapper_preparation_error) =
-                match prepare_cli_wrapper(app_dir, subagent_gate_active, runtime_config_overrides)
-                    .await
-                {
-                    Ok(wrapper) => (Some(wrapper), None),
-                    Err(error) => {
-                        error_log::record_failure(
-                            "compatibility_fallback",
-                            "prepare_windows_codex_cli_wrapper",
-                            format!("{error:#}"),
-                            serde_json::json!({ "platform": "windows" }),
-                        );
-                        (None, Some(error))
-                    }
-                };
+            let (wrapper, wrapper_preparation_error) = match prepare_cli_wrapper(
+                app_dir,
+                subagent_gate_active,
+                runtime_config_overrides,
+                !cli_only,
+            )
+            .await
+            {
+                Ok(wrapper) => (Some(wrapper), None),
+                Err(error) => {
+                    error_log::record_failure(
+                        "compatibility_fallback",
+                        "prepare_windows_codex_cli_wrapper",
+                        format!("{error:#}"),
+                        serde_json::json!({ "platform": "windows" }),
+                    );
+                    (None, Some(error))
+                }
+            };
             let inspector_port = if cli_only {
                 None
             } else {
@@ -472,9 +476,13 @@ pub(super) async fn spawn_codex(
             build_codex_command(app_dir, debug_port, &launch_arguments)
         };
         let wrapper = if app_dir.extension().and_then(|value| value.to_str()) == Some("app") {
-            let wrapper =
-                prepare_cli_wrapper(app_dir, subagent_gate_active, runtime_config_overrides)
-                    .await?;
+            let wrapper = prepare_cli_wrapper(
+                app_dir,
+                subagent_gate_active,
+                runtime_config_overrides,
+                inspect_fuse.inspector_possible(),
+            )
+            .await?;
             add_macos_cli_wrapper(&mut command, &wrapper.environment)?;
             Some(wrapper)
         } else {
@@ -930,6 +938,7 @@ async fn prepare_cli_wrapper(
     app_dir: &std::path::Path,
     subagent_gate_active: bool,
     runtime_config_overrides: &[String],
+    handshake_optional: bool,
 ) -> Result<CliWrapperLaunch> {
     let codey = std::env::current_exe().context("定位 Codey 兼容执行器失败")?;
     #[cfg(windows)]
@@ -977,10 +986,21 @@ async fn prepare_cli_wrapper(
             marker_path.to_string_lossy().to_string(),
         ),
     ];
+    if handshake_optional {
+        environment.push((
+            crate::codex_startup_patch::CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV.to_string(),
+            "1".to_string(),
+        ));
+    }
     if crate::codex_startup_patch::local_router_runtime_enabled(runtime_config_overrides) {
         // Applies before Desktop chooses a transport, including CLI fallback
         // launches where the inspector patch cannot set this environment.
         environment.push(("CODEX_APP_SERVER_FORCE_CLI".to_string(), "1".to_string()));
+        environment.extend(local_router_proxy_bypass_environment(
+            runtime_config_overrides,
+            std::env::var("NO_PROXY").ok().as_deref(),
+            std::env::var("no_proxy").ok().as_deref(),
+        ));
     }
     #[cfg(windows)]
     let wrapper = codey;
@@ -1003,6 +1023,64 @@ async fn prepare_cli_wrapper(
         marker_path,
         environment,
     })
+}
+
+/// Local routing terminates at Codey's loopback listener. Keep that hop out of
+/// the user's system proxy while preserving every existing bypass rule. Windows
+/// treats environment keys case-insensitively, so it receives one canonical key.
+#[cfg(any(windows, target_os = "macos", test))]
+fn local_router_proxy_bypass_environment(
+    runtime_config_overrides: &[String],
+    no_proxy: Option<&str>,
+    lowercase_no_proxy: Option<&str>,
+) -> Vec<(String, String)> {
+    if !crate::codex_startup_patch::local_router_runtime_enabled(runtime_config_overrides) {
+        return Vec::new();
+    }
+    #[cfg(windows)]
+    {
+        vec![(
+            "NO_PROXY".to_string(),
+            merge_loopback_no_proxy(no_proxy.or(lowercase_no_proxy)),
+        )]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        vec![
+            ("NO_PROXY".to_string(), merge_loopback_no_proxy(no_proxy)),
+            (
+                "no_proxy".to_string(),
+                merge_loopback_no_proxy(lowercase_no_proxy.or(no_proxy)),
+            ),
+        ]
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (no_proxy, lowercase_no_proxy);
+        Vec::new()
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn merge_loopback_no_proxy(existing: Option<&str>) -> String {
+    const LOOPBACK: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
+    let mut entries = existing
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for required in LOOPBACK {
+        if !entries.iter().any(|entry| {
+            entry
+                .trim_matches(['[', ']'])
+                .eq_ignore_ascii_case(required)
+        }) {
+            entries.push(required.to_string());
+        }
+    }
+    entries.join(",")
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -1692,6 +1770,23 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
 #[cfg(test)]
 mod cli_wrapper_tests {
     use super::*;
+
+    #[test]
+    fn local_router_proxy_bypass_merges_loopback_entries_without_changing_direct_mode() {
+        let inherited = Some("corp.internal,127.0.0.1");
+        let router = vec!["model_provider=codey_router".to_string()];
+        let direct = vec!["model_provider=openai".to_string()];
+
+        let enabled = local_router_proxy_bypass_environment(&router, inherited, None);
+        assert_eq!(
+            enabled.len(),
+            1,
+            "Windows must not receive case-conflicting proxy variables"
+        );
+        assert_eq!(enabled[0].0, "NO_PROXY");
+        assert_eq!(enabled[0].1, "corp.internal,127.0.0.1,localhost,::1");
+        assert!(local_router_proxy_bypass_environment(&direct, inherited, None).is_empty());
+    }
 
     // 【自动化测试】启动 - 查询失败不报告退出，真实退出仍立即识别
     #[test]
