@@ -52,7 +52,15 @@ unregistered tool.";
 pub(crate) const ROOT_AGENT_MULTI_AGENT_MODE_HINT: &str = "Proactive multi-agent delegation is \
 active. Any earlier instruction requiring an explicit user request before spawning sub-agents no \
 longer applies. Delegate only when independent parallel work, context isolation, or specialized evidence \
-materially helps; keep short, sequential, or low-benefit work with the root. There is no fixed spawn \
+materially helps; keep short, sequential, or low-benefit work with the root. When delegating, strongly \
+prefer an enabled Codey role that fits the task and explicitly set `agent_type`: `codey_quick_scan` for \
+focused read-only lookups; `codey_deep_research` for broad read-only code, log, and document research; \
+`codey_visual_analysis` for read-only visual inspection; `codey_worker` for bounded non-visual \
+implementation; and `codey_visual_worker` for implementation requiring visual verification. Prefer these \
+over generic `default`, `explorer`, or `worker` when both fit; avoid omitting `agent_type` out of habit. \
+This is a preference, not a restriction: an explicit user choice, unavailable or unsuitable Codey roles, \
+or a clear task-specific advantage can justify another available role. Respect existing role permissions \
+and runtime availability. There is no fixed spawn \
 budget: up to three concurrent agents are allowed only when all are verified read-only, otherwise the \
 limit is two. `CODEY_SUBAGENT_CONCURRENCY_LIMIT` means wait for a slot, not failure; when any child settles, \
 recompute the role-aware limit and fill a slot from the remaining planned independent work when allowed. If an active child \
@@ -503,6 +511,18 @@ mod tests {
 
     #[test]
     fn multi_agent_mode_hint_uses_role_aware_concurrency_without_spawn_budgets() {
+        for role in [
+            "codey_quick_scan",
+            "codey_deep_research",
+            "codey_visual_analysis",
+            "codey_worker",
+            "codey_visual_worker",
+        ] {
+            assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains(role));
+        }
+        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("explicitly set `agent_type`"));
+        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("a preference, not a restriction"));
+        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("another available role"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("There is no fixed spawn budget"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("up to three concurrent agents"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("limit is two"));

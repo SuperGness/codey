@@ -15,6 +15,11 @@
 - 内置目录模式下，只要启动时启用了子代理增强，线路与模型映射在重启前保持不变。路由更新与角色热更新共用前置校验，拒绝映射变化时均保留原运行配置，避免旧角色及运行中的子代理被父任务线路元数据重新定向；即使同时保存关闭子代理增强也不提前解除保护。角色模型、思考深度和列表排序仍可在映射不变时热更新，自定义目录模式不受此限制。
 - 账号额度摘要在 `/account/usage` 返回错误时回退到 `account/rateLimits/read`，仅使用顶层 `rateLimits`，不合并 `rateLimitsByLimitId` 中的模型专属额度。5 小时窗口是否显示取决于账号通用额度实际返回的窗口，不按套餐名称隐藏。
 
+## 子代理角色选择提示
+
+- 开启子代理增强时，`ROOT_AGENT_MULTI_AGENT_MODE_HINT` 按任务用途优先推荐五种已启用的 Codey 角色，并建议显式填写 `agent_type`，减少习惯性选择 `default`、`explorer`、`worker` 或省略类型的情况。用户明确指定、Codey 角色不可用或不适合、其他角色对任务有明确优势时，提示允许选择其他可用角色；不新增角色白名单、参数改写或拒绝条件，原有权限与运行时校验继续适用。
+- 该提示通过生成配置中的 `features.multi_agent_v2.multi_agent_mode_hint_text` 更新，不覆盖用户自定义约束文件。更新 Codey 后，通过 Codey 重启 Codex 加载新提示；已注入当前会话的旧提示不会被源码修改直接替换。
+
 ## 官方线路额度估算
 
 - `QuotaEstimateDialog.tsx` 复用现有 Dialog、LinkButton 和 Ant Design Table。仅请求日志 header 提供周限额度估算按钮，配置页不再提供入口；提示集中在一个 Alert，详细说明使用原生 details 折叠；表格合并档位与上下文及计价依据，并将 Token、缓存、费用明细和额度估算各自分组展示，仅以现有 `officialAccountAvailable === true` 官方登录状态控制显示；删除线路名称及供应商分组旧入口，不依赖 profile、分组方式或额度显示开关。独立日志页的 `RequestLogCatalog.officialAccountAvailable` 来自后端登录探测结果，`request_log_catalog_exposes_login_status_independently_of_profiles` 覆盖有官方配置但未登录和已登录无保存线路的目录序列化。弹窗固定统计官方账号 `openai` 的当前周周期全部模型，不沿用日志筛选时间。关闭或刷新弹窗不修改原页面筛选和记录。
