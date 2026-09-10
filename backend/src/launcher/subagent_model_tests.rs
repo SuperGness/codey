@@ -91,6 +91,44 @@ fn subagent_catalog_fallback_checks_enabled_roles_only_and_rejects_missing_route
     );
 }
 
+#[test]
+fn subagent_catalog_fallback_disables_only_this_launch_on_invalid_routes() {
+    let mut config = subagent_catalog_fallback_config();
+    let saved = config.clone();
+    let roles = startup_router_subagent_runtime_config(&mut config, false);
+    assert!(roles.subagent_optimization);
+    assert_eq!(roles.subagent_model, "gpt-6-astra");
+    assert_eq!(config, saved);
+
+    let mut other = config.profiles[0].clone();
+    other.id = "route-b".into();
+    config.profiles.push(other);
+    config
+        .selected_models_by_provider
+        .insert("route-b".into(), vec!["gpt-6-astra".into()]);
+    let mut missing = saved;
+    missing
+        .subagent_roles
+        .get_mut("codey_worker")
+        .unwrap()
+        .model = "missing/model".into();
+    let mut restored = config.clone();
+    let roles = startup_router_subagent_runtime_config(&mut restored, true);
+    assert!(roles.subagent_optimization);
+    assert_eq!(roles.subagent_model, "route-a/gpt-6-astra");
+    assert_eq!(restored, config);
+    for saved in [config, missing] {
+        let mut runtime = saved.clone();
+        let roles = startup_router_subagent_runtime_config(&mut runtime, false);
+        assert!(!runtime.subagent_optimization);
+        assert_eq!(roles, runtime);
+        runtime.subagent_optimization = true;
+        assert_eq!(runtime, saved);
+        // A failed startup check must not weaken validation during hot reload.
+        assert!(router_subagent_runtime_config(&saved, false).is_err());
+    }
+}
+
 #[tokio::test]
 async fn subagent_catalog_fallback_keeps_live_routes_and_roles_until_restart() {
     let mut config = subagent_catalog_fallback_config();

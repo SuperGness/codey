@@ -696,7 +696,7 @@ async fn prepare_codex_startup_state(
     runtime_subagent_config.active_profile_id = current_profile.id.clone();
     subagent_policy::reconcile_with_model_state(&mut runtime_subagent_config, Some(&model_state));
     let runtime_roles_config =
-        router_subagent_runtime_config(&runtime_subagent_config, use_official_catalog)?;
+        startup_router_subagent_runtime_config(&mut runtime_subagent_config, use_official_catalog);
     let subagent_optimization = runtime_subagent_config.subagent_optimization;
     let subagent_model = runtime_roles_config.subagent_model.clone();
     let subagent_reasoning_effort = runtime_subagent_config.subagent_reasoning_effort.clone();
@@ -752,6 +752,36 @@ async fn prepare_codex_startup_state(
         runtime_config: runtime_subagent_config,
         runtime_config_overrides: applied.runtime_config_overrides,
     })
+}
+
+fn startup_router_subagent_runtime_config(
+    runtime_config: &mut CodeyConfig,
+    route_catalog_installed: bool,
+) -> CodeyConfig {
+    match router_subagent_runtime_config(runtime_config, route_catalog_installed) {
+        Ok(roles) => roles,
+        Err(error) => {
+            runtime_config.subagent_optimization = false;
+            let message = format!(
+                "本次启动已停用子代理增强，Codey 将继续启动；已保留原设置，修复模型线路后重启可恢复。原因：{error:#}"
+            );
+            error_log::record_failure_with_metadata(
+                "subagent_optimization_unavailable",
+                "prepare_startup_subagent_config",
+                &message,
+                error_log::FailureMetadata {
+                    stage: Some("startup.subagent_config".to_string()),
+                    recoverable: Some(true),
+                },
+                serde_json::json!({
+                    "fallback": "disable_subagent_optimization_for_current_launch",
+                    "routeCatalogInstalled": route_catalog_installed,
+                }),
+            );
+            eprintln!("{message}");
+            runtime_config.clone()
+        }
+    }
 }
 
 async fn await_initial_storage_guards(
