@@ -241,9 +241,13 @@ pub(crate) fn rewrite_native_responses_encoded_body(
 pub(crate) async fn rewrite_native_responses_encoded_body_offloaded(
     original: Vec<u8>,
     updated: &Value,
-) -> Result<Vec<u8>> {
+    permit: Option<OwnedSemaphorePermit>,
+) -> Result<(Vec<u8>, Option<OwnedSemaphorePermit>)> {
     if original.len() < REQUEST_JSON_OFFLOAD_BYTES {
-        return rewrite_native_responses_encoded_body(&original, updated);
+        return Ok((
+            rewrite_native_responses_encoded_body(&original, updated)?,
+            permit,
+        ));
     }
     let updated = updated
         .as_object()
@@ -258,7 +262,9 @@ pub(crate) async fn rewrite_native_responses_encoded_body_offloaded(
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<serde_json::Map<_, _>>();
     tokio::task::spawn_blocking(move || {
-        rewrite_native_responses_encoded_body(&original, &Value::Object(updated))
+        let body = rewrite_native_responses_encoded_body(&original, &Value::Object(updated));
+        drop(original);
+        body.map(|body| (body, permit))
     })
     .await
     .context("等待大型 Responses 请求改写任务失败")?

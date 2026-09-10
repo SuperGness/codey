@@ -202,9 +202,18 @@ async fn large_request_json_is_parsed_off_the_router_worker() {
         "input":"x".repeat(REQUEST_JSON_OFFLOAD_BYTES),
     }))
     .unwrap();
-    let (encoded, parsed) = parse_responses_request_body(encoded).await.unwrap();
+    let budget = Arc::new(Semaphore::new(REQUEST_BODY_BUDGET_PERMITS));
+    let permit = acquire_request_body_budget(&budget, encoded.len()).unwrap();
+    let held = permit.as_ref().unwrap().num_permits();
+    let (encoded, parsed, permit) = parse_responses_request_body(encoded, permit).await.unwrap();
     assert!(encoded.len() >= REQUEST_JSON_OFFLOAD_BYTES);
     assert_eq!(parsed.unwrap()["model"], "test-model");
+    assert_eq!(
+        budget.available_permits(),
+        REQUEST_BODY_BUDGET_PERMITS - held
+    );
+    drop((encoded, permit));
+    assert_eq!(budget.available_permits(), REQUEST_BODY_BUDGET_PERMITS);
 }
 
 #[test]

@@ -35,6 +35,29 @@ impl std::fmt::Display for RequestBodyBudgetUnavailable {
 impl std::error::Error for RequestBodyBudgetUnavailable {}
 
 #[derive(Debug)]
+pub(crate) struct RequestBodyTooLarge {
+    pub(crate) bytes: usize,
+    pub(crate) decoded: bool,
+}
+
+impl std::fmt::Display for RequestBodyTooLarge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}请求体超过 Codey 本地路由的 {} MiB 上限，请减少图片、附件或对话上下文后重试",
+            if self.decoded {
+                "解压后的 Responses "
+            } else {
+                "HTTP "
+            },
+            MAX_REQUEST_BYTES / (1024 * 1024)
+        )
+    }
+}
+
+impl std::error::Error for RequestBodyTooLarge {}
+
+#[derive(Debug)]
 pub(crate) struct UnsupportedRequestContentEncoding;
 
 impl std::fmt::Display for UnsupportedRequestContentEncoding {
@@ -130,7 +153,11 @@ where
         headers.push((name, value));
     }
     if content_length > MAX_REQUEST_BYTES {
-        anyhow::bail!("请求体超过 Codey 本地路由安全上限");
+        return Err(RequestBodyTooLarge {
+            bytes: content_length,
+            decoded: false,
+        }
+        .into());
     }
     let body_start = header_end + 4;
     let buffered_body = buffer.get(body_start..).unwrap_or_default();
@@ -225,61 +252,108 @@ pub(crate) async fn decode_responses_request_body(
         return Ok(encoded);
     }
 
-    reserve_request_body_budget_for_decompression(request, body_budget)?;
-    let decoded = tokio::task::spawn_blocking(move || decode_zstd_request_body(encoded))
-        .await
-        .context("等待 Responses zstd 请求体解压任务失败")??;
-    shrink_request_body_budget(request, decoded.len())?;
+    let permit = request._body_budget_permit.take();
+    let body_budget = Arc::clone(body_budget);
+    let (decoded, permit) = tokio::task::spawn_blocking(move || {
+        decode_zstd_request_body(encoded, &body_budget, permit)
+    })
+    .await
+    .context("等待 Responses zstd 请求体解压任务失败")??;
+    request._body_budget_permit = permit;
     Ok(decoded)
 }
 
 pub(crate) async fn parse_responses_request_body(
     encoded: Vec<u8>,
-) -> Result<(Vec<u8>, serde_json::Result<Value>)> {
+    permit: Option<OwnedSemaphorePermit>,
+) -> Result<(
+    Vec<u8>,
+    serde_json::Result<Value>,
+    Option<OwnedSemaphorePermit>,
+)> {
     if encoded.len() < REQUEST_JSON_OFFLOAD_BYTES {
         let parsed = serde_json::from_slice(&encoded);
-        return Ok((encoded, parsed));
+        return Ok((encoded, parsed, permit));
     }
     tokio::task::spawn_blocking(move || {
         let parsed = serde_json::from_slice(&encoded);
-        (encoded, parsed)
+        (encoded, parsed, permit)
     })
     .await
     .context("等待大型 Responses JSON 解析任务失败")
 }
 
-pub(crate) fn decode_zstd_request_body(encoded: Vec<u8>) -> Result<Vec<u8>> {
+pub(crate) fn decode_zstd_request_body(
+    encoded: Vec<u8>,
+    body_budget: &Arc<Semaphore>,
+    mut permit: Option<OwnedSemaphorePermit>,
+) -> Result<(Vec<u8>, Option<OwnedSemaphorePermit>)> {
+    // Keep the permit inside the blocking task until its buffers are dropped,
+    // even if the caller cancels its JoinHandle.
+    let encoded_capacity = encoded.capacity();
+    grow_request_body_budget(&mut permit, body_budget, encoded_capacity)?;
     let mut decoder = zstd::stream::read::Decoder::new(Cursor::new(encoded))
         .context("初始化 Responses zstd 请求体解码器失败")?;
+    // The output limit does not require a larger zstd history window.
     decoder
         .window_log_max(25)
         .context("限制 Responses zstd 请求体解压窗口失败")?;
     let mut decoded = Vec::new();
-    decoder
-        .take((MAX_REQUEST_BYTES as u64).saturating_add(1))
-        .read_to_end(&mut decoded)
-        .context("解压 Responses zstd 请求体失败")?;
-    if decoded.len() > MAX_REQUEST_BYTES {
-        anyhow::bail!("解压后的 Responses 请求体超过 Codey 本地路由安全上限");
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read_length = chunk.len().min(MAX_REQUEST_BYTES + 1 - decoded.len());
+        let read = decoder
+            .read(&mut chunk[..read_length])
+            .context("解压 Responses zstd 请求体失败")?;
+        if read == 0 {
+            break;
+        }
+        let required = decoded.len() + read;
+        if required > MAX_REQUEST_BYTES {
+            return Err(RequestBodyTooLarge {
+                bytes: required,
+                decoded: true,
+            }
+            .into());
+        }
+        if required > decoded.capacity() {
+            let capacity = required
+                .max(decoded.capacity().saturating_mul(2))
+                .min(MAX_REQUEST_BYTES);
+            // Four times the larger buffer covers compressed input, old output
+            // and new output during reallocation without reserving the limit.
+            grow_request_body_budget(&mut permit, body_budget, encoded_capacity.max(capacity))?;
+            decoded
+                .try_reserve_exact(capacity - decoded.len())
+                .context("分配 Responses 请求体解压缓冲失败")?;
+        }
+        decoded.extend_from_slice(&chunk[..read]);
     }
-    Ok(decoded)
+    drop(decoder);
+    decoded.shrink_to_fit();
+    shrink_request_body_budget(&mut permit, decoded.capacity())?;
+    Ok((decoded, permit))
 }
 
 pub(crate) fn request_body_budget_permit_count(wire_bytes: usize) -> Result<usize> {
     if wire_bytes > MAX_REQUEST_BYTES {
-        anyhow::bail!("请求体超过 Codey 本地路由安全上限");
+        return Err(RequestBodyTooLarge {
+            bytes: wire_bytes,
+            decoded: false,
+        }
+        .into());
     }
     let estimated_memory = wire_bytes.saturating_mul(REQUEST_MEMORY_BUDGET_MULTIPLIER);
     Ok(estimated_memory.div_ceil(REQUEST_BODY_BUDGET_UNIT_BYTES))
 }
 
-pub(crate) fn reserve_request_body_budget_for_decompression(
-    request: &mut HttpRequest,
+fn grow_request_body_budget(
+    permit: &mut Option<OwnedSemaphorePermit>,
     body_budget: &Arc<Semaphore>,
+    bytes: usize,
 ) -> Result<()> {
-    let required = request_body_budget_permit_count(MAX_REQUEST_BYTES)?;
-    let held = request
-        ._body_budget_permit
+    let required = request_body_budget_permit_count(bytes)?;
+    let held = permit
         .as_ref()
         .map(OwnedSemaphorePermit::num_permits)
         .unwrap_or(0);
@@ -288,23 +362,23 @@ pub(crate) fn reserve_request_body_budget_for_decompression(
         return Ok(());
     }
     let additional = u32::try_from(additional).context("请求体解压预算超出内部上限")?;
-    let permit = Arc::clone(body_budget)
+    let additional_permit = Arc::clone(body_budget)
         .try_acquire_many_owned(additional)
         .map_err(|_| anyhow::Error::new(RequestBodyBudgetUnavailable))?;
-    if let Some(held) = request._body_budget_permit.as_mut() {
-        held.merge(permit);
+    if let Some(held) = permit.as_mut() {
+        held.merge(additional_permit);
     } else {
-        request._body_budget_permit = Some(permit);
+        *permit = Some(additional_permit);
     }
     Ok(())
 }
 
-pub(crate) fn shrink_request_body_budget(
-    request: &mut HttpRequest,
+fn shrink_request_body_budget(
+    permit: &mut Option<OwnedSemaphorePermit>,
     decoded_bytes: usize,
 ) -> Result<()> {
     let desired = request_body_budget_permit_count(decoded_bytes)?;
-    let Some(mut held) = request._body_budget_permit.take() else {
+    let Some(mut held) = permit.take() else {
         return Ok(());
     };
     if desired == 0 {
@@ -314,14 +388,14 @@ pub(crate) fn shrink_request_body_budget(
         anyhow::bail!("Responses 请求体解压预算不足");
     }
     if desired == held.num_permits() {
-        request._body_budget_permit = Some(held);
+        *permit = Some(held);
         return Ok(());
     }
     let retained = held
         .split(desired)
         .context("缩减 Responses 请求体解压预算失败")?;
     drop(held);
-    request._body_budget_permit = Some(retained);
+    *permit = Some(retained);
     Ok(())
 }
 

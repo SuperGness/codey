@@ -3,6 +3,212 @@ use super::*;
 
 const TERMINAL: &[u8] = b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[]}}\n\n";
 
+#[tokio::test]
+async fn request_size_errors_are_413_and_damaged_compression_is_400() {
+    let router = LocalRouter::start(&CodeyConfig::default()).await.unwrap();
+    let endpoint = router.endpoint();
+    let url = reqwest::Url::parse(&endpoint.base_url).unwrap();
+    let mut socket = TcpStream::connect(("127.0.0.1", url.port().unwrap()))
+        .await
+        .unwrap();
+    socket
+        .write_all(
+            format!(
+                "POST /v1/responses HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                MAX_REQUEST_BYTES + 1
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    socket.read_to_string(&mut response).await.unwrap();
+    assert!(response.starts_with("HTTP/1.1 413 "), "{response}");
+    assert!(response.contains("request_too_large"));
+
+    let oversized = zstd::stream::encode_all(
+        std::io::repeat(b'x').take((MAX_REQUEST_BYTES + 1) as u64),
+        3,
+    )
+    .unwrap();
+    for (body, status, code) in [
+        (oversized, 413, "request_too_large"),
+        (b"invalid zstd".to_vec(), 400, "invalid_request_body"),
+    ] {
+        let response = reqwest::Client::new()
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .header(CONTENT_ENCODING, "zstd")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), status);
+        let error = response.json::<Value>().await.unwrap();
+        assert_eq!(error["error"]["code"], code);
+        if status == 413 {
+            assert!(
+                error["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("64 MiB")
+            );
+        }
+    }
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn large_request_budget_is_released_before_native_response_finishes() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (config, provider, model) =
+        router_config(format!("http://{}/v1", upstream.local_addr().unwrap()));
+    let upstream_task = tokio::spawn(async move {
+        let mut sockets = Vec::new();
+        for _ in 0..2 {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            drop(read_http_request(&mut socket).await.unwrap());
+            socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n").await.unwrap();
+            write_chunked_frame(
+                &mut socket,
+                b"data: {\"type\":\"response.created\"}\n\n",
+                "test",
+            )
+            .await
+            .unwrap();
+            sockets.push(socket);
+        }
+        for mut socket in sockets {
+            write_chunked_frame(&mut socket, TERMINAL, "test")
+                .await
+                .unwrap();
+            socket.write_all(b"0\r\n\r\n").await.unwrap();
+        }
+    });
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+    std::io::Write::write_all(
+        &mut encoder,
+        format!(
+            "{{\"model\":{},\"stream\":true,\"input\":\"",
+            serde_json::to_string(&model_alias(&provider, &model)).unwrap()
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    std::io::copy(
+        &mut std::io::repeat(b'x').take(40 * 1024 * 1024),
+        &mut encoder,
+    )
+    .unwrap();
+    std::io::Write::write_all(&mut encoder, b"\"}").unwrap();
+    let compressed = encoder.finish().unwrap();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .unwrap();
+    let mut responses = Vec::new();
+    for _ in 0..2 {
+        let response = client
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .header(CONTENT_ENCODING, "zstd")
+            .body(compressed.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        responses.push(response);
+    }
+    for response in responses {
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("response.completed")
+        );
+    }
+    upstream_task.await.unwrap();
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn request_body_limit_reports_declared_size() {
+    for size in [
+        32 * 1024 * 1024 + 1,
+        MAX_REQUEST_BYTES,
+        MAX_REQUEST_BYTES + 1,
+    ] {
+        let head = format!("POST /responses HTTP/1.1\r\nContent-Length: {size}\r\n\r\n");
+        let result = read_http_request_head(&mut head.as_bytes()).await;
+        if size <= MAX_REQUEST_BYTES {
+            assert_eq!(result.unwrap().content_length, size);
+        } else {
+            let error = result.unwrap_err();
+            let error = error.downcast_ref::<RequestBodyTooLarge>().unwrap();
+            assert_eq!(error.bytes, size);
+            assert!(!error.decoded);
+        }
+    }
+}
+
+#[test]
+fn zstd_request_budget_grows_and_releases_on_all_results() {
+    // A tiny request succeeds with far less than the maximum request budget.
+    let budget = Arc::new(Semaphore::new(16));
+    let compressed = zstd::stream::encode_all(Cursor::new(b"hello"), 3).unwrap();
+    let (decoded, permit) = decode_zstd_request_body(compressed, &budget, None).unwrap();
+    assert_eq!(decoded, b"hello");
+    assert_eq!(budget.available_permits(), 15);
+    drop((decoded, permit));
+    assert_eq!(budget.available_permits(), 16);
+
+    let compressed = zstd::stream::encode_all(std::io::repeat(b'x').take(1024 * 1024), 3).unwrap();
+    let error = decode_zstd_request_body(compressed, &budget, None).unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<RequestBodyBudgetUnavailable>()
+            .is_some()
+    );
+    assert_eq!(budget.available_permits(), 16);
+    for damaged in [b"invalid zstd".to_vec(), vec![0x28, 0xb5, 0x2f, 0xfd]] {
+        assert!(decode_zstd_request_body(damaged, &budget, None).is_err());
+        assert_eq!(budget.available_permits(), 16);
+    }
+}
+
+#[test]
+fn zstd_request_limit_accepts_64_mib_and_stops_at_one_byte_over() {
+    let budget = Arc::new(Semaphore::new(REQUEST_BODY_BUDGET_PERMITS));
+    for size in [
+        32 * 1024 * 1024 + 1,
+        MAX_REQUEST_BYTES,
+        MAX_REQUEST_BYTES + 1,
+    ] {
+        let compressed =
+            zstd::stream::encode_all(std::io::repeat(b'x').take(size as u64), 3).unwrap();
+        let result = decode_zstd_request_body(compressed, &budget, None);
+        if size <= MAX_REQUEST_BYTES {
+            let (decoded, permit) = result.unwrap();
+            assert_eq!(decoded.len(), size);
+            assert!(decoded.iter().all(|byte| *byte == b'x'));
+            assert_eq!(
+                permit.as_ref().unwrap().num_permits(),
+                request_body_budget_permit_count(decoded.capacity()).unwrap()
+            );
+            drop((decoded, permit));
+        } else {
+            let error = result.unwrap_err();
+            let error = error.downcast_ref::<RequestBodyTooLarge>().unwrap();
+            assert_eq!(error.bytes, MAX_REQUEST_BYTES + 1);
+            assert!(error.decoded);
+        }
+        assert_eq!(budget.available_permits(), REQUEST_BODY_BUDGET_PERMITS);
+    }
+}
+
 async fn upstream_response(
     body: Vec<u8>,
     hold_open: bool,

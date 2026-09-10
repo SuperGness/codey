@@ -10,6 +10,17 @@ impl RouterServer {
                 .await
             {
                 Ok(Ok(request)) => request,
+                Ok(Err(error)) if error.is::<RequestBodyTooLarge>() => {
+                    write_error_response(
+                        &mut stream,
+                        413,
+                        "request_too_large",
+                        error.to_string(),
+                        None,
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 Ok(Err(error)) => {
                     write_error_response(
                         &mut stream,
@@ -785,6 +796,7 @@ impl RouterServer {
                             continue;
                         }
                     };
+                    drop(text);
                     let message_type = body
                         .as_object_mut()
                         .and_then(|body| body.remove("type"))
@@ -931,88 +943,117 @@ impl RouterServer {
         stream: TcpStream,
         request_kind: ResponsesRequestKind,
     ) -> Result<()> {
-        let encoded_body =
-            match decode_responses_request_body(&mut request, &self.request_body_budget).await {
-                Ok(body) => body,
-                Err(error)
-                    if error
-                        .downcast_ref::<RequestBodyBudgetUnavailable>()
-                        .is_some() =>
-                {
-                    let mut downstream = HttpResponsesDownstream::new(stream);
-                    self.record_rejected_request(
-                        &request,
-                        request_kind.label(),
-                        503,
-                        "router_memory_busy",
-                    );
-                    downstream
-                        .write_error(
-                            503,
-                            "router_memory_busy",
-                            "Codey 本地路由请求缓冲区已满，请稍后重试".to_string(),
-                            None,
-                        )
-                        .await?;
-                    return Ok(());
-                }
-                Err(error)
-                    if error
-                        .downcast_ref::<UnsupportedRequestContentEncoding>()
-                        .is_some() =>
-                {
-                    let mut downstream = HttpResponsesDownstream::new(stream);
-                    self.record_rejected_request(
-                        &request,
-                        request_kind.label(),
-                        415,
-                        "unsupported_content_encoding",
-                    );
-                    downstream
-                        .write_error(415, "unsupported_content_encoding", error.to_string(), None)
-                        .await?;
-                    return Ok(());
-                }
-                Err(error) => {
-                    let mut downstream = HttpResponsesDownstream::new(stream);
-                    self.record_rejected_request(
-                        &request,
-                        request_kind.label(),
-                        400,
-                        "invalid_request_body",
-                    );
-                    downstream
-                        .write_error(
-                            400,
-                            "invalid_request_body",
-                            format!("Responses 请求体解码失败：{error:#}"),
-                            None,
-                        )
-                        .await?;
-                    return Ok(());
-                }
-            };
-        let mut downstream = HttpResponsesDownstream::new(stream);
-        let (encoded_body, parsed_body) = match parse_responses_request_body(encoded_body).await {
-            Ok(parsed) => parsed,
-            Err(error) => {
+        let wire_bytes = request.body.len();
+        let encoded_body = match decode_responses_request_body(
+            &mut request,
+            &self.request_body_budget,
+        )
+        .await
+        {
+            Ok(body) => body,
+            Err(error) if error.is::<RequestBodyTooLarge>() => {
+                let too_large = error.downcast_ref::<RequestBodyTooLarge>().unwrap();
+                record_router_failure_nonblocking(
+                    "local_router_request_too_large",
+                    "decode_responses_request_body",
+                    error.to_string(),
+                    json!({"requestId": current_router_request_id(), "wireBytes": wire_bytes,
+                            "decodedBytesAtLeast": too_large.bytes, "limitBytes": MAX_REQUEST_BYTES}),
+                );
                 self.record_rejected_request(
                     &request,
                     request_kind.label(),
-                    500,
-                    "request_parse_failed",
+                    413,
+                    "request_too_large",
+                );
+                HttpResponsesDownstream::new(stream)
+                    .write_error(413, "request_too_large", error.to_string(), None)
+                    .await?;
+                return Ok(());
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<RequestBodyBudgetUnavailable>()
+                    .is_some() =>
+            {
+                let mut downstream = HttpResponsesDownstream::new(stream);
+                self.record_rejected_request(
+                    &request,
+                    request_kind.label(),
+                    503,
+                    "router_memory_busy",
                 );
                 downstream
                     .write_error(
-                        500,
-                        "request_parse_failed",
-                        format!("Responses 请求解析任务失败：{error:#}"),
+                        503,
+                        "router_memory_busy",
+                        "Codey 本地路由请求缓冲区已满，请稍后重试".to_string(),
+                        None,
+                    )
+                    .await?;
+                return Ok(());
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<UnsupportedRequestContentEncoding>()
+                    .is_some() =>
+            {
+                let mut downstream = HttpResponsesDownstream::new(stream);
+                self.record_rejected_request(
+                    &request,
+                    request_kind.label(),
+                    415,
+                    "unsupported_content_encoding",
+                );
+                downstream
+                    .write_error(415, "unsupported_content_encoding", error.to_string(), None)
+                    .await?;
+                return Ok(());
+            }
+            Err(error) => {
+                let mut downstream = HttpResponsesDownstream::new(stream);
+                self.record_rejected_request(
+                    &request,
+                    request_kind.label(),
+                    400,
+                    "invalid_request_body",
+                );
+                downstream
+                    .write_error(
+                        400,
+                        "invalid_request_body",
+                        format!("Responses 请求体解码失败：{error:#}"),
                         None,
                     )
                     .await?;
                 return Ok(());
             }
         };
+        let mut downstream = HttpResponsesDownstream::new(stream);
+        let (encoded_body, parsed_body, body_budget_permit) =
+            match parse_responses_request_body(encoded_body, request._body_budget_permit.take())
+                .await
+            {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    self.record_rejected_request(
+                        &request,
+                        request_kind.label(),
+                        500,
+                        "request_parse_failed",
+                    );
+                    downstream
+                        .write_error(
+                            500,
+                            "request_parse_failed",
+                            format!("Responses 请求解析任务失败：{error:#}"),
+                            None,
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            };
+        request._body_budget_permit = body_budget_permit;
         let body = match parsed_body {
             Ok(body) if body.is_object() => body,
             Ok(_) => {
@@ -1383,13 +1424,19 @@ impl RouterServer {
                 .as_ref()
                 .is_some_and(|body| body.len() >= REQUEST_JSON_OFFLOAD_BYTES);
         let (body, converted) = if offload_conversion {
+            let permit = request._body_budget_permit.take();
+            let encoded = encoded_body.take();
             match tokio::task::spawn_blocking(move || {
                 let converted = bridge.convert_responses_body(&body);
-                (body, converted)
+                (body, converted, encoded, permit)
             })
             .await
             {
-                Ok(converted) => converted,
+                Ok((body, converted, encoded, permit)) => {
+                    encoded_body = encoded;
+                    request._body_budget_permit = permit;
+                    (body, converted)
+                }
                 Err(error) => {
                     downstream
                         .write_error(
@@ -1409,6 +1456,7 @@ impl RouterServer {
         let mut upstream_body = match converted {
             Ok(converted) => {
                 if let Some(converted) = converted {
+                    drop(body);
                     tool_bridge = converted.tool_bridge;
                     converted.body
                 } else {
@@ -1531,7 +1579,14 @@ impl RouterServer {
                     body
                 }
                 Some(body) => {
-                    rewrite_native_responses_encoded_body_offloaded(body, &upstream_body).await?
+                    let (body, permit) = rewrite_native_responses_encoded_body_offloaded(
+                        body,
+                        &upstream_body,
+                        request._body_budget_permit.take(),
+                    )
+                    .await?;
+                    request._body_budget_permit = permit;
+                    body
                 }
                 None => serde_json::to_vec(&upstream_body)
                     .context("序列化 Responses WebSocket 上游请求失败")?,
@@ -1543,6 +1598,7 @@ impl RouterServer {
             drop(encoded_body.take());
             request_builder.json(&upstream_body)
         };
+        drop(upstream_body);
         let response_header_timeout = if upstream_stream_requested {
             UPSTREAM_RESPONSE_HEADER_TIMEOUT
         } else {
@@ -1560,6 +1616,15 @@ impl RouterServer {
             tokio::time::timeout(response_header_timeout, request_builder.send()),
         )
         .await?;
+        // The send future no longer owns the serialized request. Native HTTP
+        // can release its budget before streaming the response; adapted routes
+        // retain it only when tool-name mappings still reference request data.
+        if tool_bridge.upstream_to_response.is_empty()
+            && tool_bridge.response_to_upstream.is_empty()
+        {
+            drop(std::mem::take(&mut request.body));
+            drop(request._body_budget_permit.take());
+        }
         let response = match response_result {
             Ok(Ok(response)) => response,
             Ok(Err(error)) if compacting && error.is_timeout() => {
