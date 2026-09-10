@@ -38,14 +38,16 @@ memchr = "2"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { version = "0.12", features = ["http2", "json", "socks", "stream", "rustls-tls", "rustls-tls-native-roots", "system-proxy"], default-features = false }
 rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 sha2.workspace = true
 tokio = { version = "1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-tungstenite = "0.26"
+tokio-tungstenite.workspace = true
 toml_edit = "0.22"
 uuid = { version = "1", features = ["v4"] }
+webpki-roots = "0.26"
 zstd = "0.13"
 
 [dev-dependencies]

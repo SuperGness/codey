@@ -769,7 +769,12 @@ pub(crate) async fn connect_upstream_responses_websocket(
         UPSTREAM_WEBSOCKET_CONNECT_TIMEOUT,
         // Responses events are small and latency-sensitive. Disable Nagle on
         // the underlying upstream TCP socket before the TLS/WS handshake.
-        connect_async_with_config(request, Some(config), true),
+        tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            Some(config),
+            true,
+            Some(super::websocket_tls::connector()),
+        ),
     )
     .await
     .context("连接 Responses WebSocket 上游超时")?

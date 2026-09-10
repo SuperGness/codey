@@ -21,6 +21,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio::task::JoinSet;
+#[cfg(test)]
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::handshake::server::{
     ErrorResponse as WebSocketErrorResponse, Request as WebSocketRequest,
@@ -33,9 +35,7 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::{
     Error as WebSocketError, Message as WebSocketMessage, Utf8Bytes as WebSocketText,
 };
-use tokio_tungstenite::{
-    MaybeTlsStream, WebSocketStream, accept_hdr_async_with_config, connect_async_with_config,
-};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, accept_hdr_async_with_config};
 use uuid::Uuid;
 
 use crate::codex_config::CHATGPT_CODEX_BASE_URL;
@@ -155,6 +155,7 @@ mod upstream;
 mod upstream_response;
 mod websocket;
 mod websocket_context;
+mod websocket_tls;
 
 pub(crate) use adapt::*;
 pub(crate) use anthropic_request::*;
