@@ -858,10 +858,22 @@ fn extract_responses_optimized_text(response: &Value) -> Option<String> {
     }
     let mut text = String::new();
     for item in response.get("output").and_then(Value::as_array)? {
+        match item.get("type").and_then(Value::as_str) {
+            Some("message") => {}
+            // Some OpenAI-compatible providers omit the item type while still
+            // marking visible content as `output_text`. Accept only that
+            // narrow legacy shape; an explicit non-message type is never a
+            // final user-visible response.
+            None if item.get("type").is_none() => {}
+            _ => continue,
+        }
         let Some(content) = item.get("content").and_then(Value::as_array) else {
             continue;
         };
         for part in content {
+            if part.get("type").and_then(Value::as_str) != Some("output_text") {
+                continue;
+            }
             if let Some(segment) = part.get("text").and_then(Value::as_str) {
                 text.push_str(segment);
             }
@@ -882,6 +894,12 @@ fn extract_openai_chat_optimized_text(response: &Value) -> Option<String> {
     }
     let mut text = String::new();
     for item in content.as_array()? {
+        if !matches!(
+            item.get("type").and_then(Value::as_str),
+            Some("text" | "output_text")
+        ) {
+            continue;
+        }
         if let Some(segment) = item
             .get("text")
             .or_else(|| item.get("content"))
@@ -1584,6 +1602,58 @@ mod tests {
     }
 
     #[test]
+    fn responses_fallback_excludes_reasoning_and_summary_parts() {
+        assert_eq!(
+            extract_responses_optimized_text(&json!({
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "content": [
+                            {"type": "reasoning_text", "text": "先分析用户意图"},
+                            {"type": "summary_text", "text": "分析摘要"}
+                        ]
+                    },
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "reasoning_text", "text": "仍不能显示"},
+                            {"type": "output_text", "text": "只保留最终"},
+                            {"type": "output_text", "text": "提示词"}
+                        ]
+                    },
+                    {
+                        "type": "analysis",
+                        "content": [{"type": "output_text", "text": "不能跨 item 接受"}]
+                    }
+                ]
+            }))
+            .as_deref(),
+            Some("只保留最终提示词")
+        );
+    }
+
+    #[test]
+    fn chat_content_array_excludes_reasoning_parts() {
+        assert_eq!(
+            extract_openai_chat_optimized_text(&json!({
+                "choices": [{
+                    "message": {
+                        "content": [
+                            {"type": "reasoning", "text": "不应写回输入框"},
+                            {"type": "analysis", "content": "分析过程"},
+                            {"type": "text", "text": "最终"},
+                            {"type": "output_text", "text": "正文"},
+                            {"text": "无类型内容也不接受"}
+                        ]
+                    }
+                }]
+            }))
+            .as_deref(),
+            Some("最终正文")
+        );
+    }
+
+    #[test]
     fn extracts_responses_stream_text_and_errors() {
         let sse = concat!(
             "event: response.output_text.delta\n",
@@ -1604,6 +1674,15 @@ mod tests {
         assert_eq!(
             extract_responses_stream_optimized_text(completed.as_bytes()).unwrap(),
             "最终结果"
+        );
+
+        let completed_without_delta = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"reasoning\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"内部推理\"}]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"SSE 最终正文\"}]}]}}\n\n"
+        );
+        assert_eq!(
+            extract_responses_stream_optimized_text(completed_without_delta.as_bytes()).unwrap(),
+            "SSE 最终正文"
         );
 
         let error = concat!(
