@@ -118,6 +118,51 @@ fn third_party_provider_installs_the_codey_model_catalog_when_available() {
 }
 
 #[tokio::test]
+async fn custom_context_cold_start_can_retry_after_restoring_defaults() {
+    let home = tempfile::tempdir().unwrap();
+    let mut official = ProviderProfile::new("Official");
+    official.source_provider_id = Some("openai".into());
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+    official.normalize();
+    let mut config = CodeyConfig {
+        local_router_enabled: true,
+        active_profile_id: official.id.clone(),
+        profiles: vec![official],
+        official_account_available_this_launch: true,
+        selected_models_by_provider: std::collections::BTreeMap::from([(
+            "openai".into(),
+            vec!["gpt-5.6-sol".into()],
+        )]),
+        ..CodeyConfig::default()
+    }
+    .normalize();
+    config.model_context_by_provider.insert(
+        "openai".into(),
+        std::collections::BTreeMap::from([(
+            "gpt-5.6-sol".into(),
+            crate::config::ModelContextConfig {
+                context_window_tokens: 256_000,
+                auto_compact_token_limit: None,
+                reserve_output_tokens: None,
+            },
+        )]),
+    );
+    let error = prepare_startup_model_catalog(&config, &config.profiles[0], home.path())
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        model_catalog::CUSTOM_CONTEXT_CATALOG_UNAVAILABLE
+    );
+    config.model_context_by_provider.clear();
+    let startup = prepare_startup_model_catalog(&config, &config.profiles[0], home.path())
+        .await
+        .unwrap();
+    assert!(!startup.use_official_catalog);
+}
+
+#[tokio::test]
 async fn disabled_official_route_does_not_install_an_empty_model_catalog() {
     let home = tempfile::tempdir().unwrap();
     let mut official = ProviderProfile::new("Official");

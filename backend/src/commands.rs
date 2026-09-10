@@ -54,6 +54,7 @@ use prompt_optimization::{
     fetch_prompt_optimization_models_command, optimize_prompt_command,
     test_prompt_optimization_command,
 };
+pub(crate) use runtime::cleanup_failed_runtime_start;
 use runtime::runtime_status_with_options;
 #[cfg(test)]
 use runtime::{begin_shutdown, launch_codey_inner};
@@ -550,6 +551,15 @@ where
     })
     .await
     .map_err(|error| format!("{operation}任务异常退出：{error}"))
+}
+
+pub(crate) async fn restore_default_context_budgets(state: &AppState) -> Result<(), String> {
+    let _guard = state.config_write_lock.lock().await;
+    let mut config = state.config.read().await.clone();
+    config.model_context_by_provider.clear();
+    save_config_to_store(state, &config).await?;
+    *state.config.write().await = config;
+    Ok(())
 }
 
 async fn save_config_to_store(state: &AppState, config: &CodeyConfig) -> Result<(), String> {

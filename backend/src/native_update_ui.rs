@@ -71,6 +71,17 @@ impl NativeUpdateUi {
 enum DialogKind {
     Confirm,
     Failure,
+    RestoreContext,
+}
+
+pub(crate) async fn confirm_context_recovery() -> Result<bool, String> {
+    show_dialog(
+        "Codey 上下文设置暂时无法使用".to_string(),
+        "本机 Codex 模型缓存不完整，暂时无法应用自定义上下文预算。\n\n可以恢复所有模型的默认预算并重新启动，其他设置不受影响。原配置会自动备份。若要继续使用自定义预算，请先直接打开官方 Codex 刷新模型缓存，再返回 Codey 设置。".to_string(),
+        DialogKind::RestoreContext,
+    )
+    .await
+    .map(|result| result == DialogResult::Primary)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +102,10 @@ async fn show_dialog(
                 rfd::MessageButtons::OkCancelCustom("更新并重启".to_string(), "稍后".to_string())
             }
             DialogKind::Failure => rfd::MessageButtons::OkCustom("进入 Codex".to_string()),
+            DialogKind::RestoreContext => rfd::MessageButtons::OkCancelCustom(
+                "恢复默认预算并重试".to_string(),
+                "退出".to_string(),
+            ),
         };
         let result = rfd::MessageDialog::new()
             .set_title(title)
@@ -98,6 +113,7 @@ async fn show_dialog(
             .set_level(match kind {
                 DialogKind::Confirm => rfd::MessageLevel::Info,
                 DialogKind::Failure => rfd::MessageLevel::Error,
+                DialogKind::RestoreContext => rfd::MessageLevel::Warning,
             })
             .set_buttons(buttons)
             .show();
@@ -109,6 +125,12 @@ async fn show_dialog(
             }
             (DialogKind::Confirm, _) => DialogResult::Secondary,
             (DialogKind::Failure, _) => DialogResult::Primary,
+            (DialogKind::RestoreContext, rfd::MessageDialogResult::Custom(label))
+                if label == "恢复默认预算并重试" =>
+            {
+                DialogResult::Primary
+            }
+            (DialogKind::RestoreContext, _) => DialogResult::Secondary,
         }
     })
     .await
@@ -122,7 +144,7 @@ async fn show_dialog(
     kind: DialogKind,
 ) -> Result<DialogResult, String> {
     Ok(match kind {
-        DialogKind::Confirm => DialogResult::Secondary,
+        DialogKind::Confirm | DialogKind::RestoreContext => DialogResult::Secondary,
         DialogKind::Failure => DialogResult::Primary,
     })
 }

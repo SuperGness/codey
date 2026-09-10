@@ -649,7 +649,7 @@ async fn prepare_startup_model_catalog(
     // Official-only launches inherit Codex metadata unless the user explicitly
     // configured a budget, in which case the generated catalog must be used.
     if custom_context && !catalog_available_for_runtime {
-        anyhow::bail!("无法生成带有自定义上下文预算的模型目录，请恢复默认预算或重新同步模型");
+        anyhow::bail!(model_catalog::CUSTOM_CONTEXT_CATALOG_UNAVAILABLE);
     }
     let use_official_catalog = should_install_codey_model_catalog(
         use_builtin_official_catalog,

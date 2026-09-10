@@ -190,30 +190,55 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
     if startup_update_outcome == startup_update::StartupUpdateOutcome::InstallScheduled {
         return Ok(());
     }
-    let shutdown_reason = match commands::launch_codey_runtime(&state).await {
-        Ok(_) => tokio::select! {
-            reason = state.wait_for_shutdown() => match reason {
-                AppShutdownReason::CodexExited => ShutdownReason::CodexExited,
-                AppShutdownReason::InstallUpdate => ShutdownReason::InstallUpdate,
-            },
-            _ = &mut shutdown => ShutdownReason::Signal,
-        },
-        Err(error) => {
-            eprintln!("Codey 自动启动 Codex 失败：{error:#}");
-            let cleanup = stop_runtime_with_retry(&state).await;
-            if let Err(cleanup_error) = &cleanup {
-                error_log::record_failure(
-                    "restore_failed",
-                    "restore_runtime_after_startup_failure",
-                    cleanup_error.clone(),
-                    serde_json::json!({}),
-                );
+    let shutdown_reason = loop {
+        match commands::launch_codey_runtime(&state).await {
+            Ok(_) => {
+                break tokio::select! {
+                    reason = state.wait_for_shutdown() => match reason {
+                        AppShutdownReason::CodexExited => ShutdownReason::CodexExited,
+                        AppShutdownReason::InstallUpdate => ShutdownReason::InstallUpdate,
+                    },
+                    _ = &mut shutdown => ShutdownReason::Signal,
+                };
             }
-            let error =
-                initial_startup_failure_error(&error, cleanup.as_ref().err().map(String::as_str));
-            #[cfg(windows)]
-            show_initial_startup_failure(&error).await;
-            return Err(anyhow::Error::msg(error));
+            Err(error) => {
+                eprintln!("Codey 自动启动 Codex 失败：{error:#}");
+                let context_recovery = error == model_catalog::CUSTOM_CONTEXT_CATALOG_UNAVAILABLE;
+                let cleanup = if context_recovery {
+                    commands::cleanup_failed_runtime_start(&state)
+                        .await
+                        .map(|_| ())
+                } else {
+                    stop_runtime_with_retry(&state).await
+                };
+                if let Err(cleanup_error) = &cleanup {
+                    error_log::record_failure(
+                        "restore_failed",
+                        "restore_runtime_after_startup_failure",
+                        cleanup_error.clone(),
+                        serde_json::json!({}),
+                    );
+                }
+                if cleanup.is_ok() && context_recovery {
+                    if native_update_ui::confirm_context_recovery()
+                        .await
+                        .map_err(anyhow::Error::msg)?
+                    {
+                        commands::restore_default_context_budgets(&state)
+                            .await
+                            .map_err(anyhow::Error::msg)?;
+                        continue;
+                    }
+                    return Err(anyhow::Error::msg(error));
+                }
+                let error = initial_startup_failure_error(
+                    &error,
+                    cleanup.as_ref().err().map(String::as_str),
+                );
+                #[cfg(windows)]
+                show_initial_startup_failure(&error).await;
+                return Err(anyhow::Error::msg(error));
+            }
         }
     };
 

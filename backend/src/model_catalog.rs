@@ -47,6 +47,9 @@ const OFFICIAL_MODELS: [(&str, &str); 8] = [
 #[derive(Debug)]
 struct RuntimeModelCacheUnavailable;
 
+pub(crate) const CUSTOM_CONTEXT_CATALOG_UNAVAILABLE: &str =
+    "无法生成带有自定义上下文预算的模型目录，请恢复默认预算或重新同步模型";
+
 impl fmt::Display for RuntimeModelCacheUnavailable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(

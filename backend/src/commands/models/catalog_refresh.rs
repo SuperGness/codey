@@ -14,18 +14,30 @@ pub(crate) struct ModelCatalogRefresh {
 pub(crate) fn refresh_model_catalog_or_fallback(
     config: &CodeyConfig,
 ) -> Result<ModelCatalogRefresh, String> {
-    let home = codex_home();
+    refresh_model_catalog_or_fallback_at(config, codex_home())
+}
+
+fn refresh_model_catalog_or_fallback_at(
+    config: &CodeyConfig,
+    home: &std::path::Path,
+) -> Result<ModelCatalogRefresh, String> {
     let snapshot = model_catalog::snapshot(home).map_err(|error| error.to_string())?;
     let native_web_search_models = config.runtime_native_web_search_model_aliases();
     let context_1m_models = config.runtime_1m_context_model_aliases();
     let result = model_catalog_fallback(
-        try_refresh_model_catalog(config),
+        try_refresh_model_catalog(config, home),
         home,
         &native_web_search_models,
         &context_1m_models,
     );
     match result {
         Ok(fallback) => {
+            if !config.runtime_model_contexts().is_empty() && !model_catalog::is_available(home) {
+                return Err(rollback_model_catalog_snapshot(
+                    snapshot,
+                    model_catalog::CUSTOM_CONTEXT_CATALOG_UNAVAILABLE.to_string(),
+                ));
+            }
             if model_catalog::is_available(home)
                 && let Err(error) =
                     model_catalog::apply_catalog_contexts(home, &config.runtime_model_contexts())
@@ -168,14 +180,14 @@ pub(crate) fn model_catalog_fallback(
     }
 }
 
-pub(crate) fn try_refresh_model_catalog(config: &CodeyConfig) -> anyhow::Result<()> {
+fn try_refresh_model_catalog(config: &CodeyConfig, home: &std::path::Path) -> anyhow::Result<()> {
     let use_builtin_official_catalog = config.uses_builtin_official_model_catalog();
     let (upstream_models, selected_models) = config.runtime_catalog_models();
     let websocket_models = config.runtime_websocket_model_aliases();
     let native_web_search_models = config.runtime_native_web_search_model_aliases();
     let context_1m_models = config.runtime_1m_context_model_aliases();
     model_catalog::refresh_for_provider_with_capabilities(
-        codex_home(),
+        home,
         config.official_account_available_this_launch && use_builtin_official_catalog,
         (!use_builtin_official_catalog)
             .then_some(upstream_models)
@@ -186,4 +198,57 @@ pub(crate) fn try_refresh_model_catalog(config: &CodeyConfig) -> anyhow::Result<
         &context_1m_models,
     )
     .map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_context_requires_a_runtime_catalog_before_save() {
+        let home = tempfile::tempdir().unwrap();
+        let mut official = crate::config::ProviderProfile::new("Official");
+        official.source_provider_id = Some("openai".into());
+        official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+        official.normalize();
+        let mut config = CodeyConfig {
+            local_router_enabled: true,
+            active_profile_id: official.id.clone(),
+            profiles: vec![official],
+            official_account_available_this_launch: true,
+            selected_models_by_provider: BTreeMap::from([(
+                "openai".into(),
+                vec!["gpt-5.6-sol".into()],
+            )]),
+            ..CodeyConfig::default()
+        }
+        .normalize();
+        let policy = crate::config::ModelContextConfig {
+            context_window_tokens: 256_000,
+            auto_compact_token_limit: None,
+            reserve_output_tokens: None,
+        };
+        config.model_context_by_provider.insert(
+            "openai".into(),
+            BTreeMap::from([("gpt-5.6-sol".into(), policy)]),
+        );
+        assert!(!config.runtime_model_contexts().is_empty());
+        let result = refresh_model_catalog_or_fallback_at(&config, home.path());
+        assert_eq!(
+            result.err().unwrap(),
+            model_catalog::CUSTOM_CONTEXT_CATALOG_UNAVAILABLE
+        );
+        assert!(!home.path().join(model_catalog::relative_path()).exists());
+
+        std::fs::write(home.path().join("models_cache.json"), serde_json::to_vec(&json!({
+            "models": [{"slug": "gpt-5.6-sol", "description": "Test model", "base_instructions": "Test instructions"}]
+        })).unwrap()).unwrap();
+        assert!(refresh_model_catalog_or_fallback_at(&config, home.path()).is_ok());
+        let catalog: Value = serde_json::from_slice(
+            &std::fs::read(home.path().join(model_catalog::relative_path())).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(catalog["models"][0]["context_window"], 256_000);
+        assert_eq!(catalog["models"][0]["auto_compact_token_limit"], 230_400);
+    }
 }

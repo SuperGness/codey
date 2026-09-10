@@ -379,7 +379,9 @@ pub async fn launch_codey_runtime(state: &Arc<AppState>) -> Result<Value, String
             error.clone(),
             error_log::FailureMetadata {
                 stage: Some("startup.runtime".to_string()),
-                recoverable: Some(false),
+                recoverable: Some(
+                    error == crate::model_catalog::CUSTOM_CONTEXT_CATALOG_UNAVAILABLE,
+                ),
             },
             runtime_start_failure_context(state, false, error).await,
         );
@@ -530,6 +532,12 @@ async fn stop_codey_runtime_locked(state: &Arc<AppState>) -> Result<Value, Strin
 
 pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
     begin_shutdown(state).await;
+    let _operation = state.runtime_operation.lock().await;
+    stop_codey_runtime_locked(state).await
+}
+
+pub(crate) async fn cleanup_failed_runtime_start(state: &Arc<AppState>) -> Result<Value, String> {
+    // Recovery retries within this process, so do not mark the app as shutting down.
     let _operation = state.runtime_operation.lock().await;
     stop_codey_runtime_locked(state).await
 }

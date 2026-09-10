@@ -2,6 +2,56 @@ use super::*;
 use crate::config::ProviderProfile;
 
 #[tokio::test]
+async fn context_recovery_preserves_other_settings_and_backs_up_the_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = CodeyConfig::default();
+    config.model_context_by_provider.insert(
+        "route".into(),
+        BTreeMap::from([(
+            "gpt-5.6-sol".into(),
+            crate::config::ModelContextConfig {
+                context_window_tokens: 256_000,
+                auto_compact_token_limit: None,
+                reserve_output_tokens: None,
+            },
+        )]),
+    );
+    let state = AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(config.clone()),
+        ..AppState::default()
+    };
+    state.store.save(&config).unwrap();
+    let original = std::fs::read(state.store.path()).unwrap();
+    restore_default_context_budgets(&state).await.unwrap();
+    config.model_context_by_provider.clear();
+    assert_eq!(*state.config.read().await, config);
+    let saved: CodeyConfig =
+        serde_json::from_slice(&std::fs::read(state.store.path()).unwrap()).unwrap();
+    assert_eq!(saved, config);
+    assert_eq!(
+        std::fs::read(directory.path().join("config.json.bak.1")).unwrap(),
+        original
+    );
+
+    // A failed write must not report recovery or change the in-memory settings.
+    let failed = AppState {
+        store: ConfigStore::new(directory.path()),
+        config: RwLock::new(serde_json::from_slice(&original).unwrap()),
+        ..AppState::default()
+    };
+    assert!(restore_default_context_budgets(&failed).await.is_err());
+    assert!(
+        !failed
+            .config
+            .read()
+            .await
+            .model_context_by_provider
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn model_save_routes_accept_missing_or_null_ids_without_weakening_required_routes() {
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState {
