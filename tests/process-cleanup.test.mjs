@@ -17,10 +17,11 @@ test("every shutdown path reaps Codex and Codey process trees", async () => {
     ]);
   const launcherModules = `${launcher}\n${launcherProcess}\n${launcherPlatform}`;
 
-  const finalShutdown = library.slice(
-    library.indexOf("let shutdown_reason = match"),
-    library.indexOf("cleanup.map_err"),
-  );
+  const shutdownStart = library.indexOf("let cleanup = stop_runtime_with_retry(&state).await;");
+  const shutdownEnd = library.indexOf("cleanup.map_err", shutdownStart);
+  assert.notEqual(shutdownStart, -1);
+  assert.ok(shutdownEnd > shutdownStart);
+  const finalShutdown = library.slice(shutdownStart, shutdownEnd);
   assert.match(finalShutdown, /stop_runtime_with_retry\(&state\)\.await/);
   assert.match(finalShutdown, /terminate_other_codey_processes\(\)\.await/);
   assert.doesNotMatch(

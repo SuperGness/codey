@@ -900,7 +900,10 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 if !official_account_available_for_usage(&*state.config.read().await) {
                     Err("当前没有可用的官方账号".to_string())
                 } else {
-                    state.account_usage_cache.lock().await
+                    state
+                        .account_usage_cache
+                        .lock()
+                        .await
                         .store_displayed_snapshot(codex_home(), generation, snapshot)
                         .map(|()| json!({"status": "ok"}))
                         .map_err(|error| error.to_string())

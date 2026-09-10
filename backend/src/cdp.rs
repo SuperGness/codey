@@ -1534,8 +1534,8 @@ assert.equal(nextPage.window.attempts, 1);
         assert!(!snapshot_script.contains("user-script-1\": () =>"));
         let overlay_load_script = prepared_settings_overlay_load_script();
         assert!(overlay_load_script.contains("codey-settings-overlay-host"));
-        assert!(overlay_load_script.contains("data-token-hash"));
-        assert!(overlay_load_script.contains("data-css-hash"));
+        assert!(overlay_load_script.contains("codey-overlay-root"));
+        assert!(overlay_load_script.contains("codey-overlay-modal-container"));
         assert!(overlay_load_script.contains("@layer"));
         assert!(overlay_load_script.contains("delete window.__codeySettingsOverlay"));
         assert!(

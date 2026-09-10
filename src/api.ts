@@ -12,6 +12,7 @@ export const CODEY_API_COMMANDS = [
   "query_route_request_logs",
   "query_route_request_log_stats",
   "query_official_account_usage",
+  "store_official_account_usage",
   "clear_route_request_logs",
   "restart_codey",
   "clear_diagnostic_storage",

@@ -141,17 +141,26 @@ impl AccountUsageCache {
             bail!("官方登录状态已变化，请重新读取额度");
         }
         let now = unix_timestamp();
-        if snapshot.fetched_at == 0 || snapshot.fetched_at > now + 1
+        if snapshot.fetched_at == 0
+            || snapshot.fetched_at > now + 1
             || now.saturating_sub(snapshot.fetched_at) > 120
             || snapshot.primary.is_none() && snapshot.secondary.is_none()
-            || [&snapshot.primary, &snapshot.secondary].into_iter().flatten().any(|window| {
-                !window.used_percent.is_finite() || !(0.0..=100.0).contains(&window.used_percent)
-                    || window.window_minutes == 0
-            })
+            || [&snapshot.primary, &snapshot.secondary]
+                .into_iter()
+                .flatten()
+                .any(|window| {
+                    !window.used_percent.is_finite()
+                        || !(0.0..=100.0).contains(&window.used_percent)
+                        || window.window_minutes == 0
+                })
         {
             bail!("同步的官方额度数据无效或已过期");
         }
-        if self.snapshot.as_ref().is_none_or(|current| current.fetched_at <= snapshot.fetched_at) {
+        if self
+            .snapshot
+            .as_ref()
+            .is_none_or(|current| current.fetched_at <= snapshot.fetched_at)
+        {
             self.record_success(snapshot, Instant::now());
         }
         Ok(())
@@ -160,11 +169,19 @@ impl AccountUsageCache {
     fn valid_weekly_snapshot(&self) -> Option<AccountUsageSnapshot> {
         let snapshot = self.snapshot.as_ref()?;
         let now = unix_timestamp();
-        [&snapshot.primary, &snapshot.secondary].into_iter().flatten().find(|window| {
-            window.window_minutes == 10080 && (0.0..=100.0).contains(&window.used_percent)
-                && window.resets_at.is_some_and(|end| end > now && snapshot.fetched_at < end
-                    && snapshot.fetched_at > end.saturating_sub(604800) && snapshot.fetched_at <= now + 1)
-        })?;
+        [&snapshot.primary, &snapshot.secondary]
+            .into_iter()
+            .flatten()
+            .find(|window| {
+                window.window_minutes == 10080
+                    && (0.0..=100.0).contains(&window.used_percent)
+                    && window.resets_at.is_some_and(|end| {
+                        end > now
+                            && snapshot.fetched_at < end
+                            && snapshot.fetched_at > end.saturating_sub(604800)
+                            && snapshot.fetched_at <= now + 1
+                    })
+            })?;
         Some(snapshot.clone())
     }
 
@@ -278,10 +295,13 @@ pub(crate) async fn query_snapshot(
         }
         Err(error) => match cache.valid_weekly_snapshot() {
             Some(snapshot) => {
-                let mut value = serde_json::to_value(snapshot).expect("serializable usage snapshot");
+                let mut value =
+                    serde_json::to_value(snapshot).expect("serializable usage snapshot");
                 value["status"] = Value::String("ok".into());
                 value["stale"] = Value::Bool(true);
-                value["message"] = Value::String("额度刷新失败，正在使用本周上次成功获取的数据，统计截止时间保持不变。".into());
+                value["message"] = Value::String(
+                    "额度刷新失败，正在使用本周上次成功获取的数据，统计截止时间保持不变。".into(),
+                );
                 value
             }
             None => serde_json::json!({"status": "error", "message": error.to_string()}),
@@ -647,28 +667,48 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.fetched_at = unix_timestamp();
         snapshot.primary = Some(AccountUsageWindow {
-            used_percent: 40.0, window_minutes: 10080,
+            used_percent: 40.0,
+            window_minutes: 10080,
             resets_at: Some(snapshot.fetched_at + 86400),
         });
         snapshot.secondary = None;
-        shared.lock().await.store_displayed_snapshot(home, 1, snapshot.clone()).unwrap();
+        shared
+            .lock()
+            .await
+            .store_displayed_snapshot(home, 1, snapshot.clone())
+            .unwrap();
         let mut profile = crate::config::ProviderProfile::new("Official");
         profile.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
         profile.normalize();
         let config = crate::config::CodeyConfig {
-            profiles: vec![profile], official_account_available_this_launch: true,
+            profiles: vec![profile],
+            official_account_available_this_launch: true,
             ..Default::default()
         };
-        let router = crate::local_router::LocalRouter::start_with_usage(&config, shared.clone()).await.unwrap();
+        let router = crate::local_router::LocalRouter::start_with_usage(&config, shared.clone())
+            .await
+            .unwrap();
         let endpoint = router.endpoint();
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         for force in [false, true] {
             // Force-refresh must fail locally; this test never contacts the official service.
-            shared.lock().await.record_failure("offline".into(), Instant::now());
-            let value: Value = client.post(format!("{}/codey/api/query_official_account_usage", endpoint.base_url.trim_end_matches("/v1")))
+            shared
+                .lock()
+                .await
+                .record_failure("offline".into(), Instant::now());
+            let value: Value = client
+                .post(format!(
+                    "{}/codey/api/query_official_account_usage",
+                    endpoint.base_url.trim_end_matches("/v1")
+                ))
                 .header("x-codey-router-token", &endpoint.token)
-                .json(&serde_json::json!({"forceRefresh": force})).send().await.unwrap()
-                .json().await.unwrap();
+                .json(&serde_json::json!({"forceRefresh": force}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
             assert_eq!(value["status"], "ok", "{value}");
             assert_eq!(value["fetchedAt"], snapshot.fetched_at);
             assert_eq!(value["primary"]["usedPercent"], 40.0);
@@ -684,17 +724,28 @@ mod tests {
         let mut snapshot = sample_snapshot();
         snapshot.fetched_at = unix_timestamp();
         snapshot.primary = Some(AccountUsageWindow {
-            used_percent: 40.0, window_minutes: 10080,
+            used_percent: 40.0,
+            window_minutes: 10080,
             resets_at: Some(snapshot.fetched_at + 86400),
         });
         snapshot.secondary = None;
-        cache.store_displayed_snapshot(directory.path(), 1, snapshot.clone()).unwrap();
+        cache
+            .store_displayed_snapshot(directory.path(), 1, snapshot.clone())
+            .unwrap();
         assert!(cache.valid_weekly_snapshot().is_some());
         let mut invalid = snapshot.clone();
         invalid.primary.as_mut().unwrap().used_percent = 101.0;
-        assert!(cache.store_displayed_snapshot(directory.path(), 1, invalid).is_err());
+        assert!(
+            cache
+                .store_displayed_snapshot(directory.path(), 1, invalid)
+                .is_err()
+        );
         std::fs::write(directory.path().join("auth.json"), "changed account").unwrap();
-        assert!(cache.store_displayed_snapshot(directory.path(), 1, snapshot.clone()).is_err());
+        assert!(
+            cache
+                .store_displayed_snapshot(directory.path(), 1, snapshot.clone())
+                .is_err()
+        );
         assert!(cache.valid_weekly_snapshot().is_none());
         snapshot.primary.as_mut().unwrap().resets_at = Some(unix_timestamp());
         cache.record_success(snapshot, Instant::now());

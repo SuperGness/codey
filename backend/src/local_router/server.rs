@@ -113,7 +113,12 @@ impl LocalRouter {
         config: &CodeyConfig,
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCache>>,
     ) -> Result<Self> {
-        Self::start_with_logger_and_usage(config, Arc::new(RouteRequestLogController::new()), account_usage_cache).await
+        Self::start_with_logger_and_usage(
+            config,
+            Arc::new(RouteRequestLogController::new()),
+            account_usage_cache,
+        )
+        .await
     }
 
     async fn start_with_logger_and_usage(
@@ -433,7 +438,8 @@ pub(crate) struct RouterServer {
     pub(crate) native_history_cache: Arc<Mutex<NativeHistoryCache>>,
     pub(crate) client: reqwest::Client,
     pub(crate) official_auth_path: PathBuf,
-    pub(crate) account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCache>>,
+    pub(crate) account_usage_cache:
+        Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCache>>,
     pub(crate) official_auth_cache: Arc<Mutex<crate::account_usage::OfficialAuthCache>>,
     pub(crate) request_log: Arc<RouteRequestLogController>,
 }

@@ -645,10 +645,6 @@ export function App({
           result.config.profiles.find((profile) => profile.id === savedRoute.id)
             ?.supportsAutoReview === true,
         );
-        setNotice({
-          tone: "success",
-          text: `已同步「${savedRoute.name}」的 ${result.models.length} 个模型，请勾选要启用的模型`,
-        });
       } catch (error) {
         const warning = `自动同步失败：${errorText(error)}。仍可手动录入当前线路支持的模型 ID。`;
         openModelPicker(
@@ -1316,10 +1312,7 @@ export function App({
         </div>
       </div>
 
-      <NoticeToast
-        autoDismissEnabled
-        controller={noticeController}
-      />
+      <NoticeToast controller={noticeController} />
 
       <ModelPickerDialog
         open={modelPickerVisible}

@@ -24,19 +24,14 @@ test("Windows source contract: Codey uses the GUI subsystem", async () => {
 
 test("Windows source contract: fatal startup failures remain visible", async () => {
   const library = await readSource("backend/src/lib.rs");
-  const failureStart = library.indexOf("let shutdown_reason = match");
-  const fatalCleanup = library.indexOf(
+  const failureStart = library.indexOf("let shutdown_reason =");
+  const shutdownCleanup = library.indexOf(
     "let cleanup = stop_runtime_with_retry(&state).await;",
     failureStart,
   );
-  const shutdownCleanup = library.indexOf(
-    "let cleanup = stop_runtime_with_retry(&state).await;",
-    fatalCleanup + 1,
-  );
 
   assert.notEqual(failureStart, -1);
-  assert.notEqual(fatalCleanup, -1);
-  assert.notEqual(shutdownCleanup, -1);
+  assert.ok(shutdownCleanup > failureStart);
 
   const failureBranch = library.slice(failureStart, shutdownCleanup);
   assert.match(failureBranch, /commands::launch_codey_runtime\(&state\)\.await/);

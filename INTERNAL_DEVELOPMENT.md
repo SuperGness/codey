@@ -83,6 +83,8 @@ pnpm run dev 会先构建完整 Cargo 工作区，再启动 Codey，确保主程
 
 JavaScript 源码合同测试共用 `tests/helpers/`：`read-source.mjs` 读取仓库文件并统一换行；`startup-patch.mjs` 提供 `loadStartupPatchTemplate` 渲染 `codex_startup_patch.js` 占位符，以及 `loadSpawnCodexSections` 按 `#[cfg]` 切分 `spawn_codex` 的各平台段落；`flush.mjs` 提供微任务与定时器刷新；`fake-element.mjs` 的 `FakeElementCore` 已内置 `append`、`focus`、`insertAdjacentElement`，测试文件只覆盖各自需要的特殊语义。新测试不要再复制这些辅助函数。`assert.doesNotMatch` 只用于锁定近期刻意删除的实现；被删代码从未存在或已超出兼容窗口时应连同守卫一起删除。
 
+新增 bridge 命令时同步维护 `src/api.ts` 与 `invoke_api` 白名单，包括 `store_official_account_usage`。启动与退出的源码测试分别检查启动失败分支和最终清理段落，避免依赖 `match`/`loop` 写法或同一清理赋值出现的次数；保留运行时清理、遗留进程回收和 Windows 错误提示断言。内嵌面板产物检查使用当前根节点、弹窗容器与样式层标记，不再要求旧 UI 库的样式哈希属性。
+
 `save_selected_models` 的参数逐项对应命令请求字段，因此仅在该函数上允许 `clippy::too_many_arguments`；工作区继续以 `-D warnings` 检查其他警告。
 
 `spawn_codex` 在 Windows 启动重试时需要替换调用方的应用目录，因此保留 `&mut PathBuf`，仅在非 Windows 平台对该函数允许 `clippy::ptr_arg`。
@@ -1148,6 +1150,8 @@ git diff --check
 - 内嵌配置弹窗（`SettingsModalShell`）：基于 HeroUI Modal，遮罩不可点击关闭且屏蔽 Esc，高度、布局、圆角与内容裁剪由外壳自身的工具类控制；次级弹窗（如通知渠道、模型配置等）必须挂载至 `popupContainer`（即 `modalContainer`），不得挂载至作为页面主体的 `portalContainer`，确保遮罩与弹窗正确覆盖包括 Header 在内的完整外壳。
 
 `src/styles*.css` 均包含独立入口和内嵌入口使用的业务布局，因此保留文件；已删除无调用的 `.route-websocket-option`、`.notification-empty`、`.feature-disabled-*` 规则及组件外观覆盖，不保留空样式文件。`src/components/ui` 封装层只保留有调用方的 prop；`useAppNotice` 与 `useConfirmationDialog` 共用 `src/externalStore.ts` 的 `createExternalStore`。
+
+第三方线路模型同步成功后直接打开模型配置，不再弹出模型数量提示。`NoticeToast` 展示提示时清空已消费的消息，避免配置弹窗重新挂载后重复显示旧提示；同步失败提示继续保留。`tests/app-notice.test.mjs` 验证消息消费、重新挂载和相同内容的新通知。
 
 运行 `pnpm check` 和 `pnpm test:js` 验证类型与回归；`pnpm vite:build` 构建嵌入产物，`pnpm exec vite build` 构建独立页面。开发服务下，`tests/ui-browser.html` 验证真实 Shadow DOM 设置入口，`?view=logs` 使用模拟数据验证日志筛选、详情与布局；`tests/model-combobox-browser.html` 验证万条模型列表。这些页面不连接真实模型服务。
 
