@@ -1151,7 +1151,7 @@ git diff --check
 
 `src/styles*.css` 均包含独立入口和内嵌入口使用的业务布局，因此保留文件；已删除无调用的 `.route-websocket-option`、`.notification-empty`、`.feature-disabled-*` 规则及组件外观覆盖，不保留空样式文件。`src/components/ui` 封装层只保留有调用方的 prop；`useAppNotice` 与 `useConfirmationDialog` 共用 `src/externalStore.ts` 的 `createExternalStore`。
 
-第三方线路模型同步成功后直接打开模型配置，不再弹出模型数量提示。`NoticeToast` 展示提示时清空已消费的消息，避免配置弹窗重新挂载后重复显示旧提示；同步失败提示继续保留。`tests/app-notice.test.mjs` 验证消息消费、重新挂载和相同内容的新通知。
+第三方线路模型同步成功后直接打开模型配置，不再弹出模型数量提示。`NoticeToast` 展示提示时清空已消费的消息，避免配置弹窗重新挂载后重复显示旧提示；同步失败提示继续保留。`tests/app-notice.test.mjs` 验证消息消费、重新挂载和相同内容的新通知。`UiProvider` 在注销弹窗的 Toast 容器前清空全局提示队列，避免未到期的提示随挂载点切换到外层页面。`tests/ui-browser.html?check=toast-close` 逐帧验证嵌套弹窗和设置弹窗关闭时提示不会移到外层，并检查重新打开后的旧提示清理和新提示展示。
 
 运行 `pnpm check` 和 `pnpm test:js` 验证类型与回归；`pnpm vite:build` 构建嵌入产物，`pnpm exec vite build` 构建独立页面。开发服务下，`tests/ui-browser.html` 验证真实 Shadow DOM 设置入口，`?view=logs` 使用模拟数据验证日志筛选、详情与布局；`tests/model-combobox-browser.html` 验证万条模型列表。这些页面不连接真实模型服务。
 

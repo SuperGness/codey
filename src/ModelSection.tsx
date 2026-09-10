@@ -498,8 +498,8 @@ function ModelSectionComponent({
               <div className="catalog-aggregate-title-wrap">
                 <div className="catalog-aggregate-title">
                   <strong>{routeConfigReadOnly ? "当前线路模型" : "供应商与模型"}</strong>
-                  <Badge variant="secondary">{visibleProfiles.length} 条线路</Badge>
-                  <Badge variant="secondary">{totalModelCount} 个模型</Badge>
+                  <Badge variant="info">{visibleProfiles.length} 条线路</Badge>
+                  <Badge variant="info">{totalModelCount} 个模型</Badge>
                 </div>
                 <small>
                   {routeConfigReadOnly
@@ -597,7 +597,7 @@ function ModelSectionComponent({
                             <div className="route-item-badges">
                               {disabled ? <Badge variant="destructive">已禁用</Badge> : (
                                 <>
-                                  <Badge variant="secondary">{group?.models.length || 0} 模型</Badge>
+                                  <Badge variant="info">{group?.models.length || 0} 模型</Badge>
                                   {!routeConfigReadOnly && !isOfficial && (
                                     <Badge variant={group?.models.length ? "brand" : "secondary"}>
                                       {group?.models.length ? "已接入路由" : "待配置模型"}

@@ -38,6 +38,47 @@
       button.onclick = () => window.__codeySettingsOverlay.open();
       document.body.append(button);
       window.__codeySettingsOverlay.open();
+      if (new URLSearchParams(location.search).get("check") === "toast-close") {
+        const { toast } = await import("@heroui/react");
+        const shadow = document.querySelector("#codey-settings-overlay-host").shadowRoot;
+        const nextFrame = () => new Promise(requestAnimationFrame);
+        const waitFor = async (read) => {
+          const deadline = performance.now() + 5000;
+          while (!read()) {
+            if (performance.now() > deadline) throw new Error("Toast 回归验证等待超时");
+            await nextFrame();
+          }
+        };
+        await waitFor(() => shadow.querySelector('button[aria-label="删除Telegram通知渠道"]'));
+        for (const nested of [true, false]) {
+          if (nested) {
+            shadow.querySelector('button[aria-label="删除Telegram通知渠道"]').click();
+            await waitFor(() => shadow.querySelector(".confirmation-dialog .toast-portal-host"));
+          }
+          const dialog = shadow.querySelector(nested ? ".confirmation-dialog" : ".settings-modal-shell");
+          toast.info("关闭弹窗提示回归验证", { timeout: 0 });
+          await waitFor(() => [...dialog.querySelectorAll('[data-slot="toast"]')].some(t => t.textContent.includes("关闭弹窗提示回归验证")));
+          if (nested) dialog.querySelector('button[aria-label="关闭"]').click();
+          else window.__codeySettingsOverlay.close();
+          const deadline = performance.now() + 650;
+          while (performance.now() < deadline) {
+            await nextFrame();
+            for (const notice of shadow.querySelectorAll('[data-slot="toast"]')) {
+              if (notice.textContent.includes("关闭弹窗提示回归验证") && !dialog.contains(notice)) throw new Error(`${nested ? "嵌套" : "设置"}弹窗关闭时 Toast 移到了外层：${notice.textContent}`);
+            }
+          }
+          if (toast.getQueue().visibleToasts.some(t => t.content.title === "关闭弹窗提示回归验证")) throw new Error("关闭后仍有旧 Toast");
+        }
+        window.__codeySettingsOverlay.open();
+        await waitFor(() => shadow.querySelector(".settings-modal-shell .toast-portal-host"));
+        if (shadow.querySelector('[data-slot="toast"]')) throw new Error("重新打开后出现旧 Toast");
+        toast.success("重新打开后可以显示新提示", { timeout: 0 });
+        await waitFor(() => shadow.querySelector('.settings-modal-shell [data-slot="toast"]'));
+        const result = document.createElement("pre");
+        result.id = "toast-close-result";
+        result.textContent = "PASS：嵌套弹窗和设置弹窗关闭时提示未移到外层，重新打开后新提示正常";
+        shadow.querySelector(".settings-modal-body").prepend(result);
+      }
       if (new URLSearchParams(location.search).get("check") === "dialog-motion") {
         const shadow = document.querySelector("#codey-settings-overlay-host").shadowRoot;
         const nextFrame = () => new Promise(requestAnimationFrame);

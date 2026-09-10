@@ -1,5 +1,5 @@
 import { useCallback, useState, type ReactNode } from "react";
-import { I18nProvider, ToastProvider } from "@heroui/react";
+import { I18nProvider, ToastProvider, toast } from "@heroui/react";
 import { UNSAFE_PortalProvider } from "react-aria";
 import { ToastContainerContext } from "./components/ui";
 
@@ -15,6 +15,8 @@ export function UiProvider({ children, container }: {
     if (!element) return () => {};
     setContainerStack((prev) => [...prev, element]);
     return () => {
+      // 先清空提示，再切换挂载点，避免关闭弹窗时旧提示被移到外层。
+      toast.clear();
       setContainerStack((prev) => prev.filter((el) => el !== element));
     };
   }, []);
