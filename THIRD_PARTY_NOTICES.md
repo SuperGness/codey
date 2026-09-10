@@ -56,8 +56,8 @@ The primary frontend dependencies are:
 
 | Package | Version | License | Copyright or project |
 | --- | --- | --- | --- |
-| `antd` | 6.6.2 | MIT | Ant Design contributors |
-| `@ant-design/cssinjs` | 2.1.2 | MIT | Ant Design contributors |
+| `@heroui/react`, `@heroui/styles` | 3.2.4 | MIT | HeroUI Inc. |
+| `react-aria`, `react-aria-components`, `react-stately` | 3.52.1, 1.21.1, 3.50.0 | Apache-2.0 | Adobe Inc. and React Spectrum contributors |
 | `@tabler/icons-react` | 3.45.0 | MIT | Paweł Kuna and Tabler contributors |
 | `tailwindcss`, `@tailwindcss/vite` | 4.3.0 | MIT | Tailwind Labs, Inc. |
 | `@vitejs/plugin-react` | 4.3.4 | MIT | Vite and Babel contributors |

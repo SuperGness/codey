@@ -18,13 +18,10 @@
 .request-log-eyebrow { margin: 0 0 2px; color: #73767d; font-size: 10px; letter-spacing: .08em; }
 .request-log-heading h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -.03em; line-height: 1.25; }
 .request-log-actions { gap: 8px; }
-.request-log-workspace .ant-btn { box-shadow: none; }
-.request-log-header .ant-btn { height: 30px; padding-inline: 10px; font-size: 12px; }
 .request-log-filters { flex-shrink: 0; padding: 8px 12px; border: 1px solid #e7e8eb; border-radius: 8px; background: #fafafb; }
 .request-log-filter-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.request-log-search { display: flex; gap: 6px; align-items: center; flex: 1 1 260px; min-width: 220px; max-width: 440px; }
-.request-log-filter-controls .ant-select, .request-log-filter-controls .ant-input-affix-wrapper { min-height: 32px; font-size: 12px; }
-.request-log-filter-controls > .ant-btn { height: 32px; }
+.request-log-search { display: flex; gap: 6px; align-items: center; flex: 1 1 280px; min-width: 240px; max-width: 480px; }
+.request-log-filter-controls { font-size: 12px; }
 .request-log-overview {
   flex-shrink: 0;
   padding: 8px 12px;
@@ -53,23 +50,80 @@
 .request-log-results-heading strong { font-weight: 600; }
 .request-log-results-heading strong span { margin-left: 7px; border-radius: 5px; padding: 1px 6px; background: #f0f1f3; color: #666b73; font-size: 11px; font-weight: 500; }
 .request-log-results-heading > span { color: #73767d; font-size: 11px; }
-.request-log-table .ant-table { font-size: 12px; }
-.request-log-table .ant-table-thead > tr > th { position: sticky; top: 0; z-index: 1; background: #fafafb; color: #666b73; font-size: 11px; font-weight: 500; padding: 8px 12px; border-bottom: 1px solid #e7e8eb; }
-.request-log-table .ant-table-thead > tr > th::before { display: none; }
-.request-log-table .ant-table-tbody > tr > td { padding: 8px 12px; border-bottom: 1px solid #eff0f2; }
-.request-log-table .ant-table-row { cursor: pointer; }
-.request-log-table .ant-table-row:focus-visible { outline: 2px solid #3170c9; outline-offset: -2px; }
-.request-log-table button[data-prevent-row-click] { border: 0; padding: 0; background: transparent; text-align: left; }
+.request-log-table { font-size: 12px; }
+.request-log-table th { position: sticky; top: 0; z-index: 1; background: #fafafb; color: #666b73; font-size: 11px; font-weight: 500; padding: 8px 12px; border-bottom: 1px solid #e7e8eb; text-align: left; }
+.request-log-table td { padding: 8px 12px; border-bottom: 1px solid #eff0f2; vertical-align: top; }
+.request-log-table tbody tr { cursor: pointer; }
+.request-log-table tbody tr[data-focus-visible="true"] { outline: 2px solid #3170c9; outline-offset: -2px; }
 .request-log-workspace button:focus-visible { outline: 2px solid #3170c9; outline-offset: 3px; }
 .request-log-table [class*="text-[10px]"] { font-size: 11px; }
 .request-log-table [class*="text-[#8e8e93]"] { color: #747982; }
-.request-log-table .ant-tag { border: 0; border-radius: 5px; font-size: 11px; }
-.request-log-table .request-log-protocol { background: #f1f2f4; color: #61666e; }
-.request-log-table .request-log-status { min-width: 0; padding: 2px 8px; }
-.request-log-table .request-log-status.ant-tag-success { color: #267348; background: #eef7f0; }
-.request-log-table .request-log-status.ant-tag-error { color: #b6373d; background: #fff0f0; }
-.request-log-table .request-log-status.ant-tag-warning { color: #8a621d; background: #fff7e8; }
-.request-log-pagination { padding: 8px 14px; background: #fff; }
+.request-log-protocol {
+  display: inline-flex;
+  align-items: center;
+  font-weight: 500;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  line-height: 1.25;
+  border: 1px solid transparent;
+}
+.request-log-protocol-http {
+  background: #eff6ff !important;
+  color: #1d4ed8 !important;
+  border-color: #bfdbfe !important;
+}
+.request-log-protocol-sse {
+  background: #ecfdf5 !important;
+  color: #047857 !important;
+  border-color: #a7f3d0 !important;
+}
+.request-log-protocol-ws {
+  background: #faf5ff !important;
+  color: #7e22ce !important;
+  border-color: #e9d5ff !important;
+}
+.request-log-protocol-grpc {
+  background: #fff7ed !important;
+  color: #c2410c !important;
+  border-color: #fed7aa !important;
+}
+.request-log-protocol-default {
+  background: #f1f2f4 !important;
+  color: #61666e !important;
+  border-color: #e2e4e8 !important;
+}
+.request-log-pagination {
+  padding: 8px 14px;
+  background: #fff;
+}
+.request-log-pagination .pagination {
+  width: auto;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0;
+}
+.request-log-pagination .pagination__content {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.request-log-pagination .pagination__link {
+  border-radius: 6px;
+  font-variant-numeric: tabular-nums;
+  transition: all 0.15s ease;
+}
+.request-log-pagination .pagination__link[data-active="true"] {
+  background: #007aff;
+  color: #ffffff;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 122, 255, 0.25);
+}
+.request-log-pagination .pagination__link:not([data-active="true"]):hover:not(:disabled):not([aria-disabled="true"]) {
+  background: #0000000a;
+  color: #1d1d1f;
+}
 .request-log-detail > div:first-child { padding: 22px 24px; background: white; }
 .request-log-detail > div:nth-child(2) { padding: 24px; }
 .request-log-detail > div:nth-child(2) > div:not([class*="border-red"]) { border: 0; border-radius: 0; background: white; padding: 0 0 20px; border-bottom: 1px solid #e7e8eb; }
@@ -88,14 +142,14 @@
   .request-log-heading { width: 100%; justify-content: space-between; gap: 8px; }
   .request-log-heading h1 { font-size: 19px; }
   .request-log-actions { width: 100%; }
-  .request-log-actions .ant-btn { flex: 1; }
+  .request-log-actions .button { flex: 1; }
   .request-log-search { flex-basis: 100%; max-width: 100%; }
   .request-log-metrics { grid-template-columns: 1fr; gap: 6px; }
   .request-log-overview-heading { flex-wrap: wrap; gap: 6px; }
   .request-log-overview-heading > div { flex-wrap: wrap; }
   .request-log-results { flex: 1 0 360px; }
   .request-log-results-heading > span { max-width: 140px; text-align: right; }
-  .request-log-pagination .ant-pagination { display: flex; flex-wrap: wrap; gap: 4px; }
+  .request-log-pagination nav { display: flex; flex-wrap: wrap; gap: 4px; }
   .request-log-detail > div:first-child { padding: 16px; flex-wrap: wrap; gap: 12px; }
   .request-log-detail > div:nth-child(2) { padding: 16px; }
 }

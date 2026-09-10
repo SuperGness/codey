@@ -26,15 +26,13 @@ test("settings modal keeps dismissal and stacking inside the overlay", async () 
   );
   assert.match(
     shellSource,
-    /<Modal[\s\S]*onCancel=\{onCancel\}[\s\S]*mask=\{\{ closable: false \}\}[\s\S]*keyboard=\{false\}/,
+    /<Modal[\s\S]*isOpen=\{visible\}[\s\S]*onOpenChange=\{\(open\) => \{\s*if \(!open\) onCancel\(\);/,
   );
-  assert.match(shellSource, /getContainer=\{container/);
-  assert.match(shellSource, /className="settings-modal-shell"/);
-  assert.doesNotMatch(
-    shellSource,
-    /overlay:\s*"bg-black\/25|backdrop-blur|overlayProps=/,
-  );
-  assert.match(shellSource, /body: \{[^}]*minHeight: 0[^}]*overflow: "hidden"/);
+  assert.match(shellSource, /<Modal\.Backdrop\s+isDismissable=\{false\}\s+isKeyboardDismissDisabled/);
+  assert.match(shellSource, /<UNSAFE_PortalProvider getContainer=\{\(\) => container\}>/);
+  assert.match(shellSource, /className="settings-modal-shell /);
+  assert.doesNotMatch(shellSource, /backdrop-blur|overlayProps=/);
+  assert.match(shellSource, /settings-modal-body flex min-h-0 flex-1 flex-col overflow-hidden/);
   assert.doesNotMatch(overlaySource, /addEventListener\("wheel"/);
   assert.match(
     stylesSource,
@@ -83,7 +81,9 @@ test("settings controls and popups share the modal busy and portal boundaries", 
     featurePolicySource,
     /<NotificationChannelsCard[\s\S]*container=\{tooltipContainer/,
   );
-  for (const source of [featurePolicySource, promptSource, channelDialogSource]) {
-    assert.match(source, /getPopupContainer=\{\(\) => popupContainer \?\? document\.body\}/);
+  // 弹层容器统一由 UiProvider 的 PortalProvider 决定，业务组件不再各自指定挂载点。
+  for (const source of [appSource, featurePolicySource, promptSource, channelCardSource, channelDialogSource]) {
+    assert.doesNotMatch(source, /getPopupContainer|zIndex=\{1100\}/);
   }
+  assert.match(channelDialogSource, /container=\{container \?\? popupContainer \?\? undefined\}/);
 });

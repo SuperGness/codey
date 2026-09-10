@@ -1,5 +1,7 @@
-import { Table, Alert, Spin, Button as AntButton, Pagination, Drawer } from "antd";
-import { useEffect, useMemo, useRef, useState } from "react";
+import type React from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, CloseButton, Drawer, Pagination, Spinner, Table } from "@heroui/react";
+import { UNSAFE_PortalProvider } from "react-aria";
 import {
   IconAlertTriangle,
   IconChartBar,
@@ -34,7 +36,7 @@ import {
   Input,
   Select,
   Tooltip,
-} from "./components/antd";
+} from "./components/ui";
 
 type RouteRequestLogItem = {
   requestId: string;
@@ -182,6 +184,72 @@ const protocolOptions = [
 ];
 
 const pageSizeOptions = [20, 50, 100];
+
+function protocolTagClass(transport?: string | null): string {
+  const norm = (transport || "").toLowerCase();
+  if (norm === "http_sse" || norm === "sse") return "request-log-protocol-sse";
+  if (norm === "ws" || norm === "websocket") return "request-log-protocol-ws";
+  if (norm === "http" || norm === "https") return "request-log-protocol-http";
+  if (norm === "grpc") return "request-log-protocol-grpc";
+  return "request-log-protocol-default";
+}
+
+type PaginationEntry = number | "ellipsis";
+// 首页、末页与当前页前后各一页，其余以省略号折叠。
+function paginationItems(current: number, total: number): PaginationEntry[] {
+  const pages = new Set<number>([1, total, current - 1, current, current + 1].filter((page) => page >= 1 && page <= total));
+  const sorted = Array.from(pages).sort((a, b) => a - b);
+  const entries: PaginationEntry[] = [];
+  sorted.forEach((page, index) => {
+    if (index > 0 && page - sorted[index - 1] > 1) entries.push("ellipsis");
+    entries.push(page);
+  });
+  return entries;
+}
+
+// 内嵌页面把弹层挂到 overlay 容器；独立页面沿用 UiProvider（document.body）。
+function PortalScope({ container, children }: { container: HTMLElement | null | undefined; children: React.ReactNode }) {
+  const getContainer = useCallback(() => container ?? null, [container]);
+  if (!container) return <>{children}</>;
+  return <UNSAFE_PortalProvider getContainer={getContainer}>{children}</UNSAFE_PortalProvider>;
+}
+
+type RequestLogTableColumn<Row> = { title: string; width: number; render: (record: Row) => React.ReactNode };
+type RequestLogTableRow = { key: string; item: RouteRequestLogItem; cells: React.ReactNode[] };
+function RequestLogTable({ columns, rows = [], onRowAction }: {
+  columns: RequestLogTableColumn<RequestLogTableRow>[];
+  rows?: RequestLogTableRow[];
+  onRowAction: (key: string) => void;
+}) {
+  return (
+    <Table className="request-log-table" variant="secondary">
+      <Table.ScrollContainer className="overflow-auto">
+        <Table.Content
+          aria-label="请求日志"
+          className="min-w-[1600px]"
+          onRowAction={(key) => onRowAction(String(key))}
+        >
+          <Table.Header>
+            {columns.map((column, index) => (
+              <Table.Column key={column.title} isRowHeader={index === 0} style={{ width: column.width, minWidth: column.width }}>
+                {column.title}
+              </Table.Column>
+            ))}
+          </Table.Header>
+          <Table.Body items={rows}>
+            {(record) => (
+              <Table.Row id={record.key} textValue={record.item.requestId} aria-label={`查看请求详情：${record.item.requestId}`}>
+                {columns.map((column) => (
+                  <Table.Cell key={column.title}>{column.render(record)}</Table.Cell>
+                ))}
+              </Table.Row>
+            )}
+          </Table.Body>
+        </Table.Content>
+      </Table.ScrollContainer>
+    </Table>
+  );
+}
 
 const groupByLabels: Record<string, string> = {
   model: "实际模型",
@@ -685,9 +753,9 @@ export function RequestLogDialog({
           {catalog.officialAccountAvailable === true && (
             <Button variant="link" color="primary" size="sm" onClick={() => setQuotaOpen(true)}>周限额度估算</Button>
           )}
-          <AntButton
-            size="small"
-            icon={<IconRefresh size={14} aria-hidden="true" />}
+          <Button
+            variant="outline"
+            size="sm"
             loading={loading}
             disabled={clearing}
             onClick={() => {
@@ -697,32 +765,33 @@ export function RequestLogDialog({
               setRefreshRevision((value) => value + 1);
             }}
           >
+            {loading ? null : <IconRefresh size={14} aria-hidden="true" />}
             刷新
-          </AntButton>
-          <AntButton
-            size="small"
-            danger
-            icon={<IconTrash size={14} aria-hidden="true" />}
+          </Button>
+          <Button
+            variant="destructive-light"
+            size="sm"
             disabled={loading || clearing}
             onClick={() => {
               setActionNotice(null);
               setClearConfirmationOpened(true);
             }}
           >
+            <IconTrash size={14} aria-hidden="true" />
             删除请求日志
-          </AntButton>
+          </Button>
         </div>
       </div>
 
         {actionNotice ? (
-          <Alert
-            className="flex-none"
-            type={actionNotice.tone === "success" ? "success" : "error"}
-            title={actionNotice.tone === "success" ? "删除成功" : "删除失败"}
-            closable
-            onClose={() => setActionNotice(null)}
-            description={actionNotice.text}
-          />
+          <Alert className="flex-none" status={actionNotice.tone === "success" ? "success" : "danger"}>
+            <Alert.Indicator />
+            <Alert.Content>
+              <Alert.Title>{actionNotice.tone === "success" ? "删除成功" : "删除失败"}</Alert.Title>
+              <Alert.Description>{actionNotice.text}</Alert.Description>
+            </Alert.Content>
+            <CloseButton aria-label="关闭提示" className="shrink-0" onPress={() => setActionNotice(null)} />
+          </Alert>
         ) : null}
 
         <div className="request-log-filters">
@@ -730,9 +799,8 @@ export function RequestLogDialog({
             <div className="request-log-search">
               <Select
                 aria-label="搜索方式"
-                className="w-28 shrink-0"
+                className="w-36 shrink-0"
                 value={searchMode}
-                getPopupContainer={() => container ?? document.body}
                 optionList={[
                   { label: "关键词搜索", value: "contains" },
                   { label: "精确请求 ID", value: "requestId" },
@@ -773,9 +841,8 @@ export function RequestLogDialog({
 
             <Select
               aria-label="请求日志时间范围"
-              className="w-28 shrink-0"
+              className="w-36 shrink-0"
               value={timeRange}
-              getPopupContainer={() => container ?? document.body}
               optionList={[
                 { label: "最近 24 小时", value: "24h" },
                 { label: "最近 7 天", value: "7d" },
@@ -792,7 +859,6 @@ export function RequestLogDialog({
               aria-label="按供应商筛选请求日志"
               className="w-32 shrink-0"
               filter
-              getPopupContainer={() => container ?? document.body}
               optionList={providerOptions}
               value={provider}
               onChange={(value) => {
@@ -805,7 +871,6 @@ export function RequestLogDialog({
               aria-label="按实际模型筛选请求日志"
               className="w-36 shrink-0"
               filter
-              getPopupContainer={() => container ?? document.body}
               optionList={modelOptions}
               value={model}
               onChange={(value) => {
@@ -817,7 +882,6 @@ export function RequestLogDialog({
             <Select
               aria-label="按状态筛选请求日志"
               className="w-24 shrink-0"
-              getPopupContainer={() => container ?? document.body}
               optionList={statusOptions}
               value={status}
               onChange={(value) => {
@@ -828,8 +892,7 @@ export function RequestLogDialog({
 
             <Select
               aria-label="按上游协议筛选请求日志"
-              className="w-28 shrink-0"
-              getPopupContainer={() => container ?? document.body}
+              className="w-36 shrink-0"
               optionList={protocolOptions}
               value={protocol}
               onChange={(value) => {
@@ -840,8 +903,7 @@ export function RequestLogDialog({
 
             <Select
               aria-label="按请求类型筛选请求日志"
-              className="w-32 shrink-0"
-              getPopupContainer={() => container ?? document.body}
+              className="w-36 shrink-0"
               optionList={[
                 { label: "全部请求类型", value: "all" },
                 { label: "模型请求", value: "responses" },
@@ -858,16 +920,17 @@ export function RequestLogDialog({
               }}
             />
 
-            <AntButton
-              size="small"
-              type="link"
+            <Button
+              size="sm"
+              variant="link"
+              color="primary"
               disabled={!hasFilters}
               onClick={resetFilters}
-              className={`shrink-0 ${hasFilters ? "text-blue-600 hover:text-blue-700 font-medium" : ""}`}
+              className={`shrink-0 ${hasFilters ? "font-medium" : ""}`}
             >
               清除筛选
               {activeFilterCount > 0 ? ` (${activeFilterCount})` : ""}
-            </AntButton>
+            </Button>
           </div>
 
           {timeRange === "custom" ? (
@@ -904,7 +967,15 @@ export function RequestLogDialog({
 
 
         {statsLoading ? <p className="m-0 text-xs text-[#6e6e73]" role="status">正在统计所选范围…</p> : null}
-        {statsError ? <Alert type="error" title="统计加载失败" description={statsError} /> : null}
+        {statsError ? (
+          <Alert status="danger">
+            <Alert.Indicator />
+            <Alert.Content>
+              <Alert.Title>统计加载失败</Alert.Title>
+              <Alert.Description>{statsError}</Alert.Description>
+            </Alert.Content>
+          </Alert>
+        ) : null}
 
         {stats ? (
           <div className="request-log-overview">
@@ -927,8 +998,7 @@ export function RequestLogDialog({
                 {!overviewCollapsed ? (
                   <Select
                     aria-label="统计分组"
-                    className="w-32"
-                    getPopupContainer={() => container ?? document.body}
+                    className="w-44"
                     optionList={[
                       { label: "按实际模型统计", value: "model" },
                       { label: "按供应商统计", value: "provider" },
@@ -941,17 +1011,17 @@ export function RequestLogDialog({
                     onChange={(value) => setGroupBy(String(value))}
                   />
                 ) : null}
-                <AntButton
-                  size="small"
-                  type="text"
-                  icon={overviewCollapsed ? <IconChevronDown size={13} aria-hidden="true" /> : <IconChevronUp size={13} aria-hidden="true" />}
+                <Button
+                  size="xs"
+                  variant="ghost"
                   onClick={toggleOverviewCollapsed}
                   aria-expanded={!overviewCollapsed}
                   className="text-xs text-[#6e6e73] hover:text-[#1d1d1f]"
                   title={overviewCollapsed ? "展开概览" : "收起概览以扩大列表区域"}
                 >
+                  {overviewCollapsed ? <IconChevronDown size={13} aria-hidden="true" /> : <IconChevronUp size={13} aria-hidden="true" />}
                   {overviewCollapsed ? "展开概览" : "收起概览"}
-                </AntButton>
+                </Button>
               </div>
             </div>
 
@@ -1168,15 +1238,18 @@ export function RequestLogDialog({
           ) : null}
           {error ? (
             <div className="grid min-h-48 flex-1 place-items-center p-6">
-              <Alert
-                type="error"
-                title="请求日志加载失败"
-                description={<>
-                <p className="m-0 mb-3 text-sm">{error}</p>
-                <Button size="xs" variant="outline" onClick={() => setRefreshRevision((value) => value + 1)}>
-                  重试
-                </Button>
-               </>} />
+              <Alert status="danger">
+                <Alert.Indicator />
+                <Alert.Content>
+                  <Alert.Title>请求日志加载失败</Alert.Title>
+                  <Alert.Description>
+                    <p className="m-0 mb-3 text-sm">{error}</p>
+                    <Button size="xs" variant="outline" onClick={() => setRefreshRevision((value) => value + 1)}>
+                      重试
+                    </Button>
+                  </Alert.Description>
+                </Alert.Content>
+              </Alert>
             </div>
           ) : result?.status === "unavailable" || result?.queryable === false ? (
             <div className="grid min-h-48 flex-1 place-items-center p-6 text-center">
@@ -1189,7 +1262,7 @@ export function RequestLogDialog({
           ) : !result && loading ? (
             <div className="grid min-h-48 flex-1 place-items-center" role="status">
               <div className="flex items-center gap-2 text-xs text-[#6e6e73]">
-                <Spin size="small" />
+                <Spinner size="sm" />
                 正在加载请求日志…
               </div>
             </div>
@@ -1207,23 +1280,20 @@ export function RequestLogDialog({
             </div>
           ) : (
             <div className={`min-h-0 flex-1 overflow-auto ${loading && result ? "opacity-75 transition-opacity" : ""}`} aria-busy={loading}>
-              <Table
- className="request-log-table"
- size="small" pagination={false}
-                scroll={{ x: 1600 }}
+              <RequestLogTable
                 columns={[
-                  { title: "时间 / 请求 ID", width: 180, render: (_value, record) => record.cells[0] },
-                  { title: "会话 ID", width: 190, render: (_value, record) => record.cells[1] },
-                  { title: "供应商 / 上游", width: 180, render: (_value, record) => record.cells[2] },
-                  { title: "模型", width: 180, render: (_value, record) => record.cells[3] },
-                  { title: "思考强度", width: 100, render: (_value, record) => record.cells[4] },
-                  { title: "上游协议", width: 100, render: (_value, record) => record.cells[5] },
-                  { title: "状态", width: 120, render: (_value, record) => record.cells[6] },
-                  { title: "耗时", width: 150, render: (_value, record) => record.cells[7] },
-                  { title: "Token 用量", width: 230, render: (_value, record) => record.cells[8] },
-                  { title: "缓存 Token", width: 130, render: (_value, record) => record.cells[9] },
+                  { title: "时间 / 请求 ID", width: 180, render: (record) => record.cells[0] },
+                  { title: "会话 ID", width: 190, render: (record) => record.cells[1] },
+                  { title: "供应商 / 上游", width: 180, render: (record) => record.cells[2] },
+                  { title: "模型", width: 180, render: (record) => record.cells[3] },
+                  { title: "思考强度", width: 100, render: (record) => record.cells[4] },
+                  { title: "上游协议", width: 100, render: (record) => record.cells[5] },
+                  { title: "状态", width: 120, render: (record) => record.cells[6] },
+                  { title: "耗时", width: 150, render: (record) => record.cells[7] },
+                  { title: "Token 用量", width: 230, render: (record) => record.cells[8] },
+                  { title: "缓存 Token", width: 130, render: (record) => record.cells[9] },
                 ]}
- dataSource={result?.items.map((item) => {
+                rows={result?.items.map((item) => {
    const presentation = statusPresentation[item.status] ?? { label: item.status || "未知", variant: "secondary" as const };
    const hasUpstreamError = [item.statusCode, item.upstreamStatusCode].some((statusCode) => statusCode != null && (statusCode < 200 || statusCode >= 300));
    const upstreamErrorSummary = item.upstreamErrorSummary || item.errorCode || "上游未提供具体错误信息";
@@ -1242,11 +1312,11 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                             <span className="whitespace-nowrap text-[11px] text-[#1d1d1f]">
                               {formatTimestamp(item.timestampUnixMs)}
                             </span>
-                            <button
-                              type="button"
+                            <Button
+                              variant="ghost"
+                              size="xs"
                               aria-label={`复制请求 ID：${item.requestId}`}
-                              className="group flex cursor-pointer items-center gap-1 text-[10px] text-[#8e8e93] transition-colors hover:text-[#1d1d1f]"
-                              data-prevent-row-click="true"
+                              className="group h-auto min-h-0 justify-start gap-1 rounded-md px-0.5 font-mono text-[10px] font-normal text-[#8e8e93] transition-colors hover:text-[#1d1d1f] [&_svg]:size-[11px]"
                               title={`请求 ID: ${item.requestId}（点击复制）`}
                               onClick={() => handleCopyId(item.requestId)}
                             >
@@ -1258,7 +1328,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                               ) : (
                                 <IconCopy size={11} className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden="true" />
                               )}
-                            </button>
+                            </Button>
                           </div>
                         </div>,
 <div className="w-40 max-w-40 overflow-hidden">
@@ -1272,9 +1342,10 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                                   父
                                 </Badge>
                               ) : null}
-                              <button
-                                type="button"
-                                className="group flex min-w-0 cursor-pointer items-center gap-1 border-0 bg-transparent p-0 font-mono text-[10px] text-[#6e6e73] transition-colors hover:text-[#1d1d1f]"
+                              <Button
+                                variant="ghost"
+                                size="xs"
+                                className="group h-auto min-h-0 min-w-0 justify-start gap-1 rounded-md px-0.5 font-mono text-[10px] font-normal text-[#6e6e73] transition-colors hover:text-[#1d1d1f] [&_svg]:size-[11px]"
                                 title={`${item.codexSessionIsParent ? "父会话" : "会话"} ID: ${item.codexSessionId}（点击复制）`}
                                 aria-label={`复制${item.codexSessionIsParent ? "父会话" : "会话"} ID：${item.codexSessionId}`}
                                 onClick={() => handleCopyId(item.codexSessionId!)}
@@ -1287,7 +1358,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                                 ) : (
                                   <IconCopy size={11} className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" aria-hidden="true" />
                                 )}
-                              </button>
+                              </Button>
                             </div>
                           ) : (
                             <span className="text-[#8e8e93]">—</span>
@@ -1320,7 +1391,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
 <div>
                           <Badge
                             variant="secondary"
-                            className="request-log-protocol"
+                            className={`request-log-protocol ${protocolTagClass(item.upstreamTransport)}`}
                           >
                             {item.upstreamTransport === "http_sse" ? "SSE" : (item.upstreamTransport || "—").toUpperCase()}
                           </Badge>
@@ -1338,9 +1409,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                                       {upstreamErrorPreview}
                                     </span>
                                   )}
-                                  getPopupContainer={() => container ?? document.body}
                                   position="top"
-                                  autoAdjustOverflow
                                 >
                                   <Button
                                     size="xs"
@@ -1358,9 +1427,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                                       {cancellation.message}
                                     </span>
                                   )}
-                                  getPopupContainer={() => container ?? document.body}
                                   position="top"
-                                  autoAdjustOverflow
                                 >
                                   <Button
                                     size="xs"
@@ -1420,9 +1487,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                                     {usageUnavailable.message}
                                   </span>
                                 )}
-                                getPopupContainer={() => container ?? document.body}
                                 position="top"
-                                autoAdjustOverflow
                               >
                                 <Button
                                   size="xs"
@@ -1448,8 +1513,11 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                             {cacheHitRate} 命中
                           </span>
                         </div>] };})}
- onRow={(record) => ({ tabIndex: 0, "aria-label": `查看请求详情：${record.item.requestId}`, onKeyDown: (event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); setSelectedItem(record.item); } }, onClick: (event) => { const target = event.target as HTMLElement | null; if (target?.closest("button") || target?.closest("[data-prevent-row-click]")) return; setSelectedItem(record.item); } })}
- />
+                onRowAction={(key) => {
+                  const record = result?.items.find((item) => `${item.timestampUnixMs}:${item.requestId}` === key);
+                  if (record) setSelectedItem(record);
+                }}
+              />
             </div>
           )}
 
@@ -1468,44 +1536,67 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                   第 {page} / {totalPages} 页
                 </span>
               </div>
-              <Pagination
-                size="small"
-                current={page}
-                pageSize={pageSize}
-                total={totalCount}
-                pageSizeOptions={pageSizeOptions}
-                showSizeChanger
-                disabled={loading}
-                onChange={(newPage, newPageSize) => {
-                  if (newPageSize !== pageSize) {
+              <div className="flex items-center gap-2.5 shrink-0 max-[760px]:justify-end">
+                <Select
+                  aria-label="每页条数"
+                  className="w-28 shrink-0"
+                  disabled={loading}
+                  value={pageSize}
+                  optionList={pageSizeOptions.map((size) => ({ label: `${size} 条 / 页`, value: size }))}
+                  onChange={(value) => {
+                    const newPageSize = Number(value);
+                    if (!Number.isFinite(newPageSize) || newPageSize === pageSize) return;
                     setPageSize(newPageSize);
                     setPage(1);
                     setCursors([null]);
-                    return;
-                  }
-                  if (newPage === page) return;
-                  if (newPage <= cursors.length) {
-                    setPage(newPage);
-                  }
-                }}
-                itemRender={(itemPage, type, originalElement) => {
-                  if (type === "page" && itemPage > cursors.length) {
-                    return (
-                      <span
-                        className="ant-pagination-item opacity-40 cursor-not-allowed"
-                        title="游标翻页模式下请按序浏览"
-                        aria-disabled="true"
+                  }}
+                />
+                <Pagination size="sm" aria-label="请求日志分页" className="w-auto">
+                  <Pagination.Content>
+                    <Pagination.Item>
+                      <Pagination.Previous
+                        isDisabled={loading || page <= 1}
+                        onPress={() => setPage(page - 1)}
                       >
-                        {itemPage}
-                      </span>
-                    );
-                  }
-                  if (type === "next" && (!result?.hasMore || !result.nextCursor)) {
-                    return <span className="ant-pagination-disabled">{originalElement}</span>;
-                  }
-                  return originalElement;
-                }}
-              />
+                        <Pagination.PreviousIcon />
+                      </Pagination.Previous>
+                    </Pagination.Item>
+                    {paginationItems(page, totalPages).map((entry, index) =>
+                      entry === "ellipsis" ? (
+                        <Pagination.Item key={`ellipsis-${index}`}>
+                          <Pagination.Ellipsis />
+                        </Pagination.Item>
+                      ) : (
+                        <Pagination.Item key={entry}>
+                          <Pagination.Link
+                            isActive={entry === page}
+                            isDisabled={loading || entry > cursors.length}
+                            aria-disabled={entry > cursors.length || undefined}
+                            aria-label={`第 ${entry} 页`}
+                            className={entry > cursors.length ? "cursor-not-allowed opacity-40" : undefined}
+                            onPress={() => {
+                              if (entry === page || entry > cursors.length) return;
+                              setPage(entry);
+                            }}
+                          >
+                            {entry}
+                          </Pagination.Link>
+                        </Pagination.Item>
+                      ),
+                    )}
+                    <Pagination.Item>
+                      <Pagination.Next
+                        isDisabled={loading || page >= totalPages || !result?.hasMore || !result.nextCursor}
+                        onPress={() => {
+                          if (page + 1 <= cursors.length) setPage(page + 1);
+                        }}
+                      >
+                        <Pagination.NextIcon />
+                      </Pagination.Next>
+                    </Pagination.Item>
+                  </Pagination.Content>
+                </Pagination>
+              </div>
             </div>
           ) : null}
         </div>
@@ -1567,14 +1658,10 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
       </Dialog>
 
       {selectedItem ? (
-        <Drawer
-          open
-          title="请求详情"
-          onClose={() => setSelectedItem(null)}
-          getContainer={standalone ? document.body : container ?? document.body}
-          size={580}
-          styles={{ header: { display: "none" }, body: { padding: 0 } }}
-        >
+        <PortalScope container={standalone ? null : container}>
+        <Drawer.Backdrop isOpen onOpenChange={(open) => { if (!open) setSelectedItem(null); }}>
+            <Drawer.Content placement="right">
+              <Drawer.Dialog className="w-[580px] max-w-[100vw] rounded-none p-0" aria-label="请求详情">
           <div
             className="request-log-detail relative z-10 flex h-full w-full max-w-[580px] flex-col bg-white shadow-2xl transition-transform"
           >
@@ -1605,14 +1692,6 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                 </p>
               </div>
               <div className="flex items-center gap-1.5">
-                <Button
-                  size="xs"
-                  variant="outline"
-                  onClick={() => handleCopyId(JSON.stringify(selectedItem, null, 2), "完整日志 JSON")}
-                >
-                  <IconCopy size={13} aria-hidden="true" />
-                  复制 JSON
-                </Button>
                 <button
                   type="button"
                   className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg text-[#8e8e93] hover:bg-black/5 hover:text-[#1d1d1f]"
@@ -1626,45 +1705,106 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
 
             {/* 抽屉内容区 */}
             <div className="flex-1 overflow-y-auto p-5 space-y-4 text-xs text-[#1d1d1f]">
-              {/* 耗时分解 */}
+              {/* 耗时与 Token 使用量 */}
               <div className="rounded-xl border border-black/8 bg-[#fafafa] p-3.5">
-                <div className="flex items-center justify-between pb-2 border-b border-black/6">
-                  <span className="font-semibold text-[#1d1d1f]">端到端耗时分解</span>
-                  <span className="font-mono font-bold text-sm text-[#1d1d1f]">
-                    {formatDuration(selectedItem.totalDurationMs)}
-                  </span>
-                </div>
-                <div className="mt-3 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[#6e6e73]">端到端首内容 (TTFT)</span>
-                    <span className="font-mono font-medium text-blue-600">
-                      {formatDuration(selectedItem.downstreamFirstContentMs ?? selectedItem.ttftMs)}
+                {/* 耗时分解 */}
+                <div>
+                  <div className="flex items-center justify-between pb-2 border-b border-black/6">
+                    <span className="font-semibold text-[#1d1d1f]">端到端耗时分解</span>
+                    <span className="font-mono font-bold text-sm text-[#1d1d1f]">
+                      {formatDuration(selectedItem.totalDurationMs)}
                     </span>
                   </div>
-                  {selectedItem.routerPreUpstreamMs != null ? (
+                  <div className="mt-3 space-y-2">
                     <div className="flex items-center justify-between">
-                      <span className="text-[#6e6e73]">路由前置耗时</span>
-                      <span className="font-mono">{formatDuration(selectedItem.routerPreUpstreamMs)}</span>
+                      <span className="text-[#6e6e73]">端到端首内容 (TTFT)</span>
+                      <span className="font-mono font-medium text-blue-600">
+                        {formatDuration(selectedItem.downstreamFirstContentMs ?? selectedItem.ttftMs)}
+                      </span>
                     </div>
-                  ) : null}
-                  {selectedItem.upstreamFirstByteMs != null ? (
-                    <div className="flex items-center justify-between">
-                      <span className="text-[#6e6e73]">上游首包耗时</span>
-                      <span className="font-mono">{formatDuration(selectedItem.upstreamFirstByteMs)}</span>
+                    {selectedItem.routerPreUpstreamMs != null ? (
+                      <div className="flex items-center justify-between">
+                        <span className="text-[#6e6e73]">路由前置耗时</span>
+                        <span className="font-mono">{formatDuration(selectedItem.routerPreUpstreamMs)}</span>
+                      </div>
+                    ) : null}
+                    {selectedItem.upstreamFirstByteMs != null ? (
+                      <div className="flex items-center justify-between">
+                        <span className="text-[#6e6e73]">上游首包耗时</span>
+                        <span className="font-mono">{formatDuration(selectedItem.upstreamFirstByteMs)}</span>
+                      </div>
+                    ) : null}
+                    {selectedItem.upstreamHeaderMs != null ? (
+                      <div className="flex items-center justify-between">
+                        <span className="text-[#6e6e73]">上游响应头耗时</span>
+                        <span className="font-mono">{formatDuration(selectedItem.upstreamHeaderMs)}</span>
+                      </div>
+                    ) : null}
+                    {selectedItem.queueDelayMs > 0 ? (
+                      <div className="flex items-center justify-between">
+                        <span className="text-[#6e6e73]">排队延迟</span>
+                        <span className="font-mono text-amber-600">{formatDuration(selectedItem.queueDelayMs)}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+
+                {/* Token 使用量 */}
+                <div className="mt-3.5 pt-3.5 border-t border-black/6">
+                  <span className="block font-semibold text-[#1d1d1f] pb-2 border-b border-black/6">
+                    Token 使用量
+                  </span>
+                  {selectedItem.totalTokens == null ? (
+                    <div className="mt-3 rounded-lg border border-black/6 bg-white p-3 text-center">
+                      <span className="text-xs text-[#8e8e93]">
+                        {usageUnavailablePresentation(selectedItem.usageUnavailableReason).label}：
+                        {usageUnavailablePresentation(selectedItem.usageUnavailableReason).message}
+                      </span>
                     </div>
-                  ) : null}
-                  {selectedItem.upstreamHeaderMs != null ? (
-                    <div className="flex items-center justify-between">
-                      <span className="text-[#6e6e73]">上游响应头耗时</span>
-                      <span className="font-mono">{formatDuration(selectedItem.upstreamHeaderMs)}</span>
-                    </div>
-                  ) : null}
-                  {selectedItem.queueDelayMs > 0 ? (
-                    <div className="flex items-center justify-between">
-                      <span className="text-[#6e6e73]">排队延迟</span>
-                      <span className="font-mono text-amber-600">{formatDuration(selectedItem.queueDelayMs)}</span>
-                    </div>
-                  ) : null}
+                  ) : (
+                    <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2.5">
+                      <div>
+                        <dt className="text-[11px] text-[#8e8e93]">总 Token</dt>
+                        <dd className="m-0 mt-0.5 font-mono text-base font-bold text-[#1d1d1f]">
+                          {formatTokens(selectedItem.totalTokens)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-[11px] text-[#8e8e93]">缓存输入 Token</dt>
+                        <dd className="m-0 mt-0.5 font-mono text-base font-bold text-purple-600">
+                          {formatTokens(selectedItem.cachedInputTokens)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-[11px] text-[#8e8e93]">输入 Token</dt>
+                        <dd className="m-0 mt-0.5 font-mono font-medium text-[#1d1d1f]">
+                          {formatTokens(selectedItem.inputTokens)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt className="text-[11px] text-[#8e8e93]">输出 Token</dt>
+                        <dd className="m-0 mt-0.5 font-mono font-medium text-[#1d1d1f]">
+                          {formatTokens(selectedItem.outputTokens)}
+                        </dd>
+                      </div>
+                      {selectedItem.reasoningOutputTokens != null ? (
+                        <div>
+                          <dt className="text-[11px] text-[#8e8e93]">思考输出 Token</dt>
+                          <dd className="m-0 mt-0.5 font-mono font-medium text-[#48484a]">
+                            {formatTokens(selectedItem.reasoningOutputTokens)}
+                          </dd>
+                        </div>
+                      ) : null}
+                      {selectedItem.cacheCreationInputTokens != null ? (
+                        <div>
+                          <dt className="text-[11px] text-[#8e8e93]">缓存创建 Token</dt>
+                          <dd className="m-0 mt-0.5 font-mono font-medium text-[#48484a]">
+                            {formatTokens(selectedItem.cacheCreationInputTokens)}
+                          </dd>
+                        </div>
+                      ) : null}
+                    </dl>
+                  )}
                 </div>
               </div>
 
@@ -1707,7 +1847,10 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                   <div>
                     <dt className="text-[11px] text-[#8e8e93]">上游传输方式</dt>
                     <dd className="m-0 mt-0.5 font-medium text-[#1d1d1f]">
-                      <Badge variant="secondary">
+                      <Badge
+                        variant="secondary"
+                        className={`request-log-protocol ${protocolTagClass(selectedItem.upstreamTransport)}`}
+                      >
                         {selectedItem.upstreamTransport === "http_sse" ? "SSE" : (selectedItem.upstreamTransport || "—").toUpperCase()}
                       </Badge>
                     </dd>
@@ -1761,62 +1904,14 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                 </dl>
               </div>
 
-              {/* Token 使用量 */}
-              <div className="rounded-xl border border-black/8 bg-[#fafafa] p-3.5">
+              {/* 原始记录 JSON */}
+              <div className="rounded-xl border border-black/8 bg-[#fafafa] p-3.5 text-xs">
                 <span className="block font-semibold text-[#1d1d1f] pb-2 border-b border-black/6">
-                  Token 使用量
+                  原始记录 JSON
                 </span>
-                {selectedItem.totalTokens == null ? (
-                  <div className="mt-3 rounded-lg border border-black/6 bg-white p-3 text-center">
-                    <span className="text-xs text-[#8e8e93]">
-                      {usageUnavailablePresentation(selectedItem.usageUnavailableReason).label}：
-                      {usageUnavailablePresentation(selectedItem.usageUnavailableReason).message}
-                    </span>
-                  </div>
-                ) : (
-                  <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2.5">
-                    <div>
-                      <dt className="text-[11px] text-[#8e8e93]">总 Token</dt>
-                      <dd className="m-0 mt-0.5 font-mono text-base font-bold text-[#1d1d1f]">
-                        {formatTokens(selectedItem.totalTokens)}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-[11px] text-[#8e8e93]">缓存输入 Token</dt>
-                      <dd className="m-0 mt-0.5 font-mono text-base font-bold text-purple-600">
-                        {formatTokens(selectedItem.cachedInputTokens)}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-[11px] text-[#8e8e93]">输入 Token</dt>
-                      <dd className="m-0 mt-0.5 font-mono font-medium text-[#1d1d1f]">
-                        {formatTokens(selectedItem.inputTokens)}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-[11px] text-[#8e8e93]">输出 Token</dt>
-                      <dd className="m-0 mt-0.5 font-mono font-medium text-[#1d1d1f]">
-                        {formatTokens(selectedItem.outputTokens)}
-                      </dd>
-                    </div>
-                    {selectedItem.reasoningOutputTokens != null ? (
-                      <div>
-                        <dt className="text-[11px] text-[#8e8e93]">思考输出 Token</dt>
-                        <dd className="m-0 mt-0.5 font-mono font-medium text-[#48484a]">
-                          {formatTokens(selectedItem.reasoningOutputTokens)}
-                        </dd>
-                      </div>
-                    ) : null}
-                    {selectedItem.cacheCreationInputTokens != null ? (
-                      <div>
-                        <dt className="text-[11px] text-[#8e8e93]">缓存创建 Token</dt>
-                        <dd className="m-0 mt-0.5 font-mono font-medium text-[#48484a]">
-                          {formatTokens(selectedItem.cacheCreationInputTokens)}
-                        </dd>
-                      </div>
-                    ) : null}
-                  </dl>
-                )}
+                <pre className="mt-3 max-h-60 overflow-auto rounded-lg bg-black/5 p-2.5 font-mono text-[10px] text-[#1d1d1f]">
+                  {JSON.stringify(selectedItem, null, 2)}
+                </pre>
               </div>
 
               {/* 异常与降级诊断 */}
@@ -1868,16 +1963,6 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                   </div>
                 </div>
               ) : null}
-
-              {/* 原始 JSON 折叠 */}
-              <details className="rounded-xl border border-black/8 bg-[#fafafa] p-3 text-xs">
-                <summary className="cursor-pointer font-medium text-[#6e6e73] hover:text-[#1d1d1f]">
-                  查看原始记录 JSON
-                </summary>
-                <pre className="mt-2 max-h-60 overflow-auto rounded-lg bg-black/5 p-2.5 font-mono text-[10px] text-[#1d1d1f]">
-                  {JSON.stringify(selectedItem, null, 2)}
-                </pre>
-              </details>
             </div>
 
             {/* 抽屉底部操作栏 */}
@@ -1899,7 +1984,10 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
               </Button>
             </div>
           </div>
-        </Drawer>
+              </Drawer.Dialog>
+            </Drawer.Content>
+        </Drawer.Backdrop>
+        </PortalScope>
       ) : null}
 
       {copyToast ? (

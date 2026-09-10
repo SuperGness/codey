@@ -58,7 +58,8 @@ test("subagent settings expose the five supported role controls", async () => {
   );
   assert.match(modelOptionsSource, /modelState\.thirdPartyModelMetadata/);
   assert.match(modelOptionsSource, /resolveSubagentModelOption/);
-  assert.match(comboboxSource, /showSearch/);
+  assert.match(comboboxSource, /<ComboBox/);
+  assert.match(comboboxSource, /<ListBox\.Section/);
   assert.match(comboboxSource, /没有匹配的模型或线路/);
-  assert.match(comboboxSource, /options=\{groups\}/);
+  assert.match(comboboxSource, /items=\{groups\}/);
 });

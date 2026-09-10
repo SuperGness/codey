@@ -15,10 +15,10 @@ import {
 } from "@tabler/icons-react";
 
 import type { Config, ModelContextConfig, ModelState, Profile, ProviderStatus } from "./App.types";
+import { Card } from "@heroui/react";
 import {
   Badge,
   Button,
-  Card,
   Checkbox,
   Dialog,
   DialogContent,
@@ -30,10 +30,13 @@ import {
   PasswordInput,
   Select,
   Switch,
-} from "./components/antd";
+} from "./components/ui";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
 import { globalDefaultForRoute, routeProviderId } from "./modelRoutes";
-import { validateThirdPartyRouteShortName } from "./routeShortNames";
+import {
+  MAX_ROUTE_SHORT_NAME_CHARACTERS,
+  validateThirdPartyRouteShortName,
+} from "./routeShortNames";
 import { flushCardClass } from "./uiClasses";
 import { validateOutboundApiUrl } from "./urlValidation";
 import { invoke } from "./api";
@@ -666,7 +669,7 @@ function ModelSectionComponent({
                             <Button
                               variant="link"
                               color="primary"
-                              size="xs"
+                              size="icon-sm"
                               disabled={isBusy || dirty}
                               onClick={() => openEditRouteDialog(profile)}
                               aria-label={`编辑线路 ${profile.name}`}
@@ -677,7 +680,7 @@ function ModelSectionComponent({
                             <Button
                               variant="link"
                               color="danger"
-                              size="xs"
+                              size="icon-sm"
                               disabled={routeConfigReadOnly || isBusy || dirty || config.profiles.length <= 1}
                               onClick={() => onDeleteRoute(profile.id)}
                               aria-label={`删除线路 ${profile.name}`}
@@ -692,7 +695,7 @@ function ModelSectionComponent({
                             <Button
                               variant="link"
                               color="primary"
-                              size="xs"
+                              size="icon-sm"
                               disabled={isBusy || dirty}
                               onClick={() => openEditRouteDialog(profile)}
                               aria-label={`编辑线路 ${profile.name}`}
@@ -891,6 +894,7 @@ function ModelSectionComponent({
                       value={routeDraft.shortName}
                       disabled={isBusy}
                       placeholder="如：主、备"
+                      maxLength={MAX_ROUTE_SHORT_NAME_CHARACTERS}
                       onChange={(event) =>
                         updateRouteDraft({ shortName: event.target.value })}
                     />
@@ -917,8 +921,6 @@ function ModelSectionComponent({
                     aria-labelledby="route-protocol-label"
                     value={routeDraft.upstreamProtocol}
                     disabled={isBusy}
-                    zIndex={1100}
-                    getPopupContainer={() => popupContainer ?? document.body}
                     onChange={(value) => {
                       if (value == null) return;
                       const upstreamProtocol = value as Profile["upstreamProtocol"];

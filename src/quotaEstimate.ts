@@ -144,7 +144,7 @@ export function sumQuotaRows(rows: QuotaRow[]) {
   return total;
 }
 export type AccountUsageSnapshot = {
-  status: string; message?: string; fetchedAt?: number;
+  status: string; message?: string; fetchedAt?: number; stale?: boolean;
   primary?: { usedPercent: number; windowMinutes: number; resetsAt?: number } | null;
   secondary?: { usedPercent: number; windowMinutes: number; resetsAt?: number } | null;
 };

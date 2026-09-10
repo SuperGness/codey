@@ -1,9 +1,9 @@
 import type { Profile } from "./App.types";
 
 const OFFICIAL_ROUTE_SHORT_NAME = "官";
-const MAX_ROUTE_SHORT_NAME_CHARACTERS = 2;
+export const MAX_ROUTE_SHORT_NAME_CHARACTERS = 2;
 
-function routeShortNameCharacterCount(value: string) {
+export function routeShortNameCharacterCount(value: string) {
   return Array.from(value.trim()).length;
 }
 

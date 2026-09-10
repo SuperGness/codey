@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { notification } from "antd";
+import { toast } from "@heroui/react";
 import {
   IconCheck,
   IconCircleArrowUp,
@@ -48,7 +48,7 @@ import type {
   PluginMarketplaceStatus,
   Profile,
 } from "./App.types";
-import { Badge, Button, Tag, Tooltip } from "./components/antd";
+import { Badge, Button, Tooltip } from "./components/ui";
 
 const Check = IconCheck;
 const X = IconX;
@@ -128,20 +128,10 @@ export function App({
     useState<FastContextToolsStatus>(UNKNOWN_FAST_CONTEXT_TOOLS_STATUS);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
-  const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(
-    null,
-  );
   const popupContainer = modalContainer ?? null;
-  const getTooltipContainer = useCallback(
-    () => popupContainer ?? portalContainer ?? document.body,
-    [popupContainer, portalContainer],
-  );
   const noticeController = useAppNoticeController();
-  const [cleanupNotification, cleanupNotificationHolder] = notification.useNotification({
-    getContainer: getTooltipContainer,
-    placement: "bottomRight",
-    duration: 5,
-  });
+  // 诊断清理结果用 HeroUI Toast 展示；同一次清理的“进行中 / 结果”共用一条提示，后者替换前者。
+  const cleanupToastKey = useRef<string | null>(null);
   const confirmationController = useConfirmationController();
   const setNotice = noticeController.set;
   const setConfirmation = confirmationController.set;
@@ -889,15 +879,16 @@ export function App({
 
   async function analyzeDiagnosticStorage(target: DiagnosticStorageTarget) {
     await runOperation("clear-diagnostic-storage", async () => {
-      const key = "diagnostic-storage-cleanup";
       const title = target === "trace" ? "Trace 日志" : "Crashpad";
-      cleanupNotification.info({
-        key,
-        duration: 0,
-        className: "cleanup-notification-card",
-        title: `${title}：正在分析并清理`,
+      const replaceCleanupToast = (next: () => string) => {
+        if (cleanupToastKey.current) toast.close(cleanupToastKey.current);
+        cleanupToastKey.current = next();
+      };
+      replaceCleanupToast(() => toast(`${title}：正在分析并清理`, {
         description: "正在统计占用并清理，请稍候…",
-      });
+        isLoading: true,
+        timeout: 0,
+      }));
       try {
         const result = await invoke<DiagnosticStorageCleanup>("clear_diagnostic_storage", { target });
         setStatus((current) => ({
@@ -905,20 +896,16 @@ export function App({
           traceLogWriteProtectionActive: result.traceLogWriteProtectionActive,
         }));
         const incomplete = result.status === "partial" || result.errors.length > 0;
-        cleanupNotification.open({
-          key,
-          className: "cleanup-notification-card",
-          type: incomplete ? "warning" : "success",
-          title: `${title}：${incomplete ? "部分项目未完成" : "分析并清理完成"}`,
+        replaceCleanupToast(() => toast(`${title}：${incomplete ? "部分项目未完成" : "分析并清理完成"}`, {
           description: <DiagnosticCleanupNotice result={result} target={target} />,
-        });
+          variant: incomplete ? "warning" : "success",
+          timeout: 8_000,
+        }));
       } catch (error) {
-        cleanupNotification.error({
-          key,
-          className: "cleanup-notification-card",
-          title: `${title}：清理结果未能确认`,
+        replaceCleanupToast(() => toast.danger(`${title}：清理结果未能确认`, {
           description: `无法确认清理前后占用及清理情况：${errorText(error)}`,
-        });
+          timeout: 8_000,
+        }));
       }
     });
   }
@@ -1059,51 +1046,58 @@ export function App({
         <div className="flex min-w-0 flex-col">
           <div className="flex min-w-0 items-center gap-2">
             <h1 className="m-0 whitespace-nowrap text-base font-bold tracking-[-0.02em] text-[#1d1d1f]">Codey 控制台</h1>
-            <Tag color="volcano" className="header-version-tag">
-              v{status.appVersion || "0.0.1"}
-            </Tag>
-
-            <Tooltip
-              content={updateTooltipText}
-              getPopupContainer={getTooltipContainer}
-              position="bottom"
-            >
-              <span className="header-update-btn-wrap">
-                <Button
-                  size="xs"
-                  className="header-update-btn"
-                  variant={downloadedUpdate ? "default" : hasUpdate ? "brand-outline" : "ghost"}
-                  disabled={isBusy}
-                  aria-label={updateTooltipText}
-                  onClick={() => {
-                    if (downloadedUpdate) {
-                      handleInstallDownloadedUpdate();
-                    } else if (hasUpdate) {
-                      handleDownloadUpdate();
-                    } else {
-                      handleCheckForUpdates();
-                    }
-                  }}
-                >
-                  {isCheckingUpdate || isDownloadingUpdate || isInstallingUpdate ? (
-                    <LoaderCircle className="animate-spin" size={12} aria-hidden="true" />
-                  ) : downloadedUpdate ? (
-                    <IconCheck size={12} aria-hidden="true" />
-                  ) : (
-                    <IconCircleArrowUp size={13} aria-hidden="true" />
-                  )}
-                  {downloadedUpdate ? (
-                    <span>
-                      v{downloadedUpdate.latestVersion} 已下载
-                    </span>
-                  ) : hasUpdate ? (
-                    <span>
-                      v{updateCheck?.latestVersion} 可更新
-                    </span>
-                  ) : null}
-                </Button>
+            <div className="flex items-center gap-1.5">
+              <span className="header-version-badge">
+                v{status.appVersion || "0.0.1"}
               </span>
-            </Tooltip>
+
+              <Tooltip
+                content={updateTooltipText}
+                position="bottom"
+              >
+                <span className="header-update-btn-wrap">
+                  <Button
+                    size="xs"
+                    className={`header-update-btn ${
+                      downloadedUpdate
+                        ? "is-downloaded"
+                        : hasUpdate
+                          ? "has-update"
+                          : "is-idle"
+                    }`}
+                    variant={downloadedUpdate ? "default" : hasUpdate ? "brand-outline" : "ghost"}
+                    disabled={isBusy}
+                    aria-label={updateTooltipText}
+                    onClick={() => {
+                      if (downloadedUpdate) {
+                        handleInstallDownloadedUpdate();
+                      } else if (hasUpdate) {
+                        handleDownloadUpdate();
+                      } else {
+                        handleCheckForUpdates();
+                      }
+                    }}
+                  >
+                    {isCheckingUpdate || isDownloadingUpdate || isInstallingUpdate ? (
+                      <LoaderCircle className="animate-spin" size={12} aria-hidden="true" />
+                    ) : downloadedUpdate ? (
+                      <IconCheck size={12} aria-hidden="true" />
+                    ) : (
+                      <IconCircleArrowUp size={13} aria-hidden="true" />
+                    )}
+                    {downloadedUpdate ? (
+                      <span>
+                        v{downloadedUpdate.latestVersion} 已下载
+                      </span>
+                    ) : hasUpdate ? (
+                      <span>
+                        v{updateCheck?.latestVersion} 可更新
+                      </span>
+                    ) : null}
+                  </Button>
+                </span>
+              </Tooltip>
+            </div>
 
             {dirty && (
               <Badge variant="warning">
@@ -1189,10 +1183,7 @@ export function App({
   );
 
   const appContent = (
-    <main
-      className={`app-shell${embedded ? " embedded" : ""}`}
-      ref={setPortalContainer}
-    >
+    <main className={`app-shell${embedded ? " embedded" : ""}`}>
       <a className="skip-link" href="#codey-settings-content">
         跳至设置内容
       </a>
@@ -1286,7 +1277,6 @@ export function App({
               <PromptOptimizationCard
                 config={config}
                 isBusy={isBusy}
-                popupContainer={popupContainer}
                 subagentModelOptions={subagentModelOptions}
                 onConfigChange={handleConfigChange}
                 onNotice={setNotice}
@@ -1297,8 +1287,6 @@ export function App({
             <div className="subagent-column">
               <SubagentPolicyCard
                 config={config}
-                popupContainer={popupContainer}
-                tooltipContainer={portalContainer}
                 isBusy={isBusy}
                 subagentModelOptions={subagentModelOptions}
                 onConfigChange={handleConfigChange}
@@ -1317,7 +1305,6 @@ export function App({
               cleanupBusy={busy === "clear-diagnostic-storage"}
               onAnalyzeDiagnosticStorage={handleAnalyzeDiagnosticStorage}
               popupContainer={popupContainer}
-              tooltipContainer={portalContainer}
               isBusy={isBusy}
               onConfigChange={handleConfigChange}
               onAddChannel={handleAddNotificationChannel}
@@ -1329,7 +1316,6 @@ export function App({
         </div>
       </div>
 
-      {cleanupNotificationHolder}
       <NoticeToast
         autoDismissEnabled
         controller={noticeController}

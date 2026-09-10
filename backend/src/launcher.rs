@@ -1741,6 +1741,7 @@ impl CodeyRuntime {
         handler: codey_runtime_core::bridge::BridgeHandler,
         trace_log_write_protection_active: &AtomicBool,
         crashpad_pending_stats: CrashpadPendingStatsHandle,
+        account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCache>>,
     ) -> Result<(Self, oneshot::Receiver<()>)> {
         let home = codex_home();
         trace_log_write_protection_active.store(false, Ordering::Release);
@@ -1770,7 +1771,7 @@ impl CodeyRuntime {
         )
         .await?;
         let local_router = if config.local_router_enabled {
-            Some(LocalRouter::start(config).await?)
+            Some(LocalRouter::start_with_usage(config, account_usage_cache).await?)
         } else {
             None
         };

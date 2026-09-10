@@ -41,11 +41,11 @@ test("prompt optimization renders the searchable manual model combobox without r
   );
   assert.match(
     manualComboboxSource,
-    /<AutoComplete/,
+    /<ComboBox[\s\S]*allowsCustomValue/,
   );
   assert.match(
     manualComboboxSource,
-    /onChange=\{onChange\}/,
+    /onInputChange=\{onChange\}/,
   );
   assert.match(
     manualComboboxSource,

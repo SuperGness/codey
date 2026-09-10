@@ -7,6 +7,7 @@ import {
 
 import { invoke } from "../api";
 import { errorText, withTimeout } from "../appUtils";
+import { toast } from "@heroui/react";
 import {
   Button,
   Dialog,
@@ -17,7 +18,7 @@ import {
   DialogTitle,
   Select,
   Switch,
-} from "../components/antd";
+} from "../components/ui";
 import {
   createNotificationChannel,
   getNotificationChannelDefinition,
@@ -49,10 +50,6 @@ function NotificationChannelDialogComponent({
   const [draft, setDraft] = useState<NotificationChannel | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [testResult, setTestResult] = useState<{
-    text: string;
-    tone: "idle" | "pending" | "success" | "error";
-  }>({ tone: "idle", text: "" });
   const isEditing = editingChannel !== null;
   const definition = draft
     ? getNotificationChannelDefinition(draft.kind)
@@ -63,7 +60,6 @@ function NotificationChannelDialogComponent({
       setDraft(null);
       setIsTesting(false);
       setIsSaving(false);
-      setTestResult({ tone: "idle", text: "" });
       return;
     }
     setDraft(
@@ -73,24 +69,17 @@ function NotificationChannelDialogComponent({
     );
     setIsTesting(false);
     setIsSaving(false);
-    setTestResult({ tone: "idle", text: "" });
   }, [editingChannel?.id, open]);
 
   function selectChannel(kind: NotificationChannelKind) {
     if (draft?.kind === kind) return;
     setDraft(createNotificationChannel(kind));
-    resetTestResult();
-  }
-
-  function resetTestResult() {
-    setTestResult({ tone: "idle", text: "" });
   }
 
   function updateDraft(patch: Partial<NotificationChannel>) {
     setDraft((current) =>
       current ? { ...current, ...patch } : current,
     );
-    resetTestResult();
   }
 
   function closeDialog() {
@@ -122,21 +111,19 @@ function NotificationChannelDialogComponent({
       return;
     }
     setIsTesting(true);
-    setTestResult({ tone: "pending", text: "正在发送测试通知…" });
     try {
       await withTimeout(
         invoke("test_notification_channel", { channel: draft }),
         12_000,
         `${definition.addLabel}测试在 12 秒内没有完成，请检查渠道配置和网络`,
       );
-      setTestResult({
-        tone: "success",
-        text: draft.kind === "wechatClaw"
+      toast.success(
+        draft.kind === "wechatClaw"
           ? "iLink 已接受测试消息，请在微信中确认接收"
           : "测试发送成功",
-      });
+      );
     } catch (error) {
-      setTestResult({ tone: "error", text: errorText(error) });
+      toast.danger(errorText(error));
     } finally {
       setIsTesting(false);
     }
@@ -195,15 +182,12 @@ function NotificationChannelDialogComponent({
                   disabled={isEditing || formBusy}
                   aria-labelledby="notification-channel-select-label"
                   optionList={notificationChannelOptions}
-                  dropdownClassName="rounded-[10px]"
                   filter={false}
-                  zIndex={1100}
                   prefix={
                     <span className="grid size-[22px] shrink-0 place-items-center">
                       <SelectedChannelIcon size={20} aria-hidden="true" />
                     </span>
                   }
-                  getPopupContainer={() => popupContainer ?? document.body}
                   renderOptionItem={(option) => {
                     const optionDefinition = notificationChannelDefinitions.find(
                       (item) => item.kind === option.value,
@@ -252,16 +236,10 @@ function NotificationChannelDialogComponent({
               <div className="notification-dialog-test">
                 <div>
                   <strong>测试发送</strong>
-                  <span
-                    className={`inline-result ${testResult.tone}`}
-                    role="status"
-                    aria-live="polite"
-                  >
-                    {testResult.tone === "error"
-                      ? "测试失败，请检查配置"
-                      : testResult.text || (canTest
-                        ? "可先测试，也可直接保存"
-                        : "填写配置后可测试")}
+                  <span className="inline-result">
+                    {canTest
+                      ? "可先测试，也可直接保存"
+                      : "填写配置后可测试"}
                   </span>
                 </div>
                 <Button
@@ -280,11 +258,6 @@ function NotificationChannelDialogComponent({
                 </Button>
               </div>
             </div>
-            {testResult.tone === "error" ? (
-              <p className="notification-test-error" role="alert">
-                {testResult.text}
-              </p>
-            ) : null}
             <DialogFooter>
               <Button variant="outline" disabled={formBusy} onClick={closeDialog}>
                 取消

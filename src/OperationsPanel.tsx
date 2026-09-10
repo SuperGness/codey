@@ -21,8 +21,8 @@ import type {
   PluginMarketplaceStatus,
   RuntimeStatus,
 } from "./App.types";
-import { Collapse } from "antd";
-import { Badge, Button, Card } from "./components/antd";
+import { Card, Disclosure } from "@heroui/react";
+import { Badge, Button } from "./components/ui";
 import { flushCardClass } from "./uiClasses";
 import {
   buildEnabledOptimizationFeatures,
@@ -477,10 +477,10 @@ function OperationsPanelComponent({
           </div>
         </div>
 
-        <Collapse bordered={false} activeKey={activeCardTitle ? ["details"] : []} items={[{
-          key: "details", label: null, showArrow: false,
-          styles: { header: { display: "none" }, body: { padding: 0 } },
-          children: <>
+        {/* 详情面板只做展开收起动画，没有独立触发器：标题卡片本身就是开关。 */}
+        <Disclosure isExpanded={Boolean(activeCardTitle)} className="border-0 p-0">
+          <Disclosure.Content>
+          <Disclosure.Body className="p-0">
           {expandedStatusCard && ExpandedStatusIcon && (
             <div
               className="operations-expanded-grid"
@@ -620,8 +620,9 @@ function OperationsPanelComponent({
               </article>
             </div>
           )}
-          </>,
-        }]} />
+          </Disclosure.Body>
+          </Disclosure.Content>
+        </Disclosure>
 
       </Card>
     </section>

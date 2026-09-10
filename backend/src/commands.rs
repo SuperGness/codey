@@ -126,7 +126,7 @@ pub struct AppState {
     #[cfg(test)]
     pub webhook_http_client_override: Option<reqwest::Client>,
     wechat_claw_login_http_client: reqwest::Client,
-    account_usage_cache: Mutex<account_usage::AccountUsageCache>,
+    account_usage_cache: Arc<Mutex<account_usage::AccountUsageCache>>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     runtime_operation: Mutex<()>,
     diagnostic_storage_operation: Mutex<()>,
@@ -213,7 +213,7 @@ impl Default for AppState {
             #[cfg(test)]
             webhook_http_client_override: None,
             wechat_claw_login_http_client: wechat_claw_login_http_client(),
-            account_usage_cache: Mutex::new(account_usage::AccountUsageCache::default()),
+            account_usage_cache: Arc::new(Mutex::new(account_usage::AccountUsageCache::default())),
             runtime: Mutex::new(None),
             runtime_operation: Mutex::new(()),
             diagnostic_storage_operation: Mutex::new(()),
@@ -891,6 +891,22 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         "query_official_account_usage" => match optional_argument::<bool>(&args, "forceRefresh") {
             Ok(force) => Ok(query_official_account_usage(state, force.unwrap_or(false)).await),
             Err(error) => Err(error),
+        },
+        "store_official_account_usage" => match (
+            argument::<u64>(&args, "authGeneration"),
+            argument::<account_usage::AccountUsageSnapshot>(&args, "snapshot"),
+        ) {
+            (Ok(generation), Ok(snapshot)) => {
+                if !official_account_available_for_usage(&*state.config.read().await) {
+                    Err("当前没有可用的官方账号".to_string())
+                } else {
+                    state.account_usage_cache.lock().await
+                        .store_displayed_snapshot(codex_home(), generation, snapshot)
+                        .map(|()| json!({"status": "ok"}))
+                        .map_err(|error| error.to_string())
+                }
+            }
+            (Err(error), _) | (_, Err(error)) => Err(error),
         },
         "save_codey_config" => match codey_config_save_input(&args) {
             Ok(input) => save_codey_config_input(state, input).await,

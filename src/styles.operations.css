@@ -102,15 +102,6 @@
   margin-right: 4px;
 }
 
-.operations-running-badge.ant-tag-success,
-.operations-actions .ant-tag.ant-tag-success,
-.operations-expanded-card .ant-tag.ant-tag-success {
-  background: rgba(52, 199, 89, 0.13) !important;
-  color: #248a3d !important;
-  border-color: transparent !important;
-  font-weight: 500;
-}
-
 .operations-status-chips {
   display: flex;
   flex-direction: row;

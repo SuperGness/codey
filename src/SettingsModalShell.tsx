@@ -1,6 +1,7 @@
-import type { ReactNode } from "react";
-import { Modal } from "antd";
-
+import { useEffect, useState, type ReactNode } from "react";
+import { Modal } from "@heroui/react";
+import { UNSAFE_PortalProvider } from "react-aria";
+import { useToastContainer } from "./components/ui";
 
 type SettingsModalShellProps = {
   afterClose?: () => void;
@@ -52,6 +53,13 @@ export function CodeyBrandMark() {
   );
 }
 
+// HeroUI 的 Modal 会等退出动画结束后再卸载对话框内容，
+// 借助子节点的卸载时机通知调用方“已完全关闭”。
+function AfterClose({ onUnmount }: { onUnmount?: () => void }) {
+  useEffect(() => () => onUnmount?.(), [onUnmount]);
+  return null;
+}
+
 export function SettingsModalShell({
   afterClose,
   children,
@@ -61,51 +69,54 @@ export function SettingsModalShell({
   title,
   visible,
 }: SettingsModalShellProps) {
-  return (
-    <Modal
-      open={visible}
-      onCancel={onCancel}
-      afterClose={afterClose}
-      mask={{ closable: false }}
-      keyboard={false}
-      footer={null}
-      closable={header === undefined}
-      title={header ?? title}
-      getContainer={container ?? undefined}
-      width={1040}
-      centered
-      styles={{
-        container: {
-          height: "min(860px, calc(100dvh - 24px))",
-          display: "flex",
-          flexDirection: "column",
-          padding: 0,
-          overflow: "hidden",
-          borderRadius: 14,
-        },
-        header: {
-          padding: "12px 20px",
-          marginBottom: 0,
-          borderTopLeftRadius: 14,
-          borderTopRightRadius: 14,
-          position: "relative",
-          zIndex: 10,
-          borderBottom: "1px solid rgba(0, 0, 0, 0.06)",
-          boxShadow: "0 3px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02)",
-        },
-        body: {
-          display: "flex",
-          flex: 1,
-          minHeight: 0,
-          flexDirection: "column",
-          overflow: "hidden",
-          borderBottomLeftRadius: 14,
-          borderBottomRightRadius: 14,
-        },
+  const [toastHostEl, setToastHostEl] = useState<HTMLDivElement | null>(null);
+  useToastContainer(toastHostEl, visible);
+
+  // 外壳不响应遮罩点击与 Esc；关闭只能通过头部按钮，避免误触丢失未保存的更改。
+  // 开关状态直接交给 Backdrop（无触发按钮的受控用法）。
+  const modal = (
+    <Modal.Backdrop
+      isDismissable={false}
+      isKeyboardDismissDisabled
+      isOpen={visible}
+      onOpenChange={(open) => {
+        if (!open) onCancel();
       }}
-      className="settings-modal-shell"
+      className="p-0"
     >
-      {children}
-    </Modal>
+        <Modal.Container placement="center" className="p-3 sm:p-3">
+          <Modal.Dialog
+            className="settings-modal-shell relative flex h-[min(860px,calc(100dvh-24px))] w-[min(1040px,calc(100vw-24px))] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[14px] p-0 text-sm"
+            aria-label="Codey 配置"
+          >
+            <AfterClose onUnmount={afterClose} />
+            {header !== undefined ? (
+              <div className="settings-modal-header relative z-10 flex flex-none items-center px-5 py-3">
+                {header}
+              </div>
+            ) : (
+              <>
+                <Modal.Header className="settings-modal-header relative z-10 flex-none px-5 py-3">
+                  <Modal.Heading className="text-base font-semibold text-foreground">{title}</Modal.Heading>
+                </Modal.Header>
+                <Modal.CloseTrigger aria-label="关闭配置" className="end-4 top-3" />
+              </>
+            )}
+            <div className="settings-modal-body flex min-h-0 flex-1 flex-col overflow-hidden relative">
+              <div
+                ref={setToastHostEl}
+                className="toast-portal-host pointer-events-none absolute inset-x-0 top-0 z-[100] h-0"
+                aria-hidden="true"
+              />
+              {children}
+            </div>
+          </Modal.Dialog>
+        </Modal.Container>
+    </Modal.Backdrop>
+  );
+  return container ? (
+    <UNSAFE_PortalProvider getContainer={() => container}>{modal}</UNSAFE_PortalProvider>
+  ) : (
+    modal
   );
 }

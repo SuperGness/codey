@@ -330,6 +330,7 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
         handler,
         &state.trace_log_write_protection_active,
         state.crashpad_pending_stats.clone(),
+        Arc::clone(&state.account_usage_cache),
     )
     .await
     {

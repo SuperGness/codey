@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="zh-CN">
   <meta charset="utf-8" />
-  <title>Ant Design 界面回归验证</title>
+  <title>HeroUI 界面回归验证</title>
   <div id="root"></div>
   <script type="module">
     import React from "react";
@@ -38,6 +38,34 @@
       button.onclick = () => window.__codeySettingsOverlay.open();
       document.body.append(button);
       window.__codeySettingsOverlay.open();
+      if (new URLSearchParams(location.search).get("check") === "dialog-motion") {
+        const shadow = document.querySelector("#codey-settings-overlay-host").shadowRoot;
+        const nextFrame = () => new Promise(requestAnimationFrame);
+        const deadline = performance.now() + 5000;
+        let trigger;
+        while (!(trigger = shadow.querySelector('button[aria-label="删除Telegram通知渠道"]'))) {
+          if (performance.now() > deadline) throw new Error("确认弹窗入口未加载");
+          await nextFrame();
+        }
+        trigger.click();
+        const frames = [];
+        const start = performance.now();
+        while (performance.now() - start < 600) {
+          await nextFrame();
+          const dialog = shadow.querySelector(".confirmation-dialog");
+          if (!dialog) continue;
+          const backdrop = dialog.closest(".modal__backdrop");
+          const rect = dialog.getBoundingClientRect();
+          frames.push({ center: rect.x + rect.width / 2, overflow: backdrop.scrollWidth > backdrop.clientWidth || backdrop.scrollHeight > backdrop.clientHeight });
+        }
+        const drift = Math.max(...frames.map(frame => frame.center)) - Math.min(...frames.map(frame => frame.center));
+        const passed = frames.length > 2 && drift < 0.5 && frames.every(frame => !frame.overflow);
+        const result = document.createElement("pre");
+        result.id = "motion-result";
+        result.textContent = `${passed ? "PASS" : "FAIL"}：${frames.length} 帧，横向位移 ${drift.toFixed(3)}px`;
+        shadow.querySelector(".confirmation-dialog").append(result);
+        if (!passed) throw new Error(result.textContent);
+      }
     }
   </script>
 </html>

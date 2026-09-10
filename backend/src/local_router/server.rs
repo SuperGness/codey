@@ -96,13 +96,30 @@ pub(crate) struct LocalRouter {
 }
 
 impl LocalRouter {
+    #[cfg(test)]
     pub(crate) async fn start(config: &CodeyConfig) -> Result<Self> {
         Self::start_with_logger(config, Arc::new(RouteRequestLogController::new())).await
     }
 
+    #[cfg(test)]
     pub(super) async fn start_with_logger(
         config: &CodeyConfig,
         request_log: Arc<RouteRequestLogController>,
+    ) -> Result<Self> {
+        Self::start_with_logger_and_usage(config, request_log, Arc::default()).await
+    }
+
+    pub(crate) async fn start_with_usage(
+        config: &CodeyConfig,
+        account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCache>>,
+    ) -> Result<Self> {
+        Self::start_with_logger_and_usage(config, Arc::new(RouteRequestLogController::new()), account_usage_cache).await
+    }
+
+    async fn start_with_logger_and_usage(
+        config: &CodeyConfig,
+        request_log: Arc<RouteRequestLogController>,
+        account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCache>>,
     ) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -168,9 +185,7 @@ impl LocalRouter {
                 .build()
                 .context("创建 Codey 本地路由 HTTP 客户端失败")?,
             official_auth_path,
-            account_usage_cache: tokio::sync::Mutex::new(
-                crate::account_usage::AccountUsageCache::default(),
-            ),
+            account_usage_cache,
             official_auth_cache: Arc::new(Mutex::new(
                 crate::account_usage::OfficialAuthCache::default(),
             )),
@@ -418,7 +433,7 @@ pub(crate) struct RouterServer {
     pub(crate) native_history_cache: Arc<Mutex<NativeHistoryCache>>,
     pub(crate) client: reqwest::Client,
     pub(crate) official_auth_path: PathBuf,
-    pub(crate) account_usage_cache: tokio::sync::Mutex<crate::account_usage::AccountUsageCache>,
+    pub(crate) account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCache>>,
     pub(crate) official_auth_cache: Arc<Mutex<crate::account_usage::OfficialAuthCache>>,
     pub(crate) request_log: Arc<RouteRequestLogController>,
 }

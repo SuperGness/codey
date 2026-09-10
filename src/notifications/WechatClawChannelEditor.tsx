@@ -7,7 +7,7 @@ import {
 
 import { invoke } from "../api";
 import { errorText } from "../appUtils";
-import { Button, Input } from "../components/antd";
+import { Button, Input } from "../components/ui";
 import { inputShellClass, insetInputClass } from "../uiClasses";
 import type { NotificationChannelEditorProps } from "./types";
 
@@ -254,36 +254,6 @@ function WechatClawChannelEditorComponent({
           />
         </div>
       </label>
-
-      {hasBinding || channel.contextTokenConfigured ? (
-        <div className="-mt-[7px] flex justify-end">
-          <Button
-            className="text-[#8e8e93] hover:text-[#d70015]"
-            variant="ghost"
-            size="xs"
-            disabled={disabled}
-            onClick={() => {
-              setLogin(null);
-              onChange({
-                url: "",
-                urlConfigured: false,
-                clearUrl: false,
-                botToken: "",
-                botTokenConfigured: false,
-                clearBotToken: true,
-                contextToken: "",
-                contextTokenConfigured: false,
-                clearContextToken: true,
-                getUpdatesBuf: "",
-                chatId: "",
-                sessionStatus: "active",
-              });
-            }}
-          >
-            解除已保存绑定
-          </Button>
-        </div>
-      ) : null}
     </>
   );
 }

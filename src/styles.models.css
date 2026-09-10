@@ -241,15 +241,6 @@
   gap: 2px;
 }
 
-.route-item-manage-actions .ant-btn {
-  padding: 0 4px;
-  height: 24px;
-  min-width: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
 .route-item-badges {
   display: inline-flex;
   align-items: center;

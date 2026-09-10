@@ -1,5 +1,4 @@
 import { memo, useEffect, useMemo, useState } from "react";
-import { Button as AntButton, Input as AntInput } from "antd";
 import {
   IconAlertTriangle as AlertTriangle,
   IconCheck as Check,
@@ -9,6 +8,7 @@ import {
   IconRefresh as RefreshCw,
   IconSearch,
   IconTrash as Trash2,
+  IconX,
 } from "@tabler/icons-react";
 
 import type { Confirmation, ModelContextConfig, ModelState } from "./App.types";
@@ -30,8 +30,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  Input,
   Switch,
-} from "./components/antd";
+} from "./components/ui";
 
 type ModelPickerDialogProps = {
   open: boolean;
@@ -177,20 +178,44 @@ function ModelPickerDialogComponent({
             aria-label="当前线路支持 auto-review"
           />
         </div>}
-        <div className="mt-3">
-          <AntInput.Search
+        <div className="mt-3 flex items-center gap-2">
+          <Input
+            className="min-w-0 flex-1"
             value={customModelInput}
             onChange={(event) => onCustomModelInputChange(event.target.value)}
-            onSearch={(value, _event, info) => { if (!isBusy && info?.source !== "clear" && value.trim()) onAddCustomModel(); }}
-            enterButton={<AntButton type="primary" disabled={isBusy || !customModelInput.trim()} icon={<Plus size={16} aria-hidden="true" />}>添加</AntButton>}
-            allowClear
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !isBusy && customModelInput.trim()) {
+                event.preventDefault();
+                onAddCustomModel();
+              }
+            }}
+            leftSection={<IconSearch size={15} className="text-muted" aria-hidden="true" />}
+            rightSection={customModelInput ? (
+              <button
+                type="button"
+                className="flex size-5 cursor-pointer items-center justify-center rounded-full text-muted hover:bg-black/5 hover:text-foreground"
+                onClick={() => onCustomModelInputChange("")}
+                disabled={isBusy}
+                aria-label="清空搜索"
+              >
+                <IconX size={12} aria-hidden="true" />
+              </button>
+            ) : undefined}
             placeholder="搜索模型，或输入模型 ID 添加"
             spellCheck={false}
             aria-label="搜索或添加模型"
             aria-invalid={Boolean(modelInputError)}
-            status={modelInputError ? "error" : undefined}
+            error={Boolean(modelInputError)}
             disabled={isBusy}
           />
+          <Button
+            className="shrink-0"
+            disabled={isBusy || !customModelInput.trim()}
+            onClick={onAddCustomModel}
+          >
+            <Plus size={16} aria-hidden="true" />
+            添加
+          </Button>
         </div>
         {modelInputError && (
           <p className="mt-1.5 text-[11px] leading-[1.45] text-[#d70015]" role="alert">{modelInputError}</p>

@@ -22,16 +22,16 @@
 
 ## 官方线路额度估算
 
-- `QuotaEstimateDialog.tsx` 复用现有 Dialog、LinkButton 和 Ant Design Table。仅请求日志 header 提供周限额度估算按钮，配置页不再提供入口；提示集中在一个 Alert，详细说明使用原生 details 折叠；表格合并档位与上下文及计价依据，并将 Token、缓存、费用明细和额度估算各自分组展示，仅以现有 `officialAccountAvailable === true` 官方登录状态控制显示；删除线路名称及供应商分组旧入口，不依赖 profile、分组方式或额度显示开关。独立日志页的 `RequestLogCatalog.officialAccountAvailable` 来自后端登录探测结果，`request_log_catalog_exposes_login_status_independently_of_profiles` 覆盖有官方配置但未登录和已登录无保存线路的目录序列化。弹窗固定统计官方账号 `openai` 的当前周周期全部模型，不沿用日志筛选时间。关闭或刷新弹窗不修改原页面筛选和记录。
+- `QuotaEstimateDialog.tsx` 复用现有 Dialog 和 HeroUI Table。弹窗支持宽屏自适应布局（`sm:w-[min(1240px,calc(100vw-32px))]`），移除冗余的底部 footer 区域（由右上角关闭按钮及遮罩接管关闭），并在 `DialogContent` 中支持自定义宽度覆盖默认的 480px 限制。仅请求日志 header 提供周限额度估算按钮，配置页不再提供入口；提示集中在一个 Alert，详细说明使用原生 details 折叠；表格合并档位与上下文及计价依据，并将 Token、缓存、费用明细和额度估算各自分组展示，仅以现有 `officialAccountAvailable === true` 官方登录状态控制显示；删除线路名称及供应商分组旧入口，不依赖 profile、分组方式或额度显示开关。独立日志页的 `RequestLogCatalog.officialAccountAvailable` 来自后端登录探测结果，`request_log_catalog_exposes_login_status_independently_of_profiles` 覆盖有官方配置但未登录和已登录无保存线路的目录序列化。弹窗固定统计官方账号 `openai` 的当前周周期全部模型，不沿用日志筛选时间。关闭或刷新弹窗不修改原页面筛选和记录。
 - `quotaEstimate.ts` 内置 OpenAI Standard、Fast、Batch、Flex 各档独立 Token 单价，来源为 https://developers.openai.com/api/docs/pricing 及对应模型文档，2026-09-09 核对；GPT-5.6 Sol 使用官方当日公开促销价。2026-09-10 按用户要求将 gpt-6-astra 所有档位及长短上下文的缓存读取单价设为已核对价格的 2 倍，弹窗标注为自定义规则；其他费率保持原值。金额为 USD API 等值估算，不是订阅真实扣费。按模型、档位、长短上下文、计价依据分别聚合；Fast 不使用统一倍数。未知档位或缺少对应费率时保留用量，金额显示不可计价，合计排除并警告；全部未计价时结果显示不可计算。新增价格需重新核对官方来源。
 - 请求日志 schema 7 增加 `requested_service_tier` 和 `service_tier`，对外为 `requestedServiceTier` / `serviceTier`。共享 Responses 代理链路记录请求档位；JSON、SSE、WebSocket 响应记录实际档位，实际响应优先，priority/fast 等价，default/standard 等价。仅有明确请求档位时单独标注推定；未记录档位或仅有 auto 时按默认 Standard 计价，来源单独标为默认档位（未记录），计入推定请求数；其他未知响应档位不猜价。旧 SQLite 库写入时迁移，迁移前只读查询以 NULL 补列；NDJSON 保留相同字段。第三方协议转换可能缺失实际档位；重启开发版后才采集新增字段，历史记录不补造。
 - 通过 `query_route_request_log_stats` 读取日志健康状态，再复用 `query_route_request_logs` 每页 100 条游标分页，逐请求计价后按模型及各计费规则分别累加，避免分组统计 50 条上限及汇总后无法区分长上下文的问题。关闭后停止后续分页并忽略迟到响应；分页失败不提交部分结果。大量历史记录查询可能较慢，必要时再改后端聚合；分页期间发生日志补写或清理时不保证跨页事务快照，更新时间表示本轮读取完成时间。
 - 缓存读取与写入视为输入 Token 的子集，按请求限制到输入总量，防止重复计费；新版 `usage.input_tokens_details.cache_write_tokens` 优先于旧写入字段，并由有界流式投影保留。Chat 与 Anthropic 转 Responses 时保留缓存写入量，缺失字段不生成伪零值；额度表按模型和合计标注未记录写入量的请求数，缺失部分仍按普通输入价估算，额外写入费用可能未计入。读写费用单独展示，所在档位没有独立缓存价时使用该档位输入价。缓存节省仅作为参考，不从总价重复扣除。支持长上下文的模型单请求输入超过 272,000 时使用该档长价；未公布长价的组合保持未计价，不借用 Standard 价格。输出包含推理 Token，不另加一次。
 - 额度估算不使用地区规则：不按上游域名分组、不加收地区费用、不因地区拒绝计价。日志缺少工具调用完整计量、搜索内容特殊计价、容器容量与时长、账户存储数据，因此这些费用尚未计入，弹窗明确说明。
-- `renderer-inject.js` 提供 `__codeyReadQuotaAccountUsage`，优先复用开启显示时 60 秒内且周窗未过期的 `accountUsageLastResult`；配置变化清除复用数据。关闭显示、数据过期或主动刷新时调用 `query_official_account_usage({forceRefresh:true})`，错误时沿用 AppServer 通用额度回退，查询不启用显示或轮询。独立日志页通过同名认证 POST API 主动获取。后端共用现有缓存实现，强制刷新绕过成功缓存但保留失败退避；原 `/account/usage` 仍遵守显示开关。
+- `renderer-inject.js` 提供 `__codeyReadQuotaAccountUsage`，优先复用开启显示时 60 秒内且周窗未过期的结果。主程序与独立日志路由共用同一个 `Arc<Mutex<AccountUsageCache>>`，成功缓存保留 60 秒。AppServer 通用额度回退结果通过认证 bridge 的 `store_official_account_usage` 同步到该缓存，保留 `fetchedAt`，校验窗口数值、同步时间和 `authGeneration`；auth.json 指纹改变时清空缓存并拒绝旧查询的回写。普通打开传递 `forceRefresh:false`，手动刷新才绕过成功缓存，仍保留失败退避。刷新失败但本周快照有效时返回 `stale:true` 和提示，日志截止时间仍使用原快照时间；跨周或账号变化不复用。查询不启用额度显示或轮询。
 - 从 `primary/secondary` 选取 `windowMinutes=10080` 的周窗，使用官方 `usedPercent`，上次重置 = `resetsAt × 1000 − 7天`，请求截止 = `fetchedAt × 1000`；区分秒与毫秒，校验比例、更新时间和周期边界。缺少周窗、数据无效或已经重置时提示错误，不回退到手填比例或最近24小时。
 - 设本周期已记录消耗为 C、从上次重置到额度更新时间的时长为 T、官方已用比例为 p：预估周限 L = C / p，当前预估剩余 = L − C；按当前速度预计的整周消耗 W = C × 7 天 / T 单独展示，不用于周限反推。p 为 0 时周限及剩余显示不可计算。官方比例可能包含其他设备或渠道用量，缺失日志和跨账号历史可能使反推不准确，界面明确提示。
-- 缺失用量按 0，已知输入或输出仍分别计费；不按采样率补推。计算保留原始精度，金额显示 4 位、Token 显示整数、占比显示 2 位。`tests/antd-browser.html?view=quota` 提供大数值、缺失数据与未计价模型的分组布局预览；`node --test tests/quota-estimate.test.mjs` 覆盖各档独立价格、Fast 回退与推定、缓存读写、长上下文边界与未公布费率、缺失数据、未知模型、比例边界、周换算、完整分页、异常与取消。`cargo test -p codey --lib --no-default-features request_log` 覆盖档位迁移、字段往返及分块流式提取。
+- 缺失用量按 0，已知输入或输出仍分别计费；不按采样率补推。计算保留原始精度，金额显示 4 位、Token 显示整数、占比显示 2 位。`tests/ui-browser.html?view=quota` 提供大数值、缺失数据与未计价模型的分组布局预览；`node --test tests/quota-estimate.test.mjs` 覆盖各档独立价格、Fast 回退与推定、缓存读写、长上下文边界与未公布费率、缺失数据、未知模型、比例边界、周换算、完整分页、异常与取消。`cargo test -p codey --lib --no-default-features request_log` 覆盖档位迁移、字段往返及分块流式提取。
 
 - Fast WebSocket 转发核验：`websocket_service_tier_survives_forwarding_and_connection_reuse` 使用本地模拟上游，确认新建及复用同一连接时，`priority → default → priority` 请求档位逐次原样送达，上游返回的 `default` 也原样传回客户端。通过 `cargo test -p codey --lib --no-default-features websocket_service_tier_survives_forwarding_and_connection_reuse` 与 `cargo test -p codey --lib --no-default-features billing_tiers` 验证。此测试覆盖当前代码的字段透传，不代表历史运行实例的原始发送内容，也不能验证官方账号权限或服务端调度。
 
@@ -526,7 +526,7 @@ cc-switch（farion1231/cc-switch，`src-tauri/src/proxy`）对照结论，仅基
 
 ### 控制台与页面注入
 
-`ModelSection` 按 `visibleProfiles` 渲染紧凑单列供应商列表（无独立卡片边框与内边距浪费，通过列表项下边框分割），线路信息、管理按钮、状态和模型共用一个滚动区域。标题行整合线路名称与状态徽章，官方额度开关与操作按钮右对齐，模型标签内联紧凑展示。禁用线路保留编辑入口，但不展示可选模型或计入模型总数；关闭本地路由后仅展示当前线路，保留同步和官方额度开关。排序支持拖动及手柄上的上下方向键。控制台各模块的行内微操作按钮（如线路列表与通知渠道卡片的编辑、删除操作）采用统一无边框纯图标规范（26px × 26px，透明背景，编辑统一为 macOS 品牌蓝 `#007aff`、删除为警示红 `#ff3b30`，悬浮呈现微透明背景色，操作间隙收窄至 2px），以保持轻盈扁平的 macOS 交互一致性。模型配置弹框（`ModelPickerDialog`）将 Auto Review 线路能力置顶，搜索框下移紧邻模型操作栏，全选采用带半选支持的标准 Checkbox，且模型上下文预算（`ModelContextFields`）采用旋转折叠徽章与卡片式参数面板。开发预览入口为 `/codey/tests/antd-browser.html`，使用 mock 数据验证默认模型切换、排序、禁用线路及 600px 窄窗口布局。
+`ModelSection` 按 `visibleProfiles` 渲染紧凑单列供应商列表（无独立卡片边框与内边距浪费，通过列表项下边框分割），线路信息、管理按钮、状态和模型共用一个滚动区域。标题行整合线路名称与状态徽章，官方额度开关与操作按钮右对齐，模型标签内联紧凑展示。禁用线路保留编辑入口，但不展示可选模型或计入模型总数；关闭本地路由后仅展示当前线路，保留同步和官方额度开关。排序支持拖动及手柄上的上下方向键。控制台各模块的行内微操作按钮（如线路列表与通知渠道卡片的编辑、删除操作）采用统一无边框纯图标规范（26px × 26px，透明背景，编辑统一为 macOS 品牌蓝 `#007aff`、删除为警示红 `#ff3b30`，悬浮呈现微透明背景色，操作间隙收窄至 2px），以保持轻盈扁平的 macOS 交互一致性。模型配置弹框（`ModelPickerDialog`）将 Auto Review 线路能力置顶，搜索框下移紧邻模型操作栏，全选采用带半选支持的标准 Checkbox，且模型上下文预算（`ModelContextFields`）采用旋转折叠徽章与卡片式参数面板。开发预览入口为 `/codey/tests/ui-browser.html`，使用 mock 数据验证默认模型切换、排序、禁用线路及 600px 窄窗口布局。
 
 cdp.rs 负责准备嵌入资源、安装桥接、首次注入和健康复核。src/overlay.tsx 挂载 React 控制台；public/ 中的脚本分别处理模型、插件、会话、提示词和平台增强。
 
@@ -1125,21 +1125,31 @@ git diff --check
 
 ## UI 组件与验证
 
-前端统一使用 `antd` 6.6.2。共用业务控件位于 `src/components/antd`；模型选择器、表格、折叠面板和弹窗使用 Ant Design 原生组件。`UiProvider` 配置简体中文，并使用 `@ant-design/cssinjs` 的 `StyleProvider` 将动态样式写入对应的 ShadowRoot；内嵌弹层挂载在 overlay 的容器内。历史组件目录、依赖、依赖修补和控件覆盖样式已删除，业务布局样式保留。
+前端统一使用 HeroUI 3（`@heroui/react` + `@heroui/styles`，底层为 React Aria Components 与 Tailwind CSS 4）。共用业务控件位于 `src/components/ui`：按钮语义变体、状态徽章（Chip）、输入框 / 密码框（Input、InputGroup）、`optionList` 形式的下拉（Select；`filter` 为真时为带搜索框的 Autocomplete）、复选框、开关以及受控对话框（Modal）。模型选择器、表格、折叠面板、抽屉、分页、提示、Toast 等直接使用 HeroUI 原生组件。`UiProvider` 提供简体中文 `I18nProvider`、置顶的 `ToastProvider`（`placement="top"`），并通过 react-aria 的 `UNSAFE_PortalProvider` 把所有弹层（对话框、下拉、提示、Toast）统一挂到 overlay 的弹层容器；业务组件不再各自指定 `getPopupContainer` 或 z-index，只有对话框保留 `container` 属性用于按需覆盖挂载点。连通性测试、通知渠道测试、模型列表获取及诊断清理结果均统一使用顶部 Toast 反馈；Toast 通过 `ToastContainerContext` 栈动态挂载至当前处于前台的弹窗（`SettingsModalShell` 或 `DialogContent` 嵌套对话框）顶部内部容器，避免因视口居中导致 Toast 溢出到外层遮罩。
 
-`src/tailwind.css` 声明 theme、base、antd、components、utilities 样式层级；`StyleProvider layer` 让组件库样式服从该顺序。模型选择器通过数字形式的 `popupMatchSelectWidth` 设置弹层宽度，不能设为 `false`，否则会关闭虚拟滚动。两行模型选项的 `listItemHeight` 与行高一致，保留完整搜索及线路分组。
+`src/tailwind.css` 通过 `@import "@heroui/styles"` 引入 Tailwind 与 HeroUI 分层样式，并在 theme 层覆盖 `--accent`、`--danger`、`--success`、`--warning` 等语义色为 Codey 品牌色。HeroUI 主题变量声明在 `:root` / `[data-theme]` 上，ShadowRoot 内没有 `:root`，因此 overlay 在 `#codey-overlay-root` 与 `#codey-overlay-modal-container` 上设置 `data-theme="light"`，并在挂载前调用 `react-stately/private/flags/flags` 的 `enableShadowDOM()`，让 react-aria 的焦点、外部点击与 aria-hide 逻辑感知 Shadow DOM（该路径与 react-aria 共用同一模块实例，公开的 `@react-stately/flags` 包会是另一份副本，不能替代）。项目自有的 `src/styles*.css` 不分层，优先级高于 HeroUI 组件层，可用结构选择器（如 `.subagent-table th`）微调布局，不再保留任何组件库类名覆盖。
 
-`tests/antd-controls.test.mjs` 检查输入值、密码可见性、复选框、禁用状态、单一组件库依赖及内嵌样式容器。
+`patches/react-aria@3.52.1.patch`（由 `pnpm patch` 生成，在 `pnpm-workspace.yaml` 的 `patchedDependencies` 中登记）修复 react-aria `ariaHideOutside` 在 Shadow DOM 模式下的一个缺陷：它为 ShadowRoot 额外创建的 MutationObserver 没有随观察器栈一起断开或恢复，导致在内嵌设置外壳（本身是 Modal）里打开的下拉、提示、嵌套对话框刚挂载就被外层标记为 `inert`，无法获得焦点与点击。补丁只让这些 ShadowRoot 观察器与主观察器共用同一套 `observe / disconnect` 生命周期，独立页面行为不变。升级 react-aria 时需要确认上游是否已修复，再决定是否保留补丁。另一处 Shadow DOM 限制是 react-aria 的插槽 id 检测依赖 `document.getElementById`，因此共用对话框显式设置标题 / 描述 id 并以 `aria-labelledby` / `aria-describedby` 关联。
+
+`src/shadowStyles.ts` 在内嵌入口把编译后样式的 `:root` 映射为 `:host`，使 HeroUI 基础变量与 Tailwind 派生变量在同一节点解析；同时复用 Tailwind `properties` 层生成的初始值，绕过 Chromium 在 ShadowRoot 内不注册 `@property` 的限制。否则下拉弹层的 `--shadow-overlay`、圆角和控件阴影会失效。样式仅在 ShadowRoot 内生效，不向 Codex 文档注册全局属性。`tests/shadow-styles-browser.html` 将 6 类控件与隔离 iframe 中的独立页面样式对照，并检查弹层和输入焦点轮廓。
+
+共用 `DialogContent` 的入场缩放从 95% 到 100%，避免 HeroUI 默认 105% 缩放将整屏定位容器撑出临时滚动条，导致动画结束时横向跳动。`tests/ui-browser.html?check=dialog-motion` 自动打开 Telegram 删除确认框并逐帧检查中心位置与滚动溢出，不执行删除。
+
+运行时验证可用 Chrome 无头模式加载 `tests/ui-browser.html`（内嵌 Shadow DOM 入口）、`?view=logs` 与 `tests/model-combobox-browser.html`，通过 DevTools 协议模拟点击线路编辑、协议下拉、子代理模型搜索、清理 Toast、日志抽屉、筛选下拉、分页与删除确认，检查控制台没有 react-aria / HeroUI 警告；样式覆盖层级正确的标志是 ShadowRoot 内 `.button--primary` 的背景色解析为品牌色。
+
+模型选择器（`ModelCombobox`）基于 HeroUI Autocomplete：搜索框位于弹层内，线路分组用 `ListBox.Section`，`Virtualizer` + `ListLayout` 固定 52px 双行选项高度以支撑万条模型；手动模型输入（`ManualModelCombobox`）基于 ComboBox 的 `allowsCustomValue`。请求日志表格与子代理角色表格使用 HeroUI Table（React Aria 表格语义，行激活通过 `onRowAction`），分页由 HeroUI Pagination 组合件加页大小 Select 单行并排组成（Pagination 设置为 `width: auto` 避免 HeroUI 默认全宽破坏右侧水平流，并在右侧容器消除换行，保证与每页条数下拉对齐于同一水平行），游标翻页语义不变。请求日志表格与详情抽屉的上游传输协议标签按协议类型（HTTP 柔和蓝、SSE 柔和绿、WS 柔和紫、GRPC 柔和橙、默认中性灰）展示独立色彩与边框样式，增强可读性。
+
+`tests/ui-controls.test.mjs` 以 SSR 渲染共用控件层，检查输入值、密码可见性、复选框、禁用状态、按钮语义类名、单一组件库依赖及弹层容器约定。
 
 供应商与模型、通知及诊断界面的组件与按钮规范：
 - 供应商卡片（`.provider-model-group`）采用左右分栏布局：左侧展示线路标识、标题、状态与模型列表（`.provider-model-group-left`），右侧为顶部紧凑上下两行操作区（`.provider-model-group-actions`，整体顶对齐避免纵向大空白）。官方线路上面展示额度开关、下面展示同步按钮；第三方线路上面展示编辑与删除图标按钮（使用 `variant="link"`，编辑为 `primary`，删除为 `danger`）、下面展示同步按钮（使用 `<Button color="primary" variant="filled">`）；按钮全局禁用两字中文自动插入空格，保持文字紧凑；
 - 供应商与模型外壳沿用 Ant Design Card 外观，仅保留内容裁剪；内部列表 `.provider-model-groups` 使用 `overscroll-behavior-y: auto`，支持内部滚动到底后继续滚动外层页面；底栏 `.readonly-note` 保留业务布局与背景；
 - 模型药丸（`.model-tag-pill`）：高度调整为 31px、字体 12.5px、内边距 4px 11px、药丸间距 8x10px、圆点 6px，兼顾列表轻盈度与点击舒适度；
-- 内嵌配置弹窗（`SettingsModalShell`）：通过 Modal 的 `styles` 配置高度、布局、圆角与内容裁剪，删除重复的 `.ant-modal-*` CSS 覆盖；次级弹窗（如通知渠道、模型配置等）必须挂载至 `popupContainer`（即 `modalContainer`），不得挂载至作为页面主体的 `portalContainer`，确保遮罩与弹窗正确覆盖包括 Header 在内的完整外壳。
+- 内嵌配置弹窗（`SettingsModalShell`）：基于 HeroUI Modal，遮罩不可点击关闭且屏蔽 Esc，高度、布局、圆角与内容裁剪由外壳自身的工具类控制；次级弹窗（如通知渠道、模型配置等）必须挂载至 `popupContainer`（即 `modalContainer`），不得挂载至作为页面主体的 `portalContainer`，确保遮罩与弹窗正确覆盖包括 Header 在内的完整外壳。
 
-`src/styles*.css` 均包含独立入口和内嵌入口使用的业务布局，因此保留文件；已删除无调用的 `.route-websocket-option`、`.notification-empty`、`.feature-disabled-*` 规则及组件外观覆盖，不保留空样式文件。`src/components/antd` 封装层只保留有调用方的 prop；`useAppNotice` 与 `useConfirmationDialog` 共用 `src/externalStore.ts` 的 `createExternalStore`。
+`src/styles*.css` 均包含独立入口和内嵌入口使用的业务布局，因此保留文件；已删除无调用的 `.route-websocket-option`、`.notification-empty`、`.feature-disabled-*` 规则及组件外观覆盖，不保留空样式文件。`src/components/ui` 封装层只保留有调用方的 prop；`useAppNotice` 与 `useConfirmationDialog` 共用 `src/externalStore.ts` 的 `createExternalStore`。
 
-运行 `pnpm check` 和 `pnpm test:js` 验证类型与回归；`pnpm vite:build` 构建嵌入产物，`pnpm exec vite build` 构建独立页面。开发服务下，`tests/antd-browser.html` 验证真实 Shadow DOM 设置入口，`?view=logs` 使用模拟数据验证日志筛选、详情与布局；`tests/model-combobox-browser.html` 验证万条模型列表。这些页面不连接真实模型服务。
+运行 `pnpm check` 和 `pnpm test:js` 验证类型与回归；`pnpm vite:build` 构建嵌入产物，`pnpm exec vite build` 构建独立页面。开发服务下，`tests/ui-browser.html` 验证真实 Shadow DOM 设置入口，`?view=logs` 使用模拟数据验证日志筛选、详情与布局；`tests/model-combobox-browser.html` 验证万条模型列表。这些页面不连接真实模型服务。
 
 ### 官方线路上下文设置限制
 

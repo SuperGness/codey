@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" />
+  <title>Shadow DOM 样式回归</title>
+  <pre id="result">正在检查…</pre>
+  <iframe id="reference" title="独立页面对照"></iframe>
+  <div id="embedded"></div>
+  <script type="module">
+    import css from "../src/tailwind.css?inline";
+    import { shadowStyles } from "../src/shadowStyles.ts";
+    const markup = `<style>* { transition: none !important; }</style><div data-theme="light">
+      <input class="input" aria-label="线路名" value="示例线路">
+      <button class="select__trigger">上游协议</button>
+      <div class="select__popover">OpenAI Responses</div>
+      <div class="autocomplete__popover">模型选项</div>
+      <div class="combo-box__popover">手动模型选项</div>
+      <div class="modal__dialog">编辑线路</div>
+    </div>`;
+    const shadow = document.querySelector("#embedded").attachShadow({ mode: "open" });
+    shadow.innerHTML = `<style>${shadowStyles(css)}</style>${markup}`;
+    const frame = document.querySelector("#reference");
+    const loaded = new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
+    frame.srcdoc = `<style>${css}</style>${markup}`;
+    await loaded;
+    const properties = ["borderTopWidth", "borderTopStyle", "borderTopColor", "borderRadius", "boxShadow"];
+    const failures = [];
+    for (const selector of [".input", ".select__trigger", ".select__popover", ".autocomplete__popover", ".combo-box__popover", ".modal__dialog"]) {
+      const actual = getComputedStyle(shadow.querySelector(selector));
+      const expected = frame.contentWindow.getComputedStyle(frame.contentDocument.querySelector(selector));
+      for (const property of properties) {
+        if (actual[property] !== expected[property]) failures.push(`${selector} ${property}: ${actual[property]} != ${expected[property]}`);
+      }
+    }
+    const popup = getComputedStyle(shadow.querySelector(".select__popover"));
+    if (popup.boxShadow === "none" || popup.borderRadius === "0px") failures.push("下拉弹层轮廓缺失");
+    const input = shadow.querySelector(".input");
+    input.focus();
+    const focusedShadow = getComputedStyle(input).boxShadow;
+    const referenceInput = frame.contentDocument.querySelector(".input");
+    referenceInput.focus();
+    if (focusedShadow === "none" || focusedShadow !== frame.contentWindow.getComputedStyle(referenceInput).boxShadow) failures.push("输入框焦点轮廓与独立页面不一致");
+    document.querySelector("#result").textContent = failures.length ? `FAIL\n${failures.join("\n")}` : "PASS：6 类控件与独立页面样式一致，弹层及焦点轮廓正常";
+    if (failures.length) throw new Error(failures.join("\n"));
+  </script>
+</html>

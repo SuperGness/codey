@@ -102,7 +102,7 @@
 }
 
 .feature-action-btn:disabled,
-.feature-action-btn.ant-btn-loading {
+.feature-action-btn[aria-busy="true"] {
   cursor: not-allowed !important;
   opacity: 0.65 !important;
 }
@@ -174,11 +174,12 @@
   scrollbar-width: thin;
 }
 
-.subagent-table .ant-table {
+.subagent-table table {
+  width: 100%;
   background: transparent;
 }
 
-.subagent-table .ant-table-thead > tr > th {
+.subagent-table th {
   padding: 6px 6px 8px 6px;
   font-size: 11.5px;
   font-weight: 600;
@@ -188,13 +189,13 @@
   white-space: nowrap;
 }
 
-.subagent-table .ant-table-tbody > tr > td {
+.subagent-table td {
   padding: 6px 6px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.035);
   vertical-align: middle;
 }
 
-.subagent-table .ant-table-tbody > tr:last-child > td {
+.subagent-table tbody tr:last-child td {
   border-bottom: 0;
 }
 
@@ -423,22 +424,6 @@
   display: inline-flex;
   align-items: center;
   gap: 2px;
-}
-
-.notification-item-actions .ant-btn {
-  padding: 0 4px;
-  height: 24px;
-  min-width: 24px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.notification-channel-controls .ant-tag.ant-tag-success {
-  background: rgba(52, 199, 89, 0.13) !important;
-  color: #248a3d !important;
-  border-color: transparent !important;
-  font-weight: 500;
 }
 
 .notification-card.active {

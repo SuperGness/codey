@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
+// react-aria 用同一份模块实例读取该开关，必须从 react-stately 内部路径导入才能生效。
+import { enableShadowDOM } from "react-stately/private/flags/flags";
 import { UiProvider } from "./UiProvider";
 import utilityStyles from "./tailwind.css?inline";
+import { shadowStyles } from "./shadowStyles";
 import { App } from "./App";
 import { errorText } from "./appUtils";
 import coreStyles from "./styles.css?inline";
@@ -144,7 +147,7 @@ if (!window.__codeySettingsOverlay) {
   const shadow = host.attachShadow({ mode: "open" });
   const style = document.createElement("style");
   style.textContent = [
-    utilityStyles,
+    shadowStyles(utilityStyles),
     coreStyles,
     operationsStyles,
     modelStyles,
@@ -152,14 +155,19 @@ if (!window.__codeySettingsOverlay) {
     diagnosticStyles,
     responsiveStyles,
   ].join("\n");
+  // HeroUI 的主题变量声明在 :root / [data-theme] 上，ShadowRoot 内没有 :root，
+  // 因此在两个挂载容器上显式声明主题；react-aria 也需要开启 Shadow DOM 感知。
+  enableShadowDOM();
   const rootElement = document.createElement("div");
   rootElement.id = "codey-overlay-root";
+  rootElement.dataset.theme = "light";
   rootElement.style.inset = "0";
   rootElement.style.pointerEvents = "none";
   rootElement.style.position = "fixed";
   rootElement.style.width = "100%";
   const modalContainer = document.createElement("div");
   modalContainer.id = "codey-overlay-modal-container";
+  modalContainer.dataset.theme = "light";
   modalContainer.style.inset = "0";
   modalContainer.style.position = "fixed";
   modalContainer.style.width = "100%";
@@ -178,7 +186,7 @@ if (!window.__codeySettingsOverlay) {
   const reactRoot = ReactDOM.createRoot(rootElement);
   const render = (visible: boolean) => {
     reactRoot.render(
-      <UiProvider container={modalContainer} styleContainer={shadow}>
+      <UiProvider container={modalContainer}>
         <App
           embedded
           modalContainer={modalContainer}

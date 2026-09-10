@@ -1,0 +1,114 @@
+diff --git a/dist/private/overlays/ariaHideOutside.cjs b/dist/private/overlays/ariaHideOutside.cjs
+index b81041bbd3abe9251c1737df770e66f96d148bc2..59185b3cf186af8697fdfa5b412e032c09a000bc 100644
+--- a/dist/private/overlays/ariaHideOutside.cjs
++++ b/dist/private/overlays/ariaHideOutside.cjs
+@@ -137,6 +137,7 @@ function $3c73045d61be2d91$export$1c3ebcada18427bf(targets, options) {
+         subtree: true
+     });
+     let shadowObservers = new Set();
++    let shadowObserverRoots = new Map();
+     if ((0, $8F2D1$reactstatelyprivateflagsflags.shadowDOM)()) for (let shadowRoot of shadowRootsToWatch){
+         // Disconnect single target instead of all https://github.com/whatwg/dom/issues/126
+         let shadowObserver = new MutationObserver((changes)=>{
+@@ -165,6 +166,7 @@ function $3c73045d61be2d91$export$1c3ebcada18427bf(targets, options) {
+             subtree: true
+         });
+         shadowObservers.add(shadowObserver);
++        shadowObserverRoots.set(shadowObserver, shadowRoot);
+     }
+     let observerWrapper = {
+         visibleNodes: visibleNodes,
+@@ -174,9 +176,17 @@ function $3c73045d61be2d91$export$1c3ebcada18427bf(targets, options) {
+                 childList: true,
+                 subtree: true
+             });
++            // Codey patch: shadow-root observers must follow the same stack lifecycle as the main
++            // observer; otherwise an outer overlay keeps marking nested overlays that mount inside
++            // the same shadow root as inert, which makes popovers and nested dialogs unusable.
++            for (let shadowObserver of shadowObservers)shadowObserver.observe(shadowObserverRoots.get(shadowObserver), {
++                childList: true,
++                subtree: true
++            });
+         },
+         disconnect () {
+             observer.disconnect();
++            for (let shadowObserver of shadowObservers)shadowObserver.disconnect();
+         }
+     };
+     $3c73045d61be2d91$var$observerStack.push(observerWrapper);
+diff --git a/dist/private/overlays/ariaHideOutside.js b/dist/private/overlays/ariaHideOutside.js
+index 88b97ab5d5200a25d92d877d03f279e04923d193..23a9cad0385c0f0128f6285269c2c9c03d9a5652 100644
+--- a/dist/private/overlays/ariaHideOutside.js
++++ b/dist/private/overlays/ariaHideOutside.js
+@@ -132,6 +132,7 @@ function $20aa6983aa303ce6$export$1c3ebcada18427bf(targets, options) {
+         subtree: true
+     });
+     let shadowObservers = new Set();
++    let shadowObserverRoots = new Map();
+     if ((0, $han3A$shadowDOM)()) for (let shadowRoot of shadowRootsToWatch){
+         // Disconnect single target instead of all https://github.com/whatwg/dom/issues/126
+         let shadowObserver = new MutationObserver((changes)=>{
+@@ -160,6 +161,7 @@ function $20aa6983aa303ce6$export$1c3ebcada18427bf(targets, options) {
+             subtree: true
+         });
+         shadowObservers.add(shadowObserver);
++        shadowObserverRoots.set(shadowObserver, shadowRoot);
+     }
+     let observerWrapper = {
+         visibleNodes: visibleNodes,
+@@ -169,9 +171,17 @@ function $20aa6983aa303ce6$export$1c3ebcada18427bf(targets, options) {
+                 childList: true,
+                 subtree: true
+             });
++            // Codey patch: shadow-root observers must follow the same stack lifecycle as the main
++            // observer; otherwise an outer overlay keeps marking nested overlays that mount inside
++            // the same shadow root as inert, which makes popovers and nested dialogs unusable.
++            for (let shadowObserver of shadowObservers)shadowObserver.observe(shadowObserverRoots.get(shadowObserver), {
++                childList: true,
++                subtree: true
++            });
+         },
+         disconnect () {
+             observer.disconnect();
++            for (let shadowObserver of shadowObservers)shadowObserver.disconnect();
+         }
+     };
+     $20aa6983aa303ce6$var$observerStack.push(observerWrapper);
+diff --git a/dist/private/overlays/ariaHideOutside.mjs b/dist/private/overlays/ariaHideOutside.mjs
+index 01643c2cac3682e1c55ca80957b23e6db197661c..d5e2d06155cd5dcf12c72bb0ed7da578273dd7f7 100644
+--- a/dist/private/overlays/ariaHideOutside.mjs
++++ b/dist/private/overlays/ariaHideOutside.mjs
+@@ -130,6 +130,7 @@ function $58196c8d6a1f38fc$export$1c3ebcada18427bf(targets, options) {
+         subtree: true
+     });
+     let shadowObservers = new Set();
++    let shadowObserverRoots = new Map();
+     if ((0, $6UjbS$shadowDOM)()) for (let shadowRoot of shadowRootsToWatch){
+         // Disconnect single target instead of all https://github.com/whatwg/dom/issues/126
+         let shadowObserver = new MutationObserver((changes)=>{
+@@ -158,6 +159,7 @@ function $58196c8d6a1f38fc$export$1c3ebcada18427bf(targets, options) {
+             subtree: true
+         });
+         shadowObservers.add(shadowObserver);
++        shadowObserverRoots.set(shadowObserver, shadowRoot);
+     }
+     let observerWrapper = {
+         visibleNodes: visibleNodes,
+@@ -167,9 +169,17 @@ function $58196c8d6a1f38fc$export$1c3ebcada18427bf(targets, options) {
+                 childList: true,
+                 subtree: true
+             });
++            // Codey patch: shadow-root observers must follow the same stack lifecycle as the main
++            // observer; otherwise an outer overlay keeps marking nested overlays that mount inside
++            // the same shadow root as inert, which makes popovers and nested dialogs unusable.
++            for (let shadowObserver of shadowObservers)shadowObserver.observe(shadowObserverRoots.get(shadowObserver), {
++                childList: true,
++                subtree: true
++            });
+         },
+         disconnect () {
+             observer.disconnect();
++            for (let shadowObserver of shadowObservers)shadowObserver.disconnect();
+         }
+     };
+     $58196c8d6a1f38fc$var$observerStack.push(observerWrapper);

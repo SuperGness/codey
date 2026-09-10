@@ -7,7 +7,7 @@ import {
 } from "@tabler/icons-react";
 
 import type { Config } from "../App.types";
-import { Badge, Button } from "../components/antd";
+import { Badge, Button } from "../components/ui";
 import { getNotificationChannelDefinition } from "./channelRegistry";
 import { NotificationChannelDialog } from "./NotificationChannelDialog";
 import {
@@ -150,7 +150,7 @@ function NotificationChannelsCardComponent({
                             <Button
                               variant="link"
                               color="primary"
-                              size="xs"
+                              size="icon-sm"
                               disabled={isBusy}
                               onClick={() => openEditDialog(channel.id)}
                               aria-label={`编辑${definition.title}通知渠道`}
@@ -161,7 +161,7 @@ function NotificationChannelsCardComponent({
                             <Button
                               variant="link"
                               color="danger"
-                              size="xs"
+                              size="icon-sm"
                               disabled={isBusy}
                               onClick={() => onRequestRemoveChannel(channel)}
                               aria-label={`删除${definition.addLabel}通知渠道`}

@@ -1,6 +1,6 @@
 import { memo } from "react";
 
-import { Button, Input } from "../components/antd";
+import { Input } from "../components/ui";
 import { inputShellClass, insetInputClass } from "../uiClasses";
 import type { NotificationChannelEditorProps } from "./types";
 
@@ -35,25 +35,6 @@ function TelegramChannelEditorComponent({
           />
         </div>
       </label>
-      {channel.botTokenConfigured ? (
-        <div className="-mt-[7px] flex justify-end">
-          <Button
-            className="text-[#8e8e93] hover:text-[#d70015]"
-            variant="ghost"
-            size="xs"
-            disabled={disabled}
-            onClick={() =>
-              onChange({
-                botToken: "",
-                botTokenConfigured: false,
-                clearBotToken: true,
-              })
-            }
-          >
-            清除已保存 Token
-          </Button>
-        </div>
-      ) : null}
       <label className="field notification-field-row">
         <span>Chat ID</span>
         <div className={inputShellClass}>

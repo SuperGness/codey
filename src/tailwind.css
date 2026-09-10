@@ -1,2 +1,20 @@
-@layer theme, base, antd, components, utilities;
-@import "tailwindcss";
+@import "@heroui/styles";
+@source "../node_modules/@heroui/react/dist";
+
+/* Codey 品牌色映射到 HeroUI 语义色变量；派生的 hover / soft 变体由 HeroUI 主题自动按 --accent 计算。 */
+@layer theme {
+  :root,
+  [data-theme="light"] {
+    --accent: #007aff;
+    --accent-foreground: #ffffff;
+    --link: #007aff;
+    --danger: #ff3b30;
+    --success: #34c759;
+    --warning: #ff9500;
+    --background: #ffffff;
+    --field-shadow: 0 0 0 0 transparent;
+    --field-border: rgba(0, 0, 0, 0.12);
+    --field-border-hover: rgba(0, 0, 0, 0.24);
+    --field-border-focus: #007aff;
+  }
+}

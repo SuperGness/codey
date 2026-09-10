@@ -747,13 +747,22 @@
     }, delayMs);
   };
 
-  const readAccountUsageFromAppServer = async () => {
+  const readAccountUsageFromAppServer = async (backendResult) => {
     const loaded = await loadSessionTools();
     if (!loaded || typeof window.__codeyReadAccountRateLimits !== "function") {
       throw new Error("Codex 官方额度读取接口不可用");
     }
     const response = await window.__codeyReadAccountRateLimits();
-    return normalizeAppServerAccountUsage(response);
+    const snapshot = normalizeAppServerAccountUsage(response);
+    // Publish Codex's managed-auth result so the independent log window can reuse it.
+    if (Number.isSafeInteger(backendResult?.authGeneration)) {
+      const stored = await callBridge("/api/store_official_account_usage", {
+        authGeneration: backendResult.authGeneration, snapshot,
+      }, { timeoutMs: accountUsageTimeoutMs });
+      if (stored?.status !== "ok") throw new Error(stored?.message || "同步官方额度失败");
+      snapshot.authGeneration = backendResult.authGeneration;
+    }
+    return snapshot;
   };
 
   let quotaUsageRequest = null;
@@ -769,12 +778,12 @@
     if (quotaUsageRequest) return quotaUsageRequest;
     quotaUsageRequest = (async () => {
       let result = await withTimeout(
-        callBridge("/api/query_official_account_usage", { forceRefresh: true }, { timeoutMs: accountUsageTimeoutMs }),
+        callBridge("/api/query_official_account_usage", { forceRefresh }, { timeoutMs: accountUsageTimeoutMs }),
         accountUsageTimeoutMs, "读取官方周额度超时",
       );
-      if (result?.status === "error") {
+      if (result?.status === "error" || result?.stale) {
         try {
-          result = await withTimeout(readAccountUsageFromAppServer(), accountUsageTimeoutMs, "读取 Codex 周额度超时");
+          result = await withTimeout(readAccountUsageFromAppServer(result), accountUsageTimeoutMs, "读取 Codex 周额度超时");
         } catch { /* Keep the backend error when the fallback is unavailable. */ }
       }
       // A dialog query never enables the account display or its polling.
@@ -795,10 +804,10 @@
         accountUsageTimeoutMs,
         "读取官方账号额度超时",
       );
-      if (result?.status === "error") {
+      if (result?.status === "error" || result?.stale) {
         try {
           result = await withTimeout(
-            readAccountUsageFromAppServer(),
+            readAccountUsageFromAppServer(result),
             accountUsageTimeoutMs,
             "读取 Codex 官方额度超时",
           );

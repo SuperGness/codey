@@ -276,9 +276,15 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
     __codeySessionToolsInjectLoaded: true,
     __codexSessionDeleteBridge: async (path, args) => {
       if (path === "/api/query_official_account_usage") {
-        assert.equal(args.forceRefresh, true);
+        assert.equal(args.forceRefresh, quotaUsageCalls === 0);
         quotaUsageCalls += 1;
         return quotaUsageResult;
+      }
+      if (path === "/api/store_official_account_usage") {
+        assert.equal(args.authGeneration, 1);
+        assert.equal(args.snapshot.primary.usedPercent, 20);
+        assert.ok(args.snapshot.fetchedAt > 0);
+        return { status: "ok" };
       }
       if (path === "/account/usage") {
         accountUsageCalls += 1;
@@ -387,7 +393,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.match(usage.innerHTML, /周额度/);
   assert.doesNotMatch(usage.innerHTML, /data-window="five-hour"/);
 
-  accountUsageResult = { status: "error", message: "官方额度接口返回 401" };
+  accountUsageResult = { status: "error", message: "官方额度接口返回 401", authGeneration: 1 };
   appServerUsageResult.rateLimits.primary.resetsAt = Math.floor(Date.now() / 1000) + 29.5 * 60 * 60;
   await window.__codeyRefreshAccountUsage();
   assert.equal(appServerUsageCalls, 1);

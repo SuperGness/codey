@@ -15,11 +15,14 @@
     "vite:build": "node scripts/build-overlay.mjs"
   },
   "dependencies": {
-    "@ant-design/cssinjs": "^2.1.2",
+    "@heroui/react": "3.2.4",
+    "@heroui/styles": "3.2.4",
     "@tabler/icons-react": "^3.45.0",
-    "antd": "^6.6.2",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-aria": "^3.52.1",
+    "react-aria-components": "^1.21.1",
+    "react-dom": "^19.0.0",
+    "react-stately": "^3.50.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.3.0",

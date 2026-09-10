@@ -39,8 +39,7 @@ test("WeChat ClawBot is a scan-bound, token-protected notification channel", () 
   assert.match(editorSource, /contextTokenConfigured: true/);
   assert.match(editorSource, /sessionStatus: "active"/);
   assert.match(editorSource, /qrCodeImageUrl/);
-  assert.match(editorSource, /clearBotToken: true/);
-  assert.match(editorSource, /clearContextToken: true/);
+  assert.doesNotMatch(editorSource, /解除已保存绑定|clearBotToken: true|clearContextToken: true/);
   assert.match(editorSource, /发送一条消息完成激活/);
   assert.match(editorSource, /登录已失效，请重新扫码后保存配置/);
   assert.match(cardSource, /label: "登录失效", variant: "warning"/);

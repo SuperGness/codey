@@ -1,2 +1,4 @@
 allowBuilds:
   esbuild: true
+patchedDependencies:
+  react-aria@3.52.1: patches/react-aria@3.52.1.patch

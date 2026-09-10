@@ -4,12 +4,13 @@ import {
   IconSparkles,
 } from "@tabler/icons-react";
 
-import type { Config, InlineResult, Notice } from "./App.types";
+import type { Config, Notice } from "./App.types";
 import { invoke } from "./api";
 import { errorText, withTimeout } from "./appUtils";
 import { ManualModelCombobox } from "./components/ManualModelCombobox";
 import { ModelCombobox } from "./components/ModelCombobox";
-import { Button, Card, Input, PasswordInput, Select, Switch } from "./components/antd";
+import { Card, toast } from "@heroui/react";
+import { Button, Input, PasswordInput, Select, Switch } from "./components/ui";
 import type { SubagentModelOption } from "./subagentModels";
 import { flushCardClass } from "./uiClasses";
 import { validateOutboundApiUrl } from "./urlValidation";
@@ -28,7 +29,6 @@ const MANUAL_PROTOCOL_OPTIONS = [
 type PromptOptimizationCardProps = {
   config: Config;
   isBusy: boolean;
-  popupContainer: HTMLElement | null;
   subagentModelOptions: SubagentModelOption[];
   onConfigChange: (config: Config) => void;
   onNotice: (notice: Notice) => void;
@@ -42,7 +42,6 @@ type TestResult = {
 function PromptOptimizationCardComponent({
   config,
   isBusy,
-  popupContainer,
   subagentModelOptions,
   onConfigChange,
   onNotice,
@@ -55,10 +54,6 @@ function PromptOptimizationCardComponent({
   const [testing, setTesting] = useState(false);
   const [cloudModels, setCloudModels] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
-  const [modelsResult, setModelsResult] = useState<InlineResult>({
-    tone: "idle",
-    text: "",
-  });
 
   const updateOptimization = (patch: Partial<Config["promptOptimization"]>) => {
     onConfigChange({
@@ -100,7 +95,6 @@ function PromptOptimizationCardComponent({
 
   const clearModelSuggestions = () => {
     setCloudModels([]);
-    setModelsResult({ tone: "idle", text: "" });
   };
 
   const changeMode = (mode: "codeyRoute" | "manual") => {
@@ -111,7 +105,12 @@ function PromptOptimizationCardComponent({
   };
 
   const showTestNotice = (tone: "success" | "error", text: string) => {
-    onNotice({ tone, text });
+    if (tone === "success") {
+      toast.success(text);
+    } else {
+      toast.danger(text);
+    }
+    onNotice({ tone: "info", text: "" });
   };
 
   const handleApiKeyChange = (value: string) => {
@@ -134,10 +133,6 @@ function PromptOptimizationCardComponent({
     const requestId = requestSequenceRef.current + 1;
     requestSequenceRef.current = requestId;
     setFetchingModels(true);
-    setModelsResult({
-      tone: "pending",
-      text: "正在获取模型列表…",
-    });
     try {
       const result = await withTimeout(
         invoke<{ models?: string[] }>("fetch_prompt_optimization_models", {
@@ -149,14 +144,14 @@ function PromptOptimizationCardComponent({
       if (requestSequenceRef.current !== requestId) return;
       const models = result?.models ?? [];
       setCloudModels(models);
-      setModelsResult(
-        models.length > 0
-          ? { tone: "success", text: "已获取 " + models.length + " 个模型" }
-          : { tone: "error", text: "服务端没有返回可用模型" },
-      );
+      if (models.length > 0) {
+        toast.success("已获取 " + models.length + " 个模型");
+      } else {
+        toast.danger("服务端没有返回可用模型");
+      }
     } catch (error) {
       if (requestSequenceRef.current === requestId) {
-        setModelsResult({ tone: "error", text: errorText(error) });
+        toast.danger(errorText(error));
       }
     } finally {
       if (requestSequenceRef.current === requestId) {
@@ -314,7 +309,6 @@ function PromptOptimizationCardComponent({
                             subagentModelOptions.length === 0
                           }
                           options={subagentModelOptions}
-                          getPopupContainer={() => popupContainer ?? document.body}
                           onChange={(model) => updateOptimization({ model })}
                         />
                         {!codeyRouteAvailable ? (
@@ -376,8 +370,6 @@ function PromptOptimizationCardComponent({
                           aria-label="提示词优化上游协议"
                           optionList={[...MANUAL_PROTOCOL_OPTIONS]}
                           filter={false}
-                          dropdownClassName="rounded-[10px]"
-                          getPopupContainer={() => popupContainer ?? document.body}
                           onChange={(value) => {
                             clearModelSuggestions();
                             updateOptimization({
@@ -465,7 +457,6 @@ function PromptOptimizationCardComponent({
                               ariaDescribedBy={modelError ? modelInputId + "-error" : undefined}
                               options={cloudModels}
                               placeholder="例如 gpt-4o-mini 或 deepseek-chat"
-                              getPopupContainer={() => popupContainer ?? document.body}
                               onChange={(model) => updateOptimization({ model })}
                             />
                           </div>
@@ -484,11 +475,6 @@ function PromptOptimizationCardComponent({
                             获取列表
                           </Button>
                         </div>
-                        {modelsResult.text ? (
-                          <span className={"inline-result " + modelsResult.tone}>
-                            {modelsResult.text}
-                          </span>
-                        ) : null}
                         {modelError ? (
                           <small id={modelInputId + "-error"} className="field-error" role="alert">
                             {modelError}

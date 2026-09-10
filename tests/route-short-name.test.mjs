@@ -9,6 +9,7 @@ const shortNames = await loadTypeScriptModule(
 );
 
 test("third-party route short names are required and limited to two characters", () => {
+  assert.equal(shortNames.MAX_ROUTE_SHORT_NAME_CHARACTERS, 2);
   assert.equal(shortNames.validateThirdPartyRouteShortName(""), "请输入短名称");
   assert.equal(shortNames.validateThirdPartyRouteShortName("中转"), "");
   assert.equal(
@@ -55,6 +56,7 @@ test("the third-party route editor exposes the short-name field and validation h
   );
 
   assert.match(source, /id="route-short-name-input"/);
+  assert.match(source, /maxLength=\{MAX_ROUTE_SHORT_NAME_CHARACTERS\}/);
   assert.match(source, /最多 2 个字符且不可重复，模型名称前会显示为 \[短名称\]/);
   assert.match(
     source,

@@ -70,6 +70,7 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   );
 
   assert.doesNotMatch(viewer, /<Modal/);
+  assert.doesNotMatch(viewer, /antd|ant-/);
   assert.match(viewer, /className="[^"]*flex h-full min-h-0 flex-1 flex-col/);
   assert.match(viewer, /invoke<RouteRequestLogQueryPage>\("query_route_request_logs", \{/);
   assert.match(viewer, /pageSize/);
@@ -80,10 +81,16 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /按上游协议筛选请求日志/);
   assert.match(viewer, /label: "SSE", value: "http_sse"/);
   assert.match(viewer, /item\.upstreamTransport === "http_sse" \? "SSE" : \(item\.upstreamTransport \|\| "—"\)\.toUpperCase\(\)/);
+  assert.match(viewer, /protocolTagClass\(item\.upstreamTransport\)/);
   assert.doesNotMatch(viewer, /item\.requestProtocol/);
-  assert.match(viewer, /<Pagination/);
-  assert.match(viewer, /<Drawer[\s\S]*onClose=\{\(\) => setSelectedItem\(null\)\}/);
-  assert.match(viewer, /tabIndex: 0[\s\S]*event\.key === "Enter" \|\| event\.key === " "/);
+  assert.match(viewer, /<Pagination[^>]*className="w-auto"/);
+  const styles = await readFile(new URL("src/styles.request-log.css", root), "utf8");
+  assert.match(styles, /\.request-log-protocol-http/);
+  assert.match(styles, /\.request-log-protocol-sse/);
+  assert.match(styles, /\.request-log-protocol-ws/);
+  assert.match(styles, /\.request-log-pagination \.pagination[\s\S]*width:\s*auto/);
+  assert.match(viewer, /<Drawer[\s\S]*onOpenChange=\{[^}]*setSelectedItem\(null\)/);
+  assert.match(viewer, /onRowAction=\{\(key\) =>[\s\S]*setSelectedItem\(record\)/);
   assert.match(viewer, /aria-label=\{`复制请求 ID：\$\{item\.requestId\}`\}/);
   assert.match(viewer, /cursorMode: true/);
   assert.match(viewer, /result\.nextCursor/);
@@ -104,7 +111,7 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /setPage\(1\)/);
   assert.match(viewer, /total:\s*0/);
   assert.match(viewer, /items:\s*\[\]/);
-  assert.match(viewer, /title=\{actionNotice\.tone === "success" \? "删除成功" : "删除失败"\}/);
+  assert.match(viewer, /<Alert\.Title>\{actionNotice\.tone === "success" \? "删除成功" : "删除失败"\}<\/Alert\.Title>/);
   assert.match(viewer, /result\?\.status === "unavailable"/);
   assert.match(viewer, /请求日志加载失败/);
   assert.match(viewer, /没有匹配的请求日志/);
@@ -140,7 +147,7 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /completionReason === "scope_dropped"/);
   assert.match(viewer, /查看中断原因/);
   assert.match(viewer, /`HTTP \$\{item\.statusCode\}`/);
-  assert.match(viewer, /<Tooltip[\s\S]*autoAdjustOverflow/);
+  assert.match(viewer, /<Tooltip[\s\S]*position="top"/);
   for (const reason of [
     "not_reported_by_upstream",
     "response_tap_limit_exceeded",
