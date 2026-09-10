@@ -178,15 +178,12 @@ export function QuotaEstimateDialog({ container, onClose }: {
               <summary className="cursor-pointer select-none font-medium text-amber-900 hover:text-amber-950 transition-colors">计算说明与价格来源</summary>
                 <div className="mt-2 grid gap-1.5 border-t border-amber-200/60 pt-2 text-xs text-gray-600 leading-relaxed">
                   <p className="m-0">金额统一保留 4 位小数；Token 和调用次数取整数；比例保留 2 位小数。计算时使用未四舍五入的金额。</p>
-                  <p className="m-0">周统计周期由官方下次重置时间减去 7 天得到；请求从推算的上次重置时间读到额度数据更新时间，以对齐官方使用比例。请求数据读取完成时间：{updatedAt ? formatTimestamp(updatedAt) : "尚未完成读取"}。刷新会重新获取额度及对应周期的请求，不修改原页面筛选或记录。</p>
                   <p className="m-0">当前消耗 =（非缓存输入 × 输入单价 + 缓存读取 × 读取单价 + 缓存写入 × 写入单价 + 输出 × 输出单价）÷ 1,000,000。各费用单独展示，推理 Token 已包含在输出中，不重复计费。</p>
                   <p className="m-0">预估周限 = 本周期已记录消耗 ÷ 官方周额度已用比例；当前预估剩余 = 预估周限 − 本周期已消耗。模型的折算周限份额按同一比例分摊。预计周消耗 = 本周期消耗 × 7 天 ÷ 已统计时长，仅表示按当前速度推算的整周消耗，不参与周限反推。</p>
-                  <p className="m-0">额度显示与独立日志页共用已获取的额度数据；普通打开优先复用有效缓存，主动刷新才强制请求。刷新失败时可使用本周上次成功获取的数据，并提示原更新时间；周周期已结束或登录状态变化后不复用。无需填写比例，查询不会开启额度显示或后台轮询。官方未返回周窗口、重置时间或有效使用比例时不进行推算。</p>
                   <p className="m-0">Standard、Fast（含 priority）、Flex、Batch 各用独立价表，响应档位优先于请求档位；请求 Fast 而响应 default 按 Standard 计价。只有请求档位时单独列为推定；未记录计费档位或仅记录 auto 时按默认 Standard 档位计价，并标明默认依据。</p>
-                  <p className="m-0">缓存读写从输入中拆分，均已包含在当前消耗内；该档位无单独缓存价格时按输入价计算。新版模型按公开缓存写入价计费。缓存节省与普通输入价比较，负数表示写入增加费用，仅供参考，不重复加减。</p>
                   <p className="m-0">适用模型单次输入超过 272K 时，整次请求使用该档位的长上下文价，表格与短上下文分开。未公布价格的组合不借用其他档位价格。</p>
                   <p className="m-0">估算仅覆盖本线路已记录的 Token，不按采样率补推。官方已用比例可能包含其他设备用量，缺失日志或跨账号历史会影响推算准确性。工具调用、搜索内容特殊计价、容器和存储等缺少完整计费数据，尚未计入。合计中的未计价请求不代表实际免费。</p>
-                  <p className="m-0">价格核对：{PRICING_CHECKED} · <a className="text-blue-600 hover:underline font-medium" href={PRICING_SOURCE} target="_blank" rel="noreferrer">OpenAI 官方价格</a>；Codex 历史模型价格见对应官方模型页。GPT-5.6 Sol 使用当前公开促销价。gpt-6-astra 缓存读取单价按自定义规则乘以 2，适用于所有档位及长短上下文。</p>
+                  <p className="m-0">价格核对：{PRICING_CHECKED} · <a className="text-blue-600 hover:underline font-medium" href={PRICING_SOURCE} target="_blank" rel="noreferrer">OpenAI 官方价格</a>；Codex 历史模型价格见对应官方模型页。GPT-5.6 Sol 使用当前公开促销价。</p>
                 </div>
             </details>
           </div></Alert.Description>
