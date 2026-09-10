@@ -79,6 +79,47 @@
         result.textContent = "PASS：嵌套弹窗和设置弹窗关闭时提示未移到外层，重新打开后新提示正常";
         shadow.querySelector(".settings-modal-body").prepend(result);
       }
+      if (new URLSearchParams(location.search).get("check") === "notification-close") {
+        const shadow = document.querySelector("#codey-settings-overlay-host").shadowRoot;
+        const nextFrame = () => new Promise(requestAnimationFrame);
+        const waitFor = async (read) => {
+          const deadline = performance.now() + 5000;
+          while (!read()) {
+            if (performance.now() > deadline) throw new Error("通知弹窗回归验证等待超时");
+            await nextFrame();
+          }
+        };
+        await waitFor(() => shadow.querySelector('button[aria-label="编辑Telegram Bot通知渠道"]'));
+        let frames = 0;
+        for (const mode of ["edit", "add"]) {
+          for (const close of ["关闭", "取消", "Escape"]) {
+            const trigger = mode === "edit"
+              ? shadow.querySelector('button[aria-label="编辑Telegram Bot通知渠道"]')
+              : shadow.querySelector(".notification-add-actions button");
+            trigger.click();
+            await waitFor(() => shadow.querySelector(".notification-channel-dialog .notification-dialog-fields"));
+            const dialog = shadow.querySelector(".notification-channel-dialog");
+            await waitFor(() => !dialog.closest(".modal__backdrop").getAnimations({ subtree: true }).length);
+            const heading = dialog.querySelector("h2").textContent;
+            if (heading !== (mode === "edit" ? "编辑Telegram渠道" : "添加通知渠道")) throw new Error(`重新打开时模式错误：${heading}`);
+            const height = dialog.getBoundingClientRect().height;
+            if (close === "Escape") dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+            else [...dialog.querySelectorAll("button")].find(button => button.getAttribute("aria-label") === close || button.textContent.trim() === close).click();
+            const deadline = performance.now() + 2000;
+            while (dialog.isConnected) {
+              if (performance.now() > deadline) throw new Error("通知弹窗未完成关闭");
+              if (!dialog.querySelector(".notification-dialog-fields") || dialog.querySelector("h2")?.textContent !== heading || dialog.getBoundingClientRect().height < height * 0.9) throw new Error(`${mode}/${close}：关闭动画中表单消失、模式改变或高度收缩`);
+              frames++;
+              await nextFrame();
+            }
+          }
+        }
+        if (frames < 6) throw new Error("未采集到足够的关闭动画帧");
+        const result = document.createElement("pre");
+        result.id = "notification-close-result";
+        result.textContent = `PASS：新增和编辑通知渠道的关闭按钮、取消、Esc 共检查 ${frames} 帧，表单及模式保留至卸载`;
+        shadow.querySelector(".settings-modal-body").prepend(result);
+      }
       if (new URLSearchParams(location.search).get("check") === "dialog-motion") {
         const shadow = document.querySelector("#codey-settings-overlay-host").shadowRoot;
         const nextFrame = () => new Promise(requestAnimationFrame);

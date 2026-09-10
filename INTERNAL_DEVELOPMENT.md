@@ -244,6 +244,8 @@ Codey 当前声明版本为 0.9.18，不固定安装某一版 Codex。macOS 根�
 
 当前保留 renderer CDP 页面增强和 CLI 包装器运行配置；主进程 Inspector 可用时还会安装桌面统计上报和定时状态采集精简、窗口聚焦触发的插件刷新去重、任务标题模型处理，以及模型/页面控件兼容等可选修改。CLI 包装入口不安装这些主进程修改。
 
+2026-09-10 补充核验 Codex 26.903.61454：本机 macOS 包将 CES 主传输移至 `window-all-closed` 共享文件，标题生成移至 `src` 共享文件；编译拦截按功能锚点应用补丁，统计功能分别校验 worker 与主传输，保留独立失败记录及原源码回退。聚焦监听器匹配使用 JavaScript 标识符边界，完整保留 `$` 前缀；中文初始化同时支持旧的配置对象和新版 localeOverride 参数结构。回归覆盖合并与拆分文件、加载顺序、失败状态保留及语言解析行为；可用 `CODEY_TEST_CODEX_BUILD_DIR` 指定提取的主进程文件目录，用 `CODEY_RENDERER_ASSET` 指定真实页面资源运行相应 JavaScript 测试。此次使用同版本 macOS 安装包验证，Windows Store 实际启动仍需实机核验；附件中的 CLI 回连超时不能单凭 markerPresent 判定启动失败，继续保留现有文件确认流程。
+
 Fast 控件使用统一的页面侧兼容（模型注入脚本 v54）：所有线路和模型都补充 `priority` 服务档位与 `fast` 速度选项，包括关闭本地路由后的直连模式。模型菜单的鼠标或键盘交互在原生处理前修正选择器的原生权限缓存，不再检查线路归属或模型是否声明 Fast；菜单及 `serviceTierForRequest` 使用同一修正结果，由原生控件和回调保存设置。保留加载状态，卸载脚本时恢复权限原值；React 父节点查找最多 80 层，待恢复的权限对象最多 64 个，不扫描全页、不改写安装包。回归覆盖路由及直连模式、官方与第三方模型切换、未声明 Fast 的模型、React alternate 缓存、开关、键盘交互、加载状态和卸载恢复。选项展示不代表上游服务承诺支持加速。
 
 Fast 新版控件兼容不再依赖已移除的 `composer.intelligenceDropdown.model.rowLabel` 和 `showFastServiceTierIndicator` 字段；通过模型选择器与档位图标字段定位，支持编译后的 React 缓存将控件配置与显示条件分开的结构。所有线路和模型统一采用新版原生控件，仍保留 `hideLabel` 和实际选中档位的显示语义。回归覆盖旧结构、新缓存结构、入口能力开关及 Fast 开关；本机安装包的 `app-primary` 资源已验证两处新旧控件切换条件均成功替换，未修改安装包。
@@ -1147,6 +1149,7 @@ git diff --check
 - 供应商卡片（`.provider-model-group`）采用左右分栏布局：左侧展示线路标识、标题、状态与模型列表（`.provider-model-group-left`），右侧为顶部紧凑上下两行操作区（`.provider-model-group-actions`，整体顶对齐避免纵向大空白）。官方线路上面展示额度开关、下面展示同步按钮；第三方线路上面展示编辑与删除图标按钮（使用 `variant="link"`，编辑为 `primary`，删除为 `danger`）、下面展示同步按钮（使用 `<Button color="primary" variant="filled">`）；按钮全局禁用两字中文自动插入空格，保持文字紧凑；
 - 供应商与模型外壳沿用 Ant Design Card 外观，仅保留内容裁剪；内部列表 `.provider-model-groups` 使用 `overscroll-behavior-y: auto`，支持内部滚动到底后继续滚动外层页面；底栏 `.readonly-note` 保留业务布局与背景；
 - 模型药丸（`.model-tag-pill`）：高度调整为 31px、字体 12.5px、内边距 4px 11px、药丸间距 8x10px、圆点 6px，兼顾列表轻盈度与点击舒适度；
+- 通知渠道弹窗关闭时保留草稿和编辑渠道标识，避免 HeroUI 退出动画期间表单被清空或切换为新增模式；下次打开时重新初始化草稿。`tests/ui-browser.html?check=notification-close` 逐帧检查新增、编辑弹窗通过关闭按钮、取消和 Esc 退出时的表单、标题和高度。
 - 内嵌配置弹窗（`SettingsModalShell`）：基于 HeroUI Modal，遮罩不可点击关闭且屏蔽 Esc，高度、布局、圆角与内容裁剪由外壳自身的工具类控制；次级弹窗（如通知渠道、模型配置等）必须挂载至 `popupContainer`（即 `modalContainer`），不得挂载至作为页面主体的 `portalContainer`，确保遮罩与弹窗正确覆盖包括 Header 在内的完整外壳。
 
 `src/styles*.css` 均包含独立入口和内嵌入口使用的业务布局，因此保留文件；已删除无调用的 `.route-websocket-option`、`.notification-empty`、`.feature-disabled-*` 规则及组件外观覆盖，不保留空样式文件。`src/components/ui` 封装层只保留有调用方的 prop；`useAppNotice` 与 `useConfirmationDialog` 共用 `src/externalStore.ts` 的 `createExternalStore`。

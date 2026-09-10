@@ -477,16 +477,16 @@
       // first route has already selected and cached English messages.
       patched = replaceUniqueRendererGate(
         patched,
-        /let\s+([$A-Z_a-z][$\w]*)\s*=\s*([$A-Z_a-z][$\w]*)\s*,\s*([$A-Z_a-z][$\w]*)\s*=\s*([$A-Z_a-z][$\w]*)\?\.\s*get\(\s*`locale_source`\s*,\s*`IDE`\s*\)\s*,\s*([$A-Z_a-z][$\w]*)\s*=\s*([$A-Z_a-z][$\w]*)\(\s*([$A-Z_a-z][$\w]*)\.localeOverride\s*\)/g,
-        (
-          _match,
-          i18nEnabledName,
-          _i18nGateValueName,
-          localeSourceName,
-          _dynamicConfigName,
-          localeOverrideName,
-        ) =>
-          `let ${i18nEnabledName}=(globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__=!0),${localeSourceName}=\`SYSTEM\`,${localeOverrideName}=\`zh-CN\``,
+        [{
+          pattern: /let\s+([$A-Z_a-z][$\w]*)\s*=\s*([$A-Z_a-z][$\w]*)\s*,\s*([$A-Z_a-z][$\w]*)\s*=\s*([$A-Z_a-z][$\w]*)\?\.\s*get\(\s*`locale_source`\s*,\s*`IDE`\s*\)\s*,\s*([$A-Z_a-z][$\w]*)\s*=\s*([$A-Z_a-z][$\w]*)\(\s*([$A-Z_a-z][$\w]*)\.localeOverride\s*\)/g,
+          replacement: (_match, enabled, _gate, localeSource, _config, override) =>
+            `let ${enabled}=(globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__=!0),${localeSource}=\`SYSTEM\`,${override}=\`zh-CN\``,
+        }, {
+          pattern: /let ([$A-Z_a-z][$\w]*)=([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)=([$A-Z_a-z][$\w]*)\?\.get\(`locale_source`,`IDE`\),([$A-Z_a-z][$\w]*=([$A-Z_a-z][$\w]*)\?\.ideLocale,[$A-Z_a-z][$\w]*=\6\?\.systemLocale,[$A-Z_a-z][$\w]*=[$A-Z_a-z][$\w]*\(([$A-Z_a-z][$\w]*)\))/g,
+          replacement: (_match, enabled, _gate, localeSource, _config, resolution, _data, override) =>
+            `${override}=\`zh-CN\`;let ${enabled}=(globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__=!0),${localeSource}=\`SYSTEM\`,${resolution}`,
+        }],
+        undefined,
         "default Chinese locale",
       );
     }
@@ -1502,7 +1502,7 @@
     let listenerName = null;
     let count = 0;
     let patched = source.replace(
-      /(\b[$A-Z_a-z][$\w]*)=\(\)=>\{([$A-Z_a-z][$\w]*)\.reconcileExternalPluginState\((`focus`|"focus"|'focus')\)\}/g,
+      /(?<![$\w])([$A-Z_a-z][$\w]*)=\(\)=>\{([$A-Z_a-z][$\w]*)\.reconcileExternalPluginState\((`focus`|"focus"|'focus')\)\}/g,
       (_match, matchedListenerName, coordinatorName, focusLiteral) => {
         count += 1;
         listenerName = matchedListenerName;
@@ -1520,7 +1520,7 @@
     }
     let cleanupCount = 0;
     patched = patched.replace(
-      /(\b[$A-Z_a-z][$\w]*)\.add\(\(\)=>\{([$A-Z_a-z][$\w]*)\.app\.off\((`browser-window-focus`|"browser-window-focus"|'browser-window-focus'),([$A-Z_a-z][$\w]*)\)\}\)/g,
+      /(?<![$\w])([$A-Z_a-z][$\w]*)\.add\(\(\)=>\{([$A-Z_a-z][$\w]*)\.app\.off\((`browser-window-focus`|"browser-window-focus"|'browser-window-focus'),([$A-Z_a-z][$\w]*)\)\}\)/g,
       (match, disposerName, appName, eventLiteral, cleanupListenerName) => {
         if (cleanupListenerName !== listenerName) return match;
         cleanupCount += 1;
@@ -1551,7 +1551,7 @@
   // transport. Disable the transport promise, worker bootstrap value, and the
   // later startup-config update explicitly so no events queue while app-server
   // configuration is still resolving.
-  const patchCodexMainDesktopAnalytics = (source) => {
+  const patchCodexMainDesktopAnalytics = (source, { worker = true, transport = true } = {}) => {
     let workerBootstrapCount = 0;
     let workerUpdateCount = 0;
     let mainTransportCount = 0;
@@ -1577,9 +1577,9 @@
       },
     );
     if (
-      workerBootstrapCount !== 1 ||
-      workerUpdateCount !== 1 ||
-      mainTransportCount !== 1
+      workerBootstrapCount !== Number(worker) ||
+      workerUpdateCount !== Number(worker) ||
+      mainTransportCount !== Number(transport)
     ) {
       throw new Error(
         "Codey desktop analytics matches " +
@@ -1712,6 +1712,8 @@
   let mainBundleSourcePatchAttempted = false;
   let mainBundleSourcePatched = false;
   let mainBundleFilename = "";
+  let desktopAnalyticsWorkerSourcePatched = false;
+  let desktopAnalyticsTransportSourcePatched = false;
   const hasOptionalMainBundlePatchFailure = (name) =>
     optionalMainBundlePatchFailures.some((failure) => failure.name === name);
   const applyOptionalMainBundlePatch = (name, patch, source) => {
@@ -1775,19 +1777,46 @@
         source.includes("checkout-webview-presentation-changed") &&
         source.includes("will-attach-webview") &&
         source.includes("did-attach-webview");
+      const isMainBundle = hasMainBundleName || hasMainBundleSignature;
+      // 26.903 moved CES transport and metadata generation into shared chunks.
+      const hasDesktopAnalyticsTransport =
+        source.includes("datadog-log-sink-failure") && source.includes("codex-desktop");
+      const hasThreadTitleModel = source.includes("thread_title");
+      if (isMainBundle || hasDesktopAnalyticsTransport) {
+        const patchName = isMainBundle ? "desktopCesAnalytics" : "desktopCesAnalyticsTransport";
+        source = applyOptionalMainBundlePatch(
+          patchName,
+          (input) => patchCodexMainDesktopAnalytics(input, {
+            worker: isMainBundle,
+            transport: hasDesktopAnalyticsTransport,
+          }),
+          source,
+        );
+        const patched = !hasOptionalMainBundlePatchFailure(patchName);
+        if (isMainBundle) desktopAnalyticsWorkerSourcePatched = patched;
+        if (hasDesktopAnalyticsTransport) desktopAnalyticsTransportSourcePatched = patched;
+        globalThis.__CODEY_DESKTOP_ANALYTICS_SOURCE_PATCHED__ =
+          desktopAnalyticsWorkerSourcePatched && desktopAnalyticsTransportSourcePatched;
+      }
+      if (hasThreadTitleModel) {
+        source = applyOptionalMainBundlePatch(
+          "threadTitleModel",
+          patchCodexMainThreadTitleModel,
+          source,
+        );
+        globalThis.__CODEY_THREAD_TITLE_MODEL_SOURCE_PATCHED__ =
+          !hasOptionalMainBundlePatchFailure("threadTitleModel");
+      }
       if (!hasMainBundleName && !hasMainBundleSignature) {
-        if (hasAppServerMessages) return module._compile(source, filename);
+        if (hasAppServerMessages || hasDesktopAnalyticsTransport || hasThreadTitleModel) {
+          return module._compile(source, filename);
+        }
         return Reflect.apply(originalJsExtension, this, arguments);
       }
 
       mainBundleSourcePatchAttempted = true;
       mainBundleFilename = filename.split(/[\\/]/).at(-1)?.slice(0, 160) ?? "";
       try {
-      source = applyOptionalMainBundlePatch(
-        "desktopCesAnalytics",
-        patchCodexMainDesktopAnalytics,
-        source,
-      );
       source = applyOptionalMainBundlePatch(
         "externalPluginFocusReconcile",
         patchCodexMainFocusReconcile,
@@ -1798,19 +1827,10 @@
         patchCodexMainAppStateHeartbeat,
         source,
       );
-      source = applyOptionalMainBundlePatch(
-        "threadTitleModel",
-        patchCodexMainThreadTitleModel,
-        source,
-      );
       globalThis.__CODEY_EXTERNAL_PLUGIN_FOCUS_RECONCILE_SOURCE_PATCHED__ =
         !hasOptionalMainBundlePatchFailure("externalPluginFocusReconcile");
-      globalThis.__CODEY_DESKTOP_ANALYTICS_SOURCE_PATCHED__ =
-        !hasOptionalMainBundlePatchFailure("desktopCesAnalytics");
       globalThis.__CODEY_APP_STATE_HEARTBEAT_SOURCE_PATCHED__ =
         !hasOptionalMainBundlePatchFailure("appStateHeartbeat");
-      globalThis.__CODEY_THREAD_TITLE_MODEL_SOURCE_PATCHED__ =
-        !hasOptionalMainBundlePatchFailure("threadTitleModel");
       mainBundleSourcePatched = true;
       module._compile(source, filename);
       } catch (error) {
@@ -1898,7 +1918,8 @@
     disablePet,
     disableAppServerAnalytics: true,
     get disableDesktopCesAnalytics() {
-      return !hasOptionalMainBundlePatchFailure("desktopCesAnalytics");
+      return !hasOptionalMainBundlePatchFailure("desktopCesAnalytics") &&
+        !hasOptionalMainBundlePatchFailure("desktopCesAnalyticsTransport");
     },
     get appServerAnalyticsPatchCount() {
       return appServerAnalyticsPatchCount;

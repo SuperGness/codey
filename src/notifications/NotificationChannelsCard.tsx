@@ -56,7 +56,6 @@ function NotificationChannelsCardComponent({
   }
 
   function handleDialogOpenChange(open: boolean) {
-    if (!open) setEditingChannelId(null);
     setDialogOpen(open);
   }
 

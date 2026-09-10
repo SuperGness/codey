@@ -755,6 +755,30 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     );
     delete globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__;
 
+    const localePropsSource = [
+      "function provider(E){return E.localeOverride}",
+      "function resolveProps(a,o,r,H3){const dynamicConfigId=`72216192`;",
+      "let s=o?.get(`enable_i18n`,!1);",
+      "let c=s,l=o?.get(`locale_source`,`IDE`),u=a?.ideLocale,d=a?.systemLocale,f=H3(r),p;",
+      "bb0:{if(r){p=r;break bb0}if(l===`SYSTEM`){p=d;break bb0}p=u}",
+      "return {enabled:c,source:l,locale:p,english:f}}",
+    ].join("");
+    electron.protocol.handle("app", async () => new Response(localePropsSource));
+    const localePropsResponse = await installedHandler({
+      url: "app://-/assets/app-initial-26903.js",
+    });
+    const patchedLocaleProps = await localePropsResponse.text();
+    const resolveProps = Function(`${patchedLocaleProps};return resolveProps`)();
+    for (const override of [undefined, "en-US"]) {
+      assert.deepEqual(
+        resolveProps({ ideLocale: "en-US", systemLocale: "en-US" }, { get: () => false }, override,
+          (locale) => locale?.startsWith("en") ?? false),
+        { enabled: true, source: "SYSTEM", locale: "zh-CN", english: false },
+      );
+    }
+    assert.equal(globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__, true);
+    delete globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__;
+
     const ownerDiscoverySource = [
       "async function maybeResume(Bm,f,n,t){",
       "if(t.followExistingOwner===!0&&f===`local`&&Bm?.clientCoordination!=null){",
@@ -1109,11 +1133,14 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
         productionSource,
         "the production renderer asset should receive compatible Codey gates",
       );
+      if (productionSource.includes("locale_source")) {
+        assert.match(patchedProductionSource, /__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__=!0/);
+      }
       const currentGateFailures = patchErrors
         .slice(previousErrorCount)
         .map(([message]) => String(message))
         .filter((message) =>
-          /model allowlist|model visibility|model-aware service tier control|model-aware Fast toggle|fast model trigger availability/.test(
+          /default Chinese locale|model allowlist|model visibility|model-aware service tier control|model-aware Fast toggle|fast model trigger availability/.test(
             message,
           ),
         );

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -138,6 +138,77 @@ test("router mode refuses to spawn when the shared request patch is missing", as
     assert.equal(runtime.spawnCalls.length, 0);
     await assert.rejects(pending, /未能启用本地路由请求处理/);
   } finally { runtime.restore(); }
+});
+
+test("desktop patches follow split 26.903 chunks and preserve dollar-prefixed listeners", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codey-split-patch-"));
+  const build = join(directory, ".vite", "build");
+  await mkdir(build, { recursive: true });
+  const chunks = {
+    "main-fixture.js": [
+      "let u={},d={analyticsEnabled:u!=null&&u.analytics?.enabled!==!1};",
+      "f.postMessage({type:`worker-analytics-enabled-update`,enabled:e.analytics?.enabled!==!1});",
+      "let $e=()=>{Qe.reconcileExternalPluginState(`focus`)};",
+      "l.app.on(`browser-window-focus`,$e),$I.add(()=>{l.app.off(`browser-window-focus`,$e)});",
+      "class Sampler{start(){this.appStateHeartbeat=setInterval(()=>{this.requestAppStateSnapshot(`heartbeat`)},gX),this.appStateHeartbeat.unref()}}",
+      "const request=`electron-app-state-snapshot-request`;",
+    ].join(""),
+    "window-all-closed-fixture.js": [
+      "const failure=`datadog-log-sink-failure`;",
+      "let d=new n.wt({analyticsEnabled:s.get().then(e=>e.analytics?.enabled!==!1)}),",
+      "f=new n.Ct({source:`codex-desktop`,transport:d});",
+    ].join(""),
+    "src-fixture.js": [
+      "async function title(){return await $9({feature:`thread_title`})}",
+      "async function $9({feature:i}){try{let h=await V0({model:tj,threadSource:i});",
+      "return WA({feature:i,model:tj}),h}catch(e){throw WA({feature:i,model:tj}),e}}function next(){}",
+    ].join(""),
+  };
+  chunks["main-monolithic.js"] = Object.values(chunks).map((source) => `{${source}}`).join("");
+  if (process.env.CODEY_TEST_CODEX_BUILD_DIR) {
+    for (const name of await readdir(process.env.CODEY_TEST_CODEX_BUILD_DIR)) {
+      if (/^(?:main-|src-|window-all-closed-).*\.js$/.test(name)) {
+        chunks[name] = await readFile(join(process.env.CODEY_TEST_CODEX_BUILD_DIR, name), "utf8");
+      }
+    }
+  }
+  try {
+    for (const entries of [Object.entries(chunks), Object.entries(chunks).reverse()]) {
+      const runtime = await loadPatchInIsolatedContext([], {}, false);
+      try {
+        for (const [name, input] of entries) {
+          const filename = join(build, name);
+          await writeFile(filename, input);
+          let output;
+          process.getBuiltinModule("module")._extensions[".js"]({
+            _compile(source) { output = source; new vm.Script(source); },
+          }, filename);
+          if (name.startsWith("main-")) {
+            assert.match(output, /worker-analytics-enabled-update`,enabled:!1/);
+            assert.match(output, /\$e\.cancel\?\.\(\)/);
+          } else if (name.startsWith("src-")) {
+            assert.equal(output.match(/globalThis\.__CODEY_THREAD_TITLE_MODEL__/g)?.length, 3);
+          } else {
+            assert.match(output, /analyticsEnabled:!1/);
+            assert.doesNotMatch(output, /analyticsEnabled:.*\.get\(\)\.then/);
+          }
+        }
+        assert.equal(runtime.context.__CODEY_DESKTOP_ANALYTICS_SOURCE_PATCHED__, true);
+        assert.equal(runtime.context.__CODEY_THREAD_TITLE_MODEL_SOURCE_PATCHED__, true);
+        assert.equal(runtime.context.__CODEY_CODEX_STARTUP_PATCH__.optionalMainBundlePatchFailures.length, 0);
+        // A successful worker chunk must not erase a shared transport failure.
+        const filename = join(build, "window-all-closed-broken.js");
+        const broken = chunks["window-all-closed-fixture.js"].replace("s.get()", "s.read()");
+        await writeFile(filename, broken);
+        process.getBuiltinModule("module")._extensions[".js"]({
+          _compile(source) { assert.equal(source, broken); },
+        }, filename);
+        process.getBuiltinModule("module")._extensions[".js"]({ _compile() {} }, join(build, "main-fixture.js"));
+        assert.equal(runtime.context.__CODEY_CODEX_STARTUP_PATCH__.disableDesktopCesAnalytics, false);
+        assert.equal(runtime.context.__CODEY_DESKTOP_ANALYTICS_SOURCE_PATCHED__, false);
+      } finally { runtime.restore(); }
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("real CLI routes new and resumed threads through the local entry", {

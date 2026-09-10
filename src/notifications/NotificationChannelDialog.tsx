@@ -56,12 +56,8 @@ function NotificationChannelDialogComponent({
     : null;
 
   useLayoutEffect(() => {
-    if (!open) {
-      setDraft(null);
-      setIsTesting(false);
-      setIsSaving(false);
-      return;
-    }
+    // 退出动画结束前保留表单，下次打开时再初始化。
+    if (!open) return;
     setDraft(
       editingChannel
         ? { ...editingChannel }
