@@ -190,6 +190,38 @@ fn discarding_a_cancelled_startup_clears_active_and_pending_runtime_policy() {
 }
 
 #[test]
+fn restore_without_a_lease_removes_a_standalone_codey_catalog_reference() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex-home");
+    fs::create_dir_all(&home).unwrap();
+    let config_path = home.join("config.toml");
+    let marker = temp.path().join("missing-lease.json");
+    let absolute = home.join(crate::model_catalog::relative_path());
+    for catalog in [
+        crate::model_catalog::relative_path(),
+        absolute.to_str().unwrap(),
+        "/user/catalog.json",
+    ] {
+        let original = format!("model = 'user-model'\nmodel_catalog_json = '{catalog}'\n");
+        fs::write(&config_path, &original).unwrap();
+        let codey_owned = catalog != "/user/catalog.json";
+        assert_eq!(
+            restore_runtime_config_at(&home, &marker, true).unwrap(),
+            codey_owned
+        );
+        let repaired = fs::read_to_string(&config_path).unwrap();
+        let document = repaired.parse::<DocumentMut>().unwrap();
+        assert_eq!(document["model"].as_str(), Some("user-model"));
+        if codey_owned {
+            assert!(document.get("model_catalog_json").is_none());
+        } else {
+            assert_eq!(repaired, original);
+        }
+        assert!(!restore_runtime_config_at(&home, &marker, true).unwrap());
+    }
+}
+
+#[test]
 fn restore_without_a_lease_repairs_legacy_persistent_codey_runtime_config() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");

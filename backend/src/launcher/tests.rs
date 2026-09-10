@@ -118,7 +118,7 @@ fn third_party_provider_installs_the_codey_model_catalog_when_available() {
 }
 
 #[tokio::test]
-async fn disabled_official_route_installs_an_empty_model_catalog() {
+async fn disabled_official_route_does_not_install_an_empty_model_catalog() {
     let home = tempfile::tempdir().unwrap();
     let mut official = ProviderProfile::new("Official");
     official.source_provider_id = Some("openai".into());
@@ -146,7 +146,7 @@ async fn disabled_official_route_installs_an_empty_model_catalog() {
         .await
         .unwrap();
 
-    assert!(startup.use_official_catalog);
+    assert!(!startup.use_official_catalog);
     assert!(startup.model_state.official_models.is_empty());
     assert!(startup.model_state.third_party_models.is_empty());
     assert!(runtime_default_model(&config, true, &startup.model_state).is_none());
@@ -159,6 +159,27 @@ async fn disabled_official_route_installs_an_empty_model_catalog() {
     let mut unavailable = config;
     unavailable.official_account_available_this_launch = false;
     assert!(!resolve_startup_profile(&unavailable).unwrap().enabled);
+
+    let mut custom = ProviderProfile::new("Custom");
+    custom.id = "custom".into();
+    custom.base_url = "https://custom.example/v1".into();
+    custom.api_key = "test-key".into();
+    custom.api_key_configured = true;
+    custom.normalize();
+    unavailable.active_profile_id = custom.id.clone();
+    unavailable.profiles.push(custom);
+    unavailable = unavailable.normalize();
+    assert_eq!(unavailable.runtime_catalog_models(), (vec![], vec![]));
+
+    // Repeat with the previous empty file still present, as on the affected host.
+    for _ in 0..2 {
+        let startup =
+            prepare_startup_model_catalog(&unavailable, &unavailable.profiles[1], home.path())
+                .await
+                .unwrap();
+        assert!(!startup.use_official_catalog);
+        assert!(startup.model_state.third_party_models.is_empty());
+    }
 }
 
 #[tokio::test]

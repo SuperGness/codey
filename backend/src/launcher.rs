@@ -609,7 +609,8 @@ async fn prepare_startup_model_catalog(
         }
     };
     let catalog_available_for_runtime = match refresh_result {
-        Ok(_) => true,
+        // Codex rejects an empty catalog even when writing it succeeded.
+        Ok(count) => count > 0,
         Err(error) if model_catalog::is_runtime_model_cache_unavailable(&error) => {
             if catalog_available {
                 eprintln!("本机官方模型缓存暂不含自定义目录必需字段，沿用上一份合法镜像");

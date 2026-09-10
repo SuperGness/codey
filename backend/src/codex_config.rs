@@ -1307,9 +1307,7 @@ fn remove_persistent_codey_runtime_config(doc: &mut DocumentMut, home: &Path) ->
     {
         doc.as_table_mut().remove("model");
     }
-    if codey_router_owned || codey_router_dangling || codey_subagent_owned {
-        remove_codey_model_catalog_reference(doc, home);
-    }
+    remove_codey_model_catalog_reference(doc, home);
     remove_codey_owned_agents_config(doc, codey_subagent_owned);
     remove_codey_owned_multi_agent_defaults(doc, codey_subagent_owned);
     doc.to_string() != before
