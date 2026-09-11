@@ -1779,6 +1779,7 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
 mod cli_wrapper_tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn local_router_proxy_bypass_merges_loopback_entries_without_changing_direct_mode() {
         let inherited = Some("corp.internal,127.0.0.1");
