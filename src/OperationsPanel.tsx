@@ -2,6 +2,7 @@ import { memo, useMemo, useState } from "react";
 import {
   IconActivity as Activity,
   IconCode as Code,
+  IconCodeDots,
   IconCloudCheck,
   IconCpu,
   IconDatabase,
@@ -130,6 +131,40 @@ function OperationsPanelComponent({
     remoteMarketplaceReady && managedConfigCompatible;
   const performanceError = maintenance?.performanceStatus === "error";
   const startupNeedsAttention = maintenance?.performanceStatus === "degraded";
+  const startupInjectionMode = maintenance?.startupInjectionMode ?? "";
+  const injectionModeCard =
+    !status.running
+      ? {
+          label: "待启动",
+          tone: "info" as const,
+          description: "Codex 启动后将在这里显示主进程补丁的注入路径。",
+        }
+      : startupInjectionMode === "node_options"
+        ? {
+            label: "--require",
+            tone: "success" as const,
+            description:
+              "主进程已通过 NODE_OPTIONS=--require 加载补丁，覆盖范围与 Inspector evaluate 相同。",
+          }
+        : startupInjectionMode === "inspector"
+          ? {
+              label: "Inspector",
+              tone: "success" as const,
+              description: "主进程已通过 Inspector evaluate 加载补丁。",
+            }
+          : startupInjectionMode === "cli"
+            ? {
+                label: "CLI",
+                tone: "warning" as const,
+                description:
+                  "仅 CLI 包装器确认了 app-server 参数；主进程补丁未应用。",
+              }
+            : {
+                label: "未应用",
+                tone: "warning" as const,
+                description:
+                  "本次启动未确认主进程注入方式，页面功能以检测结果为准。",
+              };
   const injectionScripts = status.injectionScripts ?? EMPTY_INJECTION_SCRIPTS;
   const enabledOptimizationFeatures = useMemo<EnabledOptimizationFeature[]>(
     () =>
@@ -343,6 +378,14 @@ function OperationsPanelComponent({
       icon: Cpu,
       showInjectionScripts: true,
       enabledFeatureCount: enabledOptimizationFeatures.length,
+    },
+    {
+      title: "主进程注入",
+      description: injectionModeCard.description,
+      metrics: [],
+      label: injectionModeCard.label,
+      tone: injectionModeCard.tone,
+      icon: IconCodeDots,
     },
     {
       title: "插件市场",

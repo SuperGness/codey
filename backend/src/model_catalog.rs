@@ -358,7 +358,10 @@ fn refresh_for_provider_with_transport_preferences(
                 });
             }
             !provider_models_synced
-                || slug.is_some_and(|slug| upstream.contains(&model_id::key(slug)))
+                || slug.is_some_and(|slug| {
+                    let key = model_id::key(slug);
+                    selected_model_keys.contains(&key) || upstream.contains(&key)
+                })
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -373,6 +376,11 @@ fn refresh_for_provider_with_transport_preferences(
     }
 
     if !official_provider {
+        // Mixed catalogs must keep compatible official raw slugs for spawn_agent,
+        // but a newly bundled official model without a local runtime template
+        // cannot fail the whole refresh. Official-only generation still
+        // fail-closes on that slug.
+        catalog_models.retain(model_is_runtime_source_compatible);
         let template = official_models
             .iter()
             .find(|model| {
@@ -437,8 +445,9 @@ fn refresh_for_provider_with_transport_preferences(
     for model in &mut catalog_models {
         configure_1m_context_window(model, &context_1m_model_keys);
     }
-    // Validate the selected models so a newly bundled model without a local
-    // runtime template cannot block routes that still use older models.
+    // Synthetic routes still fail closed when their template lacks runtime
+    // fields. Official-only catalogs never drop incompatible slugs above, so
+    // this remains all-or-nothing for that path.
     if !catalog_models.is_empty() {
         ensure_runtime_compatible_models(&catalog_models)?;
     }
@@ -1055,11 +1064,12 @@ fn ensure_runtime_compatible_models(models: &[Value]) -> Result<()> {
     Err(RuntimeModelCacheUnavailable.into())
 }
 
+fn model_is_runtime_source_compatible(model: &Value) -> bool {
+    model_instruction_source(model).is_some() && model_has_runtime_description(model)
+}
+
 fn source_models_are_runtime_compatible(models: &[Value]) -> bool {
-    !models.is_empty()
-        && models.iter().all(|model| {
-            model_instruction_source(model).is_some() && model_has_runtime_description(model)
-        })
+    !models.is_empty() && models.iter().all(model_is_runtime_source_compatible)
 }
 
 fn runtime_compatible_models(models: &[Value]) -> bool {
@@ -2287,6 +2297,98 @@ mod tests {
                 .iter()
                 .find(|model| model["slug"] == "gpt-5.4")
                 .unwrap(),
+        );
+    }
+
+    #[test]
+    fn mixed_catalog_drops_prompt_free_official_stubs_without_blocking_supported_models() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cache = official_cache();
+        cache["models"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|model| model["slug"] != "gpt-5.4-mini");
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let selected = vec![
+            "gpt-5.6-sol".into(),
+            "gpt-5.6-luna".into(),
+            "gpt-6-astra".into(),
+            "gpt-5.4-mini".into(),
+            "route-oc/deepseek-flash".into(),
+        ];
+
+        assert_eq!(
+            refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap(),
+            4
+        );
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
+        )
+        .unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["slug"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "gpt-6-astra",
+                "gpt-5.6-sol",
+                "gpt-5.6-luna",
+                "route-oc/deepseek-flash",
+            ]
+        );
+        for slug in ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-luna"] {
+            let model = models.iter().find(|model| model["slug"] == slug).unwrap();
+            assert_ne!(
+                model.get("codey_source").and_then(Value::as_str),
+                Some("third_party")
+            );
+            assert!(model_instruction_source(model).is_some());
+            assert!(model_has_runtime_description(model));
+        }
+        let custom = models.last().unwrap();
+        assert_eq!(custom["slug"], "route-oc/deepseek-flash");
+        assert_eq!(custom["codey_source"], "third_party");
+        assert!(model_instruction_source(custom).is_some());
+    }
+
+    #[test]
+    fn mixed_catalog_keeps_selected_official_slugs_missing_from_upstream() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let upstream = vec!["route-oc/deepseek-flash".into()];
+        let selected = vec![
+            "gpt-5.6-sol".into(),
+            "gpt-5.6-luna".into(),
+            "gpt-6-astra".into(),
+            "route-oc/deepseek-flash".into(),
+        ];
+
+        assert_eq!(
+            refresh_for_provider(home.path(), false, Some(&upstream), &selected).unwrap(),
+            4
+        );
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
+        )
+        .unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model["slug"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "gpt-6-astra",
+                "gpt-5.6-sol",
+                "gpt-5.6-luna",
+                "route-oc/deepseek-flash",
+            ]
         );
     }
 

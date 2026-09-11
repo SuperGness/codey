@@ -130,6 +130,26 @@
   const threadOwnerDiscoveryTimeoutMs = 150;
   const disableWindowsOptimizations = process.platform === "win32";
   const disableMicro = disableWindowsOptimizations;
+  const startupPatchMarkerPath = process.env.CODEY_STARTUP_PATCH_MARKER;
+  const loadedViaNodeRequire =
+    typeof startupPatchMarkerPath === "string" &&
+    startupPatchMarkerPath.length > 0;
+  if (loadedViaNodeRequire) {
+    // NODE_OPTIONS has no quoting; children and workers must not inherit
+    // `--require`. Only clear it for the launcher-owned require path so
+    // Inspector eval tests do not clobber the host process.
+    try {
+      delete process.env.NODE_OPTIONS;
+    } catch {}
+    if (process.env.NODE_OPTIONS) {
+      try {
+        process.env.NODE_OPTIONS = "";
+      } catch {}
+    }
+    try {
+      delete process.env.CODEY_STARTUP_PATCH_MARKER;
+    } catch {}
+  }
   const Module = process.getBuiltinModule("module");
   const originalLoad = Module._load;
   const readCodexAppVersion = () => {
@@ -146,6 +166,20 @@
   };
   const isInspectorArgument = (argument) =>
     typeof argument === "string" && /^--inspect(?:-brk)?(?:=|$)/.test(argument);
+  const isRequireArgument = (argument) =>
+    typeof argument === "string" && /^(?:--require|-r)(?:=|$)/.test(argument);
+  const withoutRequireArguments = (argv) => {
+    const stripped = [];
+    for (let index = 0; index < argv.length; index += 1) {
+      const argument = argv[index];
+      if (!isRequireArgument(argument)) {
+        stripped.push(argument);
+        continue;
+      }
+      if (argument === "--require" || argument === "-r") index += 1;
+    }
+    return stripped;
+  };
   const maxRendererPatchFingerprints = 64;
   const rendererPatchFailuresByFingerprint = new Map();
   let activeRendererPatchFailures = null;
@@ -1008,12 +1042,17 @@
     });
   };
 
-  // The inspector is only a startup injection mechanism. Do not pass its
-  // pause state or command-line flags to Codex workers.
+  // The inspector and NODE_OPTIONS --require path are only startup injection
+  // mechanisms. Do not pass their flags to Codex workers or child processes.
+  const withoutInspectorArguments = process.execArgv.filter(
+    (argument) => !isInspectorArgument(argument),
+  );
   process.execArgv.splice(
     0,
     process.execArgv.length,
-    ...process.execArgv.filter((argument) => !isInspectorArgument(argument)),
+    ...(loadedViaNodeRequire
+      ? withoutRequireArguments(withoutInspectorArguments)
+      : withoutInspectorArguments),
   );
   process.argv.splice(
     0,
@@ -2002,5 +2041,30 @@
     if (requireAppServerRuntimeOverrideValidation) return;
     try { process.getBuiltinModule("inspector").close(); } catch {}
   });
+  if (loadedViaNodeRequire) {
+    try {
+      const fs = process.getBuiltinModule("fs");
+      const path = process.getBuiltinModule("path");
+      if (
+        path.isAbsolute(startupPatchMarkerPath) &&
+        startupPatchMarkerPath.endsWith(".json")
+      ) {
+        fs.mkdirSync(path.dirname(startupPatchMarkerPath), {
+          recursive: true,
+          mode: 0o700,
+        });
+        const payload = `${JSON.stringify({
+          status: "executed",
+          pid: process.pid,
+          timestamp_ms: Date.now(),
+        })}\n`;
+        const tempPath = `${startupPatchMarkerPath}.${process.pid}.tmp`;
+        fs.writeFileSync(tempPath, payload, { encoding: "utf8", mode: 0o600 });
+        fs.renameSync(tempPath, startupPatchMarkerPath);
+      }
+    } catch (error) {
+      recordCodeyPatchFailure("write_startup_patch_marker", error);
+    }
+  }
   return "codey-startup-patch-installed-v39";
 })()

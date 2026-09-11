@@ -45,6 +45,14 @@ pub(crate) const CLI_WRAPPER_MARKER_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_MARKER"
 #[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV: &str =
     "CODEY_CODEX_CLI_WRAPPER_HANDSHAKE_OPTIONAL";
+/// Absolute JSON path the `--require` patch writes after it installs. Reuses
+/// [`CliWrapperMarker`] so the launcher can poll the same record format.
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) const STARTUP_PATCH_MARKER_ENV: &str = "CODEY_STARTUP_PATCH_MARKER";
+#[cfg(any(windows, target_os = "macos", test))]
+const STARTUP_REQUIRE_DIR: &str = "startup-require";
+#[cfg(any(windows, target_os = "macos", test))]
+const STARTUP_REQUIRE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 #[cfg(any(windows, target_os = "macos", test))]
 const CLI_WRAPPER_HANDSHAKE_CONNECT_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(500);
@@ -130,6 +138,181 @@ fn patch_expression_with_runtime_overrides_and_validation(
                 "false"
             },
         )
+}
+
+/// Main-process `--require` payload written next to Codey state and pointed at
+/// by `NODE_OPTIONS`. Never combined with `--inspect-brk`: both wrap
+/// `Module._load`.
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) struct StartupRequire {
+    pub environment: Vec<(String, String)>,
+    pub marker_path: std::path::PathBuf,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn prepare_startup_require(
+    options: PatchOptions,
+    runtime_config_overrides: &[String],
+) -> Result<StartupRequire> {
+    prepare_startup_require_in(
+        &codey_runtime_core::paths::default_app_state_dir(),
+        options,
+        runtime_config_overrides,
+    )
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn prepare_startup_require_in(
+    state_dir: &std::path::Path,
+    options: PatchOptions,
+    runtime_config_overrides: &[String],
+) -> Result<StartupRequire> {
+    let directory = state_dir.join(STARTUP_REQUIRE_DIR);
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("创建 Codex 启动补丁目录失败：{}", directory.display()))?;
+    prune_startup_require_files(
+        &directory,
+        std::time::SystemTime::now(),
+        STARTUP_REQUIRE_MAX_AGE,
+    );
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let script_path = directory.join(format!("{token}.js"));
+    let marker_path = directory.join(format!("{token}.json"));
+    // `--require` has no Inspector evaluate step; the executed marker is the
+    // confirmation. Keep inspector.close() enabled in the payload.
+    let expression = patch_expression_with_runtime_overrides_and_validation(
+        options,
+        runtime_config_overrides,
+        false,
+    );
+    crate::fs_util::atomic_write_private_with_parent(&script_path, expression.as_bytes())
+        .with_context(|| format!("写入 Codex 启动补丁失败：{}", script_path.display()))?;
+    let require_path = space_free_path(&script_path)?;
+    Ok(StartupRequire {
+        environment: vec![
+            (
+                "NODE_OPTIONS".to_string(),
+                node_require_argument(&require_path)?,
+            ),
+            (
+                STARTUP_PATCH_MARKER_ENV.to_string(),
+                marker_path.to_string_lossy().into_owned(),
+            ),
+        ],
+        marker_path,
+    })
+}
+
+/// `NODE_OPTIONS` splits on whitespace and does not honour quotes, so the
+/// `--require` path must be a single token.
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn node_require_argument(path: &std::path::Path) -> Result<String> {
+    let path = space_free_path(path)?;
+    let rendered = path.to_string_lossy();
+    anyhow::ensure!(
+        !path_has_whitespace(&path),
+        "Codex 启动补丁路径包含空白，无法通过 NODE_OPTIONS 注入：{rendered}"
+    );
+    Ok(format!("--require={rendered}"))
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn path_has_whitespace(path: &std::path::Path) -> bool {
+    path.to_string_lossy().chars().any(char::is_whitespace)
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn space_free_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    if !path_has_whitespace(path) {
+        return Ok(path.to_path_buf());
+    }
+    #[cfg(windows)]
+    {
+        let short = windows_short_path(path)?;
+        anyhow::ensure!(
+            !path_has_whitespace(&short),
+            "Codex 启动补丁短路径仍包含空白：{}",
+            short.display()
+        );
+        return Ok(short);
+    }
+    #[cfg(not(windows))]
+    {
+        let file_name = path.file_name().context("Codex 启动补丁路径缺少文件名")?;
+        let destination = std::env::temp_dir().join(file_name);
+        anyhow::ensure!(
+            !path_has_whitespace(&destination),
+            "临时目录包含空白，无法通过 NODE_OPTIONS 注入：{}",
+            destination.display()
+        );
+        std::fs::copy(path, &destination).with_context(|| {
+            format!(
+                "复制 Codex 启动补丁到无空格路径失败：{} -> {}",
+                path.display(),
+                destination.display()
+            )
+        })?;
+        Ok(destination)
+    }
+}
+
+#[cfg(windows)]
+fn windows_short_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+    use windows::core::PCWSTR;
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut buffer = vec![0u16; 1024];
+    let mut length =
+        unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(buffer.as_mut_slice())) };
+    if length as usize >= buffer.len() {
+        buffer.resize(length as usize + 1, 0);
+        length = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(buffer.as_mut_slice())) };
+    }
+    anyhow::ensure!(
+        length > 0,
+        "无法为 Codex 启动补丁生成无空格短路径：{}",
+        path.display()
+    );
+    Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..length as usize],
+    )))
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn prune_startup_require_files(
+    directory: &std::path::Path,
+    now: std::time::SystemTime,
+    max_age: std::time::Duration,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten().take(1024) {
+        let path = entry.path();
+        let keep = path
+            .extension()
+            .is_none_or(|extension| extension != "js" && extension != "json" && extension != "tmp");
+        if keep {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= max_age);
+        if stale && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
 }
 
 pub fn reserve_loopback_port() -> Result<u16> {
@@ -408,6 +591,8 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
             CLI_WRAPPER_TOKEN_ENV,
             CLI_WRAPPER_MARKER_ENV,
             CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV,
+            STARTUP_PATCH_MARKER_ENV,
+            "NODE_OPTIONS",
         ] {
             command.env_remove(name);
         }
@@ -1477,6 +1662,9 @@ mod tests {
                 .contains("const disableWindowsOptimizations = process.platform === \"win32\"")
         );
         assert!(expression.contains("const disableMicro = disableWindowsOptimizations"));
+        assert!(expression.contains("CODEY_STARTUP_PATCH_MARKER"));
+        assert!(expression.contains("delete process.env.NODE_OPTIONS"));
+        assert!(expression.contains("isRequireArgument"));
         assert!(expression.contains("patchCodexRendererResponse"));
         assert!(expression.contains("pet settings avatar resources"));
         assert!(expression.contains("restoreNativeModelAndSpeedControls: true"));
@@ -2014,5 +2202,99 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn node_require_argument_is_a_single_unquoted_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("patch.js");
+        std::fs::write(&path, "0").unwrap();
+        let argument = node_require_argument(&path).unwrap();
+        assert!(argument.starts_with("--require="));
+        assert!(!argument.contains(char::is_whitespace));
+        assert!(argument.ends_with("patch.js"));
+    }
+
+    #[test]
+    fn prepare_startup_require_writes_js_and_marker_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let prepared = prepare_startup_require_in(
+            temp.path(),
+            PatchOptions {
+                disable_pet: false,
+                subagent_gate_active: true,
+            },
+            &["analytics.enabled=false".to_string()],
+        )
+        .unwrap();
+        let environment = prepared
+            .environment
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashMap<_, _>>();
+        let node_options = environment
+            .get("NODE_OPTIONS")
+            .expect("NODE_OPTIONS must be set for --require");
+        assert!(node_options.starts_with("--require="));
+        assert!(!node_options.contains(char::is_whitespace));
+        let script = std::path::PathBuf::from(node_options.trim_start_matches("--require="));
+        let source = std::fs::read_to_string(&script).unwrap();
+        assert!(source.contains("CODEY_STARTUP_PATCH_MARKER"));
+        assert!(source.contains("delete process.env.NODE_OPTIONS"));
+        assert!(source.contains("analytics.enabled=false"));
+        let marker = environment
+            .get(STARTUP_PATCH_MARKER_ENV)
+            .expect("require path must publish a marker");
+        assert_eq!(std::path::Path::new(marker), prepared.marker_path);
+        assert!(marker.ends_with(".json"));
+        assert!(!prepared.marker_path.exists());
+    }
+
+    #[test]
+    fn space_free_path_moves_off_whitespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let spaced = temp.path().join("has space");
+        std::fs::create_dir(&spaced).unwrap();
+        let source = spaced.join("patch.js");
+        std::fs::write(&source, "1").unwrap();
+        let resolved = space_free_path(&source).unwrap();
+        assert!(!path_has_whitespace(&resolved));
+        assert_eq!(std::fs::read_to_string(&resolved).unwrap(), "1");
+    }
+
+    #[test]
+    fn prune_startup_require_files_removes_stale_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now();
+        let old = now - std::time::Duration::from_secs(2 * 60 * 60);
+        let stale_js = temp.path().join("stale.js");
+        let stale_json = temp.path().join("stale.json");
+        let stale_tmp = temp.path().join("stale.tmp");
+        let fresh = temp.path().join("fresh.js");
+        let other = temp.path().join("stale.txt");
+        for path in [&stale_js, &stale_json, &stale_tmp, &fresh, &other] {
+            std::fs::write(path, "{}").unwrap();
+        }
+        for path in [&stale_js, &stale_json, &stale_tmp, &other] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        assert_eq!(
+            prune_startup_require_files(temp.path(), now, STARTUP_REQUIRE_MAX_AGE),
+            3
+        );
+        assert!(!stale_js.exists());
+        assert!(!stale_json.exists());
+        assert!(!stale_tmp.exists());
+        assert!(fresh.exists());
+        assert!(other.exists());
+        assert_eq!(
+            prune_startup_require_files(&temp.path().join("missing"), now, STARTUP_REQUIRE_MAX_AGE),
+            0
+        );
     }
 }

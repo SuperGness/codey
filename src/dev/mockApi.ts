@@ -367,6 +367,7 @@ if (import.meta.env.DEV) {
             ghostTasksPruned: 2,
             performanceStatus: "ready",
             performanceDetail: "Codex 启动成功",
+            startupInjectionMode: "node_options",
           },
           injectionScripts: [
             {

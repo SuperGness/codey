@@ -149,6 +149,7 @@ async fn subagent_catalog_fallback_keeps_live_routes_and_roles_until_restart() {
             ghost_tasks_pruned: 0,
             performance_status: String::new(),
             performance_detail: String::new(),
+            startup_injection_mode: String::new(),
         },
         applied_model_config: RwLock::new(RuntimeModelConfig::from_config(&config)),
         applied_subagent_config: RwLock::new(RuntimeSubagentConfig::from_config(&config)),

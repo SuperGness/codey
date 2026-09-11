@@ -898,6 +898,7 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
             ghost_tasks_pruned: 0,
             performance_status: String::new(),
             performance_detail: String::new(),
+            startup_injection_mode: String::new(),
         },
         applied_model_config: RwLock::new(RuntimeModelConfig::from_config(&config)),
         applied_subagent_config: RwLock::new(RuntimeSubagentConfig::from_config(&config)),

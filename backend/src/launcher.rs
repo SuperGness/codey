@@ -79,6 +79,7 @@ pub struct MaintenanceStatus {
     pub ghost_tasks_pruned: usize,
     pub performance_status: String,
     pub performance_detail: String,
+    pub startup_injection_mode: String,
 }
 
 struct SessionMaintenanceSummary {
@@ -1620,6 +1621,7 @@ async fn spawn_and_inject_runtime(
         ghost_tasks_pruned: storage.session_maintenance.ghost_tasks_pruned,
         performance_status: spawned.performance_status.clone(),
         performance_detail: spawned.performance_detail.clone(),
+        startup_injection_mode: spawned.startup_injection_mode.clone(),
     };
     let child = Arc::new(Mutex::new(spawned.child.take()));
     let injected_target = inject_initial_renderer(

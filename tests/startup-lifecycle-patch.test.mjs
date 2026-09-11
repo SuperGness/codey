@@ -1,8 +1,33 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
+import vm from "node:vm";
 
 import { loadStartupPatchTemplate } from "./helpers/startup-patch.mjs";
+
+function evalStartupPatchInIsolatedProcess(source, envOverrides = {}) {
+  const isolatedProcess = Object.create(process);
+  isolatedProcess.env = { ...process.env };
+  for (const [name, value] of Object.entries(envOverrides)) {
+    if (value == null) delete isolatedProcess.env[name];
+    else isolatedProcess.env[name] = value;
+  }
+  isolatedProcess.execArgv = process.execArgv.slice();
+  isolatedProcess.argv = process.argv.slice();
+  const context = {
+    console,
+    process: isolatedProcess,
+    setImmediate,
+    setTimeout,
+    clearTimeout,
+    Promise,
+  };
+  context.globalThis = context;
+  return {
+    process: isolatedProcess,
+    result: vm.runInNewContext(source, context),
+  };
+}
 
 test("main bundle detection accepts renamed CommonJS entry chunks by signature", async () => {
   const source = await loadStartupPatchTemplate();
@@ -86,6 +111,70 @@ test("startup patch preserves native child processes and ordinary BrowserWindows
     workerThreads.Worker = NativeWorker;
     Module.syncBuiltinESMExports?.();
     childProcessModule.spawn = nativeSpawn;
+    Module._load = nativeLoad;
+    Module._extensions[".js"] = nativeJsExtension;
+  }
+});
+
+test("NODE_OPTIONS require path writes a marker and clears inherited options", async () => {
+  const fs = process.getBuiltinModule("fs");
+  const os = process.getBuiltinModule("os");
+  const path = process.getBuiltinModule("path");
+  const Module = process.getBuiltinModule("module");
+  const workerThreads = process.getBuiltinModule("worker_threads");
+  const nativeLoad = Module._load;
+  const nativeJsExtension = Module._extensions[".js"];
+  const NativeWorker = workerThreads.Worker;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codey-startup-require-"));
+  const markerPath = path.join(tempDir, "marker.json");
+
+  try {
+    const isolated = evalStartupPatchInIsolatedProcess(
+      await loadStartupPatchTemplate(),
+      {
+        NODE_OPTIONS: "--require=/tmp/codey-should-not-leak.js",
+        CODEY_STARTUP_PATCH_MARKER: markerPath,
+      },
+    );
+    assert.equal(isolated.result, "codey-startup-patch-installed-v39");
+    assert.ok(!isolated.process.env.NODE_OPTIONS);
+    assert.ok(!isolated.process.env.CODEY_STARTUP_PATCH_MARKER);
+    const payload = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+    assert.equal(payload.status, "executed");
+    assert.equal(payload.pid, process.pid);
+    assert.equal(typeof payload.timestamp_ms, "number");
+  } finally {
+    workerThreads.Worker = NativeWorker;
+    Module.syncBuiltinESMExports?.();
+    Module._load = nativeLoad;
+    Module._extensions[".js"] = nativeJsExtension;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("inspector eval does not clear NODE_OPTIONS without the require marker", async () => {
+  const Module = process.getBuiltinModule("module");
+  const workerThreads = process.getBuiltinModule("worker_threads");
+  const nativeLoad = Module._load;
+  const nativeJsExtension = Module._extensions[".js"];
+  const NativeWorker = workerThreads.Worker;
+
+  try {
+    const isolated = evalStartupPatchInIsolatedProcess(
+      await loadStartupPatchTemplate(),
+      {
+        NODE_OPTIONS: "--require=/tmp/codey-keep-node-options.js",
+        CODEY_STARTUP_PATCH_MARKER: null,
+      },
+    );
+    assert.equal(isolated.result, "codey-startup-patch-installed-v39");
+    assert.equal(
+      isolated.process.env.NODE_OPTIONS,
+      "--require=/tmp/codey-keep-node-options.js",
+    );
+  } finally {
+    workerThreads.Worker = NativeWorker;
+    Module.syncBuiltinESMExports?.();
     Module._load = nativeLoad;
     Module._extensions[".js"] = nativeJsExtension;
   }

@@ -2,11 +2,12 @@
 //!
 //! Electron bakes a "fuse wire" into its binary: a sentinel string followed by
 //! a version byte, a length byte and one byte per fuse (`0` disabled, `1`
-//! enabled, `r` removed). Current Codex builds ship with
-//! `EnableNodeCliInspectArguments` disabled, so Electron drops `--inspect-brk`
-//! before Node ever sees it and the main-process Inspector patch can never
-//! attach. Reading the wire before launch lets the launcher start on the CLI
-//! wrapper directly instead of waiting for a debug port that will never answer.
+//! enabled, `r` removed). `EnableNodeCliInspectArguments` and
+//! `EnableNodeOptionsEnvironmentVariable` are independent: a build can drop
+//! `--inspect-brk` while still honouring `NODE_OPTIONS=--require`. Reading the
+//! wire before launch lets the launcher prefer `--require` when NODE_OPTIONS is
+//! on, then Inspector, then the CLI wrapper, instead of waiting for a debug port
+//! that will never answer.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -19,6 +20,8 @@ use serde::{Deserialize, Serialize};
 /// Sentinel that precedes the fuse wire in every Electron binary (@electron/fuses).
 pub(crate) const FUSE_SENTINEL: &[u8] = b"dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX";
 const FUSE_WIRE_VERSION_V1: u8 = 1;
+/// Index of `EnableNodeOptionsEnvironmentVariable` in the v1 fuse wire (`FuseV1Options`).
+pub(crate) const NODE_OPTIONS_FUSE_INDEX: usize = 2;
 /// Index of `EnableNodeCliInspectArguments` in the v1 fuse wire (`FuseV1Options`).
 pub(crate) const NODE_CLI_INSPECT_FUSE_INDEX: usize = 3;
 const MAX_FUSE_COUNT: usize = 64;
@@ -51,6 +54,38 @@ impl FuseState {
     /// a working path; the runtime probes then decide.
     pub(crate) fn inspector_possible(self) -> bool {
         !matches!(self, FuseState::Disabled | FuseState::Removed)
+    }
+
+    /// Whether Electron still honours `NODE_OPTIONS` in the main process. Unknown
+    /// keeps the `--require` attempt for the same reason as Inspector.
+    pub(crate) fn node_options_possible(self) -> bool {
+        !matches!(self, FuseState::Disabled | FuseState::Removed)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ElectronFuses {
+    pub(crate) node_cli_inspect: FuseState,
+    pub(crate) node_options: FuseState,
+}
+
+impl ElectronFuses {
+    fn unknown() -> Self {
+        Self {
+            node_cli_inspect: FuseState::Unknown,
+            node_options: FuseState::Unknown,
+        }
+    }
+
+    fn from_wire(wire: Option<&FuseWire>) -> Self {
+        Self {
+            node_cli_inspect: wire
+                .map(|wire| wire.state(NODE_CLI_INSPECT_FUSE_INDEX))
+                .unwrap_or(FuseState::Unknown),
+            node_options: wire
+                .map(|wire| wire.state(NODE_OPTIONS_FUSE_INDEX))
+                .unwrap_or(FuseState::Unknown),
+        }
     }
 }
 
@@ -255,9 +290,9 @@ pub(crate) fn cached_fuse_wire(binary: &Path, cache: &Path) -> Result<(Option<Fu
     Ok((wire, false))
 }
 
-/// Resolves whether the Codex desktop app at `app_dir` honours `--inspect-brk`.
+/// Resolves the Inspector and `NODE_OPTIONS` fuses for the Codex desktop app.
 #[cfg(any(windows, target_os = "macos"))]
-pub(crate) fn node_cli_inspect_state(app_dir: &Path) -> FuseState {
+pub(crate) fn read_electron_fuses(app_dir: &Path) -> ElectronFuses {
     let started = Instant::now();
     let Some(binary) = electron_binary_path(app_dir) else {
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
@@ -265,17 +300,15 @@ pub(crate) fn node_cli_inspect_state(app_dir: &Path) -> FuseState {
             serde_json::json!({
                 "appPath": app_dir,
                 "nodeCliInspect": FuseState::Unknown.as_str(),
+                "nodeOptions": FuseState::Unknown.as_str(),
                 "error": "electron binary not found",
             }),
         );
-        return FuseState::Unknown;
+        return ElectronFuses::unknown();
     };
     match cached_fuse_wire(&binary, &cache_path()) {
         Ok((wire, cached)) => {
-            let state = wire
-                .as_ref()
-                .map(|wire| wire.state(NODE_CLI_INSPECT_FUSE_INDEX))
-                .unwrap_or(FuseState::Unknown);
+            let fuses = ElectronFuses::from_wire(wire.as_ref());
             let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
                 "launcher.electron_fuses",
                 serde_json::json!({
@@ -283,11 +316,12 @@ pub(crate) fn node_cli_inspect_state(app_dir: &Path) -> FuseState {
                     "cached": cached,
                     "version": wire.as_ref().map(|wire| wire.version),
                     "states": wire.as_ref().map(|wire| wire.states.as_str()),
-                    "nodeCliInspect": state.as_str(),
+                    "nodeCliInspect": fuses.node_cli_inspect.as_str(),
+                    "nodeOptions": fuses.node_options.as_str(),
                     "scanMs": started.elapsed().as_millis(),
                 }),
             );
-            state
+            fuses
         }
         Err(error) => {
             crate::error_log::record_failure(
@@ -301,22 +335,23 @@ pub(crate) fn node_cli_inspect_state(app_dir: &Path) -> FuseState {
                 serde_json::json!({
                     "binary": binary,
                     "nodeCliInspect": FuseState::Unknown.as_str(),
+                    "nodeOptions": FuseState::Unknown.as_str(),
                     "error": format!("{error:#}"),
                     "scanMs": started.elapsed().as_millis(),
                 }),
             );
-            FuseState::Unknown
+            ElectronFuses::unknown()
         }
     }
 }
 
-/// Blocking-pool wrapper for [`node_cli_inspect_state`]; the first scan of a
+/// Blocking-pool wrapper for [`read_electron_fuses`]; the first scan of a
 /// new Codex build reads the whole executable.
 #[cfg(any(windows, target_os = "macos"))]
-pub(crate) async fn detect_node_cli_inspect_state(app_dir: PathBuf) -> FuseState {
-    tokio::task::spawn_blocking(move || node_cli_inspect_state(&app_dir))
+pub(crate) async fn detect_electron_fuses(app_dir: PathBuf) -> ElectronFuses {
+    tokio::task::spawn_blocking(move || read_electron_fuses(&app_dir))
         .await
-        .unwrap_or(FuseState::Unknown)
+        .unwrap_or_else(|_| ElectronFuses::unknown())
 }
 
 #[cfg(test)]
@@ -339,6 +374,7 @@ mod tests {
         };
         assert_eq!(wire.state(0), FuseState::Disabled);
         assert_eq!(wire.state(1), FuseState::Enabled);
+        assert_eq!(wire.state(NODE_OPTIONS_FUSE_INDEX), FuseState::Disabled);
         assert_eq!(wire.state(NODE_CLI_INSPECT_FUSE_INDEX), FuseState::Disabled);
         assert_eq!(wire.state(9), FuseState::Unknown);
         assert_eq!(
@@ -353,6 +389,13 @@ mod tests {
         assert!(FuseState::Unknown.inspector_possible());
         assert!(!FuseState::Disabled.inspector_possible());
         assert!(!FuseState::Removed.inspector_possible());
+        assert!(FuseState::Enabled.node_options_possible());
+        assert!(FuseState::Unknown.node_options_possible());
+        assert!(!FuseState::Disabled.node_options_possible());
+        assert!(!FuseState::Removed.node_options_possible());
+        let fuses = ElectronFuses::from_wire(Some(&wire));
+        assert_eq!(fuses.node_cli_inspect, FuseState::Disabled);
+        assert_eq!(fuses.node_options, FuseState::Disabled);
     }
 
     #[test]
@@ -471,6 +514,11 @@ mod tests {
         assert_eq!(wire.version, FUSE_WIRE_VERSION_V1);
         assert_ne!(
             wire.state(NODE_CLI_INSPECT_FUSE_INDEX),
+            FuseState::Unknown,
+            "{wire:?}"
+        );
+        assert_ne!(
+            wire.state(NODE_OPTIONS_FUSE_INDEX),
             FuseState::Unknown,
             "{wire:?}"
         );

@@ -4,7 +4,7 @@ import test from "node:test";
 
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
-test("settings reports startup health without exposing implementation modes", async () => {
+test("settings reports startup health and the confirmed main-process injection mode", async () => {
   const [
     sectionsSource,
     typesSource,
@@ -38,6 +38,12 @@ test("settings reports startup health without exposing implementation modes", as
     /const startupNeedsAttention = maintenance\?\.performanceStatus === "degraded"/,
   );
   assert.match(sectionsSource, /startupNeedsAttention\s*\? "需检查"\s*: "正常"/);
+  assert.match(sectionsSource, /title: "主进程注入"/);
+  assert.match(sectionsSource, /startupInjectionMode === "node_options"/);
+  assert.match(sectionsSource, /startupInjectionMode === "inspector"/);
+  assert.match(sectionsSource, /startupInjectionMode === "cli"/);
+  assert.match(typesSource, /startupInjectionMode\?: string/);
+  assert.match(launcherRootSource, /pub startup_injection_mode: String/);
   assert.doesNotMatch(sectionsSource, /兼容模式|主进程增强|已优化/);
   const failedSummary = runtimeStatusPresentation.summarizeInjectionScripts([
     {
