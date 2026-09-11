@@ -1251,26 +1251,17 @@ impl RouterServer {
         body_mutated |= model_was_defaulted;
         let subagent_request = request_is_subagent(&request);
         let binding_keys = request_binding_keys(&request);
-        // Route lookup and binding refresh are both synchronous hash lookups.
-        // Keeping them under one short critical section halves mutex traffic on
-        // the request hot path without holding the lock across any I/O.
-        let resolved = {
-            let mut bindings = self
+        // Resolve against the current binding, but do not replace it until the
+        // request passes local cross-route history validation.
+        let (resolved, previous_route) = {
+            let bindings = self
                 .bindings
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let bound_route = bindings.route_for_keys(&binding_keys);
             let resolved =
                 snapshot.target_for_request(&model, route_hint.as_deref(), bound_route.as_deref());
-            if let Ok(resolved) = &resolved {
-                let refresh_session_binding = route_hint.is_some() && !subagent_request;
-                bindings.remember(
-                    &binding_keys,
-                    &resolved.provider_id,
-                    refresh_session_binding,
-                );
-            }
-            resolved
+            (resolved, bound_route)
         };
         let resolved = match resolved {
             Ok(resolved) => resolved,
@@ -1281,6 +1272,9 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        let route_changed = previous_route
+            .as_deref()
+            .is_some_and(|provider_id| provider_id != resolved.provider_id);
         if model != resolved.upstream_model {
             body.as_object_mut()
                 .expect("validated Responses body must remain an object")
@@ -1388,6 +1382,25 @@ impl RouterServer {
             // JSON slice, which would contain only the latest delta.
             encoded_body = None;
         }
+        if bridge == ProtocolBridge::NativeResponses
+            && route_changed
+            && let Err(error) = validate_cross_route_context(&body)
+        {
+            return downstream
+                .write_error(
+                    400,
+                    "context_not_portable",
+                    error.to_string(),
+                    Some(&resolved.route),
+                )
+                .await;
+        }
+        if bridge == ProtocolBridge::NativeResponses
+            && normalize_native_responses_context(&mut body, route_changed)
+        {
+            body_mutated = true;
+            encoded_body = None;
+        }
         let force_upstream_stream = should_force_upstream_streaming(
             bridge,
             request_kind,
@@ -1491,6 +1504,20 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        // Commit the new binding only after the request's route compatibility,
+        // payload conversion, and credentials have passed local checks. A
+        // rejected switch must leave the prior route available for a retry.
+        {
+            let refresh_session_binding = route_hint.is_some() && !subagent_request;
+            self.bindings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remember(
+                    &binding_keys,
+                    &resolved.provider_id,
+                    refresh_session_binding,
+                );
+        }
         if bridge == ProtocolBridge::NativeResponses {
             ensure_native_prompt_cache_key(
                 &mut headers,
@@ -1512,7 +1539,12 @@ impl RouterServer {
                 let had_previous_response =
                     responses_previous_response_id(&upstream_body).is_some();
                 let websocket_attempt = downstream
-                    .try_proxy_upstream_websocket(&resolved.route, &headers, &mut upstream_body)
+                    .try_proxy_upstream_websocket(
+                        &resolved.route,
+                        &headers,
+                        &mut upstream_body,
+                        route_changed,
+                    )
                     .await?;
                 if websocket_attempt == UpstreamWebSocketAttempt::Completed {
                     return Ok(());
@@ -1555,6 +1587,23 @@ impl RouterServer {
                         )
                         .await;
                 }
+            }
+            // A failed/reconnected WebSocket can restore full history after the
+            // first normalization pass. Validate and normalize the exact body
+            // that will be sent through the HTTP fallback as well.
+            if route_changed && let Err(error) = validate_cross_route_context(&upstream_body) {
+                return downstream
+                    .write_error(
+                        400,
+                        "context_not_portable",
+                        error.to_string(),
+                        Some(&resolved.route),
+                    )
+                    .await;
+            }
+            if normalize_native_responses_context(&mut upstream_body, route_changed) {
+                body_mutated = true;
+                encoded_body = None;
             }
         }
         let upstream_stream_requested = upstream_body

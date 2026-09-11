@@ -72,6 +72,7 @@ pub(crate) trait ResponsesDownstream: Send {
         _route: &RouteTarget,
         _headers: &HeaderMap,
         _body: &mut Value,
+        _discard_opaque_reasoning: bool,
         _probe: Option<&RouteRequestLogProbe>,
     ) -> Result<UpstreamWebSocketAttempt> {
         Ok(UpstreamWebSocketAttempt::UseHttp)
@@ -82,9 +83,16 @@ pub(crate) trait ResponsesDownstream: Send {
         route: &RouteTarget,
         headers: &HeaderMap,
         body: &mut Value,
+        discard_opaque_reasoning: bool,
     ) -> Result<UpstreamWebSocketAttempt> {
-        self.try_proxy_upstream_websocket_with_probe(route, headers, body, None)
-            .await
+        self.try_proxy_upstream_websocket_with_probe(
+            route,
+            headers,
+            body,
+            discard_opaque_reasoning,
+            None,
+        )
+        .await
     }
 }
 
@@ -298,6 +306,7 @@ where
         route: &RouteTarget,
         headers: &HeaderMap,
         body: &mut Value,
+        discard_opaque_reasoning: bool,
         probe: Option<&RouteRequestLogProbe>,
     ) -> Result<UpstreamWebSocketAttempt> {
         let result = self
@@ -306,6 +315,7 @@ where
                 route,
                 headers,
                 body,
+                discard_opaque_reasoning,
                 probe.or(self.probe.as_ref()),
             )
             .await;

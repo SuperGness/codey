@@ -243,6 +243,7 @@ impl WebSocketResponsesDownstream {
         route: &RouteTarget,
         headers: &HeaderMap,
         body: &mut Value,
+        discard_opaque_reasoning: bool,
         probe: Option<&RouteRequestLogProbe>,
     ) -> Result<UpstreamWebSocketAttempt> {
         if !route.supports_websockets {
@@ -306,6 +307,7 @@ impl WebSocketResponsesDownstream {
             }
             self.upstream.take();
         }
+        normalize_native_responses_context(body, discard_opaque_reasoning);
         let mut upstream = if let Some(cached) = self.upstream.take() {
             cached
         } else {
@@ -980,9 +982,10 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
         route: &RouteTarget,
         headers: &HeaderMap,
         body: &mut Value,
+        discard_opaque_reasoning: bool,
         probe: Option<&RouteRequestLogProbe>,
     ) -> Result<UpstreamWebSocketAttempt> {
-        self.proxy_upstream_websocket(route, headers, body, probe)
+        self.proxy_upstream_websocket(route, headers, body, discard_opaque_reasoning, probe)
             .await
     }
 }
