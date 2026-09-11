@@ -1479,6 +1479,12 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        if !resolved.route.official_account
+            && normalize_responses_tool_parameter_roots(&mut upstream_body)
+        {
+            body_mutated = true;
+            encoded_body = None;
+        }
         let mut headers = match self
             .prepare_upstream_request_headers(&request, &resolved.route)
             .await

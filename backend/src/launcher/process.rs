@@ -1036,7 +1036,7 @@ async fn prepare_cli_wrapper(
 /// Local routing terminates at Codey's loopback listener. Keep that hop out of
 /// the user's system proxy while preserving every existing bypass rule. Windows
 /// treats environment keys case-insensitively, so it receives one canonical key.
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos"))]
 fn local_router_proxy_bypass_environment(
     runtime_config_overrides: &[String],
     no_proxy: Option<&str>,

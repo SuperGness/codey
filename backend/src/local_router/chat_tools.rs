@@ -722,6 +722,9 @@ pub(crate) fn normalize_responses_tool_list(tools: Option<&mut Value>) -> bool {
         {
             changed |= normalize_tool_parameter_root(parameters);
         }
+        if let Some(input_schema) = tool.get_mut("input_schema") {
+            changed |= normalize_tool_parameter_root(input_schema);
+        }
         for field in ["tools", "children"] {
             changed |= normalize_responses_tool_list(tool.get_mut(field));
         }
@@ -1650,5 +1653,35 @@ pub(crate) fn copy_json_field(
 ) {
     if let Some(value) = from.get(source) {
         to.insert(target.to_string(), value.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_final_upstream_tool_schema_shapes() {
+        let mut body = json!({
+            "tools": [{
+                "name": "automation_update",
+                "input_schema": {
+                    "anyOf": [
+                        {"type": "object", "properties": {"mode": {"type": "string"}}},
+                        {"type": "null"}
+                    ]
+                }
+            }]
+        });
+
+        assert!(normalize_responses_tool_parameter_roots(&mut body));
+        assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+        assert_eq!(
+            body["tools"][0]["input_schema"]["anyOf"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }
