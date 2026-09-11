@@ -14,19 +14,29 @@ use crate::local_router;
 use crate::prompt_optimization;
 
 static OPTIMIZER_CLIENT: OnceLock<Client> = OnceLock::new();
+static LOOPBACK_OPTIMIZER_CLIENT: OnceLock<Client> = OnceLock::new();
 const CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
 const CODEX_INSTALLATION_ID_FILE: &str = "installation_id";
 const AUTHORIZATION_HEADER: &str = "authorization";
 const CHATGPT_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 
-fn optimizer_client() -> Result<&'static Client, String> {
-    if let Some(client) = OPTIMIZER_CLIENT.get() {
+fn optimizer_client(uses_codey_route: bool) -> Result<&'static Client, String> {
+    let slot = if uses_codey_route {
+        &LOOPBACK_OPTIMIZER_CLIENT
+    } else {
+        &OPTIMIZER_CLIENT
+    };
+    if let Some(client) = slot.get() {
         return Ok(client);
     }
-    let client = prompt_optimization::optimizer_http_client()?;
+    let client = if uses_codey_route {
+        prompt_optimization::loopback_optimizer_http_client()?
+    } else {
+        prompt_optimization::optimizer_http_client()?
+    };
     // Concurrent callers may build a duplicate client; the first successful
     // one wins and the rest reuse it.
-    Ok(OPTIMIZER_CLIENT.get_or_init(|| client))
+    Ok(slot.get_or_init(|| client))
 }
 
 async fn resolve_request_config(
@@ -147,8 +157,9 @@ pub async fn optimize_prompt_command(state: &Arc<AppState>, text: String) -> Res
     if !optimization.enabled {
         return Err("提示词优化尚未启用，请先在 Codey 控制台开启".to_string());
     }
+    let uses_codey_route = optimization.uses_codey_route();
     let request_config = resolve_request_config(state, &optimization).await?;
-    let client = optimizer_client()?;
+    let client = optimizer_client(uses_codey_route)?;
     match prompt_optimization::optimize_prompt_resolved(client, &request_config, &text).await {
         Ok(optimized) => Ok(json!({"optimized": optimized})),
         Err(error) => {
@@ -176,8 +187,9 @@ pub async fn fetch_prompt_optimization_models_command(
     let mut optimization = draft.unwrap_or_else(|| config.prompt_optimization.clone());
     optimization.merge_redacted_secrets(&config.prompt_optimization);
     optimization.validate()?;
+    let uses_codey_route = optimization.uses_codey_route();
     let request_config = resolve_request_config(state, &optimization).await?;
-    let client = optimizer_client()?;
+    let client = optimizer_client(uses_codey_route)?;
     let models = prompt_optimization::fetch_models_resolved(client, &request_config).await;
     match models {
         Ok(models) => Ok(json!({"models": models})),
@@ -204,8 +216,9 @@ pub async fn test_prompt_optimization_command(
     let mut optimization = draft.unwrap_or_else(|| config.prompt_optimization.clone());
     optimization.merge_redacted_secrets(&config.prompt_optimization);
     optimization.validate()?;
+    let uses_codey_route = optimization.uses_codey_route();
     let request_config = resolve_request_config(state, &optimization).await?;
-    let client = optimizer_client()?;
+    let client = optimizer_client(uses_codey_route)?;
     match prompt_optimization::test_configuration_resolved(client, &request_config).await {
         Ok(result) => Ok(json!({"status": "ok", "result": result})),
         Err(error) => {

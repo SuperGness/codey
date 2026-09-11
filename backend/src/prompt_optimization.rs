@@ -114,17 +114,41 @@ fn optimization_upstream_protocol(
     }
 }
 
+#[derive(Clone, Copy)]
+enum OptimizerProxyMode {
+    System,
+    Disabled,
+}
+
+fn build_optimizer_http_client(
+    builder: reqwest::ClientBuilder,
+    proxy_mode: OptimizerProxyMode,
+) -> Result<Client, String> {
+    let builder = builder
+        .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none());
+    let builder = match proxy_mode {
+        OptimizerProxyMode::System => builder,
+        OptimizerProxyMode::Disabled => builder.no_proxy(),
+    };
+    builder
+        .build()
+        .map_err(|error| format!("创建优化 HTTP 客户端失败：{error}"))
+}
+
 /// Builds the dedicated HTTP client for optimizer requests. The shared
 /// `AppState` client caps connects at 5s, which is too tight for provider
 /// relays behind a system proxy (CONNECT + TLS handshake routinely exceed
 /// that). The per-request `.timeout()` still bounds the whole call.
 pub fn optimizer_http_client() -> Result<Client, String> {
-    Client::builder()
-        .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| format!("创建优化 HTTP 客户端失败：{error}"))
+    build_optimizer_http_client(Client::builder(), OptimizerProxyMode::System)
+}
+
+/// Builds an optimizer client for Codey's loopback router. Local requests must
+/// never inherit the Windows system proxy, even when its bypass list is broken.
+pub fn loopback_optimizer_http_client() -> Result<Client, String> {
+    build_optimizer_http_client(Client::builder(), OptimizerProxyMode::Disabled)
 }
 
 fn request_endpoint(
@@ -1055,6 +1079,108 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn loopback_optimizer_client_bypasses_configured_proxy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::time::timeout;
+
+        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target.local_addr().unwrap();
+        let target_server = tokio::spawn(async move {
+            let (mut socket, _) = target.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\nconnection: close\r\n\r\ntarget",
+                )
+                .await
+                .unwrap();
+        });
+
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy.local_addr().unwrap();
+        let proxy_server = tokio::spawn(async move {
+            let Ok(Ok((mut socket, _))) = timeout(Duration::from_millis(500), proxy.accept()).await
+            else {
+                return false;
+            };
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            true
+        });
+
+        let client = build_optimizer_http_client(
+            Client::builder().proxy(
+                reqwest::Proxy::all(format!("http://{proxy_address}"))
+                    .expect("test proxy URL is valid"),
+            ),
+            OptimizerProxyMode::Disabled,
+        )
+        .unwrap();
+        let response = client
+            .get(format!("http://{target_address}/health"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.text().await.unwrap(), "target");
+        target_server.await.unwrap();
+        assert!(
+            !proxy_server.await.unwrap(),
+            "loopback request used the proxy"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_optimizer_client_preserves_configured_proxy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy.local_addr().unwrap();
+        let proxy_server = tokio::spawn(async move {
+            let (mut socket, _) = proxy.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            let bytes_read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes_read]);
+            assert!(
+                request.starts_with("GET http://example.invalid/health HTTP/1.1"),
+                "{request}"
+            );
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nproxy",
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = build_optimizer_http_client(
+            Client::builder().proxy(
+                reqwest::Proxy::all(format!("http://{proxy_address}"))
+                    .expect("test proxy URL is valid"),
+            ),
+            OptimizerProxyMode::System,
+        )
+        .unwrap();
+        let response = client
+            .get("http://example.invalid/health")
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.text().await.unwrap(), "proxy");
+        proxy_server.await.unwrap();
+    }
+
     fn configured() -> PromptOptimizationConfig {
         PromptOptimizationConfig {
             enabled: true,
@@ -1064,6 +1190,10 @@ mod tests {
             model: "gpt-test".to_string(),
             ..PromptOptimizationConfig::default()
         }
+    }
+
+    fn test_client() -> Client {
+        Client::builder().no_proxy().build().unwrap()
     }
 
     #[test]
@@ -1291,7 +1421,7 @@ mod tests {
 
         let mut config = configured();
         config.base_url = format!("http://{address}");
-        let client = Client::new();
+        let client = test_client();
         let models = fetch_models(&client, &config).await.unwrap();
         assert_eq!(models, ["model-a", "model-b"]);
         server.await.unwrap();
@@ -1328,7 +1458,7 @@ mod tests {
 
         let mut config = configured();
         config.base_url = format!("http://{address}");
-        let models = fetch_models(&Client::new(), &config).await.unwrap();
+        let models = fetch_models(&test_client(), &config).await.unwrap();
         assert_eq!(models, ["fallback-model"]);
         server.await.unwrap();
     }
@@ -1355,7 +1485,7 @@ mod tests {
 
         let mut config = configured();
         config.base_url = format!("http://{address}/v1");
-        let error = test_configuration(&Client::new(), &config)
+        let error = test_configuration(&test_client(), &config)
             .await
             .unwrap_err();
         assert!(error.contains("401"), "{error}");
@@ -1392,7 +1522,7 @@ mod tests {
 
         let mut config = configured();
         config.base_url = format!("http://{address}");
-        let error = test_configuration(&Client::new(), &config)
+        let error = test_configuration(&test_client(), &config)
             .await
             .unwrap_err();
         assert!(error.contains("401"), "{error}");
@@ -1424,7 +1554,7 @@ mod tests {
 
         let mut config = configured();
         config.base_url = format!("http://{address}/v1");
-        let error = test_configuration(&Client::new(), &config)
+        let error = test_configuration(&test_client(), &config)
             .await
             .unwrap_err();
         assert!(error.contains("过大"), "{error}");
@@ -1732,7 +1862,7 @@ mod tests {
 
     #[tokio::test]
     async fn optimize_prompt_validates_before_any_request() {
-        let client = Client::new();
+        let client = test_client();
         let config = configured();
 
         assert!(
@@ -1826,7 +1956,7 @@ mod tests {
 
         let mut config = configured();
         config.base_url = format!("http://{address}");
-        let client = Client::new();
+        let client = test_client();
         let result = optimize_prompt(&client, &config, "写个博客").await.unwrap();
         assert_eq!(result, "优化后的提示词");
         server.await.unwrap();
@@ -1919,7 +2049,7 @@ mod tests {
             upstream_protocol: UPSTREAM_PROTOCOL_OPENAI_RESPONSES.to_string(),
             instruction: "保持原意".to_string(),
         };
-        let result = optimize_prompt_resolved(&Client::new(), &config, "写个博客")
+        let result = optimize_prompt_resolved(&test_client(), &config, "写个博客")
             .await
             .unwrap();
         assert_eq!(result, "优化后的响应");
@@ -2010,7 +2140,7 @@ mod tests {
             upstream_protocol: UPSTREAM_PROTOCOL_OPENAI_RESPONSES.to_string(),
             instruction: "保持原意".to_string(),
         };
-        let result = optimize_prompt_resolved(&Client::new(), &config, "写个博客")
+        let result = optimize_prompt_resolved(&test_client(), &config, "写个博客")
             .await
             .unwrap();
         assert_eq!(result, "官方优化");
@@ -2039,7 +2169,7 @@ mod tests {
 
         let mut config = configured();
         config.base_url = format!("http://{address}");
-        let client = Client::new();
+        let client = test_client();
         let error = optimize_prompt(&client, &config, "你好").await.unwrap_err();
         assert!(error.contains("401"), "{error}");
         assert!(!error.contains("sk-test-key"), "{error}");
