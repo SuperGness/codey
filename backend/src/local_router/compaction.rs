@@ -44,10 +44,17 @@ pub(crate) fn validate_portable_context(body: &Value) -> Result<()> {
 
 pub(crate) fn validate_cross_route_context(body: &Value) -> Result<()> {
     validate_portable_context(body)?;
-    if input_items(body)
-        .iter()
-        .any(|item| item.get("type").and_then(Value::as_str) == Some("item_reference"))
-    {
+    fn contains_item_reference(value: &Value) -> bool {
+        if value.get("type").and_then(Value::as_str) == Some("item_reference") {
+            return true;
+        }
+        match value {
+            Value::Array(items) => items.iter().any(contains_item_reference),
+            Value::Object(object) => object.values().any(contains_item_reference),
+            _ => false,
+        }
+    }
+    if input_items(body).iter().any(contains_item_reference) {
         anyhow::bail!("context_not_portable: item_reference 属于上一条线路，不能发送到新的供应商");
     }
     Ok(())
@@ -254,6 +261,17 @@ mod tests {
         assert!(normalize_native_responses_context(&mut single, false));
         assert_eq!(single["input"]["id"], "rs_single");
         assert!(single["input"].get("content").is_none());
+    }
+
+    #[test]
+    fn cross_route_context_rejects_nested_item_reference() {
+        let body = json!({
+            "input": [{
+                "role": "assistant",
+                "content": [{"type": "output_text", "annotations": [{"type": "item_reference"}]}]
+            }]
+        });
+        assert!(validate_cross_route_context(&body).is_err());
     }
 
     #[test]
