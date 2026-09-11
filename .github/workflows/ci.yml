@@ -62,11 +62,16 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --all -- --check
 
+      # dist-overlay was just built above; tell build.rs not to run Vite again.
       - name: Rust tests
         run: cargo test --workspace --locked
+        env:
+          CODEY_SKIP_OVERLAY_BUILD: "1"
 
       - name: Rust lint
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        env:
+          CODEY_SKIP_OVERLAY_BUILD: "1"
 
   windows-rust:
     name: Windows Rust
@@ -105,6 +110,8 @@ jobs:
 
       - name: Test Windows workspace
         run: cargo test --workspace --locked
+        env:
+          CODEY_SKIP_OVERLAY_BUILD: "1"
 
       - name: Compile native overlay helper and test identity guards
         shell: powershell
@@ -112,3 +119,5 @@ jobs:
 
       - name: Lint Windows workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        env:
+          CODEY_SKIP_OVERLAY_BUILD: "1"

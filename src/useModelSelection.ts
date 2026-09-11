@@ -393,7 +393,6 @@ export function useModelSelection({
     updateDraftModelContext,
     toggleDraft1MModel,
     draftManualThirdPartyModelKeys,
-    manualThirdPartyModelKeys,
     thirdPartyModelOptions,
     openModelPicker,
     toggleDraftModel,

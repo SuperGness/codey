@@ -2984,8 +2984,8 @@ fn route_resolver_keeps_provider_protocol_and_model_selection_explicit() {
 
     for (provider_id, protocol, upstream_url) in selections {
         let requested_model = model_alias(provider_id, &model);
-        let resolved = RouteResolver::new(&snapshot)
-            .resolve(RouteRequest {
+        let resolved = snapshot
+            .resolve_request(RouteRequest {
                 requested_model: &requested_model,
                 route_hint: None,
                 bound_route: None,
@@ -5687,7 +5687,10 @@ async fn compaction_timeout_releases_session_and_model_switch_keeps_request_snap
 #[tokio::test]
 async fn compaction_stream_can_wait_for_headers_within_its_total_budget() {
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let (mut config, provider_id, model) = router_config(format!("http://{}/v1/responses", upstream.local_addr().unwrap()));
+    let (mut config, provider_id, model) = router_config(format!(
+        "http://{}/v1/responses",
+        upstream.local_addr().unwrap()
+    ));
     config.profiles[0].supports_remote_compaction = true;
     let (received, wait_received) = oneshot::channel();
     let (release, wait_release) = oneshot::channel();
@@ -5708,7 +5711,11 @@ async fn compaction_stream_can_wait_for_headers_within_its_total_budget() {
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(31)).await;
     tokio::time::resume();
-    assert!(tokio::time::timeout(Duration::from_millis(100), &mut pending).await.is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut pending)
+            .await
+            .is_err()
+    );
     release.send(()).unwrap();
     let response = pending.await.unwrap();
     assert_eq!(response.status().as_u16(), 200);
@@ -5720,14 +5727,22 @@ async fn compaction_stream_can_wait_for_headers_within_its_total_budget() {
 #[tokio::test]
 async fn compaction_large_sse_and_context_errors_keep_their_meaning() {
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let (mut config, provider_id, model) = router_config(format!("http://{}/v1/responses", upstream.local_addr().unwrap()));
+    let (mut config, provider_id, model) = router_config(format!(
+        "http://{}/v1/responses",
+        upstream.local_addr().unwrap()
+    ));
     config.profiles[0].supports_remote_compaction = true;
     let encrypted = "x".repeat(MAX_UPSTREAM_SSE_BUFFER_BYTES + 1);
-    let large = format!("data: {}\n\ndata: {}\n\n",
+    let large = format!(
+        "data: {}\n\ndata: {}\n\n",
         json!({"type":"response.output_item.done","output_index":0,"item":{"type":"compaction","encrypted_content":encrypted}}),
-        json!({"type":"response.completed","response":{"status":"completed","output":[]}}));
+        json!({"type":"response.completed","response":{"status":"completed","output":[]}})
+    );
     let error = json!({"error":{"code":"context_length_exceeded","message":"context full"}});
-    let sse_error = format!("data: {}\n\n", json!({"type":"response.failed","response":error}));
+    let sse_error = format!(
+        "data: {}\n\n",
+        json!({"type":"response.failed","response":error})
+    );
     let upstream_task = tokio::spawn(async move {
         for (content_type, body) in [
             ("text/event-stream", large),
@@ -5753,7 +5768,10 @@ async fn compaction_large_sse_and_context_errors_keep_their_meaning() {
             assert!(body.contains(&encrypted));
             assert!(body.contains("response.completed"));
         } else {
-            assert_eq!(response.json::<Value>().await.unwrap()["error"]["code"], CONTEXT_LENGTH_EXCEEDED);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["error"]["code"],
+                CONTEXT_LENGTH_EXCEEDED
+            );
         }
     }
     upstream_task.await.unwrap();

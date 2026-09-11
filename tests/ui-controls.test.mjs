@@ -48,5 +48,17 @@ test("frontend uses a single component library and keeps popups inside the overl
   assert.match(provider, /<ToastProvider placement="top"/);
   assert.match(provider, /<I18nProvider locale="zh-CN">/);
   const styles = readFileSync(new URL("src/tailwind.css", root), "utf8");
-  assert.match(styles, /@import "@heroui\/styles";/);
+  // HeroUI 样式按组件导入，避免把从未渲染的组件表内联进 overlay；
+  // 主题、工具类与变体三个入口必须保留，否则语义色与 focus-ring 失效。
+  assert.doesNotMatch(styles, /@import "@heroui\/styles";/);
+  assert.match(styles, /@import "@heroui\/styles\/themes\/default" layer\(theme\);/);
+  assert.match(styles, /@import "@heroui\/styles\/utilities";/);
+  assert.match(styles, /@import "@heroui\/styles\/variants";/);
+  for (const component of ["modal", "table", "combo-box", "toast", "checkbox", "switch", "tooltip", "popover"]) {
+    assert.match(
+      styles,
+      new RegExp(`@import "@heroui\\/styles\\/components\\/${component}\\.css" layer\\(components\\);`),
+      component,
+    );
+  }
 });

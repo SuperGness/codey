@@ -408,6 +408,12 @@ export function RequestLogDialog({
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [cursors, setCursors] = useState<Array<LogCursor | null>>([null]);
+  // Reset page and cursors together in the same handler; a separate effect
+  // would run one render late and let a stale cursor reach the query.
+  const resetPagination = useCallback(() => {
+    setPage(1);
+    setCursors([null]);
+  }, []);
   const [timeRange, setTimeRange] = useState("24h");
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
@@ -452,6 +458,12 @@ export function RequestLogDialog({
   };
   const [usedModels, setUsedModels] = useState<string[]>([]);
   const copyToastTimer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (copyToastTimer.current) window.clearTimeout(copyToastTimer.current);
+    },
+    [],
+  );
   const requestRevision = useRef(0);
   const listTask = useRef(Promise.resolve());
   const statsTask = useRef(Promise.resolve());
@@ -552,14 +564,10 @@ export function RequestLogDialog({
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setSearch(searchInput.trim());
-      setPage(1);
+      resetPagination();
     }, 300);
     return () => window.clearTimeout(timer);
   }, [searchInput]);
-
-  useEffect(() => {
-    setCursors([null]);
-  }, [filters, pageSize, refreshRevision]);
 
   useEffect(() => {
     if (!opened) return;
@@ -632,7 +640,7 @@ export function RequestLogDialog({
     setTimeRange("24h");
     setCustomFrom("");
     setCustomTo("");
-    setPage(1);
+    resetPagination();
   };
 
   const clearRequestLogs = async () => {
@@ -650,9 +658,8 @@ export function RequestLogDialog({
       }
       requestRevision.current += 1;
       setLoading(false);
-      setPage(1);
-      setCursors([null]);
-      setRefreshRevision((value) => value + 1);
+      resetPagination();
+            setRefreshRevision((value) => value + 1);
       setResult((current) => current
         ? {
             ...current,
@@ -760,9 +767,8 @@ export function RequestLogDialog({
             disabled={clearing}
             onClick={() => {
               setActionNotice(null);
-              setPage(1);
-              setCursors([null]);
-              setRefreshRevision((value) => value + 1);
+              resetPagination();
+                            setRefreshRevision((value) => value + 1);
             }}
           >
             {loading ? null : <IconRefresh size={14} aria-hidden="true" />}
@@ -808,7 +814,7 @@ export function RequestLogDialog({
                 ]}
                 onChange={(value) => {
                   setSearchMode(String(value));
-                  setPage(1);
+                  resetPagination();
                 }}
               />
               <Input
@@ -851,7 +857,7 @@ export function RequestLogDialog({
               ]}
               onChange={(value) => {
                 setTimeRange(String(value));
-                setPage(1);
+                resetPagination();
               }}
             />
 
@@ -863,7 +869,7 @@ export function RequestLogDialog({
               value={provider}
               onChange={(value) => {
                 setProvider(String(value ?? "all"));
-                setPage(1);
+                resetPagination();
               }}
             />
 
@@ -875,7 +881,7 @@ export function RequestLogDialog({
               value={model}
               onChange={(value) => {
                 setModel(String(value ?? "all"));
-                setPage(1);
+                resetPagination();
               }}
             />
 
@@ -886,7 +892,7 @@ export function RequestLogDialog({
               value={status}
               onChange={(value) => {
                 setStatus(String(value ?? "all"));
-                setPage(1);
+                resetPagination();
               }}
             />
 
@@ -897,7 +903,7 @@ export function RequestLogDialog({
               value={protocol}
               onChange={(value) => {
                 setProtocol(String(value ?? "all"));
-                setPage(1);
+                resetPagination();
               }}
             />
 
@@ -916,7 +922,7 @@ export function RequestLogDialog({
               value={requestKind}
               onChange={(value) => {
                 setRequestKind(String(value));
-                setPage(1);
+                resetPagination();
               }}
             />
 
@@ -944,7 +950,7 @@ export function RequestLogDialog({
                   value={customFrom}
                   onChange={(event) => {
                     setCustomFrom(event.currentTarget.value);
-                    setPage(1);
+                    resetPagination();
                   }}
                 />
               </label>
@@ -957,7 +963,7 @@ export function RequestLogDialog({
                   value={customTo}
                   onChange={(event) => {
                     setCustomTo(event.currentTarget.value);
-                    setPage(1);
+                    resetPagination();
                   }}
                 />
               </label>
@@ -1547,9 +1553,8 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                     const newPageSize = Number(value);
                     if (!Number.isFinite(newPageSize) || newPageSize === pageSize) return;
                     setPageSize(newPageSize);
-                    setPage(1);
-                    setCursors([null]);
-                  }}
+                    resetPagination();
+                                      }}
                 />
                 <Pagination size="sm" aria-label="请求日志分页" className="w-auto">
                   <Pagination.Content>

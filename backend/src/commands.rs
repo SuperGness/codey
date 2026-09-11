@@ -125,7 +125,13 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     #[cfg(test)]
     pub webhook_http_client_override: Option<reqwest::Client>,
-    wechat_claw_login_http_client: reqwest::Client,
+    /// Built on first use: the login/sync client is only needed for WeChat
+    /// ClawBot flows, and constructing a reqwest client loads the system root
+    /// certificates, which is measurable on the startup path.
+    wechat_claw_login_http_client: std::sync::OnceLock<reqwest::Client>,
+    /// Official-account probe started before the update check so the two
+    /// startup waits overlap; keyed by the app path it was resolved against.
+    official_account_probe_prewarm: Mutex<Option<OfficialAccountProbePrewarm>>,
     account_usage_cache: Arc<Mutex<account_usage::AccountUsageCache>>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     runtime_operation: Mutex<()>,
@@ -159,6 +165,11 @@ pub struct AppState {
     #[cfg(test)]
     restart_operation_pending: Notify,
     shutdown_reason: watch::Sender<Option<AppShutdownReason>>,
+}
+
+struct OfficialAccountProbePrewarm {
+    configured_codex_app_path: String,
+    task: tokio::task::JoinHandle<anyhow::Result<OfficialAccountProfileStatus>>,
 }
 
 struct ScheduledRestart {
@@ -212,7 +223,8 @@ impl Default for AppState {
                 .expect("shared Codey HTTP client should be constructible"),
             #[cfg(test)]
             webhook_http_client_override: None,
-            wechat_claw_login_http_client: wechat_claw_login_http_client(),
+            wechat_claw_login_http_client: std::sync::OnceLock::new(),
+            official_account_probe_prewarm: Mutex::new(None),
             account_usage_cache: Arc::new(Mutex::new(account_usage::AccountUsageCache::default())),
             runtime: Mutex::new(None),
             runtime_operation: Mutex::new(()),
@@ -283,6 +295,43 @@ fn bridge_string_array(payload: &Value, name: &str, limit: usize) -> Vec<String>
 }
 
 impl AppState {
+    /// Starts the `codex login status` probe in the background. The next
+    /// `prepare_routes_for_current_launch` consumes it when the configured app
+    /// path is unchanged; otherwise the probe runs again as before.
+    pub async fn prewarm_official_account_probe(&self) {
+        let configured_codex_app_path = self.config.read().await.codex_app_path.clone();
+        let home = codex_home().to_path_buf();
+        let probe_path = configured_codex_app_path.clone();
+        let task = tokio::task::spawn_blocking(move || {
+            crate::codex_provider::current_official_account_profile_status_for_launch(
+                &home,
+                &probe_path,
+            )
+        });
+        *self.official_account_probe_prewarm.lock().await = Some(OfficialAccountProbePrewarm {
+            configured_codex_app_path,
+            task,
+        });
+    }
+
+    async fn take_official_account_probe_prewarm(
+        &self,
+        configured_codex_app_path: &str,
+    ) -> Option<tokio::task::JoinHandle<anyhow::Result<OfficialAccountProfileStatus>>> {
+        let prewarm = self.official_account_probe_prewarm.lock().await.take()?;
+        if prewarm.configured_codex_app_path == configured_codex_app_path {
+            Some(prewarm.task)
+        } else {
+            prewarm.task.abort();
+            None
+        }
+    }
+
+    pub(crate) fn wechat_claw_login_http_client(&self) -> &reqwest::Client {
+        self.wechat_claw_login_http_client
+            .get_or_init(wechat_claw_login_http_client)
+    }
+
     pub fn request_shutdown(&self) {
         self.request_shutdown_with_reason(AppShutdownReason::CodexExited);
     }
@@ -643,15 +692,22 @@ pub(super) fn validate_official_account_config_change(
 pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> Result<(), String> {
     let home = codex_home().to_path_buf();
     let configured_codex_app_path = state.config.read().await.codex_app_path.clone();
-    let official_status = tokio::task::spawn_blocking(move || {
-        crate::codex_provider::current_official_account_profile_status_for_launch(
-            &home,
-            &configured_codex_app_path,
-        )
-    })
-    .await
-    .map_err(|error| format!("检测 Codex 官方账号登录状态的任务异常退出：{error}"))?
-    .map_err(|error| format!("检测 Codex 官方账号登录状态失败：{error:#}"))?;
+    let probe = match state
+        .take_official_account_probe_prewarm(&configured_codex_app_path)
+        .await
+    {
+        Some(task) => task,
+        None => tokio::task::spawn_blocking(move || {
+            crate::codex_provider::current_official_account_profile_status_for_launch(
+                &home,
+                &configured_codex_app_path,
+            )
+        }),
+    };
+    let official_status = probe
+        .await
+        .map_err(|error| format!("检测 Codex 官方账号登录状态的任务异常退出：{error}"))?
+        .map_err(|error| format!("检测 Codex 官方账号登录状态失败：{error:#}"))?;
 
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
@@ -2393,9 +2449,9 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.gpu_launch_mode != current.gpu_launch_mode
         || applied.fast_context_tools != current.fast_context_tools
         || applied.subagent_optimization != current.subagent_optimization
-        || applied_models != &RuntimeModelConfig::from_config(current)
+        || !applied_models.matches(current)
         || ((applied.subagent_optimization || current.subagent_optimization)
-            && applied_subagent != &RuntimeSubagentConfig::from_config(current))
+            && !applied_subagent.matches(current))
 }
 
 pub(super) fn provider_route_restart_required_for_runtime(

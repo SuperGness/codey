@@ -11,13 +11,6 @@ use super::{NotificationChannelConfig, NotificationChannelKind, NotificationEven
 pub(super) trait NotificationChannelAdapter: Send + Sync {
     fn display_name(&self) -> &'static str;
     fn configuration_error(&self) -> Option<&'static str>;
-    /// Some providers require a lightweight, idempotent activation before the
-    /// first delivery in a process. Returning `None` keeps the common path free
-    /// of an extra request.
-    fn prepare_request(&self, _client: &Client) -> Option<Result<RequestBuilder>> {
-        None
-    }
-    fn mark_prepared(&self) {}
     fn settle_on_success_status_error(&self, _body: &str) -> bool {
         false
     }

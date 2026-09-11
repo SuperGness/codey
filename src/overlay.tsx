@@ -4,7 +4,7 @@ import ReactDOM from "react-dom/client";
 import { enableShadowDOM } from "react-stately/private/flags/flags";
 import { UiProvider } from "./UiProvider";
 import utilityStyles from "./tailwind.css?inline";
-import { shadowStyles } from "./shadowStyles";
+import { shadowStyleSheet } from "./shadowStyles";
 import { App } from "./App";
 import { errorText } from "./appUtils";
 import coreStyles from "./styles.css?inline";
@@ -145,16 +145,17 @@ if (!window.__codeySettingsOverlay) {
   host.style.setProperty("background", "transparent", "important");
   host.setAttribute("aria-hidden", "true");
   const shadow = host.attachShadow({ mode: "open" });
-  const style = document.createElement("style");
-  style.textContent = [
-    shadowStyles(utilityStyles),
-    coreStyles,
-    operationsStyles,
-    modelStyles,
-    featureStyles,
-    diagnosticStyles,
-    responsiveStyles,
-  ].join("\n");
+  shadow.adoptedStyleSheets = [
+    shadowStyleSheet(
+      utilityStyles,
+      coreStyles,
+      operationsStyles,
+      modelStyles,
+      featureStyles,
+      diagnosticStyles,
+      responsiveStyles,
+    ),
+  ];
   // HeroUI 的主题变量声明在 :root / [data-theme] 上，ShadowRoot 内没有 :root，
   // 因此在两个挂载容器上显式声明主题；react-aria 也需要开启 Shadow DOM 感知。
   enableShadowDOM();
@@ -171,7 +172,7 @@ if (!window.__codeySettingsOverlay) {
   modalContainer.style.inset = "0";
   modalContainer.style.position = "fixed";
   modalContainer.style.width = "100%";
-  shadow.append(style, rootElement, modalContainer);
+  shadow.append(rootElement, modalContainer);
   getOverlayMountTarget().appendChild(host);
 
   let hideTimer: number | undefined;

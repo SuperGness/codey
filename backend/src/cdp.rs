@@ -452,7 +452,9 @@ pub async fn retry_inject_with_scripts(
                 }
                 previous_error = Some(safe_injection_error_summary(&error));
                 tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(Duration::from_secs(2));
+                // A renderer that becomes injectable mid-sleep should not wait
+                // out a multi-second backoff; a loopback GET every 500 ms is cheap.
+                delay = (delay * 2).min(Duration::from_millis(500));
             }
             Err(_) => {
                 let current_phase = InjectionPhase::from_raw(phase.load(Ordering::Acquire));

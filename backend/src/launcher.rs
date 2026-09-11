@@ -104,6 +104,32 @@ pub struct RuntimeModelConfig {
 }
 
 impl RuntimeModelConfig {
+    /// Equivalent to `*self == Self::from_config(config)` without cloning the
+    /// six model maps; the runtime-status poll calls this on every request.
+    pub fn matches(&self, config: &CodeyConfig) -> bool {
+        self.routes.len() == config.profiles.len()
+            && self
+                .routes
+                .iter()
+                .zip(&config.profiles)
+                .all(|(route, profile)| {
+                    route.0 == profile.provider_id()
+                        && route.1 == profile.name
+                        && route.2 == profile.enabled
+                        && route.3 == profile.official_account
+                        && route.4 == profile.supports_auto_review
+                })
+            && self.selected_models_by_provider == config.selected_models_by_provider
+            && self.supports_1m_context_by_provider == config.supports_1m_context_by_provider
+            && self.model_context_by_provider == config.model_context_by_provider
+            && self.manual_third_party_models_by_provider
+                == config.manual_third_party_models_by_provider
+            && self.declared_official_models_by_provider
+                == config.declared_official_models_by_provider
+            && self.upstream_models_by_provider == config.upstream_models_by_provider
+            && self.default_model == config.default_model
+    }
+
     pub fn from_config(config: &CodeyConfig) -> Self {
         Self {
             routes: config
@@ -142,6 +168,12 @@ pub struct RuntimeSubagentConfig {
 }
 
 impl RuntimeSubagentConfig {
+    pub fn matches(&self, config: &CodeyConfig) -> bool {
+        self.model == config.subagent_model
+            && self.reasoning_effort == config.subagent_reasoning_effort
+            && self.roles == config.subagent_roles
+    }
+
     pub fn from_config(config: &CodeyConfig) -> Self {
         Self {
             model: config.subagent_model.clone(),
@@ -1470,7 +1502,15 @@ async fn prepare_startup_patches(
 ) -> StartupPatchState {
     let slim_codex_pet = config.slim_codex_pet;
     let pet_result = configure_startup_pet(home, slim_codex_pet).await;
-    let debug_port = codey_runtime_core::ports::select_packaged_codex_debug_port(9229);
+    // The vendored helper only probes the port on Windows. A busy 9229 on macOS
+    // (another Node/Electron debugger) otherwise leaves Chromium without a
+    // remote-debugging port and the injection times out after 30 s.
+    let debug_port = codey_runtime_core::ports::select_packaged_codex_debug_port_with(
+        9229,
+        true,
+        codey_runtime_core::ports::can_bind_loopback_port,
+        codey_runtime_core::ports::find_available_loopback_port,
+    );
     match pet_result {
         Ok(Ok(_)) => {}
         Ok(Err(error)) => {

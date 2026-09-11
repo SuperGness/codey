@@ -10,5 +10,5 @@ pub use config::{
     WebhookConfig,
 };
 pub use dispatcher::NotificationDispatcher;
-pub(crate) use dispatcher::notification_http_client;
+pub(crate) use dispatcher::shared_notification_http_client;
 pub use event::NotificationEvent;

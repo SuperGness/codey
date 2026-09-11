@@ -1,5 +1,107 @@
-@import "@heroui/styles";
-@source "../node_modules/@heroui/react/dist";
+/*
+ * HeroUI 样式按组件导入。@heroui/styles 的总入口会拉进全部组件表（含日历、取色器、
+ * 数字输入等从未渲染的组件，约 150 KB），而 overlay 把整份 CSS 内联进 JS。
+ * 这里按 dist/index.css 与 dist/components/index.css 的分层和顺序复刻，只保留实际
+ * 渲染的组件：共享基元先导入，再导入依赖它们的组件，最后是弹层与组合框。
+ * 新增 HeroUI 组件时在对应位置补一行 @import。
+ */
+@layer theme, base, components, utilities;
+
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@import "@heroui/styles/base/base.css" layer(base);
+@import "@heroui/styles/base/scrollbar.css" layer(base);
+
+/* 共享基元（必须最先导入，供后续组件覆盖） */
+@import "@heroui/styles/components/close-button.css" layer(components);
+@import "@heroui/styles/components/description.css" layer(components);
+@import "@heroui/styles/components/error-message.css" layer(components);
+@import "@heroui/styles/components/field-error.css" layer(components);
+@import "@heroui/styles/components/label.css" layer(components);
+
+/* 导航 */
+@import "@heroui/styles/components/disclosure.css" layer(components);
+@import "@heroui/styles/components/pagination.css" layer(components);
+
+/* 按钮 */
+@import "@heroui/styles/components/button.css" layer(components);
+
+/* 集合 */
+@import "@heroui/styles/components/list-box-item.css" layer(components);
+@import "@heroui/styles/components/list-box-section.css" layer(components);
+@import "@heroui/styles/components/list-box.css" layer(components);
+
+/* 控件 */
+@import "@heroui/styles/components/switch.css" layer(components);
+
+/* 数据展示 */
+@import "@heroui/styles/components/badge.css" layer(components);
+@import "@heroui/styles/components/chip.css" layer(components);
+@import "@heroui/styles/components/table.css" layer(components);
+
+/* 反馈 */
+@import "@heroui/styles/components/alert.css" layer(components);
+@import "@heroui/styles/components/spinner.css" layer(components);
+@import "@heroui/styles/components/toast.css" layer(components);
+
+/* 表单 */
+@import "@heroui/styles/components/checkbox.css" layer(components);
+@import "@heroui/styles/components/input.css" layer(components);
+@import "@heroui/styles/components/input-group.css" layer(components);
+@import "@heroui/styles/components/textarea.css" layer(components);
+
+/* 布局 */
+@import "@heroui/styles/components/card.css" layer(components);
+@import "@heroui/styles/components/header.css" layer(components);
+
+/* 弹层 */
+@import "@heroui/styles/components/drawer.css" layer(components);
+@import "@heroui/styles/components/modal.css" layer(components);
+@import "@heroui/styles/components/popover.css" layer(components);
+@import "@heroui/styles/components/tooltip.css" layer(components);
+
+/* 选择器 */
+@import "@heroui/styles/components/combo-box.css" layer(components);
+@import "@heroui/styles/components/select.css" layer(components);
+
+@import "@heroui/styles/themes/default" layer(theme);
+@import "@heroui/styles/utilities";
+@import "@heroui/styles/variants";
+
+/* Tailwind 只需扫描实际导入的 HeroUI 组件源码。 */
+@source "../node_modules/@heroui/react/dist/utils";
+@source "../node_modules/@heroui/react/dist/hooks";
+@source "../node_modules/@heroui/react/dist/components/alert";
+@source "../node_modules/@heroui/react/dist/components/badge";
+@source "../node_modules/@heroui/react/dist/components/button";
+@source "../node_modules/@heroui/react/dist/components/card";
+@source "../node_modules/@heroui/react/dist/components/checkbox";
+@source "../node_modules/@heroui/react/dist/components/chip";
+@source "../node_modules/@heroui/react/dist/components/close-button";
+@source "../node_modules/@heroui/react/dist/components/combo-box";
+@source "../node_modules/@heroui/react/dist/components/description";
+@source "../node_modules/@heroui/react/dist/components/disclosure";
+@source "../node_modules/@heroui/react/dist/components/drawer";
+@source "../node_modules/@heroui/react/dist/components/error-message";
+@source "../node_modules/@heroui/react/dist/components/field-error";
+@source "../node_modules/@heroui/react/dist/components/header";
+@source "../node_modules/@heroui/react/dist/components/input";
+@source "../node_modules/@heroui/react/dist/components/input-group";
+@source "../node_modules/@heroui/react/dist/components/label";
+@source "../node_modules/@heroui/react/dist/components/list-box";
+@source "../node_modules/@heroui/react/dist/components/list-box-item";
+@source "../node_modules/@heroui/react/dist/components/list-box-section";
+@source "../node_modules/@heroui/react/dist/components/modal";
+@source "../node_modules/@heroui/react/dist/components/pagination";
+@source "../node_modules/@heroui/react/dist/components/popover";
+@source "../node_modules/@heroui/react/dist/components/select";
+@source "../node_modules/@heroui/react/dist/components/spinner";
+@source "../node_modules/@heroui/react/dist/components/switch";
+@source "../node_modules/@heroui/react/dist/components/table";
+@source "../node_modules/@heroui/react/dist/components/textarea";
+@source "../node_modules/@heroui/react/dist/components/toast";
+@source "../node_modules/@heroui/react/dist/components/tooltip";
 
 /* Codey 品牌色映射到 HeroUI 语义色变量；派生的 hover / soft 变体由 HeroUI 主题自动按 --accent 计算。 */
 @layer theme {

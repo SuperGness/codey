@@ -987,7 +987,15 @@ async fn prepare_cli_wrapper(
     #[cfg(target_os = "macos")]
     let wrapper = {
         let path = crate::config::default_config_path().with_file_name("codex-cli-wrapper");
-        write_macos_cli_wrapper(&path, &codey, &environment)?;
+        // The wrapper write fsyncs; keep it off the two-worker async runtime.
+        let write_path = path.clone();
+        let write_codey = codey.clone();
+        let write_environment = environment.clone();
+        tokio::task::spawn_blocking(move || {
+            write_macos_cli_wrapper(&write_path, &write_codey, &write_environment)
+        })
+        .await
+        .context("写入 macOS Codex CLI 兼容入口的任务异常退出")??;
         path
     };
     environment.insert(

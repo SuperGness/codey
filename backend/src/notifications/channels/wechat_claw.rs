@@ -29,10 +29,12 @@ impl<'a> WechatClawChannel<'a> {
             .wechat_claw_base_url()
             .map_err(anyhow::Error::msg)?;
         let endpoint = base_url.join(endpoint).map_err(anyhow::Error::from)?;
+        let headers =
+            ilink::headers(Some(self.config.bot_token.trim())).map_err(anyhow::Error::msg)?;
         Ok(client
             .post(endpoint)
             .header("Content-Type", "application/json")
-            .headers(ilink::headers(Some(self.config.bot_token.trim())))
+            .headers(headers)
             .json(&body))
     }
 }

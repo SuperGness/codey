@@ -2404,8 +2404,18 @@ fn resource_conflict_in_other_sessions(
                 });
             }
         };
-        let ledger: SessionLedger = serde_json::from_slice(&bytes)
-            .with_context(|| format!("解析跨会话子代理账本失败：{}", ledger_path.display()))?;
+        // A ledger left behind by a crashed or older Codey must not block every
+        // other session: skip it, keep looking, and leave the diagnostics on stderr.
+        let ledger: SessionLedger = match serde_json::from_slice(&bytes) {
+            Ok(ledger) => ledger,
+            Err(error) => {
+                eprintln!(
+                    "Codey 跳过无法解析的跨会话子代理账本 {}：{error}",
+                    ledger_path.display()
+                );
+                continue;
+            }
+        };
         if ledger.runtime_id_hash != runtime_id_hash {
             continue;
         }
@@ -2630,6 +2640,27 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(denied.contains("visual.inspect"));
+    }
+
+    #[test]
+    fn an_unparseable_ledger_in_another_session_does_not_block_spawns() {
+        let temp = tempdir().unwrap();
+        let stale_session = temp.path().join("deadbeef");
+        std::fs::create_dir_all(&stale_session).unwrap();
+        std::fs::write(stale_session.join(LEDGER_FILE), b"{not json").unwrap();
+        assert_eq!(
+            pre_spawn_with_workspace(
+                temp.path(),
+                "runtime-a",
+                "session-a",
+                Some(&spawn_input("writer_a", "codey_worker")),
+                Some("/repo"),
+                0,
+                10,
+            )
+            .unwrap(),
+            None
+        );
     }
 
     #[test]

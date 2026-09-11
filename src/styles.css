@@ -10,10 +10,6 @@
   --mac-text-primary: #1d1d1f;
   --mac-text-secondary: #6e6e73;
   --mac-text-tertiary: #8e8e93;
-  --field-shadow: 0 0 0 0 transparent;
-  --field-border: rgba(0, 0, 0, 0.12);
-  --field-border-hover: rgba(0, 0, 0, 0.24);
-  --field-border-focus: #007aff;
 }
 
 :host {
@@ -469,12 +465,7 @@ button,
 .input,
 .input-group,
 .select__trigger,
-.textarea,
-.search-field,
-.number-field,
-.date-input-group,
-.color-input-group,
-.autocomplete__trigger {
+.textarea {
   --field-shadow: 0 0 0 0 transparent !important;
   --tw-shadow: 0 0 0 0 transparent !important;
   border-width: 1px !important;
@@ -484,12 +475,7 @@ button,
 .input:not(:focus):not([data-focused="true"]):not([data-focus-visible="true"]),
 .input-group:not(:focus-within):not([data-focus-within="true"]),
 .select__trigger:not(:focus):not([data-focus="true"]):not([data-focus-visible="true"]),
-.textarea:not(:focus):not([data-focused="true"]):not([data-focus-visible="true"]),
-.search-field:not(:focus-within),
-.number-field:not(:focus-within),
-.date-input-group:not(:focus-within),
-.color-input-group:not(:focus-within),
-.autocomplete__trigger:not(:focus):not([data-focus="true"]):not([data-focus-visible="true"]) {
+.textarea:not(:focus):not([data-focused="true"]):not([data-focus-visible="true"]) {
   box-shadow: none !important;
 }
 

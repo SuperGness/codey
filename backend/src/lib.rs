@@ -49,9 +49,7 @@ mod update_helper;
 
 use std::sync::Arc;
 
-#[cfg(unix)]
-use anyhow::Context;
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use commands::{AppShutdownReason, AppState};
 use native_update_ui::NativeUpdateUi;
@@ -141,13 +139,18 @@ fn build_async_runtime() -> Result<tokio::runtime::Runtime> {
 }
 
 async fn run(ui: NativeUpdateUi) -> Result<()> {
-    error_log::initialize();
-    let state = Arc::new(AppState::default());
-    let configured_codex_app_path = state.config.read().await.codex_app_path.clone();
-    let _ = tokio::task::spawn_blocking(move || {
+    // Config load, ledger read and HTTP client construction (which loads the
+    // system root store) are synchronous; keep them off the async workers.
+    let state = tokio::task::spawn_blocking(|| {
+        error_log::initialize();
+        let state = AppState::default();
+        let configured_codex_app_path = state.config.blocking_read().codex_app_path.clone();
         error_log::refresh_codex_app_version(None, Some(&configured_codex_app_path));
+        state
     })
-    .await;
+    .await
+    .map(Arc::new)
+    .context("初始化 Codey 状态的任务异常退出")?;
     let codex_home = codex_config::codex_home();
     let local_router_enabled = state.config.read().await.local_router_enabled;
     if let Err(error) =
@@ -180,6 +183,10 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
         );
         eprintln!("Codey 启动前写入 codey_router 恢复兼容桩失败：{error:#}");
     }
+    // The official-account probe spawns `codex login status` (up to 3 s) and the
+    // update check is a network round trip (up to 10 s). Neither depends on the
+    // other, so start the probe now and let the launch path collect it.
+    state.prewarm_official_account_probe().await;
     let mut shutdown = Box::pin(shutdown_signal());
     let startup_update = startup_update::run(&state, &ui);
     tokio::pin!(startup_update);

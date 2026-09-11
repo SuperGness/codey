@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Modal } from "@heroui/react";
 import { UNSAFE_PortalProvider } from "react-aria";
 import { useToastContainer } from "./components/ui";
@@ -71,6 +71,9 @@ export function SettingsModalShell({
 }: SettingsModalShellProps) {
   const [toastHostEl, setToastHostEl] = useState<HTMLDivElement | null>(null);
   useToastContainer(toastHostEl, visible);
+  // PortalProvider 以 getContainer 的引用作为上下文值；每次渲染新建闭包会让
+  // 所有弹层 / 提示 / 组合框在每次 App 重渲染时一起重渲染。
+  const getContainer = useCallback(() => container ?? null, [container]);
 
   // 外壳不响应遮罩点击与 Esc；关闭只能通过头部按钮，避免误触丢失未保存的更改。
   // 开关状态直接交给 Backdrop（无触发按钮的受控用法）。
@@ -115,7 +118,7 @@ export function SettingsModalShell({
     </Modal.Backdrop>
   );
   return container ? (
-    <UNSAFE_PortalProvider getContainer={() => container}>{modal}</UNSAFE_PortalProvider>
+    <UNSAFE_PortalProvider getContainer={getContainer}>{modal}</UNSAFE_PortalProvider>
   ) : (
     modal
   );

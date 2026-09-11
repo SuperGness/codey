@@ -61,3 +61,41 @@ fn startup_without_provider_rewrites_is_still_ready() {
     assert_eq!(summary.files_fixed, 0);
     assert_eq!(summary.sqlite_rows_updated, 0);
 }
+
+#[test]
+fn runtime_config_matches_agrees_with_from_config_equality() {
+    let mut applied = CodeyConfig::default();
+    applied.profiles[0].name = "主线路".to_string();
+    applied
+        .selected_models_by_provider
+        .insert("openai".to_string(), vec!["gpt-6-astra".to_string()]);
+    applied.subagent_model = "gpt-6-astra".to_string();
+    let models = RuntimeModelConfig::from_config(&applied);
+    let subagent = RuntimeSubagentConfig::from_config(&applied);
+    assert!(models.matches(&applied));
+    assert!(subagent.matches(&applied));
+
+    let mut changed = applied.clone();
+    changed.profiles[0].enabled = !changed.profiles[0].enabled;
+    assert_eq!(
+        models.matches(&changed),
+        models == RuntimeModelConfig::from_config(&changed)
+    );
+    assert!(!models.matches(&changed));
+
+    let mut changed = applied.clone();
+    changed.default_model = "gpt-5.6-luna".to_string();
+    assert!(!models.matches(&changed));
+
+    let mut changed = applied.clone();
+    changed.profiles.push(changed.profiles[0].clone());
+    assert!(!models.matches(&changed));
+
+    let mut changed = applied.clone();
+    changed.subagent_reasoning_effort = format!("{}-changed", applied.subagent_reasoning_effort);
+    assert_eq!(
+        subagent.matches(&changed),
+        subagent == RuntimeSubagentConfig::from_config(&changed)
+    );
+    assert!(!subagent.matches(&changed));
+}

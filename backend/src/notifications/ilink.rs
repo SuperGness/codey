@@ -32,8 +32,10 @@ pub(crate) fn base_info() -> Value {
 }
 
 /// Protocol headers for every iLink request. `token` is attached as a Bearer
-/// credential only when non-empty.
-pub(crate) fn headers(token: Option<&str>) -> HeaderMap {
+/// credential only when non-empty. A token that is not a valid header value
+/// (control characters, non-ASCII) is reported instead of panicking, so a
+/// mis-pasted token cannot take down the watcher or the sync task.
+pub(crate) fn headers(token: Option<&str>) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(
         "AuthorizationType",
@@ -49,10 +51,27 @@ pub(crate) fn headers(token: Option<&str>) -> HeaderMap {
         client_version().parse().expect("numeric header"),
     );
     if let Some(token) = token.filter(|token| !token.trim().is_empty()) {
-        headers.insert(
-            "Authorization",
-            format!("Bearer {token}").parse().expect("token header"),
-        );
+        let value = format!("Bearer {token}")
+            .parse()
+            .map_err(|_| "微信 ClawBot 令牌包含非法字符，请重新扫码登录".to_string())?;
+        headers.insert("Authorization", value);
     }
-    headers
+    Ok(headers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_token_characters_return_an_error_instead_of_panicking() {
+        let error = headers(Some("abc\r\ndef")).unwrap_err();
+        assert!(error.contains("令牌"));
+        assert!(
+            headers(Some("valid-token"))
+                .unwrap()
+                .contains_key("authorization")
+        );
+        assert!(!headers(Some("   ")).unwrap().contains_key("authorization"));
+    }
 }

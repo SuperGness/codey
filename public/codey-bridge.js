@@ -220,10 +220,40 @@
   };
   const dispatchMutations = (mutations) =>
     codeyTimed("bridge.dispatchMutations", mutations?.length ?? 0, () => dispatchMutationsImpl(mutations));
+  // The shared observer unions every subscriber's options, so a class flip
+  // anywhere in the document would otherwise wake the childList-only shields.
+  // Hand each subscriber only the records its own options would have produced;
+  // records of an unknown type are delivered to everyone (fail open).
+  const mutationBelongsTo = (mutation, subscriber) => {
+    const type = mutation?.type;
+    if (type === "childList") return subscriber.childList;
+    if (type === "attributes") {
+      if (!subscriber.attributes) return false;
+      if (subscriber.attributeFilter === null) return true;
+      return subscriber.attributeFilter.includes(mutation.attributeName);
+    }
+    return true;
+  };
+  const mutationsFor = (mutations, subscriber) => {
+    if (!Array.isArray(mutations)) return mutations;
+    let filtered = null;
+    for (let index = 0; index < mutations.length; index += 1) {
+      const belongs = mutationBelongsTo(mutations[index], subscriber);
+      if (filtered === null) {
+        if (belongs) continue;
+        filtered = mutations.slice(0, index);
+      } else if (belongs) {
+        filtered.push(mutations[index]);
+      }
+    }
+    return filtered === null ? mutations : filtered;
+  };
   const dispatchMutationsImpl = (mutations) => {
     for (const subscriber of [...mutationSubscribers.values()]) {
+      const own = mutationsFor(mutations, subscriber);
+      if (Array.isArray(own) && own.length === 0) continue;
       try {
-        subscriber.callback(mutations);
+        subscriber.callback(own);
       } catch (error) {
         window.console?.error?.("[Codey] mutation subscriber failed", error);
       }

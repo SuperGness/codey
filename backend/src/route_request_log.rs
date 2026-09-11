@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -1969,8 +1970,9 @@ impl SqliteSink {
                 ON route_request_logs(codex_session_id, timestamp_unix_ms DESC, request_id DESC);
              DROP INDEX IF EXISTS idx_route_request_logs_time;
              DROP INDEX IF EXISTS idx_route_request_logs_provider_model;
-             CREATE INDEX IF NOT EXISTS idx_route_request_logs_status
-                ON route_request_logs(status, timestamp_unix_ms);",
+             DROP INDEX IF EXISTS idx_route_request_logs_status;
+             CREATE INDEX IF NOT EXISTS idx_route_request_logs_status_time_id
+                ON route_request_logs(status, timestamp_unix_ms DESC, request_id DESC);",
         )?;
         for column in ["requested_service_tier", "service_tier"] {
             let exists: bool = connection.query_row(
@@ -2163,10 +2165,7 @@ fn query_sqlite_route_request_logs(
     } else {
         "LIMIT ? OFFSET ?"
     };
-    let has_tiers: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('route_request_logs') WHERE name = 'service_tier')",
-        [], |row| row.get(0),
-    )?;
+    let has_tiers = sqlite_has_tier_columns(&transaction, path)?;
     let tier_columns = if has_tiers {
         "requested_service_tier, service_tier"
     } else {
@@ -2440,6 +2439,25 @@ pub(crate) fn query_route_request_log_stats(
         .collect::<rusqlite::Result<Vec<_>>>()?;
     transaction.commit()?;
     Ok(result)
+}
+
+/// The tier columns are added by the writer at open time and never dropped, so
+/// a positive probe can be remembered per database path. Negative results keep
+/// probing: the writer may add the columns while this process is running.
+fn sqlite_has_tier_columns(connection: &Connection, path: &Path) -> rusqlite::Result<bool> {
+    static TIERED_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    let known = TIERED_PATHS.get_or_init(|| Mutex::new(HashSet::new()));
+    if lock_unpoisoned(known).contains(path) {
+        return Ok(true);
+    }
+    let has_tiers: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('route_request_logs') WHERE name = 'service_tier')",
+        [], |row| row.get(0),
+    )?;
+    if has_tiers {
+        lock_unpoisoned(known).insert(path.to_path_buf());
+    }
+    Ok(has_tiers)
 }
 
 fn open_query_connection(path: &Path) -> rusqlite::Result<Connection> {

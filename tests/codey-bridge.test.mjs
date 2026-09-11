@@ -84,6 +84,23 @@ test("mutation dispatcher unions subscriptions and tears down only when empty", 
     ["assets", "mutation"],
   ]);
 
+  // Records are routed by each subscriber's own options: the childList-only
+  // subscriber never sees attribute records, attribute subscribers only see
+  // attributes in their filter, and subscribers with nothing to see are skipped.
+  calls.length = 0;
+  const classFlip = { type: "attributes", attributeName: "class" };
+  const srcFlip = { type: "attributes", attributeName: "src" };
+  const added = { type: "childList" };
+  activeObserver.callback([classFlip, srcFlip, added]);
+  assert.deepEqual(calls, [
+    ["pet", added],
+    ["security", added],
+    ["assets", srcFlip, added],
+  ]);
+  calls.length = 0;
+  activeObserver.callback([classFlip]);
+  assert.deepEqual(calls, []);
+
   unsubscribeAssets();
   unsubscribeAssets();
   assert.deepEqual(

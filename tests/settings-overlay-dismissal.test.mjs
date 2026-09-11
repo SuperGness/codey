@@ -29,7 +29,7 @@ test("settings modal keeps dismissal and stacking inside the overlay", async () 
     /<Modal[\s\S]*isOpen=\{visible\}[\s\S]*onOpenChange=\{\(open\) => \{\s*if \(!open\) onCancel\(\);/,
   );
   assert.match(shellSource, /<Modal\.Backdrop\s+isDismissable=\{false\}\s+isKeyboardDismissDisabled/);
-  assert.match(shellSource, /<UNSAFE_PortalProvider getContainer=\{\(\) => container\}>/);
+  assert.match(shellSource, /<UNSAFE_PortalProvider getContainer=\{getContainer\}>/);
   assert.match(shellSource, /className="settings-modal-shell /);
   assert.doesNotMatch(shellSource, /backdrop-blur|overlayProps=/);
   assert.match(shellSource, /settings-modal-body flex min-h-0 flex-1 flex-col overflow-hidden/);

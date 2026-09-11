@@ -602,13 +602,6 @@
   white-space: nowrap;
 }
 
-.notification-test-error {
-  margin: 8px 0 0;
-  color: #d70015;
-  font-size: 11px;
-  line-height: 1.45;
-}
-
 .inline-result {
   font-size: 11px;
   color: #6e6e73;

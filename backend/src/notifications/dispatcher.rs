@@ -109,7 +109,6 @@ impl NotificationDispatcher {
         adapter: &dyn NotificationChannelAdapter,
         attempts: u32,
     ) -> std::result::Result<(), NotificationDeliveryError> {
-        let preparation_error = self.prepare_channel(adapter).await;
         let mut last_error = None;
         for attempt in 0..attempts.max(1) {
             let request = adapter
@@ -170,6 +169,16 @@ impl NotificationDispatcher {
                                             adapter.display_name()
                                         )));
                                     }
+                                    if is_permanent_client_error(status) {
+                                        // A rejected token, unknown chat or malformed
+                                        // payload will not fix itself; retrying every
+                                        // scan only burns the ledger with fsyncs.
+                                        return Err(NotificationDeliveryError::settled(format!(
+                                            "{}消息发送失败（HTTP {}，已停止自动重试）：{error}",
+                                            adapter.display_name(),
+                                            status.as_u16()
+                                        )));
+                                    }
                                     last_error = Some(error);
                                 }
                             }
@@ -201,12 +210,7 @@ impl NotificationDispatcher {
                 tokio::time::sleep(Duration::from_millis(250 * 2u64.pow(attempt))).await;
             }
         }
-        let mut error = last_error.unwrap_or_else(|| "未知错误".to_string());
-        if let Some(preparation_error) = preparation_error {
-            error.push_str("（iLink 激活检查未完成：");
-            error.push_str(&preparation_error);
-            error.push('）');
-        }
+        let error = last_error.unwrap_or_else(|| "未知错误".to_string());
         Err(NotificationDeliveryError::retryable(format!(
             "{}消息发送失败：{}",
             adapter.display_name(),
@@ -240,36 +244,16 @@ impl NotificationDispatcher {
             .map_err(anyhow::Error::new)?;
         Ok(json!({"status":"ok", "eventId": event.event_id}))
     }
+}
 
-    async fn prepare_channel(&self, adapter: &dyn NotificationChannelAdapter) -> Option<String> {
-        let request = adapter.prepare_request(&self.client)?;
-        let request = match request {
-            Ok(request) => request,
-            Err(error) => return Some(adapter.sanitize_error(&error.to_string())),
-        };
-        let response = match request.send().await {
-            Ok(response) => response,
-            Err(error) => return Some(adapter.sanitize_error(&error.to_string())),
-        };
-        let status = response.status();
-        let body = match crate::http_response::read_bounded_body(
-            response,
-            MAX_NOTIFICATION_RESPONSE_BYTES,
-            "通知渠道准备响应",
+/// 4xx responses other than request-timeout and rate-limit describe a request
+/// the service will keep rejecting until the configuration changes.
+fn is_permanent_client_error(status: StatusCode) -> bool {
+    status.is_client_error()
+        && !matches!(
+            status,
+            StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
         )
-        .await
-        {
-            Ok(body) => String::from_utf8_lossy(&body).into_owned(),
-            Err(error) => return Some(adapter.sanitize_error(&error.to_string())),
-        };
-        match validate_http_response(adapter, status, &body) {
-            Ok(()) => {
-                adapter.mark_prepared();
-                None
-            }
-            Err(error) => Some(adapter.sanitize_error(&error)),
-        }
-    }
 }
 
 pub(crate) fn notification_http_client() -> Result<Client> {
@@ -280,6 +264,30 @@ pub(crate) fn notification_http_client() -> Result<Client> {
         .redirect(redirect::Policy::none())
         .build()
         .context("创建通知 HTTP 客户端失败")
+}
+
+/// How long a built client is reused before the system proxy configuration
+/// and root store are snapshotted again.
+const SHARED_CLIENT_MAX_AGE: Duration = Duration::from_secs(10 * 60);
+
+/// Building a reqwest client loads the operating-system root certificates,
+/// which is measurable on macOS. reqwest also snapshots the system proxy
+/// configuration at build time, so the shared client is rebuilt periodically
+/// instead of living for the whole process.
+pub(crate) fn shared_notification_http_client() -> Result<Client> {
+    static SHARED: std::sync::Mutex<Option<(std::time::Instant, Client)>> =
+        std::sync::Mutex::new(None);
+    let mut shared = SHARED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((built_at, client)) = shared.as_ref()
+        && built_at.elapsed() < SHARED_CLIENT_MAX_AGE
+    {
+        return Ok(client.clone());
+    }
+    let client = notification_http_client()?;
+    *shared = Some((std::time::Instant::now(), client.clone()));
+    Ok(client)
 }
 
 fn validate_http_response(
@@ -374,6 +382,66 @@ mod tests {
         assert!(error.to_string().contains("已停止自动重试"));
         server.await.unwrap();
         assert_eq!(request_count.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn a_permanent_client_error_settles_the_delivery_without_retrying() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = 0;
+            while let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(Duration::from_millis(400), listener.accept()).await
+            {
+                let mut request = [0_u8; 4096];
+                let _ = socket.read(&mut request).await.unwrap();
+                requests += 1;
+                let body = r#"{"ok":false,"description":"Unauthorized"}"#;
+                let response = format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let config = NotificationChannelConfig {
+            id: "unauthorized-feishu".to_string(),
+            kind: NotificationChannelKind::Feishu,
+            enabled: true,
+            url: format!("http://{address}"),
+            allow_insecure_test_url: true,
+            ..NotificationChannelConfig::default()
+        };
+        let dispatcher = NotificationDispatcher::new(config).unwrap();
+        let event = NotificationEvent::new(
+            "session.waiting",
+            "session-unauthorized",
+            "profile-unauthorized",
+            "Codex",
+            0,
+            None,
+        );
+
+        let error = dispatcher.send(&event).await.unwrap_err();
+
+        assert!(error.should_settle_delivery());
+        assert!(error.to_string().contains("HTTP 401"));
+        assert_eq!(server.await.unwrap(), 1);
+    }
+
+    #[test]
+    fn only_timeouts_and_rate_limits_stay_retryable_among_client_errors() {
+        assert!(is_permanent_client_error(StatusCode::BAD_REQUEST));
+        assert!(is_permanent_client_error(StatusCode::UNAUTHORIZED));
+        assert!(is_permanent_client_error(StatusCode::NOT_FOUND));
+        assert!(!is_permanent_client_error(StatusCode::REQUEST_TIMEOUT));
+        assert!(!is_permanent_client_error(StatusCode::TOO_MANY_REQUESTS));
+        assert!(!is_permanent_client_error(StatusCode::BAD_GATEWAY));
+        assert!(!is_permanent_client_error(StatusCode::OK));
     }
 
     #[tokio::test]

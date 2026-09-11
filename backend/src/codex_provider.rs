@@ -667,11 +667,15 @@ fn native_login_status(codex_home: &Path, executable: Option<&Path>) -> NativeLo
         }
     };
     let started = Instant::now();
+    // Poll with a growing interval: the CLI usually answers in well under a
+    // second, so a fixed 25 ms sleep only added scheduling jitter and CPU.
+    let mut poll_interval = Duration::from_millis(5);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if started.elapsed() < LOGIN_STATUS_TIMEOUT => {
-                thread::sleep(Duration::from_millis(25));
+                thread::sleep(poll_interval);
+                poll_interval = (poll_interval * 2).min(Duration::from_millis(50));
             }
             Ok(None) => {
                 let _ = child.kill();

@@ -162,8 +162,21 @@
       return null;
     }
   };
-  const rendererPatchFailuresForSource = (source) => {
-    const fingerprint = rendererPatchFingerprint(source);
+  // Patching is a pure function of the asset text: reloads, renderer recovery
+  // and the locale-forced first-launch reload re-request the same app-initial
+  // chunk, so remember the patched output instead of rerunning every gate.
+  const maxRendererPatchedOutputs = 4;
+  const rendererPatchedOutputByFingerprint = new Map();
+  const rememberRendererPatchedOutput = (fingerprint, patched) => {
+    if (fingerprint == null) return;
+    rendererPatchedOutputByFingerprint.delete(fingerprint);
+    rendererPatchedOutputByFingerprint.set(fingerprint, patched);
+    while (rendererPatchedOutputByFingerprint.size > maxRendererPatchedOutputs) {
+      const oldest = rendererPatchedOutputByFingerprint.keys().next().value;
+      rendererPatchedOutputByFingerprint.delete(oldest);
+    }
+  };
+  const rendererPatchFailuresForFingerprint = (fingerprint) => {
     if (fingerprint == null) return null;
     const existing = rendererPatchFailuresByFingerprint.get(fingerprint);
     if (existing) {
@@ -937,10 +950,32 @@
       return response;
     }
     let patched;
+    const fingerprint = rendererPatchFingerprint(source);
+    if (fingerprint != null && rendererPatchedOutputByFingerprint.has(fingerprint)) {
+      patched = rendererPatchedOutputByFingerprint.get(fingerprint);
+      // Refresh insertion order so the bounded map behaves as an LRU.
+      rememberRendererPatchedOutput(fingerprint, patched);
+      if (patched === source) return response;
+      const headers = new Headers(response.headers);
+      for (const header of [
+        "content-encoding",
+        "content-length",
+        "content-md5",
+        "digest",
+        "etag",
+        "last-modified",
+      ]) headers.delete(header);
+      return new Response(patched, {
+        headers,
+        status: response.status,
+        statusText: response.statusText,
+      });
+    }
     const previousRendererPatchFailures = activeRendererPatchFailures;
-    activeRendererPatchFailures = rendererPatchFailuresForSource(source);
+    activeRendererPatchFailures = rendererPatchFailuresForFingerprint(fingerprint);
     try {
       patched = patchCodexRendererAsset(source);
+      rememberRendererPatchedOutput(fingerprint, patched);
     } catch (error) {
       // Codex renderer bundles are minified implementation details and their
       // shapes change between releases. These UI restorations are optional:
@@ -1769,7 +1804,14 @@
       const hasAppServerMessages = localRouterRuntimeEnabled &&
         source.includes("this.options.transformOutgoingMessage");
       if (hasAppServerMessages) {
-        source = patchCodexAppServerMessages(source);
+        try {
+          source = patchCodexAppServerMessages(source);
+        } catch (error) {
+          // Fail closed (router mode cannot run without this hook), but leave
+          // the diagnostic behind so a drifted anchor is visible in the log.
+          recordCodeyPatchFailure("patch_codex_app_server_messages", error, { filename });
+          throw error;
+        }
       }
       const hasMainBundleName =
         /[\\/]\.vite[\\/]build[\\/]main(?:[-.][^\\/]*)?\.(?:cjs|js)$/i.test(filename);

@@ -417,6 +417,26 @@ pub(crate) fn validate_outbound_api_url(value: &str, label: &str) -> Result<reqw
             "{label}不能包含用户名或密码，请通过 API Key 单独配置凭据"
         ));
     }
+    // Loopback and private ranges stay allowed (local model servers such as
+    // Ollama are a supported target). Unspecified and link-local literals are
+    // never a usable API host and usually mean a pasted metadata address.
+    let unusable_host = url
+        .host_str()
+        .and_then(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|ip| match ip {
+            std::net::IpAddr::V4(ip) => {
+                ip.is_unspecified() || ip.is_link_local() || ip.is_broadcast()
+            }
+            std::net::IpAddr::V6(ip) => ip.is_unspecified() || ip.is_unicast_link_local(),
+        });
+    if unusable_host {
+        return Err(format!("{label}不能指向未指定地址或链路本地地址"));
+    }
     Ok(url)
 }
 
@@ -2086,6 +2106,10 @@ mod tests {
             "ftp://localhost/models",
             "https://user:password@api.example.com/v1",
             "http://token@localhost:11434/v1",
+            "http://0.0.0.0:8080/v1",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::]:8080/v1",
+            "http://[fe80::1]:8080/v1",
         ] {
             assert!(
                 validate_outbound_api_url(rejected, "测试 API 地址").is_err(),

@@ -282,6 +282,9 @@
         isPluginRequest = argsMatch(args, pluginRequestPattern);
         isPluginListRequest = argsHaveRequestMethod(args, "list-plugins");
       } catch {}
+      // Every IPC message passes through here; unrelated requests must not
+      // pay for an extra promise hop or a second argument walk.
+      if (!isPluginRequest && !isPluginListRequest) return original.apply(this, args);
       const normalizedArgs = isPluginRequest ? args.map(normalizeRequestArg) : args;
       const result = original.apply(this, normalizedArgs);
       if (!result || typeof result.then !== "function") return result;

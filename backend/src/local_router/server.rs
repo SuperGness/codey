@@ -636,7 +636,7 @@ impl RouterSnapshot {
         route_hint: Option<&str>,
         bound_route: Option<&str>,
     ) -> Result<RouteSelection> {
-        RouteResolver::new(self).resolve(RouteRequest {
+        self.resolve_request(RouteRequest {
             requested_model,
             route_hint,
             bound_route,
@@ -890,20 +890,6 @@ pub(crate) struct RouteRequest<'a> {
     pub(crate) requested_model: &'a str,
     pub(crate) route_hint: Option<&'a str>,
     pub(crate) bound_route: Option<&'a str>,
-}
-
-pub(crate) struct RouteResolver<'a> {
-    pub(crate) snapshot: &'a RouterSnapshot,
-}
-
-impl<'a> RouteResolver<'a> {
-    pub(crate) fn new(snapshot: &'a RouterSnapshot) -> Self {
-        Self { snapshot }
-    }
-
-    pub(crate) fn resolve(&self, request: RouteRequest<'_>) -> Result<RouteSelection> {
-        self.snapshot.resolve_request(request)
-    }
 }
 
 pub(crate) fn route_models(

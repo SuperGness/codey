@@ -601,8 +601,17 @@ pub(super) async fn start_waiting_webhook_watcher(
 
             let (next_cache, events) = scan_recent_session_events(event_cache).await;
             event_cache = next_cache;
-            notify_pending_approvals(&watcher_state, &events).await;
+            // Deliveries to unreachable channels take seconds each; a shutdown
+            // request must interrupt them instead of waiting the batch out.
+            let stop_requested = tokio::select! {
+                _ = &mut shutdown_rx => true,
+                _ = notify_pending_approvals(&watcher_state, &events) => false,
+            };
+            if stop_requested {
+                break;
+            }
             let mut completion_delivery_pending = false;
+            let mut stop_requested = false;
             for completed in turn_tracker.completion_candidates(&events) {
                 let (model, reasoning_effort) =
                     webhook_turn_configuration(&events, &completed.session_id, &completed.turn_id);
@@ -615,7 +624,14 @@ pub(super) async fn start_waiting_webhook_watcher(
                     "model": model,
                     "reasoningEffort": reasoning_effort,
                 });
-                match notify_webhook_completion(&watcher_state, &payload).await {
+                let delivery = tokio::select! {
+                    _ = &mut shutdown_rx => {
+                        stop_requested = true;
+                        break;
+                    }
+                    delivery = notify_webhook_completion(&watcher_state, &payload) => delivery,
+                };
+                match delivery {
                     Ok(_) => turn_tracker.mark_settled(&completed),
                     Err(error) => {
                         // Keep the running edge so a transient delivery failure is retried.
@@ -623,6 +639,9 @@ pub(super) async fn start_waiting_webhook_watcher(
                         eprintln!("Codey 完成通知失败：{error}");
                     }
                 }
+            }
+            if stop_requested {
+                break;
             }
             next_scan_delay = if completion_delivery_pending {
                 scan_schedule.wake();
@@ -733,11 +752,7 @@ fn current_notification_http_client(_state: &AppState) -> Result<reqwest::Client
         return Ok(client.clone());
     }
 
-    // reqwest snapshots the operating system proxy configuration when a client
-    // is built. Notifications are infrequent, so create one client per test or
-    // delivery batch instead of retaining stale proxy settings for the entire
-    // Codey process lifetime.
-    crate::notifications::notification_http_client().map_err(|error| error.to_string())
+    crate::notifications::shared_notification_http_client().map_err(|error| error.to_string())
 }
 
 fn webhook_session_configuration(

@@ -1,9 +1,11 @@
 # Node.js dependencies
 /node_modules/
+/.pnpm-store/
 
 # Rust and frontend build output
 /target/
 /target-legacy/
+/backend/target/
 /vendor/CodeyRuntime/target/
 /dist/
 /dist-overlay/

@@ -55,6 +55,10 @@
   let codexSessionControllerPromise = null;
   let completionReconcileInFlight = false;
   let completionNextReconcileAt = 0;
+  // The AppServerManager comes from app-initial and only gains
+  // reconcileCompletedConversation through the renderer patch; once a manager
+  // without it is cached, re-scanning the bundles every 15 s cannot change that.
+  let completionReconcileUnsupported = false;
   let completionReconcileSessionId = "";
   let sidebarActionTooltipTimer = 0;
   let sidebarActionTooltipAnchor = null;
@@ -2214,6 +2218,13 @@
     ) {
       return window.__codeyCodexSessionController;
     }
+    if (
+      requireCompletionReconcile
+      && window.__codeyCodexSessionController?.kind === "manager"
+    ) {
+      completionReconcileUnsupported = true;
+      throw new Error("Codex 完成态同步接口不可用");
+    }
     let fallbackDispatcher = typeof window.__codeyCodexSignalDispatcher === "function"
       ? window.__codeyCodexSignalDispatcher
       : null;
@@ -2296,6 +2307,7 @@
   window.__codeyReadAccountRateLimits = readAccountRateLimits;
 
   const reconcileStaleCompletedTask = async () => {
+    if (completionReconcileUnsupported) return false;
     if (document.visibilityState === "hidden") return false;
     const sessionId = getSessionId();
     if (!sessionId) {
@@ -3850,6 +3862,24 @@
   };
   const mutationDispatcher = window.__codeyMutationDispatcher;
   let sessionToolObserver = null;
+  // A previous load that threw after installing listeners is re-run by the
+  // loader; dispose what that run left behind so observers, listeners and
+  // intervals never accumulate in the same document.
+  const previousInstall = window.__codeySessionToolsInstall;
+  if (typeof previousInstall?.dispose === "function") {
+    try { previousInstall.dispose(); } catch {}
+  }
+  const installedIntervals = [];
+  const installedListeners = [];
+  window.__codeySessionToolsInstall = {
+    dispose() {
+      try { sessionToolObserver?.disconnect?.(); } catch {}
+      for (const [target, type, handler, options] of installedListeners) {
+        try { target.removeEventListener?.(type, handler, options); } catch {}
+      }
+      for (const id of installedIntervals) window.clearInterval?.(id);
+    },
+  };
   if (typeof mutationDispatcher?.subscribe === "function") {
     const unsubscribe = mutationDispatcher.subscribe(
       handleSessionToolMutations,
@@ -3876,18 +3906,28 @@
     lastForcedThreadTimeRefresh = now;
     refreshTrackedThreadUpdatedTimes(true);
   };
+  const reconcileOnVisible = () => {
+    if (document.visibilityState !== "hidden") {
+      refreshThreadUpdatedTimesOnReturn();
+      void reconcileStaleCompletedTask();
+    }
+  };
   if (typeof document.addEventListener === "function") {
+    const pointerdownOptions = { capture: true, passive: true };
     document.addEventListener("visibilitychange", wakeSessionWatcher);
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState !== "hidden") {
-        refreshThreadUpdatedTimesOnReturn();
-        void reconcileStaleCompletedTask();
-      }
-    });
+    document.addEventListener("visibilitychange", reconcileOnVisible);
     document.addEventListener("pointerout", holdConversationRichTooltipOpen, true);
     document.addEventListener("pointerover", continueConversationRichTooltipHandoff, true);
-    document.addEventListener("pointerdown", wakeSessionWatcher, { capture: true, passive: true });
+    document.addEventListener("pointerdown", wakeSessionWatcher, pointerdownOptions);
     document.addEventListener("keydown", wakeSessionWatcherFromKey, true);
+    installedListeners.push(
+      [document, "visibilitychange", wakeSessionWatcher, undefined],
+      [document, "visibilitychange", reconcileOnVisible, undefined],
+      [document, "pointerout", holdConversationRichTooltipOpen, true],
+      [document, "pointerover", continueConversationRichTooltipHandoff, true],
+      [document, "pointerdown", wakeSessionWatcher, pointerdownOptions],
+      [document, "keydown", wakeSessionWatcherFromKey, true],
+    );
   }
   if (typeof window.addEventListener === "function") {
     window.addEventListener("focus", wakeSessionWatcher);
@@ -3896,15 +3936,20 @@
     window.addEventListener("pageshow", wakeSessionWatcher);
     window.addEventListener("pageshow", refreshThreadUpdatedTimesOnReturn);
     window.addEventListener("pageshow", reconcileStaleCompletedTask);
+    for (const type of ["focus", "pageshow"]) {
+      for (const handler of [wakeSessionWatcher, refreshThreadUpdatedTimesOnReturn, reconcileStaleCompletedTask]) {
+        installedListeners.push([window, type, handler, undefined]);
+      }
+    }
   }
   if (typeof window.setInterval === "function") {
-    window.setInterval(() => {
+    installedIntervals.push(window.setInterval(() => {
       void reconcileStaleCompletedTask();
-    }, completedTaskReconcileIntervalMs);
-    window.setInterval(() => {
+    }, completedTaskReconcileIntervalMs));
+    installedIntervals.push(window.setInterval(() => {
       if (document.visibilityState === "hidden") return;
       refreshTrackedThreadUpdatedTimes(false);
-    }, threadTimestampRefreshIntervalMs);
+    }, threadTimestampRefreshIntervalMs));
   }
   window.__codeyRendererInjectLoaded = true;
   window.__codeySessionToolsInjectLoaded = true;

@@ -384,7 +384,8 @@ async fn run_wechat_claw_sync_service(
     };
 
     if stopped {
-        notify_stop_wechat_claw_channels(&state.wechat_claw_login_http_client, stop_channels).await;
+        notify_stop_wechat_claw_channels(state.wechat_claw_login_http_client(), stop_channels)
+            .await;
     }
 }
 
@@ -408,7 +409,7 @@ async fn run_wechat_claw_sync_channel(
             continue;
         }
         let result = sync_wechat_claw_channel(
-            &state.wechat_claw_login_http_client,
+            state.wechat_claw_login_http_client(),
             channel_state.channel.clone(),
             channel_state.notify_started,
         )
@@ -595,10 +596,8 @@ fn sync_ilink_post_request(
     let endpoint = base_url
         .join(endpoint)
         .map_err(|_| "微信 ClawBot 服务地址无效".to_string())?;
-    Ok(client
-        .post(endpoint)
-        .headers(ilink::headers(Some(bot_token)))
-        .json(&body))
+    let headers = ilink::headers(Some(bot_token))?;
+    Ok(client.post(endpoint).headers(headers).json(&body))
 }
 
 fn sync_backoff(failure_count: u32) -> Duration {
@@ -711,7 +710,7 @@ async fn refresh_wechat_claw_channel_context_locked(
         return Err(stale_token_cooldown_message(remaining));
     }
     let notify_request = sync_ilink_post_request(
-        &state.wechat_claw_login_http_client,
+        state.wechat_claw_login_http_client(),
         &sync_channel.base_url,
         &sync_channel.bot_token,
         "ilink/bot/msg/notifystart",
@@ -741,7 +740,7 @@ async fn refresh_wechat_claw_channel_context_locked(
     let update = match tokio::time::timeout(
         SYNC_RECOVERY_POLL_TIMEOUT,
         sync_wechat_claw_channel(
-            &state.wechat_claw_login_http_client,
+            state.wechat_claw_login_http_client(),
             sync_channel.clone(),
             true,
         ),
@@ -796,7 +795,7 @@ enum WechatClawLoginPhase {
 }
 
 pub(super) async fn start_wechat_claw_login(state: &AppState) -> Result<Value, String> {
-    let response = get_bot_qrcode_request(&state.wechat_claw_login_http_client)?
+    let response = get_bot_qrcode_request(state.wechat_claw_login_http_client())?
         .send()
         .await
         .map_err(|_| "无法连接微信 ClawBot 登录服务，请检查网络后重试".to_string())?;
@@ -896,10 +895,10 @@ async fn poll_wechat_claw_qr(
 ) -> Result<Value, String> {
     let url = endpoint_url(&base_url, "ilink/bot/get_qrcode_status")?;
     let response = state
-        .wechat_claw_login_http_client
+        .wechat_claw_login_http_client()
         .get(url)
         .query(&[("qrcode", qr_code)])
-        .headers(ilink::headers(None))
+        .headers(ilink::headers(None)?)
         .send()
         .await
         .map_err(|_| "无法查询微信 ClawBot 扫码状态，请检查网络后重试".to_string())?;
@@ -1022,7 +1021,7 @@ async fn poll_wechat_claw_activation(
 ) -> Result<Value, String> {
     if !notify_started {
         let request =
-            notify_start_request(&state.wechat_claw_login_http_client, &base_url, &bot_token)?;
+            notify_start_request(state.wechat_claw_login_http_client(), &base_url, &bot_token)?;
         match activation_response_json(request, "激活", ActivationResponseContract::Strict).await
         {
             Ok(_) => {
@@ -1048,7 +1047,7 @@ async fn poll_wechat_claw_activation(
     }
 
     let request = get_updates_request(
-        &state.wechat_claw_login_http_client,
+        state.wechat_claw_login_http_client(),
         &base_url,
         &bot_token,
         &get_updates_buf,
@@ -1161,7 +1160,7 @@ fn ilink_post_request(
 ) -> Result<RequestBuilder, String> {
     Ok(client
         .post(endpoint_url(base_url, endpoint)?)
-        .headers(ilink::headers(Some(bot_token)))
+        .headers(ilink::headers(Some(bot_token))?)
         .json(&body))
 }
 
@@ -1366,7 +1365,7 @@ fn get_bot_qrcode_request(client: &Client) -> Result<reqwest::RequestBuilder, St
     Ok(client
         .post(url)
         .query(&[("bot_type", "3")])
-        .headers(ilink::headers(None))
+        .headers(ilink::headers(None)?)
         // The official client accepts a list of known local bot tokens here.
         // Codey intentionally keeps this isolated notification binding stateless.
         .json(&json!({"local_token_list": []})))
@@ -1914,7 +1913,7 @@ mod tests {
 
     #[test]
     fn login_headers_include_the_required_ilink_identifiers() {
-        let headers = ilink::headers(None);
+        let headers = ilink::headers(None).unwrap();
         assert_eq!(headers["authorizationtype"], "ilink_bot_token");
         assert_eq!(headers["ilink-app-id"], "bot");
         assert!(headers.contains_key("x-wechat-uin"));
