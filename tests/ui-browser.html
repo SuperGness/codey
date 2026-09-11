@@ -31,6 +31,11 @@
           React.createElement(RequestLogDialog, { catalog: { ...config, officialAccountAvailable: true }, opened: true, standalone: true, onClose() {} }))
       );
     } else {
+      if (new URLSearchParams(location.search).get("theme") === "dark") {
+        document.documentElement.style.colorScheme = "dark";
+        document.body.style.background = "#181818";
+        document.body.style.color = "#ffffff";
+      }
       window.__codexSessionDeleteBridge = (path, args) => mock(path.split("/").pop(), args);
       await import("../src/overlay.tsx");
       const button = document.createElement("button");

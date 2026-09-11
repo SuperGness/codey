@@ -920,6 +920,14 @@ fn should_attempt_official_launch_when_auth_unknown(config: &CodeyConfig) -> boo
 }
 
 fn persisted_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> bool {
+    // The two launch-only fields are the usual difference after the official
+    // probe; only mask them (which needs a copy) when they actually differ.
+    if previous.official_account_available_this_launch
+        == next.official_account_available_this_launch
+        && previous.official_account_status_this_launch == next.official_account_status_this_launch
+    {
+        return previous != next;
+    }
     let mut previous = previous.clone();
     let mut next = next.clone();
     previous.official_account_available_this_launch = false;
@@ -1818,7 +1826,6 @@ fn merge_profile_secrets(
                 // are not editable renderer input. Keep them attached
                 // to the saved route even though the renderer receives a redacted
                 // profile and sends the whole form back on save.
-                profile.model_request_headers = previous_profile.model_request_headers.clone();
                 profile.source_provider_id = previous_profile.source_provider_id.clone();
                 profile.official_account = previous_profile.official_account;
                 profile.supports_remote_compaction = previous_profile.supports_remote_compaction;

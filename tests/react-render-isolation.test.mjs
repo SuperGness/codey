@@ -111,7 +111,7 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(app, /if \(nativeMode \|\| route\.authMode === "officialAccount"\) \{\s*await syncCurrentProvider\(\);\s*return/);
   assert.match(
     sections,
-    /disabled=\{\s*routeConfigReadOnly \|\|\s*isBusy \|\|\s*dirty \|\|\s*config\.profiles\.length <= 1\s*\}/,
+    /disabled=\{\s*routeConfigReadOnly \|\|\s*(?:isOfficial \|\|\s*)?isBusy \|\|\s*dirty \|\|\s*config\.profiles\.length <= 1\s*\}/,
   );
   assert.match(sections, /供应商与模型/);
   assert.doesNotMatch(sections, /catalog-search|searchQuery|搜索模型\.\.\./);

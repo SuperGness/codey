@@ -2533,10 +2533,6 @@
       deletedSidebarSessionIds.delete(normalizeThreadSessionId(result.sessionId));
       const refreshed = await refreshRecentLocalSessions();
       showRuntimeToast(result.message || "会话数据已导入");
-      const importedProjectPath = result.projectPath || projectPath;
-      window.dispatchEvent(new CustomEvent("codey-session-refresh", {
-        detail: { sessionId: result.sessionId, projectPath: importedProjectPath, imported: true },
-      }));
       if (!refreshed) window.setTimeout(() => location.reload(), 700);
     } catch (error) {
       showRuntimeToast(`导入失败：${error instanceof Error ? error.message : String(error)}`, "error");
@@ -3098,9 +3094,6 @@
       window.alert(`消息已从会话文件永久删除，但 Codex 内存会话卸载失败。\n请重启 Codex 后再继续对话。\n\n${message}`);
       return;
     }
-    window.dispatchEvent(new CustomEvent("codey-session-refresh", {
-      detail: { sessionId, messageIds: resolvedMessageIds },
-    }));
     showRuntimeToast(`已永久删除 ${logicalCount} 轮对话`);
   };
 

@@ -404,6 +404,16 @@ pub(crate) fn embedded() -> &'static RuleSet {
     })
 }
 
+/// `load` plus the standard stderr note when the live rule file was rejected
+/// and the last-known-good or embedded baseline is in use.
+pub(crate) fn load_logged(state_root: &Path) -> LoadedRuleSet {
+    let loaded = load(state_root);
+    if let Some(warning) = &loaded.warning {
+        eprintln!("Codey 子代理规则回退：{warning}");
+    }
+    loaded
+}
+
 pub(crate) fn load(state_root: &Path) -> LoadedRuleSet {
     // Codey invokes this binary once per Hook event, so a process-local cache
     // cannot be reused by the next rule evaluation. Keep the embedded baseline

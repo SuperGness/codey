@@ -124,12 +124,7 @@ pub(super) fn collect_terminal_task_outcomes(
         let Some(task_id) = candidates.into_iter().next() else {
             continue;
         };
-        let outcome = match observation.outcome {
-            protocol::TerminalOutcome::Succeeded => ExecutionOutcome::Succeeded,
-            protocol::TerminalOutcome::Failed => ExecutionOutcome::Failed,
-            protocol::TerminalOutcome::TimedOut => ExecutionOutcome::TimedOut,
-            protocol::TerminalOutcome::Lost => ExecutionOutcome::Lost,
-        };
+        let outcome = ExecutionOutcome::from(observation.outcome);
         terminal_tasks
             .entry(task_id)
             .and_modify(|current| *current = stricter_outcome(*current, outcome))
@@ -393,7 +388,7 @@ pub(super) fn fence_identity_conflict(
 }
 
 pub(super) fn identifier_mentions_task(identifier: &str, task_id: &str) -> bool {
-    identifier == task_id || identifier == format!("/root/{task_id}")
+    spawn_task_name_matches(identifier, task_id)
 }
 
 pub(super) fn normalized_identifier(value: &str) -> String {

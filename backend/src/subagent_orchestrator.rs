@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::subagent::api::{TokenUsage, TraceContext};
 use crate::subagent::lifecycle::{ExecutionOutcome, ExecutionPhase as ReservationState};
-use crate::subagent::protocol::{AgentState, InterruptAcknowledgement, TerminalOutcome};
+use crate::subagent::protocol::{AgentState, InterruptAcknowledgement};
 use crate::subagent::rules::{self, RoleAccess, RuleActor, RuleContext, RuleEffect, ToolClass};
 use crate::subagent::telemetry::{
     self, ExecutionStatus, SubagentTraceEvent, TraceEventKind, TraceRecorder,
@@ -152,7 +152,17 @@ impl LedgerStore {
             )
         })?;
         let session_hash = hash_component(session_id);
-        let lock_path = state_root.join(LEDGER_LOCK_FILE);
+        let session_dir = state_root.join(&session_hash);
+        fs::create_dir_all(&session_dir).with_context(|| {
+            format!(
+                "创建 Codey 子代理会话状态目录失败：{}",
+                session_dir.display()
+            )
+        })?;
+        // The ledger is per session; other sessions only read it through
+        // atomic-write snapshots, so the lock lives next to it instead of at
+        // the state root where every window would queue behind each other.
+        let lock_path = session_dir.join(LEDGER_LOCK_FILE);
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -181,7 +191,6 @@ impl LedgerStore {
                 }
             }
         }
-        let session_dir = state_root.join(session_hash);
         cleanup_stale_ledger_temps(&session_dir)?;
         Ok(Self {
             lock,
@@ -209,8 +218,7 @@ impl LedgerStore {
             "Codey 子代理编排账本版本不受支持：{}",
             ledger.schema_version
         );
-        let source_schema_version = ledger.schema_version;
-        let mut changed = migrate_ledger(&mut ledger, source_schema_version)?;
+        let mut changed = validate_ledger(&mut ledger)?;
         let session_id_hash = hash_component(session_id);
         anyhow::ensure!(
             ledger.session_id_hash == session_id_hash,
@@ -300,7 +308,7 @@ impl LedgerStore {
         // Never persist a state that the next Hook invocation would reject on
         // load. This also protects future write paths from bypassing
         // identity, capacity, or generation invariants.
-        let _ = migrate_ledger(ledger, LEDGER_SCHEMA_VERSION)?;
+        let _ = validate_ledger(ledger)?;
         validate_unique_agent_bindings(ledger)?;
         let parent = self
             .ledger_path
@@ -564,7 +572,10 @@ impl SessionLedger {
     }
 }
 
-fn migrate_ledger(ledger: &mut SessionLedger, _source_schema_version: u32) -> Result<bool> {
+/// Repairs derivable fields (issued task ids, next fencing token) and rejects
+/// ledgers that violate the identity, capacity or generation invariants. Only
+/// the current schema version is accepted, so there is no migration step.
+fn validate_ledger(ledger: &mut SessionLedger) -> Result<bool> {
     let mut changed = false;
     let before = ledger.issued_task_ids.len();
     ledger
@@ -757,10 +768,7 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
         active_agents,
         now_ms,
     } = context;
-    let loaded_rules = rules::load(state_root);
-    if let Some(warning) = &loaded_rules.warning {
-        eprintln!("Codey 子代理规则回退：{warning}");
-    }
+    let loaded_rules = rules::load_logged(state_root);
     let store = LedgerStore::open(state_root, session_id)?;
     let mut ledger = store
         .load(runtime_id, session_id, now_ms)?
@@ -1435,16 +1443,7 @@ pub(crate) fn observe_status_response(
                 Value::String(format!("{outcome:?}").to_ascii_lowercase()),
             );
             if !success {
-                event.error_code = Some(
-                    match outcome {
-                        ExecutionOutcome::Failed => "agent_failed",
-                        ExecutionOutcome::TimedOut => "agent_timed_out",
-                        ExecutionOutcome::Lost => "agent_lost",
-                        ExecutionOutcome::Unknown => "unknown_terminal_outcome",
-                        ExecutionOutcome::Succeeded => unreachable!(),
-                    }
-                    .into(),
-                );
+                event.error_code = Some(outcome.failure_error_code().into());
                 event.error_message = reservation.error_message.clone();
             }
             trace_events.push(event);
@@ -1701,10 +1700,7 @@ pub(crate) fn verified_local_read_only_active_count(
     if active_marker_hashes.is_empty() {
         return Ok(None);
     }
-    let loaded_rules = rules::load(state_root);
-    if let Some(warning) = &loaded_rules.warning {
-        eprintln!("Codey 子代理规则回退：{warning}");
-    }
+    let loaded_rules = rules::load_logged(state_root);
     let store = LedgerStore::open(state_root, session_id)?;
     let Some(ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(None);
@@ -1879,12 +1875,7 @@ pub(crate) fn settle_interrupt_acknowledgement(
 
     let trace = reservation_trace(reservation);
     let role = reservation.role.clone();
-    let prior_outcome = acknowledgement.prior_outcome.map(|outcome| match outcome {
-        TerminalOutcome::Succeeded => ExecutionOutcome::Succeeded,
-        TerminalOutcome::Failed => ExecutionOutcome::Failed,
-        TerminalOutcome::TimedOut => ExecutionOutcome::TimedOut,
-        TerminalOutcome::Lost => ExecutionOutcome::Lost,
-    });
+    let prior_outcome = acknowledgement.prior_outcome.map(ExecutionOutcome::from);
     let outcome = prior_outcome.unwrap_or(ExecutionOutcome::Lost);
     reservation.state = if prior_outcome.is_some() {
         ReservationState::Terminal
@@ -1959,15 +1950,7 @@ pub(crate) fn settle_interrupt_acknowledgement(
         event.error_code = Some("root_interrupt_abandoned".into());
         event.error_message = error_message;
     } else if !success {
-        event.error_code = Some(
-            match outcome {
-                ExecutionOutcome::Failed => "agent_failed",
-                ExecutionOutcome::TimedOut => "agent_timed_out",
-                ExecutionOutcome::Lost => "agent_lost",
-                ExecutionOutcome::Unknown | ExecutionOutcome::Succeeded => unreachable!(),
-            }
-            .into(),
-        );
+        event.error_code = Some(outcome.failure_error_code().into());
         event.error_message = error_message;
     }
     TraceRecorder::new(state_root).record_best_effort(&event);
@@ -1997,10 +1980,7 @@ pub(crate) fn authorize_child_tool_with_context(
         tool_name,
         tool_input,
     } = context;
-    let loaded_rules = rules::load(state_root);
-    if let Some(warning) = &loaded_rules.warning {
-        eprintln!("Codey 子代理规则回退：{warning}");
-    }
+    let loaded_rules = rules::load_logged(state_root);
     let tool_class = rules::classify_tool(tool_name);
     let store = LedgerStore::open(state_root, session_id)?;
     let mut ledger = store.load(runtime_id, session_id, now_ms)?;

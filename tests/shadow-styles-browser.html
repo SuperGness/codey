@@ -7,7 +7,8 @@
   <div id="embedded"></div>
   <script type="module">
     import css from "../src/tailwind.css?inline";
-    import { shadowStyles } from "../src/shadowStyles.ts";
+    import coreCss from "../src/styles.css?inline";
+    import { shadowStyleSheet } from "../src/shadowStyles.ts";
     const markup = `<style>* { transition: none !important; }</style><div data-theme="light">
       <input class="input" aria-label="线路名" value="示例线路">
       <button class="select__trigger">上游协议</button>
@@ -17,10 +18,11 @@
       <div class="modal__dialog">编辑线路</div>
     </div>`;
     const shadow = document.querySelector("#embedded").attachShadow({ mode: "open" });
-    shadow.innerHTML = `<style>${shadowStyles(css)}</style>${markup}`;
+    shadow.adoptedStyleSheets = [shadowStyleSheet(css, coreCss)];
+    shadow.innerHTML = markup;
     const frame = document.querySelector("#reference");
     const loaded = new Promise((resolve) => frame.addEventListener("load", resolve, { once: true }));
-    frame.srcdoc = `<style>${css}</style>${markup}`;
+    frame.srcdoc = `<style>${css}${coreCss}</style>${markup}`;
     await loaded;
     const properties = ["borderTopWidth", "borderTopStyle", "borderTopColor", "borderRadius", "boxShadow"];
     const failures = [];
@@ -39,7 +41,20 @@
     const referenceInput = frame.contentDocument.querySelector(".input");
     referenceInput.focus();
     if (focusedShadow === "none" || focusedShadow !== frame.contentWindow.getComputedStyle(referenceInput).boxShadow) failures.push("输入框焦点轮廓与独立页面不一致");
-    document.querySelector("#result").textContent = failures.length ? `FAIL\n${failures.join("\n")}` : "PASS：6 类控件与独立页面样式一致，弹层及焦点轮廓正常";
+    // 模拟 Codex 在浅色和深色外观之间切换，弹层不能继承宿主的文字颜色。
+    for (const color of ["rgb(29, 29, 31)", "rgb(255, 255, 255)", "rgb(29, 29, 31)"]) {
+      document.body.style.color = color;
+      const popover = shadow.querySelector(".combo-box__popover");
+      popover.innerHTML = `<div class="list-box"><div class="list-box-item">普通模型</div><div class="list-box-item" data-selected="true">选中模型</div></div>`;
+      const item = getComputedStyle(popover.querySelector(".list-box-item"));
+      const selected = getComputedStyle(popover.querySelector('[data-selected="true"]'));
+      if (item.color !== "rgb(29, 29, 31)") failures.push(`宿主 ${color}：普通选项文字颜色错误 ${item.color}`);
+      if (selected.color !== "rgb(255, 255, 255)" || selected.backgroundColor !== "rgb(0, 122, 255)") failures.push("选中选项未保持蓝底白字");
+      popover.querySelector('[data-selected="true"]').setAttribute("data-hovered", "true");
+      const hovered = getComputedStyle(popover.querySelector('[data-selected="true"]'));
+      if (hovered.color !== "rgb(255, 255, 255)" || hovered.backgroundColor !== "rgb(0, 113, 235)") failures.push("选中选项悬停配色错误");
+    }
+    document.querySelector("#result").textContent = failures.length ? `FAIL\n${failures.join("\n")}` : "PASS：6 类控件样式及焦点轮廓正常；宿主深浅色切换时，普通、选中及悬停选项配色正常";
     if (failures.length) throw new Error(failures.join("\n"));
   </script>
 </html>

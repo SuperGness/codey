@@ -306,9 +306,16 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
     restore_previous_runtime_state(codex_home(), local_router_enabled)
         .await
         .map_err(|error| format!("恢复上次 Codey 临时 Codex 配置失败：{error}"))?;
+    let launch_started = std::time::Instant::now();
     prepare_routes_for_current_launch(state).await?;
+    let routes_ms = launch_started.elapsed().as_millis() as u64;
     let imported_default_route = super::ensure_default_route_imported(state).await;
     let config = sync_provider_models_for_launch(state, imported_default_route).await;
+    let model_sync_ms = launch_started.elapsed().as_millis() as u64 - routes_ms;
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.prelaunch_timings",
+        json!({ "prepareRoutesMs": routes_ms, "modelSyncMs": model_sync_ms }),
+    );
     let initial_scan_task = if webhook_watcher_should_run(&config) {
         let initial_event_cache = state
             .recent_session_event_cache

@@ -190,10 +190,15 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
     let mut shutdown = Box::pin(shutdown_signal());
     let startup_update = startup_update::run(&state, &ui);
     tokio::pin!(startup_update);
+    let update_check_started = std::time::Instant::now();
     let startup_update_outcome = tokio::select! {
         outcome = &mut startup_update => outcome,
         _ = &mut shutdown => return Ok(()),
     };
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.update_check_timing",
+        serde_json::json!({ "updateCheckMs": update_check_started.elapsed().as_millis() as u64 }),
+    );
     if startup_update_outcome == startup_update::StartupUpdateOutcome::InstallScheduled {
         return Ok(());
     }

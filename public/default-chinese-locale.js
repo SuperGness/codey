@@ -395,7 +395,9 @@
     const scanStatsigUntilReady = () => {
       patchStatsigClients();
       if (Date.now() - startedAt >= 15000) return;
-      window.setTimeout?.(scanStatsigUntilReady, 250);
+      // Once the first client is patched, the root setter catches clients
+      // replaced later; keep a slower sweep only for clients added in place.
+      window.setTimeout?.(scanStatsigUntilReady, state.statsigClientsPatched > 0 ? 1000 : 250);
     };
     window.setTimeout?.(scanStatsigUntilReady, 250);
   };

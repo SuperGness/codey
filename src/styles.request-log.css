@@ -69,29 +69,29 @@
   border: 1px solid transparent;
 }
 .request-log-protocol-http {
-  background: #eff6ff !important;
-  color: #1d4ed8 !important;
-  border-color: #bfdbfe !important;
+  background: #eff6ff;
+  color: #1d4ed8;
+  border-color: #bfdbfe;
 }
 .request-log-protocol-sse {
-  background: #ecfdf5 !important;
-  color: #047857 !important;
-  border-color: #a7f3d0 !important;
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
 }
 .request-log-protocol-ws {
-  background: #faf5ff !important;
-  color: #7e22ce !important;
-  border-color: #e9d5ff !important;
+  background: #faf5ff;
+  color: #7e22ce;
+  border-color: #e9d5ff;
 }
 .request-log-protocol-grpc {
-  background: #fff7ed !important;
-  color: #c2410c !important;
-  border-color: #fed7aa !important;
+  background: #fff7ed;
+  color: #c2410c;
+  border-color: #fed7aa;
 }
 .request-log-protocol-default {
-  background: #f1f2f4 !important;
-  color: #61666e !important;
-  border-color: #e2e4e8 !important;
+  background: #f1f2f4;
+  color: #61666e;
+  border-color: #e2e4e8;
 }
 .request-log-pagination {
   padding: 8px 14px;

@@ -363,6 +363,11 @@ pub(crate) struct RouteRequestLogSummary {
     pub cancelled_count: u64,
     pub avg_duration: Option<f64>,
     pub avg_ttft: Option<f64>,
+    pub avg_router_pre_upstream: Option<f64>,
+    pub avg_upstream_header: Option<f64>,
+    pub avg_upstream_first_byte: Option<f64>,
+    pub avg_downstream_first_content: Option<f64>,
+    pub avg_queue_delay: Option<f64>,
     pub success_rate: Option<f64>,
     pub input_tokens_sum: Option<u64>,
     pub output_tokens_sum: Option<u64>,
@@ -387,6 +392,8 @@ pub(crate) struct RouteRequestLogTrend {
     pub total: u64,
     pub total_tokens_sum: Option<u64>,
     pub avg_duration: Option<f64>,
+    pub avg_ttft: Option<f64>,
+    pub avg_downstream_first_content: Option<f64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2326,6 +2333,11 @@ const SUMMARY_COLUMNS: &str = "COUNT(*),
     AVG(CASE WHEN total_duration_ms >= 0 THEN total_duration_ms END),
     AVG(CASE WHEN COALESCE(downstream_first_content_ms, ttft_ms) >= 0
         THEN COALESCE(downstream_first_content_ms, ttft_ms) END),
+    AVG(CASE WHEN router_pre_upstream_ms >= 0 THEN router_pre_upstream_ms END),
+    AVG(CASE WHEN upstream_header_ms >= 0 THEN upstream_header_ms END),
+    AVG(CASE WHEN upstream_first_byte_ms >= 0 THEN upstream_first_byte_ms END),
+    AVG(CASE WHEN downstream_first_content_ms >= 0 THEN downstream_first_content_ms END),
+    AVG(CASE WHEN queue_delay_ms >= 0 THEN queue_delay_ms END),
     SUM(input_tokens), SUM(output_tokens), SUM(total_tokens), SUM(cached_input_tokens),
     COALESCE(SUM(usage_reported != 0), 0), COUNT(total_tokens)";
 
@@ -2340,13 +2352,18 @@ fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequestLog
         cancelled_count: row_u64(row, 4)?,
         avg_duration: row.get(5)?,
         avg_ttft: row.get(6)?,
+        avg_router_pre_upstream: row.get(7)?,
+        avg_upstream_header: row.get(8)?,
+        avg_upstream_first_byte: row.get(9)?,
+        avg_downstream_first_content: row.get(10)?,
+        avg_queue_delay: row.get(11)?,
         success_rate: (total > 0).then(|| succeeded_count as f64 * 100.0 / total as f64),
-        input_tokens_sum: row_optional_u64(row, 7)?,
-        output_tokens_sum: row_optional_u64(row, 8)?,
-        total_tokens_sum: row_optional_u64(row, 9)?,
-        cached_tokens_sum: row_optional_u64(row, 10)?,
-        usage_reported_count: row_u64(row, 11)?,
-        total_tokens_known_count: row_u64(row, 12)?,
+        input_tokens_sum: row_optional_u64(row, 12)?,
+        output_tokens_sum: row_optional_u64(row, 13)?,
+        total_tokens_sum: row_optional_u64(row, 14)?,
+        cached_tokens_sum: row_optional_u64(row, 15)?,
+        usage_reported_count: row_u64(row, 16)?,
+        total_tokens_known_count: row_u64(row, 17)?,
     })
 }
 
@@ -2414,7 +2431,7 @@ pub(crate) fn query_route_request_log_stats(
             .prepare(&sql)?
             .query_map(params_from_iter(values.iter()), |row| {
                 Ok(RouteRequestLogGroup {
-                    key: row.get(13)?,
+                    key: row.get(18)?,
                     summary: summary_from_row(row)?,
                 })
             })?
@@ -2424,7 +2441,9 @@ pub(crate) fn query_route_request_log_stats(
     }
     // The validated range produces at most 367 daily or 169 hourly buckets.
     let sql = format!("SELECT timestamp_unix_ms / {bucket_ms} * {bucket_ms} AS bucket,
-        COUNT(*), SUM(total_tokens), AVG(CASE WHEN total_duration_ms >= 0 THEN total_duration_ms END)
+        COUNT(*), SUM(total_tokens), AVG(CASE WHEN total_duration_ms >= 0 THEN total_duration_ms END),
+        AVG(CASE WHEN COALESCE(downstream_first_content_ms, ttft_ms) >= 0 THEN COALESCE(downstream_first_content_ms, ttft_ms) END),
+        AVG(CASE WHEN downstream_first_content_ms >= 0 THEN downstream_first_content_ms END)
         FROM route_request_logs{where_clause} GROUP BY bucket ORDER BY bucket");
     result.trend = transaction
         .prepare(&sql)?
@@ -2434,6 +2453,8 @@ pub(crate) fn query_route_request_log_stats(
                 total: row_u64(row, 1)?,
                 total_tokens_sum: row_optional_u64(row, 2)?,
                 avg_duration: row.get(3)?,
+                avg_ttft: row.get(4)?,
+                avg_downstream_first_content: row.get(5)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

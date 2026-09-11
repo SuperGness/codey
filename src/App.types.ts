@@ -17,6 +17,7 @@ export type Profile = {
   authMode: "officialAccount" | "apiKey";
   apiKeyConfigured: boolean;
   clearApiKey?: boolean;
+  modelRequestHeaders?: Record<string, string>;
   sourceProviderId?: string;
   officialAccount: boolean;
   supportsRemoteCompaction?: boolean;

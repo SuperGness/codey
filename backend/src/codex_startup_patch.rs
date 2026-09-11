@@ -607,15 +607,15 @@ fn windows_package_resume_thread_id(arguments: &[OsString]) -> Result<Option<u32
     Ok(Some(thread_id))
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 /// 包装器向启动器汇报进度的两条通道：回环握手连接和记录文件。任一到达即可确认。
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 struct CliWrapperReadiness {
     stream: Option<std::net::TcpStream>,
     marker: Option<std::path::PathBuf>,
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 impl CliWrapperReadiness {
     fn begin() -> Self {
         let started = std::time::Instant::now();

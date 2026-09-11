@@ -504,6 +504,24 @@ impl WebSocketResponsesDownstream {
                                 probe.mark_upstream_error_summary(error_summary);
                             }
                             raw_json_text = None;
+                            // Codex consumes terminal failures as
+                            // `response.failed`; a bare upstream `error`
+                            // event otherwise leaves the turn in progress.
+                            if event.get("type").and_then(Value::as_str) == Some("error") {
+                                let error = event.get("error").cloned().unwrap_or(Value::Null);
+                                event = json!({
+                                    "type": "response.failed",
+                                    "response": {
+                                        "id": format!("resp_codey_{}", Uuid::new_v4()),
+                                        "object": "response",
+                                        "created_at": current_unix_timestamp(),
+                                        "status": "failed",
+                                        "output": [],
+                                        "error": error,
+                                        "incomplete_details": Value::Null
+                                    }
+                                });
+                            }
                         }
                         if let Some(probe) = probe {
                             probe.observe_event(&event);

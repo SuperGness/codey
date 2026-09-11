@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::api::{TokenUsage, TraceContext};
@@ -292,7 +291,7 @@ fn unsigned_field(values: &serde_json::Map<String, Value>, keys: &[&str]) -> Opt
 }
 
 fn hash_identifier(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
+    crate::fs_util::sha256_hex_str(value)
 }
 
 #[cfg(test)]

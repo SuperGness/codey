@@ -110,6 +110,11 @@ type LogSummary = {
   successRate: number | null;
   avgDuration: number | null;
   avgTtft: number | null;
+  avgRouterPreUpstream: number | null;
+  avgUpstreamHeader: number | null;
+  avgUpstreamFirstByte: number | null;
+  avgDownstreamFirstContent: number | null;
+  avgQueueDelay: number | null;
   inputTokensSum: number | null;
   outputTokensSum: number | null;
   totalTokensSum: number | null;
@@ -123,7 +128,7 @@ type LogAnalytics = LogSummary & {
   toUnixMs: number;
   groups: Array<LogSummary & { key: string }>;
   groupsTruncated: boolean;
-  trend: Array<{ timestampUnixMs: number; total: number; totalTokensSum: number | null; avgDuration: number | null }>;
+  trend: Array<{ timestampUnixMs: number; total: number; totalTokensSum: number | null; avgDuration: number | null; avgTtft: number | null; avgDownstreamFirstContent: number | null }>;
   bucketMs: number;
   databaseBytes?: number;
   walBytes?: number;
@@ -1047,6 +1052,20 @@ export function RequestLogDialog({
                   </div>
                   <div className="request-log-metric">
                     <div className="flex items-baseline justify-between gap-1">
+                      <span className="text-[11px] font-medium text-[#73767d]">上游首字节</span>
+                      <span className="text-[15px] font-bold text-[#1d1d1f] tabular-nums">{formatDuration(stats.avgUpstreamFirstByte)}</span>
+                    </div>
+                    <span className="text-[10px] text-[#8e8e93] truncate">路由准备 {formatDuration(stats.avgRouterPreUpstream)} · 响应头 {formatDuration(stats.avgUpstreamHeader)}</span>
+                  </div>
+                  <div className="request-log-metric">
+                    <div className="flex items-baseline justify-between gap-1">
+                      <span className="text-[11px] font-medium text-[#73767d]">下游首段内容</span>
+                      <span className="text-[15px] font-bold text-[#1d1d1f] tabular-nums">{formatDuration(stats.avgDownstreamFirstContent)}</span>
+                    </div>
+                    <span className="text-[10px] text-[#8e8e93] truncate">日志排队 {formatDuration(stats.avgQueueDelay)}</span>
+                  </div>
+                  <div className="request-log-metric">
+                    <div className="flex items-baseline justify-between gap-1">
                       <span className="text-[11px] font-medium text-[#73767d]">请求成功率</span>
                       <span
                         className={`text-[15px] font-bold tabular-nums ${
@@ -1124,12 +1143,13 @@ export function RequestLogDialog({
                               <th className="py-1.5 px-2.5 text-right font-medium">请求数</th>
                               <th className="py-1.5 px-2.5 text-right font-medium">Token</th>
                               <th className="py-1.5 px-2.5 text-right font-medium">平均耗时</th>
+                              <th className="py-1.5 px-2.5 text-right font-medium">首段内容</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-black/4 font-mono">
                             {stats.trend.length === 0 ? (
                               <tr>
-                                <td colSpan={4} className="py-4 text-center text-xs text-[#8e8e93] font-sans">
+                                <td colSpan={5} className="py-4 text-center text-xs text-[#8e8e93] font-sans">
                                   所选时间范围暂无趋势数据
                                 </td>
                               </tr>
@@ -1152,6 +1172,9 @@ export function RequestLogDialog({
                                   </td>
                                   <td className="py-1 px-2.5 text-right text-[#48484a] tabular-nums">
                                     {formatDuration(bucket.avgDuration)}
+                                  </td>
+                                  <td className="py-1 px-2.5 text-right text-[#48484a] tabular-nums">
+                                    {formatDuration(bucket.avgDownstreamFirstContent)}
                                   </td>
                                 </tr>
                               ))

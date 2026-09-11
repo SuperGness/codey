@@ -29,6 +29,31 @@ pub(crate) enum ExecutionOutcome {
     Lost,
 }
 
+impl From<super::protocol::TerminalOutcome> for ExecutionOutcome {
+    fn from(outcome: super::protocol::TerminalOutcome) -> Self {
+        use super::protocol::TerminalOutcome;
+        match outcome {
+            TerminalOutcome::Succeeded => Self::Succeeded,
+            TerminalOutcome::Failed => Self::Failed,
+            TerminalOutcome::TimedOut => Self::TimedOut,
+            TerminalOutcome::Lost => Self::Lost,
+        }
+    }
+}
+
+impl ExecutionOutcome {
+    /// Trace error code for a non-successful terminal outcome.
+    pub(crate) fn failure_error_code(self) -> &'static str {
+        match self {
+            Self::Failed => "agent_failed",
+            Self::TimedOut => "agent_timed_out",
+            Self::Lost => "agent_lost",
+            Self::Unknown => "unknown_terminal_outcome",
+            Self::Succeeded => unreachable!("successful outcomes carry no error code"),
+        }
+    }
+}
+
 impl ExecutionOutcome {
     pub(crate) fn is_success(self) -> bool {
         self == Self::Succeeded

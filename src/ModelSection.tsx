@@ -186,6 +186,7 @@ function createRoute(profiles: Profile[]): Profile {
     upstreamProtocol: "openaiResponses",
     authMode: "apiKey",
     apiKeyConfigured: false,
+    modelRequestHeaders: {},
     clearApiKey: false,
     officialAccount: false,
     supportsRemoteCompaction: false,
@@ -252,6 +253,9 @@ function ModelSectionComponent({
   const [routeDraft, setRouteDraft] = useState<Profile | null>(null);
   const [routeValidationAttempted, setRouteValidationAttempted] = useState(false);
   const [routeApiKeyVisible, setRouteApiKeyVisible] = useState(false);
+  const [routeHeadersText, setRouteHeadersText] = useState("{}");
+  const [headerDialogProfile, setHeaderDialogProfile] = useState<Profile | null>(null);
+  const [headerValidationAttempted, setHeaderValidationAttempted] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
   const routeConfigReadOnly = !config.localRouterEnabled;
 
@@ -291,6 +295,7 @@ function ModelSectionComponent({
       supportsWebsockets: matchingProfile?.supportsWebsockets,
       supportsNativeWebSearch: matchingProfile?.supportsNativeWebSearch,
       supportsAutoReview: matchingProfile?.supportsAutoReview,
+      modelRequestHeaders: matchingProfile?.modelRequestHeaders || {},
     };
   }, [config.profiles, currentProvider, routeConfigReadOnly]);
   const visibleProfiles = useMemo(
@@ -384,6 +389,7 @@ function ModelSectionComponent({
     setRouteDraft(createRoute(config.profiles));
     setRouteValidationAttempted(false);
     setRouteApiKeyVisible(false);
+    setRouteHeadersText(JSON.stringify({}, null, 2));
     setOfficialModelDraft([]);
     setRouteDialogOpen(true);
   };
@@ -392,6 +398,7 @@ function ModelSectionComponent({
     setRouteDraft({ ...profile });
     setRouteValidationAttempted(false);
     setRouteApiKeyVisible(false);
+    setRouteHeadersText(JSON.stringify(profile.modelRequestHeaders || {}, null, 2));
     if (official) {
       const providerId = routeProviderId(profile);
       const configuredModels = config.selectedModelsByProvider[providerId] || [];
@@ -406,11 +413,43 @@ function ModelSectionComponent({
   const updateRouteDraft = (patch: Partial<Profile>) => {
     setRouteDraft((current) => current ? { ...current, ...patch } : current);
   };
+  const openHeadersDialog = (profile: Profile) => {
+    setHeaderDialogProfile(profile);
+    setRouteHeadersText(JSON.stringify(profile.modelRequestHeaders || {}, null, 2));
+    setHeaderValidationAttempted(false);
+  };
+  const saveHeaders = async () => {
+    if (!headerDialogProfile) return;
+    try {
+      const parsed = JSON.parse(routeHeadersText);
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error();
+      const modelRequestHeaders = Object.fromEntries(Object.entries(parsed).map(([name, value]) => {
+        if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || typeof value !== "string") throw new Error();
+        return [name, value];
+      }));
+      if (!await onSaveRoute({ ...headerDialogProfile, modelRequestHeaders })) return;
+      setHeaderDialogProfile(null);
+    } catch {
+      setHeaderValidationAttempted(true);
+    }
+  };
   const toggleRouteApiKeyVisibility = () => {
     setRouteApiKeyVisible((visible) => !visible);
   };
   const saveRouteDraft = async () => {
     if (!routeDraft) return;
+    let modelRequestHeaders: Record<string, string>;
+    try {
+      const parsed = JSON.parse(routeHeadersText);
+      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error();
+      modelRequestHeaders = Object.fromEntries(Object.entries(parsed).map(([name, value]) => {
+        if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || typeof value !== "string") throw new Error();
+        return [name, value];
+      }));
+    } catch {
+      setRouteValidationAttempted(true);
+      return;
+    }
     if (routeDraft.authMode !== "officialAccount" && routeDraftHasErrors) {
       setRouteValidationAttempted(true);
       requestAnimationFrame(() => {
@@ -432,10 +471,30 @@ function ModelSectionComponent({
               {},
             )
           : true)
-      : await onSaveRoute(routeDraft);
+      : await onSaveRoute({ ...routeDraft, modelRequestHeaders });
     if (saved) {
       setRouteDialogOpen(false);
       setRouteDraft(null);
+    }
+  };
+
+  const handleToggleRouteEnabled = async (profile: Profile, enabled: boolean) => {
+    if (isBusy || dirty || routeConfigReadOnly) return;
+    if (profile.authMode === "officialAccount") {
+      if (!onSaveOfficialRouteSettings) return;
+      const providerId = routeProviderId(profile);
+      const configuredModels = config.selectedModelsByProvider[providerId] || [];
+      const models = configuredModels.length > 0 ? configuredModels : officialCatalog;
+      await onSaveOfficialRouteSettings(
+        profile.id,
+        models,
+        showAccountUsageInHeader,
+        [],
+        enabled,
+        {},
+      );
+    } else {
+      await onSaveRoute({ ...profile, enabled });
     }
   };
 
@@ -593,6 +652,21 @@ function ModelSectionComponent({
                         </div>
                         <div className="provider-heading-text">
                           <div className="provider-heading-title-row">
+                            {!routeConfigReadOnly && (
+                              <span
+                                title={disabled ? `点击启用线路「${profile.name}」` : `点击停用线路「${profile.name}」`}
+                                className="flex items-center"
+                              >
+                                <Switch
+                                  size="xs"
+                                  checked={!disabled}
+                                  disabled={isBusy || dirty}
+                                  onCheckedChange={(checked) => void handleToggleRouteEnabled(profile, checked)}
+                                  aria-label={`${disabled ? "启用" : "停用"}线路 ${profile.name}`}
+                                  className="route-status-switch"
+                                />
+                              </span>
+                            )}
                             <strong id={`provider-model-${profile.id}`} title={profile.name}>{profile.name || "未命名线路"}</strong>
                             <div className="route-item-badges">
                               {disabled ? <Badge variant="destructive">已禁用</Badge> : (
@@ -664,45 +738,45 @@ function ModelSectionComponent({
                             <Switch size="xs" checked={showAccountUsageInHeader} disabled={isBusy} onCheckedChange={(checked) => onToggleAccountUsage?.(checked)} aria-label="在账户区域显示额度" />
                           </div>
                         )}
-                        {!routeConfigReadOnly && !isOfficial && (
+                        {!routeConfigReadOnly && (
                           <div className="route-item-manage-actions">
                             <Button
                               variant="link"
                               color="primary"
                               size="icon-sm"
                               disabled={isBusy || dirty}
-                              onClick={() => openEditRouteDialog(profile)}
-                              aria-label={`编辑线路 ${profile.name}`}
-                              title={`编辑线路 ${profile.name}`}
+                              onClick={() => openHeadersDialog(profile)}
+                              aria-label={`编辑线路 ${profile.name} 的请求头`}
+                              title="编辑上游请求头"
                             >
-                              <Edit size={14} aria-hidden="true" />
+                              <IconListDetails size={14} aria-hidden="true" />
                             </Button>
-                            <Button
-                              variant="link"
-                              color="danger"
-                              size="icon-sm"
-                              disabled={routeConfigReadOnly || isBusy || dirty || config.profiles.length <= 1}
-                              onClick={() => onDeleteRoute(profile.id)}
-                              aria-label={`删除线路 ${profile.name}`}
-                              title={config.profiles.length <= 1 ? "至少需要保留一条线路" : `删除线路 ${profile.name}`}
-                            >
-                              <Trash size={14} aria-hidden="true" />
-                            </Button>
-                          </div>
-                        )}
-                        {!routeConfigReadOnly && isOfficial && disabled && (
-                          <div className="route-item-manage-actions">
-                            <Button
-                              variant="link"
-                              color="primary"
-                              size="icon-sm"
-                              disabled={isBusy || dirty}
-                              onClick={() => openEditRouteDialog(profile)}
-                              aria-label={`编辑线路 ${profile.name}`}
-                              title={`编辑线路 ${profile.name}`}
-                            >
-                              <Edit size={14} aria-hidden="true" />
-                            </Button>
+                            {!isOfficial && (
+                              <>
+                                <Button
+                                  variant="link"
+                                  color="primary"
+                                  size="icon-sm"
+                                  disabled={isBusy || dirty}
+                                  onClick={() => openEditRouteDialog(profile)}
+                                  aria-label={`编辑线路 ${profile.name}`}
+                                  title={`编辑线路 ${profile.name}`}
+                                >
+                                  <Edit size={14} aria-hidden="true" />
+                                </Button>
+                                <Button
+                                  variant="link"
+                                  color="danger"
+                                  size="icon-sm"
+                                  disabled={routeConfigReadOnly || isBusy || dirty || config.profiles.length <= 1}
+                                  onClick={() => onDeleteRoute(profile.id)}
+                                  aria-label={`删除线路 ${profile.name}`}
+                                  title={config.profiles.length <= 1 ? "至少需要保留一条线路" : `删除线路 ${profile.name}`}
+                                >
+                                  <Trash size={14} aria-hidden="true" />
+                                </Button>
+                              </>
+                            )}
                           </div>
                         )}
                       </div>
@@ -778,18 +852,6 @@ function ModelSectionComponent({
                       ? "编辑线路"
                       : "新增线路"}
                 </DialogTitle>
-                <div
-                  title={routeDraft.enabled !== false ? "线路已启用（点击停用）" : "线路已停用（点击启用）"}
-                  className="flex items-center"
-                >
-                  <Switch
-                    checked={routeDraft.enabled !== false}
-                    disabled={isBusy}
-                    onCheckedChange={(enabled) => updateRouteDraft({ enabled })}
-                    aria-label="启用线路"
-                    className="route-status-switch"
-                  />
-                </div>
               </div>
               <DialogDescription>
                 {routeDraft.authMode === "officialAccount"
@@ -1078,6 +1140,33 @@ function ModelSectionComponent({
                 <Check aria-hidden="true" />
                 {routeDraft.authMode === "officialAccount" ? "保存模型" : "保存线路"}
               </Button>
+            </DialogFooter>
+          </DialogContent>
+        )}
+      </Dialog>
+      <Dialog open={headerDialogProfile !== null} onOpenChange={(open) => { if (!open && !isBusy) setHeaderDialogProfile(null); }}>
+        {headerDialogProfile && (
+          <DialogContent className="route-editor-dialog">
+            <DialogHeader>
+              <DialogTitle>编辑上游请求头</DialogTitle>
+              <DialogDescription>{headerDialogProfile.name} 的 Codey → 上游请求头，使用 JSON 对象表示。</DialogDescription>
+            </DialogHeader>
+            <label className="route-field">
+              <span>请求头（JSON）</span>
+              <textarea
+                aria-label="请求头（JSON）"
+                value={routeHeadersText}
+                disabled={isBusy}
+                rows={10}
+                className="min-h-48 rounded-lg border border-black/10 bg-white p-2 font-mono text-xs"
+                onChange={(event) => setRouteHeadersText(event.target.value)}
+                placeholder={'{"X-Custom-Header": "value"}'}
+              />
+              {headerValidationAttempted && <small className="text-[#d70015]" role="alert">请输入合法的 JSON 对象，键须为有效请求头名称，值须为字符串</small>}
+            </label>
+            <DialogFooter className="route-editor-footer">
+              <Button variant="outline" disabled={isBusy} onClick={() => setHeaderDialogProfile(null)}>取消</Button>
+              <Button disabled={isBusy} onClick={() => void saveHeaders()}><Check aria-hidden="true" />保存请求头</Button>
             </DialogFooter>
           </DialogContent>
         )}

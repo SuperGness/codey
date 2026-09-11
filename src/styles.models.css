@@ -3,10 +3,10 @@
    ========================================================================== */
 
 .route-card {
-  border-radius: 14px !important;
-  overflow: hidden !important;
-  border: 1px solid rgba(0, 0, 0, 0.08) !important;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04) !important;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 .route-manager {
@@ -452,6 +452,7 @@
 }
 
 .route-status-switch {
+  flex-shrink: 0;
   --switch-control-bg: var(--danger, #ff3b30);
   --switch-control-bg-hover: color-mix(in oklab, var(--danger, #ff3b30), black 8%);
   --switch-control-bg-pressed: color-mix(in oklab, var(--danger, #ff3b30), black 15%);

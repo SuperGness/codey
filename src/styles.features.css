@@ -74,49 +74,49 @@
 }
 
 .feature-action-btn {
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-  height: 22px !important;
-  padding: 0 8px !important;
-  font-size: 11px !important;
-  font-weight: 500 !important;
-  line-height: 1 !important;
-  border-radius: 6px !important;
-  background: rgba(0, 0, 0, 0.04) !important;
-  color: #6e6e73 !important;
-  border: 1px solid rgba(0, 0, 0, 0.08) !important;
-  box-shadow: none !important;
-  cursor: pointer !important;
-  transition: all 120ms ease !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.04);
+  color: #6e6e73;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  box-shadow: none;
+  cursor: pointer;
+  transition: all 120ms ease;
 }
 
 .feature-action-btn:hover:not(:disabled) {
-  background: rgba(0, 122, 255, 0.08) !important;
-  color: #007aff !important;
-  border-color: rgba(0, 122, 255, 0.24) !important;
+  background: rgba(0, 122, 255, 0.08);
+  color: #007aff;
+  border-color: rgba(0, 122, 255, 0.24);
 }
 
 .feature-action-btn:active:not(:disabled) {
-  background: rgba(0, 122, 255, 0.14) !important;
+  background: rgba(0, 122, 255, 0.14);
 }
 
 .feature-action-btn:disabled,
 .feature-action-btn[aria-busy="true"] {
-  cursor: not-allowed !important;
-  opacity: 0.65 !important;
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .feature-card.active .feature-action-btn {
-  background: rgba(0, 122, 255, 0.06) !important;
-  color: #007aff !important;
-  border-color: rgba(0, 122, 255, 0.18) !important;
+  background: rgba(0, 122, 255, 0.06);
+  color: #007aff;
+  border-color: rgba(0, 122, 255, 0.18);
 }
 
 .feature-card.active .feature-action-btn:hover:not(:disabled) {
-  background: rgba(0, 122, 255, 0.12) !important;
-  color: #0056b3 !important;
-  border-color: rgba(0, 122, 255, 0.32) !important;
+  background: rgba(0, 122, 255, 0.12);
+  color: #0056b3;
+  border-color: rgba(0, 122, 255, 0.32);
 }
 
 .feature-card-title {
@@ -731,10 +731,10 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  border: 0 !important;
-  border-radius: 0 !important;
-  box-shadow: none !important;
-  background: transparent !important;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
 }
 
 .prompt-optimization-body {

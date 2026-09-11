@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved;
@@ -1249,6 +1249,42 @@ struct RuntimeWatcherInputs {
     crashpad_pending_stats: CrashpadPendingStatsHandle,
 }
 
+/// Accumulates per-stage durations for `CodeyRuntime::start` and writes one
+/// `launcher.startup_timings` diagnostic record with the total.
+#[derive(Default)]
+struct StartupStageTimings {
+    started: Option<Instant>,
+    previous: Option<Instant>,
+    stages: Vec<(&'static str, u64)>,
+}
+
+impl StartupStageTimings {
+    fn mark(&mut self, stage: &'static str) {
+        let now = Instant::now();
+        let started = *self.started.get_or_insert(now);
+        let previous = self.previous.replace(now).unwrap_or(started);
+        self.stages
+            .push((stage, now.duration_since(previous).as_millis() as u64));
+    }
+
+    fn report(&self) {
+        let mut detail = serde_json::Map::new();
+        for (stage, millis) in &self.stages {
+            detail.insert((*stage).to_string(), serde_json::json!(millis));
+        }
+        if let Some(started) = self.started {
+            detail.insert(
+                "totalMs".to_string(),
+                serde_json::json!(started.elapsed().as_millis() as u64),
+            );
+        }
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.startup_timings",
+            serde_json::Value::Object(detail),
+        );
+    }
+}
+
 fn spawn_initial_storage_guards(
     home: &std::path::Path,
     config: &CodeyConfig,
@@ -1795,11 +1831,15 @@ impl CodeyRuntime {
             .local_router_enabled
             .then(|| resolve_startup_profile(config))
             .transpose()?;
+        // Stage timings go to the diagnostic log so a slow launch can be
+        // attributed without a debugger; values are milliseconds.
+        let mut stage_timings = StartupStageTimings::default();
         // apply_runtime_router_config installs the live loopback table before
         // Codex starts, so saved codey_router tasks need no provider rewrite.
         if config.local_router_enabled {
             validate_startup_router_provider(home).await?;
         }
+        stage_timings.mark("validateRouterProviderMs");
         let initial_storage_guards = spawn_initial_storage_guards(home, config);
         let (storage, startup_catalog) = prepare_startup_storage(
             home,
@@ -1810,11 +1850,13 @@ impl CodeyRuntime {
             &crashpad_pending_stats,
         )
         .await?;
+        stage_timings.mark("storageAndCatalogMs");
         let local_router = if config.local_router_enabled {
             Some(LocalRouter::start_with_usage(config, account_usage_cache).await?)
         } else {
             None
         };
+        stage_timings.mark("localRouterStartMs");
         let prepared_provider_state =
             if let (Some(startup_profile), Some(local_router), Some(startup_catalog)) = (
                 startup_profile.as_ref(),
@@ -1846,7 +1888,9 @@ impl CodeyRuntime {
                 .await);
             }
         };
+        stage_timings.mark("providerStateMs");
         let patch = prepare_startup_patches(home, config).await;
+        stage_timings.mark("startupPatchesMs");
         let SpawnedRenderer {
             app_dir,
             spawned,
@@ -1863,6 +1907,8 @@ impl CodeyRuntime {
             &runtime_config_overrides,
         )
         .await?;
+        stage_timings.mark("spawnAndInjectMs");
+        stage_timings.report();
         #[cfg(target_os = "macos")]
         let inspector_argument = spawned.inspector_argument.clone();
         let process_id = spawned.process_id;
