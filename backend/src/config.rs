@@ -30,8 +30,10 @@ pub struct ProviderProfile {
     pub api_key_configured: bool,
     #[serde(default, skip_serializing)]
     pub clear_api_key: bool,
-    /// Per-route request headers editable in the local router settings.
-    #[serde(default)]
+    /// Request-only headers loaded from the active Codex provider. They may
+    /// contain credentials, so they are never serialized into Codey's store or
+    /// exposed to the renderer.
+    #[serde(skip)]
     pub model_request_headers: BTreeMap<String, String>,
     /// Stable id of the provider in the source Codex configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]

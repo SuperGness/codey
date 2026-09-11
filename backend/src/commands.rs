@@ -1827,6 +1827,7 @@ fn merge_profile_secrets(
                 // to the saved route even though the renderer receives a redacted
                 // profile and sends the whole form back on save.
                 profile.source_provider_id = previous_profile.source_provider_id.clone();
+                profile.model_request_headers = previous_profile.model_request_headers.clone();
                 profile.official_account = previous_profile.official_account;
                 profile.supports_remote_compaction = previous_profile.supports_remote_compaction;
             }
