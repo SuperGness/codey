@@ -674,7 +674,7 @@ async fn upstream_websocket_normalizes_sse_wrapped_events_to_json_frames() {
 
     assert_eq!(
         downstream
-            .proxy_upstream_websocket(&route, &HeaderMap::new(), &mut body, None)
+            .proxy_upstream_websocket(&route, &HeaderMap::new(), &mut body, false, None)
             .await
             .unwrap(),
         UpstreamWebSocketAttempt::Completed
@@ -1493,7 +1493,7 @@ async fn upstream_websocket_reconnects_when_account_identity_changes() {
         let mut body = json!({"model":model,"input":input});
         assert_eq!(
             downstream
-                .proxy_upstream_websocket(&route, &headers, &mut body, None)
+                .proxy_upstream_websocket(&route, &headers, &mut body, false, None)
                 .await
                 .unwrap(),
             UpstreamWebSocketAttempt::Completed
@@ -1594,7 +1594,7 @@ async fn upstream_websocket_keeps_continuation_on_original_account_connection() 
         }
         assert_eq!(
             downstream
-                .proxy_upstream_websocket(&route, &headers, &mut body, None)
+                .proxy_upstream_websocket(&route, &headers, &mut body, false, None)
                 .await
                 .unwrap(),
             UpstreamWebSocketAttempt::Completed
@@ -1666,7 +1666,7 @@ async fn unknown_previous_response_id_uses_http_fallback_instead_of_websocket_re
     let mut first_body = json!({"model":model,"input":"first"});
     assert_eq!(
         downstream
-            .proxy_upstream_websocket(&route, &headers, &mut first_body, None)
+            .proxy_upstream_websocket(&route, &headers, &mut first_body, false, None)
             .await
             .unwrap(),
         UpstreamWebSocketAttempt::Completed
@@ -1681,7 +1681,13 @@ async fn unknown_previous_response_id_uses_http_fallback_instead_of_websocket_re
     });
     assert_eq!(
         downstream
-            .proxy_upstream_websocket(&route, &headers, &mut continuation_from_elsewhere, None,)
+            .proxy_upstream_websocket(
+                &route,
+                &headers,
+                &mut continuation_from_elsewhere,
+                false,
+                None,
+            )
             .await
             .unwrap(),
         UpstreamWebSocketAttempt::UseHttp
@@ -6283,7 +6289,11 @@ async fn model_switch_from_chat_to_native_expands_synthetic_history_in_order() {
     let upstream_task = tokio::spawn(async move {
         let (mut first, _) = upstream.accept().await.unwrap();
         read_http_request(&mut first).await.unwrap();
-        let sse = "data: {\"id\":\"chat-first\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"remembered answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let sse = concat!(
+            "data: {\"id\":\"chat-first\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"private bridge reasoning\"}}]}\n\n",
+            "data: {\"id\":\"chat-first\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"remembered answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
         first.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}", sse.len()).as_bytes()).await.unwrap();
         let (mut second, _) = upstream.accept().await.unwrap();
         let request = read_http_request(&mut second).await.unwrap();
@@ -6328,8 +6338,191 @@ async fn model_switch_from_chat_to_native_expands_synthetic_history_in_order() {
     assert_eq!(sent["input"][1]["role"], "assistant");
     assert_eq!(sent["input"][1]["content"][0]["text"], "remembered answer");
     assert_eq!(sent["input"][2], "continue");
+    assert!(
+        sent["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| { item.get("type").and_then(Value::as_str) != Some("reasoning") })
+    );
     socket.close(None).await.unwrap();
     router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_route_switch_drops_previous_provider_reasoning_state() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let (mut config, provider_a, model) = router_config(format!("http://{upstream_address}/v1"));
+    let mut route_b = config.profiles[0].clone();
+    route_b.id = "route-native-b".into();
+    route_b.name = "Native B".into();
+    route_b.normalize();
+    let provider_b = route_b.provider_id().to_string();
+    config.profiles.push(route_b);
+    config
+        .selected_models_by_provider
+        .insert(provider_b.clone(), vec![model.clone()]);
+    let upstream_task = tokio::spawn(async move {
+        let mut bodies = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+            write_json_response(
+                &mut stream,
+                200,
+                &json!({"id":"resp-native","object":"response","model":body["model"],"output":[]}),
+            )
+            .await
+            .unwrap();
+            bodies.push(body);
+        }
+        bodies
+    });
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let client = reqwest::Client::new();
+
+    let first = client
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .header("thread-id", "native-provider-switch")
+        .json(&json!({"model":model_alias(&provider_a, &model),"input":"first"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), reqwest::StatusCode::OK);
+
+    let second = client
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .header("thread-id", "native-provider-switch")
+        .json(&json!({
+            "model":model_alias(&provider_b, &model),
+            "input":[
+                {"role":"user","content":"original task"},
+                {"type":"reasoning","id":"rs_provider_a","encrypted_content":"opaque-provider-a"},
+                {"role":"assistant","content":[{"type":"output_text","text":"visible answer"}]},
+                {"role":"user","content":"continue"}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), reqwest::StatusCode::OK);
+
+    let bodies = upstream_task.await.unwrap();
+    assert_eq!(bodies[1]["input"].as_array().unwrap().len(), 3);
+    assert!(
+        bodies[1]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| { item.get("type").and_then(Value::as_str) != Some("reasoning") })
+    );
+    assert_eq!(bodies[1]["input"][1]["role"], "assistant");
+    assert_eq!(
+        bodies[1]["input"][1]["content"][0]["text"],
+        "visible answer"
+    );
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_route_switch_rejects_provider_bound_history_references_locally() {
+    for opaque_item in [
+        json!({"type":"compaction","id":"cmp_provider_a","encrypted_content":"opaque-provider-a"}),
+        json!({"type":"item_reference","id":"item_provider_a"}),
+    ] {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let (mut config, provider_a, model) =
+            router_config(format!("http://{upstream_address}/v1"));
+        let mut route_b = config.profiles[0].clone();
+        route_b.id = "route-native-b".into();
+        route_b.name = "Native B".into();
+        route_b.normalize();
+        let provider_b = route_b.provider_id().to_string();
+        config.profiles.push(route_b);
+        config
+            .selected_models_by_provider
+            .insert(provider_b.clone(), vec![model.clone()]);
+        let upstream_task = tokio::spawn(async move {
+            let (mut first, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut first).await.unwrap();
+            let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+            write_json_response(
+                &mut first,
+                200,
+                &json!({"id":"resp-native","object":"response","model":body["model"],"output":[]}),
+            )
+            .await
+            .unwrap();
+            if let Ok(Ok((mut second, _))) =
+                tokio::time::timeout(Duration::from_millis(250), upstream.accept()).await
+            {
+                let _request = read_http_request(&mut second).await.unwrap();
+                write_json_response(
+                    &mut second,
+                    200,
+                    &json!({"id":"unexpected-forward","object":"response","output":[]}),
+                )
+                .await
+                .unwrap();
+                return true;
+            }
+            false
+        });
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let client = reqwest::Client::new();
+
+        let first = client
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .header("thread-id", "native-provider-reference-switch")
+            .json(&json!({"model":model_alias(&provider_a, &model),"input":"first"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(first.status(), reqwest::StatusCode::OK);
+
+        let second = client
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .header("thread-id", "native-provider-reference-switch")
+            .json(&json!({
+                "model":model_alias(&provider_b, &model),
+                "input":[{"role":"user","content":"continue"},opaque_item.clone()]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(second.status().as_u16(), 400);
+        assert_eq!(
+            second.json::<Value>().await.unwrap()["error"]["code"],
+            "context_not_portable"
+        );
+        let retry = client
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .header("thread-id", "native-provider-reference-switch")
+            .json(&json!({
+                "model":model_alias(&provider_b, &model),
+                "input":[{"role":"user","content":"continue"},opaque_item]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retry.status().as_u16(), 400);
+        assert_eq!(
+            retry.json::<Value>().await.unwrap()["error"]["code"],
+            "context_not_portable"
+        );
+        assert!(!upstream_task.await.unwrap());
+        router.stop().await.unwrap();
+    }
 }
 
 #[tokio::test]

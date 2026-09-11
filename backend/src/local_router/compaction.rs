@@ -42,6 +42,80 @@ pub(crate) fn validate_portable_context(body: &Value) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn validate_cross_route_context(body: &Value) -> Result<()> {
+    validate_portable_context(body)?;
+    fn contains_item_reference(value: &Value) -> bool {
+        if value.get("type").and_then(Value::as_str) == Some("item_reference") {
+            return true;
+        }
+        match value {
+            Value::Array(items) => items.iter().any(contains_item_reference),
+            Value::Object(object) => object.values().any(contains_item_reference),
+            _ => false,
+        }
+    }
+    if input_items(body).iter().any(contains_item_reference) {
+        anyhow::bail!("context_not_portable: item_reference 属于上一条线路，不能发送到新的供应商");
+    }
+    Ok(())
+}
+
+pub(crate) fn normalize_native_responses_context(
+    body: &mut Value,
+    discard_opaque_reasoning: bool,
+) -> bool {
+    fn normalize_reasoning_item(item: &mut Value, discard_opaque_reasoning: bool) -> (bool, bool) {
+        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
+            return (true, false);
+        }
+        if discard_opaque_reasoning {
+            return (false, true);
+        }
+        let has_nonempty_content = item
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|content| !content.is_empty());
+        if !has_nonempty_content {
+            return (true, false);
+        }
+        let has_encrypted_content = item
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| !content.trim().is_empty());
+        if has_encrypted_content {
+            item.as_object_mut()
+                .expect("reasoning input item must remain an object")
+                .remove("content");
+            (true, true)
+        } else {
+            (false, true)
+        }
+    }
+
+    let Some(input) = body.get_mut("input") else {
+        return false;
+    };
+    match input {
+        Value::Array(items) => {
+            let mut mutated = false;
+            items.retain_mut(|item| {
+                let (keep, item_mutated) = normalize_reasoning_item(item, discard_opaque_reasoning);
+                mutated |= item_mutated;
+                keep
+            });
+            mutated
+        }
+        Value::Object(_) => {
+            let (keep, mutated) = normalize_reasoning_item(input, discard_opaque_reasoning);
+            if !keep {
+                *input = Value::Array(Vec::new());
+            }
+            mutated
+        }
+        _ => false,
+    }
+}
+
 // Only in-flight work is owned here. Codex remains responsible for history
 // versions, retries and installing a successful compaction result.
 pub(crate) struct CompactionGuard {
@@ -154,6 +228,51 @@ pub(crate) fn validate_compaction_result(value: &Value, v2: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_reasoning_normalization_preserves_same_provider_encrypted_state() {
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_encrypted",
+                    "encrypted_content": "opaque-state",
+                    "content": [{"type": "reasoning_text", "text": "private"}]
+                },
+                {"role": "user", "content": "continue"}
+            ]
+        });
+
+        assert!(normalize_native_responses_context(&mut body, false));
+        assert_eq!(body["input"].as_array().unwrap().len(), 2);
+        assert_eq!(body["input"][0]["id"], "rs_encrypted");
+        assert_eq!(body["input"][0]["encrypted_content"], "opaque-state");
+        assert!(body["input"][0].get("content").is_none());
+        assert_eq!(body["input"][1]["role"], "user");
+
+        let mut single = json!({
+            "input": {
+                "type": "reasoning",
+                "id": "rs_single",
+                "encrypted_content": "opaque-single",
+                "content": [{"type": "reasoning_text", "text": "private"}]
+            }
+        });
+        assert!(normalize_native_responses_context(&mut single, false));
+        assert_eq!(single["input"]["id"], "rs_single");
+        assert!(single["input"].get("content").is_none());
+    }
+
+    #[test]
+    fn cross_route_context_rejects_nested_item_reference() {
+        let body = json!({
+            "input": [{
+                "role": "assistant",
+                "content": [{"type": "output_text", "annotations": [{"type": "item_reference"}]}]
+            }]
+        });
+        assert!(validate_cross_route_context(&body).is_err());
+    }
 
     #[test]
     fn compaction_guard_releases_on_failure_and_serializes_overlapping_sessions() {
