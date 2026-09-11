@@ -7,7 +7,7 @@ use anyhow::Context;
 
 #[cfg(any(windows, target_os = "macos", test))]
 use std::ffi::{OsStr, OsString};
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 use std::io::Write;
 
 const PATCH_RESULT: &str = "codey-startup-patch-installed-v39";
@@ -37,12 +37,12 @@ pub(crate) const CLI_WRAPPER_PORT_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_PORT";
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) const CLI_WRAPPER_TOKEN_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TOKEN";
 /// 包装器执行记录文件的绝对路径；回环握手丢失时启动器据此确认目标已执行。
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_MARKER_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_MARKER";
 /// When Inspector installation may win the startup race, the wrapper records
 /// progress through its marker only and does not connect a listener that the
 /// launcher can drop after Inspector success.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV: &str =
     "CODEY_CODEX_CLI_WRAPPER_HANDSHAKE_OPTIONAL";
 #[cfg(any(windows, target_os = "macos", test))]
@@ -741,7 +741,7 @@ fn cli_wrapper_handshake_required(optional: Option<&OsStr>) -> bool {
     optional != Some(OsStr::new("1"))
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 fn connect_cli_wrapper_handshake() -> Result<std::net::TcpStream> {
     let port = std::env::var(CLI_WRAPPER_PORT_ENV)
         .context("Codex CLI 缺少兼容校验端口")?
