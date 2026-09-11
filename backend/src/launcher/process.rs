@@ -1069,7 +1069,7 @@ fn local_router_proxy_bypass_environment(
     }
 }
 
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, target_os = "macos"))]
 fn merge_loopback_no_proxy(existing: Option<&str>) -> String {
     const LOOPBACK: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
     let mut entries = existing
