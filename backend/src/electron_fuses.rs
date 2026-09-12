@@ -70,6 +70,7 @@ pub(crate) struct ElectronFuses {
 }
 
 impl ElectronFuses {
+    #[cfg(any(windows, target_os = "macos"))]
     fn unknown() -> Self {
         Self {
             node_cli_inspect: FuseState::Unknown,
