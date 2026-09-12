@@ -59,9 +59,13 @@ pub(crate) fn take_codey_route_metadata(
             continue;
         };
         let extracted = take_route_hint_from_metadata_value(&mut metadata)?;
+        // 只在真正删除了 Codey 字段时才重新序列化；否则保留客户端的
+        // 原始字节（重序列化会改变键顺序，造成与官方客户端不一致的线上字节）。
+        if extracted.is_some() {
+            *value = serde_json::to_string(&metadata)
+                .context("序列化清理后的 Codex turn metadata 失败")?;
+        }
         merge_route_hint(&mut route_hint, extracted)?;
-        *value =
-            serde_json::to_string(&metadata).context("序列化清理后的 Codex turn metadata 失败")?;
     }
 
     let Some(client_metadata) = body
@@ -331,6 +335,7 @@ pub(crate) fn should_forward_incoming_header(name: &str, official_account: bool)
         || name.eq_ignore_ascii_case(ROUTE_METADATA_KEY)
         || name.eq_ignore_ascii_case(CONTENT_ENCODING.as_str())
         || name.eq_ignore_ascii_case(CONTENT_TYPE.as_str())
+        || name.to_ascii_lowercase().starts_with("x-codey-")
         || is_hop_by_hop_header(name)
     {
         return false;
@@ -407,6 +412,44 @@ pub(crate) fn update_length_prefixed_digest(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
+pub(crate) const ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
+
+/// `x-codex-routing-hint` 的值形如 `model=<模型名>[;tier=<层级>]`，由 Codex 按它
+/// 所见的模型名（可能是 Codey 线路别名）生成。请求体的模型名在转发前
+/// 已还原为上游模型名，路由提示必须同步改写，否则上游收到与请求体
+/// 不一致的模型提示，可能被路由到错误的服务组。
+pub(crate) fn align_routing_hint_model(headers: &mut HeaderMap, upstream_model: &str) {
+    let Some(value) = headers.get(ROUTING_HINT_HEADER) else {
+        return;
+    };
+    let Ok(value) = value.to_str() else {
+        headers.remove(ROUTING_HINT_HEADER);
+        return;
+    };
+    let rewritten = value
+        .split(';')
+        .map(|segment| {
+            if segment.trim().starts_with("model=") {
+                format!("model={upstream_model}")
+            } else {
+                segment.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    if rewritten == value {
+        return;
+    }
+    match HeaderValue::from_str(&rewritten) {
+        Ok(rewritten) => {
+            headers.insert(HeaderName::from_static(ROUTING_HINT_HEADER), rewritten);
+        }
+        Err(_) => {
+            headers.remove(ROUTING_HINT_HEADER);
+        }
+    }
+}
+
 pub(crate) fn is_codex_client_identity_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
@@ -428,7 +471,12 @@ pub(crate) fn is_codex_client_identity_header(name: &str) -> bool {
             | "x-codex-window-id"
             | "x-codex-parent-thread-id"
             | "x-codex-beta-features"
+            | "x-codex-turn-state"
+            | "x-codex-routing-hint"
             | "x-openai-subagent"
+            | "x-openai-memgen-request"
+            | "x-openai-internal-codex-responses-lite"
+            | "x-responsesapi-include-timing-metrics"
     ) || lower.starts_with("x-stainless-")
 }
 

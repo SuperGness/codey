@@ -248,6 +248,19 @@ pub(crate) async fn write_proxy_response(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/json")
         .to_string();
+    let mut forwarded_headers = String::new();
+    for (name, value) in response.headers() {
+        if !should_forward_upstream_response_header(name.as_str()) {
+            continue;
+        }
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        forwarded_headers.push_str(name.as_str());
+        forwarded_headers.push_str(": ");
+        forwarded_headers.push_str(value);
+        forwarded_headers.push_str("\r\n");
+    }
     let mut prepared = prepare_upstream_response(response, "读取上游响应失败", probe).await?;
     let upstream_is_sse = prepared.is_sse;
     let mut terminal = (upstream_is_sse && validate_responses).then(NativeSseTerminal::default);
@@ -260,7 +273,7 @@ pub(crate) async fn write_proxy_response(
     write_all_with_timeout(
         stream,
         format!(
-            "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ntransfer-encoding: chunked\r\n{}connection: close\r\n\r\n",
+            "HTTP/1.1 {status} {reason}\r\ncontent-type: {content_type}\r\ntransfer-encoding: chunked\r\n{forwarded_headers}{}connection: close\r\n\r\n",
             router_request_id_header()
         )
         .as_bytes(),

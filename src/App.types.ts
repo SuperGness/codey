@@ -18,6 +18,7 @@ export type Profile = {
   apiKeyConfigured: boolean;
   clearApiKey?: boolean;
   modelRequestHeaders?: Record<string, string>;
+  upstreamProxy?: string;
   sourceProviderId?: string;
   officialAccount: boolean;
   supportsRemoteCompaction?: boolean;

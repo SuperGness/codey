@@ -1065,32 +1065,34 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 &args,
                 "modelContexts",
             ),
+            optional_argument::<String>(&args, "upstreamProxy"),
         ) {
             (
                 Ok(route_id),
                 Ok(models),
-                Ok(context_models),
+                Ok(_context_models),
                 Ok(enabled),
                 Ok(show_usage),
-                Ok(model_contexts),
+                Ok(_model_contexts),
+                Ok(upstream_proxy),
             ) => {
                 save_official_route_models(
                     state,
                     route_id,
                     models,
-                    context_models,
                     enabled,
                     show_usage,
-                    model_contexts,
+                    upstream_proxy,
                 )
                 .await
             }
-            (Err(error), _, _, _, _, _)
-            | (_, Err(error), _, _, _, _)
-            | (_, _, Err(error), _, _, _)
-            | (_, _, _, Err(error), _, _)
-            | (_, _, _, _, Err(error), _)
-            | (_, _, _, _, _, Err(error)) => Err(error),
+            (Err(error), _, _, _, _, _, _)
+            | (_, Err(error), _, _, _, _, _)
+            | (_, _, Err(error), _, _, _, _)
+            | (_, _, _, Err(error), _, _, _)
+            | (_, _, _, _, Err(error), _, _)
+            | (_, _, _, _, _, Err(error), _)
+            | (_, _, _, _, _, _, Err(error)) => Err(error),
         },
         "runtime_status" => {
             let refresh_injection_status = args
@@ -2398,6 +2400,7 @@ async fn account_usage_snapshot(state: &Arc<AppState>) -> Value {
 }
 
 async fn query_official_account_usage(state: &Arc<AppState>, force_refresh: bool) -> Value {
+    let official_proxy;
     {
         let config = state.config.read().await;
         if !official_account_available_for_usage(&config) {
@@ -2407,11 +2410,17 @@ async fn query_official_account_usage(state: &Arc<AppState>, force_refresh: bool
                 "message": "当前线路列表中没有可用的官方账号线路",
             });
         }
+        official_proxy = config
+            .profiles
+            .iter()
+            .find(|profile| profile.enabled && profile.official_account)
+            .map(|profile| profile.upstream_proxy.trim().to_string())
+            .filter(|proxy| !proxy.is_empty());
     }
 
     let home = codex_home();
     let mut cache = state.account_usage_cache.lock().await;
-    account_usage::query_snapshot(&mut cache, home, force_refresh).await
+    account_usage::query_snapshot(&mut cache, home, force_refresh, official_proxy.as_deref()).await
 }
 
 #[cfg(test)]

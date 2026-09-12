@@ -2628,11 +2628,60 @@ fn third_party_routes_forward_codex_identity_without_chatgpt_account_headers() {
     assert!(should_forward_incoming_header("session-id", false));
     assert!(should_forward_incoming_header("prompt-cache-key", false));
     assert!(should_forward_incoming_header("prompt_cache_key", false));
+    assert!(should_forward_incoming_header("x-codex-turn-state", false));
     assert!(!should_forward_incoming_header("authorization", true));
     assert!(!should_forward_incoming_header(ROUTER_AUTH_HEADER, true));
     assert!(!should_forward_incoming_header(ROUTE_METADATA_KEY, true));
     assert!(!should_forward_incoming_header(TURN_METADATA_HEADER, false));
+    assert!(!should_forward_incoming_header("x-codey-request-id", true));
+    assert!(!should_forward_incoming_header("X-Codey-Anything", false));
     assert!(should_forward_incoming_header("accept", false));
+}
+
+#[test]
+fn routing_hint_model_follows_the_resolved_upstream_model() {
+    let mut headers = HeaderMap::new();
+    align_routing_hint_model(&mut headers, "provider-model");
+    assert!(headers.is_empty());
+
+    headers.insert(
+        HeaderName::from_static(ROUTING_HINT_HEADER),
+        HeaderValue::from_static("model=route%20a/provider-model;tier=priority"),
+    );
+    align_routing_hint_model(&mut headers, "provider-model");
+    assert_eq!(
+        headers[ROUTING_HINT_HEADER],
+        HeaderValue::from_static("model=provider-model;tier=priority")
+    );
+
+    // 已经一致时不改写；无 model 段时保留原值。
+    headers.insert(
+        HeaderName::from_static(ROUTING_HINT_HEADER),
+        HeaderValue::from_static("tier=priority"),
+    );
+    align_routing_hint_model(&mut headers, "provider-model");
+    assert_eq!(
+        headers[ROUTING_HINT_HEADER],
+        HeaderValue::from_static("tier=priority")
+    );
+}
+
+#[test]
+fn upstream_response_headers_forward_end_to_end_values_only() {
+    assert!(should_forward_upstream_response_header(
+        "x-codex-turn-state"
+    ));
+    assert!(should_forward_upstream_response_header("x-models-etag"));
+    assert!(should_forward_upstream_response_header("set-cookie"));
+    assert!(!should_forward_upstream_response_header("Content-Type"));
+    assert!(!should_forward_upstream_response_header("content-length"));
+    assert!(!should_forward_upstream_response_header("Connection"));
+    assert!(!should_forward_upstream_response_header(
+        "transfer-encoding"
+    ));
+    assert!(!should_forward_upstream_response_header(
+        "X-Codey-Request-Id"
+    ));
 }
 
 #[test]
@@ -7314,6 +7363,176 @@ async fn route_header_overrides_replace_and_remove_forwarded_headers() {
     assert_eq!(user_agent.as_deref(), Some("Codex Desktop/0.153.4"));
     assert_eq!(originator, None);
     assert_eq!(request_id, None);
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn routing_hint_reaches_upstream_with_the_restored_model_name() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await.unwrap();
+        let routing_hint = incoming_header(&request, "x-codex-routing-hint").map(str::to_string);
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+        write_json_response(
+            &mut stream,
+            200,
+            &json!({"object":"response","model":body["model"]}),
+        )
+        .await
+        .unwrap();
+        (routing_hint, body["model"].as_str().unwrap().to_string())
+    });
+    let (config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let alias = model_alias(&provider_id, &model);
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .header(
+            "x-codex-routing-hint",
+            format!("model={alias};tier=default"),
+        )
+        .json(&json!({"model":alias,"input":"hello"}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let (routing_hint, upstream_model) = upstream_task.await.unwrap();
+    assert_eq!(upstream_model, model);
+    // 路由提示必须和请求体里已还原的上游模型名一致，不能把线路别名泄给上游。
+    assert_eq!(
+        routing_hint.as_deref(),
+        Some("model=provider-model;tier=default")
+    );
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn route_upstream_proxy_carries_requests_through_the_proxy() {
+    let proxy = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    let proxy_task = tokio::spawn(async move {
+        let (mut stream, _) = proxy.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await.unwrap();
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+        write_json_response(
+            &mut stream,
+            200,
+            &json!({"object":"response","model":body["model"]}),
+        )
+        .await
+        .unwrap();
+        request.path
+    });
+    // 上游域名不可解析：请求只有经过代理（绝对形式请求行）才能成功。
+    let (mut config, provider_id, model) =
+        router_config("http://codey-proxy-test.invalid/v1".into());
+    config.profiles[0].upstream_proxy = format!("http://{proxy_address}");
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .json(&json!({"model":model_alias(&provider_id, &model),"input":"hello"}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(response.json::<Value>().await.unwrap()["model"], model);
+    let proxied_path = proxy_task.await.unwrap();
+    assert_eq!(proxied_path, "http://codey-proxy-test.invalid/v1/responses");
+    // 配置了上游代理的线路不使用上游 WebSocket，即使线路声明支持。
+    config.profiles[0].supports_websockets = true;
+    let snapshot = RouterSnapshot::from_config(&config);
+    assert!(
+        snapshot
+            .routes
+            .values()
+            .all(|route| !route.supports_websockets)
+    );
+    config.profiles[0].upstream_proxy = String::new();
+    let snapshot = RouterSnapshot::from_config(&config);
+    assert!(
+        snapshot
+            .routes
+            .values()
+            .any(|route| route.supports_websockets)
+    );
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn upstream_response_headers_reach_the_downstream_client() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await.unwrap();
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+        let response = json!({"object":"response","model":body["model"]}).to_string();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nx-codex-turn-state: sticky-token\r\nx-models-etag: etag-1\r\nx-codey-request-id: forged-by-upstream\r\nconnection: close\r\n\r\n{response}",
+                    response.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let (config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .json(&json!({"model":model_alias(&provider_id, &model),"input":"hello"}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    // Codex 依赖粘性路由令牌等端到端响应头；传输层头由本地路由自行管理，
+    // x-codey-request-id 以本地路由生成的值为准，不接受上游伪造。
+    assert_eq!(
+        response
+            .headers()
+            .get("x-codex-turn-state")
+            .and_then(|value| value.to_str().ok()),
+        Some("sticky-token")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-models-etag")
+            .and_then(|value| value.to_str().ok()),
+        Some("etag-1")
+    );
+    let request_id = response
+        .headers()
+        .get("x-codey-request-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap();
+    assert_ne!(request_id, "forged-by-upstream");
+    assert_eq!(
+        response
+            .headers()
+            .get_all(reqwest::header::CONTENT_TYPE)
+            .iter()
+            .count(),
+        1
+    );
+    assert_eq!(response.json::<Value>().await.unwrap()["model"], model);
+    upstream_task.await.unwrap();
     router.stop().await.unwrap();
 }
 

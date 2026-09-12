@@ -39,7 +39,7 @@ import {
   validateThirdPartyRouteShortName,
 } from "./routeShortNames";
 import { flushCardClass } from "./uiClasses";
-import { validateOutboundApiUrl } from "./urlValidation";
+import { validateOutboundApiUrl, validateOutboundProxyUrl } from "./urlValidation";
 import { invoke } from "./api";
 
 export function ModelContextFields({ model, policy, disabled, onChange }: {
@@ -156,6 +156,7 @@ type ModelSectionProps = {
     supports1MContextModels: string[],
     enabled: boolean,
     modelContexts: Record<string, ModelContextConfig>,
+    upstreamProxy?: string,
   ) => Promise<boolean>;
   onSetDefaultModel: (routeId: string, model: string) => void;
 };
@@ -188,6 +189,7 @@ function createRoute(profiles: Profile[]): Profile {
     authMode: "apiKey",
     apiKeyConfigured: false,
     modelRequestHeaders: {},
+    upstreamProxy: "",
     clearApiKey: false,
     officialAccount: false,
     supportsRemoteCompaction: false,
@@ -201,17 +203,25 @@ type RouteDraftErrors = {
   shortName: string;
   baseUrl: string;
   apiKey: string;
+  upstreamProxy: string;
 };
 
 function validateRouteDraft(route: Profile, profiles: readonly Profile[]): RouteDraftErrors {
   if (route.authMode === "officialAccount") {
-    return { name: "", shortName: "", baseUrl: "", apiKey: "" };
+    return {
+      name: "",
+      shortName: "",
+      baseUrl: "",
+      apiKey: "",
+      upstreamProxy: validateOutboundProxyUrl(route.upstreamProxy || ""),
+    };
   }
   const errors: RouteDraftErrors = {
     name: route.name.trim() ? "" : "请输入线路名称",
     shortName: validateThirdPartyRouteShortName(route.shortName, profiles, route.id),
     baseUrl: "",
     apiKey: "",
+    upstreamProxy: validateOutboundProxyUrl(route.upstreamProxy || ""),
   };
   errors.baseUrl = validateOutboundApiUrl(route.baseUrl);
   if (route.apiKey.trim() === "" && !route.apiKeyConfigured) errors.apiKey = "请输入 API Key";
@@ -297,6 +307,7 @@ function ModelSectionComponent({
       supportsNativeWebSearch: matchingProfile?.supportsNativeWebSearch,
       supportsAutoReview: matchingProfile?.supportsAutoReview,
       modelRequestHeaders: matchingProfile?.modelRequestHeaders || {},
+      upstreamProxy: matchingProfile?.upstreamProxy || "",
     };
   }, [config.profiles, currentProvider, routeConfigReadOnly]);
   const visibleProfiles = useMemo(
@@ -447,6 +458,10 @@ function ModelSectionComponent({
       setRouteValidationAttempted(true);
       return;
     }
+    if (routeDraft.authMode === "officialAccount" && routeDraftErrors?.upstreamProxy) {
+      setRouteValidationAttempted(true);
+      return;
+    }
     if (routeDraft.authMode !== "officialAccount" && routeDraftHasErrors) {
       setRouteValidationAttempted(true);
       requestAnimationFrame(() => {
@@ -466,6 +481,7 @@ function ModelSectionComponent({
               [],
               routeDraft.enabled !== false,
               {},
+              routeDraft.upstreamProxy ?? "",
             )
           : true)
       : await onSaveRoute({ ...routeDraft, modelRequestHeaders });
@@ -867,6 +883,34 @@ function ModelSectionComponent({
                   <Badge variant="info">官方账号</Badge>
                 </div>
 
+                <label className="route-field">
+                  <span>上游代理（可选）</span>
+                  <Input
+                    id="official-route-proxy-input"
+                    aria-label="上游代理（可选）"
+                    aria-invalid={Boolean(routeDraftErrors?.upstreamProxy)}
+                    aria-describedby={
+                      routeDraftErrors?.upstreamProxy
+                        ? "official-route-proxy-error"
+                        : undefined
+                    }
+                    value={routeDraft.upstreamProxy || ""}
+                    disabled={isBusy}
+                    placeholder="http://127.0.0.1:7890 或 socks5://…，留空使用系统代理"
+                    onChange={(event) =>
+                      updateRouteDraft({ upstreamProxy: event.target.value })}
+                  />
+                  {routeDraftErrors?.upstreamProxy ? (
+                    <small id="official-route-proxy-error" className="text-[#d70015]" role="alert">
+                      {routeDraftErrors.upstreamProxy}
+                    </small>
+                  ) : (
+                    <small className="route-field-hint">
+                      本线路的上游流量（含额度查询）改走此代理，可用于指定出口地区；设置后该线路改用流式 HTTP 传输。
+                    </small>
+                  )}
+                </label>
+
                 <div className="official-model-editor">
                   <div className="official-model-editor-heading">
                     <span>
@@ -1073,6 +1117,39 @@ function ModelSectionComponent({
                       {routeDraftErrors.baseUrl}
                     </small>
                   ) : null}
+                </label>
+
+                <label className="route-field">
+                  <span>上游代理（可选）</span>
+                  <Input
+                    id="route-proxy-input"
+                    aria-label="上游代理（可选）"
+                    aria-invalid={Boolean(
+                      routeDraftErrors?.upstreamProxy &&
+                      (routeValidationAttempted || (routeDraft.upstreamProxy || "").trim()),
+                    )}
+                    aria-describedby={
+                      routeDraftErrors?.upstreamProxy &&
+                      (routeValidationAttempted || (routeDraft.upstreamProxy || "").trim())
+                        ? "route-proxy-error"
+                        : undefined
+                    }
+                    value={routeDraft.upstreamProxy || ""}
+                    disabled={isBusy}
+                    placeholder="http://127.0.0.1:7890 或 socks5://…，留空使用系统代理"
+                    onChange={(event) =>
+                      updateRouteDraft({ upstreamProxy: event.target.value })}
+                  />
+                  {routeDraftErrors?.upstreamProxy &&
+                  (routeValidationAttempted || (routeDraft.upstreamProxy || "").trim()) ? (
+                    <small id="route-proxy-error" className="text-[#d70015]" role="alert">
+                      {routeDraftErrors.upstreamProxy}
+                    </small>
+                  ) : (
+                    <small className="route-field-hint">
+                      本线路的上游流量改走此代理，可用于指定出口地区；设置后该线路改用流式 HTTP 传输。
+                    </small>
+                  )}
                 </label>
 
                 <label className="route-field">

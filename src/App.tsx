@@ -668,6 +668,7 @@ export function App({
     supports1MContextModels: string[],
     enabled: boolean,
     modelContexts: Record<string, import("./App.types").ModelContextConfig>,
+    upstreamProxy?: string,
   ) {
     if (!config) return false;
     const profile = config.profiles.find((candidate) => candidate.id === routeId);
@@ -690,6 +691,8 @@ export function App({
         modelContexts,
         enabled,
         showAccountUsageInHeader,
+        // undefined 表示保持现状（如启用开关的快捷切换），空字符串表示清除代理。
+        ...(upstreamProxy === undefined ? {} : { upstreamProxy }),
       });
       applyRouteResult(modelResult);
       saved = true;

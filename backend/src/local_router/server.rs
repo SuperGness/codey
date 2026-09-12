@@ -167,27 +167,10 @@ impl LocalRouter {
             bindings: Arc::new(Mutex::new(RouteBindings::default())),
             websocket_backoffs: Arc::clone(&websocket_backoffs),
             native_history_cache: Arc::new(Mutex::new(NativeHistoryCache::default())),
-            client: reqwest::Client::builder()
-                .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
-                // Reuse a warm TLS connection across normal tool turns while
-                // TCP probes evict half-open sockets before the next request.
-                .pool_idle_timeout(Some(UPSTREAM_HTTP_POOL_IDLE_TIMEOUT))
-                .http2_adaptive_window(true)
-                // Pooled HTTP/2 connections can die silently behind NAT or
-                // provider load balancers. PING frames while idle detect that
-                // before the next request instead of spending its first
-                // seconds on a dead socket. TCP keepalive below still covers
-                // HTTP/1.1 upstreams.
-                .http2_keep_alive_interval(Some(UPSTREAM_HTTP2_KEEPALIVE_INTERVAL))
-                .http2_keep_alive_timeout(UPSTREAM_HTTP2_KEEPALIVE_TIMEOUT)
-                .http2_keep_alive_while_idle(true)
-                .tcp_nodelay(true)
-                .tcp_keepalive(Some(UPSTREAM_TCP_KEEPALIVE_IDLE))
-                .tcp_keepalive_interval(Some(UPSTREAM_TCP_KEEPALIVE_INTERVAL))
-                .tcp_keepalive_retries(Some(UPSTREAM_TCP_KEEPALIVE_RETRIES))
-                .redirect(reqwest::redirect::Policy::none())
+            client: upstream_http_client_builder()
                 .build()
                 .context("创建 Codey 本地路由 HTTP 客户端失败")?,
+            proxied_clients: Mutex::new(HashMap::new()),
             official_auth_path,
             account_usage_cache,
             official_auth_cache: Arc::new(Mutex::new(
@@ -386,8 +369,35 @@ impl LocalRouter {
     }
 }
 
+/// 上游 HTTP 客户端的统一构造参数；默认客户端和线路代理客户端共用，
+/// 避免两者的连接与协议行为出现差异。
+pub(crate) fn upstream_http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
+        // Reuse a warm TLS connection across normal tool turns while
+        // TCP probes evict half-open sockets before the next request.
+        .pool_idle_timeout(Some(UPSTREAM_HTTP_POOL_IDLE_TIMEOUT))
+        .http2_adaptive_window(true)
+        // Pooled HTTP/2 connections can die silently behind NAT or
+        // provider load balancers. PING frames while idle detect that
+        // before the next request instead of spending its first
+        // seconds on a dead socket. TCP keepalive below still covers
+        // HTTP/1.1 upstreams.
+        .http2_keep_alive_interval(Some(UPSTREAM_HTTP2_KEEPALIVE_INTERVAL))
+        .http2_keep_alive_timeout(UPSTREAM_HTTP2_KEEPALIVE_TIMEOUT)
+        .http2_keep_alive_while_idle(true)
+        .tcp_nodelay(true)
+        .tcp_keepalive(Some(UPSTREAM_TCP_KEEPALIVE_IDLE))
+        .tcp_keepalive_interval(Some(UPSTREAM_TCP_KEEPALIVE_INTERVAL))
+        .tcp_keepalive_retries(Some(UPSTREAM_TCP_KEEPALIVE_RETRIES))
+        .redirect(reqwest::redirect::Policy::none())
+}
+
 #[cfg(not(test))]
 pub(crate) fn outbound_proxy_applies_to_route(profile: &ProviderProfile) -> bool {
+    if !profile.upstream_proxy.trim().is_empty() {
+        return true;
+    }
     let base_url = if profile.official_account {
         CHATGPT_CODEX_BASE_URL
     } else {
@@ -397,8 +407,9 @@ pub(crate) fn outbound_proxy_applies_to_route(profile: &ProviderProfile) -> bool
 }
 
 #[cfg(test)]
-pub(crate) fn outbound_proxy_applies_to_route(_profile: &ProviderProfile) -> bool {
-    false
+pub(crate) fn outbound_proxy_applies_to_route(profile: &ProviderProfile) -> bool {
+    // 测试不读系统代理，但线路级代理的行为（禁用上游 WebSocket）保持一致。
+    !profile.upstream_proxy.trim().is_empty()
 }
 
 pub(crate) fn outbound_proxy_applies_to_url_with_matcher(
@@ -436,11 +447,56 @@ pub(crate) struct RouterServer {
     pub(crate) websocket_backoffs: Arc<Mutex<UpstreamWebSocketBackoffs>>,
     pub(crate) native_history_cache: Arc<Mutex<NativeHistoryCache>>,
     pub(crate) client: reqwest::Client,
+    /// 按代理地址缓存的线路专用客户端，保留连接池复用。上限内缓存，
+    /// 超出后清空重建（代理地址变更是罕见操作，代价仅为重建连接）。
+    pub(crate) proxied_clients: Mutex<HashMap<String, reqwest::Client>>,
     pub(crate) official_auth_path: PathBuf,
     pub(crate) account_usage_cache:
         Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCache>>,
     pub(crate) official_auth_cache: Arc<Mutex<crate::account_usage::OfficialAuthCache>>,
     pub(crate) request_log: Arc<RouteRequestLogController>,
+}
+
+const MAX_PROXIED_CLIENTS: usize = 8;
+
+impl RouterServer {
+    /// 选择线路的上游 HTTP 客户端：未配置代理的线路共用默认客户端（遵循
+    /// 系统代理），配置了上游代理的线路使用仅走该代理的专用客户端。
+    pub(crate) fn upstream_client(
+        &self,
+        route: &RouteTarget,
+    ) -> std::result::Result<reqwest::Client, String> {
+        let Some(proxy) = route.upstream_proxy.as_deref() else {
+            return Ok(self.client.clone());
+        };
+        let mut clients = self
+            .proxied_clients
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(client) = clients.get(proxy) {
+            return Ok(client.clone());
+        }
+        let proxy_target = reqwest::Proxy::all(proxy).map_err(|_| {
+            format!(
+                "线路「{}」的上游代理地址无效，请检查线路设置",
+                route.route_name
+            )
+        })?;
+        let client = upstream_http_client_builder()
+            .proxy(proxy_target)
+            .build()
+            .map_err(|_| {
+                format!(
+                    "线路「{}」无法创建上游代理客户端，请检查代理地址",
+                    route.route_name
+                )
+            })?;
+        if clients.len() >= MAX_PROXIED_CLIENTS {
+            clients.clear();
+        }
+        clients.insert(proxy.to_string(), client.clone());
+        Ok(client)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -583,6 +639,8 @@ impl RouterSnapshot {
                 upstream_websocket_url: prepare_upstream_websocket_url(protocol, &base_url),
                 upstream_headers: prepare_upstream_headers(profile, protocol),
                 upstream_authority: upstream_authority(&base_url),
+                upstream_proxy: Some(profile.upstream_proxy.trim().to_string())
+                    .filter(|proxy| !proxy.is_empty()),
                 protocol,
                 official_account: profile.official_account,
                 supports_websockets: protocol == UpstreamProtocol::OpenAiResponses
@@ -827,6 +885,7 @@ pub(crate) struct RouteTarget {
     pub(crate) upstream_websocket_url: std::result::Result<String, String>,
     pub(crate) upstream_headers: std::result::Result<HeaderMap, String>,
     pub(crate) upstream_authority: String,
+    pub(crate) upstream_proxy: Option<String>,
     pub(crate) protocol: UpstreamProtocol,
     pub(crate) official_account: bool,
     pub(crate) supports_websockets: bool,
@@ -847,6 +906,9 @@ impl RouteTarget {
     fn context_config_fingerprint(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
         digest.update([u8::from(self.official_account)]);
+        if let Some(proxy) = &self.upstream_proxy {
+            update_length_prefixed_digest(&mut digest, proxy.as_bytes());
+        }
         if let Ok(url) = &self.upstream_url {
             update_length_prefixed_digest(&mut digest, url.as_bytes());
         }

@@ -166,14 +166,15 @@ impl RouterServer {
                         return Ok(());
                     }
                 };
-                let available = self
+                let official_proxy = self
                     .snapshot
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .routes
                     .values()
-                    .any(|route| route.official_account);
-                let value = if !available {
+                    .find(|route| route.official_account)
+                    .map(|route| route.upstream_proxy.clone());
+                let value = if official_proxy.is_none() {
                     json!({"status": "unavailable", "reason": "official_account_missing", "message": "当前线路列表中没有可用的官方账号线路"})
                 } else if let Some(home) = self.official_auth_path.parent() {
                     let mut cache = self.account_usage_cache.lock().await;
@@ -181,6 +182,7 @@ impl RouterServer {
                         &mut cache,
                         home,
                         args.force_refresh.unwrap_or(false),
+                        official_proxy.flatten().as_deref(),
                     )
                     .await
                 } else {
@@ -479,8 +481,23 @@ impl RouterServer {
         let mut headers = headers;
         // insert 保证只有一个 content-type；在 .headers() 之后用 .header() 会追加重复值。
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let upstream_client = match self.upstream_client(&route) {
+            Ok(client) => client,
+            Err(message) => {
+                mark_error(502, "route_configuration_error");
+                write_error_response(
+                    &mut stream,
+                    502,
+                    "route_configuration_error",
+                    message,
+                    Some(&route),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
         let request_builder =
-            self.client
+            upstream_client
                 .post(&upstream_url)
                 .headers(headers)
                 .body(if body_mutated {
@@ -1515,6 +1532,9 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        // 请求体的模型名已还原为上游模型名，路由提示头里的模型名必须保持一致；
+        // HTTP、WebSocket 握手和压缩请求共用这份头。
+        align_routing_hint_model(&mut headers, &resolved.upstream_model);
         // Commit the new binding only after the request's route compatibility,
         // payload conversion, and credentials have passed local checks. A
         // rejected switch must leave the prior route available for a retry.
@@ -1634,7 +1654,20 @@ impl RouterServer {
         // 用 .header() 会追加重复值。只在 HTTP 请求上设置，上游 WebSocket 握手已在
         // 此前发起，不携带 content-type。
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let mut request_builder = self.client.post(upstream_url).headers(headers);
+        let upstream_client = match self.upstream_client(&resolved.route) {
+            Ok(client) => client,
+            Err(message) => {
+                return downstream
+                    .write_error(
+                        502,
+                        "route_configuration_error",
+                        message,
+                        Some(&resolved.route),
+                    )
+                    .await;
+            }
+        };
+        let mut request_builder = upstream_client.post(upstream_url).headers(headers);
         if compacting {
             request_builder = request_builder.timeout(COMPACTION_TIMEOUT);
         }

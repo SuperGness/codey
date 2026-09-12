@@ -109,6 +109,16 @@ pub(crate) fn is_hop_by_hop_header(name: &str) -> bool {
     .any(|blocked| name.eq_ignore_ascii_case(blocked))
 }
 
+/// 上游响应头除传输层头外原样透传给下游客户端。Codex 依赖其中的
+/// 端到端响应头（如 `x-codex-turn-state` 粘性路由令牌），丢弃它们会改变
+/// 官方客户端行为。content-type 由转发逻辑自行写出；x-codey-* 由本地路由
+/// 自己管理，不接受上游伪造。
+pub(crate) fn should_forward_upstream_response_header(name: &str) -> bool {
+    !(is_hop_by_hop_header(name)
+        || name.eq_ignore_ascii_case(CONTENT_TYPE.as_str())
+        || name.to_ascii_lowercase().starts_with("x-codey-"))
+}
+
 pub(crate) fn is_sse_content_type(value: &str) -> bool {
     const SSE_CONTENT_TYPE: &[u8] = b"text/event-stream";
     value

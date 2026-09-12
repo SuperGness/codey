@@ -50,14 +50,15 @@ pub async fn save_default_model(
     })))
 }
 
+// 入口层仍解析并校验旧版 supports1MContextModels / modelContexts 参数，
+// 官方线路不接受这两类变更，所以不再传入本函数。
 pub async fn save_official_route_models(
     state: &Arc<AppState>,
     route_id: String,
     requested_models: Vec<String>,
-    _requested_supports_1m_context_models: Option<Vec<String>>,
     requested_enabled: Option<bool>,
     requested_show_account_usage: Option<bool>,
-    _requested_model_contexts: Option<BTreeMap<String, crate::config::ModelContextConfig>>,
+    requested_upstream_proxy: Option<String>,
 ) -> Result<Value, String> {
     validate_requested_model_list_bounds("官方模型", &requested_models)?;
     let _config_write_guard = state.config_write_lock.lock().await;
@@ -76,6 +77,10 @@ pub async fn save_official_route_models(
     let provider_id = profile.provider_id().to_string();
     if let Some(enabled) = requested_enabled {
         config.profiles[profile_index].enabled = enabled;
+    }
+    // 参数缺席表示保持现状；空字符串表示清除代理。地址合法性由配置校验把关。
+    if let Some(upstream_proxy) = requested_upstream_proxy {
+        config.profiles[profile_index].upstream_proxy = upstream_proxy.trim().to_string();
     }
     if let Some(show_usage) = requested_show_account_usage {
         config.show_account_usage_in_header = show_usage;
