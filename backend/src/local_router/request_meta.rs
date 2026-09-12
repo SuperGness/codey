@@ -303,6 +303,27 @@ pub(crate) fn merge_route_hint(current: &mut Option<String>, next: Option<String
     Ok(())
 }
 
+/// `Connection`/`Proxy-Connection` 列出的请求头按 RFC 9110 属于当前连接，
+/// 不得转发到上游。
+pub(crate) fn connection_scoped_header_names<'a>(
+    headers: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("connection") || name.eq_ignore_ascii_case("proxy-connection")
+        {
+            names.extend(
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_ascii_lowercase),
+            );
+        }
+    }
+    names
+}
+
 pub(crate) fn should_forward_incoming_header(name: &str, official_account: bool) -> bool {
     if name.eq_ignore_ascii_case("authorization")
         || name.eq_ignore_ascii_case("proxy-authorization")
@@ -370,8 +391,15 @@ pub(crate) fn stable_prompt_cache_key(
         .unwrap_or((b"anonymous".as_slice(), b"".as_slice()));
     update_length_prefixed_digest(&mut hasher, identity_kind);
     update_length_prefixed_digest(&mut hasher, &Sha256::digest(identity));
-    let digest = format!("{:x}", hasher.finalize());
-    format!("codey-{}", &digest[..48])
+    let digest = hasher.finalize();
+    let seed: [u8; 16] = digest[..16]
+        .try_into()
+        .expect("SHA-256 digest provides at least 16 bytes");
+    // 缓存键以标准 UUID 形态外发，与官方客户端自行携带的会话缓存键一致，
+    // 不在值里携带 Codey 标识；同一输入仍生成同一个键。
+    uuid::Builder::from_random_bytes(seed)
+        .into_uuid()
+        .to_string()
 }
 
 pub(crate) fn update_length_prefixed_digest(hasher: &mut Sha256, value: &[u8]) {

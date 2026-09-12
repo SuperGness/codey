@@ -87,12 +87,20 @@ pub(crate) fn websocket_request_authorized(
 }
 
 pub(crate) fn websocket_forward_headers(request: &WebSocketRequest) -> Vec<(String, String)> {
+    let connection_scoped = connection_scoped_header_names(
+        request
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| value.to_str().ok().map(|value| (name.as_str(), value))),
+    );
     request
         .headers()
         .iter()
         .filter(|(name, _)| {
             let name = name.as_str();
-            !is_hop_by_hop_header(name) && !name.to_ascii_lowercase().starts_with("sec-websocket-")
+            !is_hop_by_hop_header(name)
+                && !name.to_ascii_lowercase().starts_with("sec-websocket-")
+                && !connection_scoped.contains(&name.to_ascii_lowercase())
         })
         .filter_map(|(name, value)| {
             value

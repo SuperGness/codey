@@ -2658,8 +2658,9 @@ fn generated_prompt_cache_key_is_stable_and_scoped() {
             &headers,
         )
     );
-    assert!(key.starts_with("codey-"));
-    assert_eq!(key.len(), "codey-".len() + 48);
+    // 生成的缓存键对上游呈现为普通 UUID，不携带 Codey 标识。
+    assert!(uuid::Uuid::parse_str(&key).is_ok());
+    assert!(!key.to_ascii_lowercase().contains("codey"));
 
     let mut refreshed_auth = headers.clone();
     refreshed_auth.insert(AUTHORIZATION, HeaderValue::from_static("Bearer token-b"));
@@ -7291,9 +7292,9 @@ async fn route_header_overrides_replace_and_remove_forwarded_headers() {
     let (mut config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
     let headers = &mut config.profiles[0].model_request_headers;
     headers.insert("user-agent".into(), "Codex Desktop/0.153.4".into());
-    // 空值（前端的 null）表示从上游请求中移除该请求头，对路由自动追加的请求头同样生效。
+    // 空值（前端的 null）表示从上游请求中移除该请求头，而不是发送空值头。
+    // x-codey-request-id 不配置覆盖：Codey 内部请求 ID 默认就不得发往上游。
     headers.insert("originator".into(), String::new());
-    headers.insert("x-codey-request-id".into(), String::new());
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
     let alias = model_alias(&provider_id, &model);

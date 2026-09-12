@@ -87,11 +87,11 @@ async fn header_deletions_and_content_type_survive_every_http_protocol_and_confi
         let (mut config, provider, model) = router_config(format!("http://{address}/v1"));
         config.default_model = model_alias(&provider, &model);
         config.profiles[0].upstream_protocol = protocol.into();
+        // x-codey-request-id 不配置删除覆盖：Codey 内部请求 ID 默认就不得发往上游。
         config.profiles[0].model_request_headers = BTreeMap::from([
             ("user-agent".into(), String::new()),
             ("originator".into(), String::new()),
             (PROMPT_CACHE_KEY_HEADER.into(), String::new()),
-            ("x-codey-request-id".into(), String::new()),
             ("Content-Type".into(), "application/json".into()),
         ]);
         let router = LocalRouter::start(&config).await.unwrap();

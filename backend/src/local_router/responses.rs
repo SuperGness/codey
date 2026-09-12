@@ -476,16 +476,18 @@ impl RouterServer {
                 UpstreamTransport::Http
             });
         }
-        let request_builder = self
-            .client
-            .post(&upstream_url)
-            .headers(headers)
-            .header(CONTENT_TYPE, "application/json")
-            .body(if body_mutated {
-                serde_json::to_vec(&body).context("序列化 Images 上游请求失败")?
-            } else {
-                request.body
-            });
+        let mut headers = headers;
+        // insert 保证只有一个 content-type；在 .headers() 之后用 .header() 会追加重复值。
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let request_builder =
+            self.client
+                .post(&upstream_url)
+                .headers(headers)
+                .body(if body_mutated {
+                    serde_json::to_vec(&body).context("序列化 Images 上游请求失败")?
+                } else {
+                    request.body
+                });
         let response_header_timeout = if stream_requested {
             UPSTREAM_RESPONSE_HEADER_TIMEOUT
         } else {
@@ -616,8 +618,15 @@ impl RouterServer {
             .as_ref()
             .map_err(|error| (502, "route_configuration_error", error.clone()))?;
         let mut headers = HeaderMap::with_capacity(request.headers.len() + prepared_headers.len());
+        let connection_scoped = connection_scoped_header_names(
+            request
+                .headers
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        );
         for (name, value) in &request.headers {
-            if should_forward_incoming_header(name, route.official_account)
+            if !connection_scoped.contains(&name.to_ascii_lowercase())
+                && should_forward_incoming_header(name, route.official_account)
                 && let (Ok(name), Ok(value)) = (
                     HeaderName::from_bytes(name.as_bytes()),
                     HeaderValue::from_str(value),
@@ -626,14 +635,10 @@ impl RouterServer {
                 headers.insert(name, value);
             }
         }
-        for (name, value) in prepared_headers {
-            headers.insert(name, value.clone());
-        }
-        if let Some(request_id) = current_router_request_id()
-            && let Ok(value) = HeaderValue::from_str(&request_id)
-        {
-            headers.insert(HeaderName::from_static("x-codey-request-id"), value);
-        }
+        // 线路覆盖中的空值是删除标记：合并时移除对应请求头，而不是把空值头
+        // 原样发到上游。Codey 内部请求 ID 只写入下游响应和本地日志，不随上游
+        // 请求外发，避免向上游暴露代理痕迹。
+        apply_upstream_headers(&mut headers, prepared_headers);
         if route.official_account {
             let official_auth = resolve_official_upstream_auth(
                 request,
@@ -1625,6 +1630,10 @@ impl RouterServer {
             .get("stream")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        // insert 保证只有一个 content-type（线路覆盖可能已写入）；在 .headers() 之后
+        // 用 .header() 会追加重复值。只在 HTTP 请求上设置，上游 WebSocket 握手已在
+        // 此前发起，不携带 content-type。
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let mut request_builder = self.client.post(upstream_url).headers(headers);
         if compacting {
             request_builder = request_builder.timeout(COMPACTION_TIMEOUT);
@@ -1658,9 +1667,7 @@ impl RouterServer {
                 None => serde_json::to_vec(&upstream_body)
                     .context("序列化 Responses WebSocket 上游请求失败")?,
             };
-            request_builder
-                .header(CONTENT_TYPE, "application/json")
-                .body(passthrough_body)
+            request_builder.body(passthrough_body)
         } else {
             drop(encoded_body.take());
             request_builder.json(&upstream_body)
