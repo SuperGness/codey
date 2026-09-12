@@ -611,7 +611,7 @@ function FeaturePolicyCardComponent({
             <div className="feature-card-body">
               <small>
                 {config.hideFullAccessWarning
-                  ? "自动隐藏完全访问模式的原生安全提示"
+                  ? "自动隐藏完全访问模式和 Ultra 的原生安全提示"
                   : "保留 Codex 原生安全提示"}
               </small>
             </div>

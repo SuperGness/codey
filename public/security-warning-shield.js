@@ -12,10 +12,14 @@
     /^don['’]t show again$/i,
     /^(?:在|于)?本次会话(?:中)?(?:隐藏|不再显示)$/,
     /^(?:隐藏|不再显示)(?:本次会话)?$/,
+    /^continue$/i,
+    /^继续$/,
   ];
   const titlePatterns = [
     /full access is on/i,
     /完(?:全|整)访问权限.*(?:已开启|开启中|已打开)/,
+    /enable ultra with full access/i,
+    /是否启用\s*ultra\s*搭配完整访问权限/i,
   ];
   const riskPatterns = [
     /without your permission/i,
@@ -25,6 +29,8 @@
     /未经(?:你|您)(?:的)?(?:许可|批准)/,
     /数据丢失/,
     /提示词?注入/,
+    /with ultra and full access enabled/i,
+    /开启\s*ultra\s*和完整访问权限后/i,
   ];
   let enabled = false;
   let scanTimer = 0;

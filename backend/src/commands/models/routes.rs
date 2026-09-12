@@ -108,7 +108,7 @@ pub async fn fetch_route_models(
     }
     profile.validate()?;
     let provider_id = profile.provider_id().to_string();
-    let fetched_models = fetch_provider_models(profile, &state.http_client)
+    let fetched_models = fetch_provider_models(profile)
         .await
         .map_err(|error| error.to_string())?;
     let visible_fetched_models = regular_route_models(fetched_models.clone());

@@ -590,6 +590,7 @@ async fn upstream_websocket_connection_disables_nagle() {
     let mut socket = connect_upstream_responses_websocket(
         &format!("ws://{address}/v1/responses"),
         &HeaderMap::new(),
+        None,
     )
     .await
     .unwrap();
@@ -7071,6 +7072,54 @@ async fn router_rewrites_alias_and_keeps_upstream_credentials_private() {
     assert_eq!(router_token, None);
     assert_eq!(body["model"], "provider-model");
     assert!(!body.to_string().contains(&endpoint.token));
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn route_header_overrides_replace_and_remove_forwarded_headers() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await.unwrap();
+        let user_agent = incoming_header(&request, "user-agent").map(str::to_string);
+        let originator = incoming_header(&request, "originator").map(str::to_string);
+        let request_id = incoming_header(&request, "x-codey-request-id").map(str::to_string);
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+        write_json_response(
+            &mut stream,
+            200,
+            &json!({"object":"response","model":body["model"]}),
+        )
+        .await
+        .unwrap();
+        (user_agent, originator, request_id)
+    });
+    let (mut config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
+    let headers = &mut config.profiles[0].model_request_headers;
+    headers.insert("user-agent".into(), "Codex Desktop/0.153.4".into());
+    // 空值（前端的 null）表示从上游请求中移除该请求头，对路由自动追加的请求头同样生效。
+    headers.insert("originator".into(), String::new());
+    headers.insert("x-codey-request-id".into(), String::new());
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let alias = model_alias(&provider_id, &model);
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .header("user-agent", "codex_cli_rs/0.114.0")
+        .header("originator", "codex_cli_rs")
+        .json(&json!({"model":alias,"input":"hello"}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let (user_agent, originator, request_id) = upstream_task.await.unwrap();
+    assert_eq!(user_agent.as_deref(), Some("Codex Desktop/0.153.4"));
+    assert_eq!(originator, None);
+    assert_eq!(request_id, None);
     router.stop().await.unwrap();
 }
 

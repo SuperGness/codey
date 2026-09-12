@@ -2,7 +2,6 @@ import { memo, useMemo, useState } from "react";
 import {
   IconActivity as Activity,
   IconCode as Code,
-  IconCodeDots,
   IconCloudCheck,
   IconCpu,
   IconDatabase,
@@ -380,14 +379,6 @@ function OperationsPanelComponent({
       enabledFeatureCount: enabledOptimizationFeatures.length,
     },
     {
-      title: "主进程注入",
-      description: injectionModeCard.description,
-      metrics: [],
-      label: injectionModeCard.label,
-      tone: injectionModeCard.tone,
-      icon: IconCodeDots,
-    },
-    {
       title: "插件市场",
       description: pluginOk
         ? "配置状态完整，可正常发现与管理插件。"
@@ -583,6 +574,25 @@ function OperationsPanelComponent({
                         );
                       })}
                     </div>
+                  )}
+
+                  {expandedStatusCard.showInjectionScripts && (
+                    <section
+                      className="injection-status-section"
+                      aria-labelledby="injection-mode-title"
+                    >
+                      <div className="injection-status-header">
+                        <div>
+                          <h4 id="injection-mode-title">主进程注入</h4>
+                          <span className="injection-script-detail">
+                            {injectionModeCard.description}
+                          </span>
+                        </div>
+                        <Badge variant={injectionModeCard.tone}>
+                          {injectionModeCard.label}
+                        </Badge>
+                      </div>
+                    </section>
                   )}
 
                   {expandedStatusCard.showInjectionScripts && (

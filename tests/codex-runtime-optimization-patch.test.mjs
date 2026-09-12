@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,7 +31,10 @@ async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrid
   const context = {
     clearTimeout,
     console,
-    process: { ...process, env: { ...process.env } },
+    process: { ...process, env: {
+      ...process.env,
+      CODEY_DISABLE_MACOS_CHILD_PROCESS_SAMPLER: "false",
+    } },
     Promise,
     setImmediate,
     setTimeout,
@@ -130,6 +133,53 @@ test("shared app-server chunk routes native thread requests after Desktop's tran
   } finally { native.restore(); }
 });
 
+test("build chunks use one native source read and retain CommonJS loading semantics", async () => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "codey-build-loading-")));
+  const build = join(directory, ".vite", "build");
+  await mkdir(build, { recursive: true });
+  const dependency = join(build, "dependency.cjs");
+  const entry = join(build, "entry.cjs");
+  const broken = join(build, "broken.cjs");
+  await writeFile(dependency, "module.exports=41;");
+  await writeFile(entry, "#!/usr/bin/env node\nmodule.exports=require('./dependency.cjs')+1;");
+  await writeFile(broken, "module.exports=;");
+  const Module = process.getBuiltinModule("module");
+  const fs = process.getBuiltinModule("fs");
+  const nativeRead = fs.readFileSync;
+  const reads = new Map();
+  const runtime = await loadPatchInIsolatedContext([], {}, false);
+  fs.readFileSync = function(filename, ...args) {
+    if (String(filename).startsWith(build)) {
+      reads.set(String(filename), (reads.get(String(filename)) ?? 0) + 1);
+    }
+    return Reflect.apply(nativeRead, this, [filename, ...args]);
+  };
+  try {
+    const require = Module.createRequire(join(directory, "probe.cjs"));
+    assert.equal(require(entry), 42);
+    assert.equal(require(entry), 42);
+    assert.equal(reads.get(entry), 1);
+    assert.equal(reads.get(dependency), 1);
+    const loaded = require.cache[entry];
+    assert.equal(Object.hasOwn(loaded, "_compile"), false);
+    assert.equal(loaded.loaded, true);
+    assert.equal(loaded.children[0].filename, dependency);
+    delete require.cache[dependency];
+    await writeFile(dependency, "module.exports=99;");
+    assert.equal(require(dependency), 99);
+    assert.equal(reads.get(dependency), 2);
+    const failed = new Module(broken);
+    assert.throws(() => Module._extensions[".js"](failed, broken), SyntaxError);
+    assert.equal(Object.hasOwn(failed, "_compile"), false);
+  } finally {
+    fs.readFileSync = nativeRead;
+    runtime.restore();
+    delete Module._cache[entry];
+    delete Module._cache[dependency];
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("router mode refuses to spawn when the shared request patch is missing", async () => {
   const runtime = await loadPatchInIsolatedContext(['model_provider="codey_router"'], {}, false);
   try {
@@ -186,11 +236,13 @@ test("desktop patches follow split 26.903 chunks and preserve dollar-prefixed li
           if (name.startsWith("main-")) {
             assert.match(output, /worker-analytics-enabled-update`,enabled:!1/);
             assert.match(output, /\$e\.cancel\?\.\(\)/);
-          } else if (name.startsWith("src-")) {
+          } else if (input.includes("thread_title")) {
             assert.equal(output.match(/globalThis\.__CODEY_THREAD_TITLE_MODEL__/g)?.length, 3);
-          } else {
+          } else if (input.includes("datadog-log-sink-failure") && input.includes("codex-desktop")) {
             assert.match(output, /analyticsEnabled:!1/);
             assert.doesNotMatch(output, /analyticsEnabled:.*\.get\(\)\.then/);
+          } else {
+            assert.equal(output, input);
           }
         }
         assert.equal(runtime.context.__CODEY_DESKTOP_ANALYTICS_SOURCE_PATCHED__, true);

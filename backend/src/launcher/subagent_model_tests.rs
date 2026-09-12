@@ -151,7 +151,7 @@ async fn subagent_catalog_fallback_keeps_live_routes_and_roles_until_restart() {
             performance_detail: String::new(),
             startup_injection_mode: String::new(),
         },
-        applied_model_config: RwLock::new(RuntimeModelConfig::from_config(&config)),
+        applied_model_config: RwLock::new(config.clone()),
         applied_subagent_config: RwLock::new(RuntimeSubagentConfig::from_config(&config)),
         applied_config: config.clone(),
         subagent_route_catalog_installed: false,
@@ -201,6 +201,9 @@ async fn subagent_catalog_fallback_keeps_live_routes_and_roles_until_restart() {
         .unwrap()
         .reasoning_effort = "low".into();
     runtime.sync_local_router_routes(&roles).unwrap();
+    runtime.mark_model_config_applied(&roles).await;
+    assert_eq!(runtime.applied_model_catalog_config().await, roles);
+    assert!(runtime.applied_model_config().await.matches(&roles));
     let reloaded = runtime.subagent_reconcile_config(&roles).unwrap();
     assert_eq!(
         reloaded.subagent_roles["codey_worker"].model,
@@ -225,6 +228,7 @@ async fn subagent_catalog_fallback_keeps_live_routes_and_roles_until_restart() {
             .contains("需重启")
     );
     assert!(runtime.subagent_reconcile_config(&changed).is_err());
+    assert_eq!(runtime.applied_model_catalog_config().await, roles);
     assert_eq!(target(), "route-a");
 
     // Removing A, or disabling optimization in saved settings, cannot release

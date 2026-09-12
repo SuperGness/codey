@@ -315,7 +315,11 @@ impl WebSocketResponsesDownstream {
                 return Ok(UpstreamWebSocketAttempt::UseHttp);
             };
             match self
-                .wait_for_upstream(connect_upstream_responses_websocket(upstream_url, headers))
+                .wait_for_upstream(connect_upstream_responses_websocket(
+                    upstream_url,
+                    headers,
+                    probe,
+                ))
                 .await?
             {
                 Ok(socket) => {
@@ -776,8 +780,14 @@ pub(crate) fn upstream_websocket_request(
 pub(crate) async fn connect_upstream_responses_websocket(
     url: &str,
     headers: &HeaderMap,
+    probe: Option<&RouteRequestLogProbe>,
 ) -> Result<WebSocketStream<MaybeTlsStream<TcpStream>>> {
     let request = upstream_websocket_request(url, headers)?;
+    if let Some(probe) = probe {
+        probe.set_upstream_request_headers(&super::responses::format_upstream_headers(
+            request.headers(),
+        ));
+    }
     let config = WebSocketConfig::default()
         .write_buffer_size(0)
         .max_write_buffer_size(MAX_REQUEST_BYTES)

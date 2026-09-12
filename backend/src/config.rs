@@ -30,10 +30,8 @@ pub struct ProviderProfile {
     pub api_key_configured: bool,
     #[serde(default, skip_serializing)]
     pub clear_api_key: bool,
-    /// Request-only headers loaded from the active Codex provider. They may
-    /// contain credentials, so they are never serialized into Codey's store or
-    /// exposed to the renderer.
-    #[serde(skip)]
+    /// Per-route request headers editable in the local router settings.
+    #[serde(default)]
     pub model_request_headers: BTreeMap<String, String>,
     /// Stable id of the provider in the source Codex configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -241,6 +239,13 @@ impl ProviderProfile {
         if name.is_empty() {
             return Err("线路名称不能为空".to_string());
         }
+        local_router::prepare_upstream_headers(
+            self,
+            local_router::UpstreamProtocol::from_profile(
+                self.official_account,
+                &self.upstream_protocol,
+            ),
+        )?;
         if self.supports_websockets
             && !self.official_account
             && self.upstream_protocol != UPSTREAM_PROTOCOL_OPENAI_RESPONSES
@@ -2291,7 +2296,7 @@ mod tests {
     }
 
     #[test]
-    fn request_only_provider_headers_are_never_serialized() {
+    fn provider_request_headers_are_serialized_for_route_editing() {
         let mut profile = ProviderProfile::new("Private Relay");
         profile
             .model_request_headers
@@ -2299,8 +2304,13 @@ mod tests {
 
         let serialized = serde_json::to_value(profile).unwrap();
 
-        assert!(serialized.get("modelRequestHeaders").is_none());
-        assert!(!serialized.to_string().contains("secret"));
+        assert_eq!(
+            serialized
+                .get("modelRequestHeaders")
+                .and_then(|headers| headers.get("Authorization"))
+                .and_then(serde_json::Value::as_str),
+            Some("secret")
+        );
     }
 
     #[test]

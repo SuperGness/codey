@@ -188,7 +188,7 @@ pub struct CodeyRuntime {
     pub codex_app_path: PathBuf,
     pub maintenance: MaintenanceStatus,
     pub applied_config: CodeyConfig,
-    applied_model_config: RwLock<RuntimeModelConfig>,
+    applied_model_config: RwLock<CodeyConfig>,
     applied_subagent_config: RwLock<RuntimeSubagentConfig>,
     subagent_route_catalog_installed: bool,
     pub injection_statuses: Arc<RwLock<Arc<[cdp::InjectionScriptStatus]>>>,
@@ -1594,6 +1594,7 @@ async fn spawn_and_inject_runtime(
     patch: &StartupPatchState,
     runtime_config_overrides: &[String],
 ) -> Result<SpawnedRenderer> {
+    let spawn_inject_started = Instant::now();
     let mut spawned = match spawn_codex(
         &mut storage.app_dir,
         patch.debug_port,
@@ -1614,6 +1615,7 @@ async fn spawn_and_inject_runtime(
             .await);
         }
     };
+    let codex_spawn_ms = spawn_inject_started.elapsed().as_millis() as u64;
     let maintenance = MaintenanceStatus {
         session_status: storage.session_maintenance.status,
         session_files_fixed: storage.session_maintenance.files_fixed,
@@ -1637,6 +1639,15 @@ async fn spawn_and_inject_runtime(
         },
     )
     .await?;
+    let inject_renderer_ms = spawn_inject_started.elapsed().as_millis() as u64 - codex_spawn_ms;
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.spawn_inject_timings",
+        serde_json::json!({
+            "codexSpawnAndCompatibilityMs": codex_spawn_ms,
+            "rendererInjectionMs": inject_renderer_ms,
+            "totalMs": spawn_inject_started.elapsed().as_millis() as u64,
+        }),
+    );
     Ok(SpawnedRenderer {
         app_dir: storage.app_dir,
         spawned,
@@ -1695,11 +1706,15 @@ impl CodeyRuntime {
     }
 
     pub async fn applied_model_config(&self) -> RuntimeModelConfig {
+        RuntimeModelConfig::from_config(&*self.applied_model_config.read().await)
+    }
+
+    pub async fn applied_model_catalog_config(&self) -> CodeyConfig {
         self.applied_model_config.read().await.clone()
     }
 
     pub async fn mark_model_config_applied(&self, config: &CodeyConfig) {
-        *self.applied_model_config.write().await = RuntimeModelConfig::from_config(config);
+        *self.applied_model_config.write().await = config.clone();
     }
 
     pub(crate) fn validate_subagent_route_hot_reload(&self, config: &CodeyConfig) -> Result<()> {
@@ -1939,7 +1954,7 @@ impl CodeyRuntime {
             Self {
                 codex_app_path: app_dir,
                 maintenance,
-                applied_model_config: RwLock::new(RuntimeModelConfig::from_config(&runtime_config)),
+                applied_model_config: RwLock::new(runtime_config.clone()),
                 applied_subagent_config: RwLock::new(RuntimeSubagentConfig::from_config(
                     &runtime_config,
                 )),

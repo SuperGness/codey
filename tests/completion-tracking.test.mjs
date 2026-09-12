@@ -118,6 +118,7 @@ const messageSelectButton = (row) => row.children.find(
 
 function loadInjection({
   initialNow = 1_000_000,
+  initialSessionId = "session-1",
   turnIds = ["turn-1"],
   sessionTitle = "排查飞书通知",
   bridgeHandler = null,
@@ -138,7 +139,7 @@ function loadInjection({
     "data-app-action-sidebar-thread-title": sessionTitle,
   });
   let now = initialNow;
-  let sessionId = "session-1";
+  let sessionId = initialSessionId;
   const bridgeCalls = [];
   const alerts = [];
   const confirmations = [];
@@ -377,6 +378,56 @@ test("reconciles the current session through AppServerManager without a completi
   assert.equal(events.length, 1);
 });
 
+test("reconciles when the conversation appears after renderer startup", async () => {
+  const events = [];
+  const runtime = loadInjection({
+    initialSessionId: "",
+    codexSessionController: createRecoveryController(events),
+  });
+
+  await flushMicrotasks();
+  assert.equal(events.length, 0);
+
+  runtime.setSessionId("session-1");
+  runtime.emitMutations([{
+    type: "childList",
+    target: new FakeElement(),
+    addedNodes: [],
+    removedNodes: [],
+  }]);
+  await flushMicrotasks();
+
+  assert.deepEqual(events.map((event) => event.payload.conversationId), ["session-1"]);
+});
+
+test("rediscovers a patched manager cached before completion reconciliation was available", async () => {
+  const managerEvents = [];
+  const discoveredAppServerManager = {
+    codeyReconcileCompletedConversation(payload) {
+      managerEvents.push(payload.conversationId);
+      return Promise.resolve(true);
+    },
+    discardConversationFromCache() {},
+    handleThreadDeletion() {},
+    refreshRecentConversations() {},
+    resumeConversation() {},
+  };
+  loadInjection({
+    codexSessionController: {
+      kind: "manager",
+      discardConversation() {},
+      notifyConversationDeleted() {},
+      refreshRecentConversations() {},
+      resumeConversation() {},
+    },
+    discoveredAppServerManager,
+  });
+
+  await flushMicrotasks();
+
+  assert.deepEqual(managerEvents, ["session-1"]);
+});
+
 test("resets the reconciliation interval when the visible session changes", async () => {
   const events = [];
   const runtime = loadInjection({
@@ -393,7 +444,7 @@ test("resets the reconciliation interval when the visible session changes", asyn
   );
 });
 
-test("rejects a reconciliation result when the visible session changes in flight", async () => {
+test("rejects a stale result and reconciles the task opened while a request was in flight", async () => {
   const events = [];
   let deferReconcile = false;
   let resolveReconcile;
@@ -401,7 +452,7 @@ test("rejects a reconciliation result when the visible session changes in flight
     codexSessionController: createRecoveryController(events, {
       async reconcileCompletedConversation(payload) {
         events.push({ payload, type: "reconcile" });
-        if (!deferReconcile) return false;
+        if (!deferReconcile || payload.conversationId !== "session-1") return false;
         return new Promise((resolve) => {
           resolveReconcile = resolve;
         });
@@ -415,12 +466,21 @@ test("rejects a reconciliation result when the visible session changes in flight
   const reconciliation = runtime.window.__codeyReconcileStaleCompletedTask();
   await flushMicrotasks();
   runtime.setSessionId("session-2");
+  runtime.emitMutations([{
+    type: "childList",
+    target: new FakeElement(),
+    addedNodes: [],
+    removedNodes: [],
+  }]);
+  await flushMicrotasks();
+  assert.deepEqual(events.map((event) => event.payload.conversationId), ["session-1", "session-1"]);
   resolveReconcile(true);
 
   assert.equal(await reconciliation, false);
+  await flushMicrotasks();
   assert.deepEqual(
     events.map((event) => event.payload.conversationId),
-    ["session-1", "session-1"],
+    ["session-1", "session-1", "session-2"],
   );
 });
 

@@ -380,6 +380,10 @@ impl AppState {
             "/codex-model-catalog" => {
                 let current_config = self.config.read().await.clone();
                 let runtime = self.runtime.lock().await.clone();
+                let applied_catalog_config = match runtime.as_ref() {
+                    Some(runtime) => Some(runtime.applied_model_catalog_config().await),
+                    None => None,
+                };
                 let current_config = runtime
                     .as_ref()
                     .filter(|runtime| {
@@ -387,11 +391,12 @@ impl AppState {
                             .validate_subagent_route_hot_reload(&current_config)
                             .is_err()
                     })
-                    .map(|runtime| &runtime.applied_config)
+                    .and(applied_catalog_config.as_ref())
                     .unwrap_or(&current_config);
                 let catalog_config = model_catalog_config_for_runtime(
                     current_config,
                     runtime.as_ref().map(|runtime| &runtime.applied_config),
+                    applied_catalog_config.as_ref(),
                 )
                 .clone();
                 current_renderer_model_catalog_async(catalog_config)
@@ -1822,12 +1827,9 @@ fn merge_profile_secrets(
                     profile.official_account = false;
                 }
             } else {
-                // These fields are discovered from the trusted Codex source and
-                // are not editable renderer input. Keep them attached
-                // to the saved route even though the renderer receives a redacted
-                // profile and sends the whole form back on save.
+                // Keep source-owned identity and capability fields attached to
+                // the saved route even though the renderer sends the whole form back.
                 profile.source_provider_id = previous_profile.source_provider_id.clone();
-                profile.model_request_headers = previous_profile.model_request_headers.clone();
                 profile.official_account = previous_profile.official_account;
                 profile.supports_remote_compaction = previous_profile.supports_remote_compaction;
             }
@@ -2475,9 +2477,12 @@ pub(super) fn provider_route_restart_required_for_runtime(
 fn model_catalog_config_for_runtime<'a>(
     current: &'a CodeyConfig,
     runtime_applied: Option<&'a CodeyConfig>,
+    applied_catalog: Option<&'a CodeyConfig>,
 ) -> &'a CodeyConfig {
     runtime_applied
         .filter(|applied| !runtime_supports_current_routes_for_hot_reload(applied, current))
+        // 待重启的能力变更保留最近已生效的模型，不能退回启动时的旧目录。
+        .map(|applied| applied_catalog.unwrap_or(applied))
         .unwrap_or(current)
 }
 

@@ -200,7 +200,9 @@ fn full_config_save_restores_route_secrets_and_source_owned_identity() {
     redacted.api_key_configured = true;
     redacted.source_provider_id = Some("spoofed-provider".into());
     redacted.supports_remote_compaction = false;
-    redacted.model_request_headers.clear();
+    redacted
+        .model_request_headers
+        .insert("X-Private-Route".into(), "edited-header".into());
 
     let merged = merge_profile_secrets(vec![redacted], &previous).unwrap();
 
@@ -212,7 +214,7 @@ fn full_config_save_restores_route_secrets_and_source_owned_identity() {
             .model_request_headers
             .get("X-Private-Route")
             .map(String::as_str),
-        Some("private-header")
+        Some("edited-header")
     );
 }
 
@@ -453,14 +455,64 @@ fn renderer_catalog_uses_current_config_only_for_hot_reloadable_routes() {
     current.profiles.push(third_party);
 
     assert!(std::ptr::eq(
-        model_catalog_config_for_runtime(&current, Some(&applied)),
+        model_catalog_config_for_runtime(&current, Some(&applied), None),
         &current
     ));
 
     current.profiles.last_mut().unwrap().official_account = true;
     assert!(std::ptr::eq(
-        model_catalog_config_for_runtime(&current, Some(&applied)),
+        model_catalog_config_for_runtime(&current, Some(&applied), None),
         &applied
+    ));
+}
+
+#[test]
+fn renderer_catalog_keeps_hot_reloaded_routes_when_websockets_are_pending_restart() {
+    let startup = CodeyConfig::default();
+    let mut delivered = startup.clone();
+    for (id, models) in [
+        (
+            "new-route",
+            vec!["gpt-6-astra".into(), "gpt-5.6-sol".into()],
+        ),
+        ("local-route", vec!["gpt-6-astra".into()]),
+    ] {
+        let mut route = crate::config::ProviderProfile::new(id);
+        route.id = id.into();
+        route.base_url = "http://127.0.0.1:18080/v1".into();
+        delivered.profiles.push(route);
+        delivered
+            .selected_models_by_provider
+            .insert(id.into(), models);
+    }
+    assert!(runtime_supports_current_routes_for_hot_reload(
+        &startup, &delivered
+    ));
+
+    let mut pending = delivered.clone();
+    pending.profiles.last_mut().unwrap().supports_websockets = true;
+    assert!(provider_route_restart_required_for_runtime(
+        &startup, &pending
+    ));
+    let catalog_config =
+        model_catalog_config_for_runtime(&pending, Some(&startup), Some(&delivered));
+    assert_eq!(catalog_config, &delivered);
+    assert!(!catalog_config.profiles.last().unwrap().supports_websockets);
+    let models = catalog_config.runtime_model_targets();
+    for (provider, model) in [
+        ("new-route", "gpt-6-astra"),
+        ("new-route", "gpt-5.6-sol"),
+        ("local-route", "gpt-6-astra"),
+    ] {
+        assert!(
+            models
+                .iter()
+                .any(|target| { target.provider_id == provider && target.upstream_model == model })
+        );
+    }
+    assert!(std::ptr::eq(
+        model_catalog_config_for_runtime(&delivered, Some(&startup), Some(&startup)),
+        &delivered,
     ));
 }
 
@@ -471,7 +523,7 @@ fn renderer_catalog_uses_current_config_for_model_only_changes() {
     current.default_model = "provider-default".into();
 
     assert!(std::ptr::eq(
-        model_catalog_config_for_runtime(&current, Some(&applied)),
+        model_catalog_config_for_runtime(&current, Some(&applied), None),
         &current
     ));
 }
@@ -493,7 +545,7 @@ fn model_hot_reload_ignores_empty_context_entries_but_keeps_budget_changes_pendi
             baseline, saved
         ));
         assert!(std::ptr::eq(
-            model_catalog_config_for_runtime(saved, Some(baseline)),
+            model_catalog_config_for_runtime(saved, Some(baseline), None),
             saved,
         ));
         assert!(!provider_route_restart_required_for_runtime(
@@ -526,7 +578,7 @@ fn model_hot_reload_ignores_empty_context_entries_but_keeps_budget_changes_pendi
                 baseline, saved
             ));
             assert!(std::ptr::eq(
-                model_catalog_config_for_runtime(saved, Some(baseline)),
+                model_catalog_config_for_runtime(saved, Some(baseline), None),
                 baseline,
             ));
             assert!(provider_route_restart_required_for_runtime(baseline, saved));
@@ -562,7 +614,7 @@ fn model_hot_reload_keeps_startup_capabilities_pending_without_blocking_other_ro
             .selected_models_by_provider
             .insert("other".into(), vec!["other-b".into()]);
         assert!(std::ptr::eq(
-            model_catalog_config_for_runtime(&current, Some(&applied)),
+            model_catalog_config_for_runtime(&current, Some(&applied), None),
             &current,
         ));
         // Publishing the picker updates only the model baseline. The app-server

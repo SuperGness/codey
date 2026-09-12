@@ -305,6 +305,7 @@ pub(crate) fn merge_route_hint(current: &mut Option<String>, next: Option<String
 
 pub(crate) fn should_forward_incoming_header(name: &str, official_account: bool) -> bool {
     if name.eq_ignore_ascii_case("authorization")
+        || name.eq_ignore_ascii_case("proxy-authorization")
         || name.eq_ignore_ascii_case(ROUTER_AUTH_HEADER)
         || name.eq_ignore_ascii_case(ROUTE_METADATA_KEY)
         || name.eq_ignore_ascii_case(CONTENT_ENCODING.as_str())

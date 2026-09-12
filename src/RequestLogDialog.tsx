@@ -77,6 +77,7 @@ type RouteRequestLogItem = {
   fallbackCount: number;
   fallbackReason?: string | null;
   upstreamAuthority?: string | null;
+  upstreamRequestHeaders?: string | null;
   upstreamRequestId?: string | null;
   upstreamProtocol?: string | null;
   protocolBridge?: string | null;
@@ -474,7 +475,7 @@ export function RequestLogDialog({
   const statsTask = useRef(Promise.resolve());
   const clearInFlight = useRef(false);
 
-  const handleCopyId = (requestId: string, customLabel?: string) => {
+  const handleCopyId = (requestId: string, customLabel?: string, toastSubtext = requestId) => {
     if (!navigator.clipboard) return;
     void navigator.clipboard.writeText(requestId).then(
       () => {
@@ -487,7 +488,7 @@ export function RequestLogDialog({
         const label = customLabel || defaultLabel;
         setCopyToast({
           text: `已复制${label}`,
-          subtext: requestId,
+          subtext: toastSubtext,
         });
         copyToastTimer.current = window.setTimeout(() => {
           setCopyToast(null);
@@ -1894,6 +1895,27 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                       <dt className="text-[11px] text-[#8e8e93]">上游请求 ID</dt>
                       <dd className="m-0 mt-0.5 font-mono text-[11px] text-[#48484a] truncate">
                         {selectedItem.upstreamRequestId}
+                      </dd>
+                    </div>
+                  ) : null}
+                  {selectedItem.upstreamRequestHeaders ? (
+                    <div className="col-span-2">
+                      <dt className="flex items-center gap-1 text-[11px] text-[#8e8e93]">
+                        <span>上游请求头（敏感值已脱敏）</span>
+                        <button
+                          type="button"
+                          className="inline-flex items-center rounded p-0.5 text-[#8e8e93] transition-colors hover:bg-black/8 hover:text-[#1d1d1f] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                          onClick={() => handleCopyId(selectedItem.upstreamRequestHeaders!, "上游请求头", "请求头内容")}
+                          aria-label="复制上游请求头"
+                          title="复制上游请求头"
+                        >
+                          <IconCopy size={12} aria-hidden="true" />
+                        </button>
+                      </dt>
+                      <dd className="m-0 mt-1">
+                        <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-black/5 p-2 font-mono text-[10px] leading-relaxed text-[#48484a] break-words">
+                          {selectedItem.upstreamRequestHeaders}
+                        </pre>
                       </dd>
                     </div>
                   ) : null}

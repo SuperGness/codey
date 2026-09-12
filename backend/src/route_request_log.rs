@@ -22,8 +22,9 @@ use tokio::sync::oneshot;
 
 use crate::config::{RouteRequestLogBackend, RouteRequestLogConfig};
 
-const SCHEMA_VERSION: u8 = 7;
+const SCHEMA_VERSION: u8 = 8;
 const MAX_LOG_STRING_BYTES: usize = 512;
+const MAX_LOG_HEADERS_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_LOG_ERROR_BYTES: usize = 64 * 1024;
 const MAX_CONSECUTIVE_WRITE_FAILURES: u32 = 3;
 const PARTS_PER_MILLION: u64 = 1_000_000;
@@ -204,6 +205,8 @@ pub(crate) struct RouteRequestLogEntry {
     pub fallback_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_authority: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_request_headers: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_request_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -456,6 +459,7 @@ pub(crate) struct RouteRequestLogQueryItem {
     pub fallback_count: u32,
     pub fallback_reason: Option<String>,
     pub upstream_authority: Option<String>,
+    pub upstream_request_headers: Option<String>,
     pub upstream_request_id: Option<String>,
     pub upstream_protocol: Option<String>,
     pub protocol_bridge: Option<String>,
@@ -640,6 +644,7 @@ impl RouteRequestLogProducer {
             fallback_count: 0,
             fallback_reason: None,
             upstream_authority: None,
+            upstream_request_headers: None,
             upstream_request_id: None,
             upstream_protocol: None,
             protocol_bridge: None,
@@ -785,6 +790,7 @@ struct PendingEntry {
     fallback_count: u32,
     fallback_reason: Option<String>,
     upstream_authority: Option<String>,
+    upstream_request_headers: Option<String>,
     upstream_request_id: Option<String>,
     upstream_protocol: Option<String>,
     protocol_bridge: Option<String>,
@@ -920,6 +926,13 @@ impl RouteRequestLogProbe {
             entry.upstream_protocol = Some(bounded_string(upstream_protocol));
             entry.protocol_bridge = Some(bounded_string(protocol_bridge));
             entry.subagent = subagent;
+        });
+    }
+
+    pub(crate) fn set_upstream_request_headers(&self, headers: &str) {
+        self.shield(|| {
+            lock_unpoisoned(&self.shared.entry).upstream_request_headers =
+                Some(bounded_string_to(headers, MAX_LOG_HEADERS_BYTES));
         });
     }
 
@@ -1226,6 +1239,7 @@ impl RouteRequestLogProbe {
             fallback_count: pending.fallback_count,
             fallback_reason: pending.fallback_reason.take(),
             upstream_authority: pending.upstream_authority.take(),
+            upstream_request_headers: pending.upstream_request_headers.take(),
             upstream_request_id: pending.upstream_request_id.take(),
             upstream_protocol: pending.upstream_protocol.take(),
             protocol_bridge: pending.protocol_bridge.take(),
@@ -1964,7 +1978,8 @@ impl SqliteSink {
                 codex_session_id TEXT,
                 codex_session_is_parent INTEGER NOT NULL,
                 requested_service_tier TEXT,
-                service_tier TEXT
+                service_tier TEXT,
+                upstream_request_headers TEXT
              );
              CREATE INDEX IF NOT EXISTS idx_route_request_logs_time_id
                 ON route_request_logs(timestamp_unix_ms DESC, request_id DESC);
@@ -1981,7 +1996,11 @@ impl SqliteSink {
              CREATE INDEX IF NOT EXISTS idx_route_request_logs_status_time_id
                 ON route_request_logs(status, timestamp_unix_ms DESC, request_id DESC);",
         )?;
-        for column in ["requested_service_tier", "service_tier"] {
+        for column in [
+            "requested_service_tier",
+            "service_tier",
+            "upstream_request_headers",
+        ] {
             let exists: bool = connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info('route_request_logs') WHERE name = ?1)",
                 [column], |row| row.get(0),
@@ -2026,13 +2045,13 @@ impl SqliteSink {
                     upstream_request_id, upstream_protocol, protocol_bridge,
                     first_byte_source, client_fingerprint, subagent, schema_version,
                     upstream_error_summary, codex_session_id, codex_session_is_parent,
-                    requested_service_tier, service_tier
+                    requested_service_tier, service_tier, upstream_request_headers
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                     ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
                     ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
-                    ?41, ?42, ?43, ?44, ?45, ?46, ?47
+                    ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48
                 ) ON CONFLICT(request_id) DO NOTHING",
             )?;
             for queued in batch {
@@ -2085,6 +2104,7 @@ impl SqliteSink {
                     entry.codex_session_is_parent,
                     entry.requested_service_tier,
                     entry.service_tier,
+                    entry.upstream_request_headers,
                 ])?;
             }
         }
@@ -2192,7 +2212,7 @@ fn query_sqlite_route_request_logs(
             fallback_reason, upstream_authority,
             upstream_request_id, upstream_protocol, protocol_bridge,
             first_byte_source, subagent, upstream_error_summary,
-            codex_session_id, codex_session_is_parent, {tier_columns}
+            codex_session_id, codex_session_is_parent, {tier_columns}, upstream_request_headers
          FROM route_request_logs{where_clause}
          ORDER BY timestamp_unix_ms DESC, request_id DESC
          {pagination}"
@@ -2540,6 +2560,7 @@ fn query_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequest
         upstream_error_summary: row.get(40)?,
         codex_session_id: row.get(41)?,
         codex_session_is_parent: row.get(42)?,
+        upstream_request_headers: row.get(45)?,
     })
 }
 
@@ -2718,11 +2739,15 @@ fn first_string<'a>(value: &'a Value, pointers: &[&str]) -> Option<&'a str> {
 }
 
 fn bounded_string(value: &str) -> String {
+    bounded_string_to(value, MAX_LOG_STRING_BYTES)
+}
+
+fn bounded_string_to(value: &str, max_bytes: usize) -> String {
     let value = value.trim();
-    if value.len() <= MAX_LOG_STRING_BYTES {
+    if value.len() <= max_bytes {
         return value.to_string();
     }
-    let mut end = MAX_LOG_STRING_BYTES;
+    let mut end = max_bytes;
     while !value.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }
@@ -2967,6 +2992,7 @@ mod tests {
             fallback_count: 0,
             fallback_reason: None,
             upstream_authority: Some("api.example.com".to_string()),
+            upstream_request_headers: Some("authorization: [REDACTED]\nx-test: value".to_string()),
             upstream_request_id: Some("upstream-id".to_string()),
             upstream_protocol: Some("OpenAI Responses".to_string()),
             protocol_bridge: Some("Responses passthrough".to_string()),
@@ -3383,6 +3409,10 @@ mod tests {
         assert_eq!(page.items[0].router_pre_upstream_ms, Some(4));
         assert_eq!(page.items[0].upstream_first_byte_ms, Some(12));
         assert_eq!(page.items[0].downstream_first_content_ms, Some(14));
+        assert_eq!(
+            page.items[0].upstream_request_headers.as_deref(),
+            Some("authorization: [REDACTED]\nx-test: value")
+        );
     }
 
     #[test]
@@ -3650,6 +3680,7 @@ mod tests {
             fallback_count: 0,
             fallback_reason: None,
             upstream_authority: None,
+            upstream_request_headers: None,
             upstream_request_id: None,
             upstream_protocol: None,
             protocol_bridge: None,

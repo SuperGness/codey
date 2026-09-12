@@ -309,22 +309,71 @@ pub(crate) fn prepare_upstream_headers(
     protocol: UpstreamProtocol,
 ) -> std::result::Result<HeaderMap, String> {
     let route_name = profile.name.trim();
+    if profile.model_request_headers.len() > 128
+        || profile
+            .model_request_headers
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum::<usize>()
+            > 32 * 1024
+    {
+        return Err(format!(
+            "线路「{route_name}」的请求头最多 128 个，名称和值合计不能超过 32 KiB"
+        ));
+    }
     let mut headers = HeaderMap::with_capacity(profile.model_request_headers.len() + 2);
     for (name, value) in &profile.model_request_headers {
-        if value.trim().is_empty() {
-            continue;
-        }
-        if is_hop_by_hop_header(name) {
+        if is_hop_by_hop_header(name)
+            || name.eq_ignore_ascii_case(CONTENT_ENCODING.as_str())
+            || name.eq_ignore_ascii_case("proxy-authorization")
+            || name.eq_ignore_ascii_case(ROUTER_AUTH_HEADER)
+            || name.eq_ignore_ascii_case(ROUTE_METADATA_KEY)
+            || name.eq_ignore_ascii_case(TURN_METADATA_HEADER)
+            || name.to_ascii_lowercase().starts_with("sec-websocket-")
+        {
             return Err(format!("线路「{route_name}」包含不允许覆盖的请求头 {name}"));
         }
         let name = HeaderName::from_bytes(name.as_bytes())
             .map_err(|_| format!("线路「{route_name}」包含非法请求头名称"))?;
-        let value = HeaderValue::from_str(value)
-            .map_err(|_| format!("线路「{route_name}」包含非法请求头值"))?;
+        if headers.contains_key(&name) {
+            return Err(format!(
+                "线路「{route_name}」的请求头 {name} 重复，名称不区分大小写"
+            ));
+        }
+        if value.len() > 8 * 1024 {
+            return Err(format!("线路「{route_name}」的请求头 {name} 超过 8 KiB"));
+        }
+        if !value.is_empty() && value.trim().is_empty() {
+            return Err(format!(
+                "线路「{route_name}」的请求头 {name} 不能只包含空白；请用 null 删除"
+            ));
+        }
+        if name == reqwest::header::ACCEPT && value.is_empty() {
+            return Err(format!(
+                "线路「{route_name}」不能删除 Accept；HTTP 客户端要求保留默认值"
+            ));
+        }
+        if name == CONTENT_TYPE && !value.eq_ignore_ascii_case("application/json") {
+            return Err(format!(
+                "线路「{route_name}」的 Content-Type 必须为 application/json"
+            ));
+        }
+        if profile.official_account && (name == AUTHORIZATION || name == CHATGPT_ACCOUNT_ID_HEADER)
+        {
+            return Err(format!(
+                "线路「{route_name}」的 {name} 由官方登录态管理，不允许覆盖"
+            ));
+        }
+        // 精确空字符串保留为删除标记，随后合并时再移除默认值和转发值。
+        let mut value = HeaderValue::from_str(value)
+            .map_err(|_| format!("线路「{route_name}」的请求头 {name} 包含非法值"))?;
+        value.set_sensitive(is_sensitive_upstream_header(name.as_str()));
         headers.insert(name, value);
     }
 
-    let has_custom_authorization = headers.contains_key(AUTHORIZATION);
+    let has_custom_authorization = headers
+        .get(AUTHORIZATION)
+        .is_some_and(|value| !value.is_empty());
     if protocol == UpstreamProtocol::AnthropicMessages && has_custom_authorization {
         return Err(format!(
             "线路「{route_name}」使用 Anthropic Messages 时不允许配置 Authorization；请使用该线路的 Key 字段或 x-api-key"
@@ -336,19 +385,26 @@ pub(crate) fn prepare_upstream_headers(
         } else {
             AUTHORIZATION
         };
-        if !headers.contains_key(&header_name) {
+        // 凭据以线路 Key 为准：空值移除标记不会抑制它，只有非空覆盖才能替换。
+        let has_custom_credential = headers
+            .get(&header_name)
+            .is_some_and(|value| !value.is_empty());
+        if !has_custom_credential {
             let header_value = if protocol == UpstreamProtocol::AnthropicMessages {
                 profile.api_key.trim().to_string()
             } else {
                 format!("Bearer {}", profile.api_key.trim())
             };
-            let value = HeaderValue::from_str(&header_value)
+            let mut value = HeaderValue::from_str(&header_value)
                 .map_err(|_| format!("线路「{route_name}」的 API Key 格式无效"))?;
+            value.set_sensitive(true);
             headers.insert(header_name, value);
         }
     }
     if protocol == UpstreamProtocol::AnthropicMessages
-        && !headers.contains_key(HeaderName::from_static("anthropic-version"))
+        && !headers
+            .get(HeaderName::from_static("anthropic-version"))
+            .is_some_and(|value| !value.is_empty())
     {
         headers.insert(
             HeaderName::from_static("anthropic-version"),
@@ -356,6 +412,30 @@ pub(crate) fn prepare_upstream_headers(
         );
     }
     Ok(headers)
+}
+
+pub(crate) fn apply_upstream_headers(headers: &mut HeaderMap, overrides: &HeaderMap) {
+    for (name, value) in overrides {
+        if value.is_empty() {
+            headers.remove(name);
+        } else {
+            headers.insert(name, value.clone());
+        }
+    }
+}
+
+pub(crate) fn is_sensitive_upstream_header(name: &str) -> bool {
+    matches!(
+        name,
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "x-api-key"
+            | "x-oai-attestation"
+            | "x-tenant"
+            | "x-codey-router-token"
+            | "sec-websocket-key"
+    )
 }
 
 pub(crate) fn has_version_suffix(segment: &str) -> bool {

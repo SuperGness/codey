@@ -16,7 +16,8 @@ use crate::error_log;
 const SETTINGS_OVERLAY_LOAD_PATH: &str = "/internal/codey/settings-overlay/load";
 const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";
 const CDP_INJECTION_TIMEOUT: Duration = Duration::from_secs(30);
-const INJECTION_STATUS_READ_TIMEOUT: Duration = Duration::from_secs(1);
+// Status is diagnostic only; the bridge and overlay are already installed.
+const INJECTION_STATUS_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const INJECTION_DEADLINE_MARGIN: Duration = Duration::from_millis(100);
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-bridge.js");
 const MODEL_WHITELIST_INJECT_SCRIPT: &str =
@@ -436,7 +437,7 @@ pub async fn retry_inject_with_scripts(
         phase.store(InjectionPhase::DiscoverTargets as u8, Ordering::Release);
         match tokio::time::timeout_at(
             deadline,
-            inject_with_scripts(debug_port, handler.clone(), scripts, &phase, deadline),
+            inject_with_scripts(debug_port, handler.clone(), scripts, &phase),
         )
         .await
         {
@@ -561,7 +562,6 @@ async fn inject_with_scripts(
     handler: BridgeHandler,
     scripts: &PreparedInjectionScripts,
     phase: &AtomicU8,
-    deadline: tokio::time::Instant,
 ) -> Result<InjectedTarget> {
     phase.store(InjectionPhase::DiscoverTargets as u8, Ordering::Release);
     let targets = list_targets(debug_port)
@@ -594,21 +594,12 @@ async fn inject_with_scripts(
     ensure_settings_overlay_ready(&websocket_url)
         .await
         .with_context(|| format!("验证 Codex renderer {} 的 Codey 浮层失败", target.id))?;
+    // Status probing is diagnostic-only. Keep it out of the critical startup
+    // path: the bridge and overlay checks above prove injection is usable, and
+    // the existing refresh_injection_statuses command fills in the real state
+    // once the UI asks for it.
     phase.store(InjectionPhase::ReadStatuses as u8, Ordering::Release);
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let injection_statuses = match injection_status_read_budget(remaining) {
-        Some(status_budget) => match tokio::time::timeout(
-            status_budget,
-            read_injection_statuses(&websocket_url, scripts),
-        )
-        .await
-        {
-            Ok(Ok(statuses)) => statuses,
-            Ok(Err(_)) => scripts.statuses_with_error("读取注入状态失败，将在运行期复核"),
-            Err(_) => scripts.statuses_with_error("读取注入状态超时，将在运行期复核"),
-        },
-        None => scripts.statuses_with_error("启动预算即将结束，注入状态将在运行期复核"),
-    };
+    let injection_statuses = scripts.statuses_with_error("启动后复核注入状态");
     Ok(InjectedTarget {
         websocket_url,
         pump,
@@ -1280,7 +1271,7 @@ assert.equal(nextPage.window.attempts, 1);
     fn nonessential_status_read_never_consumes_the_injection_deadline() {
         assert_eq!(
             injection_status_read_budget(Duration::from_secs(5)),
-            Some(Duration::from_secs(1))
+            Some(Duration::from_millis(250))
         );
         assert_eq!(
             injection_status_read_budget(Duration::from_millis(150)),

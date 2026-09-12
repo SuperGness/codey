@@ -168,7 +168,6 @@ impl LocalRouter {
             websocket_backoffs: Arc::clone(&websocket_backoffs),
             native_history_cache: Arc::new(Mutex::new(NativeHistoryCache::default())),
             client: reqwest::Client::builder()
-                .user_agent(format!("Codey-Router/{}", env!("CARGO_PKG_VERSION")))
                 .connect_timeout(UPSTREAM_CONNECT_TIMEOUT)
                 // Reuse a warm TLS connection across normal tool turns while
                 // TCP probes evict half-open sockets before the next request.

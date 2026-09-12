@@ -175,7 +175,12 @@ pub fn provider_model_fetch_profile(
         if let Some(api_key) = extensions.api_key {
             fetch_profile.api_key = api_key;
         }
-        fetch_profile.model_request_headers = extensions.headers;
+        let mut headers = extensions.headers;
+        for (name, value) in &profile.model_request_headers {
+            headers.retain(|existing, _| !existing.eq_ignore_ascii_case(name));
+            headers.insert(name.clone(), value.clone());
+        }
+        fetch_profile.model_request_headers = headers;
     }
     Ok(fetch_profile)
 }
@@ -279,8 +284,7 @@ fn sync_provider_profile(
     next.active_profile_id = active_profile_id;
     next.initial_route_import_completed = true;
     next = next.normalize();
-    // Compare the persisted shape only: `#[serde(skip)]` request headers and
-    // one-shot flags must not bump `settings_revision`.
+    // One-shot launch flags must not bump `settings_revision`.
     let changed = serde_json::to_value(&next)? != serde_json::to_value(config)?;
     if changed {
         next.settings_revision = config.settings_revision.saturating_add(1);
@@ -1534,6 +1538,17 @@ env_http_headers = { X-Dynamic = "DYNAMIC_HEADER" }
         let fetch = provider_model_fetch_profile(&profile, home.path()).unwrap();
         assert_eq!(fetch.api_key, "fresh-key");
         assert_eq!(fetch.model_request_headers["X-Static"], "static-value");
+
+        profile
+            .model_request_headers
+            .insert("x-static".into(), String::new());
+        profile
+            .model_request_headers
+            .insert("X-Saved".into(), "saved".into());
+        let fetch = provider_model_fetch_profile(&profile, home.path()).unwrap();
+        assert_eq!(fetch.model_request_headers["x-static"], "");
+        assert!(!fetch.model_request_headers.contains_key("X-Static"));
+        assert_eq!(fetch.model_request_headers["X-Saved"], "saved");
     }
 
     #[test]

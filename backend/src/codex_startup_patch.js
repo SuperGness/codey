@@ -637,6 +637,20 @@
       );
     }
     if (
+      source.includes("includeUltraReasoningEffort:") &&
+      source.includes("isCustomModelProvider:") &&
+      source.includes("1186680773")
+    ) {
+      // 第三方线路按模型目录显示 Ultra，保留调用方和用户的推理等级设置。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\bisCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[^{}]*\b[$A-Z_a-z][$\w]*\s*=\s*\2\s*&&\s*)(\4\(\s*[$A-Z_a-z][$\w]*\s*,\s*(["'`])1186680773\6\s*\))/g,
+        (_match, prefix, _includeUltra, customProvider, _get, gate) =>
+          `${prefix}(${customProvider}||${gate})`,
+        "third-party Ultra reasoning",
+      );
+    }
+    if (
       source.includes("isServiceTierAllowed") &&
       source.includes("featureRequirements?.fast_mode") &&
       source.includes("authMethod:")
@@ -1515,6 +1529,95 @@
     childProcess.spawn = codeyAnalyticsDisabledSpawn;
   }
 
+  const cuaCompatibilityLaunchers = new Map();
+  const patchCuaBrowserPolicyTimeout = (source) => {
+    // Both SDK deadlines must cover a slow policy response. Keeping the network
+    // deadline at 10s causes retries even if initializeAsync waits longer.
+    const budget = /var ([$\w]+)=1e4,([$\w]+);(?=function [$\w]+\(([$\w]+)\)\{if\(\2!=null\)return \2;)/g;
+    const network = /networkConfig:\{api:([$\w]+),sdkExceptionUrl:/g;
+    if (!source.includes("Unable to load browser request-header policy.") ||
+        [...source.matchAll(budget)].length !== 1 ||
+        [...source.matchAll(network)].length !== 1) {
+      throw new Error("Unsupported Computer Use policy initialization");
+    }
+    return source.replace(budget, "var $1=25e3,$2;")
+      .replace(network, "networkConfig:{networkTimeoutMs:25e3,api:$1,sdkExceptionUrl:");
+  };
+  const prepareCuaCompatibilityLauncher = async (config) => {
+    if (!config?.enabled || !config.env?.CUA_REPL_ENABLED_SURFACES?.split(",").includes("browser")) return;
+    const path = process.getBuiltinModule("path");
+    const launcherPath = config.args?.[0];
+    const codexHome = config.env.CODEX_HOME;
+    const moduleDirs = config.env.NODE_REPL_NODE_MODULE_DIRS?.split(path.delimiter) ?? [];
+    if (typeof launcherPath !== "string" ||
+        !/[\\/]unified-computer-use[\\/][^\\/]+[\\/]scripts[\\/]launch\.mjs$/.test(launcherPath) ||
+        !path.isAbsolute(codexHome ?? "") ||
+        !config.env.NODE_REPL_TRUSTED_CODE_PATHS?.split(path.delimiter)
+          .some((entry) => path.resolve(entry) === path.resolve(codexHome))) return;
+    const key = JSON.stringify([launcherPath, codexHome, moduleDirs]);
+    let prepared = cuaCompatibilityLaunchers.get(key);
+    if (!prepared) {
+      prepared = (async () => {
+        const fs = process.getBuiltinModule("fs/promises");
+        const { pathToFileURL } = process.getBuiltinModule("url");
+        const { createHash, randomUUID } = process.getBuiltinModule("crypto");
+        let servicePath;
+        for (const directory of moduleDirs.filter((entry) => path.isAbsolute(entry))) {
+          const candidate = path.join(directory, "@oai/browser-desktop/scripts/browser-service.mjs");
+          try { await fs.access(candidate); servicePath = candidate; break; }
+          catch (error) { if (error.code !== "ENOENT") throw error; }
+        }
+        if (!servicePath) throw new Error("Computer Use browser runtime is unavailable");
+        const [launcher, service] = await Promise.all([
+          fs.readFile(launcherPath, "utf8"), fs.readFile(servicePath, "utf8"),
+        ]);
+        const serviceAnchor = /browser: ["']@oai\/browser-desktop\/service["']/g;
+        if ([...launcher.matchAll(serviceAnchor)].length !== 1) {
+          throw new Error("Unsupported Computer Use launcher");
+        }
+        const patchedService = patchCuaBrowserPolicyTimeout(service)
+          .replaceAll("import.meta.url", () => JSON.stringify(pathToFileURL(servicePath).href));
+        const fingerprint = createHash("sha256").update(patchedService)
+          .update(launcher).update(launcherPath).digest("hex");
+        // Stay within the official runtime's existing trusted Codex directory.
+        const directory = path.join(codexHome, ".tmp", "codey-cua", fingerprint);
+        const browserPath = path.join(directory, "browser-service.mjs");
+        const preparedLauncher = path.join(directory, "launch.mjs");
+        const patchedLauncher = launcher
+          .replace(serviceAnchor, () => `browser: ${JSON.stringify(browserPath)}`)
+          .replaceAll("import.meta.url", () => JSON.stringify(pathToFileURL(launcherPath).href));
+        await fs.mkdir(directory, { recursive: true });
+        for (const [filename, contents] of [[browserPath, patchedService], [preparedLauncher, patchedLauncher]]) {
+          const temporary = `${filename}.${randomUUID()}.tmp`;
+          try { await fs.writeFile(temporary, contents); await fs.rename(temporary, filename); }
+          finally { await fs.rm(temporary, { force: true }); }
+        }
+        return preparedLauncher;
+      })();
+      cuaCompatibilityLaunchers.set(key, prepared);
+    }
+    try {
+      config.args = [await prepared, ...config.args.slice(1)];
+    } catch (error) {
+      cuaCompatibilityLaunchers.delete(key);
+      recordCodeyPatchFailure("optional_main_bundle_patch:cuaBrowserPolicyRuntime", error);
+      console.warn(`[Codey] skipped incompatible Computer Use runtime: ${error.message}`);
+    }
+  };
+  const patchCodexCuaPluginConfig = (source) => {
+    const anchor = /([$\w]+)\.args=\[([$\w.]+)\.join\(([$\w]+),([`"'])scripts\/launch\.mjs\4\)\]\);/g;
+    if (!source.includes("CUA_REPL_NODE_REPL_PATH") || [...source.matchAll(anchor)].length !== 1) {
+      throw new Error("Computer Use plugin configuration anchor is unavailable");
+    }
+    return source.replace(anchor, (match, config) =>
+      `${match}await globalThis.__CODEY_PREPARE_CUA_COMPATIBILITY_LAUNCHER__(${config});`);
+  };
+  Object.defineProperties(globalThis, {
+    __CODEY_PATCH_CUA_BROWSER_POLICY_TIMEOUT__: { value: patchCuaBrowserPolicyTimeout },
+    __CODEY_PREPARE_CUA_COMPATIBILITY_LAUNCHER__: { value: prepareCuaCompatibilityLauncher },
+    __CODEY_PATCH_CODEX_CUA_PLUGIN_CONFIG__: { value: patchCodexCuaPluginConfig },
+  });
+
   const externalPluginFocusReconcileMinIntervalMs = 30_000;
   let externalPluginFocusReconcileSuppressedCount = 0;
   const throttleExternalPluginFocusReconcile = (
@@ -1967,6 +2070,8 @@
       if (!path) return null;
       const fs = process.getBuiltinModule("fs");
       const stats = fs.statSync(path, { bigint: true });
+      // ponytail: inspect small workers only; known sampler names are checked first.
+      if (!stats.isFile() || stats.size > maximumWmiWorkerSourceBytes) return null;
       return {
         cacheKey: [
           path,
@@ -1976,9 +2081,7 @@
           stats.mtimeNs,
           stats.ctimeNs,
         ].join("\0"),
-        load: () => fs
-          .readFileSync(path, "utf8")
-          .slice(0, maximumWmiWorkerSourceBytes),
+        load: () => fs.readFileSync(path, "utf8").slice(0, maximumWmiWorkerSourceBytes),
       };
     };
     const classifyWmiSnapshotWorker = (filename, options) => {
@@ -2207,16 +2310,7 @@
 
   // The app-server transport can live in a shared Vite chunk, outside main.
   {
-    const originalJsExtension = Module._extensions[".js"];
-    Module._extensions[".js"] = function codeyMainBundleCompileHook(module, filename) {
-      const isCodexBuildScript =
-        /[\\/]\.vite[\\/]build[\\/][^\\/]+\.(?:cjs|js)$/i.test(filename);
-      if (!isCodexBuildScript) {
-        return Reflect.apply(originalJsExtension, this, arguments);
-      }
-
-      const fs = process.getBuiltinModule("fs");
-      let source = fs.readFileSync(filename, "utf8");
+    const patchCodexBuildScript = (source, filename) => {
       const hasAppServerMessages = localRouterRuntimeEnabled &&
         source.includes("this.options.transformOutgoingMessage");
       if (hasAppServerMessages) {
@@ -2240,6 +2334,13 @@
       const hasDesktopAnalyticsTransport =
         source.includes("datadog-log-sink-failure") && source.includes("codex-desktop");
       const hasThreadTitleModel = source.includes("thread_title");
+      if (source.includes("CUA_REPL_NODE_REPL_PATH")) {
+        source = applyOptionalMainBundlePatch(
+          "cuaBrowserPolicyConfig",
+          patchCodexCuaPluginConfig,
+          source,
+        );
+      }
       if (isMainBundle || hasDesktopAnalyticsTransport) {
         const patchName = isMainBundle ? "desktopCesAnalytics" : "desktopCesAnalyticsTransport";
         source = applyOptionalMainBundlePatch(
@@ -2266,10 +2367,7 @@
           !hasOptionalMainBundlePatchFailure("threadTitleModel");
       }
       if (!hasMainBundleName && !hasMainBundleSignature) {
-        if (hasAppServerMessages || hasDesktopAnalyticsTransport || hasThreadTitleModel) {
-          return module._compile(source, filename);
-        }
-        return Reflect.apply(originalJsExtension, this, arguments);
+        return source;
       }
 
       mainBundleSourcePatchAttempted = true;
@@ -2309,10 +2407,32 @@
         disableMacosChildProcessSampler &&
         !hasOptionalMainBundlePatchFailure("macosChildProcessSampler");
       mainBundleSourcePatched = true;
-      module._compile(source, filename);
+      return source;
       } catch (error) {
         recordCodeyPatchFailure("patch_codex_main_bundle", error, { filename });
         throw error;
+      }
+    };
+    const originalJsExtension = Module._extensions[".js"];
+    Module._extensions[".js"] = function codeyMainBundleCompileHook(module, filename) {
+      const isCodexBuildScript =
+        /[\\/]\.vite[\\/]build[\\/][^\\/]+\.(?:cjs|js)$/i.test(filename);
+      if (!isCodexBuildScript) {
+        return Reflect.apply(originalJsExtension, this, arguments);
+      }
+      const compileDescriptor = Object.getOwnPropertyDescriptor(module, "_compile");
+      const originalCompile = module._compile;
+      module._compile = function codeyCompile(source, ...args) {
+        const patched = typeof source === "string"
+          ? patchCodexBuildScript(source, filename)
+          : source;
+        return Reflect.apply(originalCompile, this, [patched, ...args]);
+      };
+      try {
+        return Reflect.apply(originalJsExtension, this, arguments);
+      } finally {
+        if (compileDescriptor) Object.defineProperty(module, "_compile", compileDescriptor);
+        else delete module._compile;
       }
     };
   }

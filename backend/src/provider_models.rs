@@ -1,15 +1,17 @@
 use std::collections::HashSet;
 use std::fmt;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use reqwest::{
     Client,
-    header::{ACCEPT, AUTHORIZATION},
+    header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT},
 };
 use serde_json::Value;
 
-use crate::config::{ProviderProfile, UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES};
+use crate::config::ProviderProfile;
+use crate::local_router::{UpstreamProtocol, apply_upstream_headers, prepare_upstream_headers};
 use crate::model_id;
 use crate::model_list::{self, ModelEndpointError};
 
@@ -54,51 +56,37 @@ impl fmt::Display for ModelListError {
 
 impl std::error::Error for ModelListError {}
 
+pub(crate) fn http_client() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("provider model HTTP client should be constructible")
+    })
+}
+
 pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<String>> {
     let base = profile.normalized_base_url();
     if base.is_empty() {
         anyhow::bail!("API 地址不能为空");
     }
     let endpoints = model_endpoints(&base)?;
-    let anthropic_messages = profile.upstream_protocol == UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES;
-    let has_custom_header = |header: &str| {
-        profile
-            .model_request_headers
-            .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case(header) && !value.trim().is_empty())
-    };
-    let has_custom_authorization = has_custom_header(AUTHORIZATION.as_str());
-    let has_custom_anthropic_key = has_custom_header("x-api-key");
-    let has_custom_anthropic_version = has_custom_header("anthropic-version");
+    let overrides = prepare_upstream_headers(
+        profile,
+        UpstreamProtocol::from_profile(profile.official_account, &profile.upstream_protocol),
+    )
+    .map_err(anyhow::Error::msg)?;
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static(concat!("Codey/", env!("CARGO_PKG_VERSION"))),
+    );
+    apply_upstream_headers(&mut headers, &overrides);
     for (index, endpoint) in endpoints.iter().enumerate() {
-        let mut request = client.get(endpoint).header(ACCEPT, "application/json");
-        if anthropic_messages && !profile.api_key.trim().is_empty() && !has_custom_anthropic_key {
-            request = request.header("x-api-key", profile.api_key.trim());
-        } else if !anthropic_messages
-            && !profile.api_key.trim().is_empty()
-            && !has_custom_authorization
-        {
-            request = request.bearer_auth(profile.api_key.trim());
-        }
-        if anthropic_messages && !has_custom_anthropic_version {
-            request = request.header("anthropic-version", "2023-06-01");
-        }
-        for (name, value) in &profile.model_request_headers {
-            if anthropic_messages && name.eq_ignore_ascii_case(AUTHORIZATION.as_str()) {
-                continue;
-            }
-            if anthropic_messages
-                && (name.eq_ignore_ascii_case("x-api-key")
-                    || name.eq_ignore_ascii_case("anthropic-version"))
-                && value.trim().is_empty()
-            {
-                continue;
-            }
-            if name.eq_ignore_ascii_case(AUTHORIZATION.as_str()) && value.trim().is_empty() {
-                continue;
-            }
-            request = request.header(name, value);
-        }
+        let request = client.get(endpoint).headers(headers.clone());
         let response = request
             .timeout(PROVIDER_MODEL_REQUEST_TIMEOUT)
             .send()
@@ -208,6 +196,7 @@ fn push_model_id(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -388,7 +377,7 @@ mod tests {
         profile.api_key = "fallback-key".to_string();
         profile
             .model_request_headers
-            .insert("Authorization".to_string(), " ".to_string());
+            .insert("Authorization".to_string(), String::new());
         let client = Client::builder().no_proxy().build().unwrap();
 
         let models = fetch(&profile, &client).await.unwrap();
@@ -460,5 +449,86 @@ mod tests {
 
         assert_eq!(models, vec!["fallback-model"]);
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_header_overrides_replace_defaults_and_preserve_deletions_on_fallback() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for status in [404, 200] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = crate::local_router::read_http_request(&mut stream)
+                    .await
+                    .unwrap();
+                let accepts = request
+                    .headers
+                    .iter()
+                    .filter(|(name, _)| name.eq_ignore_ascii_case("accept"))
+                    .collect::<Vec<_>>();
+                assert_eq!(accepts.len(), 1);
+                assert_eq!(accepts[0].1, "application/custom+json");
+                for name in ["user-agent", "x-remove"] {
+                    assert!(crate::local_router::incoming_header(&request, name).is_none());
+                }
+                assert_eq!(
+                    crate::local_router::incoming_header(&request, "x-tenant"),
+                    Some("tenant")
+                );
+                crate::local_router::write_json_response(
+                    &mut stream,
+                    status,
+                    &serde_json::json!({"data":[{"id":"test-model"}]}),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let mut profile = ProviderProfile::new("test");
+        profile.base_url = format!("http://{address}/api");
+        profile.model_request_headers = std::collections::BTreeMap::from([
+            ("Accept".into(), "application/custom+json".into()),
+            ("user-agent".into(), String::new()),
+            ("x-remove".into(), String::new()),
+            ("x-tenant".into(), "tenant".into()),
+        ]);
+        let models = fetch(&profile, http_client()).await.unwrap();
+        assert_eq!(models, ["test-model"]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn model_header_credentials_never_follow_redirects() {
+        use tokio::io::AsyncWriteExt;
+        for status in [301, 302, 307, 308] {
+            let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let destination_address = destination.local_addr().unwrap();
+            let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = source.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = source.accept().await.unwrap();
+                let request = crate::local_router::read_http_request(&mut stream)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    crate::local_router::incoming_header(&request, "x-api-key"),
+                    Some("test-secret")
+                );
+                stream.write_all(format!("HTTP/1.1 {status} Redirect\r\nLocation: http://{destination_address}/models\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+            });
+            let mut profile = ProviderProfile::new("test");
+            profile.base_url = format!("http://{address}/v1");
+            profile
+                .model_request_headers
+                .insert("x-api-key".into(), "test-secret".into());
+            let error = fetch(&profile, http_client()).await.unwrap_err();
+            assert!(error.to_string().contains(&status.to_string()));
+            server.await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), destination.accept())
+                    .await
+                    .is_err()
+            );
+        }
     }
 }

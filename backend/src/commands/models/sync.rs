@@ -149,7 +149,7 @@ pub(crate) async fn sync_native_current_provider_models(
     }
     let visible_fetched_models = if let Some(fetch_profile) = context.fetch_profile.clone() {
         fetch_profile.validate()?;
-        let fetched_models = fetch_provider_models(fetch_profile, &state.http_client)
+        let fetched_models = fetch_provider_models(fetch_profile)
             .await
             .map_err(|error| error.to_string())?;
         regular_route_models(fetched_models)
@@ -469,17 +469,14 @@ pub(crate) fn preserve_declared_official_models(
     }
 }
 
-pub(crate) async fn fetch_provider_models(
-    profile: ProviderProfile,
-    http_client: &reqwest::Client,
-) -> anyhow::Result<Vec<String>> {
+pub(crate) async fn fetch_provider_models(profile: ProviderProfile) -> anyhow::Result<Vec<String>> {
     let home = codex_home();
     let fetch_profile = tokio::task::spawn_blocking(move || {
         codex_provider::provider_model_fetch_profile(&profile, home)
     })
     .await
     .map_err(|error| anyhow::anyhow!("解析模型源 API 配置任务异常退出：{error}"))??;
-    provider_models::fetch(&fetch_profile, http_client).await
+    provider_models::fetch(&fetch_profile, provider_models::http_client()).await
 }
 
 pub(crate) async fn sync_provider_models_for_launch(
@@ -523,7 +520,7 @@ pub(crate) async fn sync_provider_models_for_launch(
 
     let (models, synced) = match tokio::time::timeout(
         STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT,
-        fetch_provider_models(profile.clone(), &state.http_client),
+        fetch_provider_models(profile.clone()),
     )
     .await
     {

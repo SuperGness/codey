@@ -32,6 +32,7 @@ import {
   Switch,
 } from "./components/ui";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
+import { headersTextFromMap, parseHeadersText } from "./requestHeaders";
 import { globalDefaultForRoute, routeProviderId } from "./modelRoutes";
 import {
   MAX_ROUTE_SHORT_NAME_CHARACTERS,
@@ -255,7 +256,7 @@ function ModelSectionComponent({
   const [routeApiKeyVisible, setRouteApiKeyVisible] = useState(false);
   const [routeHeadersText, setRouteHeadersText] = useState("{}");
   const [headerDialogProfile, setHeaderDialogProfile] = useState<Profile | null>(null);
-  const [headerValidationAttempted, setHeaderValidationAttempted] = useState(false);
+  const [headerError, setHeaderError] = useState("");
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
   const routeConfigReadOnly = !config.localRouterEnabled;
 
@@ -390,6 +391,7 @@ function ModelSectionComponent({
     setRouteValidationAttempted(false);
     setRouteApiKeyVisible(false);
     setRouteHeadersText(JSON.stringify({}, null, 2));
+    setHeaderError("");
     setOfficialModelDraft([]);
     setRouteDialogOpen(true);
   };
@@ -398,7 +400,8 @@ function ModelSectionComponent({
     setRouteDraft({ ...profile });
     setRouteValidationAttempted(false);
     setRouteApiKeyVisible(false);
-    setRouteHeadersText(JSON.stringify(profile.modelRequestHeaders || {}, null, 2));
+    setRouteHeadersText(headersTextFromMap(profile.modelRequestHeaders));
+    setHeaderError("");
     if (official) {
       const providerId = routeProviderId(profile);
       const configuredModels = config.selectedModelsByProvider[providerId] || [];
@@ -415,23 +418,21 @@ function ModelSectionComponent({
   };
   const openHeadersDialog = (profile: Profile) => {
     setHeaderDialogProfile(profile);
-    setRouteHeadersText(JSON.stringify(profile.modelRequestHeaders || {}, null, 2));
-    setHeaderValidationAttempted(false);
+    setRouteHeadersText(headersTextFromMap(profile.modelRequestHeaders));
+    setHeaderError("");
   };
   const saveHeaders = async () => {
     if (!headerDialogProfile) return;
+    let modelRequestHeaders: Record<string, string>;
     try {
-      const parsed = JSON.parse(routeHeadersText);
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error();
-      const modelRequestHeaders = Object.fromEntries(Object.entries(parsed).map(([name, value]) => {
-        if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || typeof value !== "string") throw new Error();
-        return [name, value];
-      }));
-      if (!await onSaveRoute({ ...headerDialogProfile, modelRequestHeaders })) return;
-      setHeaderDialogProfile(null);
-    } catch {
-      setHeaderValidationAttempted(true);
+      modelRequestHeaders = parseHeadersText(routeHeadersText);
+    } catch (error) {
+      setHeaderError((error as Error).message);
+      return;
     }
+    setHeaderError("");
+    if (!await onSaveRoute({ ...headerDialogProfile, modelRequestHeaders })) return;
+    setHeaderDialogProfile(null);
   };
   const toggleRouteApiKeyVisibility = () => {
     setRouteApiKeyVisible((visible) => !visible);
@@ -440,13 +441,9 @@ function ModelSectionComponent({
     if (!routeDraft) return;
     let modelRequestHeaders: Record<string, string>;
     try {
-      const parsed = JSON.parse(routeHeadersText);
-      if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") throw new Error();
-      modelRequestHeaders = Object.fromEntries(Object.entries(parsed).map(([name, value]) => {
-        if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || typeof value !== "string") throw new Error();
-        return [name, value];
-      }));
-    } catch {
+      modelRequestHeaders = parseHeadersText(routeHeadersText);
+    } catch (error) {
+      setHeaderError((error as Error).message);
       setRouteValidationAttempted(true);
       return;
     }
@@ -1116,6 +1113,7 @@ function ModelSectionComponent({
               </div>
             )}
 
+            {headerError && <small className="text-[#d70015]" role="alert">{headerError}；请先在线路的请求头编辑器中修正。</small>}
             <DialogFooter className="route-editor-footer">
               <Button
                 variant="outline"
@@ -1149,20 +1147,22 @@ function ModelSectionComponent({
           <DialogContent className="route-editor-dialog">
             <DialogHeader>
               <DialogTitle>编辑上游请求头</DialogTitle>
-              <DialogDescription>{headerDialogProfile.name} 的 Codey → 上游请求头，使用 JSON 对象表示。</DialogDescription>
+              <DialogDescription>{headerDialogProfile.name} 的 Codey → 上游请求头，使用 JSON 对象表示；null 或空字符串删除普通请求头，认证和协议必需请求头受保护。</DialogDescription>
             </DialogHeader>
             <label className="route-field">
               <span>请求头（JSON）</span>
               <textarea
                 aria-label="请求头（JSON）"
+                aria-invalid={Boolean(headerError)}
+                aria-describedby={headerError ? "request-headers-error" : undefined}
                 value={routeHeadersText}
                 disabled={isBusy}
                 rows={10}
                 className="min-h-48 rounded-lg border border-black/10 bg-white p-2 font-mono text-xs"
-                onChange={(event) => setRouteHeadersText(event.target.value)}
+                onChange={(event) => { setRouteHeadersText(event.target.value); setHeaderError(""); }}
                 placeholder={'{"X-Custom-Header": "value"}'}
               />
-              {headerValidationAttempted && <small className="text-[#d70015]" role="alert">请输入合法的 JSON 对象，键须为有效请求头名称，值须为字符串</small>}
+              {headerError && <small id="request-headers-error" className="text-[#d70015]" role="alert">{headerError}</small>}
             </label>
             <DialogFooter className="route-editor-footer">
               <Button variant="outline" disabled={isBusy} onClick={() => setHeaderDialogProfile(null)}>取消</Button>

@@ -181,6 +181,50 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       ["gpt-5.6-sol", "gpt-5.3-codex-spark"],
     );
 
+    const ultraQuerySource = [
+      "const ultraGate={},queryFactory=(_,factory)=>factory;",
+      "const query=queryFactory(null,({includeUltraReasoningEffort:i,isCustomModelProvider:a},",
+      "{get:l})=>{let m=i&&l(ultraGate,`1186680773`);",
+      "return {select:({data:r,enabledReasoningEfforts:n})=>r.map(e=>({...e,",
+      "supportedReasoningEfforts:e.supportedReasoningEfforts.filter(",
+      "({reasoningEffort:e})=>(m||e!==`ultra`)&&n.has(e))}))}});",
+    ].join("");
+    const patchedUltraQuery = await patchAsset(ultraQuerySource);
+    const ultraQuery = Function(`${patchedUltraQuery};return query;`)();
+    const nativeEfforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
+    const routeModels = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+      .map(model => ({
+        model: `relay/${model}`,
+        supportedReasoningEfforts: nativeEfforts.map(reasoningEffort => ({reasoningEffort})),
+      }));
+    routeModels.push({
+      model: "relay/other-model",
+      supportedReasoningEfforts: [{reasoningEffort: "high"}],
+    });
+    for (const [customProvider, remoteGate, includeUltra, enabledUltra, expectedUltra] of [
+      [true, false, true, true, true],
+      [true, true, true, true, true],
+      [true, false, false, true, false],
+      [true, false, true, false, false],
+      [false, false, true, true, false],
+      [false, true, true, true, true],
+    ]) {
+      const result = ultraQuery({
+        includeUltraReasoningEffort: includeUltra,
+        isCustomModelProvider: customProvider,
+      }, {get: () => remoteGate}).select({
+        data: routeModels,
+        enabledReasoningEfforts: new Set(nativeEfforts.filter(e => enabledUltra || e !== "ultra")),
+      });
+      for (const model of result.slice(0, 4)) {
+        assert.deepEqual(
+          model.supportedReasoningEfforts.map(e => e.reasoningEffort),
+          nativeEfforts.filter(e => expectedUltra || e !== "ultra"),
+        );
+      }
+      assert.deepEqual(result[4], routeModels[4], "models without ultra must not gain it");
+    }
+
     const serviceTierUiSource = [
       "function U(e){let o=e,s=o?.authMethod===`chatgpt`,c=o?.authMethod??null,l;",
       "let u=o,f=false,p=s&&!f&&u!=null&&",

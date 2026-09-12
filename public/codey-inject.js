@@ -55,10 +55,6 @@
   let codexSessionControllerPromise = null;
   let completionReconcileInFlight = false;
   let completionNextReconcileAt = 0;
-  // The AppServerManager comes from app-initial and only gains
-  // reconcileCompletedConversation through the renderer patch; once a manager
-  // without it is cached, re-scanning the bundles every 15 s cannot change that.
-  let completionReconcileUnsupported = false;
   let completionReconcileSessionId = "";
   let sidebarActionTooltipTimer = 0;
   let sidebarActionTooltipAnchor = null;
@@ -2221,9 +2217,14 @@
     if (
       requireCompletionReconcile
       && window.__codeyCodexSessionController?.kind === "manager"
+      && !sessionControllerCanReconcileCompletedConversation(
+        window.__codeyCodexSessionController,
+      )
     ) {
-      completionReconcileUnsupported = true;
-      throw new Error("Codex 完成态同步接口不可用");
+      // A manager can be cached before the renderer patch adds the reconcile
+      // method. Drop that stale wrapper and rediscover the patched manager.
+      window.__codeyCodexSessionController = null;
+      codexSessionControllerPromise = null;
     }
     let fallbackDispatcher = typeof window.__codeyCodexSignalDispatcher === "function"
       ? window.__codeyCodexSignalDispatcher
@@ -2307,7 +2308,6 @@
   window.__codeyReadAccountRateLimits = readAccountRateLimits;
 
   const reconcileStaleCompletedTask = async () => {
-    if (completionReconcileUnsupported) return false;
     if (document.visibilityState === "hidden") return false;
     const sessionId = getSessionId();
     if (!sessionId) {
@@ -2346,9 +2346,18 @@
           && getSessionId() === sessionId;
       });
     } catch {
+      // Asset discovery can race renderer patch injection. Retry on the next
+      // lifecycle or DOM event instead of waiting for the 15 s interval.
+      completionNextReconcileAt = Date.now() + 1_000;
       return false;
     } finally {
       completionReconcileInFlight = false;
+      // A navigation event can arrive while the previous task is reconciling.
+      // Check the newly visible task as soon as that operation settles.
+      if (getSessionId() !== sessionId) {
+        completionNextReconcileAt = 0;
+        void reconcileStaleCompletedTask();
+      }
     }
   };
 
@@ -3825,6 +3834,17 @@
     }
     if (pendingScanRoots.size) {
       scheduleIncrementalScan(null);
+    }
+    const sessionId = getSessionId();
+    if (
+      sessionId
+      && !completionReconcileInFlight
+      && (
+        sessionId !== completionReconcileSessionId
+        || Date.now() >= completionNextReconcileAt
+      )
+    ) {
+      void reconcileStaleCompletedTask();
     }
   };
   const sessionToolMutationOptions = {

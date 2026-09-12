@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import vm from "node:vm";
 
 import { loadStartupPatchTemplate } from "./helpers/startup-patch.mjs";
 
@@ -32,6 +33,49 @@ test("Windows worker source signature cache is bounded", async () => {
   assert.match(source, /stats\.ctimeNs/);
   assert.match(source, /Win32_ComputerSystem/);
   assert.doesNotMatch(source, /__codeyWindowsWmiSamplerGuard/);
+});
+
+test("WMI inspection skips oversized files and reuses small worker results", async () => {
+  const source = await loadStartupPatchTemplate();
+  const limit = 2 * 1024 * 1024;
+  const prefix = 'powershell Get-CimInstance Win32_Process Win32_PerfFormattedData_PerfProc_Process parentPort';
+  const reads = [];
+  const fakeFs = {
+    statSync: (filename) => ({ dev: 1, ino: 1,
+      size: filename.includes("large") ? limit * 20 : limit,
+      mtimeNs: 1, ctimeNs: 1, isFile: () => !filename.endsWith("directory.cjs"),
+    }),
+    readFileSync(filename) {
+      reads.push(filename);
+      if (filename === "/small-worker.cjs") return prefix;
+      throw new Error("read failed");
+    },
+  };
+  class NativeWorker { threadId = 123; }
+  const workerThreads = { Worker: NativeWorker };
+  const Module = { _load() {}, _extensions: { ".js"() {} }, syncBuiltinESMExports() {} };
+  const sandboxProcess = {
+    ...process, platform: "win32", env: {}, execArgv: [], argv: [],
+    getBuiltinModule(name) {
+      if (name === "fs") return fakeFs;
+      if (name === "module") return Module;
+      if (name === "worker_threads") return workerThreads;
+      if (name === "child_process") return { ...process.getBuiltinModule(name) };
+      return process.getBuiltinModule(name);
+    },
+  };
+  vm.runInNewContext(source, { process: sandboxProcess, Buffer, console, setTimeout, clearTimeout, setImmediate });
+  reads.length = 0;
+  assert.equal(new workerThreads.Worker("/large-worker.cjs").threadId, 123);
+  assert.equal(new workerThreads.Worker("/app.asar/large-worker.cjs").threadId, 123);
+  assert.equal(new workerThreads.Worker("/directory.cjs").threadId, 123);
+  assert.equal(new workerThreads.Worker("/child-process-snapshot-worker-large.cjs").threadId, -1);
+  assert.deepEqual(reads, []);
+  assert.equal(new workerThreads.Worker("/small-worker.cjs").threadId, -1);
+  assert.equal(new workerThreads.Worker("/small-worker.cjs").threadId, -1);
+  assert.deepEqual(reads, ["/small-worker.cjs"]);
+  assert.equal(new workerThreads.Worker("/unreadable-worker.cjs").threadId, 123);
+  assert.deepEqual(reads, ["/small-worker.cjs", "/unreadable-worker.cjs"]);
 });
 
 test("Windows lag patch bypasses only the recurring WMI snapshot worker", async () => {

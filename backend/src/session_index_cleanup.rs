@@ -18,6 +18,9 @@ const MANAGED_BY: &str = "Codey session index cleanup";
 const CLEANUP_MARKER_VERSION: u32 = 1;
 const CLEANUP_MARKER_FILE: &str = "tmp/codey-session-index-cleanup-marker-v1.json";
 const SQLITE_ID_QUERY_CHUNK_SIZE: usize = 900;
+// ponytail: startup cleanup is best-effort; cap lock waiting so a busy Codex
+// database cannot add one long timeout per database to the critical path.
+const STARTUP_SQLITE_BUSY_TIMEOUT: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -387,7 +390,7 @@ fn sqlite_thread_ids(path: &Path, candidate_ids: &HashSet<String>) -> Result<Sql
     }
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("只读打开 Codex 数据库失败：{}", path.display()))?;
-    db.busy_timeout(Duration::from_secs(5))?;
+    db.busy_timeout(STARTUP_SQLITE_BUSY_TIMEOUT)?;
     let mut scan = SqliteThreadScan::default();
     let mut candidates = candidate_ids.iter().collect::<Vec<_>>();
     candidates.sort();

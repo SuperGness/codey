@@ -476,11 +476,15 @@ impl RouterServer {
                 UpstreamTransport::Http
             });
         }
+        let mut request_headers = headers;
+        request_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        if let Some(probe) = &probe {
+            probe.set_upstream_request_headers(&format_upstream_headers(&request_headers));
+        }
         let request_builder = self
             .client
             .post(&upstream_url)
-            .headers(headers)
-            .header(CONTENT_TYPE, "application/json")
+            .headers(request_headers)
             .body(if body_mutated {
                 serde_json::to_vec(&body).context("序列化 Images 上游请求失败")?
             } else {
@@ -616,20 +620,45 @@ impl RouterServer {
             .as_ref()
             .map_err(|error| (502, "route_configuration_error", error.clone()))?;
         let mut headers = HeaderMap::with_capacity(request.headers.len() + prepared_headers.len());
+        headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("*/*"));
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            HeaderValue::from_static(concat!("Codey-Router/", env!("CARGO_PKG_VERSION"))),
+        );
+        let connection_headers = request
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
+            .flat_map(|(_, value)| {
+                value
+                    .split(',')
+                    .map(|name| name.trim().to_ascii_lowercase())
+            })
+            .collect::<HashSet<_>>();
         for (name, value) in &request.headers {
             if should_forward_incoming_header(name, route.official_account)
-                && let (Ok(name), Ok(value)) = (
-                    HeaderName::from_bytes(name.as_bytes()),
-                    HeaderValue::from_str(value),
-                )
+                && !connection_headers.contains(&name.to_ascii_lowercase())
             {
+                let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                    (
+                        400,
+                        "invalid_request_header",
+                        "请求包含非法请求头名称".to_string(),
+                    )
+                })?;
+                let value = HeaderValue::from_str(value).map_err(|_| {
+                    (
+                        400,
+                        "invalid_request_header",
+                        format!("请求头 {name} 包含非法值"),
+                    )
+                })?;
                 headers.insert(name, value);
             }
         }
-        for (name, value) in prepared_headers {
-            headers.insert(name, value.clone());
-        }
-        if let Some(request_id) = current_router_request_id()
+        apply_upstream_headers(&mut headers, prepared_headers);
+        if !prepared_headers.contains_key("x-codey-request-id")
+            && let Some(request_id) = current_router_request_id()
             && let Ok(value) = HeaderValue::from_str(&request_id)
         {
             headers.insert(HeaderName::from_static("x-codey-request-id"), value);
@@ -649,13 +678,14 @@ impl RouterServer {
                     "官方账号线路缺少 Codex OpenAI 登录态，请重新登录后重试".to_string(),
                 )
             })?;
-            let value = HeaderValue::from_str(&official_auth.authorization).map_err(|_| {
+            let mut value = HeaderValue::from_str(&official_auth.authorization).map_err(|_| {
                 (
                     401,
                     "openai_auth_invalid",
                     "官方账号线路的 Codex OpenAI 登录态无效，请重新登录后重试".to_string(),
                 )
             })?;
+            value.set_sensitive(true);
             headers.insert(AUTHORIZATION, value);
             headers.remove(CHATGPT_ACCOUNT_ID_HEADER);
             if let Some(account_id) = official_auth.account_id.as_deref()
@@ -1497,7 +1527,16 @@ impl RouterServer {
                 return Ok(());
             }
         };
-        if bridge == ProtocolBridge::NativeResponses {
+        let cache_key_deleted = resolved
+            .route
+            .upstream_headers
+            .as_ref()
+            .is_ok_and(|overrides| {
+                [PROMPT_CACHE_KEY_HEADER, PROMPT_CACHE_KEY_COMPAT_HEADER]
+                    .iter()
+                    .any(|name| overrides.get(*name).is_some_and(HeaderValue::is_empty))
+            });
+        if bridge == ProtocolBridge::NativeResponses && !cache_key_deleted {
             ensure_native_prompt_cache_key(
                 &mut headers,
                 &upstream_body,
@@ -1567,6 +1606,10 @@ impl RouterServer {
             .get("stream")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        if let Some(probe) = downstream.request_log_probe() {
+            probe.set_upstream_request_headers(&format_upstream_headers(&headers));
+        }
         let mut request_builder = self.client.post(upstream_url).headers(headers);
         if compacting {
             request_builder = request_builder.timeout(COMPACTION_TIMEOUT);
@@ -1600,9 +1643,7 @@ impl RouterServer {
                 None => serde_json::to_vec(&upstream_body)
                     .context("序列化 Responses WebSocket 上游请求失败")?,
             };
-            request_builder
-                .header(CONTENT_TYPE, "application/json")
-                .body(passthrough_body)
+            request_builder.body(passthrough_body)
         } else {
             drop(encoded_body.take());
             request_builder.json(&upstream_body)
@@ -1798,4 +1839,22 @@ impl RouterServer {
         }
         result
     }
+}
+
+pub(crate) fn format_upstream_headers(headers: &reqwest::header::HeaderMap) -> String {
+    headers
+        .iter()
+        .map(|(name, value)| {
+            let sensitive = value.is_sensitive() || is_sensitive_upstream_header(name.as_str());
+            format!(
+                "{name}: {}",
+                if sensitive {
+                    "[REDACTED]"
+                } else {
+                    value.to_str().unwrap_or("<binary>")
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

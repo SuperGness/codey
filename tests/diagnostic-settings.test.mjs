@@ -38,7 +38,8 @@ test("settings reports startup health and the confirmed main-process injection m
     /const startupNeedsAttention = maintenance\?\.performanceStatus === "degraded"/,
   );
   assert.match(sectionsSource, /startupNeedsAttention\s*\? "需检查"\s*: "正常"/);
-  assert.match(sectionsSource, /title: "主进程注入"/);
+  assert.doesNotMatch(sectionsSource, /title: "主进程注入"/);
+  assert.match(sectionsSource, />主进程注入<\/h4>/);
   assert.match(sectionsSource, /startupInjectionMode === "node_options"/);
   assert.match(sectionsSource, /startupInjectionMode === "inspector"/);
   assert.match(sectionsSource, /startupInjectionMode === "cli"/);
