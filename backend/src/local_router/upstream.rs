@@ -402,9 +402,9 @@ pub(crate) fn prepare_upstream_headers(
         }
     }
     if protocol == UpstreamProtocol::AnthropicMessages
-        && !headers
+        && headers
             .get(HeaderName::from_static("anthropic-version"))
-            .is_some_and(|value| !value.is_empty())
+            .is_none_or(|value| value.is_empty())
     {
         headers.insert(
             HeaderName::from_static("anthropic-version"),

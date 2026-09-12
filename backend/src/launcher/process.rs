@@ -339,11 +339,11 @@ pub(super) async fn spawn_codex(
                 }),
             );
             let wrapper_handshake = wrapper_environment_applied
-                .then(|| wrapper)
+                .then_some(wrapper)
                 .flatten()
                 .map(CliWrapperLaunch::into_handshake);
             let require_marker = wrapper_environment_applied
-                .then(|| require_patch)
+                .then_some(require_patch)
                 .flatten()
                 .map(|prepared| prepared.marker_path);
             if inspector_port.is_none() && wrapper_handshake.is_none() && require_marker.is_none() {
@@ -1607,6 +1607,7 @@ async fn install_startup_patch_with_cli_fallback(
 }
 
 #[cfg(any(windows, target_os = "macos"))]
+#[allow(clippy::too_many_arguments)]
 async fn wait_for_startup_compatibility(
     inspector_port: Option<u16>,
     patch_options: crate::codex_startup_patch::PatchOptions,

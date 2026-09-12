@@ -239,7 +239,7 @@ fn space_free_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
             "Codex 启动补丁短路径仍包含空白：{}",
             short.display()
         );
-        return Ok(short);
+        Ok(short)
     }
     #[cfg(not(windows))]
     {
