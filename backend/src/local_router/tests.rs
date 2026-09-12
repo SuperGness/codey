@@ -2628,11 +2628,32 @@ fn third_party_routes_forward_codex_identity_without_chatgpt_account_headers() {
     assert!(should_forward_incoming_header("session-id", false));
     assert!(should_forward_incoming_header("prompt-cache-key", false));
     assert!(should_forward_incoming_header("prompt_cache_key", false));
+    assert!(should_forward_incoming_header("x-codex-turn-state", false));
     assert!(!should_forward_incoming_header("authorization", true));
     assert!(!should_forward_incoming_header(ROUTER_AUTH_HEADER, true));
     assert!(!should_forward_incoming_header(ROUTE_METADATA_KEY, true));
     assert!(!should_forward_incoming_header(TURN_METADATA_HEADER, false));
+    assert!(!should_forward_incoming_header("x-codey-request-id", true));
+    assert!(!should_forward_incoming_header("X-Codey-Anything", false));
     assert!(should_forward_incoming_header("accept", false));
+}
+
+#[test]
+fn upstream_response_headers_forward_end_to_end_values_only() {
+    assert!(should_forward_upstream_response_header(
+        "x-codex-turn-state"
+    ));
+    assert!(should_forward_upstream_response_header("x-models-etag"));
+    assert!(should_forward_upstream_response_header("set-cookie"));
+    assert!(!should_forward_upstream_response_header("Content-Type"));
+    assert!(!should_forward_upstream_response_header("content-length"));
+    assert!(!should_forward_upstream_response_header("Connection"));
+    assert!(!should_forward_upstream_response_header(
+        "transfer-encoding"
+    ));
+    assert!(!should_forward_upstream_response_header(
+        "X-Codey-Request-Id"
+    ));
 }
 
 #[test]
@@ -7314,6 +7335,74 @@ async fn route_header_overrides_replace_and_remove_forwarded_headers() {
     assert_eq!(user_agent.as_deref(), Some("Codex Desktop/0.153.4"));
     assert_eq!(originator, None);
     assert_eq!(request_id, None);
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn upstream_response_headers_reach_the_downstream_client() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await.unwrap();
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+        let response = json!({"object":"response","model":body["model"]}).to_string();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nx-codex-turn-state: sticky-token\r\nx-models-etag: etag-1\r\nx-codey-request-id: forged-by-upstream\r\nconnection: close\r\n\r\n{response}",
+                    response.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    let (config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .json(&json!({"model":model_alias(&provider_id, &model),"input":"hello"}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    // Codex 依赖粘性路由令牌等端到端响应头；传输层头由本地路由自行管理，
+    // x-codey-request-id 以本地路由生成的值为准，不接受上游伪造。
+    assert_eq!(
+        response
+            .headers()
+            .get("x-codex-turn-state")
+            .and_then(|value| value.to_str().ok()),
+        Some("sticky-token")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-models-etag")
+            .and_then(|value| value.to_str().ok()),
+        Some("etag-1")
+    );
+    let request_id = response
+        .headers()
+        .get("x-codey-request-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap();
+    assert_ne!(request_id, "forged-by-upstream");
+    assert_eq!(
+        response
+            .headers()
+            .get_all(reqwest::header::CONTENT_TYPE)
+            .iter()
+            .count(),
+        1
+    );
+    assert_eq!(response.json::<Value>().await.unwrap()["model"], model);
+    upstream_task.await.unwrap();
     router.stop().await.unwrap();
 }
 

@@ -331,6 +331,7 @@ pub(crate) fn should_forward_incoming_header(name: &str, official_account: bool)
         || name.eq_ignore_ascii_case(ROUTE_METADATA_KEY)
         || name.eq_ignore_ascii_case(CONTENT_ENCODING.as_str())
         || name.eq_ignore_ascii_case(CONTENT_TYPE.as_str())
+        || name.to_ascii_lowercase().starts_with("x-codey-")
         || is_hop_by_hop_header(name)
     {
         return false;
@@ -428,6 +429,7 @@ pub(crate) fn is_codex_client_identity_header(name: &str) -> bool {
             | "x-codex-window-id"
             | "x-codex-parent-thread-id"
             | "x-codex-beta-features"
+            | "x-codex-turn-state"
             | "x-openai-subagent"
     ) || lower.starts_with("x-stainless-")
 }
