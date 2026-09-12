@@ -16,9 +16,6 @@ use crate::error_log;
 const SETTINGS_OVERLAY_LOAD_PATH: &str = "/internal/codey/settings-overlay/load";
 const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";
 const CDP_INJECTION_TIMEOUT: Duration = Duration::from_secs(30);
-// Status is diagnostic only; the bridge and overlay are already installed.
-const INJECTION_STATUS_READ_TIMEOUT: Duration = Duration::from_millis(250);
-const INJECTION_DEADLINE_MARGIN: Duration = Duration::from_millis(100);
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-bridge.js");
 const MODEL_WHITELIST_INJECT_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/model-whitelist-inject.js");
@@ -548,13 +545,6 @@ fn safe_injection_error_summary(error: &anyhow::Error) -> String {
     } else {
         "内部注入尝试失败".to_string()
     }
-}
-
-fn injection_status_read_budget(remaining: Duration) -> Option<Duration> {
-    let budget = remaining
-        .saturating_sub(INJECTION_DEADLINE_MARGIN)
-        .min(INJECTION_STATUS_READ_TIMEOUT);
-    (!budget.is_zero()).then_some(budget)
 }
 
 async fn inject_with_scripts(
@@ -1265,22 +1255,6 @@ assert.equal(nextPage.window.attempts, 1);
     #[test]
     fn injection_deadline_leaves_time_for_slow_windows_renderer_startup() {
         assert_eq!(CDP_INJECTION_TIMEOUT, Duration::from_secs(30));
-    }
-
-    #[test]
-    fn nonessential_status_read_never_consumes_the_injection_deadline() {
-        assert_eq!(
-            injection_status_read_budget(Duration::from_secs(5)),
-            Some(Duration::from_millis(250))
-        );
-        assert_eq!(
-            injection_status_read_budget(Duration::from_millis(150)),
-            Some(Duration::from_millis(50))
-        );
-        assert_eq!(
-            injection_status_read_budget(Duration::from_millis(100)),
-            None
-        );
     }
 
     #[test]

@@ -1865,7 +1865,11 @@ pub(crate) fn format_upstream_headers(headers: &reqwest::header::HeaderMap) -> S
             let sensitive = value.is_sensitive() || is_sensitive_upstream_header(name.as_str());
             format!(
                 "{name}: {}",
-                if sensitive { "[REDACTED]" } else { value.to_str().unwrap_or("<binary>") }
+                if sensitive {
+                    "[REDACTED]"
+                } else {
+                    value.to_str().unwrap_or("<binary>")
+                }
             )
         })
         .collect::<Vec<_>>()
