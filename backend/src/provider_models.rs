@@ -72,6 +72,21 @@ pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<Str
     if base.is_empty() {
         anyhow::bail!("API 地址不能为空");
     }
+    // 配置了上游代理的线路，模型同步也走同一出口，保持该线路流量的网络路径一致。
+    let proxied_client;
+    let client = if profile.upstream_proxy.trim().is_empty() {
+        client
+    } else {
+        let proxy =
+            reqwest::Proxy::all(profile.upstream_proxy.trim()).context("线路上游代理地址无效")?;
+        proxied_client = Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .redirect(reqwest::redirect::Policy::none())
+            .proxy(proxy)
+            .build()
+            .context("创建线路代理客户端失败")?;
+        &proxied_client
+    };
     let endpoints = model_endpoints(&base)?;
     let overrides = prepare_upstream_headers(
         profile,

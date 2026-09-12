@@ -185,14 +185,20 @@ impl AccountUsageCache {
         Some(snapshot.clone())
     }
 
-    pub async fn fetch(&mut self, codex_home: &Path) -> Result<AccountUsageSnapshot> {
-        self.fetch_with_refresh(codex_home, false).await
+    pub async fn fetch(
+        &mut self,
+        codex_home: &Path,
+        upstream_proxy: Option<&str>,
+    ) -> Result<AccountUsageSnapshot> {
+        self.fetch_with_refresh(codex_home, false, upstream_proxy)
+            .await
     }
 
     pub async fn fetch_with_refresh(
         &mut self,
         codex_home: &Path,
         force_refresh: bool,
+        upstream_proxy: Option<&str>,
     ) -> Result<AccountUsageSnapshot> {
         self.observe_auth_fingerprint(official_auth_fingerprint(&codex_home.join("auth.json")));
         let generation = self.auth_generation;
@@ -206,7 +212,9 @@ impl AccountUsageCache {
         // reqwest snapshots the current system proxy when a client is built. Rebuild the
         // dedicated usage client for each network refresh so proxy changes do not require
         // restarting Codey. Cached results still avoid unnecessary requests and rebuilds.
-        let result = match account_usage_http_client() {
+        // 官方线路配置了上游代理时，额度查询走同一出口，避免同一账号同时从
+        // 两个地区访问。
+        let result = match account_usage_http_client(upstream_proxy) {
             Ok(client) => fetch_official_account_usage(&client, codex_home).await,
             Err(error) => Err(error),
         };
@@ -280,11 +288,12 @@ pub(crate) async fn query_snapshot(
     cache: &mut AccountUsageCache,
     home: &Path,
     force_refresh: bool,
+    upstream_proxy: Option<&str>,
 ) -> Value {
     let result = if force_refresh {
-        cache.fetch_with_refresh(home, true).await
+        cache.fetch_with_refresh(home, true, upstream_proxy).await
     } else {
-        cache.fetch(home).await
+        cache.fetch(home, upstream_proxy).await
     };
     let mut value = match result {
         Ok(snapshot) => {
@@ -311,12 +320,17 @@ pub(crate) async fn query_snapshot(
     value
 }
 
-fn account_usage_http_client() -> Result<Client> {
-    Client::builder()
+fn account_usage_http_client(upstream_proxy: Option<&str>) -> Result<Client> {
+    let mut builder = Client::builder()
         .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(ACCOUNT_USAGE_CONNECT_TIMEOUT)
-        .build()
-        .context("创建官方额度网络客户端失败")
+        .connect_timeout(ACCOUNT_USAGE_CONNECT_TIMEOUT);
+    if let Some(proxy) = upstream_proxy
+        .map(str::trim)
+        .filter(|proxy| !proxy.is_empty())
+    {
+        builder = builder.proxy(reqwest::Proxy::all(proxy).context("官方线路的上游代理地址无效")?);
+    }
+    builder.build().context("创建官方额度网络客户端失败")
 }
 
 fn account_usage_failure_backoff(consecutive_failures: u32) -> Duration {
@@ -757,16 +771,16 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut cache = AccountUsageCache::default();
         cache.record_success(sample_snapshot(), Instant::now());
-        let cached = query_snapshot(&mut cache, directory.path(), false).await;
+        let cached = query_snapshot(&mut cache, directory.path(), false, None).await;
         assert_eq!(cached["status"], "ok");
         assert_eq!(cached["fetchedAt"], 1_700_000_000_u64);
         // No auth file: a forced refresh must fetch instead of returning the snapshot.
-        let failed = query_snapshot(&mut cache, directory.path(), true).await;
+        let failed = query_snapshot(&mut cache, directory.path(), true, None).await;
         assert_eq!(failed["status"], "error");
         assert!(failed["message"].as_str().unwrap().contains("官方登录信息"));
         assert_eq!(cache.consecutive_failures, 1);
         assert_eq!(
-            query_snapshot(&mut cache, directory.path(), true).await,
+            query_snapshot(&mut cache, directory.path(), true, None).await,
             failed
         );
         assert_eq!(cache.consecutive_failures, 1);

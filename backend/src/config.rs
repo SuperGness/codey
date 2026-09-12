@@ -33,6 +33,10 @@ pub struct ProviderProfile {
     /// Per-route request headers editable in the local router settings.
     #[serde(default)]
     pub model_request_headers: BTreeMap<String, String>,
+    /// Optional per-route outbound proxy URL (http/https/socks5/socks5h)。
+    /// 设置后该线路的上游流量改走此代理而非系统代理，并禁用上游 WebSocket。
+    #[serde(default)]
+    pub upstream_proxy: String,
     /// Stable id of the provider in the source Codex configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_provider_id: Option<String>,
@@ -121,6 +125,7 @@ impl ProviderProfile {
             api_key_configured: false,
             clear_api_key: false,
             model_request_headers: BTreeMap::new(),
+            upstream_proxy: String::new(),
             source_provider_id: None,
             official_account: false,
             supports_remote_compaction: false,
@@ -173,6 +178,7 @@ impl ProviderProfile {
         self.short_name = self.short_name.trim().to_string();
         self.base_url = self.base_url.trim().trim_end_matches('/').to_string();
         self.api_key = self.api_key.trim().to_string();
+        self.upstream_proxy = self.upstream_proxy.trim().to_string();
         self.source_provider_id = self
             .source_provider_id
             .take()
@@ -253,6 +259,12 @@ impl ProviderProfile {
             return Err(format!(
                 "线路「{name}」只有 OpenAI Responses 协议可以启用 WebSocket"
             ));
+        }
+        if !self.upstream_proxy.trim().is_empty() {
+            validate_outbound_proxy_url(
+                self.upstream_proxy.trim(),
+                &format!("线路「{name}」的上游代理"),
+            )?;
         }
         if self.auth_mode == AUTH_MODE_OFFICIAL_ACCOUNT || self.official_account {
             return Ok(());
@@ -410,6 +422,35 @@ fn normalize_prompt_optimization_upstream_protocol(value: &str) -> String {
         | UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES => value.trim().to_string(),
         _ => default_prompt_optimization_upstream_protocol(),
     }
+}
+
+/// 线路上游代理地址。与 API URL 不同，代理地址允许携带用户名密码（代理认证）。
+pub(crate) fn validate_outbound_proxy_url(value: &str, label: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| format!("{label}不是有效的代理地址（http/https/socks5/socks5h）"))?;
+    if url.host_str().is_none() || !matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h")
+    {
+        return Err(format!("{label}必须是 http、https、socks5 或 socks5h 地址"));
+    }
+    reqwest::Proxy::all(url.clone()).map_err(|_| format!("{label}无法用作代理"))?;
+    let unusable_host = url
+        .host_str()
+        .and_then(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|ip| match ip {
+            std::net::IpAddr::V4(ip) => {
+                ip.is_unspecified() || ip.is_link_local() || ip.is_broadcast()
+            }
+            std::net::IpAddr::V6(ip) => ip.is_unspecified() || ip.is_unicast_link_local(),
+        });
+    if unusable_host {
+        return Err(format!("{label}不能指向未指定地址或链路本地地址"));
+    }
+    Ok(())
 }
 
 pub(crate) fn validate_outbound_api_url(value: &str, label: &str) -> Result<reqwest::Url, String> {
@@ -2121,6 +2162,48 @@ mod tests {
                 "{rejected}"
             );
         }
+    }
+
+    #[test]
+    fn upstream_proxy_urls_validate_scheme_and_host() {
+        for accepted in [
+            "http://127.0.0.1:7890",
+            "https://proxy.example.com:8443",
+            "socks5://127.0.0.1:1080",
+            "socks5h://proxy.example.com:1080",
+            // 代理认证凭据允许写在地址里，区别于 API URL。
+            "http://user:pass@proxy.example.com:8080",
+        ] {
+            assert!(
+                validate_outbound_proxy_url(accepted, "测试代理").is_ok(),
+                "{accepted}"
+            );
+        }
+        for rejected in [
+            "ftp://proxy.example.com:21",
+            "socks4://127.0.0.1:1080",
+            "127.0.0.1:7890",
+            "http://0.0.0.0:7890",
+            "http://[fe80::1]:7890",
+        ] {
+            assert!(
+                validate_outbound_proxy_url(rejected, "测试代理").is_err(),
+                "{rejected}"
+            );
+        }
+
+        let mut config = named_config("代理线路");
+        config.profiles[0].base_url = "https://api.example.com/v1".to_string();
+        config.profiles[0].api_key = "sk-test".to_string();
+        config.profiles[0].upstream_proxy = "ftp://proxy.example.com".to_string();
+        assert!(
+            config.profiles[0]
+                .validate()
+                .unwrap_err()
+                .contains("上游代理")
+        );
+        config.profiles[0].upstream_proxy = "socks5://127.0.0.1:1080".to_string();
+        assert!(config.profiles[0].validate().is_ok());
     }
 
     #[test]

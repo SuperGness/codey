@@ -7413,6 +7413,62 @@ async fn routing_hint_reaches_upstream_with_the_restored_model_name() {
 }
 
 #[tokio::test]
+async fn route_upstream_proxy_carries_requests_through_the_proxy() {
+    let proxy = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    let proxy_task = tokio::spawn(async move {
+        let (mut stream, _) = proxy.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await.unwrap();
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+        write_json_response(
+            &mut stream,
+            200,
+            &json!({"object":"response","model":body["model"]}),
+        )
+        .await
+        .unwrap();
+        request.path
+    });
+    // 上游域名不可解析：请求只有经过代理（绝对形式请求行）才能成功。
+    let (mut config, provider_id, model) =
+        router_config("http://codey-proxy-test.invalid/v1".into());
+    config.profiles[0].upstream_proxy = format!("http://{proxy_address}");
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .json(&json!({"model":model_alias(&provider_id, &model),"input":"hello"}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(response.json::<Value>().await.unwrap()["model"], model);
+    let proxied_path = proxy_task.await.unwrap();
+    assert_eq!(proxied_path, "http://codey-proxy-test.invalid/v1/responses");
+    // 配置了上游代理的线路不使用上游 WebSocket，即使线路声明支持。
+    config.profiles[0].supports_websockets = true;
+    let snapshot = RouterSnapshot::from_config(&config);
+    assert!(
+        snapshot
+            .routes
+            .values()
+            .all(|route| !route.supports_websockets)
+    );
+    config.profiles[0].upstream_proxy = String::new();
+    let snapshot = RouterSnapshot::from_config(&config);
+    assert!(
+        snapshot
+            .routes
+            .values()
+            .any(|route| route.supports_websockets)
+    );
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn upstream_response_headers_reach_the_downstream_client() {
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();

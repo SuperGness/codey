@@ -344,6 +344,7 @@ fn profile_from_provider(
         api_key_configured: !provider.official,
         clear_api_key: false,
         model_request_headers: BTreeMap::new(),
+        upstream_proxy: String::new(),
         source_provider_id: None,
         official_account: provider.official,
         supports_remote_compaction: provider.supports_remote_compaction,
