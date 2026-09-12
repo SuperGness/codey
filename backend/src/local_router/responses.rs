@@ -476,15 +476,11 @@ impl RouterServer {
                 UpstreamTransport::Http
             });
         }
-        let mut request_headers = headers;
-        request_headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        if let Some(probe) = &probe {
-            probe.set_upstream_request_headers(&format_upstream_headers(&request_headers));
-        }
         let request_builder = self
             .client
             .post(&upstream_url)
-            .headers(request_headers)
+            .headers(headers)
+            .header(CONTENT_TYPE, "application/json")
             .body(if body_mutated {
                 serde_json::to_vec(&body).context("序列化 Images 上游请求失败")?
             } else {
@@ -620,45 +616,20 @@ impl RouterServer {
             .as_ref()
             .map_err(|error| (502, "route_configuration_error", error.clone()))?;
         let mut headers = HeaderMap::with_capacity(request.headers.len() + prepared_headers.len());
-        headers.insert(reqwest::header::ACCEPT, HeaderValue::from_static("*/*"));
-        headers.insert(
-            reqwest::header::USER_AGENT,
-            HeaderValue::from_static(concat!("Codey-Router/", env!("CARGO_PKG_VERSION"))),
-        );
-        let connection_headers = request
-            .headers
-            .iter()
-            .filter(|(name, _)| name.eq_ignore_ascii_case("connection"))
-            .flat_map(|(_, value)| {
-                value
-                    .split(',')
-                    .map(|name| name.trim().to_ascii_lowercase())
-            })
-            .collect::<HashSet<_>>();
         for (name, value) in &request.headers {
             if should_forward_incoming_header(name, route.official_account)
-                && !connection_headers.contains(&name.to_ascii_lowercase())
+                && let (Ok(name), Ok(value)) = (
+                    HeaderName::from_bytes(name.as_bytes()),
+                    HeaderValue::from_str(value),
+                )
             {
-                let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-                    (
-                        400,
-                        "invalid_request_header",
-                        "请求包含非法请求头名称".to_string(),
-                    )
-                })?;
-                let value = HeaderValue::from_str(value).map_err(|_| {
-                    (
-                        400,
-                        "invalid_request_header",
-                        format!("请求头 {name} 包含非法值"),
-                    )
-                })?;
                 headers.insert(name, value);
             }
         }
-        apply_upstream_headers(&mut headers, prepared_headers);
-        if !prepared_headers.contains_key("x-codey-request-id")
-            && let Some(request_id) = current_router_request_id()
+        for (name, value) in prepared_headers {
+            headers.insert(name, value.clone());
+        }
+        if let Some(request_id) = current_router_request_id()
             && let Ok(value) = HeaderValue::from_str(&request_id)
         {
             headers.insert(HeaderName::from_static("x-codey-request-id"), value);
@@ -678,14 +649,13 @@ impl RouterServer {
                     "官方账号线路缺少 Codex OpenAI 登录态，请重新登录后重试".to_string(),
                 )
             })?;
-            let mut value = HeaderValue::from_str(&official_auth.authorization).map_err(|_| {
+            let value = HeaderValue::from_str(&official_auth.authorization).map_err(|_| {
                 (
                     401,
                     "openai_auth_invalid",
                     "官方账号线路的 Codex OpenAI 登录态无效，请重新登录后重试".to_string(),
                 )
             })?;
-            value.set_sensitive(true);
             headers.insert(AUTHORIZATION, value);
             headers.remove(CHATGPT_ACCOUNT_ID_HEADER);
             if let Some(account_id) = official_auth.account_id.as_deref()
@@ -1281,26 +1251,17 @@ impl RouterServer {
         body_mutated |= model_was_defaulted;
         let subagent_request = request_is_subagent(&request);
         let binding_keys = request_binding_keys(&request);
-        // Route lookup and binding refresh are both synchronous hash lookups.
-        // Keeping them under one short critical section halves mutex traffic on
-        // the request hot path without holding the lock across any I/O.
-        let resolved = {
-            let mut bindings = self
+        // Resolve against the current binding, but do not replace it until the
+        // request passes local cross-route history validation.
+        let (resolved, previous_route) = {
+            let bindings = self
                 .bindings
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let bound_route = bindings.route_for_keys(&binding_keys);
             let resolved =
                 snapshot.target_for_request(&model, route_hint.as_deref(), bound_route.as_deref());
-            if let Ok(resolved) = &resolved {
-                let refresh_session_binding = route_hint.is_some() && !subagent_request;
-                bindings.remember(
-                    &binding_keys,
-                    &resolved.provider_id,
-                    refresh_session_binding,
-                );
-            }
-            resolved
+            (resolved, bound_route)
         };
         let resolved = match resolved {
             Ok(resolved) => resolved,
@@ -1311,6 +1272,9 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        let route_changed = previous_route
+            .as_deref()
+            .is_some_and(|provider_id| provider_id != resolved.provider_id);
         if model != resolved.upstream_model {
             body.as_object_mut()
                 .expect("validated Responses body must remain an object")
@@ -1416,6 +1380,25 @@ impl RouterServer {
             body_mutated = true;
             // Expansion changed the input too; do not reuse its original raw
             // JSON slice, which would contain only the latest delta.
+            encoded_body = None;
+        }
+        if bridge == ProtocolBridge::NativeResponses
+            && route_changed
+            && let Err(error) = validate_cross_route_context(&body)
+        {
+            return downstream
+                .write_error(
+                    400,
+                    "context_not_portable",
+                    error.to_string(),
+                    Some(&resolved.route),
+                )
+                .await;
+        }
+        if bridge == ProtocolBridge::NativeResponses
+            && normalize_native_responses_context(&mut body, route_changed)
+        {
+            body_mutated = true;
             encoded_body = None;
         }
         let force_upstream_stream = should_force_upstream_streaming(
@@ -1527,6 +1510,20 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        // Commit the new binding only after the request's route compatibility,
+        // payload conversion, and credentials have passed local checks. A
+        // rejected switch must leave the prior route available for a retry.
+        {
+            let refresh_session_binding = route_hint.is_some() && !subagent_request;
+            self.bindings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remember(
+                    &binding_keys,
+                    &resolved.provider_id,
+                    refresh_session_binding,
+                );
+        }
         let cache_key_deleted = resolved
             .route
             .upstream_headers
@@ -1557,7 +1554,12 @@ impl RouterServer {
                 let had_previous_response =
                     responses_previous_response_id(&upstream_body).is_some();
                 let websocket_attempt = downstream
-                    .try_proxy_upstream_websocket(&resolved.route, &headers, &mut upstream_body)
+                    .try_proxy_upstream_websocket(
+                        &resolved.route,
+                        &headers,
+                        &mut upstream_body,
+                        route_changed,
+                    )
                     .await?;
                 if websocket_attempt == UpstreamWebSocketAttempt::Completed {
                     return Ok(());
@@ -1601,15 +1603,28 @@ impl RouterServer {
                         .await;
                 }
             }
+            // A failed/reconnected WebSocket can restore full history after the
+            // first normalization pass. Validate and normalize the exact body
+            // that will be sent through the HTTP fallback as well.
+            if route_changed && let Err(error) = validate_cross_route_context(&upstream_body) {
+                return downstream
+                    .write_error(
+                        400,
+                        "context_not_portable",
+                        error.to_string(),
+                        Some(&resolved.route),
+                    )
+                    .await;
+            }
+            if normalize_native_responses_context(&mut upstream_body, route_changed) {
+                body_mutated = true;
+                encoded_body = None;
+            }
         }
         let upstream_stream_requested = upstream_body
             .get("stream")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        if let Some(probe) = downstream.request_log_probe() {
-            probe.set_upstream_request_headers(&format_upstream_headers(&headers));
-        }
         let mut request_builder = self.client.post(upstream_url).headers(headers);
         if compacting {
             request_builder = request_builder.timeout(COMPACTION_TIMEOUT);
@@ -1643,7 +1658,9 @@ impl RouterServer {
                 None => serde_json::to_vec(&upstream_body)
                     .context("序列化 Responses WebSocket 上游请求失败")?,
             };
-            request_builder.body(passthrough_body)
+            request_builder
+                .header(CONTENT_TYPE, "application/json")
+                .body(passthrough_body)
         } else {
             drop(encoded_body.take());
             request_builder.json(&upstream_body)
@@ -1848,11 +1865,7 @@ pub(crate) fn format_upstream_headers(headers: &reqwest::header::HeaderMap) -> S
             let sensitive = value.is_sensitive() || is_sensitive_upstream_header(name.as_str());
             format!(
                 "{name}: {}",
-                if sensitive {
-                    "[REDACTED]"
-                } else {
-                    value.to_str().unwrap_or("<binary>")
-                }
+                if sensitive { "[REDACTED]" } else { value.to_str().unwrap_or("<binary>") }
             )
         })
         .collect::<Vec<_>>()
