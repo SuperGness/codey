@@ -1693,7 +1693,7 @@ mod tests {
         assert!(expression.contains("get throttleExternalPluginFocusReconcile()"));
         assert!(expression.contains("get disableAppStateHeartbeat()"));
         assert!(expression.contains("get optionalMainBundlePatchFailures()"));
-        assert!(expression.contains("module._compile(source, filename)"));
+        assert!(expression.contains("const originalCompile = module._compile"));
         assert!(expression.contains("CODEY_SUBAGENT_GATE_RUNTIME_ID"));
         assert!(expression.contains("default Chinese locale"));
         assert!(expression.contains("__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__"));
