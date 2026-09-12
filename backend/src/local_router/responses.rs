@@ -1515,6 +1515,9 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        // 请求体的模型名已还原为上游模型名，路由提示头里的模型名必须保持一致；
+        // HTTP、WebSocket 握手和压缩请求共用这份头。
+        align_routing_hint_model(&mut headers, &resolved.upstream_model);
         // Commit the new binding only after the request's route compatibility,
         // payload conversion, and credentials have passed local checks. A
         // rejected switch must leave the prior route available for a retry.

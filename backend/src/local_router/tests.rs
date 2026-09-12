@@ -2639,6 +2639,34 @@ fn third_party_routes_forward_codex_identity_without_chatgpt_account_headers() {
 }
 
 #[test]
+fn routing_hint_model_follows_the_resolved_upstream_model() {
+    let mut headers = HeaderMap::new();
+    align_routing_hint_model(&mut headers, "provider-model");
+    assert!(headers.is_empty());
+
+    headers.insert(
+        HeaderName::from_static(ROUTING_HINT_HEADER),
+        HeaderValue::from_static("model=route%20a/provider-model;tier=priority"),
+    );
+    align_routing_hint_model(&mut headers, "provider-model");
+    assert_eq!(
+        headers[ROUTING_HINT_HEADER],
+        HeaderValue::from_static("model=provider-model;tier=priority")
+    );
+
+    // 已经一致时不改写；无 model 段时保留原值。
+    headers.insert(
+        HeaderName::from_static(ROUTING_HINT_HEADER),
+        HeaderValue::from_static("tier=priority"),
+    );
+    align_routing_hint_model(&mut headers, "provider-model");
+    assert_eq!(
+        headers[ROUTING_HINT_HEADER],
+        HeaderValue::from_static("tier=priority")
+    );
+}
+
+#[test]
 fn upstream_response_headers_forward_end_to_end_values_only() {
     assert!(should_forward_upstream_response_header(
         "x-codex-turn-state"
@@ -7335,6 +7363,52 @@ async fn route_header_overrides_replace_and_remove_forwarded_headers() {
     assert_eq!(user_agent.as_deref(), Some("Codex Desktop/0.153.4"));
     assert_eq!(originator, None);
     assert_eq!(request_id, None);
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn routing_hint_reaches_upstream_with_the_restored_model_name() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await.unwrap();
+        let routing_hint = incoming_header(&request, "x-codex-routing-hint").map(str::to_string);
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+        write_json_response(
+            &mut stream,
+            200,
+            &json!({"object":"response","model":body["model"]}),
+        )
+        .await
+        .unwrap();
+        (routing_hint, body["model"].as_str().unwrap().to_string())
+    });
+    let (config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let alias = model_alias(&provider_id, &model);
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .header(
+            "x-codex-routing-hint",
+            format!("model={alias};tier=default"),
+        )
+        .json(&json!({"model":alias,"input":"hello"}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let (routing_hint, upstream_model) = upstream_task.await.unwrap();
+    assert_eq!(upstream_model, model);
+    // 路由提示必须和请求体里已还原的上游模型名一致，不能把线路别名泄给上游。
+    assert_eq!(
+        routing_hint.as_deref(),
+        Some("model=provider-model;tier=default")
+    );
     router.stop().await.unwrap();
 }
 
