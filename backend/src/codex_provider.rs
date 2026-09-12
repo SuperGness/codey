@@ -13,6 +13,7 @@ use codey_runtime_core::app_paths::{codex_runtime_executable, resolve_codex_app_
 use codey_runtime_core::config_manager::ConfigManager;
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::codex_config::BUILTIN_OPENAI_PROVIDER_ID;
@@ -265,7 +266,10 @@ fn sync_provider_profile(
         next.upstream_models_by_provider
             .remove(&placeholder_provider_id);
     } else if let Some(existing) = next.profiles.iter_mut().find(|existing| {
-        existing.provider_id() == imported_provider_id || existing.id == imported_id
+        (existing.id == imported_id && existing.normalized_base_url() == provider.base_url)
+            || (existing.official_account == provider.official
+                && existing.provider_id() == imported_provider_id
+                && existing.normalized_base_url() == provider.base_url)
     }) {
         // Keep the Codey UI identity stable when a previously imported route
         // has a different runtime provider id.
@@ -279,7 +283,19 @@ fn sync_provider_profile(
         }
         *existing = replacement;
     } else {
-        next.profiles.push(profile);
+        if next
+            .profiles
+            .iter()
+            .any(|existing| existing.id == profile.id)
+        {
+            let mut profile = profile;
+            profile.id = unique_imported_route_id(&next.profiles, &provider, upstream_protocol);
+            profile.source_provider_id = Some(provider.id.clone());
+            active_profile_id = profile.id.clone();
+            next.profiles.push(profile);
+        } else {
+            next.profiles.push(profile);
+        }
     }
     next.active_profile_id = active_profile_id;
     next.initial_route_import_completed = true;
@@ -290,6 +306,37 @@ fn sync_provider_profile(
         next.settings_revision = config.settings_revision.saturating_add(1);
     }
     Ok((next, ProviderStatus { changed, provider }))
+}
+
+fn stable_imported_route_id(provider: &CurrentProvider, upstream_protocol: &str) -> String {
+    let identity = format!(
+        "{}\n{}\n{}",
+        provider.id, provider.base_url, upstream_protocol
+    );
+    let digest = Sha256::digest(identity.as_bytes());
+    let suffix = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("route-{suffix}")
+}
+
+fn unique_imported_route_id(
+    profiles: &[ProviderProfile],
+    provider: &CurrentProvider,
+    upstream_protocol: &str,
+) -> String {
+    let base = stable_imported_route_id(provider, upstream_protocol);
+    if !profiles.iter().any(|profile| profile.id == base) {
+        return base;
+    }
+    for suffix in 2..=99 {
+        let candidate = format!("{base}-{suffix}");
+        if !profiles.iter().any(|profile| profile.id == candidate) {
+            return candidate;
+        }
+    }
+    format!("{base}-{}", profiles.len() + 1)
 }
 
 pub fn status_from_config(config: &CodeyConfig) -> ProviderStatus {
@@ -381,6 +428,9 @@ fn local_provider_with_auth_policy(
     let mut base_url = table
         .and_then(|provider| provider.get("base_url"))
         .and_then(Item::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| document.get("openai_base_url").and_then(Item::as_str))
         .unwrap_or_default()
         .trim()
         .trim_end_matches('/')
@@ -1498,8 +1548,56 @@ experimental_bearer_token = "sk-relay"
         )
         .unwrap();
 
+        assert_eq!(synced.profiles.len(), 2);
         assert_eq!(synced.profiles[0].short_name, "中");
-        assert_eq!(synced.profiles[0].name, "Relay Updated");
+        assert_eq!(synced.profiles[0].base_url, "https://old.example/v1");
+        assert_eq!(synced.profiles[1].name, "Relay Updated");
+        assert_eq!(synced.profiles[1].base_url, "https://new.example/v1");
+        assert_eq!(
+            synced.profiles[1].source_provider_id.as_deref(),
+            Some("relay")
+        );
+        assert_ne!(synced.profiles[0].id, synced.profiles[1].id);
+
+        let imported_id = synced.profiles[1].id.clone();
+        let (synced_again, _) = sync_provider_profile(
+            &synced,
+            CurrentProvider {
+                id: "relay".into(),
+                name: "Relay Updated".into(),
+                official: false,
+                supports_remote_compaction: false,
+                base_url: "https://new.example/v1".into(),
+            },
+            "new-key".into(),
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+        )
+        .unwrap();
+        assert_eq!(synced_again.profiles.len(), 2);
+        assert_eq!(synced_again.profiles[1].id, imported_id);
+    }
+
+    #[test]
+    fn top_level_openai_base_url_stays_paired_with_provider_key() {
+        let home = TempDir::new().unwrap();
+        write_config(
+            home.path(),
+            r#"openai_base_url = "https://relay.example/v1"
+model_provider = "openai"
+
+[model_providers.openai]
+name = "OpenAI"
+wire_api = "responses"
+experimental_bearer_token = "sk-relay"
+"#,
+        );
+        let provider = current_provider(home.path()).unwrap();
+        assert_eq!(provider.base_url, "https://relay.example/v1");
+        assert!(!provider.official);
+        let (config, _) =
+            sync_current_third_party_provider(&CodeyConfig::default(), home.path()).unwrap();
+        assert_eq!(config.profiles[0].base_url, "https://relay.example/v1");
+        assert_eq!(config.profiles[0].api_key, "sk-relay");
     }
 
     #[test]
