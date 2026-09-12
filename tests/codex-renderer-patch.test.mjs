@@ -148,7 +148,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
   try {
     assert.equal(
       (0, eval)(await loadStartupPatchTemplate({ disablePet: true, errorLoggerExecutable: "C:\\Codey\\codey.exe" })),
-      "codey-startup-patch-installed-v39",
+      "codey-startup-patch-installed-v40",
     );
     const electron = Module._load("electron", undefined, false);
     const petSurface = new electron.BrowserWindow({ title: "Pet Surface test" });
@@ -167,14 +167,32 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     assert.equal(avatarOverlayWindow.destroyed, false);
     assert.equal(
       avatarOverlayWindow.options.webPreferences.backgroundThrottling,
-      false,
+      true,
     );
     avatarOverlayWindow.emit("show");
     avatarOverlayWindow.emit("hide");
     assert.deepEqual(
       avatarOverlayWindow.webContents.backgroundThrottling,
-      [],
+      [false, true],
     );
+    assert.equal(
+      globalThis.__CODEY_CODEX_STARTUP_PATCH__.throttleHiddenAvatarOverlay,
+      true,
+    );
+    const overlaySource = [
+      "class AvatarOverlayManager{",
+      "async prewarm(e){",
+      "if(this.window!=null||this.openingWindowPromise!=null||this.isAppQuitting)return;",
+      "let t=this.windowVisibilitySequence,n=await this.ensureWindow(t);",
+      "n==null||t!==this.windowVisibilitySequence||this.positionWindow(n,e)}",
+      "async prewarm(){await this.get()}",
+      "}",
+    ].join("");
+    const patchedOverlay = globalThis.__CODEY_PATCH_CODEX_AVATAR_OVERLAY_PREWARM__(
+      overlaySource,
+    );
+    assert.match(patchedOverlay, /async prewarm\(e\)\{return;/);
+    assert.match(patchedOverlay, /async prewarm\(\)\{await this.get\(\)\}/);
     assert.equal(petSurface.options.webPreferences, undefined);
     assert.equal(
       Module._load("C:\\Codex\\avatar_overlay.node", undefined, false),

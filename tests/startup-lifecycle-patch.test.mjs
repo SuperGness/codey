@@ -75,7 +75,7 @@ test("startup patch preserves native child processes and ordinary BrowserWindows
     Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
     assert.equal(
       (0, eval)(await loadStartupPatchTemplate()),
-      "codey-startup-patch-installed-v39",
+      "codey-startup-patch-installed-v40",
     );
 
     const childProcess = Module._load("node:child_process", undefined, false);
@@ -95,17 +95,34 @@ test("startup patch preserves native child processes and ordinary BrowserWindows
 
     const electron = Module._load("electron", undefined, false);
     assert.ok(new electron.BrowserWindow({ title: "Settings" }) instanceof FakeBrowserWindow);
+    const overlaySource = [
+      "class AvatarOverlayManager{",
+      "async prewarm(e){",
+      "if(this.window!=null||this.openingWindowPromise!=null||this.isAppQuitting)return;",
+      "let t=this.windowVisibilitySequence,n=await this.ensureWindow(t);",
+      "n==null||t!==this.windowVisibilitySequence||this.positionWindow(n,e)}",
+      "}",
+    ].join("");
+    assert.equal(
+      globalThis.__CODEY_PATCH_CODEX_AVATAR_OVERLAY_PREWARM__(overlaySource),
+      overlaySource,
+    );
     const worker = new workerThreads.Worker([
       'const { parentPort } = require("node:worker_threads");',
       'const query = "powershell.exe Get-CimInstance Win32_Process Win32_PerfFormattedData_PerfProc_Process";',
       'parentPort.postMessage({ executed: true, query });',
     ].join("\n"), { eval: true, name: "child-process-snapshot" });
     try {
+      assert.equal(worker.threadId, -1);
       const [message] = await once(worker, "message");
-      assert.equal(message.executed, true);
+      assert.deepEqual(message, { type: "ok", value: [] });
     } finally {
       await worker.terminate();
     }
+    assert.equal(
+      globalThis.__CODEY_CODEX_STARTUP_PATCH__.windowsWmiSampler.lastMatchReason,
+      "worker-option-name",
+    );
   } finally {
     Object.defineProperty(process, "platform", platformDescriptor);
     workerThreads.Worker = NativeWorker;
@@ -136,7 +153,7 @@ test("NODE_OPTIONS require path writes a marker and clears inherited options", a
         CODEY_STARTUP_PATCH_MARKER: markerPath,
       },
     );
-    assert.equal(isolated.result, "codey-startup-patch-installed-v39");
+    assert.equal(isolated.result, "codey-startup-patch-installed-v40");
     assert.ok(!isolated.process.env.NODE_OPTIONS);
     assert.ok(!isolated.process.env.CODEY_STARTUP_PATCH_MARKER);
     const payload = JSON.parse(fs.readFileSync(markerPath, "utf8"));
@@ -167,7 +184,7 @@ test("inspector eval does not clear NODE_OPTIONS without the require marker", as
         CODEY_STARTUP_PATCH_MARKER: null,
       },
     );
-    assert.equal(isolated.result, "codey-startup-patch-installed-v39");
+    assert.equal(isolated.result, "codey-startup-patch-installed-v40");
     assert.equal(
       isolated.process.env.NODE_OPTIONS,
       "--require=/tmp/codey-keep-node-options.js",

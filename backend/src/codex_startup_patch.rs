@@ -10,7 +10,7 @@ use std::ffi::{OsStr, OsString};
 #[cfg(any(windows, target_os = "macos", test))]
 use std::io::Write;
 
-const PATCH_RESULT: &str = "codey-startup-patch-installed-v39";
+const PATCH_RESULT: &str = "codey-startup-patch-installed-v40";
 const APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT: &str =
     "codey-app-server-runtime-overrides-verified";
 const MAX_INSPECTOR_TARGET_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -190,6 +190,11 @@ fn prepare_startup_require_in(
     let require_path = space_free_path(&script_path)?;
     Ok(StartupRequire {
         environment: vec![
+            ("CODEX_SPARKLE_ENABLED".to_string(), "false".to_string()),
+            (
+                "CODEY_DISABLE_MACOS_CHILD_PROCESS_SAMPLER".to_string(),
+                "true".to_string(),
+            ),
             (
                 "NODE_OPTIONS".to_string(),
                 node_require_argument(&require_path)?,
@@ -1641,7 +1646,7 @@ mod tests {
 
     #[test]
     fn patch_result_is_stable_for_launch_status_validation() {
-        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v39");
+        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v40");
         assert_eq!(
             APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT,
             "codey-app-server-runtime-overrides-verified"
@@ -1662,6 +1667,12 @@ mod tests {
                 .contains("const disableWindowsOptimizations = process.platform === \"win32\"")
         );
         assert!(expression.contains("const disableMicro = disableWindowsOptimizations"));
+        assert!(
+            expression.contains("const disableWindowsWmiSampler = disableWindowsOptimizations")
+        );
+        assert!(expression.contains("CodeyDisabledWmiSnapshotWorker"));
+        assert!(expression.contains("patchCodexAvatarOverlayPrewarm"));
+        assert!(expression.contains("throttleHiddenAvatarOverlay: disablePet"));
         assert!(expression.contains("CODEY_STARTUP_PATCH_MARKER"));
         assert!(expression.contains("delete process.env.NODE_OPTIONS"));
         assert!(expression.contains("isRequireArgument"));
@@ -2235,6 +2246,10 @@ mod tests {
         let node_options = environment
             .get("NODE_OPTIONS")
             .expect("NODE_OPTIONS must be set for --require");
+        assert_eq!(
+            environment.get("CODEX_SPARKLE_ENABLED"),
+            Some(&"false".to_string())
+        );
         assert!(node_options.starts_with("--require="));
         assert!(!node_options.contains(char::is_whitespace));
         let script = std::path::PathBuf::from(node_options.trim_start_matches("--require="));

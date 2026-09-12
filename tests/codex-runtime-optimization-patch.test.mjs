@@ -211,6 +211,34 @@ test("desktop patches follow split 26.903 chunks and preserve dollar-prefixed li
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("macOS child-process sampler patch skips only the process-tree call", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codey-macos-sampler-patch-"));
+  const build = join(directory, ".vite", "build");
+  await mkdir(build, { recursive: true });
+  const filename = join(build, "main-fixture.js");
+  await writeFile(filename, [
+    "const sampler={async collectSnapshotFields(e){return process.platform!==`win32`&&await this.addChildProcessFields(i),e}};",
+    "module.exports=sampler;",
+  ].join(""));
+  const runtime = await loadPatchInIsolatedContext([], {
+    process: { ...process, platform: "darwin", env: {
+      ...process.env,
+      CODEY_DISABLE_MACOS_CHILD_PROCESS_SAMPLER: "true",
+    } },
+  }, false);
+  try {
+    let compiled;
+    process.getBuiltinModule("module")._extensions[".js"]({
+      _compile(source) { compiled = source; },
+    }, filename);
+    assert.match(compiled, /return false,e/);
+    assert.equal(runtime.context.__CODEY_MACOS_CHILD_PROCESS_SAMPLER_SOURCE_PATCHED__, true);
+  } finally {
+    runtime.restore();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("real CLI routes new and resumed threads through the local entry", {
   skip: !process.env.CODEY_TEST_CODEX_CLI,
   timeout: 30_000,
@@ -475,7 +503,7 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
     ];
     const nativeRuntimeConfigOverrides = runtimeConfigOverrides;
     const expression = await loadStartupPatchTemplate({ runtimeConfigOverrides });
-    assert.equal((0, eval)(expression), "codey-startup-patch-installed-v39");
+    assert.equal((0, eval)(expression), "codey-startup-patch-installed-v40");
 
     const patchedElectron = Module._load("electron");
     const passthroughGitHandler = () => "git-handler";
@@ -839,7 +867,7 @@ test("startup patch fails closed when app-server runtime override injection is n
       }),
       /appServerRuntimeOverrideTimeoutMs = 20_000/,
     );
-    assert.equal(runtime.result, "codey-startup-patch-installed-v39");
+    assert.equal(runtime.result, "codey-startup-patch-installed-v40");
     assert.equal(
       runtime.context.__CODEY_CODEX_STARTUP_PATCH__.appServerRuntimeOverrides.observed,
       false,
