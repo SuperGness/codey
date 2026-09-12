@@ -2199,6 +2199,26 @@ fn router_snapshot_maps_route_aliases_to_upstream_models() {
 }
 
 #[test]
+fn raw_model_without_route_metadata_prefers_the_active_route() {
+    let (mut config, active_provider_id, model) =
+        router_config("https://relay-a.example/v1".into());
+    let mut second = ProviderProfile::new("Relay B");
+    second.id = "route-b".into();
+    second.base_url = "https://relay-b.example/v1".into();
+    second.api_key = "sk-second".into();
+    second.normalize();
+    config.profiles.push(second);
+    config
+        .selected_models_by_provider
+        .insert("route-b".into(), vec![model.clone()]);
+    let snapshot = RouterSnapshot::from_config(&config.normalize());
+
+    let resolved = snapshot.target_for_model(&model).unwrap();
+    assert_eq!(resolved.provider_id, active_provider_id);
+    assert_eq!(resolved.upstream_model, model);
+}
+
+#[test]
 fn historical_aliases_recover_after_route_deletion_disable_and_restart() {
     let (mut config, provider, model) = router_config("https://relay.example/v1".into());
     for legacy in ["codey", "old/relay"] {

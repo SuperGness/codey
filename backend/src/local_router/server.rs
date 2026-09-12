@@ -599,6 +599,7 @@ pub(crate) struct RouterSnapshot {
     pub(crate) model_alias_history: BTreeMap<String, String>,
     pub(crate) model_ids: Vec<String>,
     pub(crate) default_model: String,
+    pub(crate) active_provider_id: String,
     pub(crate) request_log_backend: RouteRequestLogBackend,
     pub(crate) request_log_catalog: RequestLogCatalog,
 }
@@ -682,6 +683,7 @@ impl RouterSnapshot {
             model_alias_history: config.model_alias_history.clone(),
             model_ids,
             default_model: config.default_model().unwrap_or_default().to_string(),
+            active_provider_id: config.current_provider_id().unwrap_or_default().to_string(),
             request_log_backend: config.route_request_log.backend,
             request_log_catalog: RequestLogCatalog::from_config(config),
         }
@@ -773,6 +775,18 @@ impl RouterSnapshot {
                 .find(|candidate| candidate.provider_id == route_hint)
         {
             return self.target_for_route_model(route_hint, &candidate.model, requested_model);
+        }
+        if let Some(active_provider_id) =
+            (!self.active_provider_id.is_empty()).then_some(self.active_provider_id.as_str())
+            && let Some(candidate) = candidates
+                .iter()
+                .find(|candidate| candidate.provider_id == active_provider_id)
+        {
+            return self.target_for_route_model(
+                active_provider_id,
+                &candidate.model,
+                requested_model,
+            );
         }
         // Raw ids in the mixed runtime catalog are native OpenAI entries;
         // third-party selections remain route-qualified. An explicit hint

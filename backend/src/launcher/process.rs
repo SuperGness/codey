@@ -204,8 +204,9 @@ pub(super) async fn spawn_codex(
 
     #[cfg(windows)]
     {
-        // Prefer NODE_OPTIONS `--require` whenever that fuse is on. Inspector
-        // evaluate is the fallback. Never combine the two: both wrap Module._load.
+        // Use the established Inspector path when the Electron fuse permits it;
+        // the CLI wrapper is the fallback when the fuse is disabled or a retry
+        // is needed.
         let mut retry_without_inspector = false;
         let mut attempt = 0;
         loop {
@@ -214,23 +215,13 @@ pub(super) async fn spawn_codex(
             error_log::refresh_codex_app_version(Some(app_dir), None);
             let fuses = crate::electron_fuses::detect_electron_fuses(app_dir.to_path_buf()).await;
             let inspect_fuse = fuses.node_cli_inspect;
-            let require_wanted = fuses.node_options.node_options_possible();
-            let require_patch = prepare_startup_require_launch(
-                require_wanted,
-                patch_options,
-                runtime_config_overrides,
-                "windows",
-            )
-            .await;
-            let use_require = require_patch.is_some();
-            let use_inspector =
-                !use_require && inspect_fuse.inspector_possible() && !retry_without_inspector;
+            let cli_only = retry_without_inspector || !inspect_fuse.inspector_possible();
 
             let (wrapper, wrapper_preparation_error) = match prepare_cli_wrapper(
                 app_dir,
                 subagent_gate_active,
                 runtime_config_overrides,
-                use_inspector || use_require,
+                !cli_only,
             )
             .await
             {
@@ -245,7 +236,9 @@ pub(super) async fn spawn_codex(
                     (None, Some(error))
                 }
             };
-            let inspector_port = if use_inspector {
+            let inspector_port = if cli_only {
+                None
+            } else {
                 Some(
                     crate::codex_startup_patch::reserve_loopback_port().map_err(|error| {
                         let error = error.context("为 Codex 启动补丁选择本地调试端口失败");
@@ -260,10 +253,8 @@ pub(super) async fn spawn_codex(
                         error
                     })?,
                 )
-            } else {
-                None
             };
-            if inspector_port.is_none() && wrapper.is_none() && require_patch.is_none() {
+            if inspector_port.is_none() && wrapper.is_none() {
                 // Neither compatibility entry exists before launch: decide now
                 // instead of starting a process that would only be stopped again.
                 let error = wrapper_preparation_error
@@ -275,31 +266,27 @@ pub(super) async fn spawn_codex(
                     runtime_config_overrides,
                     subagent_gate_active,
                     format!(
-                        "启动尝试 {attempt}/2：NODE_OPTIONS 注入不可用（{}），主进程 Inspector 不可用（{}），且 CLI 兼容入口不可用：{error:#}",
-                        fuses.node_options.as_str(),
+                        "启动尝试 {attempt}/2：主进程 Inspector 已被 Electron fuse 关闭（{}），且 CLI 兼容入口不可用：{error:#}",
                         inspect_fuse.as_str()
                     ),
                 )
                 .await;
             }
             let launch_arguments = startup_launch_arguments(&runtime_arguments, inspector_port);
-            let mut launch_environment = require_patch
+            let wrapper_environment = wrapper
                 .as_ref()
-                .map(|prepared| prepared.environment.clone())
+                .map(|wrapper| wrapper.environment.as_slice())
                 .unwrap_or_default();
-            if let Some(wrapper) = &wrapper {
-                launch_environment.extend(wrapper.environment.iter().cloned());
-            }
-            // `--require` always needs the merged launch environment. Without
-            // Inspector the wrapper is otherwise the only entry, so a constrained
-            // launch must not proceed unless Store accepts it.
+            // Without an Inspector the wrapper is the only entry, so a launch
+            // that carries runtime constraints must not proceed unless Store
+            // accepts the wrapper environment; an unconstrained launch may.
             let constrained = !runtime_config_overrides.is_empty() || subagent_gate_active;
             let launch = spawn_windows_codex(
                 app_dir,
                 debug_port,
                 &launch_arguments,
-                &launch_environment,
-                use_require || (!use_inspector && constrained),
+                wrapper_environment,
+                cli_only && constrained,
             )
             .await;
             let (mut spawned, package_debug_session, wrapper_environment_applied) = match launch {
@@ -329,11 +316,8 @@ pub(super) async fn spawn_codex(
                 "launcher.windows_startup_attempt",
                 serde_json::json!({
                     "attempt": attempt,
-                    "useInspector": use_inspector,
-                    "useRequire": use_require,
+                    "cliOnly": cli_only,
                     "inspectorFuse": inspect_fuse.as_str(),
-                    "nodeOptionsFuse": fuses.node_options.as_str(),
-                    "requirePrepared": require_patch.is_some(),
                     "processId": spawned.process_id,
                     "wrapperEnvironmentApplied": wrapper_environment_applied,
                 }),
@@ -342,11 +326,7 @@ pub(super) async fn spawn_codex(
                 .then_some(wrapper)
                 .flatten()
                 .map(CliWrapperLaunch::into_handshake);
-            let require_marker = wrapper_environment_applied
-                .then_some(require_patch)
-                .flatten()
-                .map(|prepared| prepared.marker_path);
-            if inspector_port.is_none() && wrapper_handshake.is_none() && require_marker.is_none() {
+            if inspector_port.is_none() && wrapper_handshake.is_none() {
                 // The process is already running without any compatibility
                 // entry. It carries no constraints (see above), so keep it
                 // instead of stopping and relaunching the same configuration.
@@ -356,9 +336,8 @@ pub(super) async fn spawn_codex(
                         .context("Windows Store Codex 兼容环境清理失败")?;
                 }
                 let startup_error = format!(
-                    "启动尝试 {attempt}/2：未能应用主进程注入环境（Inspector {}，NODE_OPTIONS {}），且 Windows 未能应用 CLI 兼容环境，详见启动错误日志",
+                    "启动尝试 {attempt}/2：未能应用主进程注入环境（Inspector {}），且 Windows 未能应用 CLI 兼容环境，详见启动错误日志",
                     inspect_fuse.as_str(),
-                    fuses.node_options.as_str()
                 );
                 spawned.performance_status = "degraded".to_string();
                 spawned.performance_detail =
@@ -385,7 +364,7 @@ pub(super) async fn spawn_codex(
                     deadline,
                     renderer_debug_port: Some(debug_port),
                     spawned: Some(&mut spawned),
-                    require_marker,
+                    require_marker: None,
                 },
             )
             .await
@@ -432,12 +411,10 @@ pub(super) async fn spawn_codex(
                             "platform": "windows",
                             "inspectorPort": inspector_port,
                             "inspectorFuse": inspect_fuse.as_str(),
-                            "nodeOptionsFuse": fuses.node_options.as_str(),
                             "processId": spawned.process_id,
                             "startupAttempt": attempt,
                             "processes": windows_startup_process_details(app_dir, spawned.process_id),
-                            "useInspector": use_inspector,
-                            "useRequire": use_require,
+                            "cliOnly": cli_only,
                             "retryable": retryable,
                             "remainingBudgetMs": deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis(),
                             "disablePet": patch_options.disable_pet,
