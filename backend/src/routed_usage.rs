@@ -14,11 +14,14 @@ use crate::commands::AppState;
 
 const SCAN_STATE_FILE: &str = "routed-usage-scan-state-v1.json";
 const RECORDS_FILE: &str = "routed-usage-records-v1.jsonl";
-const STATE_VERSION: u64 = 1;
+/// v3 records every model's usage (official turns included, flagged `r`);
+/// bumping the version invalidates both persisted files so stale schemas
+/// cannot pollute the aggregation.
+const STATE_VERSION: u64 = 3;
 /// Upper bound of rollout files scanned per bridge call so the initial
 /// catch-up over an existing `sessions/` tree stays resumable instead of
 /// blocking one request for seconds.
-const MAX_NEW_FILES_PER_TICK: usize = 24;
+const MAX_NEW_FILES_PER_TICK: usize = 48;
 /// Per-call byte budget across all scanned files; the scan offset only ever
 /// advances past fully processed lines, so the rest is picked up next tick.
 const MAX_NEW_BYTES_PER_TICK: u64 = 192 * 1024 * 1024;
@@ -28,25 +31,17 @@ const COMPACT_THRESHOLD_BYTES: u64 = 8 * 1024 * 1024;
 /// UUIDv7 turn ids sort chronologically, so pruning the smallest ids from a
 /// file's in-memory turn→model map drops the stalest history first.
 const TURN_MODEL_MAP_CAP: usize = 64;
+/// Per-model breakdown keeps the payload bounded: everything outside the top
+/// models is folded into a single "其他" bucket, both in totals and per day.
+const MODEL_BUCKET_CAP: usize = 12;
+/// Per-model daily series shipped to the renderer (range filters only need
+/// recent windows; "全部" totals come from the aggregate model list).
+const DAILY_BY_MODEL_WINDOW_DAYS: usize = 30;
 
 static SCAN_LOCK: Mutex<()> = Mutex::new(());
 static AGGREGATE_CACHE_RECORDS_LEN: AtomicU64 = AtomicU64::new(0);
 static AGGREGATE_CACHE: Mutex<Option<Value>> = Mutex::new(None);
-static STATE_DIR_FOR_TESTS: Mutex<Option<PathBuf>> = Mutex::new(None);
-
-#[cfg(test)]
-pub fn set_state_dir_for_tests(path: Option<PathBuf>) {
-    if let Ok(mut guard) = STATE_DIR_FOR_TESTS.lock() {
-        *guard = path;
-    }
-}
-
 fn resolve_state_dir() -> PathBuf {
-    if let Ok(guard) = STATE_DIR_FOR_TESTS.lock()
-        && let Some(path) = guard.as_ref()
-    {
-        return path.clone();
-    }
     default_app_state_dir()
 }
 
@@ -58,7 +53,8 @@ pub async fn routed_usage_snapshot(state: &Arc<AppState>) -> Value {
         return json!({"status": "disabled"});
     }
     let home = codex_home();
-    crate::commands::blocking_value("合并路由 token 用量", move || scan_and_snapshot(home)).await}
+    crate::commands::blocking_value("合并路由 token 用量", move || scan_and_snapshot(home)).await
+}
 
 fn scan_and_snapshot(home: &Path) -> anyhow::Result<Value> {
     let _guard =
@@ -77,11 +73,13 @@ fn scan_and_snapshot(home: &Path) -> anyhow::Result<Value> {
     {
         return Ok(cached.clone());
     }
-    let days = aggregate_records(&records_path)?;
+    let aggregate = aggregate_records(&records_path)?;
     let snapshot = json!({
         "status": "ok",
         "version": STATE_VERSION,
-        "days": days,
+        "days": aggregate.days,
+        "models": aggregate.models,
+        "dailyByModel": aggregate.daily_by_model,
     });
     AGGREGATE_CACHE_RECORDS_LEN.store(records_len, Ordering::Release);
     if let Ok(mut cache) = AGGREGATE_CACHE.lock() {
@@ -97,6 +95,16 @@ fn scan_lock_guard() -> Option<MutexGuard<'static, ()>> {
 /// Incremental scan pass. Returns `true` when new routed usage was appended.
 fn scan_once(home: &Path, state_dir: &Path, records_path: &Path) -> anyhow::Result<bool> {
     let state_path = state_dir.join(SCAN_STATE_FILE);
+    if persisted_state_version(&state_path) != Some(STATE_VERSION) {
+        // Schema changed: model-less v1 records cannot be re-attributed, so
+        // both files restart and the scan re-derives everything from rollouts.
+        let _ = fs::remove_file(&state_path);
+        let _ = fs::remove_file(records_path);
+        AGGREGATE_CACHE_RECORDS_LEN.store(0, Ordering::Release);
+        if let Ok(mut cache) = AGGREGATE_CACHE.lock() {
+            *cache = None;
+        }
+    }
     let mut state = load_scan_state(&state_path);
     let sessions_dir = home.join("sessions");
     let mut files = Vec::new();
@@ -268,9 +276,6 @@ fn routed_record_line(line: &[u8], models: &BTreeMap<String, String>) -> Option<
     let payload = value.get("payload")?;
     let turn_id = payload.get("turn_id").and_then(Value::as_str)?;
     let model = models.get(turn_id)?;
-    if !is_routed_model(model) {
-        return None;
-    }
     let usage = payload.get("usage")?;
     let total = usage.get("total_tokens").and_then(Value::as_u64)?;
     let input = usage
@@ -305,6 +310,8 @@ fn routed_record_line(line: &[u8], models: &BTreeMap<String, String>) -> Option<
         json!({
             "rid": response_id,
             "d": date,
+            "m": display_model(model),
+            "r": is_routed_model(model),
             "i": input,
             "c": cached,
             "o": output,
@@ -312,6 +319,22 @@ fn routed_record_line(line: &[u8], models: &BTreeMap<String, String>) -> Option<
         })
         .to_string(),
     )
+}
+
+/// Strips Codey's routing artifacts (`route-<provider>/` prefix and legacy
+/// `[suffix]` tails) so usage aggregates under the model's display name.
+fn display_model(model: &str) -> String {
+    let model = model.trim();
+    let base = match model.rfind('[') {
+        Some(index) if index > 0 && model.ends_with(']') => &model[..index],
+        _ => model,
+    };
+    if base.starts_with("route-")
+        && let Some(slash) = base.find('/')
+    {
+        return base[slash + 1..].to_string();
+    }
+    base.to_string()
 }
 
 /// Routed models either carry the CC Switch takeover prefix
@@ -347,11 +370,21 @@ fn record_date(value: &Value) -> Option<String> {
     shaped.then(|| date.to_string())
 }
 
-fn aggregate_records(records_path: &Path) -> anyhow::Result<BTreeMap<String, u64>> {
+#[derive(Default)]
+struct Aggregate {
+    days: BTreeMap<String, u64>,
+    models: Vec<Value>,
+    daily_by_model: BTreeMap<String, BTreeMap<String, u64>>,
+}
+
+fn aggregate_records(records_path: &Path) -> anyhow::Result<Aggregate> {
     let Ok(contents) = fs::read(records_path) else {
-        return Ok(BTreeMap::new());
+        return Ok(Aggregate::default());
     };
     let mut days: BTreeMap<String, u64> = BTreeMap::new();
+    let mut models: BTreeMap<String, u64> = BTreeMap::new();
+    let mut official_names: HashSet<String> = HashSet::new();
+    let mut daily_by_model: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
     let mut seen: HashSet<String> = HashSet::new();
     for line in contents.split(|byte| *byte == b'\n') {
         if line.is_empty() {
@@ -370,9 +403,81 @@ fn aggregate_records(records_path: &Path) -> anyhow::Result<BTreeMap<String, u64
             continue;
         };
         let total = value.get("t").and_then(Value::as_u64).unwrap_or(0);
-        *days.entry(date.to_string()).or_insert(0) += total;
+        // The profile merge may only fold routed tokens into the official
+        // numbers — official usage is already counted there.
+        if value.get("r").and_then(Value::as_bool).unwrap_or(false) {
+            *days.entry(date.to_string()).or_insert(0) += total;
+        }
+        if let Some(model) = value.get("m").and_then(Value::as_str) {
+            if !value.get("r").and_then(Value::as_bool).unwrap_or(false) {
+                official_names.insert(model.to_string());
+            }
+            *models.entry(model.to_string()).or_insert(0) += total;
+            *daily_by_model
+                .entry(date.to_string())
+                .or_default()
+                .entry(model.to_string())
+                .or_insert(0) += total;
+        }
     }
-    Ok(days)
+
+    // Keep only the recent window for the per-model daily series; the range
+    // filters (近7日/近30日) never look further back and the "全部" totals
+    // come from the model list below.
+    if DAILY_BY_MODEL_WINDOW_DAYS < daily_by_model.len() {
+        let cutoff = daily_by_model
+            .keys()
+            .nth(daily_by_model.len() - DAILY_BY_MODEL_WINDOW_DAYS)
+            .cloned();
+        if let Some(cutoff) = cutoff {
+            daily_by_model.retain(|date, _| *date >= cutoff);
+        }
+    }
+
+    // Fold everything outside the top models into a single "其他" bucket so
+    // the payload and the rendered breakdown stay bounded.
+    let mut ranked: Vec<(String, u64)> = models.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let top: HashSet<String> = ranked
+        .iter()
+        .take(MODEL_BUCKET_CAP)
+        .map(|(name, _)| name.clone())
+        .collect();
+    for day in daily_by_model.values_mut() {
+        let mut other = 0u64;
+        day.retain(|name, tokens| {
+            if top.contains(name) {
+                true
+            } else {
+                other += *tokens;
+                false
+            }
+        });
+        if other > 0 {
+            *day.entry("其他".to_string()).or_insert(0) += other;
+        }
+    }
+    let mut model_rows: Vec<Value> = ranked
+        .iter()
+        .take(MODEL_BUCKET_CAP)
+        .map(|(name, total)| {
+            json!({
+                "name": name,
+                "total": total,
+                "official": official_names.contains(name),
+            })
+        })
+        .collect();
+    let rest: u64 = ranked.iter().skip(MODEL_BUCKET_CAP).map(|(_, t)| t).sum();
+    if rest > 0 {
+        model_rows.push(json!({"name": "其他", "total": rest}));
+    }
+
+    Ok(Aggregate {
+        days,
+        models: model_rows,
+        daily_by_model,
+    })
 }
 
 fn compact_records_if_needed(records_path: &Path) -> anyhow::Result<()> {
@@ -417,6 +522,12 @@ struct ScanState {
 struct FileScanState {
     offset: u64,
     models: BTreeMap<String, String>,
+}
+
+fn persisted_state_version(path: &Path) -> Option<u64> {
+    let contents = fs::read(path).ok()?;
+    let value = serde_json::from_slice::<Value>(&contents).ok()?;
+    value.get("version").and_then(Value::as_u64)
 }
 
 fn load_scan_state(path: &Path) -> ScanState {
@@ -542,13 +653,20 @@ mod tests {
         let records_path = state_dir.join(RECORDS_FILE);
 
         scan_once(&home, &state_dir, &records_path).unwrap();
-        let days = aggregate_records(&records_path).unwrap();
-        assert_eq!(days.get("2026-09-12"), Some(&750));
+        let aggregate = aggregate_records(&records_path).unwrap();
+        assert_eq!(aggregate.days.get("2026-09-12"), Some(&750));
+        assert_eq!(
+            aggregate.models,
+            vec![
+                json!({"name": "gpt-5.6-luna", "total": 1000, "official": true}),
+                json!({"name": "deepseek-v3", "total": 750, "official": false}),
+            ]
+        );
 
         // A second pass must not double count.
         scan_once(&home, &state_dir, &records_path).unwrap();
-        let days = aggregate_records(&records_path).unwrap();
-        assert_eq!(days.get("2026-09-12"), Some(&750));
+        let aggregate = aggregate_records(&records_path).unwrap();
+        assert_eq!(aggregate.days.get("2026-09-12"), Some(&750));
     }
 
     #[test]
@@ -571,7 +689,10 @@ mod tests {
         let records_path = state_dir.join(RECORDS_FILE);
         scan_once(&home, &state_dir, &records_path).unwrap();
         assert_eq!(
-            aggregate_records(&records_path).unwrap().get("2026-09-12"),
+            aggregate_records(&records_path)
+                .unwrap()
+                .days
+                .get("2026-09-12"),
             Some(&300)
         );
 
@@ -584,7 +705,10 @@ mod tests {
         fs::write(&path, &partial).unwrap();
         scan_once(&home, &state_dir, &records_path).unwrap();
         assert_eq!(
-            aggregate_records(&records_path).unwrap().get("2026-09-12"),
+            aggregate_records(&records_path)
+                .unwrap()
+                .days
+                .get("2026-09-12"),
             Some(&300)
         );
 
@@ -597,7 +721,10 @@ mod tests {
         fs::write(&path, &complete).unwrap();
         scan_once(&home, &state_dir, &records_path).unwrap();
         assert_eq!(
-            aggregate_records(&records_path).unwrap().get("2026-09-12"),
+            aggregate_records(&records_path)
+                .unwrap()
+                .days
+                .get("2026-09-12"),
             Some(&1000)
         );
 
@@ -606,7 +733,10 @@ mod tests {
         fs::write(&path, &contents).unwrap();
         scan_once(&home, &state_dir, &records_path).unwrap();
         assert_eq!(
-            aggregate_records(&records_path).unwrap().get("2026-09-12"),
+            aggregate_records(&records_path)
+                .unwrap()
+                .days
+                .get("2026-09-12"),
             Some(&1000)
         );
     }
@@ -617,11 +747,6 @@ mod tests {
         let home = temp.path().join("codex");
         let state_dir = temp.path().join("state");
         fs::create_dir_all(&state_dir).unwrap();
-        set_state_dir_for_tests(Some(state_dir.clone()));
-        AGGREGATE_CACHE_RECORDS_LEN.store(0, Ordering::Release);
-        if let Ok(mut cache) = AGGREGATE_CACHE.lock() {
-            *cache = None;
-        }
         write_rollout(
             &home,
             "sessions/2026/09/13/rollout-c.jsonl",
@@ -638,9 +763,51 @@ mod tests {
                 usage_record("2026-09-13T08:05:00.000Z", "resp-known", "turn-known", 4200),
             ],
         );
-        let snapshot = scan_and_snapshot(&home).unwrap();
-        assert_eq!(snapshot["status"], "ok");
-        assert_eq!(snapshot["days"]["2026-09-13"], 4200);
-        set_state_dir_for_tests(None);
+        let records_path = state_dir.join(RECORDS_FILE);
+        scan_once(&home, &state_dir, &records_path).unwrap();
+        let aggregate = aggregate_records(&records_path).unwrap();
+        assert_eq!(aggregate.days.get("2026-09-13"), Some(&4200));
+        assert_eq!(
+            serde_json::Value::Array(aggregate.models.clone()),
+            json!([{"name": "gemini", "total": 4200, "official": false}])
+        );
+    }
+
+    #[test]
+    fn display_model_strips_routing_artifacts() {
+        assert_eq!(
+            display_model("route-mtwrmp6l-exkax4/gemini-3.8-flash"),
+            "gemini-3.8-flash"
+        );
+        assert_eq!(display_model("deepseek-v3[codey]"), "deepseek-v3");
+        assert_eq!(display_model("gpt-5.6-luna"), "gpt-5.6-luna");
+    }
+
+    #[test]
+    fn per_model_totals_fold_tail_models_into_other() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+        let mut lines = vec![json!({"type": "session_meta", "payload": {}})];
+        for index in 0..(MODEL_BUCKET_CAP + 2) {
+            let turn = format!("turn-{index}");
+            lines.push(turn_context(&turn, &format!("route-abc/model-{index}")));
+            lines.push(usage_record(
+                "2026-09-12T10:00:00.000Z",
+                &format!("resp-{index}"),
+                &turn,
+                1000 - index as u64,
+            ));
+        }
+        write_rollout(&home, "sessions/2026/09/12/rollout-models.jsonl", &lines);
+        let records_path = state_dir.join(RECORDS_FILE);
+        scan_once(&home, &state_dir, &records_path).unwrap();
+        let aggregate = aggregate_records(&records_path).unwrap();
+        assert_eq!(aggregate.models.len(), MODEL_BUCKET_CAP + 1);
+        assert_eq!(aggregate.models[0]["name"], "model-0");
+        assert_eq!(aggregate.models.last().unwrap()["name"], "其他");
+        let daily = aggregate.daily_by_model.get("2026-09-12").unwrap();
+        assert!(daily.contains_key("其他"));
     }
 }
