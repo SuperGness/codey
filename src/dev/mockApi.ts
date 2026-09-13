@@ -182,6 +182,7 @@ if (import.meta.env.DEV) {
       },
       hideFullAccessWarning: false,
       showAccountUsageInHeader: true,
+      mergeRoutedUsageIntoProfile: true,
     };
     let previewModelState: ModelState = {
       officialModels: previewOfficialModels.map((model) => ({

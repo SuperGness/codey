@@ -985,6 +985,13 @@ export function App({
   const handleAnalyzeDiagnosticStorage = useStableEvent(
     (target: DiagnosticStorageTarget) => void analyzeDiagnosticStorage(target),
   );
+  const handleMergeRoutedUsageChange = useStableEvent(
+    (checked: boolean) => {
+      if (config) {
+        editConfig({ ...config, mergeRoutedUsageIntoProfile: checked });
+      }
+    },
+  );
   const handleModelPickerOpenChange = useStableEvent((open: boolean) => {
     if (!isBusy || open) setModelPickerVisible(open);
   });
@@ -1266,6 +1273,8 @@ export function App({
               onToggleAccountUsage={handleToggleAccountUsage}
               onSaveOfficialRouteSettings={handleSaveOfficialRouteSettings}
               onSetDefaultModel={handleSetRouteDefaultModel}
+              mergeRoutedUsageIntoProfile={config.mergeRoutedUsageIntoProfile}
+              onMergeRoutedUsageChange={handleMergeRoutedUsageChange}
             />
           </div>
 

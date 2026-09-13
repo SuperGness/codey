@@ -716,6 +716,12 @@ pub struct CodeyConfig {
     /// preserves whether the preflight was authoritative or inconclusive.
     #[serde(skip)]
     pub official_account_status_this_launch: LaunchOfficialAccountStatus,
+    /// Merges tokens consumed on Codey-routed providers into the Codex
+    /// profile page's token statistics. Routed traffic never reaches the
+    /// official stats backend, so the renderer patches the profile response
+    /// with locally scanned rollout totals.
+    #[serde(default = "default_true")]
+    pub merge_routed_usage_into_profile: bool,
     /// Public HTTPS endpoint for the version manifest published to Cloudflare R2.
     /// This is build-time configuration, not a user setting.
     #[serde(
@@ -798,6 +804,7 @@ impl Default for CodeyConfig {
             show_account_usage_in_header: true,
             official_account_available_this_launch: false,
             official_account_status_this_launch: LaunchOfficialAccountStatus::Unauthenticated,
+            merge_routed_usage_into_profile: true,
             update_manifest_url: default_update_manifest_url(),
         }
     }
@@ -3712,6 +3719,22 @@ mod tests {
             .normalize();
 
         assert!(config.show_account_usage_in_header);
+    }
+
+    #[test]
+    fn routed_usage_merge_defaults_to_enabled_and_round_trips() {
+        let config = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
+            .unwrap()
+            .normalize();
+
+        assert!(config.merge_routed_usage_into_profile);
+
+        let disabled = serde_json::from_str::<CodeyConfig>(
+            r#"{"activeProfileId":"","profiles":[],"mergeRoutedUsageIntoProfile":false}"#,
+        )
+        .unwrap()
+        .normalize();
+        assert!(!disabled.merge_routed_usage_into_profile);
     }
 
     #[test]

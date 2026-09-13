@@ -82,6 +82,7 @@
 ## 控制台与页面增强
 
 - CDP 负责桥接、注入及健康检查；仅确认桥接缺失时重建，页面忙或超时保持保守状态。用户脚本在同一文档成功执行后不因恢复重复运行；会话工具脚本重载时先释放上一次安装的监听与定时器。共享 DOM 观察器按订阅者各自的选项分发变更记录。
+- 个人资料页的 Token 统计由 Codex 从官方后端 `GET /wham/profiles/me` 拉取，路由流量在该口径下不可见。`backend/src/routed_usage.rs` 经 bridge 路径 `/routed-usage`（已加入并发路径清单）按需增量扫描 `~/.codex/sessions/**` rollout 的 `token_usage_record`，按 `turn_id` 关联 `turn_context.model`，模型名带 `route-` 前缀或尾部 `[后缀]` 判定为路由用量，按响应 ID 去重后聚合为 UTC 日粒度；记录与扫描偏移（含每文件最近 64 个 turn 的 model 映射）存于 app state 目录的 `routed-usage-records-v1.jsonl` 与 `routed-usage-scan-state-v1.json`，单次调用最多扫 24 个新增文件 / 192 MiB，记录超 8 MiB 去重压缩，记录长度未变化时复用聚合快照。`public/profile-usage-inject.js` 每 60 秒经 bridge 拉取用量写入 Codex 页面 localStorage 键 `__codeyRoutedTokenUsageV1`，并在 `Response.prototype.text` 层按 `daily_usage_buckets` 子串与响应形状识别资料页响应（客户端请求经 Electron IPC 传输、不走 `window.fetch`；响应体由渲染层重建为真实 `Response` 后以 `text()` + `JSON.parse` 消费），合并每日/每周/累计 bucket、`lifetime_tokens`、`peak_daily_tokens` 并基于合并后的活跃日重算连击再与官方值取 max；`profile`、`metadata` 与 `top_invocations` 保持原样，未命中形状的响应零解析透传。`mergeRoutedUsageIntoProfile` 默认开启；关闭时 bridge 返回 disabled，注入脚本清除 localStorage 并停止合并。
 - 前端使用 HeroUI、React Aria 和 Tailwind；内嵌界面通过 Shadow DOM 隔离样式，统一管理主题、焦点、弹层和提示挂载位置。HeroUI 样式按实际渲染的组件逐个导入，新增组件时需同步补充样式入口。
 - Shadow DOM 兼容包括样式变量映射、属性初始值及 React Aria 观察器生命周期补丁；内嵌界面保持浅色外观，在宿主边界明确文字颜色，避免独立弹层继承深色页面的白字。依赖升级时核对上游修复情况。
 - 模型选择器使用分组、搜索及虚拟列表，手动输入保留自定义模型；列表更新通过 QueryClient 发布，避免直接修改共享查询对象。

@@ -109,6 +109,7 @@ use crate::pending_approval;
 use crate::plugin_marketplace;
 use crate::route_request_log::RouteRequestLogQuery;
 use crate::route_request_log::RouteRequestLogReconfigure;
+use crate::routed_usage;
 use crate::session_delete;
 use crate::session_metadata;
 use crate::session_transfer;
@@ -412,6 +413,7 @@ impl AppState {
             }
             "/backend/health" => json!({"status":"ok"}),
             "/account/usage" => account_usage_snapshot(self).await,
+            "/routed-usage" => routed_usage::routed_usage_snapshot(self).await,
             "/session/wake-watcher" => {
                 self.session_scan_wake.notify_one();
                 json!({"status":"ok"})
@@ -1712,6 +1714,7 @@ async fn save_codey_config_locked(
     }
     config.hide_full_access_warning = config_input.hide_full_access_warning;
     config.show_account_usage_in_header = config_input.show_account_usage_in_header;
+    config.merge_routed_usage_into_profile = config_input.merge_routed_usage_into_profile;
     let mut config = config.normalize();
     validate_official_account_config_change(&previous, &config)?;
     if previous.local_router_enabled && config.local_router_enabled {
@@ -2613,7 +2616,7 @@ fn api_error_message(error: impl ToString) -> Value {
     json!({"status":"failed","message":error.to_string()})
 }
 
-async fn blocking_value<T, F>(operation: &str, task: F) -> Value
+pub(crate) async fn blocking_value<T, F>(operation: &str, task: F) -> Value
 where
     T: Serialize + Send + 'static,
     F: FnOnce() -> anyhow::Result<T> + Send + 'static,

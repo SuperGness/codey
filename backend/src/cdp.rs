@@ -34,6 +34,8 @@ pub(crate) const SETTINGS_OVERLAY_SCRIPT: &str =
 const PLUGIN_MARKETPLACE_FIX_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/plugin-marketplace-fix.js");
 const PROMPT_OPTIMIZE_SCRIPT: &str = include_str!("../../dist-overlay/inject/prompt-optimize.js");
+const PROFILE_USAGE_INJECT_SCRIPT: &str =
+    include_str!("../../dist-overlay/inject/profile-usage-inject.js");
 const MAX_INJECTION_ERROR_CHARS: usize = 500;
 static SETTINGS_OVERLAY_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
 static SESSION_TOOLS_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
@@ -293,6 +295,23 @@ pub fn prepare_injection_scripts(
                 .to_string(),
             Feature,
         ),
+        (
+            "profile-usage-merge",
+            "资料页路由用量合并",
+            PROFILE_USAGE_INJECT_SCRIPT,
+            r#"(() => {
+              const merger = window.__codeyProfileUsageMerge;
+              if (!merger || typeof merger.snapshot !== "function") return "";
+              const snapshot = merger.snapshot();
+              if (snapshot.enabled === false) return "个人资料路由用量合并已关闭";
+              if (snapshot.dayCount > 0) {
+                return `已合并 ${snapshot.dayCount} 天路由用量（累计 ${snapshot.totalTokens} tokens）`;
+              }
+              return "路由用量合并已就绪，等待扫描到路由会话";
+            })()"#
+                .to_string(),
+            Feature,
+        ),
     ];
     let mut core_bundle = String::with_capacity(
         CODEY_BRIDGE_SCRIPT.len()
@@ -302,6 +321,7 @@ pub fn prepare_injection_scripts(
             + SECURITY_WARNING_SHIELD_SCRIPT.len()
             + PLUGIN_MARKETPLACE_FIX_SCRIPT.len()
             + PROMPT_OPTIMIZE_SCRIPT.len()
+            + PROFILE_USAGE_INJECT_SCRIPT.len()
             + 4096,
     );
     let mut descriptors = Vec::with_capacity(builtin_scripts.len() + user_scripts.len());
@@ -1473,9 +1493,10 @@ assert.equal(nextPage.window.attempts, 1);
         assert!(prepared.scripts[1].contains("window.userScriptRan = true;"));
         assert!(prepared.scripts[1].contains(r#"status = "executed""#));
         assert!(prepared.scripts[1].contains("用户脚本 1 injection failed"));
-        assert_eq!(prepared.descriptors.len(), 9);
-        assert_eq!(prepared.descriptors[8].id, "user-script-1");
-        assert_eq!(prepared.descriptors[8].source, "user");
+        assert!(core.contains("__codeyProfileUsageMerge"));
+        assert_eq!(prepared.descriptors.len(), 10);
+        assert_eq!(prepared.descriptors[9].id, "user-script-1");
+        assert_eq!(prepared.descriptors[9].source, "user");
         assert_eq!(
             prepared.descriptors[0].visibility,
             InjectionScriptVisibility::Internal
@@ -1486,7 +1507,7 @@ assert.equal(nextPage.window.attempts, 1);
             InjectionScriptVisibility::Internal
         );
         assert_eq!(
-            prepared.descriptors[8].visibility,
+            prepared.descriptors[9].visibility,
             InjectionScriptVisibility::Feature
         );
         let snapshot_script = injection_status_snapshot_script(&prepared.descriptors);

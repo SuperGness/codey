@@ -142,6 +142,7 @@ type ModelSectionProps = {
   isBusy: boolean;
   busy: string | null;
   showAccountUsageInHeader: boolean;
+  mergeRoutedUsageIntoProfile: boolean;
   onToggleLocalRouter: (checked: boolean) => void;
   onToggleRouteRequestLog: (checked: boolean) => void;
   onSaveRoute: (route: Profile) => Promise<boolean>;
@@ -149,6 +150,7 @@ type ModelSectionProps = {
   onDeleteRoute: (routeId: string) => void;
   onFetchRouteModels: (route: Profile) => void;
   onToggleAccountUsage?: (checked: boolean) => void;
+  onMergeRoutedUsageChange: (checked: boolean) => void;
   onSaveOfficialRouteSettings?: (
     routeId: string,
     models: string[],
@@ -248,6 +250,7 @@ function ModelSectionComponent({
   isBusy,
   busy,
   showAccountUsageInHeader,
+  mergeRoutedUsageIntoProfile,
   onToggleLocalRouter,
   onToggleRouteRequestLog,
   onSaveRoute,
@@ -255,6 +258,7 @@ function ModelSectionComponent({
   onDeleteRoute,
   onFetchRouteModels,
   onToggleAccountUsage,
+  onMergeRoutedUsageChange,
   onSaveOfficialRouteSettings,
   onSetDefaultModel,
 }: ModelSectionProps) {
@@ -536,6 +540,16 @@ function ModelSectionComponent({
               disabled={isBusy}
               onCheckedChange={onToggleLocalRouter}
               aria-label="启用本地路由"
+            />
+          </div>
+          <div className="local-router-toggle">
+            <strong>路由用量计入资料页</strong>
+            <Switch
+              size="sm"
+              checked={mergeRoutedUsageIntoProfile}
+              disabled={isBusy}
+              onCheckedChange={onMergeRoutedUsageChange}
+              aria-label="把 Codey 路由产生的 token 用量合并进个人资料页统计"
             />
           </div>
           {config.localRouterEnabled && (
