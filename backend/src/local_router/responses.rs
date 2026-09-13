@@ -1383,9 +1383,9 @@ impl RouterServer {
                 .await?;
             return Ok(());
         }
-        if bridge == ProtocolBridge::NativeResponses
-            && has_codey_synthetic_previous_response_id(&body)
-        {
+        let restoring_adapted_history = bridge == ProtocolBridge::NativeResponses
+            && has_codey_synthetic_previous_response_id(&body);
+        if restoring_adapted_history {
             match downstream.prepare_adapted_response_context(&mut body) {
                 Ok(true) => {}
                 _ => {
@@ -1417,8 +1417,9 @@ impl RouterServer {
                 )
                 .await;
         }
+        let discard_opaque_reasoning = route_changed || restoring_adapted_history;
         if bridge == ProtocolBridge::NativeResponses
-            && normalize_native_responses_context(&mut body, route_changed)
+            && normalize_native_responses_context(&mut body, discard_opaque_reasoning)
         {
             body_mutated = true;
             encoded_body = None;
@@ -1583,7 +1584,7 @@ impl RouterServer {
                         &resolved.route,
                         &headers,
                         &mut upstream_body,
-                        route_changed,
+                        discard_opaque_reasoning,
                     )
                     .await?;
                 if websocket_attempt == UpstreamWebSocketAttempt::Completed {
@@ -1641,7 +1642,7 @@ impl RouterServer {
                     )
                     .await;
             }
-            if normalize_native_responses_context(&mut upstream_body, route_changed) {
+            if normalize_native_responses_context(&mut upstream_body, discard_opaque_reasoning) {
                 body_mutated = true;
                 encoded_body = None;
             }

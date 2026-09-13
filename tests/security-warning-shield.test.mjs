@@ -144,8 +144,9 @@ function appendUltraConfirmation(body) {
     "section",
     "是否启用 Ultra 搭配完整访问权限? 开启 Ultra 和完整访问权限后，Codex 可运行命令、联网检索并编辑文件。",
   ));
-  const button = warning.appendChild(new FakeElement("button", "继续"));
-  return { button, warning };
+  const fullAccessButton = warning.appendChild(new FakeElement("button", "使用完整访问权限"));
+  const continueButton = warning.appendChild(new FakeElement("button", "继续"));
+  return { continueButton, fullAccessButton, warning };
 }
 
 test("full-access warning shield is opt-in and persisted by Codey settings", async () => {
@@ -228,11 +229,12 @@ test("enabled shield dismisses the current Chinese full-access callout", async (
 
 test("enabled shield continues past the Ultra full-access confirmation", async () => {
   const runtime = createRuntime({ hideFullAccessWarning: true });
-  const { button, warning } = appendUltraConfirmation(runtime.body);
+  const { continueButton, fullAccessButton, warning } = appendUltraConfirmation(runtime.body);
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(button.clicks, 1);
-  assert.equal(warning.style.display, "none:important");
+  assert.equal(fullAccessButton.clicks, 1);
+  assert.equal(continueButton.clicks, 0);
+  assert.equal(warning.isConnected, false);
   assert.equal(runtime.window.__codeySecurityWarningShield.dismissWarnings(), 0);
 });
 

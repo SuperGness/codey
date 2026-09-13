@@ -52,7 +52,7 @@
 
 ## 协议转发与连接恢复
 
-原生 Responses 尽量保留原始请求和响应，HTTP 转发把上游端到端响应头（含 `x-codex-turn-state` 粘性路由令牌）原样透传给下游，仅重写传输层头；Chat Completions、Anthropic Messages 转换消息、工具、图片、用量及流式事件。协议无法表达的必要内容在发送前拒绝，不静默裁剪历史。
+原生 Responses 保留同一线路的完整 reasoning 内容及加密状态，跨线路切换清理上一供应商的 reasoning 状态。HTTP 转发把上游端到端响应头（含 `x-codex-turn-state` 粘性路由令牌）原样透传给下游，仅重写传输层头；Chat Completions、Anthropic Messages 转换消息、工具、图片、用量及流式事件。协议无法表达的必要内容在发送前拒绝，不静默裁剪历史。
 
 - 线路可配置独立上游代理（http/https/socks5）：该线路的转发、模型同步及官方额度查询改走专用客户端，并禁用上游 WebSocket；其余线路仍遵循系统代理。
 - HTTP 入口使用 HTTP 上游；WebSocket 入口按线路能力、系统代理和退避状态选择传输，连接按线路、配置和认证身份隔离复用。WSS 共享 TLS 配置与按服务端域名隔离的会话缓存，保留证书校验并禁用 0-RTT；服务端不接受会话恢复时执行完整握手。

@@ -6435,11 +6435,17 @@ async fn native_route_switch_drops_previous_provider_reasoning_state() {
     let endpoint = router.endpoint();
     let client = reqwest::Client::new();
 
+    let first_input = json!([
+        {"role":"user","content":"first"},
+        {"type":"reasoning","id":"rs_native","summary":[],"content":[{"type":"reasoning_text","text":"Inspect the file before continuing."}]},
+        {"type":"function_call","call_id":"call-native","name":"lookup","arguments":"{}"},
+        {"type":"function_call_output","call_id":"call-native","output":"done"}
+    ]);
     let first = client
         .post(format!("{}/responses", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .header("thread-id", "native-provider-switch")
-        .json(&json!({"model":model_alias(&provider_a, &model),"input":"first"}))
+        .json(&json!({"model":model_alias(&provider_a, &model),"input":first_input}))
         .send()
         .await
         .unwrap();
@@ -6464,6 +6470,7 @@ async fn native_route_switch_drops_previous_provider_reasoning_state() {
     assert_eq!(second.status(), reqwest::StatusCode::OK);
 
     let bodies = upstream_task.await.unwrap();
+    assert_eq!(bodies[0]["input"], first_input);
     assert_eq!(bodies[1]["input"].as_array().unwrap().len(), 3);
     assert!(
         bodies[1]["input"]

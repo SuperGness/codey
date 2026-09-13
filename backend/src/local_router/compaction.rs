@@ -64,53 +64,22 @@ pub(crate) fn normalize_native_responses_context(
     body: &mut Value,
     discard_opaque_reasoning: bool,
 ) -> bool {
-    fn normalize_reasoning_item(item: &mut Value, discard_opaque_reasoning: bool) -> (bool, bool) {
-        if item.get("type").and_then(Value::as_str) != Some("reasoning") {
-            return (true, false);
-        }
-        if discard_opaque_reasoning {
-            return (false, true);
-        }
-        let has_nonempty_content = item
-            .get("content")
-            .and_then(Value::as_array)
-            .is_some_and(|content| !content.is_empty());
-        if !has_nonempty_content {
-            return (true, false);
-        }
-        let has_encrypted_content = item
-            .get("encrypted_content")
-            .and_then(Value::as_str)
-            .is_some_and(|content| !content.trim().is_empty());
-        if has_encrypted_content {
-            item.as_object_mut()
-                .expect("reasoning input item must remain an object")
-                .remove("content");
-            (true, true)
-        } else {
-            (false, true)
-        }
+    // 同一线路必须原样回传 reasoning，包括第三方 thinking 模式需要的明文内容。
+    if !discard_opaque_reasoning {
+        return false;
     }
-
     let Some(input) = body.get_mut("input") else {
         return false;
     };
     match input {
         Value::Array(items) => {
-            let mut mutated = false;
-            items.retain_mut(|item| {
-                let (keep, item_mutated) = normalize_reasoning_item(item, discard_opaque_reasoning);
-                mutated |= item_mutated;
-                keep
-            });
-            mutated
+            let previous_len = items.len();
+            items.retain(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"));
+            items.len() != previous_len
         }
-        Value::Object(_) => {
-            let (keep, mutated) = normalize_reasoning_item(input, discard_opaque_reasoning);
-            if !keep {
-                *input = Value::Array(Vec::new());
-            }
-            mutated
+        Value::Object(_) if input.get("type").and_then(Value::as_str) == Some("reasoning") => {
+            *input = Value::Array(Vec::new());
+            true
         }
         _ => false,
     }
@@ -230,37 +199,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn native_reasoning_normalization_preserves_same_provider_encrypted_state() {
-        let mut body = json!({
-            "input": [
-                {
-                    "type": "reasoning",
-                    "id": "rs_encrypted",
-                    "encrypted_content": "opaque-state",
-                    "content": [{"type": "reasoning_text", "text": "private"}]
-                },
-                {"role": "user", "content": "continue"}
-            ]
-        });
-
-        assert!(normalize_native_responses_context(&mut body, false));
-        assert_eq!(body["input"].as_array().unwrap().len(), 2);
-        assert_eq!(body["input"][0]["id"], "rs_encrypted");
-        assert_eq!(body["input"][0]["encrypted_content"], "opaque-state");
-        assert!(body["input"][0].get("content").is_none());
-        assert_eq!(body["input"][1]["role"], "user");
-
-        let mut single = json!({
-            "input": {
-                "type": "reasoning",
-                "id": "rs_single",
-                "encrypted_content": "opaque-single",
-                "content": [{"type": "reasoning_text", "text": "private"}]
+    fn native_reasoning_normalization_preserves_same_route_history() {
+        for encrypted in [None, Some("opaque-state")] {
+            let mut reasoning = json!({
+                "type":"reasoning", "id":"rs_provider", "summary":[],
+                "content":[{"type":"reasoning_text","text":"检查工具结果。Next step 🙂"}]
+            });
+            if let Some(encrypted) = encrypted {
+                reasoning["encrypted_content"] = json!(encrypted);
             }
-        });
-        assert!(normalize_native_responses_context(&mut single, false));
-        assert_eq!(single["input"]["id"], "rs_single");
-        assert!(single["input"].get("content").is_none());
+            let user = json!({"role":"user","content":"continue"});
+            for input in [reasoning.clone(), json!([reasoning, user.clone()])] {
+                let original = json!({"input":input});
+                let mut body = original.clone();
+                assert!(!normalize_native_responses_context(&mut body, false));
+                assert_eq!(body, original);
+
+                assert!(normalize_native_responses_context(&mut body, true));
+                assert_eq!(
+                    body["input"],
+                    if input.is_array() {
+                        json!([user])
+                    } else {
+                        json!([])
+                    }
+                );
+                assert!(!normalize_native_responses_context(&mut body, true));
+            }
+        }
     }
 
     #[test]

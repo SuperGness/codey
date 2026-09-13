@@ -455,7 +455,10 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let (closed_tx, closed_rx) = oneshot::channel();
-        let reasoning = json!({"type":"reasoning","encrypted_content":"encrypted-test-history"});
+        let reasoning = json!({
+            "type":"reasoning", "encrypted_content":"encrypted-test-history",
+            "content":[{"type":"reasoning_text","text":"Check before calling the tool."}]
+        });
         let upstream = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let mut first = tokio_tungstenite::accept_async(stream).await.unwrap();
