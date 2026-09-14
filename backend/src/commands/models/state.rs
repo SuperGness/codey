@@ -149,6 +149,38 @@ pub(crate) fn official_route_snapshots(
         .collect()
 }
 
+/// 模型成员可以立即送达选择器和本地路由；线路运输能力仍保持启动时的取值，
+/// 直到重启 app-server 才切换。这样启用模型不必等待重启。
+pub(crate) fn config_with_launch_pinned_transport(
+    applied: &CodeyConfig,
+    current: &CodeyConfig,
+) -> CodeyConfig {
+    let mut pinned = current.clone();
+    pinned.model_context_by_provider = applied.model_context_by_provider.clone();
+    pinned.supports_1m_context_by_provider = applied.supports_1m_context_by_provider.clone();
+    for profile in &mut pinned.profiles {
+        let Some(previous) = applied
+            .profiles
+            .iter()
+            .find(|previous| previous.id == profile.id)
+        else {
+            continue;
+        };
+        profile.supports_websockets = previous.supports_websockets;
+        profile.supports_native_web_search = previous.supports_native_web_search;
+        profile.supports_remote_compaction = previous.supports_remote_compaction;
+        // 协议决定上面三个能力的实际取值，必须一起固定在启动时的状态。
+        profile.upstream_protocol = previous.upstream_protocol.clone();
+        if profile.official_account && previous.official_account {
+            profile.base_url = previous.base_url.clone();
+            profile.api_key = previous.api_key.clone();
+            profile.auth_mode = previous.auth_mode.clone();
+            profile.model_request_headers = previous.model_request_headers.clone();
+        }
+    }
+    pinned
+}
+
 pub(crate) fn renderer_model_catalog_value(
     config: &CodeyConfig,
     model_state: &model_catalog::ModelSelectionState,

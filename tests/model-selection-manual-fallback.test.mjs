@@ -129,19 +129,19 @@ test("third-party model sync can fall back to manual model support configuration
 
 test("model save notices distinguish delivery, pending restart and subagent errors", async () => {
   const { modelSelectionNotice } = await loadTypeScriptModule(new URL("src/modelSelectionNotice.ts", root));
-  const summary = "已保存 3 个当前线路模型";
+  const summary = "已保存 3 个模型";
   for (const [result, tone, suffix] of [
     [{}, "success", ""],
-    [{ modelHotReloaded: true }, "success", "；Codex 模型列表已立即更新"],
-    [{ modelHotReloaded: true, modelHotReloadDeferred: true }, "info", "；Codex 模型列表将在打开模型选择器时更新"],
-    [{ modelHotReloaded: true, restartRequired: true }, "info", "；Codex 模型列表已立即更新；模型能力或其他设置需重启 Codex 后生效"],
-    [{ modelHotReloaded: true, modelHotReloadDeferred: true, restartRequired: true }, "info", "；Codex 模型列表将在打开模型选择器时更新；模型能力或其他设置需重启 Codex 后生效"],
-    [{ modelHotReloaded: false, restartRequired: true }, "info", "；线路运行配置需重启，Codex 模型列表将在重启后更新"],
-    [{ modelHotReloaded: false, modelHotReloadError: "CDP failed" }, "info", "；Codex 模型列表刷新失败，重启 Codex 后生效"],
-    [{ modelHotReloaded: false, subagentConfigHotReloadError: "reload failed" }, "info", "；子代理配置暂未能更新，重启 Codex 后生效"],
-    [{ modelHotReloaded: true, subagentConfigHotReloadError: "reload failed" }, "info", "；Codex 模型列表已立即更新；子代理配置暂未能更新，重启 Codex 后生效"],
-    [{ modelHotReloaded: true, subagentConfigRepaired: true }, "success", "；Codex 模型列表已立即更新；已校验并修复受影响的子代理运行配置"],
-    [{ modelHotReloaded: true, subagentConfigHotReloaded: true }, "success", "；Codex 模型列表已立即更新；受影响的子代理角色也已同步"],
+    [{ modelHotReloaded: true }, "success", ""],
+    [{ modelHotReloaded: true, modelHotReloadDeferred: true }, "success", ""],
+    [{ modelHotReloaded: true, restartRequired: true }, "info", "，需重启 Codex 后生效"],
+    [{ modelHotReloaded: true, modelHotReloadDeferred: true, restartRequired: true }, "info", "，需重启 Codex 后生效"],
+    [{ modelHotReloaded: false, restartRequired: true }, "info", "，需重启 Codex 后生效"],
+    [{ modelHotReloaded: false, modelHotReloadError: "CDP failed" }, "info", "；模型刷新失败，需重启 Codex 后生效"],
+    [{ modelHotReloaded: false, subagentConfigHotReloadError: "reload failed" }, "info", "；子代理配置更新失败，需重启 Codex 后生效"],
+    [{ modelHotReloaded: true, subagentConfigHotReloadError: "reload failed" }, "info", "；子代理配置更新失败，需重启 Codex 后生效"],
+    [{ modelHotReloaded: true, subagentConfigRepaired: true }, "success", ""],
+    [{ modelHotReloaded: true, subagentConfigHotReloaded: true }, "success", ""],
   ]) {
     assert.deepEqual(modelSelectionNotice(result, summary), { tone, text: summary + suffix });
   }
