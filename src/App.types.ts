@@ -79,6 +79,7 @@ export type Config = {
   settingsRevision: number;
   localRouterEnabled: boolean;
   routeRequestLog: RouteRequestLogConfig;
+  streamMaxRetries: number;
   activeProfileId: string;
   profiles: Profile[];
   initialRouteImportCompleted: boolean;

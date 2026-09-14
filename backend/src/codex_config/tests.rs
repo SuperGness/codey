@@ -561,6 +561,7 @@ fn isolated_runtime_restores_live_disk_provider_to_resume_shim() {
     apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: false,
             default_model: Some("route-a/hy3"),
@@ -670,6 +671,7 @@ fn local_router_accepts_a_codey_owned_resume_shim() {
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: true,
             default_model: Some("openai/gpt-5.6-sol"),
@@ -690,6 +692,7 @@ fn local_router_accepts_a_codey_owned_resume_shim() {
     );
     let rendered = applied.runtime_config_overrides.join("\n");
     assert!(rendered.contains("model_provider=\"codey_router\""));
+    assert!(rendered.contains("model_providers.codey_router.stream_max_retries=5"));
     assert!(
         rendered.contains("model_providers.codey_router.base_url=\"http://127.0.0.1:43127/v1\"")
     );
@@ -714,6 +717,7 @@ fn isolated_runtime_config_creates_empty_codex_config_when_missing() {
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: true,
             default_model: Some("openai/gpt-5.6-sol"),
@@ -1006,6 +1010,7 @@ fn native_isolated_runtime_does_not_create_a_missing_codex_config() {
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            stream_max_retries: 5,
             local_router: None,
             use_official_catalog: false,
             default_model: None,
@@ -1024,7 +1029,8 @@ fn native_isolated_runtime_does_not_create_a_missing_codex_config() {
     assert!(applied.runtime_config_overrides.iter().all(|entry| {
         !entry.starts_with("model_provider=")
             && !entry.starts_with("model_catalog_json=")
-            && !entry.starts_with("model_providers.")
+            && (!entry.starts_with("model_providers.")
+                || entry.starts_with("model_providers.openai.stream_max_retries="))
     }));
     assert!(restore_runtime_config_at(&home, &marker, false).unwrap());
     assert!(!home.join("config.toml").exists());
@@ -1059,6 +1065,7 @@ fn isolated_runtime_preserves_computer_use_without_adding_an_mcp() {
             let applied = apply_isolated_runtime_router_config(
                 &home,
                 RouterApplyOptions {
+                    stream_max_retries: 5,
                     local_router,
                     use_official_catalog: false,
                     default_model: None,
@@ -1109,6 +1116,7 @@ wire_api = "responses"
     apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            stream_max_retries: 5,
             local_router: None,
             use_official_catalog: false,
             default_model: None,
@@ -2434,6 +2442,7 @@ experimental_bearer_token = "upstream-secret-token"
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: true,
             default_model: Some("route-a/provider-model"),
@@ -2517,6 +2526,7 @@ fn official_login_uses_the_websocket_router_without_overriding_builtin_openai() 
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: true,
             default_model: Some("openai/gpt-5.6-sol"),
@@ -2565,6 +2575,7 @@ wire_api = "responses"
     let error = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            stream_max_retries: 5,
             local_router: Some(&endpoint),
             use_official_catalog: true,
             default_model: Some("relay/provider-model"),

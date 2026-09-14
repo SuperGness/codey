@@ -214,6 +214,7 @@ pub(crate) struct RuntimeRouterConfigOptions<'a> {
     pub subagent_model: &'a str,
     pub subagent_reasoning_effort: &'a str,
     pub subagent_roles: Option<&'a BTreeMap<String, SubagentRoleConfig>>,
+    pub stream_max_retries: u32,
 }
 
 #[derive(Debug)]
@@ -233,6 +234,7 @@ pub(crate) struct FastContextToolsStatus {
 
 struct RouterApplyOptions<'a> {
     local_router: Option<&'a RuntimeRouterEndpoint>,
+    stream_max_retries: u32,
     use_official_catalog: bool,
     default_model: Option<&'a str>,
     fastctx_command: Option<&'a Path>,
@@ -285,6 +287,7 @@ pub(crate) fn apply_runtime_router_config(
         home,
         RouterApplyOptions {
             local_router: options.local_router,
+            stream_max_retries: options.stream_max_retries,
             use_official_catalog,
             default_model,
             fastctx_command: fastctx_command.as_deref(),
@@ -364,6 +367,7 @@ fn apply_isolated_runtime_router_config(
 ) -> Result<AppliedRuntimeRouterConfig> {
     let RouterApplyOptions {
         local_router,
+        stream_max_retries,
         use_official_catalog,
         default_model,
         fastctx_command,
@@ -505,6 +509,7 @@ fn apply_isolated_runtime_router_config(
         fastctx_namespace,
         local_router.map(|_| local_router::ROUTER_PROVIDER_ID),
         &hook_trust_entries,
+        stream_max_retries,
     )?;
 
     create_private_dir_all(backup_root)?;
@@ -614,6 +619,7 @@ fn apply_isolated_test_runtime_config(
         home,
         RouterApplyOptions {
             local_router: Some(test_runtime_router_endpoint()),
+            stream_max_retries: 5,
             use_official_catalog,
             default_model: None,
             fastctx_command,
@@ -2143,8 +2149,30 @@ fn build_isolated_runtime_overrides(
     fastctx_namespace: Option<&str>,
     provider_id: Option<&str>,
     hook_trust_entries: &[RuntimeHookTrustEntry],
+    stream_max_retries: u32,
 ) -> Result<Vec<String>> {
     let mut overrides = Vec::new();
+    let retry_provider_id = effective
+        .get("model_provider")
+        .and_then(Item::as_str)
+        .or_else(|| {
+            let profile = effective.get("profile").and_then(Item::as_str)?;
+            effective
+                .get("profiles")
+                .and_then(Item::as_table_like)
+                .and_then(|profiles| profiles.get(profile))
+                .and_then(Item::as_table_like)
+                .and_then(|profile| profile.get("model_provider"))
+                .and_then(Item::as_str)
+        })
+        .unwrap_or("openai");
+    let provider_segment =
+        codex_config_override_bare_segment(retry_provider_id, "Codex Provider ID")?;
+    push_runtime_override_value(
+        &mut overrides,
+        &format!("model_providers.{provider_segment}.stream_max_retries"),
+        &Value::from(stream_max_retries as i64),
+    );
     push_required_document_override(
         &mut overrides,
         effective,

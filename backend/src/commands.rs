@@ -1449,6 +1449,7 @@ struct CodeyConfigSaveInput {
     model_context_present: bool,
     local_router_enabled_present: bool,
     route_request_log_present: bool,
+    stream_max_retries_present: bool,
     subagent_roles_present: bool,
     subagent_model_present: bool,
     subagent_reasoning_effort_present: bool,
@@ -1463,6 +1464,7 @@ impl CodeyConfigSaveInput {
             model_context_present: true,
             local_router_enabled_present: true,
             route_request_log_present: true,
+            stream_max_retries_present: true,
             subagent_roles_present: true,
             subagent_model_present: true,
             subagent_reasoning_effort_present: true,
@@ -1482,6 +1484,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
     let supports_1m_context_present = fields.contains_key("supports1MContextByProvider");
     let model_context_present = fields.contains_key("modelContextByProvider");
     let route_request_log_present = fields.contains_key("routeRequestLog");
+    let stream_max_retries_present = fields.contains_key("streamMaxRetries");
     let subagent_roles_present = fields.contains_key("subagentRoles");
     let subagent_model_present = fields.contains_key("subagentModel");
     let subagent_reasoning_effort_present = fields.contains_key("subagentReasoningEffort");
@@ -1493,6 +1496,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         model_context_present,
         local_router_enabled_present,
         route_request_log_present,
+        stream_max_retries_present,
         subagent_roles_present,
         subagent_model_present,
         subagent_reasoning_effort_present,
@@ -1526,6 +1530,7 @@ async fn save_codey_config_locked(
         model_context_present,
         local_router_enabled_present,
         route_request_log_present,
+        stream_max_retries_present,
         subagent_roles_present,
         subagent_model_present,
         subagent_reasoning_effort_present,
@@ -1634,6 +1639,9 @@ async fn save_codey_config_locked(
     }
     if route_request_log_present {
         config.route_request_log = config_input.route_request_log;
+    }
+    if stream_max_retries_present {
+        config.stream_max_retries = config_input.stream_max_retries;
     }
     // Native providers can have model selections without a saved Codey route.
     // Do not prune these caches during read-only saves or router transitions.
@@ -2464,6 +2472,7 @@ pub(super) fn config_requires_restart_with_route_status(
     provider_route_restart_required
         || applied.codex_app_path != current.codex_app_path
         || applied.user_scripts != current.user_scripts
+        || applied.stream_max_retries != current.stream_max_retries
         || applied.slim_codex_pet != current.slim_codex_pet
         || applied.gpu_launch_mode != current.gpu_launch_mode
         || applied.fast_context_tools != current.fast_context_tools

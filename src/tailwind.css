@@ -49,6 +49,7 @@
 @import "@heroui/styles/components/checkbox.css" layer(components);
 @import "@heroui/styles/components/input.css" layer(components);
 @import "@heroui/styles/components/input-group.css" layer(components);
+@import "@heroui/styles/components/number-field.css" layer(components);
 @import "@heroui/styles/components/textarea.css" layer(components);
 
 /* 布局 */
@@ -93,6 +94,7 @@
 @source "../node_modules/@heroui/react/dist/components/list-box-item";
 @source "../node_modules/@heroui/react/dist/components/list-box-section";
 @source "../node_modules/@heroui/react/dist/components/modal";
+@source "../node_modules/@heroui/react/dist/components/number-field";
 @source "../node_modules/@heroui/react/dist/components/pagination";
 @source "../node_modules/@heroui/react/dist/components/popover";
 @source "../node_modules/@heroui/react/dist/components/select";

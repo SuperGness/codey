@@ -617,6 +617,9 @@ pub struct CodeyConfig {
     /// Disabled by default so existing installations pay no producer cost.
     #[serde(default)]
     pub route_request_log: RouteRequestLogConfig,
+    /// Number of times Codex retries a dropped streaming session.
+    #[serde(default = "default_stream_max_retries")]
+    pub stream_max_retries: u32,
     #[serde(default)]
     pub active_profile_id: String,
     #[serde(default)]
@@ -770,6 +773,7 @@ impl Default for CodeyConfig {
             settings_revision: 0,
             local_router_enabled: true,
             route_request_log: RouteRequestLogConfig::default(),
+            stream_max_retries: default_stream_max_retries(),
             active_profile_id: profile.id.clone(),
             profiles: vec![profile],
             webhook: WebhookConfig::default(),
@@ -803,9 +807,14 @@ impl Default for CodeyConfig {
     }
 }
 
+fn default_stream_max_retries() -> u32 {
+    5
+}
+
 impl CodeyConfig {
     pub fn normalize(mut self) -> Self {
         self.update_manifest_url = default_update_manifest_url();
+        self.stream_max_retries = self.stream_max_retries.min(100);
         self.route_request_log.normalize();
         self.profiles
             .retain(|profile| !profile.id.trim().is_empty());

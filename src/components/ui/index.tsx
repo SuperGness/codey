@@ -10,6 +10,7 @@ import {
   Label,
   ListBox,
   Modal,
+  NumberField as HeroNumberField,
   Select as HeroSelect,
   Spinner,
   Switch as HeroSwitch,
@@ -211,6 +212,85 @@ export function PasswordInput({ visibility, onVisibilityChange, rightSection, di
         </HeroButton>
       </>}
     />
+  );
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * NumberInput（数值输入框，基于 HeroUI NumberField）
+ * -----------------------------------------------------------------------------------------------*/
+type HeroNumberFieldProps = React.ComponentProps<typeof HeroNumberField>;
+export interface NumberInputProps
+  extends Omit<
+    HeroNumberFieldProps,
+    | "value"
+    | "defaultValue"
+    | "onChange"
+    | "minValue"
+    | "maxValue"
+    | "step"
+    | "isDisabled"
+    | "children"
+    | "className"
+    | "size"
+  > {
+  "aria-label"?: string;
+  className?: string;
+  defaultValue?: number;
+  disabled?: boolean;
+  maxValue?: number;
+  minValue?: number;
+  onChange?: (value: number) => void;
+  size?: "sm" | "md" | "lg";
+  step?: number;
+  value?: number;
+}
+export function NumberInput({
+  value,
+  defaultValue,
+  onChange,
+  minValue = 0,
+  maxValue = 100,
+  step = 1,
+  disabled,
+  size = "md",
+  className,
+  "aria-label": ariaLabel,
+  ...props
+}: NumberInputProps) {
+  const isSm = size === "sm";
+  return (
+    <HeroNumberField
+      {...props}
+      minValue={minValue}
+      maxValue={maxValue}
+      step={step}
+      value={value}
+      defaultValue={defaultValue}
+      onChange={(nextValue) => {
+        if (typeof nextValue === "number" && !Number.isNaN(nextValue) && Number.isInteger(nextValue)) {
+          onChange?.(nextValue);
+        }
+      }}
+      isDisabled={disabled}
+      aria-label={ariaLabel}
+      className={cn(isSm ? "number-field--sm w-[84px]" : "w-28", className)}
+    >
+      <HeroNumberField.Group
+        className={cn(
+          "rounded-md border border-black/15 bg-white shadow-2xs transition-colors hover:border-black/30 focus-within:border-[#007aff]",
+          isSm ? "h-[25px]" : "h-7"
+        )}
+      >
+        <HeroNumberField.DecrementButton className="hover:bg-black/5 active:bg-black/10 transition-colors" />
+        <HeroNumberField.Input
+          className={cn(
+            "bg-transparent text-center font-medium tabular-nums",
+            isSm ? "text-[11.5px]" : "text-xs"
+          )}
+        />
+        <HeroNumberField.IncrementButton className="hover:bg-black/5 active:bg-black/10 transition-colors" />
+      </HeroNumberField.Group>
+    </HeroNumberField>
   );
 }
 

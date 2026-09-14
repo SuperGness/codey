@@ -27,9 +27,11 @@ import {
   DialogHeader,
   DialogTitle,
   Input,
+  NumberInput,
   PasswordInput,
   Select,
   Switch,
+  Tooltip,
 } from "./components/ui";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
 import { headersTextFromMap, parseHeadersText } from "./requestHeaders";
@@ -159,6 +161,7 @@ type ModelSectionProps = {
     upstreamProxy?: string,
   ) => Promise<boolean>;
   onSetDefaultModel: (routeId: string, model: string) => void;
+  onConfigChange?: (config: Config) => void;
 };
 
 type RouteModelGroup = {
@@ -257,6 +260,7 @@ function ModelSectionComponent({
   onToggleAccountUsage,
   onSaveOfficialRouteSettings,
   onSetDefaultModel,
+  onConfigChange,
 }: ModelSectionProps) {
   const [routeDialogOpen, setRouteDialogOpen] = useState(false);
   const [draggedRouteId, setDraggedRouteId] = useState<string | null>(null);
@@ -528,6 +532,26 @@ function ModelSectionComponent({
           </div>
         </div>
         <div className="route-heading-actions">
+          <div className="local-router-toggle route-retry-toggle">
+            <Tooltip content="流式会话中断后自动重新连接的次数，保存并重启 Codex 后生效">
+              <span className="route-retry-label cursor-help">
+                <strong>会话重试</strong>
+              </span>
+            </Tooltip>
+            <NumberInput
+              size="sm"
+              value={config.streamMaxRetries}
+              minValue={0}
+              maxValue={100}
+              disabled={isBusy}
+              onChange={(value) => {
+                if (Number.isInteger(value) && value >= 0 && value <= 100 && value !== config.streamMaxRetries) {
+                  onConfigChange?.({ ...config, streamMaxRetries: value });
+                }
+              }}
+              aria-label="会话错误重试次数"
+            />
+          </div>
           <div className="local-router-toggle">
             <strong>本地路由</strong>
             <Switch
