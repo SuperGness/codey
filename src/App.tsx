@@ -744,6 +744,8 @@ export function App({
   async function saveCurrent() {
     if (!config) return;
     await runOperation("save", async () => {
+      const retryCountChanged =
+        persistedConfigRef.current?.streamMaxRetries !== config.streamMaxRetries;
       const result = await persist(config);
       const subagentHotReloaded = Boolean(result.subagentConfigHotReloaded);
       const subagentHotReloadFailed = Boolean(result.subagentConfigHotReloadError);
@@ -776,6 +778,9 @@ export function App({
         noticeText = `Codey 设置已保存；请求日志记录已实时开启，无需重启${restartSuffix}`;
       } else if (requestLogHealth === "disabled") {
         noticeText = `Codey 设置已保存；请求日志记录已实时关闭，无需重启${restartSuffix}`;
+      }
+      if (retryCountChanged && result.restartRequired) {
+        noticeText = "Codey 设置已保存；会话重试次数将在重启 Codex 后生效";
       }
       setNotice({ tone: noticeTone, text: noticeText });
     });
@@ -1266,6 +1271,7 @@ export function App({
               onToggleAccountUsage={handleToggleAccountUsage}
               onSaveOfficialRouteSettings={handleSaveOfficialRouteSettings}
               onSetDefaultModel={handleSetRouteDefaultModel}
+              onConfigChange={handleConfigChange}
             />
           </div>
 

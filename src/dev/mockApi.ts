@@ -45,6 +45,7 @@ if (import.meta.env.DEV) {
         retainedFiles: 7,
         retentionDays: 30,
       },
+      streamMaxRetries: 5,
       activeProfileId: "primary",
       initialRouteImportCompleted: true,
       profiles: [

@@ -13,34 +13,31 @@ export type ModelRuntimeUpdate = {
 
 export function modelSelectionNotice(
   result: ModelRuntimeUpdate,
-  summary: string,
+  summary = "已保存模型",
 ): Notice {
-  const messages = [summary];
   if (result.modelHotReloadError) {
-    messages.push("Codex 模型列表刷新失败，重启 Codex 后生效");
-  } else if (result.modelHotReloaded) {
-    messages.push(result.modelHotReloadDeferred
-      ? "Codex 模型列表将在打开模型选择器时更新"
-      : "Codex 模型列表已立即更新");
-  } else if (result.restartRequired) {
-    messages.push("线路运行配置需重启，Codex 模型列表将在重启后更新");
+    return {
+      tone: "info",
+      text: `${summary}；模型刷新失败，需重启 Codex 后生效`,
+    };
   }
 
   if (result.subagentConfigHotReloadError) {
-    messages.push("子代理配置暂未能更新，重启 Codex 后生效");
-  } else if (result.subagentConfigRepaired) {
-    messages.push("已校验并修复受影响的子代理运行配置");
-  } else if (result.subagentConfigHotReloaded) {
-    messages.push("受影响的子代理角色也已同步");
+    return {
+      tone: "info",
+      text: `${summary}；子代理配置更新失败，需重启 Codex 后生效`,
+    };
   }
-  if (result.modelHotReloaded && result.restartRequired) {
-    messages.push("模型能力或其他设置需重启 Codex 后生效");
+
+  if (result.restartRequired) {
+    return {
+      tone: "info",
+      text: `${summary}，需重启 Codex 后生效`,
+    };
   }
+
   return {
-    tone: result.modelHotReloadError
-      || result.subagentConfigHotReloadError
-      || result.restartRequired
-      || result.modelHotReloadDeferred ? "info" : "success",
-    text: messages.join("；"),
+    tone: "success",
+    text: summary,
   };
 }

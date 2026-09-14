@@ -78,6 +78,10 @@
     flex-direction: column;
   }
 
+  .route-heading-actions .local-router-toggle {
+    justify-content: space-between;
+  }
+
   .route-catalog-pane {
     padding: 12px;
   }

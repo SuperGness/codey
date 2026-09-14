@@ -1278,6 +1278,66 @@ fn websocket_switch_changes_require_restart_and_stop_hot_reload() {
 }
 
 #[test]
+fn pending_websocket_switch_still_delivers_added_model_membership() {
+    let mut route = crate::config::ProviderProfile::new("自建");
+    route.id = "route-self".into();
+    route.base_url = "https://route-self.example/v1".into();
+    route.api_key = "route-self-secret".into();
+    let mut applied = CodeyConfig {
+        active_profile_id: route.id.clone(),
+        profiles: vec![route],
+        ..CodeyConfig::default()
+    };
+    applied
+        .selected_models_by_provider
+        .insert("route-self".into(), vec!["gpt-5.6-luna".into()]);
+
+    let mut current = applied.clone();
+    current.profiles[0].supports_websockets = true;
+    current.selected_models_by_provider.insert(
+        "route-self".into(),
+        vec!["gpt-5.6-luna".into(), "gpt-6-astra".into()],
+    );
+    assert!(!runtime_supports_current_routes_for_hot_reload(
+        &applied, &current
+    ));
+
+    let delivered = config_with_launch_pinned_transport(&applied, &current);
+    assert!(!delivered.profiles[0].supports_websockets);
+
+    // 协议切换同样只随重启生效，否则本地路由会和已启动的 app-server 能力不一致。
+    let mut websocket_applied = applied.clone();
+    websocket_applied.profiles[0].supports_websockets = true;
+    let mut switched_protocol = websocket_applied.clone();
+    switched_protocol.profiles[0].upstream_protocol =
+        crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+    assert!(!runtime_supports_current_routes_for_hot_reload(
+        &websocket_applied,
+        &switched_protocol
+    ));
+    let pinned_protocol =
+        config_with_launch_pinned_transport(&websocket_applied, &switched_protocol);
+    assert_eq!(
+        pinned_protocol.profiles[0].upstream_protocol,
+        crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES
+    );
+    assert!(pinned_protocol.profiles[0].supports_websockets);
+    let model_state = model_catalog::ModelSelectionState {
+        third_party_models: vec!["gpt-5.6-luna".into(), "gpt-6-astra".into()],
+        default_model: "gpt-5.6-luna".into(),
+        ..Default::default()
+    };
+    let catalog = renderer_model_catalog_value(&delivered, &model_state);
+    assert!(
+        catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|model| model.as_str() == Some("route-self/gpt-6-astra"))
+    );
+}
+
+#[test]
 fn native_web_search_models_hot_reload_but_capability_switch_requires_restart() {
     let mut route = crate::config::ProviderProfile::new("Search Route");
     route.id = "route-search".into();

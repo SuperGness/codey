@@ -723,6 +723,7 @@ async fn prepare_codex_startup_state(
     } = startup_catalog;
     let runtime_config_home = home.to_path_buf();
     let runtime_local_router = local_router.clone();
+    let stream_max_retries = config.stream_max_retries;
     let runtime_default_model = runtime_default_model(config, use_official_catalog, &model_state);
     let fast_context_tools = config.fast_context_tools;
     let mut runtime_subagent_config = config.clone();
@@ -746,6 +747,7 @@ async fn prepare_codex_startup_state(
                 subagent_model: &subagent_model,
                 subagent_reasoning_effort: &subagent_reasoning_effort,
                 subagent_roles: Some(&subagent_roles),
+                stream_max_retries,
             },
         )
     })
@@ -1501,6 +1503,7 @@ async fn prepare_native_runtime_state(
     let runtime_config_home = home.to_path_buf();
     let fast_context_tools = config.fast_context_tools;
     let subagent_optimization = config.subagent_optimization;
+    let stream_max_retries = config.stream_max_retries;
     let native_subagent_config = config.clone();
     let applied = tokio::task::spawn_blocking(move || {
         let native_subagent_config = reconciled_native_subagent_runtime_config(
@@ -1518,6 +1521,7 @@ async fn prepare_native_runtime_state(
                 subagent_model: &native_subagent_config.subagent_model,
                 subagent_reasoning_effort: &native_subagent_config.subagent_reasoning_effort,
                 subagent_roles: Some(&native_subagent_config.subagent_roles),
+                stream_max_retries,
             },
         )
     })

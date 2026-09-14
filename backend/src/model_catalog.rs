@@ -1298,10 +1298,10 @@ fn synthetic_model(
             .and_then(Value::as_u64)
             .is_none_or(|window| window == 0)
     {
-        // ponytail: unknown providers use a conservative operating budget; an
+        // ponytail: unknown providers use a 200K operating budget; an
         // explicit provider/model setting replaces it when capacity is known.
-        model["context_window"] = json!(32_768);
-        model["max_context_window"] = json!(32_768);
+        model["context_window"] = json!(200_000);
+        model["max_context_window"] = json!(200_000);
         model["effective_context_window_percent"] = json!(95);
         model["auto_compact_token_limit"] = Value::Null;
         model["codey_context_source"] = json!("conservative_fallback");
@@ -1380,8 +1380,8 @@ fn configure_1m_context_window(model: &mut Value, allowed_model_keys: &HashSet<S
                     .any(|official| model_id::equal(official, upstream))
             })
     {
-        model["context_window"] = json!(32_768);
-        model["max_context_window"] = json!(32_768);
+        model["context_window"] = json!(200_000);
+        model["max_context_window"] = json!(200_000);
         model["effective_context_window_percent"] = json!(95);
         model["auto_compact_token_limit"] = Value::Null;
         model["codey_context_source"] = json!("conservative_fallback");
@@ -1462,7 +1462,7 @@ fn model_context_projection_restores_cache_and_explicit_overrides_legacy() {
     use crate::config::ModelContextConfig;
     let mut model = json!({ "slug": "route/custom", "codey_source": "third_party", "context_window": 272000, "max_context_window": 872000 });
     configure_1m_context_window(&mut model, &HashSet::new());
-    assert_eq!(model["context_window"], 32768);
+    assert_eq!(model["context_window"], 200_000);
     assert_eq!(model["codey_context_source"], "conservative_fallback");
     configure_1m_context_window(&mut model, &HashSet::from(["route/custom".into()]));
     assert_eq!(model["context_window"], 1_000_000);
@@ -1478,8 +1478,8 @@ fn model_context_projection_restores_cache_and_explicit_overrides_legacy() {
     assert_eq!(model["auto_compact_token_limit"], 80_000);
     assert_eq!(model["codey_context_source"], "user_declared");
     configure_1m_context_window(&mut model, &HashSet::new());
-    assert_eq!(model["context_window"], 32768);
-    assert_eq!(model["max_context_window"], 32768);
+    assert_eq!(model["context_window"], 200_000);
+    assert_eq!(model["max_context_window"], 200_000);
     assert_eq!(model["effective_context_window_percent"], 95);
     assert!(model["auto_compact_token_limit"].is_null());
     let mut trusted = json!({ "slug": "gpt-5.5", "context_window": 272000, "max_context_window": 872000, "effective_context_window_percent": 95 });
@@ -2687,7 +2687,7 @@ mod tests {
         let sanitized: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(sanitized["models"][0].get("supports_search_tool").is_none());
         assert!(sanitized["models"][0].get("web_search_tool_type").is_none());
-        assert_eq!(sanitized["models"][0]["context_window"], 32_768);
+        assert_eq!(sanitized["models"][0]["context_window"], 200_000);
         let sanitized_bytes = fs::read(&path).unwrap();
 
         assert!(prepare_cached_catalog_for_current_capabilities(home.path(), &[], &[]).unwrap());

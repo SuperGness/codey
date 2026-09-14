@@ -375,7 +375,8 @@ button,
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   flex-shrink: 0;
 }
 
@@ -395,6 +396,17 @@ button,
   font-size: 11px;
   font-weight: 650;
   white-space: nowrap;
+}
+
+.route-retry-toggle {
+  gap: 8px;
+  padding: 3px 3px 3px 11px;
+}
+
+.route-retry-label {
+  display: inline-flex;
+  align-items: center;
+  user-select: none;
 }
 
 .toast-region {
@@ -466,6 +478,7 @@ button,
 
 .input,
 .input-group,
+.number-field__group,
 .select__trigger,
 .textarea {
   --field-shadow: 0 0 0 0 transparent;
@@ -476,6 +489,7 @@ button,
 
 .input:not(:focus):not([data-focused="true"]):not([data-focus-visible="true"]),
 .input-group:not(:focus-within):not([data-focus-within="true"]),
+.number-field__group:not(:focus-within):not([data-focus-within="true"]),
 .select__trigger:not(:focus):not([data-focus="true"]):not([data-focus-visible="true"]),
 .textarea:not(:focus):not([data-focused="true"]):not([data-focus-visible="true"]) {
   box-shadow: none;
@@ -485,6 +499,8 @@ button,
 .input[data-hovered="true"]:not([data-focused="true"]):not([data-focus-visible="true"]),
 .input-group:hover:not(:focus-within),
 .input-group[data-hovered="true"]:not([data-focus-within="true"]),
+.number-field__group:hover:not(:focus-within),
+.number-field__group[data-hovered="true"]:not([data-focus-within="true"]),
 .select__trigger:hover:not(:focus):not(:focus-visible),
 .select__trigger[data-hovered="true"]:not([data-focused="true"]):not([data-focus-visible="true"]),
 .textarea:hover:not(:focus):not(:focus-visible),
@@ -496,6 +512,8 @@ button,
 .input[data-focused="true"],
 .input-group:has([data-slot="input-group-input"]:focus),
 .input-group:has([data-slot="input-group-textarea"]:focus),
+.number-field__group:focus-within,
+.number-field__group[data-focus-within="true"],
 .select__trigger:focus,
 .select__trigger[data-focus="true"],
 .select__trigger[data-focus-visible="true"],
@@ -508,11 +526,77 @@ button,
 .input[aria-invalid="true"],
 .input-group[data-invalid="true"],
 .input-group[aria-invalid="true"],
+.number-field__group[data-invalid="true"],
+.number-field__group[aria-invalid="true"],
 .select__trigger[data-invalid="true"],
 .select__trigger[aria-invalid="true"],
 .textarea[data-invalid="true"],
 .textarea[aria-invalid="true"] {
   border-color: var(--danger, #ff3b30);
+}
+
+.number-field__group {
+  background-color: #ffffff;
+  grid-template-columns: 28px 1fr 28px;
+}
+
+.number-field__decrement-button,
+.number-field__increment-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 100%;
+  color: var(--mac-text-secondary);
+  background: transparent;
+  cursor: pointer;
+  transition: background-color 130ms ease, color 130ms ease;
+}
+
+.number-field__decrement-button:hover:not(:disabled),
+.number-field__increment-button:hover:not(:disabled) {
+  background-color: rgba(0, 0, 0, 0.05);
+  color: var(--mac-text-primary);
+}
+
+.number-field__decrement-button:active:not(:disabled),
+.number-field__increment-button:active:not(:disabled) {
+  background-color: rgba(0, 0, 0, 0.1);
+}
+
+.number-field__input {
+  background: transparent;
+  color: var(--mac-text-primary);
+  font-weight: 500;
+  text-align: center;
+}
+
+.number-field--sm {
+  width: 84px;
+}
+
+.number-field--sm .number-field__group {
+  height: 25px;
+  border-radius: 6px;
+  grid-template-columns: 22px 1fr 22px;
+}
+
+.number-field--sm .number-field__decrement-button,
+.number-field--sm .number-field__increment-button {
+  width: 22px;
+}
+
+.number-field--sm [data-slot="number-field-decrement-button-icon"],
+.number-field--sm [data-slot="number-field-increment-button-icon"],
+.number-field--sm .number-field__decrement-button svg,
+.number-field--sm .number-field__increment-button svg {
+  width: 12px;
+  height: 12px;
+}
+
+.number-field--sm .number-field__input {
+  font-size: 11.5px;
+  padding: 0 2px;
 }
 
 .input-group__prefix,

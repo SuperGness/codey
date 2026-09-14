@@ -112,6 +112,7 @@ pub async fn save_official_route_models(
         .selected_models_by_provider
         .insert(provider_id, selected_models);
     config = config.normalize();
+    config.profiles[profile_index].validate()?;
     let (catalog_refresh, model_state) = refreshed_model_state_async(&config, false).await?;
     subagent_policy::reconcile_with_model_state(&mut config, Some(&model_state));
     config = config.normalize();
@@ -145,18 +146,26 @@ pub(crate) async fn hot_reload_runtime_models(
     let Some(runtime) = runtime else {
         return ModelHotReloadOutcome::default();
     };
-    if !runtime_supports_current_routes_for_hot_reload(&runtime.applied_config, config) {
+    if runtime.applied_config.local_router_enabled != config.local_router_enabled {
         return ModelHotReloadOutcome::default();
     }
-    if config.local_router_enabled
-        && let Err(error) = runtime.sync_local_router_routes(config)
+    // 待重启的线路能力差异（例如 Responses WebSocket 开关）不阻塞模型成员送达，
+    // 只把运输能力固定在启动时的取值，重启后自然切换。
+    let delivered =
+        if runtime_supports_current_routes_for_hot_reload(&runtime.applied_config, config) {
+            config.clone()
+        } else {
+            config_with_launch_pinned_transport(&runtime.applied_config, config)
+        };
+    if delivered.local_router_enabled
+        && let Err(error) = runtime.sync_local_router_routes(&delivered)
     {
         return ModelHotReloadOutcome {
             error: Some(format!("{error:#}")),
             ..ModelHotReloadOutcome::default()
         };
     }
-    let expected_catalog = renderer_model_catalog_value(config, model_state);
+    let expected_catalog = renderer_model_catalog_value(&delivered, model_state);
     let expected_models = expected_catalog
         .get("models")
         .and_then(Value::as_array)
@@ -165,7 +174,7 @@ pub(crate) async fn hot_reload_runtime_models(
     let websocket_url = runtime.renderer_websocket_url().await;
     match cdp::refresh_model_whitelist(&websocket_url, &expected_catalog).await {
         Ok(refresh) => {
-            runtime.mark_model_config_applied(config).await;
+            runtime.mark_model_config_applied(&delivered).await;
             ModelHotReloadOutcome {
                 reloaded: true,
                 deferred: refresh.deferred,

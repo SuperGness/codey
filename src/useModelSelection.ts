@@ -355,13 +355,14 @@ export function useModelSelection({
       const manualThirdPartyModels = draftManualThirdPartyModels.filter((model) =>
         thirdPartyModelKeys.has(modelKey(model))
       );
+      const totalCount = officialModels.length + thirdPartyModels.length;
       await applyModelSelection(
         officialModels,
         thirdPartyModels,
         manualThirdPartyModels,
         deletedThirdPartyModels,
         draftAutoReviewSupported,
-        `已保存 ${officialModels.length + thirdPartyModels.length} 个当前线路模型`,
+        totalCount > 0 ? `已保存 ${totalCount} 个模型` : "已保存模型",
         true,
       );
     });

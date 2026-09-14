@@ -690,6 +690,15 @@ fn restart_sensitive_config_changes_are_detected() {
         &default_model_change
     ));
 
+    let mut stream_retry_change = applied.clone();
+    stream_retry_change.stream_max_retries += 1;
+    assert!(config_requires_restart(
+        &applied,
+        &applied_models,
+        &applied_subagent,
+        &stream_retry_change
+    ));
+
     let mut gpu_mode_change = applied.clone();
     gpu_mode_change.gpu_launch_mode = crate::config::GpuLaunchMode::DisableGpuRasterization;
     assert!(config_requires_restart(
