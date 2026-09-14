@@ -1536,6 +1536,17 @@ impl RouterServer {
         // 请求体的模型名已还原为上游模型名，路由提示头里的模型名必须保持一致；
         // HTTP、WebSocket 握手和压缩请求共用这份头。
         align_routing_hint_model(&mut headers, &resolved.upstream_model);
+        if resolved.route.protocol == UpstreamProtocol::AnthropicMessages
+            && resolved
+                .route
+                .one_m_context_models
+                .contains(&model_id::key(&resolved.upstream_model))
+        {
+            headers.insert(
+                HeaderName::from_static("anthropic-beta"),
+                HeaderValue::from_static("context-1m-2025-08-07"),
+            );
+        }
         // Commit the new binding only after the request's route compatibility,
         // payload conversion, and credentials have passed local checks. A
         // rejected switch must leave the prior route available for a retry.
