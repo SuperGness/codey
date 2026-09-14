@@ -70,7 +70,7 @@ export function ModelContextFields({ model, policy, disabled, onChange }: {
       <div className="mt-1.5 rounded-[9px] border border-black/[0.08] bg-[#f8f8fa] p-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
         <div className="mb-2.5 flex items-start justify-between gap-2">
           <p className="text-[11px] leading-[1.45] text-[#6e6e73]">
-            自定义值优先于 1M；清空窗口恢复默认。未知模型默认使用 32768 Token 保守预算，不代表服务端容量。修改后重启 Codex 生效。
+            自定义值优先于 1M；清空窗口恢复默认。未知模型默认使用 200000 Token 保守预算，不代表服务端容量。修改后重启 Codex 生效。
           </p>
           {policy && (
             <button
@@ -89,7 +89,7 @@ export function ModelContextFields({ model, policy, disabled, onChange }: {
         </div>
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
           {([
-            ["contextWindowTokens", "窗口", 1024, "默认 (32768)"],
+            ["contextWindowTokens", "窗口", 1024, "默认 (200000)"],
             ["autoCompactTokenLimit", "压缩阈值", 1, "自动"],
             ["reserveOutputTokens", "输出预留", 1, "不单独预留"],
           ] as const).map(([field, label, min, placeholder]) => (
@@ -114,7 +114,7 @@ export function ModelContextFields({ model, policy, disabled, onChange }: {
                     return;
                   }
                   onChange({
-                    contextWindowTokens: 32768,
+                    contextWindowTokens: 200000,
                     ...policy,
                     [field]: raw === "" ? undefined : Number(raw),
                   });
