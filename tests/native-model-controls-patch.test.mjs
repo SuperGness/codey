@@ -768,10 +768,13 @@ test("starting or restarting Codex replaces the old runtime with one managed by 
     launcherModules,
     /stop_macos_codex\([\s\S]*?inspector_argument,[\s\S]*?&self\.codex_app_path,[\s\S]*?self\.process_id,[\s\S]*?self\.process_group_id/,
   );
+  // Any Codex install can hold Electron's single-instance lock, so the
+  // pre-launch stop sweeps every instance instead of one executable path.
   assert.match(
     prepareLaunchFlow,
-    /tokio::task::spawn_blocking[\s\S]*?if already_running \{[\s\S]*?terminate_windows_codex_processes\(&app_dir, None\)[\s\S]*?\.await/,
+    /stop_running_windows_codex_instances\(app_dir\)\s*\.await/,
   );
+  assert.doesNotMatch(prepareLaunchFlow, /if already_running \{/);
   assert.match(
     prepareLaunchFlow,
     /if macos_codex_is_running\(app_dir\)\.await\? \{[\s\S]*?terminate_unix_codex_processes\(app_dir, None, None, None\)[\s\S]*?\.await/,

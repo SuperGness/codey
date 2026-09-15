@@ -918,6 +918,142 @@ fn windows_path_is_within(path: &Path, directory: &Path) -> bool {
             .is_some_and(|rest| rest.starts_with('\\'))
 }
 
+/// Executable names shared by every Codex desktop build (Store and standalone).
+#[cfg(any(windows, test))]
+const WINDOWS_CODEX_EXECUTABLE_NAMES: &[&str] = &["codex.exe", "chatgpt.exe"];
+
+/// A Codex desktop process that holds, or would contend for, Electron's
+/// single-instance lock.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct WindowsCodexInstance {
+    pub(super) process_id: u32,
+    pub(super) executable_path: std::path::PathBuf,
+}
+
+/// Every Codex desktop process in the snapshot, whichever install it came
+/// from. Electron's single-instance lock is keyed by the app, not by its
+/// path: a Store package left running, a standalone copy started by hand or a
+/// build that updated into a new directory while Codey's saved path still
+/// names the old one all make the next launch quit with exit code 0.
+/// `ChatGPT.exe` only counts inside a Codex directory so the ChatGPT desktop
+/// app is left alone; processes whose path cannot be read are skipped because
+/// they cannot be terminated with an identity check either.
+#[cfg(any(windows, test))]
+pub(super) fn windows_codex_instances_from_snapshot<'a>(
+    app_dir: &Path,
+    processes: impl IntoIterator<Item = (u32, Option<&'a Path>)>,
+) -> Vec<WindowsCodexInstance> {
+    let current_process_id = std::process::id();
+    processes
+        .into_iter()
+        .filter(|(process_id, _)| *process_id != current_process_id)
+        .filter_map(|(process_id, executable_path)| {
+            let executable_path = executable_path?;
+            // Split on the normalized string rather than `Path::file_name` so
+            // the rule reads Windows paths the same way under test on any host.
+            let normalized = normalized_windows_path(executable_path);
+            let (directories, name) = normalized.rsplit_once('\\')?;
+            if !WINDOWS_CODEX_EXECUTABLE_NAMES.contains(&name) {
+                return None;
+            }
+            let codex_owned = name == "codex.exe"
+                || windows_path_is_within(executable_path, app_dir)
+                || windows_directory_names_codex(directories);
+            codex_owned.then(|| WindowsCodexInstance {
+                process_id,
+                executable_path: executable_path.to_path_buf(),
+            })
+        })
+        .collect()
+}
+
+/// True when the executable sits directly in a Codex install directory:
+/// `OpenAI.Codex_<version>_<arch>__<publisher>\app` (Store) or `Codex`
+/// (standalone `Programs\Codex`, `OpenAI\Codex\bin`). Only the two nearest
+/// directories count, so a user account named `codex` does not match.
+#[cfg(any(windows, test))]
+fn windows_directory_names_codex(normalized_directories: &str) -> bool {
+    normalized_directories
+        .rsplit('\\')
+        .take(2)
+        .any(|segment| segment == "codex" || segment.starts_with("openai.codex"))
+}
+
+/// Short list for user-facing errors: `PID 1（path）、PID 2（path） 等 N 个进程`.
+#[cfg(any(windows, test))]
+pub(super) fn windows_codex_instances_summary(instances: &[WindowsCodexInstance]) -> String {
+    const MAX_LISTED: usize = 3;
+    let listed = instances
+        .iter()
+        .take(MAX_LISTED)
+        .map(|instance| {
+            format!(
+                "PID {}（{}）",
+                instance.process_id,
+                instance.executable_path.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("、");
+    if instances.len() > MAX_LISTED {
+        format!("{listed} 等 {} 个进程", instances.len())
+    } else {
+        listed
+    }
+}
+
+/// Stops every Codex desktop instance, whichever install it belongs to, and
+/// returns what was running before the stop. Each instance's own directory is
+/// passed to the terminator so its renderer and app-server children go with it.
+#[cfg(windows)]
+pub(super) async fn stop_running_windows_codex_instances(
+    app_dir: &Path,
+) -> Result<Vec<WindowsCodexInstance>> {
+    let processes = codey_runtime_core::windows_enumerate_processes()
+        .context("检测正在运行的 Windows Codex 失败")?;
+    let instances = windows_codex_instances_from_snapshot(
+        app_dir,
+        processes
+            .iter()
+            .map(|process| (process.process_id, process.executable_path.as_deref())),
+    );
+    if instances.is_empty() {
+        return Ok(instances);
+    }
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.windows_codex_instances_stopping",
+        serde_json::json!({
+            "appPath": app_dir,
+            "instances": instances
+                .iter()
+                .map(|instance| serde_json::json!({
+                    "processId": instance.process_id,
+                    "executablePath": instance.executable_path,
+                }))
+                .collect::<Vec<_>>(),
+        }),
+    );
+    let mut directories: Vec<std::path::PathBuf> = Vec::new();
+    for instance in &instances {
+        let Some(directory) = instance.executable_path.parent() else {
+            continue;
+        };
+        if !directories
+            .iter()
+            .any(|known| windows_path_is_within(directory, known))
+        {
+            directories.push(directory.to_path_buf());
+        }
+    }
+    for directory in directories {
+        terminate_windows_codex_processes(&directory, None)
+            .await
+            .with_context(|| format!("停止正在运行的 Codex 失败：{}", directory.display()))?;
+    }
+    Ok(instances)
+}
+
 #[cfg(any(windows, test))]
 pub(super) fn windows_owned_process_ids_from_snapshot<'a>(
     app_dir: &Path,
@@ -1176,6 +1312,63 @@ pub(super) fn windows_stop_failure_summary(remaining: &[(u32, String, Option<u64
 #[cfg(test)]
 mod compatibility_tests {
     use super::*;
+
+    // 【自动化测试】启动 - 单实例锁：任何安装目录的 Codex 实例都要在启动前识别
+    #[test]
+    fn codex_instances_are_found_across_installs_but_not_the_chatgpt_app() {
+        let app_dir =
+            Path::new(r"C:\Program Files\WindowsApps\OpenAI.Codex_26.903.0_x64__2p2nqsd0c76g0\app");
+        let store_codex = Path::new(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.903.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe",
+        );
+        let older_store = Path::new(
+            r"C:\Program Files\WindowsApps\OpenAI.CodexBeta_26.901.0_x64__2p2nqsd0c76g0\app\Codex.exe",
+        );
+        let standalone = Path::new(r"C:\Users\kim\AppData\Local\Programs\Codex\ChatGPT.exe");
+        let standalone_bin = Path::new(r"C:\Users\kim\AppData\Local\OpenAI\Codex\bin\Codex.exe");
+        let chatgpt_app = Path::new(
+            r"C:\Program Files\WindowsApps\OpenAI.ChatGPT-Desktop_1.2.3_x64__2p2nqsd0c76g0\app\ChatGPT.exe",
+        );
+        let chatgpt_in_codex_user =
+            Path::new(r"C:\Users\codex\AppData\Local\Programs\ChatGPT\ChatGPT.exe");
+        let helper = Path::new(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.903.0_x64__2p2nqsd0c76g0\app\resources\codex.exe",
+        );
+        let instances = windows_codex_instances_from_snapshot(
+            app_dir,
+            [
+                (10, Some(store_codex)),
+                (11, Some(older_store)),
+                (12, Some(standalone)),
+                (13, Some(standalone_bin)),
+                (14, Some(chatgpt_app)),
+                (15, Some(chatgpt_in_codex_user)),
+                (16, Some(helper)),
+                (17, None),
+                (std::process::id(), Some(standalone_bin)),
+            ],
+        );
+        let process_ids = instances
+            .iter()
+            .map(|instance| instance.process_id)
+            .collect::<Vec<_>>();
+        assert_eq!(process_ids, vec![10, 11, 12, 13, 16]);
+        assert_eq!(instances[0].executable_path, store_codex);
+    }
+
+    #[test]
+    fn codex_instance_summary_lists_a_few_processes() {
+        let instances = (1..=4)
+            .map(|process_id| WindowsCodexInstance {
+                process_id,
+                executable_path: std::path::PathBuf::from(r"C:\Codex\Codex.exe"),
+            })
+            .collect::<Vec<_>>();
+        let summary = windows_codex_instances_summary(&instances);
+        assert!(summary.starts_with("PID 1（C:\\Codex\\Codex.exe）、PID 2"));
+        assert!(summary.ends_with(" 等 4 个进程"));
+        assert!(!windows_codex_instances_summary(&instances[..2]).contains("等"));
+    }
 
     #[test]
     fn package_cleanup_requires_confirmed_replacement_in_the_same_family() {

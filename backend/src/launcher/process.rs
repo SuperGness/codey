@@ -207,6 +207,10 @@ pub(super) async fn spawn_codex(
         // Prefer NODE_OPTIONS `--require` whenever that fuse is on. Inspector
         // evaluate is the fallback. Never combine the two: both wrap Module._load.
         let mut retry_without_inspector = false;
+        // Electron drops every NODE_OPTIONS flag except --max-http-header-size
+        // and --http-parser in packaged apps, so `--require` may never write
+        // its marker. A retry then gives Inspector its turn.
+        let mut retry_without_require = false;
         let mut attempt = 0;
         loop {
             attempt += 1;
@@ -214,7 +218,8 @@ pub(super) async fn spawn_codex(
             error_log::refresh_codex_app_version(Some(app_dir), None);
             let fuses = crate::electron_fuses::detect_electron_fuses(app_dir.to_path_buf()).await;
             let inspect_fuse = fuses.node_cli_inspect;
-            let require_wanted = fuses.node_options.node_options_possible();
+            let require_wanted =
+                fuses.node_options.node_options_possible() && !retry_without_require;
             let require_patch = prepare_startup_require_launch(
                 require_wanted,
                 patch_options,
@@ -423,7 +428,12 @@ pub(super) async fn spawn_codex(
                 }
                 Err(error) => {
                     let retryable = startup_error_allows_retry(&error);
-                    let startup_error = format!("启动尝试 {attempt}/2：{error:#}");
+                    // Exit code 0 during the wait is Electron's single-instance
+                    // handoff: a Codex that Codey did not launch holds the lock.
+                    let single_instance_exit = error
+                        .downcast_ref::<crate::codex_startup_patch::StartupProcessExited>()
+                        .is_some_and(|exited| exited.exit_code == Some(0));
+                    let mut startup_error = format!("启动尝试 {attempt}/2：{error:#}");
                     error_log::record_failure(
                         "patch_failed",
                         "install_startup_patch_or_cli_wrapper",
@@ -439,6 +449,7 @@ pub(super) async fn spawn_codex(
                             "useInspector": use_inspector,
                             "useRequire": use_require,
                             "retryable": retryable,
+                            "singleInstanceExitSuspected": single_instance_exit,
                             "remainingBudgetMs": deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis(),
                             "disablePet": patch_options.disable_pet,
                             "runtimeConfigOverrideCount": runtime_config_overrides.len(),
@@ -456,11 +467,33 @@ pub(super) async fn spawn_codex(
                             "Codex 启动兼容环境未能安全清理，已停止重试：{startup_error}"
                         );
                     }
+                    if single_instance_exit {
+                        // The instance holding the lock is not the one just
+                        // stopped; sweep every Codex install before retrying.
+                        match stop_running_windows_codex_instances(app_dir).await {
+                            Ok(instances) if instances.is_empty() => startup_error.push_str(
+                                "；退出码 0 通常表示已有 Codex 实例占用了单实例锁，但未检测到其他 Codex 进程，请在任务管理器中结束所有 Codex 进程后重试",
+                            ),
+                            Ok(instances) => startup_error.push_str(&format!(
+                                "；已停止占用单实例锁的其他 Codex 实例：{}",
+                                windows_codex_instances_summary(&instances)
+                            )),
+                            Err(sweep_error) => startup_error.push_str(&format!(
+                                "；退出码 0 通常表示已有 Codex 实例占用了单实例锁，且未能停止：{sweep_error:#}"
+                            )),
+                        }
+                    }
                     // A main process paused at an unreachable `--inspect-brk`,
                     // a lost handshake or an early exit all get one more attempt
-                    // without the breakpoint; the wrapper is prepared again.
+                    // through the other main-process entry (or the wrapper
+                    // alone); the wrapper is prepared again.
                     if should_retry_startup(&error, attempt) {
-                        retry_without_inspector = true;
+                        if use_inspector {
+                            retry_without_inspector = true;
+                        }
+                        if use_require {
+                            retry_without_require = true;
+                        }
                         continue;
                     }
                     if !runtime_config_overrides.is_empty() {
@@ -1979,26 +2012,18 @@ pub(super) async fn prepare_codex_for_launch(app_dir: &std::path::Path) -> Resul
     // relaunch it under Codey instead of leaving the user to quit it manually.
     #[cfg(windows)]
     {
-        let app_dir = app_dir.to_path_buf();
-        let process_scan_app_dir = app_dir.clone();
-        let already_running = tokio::task::spawn_blocking(move || -> Result<bool> {
-            let executable =
-                codey_runtime_core::app_paths::build_codex_executable(&process_scan_app_dir);
-            let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
-            let executable = normalized_windows_path(&executable);
-            Ok(codey_runtime_core::windows_enumerate_processes()?
-                .into_iter()
-                .filter_map(|process| process.executable_path)
-                .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
-                .any(|path| normalized_windows_path(&path) == executable))
-        })
-        .await
-        .context("检测正在运行的 Codex 任务异常退出")?
-        .context("检测正在运行的 Windows Codex 失败")?;
-        if already_running {
-            terminate_windows_codex_processes(&app_dir, None)
-                .await
-                .context("停止正在运行的 Codex 失败")?;
+        // Electron's single-instance lock is per app, not per install path: a
+        // Codex left running from any directory (another install, a manual
+        // start, a build that updated into a new folder) would make the launch
+        // below quit with exit code 0, so every instance is stopped here.
+        let stopped = stop_running_windows_codex_instances(app_dir)
+            .await
+            .context("停止正在运行的 Codex 失败")?;
+        if !stopped.is_empty() {
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "launcher.windows_codex_instances_stopped",
+                serde_json::json!({ "phase": "prepare_codex_for_launch", "count": stopped.len() }),
+            );
         }
     }
     #[cfg(not(windows))]

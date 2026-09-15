@@ -54,7 +54,12 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
   const refresh = windowsSpawn.indexOf("refresh_windows_packaged_app_dir(app_dir)");
   assert.ok(loop >= 0 && loop < refresh && refresh < fuseProbe && fuseProbe < prepareRequire);
   assert.ok(prepareRequire < prepare);
-  assert.match(windowsSpawn, /let require_wanted = fuses\.node_options\.node_options_possible\(\);/);
+  // Electron strips `--require` from NODE_OPTIONS in packaged apps, so a
+  // failed require attempt hands the retry to Inspector instead of repeating.
+  assert.match(
+    windowsSpawn,
+    /let require_wanted =\s*fuses\.node_options\.node_options_possible\(\) && !retry_without_require;/,
+  );
   assert.match(windowsSpawn, /let use_require = require_patch\.is_some\(\);/);
   assert.match(
     windowsSpawn,
@@ -87,8 +92,15 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
   assert.match(windowsSpawn.slice(packageGuard, retry), /anyhow::bail!/);
   assert.match(
     windowsSpawn.slice(retry, requiredConfigGuard),
-    /if should_retry_startup\(&error, attempt\) \{\s*retry_without_inspector = true;\s*continue;\s*\}/,
+    /if should_retry_startup\(&error, attempt\) \{\s*if use_inspector \{\s*retry_without_inspector = true;\s*\}\s*if use_require \{\s*retry_without_require = true;\s*\}\s*continue;\s*\}/,
   );
+  // Exit code 0 is Electron's single-instance handoff: every Codex install is
+  // swept after the spawned process is cleaned up and before the retry.
+  const singleInstanceSweep = windowsSpawn.indexOf(
+    "stop_running_windows_codex_instances(app_dir).await",
+  );
+  assert.ok(singleInstanceSweep > packageGuard && singleInstanceSweep < retry);
+  assert.match(windowsSpawn, /exited\.exit_code == Some\(0\)/);
   assert.match(windowsSpawn, /return Ok\(spawned\);/);
 
   // Missing entries never launch a constrained Codex.
