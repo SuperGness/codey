@@ -1,6 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 fn main() {
+    if let Some(code) = codey_lib::run_elevated_node_options_helper_if_requested() {
+        std::process::exit(code);
+    }
     codey_lib::install_crash_log_hook("codey", "runtime.codey");
     if let Err(error) = run() {
         let error = format!("{error:#}");
@@ -16,6 +19,9 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
+    if codey_lib::run_node_options_repair_if_requested()? {
+        return Ok(());
+    }
     if codey_lib::run_overlay_recovery_if_requested()? {
         return Ok(());
     }

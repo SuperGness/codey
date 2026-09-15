@@ -35,6 +35,7 @@ export const CODEY_API_COMMANDS = [
   "install_downloaded_update",
   "plugin_marketplace_status",
   "repair_plugin_marketplace",
+  "repair_main_process_injection",
 ] as const;
 
 export type CodeyApiCommand = (typeof CODEY_API_COMMANDS)[number];

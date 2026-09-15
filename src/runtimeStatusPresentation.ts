@@ -38,6 +38,22 @@ type InjectionStatusSummary = {
   unverifiedInjectionScriptCount: number;
 };
 
+export function isMainProcessInjectionConfirmed(
+  status: Pick<RuntimeStatus, "running" | "maintenance">,
+): boolean {
+  const mode = status.maintenance?.startupInjectionMode;
+  return status.running && (mode === "node_options" || mode === "inspector");
+}
+
+export function canRepairMainProcessInjection(
+  status: Pick<RuntimeStatus, "running" | "clientPlatform" | "restartInProgress" | "maintenance">,
+): boolean {
+  return status.clientPlatform === "windows" &&
+    status.running &&
+    !status.restartInProgress &&
+    status.maintenance?.startupInjectionMode === "cli";
+}
+
 export function buildEnabledOptimizationFeatures(
   status: OptimizationRuntimeStatus,
   fastContextToolsStatus: FastContextToolsStatus,

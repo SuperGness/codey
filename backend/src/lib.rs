@@ -7,7 +7,6 @@ mod codex_startup_patch;
 mod commands;
 mod config;
 mod crashpad_pending_guard;
-#[cfg(any(windows, target_os = "macos", test))]
 mod electron_fuses;
 mod error_log;
 pub mod fastctx;
@@ -76,6 +75,21 @@ pub fn run_codex_cli_wrapper_if_requested() -> Result<bool> {
 
 pub fn run_overlay_recovery_if_requested() -> Result<bool> {
     overlay_recovery::run_if_requested()
+}
+
+pub fn run_node_options_repair_if_requested() -> Result<bool> {
+    electron_fuses::run_node_options_repair_if_requested()
+}
+
+pub fn run_elevated_node_options_helper_if_requested() -> Option<i32> {
+    #[cfg(windows)]
+    {
+        electron_fuses::windows_repair::run_if_requested()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
 }
 
 pub fn install_crash_log_hook(component: &'static str, stage: &'static str) {

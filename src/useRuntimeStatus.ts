@@ -40,6 +40,15 @@ export function useRuntimeStatus({
   const activeRef = useRef(active);
   activeRef.current = active;
 
+  const markRestartInProgress = useCallback(() => {
+    // Discard requests issued before the operation, including their queued refreshes.
+    requestGenerationRef.current += 1;
+    runtimeStatusFlightRef.current = null;
+    statusPollSchedulerRef.current?.clear();
+    setRestartStatusError(null);
+    setStatus((current) => ({ ...current, restartInProgress: true }));
+  }, []);
+
   const requestRuntimeStatus = useCallback(
     (shouldRefreshInjectionStatus: boolean): Promise<RuntimeStatus> => {
       const requestCanCommit = (requestGeneration: number) =>
@@ -226,6 +235,7 @@ export function useRuntimeStatus({
   return {
     status,
     setStatus,
+    markRestartInProgress,
     refreshStatus,
     refreshStatusForLoad,
     restartStatusError,

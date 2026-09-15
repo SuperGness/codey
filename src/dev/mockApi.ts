@@ -24,6 +24,9 @@ if (import.meta.env.DEV) {
       new URLSearchParams(window.location.search).get("platform") === "windows"
         ? "windows"
         : "macos";
+    let previewInjectionMode = new URLSearchParams(window.location.search).get("injection") === "cli"
+      ? "cli" : "node_options";
+    let previewInjectionRepairUntil = 0;
     const previewEndpoints = {
       primary: "https://primary.example.invalid/v1",
       backup: "https://backup.example.invalid/v1",
@@ -376,6 +379,8 @@ if (import.meta.env.DEV) {
         };
       }
       if (command === "runtime_status") {
+        const injectionRepairing = Date.now() < previewInjectionRepairUntil;
+        if (previewInjectionRepairUntil && !injectionRepairing) previewInjectionMode = "node_options";
         const activeNotificationChannelCount =
           previewConfig.webhook.channels.filter(
             (channel) =>
@@ -395,7 +400,7 @@ if (import.meta.env.DEV) {
           codexAppVersion: "26.601.21317",
           clientPlatform: previewClientPlatform,
           restartRequired: false,
-          restartInProgress: false,
+          restartInProgress: injectionRepairing,
           activeProfileId: previewConfig.activeProfileId,
           activeProfileName:
             previewConfig.profiles.find(
@@ -409,7 +414,7 @@ if (import.meta.env.DEV) {
             ghostTasksPruned: 2,
             performanceStatus: "ready",
             performanceDetail: "Codex 启动成功",
-            startupInjectionMode: "node_options",
+            startupInjectionMode: previewInjectionMode,
           },
           injectionScripts: [
             {
@@ -981,6 +986,10 @@ if (import.meta.env.DEV) {
       }
       if (command === "restart_codey") {
         return { status: "restarting" };
+      }
+      if (command === "repair_main_process_injection") {
+        previewInjectionRepairUntil = Date.now() + 8_000;
+        return { status: "repairing" };
       }
       if (command === "check_for_updates") {
         return {

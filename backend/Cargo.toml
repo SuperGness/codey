@@ -68,6 +68,7 @@ winres = "0.1"
 rfd = { version = "0.15", default-features = false, features = ["common-controls-v6"] }
 windows = { version = "0.58", default-features = false, features = [
   "Win32_Foundation",
+  "Win32_Security",
   "Win32_Graphics_Gdi",
   "Win32_Storage_FileSystem",
   "Win32_Storage_Packaging_Appx",

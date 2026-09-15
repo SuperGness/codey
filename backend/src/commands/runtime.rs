@@ -22,6 +22,9 @@ use crate::launcher::{CodeyRuntime, restore_previous_runtime_state};
 
 const CODEX_APP_VERSION_CACHE_TTL: Duration = Duration::from_secs(30);
 
+mod injection_repair;
+pub(super) use injection_repair::schedule_main_process_injection_repair;
+
 pub(super) struct CodexAppVersionCache {
     runtime_app_path: Option<PathBuf>,
     configured_app_path: String,
