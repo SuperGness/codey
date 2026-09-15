@@ -665,7 +665,10 @@ fn pinned_launch_transport_keeps_reasoning_declarations_for_hot_reload() {
     );
 
     let pinned = config_with_launch_pinned_transport(&applied, &current);
-    assert_eq!(pinned.model_context_by_provider, applied.model_context_by_provider);
+    assert_eq!(
+        pinned.model_context_by_provider,
+        applied.model_context_by_provider
+    );
     assert_eq!(
         pinned.model_reasoning_efforts_by_provider,
         current.model_reasoning_efforts_by_provider,

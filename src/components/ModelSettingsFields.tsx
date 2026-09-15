@@ -88,7 +88,7 @@ export function ModelSettingsFields({
       <div className="mt-1.5 rounded-[9px] border border-black/[0.08] bg-[#f8f8fa] p-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
         <div className="mb-2.5 flex items-start justify-between gap-2">
           <p className="text-[11px] leading-[1.45] text-[#6e6e73]">
-            自定义值优先于上游模板；清空窗口恢复默认。未知模型默认使用 200000 Token 保守预算，不代表服务端容量。修改后重启 Codex 生效。
+            自定义值优先于上游模板；清空窗口恢复默认。未知模型默认使用 200000 Token 保守预算，不代表服务端容量。窗口与压缩阈值的修改需重启 Codex 生效。
           </p>
           {policy && (
             <button
@@ -223,7 +223,7 @@ export function ModelSettingsFields({
               })}
             </div>
             <p className="mt-2 text-[10px] leading-relaxed text-[#86868b]">
-              勾选该模型支持的思考强度，档位名称即发送给上游的取值。未声明时跟随上游模板自动适配。
+              勾选该模型支持的思考强度，档位名称即发送给上游的取值。未声明时跟随上游模板自动适配，保存后立即生效。
             </p>
           </div>
         )}

@@ -33,9 +33,9 @@ use diagnostics::clear_diagnostic_storage;
 pub(crate) use models::native_subagent_model_state;
 #[cfg(test)]
 use models::{
-    config_with_current_provider_models, preserve_selected_third_party_models,
-    preserve_selected_third_party_models_except, provider_route_requires_restart,
-    renderer_model_catalog_value, should_refresh_model_catalog,
+    config_with_current_provider_models, config_with_launch_pinned_transport,
+    preserve_selected_third_party_models, preserve_selected_third_party_models_except,
+    provider_route_requires_restart, renderer_model_catalog_value, should_refresh_model_catalog,
     startup_model_sync_models_or_fallback, sync_provider_state_with,
     validate_deleted_third_party_models, validate_manual_model_selection,
 };
