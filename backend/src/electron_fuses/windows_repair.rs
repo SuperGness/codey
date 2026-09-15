@@ -80,7 +80,7 @@ fn validate_open_handle(file: &std::fs::File, binary: &Path) -> Result<()> {
     );
     use std::os::windows::ffi::OsStringExt;
     anyhow::ensure!(
-        PathBuf::from(OsString::from_wide(&name[..count])) == binary,
+        OsString::from_wide(&name[..count]) == binary,
         "运行时在打开期间被替换或重定向"
     );
     let mut information = BY_HANDLE_FILE_INFORMATION::default();

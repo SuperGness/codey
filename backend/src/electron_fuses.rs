@@ -9,29 +9,43 @@
 //! on, then Inspector, then the CLI wrapper, instead of waiting for a debug port
 //! that will never answer.
 
+#[cfg(any(windows, target_os = "macos", test))]
 use std::io::Read;
+#[cfg(any(windows, target_os = "macos", test))]
 use std::path::{Path, PathBuf};
 #[cfg(any(windows, target_os = "macos"))]
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+#[cfg(any(windows, target_os = "macos", test))]
+use anyhow::Context;
+use anyhow::Result;
+#[cfg(any(windows, target_os = "macos", test))]
 use serde::{Deserialize, Serialize};
 
 #[cfg(windows)]
 pub(crate) mod windows_repair;
 
 /// Sentinel that precedes the fuse wire in every Electron binary (@electron/fuses).
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const FUSE_SENTINEL: &[u8] = b"dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX";
+#[cfg(any(windows, target_os = "macos", test))]
 const FUSE_WIRE_VERSION_V1: u8 = 1;
 /// Index of `EnableNodeOptionsEnvironmentVariable` in the v1 fuse wire (`FuseV1Options`).
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const NODE_OPTIONS_FUSE_INDEX: usize = 2;
 /// Index of `EnableNodeCliInspectArguments` in the v1 fuse wire (`FuseV1Options`).
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const NODE_CLI_INSPECT_FUSE_INDEX: usize = 3;
+#[cfg(any(windows, target_os = "macos", test))]
 const MAX_FUSE_COUNT: usize = 64;
+#[cfg(any(windows, target_os = "macos", test))]
 const SCAN_CHUNK_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(any(windows, target_os = "macos", test))]
 const CACHE_FILE: &str = "electron-fuses.json";
+#[cfg(any(windows, target_os = "macos", test))]
 const MAX_CACHE_BYTES: u64 = 64 * 1024;
 
+#[cfg(any(windows, target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FuseState {
@@ -41,6 +55,7 @@ pub(crate) enum FuseState {
     Unknown,
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 impl FuseState {
     #[cfg(any(windows, target_os = "macos"))]
     pub(crate) fn as_str(self) -> &'static str {
@@ -66,12 +81,14 @@ impl FuseState {
     }
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ElectronFuses {
     pub(crate) node_cli_inspect: FuseState,
     pub(crate) node_options: FuseState,
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 impl ElectronFuses {
     #[cfg(any(windows, target_os = "macos"))]
     fn unknown() -> Self {
@@ -93,12 +110,14 @@ impl ElectronFuses {
     }
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FuseWire {
     pub(crate) version: u8,
     pub(crate) states: String,
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 impl FuseWire {
     pub(crate) fn state(&self, index: usize) -> FuseState {
         if self.version != FUSE_WIRE_VERSION_V1 {
@@ -115,6 +134,7 @@ impl FuseWire {
 
 /// Parses the wire that follows a sentinel found at `sentinel_offset`.
 /// Returns `None` when the buffer does not yet hold the complete wire.
+#[cfg(any(windows, target_os = "macos", test))]
 fn parse_fuse_wire(bytes: &[u8], sentinel_offset: usize) -> Option<Result<FuseWire>> {
     let header = sentinel_offset + FUSE_SENTINEL.len();
     let version = *bytes.get(header)?;
@@ -134,12 +154,14 @@ fn parse_fuse_wire(bytes: &[u8], sentinel_offset: usize) -> Option<Result<FuseWi
 
 /// Streams through `path` looking for the fuse sentinel. `Ok(None)` means the
 /// file holds no sentinel, so it is not an Electron binary with fuses.
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) fn read_fuse_wire(path: &Path) -> Result<Option<FuseWire>> {
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("读取 Electron 二进制失败：{}", path.display()))?;
     Ok(scan_fuse_wire(&mut file, false)?.map(|(_, wire)| wire))
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 fn scan_fuse_wire(
     file: &mut std::fs::File,
     require_unique: bool,
@@ -195,6 +217,7 @@ fn scan_fuse_wire(
 /// Locates the binary that carries the fuse wire: the main executable on
 /// Windows and Linux (including split chrome.dll runtimes), or the renamed
 /// Electron framework inside a macOS bundle.
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) fn electron_binary_path(app_dir: &Path) -> Option<PathBuf> {
     if app_dir
         .extension()
@@ -240,6 +263,7 @@ pub(crate) fn electron_binary_path(app_dir: &Path) -> Option<PathBuf> {
     executable.is_file().then_some(executable)
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 #[derive(Serialize, Deserialize)]
 struct FuseCacheEntry {
     path: String,
@@ -254,6 +278,7 @@ fn cache_path() -> PathBuf {
     codey_runtime_core::paths::default_app_state_dir().join(CACHE_FILE)
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 fn binary_signature(path: &Path) -> Option<(u64, Option<u64>)> {
     let metadata = std::fs::metadata(path).ok()?;
     let modified_ms = metadata
@@ -264,6 +289,7 @@ fn binary_signature(path: &Path) -> Option<(u64, Option<u64>)> {
     Some((metadata.len(), modified_ms))
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 fn load_cached_wire(
     cache: &Path,
     binary: &Path,
@@ -283,6 +309,7 @@ fn load_cached_wire(
     })
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
 fn store_cached_wire(
     cache: &Path,
     binary: &Path,
@@ -301,6 +328,7 @@ fn store_cached_wire(
 
 /// Reads the wire for `binary`, reusing a cached result while the binary's
 /// size and modification time are unchanged.
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) fn cached_fuse_wire(binary: &Path, cache: &Path) -> Result<(Option<FuseWire>, bool)> {
     let signature = binary_signature(binary)
         .with_context(|| format!("读取 Electron 二进制信息失败：{}", binary.display()))?;
