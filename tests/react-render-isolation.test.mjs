@@ -61,7 +61,7 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(app, /onToggleRouteRequestLog=\{handleToggleRouteRequestLog\}/);
   assert.match(
     app,
-    /onToggleAccountUsage=\{handleToggleAccountUsage\}/,
+    /onOfficialAccountsChanged=\{handleOfficialAccountsChanged\}/,
   );
   assert.match(app, /onSave=\{saveModelSelection\}/);
   assert.doesNotMatch(modelSelection, /withTimeout/);
@@ -85,15 +85,12 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(sections, /route-manager-current/);
   assert.match(sections, /className="provider-model-groups"/);
   assert.match(sections, /modelState\.officialModelIds/);
-  assert.match(sections, /checked=\{showAccountUsageInHeader\}/);
   assert.match(sections, /checked=\{config\.localRouterEnabled\}/);
   assert.match(sections, /const routeConfigReadOnly = !config\.localRouterEnabled/);
   assert.match(sections, /checked=\{checked\}/);
-  assert.match(sections, /额度显示/);
-  assert.match(
-    sections,
-    /isOfficial && !disabled && \([\s\S]*provider-model-usage-toggle[\s\S]*checked=\{showAccountUsageInHeader\}/,
-  );
+  assert.match(sections, /<OfficialAccountsPanel\s/);
+  assert.doesNotMatch(sections, /isOfficial && [^\n]*<OfficialAccountsPanel/);
+  assert.doesNotMatch(sections, /provider-model-usage-toggle/);
   assert.match(sections, /<DialogTitle>/);
   assert.match(sections, /config\.localRouterEnabled && \(/);
   assert.match(sections, /checked=\{config\.routeRequestLog\.enabled\}/);

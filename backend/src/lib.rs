@@ -24,6 +24,7 @@ mod model_id;
 mod model_list;
 mod native_update_ui;
 mod notifications;
+mod official_accounts;
 mod overlay_recovery;
 mod pending_approval;
 mod pet_slim_patch;
@@ -183,9 +184,10 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
         );
         eprintln!("Codey 启动前写入 codey_router 恢复兼容桩失败：{error:#}");
     }
-    // The official-account probe spawns `codex login status` (up to 3 s) and the
-    // update check is a network round trip (up to 10 s). Neither depends on the
-    // other, so start the probe now and let the launch path collect it.
+    // Resolving the default official account touches the account store and the
+    // Codex home, and the update check is a network round trip (up to 10 s).
+    // Neither depends on the other, so start the probe now and let the launch
+    // path collect it.
     state.prewarm_official_account_probe().await;
     let mut shutdown = Box::pin(shutdown_signal());
     let startup_update = startup_update::run(&state, &ui);

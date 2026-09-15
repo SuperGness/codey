@@ -1,15 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use codey_runtime_core::app_paths::{codex_runtime_executable, resolve_codex_app_dir_with_saved};
 use codey_runtime_core::config_manager::ConfigManager;
 use serde::Serialize;
 use serde_json::Value;
@@ -17,6 +10,7 @@ use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::codex_config::BUILTIN_OPENAI_PROVIDER_ID;
 use crate::config::{CodeyConfig, DERIVED_OFFICIAL_PROFILE_ID, ProviderProfile};
+use crate::official_accounts::{LaunchLoginResolution, OfficialAccountStore};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -55,14 +49,6 @@ enum OfficialAccountAuthProbe {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum NativeLoginStatus {
-    ChatGpt,
-    NotLoggedIn(String),
-    ApiKey(String),
-    Unknown(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OfficialAccountProfileStatus {
     Available(ProviderProfile),
     Unavailable {
@@ -74,71 +60,39 @@ pub enum OfficialAccountProfileStatus {
     },
 }
 
+/// Decides whether the official route can be used for this launch. The
+/// decision comes from Codey's own account store: the default account is
+/// copied into the Codex home, and its presence makes the route available.
+/// With no accounts stored, an existing ChatGPT login in the Codex home is
+/// adopted once so earlier installs keep working.
 pub fn current_official_account_profile_status_for_launch(
     codex_home: &Path,
-    configured_codex_app_path: &str,
+    accounts: &OfficialAccountStore,
 ) -> Result<OfficialAccountProfileStatus> {
-    let executable = resolve_native_status_executable(configured_codex_app_path);
-    current_official_account_profile_status_with_probe(codex_home, |home| {
-        native_login_status_with_path_fallback(home, &executable)
-    })
-}
-
-fn current_official_account_profile_status_with_probe(
-    codex_home: &Path,
-    native_probe: impl FnOnce(&Path) -> NativeLoginStatus,
-) -> Result<OfficialAccountProfileStatus> {
-    let mut snapshot = local_provider_with_auth_policy(codex_home, AuthProbePolicy::Lenient)?;
-    let native_status = native_probe(codex_home);
-    snapshot.official_account_auth = if !snapshot.provider.official
-        && let NativeLoginStatus::Unknown(reason) = &native_status
-    {
-        OfficialAccountAuthProbe::Unavailable(format!(
-            "当前使用 API Key 或第三方线路，原生探针未确认 ChatGPT 登录，不使用残留凭据推断官方账号；{reason}"
-        ))
-    } else {
-        official_auth_probe_from_native(snapshot.official_account_auth, native_status)
-    };
+    let resolution = accounts.resolve_launch_login(codex_home);
+    let snapshot = local_provider_with_auth_policy(codex_home, AuthProbePolicy::Lenient)?;
     let profile = official_profile_from_snapshot(&snapshot);
-    Ok(match snapshot.official_account_auth {
-        OfficialAccountAuthProbe::Available(_) => OfficialAccountProfileStatus::Available(profile),
-        OfficialAccountAuthProbe::Unavailable(reason) => {
-            OfficialAccountProfileStatus::Unavailable { reason }
+    let file_reason = match &snapshot.official_account_auth {
+        OfficialAccountAuthProbe::Available(reason)
+        | OfficialAccountAuthProbe::Unavailable(reason)
+        | OfficialAccountAuthProbe::Unknown(reason) => reason.clone(),
+    };
+    Ok(match resolution {
+        Ok(LaunchLoginResolution::Available { .. }) => {
+            OfficialAccountProfileStatus::Available(profile)
         }
-        OfficialAccountAuthProbe::Unknown(reason) => {
-            OfficialAccountProfileStatus::Unknown { profile, reason }
+        Ok(LaunchLoginResolution::Unavailable { reason }) => {
+            OfficialAccountProfileStatus::Unavailable {
+                reason: format!("{reason}；文件凭据探针：{file_reason}"),
+            }
         }
-    })
-}
-
-fn official_auth_probe_from_native(
-    file_probe: OfficialAccountAuthProbe,
-    native_status: NativeLoginStatus,
-) -> OfficialAccountAuthProbe {
-    match native_status {
-        NativeLoginStatus::ChatGpt => OfficialAccountAuthProbe::Available(
-            "Codex 原生认证探针确认当前使用 ChatGPT 登录".to_string(),
-        ),
-        NativeLoginStatus::NotLoggedIn(reason) | NativeLoginStatus::ApiKey(reason) => {
-            let file_reason = match file_probe {
-                OfficialAccountAuthProbe::Available(reason)
-                | OfficialAccountAuthProbe::Unavailable(reason)
-                | OfficialAccountAuthProbe::Unknown(reason) => reason,
-            };
-            OfficialAccountAuthProbe::Unavailable(format!("{reason}；文件凭据探针：{file_reason}"))
-        }
-        NativeLoginStatus::Unknown(reason) => match file_probe {
-            OfficialAccountAuthProbe::Available(file_reason) => {
-                OfficialAccountAuthProbe::Available(format!("{reason}；{file_reason}"))
-            }
-            OfficialAccountAuthProbe::Unavailable(file_reason) => {
-                OfficialAccountAuthProbe::Unavailable(format!("{reason}；{file_reason}"))
-            }
-            OfficialAccountAuthProbe::Unknown(file_reason) => {
-                OfficialAccountAuthProbe::Unknown(format!("{reason}；{file_reason}"))
-            }
+        Err(error) => OfficialAccountProfileStatus::Unknown {
+            profile,
+            reason: format!(
+                "同步默认官方账号到 Codex 失败：{error:#}；文件凭据探针：{file_reason}"
+            ),
         },
-    }
+    })
 }
 
 fn official_profile_from_snapshot(snapshot: &LocalProviderSnapshot) -> ProviderProfile {
@@ -641,181 +595,6 @@ fn auth_file_safe_summary(auth: &Value) -> String {
     )
 }
 
-fn resolve_native_status_executable(configured_codex_app_path: &str) -> PathBuf {
-    resolve_codex_app_dir_with_saved(None, Some(configured_codex_app_path))
-        .as_deref()
-        .and_then(codex_runtime_executable)
-        .unwrap_or_else(|| PathBuf::from("codex"))
-}
-
-fn native_login_status(codex_home: &Path, executable: Option<&Path>) -> NativeLoginStatus {
-    const LOGIN_STATUS_TIMEOUT: Duration = Duration::from_secs(3);
-    let executable = executable.unwrap_or_else(|| Path::new("codex"));
-    let mut command = Command::new(executable);
-    command
-        .args(["login", "status"])
-        .env("CODEX_HOME", codex_home)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[cfg(windows)]
-    command.creation_flags(codey_runtime_core::windows_create_no_window());
-
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            return NativeLoginStatus::Unknown(format!(
-                "无法运行 codex login status：{error}；executable={}；CODEX_HOME={}",
-                executable.display(),
-                codex_home.display()
-            ));
-        }
-    };
-    let started = Instant::now();
-    // Poll with a growing interval: the CLI usually answers in well under a
-    // second, so a fixed 25 ms sleep only added scheduling jitter and CPU.
-    let mut poll_interval = Duration::from_millis(5);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() < LOGIN_STATUS_TIMEOUT => {
-                thread::sleep(poll_interval);
-                poll_interval = (poll_interval * 2).min(Duration::from_millis(50));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return NativeLoginStatus::Unknown(format!(
-                    "codex login status 在 {}ms 后超时；executable={}；CODEX_HOME={}",
-                    started.elapsed().as_millis(),
-                    executable.display(),
-                    codex_home.display()
-                ));
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return NativeLoginStatus::Unknown(format!(
-                    "等待 codex login status 失败：{error}；executable={}；CODEX_HOME={}；elapsedMs={}",
-                    executable.display(),
-                    codex_home.display(),
-                    started.elapsed().as_millis()
-                ));
-            }
-        }
-    }
-
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-        Err(error) => {
-            return NativeLoginStatus::Unknown(format!(
-                "读取 codex login status 输出失败：{error}；executable={}；CODEX_HOME={}；elapsedMs={}",
-                executable.display(),
-                codex_home.display(),
-                started.elapsed().as_millis()
-            ));
-        }
-    };
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let status = output.status.to_string();
-    let diagnostic = format!(
-        "executable={}；CODEX_HOME={}；exitStatus={status}；elapsedMs={}；stdoutBytes={}；stderrBytes={}",
-        executable.display(),
-        codex_home.display(),
-        started.elapsed().as_millis(),
-        output.stdout.len(),
-        output.stderr.len()
-    );
-    match parse_native_login_status_output(output.status.success(), &stdout, &stderr, &status) {
-        NativeLoginStatus::ChatGpt => NativeLoginStatus::ChatGpt,
-        NativeLoginStatus::NotLoggedIn(reason) => {
-            NativeLoginStatus::NotLoggedIn(format!("{reason}；{diagnostic}"))
-        }
-        NativeLoginStatus::ApiKey(reason) => {
-            NativeLoginStatus::ApiKey(format!("{reason}；{diagnostic}"))
-        }
-        NativeLoginStatus::Unknown(reason) => {
-            NativeLoginStatus::Unknown(format!("{reason}；{diagnostic}"))
-        }
-    }
-}
-
-fn native_login_status_with_path_fallback(
-    codex_home: &Path,
-    primary_executable: &Path,
-) -> NativeLoginStatus {
-    let primary_status = native_login_status(codex_home, Some(primary_executable));
-    native_login_status_with_path_fallback_result(primary_executable, primary_status, || {
-        native_login_status(codex_home, Some(Path::new("codex")))
-    })
-}
-
-fn native_login_status_with_path_fallback_result(
-    primary_executable: &Path,
-    primary_status: NativeLoginStatus,
-    fallback_probe: impl FnOnce() -> NativeLoginStatus,
-) -> NativeLoginStatus {
-    if !should_try_path_login_status_fallback(&primary_status, primary_executable) {
-        return primary_status;
-    }
-    let primary_reason = match primary_status {
-        NativeLoginStatus::Unknown(reason) => reason,
-        status => return status,
-    };
-    match fallback_probe() {
-        NativeLoginStatus::Unknown(fallback_reason) => NativeLoginStatus::Unknown(format!(
-            "{primary_reason}；PATH codex 回退也无法确认官方登录状态：{fallback_reason}"
-        )),
-        status => status,
-    }
-}
-
-fn should_try_path_login_status_fallback(status: &NativeLoginStatus, executable: &Path) -> bool {
-    let NativeLoginStatus::Unknown(reason) = status else {
-        return false;
-    };
-    if !(reason.contains("无法运行 codex login status")
-        || reason.contains("could not run codex login status"))
-    {
-        return false;
-    }
-    executable != Path::new("codex")
-}
-
-fn parse_native_login_status_output(
-    success: bool,
-    stdout: &str,
-    stderr: &str,
-    status: &str,
-) -> NativeLoginStatus {
-    let normalized = format!("{stdout}\n{stderr}").trim().to_ascii_lowercase();
-    if normalized.contains("not logged in")
-        || normalized.contains("not signed in")
-        || normalized.contains("authentication required")
-        || normalized.contains("未登录")
-    {
-        NativeLoginStatus::NotLoggedIn(
-            "Codex 原生认证探针明确返回未登录（未记录命令原始输出，避免泄露凭据）".to_string(),
-        )
-    } else if normalized.contains("api key") {
-        NativeLoginStatus::ApiKey(
-            "Codex 原生认证探针显示当前使用 API Key，而不是 ChatGPT 官方账号登录（未记录命令原始输出，避免泄露凭据）"
-                .to_string(),
-        )
-    } else if success
-        && normalized
-            .lines()
-            .any(|line| line.trim() == "logged in using chatgpt")
-    {
-        NativeLoginStatus::ChatGpt
-    } else if success {
-        NativeLoginStatus::Unknown("codex login status 输出格式未知".to_string())
-    } else {
-        NativeLoginStatus::Unknown(format!("codex login status 退出码为 {status}"))
-    }
-}
-
 fn provider_config_api_key(
     document: &DocumentMut,
     provider: Option<&dyn TableLike>,
@@ -989,10 +768,15 @@ experimental_bearer_token = "sk-relay"
         )
     }
 
-    fn status_with_unknown_native(home: &Path) -> Result<OfficialAccountProfileStatus> {
-        current_official_account_profile_status_with_probe(home, |_| {
-            NativeLoginStatus::Unknown("probe unavailable".into())
-        })
+    fn empty_store() -> (TempDir, OfficialAccountStore) {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join("official-accounts"));
+        (dir, store)
+    }
+
+    fn status_with_empty_store(home: &Path) -> Result<OfficialAccountProfileStatus> {
+        let (_dir, store) = empty_store();
+        current_official_account_profile_status_for_launch(home, &store)
     }
 
     #[test]
@@ -1033,7 +817,7 @@ experimental_bearer_token = "sk-relay"
     }
 
     #[test]
-    fn official_capability_requires_chatgpt_tokens() {
+    fn official_capability_follows_the_default_account() {
         let home = TempDir::new().unwrap();
         write_config(home.path(), "");
         write_auth(
@@ -1043,30 +827,42 @@ experimental_bearer_token = "sk-relay"
                 "tokens": { "access_token": "token" }
             }),
         );
+        let (_dir, store) = empty_store();
         let OfficialAccountProfileStatus::Available(profile) =
-            status_with_unknown_native(home.path()).unwrap()
+            current_official_account_profile_status_for_launch(home.path(), &store).unwrap()
         else {
-            panic!("auth.json ChatGPT tokens should make official auth available");
+            panic!("an existing ChatGPT login should be adopted as the default account");
         };
         assert!(profile.official_account);
         assert!(profile.supports_websockets);
         assert!(profile.supports_native_web_search);
         assert_eq!(profile.provider_id(), "openai");
         assert!(profile.api_key.is_empty());
+        assert!(store.default_account_id().unwrap().is_some());
 
+        // The default account is restored into the Codex home on every launch.
+        fs::remove_file(home.path().join("auth.json")).unwrap();
+        assert!(matches!(
+            current_official_account_profile_status_for_launch(home.path(), &store).unwrap(),
+            OfficialAccountProfileStatus::Available(_)
+        ));
+        assert!(home.path().join("auth.json").is_file());
+
+        // Without any stored account the route is unavailable, whatever the
+        // credential store setting says.
         fs::remove_file(home.path().join("auth.json")).unwrap();
         write_config(home.path(), r#"cli_auth_credentials_store = "file""#);
         let OfficialAccountProfileStatus::Unavailable { reason } =
-            status_with_unknown_native(home.path()).unwrap()
+            status_with_empty_store(home.path()).unwrap()
         else {
-            panic!("missing file credentials under file store should be unavailable");
+            panic!("no stored account should be unavailable");
         };
-        assert!(reason.contains("凭据存储策略为 file"));
+        assert!(reason.contains("没有设为默认的官方账号"));
         assert!(reason.contains("auth.json 不存在"));
     }
 
     #[test]
-    fn legacy_chatgpt_tokens_work_without_auth_mode_when_native_probe_fails() {
+    fn legacy_chatgpt_tokens_without_auth_mode_are_adopted() {
         let home = TempDir::new().unwrap();
         write_config(home.path(), "");
         let mut auth = serde_json::json!({
@@ -1079,7 +875,7 @@ experimental_bearer_token = "sk-relay"
             }
             write_auth(home.path(), auth.clone());
             assert!(matches!(
-                status_with_unknown_native(home.path()).unwrap(),
+                status_with_empty_store(home.path()).unwrap(),
                 OfficialAccountProfileStatus::Available(_)
             ));
         }
@@ -1097,138 +893,21 @@ experimental_bearer_token = "sk-relay"
     }
 
     #[test]
-    fn official_auth_probe_distinguishes_file_missing_from_unknown_store() {
-        let file_home = TempDir::new().unwrap();
-        write_config(file_home.path(), r#"cli_auth_credentials_store = "file""#);
-        let OfficialAccountProfileStatus::Unavailable { reason } =
-            current_official_account_profile_status_with_probe(file_home.path(), |_| {
-                NativeLoginStatus::Unknown("probe unavailable".into())
-            })
-            .unwrap()
-        else {
-            panic!("missing auth.json under file store should be unavailable");
-        };
-        assert!(reason.contains("probe unavailable"));
-        assert!(reason.contains("凭据存储策略为 file"));
-
-        let auto_home = TempDir::new().unwrap();
-        write_config(auto_home.path(), r#"cli_auth_credentials_store = "auto""#);
-        let status = current_official_account_profile_status_with_probe(auto_home.path(), |_| {
-            NativeLoginStatus::Unknown("probe unavailable".into())
-        })
-        .unwrap();
-        let OfficialAccountProfileStatus::Unknown { profile, reason } = status else {
-            panic!("missing auth.json under auto store should be unknown");
-        };
-        assert!(profile.official_account);
-        assert!(profile.supports_websockets);
-        assert!(profile.supports_native_web_search);
-        assert_eq!(profile.provider_id(), "openai");
-        assert!(reason.contains("auth.json"));
-    }
-
-    #[test]
-    fn native_login_status_wins_over_file_probe() {
-        let home = TempDir::new().unwrap();
-        write_config(home.path(), r#"cli_auth_credentials_store = "keyring""#);
-
-        let status = current_official_account_profile_status_with_probe(home.path(), |_| {
-            NativeLoginStatus::ChatGpt
-        })
-        .unwrap();
-        let OfficialAccountProfileStatus::Available(profile) = status else {
-            panic!("native ChatGPT login should be authoritative");
-        };
-        assert!(profile.official_account);
-
-        write_auth(
-            home.path(),
-            serde_json::json!({
-                "auth_mode": "chatgpt",
-                "tokens": { "refresh_token": "stale-token" }
-            }),
-        );
-        let OfficialAccountProfileStatus::Unavailable { reason } =
-            current_official_account_profile_status_with_probe(home.path(), |_| {
-                NativeLoginStatus::NotLoggedIn("native probe says not logged in".into())
-            })
-            .unwrap()
-        else {
-            panic!("native not-logged-in result should be authoritative");
-        };
-        assert!(reason.contains("native probe says not logged in"));
-        assert!(reason.contains("chatgptTokenFields=[\"refresh_token\"]"));
-    }
-
-    #[test]
-    fn native_login_status_parser_distinguishes_chatgpt_from_api_key() {
-        assert_eq!(
-            parse_native_login_status_output(true, "Logged in using ChatGPT", "", "exit status: 0",),
-            NativeLoginStatus::ChatGpt
-        );
-        assert!(matches!(
-            parse_native_login_status_output(
-                true,
-                "Logged in using an API key - sk-...",
-                "",
-                "exit status: 0",
-            ),
-            NativeLoginStatus::ApiKey(reason)
-                if reason.contains("API Key") && !reason.contains("sk-")
-        ));
-        assert!(matches!(
-            parse_native_login_status_output(false, "Not logged in", "", "exit status: 1"),
-            NativeLoginStatus::NotLoggedIn(reason)
-                if reason.contains("明确返回未登录")
-        ));
-        assert!(matches!(
-            parse_native_login_status_output(true, "Unexpected auth mode", "", "exit status: 0"),
-            NativeLoginStatus::Unknown(_)
-        ));
-        for output in [
-            "ChatGPT login is available",
-            "OAuth bearer token configured",
-            "warning: ChatGPT authentication failed",
-            "warning: Logged in using ChatGPT",
-        ] {
-            assert!(
-                matches!(
-                    parse_native_login_status_output(true, "", output, "exit status: 0"),
-                    NativeLoginStatus::Unknown(_)
-                ),
-                "{output}"
+    fn missing_login_is_unavailable_regardless_of_credential_store() {
+        for store_kind in ["file", "auto", "keyring"] {
+            let home = TempDir::new().unwrap();
+            write_config(
+                home.path(),
+                &format!(r#"cli_auth_credentials_store = "{store_kind}""#),
             );
+            let OfficialAccountProfileStatus::Unavailable { reason } =
+                status_with_empty_store(home.path()).unwrap()
+            else {
+                panic!("no account and no login should be unavailable for {store_kind}");
+            };
+            assert!(reason.contains("没有设为默认的官方账号"));
+            assert!(reason.contains("auth.json"));
         }
-        assert_eq!(
-            parse_native_login_status_output(true, "", "Logged in using ChatGPT\n", "0"),
-            NativeLoginStatus::ChatGpt
-        );
-        assert!(matches!(
-            parse_native_login_status_output(false, "Logged in using ChatGPT", "", "1"),
-            NativeLoginStatus::Unknown(_)
-        ));
-    }
-
-    #[test]
-    fn native_login_status_tries_path_fallback_after_spawn_access_denied() {
-        let status = native_login_status_with_path_fallback_result(
-            Path::new(
-                r"C:\Program Files\WindowsApps\OpenAI.Codex_26.820.7780.0_x64__2p2nqsd0c76g0\app\resources\codex.exe",
-            ),
-            NativeLoginStatus::Unknown(
-                "无法运行 codex login status：拒绝访问。 (os error 5)".into(),
-            ),
-            || NativeLoginStatus::ChatGpt,
-        );
-
-        assert_eq!(status, NativeLoginStatus::ChatGpt);
-
-        let status = native_login_status_with_path_fallback_result(
-            Path::new("codex"),
-            NativeLoginStatus::Unknown("无法运行 codex login status：not found".into()),
-            || panic!("PATH fallback must not retry an identical codex executable"),
-        );
-        assert!(matches!(status, NativeLoginStatus::Unknown(_)));
     }
 
     #[test]
@@ -1258,34 +937,12 @@ experimental_bearer_token = "sk-relay"
     }
 
     #[test]
-    fn unknown_native_probe_keeps_keyring_and_auto_inconclusive() {
-        for store in ["keyring", "auto"] {
-            let home = TempDir::new().unwrap();
-            write_config(
-                home.path(),
-                &format!(r#"cli_auth_credentials_store = "{store}""#),
-            );
-            write_auth(home.path(), serde_json::json!({}));
-
-            let status = current_official_account_profile_status_with_probe(home.path(), |_| {
-                NativeLoginStatus::Unknown("probe unavailable".into())
-            })
-            .unwrap();
-
-            assert!(matches!(
-                status,
-                OfficialAccountProfileStatus::Unknown { .. }
-            ));
-        }
-    }
-
-    #[test]
     fn malformed_auth_json_is_unknown_for_launch_but_strict_provider_reads_still_fail() {
         let home = TempDir::new().unwrap();
         write_config(home.path(), "");
         fs::write(home.path().join("auth.json"), b"{").unwrap();
 
-        let status = status_with_unknown_native(home.path()).unwrap();
+        let status = status_with_empty_store(home.path()).unwrap();
         assert!(matches!(
             status,
             OfficialAccountProfileStatus::Unknown { .. }
@@ -1294,7 +951,7 @@ experimental_bearer_token = "sk-relay"
     }
 
     #[test]
-    fn third_party_provider_requires_native_confirmation_of_retained_chatgpt_login() {
+    fn retained_chatgpt_login_next_to_third_party_provider_is_adopted() {
         let home = TempDir::new().unwrap();
         write_config(home.path(), &third_party_config("responses"));
         write_auth(
@@ -1305,19 +962,11 @@ experimental_bearer_token = "sk-relay"
             }),
         );
 
-        assert!(matches!(
-            status_with_unknown_native(home.path()).unwrap(),
-            OfficialAccountProfileStatus::Unavailable { .. }
-        ));
         let OfficialAccountProfileStatus::Available(profile) =
-            current_official_account_profile_status_with_probe(home.path(), |_| {
-                NativeLoginStatus::ChatGpt
-            })
-            .unwrap()
+            status_with_empty_store(home.path()).unwrap()
         else {
-            panic!("confirmed ChatGPT login should remain available alongside third-party routes");
+            panic!("a retained ChatGPT login should become the default account");
         };
-
         assert!(profile.official_account);
         assert!(profile.supports_websockets);
         assert_eq!(profile.provider_id(), "openai");
@@ -1351,8 +1000,8 @@ experimental_bearer_token = "sk-relay"
         );
 
         assert!(matches!(
-            status_with_unknown_native(home.path()).unwrap(),
-            OfficialAccountProfileStatus::Unavailable { .. }
+            status_with_empty_store(home.path()).unwrap(),
+            OfficialAccountProfileStatus::Available(_)
         ));
 
         let (imported, status) =
@@ -1408,9 +1057,11 @@ experimental_bearer_token = "sk-relay"
                 !current_provider(home.path()).unwrap().official,
                 "{base_url}"
             );
+            // The stored ChatGPT login stays usable as an account even when
+            // the Codex config points the provider elsewhere.
             assert!(matches!(
-                status_with_unknown_native(home.path()).unwrap(),
-                OfficialAccountProfileStatus::Unavailable { .. }
+                status_with_empty_store(home.path()).unwrap(),
+                OfficialAccountProfileStatus::Available(_)
             ));
         }
         for extra in [

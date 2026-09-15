@@ -978,13 +978,26 @@ export function App({
         : "保存后将实时关闭请求日志记录，无需重启 Codex；历史日志仍可查看",
     });
   });
-  const handleToggleAccountUsage = useStableEvent((checked: boolean) => {
-    if (!config) return;
-    editConfig({
-      ...config,
-      showAccountUsageInHeader: checked,
-    });
-  });
+  const handleOfficialAccountsChanged = useStableEvent(
+    (result: import("./App.types").OfficialAccountsResult) => {
+      if (result.config) {
+        applyRouteResult({
+          config: result.config,
+          modelState: result.modelState,
+          restartRequired: result.restartRequired,
+        });
+      }
+      if (typeof result.officialAccountAvailable === "boolean") {
+        setStatus((current) => ({
+          ...current,
+          officialAccountAvailable: result.officialAccountAvailable,
+        }));
+      }
+    },
+  );
+  const handleNotice = useStableEvent(
+    (notice: { tone: "success" | "info" | "error"; text: string }) => setNotice(notice),
+  );
   const handleSaveOfficialRouteSettings = useStableEvent(
     saveOfficialRouteSettings,
   );
@@ -1274,7 +1287,8 @@ export function App({
               onReorderRoute={handleReorderRoute}
               onDeleteRoute={handleDeleteRoute}
               onFetchRouteModels={handleFetchRouteModels}
-              onToggleAccountUsage={handleToggleAccountUsage}
+              onOfficialAccountsChanged={handleOfficialAccountsChanged}
+              onNotice={handleNotice}
               onSaveOfficialRouteSettings={handleSaveOfficialRouteSettings}
               onSetDefaultModel={handleSetRouteDefaultModel}
               onConfigChange={handleConfigChange}

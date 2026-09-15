@@ -171,7 +171,7 @@ fn unavailable_official_auth_error_keeps_safe_probe_diagnostics() {
     )
     .unwrap_err();
 
-    assert!(error.contains("没有可用的官方账号登录"));
+    assert!(error.contains("没有设为默认的官方账号"));
     assert!(error.contains("nativeStatus=not_logged_in"));
     assert!(error.contains("executable=codex.exe"));
     assert!(error.contains("credentialsIncluded=false"));

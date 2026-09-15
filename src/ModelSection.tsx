@@ -1,7 +1,6 @@
 import { memo, useEffect, useMemo, useState } from "react";
 import {
   IconCheck as Check,
-  IconChevronRight,
   IconCpu,
   IconEdit as Edit,
   IconGripVertical,
@@ -14,7 +13,8 @@ import {
   IconTrash as Trash,
 } from "@tabler/icons-react";
 
-import type { Config, ModelContextConfig, ModelState, Profile, ProviderStatus } from "./App.types";
+import type { Config, ModelContextConfig, ModelState, OfficialAccountsResult, Profile, ProviderStatus } from "./App.types";
+import { OfficialAccountsPanel } from "./OfficialAccountsPanel";
 import { Card } from "@heroui/react";
 import {
   Badge,
@@ -44,95 +44,6 @@ import { flushCardClass } from "./uiClasses";
 import { validateOutboundApiUrl, validateOutboundProxyUrl } from "./urlValidation";
 import { invoke } from "./api";
 
-export function ModelContextFields({ model, policy, disabled, onChange }: {
-  model: string;
-  policy?: ModelContextConfig;
-  disabled: boolean;
-  onChange: (policy: ModelContextConfig | undefined) => void;
-}) {
-  return (
-    <details className="group model-context-details w-full text-xs">
-      <summary className="model-context-summary flex cursor-pointer select-none list-none items-center gap-1.5 py-0.5 pl-6 text-[11px] text-[#6e6e73] transition-colors hover:text-[#1d1d1f] outline-none [&::-webkit-details-marker]:hidden">
-        <IconChevronRight
-          size={12}
-          className="shrink-0 text-[#86868b] transition-transform duration-150 group-open:rotate-90"
-          aria-hidden="true"
-        />
-        <span className="font-medium">上下文预算</span>
-        {policy?.contextWindowTokens ? (
-          <span className="inline-flex items-center rounded border border-blue-500/20 bg-blue-500/10 px-1.5 py-0.2 text-[10px] font-semibold text-[#007aff]">
-            {policy.contextWindowTokens.toLocaleString()} Token
-          </span>
-        ) : (
-          <span className="inline-flex items-center rounded border border-black/5 bg-black/[0.04] px-1.5 py-0.2 text-[10px] font-normal text-[#86868b]">
-            默认
-          </span>
-        )}
-      </summary>
-      <div className="mt-1.5 rounded-[9px] border border-black/[0.08] bg-[#f8f8fa] p-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
-        <div className="mb-2.5 flex items-start justify-between gap-2">
-          <p className="text-[11px] leading-[1.45] text-[#6e6e73]">
-            自定义值优先于 1M；清空窗口恢复默认。未知模型默认使用 200000 Token 保守预算，不代表服务端容量。修改后重启 Codex 生效。
-          </p>
-          {policy && (
-            <button
-              type="button"
-              disabled={disabled}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                onChange(undefined);
-              }}
-              className="shrink-0 text-[10.5px] font-medium text-[#007aff] transition-colors hover:text-[#d70015] hover:underline disabled:opacity-40"
-            >
-              恢复默认
-            </button>
-          )}
-        </div>
-        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
-          {([
-            ["contextWindowTokens", "窗口", 1024, "默认 (200000)"],
-            ["autoCompactTokenLimit", "压缩阈值", 1, "自动"],
-            ["reserveOutputTokens", "输出预留", 1, "不单独预留"],
-          ] as const).map(([field, label, min, placeholder]) => (
-            <label key={field} className="flex flex-col gap-1">
-              <span className="text-[11px] font-medium text-[#4b5563]">
-                {label} <span className="text-[10px] text-[#86868b]">（Token）</span>
-              </span>
-              <Input
-                type="number"
-                min={min}
-                max={10_000_000}
-                step={1}
-                disabled={disabled}
-                className="h-7 rounded-md border-black/10 bg-white text-xs focus:border-[#007aff]"
-                aria-label={`${model} ${label} Token`}
-                placeholder={placeholder}
-                value={policy?.[field] ?? ""}
-                onChange={(event) => {
-                  const raw = event.target.value;
-                  if (field === "contextWindowTokens" && raw === "") {
-                    onChange(undefined);
-                    return;
-                  }
-                  onChange({
-                    contextWindowTokens: 200000,
-                    ...policy,
-                    [field]: raw === "" ? undefined : Number(raw),
-                  });
-                }}
-              />
-            </label>
-          ))}
-        </div>
-        <p className="mt-2 text-[10px] leading-relaxed text-[#86868b]">
-          阈值不能超过窗口的 90% 和预留后的有效空间；预留按整百分比向下取整，不是输出长度上限。
-        </p>
-      </div>
-    </details>
-  );
-}
-
 type ModelSectionProps = {
   config: Config;
   currentProvider: ProviderStatus["provider"] | null;
@@ -150,12 +61,12 @@ type ModelSectionProps = {
   onReorderRoute: (sourceId: string, targetId: string) => Promise<void>;
   onDeleteRoute: (routeId: string) => void;
   onFetchRouteModels: (route: Profile) => void;
-  onToggleAccountUsage?: (checked: boolean) => void;
+  onOfficialAccountsChanged: (result: OfficialAccountsResult) => void;
+  onNotice: (notice: { tone: "success" | "info" | "error"; text: string }) => void;
   onSaveOfficialRouteSettings?: (
     routeId: string,
     models: string[],
     showAccountUsageInHeader: boolean,
-    supports1MContextModels: string[],
     enabled: boolean,
     modelContexts: Record<string, ModelContextConfig>,
     upstreamProxy?: string,
@@ -257,7 +168,8 @@ function ModelSectionComponent({
   onReorderRoute,
   onDeleteRoute,
   onFetchRouteModels,
-  onToggleAccountUsage,
+  onOfficialAccountsChanged,
+  onNotice,
   onSaveOfficialRouteSettings,
   onSetDefaultModel,
   onConfigChange,
@@ -482,7 +394,6 @@ function ModelSectionComponent({
               routeDraft.id,
               officialModelDraft,
               showAccountUsageInHeader,
-              [],
               routeDraft.enabled !== false,
               {},
               routeDraft.upstreamProxy ?? "",
@@ -506,7 +417,6 @@ function ModelSectionComponent({
         profile.id,
         models,
         showAccountUsageInHeader,
-        [],
         enabled,
         {},
       );
@@ -615,6 +525,14 @@ function ModelSectionComponent({
                 </Button>
               )}
             </div>
+
+            <OfficialAccountsPanel
+              officialAccountAvailable={officialAccountAvailable}
+              isBusy={isBusy}
+              popupContainer={popupContainer}
+              onAccountsChanged={onOfficialAccountsChanged}
+              onNotice={onNotice}
+            />
 
             <div id="provider-model-groups" className="provider-model-groups" role="region" aria-label="供应商与模型列表" tabIndex={0}>
               {visibleProfiles.length === 0 && (
@@ -769,12 +687,6 @@ function ModelSectionComponent({
                     </div>
                     <div className="provider-model-group-actions">
                       <div className="provider-model-group-actions-top">
-                        {isOfficial && !disabled && (
-                          <div className="route-item-usage-toggle provider-model-usage-toggle">
-                            <span className="route-item-usage-label">额度显示</span>
-                            <Switch size="xs" checked={showAccountUsageInHeader} disabled={isBusy} onCheckedChange={(checked) => onToggleAccountUsage?.(checked)} aria-label="在账户区域显示额度" />
-                          </div>
-                        )}
                         {!routeConfigReadOnly && (
                           <div className="route-item-manage-actions">
                             <Button

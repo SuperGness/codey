@@ -167,6 +167,28 @@ export type InjectionScriptStatus = {
   error?: string;
 };
 
+export type OfficialAccount = {
+  id: string;
+  email?: string;
+  planType?: string;
+  accountId?: string;
+  addedAt: number;
+  lastRefresh?: string;
+  isDefault: boolean;
+};
+
+export type OfficialAccountsResult = {
+  accounts?: OfficialAccount[];
+  defaultAccountId?: string | null;
+  officialAccountAvailable?: boolean;
+  officialAccountStatus?: string;
+  config?: Config;
+  modelState?: ModelState;
+  restartRequired?: boolean;
+  modelHotReloaded?: boolean;
+  warning?: string;
+};
+
 export type RuntimeStatus = {
   running: boolean;
   appVersion?: string;

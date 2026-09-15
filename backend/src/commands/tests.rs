@@ -582,7 +582,7 @@ fn official_probe_migrates_legacy_account_route_to_current_provider() {
             },
         )
         .unwrap_err()
-        .contains("完成官方账号登录")
+        .contains("设为默认")
     );
 }
 

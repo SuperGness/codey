@@ -13,6 +13,7 @@ use std::time::Duration;
 
 mod diagnostics;
 mod models;
+mod official_accounts;
 mod plugins;
 mod prompt_optimization;
 mod runtime;
@@ -48,6 +49,11 @@ use models::{
 pub use models::{
     delete_route, fetch_route_models, save_default_model, save_official_route_models,
     save_selected_models, sync_current_provider_command,
+};
+use official_accounts::{
+    cancel_official_account_login, import_current_codex_login, list_official_accounts,
+    poll_official_account_login, remove_official_account, set_default_official_account,
+    start_official_account_login,
 };
 use plugins::{plugin_marketplace_status, repair_plugin_marketplace};
 use prompt_optimization::{
@@ -105,6 +111,7 @@ use crate::message_delete::delete_messages_persistently;
 use crate::model_catalog;
 use crate::model_id;
 use crate::notifications::NotificationChannelConfig;
+use crate::official_accounts::OfficialAccountStore;
 use crate::pending_approval;
 use crate::plugin_marketplace;
 use crate::route_request_log::RouteRequestLogQuery;
@@ -129,9 +136,10 @@ pub struct AppState {
     /// ClawBot flows, and constructing a reqwest client loads the system root
     /// certificates, which is measurable on the startup path.
     wechat_claw_login_http_client: std::sync::OnceLock<reqwest::Client>,
-    /// Official-account probe started before the update check so the two
-    /// startup waits overlap; keyed by the app path it was resolved against.
+    /// Official-account resolution started before the update check so the two
+    /// startup waits overlap.
     official_account_probe_prewarm: Mutex<Option<OfficialAccountProbePrewarm>>,
+    official_account_logins: Mutex<crate::official_accounts::LoginSessions>,
     account_usage_cache: Arc<Mutex<account_usage::AccountUsageCache>>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     runtime_operation: Mutex<()>,
@@ -168,7 +176,6 @@ pub struct AppState {
 }
 
 struct OfficialAccountProbePrewarm {
-    configured_codex_app_path: String,
     task: tokio::task::JoinHandle<anyhow::Result<OfficialAccountProfileStatus>>,
 }
 
@@ -225,6 +232,7 @@ impl Default for AppState {
             webhook_http_client_override: None,
             wechat_claw_login_http_client: std::sync::OnceLock::new(),
             official_account_probe_prewarm: Mutex::new(None),
+            official_account_logins: Mutex::new(crate::official_accounts::LoginSessions::default()),
             account_usage_cache: Arc::new(Mutex::new(account_usage::AccountUsageCache::default())),
             runtime: Mutex::new(None),
             runtime_operation: Mutex::new(()),
@@ -295,36 +303,30 @@ fn bridge_string_array(payload: &Value, name: &str, limit: usize) -> Vec<String>
 }
 
 impl AppState {
-    /// Starts the `codex login status` probe in the background. The next
-    /// `prepare_routes_for_current_launch` consumes it when the configured app
-    /// path is unchanged; otherwise the probe runs again as before.
+    /// Codey's own store of ChatGPT accounts, kept next to the config file.
+    pub(crate) fn official_accounts(&self) -> OfficialAccountStore {
+        OfficialAccountStore::for_config_path(self.store.path())
+    }
+
+    /// Starts resolving the default official account in the background. The
+    /// next `prepare_routes_for_current_launch` consumes the result.
     pub async fn prewarm_official_account_probe(&self) {
-        let configured_codex_app_path = self.config.read().await.codex_app_path.clone();
         let home = codex_home().to_path_buf();
-        let probe_path = configured_codex_app_path.clone();
+        let accounts = self.official_accounts();
         let task = tokio::task::spawn_blocking(move || {
             crate::codex_provider::current_official_account_profile_status_for_launch(
-                &home,
-                &probe_path,
+                &home, &accounts,
             )
         });
-        *self.official_account_probe_prewarm.lock().await = Some(OfficialAccountProbePrewarm {
-            configured_codex_app_path,
-            task,
-        });
+        *self.official_account_probe_prewarm.lock().await =
+            Some(OfficialAccountProbePrewarm { task });
     }
 
     async fn take_official_account_probe_prewarm(
         &self,
-        configured_codex_app_path: &str,
     ) -> Option<tokio::task::JoinHandle<anyhow::Result<OfficialAccountProfileStatus>>> {
         let prewarm = self.official_account_probe_prewarm.lock().await.take()?;
-        if prewarm.configured_codex_app_path == configured_codex_app_path {
-            Some(prewarm.task)
-        } else {
-            prewarm.task.abort();
-            None
-        }
+        Some(prewarm.task)
     }
 
     pub(crate) fn wechat_claw_login_http_client(&self) -> &reqwest::Client {
@@ -714,7 +716,7 @@ pub(super) fn validate_official_account_config_change(
         .is_some_and(|profile| profile.enabled && profile.official_account)
     {
         return Err(
-            "本次 Codex 由 API Key 线路启动，不能启用官方账号线路；请先在 Codex 中完成官方账号登录并重新启动 Codey"
+            "本次 Codex 由 API Key 线路启动，不能启用官方账号线路；请先在线路设置中添加官方账号并设为默认，再重新启动 Codey"
                 .to_string(),
         );
     }
@@ -725,7 +727,7 @@ pub(super) fn validate_official_account_config_change(
             })
     }) {
         return Err(
-            "本次 Codex 由 API Key 线路启动，不能新增官方账号线路；请先在 Codex 中完成官方账号登录并重新启动 Codey"
+            "本次 Codex 由 API Key 线路启动，不能新增官方账号线路；请先在线路设置中添加官方账号并设为默认，再重新启动 Codey"
                 .to_string(),
         );
     }
@@ -734,23 +736,19 @@ pub(super) fn validate_official_account_config_change(
 
 pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> Result<(), String> {
     let home = codex_home().to_path_buf();
-    let configured_codex_app_path = state.config.read().await.codex_app_path.clone();
-    let probe = match state
-        .take_official_account_probe_prewarm(&configured_codex_app_path)
-        .await
-    {
+    let accounts = state.official_accounts();
+    let probe = match state.take_official_account_probe_prewarm().await {
         Some(task) => task,
         None => tokio::task::spawn_blocking(move || {
             crate::codex_provider::current_official_account_profile_status_for_launch(
-                &home,
-                &configured_codex_app_path,
+                &home, &accounts,
             )
         }),
     };
     let official_status = probe
         .await
-        .map_err(|error| format!("检测 Codex 官方账号登录状态的任务异常退出：{error}"))?
-        .map_err(|error| format!("检测 Codex 官方账号登录状态失败：{error:#}"))?;
+        .map_err(|error| format!("解析默认官方账号的任务异常退出：{error}"))?
+        .map_err(|error| format!("解析默认官方账号失败：{error:#}"))?;
 
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
@@ -870,7 +868,7 @@ fn apply_unavailable_official_probe(
     if has_official_route {
         if !next.has_third_party_route() {
             let error = format!(
-                "当前 Codex 没有可用的官方账号登录，也没有已保存的 API Key 线路；请先在 Codex 中完成官方账号登录，或在 Codey 中添加第三方 API 线路。认证诊断：{reason}"
+                "Codey 中没有设为默认的官方账号，也没有已保存的 API Key 线路；请先添加官方账号并设为默认，或添加第三方 API 线路。认证诊断：{reason}"
             );
             error_log::record_failure_with_metadata(
                 "official_auth_unavailable",
@@ -1168,6 +1166,25 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 Err(error) => Err(error),
             }
         }
+        "list_official_accounts" => list_official_accounts(state).await,
+        "start_official_account_login" => start_official_account_login(state).await,
+        "poll_official_account_login" => match string_argument(&args, "loginId") {
+            Ok(login_id) => poll_official_account_login(state, login_id).await,
+            Err(error) => Err(error),
+        },
+        "cancel_official_account_login" => match string_argument(&args, "loginId") {
+            Ok(login_id) => cancel_official_account_login(state, login_id).await,
+            Err(error) => Err(error),
+        },
+        "import_current_codex_login" => import_current_codex_login(state).await,
+        "set_default_official_account" => match string_argument(&args, "accountId") {
+            Ok(account_id) => set_default_official_account(state, account_id).await,
+            Err(error) => Err(error),
+        },
+        "remove_official_account" => match string_argument(&args, "accountId") {
+            Ok(account_id) => remove_official_account(state, account_id).await,
+            Err(error) => Err(error),
+        },
         "start_wechat_claw_login" => start_wechat_claw_login(state).await,
         "poll_wechat_claw_login" => match string_argument(&args, "loginId") {
             Ok(login_id) => poll_wechat_claw_login(state, login_id).await,
@@ -1217,7 +1234,7 @@ pub async fn open_route_request_logs(state: &Arc<AppState>) -> Result<Value, Str
     Ok(json!({"status":"ok"}))
 }
 
-fn open_system_browser(url: &str) -> Result<(), String> {
+pub(super) fn open_system_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = Command::new("open");
     #[cfg(windows)]
@@ -1233,7 +1250,7 @@ fn open_system_browser(url: &str) -> Result<(), String> {
         .arg(url)
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("无法使用系统默认浏览器打开请求日志：{error}"))
+        .map_err(|error| format!("无法使用系统默认浏览器打开页面：{error}"))
 }
 
 pub async fn query_route_request_logs(

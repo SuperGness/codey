@@ -1,7 +1,7 @@
 // Development-only preview data and a mock Codey bridge API. Loaded from
 // main.tsx via a dynamic import that only exists in Vite dev builds, so this
 // module never ships in the production overlay.
-import type { ProviderStatus, Config, ModelState, Profile } from "../App.types";
+import type { ProviderStatus, Config, ModelState, OfficialAccount, Profile } from "../App.types";
 import {
   AUTO_REVIEW_MODEL,
   includesModelId,
@@ -184,6 +184,12 @@ if (import.meta.env.DEV) {
       hideFullAccessWarning: false,
       showAccountUsageInHeader: true,
     };
+    let previewOfficialAccounts: OfficialAccount[] = [
+      { id: "acct_preview_1", email: "preview@example.com", planType: "pro", accountId: "acct_preview_1", addedAt: 1_757_000_000, isDefault: true },
+      { id: "acct_preview_2", email: "backup@example.com", planType: "plus", accountId: "acct_preview_2", addedAt: 1_757_100_000, isDefault: false },
+    ];
+    let previewOfficialLoginPolls = 0;
+    const previewDefaultOfficialAccountId = () => previewOfficialAccounts.find((account) => account.isDefault)?.id ?? null;
     let previewModelState: ModelState = {
       officialModels: previewOfficialModels.map((model) => ({
         ...model,
@@ -472,6 +478,38 @@ if (import.meta.env.DEV) {
             previewClientPlatform === "macos" &&
             previewConfig.protectCrashpadPending,
         };
+      }
+      if (command === "list_official_accounts") {
+        return { status: "ok", accounts: previewOfficialAccounts, defaultAccountId: previewDefaultOfficialAccountId(), officialAccountAvailable: true };
+      }
+      if (command === "start_official_account_login") {
+        return { status: "wait", loginId: "preview-official-login", authUrl: "https://auth.openai.com/oauth/authorize?client_id=preview&state=preview", browserOpened: true };
+      }
+      if (command === "poll_official_account_login") {
+        previewOfficialLoginPolls += 1;
+        if (previewOfficialLoginPolls < 3) return { status: "wait" };
+        previewOfficialLoginPolls = 0;
+        const id = `acct_preview_${previewOfficialAccounts.length + 1}`;
+        previewOfficialAccounts.push({ id, email: `user${previewOfficialAccounts.length + 1}@example.com`, planType: "plus", accountId: id, addedAt: Math.floor(Date.now() / 1000), isDefault: previewOfficialAccounts.length === 0 });
+        return { status: "ok", accounts: previewOfficialAccounts, defaultAccountId: previewDefaultOfficialAccountId(), officialAccountAvailable: true };
+      }
+      if (command === "cancel_official_account_login") {
+        previewOfficialLoginPolls = 0;
+        return { status: "ok" };
+      }
+      if (command === "import_current_codex_login") {
+        return { status: "failed", message: "当前 Codex 没有 ChatGPT 官方账号登录，无法导入" };
+      }
+      if (command === "set_default_official_account") {
+        for (const account of previewOfficialAccounts) account.isDefault = account.id === args.accountId;
+        previewConfig = { ...previewConfig, showAccountUsageInHeader: true };
+        return { status: "ok", accounts: previewOfficialAccounts, defaultAccountId: previewDefaultOfficialAccountId(), officialAccountAvailable: true, config: previewConfig, modelState: previewModelState, restartRequired: false };
+      }
+      if (command === "remove_official_account") {
+        const removed = previewOfficialAccounts.find((account) => account.id === args.accountId);
+        previewOfficialAccounts = previewOfficialAccounts.filter((account) => account.id !== args.accountId);
+        const available = previewOfficialAccounts.some((account) => account.isDefault);
+        return { status: "ok", accounts: previewOfficialAccounts, defaultAccountId: previewDefaultOfficialAccountId(), officialAccountAvailable: available, config: previewConfig, modelState: previewModelState, restartRequired: false, ...(removed?.isDefault ? { warning: "当前没有默认官方账号，官方线路已停用" } : {}) };
       }
       if (command === "query_official_account_usage") {
         const fetchedAt = Math.floor(Date.now() / 1000);
