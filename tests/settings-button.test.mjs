@@ -15,6 +15,7 @@ const runRenderer = (sandbox) => {
 };
 
 class FakeElement extends FakeElementCore {
+  get firstElementChild() { return this.children[0] || null; }
   constructor(tagName = "div", { visible = true, right = 100, width = right, height = 46, top = 0 } = {}) {
     super(tagName);
     this.right = right;
@@ -54,6 +55,76 @@ class FakeElement extends FakeElementCore {
   }
 
 }
+
+test("joins the native measured action row and repairs its noninteractive mirror", () => {
+  const header = new FakeElement("header", { right: 1200 });
+  const slot = new FakeElement("div", { right: 1200, width: 70 });
+  slot.setAttribute("data-test-id", "header-shell-slot");
+  const hidden = new FakeElement();
+  hidden.setAttribute("aria-hidden", "true");
+  const visible = new FakeElement();
+  const measureRow = new FakeElement();
+  const actionRow = new FakeElement();
+  hidden.appendChild(measureRow);
+  visible.appendChild(actionRow);
+  slot.append(hidden, visible);
+  header.appendChild(slot);
+  measureRow.appendChild(new FakeElement("button", { right: 1400, width: 28 }));
+  actionRow.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
+  const documentElement = new FakeElement("html");
+  documentElement.appendChild(header);
+  const document = {
+    body: new FakeElement("body"), documentElement,
+    createElement: (tag) => new FakeElement(tag),
+    getElementById: (id) => documentElement.querySelector(`#${id}`),
+    querySelector: () => null,
+    querySelectorAll: (selector) => selector === "header" ? [header] : [],
+  };
+  const window = {
+    addEventListener() {}, clearTimeout() {}, dispatchEvent() {},
+    getComputedStyle: () => ({ display: "flex", visibility: "visible" }),
+    localStorage: { getItem: () => null, key: () => null, length: 0, setItem() {} },
+    setTimeout: () => 1,
+  };
+  window.window = window;
+  runRenderer({ console, document, HTMLElement: FakeElement, location: { pathname: "/", search: "" },
+    MutationObserver: class { disconnect() {} observe() {} }, URLSearchParams, window });
+  const button = document.getElementById("codey-settings-button");
+  const mirror = document.getElementById("codey-settings-button-measure");
+  assert.equal(button.parentElement, actionRow);
+  assert.equal(button.dataset.codeyNativeSlot, "true");
+  assert.equal(mirror.parentElement, measureRow);
+  assert.equal(mirror.tagName, "SPAN");
+  assert.equal(mirror.getAttribute("aria-hidden"), "true");
+  const reads = header.rectReads;
+  window.__codeyRendererScan();
+  assert.equal(header.rectReads, reads, "stable mounts skip geometry reads");
+  mirror.remove();
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button-measure").parentElement, measureRow);
+  // React can replace its visible action row while retaining the outer shell.
+  const replacement = new FakeElement();
+  replacement.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
+  actionRow.remove();
+  visible.appendChild(replacement);
+  window.__codeyRendererInvalidateHeaderMount();
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button").parentElement, replacement);
+  hidden.remove();
+  visible.remove();
+  slot.appendChild(replacement);
+  window.__codeyRendererInvalidateHeaderMount();
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button").parentElement, replacement);
+  assert.equal(document.getElementById("codey-settings-button-measure"), null);
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button").parentElement, replacement);
+  slot.removeAttribute("data-test-id");
+  window.__codeyRendererInvalidateHeaderMount();
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button").parentElement, header);
+  assert.equal(document.getElementById("codey-settings-button-measure"), null);
+});
 
 test("moves the Codey button beside the visible header's trailing action region", () => {
   const hiddenHeader = new FakeElement("header", { visible: false });

@@ -11,6 +11,7 @@
   const backendHealthPath = "/backend/health";
   const accountUsagePath = "/account/usage";
   const buttonId = "codey-settings-button";
+  const buttonMeasureId = "codey-settings-button-measure";
   const accountUsageId = "codey-account-usage";
   const styleId = "codey-core-injected-style";
   const updateAvailableEvent = "codey-update-availability-changed";
@@ -89,6 +90,8 @@
     style.textContent = `
       #${buttonId} { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; z-index: 2147483641; display: inline-grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 8px; padding: 0; margin-inline-start: 8px; margin-inline-end: 18px; background: transparent; color: inherit; cursor: pointer; opacity: .86; user-select: none; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
       #${buttonId}[data-codey-header-actions="true"] { width: 28px; height: 28px; margin-inline-start: 0; margin-inline-end: 6px; }
+      #${buttonId}[data-codey-native-slot="true"], #${buttonMeasureId} { box-sizing: border-box; flex: 0 0 auto; width: 28px; height: 28px; margin: 0; }
+      #${buttonMeasureId} { display: inline-block; pointer-events: none; }
       #${buttonId}:hover { background: rgba(127, 127, 127, .14); opacity: 1; }
       #${buttonId}:active { transform: translateY(1px); }
       #${buttonId}:focus-visible { outline: 2px solid rgba(139, 151, 255, .72); outline-offset: 2px; }
@@ -895,6 +898,24 @@
       }, null)?.control || null;
     if (!rightmostControl) return { header, target: header };
 
+    // Newer shells measure an invisible copy of each action row. Participate
+    // in that measurement so panel headers reserve the complete action width.
+    const slot = rightmostControl.closest('[data-test-id="header-shell-slot"]');
+    if (slot?.parentElement === header) {
+      const measureHost = [...slot.children].find((child) => child.getAttribute("aria-hidden") === "true");
+      const visibleHost = [...slot.children].find((child) => child !== measureHost && child.contains(rightmostControl));
+      const measureRow = measureHost?.firstElementChild;
+      const actionRow = visibleHost?.firstElementChild;
+      if (measureRow && actionRow && visibleMountRect(actionRow)) {
+        return { header, target: actionRow, measureRow, nativeSlot: true };
+      }
+      // Some shells measure the live content directly, without a hidden copy.
+      const liveRow = slot.children.length === 1 ? slot.firstElementChild : null;
+      if (!measureHost && liveRow?.contains(rightmostControl) && visibleMountRect(liveRow)) {
+        return { header, target: liveRow, nativeSlot: true };
+      }
+    }
+
     let headerChild = rightmostControl;
     while (headerChild.parentElement && headerChild.parentElement !== header) {
       headerChild = headerChild.parentElement;
@@ -919,6 +940,15 @@
     if (!(parent instanceof HTMLElement) || button.closest("[hidden], [aria-hidden=true]")) {
       return false;
     }
+    if (button.dataset.codeyNativeSlot === "true") {
+      const measure = document.getElementById(buttonMeasureId);
+      return parent === button.__codeyActionRow
+        && !!parent.closest('[data-test-id="header-shell-slot"]')
+        && (!button.__codeyMeasureRow || (
+          measure?.parentElement === button.__codeyMeasureRow
+          && measure?.isConnected === true
+        ));
+    }
     const validParent = parent.matches?.(headerSelector);
     const anchored = button.dataset.codeyHeaderActions !== "true"
       || (
@@ -935,6 +965,7 @@
     const mount = findHeaderMount();
     if (!mount) {
       existingButton?.remove?.();
+      document.getElementById(buttonMeasureId)?.remove();
       return;
     }
     let button = existingButton;
@@ -955,6 +986,27 @@
       button.dataset.codeyHeaderActions = "true";
     } else {
       delete button.dataset.codeyHeaderActions;
+    }
+    if (mount.nativeSlot) {
+      button.dataset.codeyNativeSlot = "true";
+      let measure = document.getElementById(buttonMeasureId);
+      if (mount.measureRow && !measure) {
+        measure = document.createElement("span");
+        measure.id = buttonMeasureId;
+        measure.setAttribute("aria-hidden", "true");
+      }
+      if (mount.measureRow) {
+        if (measure.parentElement !== mount.measureRow) mount.measureRow.appendChild(measure);
+      } else {
+        measure?.remove();
+      }
+      button.__codeyActionRow = mount.target;
+      button.__codeyMeasureRow = mount.measureRow || null;
+    } else {
+      delete button.dataset.codeyNativeSlot;
+      document.getElementById(buttonMeasureId)?.remove();
+      button.__codeyActionRow = null;
+      button.__codeyMeasureRow = null;
     }
     if (mount.before) {
       if (button.parentElement !== mount.target || button.nextElementSibling !== mount.before) {
