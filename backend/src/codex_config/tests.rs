@@ -310,6 +310,103 @@ default_subagent_reasoning_effort = "max"
 }
 
 #[test]
+fn restore_without_a_lease_removes_legacy_toml_codey_hooks() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex-home");
+    fs::create_dir_all(&home).unwrap();
+    let config_path = home.join("config.toml");
+    let original = format!(
+        r#"[features]
+hooks = true
+
+[hooks.state."{path}:pre_tool_use:0:0"]
+trusted_hash = "sha256:legacy-codey"
+
+[hooks.state."{path}:pre_tool_use:1:0"]
+trusted_hash = "sha256:legacy-codey-second"
+
+[hooks.state."{path}:pre_tool_use:2:0"]
+trusted_hash = "sha256:user-hook"
+
+[hooks.state."{path}:post_tool_use:0:0"]
+trusted_hash = "sha256:legacy-codey"
+
+[[hooks.PreToolUse]]
+matcher = "*"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "'/old/codey' {gate}"
+
+[[hooks.PreToolUse]]
+matcher = "*"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "'/older/codey' {combined}"
+
+[[hooks.PreToolUse]]
+matcher = "Bash"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "echo keep-user-hook"
+
+[[hooks.PostToolUse]]
+matcher = "*"
+
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = "'/old/codey' {gate}"
+"#,
+        path = config_path.display(),
+        gate = crate::subagent_gate::HOOK_ARGUMENT,
+        combined = crate::subagent_gate::COMBINED_HOOK_ARGUMENT,
+    );
+    fs::write(&config_path, &original).unwrap();
+
+    assert!(
+        restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
+    );
+    let repaired = fs::read_to_string(&config_path).unwrap();
+    let document = repaired.parse::<DocumentMut>().unwrap();
+
+    let pre_tool_use = document["hooks"]["PreToolUse"]
+        .as_array_of_tables()
+        .unwrap();
+    assert_eq!(pre_tool_use.len(), 1);
+    assert_eq!(
+        pre_tool_use.get(0).unwrap()["matcher"].as_str(),
+        Some("Bash")
+    );
+    assert!(!repaired.contains("/old/codey"));
+    assert!(!repaired.contains("/older/codey"));
+    assert!(document["hooks"].get("PostToolUse").is_none());
+    assert_eq!(document["features"]["hooks"].as_bool(), Some(true));
+
+    let state = document["hooks"]["state"].as_table().unwrap();
+    assert_eq!(
+        state[&format!("{}:pre_tool_use:0:0", config_path.display())]["trusted_hash"].as_str(),
+        Some("sha256:user-hook")
+    );
+    assert!(
+        state
+            .get(&format!("{}:pre_tool_use:1:0", config_path.display()))
+            .is_none()
+    );
+    assert!(
+        state
+            .get(&format!("{}:pre_tool_use:2:0", config_path.display()))
+            .is_none()
+    );
+    assert!(
+        state
+            .get(&format!("{}:post_tool_use:0:0", config_path.display()))
+            .is_none()
+    );
+}
+
+#[test]
 fn read_only_router_mode_does_not_repair_or_rewrite_codex_config_without_a_lease() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
