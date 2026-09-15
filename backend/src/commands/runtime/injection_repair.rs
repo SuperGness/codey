@@ -55,6 +55,7 @@ pub(in crate::commands) async fn schedule_main_process_injection_repair(
                 error.clone(),
                 json!({}),
             );
+            #[cfg(windows)]
             let _ = tokio::task::spawn_blocking(move || {
                 rfd::MessageDialog::new()
                     .set_title("Codey 主进程注入修复失败")
