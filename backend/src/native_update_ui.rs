@@ -45,6 +45,8 @@ impl NativeUpdateUi {
                 "当前版本为 v{current_version}。是否现在下载、校验并安装更新？安装时 Codey 会退出，并尝试启动新版。"
             ),
             DialogKind::Confirm,
+            "更新并重启".to_string(),
+            Some("稍后".to_string()),
         )
         .await
         .map(|result| result == DialogResult::Primary)
@@ -55,6 +57,8 @@ impl NativeUpdateUi {
             "Codey 更新失败".to_string(),
             format!("{error}\n\n你可以进入 Codex 后，从 Codey 设置中重试。"),
             DialogKind::Failure,
+            "进入 Codex".to_string(),
+            None,
         )
         .await
         .map(|_| ())
@@ -74,11 +78,45 @@ enum DialogKind {
     RestoreContext,
 }
 
-pub(crate) async fn confirm_context_recovery() -> Result<bool, String> {
+/// 上下文恢复提示出现的时机：启动或重启 Codex 失败，或保存模型时无法应用自定义预算。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContextRecoveryPurpose {
+    /// 启动或重启 Codex 时无法生成带自定义预算的模型目录。
+    Launch,
+    /// 保存模型时无法生成带自定义预算的模型目录。
+    ModelSync,
+}
+
+impl ContextRecoveryPurpose {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Launch => "launch",
+            Self::ModelSync => "model_sync",
+        }
+    }
+}
+
+pub(crate) async fn confirm_context_recovery(
+    purpose: ContextRecoveryPurpose,
+) -> Result<bool, String> {
+    let (description, primary_label, secondary_label) = match purpose {
+        ContextRecoveryPurpose::Launch => (
+            "本机 Codex 模型缓存不完整，暂时无法应用自定义上下文预算。\n\n可以恢复所有模型的默认预算并重新启动，其他设置不受影响。原配置会自动备份。若要继续使用自定义预算，请先直接打开官方 Codex 刷新模型缓存，再返回 Codey 设置。",
+            "恢复默认预算并重试",
+            "退出",
+        ),
+        ContextRecoveryPurpose::ModelSync => (
+            "本机 Codex 模型缓存不完整，暂时无法应用自定义上下文预算。\n\n可以恢复所有模型的默认预算并继续保存本次改动，其他设置不受影响。原配置会自动备份。若要继续使用自定义预算，请先直接打开官方 Codex 刷新模型缓存，再返回 Codey 设置；也可以先取消，从模型缓存刷新后再保存。",
+            "恢复默认预算并继续",
+            "取消",
+        ),
+    };
     show_dialog(
         "Codey 上下文设置暂时无法使用".to_string(),
-        "本机 Codex 模型缓存不完整，暂时无法应用自定义上下文预算。\n\n可以恢复所有模型的默认预算并重新启动，其他设置不受影响。原配置会自动备份。若要继续使用自定义预算，请先直接打开官方 Codex 刷新模型缓存，再返回 Codey 设置。".to_string(),
+        description.to_string(),
         DialogKind::RestoreContext,
+        primary_label.to_string(),
+        Some(secondary_label.to_string()),
     )
     .await
     .map(|result| result == DialogResult::Primary)
@@ -95,17 +133,16 @@ async fn show_dialog(
     title: String,
     description: String,
     kind: DialogKind,
+    primary_label: String,
+    secondary_label: Option<String>,
 ) -> Result<DialogResult, String> {
     tokio::task::spawn_blocking(move || {
-        let buttons = match kind {
-            DialogKind::Confirm => {
-                rfd::MessageButtons::OkCancelCustom("更新并重启".to_string(), "稍后".to_string())
+        let primary_label_for_result = primary_label.clone();
+        let buttons = match secondary_label {
+            Some(secondary_label) => {
+                rfd::MessageButtons::OkCancelCustom(primary_label, secondary_label)
             }
-            DialogKind::Failure => rfd::MessageButtons::OkCustom("进入 Codex".to_string()),
-            DialogKind::RestoreContext => rfd::MessageButtons::OkCancelCustom(
-                "恢复默认预算并重试".to_string(),
-                "退出".to_string(),
-            ),
+            None => rfd::MessageButtons::OkCustom(primary_label),
         };
         let result = rfd::MessageDialog::new()
             .set_title(title)
@@ -118,19 +155,11 @@ async fn show_dialog(
             .set_buttons(buttons)
             .show();
         match (kind, result) {
-            (DialogKind::Confirm, rfd::MessageDialogResult::Custom(label))
-                if label == "更新并重启" =>
-            {
-                DialogResult::Primary
-            }
-            (DialogKind::Confirm, _) => DialogResult::Secondary,
             (DialogKind::Failure, _) => DialogResult::Primary,
-            (DialogKind::RestoreContext, rfd::MessageDialogResult::Custom(label))
-                if label == "恢复默认预算并重试" =>
-            {
+            (_, rfd::MessageDialogResult::Custom(label)) if label == primary_label_for_result => {
                 DialogResult::Primary
             }
-            (DialogKind::RestoreContext, _) => DialogResult::Secondary,
+            (_, _) => DialogResult::Secondary,
         }
     })
     .await
@@ -142,6 +171,8 @@ async fn show_dialog(
     _title: String,
     _description: String,
     kind: DialogKind,
+    _primary_label: String,
+    _secondary_label: Option<String>,
 ) -> Result<DialogResult, String> {
     Ok(match kind {
         DialogKind::Confirm | DialogKind::RestoreContext => DialogResult::Secondary,

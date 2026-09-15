@@ -21,9 +21,10 @@ test("disabled routes do not contribute subagent options while legacy routes sta
 
 test("preview configuration persists and prunes model context declarations", async () => {
   const source = await readFile(new URL("../src/dev/mockApi.ts", import.meta.url), "utf8");
-  assert.match(source, /supports1MContextByProvider: \{\}/);
+  assert.match(source, /modelReasoningEffortsByProvider: \{\}/);
   assert.match(source, /id: "primary",\s+enabled: true/);
-  assert.match(source, /args.supports1MContextModels/);
-  assert.match(source, /available1MModels/);
+  assert.match(source, /args\.reasoningEfforts/);
+  assert.match(source, /availableModels/);
+  assert.doesNotMatch(source, /supports1MContext|available1MModels/);
   assert.match(source, /线路已禁用，不能同步模型/);
 });

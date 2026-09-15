@@ -184,7 +184,7 @@ pub(crate) async fn sync_native_current_provider_models(
         }
         next.upstream_models_by_provider
             .insert(context.provider.id.clone(), cached_models.clone());
-        next.retain_1m_context_models(&context.provider.id, &cached_models);
+        next.retain_model_contexts(&context.provider.id, &cached_models);
     }
     let model_state = native_model_state_for_provider(&next, &context.provider, codex_home())?;
     let visible_models = if context.provider.official {
@@ -383,7 +383,7 @@ pub(crate) fn config_with_current_provider_model_sync(
     preserve_declared_official_models(&mut supported_models, config.declared_official_models());
     let mut next = config.clone();
     if synced {
-        next.retain_1m_context_models(&provider_id, &supported_models);
+        next.retain_model_contexts(&provider_id, &supported_models);
         set_provider_auto_review_support(&mut next, &provider_id, supports_auto_review);
     }
     next.upstream_models_by_provider

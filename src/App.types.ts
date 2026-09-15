@@ -75,6 +75,11 @@ export type ModelContextConfig = {
   reserveOutputTokens?: number | null;
 };
 
+export type ModelReasoningEffort = {
+  level: string;
+  value: string;
+};
+
 export type Config = {
   settingsRevision: number;
   localRouterEnabled: boolean;
@@ -88,8 +93,11 @@ export type Config = {
   codexAppPath: string;
   userScripts: string[];
   selectedModelsByProvider: Record<string, string[]>;
-  supports1MContextByProvider: Record<string, string[]>;
   modelContextByProvider?: Record<string, Record<string, ModelContextConfig>>;
+  modelReasoningEffortsByProvider?: Record<
+    string,
+    Record<string, ModelReasoningEffort[]>
+  >;
   manualThirdPartyModelsByProvider: Record<string, string[]>;
   declaredOfficialModelsByProvider: Record<string, string[]>;
   upstreamModelsByProvider: Record<string, string[]>;
@@ -118,6 +126,8 @@ export type OfficialModelState = {
 export type ThirdPartyModelState = {
   slug: string;
   supportedReasoningEfforts: string[];
+  autoSupportedReasoningEfforts: string[];
+  reasoningEfforts: ModelReasoningEffort[];
   defaultReasoningEffort: string;
 };
 

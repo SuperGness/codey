@@ -8,6 +8,7 @@ const root = new URL("../", import.meta.url);
 
 test("bulk model selection includes every filtered page and preserves unrelated selections", async () => {
   const ids = await loadTypeScriptModule(new URL("src/modelIds.ts", root));
+  const reasoningEfforts = await loadTypeScriptModule(new URL("src/modelReasoningEfforts.ts", root));
   const { filterModelOptions } = await loadTypeScriptModule(new URL("src/modelPickerPagination.ts", root));
   const state = [];
   let cursor = 0;
@@ -27,6 +28,7 @@ test("bulk model selection includes every filtered page and preserves unrelated 
   }).outputText)((name) => {
     if (name === "react") return react;
     if (name === "./modelIds") return ids;
+    if (name === "./modelReasoningEfforts") return reasoningEfforts;
     if (name === "./subagentModels") return { buildSubagentModelOptions: () => [] };
     return {};
   }, exports);
@@ -39,7 +41,7 @@ test("bulk model selection includes every filtered page and preserves unrelated 
     officialModels: [{ slug: "official", supported: true }], officialModelIds: ["official"],
     upstreamModels: upstream, thirdPartyModels: ["manual"], manualThirdPartyModels: ["manual"],
   });
-  render().toggleDraft1MModel("provider-0", true);
+  render().updateDraftReasoningEffort("provider-0", [{ level: "high", value: "high" }]);
   const matching = filterModelOptions(render().thirdPartyModelOptions, " PROVIDER- ");
   render().toggleDraftModel(matching, true);
   assert.equal(render().draftModelSet.size, 452);
@@ -47,7 +49,9 @@ test("bulk model selection includes every filtered page and preserves unrelated 
   assert.equal(render().draftModelSet.size, 452);
   render().toggleDraftModel(matching, false);
   assert.deepEqual([...render().draftModelSet], ["official", "manual"]);
-  assert.ok(render().draft1MModelSet.has("provider-0"));
+  assert.deepEqual(render().draftReasoningEfforts["provider-0"], [
+    { level: "high", value: "high" },
+  ]);
   assert.ok(render().draftManualThirdPartyModelKeys.has("manual"));
   render().toggleDraftModel("manual", false);
   assert.ok(!render().draftManualThirdPartyModelKeys.has("manual"));
@@ -105,8 +109,14 @@ test("third-party model sync can fall back to manual model support configuration
   assert.match(modelCommandSource, /preserve_selected_third_party_models_except/);
   assert.match(
     modelCommandSource,
-    /refreshed_model_state_async\(&config, false\)\.await\?/,
+    /refreshed_model_state_with_context_recovery\(\s*&mut config,\s*false,\s*crate::native_update_ui::confirm_context_recovery,\s*\)/,
   );
+  assert.match(
+    modelCommandSource,
+    /async fn refreshed_model_state_with_context_recovery_at/,
+  );
+  assert.match(modelCommandSource, /CUSTOM_CONTEXT_CATALOG_UNAVAILABLE/);
+  assert.match(modelCommandSource, /"customContextsRestored":\s*custom_contexts_restored/);
   assert.match(modelCommandSource, /tokio::task::spawn_blocking/);
   assert.match(modelCommandSource, /rollback_model_catalog_after_config_save/);
   assert.match(
@@ -145,6 +155,24 @@ test("model save notices distinguish delivery, pending restart and subagent erro
   ]) {
     assert.deepEqual(modelSelectionNotice(result, summary), { tone, text: summary + suffix });
   }
+  assert.deepEqual(
+    modelSelectionNotice({ customContextsRestored: true, modelHotReloaded: true }, summary),
+    {
+      tone: "info",
+      text: `${summary}；本机 Codex 模型缓存不完整，自定义上下文预算已恢复为默认值`,
+    },
+  );
+  assert.deepEqual(
+    modelSelectionNotice({ customContextsRestored: true, restartRequired: true }, summary),
+    {
+      tone: "info",
+      text: `${summary}，需重启 Codex 后生效；本机 Codex 模型缓存不完整，自定义上下文预算已恢复为默认值`,
+    },
+  );
+  assert.deepEqual(
+    modelSelectionNotice({ customContextsRestored: false }, summary),
+    { tone: "success", text: summary },
+  );
 });
 
 test("model IDs compare case-insensitively while preserving first spelling", async () => {

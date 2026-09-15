@@ -11,6 +11,7 @@ import type {
   Config,
   ModelState,
   ModelContextConfig,
+  ModelReasoningEffort,
   Notice,
   ProviderStatus,
   RuntimeStatus,
@@ -18,6 +19,7 @@ import type {
 import {
   AUTO_REVIEW_MODEL,
   includesModelId,
+  modelIdsEqual,
   modelKey,
   partitionModelIdsByKey,
   uniqueModelIds,
@@ -26,11 +28,18 @@ import {
 import { buildSubagentModelOptions } from "./subagentModels";
 import { routeProviderId } from "./modelRoutes";
 import { modelSelectionNotice, type ModelRuntimeUpdate } from "./modelSelectionNotice";
+import {
+  autoReasoningEfforts,
+  normalizeReasoningEfforts,
+  reasoningEffortsEqual,
+} from "./modelReasoningEfforts";
 
 const MAX_MODEL_ID_BYTES = 512;
 const MAX_MODEL_COUNT = 10_000;
 const modelIdEncoder = new TextEncoder();
 const AUTO_REVIEW_MODEL_KEY = modelKey(AUTO_REVIEW_MODEL);
+/// 线路模板没有给出档位时使用的默认思考强度。
+const DEFAULT_THIRD_PARTY_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"];
 
 const pickerSelection = (state: ModelState) =>
   [
@@ -71,7 +80,12 @@ export function useModelSelection({
   const [modelPickerRouteId, setModelPickerRouteId] = useState<string | null>(null);
   const [modelPickerState, setModelPickerState] = useState<ModelState | null>(null);
   const [draftModels, setDraftModels] = useState<string[]>([]);
-  const [draft1MModels, setDraft1MModels] = useState<string[]>([]);
+  const [draftReasoningEfforts, setDraftReasoningEfforts] = useState<
+    Record<string, ModelReasoningEffort[]>
+  >({});
+  const [reasoningEffortAutoByModel, setReasoningEffortAutoByModel] = useState<
+    Record<string, ModelReasoningEffort[]>
+  >({});
   const [draftModelContexts, setDraftModelContexts] = useState<Record<string, ModelContextConfig>>({});
   const updateDraftModelContext = useCallback((model: string, policy: ModelContextConfig | undefined) => {
     setDraftModelContexts((current) => {
@@ -81,10 +95,23 @@ export function useModelSelection({
       return next;
     });
   }, []);
-  const draft1MModelSet = useMemo(() => new Set(draft1MModels.map(modelKey)), [draft1MModels]);
-  const toggleDraft1MModel = useCallback((model: string, checked: boolean) => {
-    setDraft1MModels((current) => checked ? uniqueModelIds([...current, model]) : withoutModelId(current, model));
-  }, []);
+  const updateDraftReasoningEffort = useCallback(
+    (model: string, efforts: ModelReasoningEffort[]) => {
+      setDraftReasoningEfforts((current) => ({
+        ...current,
+        [modelKey(model)]: efforts,
+      }));
+    },
+    [],
+  );
+  const resetDraftReasoningEffort = useCallback((model: string) => {
+    setDraftReasoningEfforts((current) => ({
+      ...current,
+      [modelKey(model)]:
+        reasoningEffortAutoByModel[modelKey(model)] ??
+        autoReasoningEfforts(DEFAULT_THIRD_PARTY_REASONING_EFFORTS),
+    }));
+  }, [reasoningEffortAutoByModel]);
   const [draftManualThirdPartyModels, setDraftManualThirdPartyModels] = useState<string[]>([]);
   const [deletedThirdPartyModels, setDeletedThirdPartyModels] = useState<string[]>([]);
   const [customModelInput, setCustomModelInput] = useState("");
@@ -167,8 +194,32 @@ export function useModelSelection({
     setDraftModels(pickerSelection(state));
     const profile = config?.profiles.find((candidate) => candidate.id === (routeId ?? config.activeProfileId));
     const providerId = routeId && profile ? routeProviderId(profile) : currentProvider?.id || (profile ? routeProviderId(profile) : "");
-    setDraft1MModels(config?.supports1MContextByProvider?.[providerId] || []);
     setDraftModelContexts(config?.modelContextByProvider?.[providerId] || {});
+    const storedReasoningEfforts = config?.modelReasoningEffortsByProvider?.[providerId];
+    const reasoningModels = uniqueModelIds([
+      ...state.upstreamModels,
+      ...state.thirdPartyModels,
+      ...state.manualThirdPartyModels,
+      ...pickerSelection(state),
+    ]);
+    const autoEfforts: Record<string, ModelReasoningEffort[]> = {};
+    const draftEfforts: Record<string, ModelReasoningEffort[]> = {};
+    for (const model of reasoningModels) {
+      const key = modelKey(model);
+      if (autoEfforts[key]) continue;
+      const declared = state.thirdPartyModelMetadata?.find(
+        (entry) => modelKey(entry.slug) === key,
+      )?.autoSupportedReasoningEfforts;
+      const base = autoReasoningEfforts(
+        declared?.length ? declared : DEFAULT_THIRD_PARTY_REASONING_EFFORTS,
+      );
+      autoEfforts[key] = base;
+      const stored = Object.entries(storedReasoningEfforts ?? {}).find(([name]) =>
+        modelIdsEqual(name, model))?.[1];
+      draftEfforts[key] = stored ? normalizeReasoningEfforts(stored) : base;
+    }
+    setReasoningEffortAutoByModel(autoEfforts);
+    setDraftReasoningEfforts(draftEfforts);
     setDraftManualThirdPartyModels(state.manualThirdPartyModels);
     setDeletedThirdPartyModels([]);
     setCustomModelInput("");
@@ -195,7 +246,13 @@ export function useModelSelection({
     );
     if (!checked) {
       const retainedKeys = new Set([...modelEditorState.upstreamModels.map(modelKey), ...officialSlugKeys]);
-      setDraft1MModels((current) => current.filter((item) => !keys.has(modelKey(item)) || retainedKeys.has(modelKey(item))));
+      setDraftReasoningEfforts((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([key]) => !keys.has(key) || retainedKeys.has(key),
+          ),
+        ),
+      );
       setDraftManualThirdPartyModels((current) =>
         current.filter((item) => !keys.has(modelKey(item))),
       );
@@ -274,7 +331,11 @@ export function useModelSelection({
     const normalizedKey = modelKey(normalized);
     const wasManual = draftManualThirdPartyModelKeys.has(normalizedKey);
     if (!wasManual) return;
-    setDraft1MModels((current) => withoutModelId(current, normalized));
+    setDraftReasoningEfforts((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([key]) => key !== normalizedKey),
+      ),
+    );
     setDraftModels((current) =>
       withoutModelId(current, normalized),
     );
@@ -302,6 +363,20 @@ export function useModelSelection({
     summary: string,
     closePicker: boolean,
   ) => {
+    const declaredReasoningEfforts: Record<string, ModelReasoningEffort[]> = {};
+    if (config?.localRouterEnabled === true) {
+      for (const [key, efforts] of Object.entries(draftReasoningEfforts)) {
+        const model = thirdPartyModelOptions.find(
+          (candidate) => modelKey(candidate) === key,
+        );
+        if (!model) continue;
+        const normalized = normalizeReasoningEfforts(efforts);
+        if (reasoningEffortsEqual(normalized, reasoningEffortAutoByModel[key] ?? [])) {
+          continue;
+        }
+        declaredReasoningEfforts[model] = normalized;
+      }
+    }
     const result = await invoke<{
       config: Config;
       modelState: ModelState;
@@ -313,11 +388,9 @@ export function useModelSelection({
       supportsAutoReview,
       modelContexts: Object.fromEntries(Object.entries(draftModelContexts).filter(([model]) =>
         includesModelId(modelEditorState.officialModelIds, model) || includesModelId(thirdPartyModelOptions, model))),
-      supports1MContextModels: draft1MModels.filter(
-        (model) =>
-          includesModelId(modelEditorState.officialModelIds, model) ||
-          includesModelId(thirdPartyModelOptions, model),
-      ),
+      ...(config?.localRouterEnabled === true
+        ? { reasoningEfforts: declaredReasoningEfforts }
+        : {}),
       ...(modelPickerRouteId == null ? {} : { routeId: modelPickerRouteId }),
     });
     setPersistedConfig(result.config);
@@ -338,8 +411,10 @@ export function useModelSelection({
     setPersistedConfig,
     setStatus,
     modelPickerRouteId,
-    draft1MModels,
+    config,
+    draftReasoningEfforts,
     draftModelContexts,
+    reasoningEffortAutoByModel,
     modelEditorState.officialModelIds,
     thirdPartyModelOptions,
   ]);
@@ -389,10 +464,12 @@ export function useModelSelection({
     draftAutoReviewSupported,
     setDraftAutoReviewSupported,
     draftModelSet,
-    draft1MModelSet,
     draftModelContexts,
     updateDraftModelContext,
-    toggleDraft1MModel,
+    draftReasoningEfforts,
+    reasoningEffortAutoByModel,
+    updateDraftReasoningEffort,
+    resetDraftReasoningEffort,
     draftManualThirdPartyModelKeys,
     thirdPartyModelOptions,
     openModelPicker,

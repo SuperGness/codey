@@ -150,8 +150,8 @@ if (import.meta.env.DEV) {
         primary: ["provider-fast-coder", "claude-sonnet-4-5"],
         backup: ["claude-sonnet-4-5", "claude-opus-4-1"],
       },
-      supports1MContextByProvider: {},
       modelContextByProvider: {},
+      modelReasoningEffortsByProvider: {},
       manualThirdPartyModelsByProvider: {
         primary: ["provider-fast-coder"],
       },
@@ -201,6 +201,38 @@ if (import.meta.env.DEV) {
       previewConfig.profiles.find(
         (profile) => profile.id === previewConfig.activeProfileId,
       ) || previewConfig.profiles[0];
+    /// 与后端模板一致：GPT 系列模板额外开放 max/ultra，其余模型使用基础档位。
+    const previewReasoningEffortTemplate = (profile: Profile, model: string) => {
+      const upstream = routeModelAlias(profile, model);
+      const base = ["low", "medium", "high", "xhigh"];
+      return ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].some(
+        (slug) => modelIdsEqual(slug, upstream),
+      )
+        ? [...base, "max", "ultra"]
+        : base;
+    };
+    const previewThirdPartyModelMetadata = (profile: Profile, models: string[]) => {
+      const providerId = routeProviderId(profile);
+      return models.map((model) => {
+        const declared: import("../App.types").ModelReasoningEffort[] = Object.entries(
+          previewConfig.modelReasoningEffortsByProvider?.[providerId] ?? {},
+        ).find(([name]) => modelIdsEqual(name, model))?.[1] ?? [];
+        const autoSupportedReasoningEfforts = previewReasoningEffortTemplate(profile, model);
+        const supportedReasoningEfforts = declared.length
+          ? uniqueModelIds(declared.map((effort) => effort.value))
+          : autoSupportedReasoningEfforts;
+        return {
+          slug: model,
+          supportedReasoningEfforts,
+          autoSupportedReasoningEfforts,
+          reasoningEfforts: declared,
+          defaultReasoningEffort:
+            supportedReasoningEfforts.find((effort) => effort === "low") ??
+            supportedReasoningEfforts[0] ??
+            "low",
+        };
+      });
+    };
     const previewProviderStatus = (): ProviderStatus => {
       const profile = activePreviewProfile();
       return {
@@ -247,6 +279,9 @@ if (import.meta.env.DEV) {
           includesModelId(thirdPartyModels, model),
         ),
         upstreamModels: official ? [] : upstream,
+        thirdPartyModelMetadata: official
+          ? []
+          : previewThirdPartyModelMetadata(profile, thirdPartyModels),
         defaultModel,
       };
     };
@@ -613,8 +648,8 @@ if (import.meta.env.DEV) {
         const providerId = routeProviderId(route);
         const profiles = previewConfig.profiles.filter((profile) => profile.id !== routeId);
         delete previewConfig.selectedModelsByProvider[providerId];
-        delete previewConfig.supports1MContextByProvider[providerId];
         if (previewConfig.modelContextByProvider) delete previewConfig.modelContextByProvider[providerId];
+        if (previewConfig.modelReasoningEffortsByProvider) delete previewConfig.modelReasoningEffortsByProvider[providerId];
         delete previewConfig.manualThirdPartyModelsByProvider[providerId];
         delete previewConfig.declaredOfficialModelsByProvider[providerId];
         delete previewConfig.upstreamModelsByProvider[providerId];
@@ -666,9 +701,12 @@ if (import.meta.env.DEV) {
             ...previewConfig.upstreamModelsByProvider,
             [providerId]: models,
           },
-          supports1MContextByProvider: {
-            ...previewConfig.supports1MContextByProvider,
-            [providerId]: (previewConfig.supports1MContextByProvider[providerId] || []).filter((model) => includesModelId(models, model)),
+          modelReasoningEffortsByProvider: {
+            ...previewConfig.modelReasoningEffortsByProvider,
+            [providerId]: Object.fromEntries(
+              Object.entries(previewConfig.modelReasoningEffortsByProvider?.[providerId] ?? {})
+                .filter(([model]) => includesModelId(models, model)),
+            ),
           },
         };
         refreshPreviewModelState();
@@ -757,7 +795,7 @@ if (import.meta.env.DEV) {
           ...officialModels,
           ...thirdPartyModels,
         ]).filter((model) => !modelIdsEqual(model, AUTO_REVIEW_MODEL));
-        const available1MModels = targetProfile?.authMode === "officialAccount"
+        const availableModels = targetProfile?.authMode === "officialAccount"
           ? previewOfficialModels.map((model) => model.slug)
           : uniqueModelIds([
               ...(previewConfig.upstreamModelsByProvider[providerId] || []),
@@ -765,8 +803,10 @@ if (import.meta.env.DEV) {
             ]);
         previewConfig.modelContextByProvider = { ...previewConfig.modelContextByProvider,
           [providerId]: Object.fromEntries(Object.entries((args.modelContexts as Record<string, import("../App.types").ModelContextConfig> | undefined)
-            ?? previewConfig.modelContextByProvider?.[providerId] ?? {}).filter(([model]) => includesModelId(available1MModels, model))) };
-        previewConfig.supports1MContextByProvider[providerId] = uniqueModelIds((args.supports1MContextModels as string[] | undefined) ?? previewConfig.supports1MContextByProvider[providerId] ?? []).filter((model) => includesModelId(available1MModels, model));
+            ?? previewConfig.modelContextByProvider?.[providerId] ?? {}).filter(([model]) => includesModelId(availableModels, model))) };
+        previewConfig.modelReasoningEffortsByProvider = { ...previewConfig.modelReasoningEffortsByProvider,
+          [providerId]: Object.fromEntries(Object.entries((args.reasoningEfforts as Record<string, import("../App.types").ModelReasoningEffort[]> | undefined)
+            ?? previewConfig.modelReasoningEffortsByProvider?.[providerId] ?? {}).filter(([model]) => includesModelId(availableModels, model))) };
         previewConfig = {
           ...previewConfig,
           settingsRevision: previewConfig.settingsRevision + 1,
@@ -806,6 +846,7 @@ if (import.meta.env.DEV) {
           modelState: previewModelState,
           restartRequired: false,
           modelHotReloaded: true,
+          customContextsRestored: false,
         };
       }
       if (command === "save_default_model") {
@@ -844,11 +885,10 @@ if (import.meta.env.DEV) {
           return { status: "failed", message: "官方线路至少需要保留一个模型" };
         }
         const providerId = routeProviderId(targetProfile);
-        const available1MModels = previewOfficialModels.map((model) => model.slug);
+        const availableModels = previewOfficialModels.map((model) => model.slug);
         previewConfig.modelContextByProvider = { ...previewConfig.modelContextByProvider,
           [providerId]: Object.fromEntries(Object.entries((args.modelContexts as Record<string, import("../App.types").ModelContextConfig> | undefined)
-            ?? previewConfig.modelContextByProvider?.[providerId] ?? {}).filter(([model]) => includesModelId(available1MModels, model))) };
-        previewConfig.supports1MContextByProvider[providerId] = uniqueModelIds((args.supports1MContextModels as string[] | undefined) ?? previewConfig.supports1MContextByProvider[providerId] ?? []).filter((model) => includesModelId(available1MModels, model));
+            ?? previewConfig.modelContextByProvider?.[providerId] ?? {}).filter(([model]) => includesModelId(availableModels, model))) };
         previewConfig = {
           ...previewConfig,
           settingsRevision: previewConfig.settingsRevision + 1,
@@ -898,6 +938,7 @@ if (import.meta.env.DEV) {
           modelState: previewModelState,
           restartRequired: false,
           modelHotReloaded: true,
+          customContextsRestored: false,
         };
       }
       if (command === "restart_codey") {

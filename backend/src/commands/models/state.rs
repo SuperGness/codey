@@ -52,11 +52,11 @@ pub(crate) fn runtime_supports_current_routes_for_hot_reload(
             .iter()
             .filter(|(_, models)| !models.is_empty()))
         || applied
-            .supports_1m_context_by_provider
+            .model_reasoning_efforts_by_provider
             .iter()
             .filter(|(_, models)| !models.is_empty())
             .ne(current
-                .supports_1m_context_by_provider
+                .model_reasoning_efforts_by_provider
                 .iter()
                 .filter(|(_, models)| !models.is_empty()))
     {
@@ -157,7 +157,8 @@ pub(crate) fn config_with_launch_pinned_transport(
 ) -> CodeyConfig {
     let mut pinned = current.clone();
     pinned.model_context_by_provider = applied.model_context_by_provider.clone();
-    pinned.supports_1m_context_by_provider = applied.supports_1m_context_by_provider.clone();
+    pinned.model_reasoning_efforts_by_provider =
+        applied.model_reasoning_efforts_by_provider.clone();
     for profile in &mut pinned.profiles {
         let Some(previous) = applied
             .profiles
@@ -196,25 +197,6 @@ pub(crate) fn renderer_model_catalog_value(
             catalog["status"] = json!("ok");
             catalog["clear_models"] = json!(true);
         }
-        if let Some(metadata) = catalog["model_metadata"].as_array_mut() {
-            for entry in metadata {
-                let supported = config.model_supports_1m_context(
-                    &provider_id,
-                    entry["model"].as_str().unwrap_or_default(),
-                );
-                entry["supports_1m_context"] = json!(supported);
-                entry["context_window"] = if supported {
-                    json!(1_000_000)
-                } else {
-                    Value::Null
-                };
-                entry["max_context_window"] = if supported {
-                    json!(1_000_000)
-                } else {
-                    Value::Null
-                };
-            }
-        }
         return catalog;
     }
     let route_catalog = renderer_route_model_catalog(config, model_state);
@@ -246,18 +228,6 @@ pub(crate) fn renderer_model_catalog_value(
             metadata["route_provider_id"] = Value::String(entry.provider_id.clone());
             metadata["upstream_model"] = Value::String(entry.model.clone());
             metadata["model_display_name"] = Value::String(entry.model.clone());
-            let supported = config.model_supports_1m_context(&entry.provider_id, &entry.model);
-            metadata["supports_1m_context"] = json!(supported);
-            metadata["context_window"] = if supported {
-                json!(1_000_000)
-            } else {
-                Value::Null
-            };
-            metadata["max_context_window"] = if supported {
-                json!(1_000_000)
-            } else {
-                Value::Null
-            };
             if let Some(context) = context_metadata.get(&entry.alias) {
                 for (key, value) in context {
                     metadata[key] = value.clone();
@@ -399,6 +369,7 @@ pub(crate) fn renderer_route_model_catalog(
             .upstream_models_by_provider
             .get(&provider_id)
             .map(Vec::as_slice);
+        let reasoning_efforts = config.model_reasoning_efforts_by_provider.get(&provider_id);
         let default_model = config.default_model_for_profile(profile);
         let state = if provider_id == config.current_provider_id().unwrap_or_default() {
             active_model_state.clone()
@@ -409,6 +380,7 @@ pub(crate) fn renderer_route_model_catalog(
                 upstream_models,
                 &selected_models,
                 manual_models,
+                reasoning_efforts,
                 default_model.as_deref(),
             )
             .unwrap_or_default()

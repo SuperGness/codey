@@ -500,7 +500,33 @@ async fn run_scheduled_restart(restart_state: Arc<AppState>, mut cancel: oneshot
         return;
     }
 
-    let launch = launch_codey_inner_locked(&restart_state).await;
+    let mut launch = launch_codey_inner_locked(&restart_state).await;
+    // 自定义上下文预算缺少可用的运行时模型目录时，重启同样无法完成。
+    // 征询用户后清空预算并重试一次，避免仅因为预算问题关闭整个 Codey。
+    if launch
+        .as_ref()
+        .err()
+        .is_some_and(|error| error == crate::model_catalog::CUSTOM_CONTEXT_CATALOG_UNAVAILABLE)
+    {
+        match super::recover_default_context_budgets_for_launch(&restart_state).await {
+            Ok(true) => {
+                if restart_state.is_shutting_down() {
+                    return;
+                }
+                launch = launch_codey_inner_locked(&restart_state).await;
+            }
+            Ok(false) => {}
+            Err(recovery_error) => {
+                error_log::record_failure(
+                    "context_recovery",
+                    "recover_default_context_budgets_for_restart",
+                    recovery_error.clone(),
+                    json!({}),
+                );
+                eprintln!("Codey 恢复默认上下文预算失败：{recovery_error}");
+            }
+        }
+    }
     *restart_state.startup_error.write().await = launch.as_ref().err().cloned();
     let Err(error) = launch else {
         return;
@@ -511,7 +537,7 @@ async fn run_scheduled_restart(restart_state: Arc<AppState>, mut cancel: oneshot
         error.clone(),
         error_log::FailureMetadata {
             stage: Some("startup.runtime".to_string()),
-            recoverable: Some(false),
+            recoverable: Some(error == crate::model_catalog::CUSTOM_CONTEXT_CATALOG_UNAVAILABLE),
         },
         runtime_start_failure_context(&restart_state, true, &error).await,
     );

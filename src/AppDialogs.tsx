@@ -11,8 +11,13 @@ import {
   IconX,
 } from "@tabler/icons-react";
 
-import type { Confirmation, ModelContextConfig, ModelState } from "./App.types";
-import { ModelContextFields } from "./ModelSection";
+import type {
+  Confirmation,
+  ModelContextConfig,
+  ModelReasoningEffort,
+  ModelState,
+} from "./App.types";
+import { ModelSettingsFields } from "./components/ModelSettingsFields";
 import {
   filterModelOptions,
   MODEL_PICKER_PAGE_SIZE,
@@ -47,10 +52,15 @@ type ModelPickerDialogProps = {
   thirdPartyModelOptions: string[];
   modelState: ModelState;
   draftModelSet: Set<string>;
-  draft1MModelSet: Set<string>;
   draftModelContexts: Record<string, ModelContextConfig>;
+  draftReasoningEfforts: Record<string, ModelReasoningEffort[]>;
+  reasoningEffortAutoByModel: Record<string, ModelReasoningEffort[]>;
   onUpdateDraftModelContext: (model: string, policy: ModelContextConfig | undefined) => void;
-  onToggleDraft1MModel: (model: string, checked: boolean) => void;
+  onUpdateDraftReasoningEffort: (
+    model: string,
+    efforts: ModelReasoningEffort[],
+  ) => void;
+  onResetDraftReasoningEffort: (model: string) => void;
   manualThirdPartyModelKeys: Set<string>;
   onOpenChange: (open: boolean) => void;
   onCustomModelInputChange: (model: string) => void;
@@ -74,10 +84,12 @@ function ModelPickerDialogComponent({
   thirdPartyModelOptions,
   modelState,
   draftModelSet,
-  draft1MModelSet,
   draftModelContexts,
+  draftReasoningEfforts,
+  reasoningEffortAutoByModel,
   onUpdateDraftModelContext,
-  onToggleDraft1MModel,
+  onUpdateDraftReasoningEffort,
+  onResetDraftReasoningEffort,
   manualThirdPartyModelKeys,
   onOpenChange,
   onCustomModelInputChange,
@@ -259,15 +271,7 @@ function ModelPickerDialogComponent({
                     <strong className="break-words text-xs font-semibold text-[#1d1d1f]">{model.displayName}</strong>
                     <small className="break-words text-[11px] text-[#86868b]">{model.slug}</small>
                   </div>
-                  <Checkbox
-                    checked={draft1MModelSet.has(modelKey(model.slug))}
-                    disabled={isBusy}
-                    onCheckedChange={(checked) =>
-                      onToggleDraft1MModel(model.slug, checked === true)}
-                    label="1M"
-                    aria-label={`${model.slug} 支持 1M 上下文`}
-                  />
-                  {!routeConfigReadOnly && <ModelContextFields model={model.slug} policy={draftModelContexts[model.slug]} disabled={isBusy}
+                  {!routeConfigReadOnly && <ModelSettingsFields model={model.slug} policy={draftModelContexts[model.slug]} disabled={isBusy}
                     onChange={(policy) => onUpdateDraftModelContext(model.slug, policy)} />}
                 </div>
               ))}
@@ -305,14 +309,6 @@ function ModelPickerDialogComponent({
                   aria-label={`当前线路支持 ${model}`}
                 />
                 <span className="min-w-0 flex-1 break-words text-xs font-semibold text-[#1d1d1f]">{model}</span>
-                <Checkbox
-                  checked={draft1MModelSet.has(key)}
-                  disabled={isBusy}
-                  onCheckedChange={(checked) =>
-                    onToggleDraft1MModel(model, checked === true)}
-                  label="1M"
-                  aria-label={`${model} 支持 1M 上下文`}
-                />
                 {added && manual && (
                   <Button
                     variant="ghost"
@@ -326,8 +322,20 @@ function ModelPickerDialogComponent({
                     删除
                   </Button>
                 )}
-                {!routeConfigReadOnly && <ModelContextFields model={model} policy={draftModelContexts[model]} disabled={isBusy}
-                  onChange={(policy) => onUpdateDraftModelContext(model, policy)} />}
+                {!routeConfigReadOnly && (
+                  <ModelSettingsFields
+                    model={model}
+                    disabled={isBusy}
+                    policy={draftModelContexts[model]}
+                    onChange={(policy) => onUpdateDraftModelContext(model, policy)}
+                    reasoning={{
+                      efforts: draftReasoningEfforts[key] ?? [],
+                      autoEfforts: reasoningEffortAutoByModel[key] ?? [],
+                      onChange: (efforts) => onUpdateDraftReasoningEffort(model, efforts),
+                      onReset: () => onResetDraftReasoningEffort(model),
+                    }}
+                  />
+                )}
               </div>
             );
           })}

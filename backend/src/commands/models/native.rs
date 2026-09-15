@@ -113,12 +113,20 @@ pub(crate) fn native_model_state_for_provider(
             .unwrap_or_default()
     };
     let requested_default = native_upstream_model(config, &config.subagent_model);
+    let reasoning_efforts = if provider.official {
+        None
+    } else {
+        config
+            .model_reasoning_efforts_by_provider
+            .get(provider.id.as_str())
+    };
     model_catalog::selection_state_with_manual_models(
         home,
         provider.official,
         upstream_models,
         &selected_models,
         manual_third_party_models,
+        reasoning_efforts,
         Some(&requested_default),
     )
     .map_err(|error| error.to_string())

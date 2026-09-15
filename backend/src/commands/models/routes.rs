@@ -52,7 +52,7 @@ pub(crate) fn config_after_route_deletion(
         .remove(&removed_provider_id);
     config.remember_model_aliases();
     config
-        .supports_1m_context_by_provider
+        .model_reasoning_efforts_by_provider
         .remove(&removed_provider_id);
     config.profiles.retain(|profile| profile.id != route_id);
     config
@@ -132,7 +132,16 @@ pub async fn fetch_route_models(
     );
     latest.settings_revision = latest.settings_revision.saturating_add(1);
     let route_model_state = model_state_for_route_async(&latest, route_id).await?;
-    let (catalog_refresh, model_state) = refreshed_model_state_async(&latest, true).await?;
+    let RefreshedModelState {
+        refresh: catalog_refresh,
+        model_state,
+        custom_contexts_restored,
+    } = refreshed_model_state_with_context_recovery(
+        &mut latest,
+        true,
+        crate::native_update_ui::confirm_context_recovery,
+    )
+    .await?;
     if let Err(error) = save_config_to_store(state, &latest).await {
         return Err(rollback_model_catalog_after_config_save_async(catalog_refresh, error).await);
     }
@@ -149,6 +158,7 @@ pub async fn fetch_route_models(
             "models": visible_fetched_models,
             "modelState": model_state,
             "routeModelState": route_model_state,
+            "customContextsRestored": custom_contexts_restored,
             "restartRequired": restart_required,
         })),
         subagent_hot_reload,
@@ -189,7 +199,7 @@ pub(crate) fn config_with_provider_model_sync(
     preserve_declared_official_models(&mut supported_models, declared_models);
 
     let mut next = config.clone();
-    next.retain_1m_context_models(provider_id, &supported_models);
+    next.retain_model_contexts(provider_id, &supported_models);
     set_provider_auto_review_support(&mut next, provider_id, supports_auto_review);
     next.upstream_models_by_provider
         .insert(provider_id.to_string(), supported_models);

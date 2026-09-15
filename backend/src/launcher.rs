@@ -93,7 +93,10 @@ struct SessionMaintenanceSummary {
 pub struct RuntimeModelConfig {
     routes: Vec<(String, String, bool, bool, bool)>,
     selected_models_by_provider: std::collections::BTreeMap<String, Vec<String>>,
-    supports_1m_context_by_provider: std::collections::BTreeMap<String, Vec<String>>,
+    model_reasoning_efforts_by_provider: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, Vec<crate::config::ModelReasoningEffort>>,
+    >,
     model_context_by_provider: std::collections::BTreeMap<
         String,
         std::collections::BTreeMap<String, crate::config::ModelContextConfig>,
@@ -121,8 +124,9 @@ impl RuntimeModelConfig {
                         && route.4 == profile.supports_auto_review
                 })
             && self.selected_models_by_provider == config.selected_models_by_provider
-            && self.supports_1m_context_by_provider == config.supports_1m_context_by_provider
             && self.model_context_by_provider == config.model_context_by_provider
+            && self.model_reasoning_efforts_by_provider
+                == config.model_reasoning_efforts_by_provider
             && self.manual_third_party_models_by_provider
                 == config.manual_third_party_models_by_provider
             && self.declared_official_models_by_provider
@@ -147,8 +151,8 @@ impl RuntimeModelConfig {
                 })
                 .collect(),
             selected_models_by_provider: config.selected_models_by_provider.clone(),
-            supports_1m_context_by_provider: config.supports_1m_context_by_provider.clone(),
             model_context_by_provider: config.model_context_by_provider.clone(),
+            model_reasoning_efforts_by_provider: config.model_reasoning_efforts_by_provider.clone(),
             manual_third_party_models_by_provider: config
                 .manual_third_party_models_by_provider
                 .clone(),
@@ -528,7 +532,7 @@ async fn prepare_startup_model_catalog(
     let (runtime_upstream_models, runtime_selected_models) = config.runtime_catalog_models();
     let runtime_websocket_models = config.runtime_websocket_model_aliases();
     let runtime_native_web_search_models = config.runtime_native_web_search_model_aliases();
-    let runtime_1m_context_models = config.runtime_1m_context_model_aliases();
+    let runtime_model_reasoning_efforts = config.runtime_model_reasoning_efforts();
     let runtime_model_contexts = config.runtime_model_contexts();
     let custom_context = !runtime_model_contexts.is_empty();
     let refresh_official_provider =
@@ -579,20 +583,23 @@ async fn prepare_startup_model_catalog(
                 &runtime_selected_models,
                 &runtime_websocket_models,
                 &runtime_native_web_search_models,
-                &runtime_1m_context_models,
                 &runtime_model_contexts,
+                &runtime_model_reasoning_efforts,
             );
             let cached_catalog = if refresh.is_err() {
                 model_catalog::prepare_cached_catalog_for_current_capabilities(
                     &catalog_home,
                     &runtime_native_web_search_models,
-                    &runtime_1m_context_models,
                 )
                 .and_then(|available| {
                     if available {
                         model_catalog::apply_catalog_contexts(
                             &catalog_home,
                             &runtime_model_contexts,
+                        )?;
+                        model_catalog::apply_catalog_reasoning_efforts(
+                            &catalog_home,
+                            &runtime_model_reasoning_efforts,
                         )?;
                     }
                     Ok(available)
@@ -606,6 +613,7 @@ async fn prepare_startup_model_catalog(
                 upstream_models.as_deref(),
                 &selected_models,
                 &manual_models,
+                Some(&runtime_model_reasoning_efforts),
                 requested_default_model.as_deref(),
             );
             (refresh, cached_catalog, selection)

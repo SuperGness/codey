@@ -636,10 +636,14 @@ pub struct CodeyConfig {
     /// the local Codex configuration.
     #[serde(default)]
     pub selected_models_by_provider: BTreeMap<String, Vec<String>>,
-    #[serde(default, rename = "supports1MContextByProvider")]
-    pub supports_1m_context_by_provider: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub model_context_by_provider: BTreeMap<String, BTreeMap<String, ModelContextConfig>>,
+    /// User-declared thinking levels for third-party route models, keyed by
+    /// provider then model. An entry replaces the automatic template list; the
+    /// value of each level is the string declared to Codex and sent upstream.
+    #[serde(default)]
+    pub model_reasoning_efforts_by_provider:
+        BTreeMap<String, BTreeMap<String, Vec<ModelReasoningEffort>>>,
     /// Third-party model IDs that were explicitly typed by the user. Synced
     /// provider models are intentionally excluded so only manual entries can be
     /// deleted from Codey's saved support list.
@@ -766,6 +770,36 @@ impl ModelContextConfig {
     }
 }
 
+/// Selectable thinking levels for third-party models. The level identifies the
+/// user's intent; `value` is what Codex declares and sends upstream.
+pub(crate) const MODEL_REASONING_EFFORT_LEVELS: [&str; 8] = [
+    "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+pub(crate) const MAX_MODEL_REASONING_EFFORT_VALUE_BYTES: usize = 32;
+pub(crate) const MAX_MODEL_REASONING_EFFORTS: usize = 8;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelReasoningEffort {
+    pub level: String,
+    pub value: String,
+}
+
+fn normalize_model_reasoning_effort_values(efforts: &mut Vec<ModelReasoningEffort>) {
+    for effort in efforts.iter_mut() {
+        effort.level = effort.level.trim().to_string();
+        effort.value = effort.value.trim().to_string();
+    }
+    let mut seen = std::collections::HashSet::new();
+    efforts.retain(|effort| {
+        !effort.value.is_empty()
+            && effort.value.len() <= MAX_MODEL_REASONING_EFFORT_VALUE_BYTES
+            && MODEL_REASONING_EFFORT_LEVELS.contains(&effort.level.as_str())
+            && seen.insert(effort.level.clone())
+    });
+    efforts.truncate(MAX_MODEL_REASONING_EFFORTS);
+}
+
 impl Default for CodeyConfig {
     fn default() -> Self {
         let profile = ProviderProfile::new("默认配置");
@@ -781,8 +815,8 @@ impl Default for CodeyConfig {
             codex_app_path: String::new(),
             user_scripts: Vec::new(),
             selected_models_by_provider: BTreeMap::new(),
-            supports_1m_context_by_provider: BTreeMap::new(),
             model_context_by_provider: BTreeMap::new(),
+            model_reasoning_efforts_by_provider: BTreeMap::new(),
             manual_third_party_models_by_provider: BTreeMap::new(),
             declared_official_models_by_provider: BTreeMap::new(),
             upstream_models_by_provider: BTreeMap::new(),
@@ -857,8 +891,8 @@ impl CodeyConfig {
                 .id
                 .clone();
         }
-        normalize_model_lists(&mut self.supports_1m_context_by_provider);
         normalize_model_lists(&mut self.selected_models_by_provider);
+        normalize_model_reasoning_effort_lists(&mut self.model_reasoning_efforts_by_provider);
         normalize_model_lists(&mut self.manual_third_party_models_by_provider);
         normalize_model_lists(&mut self.declared_official_models_by_provider);
         normalize_upstream_model_lists(&mut self.upstream_models_by_provider);
@@ -912,8 +946,9 @@ impl CodeyConfig {
         // empty placeholder owns route-scoped data that can be removed.
         if let Some(provider_id) = placeholder_provider_id {
             self.selected_models_by_provider.remove(&provider_id);
-            self.supports_1m_context_by_provider.remove(&provider_id);
             self.model_context_by_provider.remove(&provider_id);
+            self.model_reasoning_efforts_by_provider
+                .remove(&provider_id);
             self.manual_third_party_models_by_provider
                 .remove(&provider_id);
             self.declared_official_models_by_provider
@@ -969,11 +1004,18 @@ impl CodeyConfig {
                 target.entry(model).or_insert(policy);
             }
         }
-        migrate_provider_model_list(
-            &mut self.supports_1m_context_by_provider,
-            previous_provider_id,
-            official_provider_id,
-        );
+        if let Some(models) = self
+            .model_reasoning_efforts_by_provider
+            .remove(previous_provider_id)
+        {
+            let target = self
+                .model_reasoning_efforts_by_provider
+                .entry(official_provider_id.to_string())
+                .or_default();
+            for (model, efforts) in models {
+                target.entry(model).or_insert(efforts);
+            }
+        }
         migrate_provider_model_list(
             &mut self.selected_models_by_provider,
             previous_provider_id,
@@ -1035,16 +1077,6 @@ impl CodeyConfig {
             .unwrap_or_default()
     }
 
-    pub(crate) fn model_supports_1m_context(&self, provider_id: &str, model: &str) -> bool {
-        self.supports_1m_context_by_provider
-            .get(provider_id)
-            .is_some_and(|models| {
-                models
-                    .iter()
-                    .any(|candidate| model_id::equal(candidate, model))
-            })
-    }
-
     pub(crate) fn model_context(
         &self,
         provider_id: &str,
@@ -1077,14 +1109,10 @@ impl CodeyConfig {
             .collect()
     }
 
-    pub(crate) fn provider_is_disabled(&self, provider_id: &str) -> bool {
-        self.profiles
-            .iter()
-            .find(|profile| profile.id == provider_id || profile.provider_id() == provider_id)
-            .is_some_and(|profile| !profile.enabled)
-    }
-
-    pub(crate) fn runtime_1m_context_model_aliases(&self) -> Vec<String> {
+    /// Declared thinking levels keyed by the runtime catalog id of each model.
+    pub(crate) fn runtime_model_reasoning_efforts(
+        &self,
+    ) -> BTreeMap<String, Vec<ModelReasoningEffort>> {
         self.profiles
             .iter()
             .filter(|profile| profile.enabled)
@@ -1092,16 +1120,26 @@ impl CodeyConfig {
                 !profile.official_account || self.official_account_available_this_launch
             })
             .flat_map(|profile| {
-                self.supports_1m_context_by_provider
+                self.model_reasoning_efforts_by_provider
                     .get(profile.provider_id())
                     .into_iter()
-                    .flatten()
-                    .map(move |model| runtime_catalog_model_id(profile, model))
+                    .flat_map(move |models| {
+                        models.iter().map(move |(model, efforts)| {
+                            (runtime_catalog_model_id(profile, model), efforts.clone())
+                        })
+                    })
             })
             .collect()
     }
 
-    pub(crate) fn retain_1m_context_models(&mut self, provider_id: &str, available: &[String]) {
+    pub(crate) fn provider_is_disabled(&self, provider_id: &str) -> bool {
+        self.profiles
+            .iter()
+            .find(|profile| profile.id == provider_id || profile.provider_id() == provider_id)
+            .is_some_and(|profile| !profile.enabled)
+    }
+
+    pub(crate) fn retain_model_contexts(&mut self, provider_id: &str, available: &[String]) {
         if let Some(models) = self.model_context_by_provider.get_mut(provider_id) {
             models.retain(|model, _| {
                 available
@@ -1109,8 +1147,11 @@ impl CodeyConfig {
                     .any(|candidate| model_id::equal(candidate, model))
             });
         }
-        if let Some(models) = self.supports_1m_context_by_provider.get_mut(provider_id) {
-            models.retain(|model| {
+        if let Some(models) = self
+            .model_reasoning_efforts_by_provider
+            .get_mut(provider_id)
+        {
+            models.retain(|model, _| {
                 available
                     .iter()
                     .any(|candidate| model_id::equal(candidate, model))
@@ -1779,6 +1820,23 @@ pub(crate) fn validate_provider_profiles(profiles: &[ProviderProfile]) -> Result
         }
     }
     Ok(())
+}
+
+fn normalize_model_reasoning_effort_lists(
+    lists: &mut BTreeMap<String, BTreeMap<String, Vec<ModelReasoningEffort>>>,
+) {
+    lists.retain(|provider_id, models| {
+        let mut normalized = BTreeMap::new();
+        for (model, mut efforts) in std::mem::take(models) {
+            normalize_model_reasoning_effort_values(&mut efforts);
+            let model = model.trim().to_string();
+            if !model.is_empty() && !efforts.is_empty() {
+                normalized.entry(model).or_insert(efforts);
+            }
+        }
+        *models = normalized;
+        !provider_id.trim().is_empty() && !models.is_empty()
+    });
 }
 
 fn normalize_model_lists(lists: &mut BTreeMap<String, Vec<String>>) {

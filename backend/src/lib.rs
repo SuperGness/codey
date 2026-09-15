@@ -232,13 +232,10 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
                     );
                 }
                 if cleanup.is_ok() && context_recovery {
-                    if native_update_ui::confirm_context_recovery()
+                    let restored = commands::recover_default_context_budgets_for_launch(&state)
                         .await
-                        .map_err(anyhow::Error::msg)?
-                    {
-                        commands::restore_default_context_budgets(&state)
-                            .await
-                            .map_err(anyhow::Error::msg)?;
+                        .map_err(anyhow::Error::msg)?;
+                    if restored {
                         continue;
                     }
                     return Err(anyhow::Error::msg(error));

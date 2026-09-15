@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "54";
+  const patchVersion = "55";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -56,6 +56,7 @@
   const routeMetadataParam = "responsesapiClientMetadata";
   const routeMetadataKey = "codey_route";
   const persistedThreadRoutesKey = "codey.thread-route-bindings.v1";
+  const persistedDefaultModelHistoryKey = "codey.default-model-history.v1";
   let catalog = {
     loaded: false,
     models: [],
@@ -109,6 +110,11 @@
   const maxSupersededModelMenuLabels = 512;
   const supersededDefaultRoutes = [];
   const maxSupersededDefaultRoutes = 8;
+  // The default most recently delivered to this renderer. Codex keeps its own
+  // saved model preference, which outranks the catalog default, so a default
+  // that changed while Codex was closed (or before a patch reload) must still
+  // be recognised as stale on the next launch.
+  let lastDeliveredDefaultRoute = null;
   let providerMismatchNoticeTimer = 0;
   let deliveryState = {
     revision: 0,
@@ -652,7 +658,6 @@
       defaultServiceTier: Object.hasOwn(current || {}, "defaultServiceTier")
         ? current.defaultServiceTier
         : null,
-      supports1MContext: metadata?.supports_1m_context ?? current?.supports1MContext,
       contextWindow: Object.hasOwn(metadata || {}, "context_window") ? metadata.context_window : current?.contextWindow,
       maxContextWindow: Object.hasOwn(metadata || {}, "max_context_window") ? metadata.max_context_window : current?.maxContextWindow,
       effectiveContextWindowPercent: Object.hasOwn(metadata || {}, "effective_context_window_percent") ? metadata.effective_context_window_percent : current?.effectiveContextWindowPercent,
@@ -760,7 +765,6 @@
     if (!leftMetadata || !rightMetadata) return leftMetadata === rightMetadata;
     return (
       leftMetadata.default_reasoning_effort === rightMetadata.default_reasoning_effort
-      && leftMetadata.supports_1m_context === rightMetadata.supports_1m_context
       && leftMetadata.context_window === rightMetadata.context_window
       && leftMetadata.max_context_window === rightMetadata.max_context_window
       && leftMetadata.effective_context_window_percent === rightMetadata.effective_context_window_percent
@@ -828,7 +832,6 @@
         && model?.hidden === false
         && model?.isDefault === nextModels[index]?.isDefault
         && model?.defaultReasoningEffort === nextModels[index]?.defaultReasoningEffort
-        && model?.supports1MContext === nextModels[index]?.supports1MContext
         && model?.contextWindow === nextModels[index]?.contextWindow
         && model?.maxContextWindow === nextModels[index]?.maxContextWindow
         && model?.effectiveContextWindowPercent === nextModels[index]?.effectiveContextWindowPercent
@@ -1850,20 +1853,56 @@
     }
   };
 
-  const rememberSupersededDefaultRoute = (previousCatalog, nextCatalog) => {
-    if (
-      !previousCatalog?.loaded
-      || !previousCatalog.defaultModel
-      || modelKey(previousCatalog.defaultModel) === modelKey(nextCatalog?.defaultModel)
-    ) return;
-    const route = previousCatalog.routeMetadata?.[previousCatalog.defaultModel];
-    const record = {
-      selectorModel: previousCatalog.defaultModel,
+  const defaultRouteRecord = (sourceCatalog) => {
+    if (!sourceCatalog?.loaded || !sourceCatalog.defaultModel) return null;
+    const route = sourceCatalog.routeMetadata?.[sourceCatalog.defaultModel];
+    return {
+      selectorModel: sourceCatalog.defaultModel,
       routeProviderId: requestProviderId(route?.routeProviderId),
-      sourceModel: typeof route?.sourceModel === "string"
+      sourceModel: typeof route?.sourceModel === "string" && route.sourceModel.trim()
         ? route.sourceModel.trim()
-        : previousCatalog.defaultModel,
+        : sourceCatalog.defaultModel,
     };
+  };
+
+  const normalizedDefaultRouteRecord = (value) => {
+    const selectorModel = typeof value?.selectorModel === "string"
+      ? value.selectorModel.trim()
+      : "";
+    if (!selectorModel) return null;
+    return {
+      selectorModel,
+      routeProviderId: requestProviderId(value?.routeProviderId),
+      sourceModel: typeof value?.sourceModel === "string" && value.sourceModel.trim()
+        ? value.sourceModel.trim()
+        : selectorModel,
+    };
+  };
+
+  const sameDefaultRouteRecord = (left, right) => (
+    Boolean(left) === Boolean(right)
+    && (!left || (
+      modelKey(left.selectorModel) === modelKey(right.selectorModel)
+      && modelKey(left.routeProviderId) === modelKey(right.routeProviderId)
+      && modelKey(left.sourceModel) === modelKey(right.sourceModel)
+    ))
+  );
+
+  const persistDefaultModelHistory = () => {
+    try {
+      window.localStorage?.setItem(
+        persistedDefaultModelHistoryKey,
+        JSON.stringify({
+          lastDefault: lastDeliveredDefaultRoute,
+          superseded: supersededDefaultRoutes,
+        }),
+      );
+    } catch {
+      // The in-memory history still covers this launch when storage is unavailable.
+    }
+  };
+
+  const addSupersededDefaultRoute = (record) => {
     const key = modelKey(record.selectorModel);
     const duplicate = supersededDefaultRoutes.findIndex(
       (candidate) => modelKey(candidate.selectorModel) === key,
@@ -1873,6 +1912,51 @@
     while (supersededDefaultRoutes.length > maxSupersededDefaultRoutes) {
       supersededDefaultRoutes.shift();
     }
+  };
+
+  const restoreDefaultModelHistory = () => {
+    // Native selection leaves the default to Codex itself.
+    if (nativeSelectionOnly) return;
+    try {
+      const history = JSON.parse(
+        window.localStorage?.getItem(persistedDefaultModelHistoryKey) || "null",
+      );
+      lastDeliveredDefaultRoute = normalizedDefaultRouteRecord(history?.lastDefault);
+      const superseded = Array.isArray(history?.superseded) ? history.superseded : [];
+      for (const entry of superseded.slice(-maxSupersededDefaultRoutes)) {
+        const record = normalizedDefaultRouteRecord(entry);
+        if (record) addSupersededDefaultRoute(record);
+      }
+    } catch {
+      // Ignore stale or user-cleared renderer storage.
+    }
+  };
+
+  const rememberSupersededDefaultRoute = (previousCatalog, nextCatalog) => {
+    if (nativeSelectionOnly) return;
+    const next = defaultRouteRecord(nextCatalog);
+    if (!next) return;
+    // A live catalog swap knows the previous default directly. On a cold
+    // renderer the persisted record stands in for it, so a default that
+    // changed between launches still supersedes Codex's saved preference.
+    const previous = defaultRouteRecord(previousCatalog) || lastDeliveredDefaultRoute;
+    let changed = false;
+    if (previous && modelKey(previous.selectorModel) !== modelKey(next.selectorModel)) {
+      addSupersededDefaultRoute(previous);
+      changed = true;
+    }
+    const current = supersededDefaultRoutes.findIndex(
+      (candidate) => modelKey(candidate.selectorModel) === modelKey(next.selectorModel),
+    );
+    if (current >= 0) {
+      supersededDefaultRoutes.splice(current, 1);
+      changed = true;
+    }
+    if (!sameDefaultRouteRecord(lastDeliveredDefaultRoute, next)) {
+      lastDeliveredDefaultRoute = next;
+      changed = true;
+    }
+    if (changed) persistDefaultModelHistory();
   };
 
   const requestUsesSupersededDefault = (requestedModel) => {
@@ -2674,6 +2758,7 @@
     installGroupedModelMenuObserver();
   }
   restoreThreadRoutes();
+  restoreDefaultModelHistory();
   window.addEventListener?.("focus", handleFocus);
   if (!nativeSelectionOnly) installModelRequestDispatchPatch();
   if (typeof window.addEventListener === "function") {

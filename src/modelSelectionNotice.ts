@@ -9,12 +9,34 @@ export type ModelRuntimeUpdate = {
   subagentConfigRepaired?: boolean;
   subagentConfigHotReloadError?: string;
   modelCatalogFallback?: boolean;
+  customContextsRestored?: boolean;
 };
 
 export function modelSelectionNotice(
   result: ModelRuntimeUpdate,
   summary = "已保存模型",
 ): Notice {
+  const notice = savedModelNotice(result, summary);
+  const contextNote = customContextRestoredNote(result);
+  if (!contextNote) {
+    return notice;
+  }
+  return {
+    tone: "info",
+    text: `${notice.text}${contextNote}`,
+  };
+}
+
+/** 保存时本机 Codex 模型缓存不完整，自定义上下文预算已恢复为默认值。 */
+export function customContextRestoredNote(result: {
+  customContextsRestored?: boolean;
+}): string {
+  return result.customContextsRestored
+    ? "；本机 Codex 模型缓存不完整，自定义上下文预算已恢复为默认值"
+    : "";
+}
+
+function savedModelNotice(result: ModelRuntimeUpdate, summary: string): Notice {
   if (result.modelHotReloadError) {
     return {
       tone: "info",

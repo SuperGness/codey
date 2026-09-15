@@ -25,6 +25,7 @@ import type { DiagnosticStorageCleanup, DiagnosticStorageTarget } from "./diagno
 import { DiagnosticCleanupNotice } from "./DiagnosticCleanupNotice";
 import { modelIdsEqual, uniqueModelIds } from "./modelIds";
 import { globalDefaultForRoute, routeProviderId } from "./modelRoutes";
+import { customContextRestoredNote } from "./modelSelectionNotice";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { useModelSelection } from "./useModelSelection";
 import { useRuntimeStatus } from "./useRuntimeStatus";
@@ -220,10 +221,12 @@ export function App({
     draftAutoReviewSupported,
     setDraftAutoReviewSupported,
     draftModelSet,
-    draft1MModelSet,
     draftModelContexts,
     updateDraftModelContext,
-    toggleDraft1MModel,
+    draftReasoningEfforts,
+    reasoningEffortAutoByModel,
+    updateDraftReasoningEffort,
+    resetDraftReasoningEffort,
     draftManualThirdPartyModelKeys,
     thirdPartyModelOptions,
     openModelPicker,
@@ -665,7 +668,6 @@ export function App({
     routeId: string,
     models: string[],
     showAccountUsageInHeader: boolean,
-    supports1MContextModels: string[],
     enabled: boolean,
     modelContexts: Record<string, import("./App.types").ModelContextConfig>,
     upstreamProxy?: string,
@@ -684,10 +686,10 @@ export function App({
         modelState: ModelState;
         restartRequired?: boolean;
         modelHotReloaded?: boolean;
+        customContextsRestored?: boolean;
       }>("save_official_route_models", {
         routeId,
         models,
-        supports1MContextModels,
         modelContexts,
         enabled,
         showAccountUsageInHeader,
@@ -696,11 +698,15 @@ export function App({
       });
       applyRouteResult(modelResult);
       saved = true;
+      const restartNote = modelResult.restartRequired
+        ? "，重启 Codex 后完全生效"
+        : "，模型与额度展示已更新";
       setNotice({
-        tone: modelResult.restartRequired ? "info" : "success",
-        text: modelResult.restartRequired
-          ? "官方账号设置已保存，重启 Codex 后完全生效"
-          : "官方账号设置已保存，模型与额度展示已更新",
+        tone:
+          modelResult.restartRequired || modelResult.customContextsRestored
+            ? "info"
+            : "success",
+        text: `官方账号设置已保存${restartNote}${customContextRestoredNote(modelResult)}`,
       });
     });
     return saved;
@@ -1336,10 +1342,12 @@ export function App({
         thirdPartyModelOptions={thirdPartyModelOptions}
         modelState={modelEditorState}
         draftModelSet={draftModelSet}
-        draft1MModelSet={draft1MModelSet}
         draftModelContexts={draftModelContexts}
+        draftReasoningEfforts={draftReasoningEfforts}
+        reasoningEffortAutoByModel={reasoningEffortAutoByModel}
         onUpdateDraftModelContext={updateDraftModelContext}
-        onToggleDraft1MModel={toggleDraft1MModel}
+        onUpdateDraftReasoningEffort={updateDraftReasoningEffort}
+        onResetDraftReasoningEffort={resetDraftReasoningEffort}
         manualThirdPartyModelKeys={draftManualThirdPartyModelKeys}
         onOpenChange={handleModelPickerOpenChange}
         onCustomModelInputChange={updateCustomModelInput}

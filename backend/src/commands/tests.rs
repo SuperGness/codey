@@ -52,6 +52,81 @@ async fn context_recovery_preserves_other_settings_and_backs_up_the_budget() {
 }
 
 #[tokio::test]
+async fn launch_context_recovery_clears_budgets_only_after_confirmation() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = CodeyConfig::default();
+    config.model_context_by_provider.insert(
+        "route".into(),
+        BTreeMap::from([(
+            "gpt-5.6-sol".into(),
+            crate::config::ModelContextConfig {
+                context_window_tokens: 256_000,
+                auto_compact_token_limit: None,
+                reserve_output_tokens: None,
+            },
+        )]),
+    );
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(config.clone()),
+        ..AppState::default()
+    });
+    state.store.save(&config).unwrap();
+    let saved_budgets = |state: &Arc<AppState>| {
+        let path = state.store.path().to_path_buf();
+        let saved: CodeyConfig = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        saved.model_context_by_provider
+    };
+
+    // 拒绝恢复时保留预算，也不改写已保存的配置。
+    let declined = recover_default_context_budgets_with_prompt(
+        &state,
+        crate::native_update_ui::ContextRecoveryPurpose::Launch,
+        |_| async { Ok(false) },
+    )
+    .await
+    .unwrap();
+    assert!(!declined);
+    assert_eq!(saved_budgets(&state), config.model_context_by_provider);
+
+    // 对话框不可用时按未确认处理，同样保留预算。
+    let unanswered = recover_default_context_budgets_with_prompt(
+        &state,
+        crate::native_update_ui::ContextRecoveryPurpose::Launch,
+        |_| async { Err("原生提示不可用".to_string()) },
+    )
+    .await
+    .unwrap();
+    assert!(!unanswered);
+    assert_eq!(saved_budgets(&state), config.model_context_by_provider);
+
+    // 确认后清空预算并写回配置，其他设置保持不变。
+    let restored = recover_default_context_budgets_with_prompt(
+        &state,
+        crate::native_update_ui::ContextRecoveryPurpose::Launch,
+        |purpose| async move {
+            assert_eq!(
+                purpose,
+                crate::native_update_ui::ContextRecoveryPurpose::Launch
+            );
+            Ok(true)
+        },
+    )
+    .await
+    .unwrap();
+    assert!(restored);
+    assert!(
+        state
+            .config
+            .read()
+            .await
+            .model_context_by_provider
+            .is_empty()
+    );
+    assert!(saved_budgets(&state).is_empty());
+}
+
+#[tokio::test]
 async fn model_save_routes_accept_missing_or_null_ids_without_weakening_required_routes() {
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState {

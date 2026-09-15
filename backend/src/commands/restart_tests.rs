@@ -312,9 +312,6 @@ fn renderer_model_catalog_keeps_supported_models_before_configured_models() {
             "model_display_name": "gpt-5.6-sol",
             "supported_reasoning_efforts": ["low", "medium", "high", "xhigh"],
             "default_reasoning_effort": "low",
-            "supports_1m_context": false,
-            "context_window": null,
-            "max_context_window": null,
         })
     );
     assert_eq!(
@@ -332,9 +329,6 @@ fn renderer_model_catalog_keeps_supported_models_before_configured_models() {
             "model_display_name": "provider-fast-coder",
             "supported_reasoning_efforts": ["low", "medium", "high", "xhigh"],
             "default_reasoning_effort": "low",
-            "supports_1m_context": false,
-            "context_window": null,
-            "max_context_window": null,
         })
     );
     assert_eq!(catalog["model_metadata"].as_array().unwrap().len(), 6);
@@ -357,6 +351,15 @@ fn renderer_model_catalog_uses_per_third_party_reasoning_metadata() {
                     "max".into(),
                     "ultra".into(),
                 ],
+                auto_supported_reasoning_efforts: vec![
+                    "low".into(),
+                    "medium".into(),
+                    "high".into(),
+                    "xhigh".into(),
+                    "max".into(),
+                    "ultra".into(),
+                ],
+                reasoning_efforts: Vec::new(),
                 default_reasoning_effort: "low".into(),
             },
             model_catalog::ThirdPartyModelAvailability {
@@ -367,6 +370,13 @@ fn renderer_model_catalog_uses_per_third_party_reasoning_metadata() {
                     "high".into(),
                     "xhigh".into(),
                 ],
+                auto_supported_reasoning_efforts: vec![
+                    "low".into(),
+                    "medium".into(),
+                    "high".into(),
+                    "xhigh".into(),
+                ],
+                reasoning_efforts: Vec::new(),
                 default_reasoning_effort: "low".into(),
             },
         ],
@@ -438,9 +448,6 @@ fn renderer_model_catalog_routes_official_account_models_through_the_codey_route
             "model_display_name": "gpt-5.6-sol",
             "supported_reasoning_efforts": ["low", "medium"],
             "default_reasoning_effort": "low",
-            "supports_1m_context": false,
-            "context_window": null,
-            "max_context_window": null,
         })
     );
 }
@@ -537,8 +544,8 @@ fn model_hot_reload_ignores_empty_context_entries_but_keeps_budget_changes_pendi
         .model_context_by_provider
         .insert("route".into(), Default::default());
     current
-        .supports_1m_context_by_provider
-        .insert("route".into(), Vec::new());
+        .model_reasoning_efforts_by_provider
+        .insert("route".into(), Default::default());
 
     for (baseline, saved) in [(&applied, &current), (&current, &applied)] {
         assert!(runtime_supports_current_routes_for_hot_reload(
@@ -553,12 +560,19 @@ fn model_hot_reload_ignores_empty_context_entries_but_keeps_budget_changes_pendi
         ));
     }
 
-    for one_m in [false, true] {
+    for declared_effort in [false, true] {
         let mut changed = current.clone();
-        if one_m {
-            changed
-                .supports_1m_context_by_provider
-                .insert("route".into(), vec!["new-model".into()]);
+        if declared_effort {
+            changed.model_reasoning_efforts_by_provider.insert(
+                "route".into(),
+                BTreeMap::from([(
+                    "new-model".to_string(),
+                    vec![crate::config::ModelReasoningEffort {
+                        level: "low".into(),
+                        value: "low".into(),
+                    }],
+                )]),
+            );
         } else {
             changed
                 .model_context_by_provider

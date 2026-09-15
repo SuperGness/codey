@@ -638,11 +638,6 @@ impl RouterSnapshot {
                 upstream_compact_url: prepare_upstream_compact_url(protocol, &base_url),
                 upstream_websocket_url: prepare_upstream_websocket_url(protocol, &base_url),
                 upstream_headers: prepare_upstream_headers(profile, protocol),
-                one_m_context_models: config
-                    .supports_1m_context_by_provider
-                    .get(provider_id)
-                    .map(|models| models.iter().map(|m| model_id::key(m)).collect())
-                    .unwrap_or_default(),
                 upstream_authority: upstream_authority(&base_url),
                 upstream_proxy: Some(profile.upstream_proxy.trim().to_string())
                     .filter(|proxy| !proxy.is_empty()),
@@ -896,7 +891,6 @@ pub(crate) struct RouteTarget {
     pub(crate) supports_websockets: bool,
     pub(crate) supports_remote_compaction: bool,
     pub(crate) models: HashSet<String>,
-    pub(crate) one_m_context_models: HashSet<String>,
     pub(crate) websocket_config: [u8; 32],
     pub(crate) context_config: [u8; 32],
 }

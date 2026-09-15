@@ -34,6 +34,9 @@ pub(crate) fn reconcile_for_current_provider(
         config.upstream_models_snapshot(),
         &selected_models,
         config.manual_third_party_models(),
+        config
+            .current_provider_id()
+            .and_then(|provider_id| config.model_reasoning_efforts_by_provider.get(provider_id)),
         Some(&config.subagent_model),
     )
     .ok();
@@ -505,6 +508,8 @@ mod tests {
             .push(model_catalog::ThirdPartyModelAvailability {
                 slug: "provider-special".into(),
                 supported_reasoning_efforts: vec!["low".into()],
+                auto_supported_reasoning_efforts: vec!["low".into()],
+                reasoning_efforts: Vec::new(),
                 default_reasoning_effort: "low".into(),
             });
         reconcile_with_model_state(&mut config, Some(&state));
@@ -523,6 +528,8 @@ mod tests {
             .push(model_catalog::ThirdPartyModelAvailability {
                 slug: "route-b/provider-special".into(),
                 supported_reasoning_efforts: vec!["medium".into()],
+                auto_supported_reasoning_efforts: vec!["medium".into()],
+                reasoning_efforts: Vec::new(),
                 default_reasoning_effort: "medium".into(),
             });
         reconcile_with_model_state(&mut config, Some(&state));

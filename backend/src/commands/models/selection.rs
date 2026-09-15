@@ -12,7 +12,9 @@ pub async fn save_selected_models(
     requested_deleted_third_party_models: Vec<String>,
     requested_supports_auto_review: Option<bool>,
     requested_route_id: Option<String>,
-    requested_supports_1m_context_models: Option<Vec<String>>,
+    requested_model_reasoning_efforts: Option<
+        BTreeMap<String, Vec<crate::config::ModelReasoningEffort>>,
+    >,
     requested_model_contexts: Option<BTreeMap<String, crate::config::ModelContextConfig>>,
 ) -> Result<Value, String> {
     validate_requested_model_list_bounds("官方模型", &requested_official_models)?;
@@ -37,7 +39,7 @@ pub async fn save_selected_models(
             requested_manual_third_party_models,
             requested_deleted_third_party_models,
             requested_route_id,
-            requested_supports_1m_context_models,
+            requested_model_reasoning_efforts,
             requested_model_contexts,
         )
         .await;
@@ -109,16 +111,16 @@ pub async fn save_selected_models(
     if let Some(supported) = requested_supports_auto_review {
         set_provider_auto_review_support(&mut config, &provider_id, supported);
     }
-    set_supports_1m_context_models(
-        &mut config,
-        &provider_id,
-        requested_supports_1m_context_models.as_deref(),
-        &supported_models,
-    )?;
     set_model_contexts(
         &mut config,
         &provider_id,
         requested_model_contexts.as_ref(),
+        &supported_models,
+    )?;
+    set_model_reasoning_efforts(
+        &mut config,
+        &provider_id,
+        requested_model_reasoning_efforts.as_ref(),
         &supported_models,
     )?;
     config
@@ -153,7 +155,16 @@ pub async fn save_selected_models(
         }
     }
     config = config.normalize();
-    let (catalog_refresh, model_state) = refreshed_model_state_async(&config, false).await?;
+    let RefreshedModelState {
+        refresh: catalog_refresh,
+        model_state,
+        custom_contexts_restored,
+    } = refreshed_model_state_with_context_recovery(
+        &mut config,
+        false,
+        crate::native_update_ui::confirm_context_recovery,
+    )
+    .await?;
     subagent_policy::reconcile_with_model_state(&mut config, Some(&model_state));
     config = config.normalize();
     config.settings_revision = config.settings_revision.saturating_add(1);
@@ -175,6 +186,7 @@ pub async fn save_selected_models(
             "config":public_config,
             "modelState":model_state,
             "modelCatalogFallback":model_catalog_fallback,
+            "customContextsRestored":custom_contexts_restored,
             "restartRequired":restart_required,
         })),
         subagent_hot_reload,
@@ -190,7 +202,9 @@ pub(crate) async fn save_native_selected_models(
     requested_manual_third_party_models: Vec<String>,
     requested_deleted_third_party_models: Vec<String>,
     requested_route_id: Option<String>,
-    requested_supports_1m_context_models: Option<Vec<String>>,
+    requested_model_reasoning_efforts: Option<
+        BTreeMap<String, Vec<crate::config::ModelReasoningEffort>>,
+    >,
     requested_model_contexts: Option<BTreeMap<String, crate::config::ModelContextConfig>>,
 ) -> Result<Value, String> {
     let previous = state.config.read().await.clone();
@@ -198,6 +212,9 @@ pub(crate) async fn save_native_selected_models(
         return Err("本地路由已启用，请使用线路模型配置".to_string());
     }
     let context = native_provider_context(&previous).await?;
+    if context.provider.official && requested_model_reasoning_efforts.is_some() {
+        return Err("官方线路不支持声明思考强度".to_string());
+    }
     if let Some(route_id) = requested_route_id
         .as_deref()
         .map(str::trim)
@@ -236,19 +253,19 @@ pub(crate) async fn save_native_selected_models(
             .cloned()
             .unwrap_or_default()
     };
-    set_supports_1m_context_models(
-        &mut next,
-        &context.provider.id,
-        requested_supports_1m_context_models.as_deref(),
-        &available,
-    )?;
-    let model_state = native_model_state_for_provider(&next, &context.provider, codex_home())?;
     set_model_contexts(
         &mut next,
         &context.provider.id,
         requested_model_contexts.as_ref(),
         &available,
     )?;
+    set_model_reasoning_efforts(
+        &mut next,
+        &context.provider.id,
+        requested_model_reasoning_efforts.as_ref(),
+        &available,
+    )?;
+    let model_state = native_model_state_for_provider(&next, &context.provider, codex_home())?;
     reconcile_subagent_models_for_mode(&mut next, &model_state);
     next = next.normalize();
     if next != latest {
@@ -412,34 +429,75 @@ pub(crate) fn set_model_contexts(
     Ok(())
 }
 
-pub(crate) fn set_supports_1m_context_models(
+/// Stores the thinking levels each third-party model declares. An entry replaces
+/// the automatic template list; dropping the entry restores the template.
+pub(crate) fn set_model_reasoning_efforts(
     config: &mut CodeyConfig,
     provider_id: &str,
-    requested: Option<&[String]>,
+    requested: Option<&BTreeMap<String, Vec<crate::config::ModelReasoningEffort>>>,
     available: &[String],
 ) -> Result<(), String> {
     if let Some(requested) = requested {
-        validate_requested_model_list_bounds("1M 上下文模型", requested)?;
-        validate_regular_route_model_list("1M 上下文模型", requested)?;
-        let mut models = Vec::new();
-        for model in requested
-            .iter()
-            .map(|model| model.trim())
-            .filter(|model| !model.is_empty())
-        {
-            let canonical = available
+        if !config.local_router_enabled {
+            let current = config.model_reasoning_efforts_by_provider.get(provider_id);
+            if current != Some(requested) && !(current.is_none() && requested.is_empty()) {
+                return Err("思考强度声明需要启用本地路由，当前模式使用 Codex 内置模型设置".into());
+            }
+            return Ok(());
+        }
+        validate_requested_model_list_bounds(
+            "思考强度模型",
+            &requested.keys().cloned().collect::<Vec<_>>(),
+        )?;
+        let mut canonical = BTreeMap::new();
+        for (model, efforts) in requested {
+            if efforts.len() > crate::config::MAX_MODEL_REASONING_EFFORTS {
+                return Err(format!(
+                    "模型 {model} 的思考强度不能超过 {} 个",
+                    crate::config::MAX_MODEL_REASONING_EFFORTS
+                ));
+            }
+            let canonical_model = available
                 .iter()
                 .find(|candidate| model_id::equal(candidate, model))
                 .ok_or_else(|| format!("模型 {model} 不在该线路的可用模型列表中"))?;
-            if !models.contains(canonical) {
-                models.push(canonical.clone());
+            let mut seen_levels = HashSet::new();
+            let mut canonical_efforts = Vec::with_capacity(efforts.len());
+            for effort in efforts {
+                let level = effort.level.trim().to_string();
+                let value = effort.value.trim().to_string();
+                if !crate::config::MODEL_REASONING_EFFORT_LEVELS.contains(&level.as_str()) {
+                    return Err(format!("模型 {model} 的思考强度 {level} 不在支持列表中"));
+                }
+                if value.is_empty() {
+                    return Err(format!("模型 {model} 的思考强度 {level} 缺少线上取值"));
+                }
+                if value.len() > crate::config::MAX_MODEL_REASONING_EFFORT_VALUE_BYTES {
+                    return Err(format!(
+                        "模型 {model} 的思考强度 {level} 取值超过 {} 字节",
+                        crate::config::MAX_MODEL_REASONING_EFFORT_VALUE_BYTES
+                    ));
+                }
+                if !seen_levels.insert(level.clone()) {
+                    return Err(format!("模型 {model} 的思考强度 {level} 重复"));
+                }
+                canonical_efforts.push(crate::config::ModelReasoningEffort { level, value });
+            }
+            if canonical_efforts.is_empty() {
+                continue;
+            }
+            if canonical
+                .insert(canonical_model.clone(), canonical_efforts)
+                .is_some()
+            {
+                return Err(format!("模型 {canonical_model} 的思考强度配置重复"));
             }
         }
         config
-            .supports_1m_context_by_provider
-            .insert(provider_id.to_string(), models);
+            .model_reasoning_efforts_by_provider
+            .insert(provider_id.to_string(), canonical);
     }
-    config.retain_1m_context_models(provider_id, available);
+    config.retain_model_contexts(provider_id, available);
     Ok(())
 }
 

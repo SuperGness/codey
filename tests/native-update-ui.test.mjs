@@ -38,10 +38,36 @@ test("Windows startup update UI uses a dedicated message loop and custom task-di
   assert.match(ui, /name\("codey-native-update-ui"\.to_string\(\)\)/);
   assert.match(ui, /GetMessageW\(&mut message, None, 0, 0\)/);
   assert.match(ui, /PostThreadMessageW\(self\.thread\.thread_id, WM_APP/);
-  assert.match(ui, /OkCancelCustom\("更新并重启"\.to_string\(\), "稍后"\.to_string\(\)\)/);
+  assert.match(
+    ui,
+    /rfd::MessageButtons::OkCancelCustom\(primary_label, secondary_label\)/,
+  );
+  assert.match(ui, /"更新并重启"\.to_string\(\),\s*Some\("稍后"\.to_string\(\)\)/);
   assert.match(manifest, /Microsoft\.Windows\.Common-Controls/);
   assert.match(manifest, /version="6\.0\.0\.0"/);
   assert.match(cargo, /features = \["common-controls-v6"\]/);
+});
+
+test("context recovery prompt is shared by startup, restart and model saves", async () => {
+  const [library, runtime, catalogRefresh] = await Promise.all([
+    readFile(new URL("backend/src/lib.rs", root), "utf8"),
+    readFile(new URL("backend/src/commands/runtime.rs", root), "utf8"),
+    readFile(new URL("backend/src/commands/models/catalog_refresh.rs", root), "utf8"),
+  ]);
+
+  assert.match(
+    library,
+    /commands::recover_default_context_budgets_for_launch\(\s*&state,?\s*\)/,
+  );
+  assert.match(runtime, /CUSTOM_CONTEXT_CATALOG_UNAVAILABLE/);
+  assert.match(
+    runtime,
+    /super::recover_default_context_budgets_for_launch\(\s*&restart_state,?\s*\)/,
+  );
+  assert.match(
+    catalogRefresh,
+    /confirm\(crate::native_update_ui::ContextRecoveryPurpose::ModelSync\)/,
+  );
 });
 
 test("macOS keeps AppKit on the main thread without a Dock icon", async () => {

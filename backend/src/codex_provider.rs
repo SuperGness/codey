@@ -254,7 +254,7 @@ fn sync_provider_profile(
         next.profiles = vec![profile];
         next.selected_models_by_provider
             .remove(&placeholder_provider_id);
-        next.supports_1m_context_by_provider
+        next.model_reasoning_efforts_by_provider
             .remove(&placeholder_provider_id);
         next.model_context_by_provider
             .remove(&placeholder_provider_id);

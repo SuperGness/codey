@@ -12,7 +12,8 @@ use crate::fs_util::atomic_write_private_with_parent as atomic_write;
 use crate::model_id;
 
 const MODEL_CATALOG_RELATIVE_PATH: &str = "model-catalogs/codey-official.json";
-const CONTEXT_1M_WINDOW: u64 = 1_000_000;
+/// Context window an older Codey version wrote for models flagged as 1M capable.
+const LEGACY_1M_CONTEXT_WINDOW: u64 = 1_000_000;
 const DEFAULT_CONTEXT_WINDOW: u64 = 272_000;
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
 pub(crate) const THIRD_PARTY_REASONING_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
@@ -81,7 +82,12 @@ pub struct OfficialModelAvailability {
 #[serde(rename_all = "camelCase")]
 pub struct ThirdPartyModelAvailability {
     pub slug: String,
+    /// Values declared to Codex, after the user's declaration is applied.
     pub supported_reasoning_efforts: Vec<String>,
+    /// Values the official template or the fallback list would declare.
+    pub auto_supported_reasoning_efforts: Vec<String>,
+    /// Explicit user declaration; empty when the model follows the template.
+    pub reasoning_efforts: Vec<crate::config::ModelReasoningEffort>,
     pub default_reasoning_effort: String,
 }
 
@@ -176,7 +182,6 @@ pub fn refresh_for_provider(
         selected_models,
         None,
         None,
-        None,
     )
 }
 
@@ -195,7 +200,6 @@ pub(crate) fn refresh_for_provider_with_websocket_models(
         selected_models,
         Some(websocket_models),
         None,
-        None,
     )
 }
 
@@ -206,7 +210,6 @@ pub(crate) fn refresh_for_provider_with_capabilities(
     selected_models: &[String],
     websocket_models: &[String],
     native_web_search_models: &[String],
-    context_1m_models: &[String],
 ) -> Result<usize> {
     refresh_for_provider_with_transport_preferences(
         home,
@@ -215,7 +218,6 @@ pub(crate) fn refresh_for_provider_with_capabilities(
         selected_models,
         Some(websocket_models),
         Some(native_web_search_models),
-        Some(context_1m_models),
     )
 }
 
@@ -228,8 +230,11 @@ pub(crate) fn refresh_for_provider_with_contexts(
     selected_models: &[String],
     websocket_models: &[String],
     native_web_search_models: &[String],
-    context_1m_models: &[String],
     contexts: &std::collections::BTreeMap<String, crate::config::ModelContextConfig>,
+    reasoning_efforts: &std::collections::BTreeMap<
+        String,
+        Vec<crate::config::ModelReasoningEffort>,
+    >,
 ) -> Result<usize> {
     let count = refresh_for_provider_with_capabilities(
         home,
@@ -238,9 +243,9 @@ pub(crate) fn refresh_for_provider_with_contexts(
         selected_models,
         websocket_models,
         native_web_search_models,
-        context_1m_models,
     )?;
     apply_catalog_contexts(home, contexts)?;
+    apply_catalog_reasoning_efforts(home, reasoning_efforts)?;
     Ok(count)
 }
 
@@ -310,6 +315,110 @@ pub(crate) fn apply_model_context(
     Ok(())
 }
 
+/// Shadow copy of the declaration an override replaced, so dropping the
+/// override restores the template values instead of keeping stale ones.
+const REASONING_BASE_FIELD: &str = "codey_reasoning_base";
+const REASONING_DECLARATION_FIELDS: [&str; 3] = [
+    "supported_reasoning_levels",
+    "default_reasoning_level",
+    "supports_reasoning_summaries",
+];
+
+pub(crate) fn apply_catalog_reasoning_efforts(
+    home: &Path,
+    overrides: &std::collections::BTreeMap<String, Vec<crate::config::ModelReasoningEffort>>,
+) -> Result<()> {
+    let mut models = read_runtime_catalog_models(home)?;
+    for model in &mut models {
+        let declaration = model.get("slug").and_then(Value::as_str).and_then(|slug| {
+            overrides
+                .iter()
+                .find(|(key, _)| model_id::equal(key, slug))
+                .map(|(_, efforts)| efforts.as_slice())
+        });
+        apply_model_reasoning_efforts(model, declaration);
+    }
+    write_verified_catalog(home, &models)?;
+    Ok(())
+}
+
+pub(crate) fn apply_model_reasoning_efforts(
+    model: &mut Value,
+    declaration: Option<&[crate::config::ModelReasoningEffort]>,
+) {
+    if declaration.is_none() && model.get(REASONING_BASE_FIELD).is_none() {
+        return;
+    }
+    if model.get(REASONING_BASE_FIELD).is_none() {
+        let mut base = serde_json::Map::new();
+        for field in REASONING_DECLARATION_FIELDS {
+            if let Some(value) = model.get(field) {
+                base.insert(field.to_string(), value.clone());
+            }
+        }
+        model[REASONING_BASE_FIELD] = Value::Object(base);
+    }
+    let base = model.get(REASONING_BASE_FIELD).cloned().unwrap_or_default();
+    let Some(declaration) = declaration else {
+        for field in REASONING_DECLARATION_FIELDS {
+            match base.get(field) {
+                Some(value) => model[field] = value.clone(),
+                None => {
+                    if let Some(object) = model.as_object_mut() {
+                        object.remove(field);
+                    }
+                }
+            }
+        }
+        if let Some(object) = model.as_object_mut() {
+            object.remove(REASONING_BASE_FIELD);
+        }
+        return;
+    };
+    let base_levels = base
+        .get("supported_reasoning_levels")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let description_for = |level: &str, value: &str| {
+        base_levels
+            .iter()
+            .find(|entry| {
+                entry.get("effort").and_then(Value::as_str) == Some(level)
+                    || entry.get("effort").and_then(Value::as_str) == Some(value)
+            })
+            .and_then(|entry| entry.get("description"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+            .unwrap_or_else(|| reasoning_level_description(value))
+    };
+    let levels = declaration
+        .iter()
+        .map(|effort| {
+            json!({
+                "effort": effort.value,
+                "description": description_for(&effort.level, &effort.value),
+            })
+        })
+        .collect::<Vec<_>>();
+    let default = base
+        .get("default_reasoning_level")
+        .and_then(Value::as_str)
+        .filter(|default| declaration.iter().any(|effort| effort.value == *default))
+        .map(ToString::to_string)
+        .or_else(|| {
+            declaration
+                .iter()
+                .find(|effort| effort.level == THIRD_PARTY_DEFAULT_REASONING_EFFORT)
+                .map(|effort| effort.value.clone())
+        })
+        .or_else(|| declaration.first().map(|effort| effort.value.clone()))
+        .unwrap_or_else(|| THIRD_PARTY_DEFAULT_REASONING_EFFORT.to_string());
+    model["supported_reasoning_levels"] = Value::Array(levels);
+    model["default_reasoning_level"] = json!(default);
+    model["supports_reasoning_summaries"] = json!(!declaration.is_empty());
+}
+
 fn refresh_for_provider_with_transport_preferences(
     home: &Path,
     official_provider: bool,
@@ -317,7 +426,6 @@ fn refresh_for_provider_with_transport_preferences(
     selected_models: &[String],
     websocket_models: Option<&[String]>,
     native_web_search_models: Option<&[String]>,
-    context_1m_models: Option<&[String]>,
 ) -> Result<usize> {
     if !official_provider
         && upstream_models.is_some_and(|models| models.is_empty())
@@ -437,13 +545,8 @@ fn refresh_for_provider_with_transport_preferences(
     for model in &mut catalog_models {
         gate_synthetic_native_web_search(model, &native_web_search_model_keys);
     }
-    let context_1m_model_keys = context_1m_models
-        .unwrap_or_default()
-        .iter()
-        .map(|model| model_id::key(model))
-        .collect::<HashSet<_>>();
     for model in &mut catalog_models {
-        configure_1m_context_window(model, &context_1m_model_keys);
+        prepare_cached_context_window(model);
     }
     // Synthetic routes still fail closed when their template lacks runtime
     // fields. Official-only catalogs never drop incompatible slugs above, so
@@ -468,6 +571,7 @@ pub fn selection_state(
         upstream_models,
         selected_models,
         &[],
+        None,
         requested_default_model,
     )
 }
@@ -478,6 +582,9 @@ pub fn selection_state_with_manual_models(
     upstream_models: Option<&[String]>,
     selected_models: &[String],
     manual_third_party_models: &[String],
+    reasoning_efforts: Option<
+        &std::collections::BTreeMap<String, Vec<crate::config::ModelReasoningEffort>>,
+    >,
     requested_default_model: Option<&str>,
 ) -> Result<ModelSelectionState> {
     // Model provenance comes from the route, not from a slug prefix. An API-key
@@ -567,7 +674,11 @@ pub fn selection_state_with_manual_models(
     let third_party_model_metadata = if official_provider {
         Vec::new()
     } else {
-        third_party_model_metadata_from_entries(&official_entries, &third_party_models)
+        third_party_model_metadata_from_entries(
+            &official_entries,
+            &third_party_models,
+            reasoning_efforts,
+        )
     };
     Ok(ModelSelectionState {
         official_models,
@@ -627,7 +738,6 @@ pub fn is_available(home: &Path) -> bool {
 pub(crate) fn prepare_cached_catalog_for_current_capabilities(
     home: &Path,
     native_web_search_models: &[String],
-    context_1m_models: &[String],
 ) -> Result<bool> {
     if !is_available(home) {
         return Ok(false);
@@ -638,15 +748,11 @@ pub(crate) fn prepare_cached_catalog_for_current_capabilities(
         .iter()
         .map(|model| model_id::key(model))
         .collect::<HashSet<_>>();
-    let context_1m_model_keys = context_1m_models
-        .iter()
-        .map(|model| model_id::key(model))
-        .collect::<HashSet<_>>();
     let mut changed = false;
     for model in &mut models {
         let previous = model.clone();
         gate_cached_native_web_search(model, &allowed_model_keys);
-        configure_1m_context_window(model, &context_1m_model_keys);
+        prepare_cached_context_window(model);
         changed |= *model != previous;
     }
     if changed {
@@ -657,7 +763,7 @@ pub(crate) fn prepare_cached_catalog_for_current_capabilities(
     let mut safely_gated_models = written_models.clone();
     for model in &mut safely_gated_models {
         gate_cached_native_web_search(model, &allowed_model_keys);
-        configure_1m_context_window(model, &context_1m_model_keys);
+        prepare_cached_context_window(model);
     }
     if safely_gated_models != written_models {
         bail!("复用的 Codey 模型目录仍包含与当前线路不匹配的模型能力");
@@ -995,15 +1101,37 @@ fn official_entry_for_route_model<'a>(
 fn third_party_model_metadata_from_entries(
     official_entries: &[Value],
     third_party_models: &[String],
+    declarations: Option<
+        &std::collections::BTreeMap<String, Vec<crate::config::ModelReasoningEffort>>,
+    >,
 ) -> Vec<ThirdPartyModelAvailability> {
     let availability = |slug: String, entry: Option<&Value>| {
-        let supported_reasoning_efforts = entry
+        let auto_supported_reasoning_efforts = entry
             .map(third_party_reasoning_efforts_from_value)
             .unwrap_or_else(fallback_third_party_reasoning_efforts);
+        let reasoning_efforts = declarations
+            .into_iter()
+            .flat_map(|declarations| declarations.iter())
+            .find(|(model, _)| model_id::equal(model, &slug))
+            .map(|(_, efforts)| efforts.clone());
+        let supported_reasoning_efforts = match &reasoning_efforts {
+            Some(efforts) => model_id::dedupe_preserving_first(
+                efforts.iter().map(|effort| effort.value.as_str()),
+            ),
+            None => auto_supported_reasoning_efforts.clone(),
+        };
+        let default_reasoning_effort = supported_reasoning_efforts
+            .iter()
+            .find(|effort| effort.as_str() == THIRD_PARTY_DEFAULT_REASONING_EFFORT)
+            .cloned()
+            .or_else(|| supported_reasoning_efforts.first().cloned())
+            .unwrap_or_else(|| THIRD_PARTY_DEFAULT_REASONING_EFFORT.to_string());
         ThirdPartyModelAvailability {
             slug,
             supported_reasoning_efforts,
-            default_reasoning_effort: THIRD_PARTY_DEFAULT_REASONING_EFFORT.to_string(),
+            auto_supported_reasoning_efforts,
+            reasoning_efforts: reasoning_efforts.unwrap_or_default(),
+            default_reasoning_effort,
         }
     };
     let mut metadata = official_entries
@@ -1367,7 +1495,9 @@ fn gate_cached_native_web_search(model: &mut Value, allowed_model_keys: &HashSet
     }
 }
 
-fn configure_1m_context_window(model: &mut Value, allowed_model_keys: &HashSet<String>) {
+/// Restores the context fields of a reused catalog to their declared values and
+/// migrates the larger window an older Codey version wrote for selected models.
+fn prepare_cached_context_window(model: &mut Value) {
     if model.get("codey_source").and_then(Value::as_str) == Some("third_party")
         && model.get("codey_context_source").is_none()
         && !model
@@ -1400,7 +1530,7 @@ fn configure_1m_context_window(model: &mut Value, allowed_model_keys: &HashSet<S
             model.get("codey_context_source").and_then(Value::as_str),
             None | Some("legacy_1m")
         )
-        && model.get("context_window").and_then(Value::as_u64) == Some(CONTEXT_1M_WINDOW)
+        && model.get("context_window").and_then(Value::as_u64) == Some(LEGACY_1M_CONTEXT_WINDOW)
     {
         // Migrate a pre-baseline Codey override once. A source explicitly
         // identified as official metadata must retain its declared window.
@@ -1426,17 +1556,6 @@ fn configure_1m_context_window(model: &mut Value, allowed_model_keys: &HashSet<S
         }
         model["codey_context_base"] = Value::Object(base);
     }
-    let allowed = model
-        .get("slug")
-        .and_then(Value::as_str)
-        .is_some_and(|slug| allowed_model_keys.contains(&model_id::key(slug)));
-    if allowed {
-        model["codey_context_source"] = json!("legacy_1m");
-        model["context_window"] = json!(CONTEXT_1M_WINDOW);
-        model["max_context_window"] = json!(CONTEXT_1M_WINDOW);
-        model["effective_context_window_percent"] = json!(100);
-        model["auto_compact_token_limit"] = Value::Null;
-    }
 }
 
 #[cfg(test)]
@@ -1447,9 +1566,9 @@ fn cached_context_projection_preserves_missing_fields_and_is_idempotent() {
         json!({"slug": "gpt-5.6-sol", "context_window": 272000, "auto_compact_token_limit": null}),
     ] {
         let original = model.clone();
-        configure_1m_context_window(&mut model, &HashSet::new());
+        prepare_cached_context_window(&mut model);
         let projected = model.clone();
-        configure_1m_context_window(&mut model, &HashSet::new());
+        prepare_cached_context_window(&mut model);
         assert_eq!(model, projected);
         model.as_object_mut().unwrap().remove("codey_context_base");
         assert_eq!(model, original);
@@ -1461,11 +1580,9 @@ fn cached_context_projection_preserves_missing_fields_and_is_idempotent() {
 fn model_context_projection_restores_cache_and_explicit_overrides_legacy() {
     use crate::config::ModelContextConfig;
     let mut model = json!({ "slug": "route/custom", "codey_source": "third_party", "context_window": 272000, "max_context_window": 872000 });
-    configure_1m_context_window(&mut model, &HashSet::new());
+    prepare_cached_context_window(&mut model);
     assert_eq!(model["context_window"], 200_000);
     assert_eq!(model["codey_context_source"], "conservative_fallback");
-    configure_1m_context_window(&mut model, &HashSet::from(["route/custom".into()]));
-    assert_eq!(model["context_window"], 1_000_000);
     let policy = ModelContextConfig {
         context_window_tokens: 100_000,
         auto_compact_token_limit: Some(80_000),
@@ -1477,18 +1594,23 @@ fn model_context_projection_restores_cache_and_explicit_overrides_legacy() {
     assert_eq!(model["effective_context_window_percent"], 87);
     assert_eq!(model["auto_compact_token_limit"], 80_000);
     assert_eq!(model["codey_context_source"], "user_declared");
-    configure_1m_context_window(&mut model, &HashSet::new());
+    prepare_cached_context_window(&mut model);
     assert_eq!(model["context_window"], 200_000);
     assert_eq!(model["max_context_window"], 200_000);
     assert_eq!(model["effective_context_window_percent"], 95);
     assert!(model["auto_compact_token_limit"].is_null());
     let mut trusted = json!({ "slug": "gpt-5.5", "context_window": 272000, "max_context_window": 872000, "effective_context_window_percent": 95 });
-    configure_1m_context_window(&mut trusted, &HashSet::new());
+    prepare_cached_context_window(&mut trusted);
     assert_eq!(trusted["max_context_window"], 872000);
     let mut native_large = json!({"slug":"official", "context_window":1000000, "max_context_window":1000000, "effective_context_window_percent":95, "codey_context_source":"official_catalog"});
-    configure_1m_context_window(&mut native_large, &HashSet::new());
+    prepare_cached_context_window(&mut native_large);
     assert_eq!(native_large["context_window"], 1000000);
     assert_eq!(native_large["effective_context_window_percent"], 95);
+    let mut legacy_override = json!({ "slug": "route/legacy", "codey_source": "third_party", "context_window": 1000000, "max_context_window": 1000000, "effective_context_window_percent": 100, "auto_compact_token_limit": null, "codey_context_source": "legacy_1m" });
+    prepare_cached_context_window(&mut legacy_override);
+    assert_eq!(legacy_override["context_window"], 272_000);
+    assert_eq!(legacy_override["max_context_window"], 272_000);
+    assert_eq!(legacy_override["effective_context_window_percent"], 95);
 }
 
 /// Writes the catalog and returns the exact bytes that now live on disk.
@@ -2514,7 +2636,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_models_receive_and_clear_the_1m_context_window() {
+    fn cached_catalog_migrates_the_legacy_1m_context_window() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
         let selected = vec!["route/gpt-5.6-sol".to_string(), "route/gpt-5.5".to_string()];
@@ -2526,23 +2648,41 @@ mod tests {
             &selected,
             &[],
             &[],
-            &["route/gpt-5.6-sol".to_string()],
         )
         .unwrap();
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
-        let models = catalog["models"].as_array().unwrap();
-        let supported = models
-            .iter()
-            .find(|model| model["slug"] == "route/gpt-5.6-sol")
-            .unwrap();
-        assert_eq!(supported["context_window"], 1_000_000);
-        assert_eq!(supported["max_context_window"], 1_000_000);
-        assert_eq!(supported["effective_context_window_percent"], 100);
-        assert!(supported["auto_compact_token_limit"].is_null());
+        let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
+        let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for model in catalog["models"].as_array_mut().unwrap() {
+            model["context_window"] = json!(LEGACY_1M_CONTEXT_WINDOW);
+            model["max_context_window"] = json!(LEGACY_1M_CONTEXT_WINDOW);
+            model["effective_context_window_percent"] = json!(100);
+            model["auto_compact_token_limit"] = Value::Null;
+            model["codey_context_source"] = json!("legacy_1m");
+            model.as_object_mut().unwrap().remove("codey_context_base");
+        }
+        fs::write(&path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
 
+        assert!(
+            prepare_cached_catalog_for_current_capabilities(home.path(), &[]).unwrap(),
+            "the legacy window must be rewritten"
+        );
+        let catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        for model in catalog["models"].as_array().unwrap() {
+            assert_eq!(model["context_window"], DEFAULT_CONTEXT_WINDOW);
+            assert_eq!(model["max_context_window"], DEFAULT_CONTEXT_WINDOW);
+            assert_eq!(
+                model["effective_context_window_percent"],
+                DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT
+            );
+            assert!(model["auto_compact_token_limit"].is_null());
+        }
+    }
+
+    #[test]
+    fn model_reasoning_effort_override_applies_and_restores_the_template() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let selected = vec!["route/gpt-5.6-sol".to_string()];
         refresh_for_provider_with_capabilities(
             home.path(),
             false,
@@ -2550,21 +2690,54 @@ mod tests {
             &selected,
             &[],
             &[],
-            &[],
         )
         .unwrap();
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
-        let cleared = catalog["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|model| model["slug"] == "route/gpt-5.6-sol")
-            .unwrap();
-        assert_ne!(cleared["context_window"], 1_000_000);
-        assert_ne!(cleared["max_context_window"], 1_000_000);
+        let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
+        let find_model = |catalog: &Value| {
+            catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|model| model["slug"] == "route/gpt-5.6-sol")
+                .unwrap()
+                .clone()
+        };
+        let catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let baseline = find_model(&catalog);
+
+        let overrides = std::collections::BTreeMap::from([(
+            "route/gpt-5.6-sol".to_string(),
+            vec![
+                crate::config::ModelReasoningEffort {
+                    level: "low".into(),
+                    value: "low".into(),
+                },
+                crate::config::ModelReasoningEffort {
+                    level: "high".into(),
+                    value: "high".into(),
+                },
+            ],
+        )]);
+        apply_catalog_reasoning_efforts(home.path(), &overrides).unwrap();
+        let catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let declared = find_model(&catalog);
+        assert_eq!(reasoning_efforts_from_value(&declared), ["low", "high"]);
+        assert_eq!(declared["default_reasoning_level"], "low");
+        assert_eq!(declared["supports_reasoning_summaries"], true);
+        assert!(declared.get(REASONING_BASE_FIELD).is_some());
+
+        apply_catalog_reasoning_efforts(home.path(), &std::collections::BTreeMap::new()).unwrap();
+        let catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let restored = find_model(&catalog);
+        assert_eq!(
+            restored.get("supported_reasoning_levels"),
+            baseline.get("supported_reasoning_levels")
+        );
+        assert_eq!(
+            restored.get("default_reasoning_level"),
+            baseline.get("default_reasoning_level")
+        );
+        assert!(restored.get(REASONING_BASE_FIELD).is_none());
     }
 
     #[test]
@@ -2624,7 +2797,6 @@ mod tests {
             &selected,
             &[],
             &native_web_search_models,
-            &[],
         )
         .unwrap();
         let catalog: Value = serde_json::from_slice(
@@ -2666,14 +2838,21 @@ mod tests {
             &selected,
             &[],
             &selected,
-            &selected,
         )
         .unwrap();
         let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
         let mut stale: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(stale["models"][0]["supports_search_tool"], true);
         assert!(stale["models"][0]["web_search_tool_type"].is_string());
-        assert_eq!(stale["models"][0]["context_window"], CONTEXT_1M_WINDOW);
+        stale["models"][0]["context_window"] = json!(LEGACY_1M_CONTEXT_WINDOW);
+        stale["models"][0]["max_context_window"] = json!(LEGACY_1M_CONTEXT_WINDOW);
+        stale["models"][0]["effective_context_window_percent"] = json!(100);
+        stale["models"][0]["auto_compact_token_limit"] = Value::Null;
+        stale["models"][0]["codey_context_source"] = json!("legacy_1m");
+        stale["models"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("codey_context_base");
         stale["models"][0]
             .as_object_mut()
             .unwrap()
@@ -2681,16 +2860,19 @@ mod tests {
         fs::write(&path, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
 
         assert!(
-            prepare_cached_catalog_for_current_capabilities(home.path(), &[], &[]).unwrap(),
+            prepare_cached_catalog_for_current_capabilities(home.path(), &[]).unwrap(),
             "a valid cached catalog should remain usable after stale capabilities are removed"
         );
         let sanitized: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(sanitized["models"][0].get("supports_search_tool").is_none());
         assert!(sanitized["models"][0].get("web_search_tool_type").is_none());
-        assert_eq!(sanitized["models"][0]["context_window"], 200_000);
+        assert_eq!(
+            sanitized["models"][0]["context_window"],
+            DEFAULT_CONTEXT_WINDOW
+        );
         let sanitized_bytes = fs::read(&path).unwrap();
 
-        assert!(prepare_cached_catalog_for_current_capabilities(home.path(), &[], &[]).unwrap());
+        assert!(prepare_cached_catalog_for_current_capabilities(home.path(), &[]).unwrap());
         assert_eq!(fs::read(&path).unwrap(), sanitized_bytes);
     }
 
@@ -2968,6 +3150,7 @@ mod tests {
             Some(&upstream),
             &["gpt-5.6-sol".into(), "third-model".into()],
             &["third-model".into()],
+            None,
             None,
         )
         .unwrap();

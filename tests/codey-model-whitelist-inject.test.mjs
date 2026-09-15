@@ -629,9 +629,9 @@ test("runtime whitelist keeps Spark and removes unsupported channel models", asy
 
 test("context capability changes update existing model descriptors", async () => {
   const queryClient = activeModelQueryClient(["route/model"]);
-  const catalog = { status: "ok", models: ["route/model"], default_model: "route/model", model_metadata: [{ model: "route/model", supports_1m_context: true, context_window: 1_000_000, max_context_window: 1_000_000 }] };
+  const catalog = { status: "ok", models: ["route/model"], default_model: "route/model", model_metadata: [{ model: "route/model", context_window: 1_000_000, max_context_window: 1_000_000 }] };
   const { patch } = await loadPatch(catalog, [statsigClient()], { queryClient });
-  assert.equal(queryClient.model("route/model").supports1MContext, true);
+  assert.equal(Object.hasOwn(queryClient.model("route/model"), "supports1MContext"), false);
   assert.equal(queryClient.model("route/model").contextWindow, 1_000_000);
   assert.equal(queryClient.model("route/model").maxContextWindow, 1_000_000);
   const customMetadata = { model: "route/model", context_window: 100000, max_context_window: 100000, effective_context_window_percent: 87, auto_compact_token_limit: 80000, codey_context_source: "user_declared" };
@@ -642,8 +642,7 @@ test("context capability changes update existing model descriptors", async () =>
   assert.equal(queryClient.model("route/model").contextSource, "user_declared");
   await patch.setCatalog({ ...catalog, model_metadata: [{ ...customMetadata, auto_compact_token_limit: 70000 }] });
   assert.equal(queryClient.model("route/model").autoCompactTokenLimit, 70000);
-  await patch.setCatalog({ ...catalog, model_metadata: [{ model: "route/model", supports_1m_context: false, context_window: null, max_context_window: null }] });
-  assert.equal(queryClient.model("route/model").supports1MContext, false);
+  await patch.setCatalog({ ...catalog, model_metadata: [{ model: "route/model", context_window: null, max_context_window: null }] });
   assert.equal(queryClient.model("route/model").contextWindow, null);
   assert.equal(queryClient.model("route/model").maxContextWindow, null);
   patch.dispose();
@@ -686,7 +685,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "54");
+  assert.equal(patch.version, "55");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -2672,6 +2671,135 @@ test("a hot default-model change replaces only the stale prewarm default", async
     threadId: "existing-thread",
     model: oldDefault,
   });
+  runtime.patch.dispose();
+});
+
+function defaultHistoryCatalog(defaultModel) {
+  const models = ["route-a/gpt-5.5", "route-a/claude-opus-5", "route-a/explicit-pick"];
+  return {
+    status: "ok",
+    models,
+    default_model: defaultModel,
+    model_metadata: models.map((model) => {
+      const sourceModel = model.slice("route-a/".length);
+      return {
+        model,
+        display_name: `线路 A / ${sourceModel}`,
+        route_name: "线路 A",
+        provider_id: "codey_router",
+        route_provider_id: "route-a",
+        source_model: sourceModel,
+        upstream_model: sourceModel,
+      };
+    }),
+  };
+}
+
+test("a default changed while the renderer was closed still replaces Codex's saved default", async () => {
+  const storage = memoryStorage();
+  const oldDefault = "route-a/gpt-5.5";
+  const newDefault = "route-a/claude-opus-5";
+  const first = await loadPatch(defaultHistoryCatalog(oldDefault), [statsigClient()], { storage });
+  assert.equal(
+    JSON.parse(storage.getItem("codey.default-model-history.v1")).lastDefault.selectorModel,
+    oldDefault,
+  );
+  first.patch.dispose();
+
+  // Codey changed the default while Codex was not running; the reopened
+  // renderer only ever sees the new catalog.
+  const reopened = await loadPatch(defaultHistoryCatalog(newDefault), [statsigClient()], { storage });
+  const prewarm = reopened.patch.rewriteOutgoingMessage({
+    type: "thread-prewarm-start",
+    request: {
+      id: "saved-default-prewarm",
+      method: "thread/start",
+      params: { model: oldDefault, modelProvider: "codey_router" },
+    },
+  });
+  assert.deepEqual(prewarm.request.params, {
+    model: newDefault,
+    modelProvider: "codey_router",
+  });
+  const rawSavedDefault = reopened.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "saved-raw-default",
+      method: "thread/start",
+      params: { model: "gpt-5.5", modelProvider: "codey_router" },
+    },
+  });
+  assert.equal(rawSavedDefault.request.params.model, newDefault);
+
+  // A model that was never the default is an explicit choice and stays put.
+  const explicitPick = reopened.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "explicit-pick",
+      method: "thread/start",
+      params: { model: "route-a/explicit-pick", modelProvider: "codey_router" },
+    },
+  });
+  assert.equal(explicitPick.request.params.model, "route-a/explicit-pick");
+  const existingThread = reopened.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "existing-thread-old-default",
+      method: "thread/settings/update",
+      params: { threadId: "existing-thread", model: oldDefault },
+    },
+  });
+  assert.equal(existingThread.request.params.model, oldDefault);
+  const history = JSON.parse(storage.getItem("codey.default-model-history.v1"));
+  assert.equal(history.lastDefault.selectorModel, newDefault);
+  assert.deepEqual(history.superseded.map((record) => record.selectorModel), [oldDefault]);
+  reopened.patch.dispose();
+});
+
+test("superseded defaults recorded by a hot catalog swap survive a patch reload", async () => {
+  const storage = memoryStorage();
+  const oldDefault = "route-a/gpt-5.5";
+  const newDefault = "route-a/claude-opus-5";
+  const first = await loadPatch(defaultHistoryCatalog(oldDefault), [statsigClient()], { storage });
+  await first.patch.setCatalog(defaultHistoryCatalog(newDefault));
+  first.patch.dispose();
+
+  const reopened = await loadPatch(defaultHistoryCatalog(newDefault), [statsigClient()], { storage });
+  const started = reopened.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "stale-default-after-reload",
+      method: "thread/start",
+      params: { model: oldDefault, modelProvider: "codey_router" },
+    },
+  });
+  assert.equal(started.request.params.model, newDefault);
+  reopened.patch.dispose();
+
+  // Switching the default back retires the record so the restored default is
+  // no longer treated as stale.
+  const restored = await loadPatch(defaultHistoryCatalog(oldDefault), [statsigClient()], { storage });
+  const restoredStart = restored.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "restored-default",
+      method: "thread/start",
+      params: { model: oldDefault, modelProvider: "codey_router" },
+    },
+  });
+  assert.equal(restoredStart.request.params.model, oldDefault);
+  const history = JSON.parse(storage.getItem("codey.default-model-history.v1"));
+  assert.deepEqual(history.superseded.map((record) => record.selectorModel), [newDefault]);
+  restored.patch.dispose();
+});
+
+test("an unchanged default does not rewrite the persisted default history", async () => {
+  const storage = memoryStorage();
+  const runtime = await loadPatch(defaultHistoryCatalog("route-a/gpt-5.5"), [statsigClient()], { storage });
+  const writes = storage.writeCount();
+  await runtime.patch.setCatalog(defaultHistoryCatalog("route-a/gpt-5.5"));
+  await runtime.patch.refresh();
+  assert.equal(storage.writeCount(), writes);
   runtime.patch.dispose();
 });
 

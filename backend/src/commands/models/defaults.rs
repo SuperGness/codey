@@ -50,8 +50,8 @@ pub async fn save_default_model(
     })))
 }
 
-// 入口层仍解析并校验旧版 supports1MContextModels / modelContexts 参数，
-// 官方线路不接受这两类变更，所以不再传入本函数。
+// 入口层仍解析 reasoningEfforts / modelContexts 参数，官方线路不接受这两类
+// 变更，所以不再传入本函数。
 pub async fn save_official_route_models(
     state: &Arc<AppState>,
     route_id: String,
@@ -86,7 +86,7 @@ pub async fn save_official_route_models(
         config.show_account_usage_in_header = show_usage;
     }
     let official_models = model_catalog::default_official_model_slugs();
-    // 官方线路不接受上下文预算或 1M 设置变更，保留已有配置。
+    // 官方线路不接受上下文预算或思考强度声明变更，保留已有配置。
     let official_by_key = official_models
         .iter()
         .map(|model| (model_id::key(model), model.as_str()))
@@ -113,7 +113,16 @@ pub async fn save_official_route_models(
         .insert(provider_id, selected_models);
     config = config.normalize();
     config.profiles[profile_index].validate()?;
-    let (catalog_refresh, model_state) = refreshed_model_state_async(&config, false).await?;
+    let RefreshedModelState {
+        refresh: catalog_refresh,
+        model_state,
+        custom_contexts_restored,
+    } = refreshed_model_state_with_context_recovery(
+        &mut config,
+        false,
+        crate::native_update_ui::confirm_context_recovery,
+    )
+    .await?;
     subagent_policy::reconcile_with_model_state(&mut config, Some(&model_state));
     config = config.normalize();
     config.settings_revision = config.settings_revision.saturating_add(1);
@@ -131,6 +140,7 @@ pub async fn save_official_route_models(
             "status":"ok",
             "config":public_config,
             "modelState":model_state,
+            "customContextsRestored":custom_contexts_restored,
             "restartRequired":restart_required,
         })),
         subagent_hot_reload,
@@ -204,10 +214,17 @@ pub(crate) async fn hot_reload_runtime_models(
 pub(crate) fn current_model_state(
     config: &CodeyConfig,
 ) -> Result<model_catalog::ModelSelectionState, String> {
+    current_model_state_at(config, codex_home())
+}
+
+pub(crate) fn current_model_state_at(
+    config: &CodeyConfig,
+    home: &std::path::Path,
+) -> Result<model_catalog::ModelSelectionState, String> {
     if !config.local_router_enabled {
-        let provider = codex_provider::current_provider(codex_home())
+        let provider = codex_provider::current_provider(home)
             .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))?;
-        return native_model_state_for_provider(config, &provider, codex_home());
+        return native_model_state_for_provider(config, &provider, home);
     }
     let active_profile = config
         .profiles
@@ -230,7 +247,7 @@ pub(crate) fn current_model_state(
     };
     let requested_default_model = config.default_model_for_profile(active_profile);
     model_catalog::selection_state_with_manual_models(
-        codex_home(),
+        home,
         official,
         config
             .upstream_models_by_provider
@@ -242,6 +259,7 @@ pub(crate) fn current_model_state(
             .get(provider_id)
             .map(Vec::as_slice)
             .unwrap_or_default(),
+        config.model_reasoning_efforts_by_provider.get(provider_id),
         requested_default_model.as_deref(),
     )
     .map_err(|error| error.to_string())

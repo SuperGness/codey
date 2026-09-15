@@ -616,6 +616,44 @@ pub(crate) async fn restore_default_context_budgets(state: &AppState) -> Result<
     Ok(())
 }
 
+/// 启动或重启 Codex 失败后，征询用户并恢复默认上下文预算。
+///
+/// 返回 true 表示用户确认且预算已写回配置，调用方可以重新启动 Codex；
+/// 返回 false 表示用户选择保留预算或对话框不可用，调用方应保留原始错误。
+pub(crate) async fn recover_default_context_budgets_for_launch(
+    state: &Arc<AppState>,
+) -> Result<bool, String> {
+    recover_default_context_budgets_with_prompt(
+        state,
+        crate::native_update_ui::ContextRecoveryPurpose::Launch,
+        crate::native_update_ui::confirm_context_recovery,
+    )
+    .await
+}
+
+async fn recover_default_context_budgets_with_prompt<F, Fut>(
+    state: &Arc<AppState>,
+    purpose: crate::native_update_ui::ContextRecoveryPurpose,
+    prompt: F,
+) -> Result<bool, String>
+where
+    F: FnOnce(crate::native_update_ui::ContextRecoveryPurpose) -> Fut,
+    Fut: std::future::Future<Output = Result<bool, String>>,
+{
+    // 询问失败按用户未确认处理：保留自定义预算比静默丢弃更安全。
+    if !prompt(purpose).await.unwrap_or(false) {
+        return Ok(false);
+    }
+    restore_default_context_budgets(state).await?;
+    error_log::record_failure(
+        "context_recovery",
+        "restore_default_context_budgets_for_launch",
+        crate::model_catalog::CUSTOM_CONTEXT_CATALOG_UNAVAILABLE.to_string(),
+        json!({ "purpose": purpose.as_str() }),
+    );
+    Ok(true)
+}
+
 async fn save_config_to_store(state: &AppState, config: &CodeyConfig) -> Result<(), String> {
     let store = state.store.clone();
     let config = config.clone();
@@ -645,7 +683,7 @@ fn local_route_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> boo
         || previous.declared_official_models_by_provider
             != next.declared_official_models_by_provider
         || previous.upstream_models_by_provider != next.upstream_models_by_provider
-        || previous.supports_1m_context_by_provider != next.supports_1m_context_by_provider
+        || previous.model_reasoning_efforts_by_provider != next.model_reasoning_efforts_by_provider
         || previous.model_context_by_provider != next.model_context_by_provider
         || previous.default_model != next.default_model
         || previous.initial_route_import_completed != next.initial_route_import_completed
@@ -1010,7 +1048,10 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             optional_argument::<Vec<String>>(&args, "deletedThirdPartyModels"),
             optional_argument::<bool>(&args, "supportsAutoReview"),
             optional_argument::<Option<String>>(&args, "routeId").map(Option::flatten),
-            optional_argument::<Vec<String>>(&args, "supports1MContextModels"),
+            optional_argument::<BTreeMap<String, Vec<crate::config::ModelReasoningEffort>>>(
+                &args,
+                "reasoningEfforts",
+            ),
             optional_argument::<BTreeMap<String, crate::config::ModelContextConfig>>(
                 &args,
                 "modelContexts",
@@ -1023,7 +1064,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 Ok(deleted_third_party_models),
                 Ok(supports_auto_review),
                 Ok(route_id),
-                Ok(supports_1m_context_models),
+                Ok(model_reasoning_efforts),
                 Ok(model_contexts),
             ) => {
                 save_selected_models(
@@ -1034,7 +1075,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                     deleted_third_party_models.unwrap_or_default(),
                     supports_auto_review,
                     route_id,
-                    supports_1m_context_models,
+                    model_reasoning_efforts,
                     model_contexts,
                 )
                 .await
@@ -1058,7 +1099,10 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         "save_official_route_models" => match (
             string_argument(&args, "routeId"),
             argument::<Vec<String>>(&args, "models"),
-            optional_argument::<Vec<String>>(&args, "supports1MContextModels"),
+            optional_argument::<BTreeMap<String, Vec<crate::config::ModelReasoningEffort>>>(
+                &args,
+                "reasoningEfforts",
+            ),
             optional_argument::<bool>(&args, "enabled"),
             optional_argument::<bool>(&args, "showAccountUsageInHeader"),
             optional_argument::<BTreeMap<String, crate::config::ModelContextConfig>>(
@@ -1445,7 +1489,7 @@ pub async fn save_codey_config(
 
 struct CodeyConfigSaveInput {
     config: CodeyConfig,
-    supports_1m_context_present: bool,
+    model_reasoning_efforts_present: bool,
     model_context_present: bool,
     local_router_enabled_present: bool,
     route_request_log_present: bool,
@@ -1460,7 +1504,7 @@ impl CodeyConfigSaveInput {
     fn complete(config: CodeyConfig) -> Self {
         Self {
             config,
-            supports_1m_context_present: true,
+            model_reasoning_efforts_present: true,
             model_context_present: true,
             local_router_enabled_present: true,
             route_request_log_present: true,
@@ -1481,7 +1525,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         .as_object()
         .ok_or_else(|| "参数 config 无效：必须是 object".to_string())?;
     let local_router_enabled_present = fields.contains_key("localRouterEnabled");
-    let supports_1m_context_present = fields.contains_key("supports1MContextByProvider");
+    let model_reasoning_efforts_present = fields.contains_key("modelReasoningEffortsByProvider");
     let model_context_present = fields.contains_key("modelContextByProvider");
     let route_request_log_present = fields.contains_key("routeRequestLog");
     let stream_max_retries_present = fields.contains_key("streamMaxRetries");
@@ -1492,7 +1536,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         .map_err(|error| format!("参数 config 无效：{error}"))?;
     Ok(CodeyConfigSaveInput {
         config,
-        supports_1m_context_present,
+        model_reasoning_efforts_present,
         model_context_present,
         local_router_enabled_present,
         route_request_log_present,
@@ -1526,7 +1570,7 @@ async fn save_codey_config_locked(
 ) -> Result<SavedCodeyConfig, String> {
     let CodeyConfigSaveInput {
         config: mut config_input,
-        supports_1m_context_present,
+        model_reasoning_efforts_present,
         model_context_present,
         local_router_enabled_present,
         route_request_log_present,
@@ -1585,15 +1629,16 @@ async fn save_codey_config_locked(
                 .contains_key(provider)
         });
     }
-    if supports_1m_context_present
-        && config_input.supports_1m_context_by_provider != previous.supports_1m_context_by_provider
+    if model_reasoning_efforts_present
+        && config_input.model_reasoning_efforts_by_provider
+            != previous.model_reasoning_efforts_by_provider
     {
-        for (provider_id, models) in &config_input.supports_1m_context_by_provider {
+        for (provider_id, efforts) in &config_input.model_reasoning_efforts_by_provider {
             let profile = config
                 .profiles
                 .iter()
                 .find(|profile| profile.provider_id() == provider_id)
-                .ok_or_else(|| format!("找不到 1M 上下文配置所属线路：{provider_id}"))?;
+                .ok_or_else(|| format!("找不到思考强度配置所属线路：{provider_id}"))?;
             let available = if profile.official_account {
                 model_catalog::default_official_model_slugs()
             } else {
@@ -1619,18 +1664,18 @@ async fn save_codey_config_locked(
                     .cloned()
                     .collect()
             };
-            models::set_supports_1m_context_models(
+            models::set_model_reasoning_efforts(
                 &mut config,
                 provider_id,
-                Some(models),
+                Some(efforts),
                 &available,
             )?;
         }
         config
-            .supports_1m_context_by_provider
+            .model_reasoning_efforts_by_provider
             .retain(|provider_id, _| {
                 config_input
-                    .supports_1m_context_by_provider
+                    .model_reasoning_efforts_by_provider
                     .contains_key(provider_id)
             });
     }
@@ -1866,7 +1911,7 @@ fn retain_route_scoped_config(config: &mut CodeyConfig) {
         .model_context_by_provider
         .retain(|provider_id, _| provider_ids.contains(provider_id));
     config
-        .supports_1m_context_by_provider
+        .model_reasoning_efforts_by_provider
         .retain(|provider_id, _| provider_ids.contains(provider_id));
     config
         .selected_models_by_provider
