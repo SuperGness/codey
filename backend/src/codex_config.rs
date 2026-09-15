@@ -1316,6 +1316,7 @@ fn remove_persistent_codey_runtime_config(doc: &mut DocumentMut, home: &Path) ->
     remove_codey_model_catalog_reference(doc, home);
     remove_codey_owned_agents_config(doc, codey_subagent_owned);
     remove_codey_owned_multi_agent_defaults(doc, codey_subagent_owned);
+    remove_legacy_codey_hooks(doc, &home.join("config.toml"));
     doc.to_string() != before
 }
 
@@ -2562,6 +2563,167 @@ fn enable_hooks_feature(doc: &mut DocumentMut) -> Result<()> {
 fn hook_command_is_codey_owned(command: &str) -> bool {
     command.contains(crate::subagent_gate::HOOK_ARGUMENT)
         || command.contains(crate::fastctx_route_gate::HOOK_ARGUMENT)
+}
+
+/// Releases before the runtime `hooks.json` carried their hook definitions in
+/// `config.toml`. Codex loads both files, so a leftover Codey group makes every
+/// hook run twice, and the second run rejects the spawn that the first one just
+/// admitted. Drop the Codey-owned groups, keep user groups and move their trust
+/// state to the surviving indices.
+fn remove_legacy_codey_hooks(doc: &mut DocumentMut, config_path: &Path) {
+    let Some(hooks) = doc.get_mut("hooks").and_then(Item::as_table_mut) else {
+        return;
+    };
+    for (toml_event, state_event) in LEGACY_CODEY_HOOK_EVENTS {
+        let Some((index_map, event_is_empty)) =
+            hooks.get_mut(toml_event).and_then(remove_codey_hook_groups)
+        else {
+            continue;
+        };
+        if event_is_empty {
+            hooks.remove(toml_event);
+        }
+        if let Some(state) = hooks.get_mut("state").and_then(Item::as_table_mut) {
+            remap_hook_state_entries(state, config_path, state_event, &index_map);
+        }
+    }
+}
+
+const LEGACY_CODEY_HOOK_EVENTS: [(&str, &str); 7] = [
+    ("PreToolUse", "pre_tool_use"),
+    ("PostToolUse", "post_tool_use"),
+    ("UserPromptSubmit", "user_prompt_submit"),
+    ("SubagentStart", "subagent_start"),
+    ("SubagentStop", "subagent_stop"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session_end"),
+];
+
+fn remove_codey_hook_groups(event: &mut Item) -> Option<(Vec<Option<usize>>, bool)> {
+    let (owned, group_count) = match event {
+        Item::ArrayOfTables(groups) => (
+            groups
+                .iter()
+                .map(table_hook_group_is_codey_owned)
+                .collect::<Vec<_>>(),
+            groups.len(),
+        ),
+        Item::Value(Value::Array(groups)) => (
+            groups
+                .iter()
+                .map(value_hook_group_is_codey_owned)
+                .collect::<Vec<_>>(),
+            groups.len(),
+        ),
+        _ => return None,
+    };
+    if !owned.iter().any(|owned| *owned) {
+        return None;
+    }
+
+    let mut next_index = 0;
+    let index_map = owned
+        .iter()
+        .map(|owned| {
+            if *owned {
+                None
+            } else {
+                let index = next_index;
+                next_index += 1;
+                Some(index)
+            }
+        })
+        .collect::<Vec<_>>();
+    for index in (0..group_count).rev() {
+        if !owned[index] {
+            continue;
+        }
+        match event {
+            Item::ArrayOfTables(groups) => {
+                groups.remove(index);
+            }
+            Item::Value(Value::Array(groups)) => {
+                groups.remove(index);
+            }
+            _ => {}
+        }
+    }
+    Some((index_map, next_index == 0))
+}
+
+fn table_hook_group_is_codey_owned(group: &Table) -> bool {
+    group
+        .get("hooks")
+        .is_some_and(hook_handlers_item_is_codey_owned)
+}
+
+fn value_hook_group_is_codey_owned(group: &Value) -> bool {
+    group
+        .as_inline_table()
+        .and_then(|group| group.get("hooks"))
+        .and_then(Value::as_array)
+        .is_some_and(|handlers| handlers.iter().any(value_hook_handler_is_codey_owned))
+}
+
+fn hook_handlers_item_is_codey_owned(handlers: &Item) -> bool {
+    match handlers {
+        Item::ArrayOfTables(handlers) => handlers.iter().any(table_hook_handler_is_codey_owned),
+        Item::Value(Value::Array(handlers)) => {
+            handlers.iter().any(value_hook_handler_is_codey_owned)
+        }
+        _ => false,
+    }
+}
+
+fn table_hook_handler_is_codey_owned(handler: &Table) -> bool {
+    ["command", "commandWindows", "command_windows"]
+        .into_iter()
+        .filter_map(|key| handler.get(key).and_then(Item::as_str))
+        .any(hook_command_is_codey_owned)
+}
+
+fn value_hook_handler_is_codey_owned(handler: &Value) -> bool {
+    handler.as_inline_table().is_some_and(|handler| {
+        ["command", "commandWindows", "command_windows"]
+            .into_iter()
+            .filter_map(|key| handler.get(key).and_then(Value::as_str))
+            .any(hook_command_is_codey_owned)
+    })
+}
+
+fn remap_hook_state_entries(
+    state: &mut Table,
+    config_path: &Path,
+    event_key: &str,
+    index_map: &[Option<usize>],
+) {
+    let prefix = format!("{}:{event_key}:", config_path.display());
+    let keys = state
+        .iter()
+        .filter(|(key, _)| key.starts_with(&prefix))
+        .map(|(key, _)| key.to_string())
+        .collect::<Vec<_>>();
+    let mut retained = Vec::new();
+    for key in keys {
+        let Some((group_index, handler_index)) = key[prefix.len()..].split_once(':') else {
+            continue;
+        };
+        let Ok(group_index) = group_index.parse::<usize>() else {
+            continue;
+        };
+        let Some(new_group_index) = index_map.get(group_index) else {
+            continue;
+        };
+        let Some(entry) = state.remove(&key) else {
+            continue;
+        };
+        if let Some(new_group_index) = new_group_index {
+            retained.push((format!("{prefix}{new_group_index}:{handler_index}"), entry));
+        }
+    }
+    for (key, entry) in retained {
+        state.insert(&key, entry);
+    }
 }
 
 fn local_router_provider_table(endpoint: &RuntimeRouterEndpoint) -> Table {
