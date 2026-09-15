@@ -14,6 +14,55 @@ const runRenderer = (sandbox) => {
   vm.runInContext(source, context);
 };
 
+// Boots the renderer with a controllable scan timer. When subscribers are
+// requested, the bridge's dispatcher is replaced so a test can drive the
+// bootstrap handler directly, the way a real MutationObserver would.
+const createRendererSandbox = ({ documentElement, header }) => {
+  const timers = new Map();
+  let timerSequence = 0;
+  const document = {
+    body: new FakeElement("body"),
+    documentElement,
+    createElement: (tag) => new FakeElement(tag),
+    getElementById: (id) => documentElement.querySelector(`#${id}`),
+    querySelector: () => null,
+    querySelectorAll: (selector) => selector === "header" ? [header] : [],
+  };
+  const window = {
+    addEventListener() {},
+    clearTimeout: (id) => timers.delete(id),
+    dispatchEvent() {},
+    getComputedStyle: () => ({ display: "flex", visibility: "visible" }),
+    localStorage: { getItem: () => null, key: () => null, length: 0, setItem() {} },
+    setTimeout: (handler) => {
+      timerSequence += 1;
+      timers.set(timerSequence, handler);
+      return timerSequence;
+    },
+  };
+  window.window = window;
+  return { document, timers, window };
+};
+
+const runRendererInShell = ({ document, subscribers = null, timers, window }) => {
+  const context = vm.createContext({
+    console, document, HTMLElement: FakeElement, location: { pathname: "/", search: "" },
+    MutationObserver: class { disconnect() {} observe() {} }, URLSearchParams, window,
+  });
+  vm.runInContext(bridgeSource, context);
+  if (subscribers) {
+    window.__codeyMutationDispatcher = {
+      snapshot: () => ({ observerInstalled: true }),
+      subscribe: (handler, options) => {
+        subscribers.push({ handler, options });
+        return () => {};
+      },
+    };
+  }
+  vm.runInContext(source, context);
+  timers.clear();
+};
+
 class FakeElement extends FakeElementCore {
   get firstElementChild() { return this.children[0] || null; }
   constructor(tagName = "div", { visible = true, right = 100, width = right, height = 46, top = 0 } = {}) {
@@ -73,32 +122,23 @@ test("joins the native measured action row and repairs its noninteractive mirror
   actionRow.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
   const documentElement = new FakeElement("html");
   documentElement.appendChild(header);
-  const document = {
-    body: new FakeElement("body"), documentElement,
-    createElement: (tag) => new FakeElement(tag),
-    getElementById: (id) => documentElement.querySelector(`#${id}`),
-    querySelector: () => null,
-    querySelectorAll: (selector) => selector === "header" ? [header] : [],
-  };
-  const window = {
-    addEventListener() {}, clearTimeout() {}, dispatchEvent() {},
-    getComputedStyle: () => ({ display: "flex", visibility: "visible" }),
-    localStorage: { getItem: () => null, key: () => null, length: 0, setItem() {} },
-    setTimeout: () => 1,
-  };
-  window.window = window;
-  runRenderer({ console, document, HTMLElement: FakeElement, location: { pathname: "/", search: "" },
-    MutationObserver: class { disconnect() {} observe() {} }, URLSearchParams, window });
+  const { document, timers, window } = createRendererSandbox({ documentElement, header });
+  runRendererInShell({ document, timers, window });
   const button = document.getElementById("codey-settings-button");
   const mirror = document.getElementById("codey-settings-button-measure");
   assert.equal(button.parentElement, actionRow);
   assert.equal(button.dataset.codeyNativeSlot, "true");
+  assert.equal(actionRow.children.at(-1), button, "the Codey button owns the trailing slot");
   assert.equal(mirror.parentElement, measureRow);
   assert.equal(mirror.tagName, "SPAN");
   assert.equal(mirror.getAttribute("aria-hidden"), "true");
   const reads = header.rectReads;
   window.__codeyRendererScan();
   assert.equal(header.rectReads, reads, "stable mounts skip geometry reads");
+  // A native action rendered after the Codey button must not push it left.
+  actionRow.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
+  window.__codeyRendererScan();
+  assert.equal(actionRow.children.at(-1), button);
   mirror.remove();
   window.__codeyRendererScan();
   assert.equal(document.getElementById("codey-settings-button-measure").parentElement, measureRow);
@@ -124,6 +164,93 @@ test("joins the native measured action row and repairs its noninteractive mirror
   window.__codeyRendererScan();
   assert.equal(document.getElementById("codey-settings-button").parentElement, header);
   assert.equal(document.getElementById("codey-settings-button-measure"), null);
+});
+
+test("joins the live action row inside a single measured host", () => {
+  const header = new FakeElement("header", { right: 1200 });
+  const slot = new FakeElement("div", { right: 1200, width: 70 });
+  slot.setAttribute("data-test-id", "header-shell-slot");
+  const liveHost = new FakeElement();
+  const liveRow = new FakeElement();
+  liveRow.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
+  liveHost.appendChild(liveRow);
+  slot.appendChild(liveHost);
+  header.appendChild(slot);
+  const documentElement = new FakeElement("html");
+  documentElement.appendChild(header);
+  const { document, timers, window } = createRendererSandbox({ documentElement, header });
+  runRendererInShell({ document, timers, window });
+  const button = document.getElementById("codey-settings-button");
+  assert.equal(button.parentElement, liveRow);
+  assert.equal(liveRow.children.at(-1), button);
+  assert.equal(button.dataset.codeyNativeSlot, "true");
+  assert.equal(document.getElementById("codey-settings-button-measure"), null);
+  const reads = header.rectReads;
+  window.__codeyRendererScan();
+  assert.equal(header.rectReads, reads, "stable mounts skip geometry reads");
+});
+
+test("joins a slot that holds the live action row directly", () => {
+  const header = new FakeElement("header", { right: 1200 });
+  const slot = new FakeElement("div", { right: 1200, width: 70 });
+  slot.setAttribute("data-test-id", "header-shell-slot");
+  const liveRow = new FakeElement();
+  liveRow.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
+  slot.appendChild(liveRow);
+  header.appendChild(slot);
+  const documentElement = new FakeElement("html");
+  documentElement.appendChild(header);
+  const { document, timers, window } = createRendererSandbox({ documentElement, header });
+  runRendererInShell({ document, timers, window });
+  const button = document.getElementById("codey-settings-button");
+  assert.equal(button.parentElement, liveRow);
+  assert.equal(liveRow.children.at(-1), button);
+  assert.equal(document.getElementById("codey-settings-button-measure"), null);
+});
+
+test("keeps the header mount stable when only its measurement mirror changes", () => {
+  const header = new FakeElement("header", { right: 1200 });
+  const slot = new FakeElement("div", { right: 1200, width: 70 });
+  slot.setAttribute("data-test-id", "header-shell-slot");
+  const hidden = new FakeElement();
+  hidden.setAttribute("aria-hidden", "true");
+  const visible = new FakeElement();
+  const measureRow = new FakeElement();
+  const actionRow = new FakeElement();
+  hidden.appendChild(measureRow);
+  visible.appendChild(actionRow);
+  slot.append(hidden, visible);
+  header.appendChild(slot);
+  measureRow.appendChild(new FakeElement("button", { right: 1400, width: 28 }));
+  actionRow.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
+  const documentElement = new FakeElement("html");
+  documentElement.appendChild(header);
+  const subscribers = [];
+  const { document, timers, window } = createRendererSandbox({ documentElement, header });
+  runRendererInShell({ document, subscribers, timers, window });
+  const bootstrap = subscribers.find(({ options }) => options.attributes === true);
+  assert.ok(bootstrap, "the bootstrap observer subscribes through the shared dispatcher");
+  const button = document.getElementById("codey-settings-button");
+  const mirror = document.getElementById("codey-settings-button-measure");
+  const mutation = (target, addedNodes, removedNodes) => [{
+    addedNodes, removedNodes, target, type: "childList",
+  }];
+  bootstrap.handler(mutation(measureRow, [mirror], []));
+  assert.equal(timers.size, 0, "the measurement mirror does not invalidate the header mount");
+  const latecomer = new FakeElement("button", { right: 1192, width: 28 });
+  actionRow.appendChild(latecomer);
+  bootstrap.handler(mutation(actionRow, [latecomer], []));
+  assert.equal(timers.size, 1, "native header changes still invalidate the header mount");
+  const [scheduled] = [...timers.values()];
+  timers.clear();
+  scheduled();
+  assert.equal(actionRow.children.at(-1), button);
+  timers.clear();
+  mirror.remove();
+  bootstrap.handler(mutation(measureRow, [], [mirror]));
+  assert.equal(timers.size, 0, "the mirror is repaired by the mount fast path");
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button-measure").parentElement, measureRow);
 });
 
 test("moves the Codey button beside the visible header's trailing action region", () => {

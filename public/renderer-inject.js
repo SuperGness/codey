@@ -910,7 +910,14 @@
         return { header, target: actionRow, measureRow, nativeSlot: true };
       }
       // Some shells measure the live content directly, without a hidden copy.
-      const liveRow = slot.children.length === 1 ? slot.firstElementChild : null;
+      // There the slot holds one measured host, and the action row sits inside it.
+      const liveHost = slot.children.length === 1 ? slot.firstElementChild : null;
+      const liveRowCandidate = liveHost?.firstElementChild;
+      const liveRow = liveRowCandidate
+        && liveRowCandidate !== rightmostControl
+        && liveRowCandidate.contains(rightmostControl)
+        ? liveRowCandidate
+        : liveHost;
       if (!measureHost && liveRow?.contains(rightmostControl) && visibleMountRect(liveRow)) {
         return { header, target: liveRow, nativeSlot: true };
       }
@@ -943,6 +950,7 @@
     if (button.dataset.codeyNativeSlot === "true") {
       const measure = document.getElementById(buttonMeasureId);
       return parent === button.__codeyActionRow
+        && button.nextElementSibling === null
         && !!parent.closest('[data-test-id="header-shell-slot"]')
         && (!button.__codeyMeasureRow || (
           measure?.parentElement === button.__codeyMeasureRow
@@ -1012,7 +1020,10 @@
       if (button.parentElement !== mount.target || button.nextElementSibling !== mount.before) {
         mount.target.insertBefore(button, mount.before);
       }
-    } else if (button.parentElement !== mount.target) {
+    } else if (
+      button.parentElement !== mount.target
+      || (mount.nativeSlot && button.nextElementSibling !== null)
+    ) {
       mount.target.appendChild(button);
     }
     button.__codeyHeaderAnchor = mount.before || null;
@@ -1269,6 +1280,7 @@
       if (
         node instanceof HTMLElement
         && node.id !== buttonId
+        && node.id !== buttonMeasureId
         && node.id !== accountUsageId
       ) {
         return true;
