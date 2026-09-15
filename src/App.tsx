@@ -16,6 +16,7 @@ import { FeaturePolicyCard, SubagentPolicyCard } from "./FeaturePolicyCard";
 import { ModelSection } from "./ModelSection";
 import { OperationsPanel } from "./OperationsPanel";
 import { canRepairMainProcessInjection, isMainProcessInjectionConfirmed } from "./runtimeStatusPresentation";
+import { repairOperationResult } from "./injectionRepair";
 import { PromptOptimizationCard } from "./PromptOptimizationCard";
 import {
   getNotificationChannelDefinition,
@@ -910,8 +911,10 @@ export function App({
           "修复请求暂未确认，请稍后重新查询状态");
         setInjectionRepairRequested(true);
       } catch (error) {
-        // 退出客户端会断开内嵌页面连接，不能据此判定后台修复失败。
-        setNotice({ tone: "info", text: `修复请求结果待确认：${errorText(error)}。请稍后查询运行状态；后台修复失败会弹出提示。` });
+        const result = repairOperationResult(error);
+        setNotice({ tone: result.tone, text: result.text });
+        // 退出客户端会断开内嵌页面连接；后端明确拒绝才不会开始修复。
+        if (!result.unconfirmed) return;
       }
       markRestartInProgress();
     });

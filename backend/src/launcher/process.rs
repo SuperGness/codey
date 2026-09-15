@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(windows)]
+use std::path::Path;
 
 #[cfg(windows)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +178,49 @@ impl StartupInjectionMode {
     }
 }
 
+/// One automatic fuse repair before the first Windows launch attempt.
+///
+/// The launcher restarts Codex itself, so a repaired runtime continues with
+/// `--require` inside the same startup. Only installs the current user may write
+/// are repaired; a protected runtime, a build that was already attempted or a
+/// failure keeps the CLI compatibility mode and the manual repair button.
+#[cfg(windows)]
+async fn repair_main_process_injection_before_launch(
+    app_dir: &Path,
+    fuses: crate::electron_fuses::ElectronFuses,
+) -> crate::electron_fuses::ElectronFuses {
+    use crate::electron_fuses::AutoRepairOutcome;
+
+    let repair_dir = app_dir.to_path_buf();
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::electron_fuses::auto_repair_node_options(&repair_dir)
+    })
+    .await
+    .unwrap_or_else(|error| {
+        AutoRepairOutcome::Failed(format!("主进程注入自动修复任务异常退出：{error}"))
+    });
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.main_process_injection_auto_repair",
+        serde_json::json!({
+            "appPath": app_dir,
+            "outcome": outcome.as_str(),
+            "error": outcome.error(),
+        }),
+    );
+    if let Some(error) = outcome.error() {
+        error_log::record_failure(
+            "runtime_repair_failed",
+            "auto_repair_main_process_injection",
+            error.to_string(),
+            serde_json::json!({ "platform": "windows", "appPath": app_dir }),
+        );
+    }
+    if !outcome.repaired() {
+        return fuses;
+    }
+    crate::electron_fuses::detect_electron_fuses(app_dir.to_path_buf()).await
+}
+
 #[cfg_attr(
     not(windows),
     allow(clippy::ptr_arg, reason = "Windows 启动重试需要替换调用方的应用目录")
@@ -216,7 +261,18 @@ pub(super) async fn spawn_codex(
             attempt += 1;
             *app_dir = refresh_windows_packaged_app_dir(app_dir)?;
             error_log::refresh_codex_app_version(Some(app_dir), None);
-            let fuses = crate::electron_fuses::detect_electron_fuses(app_dir.to_path_buf()).await;
+            let mut fuses =
+                crate::electron_fuses::detect_electron_fuses(app_dir.to_path_buf()).await;
+            if attempt == 1
+                && !fuses.node_options.node_options_possible()
+                && !fuses.node_cli_inspect.inspector_possible()
+            {
+                // Both main-process entries are off, so the launcher would fall
+                // back to the CLI wrapper. Repairing the fuse byte now reuses the
+                // restart this launch already performs; the manual repair stays
+                // for installs that need administrator rights.
+                fuses = repair_main_process_injection_before_launch(app_dir, fuses).await;
+            }
             let inspect_fuse = fuses.node_cli_inspect;
             let require_wanted =
                 fuses.node_options.node_options_possible() && !retry_without_require;

@@ -57,8 +57,19 @@ fn validate_target(binary: &Path) -> Result<PathBuf> {
     let normalized = codey_runtime_core::app_paths::normalize_codex_app_path(directory)
         .context("不是有效的 Codex 安装目录")?;
     anyhow::ensure!(normalized == directory, "运行时不在 Codex 安装目录中");
-    let candidate = electron_binary_path(&normalized).context("找不到 Codex 运行时")?;
-    anyhow::ensure!(candidate == canonical, "目标不是 Codex 的 Electron 运行时");
+    let candidates = electron_binary_candidates(&normalized);
+    let preferred = candidates.first().context("找不到 Codex 运行时")?;
+    if !std::fs::canonicalize(preferred).is_ok_and(|path| path == canonical) {
+        // A split runtime may keep the wire in the main executable only; that
+        // file is a valid target exactly when the preferred file has no wire.
+        anyhow::ensure!(
+            read_fuse_wire(preferred)?.is_none()
+                && candidates.iter().skip(1).any(|candidate| {
+                    std::fs::canonicalize(candidate).is_ok_and(|path| path == canonical)
+                }),
+            "目标不是 Codex 的 Electron 运行时"
+        );
+    }
     anyhow::ensure!(
         ["chrome.dll", "ChatGPT.exe", "Codex.exe"]
             .iter()
@@ -243,33 +254,59 @@ fn launch_helper(binary: &Path, digest: &str) -> Result<()> {
 }
 
 pub(super) fn repair(binary: &Path, backup: &Path, cache: &Path) -> Result<()> {
-    repair_with(binary, backup, cache, open_runtime_exclusive, launch_helper)
+    repair_inner(
+        binary,
+        backup,
+        cache,
+        open_runtime_exclusive,
+        |binary, inspection| launch_helper(binary, &inspection.digest),
+    )
+    .map(|_| ())
 }
 
-fn repair_with(
+/// Repair variant for the launcher's automatic attempt: a runtime only an
+/// administrator may write reports [`RepairNeedsElevation`] instead of opening a
+/// UAC prompt while Codey starts.
+pub(super) fn repair_without_elevation(binary: &Path, backup: &Path, cache: &Path) -> Result<bool> {
+    repair_inner(
+        binary,
+        backup,
+        cache,
+        open_runtime_exclusive,
+        deny_elevation,
+    )
+}
+
+fn deny_elevation(_: &Path, _: &NodeOptionsInspection) -> Result<()> {
+    Err(anyhow::Error::new(RepairNeedsElevation))
+}
+
+fn repair_inner(
     binary: &Path,
     backup: &Path,
     cache: &Path,
     open: impl FnOnce(&Path) -> std::io::Result<std::fs::File>,
-    elevate: impl FnOnce(&Path, &str) -> Result<()>,
-) -> Result<()> {
+    on_denied: impl FnOnce(&Path, &NodeOptionsInspection) -> Result<()>,
+) -> Result<bool> {
     let binary = validate_target(binary)?;
     match open(&binary) {
         Ok(mut file) => {
             let inspection = inspect_node_options(&mut file)?;
             if prepare_node_options_change(&binary, backup, cache, false, &inspection)? {
                 write_node_options(&mut file, &inspection, b'1')?;
+                return Ok(true);
             }
+            return Ok(false);
         }
         Err(error) if error.raw_os_error() == Some(5) => {
             let mut file = std::fs::File::open(&binary).context("无法读取待修复的运行时")?;
             validate_open_handle(&file, &binary)?;
             let inspection = inspect_node_options(&mut file)?;
             if !prepare_node_options_change(&binary, backup, cache, false, &inspection)? {
-                return Ok(());
+                return Ok(false);
             }
             drop(file);
-            elevate(&binary, &inspection.digest)?;
+            on_denied(&binary, &inspection)?;
             let mut file = std::fs::File::open(&binary).context("管理员修复后无法读取运行时")?;
             validate_open_handle(&file, &binary)?;
             let actual = inspect_node_options(&mut file)?;
@@ -285,7 +322,7 @@ fn repair_with(
                 .context("无法独占写入运行时，请确认 Codex 已关闭且文件未被其他程序占用");
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -306,7 +343,7 @@ mod tests {
         for code in [5, 32, 33] {
             let (_temp, binary, backup, cache) = runtime();
             let called = std::cell::Cell::new(false);
-            let result = repair_with(
+            let result = repair_inner(
                 &binary,
                 &backup,
                 &cache,
@@ -325,7 +362,7 @@ mod tests {
     fn parent_verifies_helper_result_and_keeps_backup_on_failure() {
         let (_temp, binary, backup, cache) = runtime();
         assert!(
-            repair_with(
+            repair_inner(
                 &binary,
                 &backup,
                 &cache,
@@ -335,15 +372,15 @@ mod tests {
             .is_err()
         );
         assert!(backup.is_file());
-        repair_with(
+        repair_inner(
             &binary,
             &backup,
             &cache,
             |_| Err(std::io::Error::from_raw_os_error(5)),
-            |path, digest| {
+            |path, expected| {
                 let mut file = open_runtime_exclusive(path)?;
                 let inspection = inspect_node_options(&mut file)?;
-                assert_eq!(inspection.digest, digest);
+                assert_eq!(inspection.digest, expected.digest);
                 write_node_options(&mut file, &inspection, b'1')
             },
         )
@@ -355,7 +392,7 @@ mod tests {
         let (_temp, binary, backup, cache) = runtime();
         std::fs::create_dir(&cache).unwrap();
         assert!(
-            repair_with(
+            repair_inner(
                 &binary,
                 &backup,
                 &cache,
@@ -366,6 +403,29 @@ mod tests {
         );
         assert!(!backup.exists());
     }
+
+    #[test]
+    fn automatic_repair_reports_elevation_instead_of_prompting() {
+        let (_temp, binary, backup, cache) = runtime();
+        let mut file = std::fs::File::open(&binary).unwrap();
+        let inspection = inspect_node_options(&mut file).unwrap();
+        let error = deny_elevation(&binary, &inspection).unwrap_err();
+        assert!(error.downcast_ref::<RepairNeedsElevation>().is_some());
+
+        // The launcher path reports the same error instead of prompting, and the
+        // recorded original byte survives so the manual repair can continue.
+        let error = repair_inner(
+            &binary,
+            &backup,
+            &cache,
+            |_| Err(std::io::Error::from_raw_os_error(5)),
+            deny_elevation,
+        )
+        .unwrap_err();
+        assert!(error.downcast_ref::<RepairNeedsElevation>().is_some());
+        assert!(backup.is_file());
+    }
+
     #[test]
     fn target_validation_rejects_network_devices_and_non_runtime_files() {
         for path in [

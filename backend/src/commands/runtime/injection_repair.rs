@@ -82,6 +82,7 @@ async fn run_repair(state: Arc<AppState>, mut cancel: oneshot::Receiver<()>) -> 
     };
     ensure_runtime_can_start(&state)?;
     let app_path = repair_app_path(&state).await?;
+    let previous_startup_error = state.startup_error.read().await.clone();
     run_repair_steps(
         || async {
             stop_codey_runtime_locked(&state).await?;
@@ -103,8 +104,20 @@ async fn run_repair(state: Arc<AppState>, mut cancel: oneshot::Receiver<()>) -> 
             Ok(())
         },
     ).await?;
-    *state.startup_error.write().await = None;
+    {
+        let mut startup_error = state.startup_error.write().await;
+        clear_startup_error_if_unchanged(&mut startup_error, previous_startup_error.as_deref());
+    }
     Ok(())
+}
+
+/// A successful repair only clears the startup error the runtime already had
+/// when the repair started. An error another task records while the repair runs
+/// stays visible, so success never hides an unrelated failure.
+fn clear_startup_error_if_unchanged(startup_error: &mut Option<String>, previous: Option<&str>) {
+    if startup_error.as_deref() == previous {
+        *startup_error = None;
+    }
 }
 
 async fn repair_runtime_file(app_path: PathBuf) -> Result<(), String> {
@@ -272,5 +285,23 @@ mod tests {
                 assert!(error.contains("Codex 已恢复启动"));
             }
         }
+    }
+
+    #[test]
+    fn successful_repair_only_clears_the_error_it_started_with() {
+        let mut unchanged_none = None;
+        clear_startup_error_if_unchanged(&mut unchanged_none, None);
+        assert_eq!(unchanged_none, None);
+
+        let mut unchanged_error = Some("上次启动失败".to_string());
+        clear_startup_error_if_unchanged(&mut unchanged_error, Some("上次启动失败"));
+        assert_eq!(unchanged_error, None);
+
+        // 修复期间其它任务记录的启动错误必须保留。
+        let mut recorded_during_repair = Some("修复期间启动失败".to_string());
+        clear_startup_error_if_unchanged(&mut recorded_during_repair, Some("上次启动失败"));
+        assert_eq!(recorded_during_repair.as_deref(), Some("修复期间启动失败"));
+        clear_startup_error_if_unchanged(&mut recorded_during_repair, None);
+        assert_eq!(recorded_during_repair.as_deref(), Some("修复期间启动失败"));
     }
 }
