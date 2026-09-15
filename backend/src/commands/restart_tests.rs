@@ -536,7 +536,7 @@ fn renderer_catalog_uses_current_config_for_model_only_changes() {
 }
 
 #[test]
-fn model_hot_reload_ignores_empty_context_entries_but_keeps_budget_changes_pending() {
+fn model_hot_reload_ignores_empty_declarations_and_delivers_reasoning_changes() {
     let applied = CodeyConfig::default();
     let mut current = applied.clone();
     current.default_model = "new-model".into();
@@ -560,44 +560,116 @@ fn model_hot_reload_ignores_empty_context_entries_but_keeps_budget_changes_pendi
         ));
     }
 
-    for declared_effort in [false, true] {
-        let mut changed = current.clone();
-        if declared_effort {
-            changed.model_reasoning_efforts_by_provider.insert(
-                "route".into(),
-                BTreeMap::from([(
-                    "new-model".to_string(),
-                    vec![crate::config::ModelReasoningEffort {
-                        level: "low".into(),
-                        value: "low".into(),
-                    }],
-                )]),
-            );
-        } else {
-            changed
-                .model_context_by_provider
-                .get_mut("route")
-                .unwrap()
-                .insert(
-                    "new-model".into(),
-                    crate::config::ModelContextConfig {
-                        context_window_tokens: 100_000,
-                        auto_compact_token_limit: None,
-                        reserve_output_tokens: None,
-                    },
-                );
-        }
-        for (baseline, saved) in [(&current, &changed), (&changed, &current)] {
-            assert!(!runtime_supports_current_routes_for_hot_reload(
-                baseline, saved
-            ));
-            assert!(std::ptr::eq(
-                model_catalog_config_for_runtime(saved, Some(baseline), None),
-                baseline,
-            ));
-            assert!(provider_route_restart_required_for_runtime(baseline, saved));
-        }
+    let mut changed = current.clone();
+    changed.model_reasoning_efforts_by_provider.insert(
+        "route".into(),
+        BTreeMap::from([(
+            "new-model".to_string(),
+            vec![crate::config::ModelReasoningEffort {
+                level: "low".into(),
+                value: "low".into(),
+            }],
+        )]),
+    );
+    for (baseline, saved) in [(&current, &changed), (&changed, &current)] {
+        assert!(runtime_supports_current_routes_for_hot_reload(
+            baseline, saved
+        ));
+        assert!(std::ptr::eq(
+            model_catalog_config_for_runtime(saved, Some(baseline), None),
+            saved,
+        ));
+        assert!(!provider_route_restart_required_for_runtime(
+            baseline, saved
+        ));
     }
+}
+
+#[test]
+fn model_hot_reload_keeps_context_budget_changes_pending() {
+    let mut applied = CodeyConfig::default();
+    applied
+        .model_context_by_provider
+        .insert("route".into(), Default::default());
+    let mut changed = applied.clone();
+    changed
+        .model_context_by_provider
+        .get_mut("route")
+        .unwrap()
+        .insert(
+            "new-model".into(),
+            crate::config::ModelContextConfig {
+                context_window_tokens: 100_000,
+                auto_compact_token_limit: None,
+                reserve_output_tokens: None,
+            },
+        );
+    changed.model_reasoning_efforts_by_provider.insert(
+        "route".into(),
+        BTreeMap::from([(
+            "new-model".to_string(),
+            vec![crate::config::ModelReasoningEffort {
+                level: "low".into(),
+                value: "low".into(),
+            }],
+        )]),
+    );
+
+    for (baseline, saved) in [(&applied, &changed), (&changed, &applied)] {
+        assert!(!runtime_supports_current_routes_for_hot_reload(
+            baseline, saved
+        ));
+        assert!(std::ptr::eq(
+            model_catalog_config_for_runtime(saved, Some(baseline), None),
+            baseline,
+        ));
+        assert!(provider_route_restart_required_for_runtime(baseline, saved));
+    }
+}
+
+#[test]
+fn pinned_launch_transport_keeps_reasoning_declarations_for_hot_reload() {
+    let mut applied = CodeyConfig::default();
+    applied
+        .model_context_by_provider
+        .insert("route".into(), Default::default());
+    applied
+        .model_context_by_provider
+        .get_mut("route")
+        .unwrap()
+        .insert(
+            "new-model".into(),
+            crate::config::ModelContextConfig {
+                context_window_tokens: 100_000,
+                auto_compact_token_limit: None,
+                reserve_output_tokens: None,
+            },
+        );
+    let mut current = applied.clone();
+    current
+        .model_context_by_provider
+        .get_mut("route")
+        .unwrap()
+        .get_mut("new-model")
+        .unwrap()
+        .context_window_tokens = 200_000;
+    current.model_reasoning_efforts_by_provider.insert(
+        "route".into(),
+        BTreeMap::from([(
+            "new-model".to_string(),
+            vec![crate::config::ModelReasoningEffort {
+                level: "high".into(),
+                value: "high".into(),
+            }],
+        )]),
+    );
+
+    let pinned = config_with_launch_pinned_transport(&applied, &current);
+    assert_eq!(pinned.model_context_by_provider, applied.model_context_by_provider);
+    assert_eq!(
+        pinned.model_reasoning_efforts_by_provider,
+        current.model_reasoning_efforts_by_provider,
+    );
 }
 
 #[test]

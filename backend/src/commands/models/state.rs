@@ -43,6 +43,7 @@ pub(crate) fn runtime_supports_current_routes_for_hot_reload(
         return false;
     }
     // 空的供应商配置不改变上下文预算；实际预算变化仍需重启 app-server。
+    // 思考强度只影响模型元数据，会随模型目录一起热更新，不作为重启条件。
     if applied
         .model_context_by_provider
         .iter()
@@ -51,14 +52,6 @@ pub(crate) fn runtime_supports_current_routes_for_hot_reload(
             .model_context_by_provider
             .iter()
             .filter(|(_, models)| !models.is_empty()))
-        || applied
-            .model_reasoning_efforts_by_provider
-            .iter()
-            .filter(|(_, models)| !models.is_empty())
-            .ne(current
-                .model_reasoning_efforts_by_provider
-                .iter()
-                .filter(|(_, models)| !models.is_empty()))
     {
         return false;
     }
@@ -151,14 +144,13 @@ pub(crate) fn official_route_snapshots(
 
 /// 模型成员可以立即送达选择器和本地路由；线路运输能力仍保持启动时的取值，
 /// 直到重启 app-server 才切换。这样启用模型不必等待重启。
+/// 思考强度属于模型元数据，同样随目录热更新，只有上下文预算需要重启。
 pub(crate) fn config_with_launch_pinned_transport(
     applied: &CodeyConfig,
     current: &CodeyConfig,
 ) -> CodeyConfig {
     let mut pinned = current.clone();
     pinned.model_context_by_provider = applied.model_context_by_provider.clone();
-    pinned.model_reasoning_efforts_by_provider =
-        applied.model_reasoning_efforts_by_provider.clone();
     for profile in &mut pinned.profiles {
         let Some(previous) = applied
             .profiles
