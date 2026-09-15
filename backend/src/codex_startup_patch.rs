@@ -232,33 +232,37 @@ fn space_free_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
         return Ok(path.to_path_buf());
     }
     #[cfg(windows)]
+    if let Ok(short) = windows_short_path(path)
+        && !path_has_whitespace(&short)
     {
-        let short = windows_short_path(path)?;
-        anyhow::ensure!(
-            !path_has_whitespace(&short),
-            "Codex 启动补丁短路径仍包含空白：{}",
-            short.display()
-        );
-        Ok(short)
+        return Ok(short);
     }
-    #[cfg(not(windows))]
-    {
-        let file_name = path.file_name().context("Codex 启动补丁路径缺少文件名")?;
-        let destination = std::env::temp_dir().join(file_name);
-        anyhow::ensure!(
-            !path_has_whitespace(&destination),
-            "临时目录包含空白，无法通过 NODE_OPTIONS 注入：{}",
+    copy_startup_require_to_temp(path, &std::env::temp_dir())
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn copy_startup_require_to_temp(
+    path: &std::path::Path,
+    temp_dir: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    // Keep the UUID filename so the launcher's existing cleanup removes this copy.
+    let file_name = path.file_name().context("Codex 启动补丁路径缺少文件名")?;
+    let destination = temp_dir.join(file_name);
+    anyhow::ensure!(
+        !path_has_whitespace(&destination),
+        "临时补丁路径包含空白，无法通过 NODE_OPTIONS 注入：{}",
+        destination.display()
+    );
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("读取 Codex 启动补丁失败：{}", path.display()))?;
+    crate::fs_util::atomic_write_private(&destination, &bytes).with_context(|| {
+        format!(
+            "复制 Codex 启动补丁到无空格路径失败：{} -> {}",
+            path.display(),
             destination.display()
-        );
-        std::fs::copy(path, &destination).with_context(|| {
-            format!(
-                "复制 Codex 启动补丁到无空格路径失败：{} -> {}",
-                path.display(),
-                destination.display()
-            )
-        })?;
-        Ok(destination)
-    }
+        )
+    })?;
+    Ok(destination)
 }
 
 #[cfg(windows)]
@@ -2270,11 +2274,67 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let spaced = temp.path().join("has space");
         std::fs::create_dir(&spaced).unwrap();
-        let source = spaced.join("patch.js");
+        let source = spaced.join(format!("{}.js", uuid::Uuid::new_v4().simple()));
         std::fs::write(&source, "1").unwrap();
         let resolved = space_free_path(&source).unwrap();
         assert!(!path_has_whitespace(&resolved));
         assert_eq!(std::fs::read_to_string(&resolved).unwrap(), "1");
+        std::fs::remove_file(resolved).unwrap();
+    }
+
+    #[test]
+    fn startup_require_temp_copy_preserves_content_and_cleanup_filename() {
+        let temp = tempfile::tempdir().unwrap();
+        let spaced = temp.path().join("has space");
+        std::fs::create_dir(&spaced).unwrap();
+        let source = spaced.join(format!("{}.js", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&source, "module.exports = 1;").unwrap();
+
+        let resolved = copy_startup_require_to_temp(&source, temp.path()).unwrap();
+
+        assert_eq!(resolved, temp.path().join(source.file_name().unwrap()));
+        assert_eq!(
+            std::fs::read(&resolved).unwrap(),
+            std::fs::read(&source).unwrap()
+        );
+        assert_eq!(
+            node_require_argument(&resolved).unwrap(),
+            format!("--require={}", resolved.display())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&resolved).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn startup_require_temp_copy_rejects_whitespace_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("patch.js");
+        std::fs::write(&source, "1").unwrap();
+        let destination_dir = temp.path().join("has space");
+        std::fs::create_dir(&destination_dir).unwrap();
+
+        let error = copy_startup_require_to_temp(&source, &destination_dir).unwrap_err();
+
+        assert!(error.to_string().contains("临时补丁路径包含空白"));
+        assert!(!destination_dir.join("patch.js").exists());
+    }
+
+    #[test]
+    fn startup_require_temp_copy_reports_missing_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("has space").join("missing.js");
+
+        let error = copy_startup_require_to_temp(&source, temp.path()).unwrap_err();
+
+        assert!(error.to_string().contains("读取 Codex 启动补丁失败"));
+        assert!(error.to_string().contains("missing.js"));
+        assert!(!temp.path().join("missing.js").exists());
     }
 
     #[test]

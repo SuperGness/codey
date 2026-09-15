@@ -319,16 +319,16 @@ fn restore_without_a_lease_removes_legacy_toml_codey_hooks() {
         r#"[features]
 hooks = true
 
-[hooks.state."{path}:pre_tool_use:0:0"]
+[hooks.state.{legacy_pre_tool_key}]
 trusted_hash = "sha256:legacy-codey"
 
-[hooks.state."{path}:pre_tool_use:1:0"]
+[hooks.state.{second_legacy_pre_tool_key}]
 trusted_hash = "sha256:legacy-codey-second"
 
-[hooks.state."{path}:pre_tool_use:2:0"]
+[hooks.state.{user_pre_tool_key}]
 trusted_hash = "sha256:user-hook"
 
-[hooks.state."{path}:post_tool_use:0:0"]
+[hooks.state.{legacy_post_tool_key}]
 trusted_hash = "sha256:legacy-codey"
 
 [[hooks.PreToolUse]]
@@ -359,7 +359,14 @@ matcher = "*"
 type = "command"
 command = "'/old/codey' {gate}"
 "#,
-        path = config_path.display(),
+        legacy_pre_tool_key =
+            toml_string_literal(&format!("{}:pre_tool_use:0:0", config_path.display())),
+        second_legacy_pre_tool_key =
+            toml_string_literal(&format!("{}:pre_tool_use:1:0", config_path.display())),
+        user_pre_tool_key =
+            toml_string_literal(&format!("{}:pre_tool_use:2:0", config_path.display())),
+        legacy_post_tool_key =
+            toml_string_literal(&format!("{}:post_tool_use:0:0", config_path.display())),
         gate = crate::subagent_gate::HOOK_ARGUMENT,
         combined = crate::subagent_gate::COMBINED_HOOK_ARGUMENT,
     );
