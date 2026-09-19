@@ -16,17 +16,11 @@ fn gpu_launch_arguments_are_mutually_exclusive_and_platform_gated() {
 }
 
 #[test]
-fn runtime_arguments_set_chinese_before_the_renderer_starts() {
-    assert_eq!(
-        codex_runtime_arguments(GpuLaunchMode::Off, true, false),
-        vec![DEFAULT_CHINESE_LOCALE_ARGUMENT.to_string()]
-    );
+fn runtime_arguments_leave_the_codex_locale_to_codex() {
+    assert!(codex_runtime_arguments(GpuLaunchMode::Off, true, false).is_empty());
     assert_eq!(
         codex_runtime_arguments(GpuLaunchMode::DisableGpu, true, false),
-        vec![
-            DEFAULT_CHINESE_LOCALE_ARGUMENT.to_string(),
-            DISABLE_GPU_ARGUMENT.to_string(),
-        ]
+        vec![DISABLE_GPU_ARGUMENT.to_string()]
     );
 }
 
@@ -34,9 +28,6 @@ fn runtime_arguments_set_chinese_before_the_renderer_starts() {
 fn windows_runtime_arguments_disable_background_ecoqos() {
     assert_eq!(
         codex_runtime_arguments(GpuLaunchMode::Off, true, true),
-        vec![
-            DEFAULT_CHINESE_LOCALE_ARGUMENT.to_string(),
-            DISABLE_BACKGROUND_ECOQOS_ARGUMENT.to_string(),
-        ]
+        vec![DISABLE_BACKGROUND_ECOQOS_ARGUMENT.to_string()]
     );
 }

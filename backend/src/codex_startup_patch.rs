@@ -1706,8 +1706,7 @@ mod tests {
         assert!(expression.contains("get optionalMainBundlePatchFailures()"));
         assert!(expression.contains("const originalCompile = module._compile"));
         assert!(expression.contains("CODEY_SUBAGENT_GATE_RUNTIME_ID"));
-        assert!(expression.contains("default Chinese locale"));
-        assert!(expression.contains("__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__"));
+        assert!(!expression.contains("localeOverride"));
         assert!(expression.contains("spawnSync"));
         assert!(expression.contains("writeCodeyPatchFailuresAsync"));
         assert!(expression.contains("optionalPatchFailureQueue"));

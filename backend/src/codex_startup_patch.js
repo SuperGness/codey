@@ -523,30 +523,6 @@
       );
     }
     if (
-      source.includes("72216192") &&
-      source.includes("enable_i18n") &&
-      source.includes("locale_source") &&
-      source.includes(".localeOverride")
-    ) {
-      // Resolve the locale before React's first i18n render. The later CDP
-      // injection still persists localeOverride, but it can arrive after the
-      // first route has already selected and cached English messages.
-      patched = replaceUniqueRendererGate(
-        patched,
-        [{
-          pattern: /let\s+([$A-Z_a-z][$\w]*)\s*=\s*([$A-Z_a-z][$\w]*)\s*,\s*([$A-Z_a-z][$\w]*)\s*=\s*([$A-Z_a-z][$\w]*)\?\.\s*get\(\s*`locale_source`\s*,\s*`IDE`\s*\)\s*,\s*([$A-Z_a-z][$\w]*)\s*=\s*([$A-Z_a-z][$\w]*)\(\s*([$A-Z_a-z][$\w]*)\.localeOverride\s*\)/g,
-          replacement: (_match, enabled, _gate, localeSource, _config, override) =>
-            `let ${enabled}=(globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__=!0),${localeSource}=\`SYSTEM\`,${override}=\`zh-CN\``,
-        }, {
-          pattern: /let ([$A-Z_a-z][$\w]*)=([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)=([$A-Z_a-z][$\w]*)\?\.get\(`locale_source`,`IDE`\),([$A-Z_a-z][$\w]*=([$A-Z_a-z][$\w]*)\?\.ideLocale,[$A-Z_a-z][$\w]*=\6\?\.systemLocale,[$A-Z_a-z][$\w]*=[$A-Z_a-z][$\w]*\(([$A-Z_a-z][$\w]*)\))/g,
-          replacement: (_match, enabled, _gate, localeSource, _config, resolution, _data, override) =>
-            `${override}=\`zh-CN\`;let ${enabled}=(globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__=!0),${localeSource}=\`SYSTEM\`,${resolution}`,
-        }],
-        undefined,
-        "default Chinese locale",
-      );
-    }
-    if (
       source.includes("maybe_resume_owner_discovery_failed")
       && source.includes("followExistingOwner")
       && source.includes(".clientCoordination.findThreadOwner")

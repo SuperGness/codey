@@ -2072,7 +2072,7 @@ pub(super) fn codex_runtime_arguments(
     gpu_arguments_enabled_for_platform: bool,
     disable_background_ecoqos: bool,
 ) -> Vec<String> {
-    let mut arguments = vec![DEFAULT_CHINESE_LOCALE_ARGUMENT.to_string()];
+    let mut arguments = Vec::new();
     if disable_background_ecoqos {
         // Chromium marks backgrounded renderer processes as EcoQoS on Windows
         // 11. During Codex startup that can throttle the renderer which owns the

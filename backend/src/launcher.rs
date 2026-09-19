@@ -69,7 +69,6 @@ pub const CODEX_APP_PATH_INVALID_ERROR: &str = "配置的 Codex App 路径无效
 const DISABLE_GPU_ARGUMENT: &str = "--disable-gpu";
 const DISABLE_GPU_RASTERIZATION_ARGUMENT: &str = "--disable-gpu-rasterization";
 const DISABLE_BACKGROUND_ECOQOS_ARGUMENT: &str = "--disable-features=UseEcoQoSForBackgroundProcess";
-const DEFAULT_CHINESE_LOCALE_ARGUMENT: &str = "--lang=zh-CN";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -19,11 +19,7 @@ const CDP_INJECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-bridge.js");
 const MODEL_WHITELIST_INJECT_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/model-whitelist-inject.js");
-const RENDERER_INJECT_SCRIPT: &str = concat!(
-    include_str!("../../dist-overlay/inject/default-chinese-locale.js"),
-    "\n",
-    include_str!("../../dist-overlay/inject/renderer-inject.js")
-);
+const RENDERER_INJECT_SCRIPT: &str = include_str!("../../dist-overlay/inject/renderer-inject.js");
 const CODEY_SESSION_TOOLS_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-inject.js");
 const PET_CONTROL_SHIELD_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/pet-control-shield.js");
@@ -258,10 +254,7 @@ pub fn prepare_injection_scripts(
               if (window.__codeyRendererCoreLoaded !== true
                 || typeof window.__codeyRendererScan !== "function"
                 || typeof window.__codeyLoadSessionTools !== "function") return "";
-              const locale = window.__codeyDefaultChineseLocale?.snapshot?.();
-              return locale?.locale === "zh-CN"
-                ? `渲染器控制、默认中文与按需加载 API 可用（Statsig client ${locale.statsigClientsPatched} 个）`
-                : "渲染器控制与按需加载 API 可用";
+              return "渲染器控制与按需加载 API 可用";
             })()"#
                 .to_string(),
             Internal,
@@ -1452,14 +1445,10 @@ assert.equal(nextPage.window.attempts, 1);
         let shared_runtime_offset = core
             .find("window.__codeySharedRuntime=Object.freeze")
             .expect("bridge helpers must initialize the shared runtime");
-        let locale_offset = core
-            .find("__codeyDefaultChineseLocale")
-            .expect("locale bootstrap must be part of renderer-controls");
         let renderer_offset = core
             .find("window.__codeyRendererCoreLoaded")
             .expect("renderer bootstrap must be part of renderer-controls");
-        assert!(shared_runtime_offset < locale_offset);
-        assert!(locale_offset < renderer_offset);
+        assert!(shared_runtime_offset < renderer_offset);
         assert!(core.contains("window.__codeyRendererCoreLoaded"));
         assert!(core.contains(r#"["false"][0]==="true""#));
         assert!(core.contains(SETTINGS_OVERLAY_LOAD_PATH));

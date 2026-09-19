@@ -737,42 +737,6 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       /const petSettingsId=`settings\.pets\.title`/,
     );
 
-    const localeSource = [
-      "function resolveLocale(a,bp,Au){",
-      "const dynamicConfigId=`72216192`,enableI18n=`enable_i18n`;",
-      "let o=a?.get(enableI18n,!1);",
-      "let s=o,c=a?.get(`locale_source`,`IDE`),l=bp(Au.localeOverride);",
-      "return {enabled:s,source:c,locale:l}}",
-    ].join("");
-    electron.protocol.handle("app", async () => new Response(localeSource));
-    const localeResponse = await installedHandler({
-      url: "app://-/assets/app-initial-BHB6SClA.js",
-    });
-    const patchedLocaleSource = await localeResponse.text();
-    assert.match(
-      patchedLocaleSource,
-      /__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__=!0/,
-    );
-    assert.doesNotMatch(
-      patchedLocaleSource,
-      /let s=o,c=a\?\.get\(`locale_source`,`IDE`\),l=bp\(Au\.localeOverride\)/,
-    );
-    delete globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__;
-    const resolveLocale = Function(`${patchedLocaleSource};return resolveLocale`)();
-    assert.deepEqual(
-      resolveLocale(
-        { get: () => false },
-        () => "en-US",
-        { localeOverride: {} },
-      ),
-      { enabled: true, source: "SYSTEM", locale: "zh-CN" },
-    );
-    assert.equal(
-      globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__,
-      true,
-    );
-    delete globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__;
-
     const localePropsSource = [
       "function provider(E){return E.localeOverride}",
       "function resolveProps(a,o,r,H3){const dynamicConfigId=`72216192`;",
@@ -785,17 +749,8 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     const localePropsResponse = await installedHandler({
       url: "app://-/assets/app-initial-26903.js",
     });
-    const patchedLocaleProps = await localePropsResponse.text();
-    const resolveProps = Function(`${patchedLocaleProps};return resolveProps`)();
-    for (const override of [undefined, "en-US"]) {
-      assert.deepEqual(
-        resolveProps({ ideLocale: "en-US", systemLocale: "en-US" }, { get: () => false }, override,
-          (locale) => locale?.startsWith("en") ?? false),
-        { enabled: true, source: "SYSTEM", locale: "zh-CN", english: false },
-      );
-    }
-    assert.equal(globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__, true);
-    delete globalThis.__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__;
+    // Codex owns the UI language, so its locale resolver must reach the renderer unchanged.
+    assert.equal(await localePropsResponse.text(), localePropsSource);
 
     const ownerDiscoverySource = [
       "async function maybeResume(Bm,f,n,t){",
@@ -1151,14 +1106,11 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
         productionSource,
         "the production renderer asset should receive compatible Codey gates",
       );
-      if (productionSource.includes("locale_source")) {
-        assert.match(patchedProductionSource, /__CODEY_DEFAULT_CHINESE_LOCALE_RENDERER_PATCH__=!0/);
-      }
       const currentGateFailures = patchErrors
         .slice(previousErrorCount)
         .map(([message]) => String(message))
         .filter((message) =>
-          /default Chinese locale|model allowlist|model visibility|model-aware service tier control|model-aware Fast toggle|fast model trigger availability/.test(
+          /model allowlist|model visibility|model-aware service tier control|model-aware Fast toggle|fast model trigger availability/.test(
             message,
           ),
         );
