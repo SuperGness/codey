@@ -313,6 +313,28 @@ export function App({
     };
   }, []);
 
+  const refreshPluginRoutesRef = useRef<() => void>(() => undefined);
+  refreshPluginRoutesRef.current = () => {
+    void invoke<{
+      config: Config;
+      providerStatus?: ProviderStatus;
+      modelState?: ModelState;
+    }>("load_codey_config")
+      .then((result) => {
+        const merged = adoptRouteConfig(result.config);
+        if (!merged) return;
+        setDirty(merged.dirty);
+        if (result.providerStatus) setProviderStatus(result.providerStatus);
+        if (result.modelState) setModelState(result.modelState);
+      })
+      .catch(() => undefined);
+  };
+  useEffect(() => {
+    const refresh = () => refreshPluginRoutesRef.current();
+    window.addEventListener("codey:plugin-routes-changed", refresh);
+    return () => window.removeEventListener("codey:plugin-routes-changed", refresh);
+  }, []);
+
   async function load() {
     const generation = ++loadGenerationRef.current;
     const current = () => generation === loadGenerationRef.current;

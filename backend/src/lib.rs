@@ -31,6 +31,7 @@ mod pending_approval;
 mod pet_slim_patch;
 mod plugin_log_terminal;
 mod plugin_marketplace;
+mod plugin_routes;
 mod process_cleanup;
 mod process_tree;
 mod prompt_optimization;
@@ -172,9 +173,10 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
     // system root store) are synchronous; keep them off the async workers.
     let state = tokio::task::spawn_blocking(|| {
         error_log::initialize();
-        let state = AppState::default();
+        let state = Arc::new(AppState::default());
         let configured_codex_app_path = state.config.blocking_read().codex_app_path.clone();
         error_log::refresh_codex_app_version(None, Some(&configured_codex_app_path));
+        commands::install_plugin_route_handler(Arc::clone(&state));
         let plugin_root = codey_runtime_core::paths::default_app_state_dir().join("codey-plugins");
         if let Err(error) = codey_plugins::initialize(plugin_root) {
             error_log::record_failure(
@@ -187,7 +189,6 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
         state
     })
     .await
-    .map(Arc::new)
     .context("初始化 Codey 状态的任务异常退出")?;
     let _plugin_shutdown = PluginShutdownGuard;
     let codex_home = codex_config::codex_home();

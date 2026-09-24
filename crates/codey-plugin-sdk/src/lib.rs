@@ -5,6 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 
 pub mod lifecycle;
+pub mod provider;
 
 pub use serde_json;
 use serde_json::Value;

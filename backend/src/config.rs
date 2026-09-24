@@ -40,6 +40,12 @@ pub struct ProviderProfile {
     /// Stable id of the provider in the source Codex configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_provider_id: Option<String>,
+    /// 这条线路由启用中的原生插件登记。用户填写密钥并改动线路后会清空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_owner_id: Option<String>,
+    /// 上次由插件提交并写入的线路描述，用来判断用户是否改过线路本身。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_route_spec: Option<crate::codey_plugins::PluginRouteSpec>,
     #[serde(default)]
     pub official_account: bool,
     /// Codey account id when this route is derived from one stored official
@@ -227,6 +233,8 @@ impl ProviderProfile {
             model_request_headers: BTreeMap::new(),
             upstream_proxy: String::new(),
             source_provider_id: None,
+            plugin_owner_id: None,
+            plugin_route_spec: None,
             official_account: false,
             official_account_id: None,
             supports_remote_compaction: false,
@@ -405,7 +413,7 @@ impl ProviderProfile {
         }
         validate_outbound_api_url(base_url, &format!("线路「{name}」的 API URL"))?;
         self.runtime_wire_api()?;
-        if self.api_key.trim().is_empty() {
+        if self.api_key.trim().is_empty() && self.plugin_owner_id.is_none() {
             return Err(format!("线路「{name}」缺少第三方 API Key"));
         }
         Ok(())
@@ -1726,6 +1734,16 @@ impl CodeyConfig {
                 .profiles
                 .iter()
                 .any(|profile| profile.enabled && profile.official_account)
+    }
+
+    pub(crate) fn allocate_route_short_name(&self, name: &str) -> String {
+        let used = self
+            .profiles
+            .iter()
+            .map(|profile| profile.short_name.trim().to_string())
+            .filter(|short_name| !short_name.is_empty())
+            .collect::<BTreeSet<_>>();
+        unique_default_route_short_name(name, &used)
     }
 
     pub(crate) fn looks_like_empty_default_route(&self) -> bool {

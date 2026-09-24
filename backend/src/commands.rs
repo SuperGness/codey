@@ -1908,6 +1908,43 @@ async fn save_codey_config_locked(
     })
 }
 
+pub(crate) fn install_plugin_route_handler(state: Arc<AppState>) {
+    let state = Arc::clone(&state);
+    crate::codey_plugins::set_route_handler(Arc::new(move |plugin_id, change| {
+        apply_plugin_route_change(&state, plugin_id, change)
+    }));
+}
+
+fn apply_plugin_route_change(
+    state: &AppState,
+    plugin_id: &str,
+    change: crate::codey_plugins::RouteChange,
+) -> Result<Option<String>, String> {
+    let _write_guard = state.config_write_lock.blocking_lock();
+    let current = state.config.blocking_read().clone();
+    let mut next = current.clone();
+    let route_id = match change {
+        crate::codey_plugins::RouteChange::Upsert {
+            spec,
+            create_if_missing,
+        } => crate::plugin_routes::upsert(&mut next, plugin_id, spec, create_if_missing)?,
+        crate::codey_plugins::RouteChange::Release => {
+            crate::plugin_routes::release(&mut next, plugin_id);
+            None
+        }
+    };
+    if next == current {
+        return Ok(route_id);
+    }
+    next.settings_revision = current.settings_revision.saturating_add(1);
+    let stored = state
+        .store
+        .persist(next)
+        .map_err(|error| format!("{error:#}"))?;
+    *state.config.blocking_write() = stored;
+    Ok(route_id)
+}
+
 fn merge_profile_secrets(
     mut profiles: Vec<crate::config::ProviderProfile>,
     previous: &CodeyConfig,
@@ -1944,6 +1981,10 @@ fn merge_profile_secrets(
                 profile.official_account = previous_profile.official_account;
                 profile.supports_remote_compaction = previous_profile.supports_remote_compaction;
             }
+            crate::plugin_routes::retain_plugin_ownership(profile, previous_profile)?;
+        } else {
+            profile.plugin_owner_id = None;
+            profile.plugin_route_spec = None;
         }
         profile.normalize();
         // 线路名上限与渲染层一致。旧配置里已经超限的名称只要这次没有改动就

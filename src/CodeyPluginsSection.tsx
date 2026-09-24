@@ -105,11 +105,18 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
     args: Record<string, unknown>,
   ) => {
     const generation = epoch.current;
+    const touchesRoutes = command === "set_codey_plugin_enabled" || command === "uninstall_codey_plugin";
     try {
       const data = await invoke(command, args);
       if (epoch.current !== generation) throw new Error("操作已过期");
       accept(data);
+      if (touchesRoutes) {
+        window.dispatchEvent(new CustomEvent("codey:plugin-routes-changed"));
+      }
     } catch (cause) {
+      if (touchesRoutes) {
+        window.dispatchEvent(new CustomEvent("codey:plugin-routes-changed"));
+      }
       if (epoch.current === generation) {
         try {
           await refresh();

@@ -76,6 +76,15 @@ test("plugin package defaults to an empty configuration object", options, t => {
   assert.equal(archive(f.output)["config.json"].toString(), "{}\n");
 });
 
+test("plugin package can declare a provider route without lifecycle permissions", options, t => {
+  const f = fixture(t);
+  const result = f.run(["--capability", "provider.route.v1"]);
+  assert.equal(result.status, 0, result.stderr);
+  const manifest = JSON.parse(archive(f.output)["manifest.json"]);
+  assert.deepEqual(manifest.capabilities, ["provider.route.v1"]);
+  assert.equal(manifest.responseHeaderNames, undefined);
+});
+
 test("plugin package declares lifecycle controls and permissions", options, t => {
   const f = fixture(t);
   const result = f.run(["--capability", "request.lifecycle.v1", "--capability", "request.lifecycle.auth",

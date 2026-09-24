@@ -389,6 +389,8 @@ fn profile_from_provider(
         model_request_headers: BTreeMap::new(),
         upstream_proxy: String::new(),
         source_provider_id: None,
+        plugin_owner_id: None,
+        plugin_route_spec: None,
         official_account: provider.official,
         official_account_id: None,
         supports_remote_compaction: provider.supports_remote_compaction,

@@ -34,6 +34,8 @@
 
 其他管理方法由插件自行定义，通过 `invoke_codey_plugin` 调用。`request.beforeSend`、`request.afterHeaders`、`request.resume`、`request.completed`、`request.failed` 和 `request.cancelled` 只由宿主调度，管理接口会拒绝同名调用。完整的权限、事件、动作及传输边界见 [请求生命周期协议](REQUEST_LIFECYCLE.md)。
 
+声明 `provider.route.v1` 后，宿主在启用时调用 `provider.describe`。返回对象包含 `name`、`baseUrl`、`upstreamProtocol`（`openaiResponses`、`openaiChatCompletions` 或 `anthropicMessages`）、至少 1 个且最多 32 个 `models`，以及可选 `headers`。线路名最多 15 个字符。请求头不能携带密钥，名称限制与生命周期相同。密钥由用户填写在线路上。该调用不能通过管理接口进入。插件不提供自己的传输实现。
+
 ## 示例
 
 `examples/plugins/header-demo` 演示配置、`ping` 方法和请求头扩展。在仓库根目录执行：

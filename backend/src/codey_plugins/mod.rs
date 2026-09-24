@@ -1,6 +1,9 @@
 //! Codey 原生插件平台。安装不执行代码，用户显式启用后加载可信动态库。
 pub mod lifecycle;
 mod logs;
+mod provider;
+
+pub(crate) use provider::{PluginRouteSpec, RouteChange, set_route_handler};
 mod native;
 mod package;
 
@@ -77,6 +80,9 @@ struct Record {
     directory: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     load_error: Option<String>,
+    /// 最近一次由这个插件登记的线路。用户删掉线路后，启动时不再补回，直到再次启用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    route_profile_id: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -276,6 +282,7 @@ fn disable_plugin(id: &str) -> Result<PluginList, String> {
     let mut state = manager.state.clone();
     state.plugins.get_mut(id).unwrap().enabled = false;
     state.plugins.get_mut(id).unwrap().load_error = None;
+    state.plugins.get_mut(id).unwrap().route_profile_id = None;
     manager.commit(state)?;
     let old = manager.live.remove(id);
     manager.errors.remove(id);
@@ -284,6 +291,7 @@ fn disable_plugin(id: &str) -> Result<PluginList, String> {
     let result = manager.list();
     drop(manager);
     drop(old); // In-flight Arc references finish before destroy runs.
+    provider::release_route(id)?;
     Ok(result)
 }
 
@@ -336,12 +344,22 @@ fn finish_enable(id: &str, mut reservation: LoadingReservation) -> Result<Plugin
         }
     };
     // 原生 create 与 destroy 一样不能占着管理锁：慢初始化会挡住其他插件的启停和列表。
-    let native = match Native::load(
+    let mut native = match Native::load(
         &prepared.library_path,
         prepared.config.clone(),
         prepared.context.clone(),
     ) {
         Ok(native) => native,
+        Err(error) => {
+            if let Ok(mut guard) = manager() {
+                guard.note_enable_failure(id, &error);
+                reservation.release(&mut guard);
+            }
+            return Err(error);
+        }
+    };
+    let route = match provider::describe_if_declared(&prepared.manifest, &mut native) {
+        Ok(route) => route,
         Err(error) => {
             if let Ok(mut guard) = manager() {
                 guard.note_enable_failure(id, &error);
@@ -393,7 +411,44 @@ fn finish_enable(id: &str, mut reservation: LoadingReservation) -> Result<Plugin
     }
     // 与提交启用状态同一把锁内解除占位，避免析构清掉下一次启用。
     reservation.release(&mut guard);
-    commit_enabled(guard, id, true)
+    let list = commit_enabled(guard, id, true)?;
+    if let Some(spec) = route
+        && let Err(error) = publish_enabled_route(id, spec, true)
+    {
+        let _ = disable_plugin(id);
+        if let Ok(mut guard) = manager() {
+            guard.note_enable_failure(id, &error);
+        }
+        return Err(error);
+    }
+    Ok(list)
+}
+
+fn publish_enabled_route(
+    id: &str,
+    spec: provider::PluginRouteSpec,
+    create_if_missing: bool,
+) -> Result<(), String> {
+    let route_id = provider::publish_route(id, spec, create_if_missing)?;
+    let mut guard = manager()?;
+    if !guard
+        .state
+        .plugins
+        .get(id)
+        .is_some_and(|record| record.enabled)
+    {
+        drop(guard);
+        provider::release_route(id)?;
+        return Err("插件已停用".into());
+    }
+    if route_id.is_none() {
+        return Ok(());
+    }
+    let mut state = guard.state.clone();
+    if let Some(record) = state.plugins.get_mut(id) {
+        record.route_profile_id = route_id;
+    }
+    guard.commit(state)
 }
 
 fn commit_enabled(
@@ -445,14 +500,21 @@ pub fn uninstall(id: &str, remove_data: bool) -> Result<PluginList, String> {
     if !package::valid_id(id) {
         return Err("插件 ID 无效".into());
     }
-    let mut manager = manager()?;
-    manager.uninstall(id, remove_data)?;
-    Ok(manager.list())
+    let list = {
+        let mut manager = manager()?;
+        manager.uninstall(id, remove_data)?;
+        manager.list()
+    };
+    provider::release_route(id)?;
+    Ok(list)
 }
 
 pub fn invoke(id: &str, method: &str, params: Value) -> Result<Value, String> {
     if codey_plugin_sdk::lifecycle::HOST_METHODS.contains(&method) {
         return Err("该方法由宿主在请求生命周期中调用，不能通过管理接口调用".into());
+    }
+    if method == provider::DESCRIBE_METHOD {
+        return Err("该方法由宿主在启用插件时调用，不能通过管理接口调用".into());
     }
     let instance = {
         manager()?
@@ -822,6 +884,7 @@ impl Manager {
                 enabled,
                 directory: directory.clone(),
                 load_error: None,
+                route_profile_id: None,
             },
         );
         if let Err(e) = self.commit(state) {
@@ -921,13 +984,42 @@ impl Manager {
 
     fn load(&mut self, id: &str) -> Result<(), String> {
         let prepared = self.prepare_load(id)?;
-        let native = Native::load(
+        let mut native = Native::load(
             &prepared.library_path,
             prepared.config.clone(),
             prepared.context.clone(),
         )?;
+        let route = provider::describe_if_declared(&prepared.manifest, &mut native)?;
+        let create_if_missing = self
+            .state
+            .plugins
+            .get(id)
+            .is_none_or(|record| record.route_profile_id.is_none());
         self.publish_prepared(&prepared, native)
-            .map_err(|(_, error)| error)
+            .map_err(|(_, error)| error)?;
+        if let Some(spec) = route {
+            let route_id = match provider::publish_route(id, spec, create_if_missing) {
+                Ok(route_id) => route_id,
+                Err(error) => {
+                    let removed = self.live.remove(id);
+                    drop(removed);
+                    return Err(error);
+                }
+            };
+            if let Some(route_id) = route_id {
+                let mut state = self.state.clone();
+                if let Some(record) = state.plugins.get_mut(id) {
+                    record.route_profile_id = Some(route_id);
+                }
+                if let Err(error) = self.commit(state) {
+                    let _ = provider::release_route(id);
+                    let removed = self.live.remove(id);
+                    drop(removed);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn prepare_load(&self, id: &str) -> Result<PreparedLoad, String> {
@@ -1773,6 +1865,8 @@ mod tests {
             let error = invoke("test.boundary", method, json!({})).unwrap_err();
             assert!(error.contains("生命周期"), "{method}: {error}");
         }
+        let describe = invoke("test.boundary", provider::DESCRIBE_METHOD, json!({})).unwrap_err();
+        assert!(describe.contains("启用插件"), "{describe}");
         let ordinary = invoke("test.boundary", "ping", json!({})).unwrap_err();
         assert!(!ordinary.contains("生命周期"), "{ordinary}");
     }
