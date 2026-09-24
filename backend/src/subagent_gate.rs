@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::subagent::protocol::{self, AgentState as ObservedAgentState};
-use crate::subagent::rules::{RuleActor, RuleContext, RuleEffect, ToolClass};
+use crate::subagent::rules::{self, RuleActor, RuleContext, RuleEffect, ToolClass};
 use crate::subagent::{
     api::TraceContext,
     telemetry::{ExecutionStatus, SubagentTraceEvent, TraceEventKind, TraceRecorder},
@@ -21,6 +21,7 @@ mod runtime_policy;
 mod state;
 #[cfg(test)]
 mod tests;
+mod tool_capability_cache;
 
 use read_only_sql::database_mcp_is_read_only;
 use runtime_policy::{RuntimeSubagentPolicy, read_optional_runtime_policy_file};
@@ -29,6 +30,7 @@ pub(crate) use runtime_policy::{
     commit_runtime_subagent_policy, runtime_subagent_policy_matches, runtime_subagent_policy_paths,
 };
 use state::*;
+use tool_capability_cache::{cached_read_only_class, looks_read_only, record_read_only};
 
 pub(crate) const HOOK_ARGUMENT: &str = "--codey-subagent-gate-hook";
 pub(crate) const COMBINED_HOOK_ARGUMENT: &str = "--codey-subagent-gate-hook-with-fastctx";
@@ -1182,6 +1184,23 @@ fn post_tool_use_output(
     let Some(tool_name) = input.tool_name.as_deref() else {
         return Ok(json!({}));
     };
+    if !input_has_subagent_context(input)
+        && rules::classify_tool(tool_name) == ToolClass::Unknown
+        && looks_read_only(tool_name)
+        && input
+            .tool_response
+            .as_ref()
+            .is_some_and(tool_response_is_successful)
+    {
+        let policy_revision = rules::load_logged(state_root).rules.revision;
+        let _ = record_read_only(
+            state_root,
+            tool_name,
+            input.tool_input.as_ref(),
+            policy_revision,
+            now_ms,
+        );
+    }
     if is_contract_spawn_tool(tool_name) {
         crate::subagent_orchestrator::post_spawn(
             state_root,
@@ -2371,6 +2390,31 @@ fn root_read_tool_allowed(state_root: &Path, tool_name: &str, tool_input: Option
         })
         .effect
         == RuleEffect::Allow
+}
+
+fn tool_response_is_successful(response: &Value) -> bool {
+    let Some(object) = response.as_object() else {
+        return true;
+    };
+    if object.contains_key("error") || object.contains_key("errors") {
+        return false;
+    }
+    !object
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| matches!(status, "error" | "failed" | "rejected"))
+}
+
+pub(crate) fn cached_read_only_tool(
+    state_root: &Path,
+    tool_name: &str,
+    tool_input: Option<&Value>,
+    policy_revision: u64,
+) -> bool {
+    if cached_read_only_class(state_root, tool_name, tool_input, policy_revision).is_some() {
+        return true;
+    }
+    false
 }
 
 fn root_read_tool_class(tool_name: &str, tool_input: Option<&Value>) -> Option<ToolClass> {

@@ -3,6 +3,7 @@ pub mod lifecycle;
 mod logs;
 mod provider;
 
+#[allow(unused_imports)]
 pub(crate) use provider::{PluginRouteSpec, RouteChange, set_route_handler};
 mod native;
 mod package;

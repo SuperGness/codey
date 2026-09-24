@@ -31,6 +31,7 @@ pub struct PluginRouteSpec {
     pub short_name: String,
 }
 
+#[allow(dead_code)]
 pub enum RouteChange {
     Upsert {
         spec: PluginRouteSpec,
@@ -43,6 +44,7 @@ type RouteHandler = Arc<dyn Fn(&str, RouteChange) -> Result<Option<String>, Stri
 
 static ROUTE_HANDLER: Mutex<Option<RouteHandler>> = Mutex::new(None);
 
+#[allow(dead_code)]
 pub(crate) fn set_route_handler(handler: RouteHandler) {
     *ROUTE_HANDLER
         .lock()

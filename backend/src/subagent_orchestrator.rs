@@ -49,6 +49,7 @@ const MAX_TRANSCRIPT_METADATA_LINE_BYTES: usize = 1024 * 1024;
 const MAX_SPAWN_RESPONSE_JSON_BYTES: usize = 64 * 1024;
 const MAX_LEDGER_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_QUARANTINE_FILES_PER_SESSION: usize = 3;
+const MAX_FOLLOWUPS_PER_ATTEMPT: u32 = 3;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SessionLedger {
@@ -128,6 +129,8 @@ struct Reservation {
     spawn_failed: bool,
     #[serde(default)]
     pending_init_observed_at_ms: Option<u64>,
+    #[serde(default)]
+    followup_count: u32,
 }
 
 const fn default_fencing_token() -> u64 {
@@ -842,6 +845,7 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
             fenced_at_ms: None,
             spawn_failed: false,
             pending_init_observed_at_ms: None,
+            followup_count: 0,
         },
     );
     store.save(&mut ledger, now_ms)?;
@@ -998,7 +1002,7 @@ pub(crate) fn pre_followup_task(
         )));
     };
     let store = LedgerStore::open(state_root, session_id)?;
-    let Some(ledger) = store.load(runtime_id, session_id, now_ms)? else {
+    let Some(mut ledger) = store.load(runtime_id, session_id, now_ms)? else {
         return Ok(Some(followup_without_active_attempt_denial(
             target,
             "当前会话没有可验证的活动委派账本",
@@ -1010,12 +1014,24 @@ pub(crate) fn pre_followup_task(
             "target 无法匹配当前账本中的 reservation",
         )));
     };
-    let reservation = &ledger.reservations[&task_id];
+    let reservation = ledger
+        .reservations
+        .get_mut(&task_id)
+        .expect("resolved task");
     if reservation.state == ReservationState::Running
         && reservation.agent_id_hash.is_some()
         && reservation.fenced_at_ms.is_none()
         && !reservation.spawn_failed
     {
+        if reservation.followup_count >= MAX_FOLLOWUPS_PER_ATTEMPT {
+            return Ok(Some(format!(
+                "{FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT_ERROR_CODE}: attempt `{}` 已达到 follow-up 上限 {}；请由主代理接管，或使用新的 task_name 派发范围实质变化的任务。",
+                reservation.attempt_id, MAX_FOLLOWUPS_PER_ATTEMPT
+            )));
+        }
+        reservation.followup_count += 1;
+        reservation.updated_at_ms = now_ms;
+        store.save(&mut ledger, now_ms)?;
         return Ok(None);
     }
     if reservation.state == ReservationState::Pending && reservation.fenced_at_ms.is_none() {
@@ -2096,7 +2112,17 @@ pub(crate) fn authorize_child_tool_with_context(
         tool_input,
     } = context;
     let loaded_rules = rules::load_logged(state_root);
-    let tool_class = rules::classify_tool(tool_name);
+    let mut tool_class = rules::classify_tool(tool_name);
+    if tool_class == ToolClass::Unknown
+        && crate::subagent_gate::cached_read_only_tool(
+            state_root,
+            tool_name,
+            tool_input,
+            loaded_rules.rules.revision,
+        )
+    {
+        tool_class = ToolClass::Read;
+    }
     let store = LedgerStore::open(state_root, session_id)?;
     let mut ledger = store.load(runtime_id, session_id, now_ms)?;
     let agent_hash = hash_component(agent_id);
