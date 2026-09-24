@@ -1782,6 +1782,139 @@ async fn local_responses_websocket_rejects_missing_router_token() {
 }
 
 #[tokio::test]
+async fn task_activity_is_readable_without_the_router_token() {
+    let (config, _, _) = router_config("http://127.0.0.1:9/v1".into());
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let url = reqwest::Url::parse(&endpoint.base_url).unwrap();
+    let mut stream = TcpStream::connect((url.host_str().unwrap(), url.port().unwrap()))
+        .await
+        .unwrap();
+    let body = r#"{"schema":"codey.appserver.v1","call":"codey://getTasks"}"#;
+    stream
+        .write_all(
+            format!(
+                "POST /codey/api/appserver HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut rejected = String::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_string(&mut rejected))
+        .await
+        .expect("task counts should reject an anonymous request")
+        .unwrap();
+    assert!(rejected.starts_with("HTTP/1.1 401 "), "{rejected}");
+    assert!(rejected.contains("invalid_router_token"), "{rejected}");
+
+    let mut stream = TcpStream::connect((url.host_str().unwrap(), url.port().unwrap()))
+        .await
+        .unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST /codey/api/appserver HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                endpoint.token,
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        stream.read_to_string(&mut response),
+    )
+    .await
+    .expect("task counts should respond")
+    .unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+    assert!(
+        response.contains("\"schema\":\"codey.appserver.v1\""),
+        "{response}"
+    );
+    assert!(response.contains("\"running\""), "{response}");
+    assert!(response.contains("\"failed\""), "{response}");
+    assert!(!response.contains(&endpoint.token), "{response}");
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn app_server_call_rejects_an_invalid_method_without_the_router_token() {
+    let (config, _, _) = router_config("http://127.0.0.1:9/v1".into());
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let url = reqwest::Url::parse(&endpoint.base_url).unwrap();
+    let mut stream = TcpStream::connect((url.host_str().unwrap(), url.port().unwrap()))
+        .await
+        .unwrap();
+    stream
+        .write_all(
+            b"POST /codey/api/appserver HTTP/1.1\r\nHost: localhost\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        )
+        .await
+        .unwrap();
+    let mut rejected = String::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_string(&mut rejected))
+        .await
+        .expect("anonymous app-server call should be rejected")
+        .unwrap();
+    assert!(rejected.starts_with("HTTP/1.1 401 "), "{rejected}");
+    assert!(rejected.contains("invalid_router_token"), "{rejected}");
+
+    let mut stream = TcpStream::connect((url.host_str().unwrap(), url.port().unwrap()))
+        .await
+        .unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST /codey/api/appserver HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+                endpoint.token
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_string(&mut response))
+        .await
+        .expect("invalid app-server call should respond")
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
+    assert!(response.contains("\"error\""), "{response}");
+    assert!(!response.contains(&endpoint.token), "{response}");
+
+    let method =
+        r#"{"schema":"codey.appserver.v1","call":"codey://appServer/thread/list","params":{}}"#;
+    let mut stream = TcpStream::connect((url.host_str().unwrap(), url.port().unwrap()))
+        .await
+        .unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST /codey/api/appserver HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{method}",
+                endpoint.token,
+                method.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut response = String::new();
+    tokio::time::timeout(Duration::from_secs(2), stream.read_to_string(&mut response))
+        .await
+        .expect("unlisted app-server method should be rejected")
+        .unwrap();
+    assert!(response.starts_with("HTTP/1.1 400 "), "{response}");
+    assert!(response.contains("\"error\""), "{response}");
+    assert!(!response.contains(&endpoint.token), "{response}");
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn idle_connection_receives_a_request_timeout_without_a_router_failure() {
     let (config, _, _) = router_config("http://127.0.0.1:9/v1".into());
     let router = LocalRouter::start(&config).await.unwrap();

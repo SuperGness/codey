@@ -90,6 +90,13 @@ impl ResponsesDownstream for CapturedDownstream {
 
 fn test_server(config: &CodeyConfig) -> RouterServer {
     RouterServer {
+        endpoint: RuntimeRouterEndpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            token: "test-router".into(),
+            supports_websockets: false,
+            supports_remote_compaction: false,
+            requires_openai_auth: false,
+        },
         token: "test-router".into(),
         bearer_token: "Bearer test-router".into(),
         snapshot: Arc::new(RwLock::new(Arc::new(RouterSnapshot::from_config(config)))),

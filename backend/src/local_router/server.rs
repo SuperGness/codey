@@ -163,6 +163,7 @@ impl LocalRouter {
             );
         }
         let server = RouterServer {
+            endpoint: endpoint.clone(),
             token: endpoint.token.clone(),
             bearer_token: format!("Bearer {}", endpoint.token),
             snapshot: Arc::clone(&snapshot),
@@ -373,6 +374,7 @@ impl LocalRouter {
                 stats.shutdown_timeouts,
             );
         }
+        crate::appserver_call::shutdown().await;
         task_result
     }
 }
@@ -458,6 +460,7 @@ fn enable_downstream_keepalive(stream: &TcpStream) {
 }
 
 pub(crate) struct RouterServer {
+    pub(crate) endpoint: RuntimeRouterEndpoint,
     pub(crate) token: String,
     pub(crate) bearer_token: String,
     pub(crate) snapshot: Arc<RwLock<Arc<RouterSnapshot>>>,

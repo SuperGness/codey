@@ -120,6 +120,7 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
     let mut capabilities = HashSet::new();
     if manifest.capabilities.iter().any(|s| {
         ![
+            codey_plugin_sdk::appserver::CAPABILITY,
             codey_plugin_sdk::lifecycle::CAPABILITY,
             codey_plugin_sdk::lifecycle::AUTH_CAPABILITY,
             codey_plugin_sdk::provider::CAPABILITY,
@@ -315,6 +316,7 @@ mod tests {
             serde_json::json!({"capabilities":["request.lifecycle.v1"],"headerNames":["x-test"]}),
             serde_json::json!({"capabilities":["request.lifecycle.v1"]}),
             serde_json::json!({"capabilities":["provider.route.v1"]}),
+            serde_json::json!({"capabilities":["appserver.call.v1"]}),
             serde_json::json!({"capabilities":["request.lifecycle.v1","request.lifecycle.auth"],"responseHeaderNames":["content-type","x-test"],"lifecycleFailurePolicy":"continue","lifecycleMaxWaitMs":600000}),
         ] {
             let mut value = base.clone();

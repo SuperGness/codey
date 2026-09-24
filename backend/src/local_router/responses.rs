@@ -72,6 +72,69 @@ impl RouterServer {
             write_json_response(&mut stream, 200, &json!({"status":"ok"})).await?;
             return Ok(());
         }
+        // 与本地路由使用同一地址和令牌。没有令牌不会统计，也不会启动共享 app-server。
+        if pending.request.method == "POST"
+            && pending.request.path == crate::appserver_call::HTTP_PATH
+        {
+            if !self.authorized(&pending.request) {
+                self.record_rejected_request(
+                    &pending.request,
+                    "http_rejected",
+                    401,
+                    "invalid_router_token",
+                );
+                write_error_response(
+                    &mut stream,
+                    401,
+                    "invalid_router_token",
+                    "Codey 本地路由认证失败",
+                    None,
+                )
+                .await?;
+                return Ok(());
+            }
+            if crate::appserver_call::call_is_too_large(pending.content_length) {
+                write_error_response(
+                    &mut stream,
+                    413,
+                    "request_too_large",
+                    "app-server 请求过大",
+                    None,
+                )
+                .await?;
+                return Ok(());
+            }
+            let request = match read_http_request_body_with_budget(
+                &mut stream,
+                pending,
+                Some(&self.request_body_budget),
+            )
+            .await
+            {
+                Ok(request) => request,
+                Err(_) => {
+                    write_error_response(
+                        &mut stream,
+                        400,
+                        "invalid_http_request",
+                        "读取 app-server 请求失败",
+                        None,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            let route = crate::appserver_call::Route {
+                base_url: self.endpoint.base_url.clone(),
+                token: self.endpoint.token.clone(),
+                requires_openai_auth: self.endpoint.requires_openai_auth,
+                supports_websockets: self.endpoint.supports_websockets,
+                supports_remote_compaction: self.endpoint.supports_remote_compaction,
+            };
+            let (status, body) = crate::appserver_call::handle(&route, &request.body).await;
+            write_json_response(&mut stream, status, &body).await?;
+            return Ok(());
+        }
         if pending.request.method == "GET" && pending.request.path == REQUEST_LOG_PAGE_PATH {
             write_static_response(
                 &mut stream,

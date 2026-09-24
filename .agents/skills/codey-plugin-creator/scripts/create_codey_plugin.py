@@ -46,7 +46,7 @@ def main() -> int:
     parser.add_argument("--display-name")
     parser.add_argument("--version", default="0.1.0")
     parser.add_argument("--sdk-path", default="../../../crates/codey-plugin-sdk")
-    parser.add_argument("--capability", action="append", choices=["request.lifecycle.v1", "request.lifecycle.auth", "provider.route.v1"], default=[])
+    parser.add_argument("--capability", action="append", choices=["request.lifecycle.v1", "request.lifecycle.auth", "provider.route.v1", "appserver.call.v1"], default=[])
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 

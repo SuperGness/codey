@@ -20,7 +20,7 @@ metadata:
 1. 读取仓库根目录、`../../../crates/codey-plugin-sdk/README.md`、相关协议参考和现有示例；确认目标平台、架构、插件 ID、版本、能力和配置字段。
 2. 使用 `scripts/create_codey_plugin.py` 生成最小 crate，或在已有 crate 上增量修改；不要覆盖用户文件，除非用户明确要求 `--force`。
 3. 实现 `Plugin::create` 和 `Plugin::invoke`，通过 `codey_plugin_sdk::export_plugin!` 导出入口。初始化时校验配置，方法名使用明确的命名空间，未知方法返回错误。
-4. 只声明实际实现的能力：普通管理方法不需要 capability；请求生命周期使用 `request.lifecycle.v1`，认证上下文额外声明 `request.lifecycle.auth`；线路描述使用 `provider.route.v1`。
+4. 只声明实际实现的能力：普通管理方法不需要 capability；请求生命周期使用 `request.lifecycle.v1`，认证上下文额外声明 `request.lifecycle.auth`；线路描述使用 `provider.route.v1`；查询任务数量使用 `appserver.call.v1`。
 5. 将持久状态写入 `PluginContext.data_dir` 的固定文件名，日志使用 `context.log`；限制文件大小、拒绝调用方提供的任意路径，不写入凭据、请求正文或认证上下文。
 6. 运行 `cargo fmt --check`、`cargo check` 和适合的 `cargo test`，再使用仓库的 `../../../scripts/package-plugin.py` 生成 `.codey-plugin`。打包前确认动态库、平台、架构和配置模板匹配。
 7. 交付前检查安装包只包含 `manifest.json`、`config.json` 和入口动态库，校验 SHA-256、配置是 UTF-8 JSON 对象且不超过 1 MiB；说明导入后默认停用，需要用户显式启用。
@@ -56,6 +56,7 @@ python3 scripts/package-plugin.py \
 - 普通插件：实现自定义管理方法，不声明 capability；适合配置、持久化、健康检查和本地业务。
 - 请求生命周期：仅修改已声明的请求头，严格遵守阶段允许的动作；不要尝试修改正文、URL、认证头或流式正文。
 - 线路描述：返回固定的 `name`、`baseUrl`、`upstreamProtocol` 和有限模型列表；不要在插件中实现传输或保存密钥。
+- 任务数量：声明 `appserver.call.v1` 后发送 `{"schema":"codey.appserver.v1","call":"codey://getTasks"}`，只使用结果里的 `running` 和 `failed`。
 - 多能力插件：逐项验证宿主调度入口，避免把生命周期事件暴露为普通管理方法。
 
 ## 安全与兼容边界

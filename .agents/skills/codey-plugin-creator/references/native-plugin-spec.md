@@ -41,6 +41,8 @@ codey_plugin_sdk::export_plugin!(MyPlugin);
 
 ## 线路能力
 
+声明 `appserver.call.v1` 后，插件发送 `{"schema":"codey.appserver.v1","call":"codey://getTasks"}` 查看正在运行和失败的任务数量。未列入该 schema 的调用不会执行。
+
 声明 `provider.route.v1` 后，宿主在启用时调用 `provider.describe`。返回对象至少包含一个模型，协议只能使用 `openaiResponses`、`openaiChatCompletions` 或 `anthropicMessages`。线路名最多 15 个字符；头部不能携带密钥，密钥由用户在线路配置中填写。
 
 ## 配置、数据与日志

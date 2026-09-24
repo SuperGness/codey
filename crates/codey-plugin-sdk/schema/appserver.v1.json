@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "codey.appserver.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "call"],
+  "properties": {
+    "schema": { "const": "codey.appserver.v1" },
+    "call": { "const": "codey://getTasks" }
+  }
+}
