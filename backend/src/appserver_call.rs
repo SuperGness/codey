@@ -193,16 +193,28 @@ impl SharedClient {
         tokio::time::timeout(timeout, async {
             loop {
                 let mut line = Vec::new();
-                let read = self
-                    .stdout
-                    .read_until(b'\n', &mut line)
-                    .await
-                    .map_err(|_| "无法读取 app-server")?;
-                if read == 0 {
-                    return Err("app-server 已退出".into());
-                }
-                if line.len() > MAX_RESPONSE_BYTES {
-                    return Err("app-server 响应过大".into());
+                loop {
+                    let buffer = self
+                        .stdout
+                        .fill_buf()
+                        .await
+                        .map_err(|_| "无法读取 app-server")?;
+                    if buffer.is_empty() {
+                        if line.is_empty() {
+                            return Err("app-server 已退出".into());
+                        }
+                        return Err("app-server 响应无效".into());
+                    }
+                    let newline = buffer.iter().position(|&byte| byte == b'\n');
+                    let available = newline.map_or(buffer.len(), |index| index + 1);
+                    if line.len() + available > MAX_RESPONSE_BYTES {
+                        return Err("app-server 响应过大".into());
+                    }
+                    line.extend_from_slice(&buffer[..available]);
+                    self.stdout.consume(available);
+                    if newline.is_some() {
+                        break;
+                    }
                 }
                 let message: Value =
                     serde_json::from_slice(line.trim_ascii()).map_err(|_| "app-server 响应无效")?;
