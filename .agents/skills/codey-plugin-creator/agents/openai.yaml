@@ -1,0 +1,7 @@
+interface:
+  display_name: "Codey Plugin Creator"
+  short_description: "快速创建并验证 Codey 原生 Rust 插件"
+  default_prompt: "使用 $codey-plugin-creator 创建一个可编译、可打包并经过安全边界检查的 Codey 原生插件。"
+
+policy:
+  allow_implicit_invocation: true
