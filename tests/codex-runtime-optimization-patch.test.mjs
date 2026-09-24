@@ -1478,7 +1478,7 @@ test("startup patch rejects unobserved runtime overrides on timeout without expo
         subagentGateActive: false,
         requireAppServerRuntimeOverrides: true,
       }),
-      /appServerRuntimeOverrideTimeoutMs = 20_000/,
+      /appServerRuntimeOverrideTimeoutMs = 45_000/,
     );
     assert.equal(runtime.result, "codey-startup-patch-installed-v40");
     assert.equal(
@@ -1486,7 +1486,7 @@ test("startup patch rejects unobserved runtime overrides on timeout without expo
       false,
     );
     const pending = runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__();
-    assert.equal(timeoutMs, 20_000);
+    assert.equal(timeoutMs, 45_000);
     expire();
     await assert.rejects(pending, (error) => {
       assert.match(error.message, /未观察到 app-server 启动调用/);

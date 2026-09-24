@@ -1327,7 +1327,10 @@
   // 配置已验证且使用 Codey 转发入口时，消息补丁失配允许降级。
   const appServerRuntimeOverrideDegradedResult =
     "codey-app-server-runtime-overrides-degraded";
-  const appServerRuntimeOverrideTimeoutMs = 20_000;
+  // 与 Rust 的调试会话上限成对：这里先超时并带上标记，启动器才会重试而不是直接退出。
+  const appServerRuntimeOverrideTimeoutMarker =
+    "codey-app-server-runtime-overrides-timeout";
+  const appServerRuntimeOverrideTimeoutMs = 45_000;
   const appServerRuntimeOverrideEvidence = {
     version: 1,
     observed: false,
@@ -1447,9 +1450,9 @@
             timeout = setTimeout(() => {
               reject(
                 new Error(
-                  formatAppServerRuntimeOverrideError(
+                  `${appServerRuntimeOverrideTimeoutMarker} ${formatAppServerRuntimeOverrideError(
                     appServerRuntimeOverrideEvidence,
-                  ),
+                  )}`,
                 ),
               );
             }, appServerRuntimeOverrideTimeoutMs);

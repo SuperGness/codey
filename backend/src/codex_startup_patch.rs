@@ -16,12 +16,17 @@ const APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT: &str =
 /// 配置已验证且使用 Codey stdin relay 时，允许消息补丁失配后降级启动。
 const APP_SERVER_RUNTIME_OVERRIDES_DEGRADED_RESULT: &str =
     "codey-app-server-runtime-overrides-degraded";
+/// JS 在等待窗口内没有观察到 app-server 启动时放进异常文本，启动器据此重试。
+const APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER: &str =
+    "codey-app-server-runtime-overrides-timeout";
 const MAX_INSPECTOR_TARGET_RESPONSE_BYTES: usize = 1024 * 1024;
 /// Inspector 发现窗口。fuse 允许时 Node 在应用脚本运行前就绑定端口，20 秒足以覆盖冷启动。
 pub(crate) const STARTUP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const STARTUP_PATCH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// 覆盖确认的调试会话上限。须盖住断点恢复前的协议和补丁求值，以及 JS 侧
+/// `appServerRuntimeOverrideTimeoutMs`（45 秒），并留在单次 60 秒启动预算内。
 const STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(24);
+    std::time::Duration::from_secs(58);
 /// 单次启动尝试等待 CLI 包装器确认的上限。进程退出、明确失败或确认成功都会提前结束；
 /// Windows 最多两次尝试，清理后重新计时。
 pub(crate) const STARTUP_CLI_READY_TIMEOUT: std::time::Duration =
@@ -1146,8 +1151,30 @@ pub async fn install(
         ),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Codex 启动补丁调试会话超时"))??;
+    .map_err(|_| startup_debug_session_timeout())??;
     Ok(())
+}
+
+/// 调试会话没在时限内返回。保留为可重试的超时，Windows 才会进行下一次启动尝试。
+pub(crate) fn startup_debug_session_timeout() -> anyhow::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, "Codex 启动补丁调试会话超时").into()
+}
+
+/// 运行时覆盖确认的异常。未观察到启动是超时，配置不兼容则保持不可重试。
+pub(crate) fn app_server_runtime_override_confirmation_error(
+    exception: &serde_json::Value,
+) -> anyhow::Error {
+    if exception
+        .to_string()
+        .contains(APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER)
+    {
+        return std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("Codex app-server 运行时覆盖确认超时：{exception}"),
+        )
+        .into();
+    }
+    anyhow::anyhow!("Codex app-server 运行时覆盖校验失败：{exception}")
 }
 
 /// 从 reqwest 错误链里找出底层 socket 错误类型，用于区分「被拒绝」与「被拖住」。
@@ -1393,7 +1420,7 @@ async fn install_over_websocket(
                     .get("result")
                     .and_then(|result| result.get("exceptionDetails"))
                 {
-                    anyhow::bail!("Codex app-server 运行时覆盖校验失败：{exception}");
+                    return Err(app_server_runtime_override_confirmation_error(exception));
                 }
                 let value = payload
                     .pointer("/result/result/value")
@@ -1697,6 +1724,41 @@ mod tests {
             APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT
         );
         assert!(STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT > STARTUP_PATCH_INSTALL_TIMEOUT);
+        // 调试会话必须盖住 JS 的 45 秒等待，否则慢启动会先被会话超时掐断。
+        assert!(
+            STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT
+                >= std::time::Duration::from_secs(45) + std::time::Duration::from_secs(10)
+        );
+        assert!(STARTUP_PATCH_TEMPLATE.contains(APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER));
+        assert!(STARTUP_PATCH_TEMPLATE.contains("appServerRuntimeOverrideTimeoutMs = 45_000"));
+    }
+
+    #[test]
+    fn runtime_override_timeouts_stay_retryable() {
+        let session = startup_debug_session_timeout();
+        let session_io = session
+            .downcast_ref::<std::io::Error>()
+            .expect("debug session timeout should stay an io timeout");
+        assert_eq!(session_io.kind(), std::io::ErrorKind::TimedOut);
+        assert!(session.to_string().contains("调试会话超时"));
+
+        let timed_out = app_server_runtime_override_confirmation_error(&serde_json::json!({
+            "exception": {
+                "description": format!("{APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER} 未观察到 app-server 启动调用")
+            }
+        }));
+        assert_eq!(
+            timed_out
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::TimedOut)
+        );
+
+        let incompatible = app_server_runtime_override_confirmation_error(&serde_json::json!({
+            "exception": { "description": "缺失：model_provider" }
+        }));
+        assert!(incompatible.downcast_ref::<std::io::Error>().is_none());
+        assert!(incompatible.to_string().contains("运行时覆盖校验失败"));
     }
 
     /// 状态字是 Rust 与 JS 两侧各自硬编码的跨语言契约：改了一边而忘了另一边，
@@ -1710,6 +1772,10 @@ mod tests {
         assert!(
             STARTUP_PATCH_TEMPLATE.contains(APP_SERVER_RUNTIME_OVERRIDES_DEGRADED_RESULT),
             "JS payload must return the degraded status the launcher accepts"
+        );
+        assert!(
+            STARTUP_PATCH_TEMPLATE.contains(APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER),
+            "JS payload must mark an unobserved app-server wait so the launcher can retry"
         );
     }
 

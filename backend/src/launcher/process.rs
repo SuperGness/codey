@@ -2677,6 +2677,26 @@ mod cli_wrapper_tests {
             timeout(),
             timeout()
         )));
+        let session_timeout = crate::codex_startup_patch::startup_debug_session_timeout();
+        assert!(startup_error_allows_retry(&session_timeout));
+        assert!(should_retry_startup(&session_timeout, 1));
+        assert!(!should_retry_startup(&session_timeout, 2));
+        assert!(startup_error_allows_retry(&combined_startup_error(
+            session_timeout,
+            timeout()
+        )));
+        let confirmation_timeout =
+            crate::codex_startup_patch::app_server_runtime_override_confirmation_error(
+                &serde_json::json!({
+                    "exception": {
+                        "description": "codey-app-server-runtime-overrides-timeout 未观察到 app-server 启动调用"
+                    }
+                }),
+            );
+        assert!(startup_error_allows_retry(&combined_startup_error(
+            confirmation_timeout,
+            timeout()
+        )));
         tokio::time::advance(Duration::from_secs(60)).await;
         assert!(should_retry_startup(&timeout(), 1));
         assert!(!should_retry_startup(&timeout(), 2));
