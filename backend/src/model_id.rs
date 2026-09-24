@@ -57,6 +57,23 @@ fn encode_alias_component(value: &str) -> String {
     encoded
 }
 
+/// 按线路保存的模型顺序排列条目；不在顺序表里的条目保持原有相对顺序排在最后。
+pub(crate) fn sort_by_selection_order<T>(
+    items: &mut [T],
+    selected_models: &[String],
+    slug: impl Fn(&T) -> Option<&str>,
+) {
+    let mut positions = std::collections::HashMap::new();
+    for (index, model) in selected_models.iter().enumerate() {
+        positions.entry(key(model)).or_insert(index);
+    }
+    items.sort_by_key(|item| {
+        slug(item)
+            .and_then(|slug| positions.get(&key(slug)).copied())
+            .unwrap_or(usize::MAX)
+    });
+}
+
 pub(crate) fn dedupe_preserving_first<'a>(
     models: impl IntoIterator<Item = &'a str>,
 ) -> Vec<String> {
@@ -86,6 +103,17 @@ mod tests {
             dedupe_preserving_first([" Provider-A ", "provider-a", "Provider-B"]),
             ["Provider-A", "Provider-B"]
         );
+    }
+
+    #[test]
+    fn selection_order_puts_configured_models_first_and_keeps_the_rest_stable() {
+        let mut items = vec!["c", "x", "a", "y", "b"];
+        sort_by_selection_order(
+            &mut items,
+            &["A".into(), "b".into(), "c".into(), "b".into()],
+            |item| Some(*item),
+        );
+        assert_eq!(items, ["a", "b", "c", "x", "y"]);
     }
 
     #[test]

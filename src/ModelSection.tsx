@@ -42,7 +42,7 @@ import {
   Switch,
   Tooltip,
 } from "./components/ui";
-import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
+import { modelIdsEqual, modelKey, moveModelId, uniqueModelIds } from "./modelIds";
 import {
   MAX_ROUTE_NAME_CHARACTERS,
   validateOfficialRouteSettings,
@@ -78,6 +78,7 @@ type ModelSectionProps = {
   onSaveRoute: (route: Profile) => Promise<boolean>;
   onSetRouteEnabled: (routeId: string, enabled: boolean) => Promise<boolean>;
   onReorderRoute: (sourceId: string, targetId: string) => Promise<void>;
+  onReorderRouteModels: (routeId: string, models: string[]) => Promise<void>;
   onDeleteRoute: (routeId: string) => void;
   onFetchRouteModels: (route: Profile) => void;
   onOfficialAccountsChanged: (result: OfficialAccountsResult) => void;
@@ -100,6 +101,8 @@ type ModelSectionProps = {
   onConfigChange?: (config: Config) => void;
   onRequestConfirmation?: (confirmation: Confirmation) => void;
 };
+
+type RouteModelRef = { routeId: string; model: string };
 
 type RouteModelGroup = {
   profile: Profile;
@@ -227,6 +230,7 @@ function ModelSectionComponent({
   onSaveRoute,
   onSetRouteEnabled,
   onReorderRoute,
+  onReorderRouteModels,
   onDeleteRoute,
   onFetchRouteModels,
   onOfficialAccountsChanged,
@@ -239,6 +243,9 @@ function ModelSectionComponent({
   const [routeDialogOpen, setRouteDialogOpen] = useState(false);
   const [draggedRouteId, setDraggedRouteId] = useState<string | null>(null);
   const [dropRouteId, setDropRouteId] = useState<string | null>(null);
+  // 模型只能在所属线路内拖动排序，因此拖动状态同时记录线路和模型。
+  const [draggedModel, setDraggedModel] = useState<RouteModelRef | null>(null);
+  const [dropModel, setDropModel] = useState<RouteModelRef | null>(null);
   const [pendingRouteToggle, setPendingRouteToggle] = useState<{
     id: string;
     enabled: boolean;
@@ -775,7 +782,7 @@ function ModelSectionComponent({
                 <small>
                   {routeConfigReadOnly
                     ? "模型请求由 Codex 当前 Provider 直接处理"
-                    : "点击模型设为全局默认；拖动线路左侧手柄调整顺序"}
+                    : "点击模型设为全局默认；拖动线路或模型左侧手柄调整顺序"}
                 </small>
               </div>
               {!routeConfigReadOnly && (
@@ -973,22 +980,86 @@ function ModelSectionComponent({
                           {group.models.map((model) => {
                             const isDefault = !routeConfigReadOnly && modelIdsEqual(group.defaultModel, model);
                             const displayName = group.official ? officialDisplayNames.get(modelKey(model)) || model : model;
+                            const isDraggedModel = draggedModel?.routeId === profile.id
+                              && modelIdsEqual(draggedModel.model, model);
+                            const acceptsModelDrop = Boolean(draggedModel)
+                              && draggedModel?.routeId === profile.id
+                              && !isDraggedModel;
+                            const isModelDropTarget = acceptsModelDrop
+                              && dropModel?.routeId === profile.id
+                              && modelIdsEqual(dropModel.model, model);
+                            const reorderModels = (source: string, target: string) => {
+                              const models = moveModelId(group.models, source, target);
+                              if (models) void onReorderRouteModels(profile.id, models);
+                            };
                             return (
-                              <button
-                                type="button"
+                              <div
                                 key={`${group.providerId}:${model}`}
-                                className={`model-tag-pill${isDefault ? " is-default" : ""}`}
-                                disabled={routeConfigReadOnly || isBusy || dirty || isDefault}
-                                onClick={() => onSetDefaultModel(profile.id, model)}
-                                title={routeConfigReadOnly ? displayName : isDefault ? `${displayName}（当前默认模型）` : `点击设为默认模型：${displayName}`}
-                                aria-label={routeConfigReadOnly ? displayName : isDefault ? `${displayName}，当前默认模型` : `设 ${displayName} 为默认模型`}
+                                className={`model-tag-item${isModelDropTarget ? " is-drop-target" : ""}`}
+                                onDragOver={(event) => {
+                                  if (!acceptsModelDrop || isBusy || dirty) return;
+                                  event.preventDefault();
+                                  event.dataTransfer.dropEffect = "move";
+                                  setDropModel({ routeId: profile.id, model });
+                                }}
+                                onDrop={(event) => {
+                                  if (!draggedModel) return;
+                                  event.preventDefault();
+                                  if (acceptsModelDrop && !isBusy && !dirty) {
+                                    reorderModels(draggedModel.model, model);
+                                  }
+                                  setDraggedModel(null);
+                                  setDropModel(null);
+                                }}
                               >
-                                <span className="model-tag-indicator" aria-hidden="true">
-                                  {isDefault ? <Check size={11} strokeWidth={2.5} /> : <span className="model-tag-dot" />}
-                                </span>
-                                <span className="model-tag-name">{displayName}</span>
-                                {isDefault && <span className="model-tag-badge">默认</span>}
-                              </button>
+                                {!routeConfigReadOnly && (
+                                  <button
+                                    type="button"
+                                    className="model-tag-drag-handle cursor-grab text-gray-400 dark:text-gray-400 hover:text-gray-600 active:cursor-grabbing disabled:cursor-default"
+                                    disabled={isBusy || dirty}
+                                    draggable={!isBusy && !dirty}
+                                    aria-label={`调整模型 ${displayName} 的顺序`}
+                                    title="在同一线路内拖动排序，也可按方向键调整"
+                                    onDragStart={(event) => {
+                                      event.dataTransfer.setData("text/plain", model);
+                                      event.dataTransfer.effectAllowed = "move";
+                                      setDraggedModel({ routeId: profile.id, model });
+                                    }}
+                                    onDragEnd={() => {
+                                      setDraggedModel(null);
+                                      setDropModel(null);
+                                    }}
+                                    onKeyDown={(event) => {
+                                      const step = event.key === "ArrowLeft" || event.key === "ArrowUp"
+                                        ? -1
+                                        : event.key === "ArrowRight" || event.key === "ArrowDown"
+                                          ? 1
+                                          : 0;
+                                      if (step === 0) return;
+                                      event.preventDefault();
+                                      const index = group.models.findIndex((candidate) => modelIdsEqual(candidate, model));
+                                      const target = group.models[index + step];
+                                      if (target) reorderModels(model, target);
+                                    }}
+                                  >
+                                    <IconGripVertical size={13} aria-hidden="true" />
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  className={`model-tag-pill${isDefault ? " is-default" : ""}`}
+                                  disabled={routeConfigReadOnly || isBusy || dirty || isDefault}
+                                  onClick={() => onSetDefaultModel(profile.id, model)}
+                                  title={routeConfigReadOnly ? displayName : isDefault ? `${displayName}（当前默认模型）` : `点击设为默认模型：${displayName}`}
+                                  aria-label={routeConfigReadOnly ? displayName : isDefault ? `${displayName}，当前默认模型` : `设 ${displayName} 为默认模型`}
+                                >
+                                  <span className="model-tag-indicator" aria-hidden="true">
+                                    {isDefault ? <Check size={11} strokeWidth={2.5} /> : <span className="model-tag-dot" />}
+                                  </span>
+                                  <span className="model-tag-name">{displayName}</span>
+                                  {isDefault && <span className="model-tag-badge">默认</span>}
+                                </button>
+                              </div>
                             );
                           })}
                         </div>

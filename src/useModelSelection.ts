@@ -22,6 +22,7 @@ import {
   includesModelId,
   modelIdsEqual,
   modelKey,
+  orderModelIdsBy,
   partitionModelIdsByKey,
   uniqueModelIds,
   withoutModelId,
@@ -208,9 +209,13 @@ export function useModelSelection({
     routeId: string | null = null,
     autoReviewSupported = false,
   ) => {
-    setDraftModels(pickerSelection(state));
     const profile = config?.profiles.find((candidate) => candidate.id === (routeId ?? config.activeProfileId));
     const providerId = routeId && profile ? routeProviderId(profile) : currentProvider?.id || (profile ? routeProviderId(profile) : "");
+    // 官方目录按 Codex 缓存顺序返回，草稿要沿用线路已保存的模型顺序，保存时才不会打乱。
+    setDraftModels(orderModelIdsBy(
+      pickerSelection(state),
+      config?.selectedModelsByProvider[providerId] || [],
+    ));
     setDraftModelContexts(config?.modelContextByProvider?.[providerId] || {});
     const storedReasoningEfforts = config?.modelReasoningEffortsByProvider?.[providerId];
     const reasoningModels = uniqueModelIds([

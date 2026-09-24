@@ -60,6 +60,91 @@ pub(crate) fn config_after_route_enabled_change(
     Ok(config)
 }
 
+pub async fn reorder_route_models(
+    state: &Arc<AppState>,
+    route_id: String,
+    requested_models: Vec<String>,
+    expected_revision: u64,
+) -> Result<Value, String> {
+    validate_requested_model_list_bounds("线路模型", &requested_models)?;
+    let config_write_guard = state.config_write_lock.lock().await;
+    let previous = state.config.read().await.clone();
+    let config = config_with_reordered_route_models(
+        &previous,
+        route_id.trim(),
+        &requested_models,
+        expected_revision,
+    )?;
+    let model_state = current_model_state_async(&config).await?;
+    // 只改模型顺序，成员、默认模型和子代理绑定都不变，直接落盘并推送目录。
+    let config = save_config_to_store(state, config).await?;
+    *state.config.write().await = config.clone();
+    drop(config_write_guard);
+    let hot_reload = hot_reload_runtime_models(state, &config, &model_state).await;
+    let restart_required = runtime_config_requires_restart(state, &config).await;
+    Ok(hot_reload.add_to_response(json!({
+        "status": "ok",
+        "config": redacted_config(&config),
+        "modelState": model_state,
+        "restartRequired": restart_required,
+    })))
+}
+
+/// 线路内模型顺序以保存的启用列表为准。请求必须是当前启用模型的一个排列，
+/// 不能借调整顺序增删模型。
+pub(crate) fn config_with_reordered_route_models(
+    previous: &CodeyConfig,
+    route_id: &str,
+    requested_models: &[String],
+    expected_revision: u64,
+) -> Result<CodeyConfig, String> {
+    ensure_local_route_config_writable(previous)?;
+    ensure_route_revision(previous, expected_revision)?;
+    let profile = previous
+        .profiles
+        .iter()
+        .find(|profile| profile.id == route_id)
+        .ok_or_else(|| "找不到要调整模型顺序的线路".to_string())?;
+    if profile.official_account && !previous.official_route_usable(profile) {
+        return Err("当前线路不是本次登录可用的官方账号线路".to_string());
+    }
+    let provider_id = profile.provider_id().to_string();
+    let current_models = if profile.official_account {
+        previous.enabled_official_route_models(&provider_id)
+    } else {
+        previous.enabled_route_models(&provider_id)
+    };
+    let current_by_key = current_models
+        .iter()
+        .map(|model| (model_id::key(model), model.as_str()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut ordered = Vec::with_capacity(current_models.len());
+    let mut seen = HashSet::new();
+    for model in requested_models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+    {
+        let key = model_id::key(model);
+        let Some(canonical) = current_by_key.get(key.as_str()) else {
+            return Err(format!("模型 {model} 不属于该线路，无法调整顺序"));
+        };
+        if seen.insert(key) {
+            ordered.push((*canonical).to_string());
+        }
+    }
+    if ordered.len() != current_models.len() {
+        return Err("线路模型列表已变化，请重新载入后再调整顺序".to_string());
+    }
+    let mut config = previous.clone();
+    config
+        .selected_models_by_provider
+        .insert(provider_id, ordered);
+    config = config.normalize();
+    config.settings_revision = previous.settings_revision.saturating_add(1);
+    Ok(config)
+}
+
 pub async fn delete_route(
     state: &Arc<AppState>,
     route_id: String,

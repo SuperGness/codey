@@ -18,7 +18,13 @@ pub(crate) fn websocket_transport_requires_restart(
     current: &CodeyConfig,
 ) -> bool {
     applied.runtime_supports_websockets() != current.runtime_supports_websockets()
-        || applied.runtime_websocket_model_aliases() != current.runtime_websocket_model_aliases()
+        || alias_set(applied.runtime_websocket_model_aliases())
+            != alias_set(current.runtime_websocket_model_aliases())
+}
+
+/// 运输能力按模型集合判断；模型顺序随目录热更新，不构成重启条件。
+fn alias_set(aliases: Vec<String>) -> std::collections::BTreeSet<String> {
+    aliases.into_iter().collect()
 }
 
 pub(crate) fn remote_compaction_transport_requires_restart(
@@ -32,8 +38,8 @@ pub(crate) fn native_web_search_capability_requires_restart(
     applied: &CodeyConfig,
     current: &CodeyConfig,
 ) -> bool {
-    applied.runtime_native_web_search_model_aliases()
-        != current.runtime_native_web_search_model_aliases()
+    alias_set(applied.runtime_native_web_search_model_aliases())
+        != alias_set(current.runtime_native_web_search_model_aliases())
 }
 
 pub(crate) fn runtime_supports_current_routes_for_hot_reload(
@@ -418,7 +424,7 @@ pub(crate) fn renderer_route_model_catalog(
             "" if profile.official_account => OFFICIAL_ROUTE_SHORT_NAME.to_string(),
             short_name => short_name.to_string(),
         };
-        let official_models = state
+        let mut official_models = state
             .official_models
             .iter()
             .filter(|model| model.supported)
@@ -428,7 +434,14 @@ pub(crate) fn renderer_route_model_catalog(
                     model.supported_reasoning_efforts.clone(),
                     model.default_reasoning_effort.clone(),
                 )
-            });
+            })
+            .collect::<Vec<_>>();
+        // 官方目录按 Codex 缓存顺序列出模型，选择器要按线路保存的顺序显示。
+        model_id::sort_by_selection_order(
+            &mut official_models,
+            &selected_models,
+            |(slug, _, _)| Some(slug.as_str()),
+        );
         let third_party_metadata = state
             .third_party_model_metadata
             .iter()
@@ -454,7 +467,7 @@ pub(crate) fn renderer_route_model_catalog(
             )
         });
         for (model, supported_reasoning_efforts, default_reasoning_effort) in
-            official_models.chain(third_party_models)
+            official_models.into_iter().chain(third_party_models)
         {
             let alias = if profile.official_account && !qualify_official {
                 aliases.insert(model.clone());

@@ -100,6 +100,16 @@ pub(super) async fn invoke(
             }
             (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
         },
+        "reorder_route_models" => match (
+            string_argument(args, "routeId"),
+            argument::<Vec<String>>(args, "models"),
+            argument::<u64>(args, "expectedRevision"),
+        ) {
+            (Ok(route_id), Ok(models), Ok(expected_revision)) => {
+                reorder_route_models(state, route_id, models, expected_revision).await
+            }
+            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        },
         "delete_route" => match (
             string_argument(args, "routeId"),
             argument::<u64>(args, "expectedRevision"),

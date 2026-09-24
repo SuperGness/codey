@@ -1280,6 +1280,32 @@ if (import.meta.env.DEV) {
           customContextsRestored: false,
         };
       }
+      if (command === "reorder_route_models") {
+        const routeId = String(args.routeId || "");
+        const targetProfile = previewConfig.profiles.find(
+          (profile) => profile.id === routeId,
+        );
+        if (!targetProfile) {
+          return { status: "failed", message: "找不到要调整模型顺序的线路" };
+        }
+        const providerId = routeProviderId(targetProfile);
+        previewConfig = {
+          ...previewConfig,
+          settingsRevision: previewConfig.settingsRevision + 1,
+          selectedModelsByProvider: {
+            ...previewConfig.selectedModelsByProvider,
+            [providerId]: uniqueModelIds((args.models as string[]) || []),
+          },
+        };
+        refreshPreviewModelState();
+        return {
+          status: "ok",
+          config: previewConfig,
+          modelState: previewModelState,
+          restartRequired: false,
+          modelHotReloaded: true,
+        };
+      }
       if (command === "save_default_model") {
         const model = String(args.model || "");
         const routeId = String(args.routeId || "");

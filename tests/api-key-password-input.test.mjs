@@ -161,6 +161,7 @@ function modelSectionProps() {
     onOfficialAccountsChanged: () => {},
     onOpenUsageAnalysis: () => {},
     onReorderRoute: async () => {},
+    onReorderRouteModels: async () => {},
     onRequestConfirmation: () => {},
     onSaveRoute: async () => true,
     onSetDefaultModel: () => {},

@@ -353,6 +353,43 @@
   padding-left: 0;
 }
 
+/* 模型芯片外层：容纳排序手柄，并承接拖放目标高亮 */
+.model-tag-item {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 2px;
+  border-radius: 6px;
+  transition: background 130ms ease, box-shadow 130ms ease;
+}
+
+.model-tag-item.is-drop-target {
+  background: rgba(0, 122, 255, 0.05);
+  box-shadow: inset 2px 0 0 0 var(--mac-blue);
+}
+
+.model-tag-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 27px;
+  border-radius: 5px;
+  transition: color 130ms ease, background 130ms ease;
+}
+
+.model-tag-drag-handle:hover:not(:disabled) {
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.05);
+  color: var(--mac-text-primary);
+}
+
+.model-tag-drag-handle:focus-visible {
+  outline: 2px solid var(--mac-blue);
+  outline-offset: 2px;
+}
+
 /* Individual Model Tag Pill */
 .model-tag-pill {
   display: inline-flex;

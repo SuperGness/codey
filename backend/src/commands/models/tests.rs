@@ -539,6 +539,146 @@ fn route_toggle_preserves_settings_and_updates_default_without_reordering() {
 }
 
 #[test]
+fn reordering_route_models_keeps_membership_and_rejects_partial_or_foreign_lists() {
+    let previous = CodeyConfig {
+        settings_revision: 4,
+        profiles: vec![configured_route("route", Some("model-a"))],
+        selected_models_by_provider: BTreeMap::from([(
+            "route".into(),
+            vec!["model-a".into(), "model-b".into()],
+        )]),
+        declared_official_models_by_provider: BTreeMap::from([(
+            "route".into(),
+            vec!["gpt-5.5".into()],
+        )]),
+        default_model: "route/model-b".into(),
+        ..CodeyConfig::default()
+    }
+    .normalize();
+    assert_eq!(
+        previous.enabled_route_models("route"),
+        ["model-a", "model-b", "gpt-5.5"]
+    );
+
+    let reordered = config_with_reordered_route_models(
+        &previous,
+        "route",
+        &["GPT-5.5".into(), " model-b ".into(), "model-a".into()],
+        4,
+    )
+    .unwrap();
+    assert_eq!(reordered.settings_revision, 5);
+    assert_eq!(
+        reordered.enabled_route_models("route"),
+        ["gpt-5.5", "model-b", "model-a"]
+    );
+    assert_eq!(reordered.default_model, "route/model-b");
+    assert_eq!(reordered.profiles, previous.profiles);
+    assert_eq!(
+        reordered.upstream_models_by_provider,
+        previous.upstream_models_by_provider
+    );
+
+    let complete = ["model-b".to_string(), "model-a".into(), "gpt-5.5".into()];
+    assert!(
+        config_with_reordered_route_models(&previous, "route", &complete[..2], 4)
+            .unwrap_err()
+            .contains("已变化")
+    );
+    let mut foreign = complete.to_vec();
+    foreign.push("other".into());
+    assert!(
+        config_with_reordered_route_models(&previous, "route", &foreign, 4)
+            .unwrap_err()
+            .contains("不属于")
+    );
+    assert!(
+        config_with_reordered_route_models(&previous, "route", &complete, 3)
+            .unwrap_err()
+            .contains("重新载入")
+    );
+    assert!(
+        config_with_reordered_route_models(&previous, "missing", &complete, 4)
+            .unwrap_err()
+            .contains("找不到")
+    );
+    let mut read_only = previous.clone();
+    read_only.local_router_enabled = false;
+    assert!(
+        config_with_reordered_route_models(&read_only, "route", &complete, 4)
+            .unwrap_err()
+            .contains("只读")
+    );
+}
+
+#[test]
+fn reordering_official_route_models_follows_the_requested_order() {
+    let mut route = configured_route("official", Some("gpt-5.6-sol"));
+    route.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+    route.source_provider_id = Some("openai".into());
+    route.official_account_id = Some("stored-account".into());
+    let previous = CodeyConfig {
+        settings_revision: 2,
+        profiles: vec![route],
+        selected_models_by_provider: BTreeMap::from([(
+            "openai".into(),
+            vec!["gpt-5.6-sol".into(), "gpt-5.6-luna".into()],
+        )]),
+        ..CodeyConfig::default()
+    }
+    .normalize();
+    assert!(previous.official_route_usable(&previous.profiles[0]));
+
+    let reordered = config_with_reordered_route_models(
+        &previous,
+        "official",
+        &["gpt-5.6-luna".into(), "gpt-5.6-sol".into()],
+        2,
+    )
+    .unwrap();
+    assert_eq!(reordered.settings_revision, 3);
+    assert_eq!(
+        reordered.enabled_official_route_models("openai"),
+        ["gpt-5.6-luna", "gpt-5.6-sol"]
+    );
+    assert_eq!(
+        reordered.runtime_catalog_models().1,
+        ["gpt-5.6-luna", "gpt-5.6-sol"]
+    );
+}
+
+#[test]
+fn official_model_selection_keeps_the_requested_order_and_catalog_spelling() {
+    let catalog = vec![
+        "gpt-6-astra".to_string(),
+        "gpt-5.6-sol".to_string(),
+        "gpt-5.6-luna".to_string(),
+    ];
+    assert_eq!(
+        ordered_official_selection(
+            &catalog,
+            &[
+                "GPT-5.6-Luna".into(),
+                " gpt-6-astra ".into(),
+                "gpt-5.6-luna".into()
+            ]
+        )
+        .unwrap(),
+        ["gpt-5.6-luna", "gpt-6-astra"]
+    );
+    assert!(
+        ordered_official_selection(&catalog, &["gpt-4".into()])
+            .unwrap_err()
+            .contains("不在官方模型列表中")
+    );
+    assert!(
+        ordered_official_selection(&catalog, &[" ".into()])
+            .unwrap_err()
+            .contains("至少需要保留一个模型")
+    );
+}
+
+#[test]
 fn route_toggle_rejects_stale_read_only_missing_and_unavailable_official_routes() {
     let mut config = CodeyConfig {
         settings_revision: 3,
@@ -1461,6 +1601,51 @@ fn websocket_model_changes_hot_reload_with_capabilities_pending_restart() {
     assert!(runtime_supports_current_routes_for_hot_reload(
         &applied,
         &after_delete
+    ));
+}
+
+#[test]
+fn reordering_models_on_websocket_and_web_search_routes_needs_no_restart() {
+    let mut route = crate::config::ProviderProfile::new("WS Route");
+    route.id = "route-ws".into();
+    route.base_url = "https://route-ws.example/v1".into();
+    route.api_key = "route-ws-secret".into();
+    route.supports_websockets = true;
+    route.supports_native_web_search = true;
+    route.normalize();
+    let mut applied = CodeyConfig {
+        active_profile_id: route.id.clone(),
+        profiles: vec![route],
+        ..CodeyConfig::default()
+    };
+    applied
+        .selected_models_by_provider
+        .insert("route-ws".into(), vec!["model-a".into(), "model-b".into()]);
+    applied = applied.normalize();
+    assert_eq!(
+        applied.runtime_websocket_model_aliases(),
+        ["route-ws/model-a", "route-ws/model-b"]
+    );
+
+    let reordered = config_with_reordered_route_models(
+        &applied,
+        "route-ws",
+        &["model-b".into(), "model-a".into()],
+        applied.settings_revision,
+    )
+    .unwrap();
+    assert_eq!(
+        reordered.runtime_websocket_model_aliases(),
+        ["route-ws/model-b", "route-ws/model-a"]
+    );
+    assert!(!websocket_transport_requires_restart(&applied, &reordered));
+    assert!(!native_web_search_capability_requires_restart(
+        &applied, &reordered
+    ));
+    assert!(!provider_route_requires_restart(&applied, &reordered));
+    assert!(!crate::commands::provider_route_restart_required_for_runtime(&applied, &reordered));
+    assert!(runtime_supports_current_routes_for_hot_reload(
+        &applied, &reordered
     ));
 }
 

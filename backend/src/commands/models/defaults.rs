@@ -129,27 +129,7 @@ pub async fn save_official_route_models(
         .cloned()
         .unwrap_or_else(model_catalog::default_official_model_slugs);
     // 官方线路不接受上下文预算或思考强度声明变更，保留已有配置。
-    let official_by_key = official_models
-        .iter()
-        .map(|model| (model_id::key(model), model.as_str()))
-        .collect::<std::collections::HashMap<_, _>>();
-    let requested_keys = requested_models
-        .iter()
-        .map(|model| model_id::key(model))
-        .collect::<HashSet<_>>();
-    if requested_keys.is_empty() {
-        return Err("官方账号线路至少需要保留一个模型".to_string());
-    }
-    if let Some(model) = requested_keys
-        .iter()
-        .find(|model| !official_by_key.contains_key(model.as_str()))
-    {
-        return Err(format!("模型 {model} 不在官方模型列表中"));
-    }
-    let selected_models = official_models
-        .into_iter()
-        .filter(|model| requested_keys.contains(&model_id::key(model)))
-        .collect::<Vec<_>>();
+    let selected_models = ordered_official_selection(&official_models, &requested_models)?;
     config
         .selected_models_by_provider
         .insert(provider_id, selected_models);
@@ -255,6 +235,37 @@ pub async fn save_official_route_models(
         response,
         subagent_hot_reload,
     ))
+}
+
+/// 官方线路启用的模型按请求顺序保存，线路卡片和选择器都按这个顺序显示；
+/// 模型 ID 统一回写为官方目录里的拼写。
+pub(crate) fn ordered_official_selection(
+    official_models: &[String],
+    requested_models: &[String],
+) -> Result<Vec<String>, String> {
+    let official_by_key = official_models
+        .iter()
+        .map(|model| (model_id::key(model), model.as_str()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut selected = Vec::with_capacity(requested_models.len());
+    let mut seen = HashSet::new();
+    for model in requested_models
+        .iter()
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+    {
+        let key = model_id::key(model);
+        let Some(official_model) = official_by_key.get(key.as_str()) else {
+            return Err(format!("模型 {model} 不在官方模型列表中"));
+        };
+        if seen.insert(key) {
+            selected.push((*official_model).to_string());
+        }
+    }
+    if selected.is_empty() {
+        return Err("官方账号线路至少需要保留一个模型".to_string());
+    }
+    Ok(selected)
 }
 
 /// Keeps the official-account store in step with the proxy edited on the

@@ -1049,6 +1049,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         },
         "sync_current_provider"
         | "set_route_enabled"
+        | "reorder_route_models"
         | "delete_route"
         | "fetch_route_models"
         | "save_selected_models"
