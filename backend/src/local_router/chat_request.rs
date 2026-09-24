@@ -441,3 +441,342 @@ pub(crate) fn should_omit_chat_tool_choice_for_web_search(
 }
 
 pub(crate) const DEFAULT_ANTHROPIC_MAX_TOKENS: u64 = 8192;
+
+/// 客户端省略输出上限、且推理强度高于 medium 时写入的上限。
+/// 第三方会把 high 及以上译成不小于 8192 的思考预算，Anthropic 要求预算严格小于
+/// 输出上限。64000 能盖住已验证的 high / ultra，也没有超过 Claude 4.5 一代的输出能力。
+const CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS: u64 = 64_000;
+
+/// 客户端没有声明输出上限时，为会触发思考预算约束的请求补上上限。
+/// 已有 `max_output_tokens` 或 `max_tokens` 时保持原值。非 Claude 的 Chat / Responses
+/// 请求不补，避免把 GPT、DeepSeek 的输出上限改掉。
+pub(crate) fn ensure_omitted_reasoning_output_limit(
+    body: &mut Value,
+    bridge: ProtocolBridge,
+) -> bool {
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    if object.contains_key("max_output_tokens") || object.contains_key("max_tokens") {
+        return false;
+    }
+    let effort = object
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            object
+                .get("reasoning")
+                .and_then(Value::as_object)
+                .and_then(|reasoning| reasoning.get("effort"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("");
+    if !reasoning_effort_needs_output_headroom(effort) {
+        return false;
+    }
+    let model = object.get("model").and_then(Value::as_str).unwrap_or("");
+    let Some(limit) = omitted_reasoning_output_limit(model, bridge) else {
+        return false;
+    };
+    object.insert("max_output_tokens".to_string(), Value::Number(limit.into()));
+    true
+}
+
+fn reasoning_effort_needs_output_headroom(effort: &str) -> bool {
+    let effort = effort.trim();
+    !(effort.is_empty()
+        || effort.eq_ignore_ascii_case("none")
+        || effort.eq_ignore_ascii_case("minimal")
+        || effort.eq_ignore_ascii_case("low")
+        || effort.eq_ignore_ascii_case("medium"))
+}
+
+fn omitted_reasoning_output_limit(model: &str, bridge: ProtocolBridge) -> Option<u64> {
+    match claude_output_token_cap(model) {
+        Some(cap) => {
+            let limit = cap.min(CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS);
+            (limit > DEFAULT_ANTHROPIC_MAX_TOKENS).then_some(limit)
+        }
+        None if bridge == ProtocolBridge::ResponsesToAnthropicMessages => {
+            Some(CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS)
+        }
+        None => None,
+    }
+}
+
+/// 已知的同步 Messages 输出上限。不是 Claude 家族时返回 None。
+/// 旧模型停在 8192 或更低，调用方因此不会把它们抬高。
+fn claude_output_token_cap(model: &str) -> Option<u64> {
+    let tokens = claude_model_tokens(model);
+    if !tokens
+        .iter()
+        .any(|token| matches!(token.as_str(), "claude" | "fable" | "mythos"))
+    {
+        return None;
+    }
+    let Some(index) = tokens.iter().position(|token| {
+        matches!(
+            token.as_str(),
+            "opus" | "sonnet" | "haiku" | "fable" | "mythos"
+        )
+    }) else {
+        let major = tokens.iter().find_map(|token| small_model_version(token));
+        return Some(match major {
+            Some(major) if major <= 3 => DEFAULT_ANTHROPIC_MAX_TOKENS,
+            _ => CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS,
+        });
+    };
+    let family = tokens[index].as_str();
+    if matches!(family, "fable" | "mythos") {
+        return Some(128_000);
+    }
+    let version = version_after(&tokens, index).or_else(|| version_before(&tokens, index));
+    Some(match (family, version) {
+        (_, None) => CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS,
+        ("opus", Some((major, _))) if major <= 3 => 4_096,
+        ("opus", Some((4, minor))) if minor <= 1 => 32_000,
+        ("opus", Some((4, minor))) if minor <= 5 => CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS,
+        ("opus", Some(_)) => 128_000,
+        ("sonnet", Some((3, minor))) if minor >= 7 => CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS,
+        ("sonnet", Some((major, _))) if major <= 3 => DEFAULT_ANTHROPIC_MAX_TOKENS,
+        ("sonnet", Some((4, minor))) if minor <= 5 => CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS,
+        ("sonnet", Some(_)) => 128_000,
+        ("haiku", Some((major, _))) if major <= 3 => DEFAULT_ANTHROPIC_MAX_TOKENS,
+        ("haiku", Some(_)) => CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS,
+        _ => CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS,
+    })
+}
+
+fn claude_model_tokens(model: &str) -> Vec<String> {
+    let trimmed = model.trim();
+    let without_marker = strip_anthropic_context_1m_model(trimmed).unwrap_or(trimmed);
+    let segment = without_marker
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(without_marker);
+    segment
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn small_model_version(token: &str) -> Option<u32> {
+    if token.len() > 2 || !token.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    token.parse().ok()
+}
+
+fn version_after(tokens: &[String], index: usize) -> Option<(u32, u32)> {
+    let major = small_model_version(tokens.get(index + 1)?)?;
+    let minor = tokens
+        .get(index + 2)
+        .and_then(|token| small_model_version(token))
+        .unwrap_or(0);
+    Some((major, minor))
+}
+
+fn version_before(tokens: &[String], index: usize) -> Option<(u32, u32)> {
+    let mut numbers = Vec::new();
+    let mut cursor = index;
+    while cursor > 0 {
+        cursor -= 1;
+        match small_model_version(&tokens[cursor]) {
+            Some(number) => numbers.push(number),
+            None => break,
+        }
+        if numbers.len() == 2 {
+            break;
+        }
+    }
+    numbers.reverse();
+    match numbers.as_slice() {
+        [major, minor] => Some((*major, *minor)),
+        [major] => Some((*major, 0)),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn output_limit(model: &str, effort: &str, bridge: ProtocolBridge) -> Option<u64> {
+        let mut body = json!({
+            "model": model,
+            "reasoning": {"effort": effort}
+        });
+        ensure_omitted_reasoning_output_limit(&mut body, bridge)
+            .then(|| body["max_output_tokens"].as_u64().unwrap())
+    }
+
+    #[test]
+    fn high_effort_claude_requests_fill_a_model_capped_output_limit() {
+        let cases = [
+            (
+                "claude-opus-5",
+                "high",
+                ProtocolBridge::NativeResponses,
+                Some(64_000),
+            ),
+            (
+                "claude-opus-5",
+                "ULTRA",
+                ProtocolBridge::ResponsesToChatCompletions,
+                Some(64_000),
+            ),
+            (
+                "claude-opus-5",
+                "xhigh",
+                ProtocolBridge::ResponsesToAnthropicMessages,
+                Some(64_000),
+            ),
+            (
+                "claude-opus-5",
+                "max",
+                ProtocolBridge::NativeResponses,
+                Some(64_000),
+            ),
+            (
+                "claude-opus-5[1m]",
+                "high",
+                ProtocolBridge::NativeResponses,
+                Some(64_000),
+            ),
+            (
+                "relay/claude-opus-5",
+                "high",
+                ProtocolBridge::ResponsesToChatCompletions,
+                Some(64_000),
+            ),
+            (
+                "claude-opus-4-20250514",
+                "high",
+                ProtocolBridge::NativeResponses,
+                Some(32_000),
+            ),
+            (
+                "claude-opus-4-1-20250805",
+                "high",
+                ProtocolBridge::ResponsesToAnthropicMessages,
+                Some(32_000),
+            ),
+            (
+                "claude-opus-4.5",
+                "high",
+                ProtocolBridge::ResponsesToChatCompletions,
+                Some(64_000),
+            ),
+            (
+                "claude-sonnet-4-6",
+                "high",
+                ProtocolBridge::NativeResponses,
+                Some(64_000),
+            ),
+            (
+                "claude-3-7-sonnet-20250219",
+                "high",
+                ProtocolBridge::ResponsesToAnthropicMessages,
+                Some(64_000),
+            ),
+            (
+                "claude-haiku-4-5",
+                "high",
+                ProtocolBridge::ResponsesToChatCompletions,
+                Some(64_000),
+            ),
+            (
+                "claude-3-5-sonnet-20241022",
+                "high",
+                ProtocolBridge::ResponsesToAnthropicMessages,
+                None,
+            ),
+            (
+                "claude-3-opus-20240229",
+                "ultra",
+                ProtocolBridge::NativeResponses,
+                None,
+            ),
+            (
+                "claude-opus-5",
+                "medium",
+                ProtocolBridge::ResponsesToAnthropicMessages,
+                None,
+            ),
+            (
+                "claude-opus-5",
+                "low",
+                ProtocolBridge::NativeResponses,
+                None,
+            ),
+            (
+                "claude-opus-5",
+                "minimal",
+                ProtocolBridge::ResponsesToChatCompletions,
+                None,
+            ),
+            ("gpt-5.4", "high", ProtocolBridge::NativeResponses, None),
+            (
+                "gpt-5.4",
+                "high",
+                ProtocolBridge::ResponsesToChatCompletions,
+                None,
+            ),
+            (
+                "deepseek-v4-pro",
+                "xhigh",
+                ProtocolBridge::ResponsesToChatCompletions,
+                None,
+            ),
+            (
+                "gpt-5.4",
+                "high",
+                ProtocolBridge::ResponsesToAnthropicMessages,
+                Some(64_000),
+            ),
+        ];
+        for (model, effort, bridge, expected) in cases {
+            assert_eq!(
+                output_limit(model, effort, bridge),
+                expected,
+                "{model} {effort} {bridge:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_output_limit_and_top_level_effort_keep_their_meaning() {
+        let mut explicit = json!({
+            "model": "claude-opus-5",
+            "reasoning": {"effort": "ultra"},
+            "max_output_tokens": 2048
+        });
+        assert!(!ensure_omitted_reasoning_output_limit(
+            &mut explicit,
+            ProtocolBridge::ResponsesToAnthropicMessages
+        ));
+        assert_eq!(explicit["max_output_tokens"], 2048);
+
+        let mut top_level = json!({
+            "model": "claude-sonnet-4-6",
+            "reasoning_effort": "high",
+            "input": "hi"
+        });
+        assert!(ensure_omitted_reasoning_output_limit(
+            &mut top_level,
+            ProtocolBridge::ResponsesToChatCompletions
+        ));
+        let chat = responses_to_chat_completions_body(&top_level).unwrap();
+        assert_eq!(chat["max_tokens"], 64_000);
+        let anthropic = responses_to_anthropic_messages_body(&json!({
+            "model": "claude-opus-5",
+            "input": [{"type":"message","role":"user","content":"hi"}],
+            "reasoning": {"effort": "high"},
+            "max_output_tokens": 64_000
+        }))
+        .unwrap();
+        assert_eq!(anthropic["max_tokens"], 64_000);
+        assert_eq!(anthropic["output_config"]["effort"], "high");
+    }
+}

@@ -6850,6 +6850,146 @@ fn responses_request_converts_messages_images_tools_and_results_to_anthropic() {
     assert_eq!(anthropic["stream"], true);
 }
 
+#[tokio::test]
+async fn omitted_high_effort_output_limit_reaches_every_upstream_protocol() {
+    let cases = [
+        (
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+            "claude-opus-5",
+            "high",
+            None,
+            "/v1/responses",
+            "max_output_tokens",
+            Some(64_000_u64),
+        ),
+        (
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+            "claude-opus-5",
+            "ultra",
+            None,
+            "/v1/chat/completions",
+            "max_tokens",
+            Some(64_000),
+        ),
+        (
+            crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+            "claude-opus-5",
+            "xhigh",
+            None,
+            "/v1/messages",
+            "max_tokens",
+            Some(64_000),
+        ),
+        (
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+            "provider-model",
+            "high",
+            None,
+            "/v1/responses",
+            "max_output_tokens",
+            None,
+        ),
+        (
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+            "claude-opus-5",
+            "high",
+            Some(2048_u64),
+            "/v1/chat/completions",
+            "max_tokens",
+            Some(2048),
+        ),
+        (
+            crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+            "claude-3-5-sonnet",
+            "high",
+            None,
+            "/v1/messages",
+            "max_tokens",
+            Some(DEFAULT_ANTHROPIC_MAX_TOKENS),
+        ),
+        (
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+            "claude-opus-5",
+            "medium",
+            None,
+            "/v1/responses",
+            "max_output_tokens",
+            None,
+        ),
+    ];
+    for (protocol, model, effort, explicit_limit, path, field, expected) in cases {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let upstream_address = upstream.local_addr().unwrap();
+        let protocol_name = protocol.to_string();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+            let response = if protocol_name == crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES {
+                json!({
+                    "id":"msg-1",
+                    "type":"message",
+                    "role":"assistant",
+                    "model":"claude",
+                    "content":[{"type":"text","text":"ok"}],
+                    "stop_reason":"end_turn"
+                })
+            } else if protocol_name == crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS {
+                json!({
+                    "id":"chatcmpl-1",
+                    "choices":[{
+                        "index":0,
+                        "message":{"role":"assistant","content":"ok"},
+                        "finish_reason":"stop"
+                    }]
+                })
+            } else {
+                json!({"id":"resp-1","object":"response","status":"completed","output":[]})
+            };
+            write_json_response(&mut stream, 200, &response)
+                .await
+                .unwrap();
+            (request.path, body)
+        });
+        let (mut config, provider_id, _) = router_config(format!("http://{upstream_address}/v1"));
+        config.profiles[0].upstream_protocol = protocol.into();
+        config.profiles[0].normalize();
+        config
+            .selected_models_by_provider
+            .insert(provider_id.clone(), vec![model.to_string()]);
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let mut request = json!({
+            "model": model_alias(&provider_id, model),
+            "input": "hello",
+            "reasoning": {"effort": effort}
+        });
+        if let Some(limit) = explicit_limit {
+            request["max_output_tokens"] = json!(limit);
+        }
+        let response = reqwest::Client::new()
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::OK,
+            "{protocol} {model} {effort}"
+        );
+        let (actual_path, body) = upstream_task.await.unwrap();
+        assert_eq!(actual_path, path, "{protocol}");
+        assert_eq!(
+            body.get(field).and_then(Value::as_u64),
+            expected,
+            "{protocol} {model} {effort} {body}"
+        );
+        router.stop().await.unwrap();
+    }
+}
+
 #[test]
 fn removed_minimal_effort_still_maps_to_low_for_anthropic() {
     // `minimal` 已不再是界面档位，但旧会话和自定义档位的 value 仍可能带上它；

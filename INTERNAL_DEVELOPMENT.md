@@ -41,7 +41,7 @@
 
 ## 协议转发与恢复
 
-- 原生 Responses 保留同线路 reasoning 与加密状态。跨线路时去掉上一供应商的密文，可见推理摘要改写成官方可接受的 summary 后保留。Chat Completions、Anthropic Messages 转换消息、工具、图片、用量和流式事件；流式工具增量的 legacy 与索引式形状只在同一次调用上合并，没有内容的空槽位丢弃；无法表达的必要内容在发送前拒绝，不裁剪历史或补造思考内容。发往 Moonshot 或 Kimi 的 Chat 工具参数会把与 `$ref` 并列的关键字收进 `allOf`，其它上游不改 schema。Anthropic 模型名末尾的 `[1m]` 在发送前去掉，并补上 context-1m beta。发往 xAI，或上游模型属于 Grok 的原生 Responses，会展平 namespace 工具并在响应中还原，去掉不接受的字段和工具类型，把可阅读的 `agent_message` 改成普通消息，并把已完成工具参数里的整数值浮点改回整数。
+- 原生 Responses 保留同线路 reasoning 与加密状态。跨线路时去掉上一供应商的密文，可见推理摘要改写成官方可接受的 summary 后保留。Chat Completions、Anthropic Messages 转换消息、工具、图片、用量和流式事件；流式工具增量的 legacy 与索引式形状只在同一次调用上合并，没有内容的空槽位丢弃；无法表达的必要内容在发送前拒绝，不裁剪历史或补造思考内容。发往 Moonshot 或 Kimi 的 Chat 工具参数会把与 `$ref` 并列的关键字收进 `allOf`，其它上游不改 schema。Anthropic 模型名末尾的 `[1m]` 在发送前去掉，并补上 context-1m beta。客户端省略输出上限时，高推理强度的 Claude 请求按模型输出能力补上上限，避免思考预算超过输出上限。发往 xAI，或上游模型属于 Grok 的原生 Responses，会展平 namespace 工具并在响应中还原，去掉不接受的字段和工具类型，把可阅读的 `agent_message` 改成普通消息，并把已完成工具参数里的整数值浮点改回整数。
 - HTTP 透传端到端响应头。线路可独立配置 HTTP、HTTPS 或 SOCKS5 代理，用于转发、模型同步和额度查询，并禁用该线路上游 WebSocket；其他线路遵循系统代理。
 - 连接按线路、配置和认证身份隔离复用；HTTP/2 使用固定流量窗口，WSS 保留证书校验并禁用 0-RTT。WebSocket 能力探测去重，缓存不支持 WebSocket 的探测结果，其他失败退避。
 - WebSocket 仅在握手或发送前失败时回退同线路 HTTP；一旦尝试发送，不自动重放或跨供应商切换。第三方原生 Responses 或 Chat Completions 因缺少 reasoning 明文被拒绝时，优先用已有摘要回填，没有摘要才补占位后向同线路重发一次。Chat 重试只保留摘要文本，不保留第二份请求正文。DeepSeek 官方地址在首次发送前还原已有摘要，Chat 在转换前写回。官方线路及已发送的 WebSocket 请求除外。

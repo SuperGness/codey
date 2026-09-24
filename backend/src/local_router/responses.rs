@@ -1750,6 +1750,18 @@ impl RouterServer {
         {
             body_mutated = true;
         }
+        // Codex 不发送输出上限。高推理强度在 Claude 网关上会变成超过 8192 的思考预算，
+        // 三种协议都会因此被拒。只在客户端省略该字段时按模型补上；输出预留仍只缩减上下文。
+        if !compacting
+            && !resolved.route.official_account
+            && ensure_omitted_reasoning_output_limit(&mut body, bridge)
+        {
+            body_mutated = true;
+            if bridge == ProtocolBridge::NativeResponses {
+                // 原生透传只改写少数顶层字段，新增的输出上限必须整段重编码才会发出。
+                encoded_body = None;
+            }
+        }
         let mut tool_bridge = ResponsesToolBridge::default();
         let offload_conversion = bridge != ProtocolBridge::NativeResponses
             && encoded_body
