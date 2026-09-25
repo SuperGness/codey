@@ -1,6 +1,6 @@
 {
   "name": "codey",
-  "version": "1.1.9",
+  "version": "1.1.10",
   "private": true,
   "license": "AGPL-3.0-only",
   "packageManager": "pnpm@11.5.2",
