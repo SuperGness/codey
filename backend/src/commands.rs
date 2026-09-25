@@ -1974,12 +1974,14 @@ fn merge_profile_secrets(
                 profile.supports_auto_review = false;
                 if profile.auth_mode.trim() == crate::config::AUTH_MODE_API_KEY {
                     profile.official_account = false;
+                    profile.official_account_id = None;
                 }
             } else {
                 // Keep source-owned identity and capability fields attached to
                 // the saved route even though the renderer sends the whole form back.
                 profile.source_provider_id = previous_profile.source_provider_id.clone();
                 profile.official_account = previous_profile.official_account;
+                profile.official_account_id = previous_profile.official_account_id.clone();
                 profile.supports_remote_compaction = previous_profile.supports_remote_compaction;
             }
             crate::plugin_routes::retain_plugin_ownership(profile, previous_profile)?;

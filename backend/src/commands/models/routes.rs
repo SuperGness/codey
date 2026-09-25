@@ -231,18 +231,81 @@ pub(crate) fn config_after_route_deletion(
     Ok(config)
 }
 
-pub(crate) async fn fetch_official_route_models(
-    state: &Arc<AppState>,
-    profile: &ProviderProfile,
-) -> Result<Vec<Value>, String> {
-    let account_id = profile
+/// Account whose credentials should be used to list models for this official
+/// route. Derived routes store the id on the profile; older routes only keep
+/// it in the stable profile id. Plugin routes reuse the host login and have
+/// neither.
+pub(crate) fn official_models_account_id(profile: &ProviderProfile) -> Option<String> {
+    let explicit = profile
         .official_account_id
         .as_deref()
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .ok_or_else(|| "官方账号线路缺少账号标识".to_string())?;
-    let record =
-        super::super::official_accounts::refresh_official_account_tokens(state, account_id).await?;
+        .map(str::to_string);
+    if explicit.is_some() {
+        return explicit;
+    }
+    let prefix = format!("{}-", crate::config::DERIVED_OFFICIAL_PROFILE_ID);
+    profile
+        .id
+        .strip_prefix(&prefix)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// Models are listed from the account gateway. A plugin route's own URL is the
+/// Responses endpoint, so it must not be used as the models base.
+pub(crate) fn official_models_base_url(
+    profile: &ProviderProfile,
+    account_base_url: Option<&str>,
+) -> String {
+    let account_base_url = account_base_url
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(|url| url.trim_end_matches('/').to_string());
+    if profile.plugin_owner_id.is_some() {
+        return account_base_url
+            .unwrap_or_else(|| crate::codex_config::CHATGPT_CODEX_BASE_URL.to_string());
+    }
+    account_base_url.unwrap_or_else(|| crate::codex_provider::official_route_base_url(profile))
+}
+
+async fn official_models_account(
+    state: &Arc<AppState>,
+    profile: &ProviderProfile,
+) -> Result<crate::official_accounts::OfficialAccountRecord, String> {
+    if let Some(account_id) = official_models_account_id(profile) {
+        return super::super::official_accounts::refresh_official_account_tokens(
+            state,
+            &account_id,
+        )
+        .await;
+    }
+    // 插件官方线路和升级前的单条官方线路都不带账号标识，模型列表跟随宿主当前
+    // 的默认官方账号；没有存储账号时再读 Codex 自己的登录文件。
+    if let Some(account_id) = super::super::header_official_account_id(state).await {
+        return super::super::official_accounts::refresh_official_account_tokens(
+            state,
+            &account_id,
+        )
+        .await;
+    }
+    let home = codex_home().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        crate::official_accounts::OfficialAccountStore::read_codex_login(&home)
+    })
+    .await
+    .map_err(|error| format!("读取 Codex 登录信息任务异常退出：{error}"))?
+    .map_err(|error| format!("{error:#}"))?
+    .ok_or_else(|| "官方账号线路缺少账号标识".to_string())
+}
+
+pub(crate) async fn fetch_official_route_models(
+    state: &Arc<AppState>,
+    profile: &ProviderProfile,
+) -> Result<Vec<Value>, String> {
+    let record = official_models_account(state, profile).await?;
     let access_token = record
         .auth
         .get("tokens")
@@ -251,13 +314,8 @@ pub(crate) async fn fetch_official_route_models(
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .ok_or_else(|| "官方账号登录信息缺少访问令牌".to_string())?;
-    let configured_base_url = record
-        .base_url
-        .as_deref()
-        .filter(|url| !url.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| crate::codex_provider::official_route_base_url(profile));
-    let base_url = configured_base_url.trim().trim_end_matches('/');
+    let base_url = official_models_base_url(profile, record.base_url.as_deref());
+    let base_url = base_url.trim().trim_end_matches('/');
     let codex_app_path = state.config.read().await.codex_app_path.clone();
     let client_version = installed_codex_client_version(&codex_app_path);
     let endpoint = official_models_endpoint(base_url, client_version.as_deref());
@@ -545,7 +603,47 @@ pub(crate) fn config_with_provider_model_sync(
 
 #[cfg(test)]
 mod tests {
-    use super::official_models_endpoint;
+    use super::{official_models_account_id, official_models_base_url, official_models_endpoint};
+    use crate::config::{AUTH_MODE_OFFICIAL_ACCOUNT, ProviderProfile, official_profile_id};
+
+    #[test]
+    fn official_models_account_id_uses_the_field_then_the_profile_id() {
+        let mut profile = ProviderProfile::new("pro");
+        profile.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+        profile.id = official_profile_id("acct-from-id");
+        profile.official_account_id = Some("acct-field".into());
+        profile.normalize();
+        assert_eq!(
+            official_models_account_id(&profile).as_deref(),
+            Some("acct-field")
+        );
+
+        profile.official_account_id = None;
+        assert_eq!(
+            official_models_account_id(&profile).as_deref(),
+            Some("acct-from-id")
+        );
+
+        profile.id = "codey-official-account".into();
+        assert_eq!(official_models_account_id(&profile), None);
+    }
+
+    #[test]
+    fn plugin_official_route_lists_models_on_the_account_gateway() {
+        let mut profile = ProviderProfile::new("Basis Points");
+        profile.base_url = "https://bps.openai.com/basispoints/api/responses".into();
+        profile.plugin_owner_id = Some("dev.codey.oai-basispoints".into());
+        profile.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+        profile.normalize();
+        assert_eq!(
+            official_models_base_url(&profile, None),
+            "https://chatgpt.com/backend-api/codex"
+        );
+        assert_eq!(
+            official_models_base_url(&profile, Some("https://gateway.example/codex/")),
+            "https://gateway.example/codex"
+        );
+    }
 
     #[test]
     fn official_models_endpoint_uses_the_installed_client_version() {

@@ -805,6 +805,26 @@ fn unavailable_official_auth_keeps_stored_account_routes() {
 }
 
 #[test]
+fn saving_a_route_keeps_the_official_account_id_when_the_form_omits_it() {
+    let mut saved = ProviderProfile::new("pro");
+    saved.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    saved.official_account_id = Some("acct-one".to_string());
+    saved.normalize();
+    let mut incoming = saved.clone();
+    incoming.official_account_id = None;
+    incoming.name = "主力".to_string();
+    let previous = CodeyConfig {
+        profiles: vec![saved],
+        ..CodeyConfig::default()
+    };
+
+    let merged = merge_profile_secrets(vec![incoming], &previous).unwrap();
+
+    assert_eq!(merged[0].name, "主力");
+    assert_eq!(merged[0].official_account_id.as_deref(), Some("acct-one"));
+}
+
+#[test]
 fn unavailable_official_auth_drops_routes_of_missing_accounts() {
     // 配置里留着已删除账号的线路，而账号列表已经没有这个账号。
     let mut stale = ProviderProfile::new("已删除的账号");
