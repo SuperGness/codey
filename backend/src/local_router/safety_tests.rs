@@ -3,6 +3,43 @@ use super::*;
 
 const TERMINAL: &[u8] = b"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"output\":[]}}\n\n";
 
+// 【自动化测试】本地路由 - 不完整的协议探测按指数退避，不再每毫秒空转
+#[test]
+fn incomplete_websocket_probe_backs_off() {
+    assert_eq!(incomplete_probe_pause(1), Duration::from_millis(5));
+    assert_eq!(incomplete_probe_pause(2), Duration::from_millis(10));
+    assert_eq!(incomplete_probe_pause(4), Duration::from_millis(40));
+    assert_eq!(incomplete_probe_pause(5), Duration::from_millis(50));
+    assert_eq!(incomplete_probe_pause(u32::MAX), Duration::from_millis(50));
+}
+
+// 【自动化测试】本地路由 - WebSocket 等连接名额超时后返回忙，而不是一直阻塞
+#[tokio::test]
+async fn websocket_connection_permit_wait_times_out() {
+    let limit = Arc::new(Semaphore::new(1));
+    let held = limit.clone().try_acquire_owned().unwrap();
+    let started = Instant::now();
+    let error = acquire_connection_permit_within(&limit, Duration::from_millis(40))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ConnectionPermitError::Busy));
+    assert!(started.elapsed() < Duration::from_millis(500));
+    drop(held);
+    let _permit = acquire_connection_permit_within(&limit, Duration::from_millis(40))
+        .await
+        .unwrap();
+}
+
+// 【自动化测试】本地路由 - accept 连续失败时指数退避并封顶，监听不会退出
+#[test]
+fn accept_failures_back_off_up_to_one_second() {
+    assert_eq!(accept_retry_delay(1), ACCEPT_RETRY_INITIAL_DELAY);
+    assert_eq!(accept_retry_delay(2), ACCEPT_RETRY_INITIAL_DELAY * 2);
+    assert_eq!(accept_retry_delay(7), ACCEPT_RETRY_INITIAL_DELAY * 64);
+    assert_eq!(accept_retry_delay(8), ACCEPT_RETRY_MAX_DELAY);
+    assert_eq!(accept_retry_delay(u32::MAX), ACCEPT_RETRY_MAX_DELAY);
+}
+
 #[tokio::test]
 async fn request_size_errors_are_413_and_damaged_compression_is_400() {
     let router = LocalRouter::start(&CodeyConfig::default()).await.unwrap();

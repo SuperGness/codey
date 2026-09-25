@@ -119,6 +119,12 @@ pub struct AppState {
     pub config: RwLock<CodeyConfig>,
     config_write_lock: Mutex<()>,
     provider_model_sync_lock: Mutex<()>,
+    plugin_route_reload_lock: Mutex<()>,
+    model_delivery_lock: Mutex<()>,
+    /// Captured when the state is created on the Codey runtime. Plugin route
+    /// changes arrive on plugin threads, which cannot see that runtime via
+    /// `Handle::try_current`.
+    runtime_handle: Option<tokio::runtime::Handle>,
     pub http_client: reqwest::Client,
     /// Official token refresh clients keyed by account proxy URL.
     official_proxied_clients: BlockingMutex<HashMap<String, reqwest::Client>>,
@@ -142,6 +148,9 @@ pub struct AppState {
     trace_log_write_protection_active: AtomicBool,
     pub crashpad_pending_stats: CrashpadPendingStatsHandle,
     pub startup_error: RwLock<Option<String>>,
+    /// Kept apart from `startup_error`, which each launch overwrites and hot
+    /// reloads treat as an untrusted runtime.
+    config_load_error: Option<String>,
     available_update: RwLock<Option<updates::UpdateCheck>>,
     update_candidate_cache: Mutex<Option<updates::CachedUpdateCandidate>>,
     codex_app_version_cache: Mutex<Option<runtime::CodexAppVersionCache>>,
@@ -198,18 +207,41 @@ pub enum AppShutdownReason {
     InstallUpdate,
 }
 
+/// An unreadable config falls back to defaults for this launch. The broken
+/// files are copied aside first because saving the defaults rotates them
+/// through the backup chain.
+fn load_config_or_defaults(store: &ConfigStore) -> (CodeyConfig, Option<String>) {
+    let error = match store.load() {
+        Ok(config) => return (config, None),
+        Err(error) => error,
+    };
+    let preserved = store.preserve_unreadable();
+    let preserved = if preserved.is_empty() {
+        String::new()
+    } else {
+        let paths = preserved
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("、");
+        format!("；原文件已另存为：{paths}")
+    };
+    let message = format!(
+        "Codey 配置无法读取，已使用安全默认值启动；请先检查或恢复配置文件：{error:#}{preserved}"
+    );
+    error_log::record_failure(
+        "config_load_failed",
+        "load_codey_config_at_startup",
+        message.clone(),
+        json!({ "path": store.path().display().to_string() }),
+    );
+    (CodeyConfig::default(), Some(message))
+}
+
 impl Default for AppState {
     fn default() -> Self {
         let store = ConfigStore::default();
-        let (config, config_load_error) = match store.load() {
-            Ok(config) => (config, None),
-            Err(error) => (
-                CodeyConfig::default(),
-                Some(format!(
-                    "Codey 配置无法读取，已使用安全默认值启动；请先检查或恢复配置文件：{error:#}"
-                )),
-            ),
-        };
+        let (config, config_load_error) = load_config_or_defaults(&store);
         let protect_crashpad_pending = config.protect_crashpad_pending;
         let persisted_waiting_notifications = initial_waiting_notifications(&store, &[]);
         let (shutdown_reason, _) = watch::channel(None);
@@ -218,6 +250,9 @@ impl Default for AppState {
             config: RwLock::new(config),
             config_write_lock: Mutex::new(()),
             provider_model_sync_lock: Mutex::new(()),
+            plugin_route_reload_lock: Mutex::new(()),
+            model_delivery_lock: Mutex::new(()),
+            runtime_handle: tokio::runtime::Handle::try_current().ok(),
             http_client: reqwest::Client::builder()
                 .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
                 .connect_timeout(Duration::from_secs(5))
@@ -236,7 +271,8 @@ impl Default for AppState {
             diagnostic_storage_operation: Mutex::new(()),
             trace_log_write_protection_active: AtomicBool::new(false),
             crashpad_pending_stats: CrashpadPendingStatsHandle::idle(protect_crashpad_pending),
-            startup_error: RwLock::new(config_load_error),
+            startup_error: RwLock::new(None),
+            config_load_error,
             available_update: RwLock::new(None),
             update_candidate_cache: Mutex::new(None),
             codex_app_version_cache: Mutex::new(None),
@@ -1369,6 +1405,7 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
         "config": public_config,
         "path": state.store.path().to_string_lossy(),
         "startupError": startup_error,
+        "configLoadError": state.config_load_error,
         "officialAccountAvailable": config.official_account_available_this_launch,
         "officialAccountStatus": config.official_account_status_this_launch,
         "providerStatus": provider_status,
@@ -1912,7 +1949,11 @@ async fn save_codey_config_locked(
 pub(crate) fn install_plugin_route_handler(state: Arc<AppState>) {
     let state = Arc::clone(&state);
     crate::codey_plugins::set_route_handler(Arc::new(move |plugin_id, change| {
-        apply_plugin_route_change(&state, plugin_id, change)
+        let (route_id, changed) = apply_plugin_route_change(&state, plugin_id, change)?;
+        if changed {
+            schedule_plugin_route_hot_reload(&state);
+        }
+        Ok(route_id)
     }));
 }
 
@@ -1920,7 +1961,7 @@ fn apply_plugin_route_change(
     state: &AppState,
     plugin_id: &str,
     change: crate::codey_plugins::RouteChange,
-) -> Result<Option<String>, String> {
+) -> Result<(Option<String>, bool), String> {
     let _write_guard = state.config_write_lock.blocking_lock();
     let current = state.config.blocking_read().clone();
     let mut next = current.clone();
@@ -1935,7 +1976,14 @@ fn apply_plugin_route_change(
         }
     };
     if next == current {
-        return Ok(route_id);
+        return Ok((route_id, false));
+    }
+    // 与手动启停线路一致：子代理不能继续引用已消失的插件模型。
+    if next.subagent_optimization
+        && let Ok(model_state) = models::current_model_state(&next)
+    {
+        reconcile_subagent_models_for_mode(&mut next, &model_state);
+        next = next.normalize();
     }
     next.settings_revision = current.settings_revision.saturating_add(1);
     let stored = state
@@ -1943,7 +1991,55 @@ fn apply_plugin_route_change(
         .persist(next)
         .map_err(|error| format!("{error:#}"))?;
     *state.config.blocking_write() = stored;
-    Ok(route_id)
+    Ok((route_id, true))
+}
+
+/// Plugin routes change on plugin-management threads rather than inside a
+/// save command, so the running router and Codex model list are updated
+/// afterwards. Reloads run one at a time and read the config inside the lock,
+/// so a burst of changes settles on the latest one.
+fn schedule_plugin_route_hot_reload(state: &Arc<AppState>) {
+    let Some(runtime) = state.runtime_handle.clone() else {
+        record_plugin_route_hot_reload_failure(
+            "插件线路已保存，但没有可用的 Codey 运行时来热更新，重启 Codex 后生效".to_string(),
+        );
+        return;
+    };
+    let state = Arc::clone(state);
+    runtime.spawn(async move {
+        let _serial = state.plugin_route_reload_lock.lock().await;
+        let config = state.config.read().await.clone();
+        let model_state = match current_model_state_async(&config).await {
+            Ok(model_state) => model_state,
+            Err(error) => {
+                record_plugin_route_hot_reload_failure(error);
+                return;
+            }
+        };
+        if let Some(error) = hot_reload_runtime_models(&state, &config, &model_state)
+            .await
+            .error
+        {
+            record_plugin_route_hot_reload_failure(error);
+        }
+        if config.subagent_optimization {
+            let outcome = hot_reload_runtime_subagent_config(&state, &config).await;
+            if outcome.requires_restart()
+                && let Some(error) = outcome.error()
+            {
+                record_plugin_route_hot_reload_failure(error.to_string());
+            }
+        }
+    });
+}
+
+fn record_plugin_route_hot_reload_failure(error: String) {
+    error_log::record_failure(
+        "plugin_route_hot_reload_failed",
+        "hot_reload_plugin_routes",
+        error,
+        json!({}),
+    );
 }
 
 fn merge_profile_secrets(

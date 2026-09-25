@@ -110,7 +110,7 @@ function installBrowserBridge() {
       },
       body: JSON.stringify(args),
     });
-    let value: { error?: { message?: string } };
+    let value: { error?: { message?: string }; message?: string };
     try {
       value = await response.json();
     } catch {
@@ -120,7 +120,9 @@ function installBrowserBridge() {
           : `Codey 请求失败（${response.status}）`,
       );
     }
-    if (!response.ok) throw new Error(value?.error?.message || `Codey 请求失败（${response.status}）`);
+    if (!response.ok) {
+      throw new Error(value?.error?.message || value?.message || `Codey 请求失败（${response.status}）`);
+    }
     return value;
   };
 }

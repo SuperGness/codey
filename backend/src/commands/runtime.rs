@@ -18,7 +18,9 @@ use super::{
 };
 use crate::codex_config::codex_home;
 use crate::error_log;
-use crate::launcher::{CodeyRuntime, restore_previous_runtime_state};
+use crate::launcher::{
+    CodeyRuntime, prepare_persistent_router_resume_shim, restore_previous_runtime_state,
+};
 
 const CODEX_APP_VERSION_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -257,10 +259,14 @@ async fn codex_app_version_for_status(
 
 fn ensure_runtime_can_start(state: &AppState) -> Result<(), String> {
     if state.is_shutting_down() {
-        Err("Codey 正在退出，无法启动 Codex".to_string())
-    } else {
-        Ok(())
+        return Err("Codey 正在退出，无法启动 Codex".to_string());
     }
+    // 平台限制原来要等 Codex 被停掉、本地路由起来之后才发现。这里直接拒绝，
+    // 避免为一次必然失败的启动改写用户的 config.toml。
+    if !crate::codex_config::runtime_router_platform_supported() {
+        return Err(crate::codex_config::unsupported_runtime_platform_message().to_string());
+    }
+    Ok(())
 }
 
 async fn reclaim_initial_session_scan(
@@ -309,6 +315,23 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
     restore_previous_runtime_state(codex_home(), local_router_enabled)
         .await
         .map_err(|error| format!("恢复上次 Codey 临时 Codex 配置失败：{error}"))?;
+    // 恢复会拿掉上次崩溃留下的运行时表。兼容桩要在这之后写回，Codex
+    // 才能在 Codey 没起来时打开旧会话；内容没变时不会再写盘。
+    if local_router_enabled
+        && let Err(error) = prepare_persistent_router_resume_shim(codex_home()).await
+    {
+        error_log::record_failure_with_metadata(
+            "patch_failed",
+            "prepare_persistent_router_resume_shim_at_startup",
+            format!("{error:#}"),
+            error_log::FailureMetadata {
+                stage: Some("startup.prepare_router_resume_shim".to_string()),
+                recoverable: Some(true),
+            },
+            json!({}),
+        );
+        eprintln!("Codey 启动前写入 codey_router 恢复兼容桩失败：{error:#}");
+    }
     let launch_started = std::time::Instant::now();
     prepare_routes_for_current_launch(state).await?;
     let routes_ms = launch_started.elapsed().as_millis() as u64;

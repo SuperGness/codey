@@ -272,6 +272,14 @@ struct RuntimeAgentPlan {
     contents: Vec<u8>,
 }
 
+pub(crate) fn runtime_router_platform_supported() -> bool {
+    cfg!(any(windows, target_os = "macos"))
+}
+
+pub(crate) fn unsupported_runtime_platform_message() -> &'static str {
+    "当前平台尚不能把 Codey Provider 配置限定到单次 Codex 进程；为避免修改用户 config.toml，已取消启动"
+}
+
 pub(crate) fn apply_runtime_router_config(
     home: &Path,
     options: RuntimeRouterConfigOptions<'_>,
@@ -287,10 +295,8 @@ pub(crate) fn apply_runtime_router_config(
     // a platform where that patch is not available.
     let subagent_optimization =
         options.subagent_optimization && cfg!(any(windows, target_os = "macos"));
-    if !cfg!(any(windows, target_os = "macos")) {
-        bail!(
-            "当前平台尚不能把 Codey Provider 配置限定到单次 Codex 进程；为避免修改用户 config.toml，已取消启动"
-        );
+    if !runtime_router_platform_supported() {
+        bail!(unsupported_runtime_platform_message());
     }
     // Most runtime values stay command-local `-c` overlays. Codex Desktop still
     // looks up a thread's saved `model_provider` from disk, so persist only the

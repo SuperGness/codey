@@ -8,19 +8,25 @@ use std::collections::HashSet;
 use std::path::Path;
 #[cfg(unix)]
 use std::time::Duration;
+use std::time::SystemTime;
 
 /// Stops every other Codey process and its descendants during final shutdown.
 /// The caller remains alive long enough to stop its owned Codex tree and
 /// restore temporary configuration before invoking this function.
-pub async fn terminate_other_codey_processes() -> Result<usize> {
+///
+/// On Windows a newly opened desktop instance waits for this one to finish
+/// shutting down, so desktop instances and processes started after
+/// `shutdown_started_at` are left alone.
+pub async fn terminate_other_codey_processes(shutdown_started_at: SystemTime) -> Result<usize> {
     #[cfg(unix)]
     {
+        let _ = shutdown_started_at;
         terminate_other_unix_codey_processes().await
     }
 
     #[cfg(windows)]
     {
-        terminate_other_windows_codey_processes().await
+        terminate_other_windows_codey_processes(shutdown_started_at).await
     }
 }
 
@@ -79,8 +85,10 @@ fn unix_codey_root_process_ids(
 }
 
 #[cfg(windows)]
-async fn terminate_other_windows_codey_processes() -> Result<usize> {
+async fn terminate_other_windows_codey_processes(shutdown_started_at: SystemTime) -> Result<usize> {
     let current_pid = std::process::id();
+    let current_session = codey_runtime_core::windows_process_session_id(current_pid);
+    let shutdown_started_at = windows_filetime(shutdown_started_at);
     let executable_path = std::env::current_exe().context("读取当前 Codey 可执行文件路径失败")?;
     let processes = codey_runtime_core::windows_enumerate_processes()
         .context("检测待清理的 Windows Codey 进程失败")?;
@@ -91,7 +99,11 @@ async fn terminate_other_windows_codey_processes() -> Result<usize> {
                 && process.executable_path.as_deref().is_some_and(|path| {
                     codey_runtime_core::windows_process_paths_equal(path, &executable_path)
                 })
-                && process.creation_time.is_some()
+                && process.creation_time.is_some_and(|creation_time| {
+                    started_before_shutdown(creation_time, shutdown_started_at)
+                })
+                && crate::launcher::windows_process_in_session(process.session_id, current_session)
+                && !crate::desktop_instance::is_desktop_process(process.process_id)
         })
         .map(|process| process.process_id)
         .collect::<HashSet<_>>();
@@ -130,6 +142,23 @@ async fn terminate_other_windows_codey_processes() -> Result<usize> {
         }
     }
     Ok(terminated)
+}
+
+/// Converts to the FILETIME scale used by Windows process creation times.
+#[cfg(any(windows, test))]
+fn windows_filetime(time: SystemTime) -> Option<u64> {
+    const UNIX_EPOCH_AS_FILETIME_SECONDS: u64 = 11_644_473_600;
+    let since_unix = time.duration_since(std::time::UNIX_EPOCH).ok()?;
+    since_unix
+        .as_secs()
+        .checked_add(UNIX_EPOCH_AS_FILETIME_SECONDS)?
+        .checked_mul(10_000_000)?
+        .checked_add(u64::from(since_unix.subsec_nanos() / 100))
+}
+
+#[cfg(any(windows, test))]
+fn started_before_shutdown(creation_time: u64, shutdown_started_at: Option<u64>) -> bool {
+    shutdown_started_at.is_none_or(|shutdown_started_at| creation_time < shutdown_started_at)
 }
 
 #[cfg(any(windows, test))]
@@ -208,6 +237,28 @@ mod tests {
         assert_eq!(
             matching_process_ids(&later, &identities),
             HashSet::from([100])
+        );
+    }
+
+    // 【自动化测试】退出清理 - 退出开始后才启动的 Codey（如等待交接的新实例）不在清理范围
+    #[test]
+    fn processes_started_after_shutdown_began_are_not_cleanup_roots() {
+        let shutdown = std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_500);
+        let shutdown_filetime = windows_filetime(shutdown).unwrap();
+        assert_eq!(shutdown_filetime, 116_444_736_015_000_000);
+
+        assert!(started_before_shutdown(
+            shutdown_filetime - 1,
+            Some(shutdown_filetime)
+        ));
+        assert!(!started_before_shutdown(
+            shutdown_filetime,
+            Some(shutdown_filetime)
+        ));
+        assert!(started_before_shutdown(shutdown_filetime + 1, None));
+        assert_eq!(
+            windows_filetime(std::time::UNIX_EPOCH - std::time::Duration::from_secs(1)),
+            None
         );
     }
 

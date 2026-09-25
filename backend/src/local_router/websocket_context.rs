@@ -22,6 +22,13 @@ const RESPONSES_WEBSOCKET_PROBE_TIMEOUT: Duration = REQUEST_READ_TIMEOUT;
 #[cfg(test)]
 const RESPONSES_WEBSOCKET_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
+/// `peek` 不取走已到达的字节，套接字会一直保持可读，`readable().await` 会空转。
+/// 不完整的请求改成指数退避，慢客户端不再每毫秒唤醒一次。
+pub(crate) fn incomplete_probe_pause(wait: u32) -> Duration {
+    let shift = wait.saturating_sub(1).min(4);
+    Duration::from_millis(5_u64.saturating_mul(1_u64 << shift)).min(Duration::from_millis(50))
+}
+
 pub(crate) async fn probe_responses_websocket(
     stream: &TcpStream,
 ) -> Result<ResponsesWebSocketProbe> {
@@ -29,6 +36,8 @@ pub(crate) async fn probe_responses_websocket(
     // Codex 重启、更新期间很常见，按静默连接处理，不记录为请求失败。
     let detected = tokio::time::timeout(RESPONSES_WEBSOCKET_PROBE_TIMEOUT, async {
         let mut peek = vec![0_u8; 4096];
+        let mut seen = 0_usize;
+        let mut incomplete_waits = 0_u32;
         loop {
             let read = match stream.peek(&mut peek).await {
                 Ok(0) => return Ok(None),
@@ -48,10 +57,15 @@ pub(crate) async fn probe_responses_websocket(
                     return Err(error).context("探测 Codey Responses WebSocket 请求失败");
                 }
             };
+            if read > seen {
+                seen = read;
+                incomplete_waits = 0;
+            }
             let bytes = &peek[..read];
             let Some(request_line_end) = bytes.windows(2).position(|window| window == b"\r\n")
             else {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+                incomplete_waits = incomplete_waits.saturating_add(1);
+                tokio::time::sleep(incomplete_probe_pause(incomplete_waits)).await;
                 continue;
             };
             let request_line = std::str::from_utf8(&bytes[..request_line_end])
@@ -92,9 +106,10 @@ pub(crate) async fn probe_responses_websocket(
                     0,
                 );
             } else {
-                // `peek` leaves the current bytes readable, so wait briefly
-                // for another packet instead of spinning on the same prefix.
-                tokio::time::sleep(Duration::from_millis(1)).await;
+                // `peek` leaves the current bytes readable, so wait for another
+                // packet instead of spinning on the same prefix.
+                incomplete_waits = incomplete_waits.saturating_add(1);
+                tokio::time::sleep(incomplete_probe_pause(incomplete_waits)).await;
             }
         }
     })

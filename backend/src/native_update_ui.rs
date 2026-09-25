@@ -64,6 +64,18 @@ impl NativeUpdateUi {
         .map(|_| ())
     }
 
+    pub async fn show_startup_failure(&self, error: &str) -> Result<(), String> {
+        show_dialog(
+            "Codey 启动失败".to_string(),
+            format!("{error}\n\nCodey 将退出。处理上述问题后，请重新启动 Codey。"),
+            DialogKind::Failure,
+            "退出".to_string(),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub fn shutdown(&self) {
         if let Ok(platform) = &self.platform {
             platform.shutdown();

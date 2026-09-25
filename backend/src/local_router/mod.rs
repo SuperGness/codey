@@ -74,6 +74,10 @@ const MAX_CUSTOM_TOOL_BRIDGE_DESCRIPTION_BYTES: usize = 8 * 1024;
 const MAX_CUSTOM_TOOL_SOURCE_DESCRIPTION_BYTES: usize = 2 * 1024;
 const MAX_CONCURRENT_CONNECTIONS: usize = 64;
 const MAX_CONCURRENT_REJECTIONS: usize = 4;
+// 句柄耗尽、对端提前中止等 accept 错误通常是暂时的；监听器一旦退出，Codex
+// 的所有请求都会被拒绝连接，所以只退避重试，关闭信号才结束监听。
+const ACCEPT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(10);
+const ACCEPT_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
 const REQUEST_BODY_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const REQUEST_BODY_BUDGET_UNIT_BYTES: usize = 64 * 1024;
 // serde_json trees and protocol conversion buffers live alongside the encoded

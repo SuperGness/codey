@@ -44,9 +44,9 @@ use crate::trace_log_guard;
 mod platform;
 mod process;
 
-#[cfg(windows)]
-pub(crate) use platform::activate_visible_windows_codex_window;
 use platform::*;
+#[cfg(windows)]
+pub(crate) use platform::{activate_visible_windows_codex_window, windows_process_in_session};
 #[cfg(windows)]
 pub(crate) use process::windows_cli_wrapper_target;
 use process::{
@@ -1973,12 +1973,21 @@ impl CodeyRuntime {
         Ok(())
     }
 
-    pub fn sync_local_router_routes(&self, config: &CodeyConfig) -> Result<()> {
+    pub(crate) fn sync_local_router_routes(
+        &self,
+        config: &CodeyConfig,
+    ) -> Result<Option<local_router::RouterSnapshotSwap>> {
         self.validate_subagent_route_hot_reload(config)?;
+        Ok(self
+            .local_router
+            .as_ref()
+            .map(|local_router| local_router.update_config(config)))
+    }
+
+    pub(crate) fn revert_local_router_routes(&self, swap: local_router::RouterSnapshotSwap) {
         if let Some(local_router) = self.local_router.as_ref() {
-            local_router.update_config(config);
+            local_router.revert_config(swap);
         }
-        Ok(())
     }
 
     pub(crate) async fn reconfigure_request_log(
@@ -2075,6 +2084,11 @@ impl CodeyRuntime {
         crashpad_pending_stats: CrashpadPendingStatsHandle,
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
     ) -> Result<(Self, oneshot::Receiver<()>)> {
+        if !crate::codex_config::runtime_router_platform_supported() {
+            return Err(anyhow::anyhow!(
+                crate::codex_config::unsupported_runtime_platform_message()
+            ));
+        }
         let home = codex_home();
         repair_startup_reserved_providers(home).await;
         trace_log_write_protection_active.store(false, Ordering::Release);
@@ -2137,6 +2151,7 @@ impl CodeyRuntime {
         } = match prepared_provider_state {
             Ok(state) => state,
             Err(error) => {
+                stop_local_router_after_failed_start(local_router.as_ref()).await;
                 return Err(restore_runtime_config_after_error(
                     home,
                     config.local_router_enabled,
@@ -2149,6 +2164,7 @@ impl CodeyRuntime {
         let patch = match prepare_startup_patches(home, config).await {
             Ok(patch) => patch,
             Err(error) => {
+                stop_local_router_after_failed_start(local_router.as_ref()).await;
                 return Err(restore_runtime_config_after_error(
                     home,
                     config.local_router_enabled,
@@ -2164,7 +2180,7 @@ impl CodeyRuntime {
             child,
             maintenance,
             injected_target,
-        } = spawn_and_inject_runtime(
+        } = match spawn_and_inject_runtime(
             home,
             config,
             &handler,
@@ -2173,7 +2189,14 @@ impl CodeyRuntime {
             &patch,
             &runtime_config_overrides,
         )
-        .await?;
+        .await
+        {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                stop_local_router_after_failed_start(local_router.as_ref()).await;
+                return Err(error);
+            }
+        };
         stage_timings.mark("spawnAndInjectMs");
         stage_timings.report();
         #[cfg(target_os = "macos")]
@@ -2326,6 +2349,22 @@ impl CodeyRuntime {
             );
         }
         local_router_stop.context("关闭本地线路路由失败")
+    }
+}
+
+/// 启动失败时路由已经在监听。直接 Drop 会中止 accept 任务，来不及排空
+/// 正在处理的请求，也不会停掉请求日志。
+async fn stop_local_router_after_failed_start(local_router: Option<&LocalRouter>) {
+    let Some(local_router) = local_router else {
+        return;
+    };
+    if let Err(error) = local_router.stop().await {
+        error_log::record_failure(
+            "cleanup_failed",
+            "stop_local_router_after_startup_failure",
+            format!("{error:#}"),
+            serde_json::json!({}),
+        );
     }
 }
 

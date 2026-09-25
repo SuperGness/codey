@@ -1131,7 +1131,7 @@ pub(crate) fn activate_visible_windows_codex_window() -> bool {
 /// termination. An unknown session stays in scope so an unreadable process is
 /// never assumed stopped.
 #[cfg(any(windows, test))]
-pub(super) fn windows_process_in_session(
+pub(crate) fn windows_process_in_session(
     process_session: Option<u32>,
     current_session: Option<u32>,
 ) -> bool {

@@ -199,38 +199,8 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
     .await
     .context("初始化 Codey 状态的任务异常退出")?;
     let _plugin_shutdown = PluginShutdownGuard;
-    let codex_home = codex_config::codex_home();
-    let local_router_enabled = state.config.read().await.local_router_enabled;
-    if let Err(error) =
-        launcher::restore_previous_runtime_state(codex_home, local_router_enabled).await
-    {
-        error_log::record_failure_with_metadata(
-            "restore_failed",
-            "restore_previous_runtime_state_at_startup",
-            format!("{error:#}"),
-            error_log::FailureMetadata {
-                stage: Some("startup.restore_previous_state".to_string()),
-                recoverable: Some(true),
-            },
-            serde_json::json!({}),
-        );
-        eprintln!("Codey 启动前恢复上次临时配置失败：{error:#}");
-    }
-    if local_router_enabled
-        && let Err(error) = launcher::prepare_persistent_router_resume_shim(codex_home).await
-    {
-        error_log::record_failure_with_metadata(
-            "patch_failed",
-            "prepare_persistent_router_resume_shim_at_startup",
-            format!("{error:#}"),
-            error_log::FailureMetadata {
-                stage: Some("startup.prepare_router_resume_shim".to_string()),
-                recoverable: Some(true),
-            },
-            serde_json::json!({}),
-        );
-        eprintln!("Codey 启动前写入 codey_router 恢复兼容桩失败：{error:#}");
-    }
+    // 临时状态的恢复和路由兼容桩都在每次启动里做。进程入口再做一次的话，
+    // 第一次失败只记日志，第二次同样的错误才会中止启动。
     // Resolve the default official account while the launch path prepares its
     // remaining state. Update checks start only after the runtime is ready.
     state.prewarm_official_account_probe().await;
@@ -285,15 +255,15 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
                     &mut shutdown,
                 )
                 .await;
-                #[cfg(windows)]
                 if let Err(error) = &result {
-                    show_initial_startup_failure(error).await;
+                    show_initial_startup_failure(&ui, error).await;
                 }
                 return result.map_err(anyhow::Error::msg);
             }
         }
     };
 
+    let shutdown_started_at = std::time::SystemTime::now();
     let cleanup = stop_runtime_with_retry(&state).await;
     if let Err(error) = &cleanup {
         error_log::record_failure(
@@ -308,7 +278,7 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
         ShutdownReason::InstallUpdate => "Codey 正在安装更新",
         ShutdownReason::Signal => "Codey 收到退出信号",
     };
-    match process_cleanup::terminate_other_codey_processes().await {
+    match process_cleanup::terminate_other_codey_processes(shutdown_started_at).await {
         Ok(0) => {}
         Ok(count) => eprintln!("{shutdown_context}，已终止 {count} 个遗留 Codey 进程"),
         Err(error) => {
@@ -406,19 +376,8 @@ fn initial_startup_failure_error(startup_error: &str, cleanup_error: Option<&str
     }
 }
 
-#[cfg(windows)]
-async fn show_initial_startup_failure(error: &str) {
-    let description = format!("{error}\n\nCodey 将退出。处理上述问题后，请重新启动 Codey。");
-    if let Err(dialog_error) = tokio::task::spawn_blocking(move || {
-        rfd::MessageDialog::new()
-            .set_title("Codey 启动失败")
-            .set_description(description)
-            .set_level(rfd::MessageLevel::Error)
-            .set_buttons(rfd::MessageButtons::Ok)
-            .show()
-    })
-    .await
-    {
+async fn show_initial_startup_failure(ui: &NativeUpdateUi, error: &str) {
+    if let Err(dialog_error) = ui.show_startup_failure(error).await {
         error_log::record_failure(
             "dialog_failed",
             "show_initial_startup_failure",
@@ -437,20 +396,29 @@ async fn shutdown_signal() {
         match signal(SignalKind::terminate()).context("监听 SIGTERM 失败") {
             Ok(mut terminate) => {
                 tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
+                    _ = ctrl_c_signal() => {}
                     _ = terminate.recv() => {}
                 }
             }
             Err(error) => {
                 eprintln!("{error:#}");
-                let _ = tokio::signal::ctrl_c().await;
+                ctrl_c_signal().await;
             }
         }
     }
 
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        ctrl_c_signal().await;
+    }
+}
+
+/// A listener that cannot be registered never fires, so Codex exit remains
+/// the shutdown trigger instead of Codey quitting right after launch.
+async fn ctrl_c_signal() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        eprintln!("监听 Ctrl+C 失败：{error}");
+        std::future::pending::<()>().await;
     }
 }
 

@@ -27,12 +27,23 @@ fn main() {
         );
     } else {
         let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-        let status = Command::new(npm)
+        match Command::new(npm)
             .args(["run", "vite:build"])
             .current_dir(Path::new(".."))
             .status()
-            .expect("无法运行 npm 构建 Codey Web 配置页");
-        assert!(status.success(), "Codey Web 配置页构建失败");
+        {
+            Err(error) => panic!(
+                "无法运行 npm 构建 Codey 配置页：{error}。请先安装 Node.js，并在仓库根目录执行 pnpm install"
+            ),
+            Ok(status) if !status.success() => panic!(
+                "Codey 配置页构建失败（退出码 {}）。请在仓库根目录执行 pnpm install 后重试",
+                status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "未知".to_string())
+            ),
+            Ok(_) => {}
+        }
     }
 
     #[cfg(windows)]

@@ -1000,6 +1000,32 @@ fn only_endpoint_capability_statuses_use_long_websocket_backoff() {
     }
 }
 
+// 【自动化测试】本地路由 - 热更新送达失败时退回原快照，不覆盖之后装入的快照
+#[tokio::test]
+async fn failed_delivery_reverts_only_its_own_router_snapshot() {
+    let (config, provider_id, model) = router_config("http://127.0.0.1:9/v1".into());
+    let router = LocalRouter::start(&config).await.unwrap();
+    let original = router.snapshot.read().unwrap().model_ids().to_vec();
+    let mut added = config.clone();
+    added.selected_models_by_provider.insert(
+        provider_id.clone(),
+        vec![model.clone(), "added-model".into()],
+    );
+    let current_models = || router.snapshot.read().unwrap().model_ids().to_vec();
+
+    let swap = router.update_config(&added);
+    assert_ne!(current_models(), original);
+    assert!(router.revert_config(swap));
+    assert_eq!(current_models(), original);
+
+    let stale = router.update_config(&added);
+    let newer = current_models();
+    router.update_config(&added);
+    assert!(!router.revert_config(stale));
+    assert_eq!(current_models(), newer);
+    router.stop().await.unwrap();
+}
+
 #[tokio::test]
 async fn router_config_update_invalidates_only_changed_websocket_routes() {
     let (mut config, provider_id, _) = router_config("http://127.0.0.1:9/v1".into());
@@ -11268,6 +11294,22 @@ async fn request_log_page_is_public_but_its_api_requires_the_launch_token() {
     assert_eq!(
         usage.json::<Value>().await.unwrap()["status"],
         "unavailable"
+    );
+    let invalid_usage = client
+        .post(format!(
+            "{gateway_root}/codey/api/query_official_account_usage"
+        ))
+        .header(ROUTER_AUTH_HEADER, &endpoint.token)
+        .json(&json!({"forceRefresh": "yes"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid_usage.status(), reqwest::StatusCode::BAD_REQUEST);
+    let invalid_usage = invalid_usage.json::<Value>().await.unwrap();
+    assert!(
+        invalid_usage["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("额度查询参数无效"))
     );
 
     // 系统浏览器里的请求日志页无法走 Codey 应用桥，账号筛选、账号名显示和按

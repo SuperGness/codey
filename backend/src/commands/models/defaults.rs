@@ -316,14 +316,21 @@ pub(crate) async fn hot_reload_runtime_models(
         } else {
             config_with_launch_pinned_transport(&runtime.applied_config, config)
         };
-    if delivered.local_router_enabled
-        && let Err(error) = runtime.sync_local_router_routes(&delivered)
-    {
-        return ModelHotReloadOutcome {
-            error: Some(format!("{error:#}")),
-            ..ModelHotReloadOutcome::default()
-        };
-    }
+    // 路由快照和渲染端模型列表成对送达，失败回退时不能覆盖另一次送达的结果。
+    let _delivery = state.model_delivery_lock.lock().await;
+    let router_swap = if delivered.local_router_enabled {
+        match runtime.sync_local_router_routes(&delivered) {
+            Ok(swap) => swap,
+            Err(error) => {
+                return ModelHotReloadOutcome {
+                    error: Some(format!("{error:#}")),
+                    ..ModelHotReloadOutcome::default()
+                };
+            }
+        }
+    } else {
+        None
+    };
     let expected_catalog = renderer_model_catalog_value(&delivered, model_state);
     let expected_models = expected_catalog
         .get("models")
@@ -341,6 +348,11 @@ pub(crate) async fn hot_reload_runtime_models(
             }
         }
         Err(error) => {
+            // 未确认送达时仍以已应用的模型配置为准（需要重启的判断也以它为基准），
+            // 路由退回原快照，与 Codex 仍在显示的模型列表一致。
+            if let Some(swap) = router_swap {
+                runtime.revert_local_router_routes(swap);
+            }
             let error = format!("{error:#}");
             error_log::record_failure(
                 "patch_verification_failed",

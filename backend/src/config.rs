@@ -2532,6 +2532,38 @@ impl ConfigStore {
         self.persist(config.clone()).map(|_| ())
     }
 
+    /// Copies the config and backups that failed to load out of the backup
+    /// rotation, so later saves of the fallback defaults cannot push the
+    /// user's original out of reach. Copies are named after their content, so
+    /// relaunching with the same broken files adds nothing.
+    pub fn preserve_unreadable(&self) -> Vec<PathBuf> {
+        use sha2::{Digest, Sha256};
+
+        std::iter::once(self.path.clone())
+            .chain((1..=CONFIG_BACKUP_COUNT).map(|index| self.backup_path(index)))
+            .filter_map(|path| {
+                let bytes = fs::read(&path).ok()?;
+                let digest = format!("{:x}", Sha256::digest(&bytes));
+                let file_name = path.file_name()?.to_string_lossy().into_owned();
+                let target =
+                    path.with_file_name(format!("{file_name}.unreadable-{}", &digest[..12]));
+                if !target.exists()
+                    && let Err(error) =
+                        crate::fs_util::atomic_write_private_with_parent(&target, &bytes)
+                {
+                    crate::error_log::record_failure(
+                        "config_preserve_failed",
+                        "preserve_unreadable_codey_config",
+                        format!("{error:#}"),
+                        serde_json::json!({ "from": path.display().to_string() }),
+                    );
+                    return None;
+                }
+                Some(target)
+            })
+            .collect()
+    }
+
     fn backup_path(&self, index: usize) -> PathBuf {
         let file_name = self
             .path
@@ -2830,6 +2862,31 @@ mod tests {
 
         let recovered = store.load().unwrap();
         assert_eq!(recovered.profiles[0].name, "version-2");
+    }
+
+    // 【自动化测试】配置存储 - 无法读取的配置另存到轮转之外，保存默认值后仍可找回
+    #[test]
+    fn unreadable_configs_are_preserved_outside_the_backup_rotation() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path().join("config.json"));
+        fs::write(store.path(), b"corrupt-primary").unwrap();
+        fs::write(store.backup_path(1), b"corrupt-backup").unwrap();
+        assert!(store.load().is_err());
+
+        let preserved = store.preserve_unreadable();
+        assert_eq!(preserved.len(), 2);
+        assert_eq!(fs::read(&preserved[0]).unwrap(), b"corrupt-primary");
+        assert_eq!(fs::read(&preserved[1]).unwrap(), b"corrupt-backup");
+        assert_eq!(store.preserve_unreadable(), preserved);
+
+        for version in 1..=4 {
+            store
+                .save(&named_config(&format!("version-{version}")))
+                .unwrap();
+        }
+        assert_eq!(fs::read(&preserved[0]).unwrap(), b"corrupt-primary");
+        assert_eq!(fs::read(&preserved[1]).unwrap(), b"corrupt-backup");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 6);
     }
 
     #[cfg(unix)]
