@@ -923,6 +923,29 @@ test("thread title routing prefers official Luna, route Luna, then the default m
       4,
     );
     assert.match(patchedExtra, /function yfe\(\)\{return \{model:tj\}\}/);
+    // Codex 26.917 (`src-DldfpmrL.js`) destructures the model as a parameter.
+    const withModelParameter = [
+      "async function Wce({appServerClient:r,model:i=z8}){let f=await X9({",
+      "appServerClient:r,model:i,feature:`thread_title`,prompt:d});return f}",
+      "async function X9({appServerClient:e,model:t,feature:a,signal:d}){",
+      "let m=null;try{let g=await L8({model:t,threadSource:a,",
+      "onTokenUsage:e=>{m??=e}});return wN({feature:a,model:t}),g}catch(e){",
+      "throw wN({feature:a,model:t}),e}}",
+      "function qce(e){return{model:t}}",
+    ].join("");
+    const patchedParameter = runtime.context.__CODEY_PATCH_CODEX_MAIN_THREAD_TITLE_MODEL__(
+      withModelParameter,
+    );
+    assert.doesNotThrow(() => new vm.Script(patchedParameter));
+    assert.match(
+      patchedParameter,
+      /async function X9\(\{appServerClient:e,model:t,feature:a,signal:d\}\)\{/,
+    );
+    assert.equal(
+      patchedParameter.match(/globalThis\.__CODEY_THREAD_TITLE_MODEL__\|\|t:t/g)?.length,
+      3,
+    );
+    assert.match(patchedParameter, /function qce\(e\)\{return\{model:t\}\}/);
   } finally {
     runtime.restore();
   }

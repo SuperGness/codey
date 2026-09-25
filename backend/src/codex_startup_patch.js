@@ -2171,8 +2171,8 @@
     const helperName = titleCalls[0][1];
     const helperStart = source.indexOf(`async function ${helperName}({`);
     const signatureEnd = source.indexOf("}){", helperStart);
-    // 26.917 在同一个辅助函数里又加了一处 model 字段。按函数体配对花括号，
-    // 避免把后面的函数切进来；次数只用来确认切到的仍是这段元数据辅助函数。
+    // 26.917 把 model 移进参数解构，签名里的 model:x 改成表达式就是语法错误，
+    // 整个 chunk 无法加载、主进程停在启动前。只在函数体内替换。
     const bodyOpen = signatureEnd + 2;
     const bodyClose = signatureEnd < 0 ? -1 : matchingBrace(source, bodyOpen);
     if (
@@ -2183,11 +2183,11 @@
     ) {
       throw new Error("Codey thread title metadata helper not found");
     }
-    const helper = source.slice(helperStart, bodyClose + 1);
+    const body = source.slice(bodyOpen, bodyClose + 1);
     const featureName = /\bfeature:([$A-Z_a-z][$\w]*)/.exec(
       source.slice(helperStart, signatureEnd),
     )?.[1];
-    const nativeModelName = /\bmodel:([$A-Z_a-z][$\w]*)/.exec(helper)?.[1];
+    const nativeModelName = /\bmodel:([$A-Z_a-z][$\w]*)/.exec(body)?.[1];
     if (!featureName || !nativeModelName) {
       throw new Error("Codey thread title metadata fields not found");
     }
@@ -2196,7 +2196,7 @@
       `\\bmodel:${escapedNativeModelName}\\b`,
       "g",
     );
-    const modelMatches = helper.match(nativeModelPattern)?.length ?? 0;
+    const modelMatches = body.match(nativeModelPattern)?.length ?? 0;
     if (modelMatches < 3 || modelMatches > 6) {
       throw new Error(
         `Codey thread title metadata model matched ${modelMatches} times`,
@@ -2206,11 +2206,11 @@
       `${featureName}===\`thread_title\`?` +
       `globalThis.__CODEY_THREAD_TITLE_MODEL__||${nativeModelName}:` +
       nativeModelName;
-    const patchedHelper = helper.replace(
+    const patchedBody = body.replace(
       nativeModelPattern,
       `model:${selectedModel}`,
     );
-    return source.slice(0, helperStart) + patchedHelper + source.slice(bodyClose + 1);
+    return source.slice(0, bodyOpen) + patchedBody + source.slice(bodyClose + 1);
   };
   Object.defineProperty(
     globalThis,
