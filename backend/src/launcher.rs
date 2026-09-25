@@ -44,6 +44,8 @@ use crate::trace_log_guard;
 mod platform;
 mod process;
 
+#[cfg(windows)]
+pub(crate) use platform::activate_visible_windows_codex_window;
 use platform::*;
 #[cfg(windows)]
 pub(crate) use process::windows_cli_wrapper_target;

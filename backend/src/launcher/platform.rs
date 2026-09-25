@@ -110,6 +110,7 @@ pub(super) fn windows_startup_process_details(
                         "executableName": process.exe_file,
                         "executablePath": process.executable_path,
                         "creationTime": process.creation_time,
+                        "sessionId": process.session_id,
                     })
                 })
                 .collect(),
@@ -1058,10 +1059,12 @@ pub(super) async fn stop_running_windows_codex_instances(
 ) -> Result<Vec<WindowsCodexInstance>> {
     let processes = codey_runtime_core::windows_enumerate_processes()
         .context("检测正在运行的 Windows Codex 失败")?;
+    let current_session = codey_runtime_core::windows_process_session_id(std::process::id());
     let instances = windows_codex_instances_from_snapshot(
         app_dir,
         processes
             .iter()
+            .filter(|process| windows_process_in_session(process.session_id, current_session))
             .map(|process| (process.process_id, process.executable_path.as_deref())),
     );
     if instances.is_empty() {
@@ -1098,6 +1101,44 @@ pub(super) async fn stop_running_windows_codex_instances(
             .with_context(|| format!("停止正在运行的 Codex 失败：{}", directory.display()))?;
     }
     Ok(instances)
+}
+
+/// Brings forward a visible Codex window, e.g. one owned by another Codey
+/// instance. Only standard install layouts are recognised because the
+/// configured app directory has not been loaded at this point.
+#[cfg(windows)]
+pub(crate) fn activate_visible_windows_codex_window() -> bool {
+    let Ok(processes) = codey_runtime_core::windows_enumerate_processes() else {
+        return false;
+    };
+    let current_session = codey_runtime_core::windows_process_session_id(std::process::id());
+    windows_codex_instances_from_snapshot(
+        Path::new(""),
+        processes
+            .iter()
+            .filter(|process| windows_process_in_session(process.session_id, current_session))
+            .map(|process| (process.process_id, process.executable_path.as_deref())),
+    )
+    .iter()
+    .any(|instance| {
+        codey_runtime_core::windows_activate_visible_process_window(instance.process_id)
+    })
+}
+
+/// Codey manages only its own logon session. Services shipped inside the Codex
+/// install (such as `codex-windows-sandbox-service.exe`) run in session 0 under
+/// another account: they hold no desktop single-instance lock and refuse
+/// termination. An unknown session stays in scope so an unreadable process is
+/// never assumed stopped.
+#[cfg(any(windows, test))]
+pub(super) fn windows_process_in_session(
+    process_session: Option<u32>,
+    current_session: Option<u32>,
+) -> bool {
+    match (process_session, current_session) {
+        (Some(process_session), Some(current_session)) => process_session == current_session,
+        _ => true,
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -1169,7 +1210,12 @@ async fn terminate_windows_codex_processes_with_snapshot(
     stop_timeout: Duration,
     mut snapshot: impl FnMut() -> Result<Vec<codey_runtime_core::WindowsProcessInfo>>,
 ) -> Result<()> {
-    let processes = snapshot().context("检测待停止的 Windows Codex 进程失败")?;
+    let current_session = codey_runtime_core::windows_process_session_id(std::process::id());
+    let processes = snapshot()
+        .context("检测待停止的 Windows Codex 进程失败")?
+        .into_iter()
+        .filter(|process| windows_process_in_session(process.session_id, current_session))
+        .collect::<Vec<_>>();
     let mut process_ids = windows_owned_process_ids_from_snapshot(
         app_dir,
         process_id,
@@ -1458,6 +1504,16 @@ mod compatibility_tests {
             .map(|instance| instance.process_id)
             .collect::<Vec<_>>();
         assert_eq!(process_ids, vec![30, 31, 32, 33]);
+    }
+
+    // 【自动化测试】Windows 清理 - 会话 0 的系统服务不属于 Codey 可停止的 Codex 进程
+    #[test]
+    fn processes_outside_the_desktop_session_are_not_cleanup_targets() {
+        assert!(windows_process_in_session(Some(1), Some(1)));
+        assert!(!windows_process_in_session(Some(0), Some(1)));
+        assert!(!windows_process_in_session(Some(2), Some(1)));
+        assert!(windows_process_in_session(None, Some(1)));
+        assert!(windows_process_in_session(Some(0), None));
     }
 
     #[test]

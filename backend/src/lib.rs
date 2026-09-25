@@ -10,6 +10,8 @@ mod codey_plugins;
 mod commands;
 mod config;
 mod crashpad_pending_guard;
+#[cfg(windows)]
+mod desktop_instance;
 mod electron_fuses;
 mod error_log;
 pub mod fastctx;
@@ -146,6 +148,10 @@ pub fn run_desktop_application() -> Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     {
+        #[cfg(windows)]
+        let Some(_desktop_instance) = desktop_instance::claim() else {
+            return Ok(());
+        };
         let ui = NativeUpdateUi::start();
         let result = build_async_runtime()?.block_on(run(ui.clone()));
         ui.shutdown();

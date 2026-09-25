@@ -19,6 +19,8 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 #[cfg(windows)]
+use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+#[cfg(windows)]
 use windows::Win32::System::Threading::{
     GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     PROCESS_TERMINATE, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
@@ -53,6 +55,16 @@ pub struct WindowsProcessInfo {
     pub exe_file: String,
     pub executable_path: Option<PathBuf>,
     pub creation_time: Option<u64>,
+    /// Windows session; services run in session 0, apart from the desktop user.
+    pub session_id: Option<u32>,
+}
+
+#[cfg(windows)]
+pub fn process_session_id(process_id: u32) -> Option<u32> {
+    let mut session_id = 0;
+    unsafe { ProcessIdToSessionId(process_id, &mut session_id) }
+        .ok()
+        .map(|()| session_id)
 }
 
 #[cfg(windows)]
@@ -115,6 +127,7 @@ fn enumerate_processes_once() -> anyhow::Result<Vec<WindowsProcessInfo>> {
             exe_file: nul_terminated_wide_to_string(&entry.szExeFile),
             executable_path,
             creation_time,
+            session_id: process_session_id(process_id),
         });
         if let Err(error) = unsafe { Process32NextW(snapshot, &mut entry) } {
             if error.code() == ERROR_NO_MORE_FILES.to_hresult() {
@@ -205,9 +218,21 @@ pub fn process_paths_equal(left: &Path, right: &Path) -> bool {
 
 #[cfg(windows)]
 pub fn activate_process_window(process_id: u32) -> bool {
-    let Some(hwnd) = process_window(process_id, false) else {
-        return false;
-    };
+    process_window(process_id, false).is_some_and(focus_window)
+}
+
+/// Hidden and auxiliary windows are left alone so a process that has not
+/// shown its main window yet is not disturbed.
+#[cfg(windows)]
+pub fn activate_visible_process_window(process_id: u32) -> bool {
+    match scored_process_window(process_id, true) {
+        Some((hwnd, score)) if score > ProcessWindowScore::Fallback => focus_window(hwnd),
+        _ => false,
+    }
+}
+
+#[cfg(windows)]
+fn focus_window(hwnd: HWND) -> bool {
     unsafe {
         if IsIconic(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
@@ -304,6 +329,14 @@ fn visible_window_for_process(process_id: u32) -> Option<HWND> {
 
 #[cfg(windows)]
 fn process_window(process_id: u32, visible_only: bool) -> Option<HWND> {
+    scored_process_window(process_id, visible_only).map(|(hwnd, _)| hwnd)
+}
+
+#[cfg(windows)]
+fn scored_process_window(
+    process_id: u32,
+    visible_only: bool,
+) -> Option<(HWND, ProcessWindowScore)> {
     let mut state = ActivateWindowState {
         process_id,
         hwnd: HWND::default(),
@@ -319,7 +352,7 @@ fn process_window(process_id: u32, visible_only: bool) -> Option<HWND> {
     if state.hwnd.is_invalid() {
         None
     } else {
-        Some(state.hwnd)
+        Some((state.hwnd, state.score))
     }
 }
 
