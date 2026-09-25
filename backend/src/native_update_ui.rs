@@ -38,11 +38,17 @@ impl NativeUpdateUi {
         &self,
         current_version: &str,
         latest_version: &str,
+        release_notes: Option<&str>,
     ) -> Result<bool, String> {
+        let notes = release_notes
+            .map(str::trim)
+            .filter(|notes| !notes.is_empty())
+            .map(|notes| format!("\n\n更新日志：\n{notes}"))
+            .unwrap_or_default();
         show_dialog(
             format!("发现 Codey v{latest_version} 更新"),
             format!(
-                "当前版本为 v{current_version}。是否现在下载、校验并安装更新？安装时会退出 Codex 和 Codey，并尝试启动新版。"
+                "当前版本为 v{current_version}。是否现在下载、校验并安装更新？安装时会退出 Codex 和 Codey，并尝试启动新版。{notes}"
             ),
             DialogKind::Confirm,
             "更新并重启".to_string(),

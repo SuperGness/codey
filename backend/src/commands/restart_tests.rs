@@ -1054,6 +1054,8 @@ async fn runtime_status_exposes_cached_available_update() {
         latest_version: "2.0.0".to_string(),
         update_available: true,
         selected_asset: None,
+        release_notes: None,
+        publish_id: None,
     });
 
     let status = runtime_status(&state).await.unwrap();

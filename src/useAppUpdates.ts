@@ -70,11 +70,13 @@ const updateAvailable = (
 ): check is UpdateCheck => check?.updateAvailable === true;
 
 function updateCheckText(result: UpdateCheck) {
-  return result.updateAvailable
+  const base = result.updateAvailable
     ? result.selectedAsset
       ? `发现 v${result.latestVersion} 更新（当前 v${result.currentVersion}）`
       : `发现 v${result.latestVersion} 更新，但当前系统暂无可安装包`
     : `当前已是最新版本 v${result.currentVersion}`;
+  const notes = result.releaseNotes?.trim();
+  return notes ? `${base}：${notes}` : base;
 }
 
 function updateResultTone(result: UpdateCheck): InlineResult["tone"] {
@@ -304,7 +306,15 @@ export function useAppUpdates({
     setConfirmation({
       action: "download-update",
       title: `发现 Codey 新版本 v${target.latestVersion}`,
-      description: `当前版本为 v${target.currentVersion}，检测到新版本 v${target.latestVersion}。是否立即下载更新？`,
+      description: [
+        `当前版本为 v${target.currentVersion}，检测到新版本 v${target.latestVersion}。`,
+        target.releaseNotes?.trim()
+          ? `更新日志：\n${target.releaseNotes.trim()}`
+          : null,
+        "是否立即下载更新？",
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
       confirmLabel: "立即更新",
       run: () => void downloadUpdate(target),
       // 用户已经在这次运行里明确推迟过这个版本，自动检查就不再反复弹窗。

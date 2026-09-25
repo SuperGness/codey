@@ -864,6 +864,14 @@ pub struct CodeyConfig {
         skip_deserializing
     )]
     pub update_manifest_url: String,
+    /// Optional release-admin Worker endpoint for device-aware publishing.
+    /// This is build-time configuration, never a user setting.
+    #[serde(
+        default = "default_release_admin_url",
+        skip_serializing,
+        skip_deserializing
+    )]
+    pub release_admin_url: String,
 }
 
 /// User-declared operating budget, never proof of upstream model capacity.
@@ -971,6 +979,7 @@ impl Default for CodeyConfig {
             official_account_available_this_launch: false,
             official_account_status_this_launch: LaunchOfficialAccountStatus::Unauthenticated,
             update_manifest_url: default_update_manifest_url(),
+            release_admin_url: default_release_admin_url(),
         }
     }
 }
@@ -982,6 +991,7 @@ fn default_stream_max_retries() -> u32 {
 impl CodeyConfig {
     pub fn normalize(mut self) -> Self {
         self.update_manifest_url = default_update_manifest_url();
+        self.release_admin_url = default_release_admin_url();
         self.stream_max_retries = self.stream_max_retries.min(100);
         self.route_request_log.normalize();
         self.profiles
@@ -2450,6 +2460,15 @@ fn update_manifest_url_from_base(configured_base_url: Option<&str>) -> String {
 
 pub fn default_update_manifest_url() -> String {
     update_manifest_url_from_base(option_env!("CODEY_UPDATE_BASE_URL"))
+}
+
+pub fn default_release_admin_url() -> String {
+    option_env!("CODEY_RELEASE_ADMIN_URL")
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or_default()
+        .trim_end_matches('/')
+        .to_string()
 }
 
 pub fn default_config_path() -> PathBuf {

@@ -126,6 +126,22 @@ test("detecting an update with an asset prompts the confirmation dialog", async 
   assert.match(confirmation.title, /1\.2\.0/);
 });
 
+test("发布更新日志会同时显示在检查结果和下载确认中", async () => {
+  const h = harness(false);
+  let confirmation = null;
+  h.options.setConfirmation = value => { confirmation = value; };
+  const update = {
+    ...available,
+    releaseNotes: "修复启动稳定性",
+    selectedAsset: { fileName: "Codey-1.2.0.dmg", size: 1048576, url: "https://example.com" },
+  };
+  const checking = h.render().checkForUpdates();
+  h.requests[0].resolve(update);
+  await checking;
+  assert.ok(confirmation);
+  assert.match(confirmation.description, /修复启动稳定性/);
+});
+
 test("发现更新后定时器链仍在，可用更新被清空后继续自动检查", async () => {
   const h = harness(true);
   h.requests[0].resolve({ ...available, updateAvailable: true });

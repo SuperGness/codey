@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Codey 发布管理</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0b1020; color: #e6e9f2; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 20% 0%, #1e2b55, transparent 45%), #0b1020; }
+    main { max-width: 1440px; margin: 0 auto; padding: 32px; }
+    h1, h2 { margin: 0 0 16px; } h1 { font-size: 28px; } h2 { font-size: 18px; }
+    .card { background: rgba(20, 28, 52, .92); border: 1px solid #303d65; border-radius: 14px; padding: 20px; margin: 16px 0; box-shadow: 0 16px 48px rgba(0,0,0,.18); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    form { display: grid; gap: 10px; } label { display: grid; gap: 6px; color: #b9c1d9; font-size: 13px; }
+    input, textarea, select { width: 100%; border: 1px solid #46547f; border-radius: 8px; background: #111932; color: #f3f5fb; padding: 10px 12px; font: inherit; }
+    textarea { min-height: 90px; resize: vertical; }
+    button { border: 0; border-radius: 8px; background: #5a78ff; color: white; padding: 9px 14px; cursor: pointer; font: inherit; } button.secondary { background: #344164; } button.danger { background: #a8485f; } button:disabled { opacity: .5; cursor: wait; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; } .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; } th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #2a3557; vertical-align: top; } th { color: #aeb8d6; font-weight: 600; }
+    .muted { color: #9aa6c7; } .status { display: inline-block; padding: 3px 7px; border-radius: 999px; background: #28385f; } .notice { min-height: 24px; color: #9ed3ff; white-space: pre-wrap; } .notice.error { color: #ff9cae; }
+    .machine { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; } .hidden { display: none !important; }
+    @media (max-width: 720px) { main { padding: 16px; } table { display: block; overflow-x: auto; } }
+  </style>
+</head>
+<body>
+<main>
+  <section id="login" class="card" style="max-width:420px;margin:10vh auto">
+    <h1>Codey 发布管理</h1><p class="muted">管理员账号登录</p>
+    <form id="loginForm"><label>用户名<input name="username" autocomplete="username" required /></label><label>密码<input name="password" type="password" autocomplete="current-password" required /></label><button>登录</button></form>
+    <p id="loginNotice" class="notice"></p>
+</section>
+<section id="app" class="hidden">
+    <div class="toolbar"><div><h1>发布管理</h1><p id="me" class="muted"></p></div><div class="actions"><button id="refresh" class="secondary">刷新</button><button id="logout" class="secondary">退出</button></div></div>
+    <p id="notice" class="notice"></p>
+    <div class="grid">
+      <section class="card"><h2>创建版本</h2><form id="versionForm"><label>版本号<input name="version" placeholder="1.2.3" required pattern="v?\\d+\\.\\d+\\.\\d+.*" /></label><label>更新日志<textarea name="releaseNotes" placeholder="可选，客户端检查更新时显示"></textarea></label><label>更新清单 HTTPS 地址<input name="manifestUrl" type="url" placeholder="https://.../latest.json" required /></label><label>产物下载地址<input name="artifactUrl" type="url" placeholder="https://..." /></label><button>保存草稿</button></form></section>
+      <section class="card"><h2>发布说明</h2><p class="muted">新版本保存为草稿，不会自动推送。发布时必须选择目标范围，并为每次操作生成独立幂等键。</p><p class="muted">撤回只停止尚未下载的设备；已下载或已安装设备的结果会保留在批次记录中。</p></section>
+    </div>
+    <section class="card"><div class="toolbar"><h2>版本</h2><span class="muted">历史版本可以再次创建发布批次</span></div><div id="versions"></div></section>
+    <section class="card"><div class="toolbar"><h2>发布批次</h2><span class="muted">可暂停、恢复或撤回未完成批次</span></div><div id="publishes"></div></section>
+    <section class="card"><div class="toolbar"><h2>设备机器号</h2><span class="muted">机器号只用于发布目标选择，不是登录凭据</span></div><div id="devices"></div></section>
+</section>
+</main>
+<script src="/config.js"></script>
+<script>
+  const API = (window.RELEASE_API_BASE || location.origin).replace(/\/$/, "");
+  const $ = (id) => document.getElementById(id);
+  const state = { versions: [], publishes: [] };
+  function notice(text, error = false) { $("notice").textContent = text || ""; $("notice").className = error ? "notice error" : "notice"; }
+  function loginNotice(text) { $("loginNotice").textContent = text || ""; }
+  async function api(path, options = {}) {
+    const response = await fetch(API + path, { ...options, credentials: "include", headers: { "content-type": "application/json", ...(options.headers || {}) } });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `请求失败（${response.status}）`);
+    return data;
+  }
+  function formObject(form) { return Object.fromEntries(new FormData(form).entries()); }
+  function esc(value) { return String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
+  function formatTime(value) { return value ? new Date(Number(value) * 1000).toLocaleString() : "—"; }
+  function renderVersions() {
+    const rows = state.versions.map(v => `<tr><td><strong>v${esc(v.version)}</strong><br><span class="status">${esc(v.status)}</span></td><td>${esc(v.release_notes || "—")}</td><td>${formatTime(v.created_at)}<br><span class="muted">${esc(v.creator || "")}</span></td><td><div class="actions"><button class="secondary" data-view="${esc(v.id)}">查看</button><button class="secondary" data-edit="${esc(v.id)}" ${v.active_publish_id || v.status === "paused" ? "disabled" : ""}>编辑</button><button class="secondary" data-publish="${esc(v.id)}" ${v.active_publish_id || v.status === "paused" ? "disabled" : ""}>创建发布</button><button class="danger" data-archive="${esc(v.id)}" ${v.active_publish_id || v.status === "paused" || v.status === "archived" ? "disabled" : ""}>归档</button></div></td></tr>`).join("");
+    $("versions").innerHTML = rows ? `<table><thead><tr><th>版本</th><th>更新日志</th><th>创建时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>` : `<p class="muted">暂无版本</p>`;
+  }
+  function renderPublishes() {
+    const rows = state.publishes.map(p => `<tr><td><strong>v${esc(p.version)}</strong><br><span class="status">${esc(p.status)}</span></td><td>${esc(p.mode)}<br>${p.success_count || 0} 成功 / ${p.failure_count || 0} 失败 / ${p.target_count || 0} 目标</td><td>${formatTime(p.scheduled_at)}<br><span class="muted">${esc(p.notes || "")}</span></td><td><div class="actions">${["scheduled","running"].includes(p.status) ? `<button class="secondary" data-pause="${esc(p.id)}">暂停</button><button class="danger" data-withdraw="${esc(p.id)}">撤回</button>` : ""}${p.status === "paused" ? `<button class="secondary" data-resume="${esc(p.id)}">恢复</button><button class="danger" data-withdraw="${esc(p.id)}">撤回</button>` : ""}</div></td></tr>`).join("");
+    $("publishes").innerHTML = rows ? `<table><thead><tr><th>版本</th><th>范围与进度</th><th>时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>` : `<p class="muted">暂无发布批次</p>`;
+  }
+  function renderDevices(items) {
+    const rows = items.map(d => `<tr><td class="machine">${esc(d.machine_no)} <button class="secondary" data-copy="${esc(d.machine_no)}">复制</button></td><td>${esc(d.platform || "")} ${esc(d.arch || "")}<br>当前版本：${esc(d.current_version || "未知")}<br><span class="status">${d.whitelisted ? "白名单" : "已排除"}</span>${d.disabled ? ` <span class="status">已停用</span>` : ""}</td><td>${formatTime(d.last_seen_at)}</td><td><button class="secondary" data-whitelist="${esc(d.id)}" data-value="${d.whitelisted ? "false" : "true"}">${d.whitelisted ? "移出白名单" : "加入白名单"}</button> <button class="danger" data-disabled="${esc(d.id)}" data-value="${d.disabled ? "false" : "true"}">${d.disabled ? "启用" : "停用"}</button></td></tr>`).join("");
+    $("devices").innerHTML = rows ? `<table><thead><tr><th>机器号</th><th>设备</th><th>最近检查</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table>` : `<p class="muted">暂无设备。客户端首次检查更新时会自动登记。</p>`;
+  }
+  async function refresh() {
+    const [versions, publishes, devices] = await Promise.all([api("/api/versions?limit=100"), api("/api/publishes?limit=100"), api("/api/devices?limit=200")]);
+    state.versions = versions.items || []; state.publishes = publishes.items || []; renderVersions(); renderPublishes(); renderDevices(devices.items || []);
+  }
+  async function publish(versionId) {
+    const mode = prompt("发布方式：full 全量，gray 灰度，targeted 定向", "gray"); if (!mode || !["full","gray","targeted"].includes(mode)) return;
+    const body = { mode, notes: prompt("发布说明（可选）", "") || undefined };
+    const schedule = prompt("发布时间（留空立即执行；可填 ISO 时间，例如 2026-10-01T09:00:00+08:00）", "");
+    if (schedule === null) return;
+    if (schedule.trim()) { const timestamp = Date.parse(schedule); if (!Number.isFinite(timestamp)) { notice("发布时间格式无效。", true); return; } body.scheduledAt = Math.floor(timestamp / 1000); }
+    if (mode === "gray") { const value = prompt("输入 all 推送全部白名单设备；或输入比例 1-100，或数量前缀 count:", "all"); if (!value) return; if (value === "all") body.whitelistOnly = true; else if (value.startsWith("count:")) body.deviceLimit = Number(value.slice(6)); else body.percentage = Number(value); }
+    if (mode === "targeted") { const machines = prompt("输入机器号，使用逗号分隔", ""); if (!machines) return; body.machineNos = machines.split(",").map(x => x.trim()).filter(Boolean); }
+    await api(`/api/versions/${encodeURIComponent(versionId)}/publishes`, { method: "POST", headers: { "idempotency-key": crypto.randomUUID() }, body: JSON.stringify(body) });
+    notice("发布批次已创建，设备将在下次检查更新时获取版本。"); await refresh();
+  }
+  async function viewVersion(versionId) { const version = await api(`/api/versions/${encodeURIComponent(versionId)}`); const batches = (version.publishes || []).map(p => `${p.mode}/${p.status}：${p.success_count || 0} 成功，${p.failure_count || 0} 失败`).join("\n") || "暂无发布记录"; notice(`版本 v${version.version}\n状态：${version.status}\n更新日志：${version.release_notes || "无"}\n发布记录：\n${batches}`); }
+  async function editVersion(versionId) { const version = state.versions.find(item => item.id === versionId); if (!version) return; const releaseNotes = prompt("更新日志", version.release_notes || ""); if (releaseNotes === null) return; const manifestUrl = prompt("更新清单 HTTPS 地址", version.manifest_url || ""); if (manifestUrl === null) return; const artifactUrl = prompt("产物下载地址（可选）", version.artifact_url || ""); if (artifactUrl === null) return; await api(`/api/versions/${encodeURIComponent(versionId)}`, { method: "PATCH", body: JSON.stringify({ releaseNotes, manifestUrl, artifactUrl }) }); notice("版本已更新。"); await refresh(); }
+  async function mutate(id, action) { if (action === "withdraw" && !confirm("确认撤回该发布批次？已下载或已安装设备的记录会保留。")) return; await api(`/api/publishes/${encodeURIComponent(id)}/${action}`, { method: "POST" }); notice(`已${action === "pause" ? "暂停" : action === "resume" ? "恢复" : "撤回"}发布。`); await refresh(); }
+  async function toggleWhitelist(id, value) { await api(`/api/devices/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ whitelisted: value === "true" }) }); notice(value === "true" ? "设备已加入白名单。" : "设备已移出白名单。"); await refresh(); }
+  async function toggleDisabled(id, value) { if (value === "true" && !confirm("停用后该设备将无法领取新的发布，确认继续？")) return; await api(`/api/devices/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify({ disabled: value === "true" }) }); notice(value === "true" ? "设备已停用。" : "设备已启用。"); await refresh(); }
+  $("loginForm").addEventListener("submit", async event => { event.preventDefault(); try { const data = await api("/api/auth/login", { method: "POST", body: JSON.stringify(formObject(event.currentTarget)) }); $("login").classList.add("hidden"); $("app").classList.remove("hidden"); $("me").textContent = `${data.admin.username} · ${data.admin.role}`; await refresh(); } catch (error) { loginNotice(error.message); } });
+  $("versionForm").addEventListener("submit", async event => { event.preventDefault(); try { const body = formObject(event.currentTarget); if (!body.artifactUrl) delete body.artifactUrl; await api("/api/versions", { method: "POST", body: JSON.stringify(body) }); event.currentTarget.reset(); notice("版本草稿已保存。"); await refresh(); } catch (error) { notice(error.message, true); } });
+  $("refresh").addEventListener("click", () => refresh().catch(error => notice(error.message, true)));
+  $("logout").addEventListener("click", async () => { await api("/api/auth/logout", { method: "POST" }).catch(() => {}); location.reload(); });
+  document.addEventListener("click", async event => { const button = event.target.closest("button"); if (!button) return; try { if (button.dataset.view) await viewVersion(button.dataset.view); if (button.dataset.edit) await editVersion(button.dataset.edit); if (button.dataset.publish) await publish(button.dataset.publish); if (button.dataset.archive && confirm("确认归档该版本？")) { await api(`/api/versions/${encodeURIComponent(button.dataset.archive)}/archive`, { method: "POST" }); await refresh(); } if (button.dataset.copy) { await navigator.clipboard.writeText(button.dataset.copy); notice("机器号已复制。"); } if (button.dataset.whitelist) await toggleWhitelist(button.dataset.whitelist, button.dataset.value); if (button.dataset.disabled) await toggleDisabled(button.dataset.disabled, button.dataset.value); for (const action of ["pause","resume","withdraw"]) if (button.dataset[action]) await mutate(button.dataset[action], action); } catch (error) { notice(error.message, true); } });
+  api("/api/me").then(async me => { $("login").classList.add("hidden"); $("app").classList.remove("hidden"); $("me").textContent = `${me.username} · ${me.role}`; await refresh(); }).catch(() => {});
+</script>
+</body>
+</html>

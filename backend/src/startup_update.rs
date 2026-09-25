@@ -29,6 +29,7 @@ trait StartupUpdateUi: Send + Sync {
         &self,
         current_version: &str,
         latest_version: &str,
+        release_notes: Option<&str>,
     ) -> Result<bool, String>;
     async fn show_update_failure(&self, error: &str) -> Result<(), String>;
 }
@@ -47,8 +48,9 @@ impl StartupUpdateUi for NativeUpdateUi {
         &self,
         current_version: &str,
         latest_version: &str,
+        release_notes: Option<&str>,
     ) -> Result<bool, String> {
-        NativeUpdateUi::confirm_update(self, current_version, latest_version).await
+        NativeUpdateUi::confirm_update(self, current_version, latest_version, release_notes).await
     }
 
     async fn show_update_failure(&self, error: &str) -> Result<(), String> {
@@ -147,6 +149,7 @@ async fn run_with_mode(
         .confirm_update(
             &candidate.check.current_version,
             &candidate.check.latest_version,
+            candidate.check.release_notes.as_deref(),
         )
         .await
         .unwrap_or_default();
@@ -224,6 +227,7 @@ mod tests {
             &self,
             _current_version: &str,
             _latest_version: &str,
+            _release_notes: Option<&str>,
         ) -> Result<bool, String> {
             self.confirmations.fetch_add(1, Ordering::Relaxed);
             Ok(self.confirm.load(Ordering::Relaxed))
@@ -297,6 +301,8 @@ mod tests {
                 },
                 update_available,
                 selected_asset: installable.then(asset),
+                release_notes: None,
+                publish_id: None,
             },
         }
     }
@@ -310,6 +316,7 @@ mod tests {
             size: asset.size,
             sha256: asset.sha256.clone(),
             asset,
+            publish_id: None,
         }
     }
 
