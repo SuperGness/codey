@@ -1,4 +1,4 @@
-import { useState, useMemo, useDeferredValue, useEffect } from "react";
+import { memo, useState, useMemo, useDeferredValue, useEffect } from "react";
 import { toast } from "@heroui/react";
 import {
   Button,
@@ -49,7 +49,7 @@ import {
   exportMcpJson,
 } from "./mcpJson";
 
-export function CodexExtensionsPage({
+function CodexExtensionsPageComponent({
   kind,
   request,
   container,
@@ -764,3 +764,5 @@ export function CodexExtensionsPage({
     </section>
   );
 }
+
+export const CodexExtensionsPage = memo(CodexExtensionsPageComponent);

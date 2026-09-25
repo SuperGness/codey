@@ -2443,7 +2443,8 @@ pub(super) async fn hot_reload_runtime_subagent_config(
     if !runtime.supports_subagent_config_hot_reload(&current_config) {
         return SubagentHotReloadOutcome::default();
     }
-    let applied_config_changed = runtime.applied_subagent_config().await != desired_config;
+    let applied_config_changed =
+        runtime.applied_subagent_config().await.as_ref() != &desired_config;
     let runtime_generation = state.runtime_generation.load(Ordering::Acquire);
     let current_runtime = state.runtime.lock().await.clone();
     let same_runtime = current_runtime

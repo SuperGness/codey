@@ -1,5 +1,5 @@
 import type React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, CloseButton, Drawer, Pagination, Spinner, Table } from "@heroui/react";
 import { UNSAFE_PortalProvider } from "react-aria";
 import {
@@ -427,9 +427,64 @@ function unavailableMessage(reason?: string) {
   return "当前请求日志存储暂不可查询，请稍后重试。";
 }
 
+let copiedIdSnapshot: string | null = null;
+const copiedIdListeners = new Set<() => void>();
+
+function subscribeCopiedId(listener: () => void) {
+  copiedIdListeners.add(listener);
+  return () => {
+    copiedIdListeners.delete(listener);
+  };
+}
+
+function getCopiedIdSnapshot() {
+  return copiedIdSnapshot;
+}
+
+function publishCopiedId(id: string | null) {
+  if (Object.is(copiedIdSnapshot, id)) return;
+  copiedIdSnapshot = id;
+  copiedIdListeners.forEach((listener) => listener());
+}
+
+function CopyIdButton({
+  id,
+  label,
+  className,
+  iconClassName,
+  title,
+  onCopy,
+}: {
+  id: string;
+  label: string;
+  className: string;
+  iconClassName: string;
+  title: string;
+  onCopy: (id: string) => void;
+}) {
+  const copiedId = useSyncExternalStore(subscribeCopiedId, getCopiedIdSnapshot, getCopiedIdSnapshot);
+  const copied = copiedId === id;
+  return (
+    <Button
+      variant="ghost"
+      size="xs"
+      aria-label={label}
+      className={className}
+      title={title}
+      onClick={() => onCopy(id)}
+    >
+      <span className="truncate select-all">{copied ? "已复制" : id}</span>
+      {copied ? (
+        <IconCheck size={11} className="shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+      ) : (
+        <IconCopy size={11} className={iconClassName} aria-hidden="true" />
+      )}
+    </Button>
+  );
+}
+
 function buildRequestLogRow(
   item: RouteRequestLogItem,
-  copiedId: string | null,
   officialAccountLabel: (accountId?: string | null) => string,
   handleCopyId: (requestId: string) => void,
 ): RequestLogTableRow {
@@ -455,23 +510,14 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                             <span className="whitespace-nowrap text-[11px] text-[var(--codey-text,#1d1d1f)]">
                               {formatTimestamp(item.timestampUnixMs)}
                             </span>
-                            <Button
-                              variant="ghost"
-                              size="xs"
-                              aria-label={`复制请求 ID：${item.requestId}`}
+                            <CopyIdButton
+                              id={item.requestId}
+                              label={`复制请求 ID：${item.requestId}`}
                               className="group h-auto min-h-0 justify-start gap-1 rounded-md px-0.5 font-mono text-[10px] font-normal text-[var(--codey-subtle,#8e8e93)] transition-colors hover:text-[var(--codey-text,#1d1d1f)] [&_svg]:size-[11px]"
+                              iconClassName="shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
                               title={`请求 ID: ${item.requestId}（点击复制）`}
-                              onClick={() => handleCopyId(item.requestId)}
-                            >
-                              <span className="truncate select-all">
-                                {copiedId === item.requestId ? "已复制" : item.requestId}
-                              </span>
-                              {copiedId === item.requestId ? (
-                                <IconCheck size={11} className="shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-                              ) : (
-                                <IconCopy size={11} className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100" aria-hidden="true" />
-                              )}
-                            </Button>
+                              onCopy={handleCopyId}
+                            />
                           </div>
                         </div>,
 <div className="w-40 max-w-40 overflow-hidden">
@@ -485,23 +531,14 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                                   父
                                 </Badge>
                               ) : null}
-                              <Button
-                                variant="ghost"
-                                size="xs"
+                              <CopyIdButton
+                                id={item.codexSessionId}
+                                label={`复制${item.codexSessionIsParent ? "父会话" : "会话"} ID：${item.codexSessionId}`}
                                 className="group h-auto min-h-0 min-w-0 justify-start gap-1 rounded-md px-0.5 font-mono text-[10px] font-normal text-[var(--codey-muted,#6e6e73)] transition-colors hover:text-[var(--codey-text,#1d1d1f)] [&_svg]:size-[11px]"
+                                iconClassName="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
                                 title={`${item.codexSessionIsParent ? "父会话" : "会话"} ID: ${item.codexSessionId}（点击复制）`}
-                                aria-label={`复制${item.codexSessionIsParent ? "父会话" : "会话"} ID：${item.codexSessionId}`}
-                                onClick={() => handleCopyId(item.codexSessionId!)}
-                              >
-                                <span className="truncate select-all">
-                                  {copiedId === item.codexSessionId ? "已复制" : item.codexSessionId}
-                                </span>
-                                {copiedId === item.codexSessionId ? (
-                                  <IconCheck size={11} className="shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
-                                ) : (
-                                  <IconCopy size={11} className="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" aria-hidden="true" />
-                                )}
-                              </Button>
+                                onCopy={handleCopyId}
+                              />
                             </div>
                           ) : (
                             <span className="text-[var(--codey-subtle,#8e8e93)]">—</span>
@@ -730,7 +767,6 @@ export function RequestLogDialog({
   const [clearConfirmationOpened, setClearConfirmationOpened] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [actionNotice, setActionNotice] = useState<ActionNotice | null>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
   const [copyToast, setCopyToast] = useState<{
     text: string;
     subtext?: string;
@@ -762,6 +798,7 @@ export function RequestLogDialog({
   useEffect(
     () => () => {
       if (copyToastTimer.current) window.clearTimeout(copyToastTimer.current);
+      publishCopiedId(null);
     },
     [],
   );
@@ -775,7 +812,7 @@ export function RequestLogDialog({
     if (!navigator.clipboard) return;
     void navigator.clipboard.writeText(requestId).then(
       () => {
-        setCopiedId(requestId);
+        publishCopiedId(requestId);
         if (copyToastTimer.current) {
           window.clearTimeout(copyToastTimer.current);
         }
@@ -788,7 +825,7 @@ export function RequestLogDialog({
         });
         copyToastTimer.current = window.setTimeout(() => {
           setCopyToast(null);
-          setCopiedId((current) => (current === requestId ? null : current));
+          publishCopiedId(copiedIdSnapshot === requestId ? null : copiedIdSnapshot);
         }, 2200);
       },
       () => undefined,
@@ -1077,8 +1114,8 @@ export function RequestLogDialog({
   };
 
   const requestLogRows = useMemo(
-    () => (result?.items ?? []).map((item) => buildRequestLogRow(item, copiedId, officialAccountLabel, handleCopyId)),
-    [result?.items, copiedId, officialAccountLabel, handleCopyId],
+    () => (result?.items ?? []).map((item) => buildRequestLogRow(item, officialAccountLabel, handleCopyId)),
+    [result?.items, officialAccountLabel, handleCopyId],
   );
 
   if (!opened) return null;

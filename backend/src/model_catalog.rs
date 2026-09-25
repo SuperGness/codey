@@ -989,6 +989,7 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
     let mut catalogs = Vec::new();
     let mut bundled_fast_model_slugs = HashSet::new();
     let mut last_error = None;
+    let mut account_snapshot_models = None;
     for path in paths {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
@@ -1005,7 +1006,15 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
                 continue;
             }
         };
+        let account_snapshot = path.ends_with(DEBUG_CATALOG_RELATIVE_PATH)
+            && value
+                .get("codey_account_snapshot")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
         let models = official_models_from_value(&value);
+        if account_snapshot {
+            account_snapshot_models = Some(models.clone());
+        }
         if !models.is_empty() {
             catalogs.push(models);
         }
@@ -1035,21 +1044,7 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
     // the signed-in account can actually use. A generic models_cache.json is
     // intentionally not treated as dynamic input because older Codex builds
     // can leave retired models in that file.
-    let dynamic_source = paths
-        .iter()
-        .position(|path| path.ends_with(DEBUG_CATALOG_RELATIVE_PATH))
-        .and_then(|index| {
-            fs::read(&paths[index])
-                .ok()
-                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-                .filter(|value| {
-                    value
-                        .get("codey_account_snapshot")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false)
-                })
-                .map(|value| official_models_from_value(&value))
-        });
+    let dynamic_source = account_snapshot_models;
     // Account `/models` payloads name the slugs the signed-in account can call,
     // but they omit the instruction templates Codex needs to launch a model.
     // Fill those from the local cache before deciding the snapshot is unusable,

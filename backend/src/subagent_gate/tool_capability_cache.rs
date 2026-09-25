@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -35,12 +37,13 @@ pub(crate) fn cached_read_only_class(
     tool_input: Option<&Value>,
     policy_revision: u64,
 ) -> Option<()> {
-    let cache = load(state_root).ok()?;
     let normalized = crate::subagent::rules::normalize_tool_name(tool_name);
-    let key = cache_key(&normalized, tool_input);
-    let entry = cache.entries.get(&key)?;
+    let fingerprint = input_fingerprint(tool_input);
+    let key = format!("{normalized}:{fingerprint}");
+    let guard = load_guard(state_root);
+    let entry = guard.as_ref()?.file.entries.get(&key)?;
     (entry.tool_name == normalized
-        && entry.tool_fingerprint == input_fingerprint(tool_input)
+        && entry.tool_fingerprint == fingerprint
         && entry.policy_revision == policy_revision
         && entry.capability_version == CAPABILITY_VERSION
         && entry.capability == "read_only")
@@ -56,10 +59,22 @@ pub(crate) fn record_read_only(
 ) -> Result<()> {
     let normalized = crate::subagent::rules::normalize_tool_name(tool_name);
     let fingerprint = input_fingerprint(tool_input);
-    let key = cache_key(&normalized, tool_input);
-    let mut cache = load(state_root).unwrap_or_default();
-    cache.schema_version = CACHE_SCHEMA_VERSION;
-    cache.entries.insert(
+    let key = format!("{normalized}:{fingerprint}");
+    let mut guard = load_guard(state_root);
+    let cached = guard.as_mut().expect("工具能力缓存已装入");
+    if let Some(entry) = cached.file.entries.get_mut(&key)
+        && entry.tool_name == normalized
+        && entry.tool_fingerprint == fingerprint
+        && entry.policy_revision == policy_revision
+        && entry.capability_version == CAPABILITY_VERSION
+        && entry.capability == "read_only"
+    {
+        // 分类没变时只刷新内存里的最近使用时间，避免每次工具调用都重写整份缓存。
+        entry.last_verified_at_ms = now_ms;
+        return Ok(());
+    }
+    cached.file.schema_version = CACHE_SCHEMA_VERSION;
+    cached.file.entries.insert(
         key,
         CacheEntry {
             tool_name: normalized,
@@ -70,8 +85,9 @@ pub(crate) fn record_read_only(
             last_verified_at_ms: now_ms,
         },
     );
-    while cache.entries.len() > MAX_ENTRIES {
-        let Some(oldest) = cache
+    while cached.file.entries.len() > MAX_ENTRIES {
+        let Some(oldest) = cached
+            .file
             .entries
             .iter()
             .min_by_key(|(_, entry)| entry.last_verified_at_ms)
@@ -79,11 +95,18 @@ pub(crate) fn record_read_only(
         else {
             break;
         };
-        cache.entries.remove(&oldest);
+        cached.file.entries.remove(&oldest);
     }
-    let bytes = serde_json::to_vec_pretty(&cache).context("序列化子代理工具能力缓存失败")?;
-    crate::fs_util::atomic_write_private_with_parent(&cache_path(state_root), &bytes)
-        .context("写入子代理工具能力缓存失败")
+    let bytes = serde_json::to_vec_pretty(&cached.file).context("序列化子代理工具能力缓存失败")?;
+    let path = cached.path.clone();
+    crate::fs_util::atomic_write_private_with_parent(&path, &bytes)
+        .context("写入子代理工具能力缓存失败")?;
+    cached.identity = file_identity(&path).unwrap_or(FileIdentity {
+        exists: true,
+        modified: None,
+        len: bytes.len() as u64,
+    });
+    Ok(())
 }
 
 pub(crate) fn looks_read_only(tool_name: &str) -> bool {
@@ -106,9 +129,48 @@ fn cache_path(state_root: &Path) -> PathBuf {
     state_root.join(CACHE_FILE)
 }
 
-fn load(state_root: &Path) -> Result<CacheFile> {
-    let path = cache_path(state_root);
-    let bytes = match fs::read(&path) {
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    exists: bool,
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+struct MemoryCache {
+    path: PathBuf,
+    identity: FileIdentity,
+    file: CacheFile,
+}
+
+fn memory_cache() -> &'static Mutex<Option<MemoryCache>> {
+    static MEMORY: Mutex<Option<MemoryCache>> = Mutex::new(None);
+    &MEMORY
+}
+
+fn lock_memory() -> std::sync::MutexGuard<'static, Option<MemoryCache>> {
+    memory_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn file_identity(path: &Path) -> std::io::Result<FileIdentity> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(FileIdentity {
+            exists: true,
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(FileIdentity {
+            exists: false,
+            modified: None,
+            len: 0,
+        }),
+        Err(error) => Err(error),
+    }
+}
+
+fn read_cache_file(path: &Path) -> Result<CacheFile> {
+    let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(CacheFile::default());
@@ -125,8 +187,33 @@ fn load(state_root: &Path) -> Result<CacheFile> {
     Ok(cache)
 }
 
-fn cache_key(tool_name: &str, tool_input: Option<&Value>) -> String {
-    format!("{tool_name}:{}", input_fingerprint(tool_input))
+/// 同一进程内按路径和文件标识复用已解析的缓存。磁盘仍是跨进程的事实来源：
+/// 标识变化时重新读取。
+fn load_guard(state_root: &Path) -> std::sync::MutexGuard<'static, Option<MemoryCache>> {
+    let path = cache_path(state_root);
+    let identity = file_identity(&path).unwrap_or(FileIdentity {
+        exists: false,
+        modified: None,
+        len: 0,
+    });
+    {
+        let guard = lock_memory();
+        if guard
+            .as_ref()
+            .is_some_and(|cached| cached.path == path && cached.identity == identity)
+        {
+            return guard;
+        }
+    }
+    let file = read_cache_file(&path).unwrap_or_default();
+    let identity = file_identity(&path).unwrap_or(identity);
+    let mut guard = lock_memory();
+    *guard = Some(MemoryCache {
+        path,
+        identity,
+        file,
+    });
+    guard
 }
 
 fn input_fingerprint(tool_input: Option<&Value>) -> String {
@@ -188,6 +275,46 @@ mod tests {
         );
         assert!(
             cached_read_only_class(root.path(), "mcp__docs__search", Some(&input), 8).is_none()
+        );
+    }
+
+    #[test]
+    fn repeat_classification_keeps_the_cache_file_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let input = json!({"query": "secret"});
+        record_read_only(root.path(), "mcp__docs__search", Some(&input), 7, 10).unwrap();
+        let path = root.path().join(CACHE_FILE);
+        let before = fs::read(&path).unwrap();
+        record_read_only(root.path(), "mcp__docs__search", Some(&input), 7, 99).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(
+            cached_read_only_class(root.path(), "mcp__docs__search", Some(&input), 7).is_some()
+        );
+    }
+
+    #[test]
+    fn external_cache_rewrite_invalidates_the_memory_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let input = json!({"query": "secret"});
+        record_read_only(root.path(), "mcp__docs__search", Some(&input), 7, 10).unwrap();
+        let path = root.path().join(CACHE_FILE);
+        fs::write(&path, br#"{"schemaVersion":1,"entries":{}}"#).unwrap();
+        assert!(
+            cached_read_only_class(root.path(), "mcp__docs__search", Some(&input), 7).is_none()
+        );
+    }
+
+    #[test]
+    fn policy_change_replaces_the_cached_classification() {
+        let root = tempfile::tempdir().unwrap();
+        let input = json!({"query": "secret"});
+        record_read_only(root.path(), "mcp__docs__search", Some(&input), 7, 10).unwrap();
+        record_read_only(root.path(), "mcp__docs__search", Some(&input), 8, 11).unwrap();
+        assert!(
+            cached_read_only_class(root.path(), "mcp__docs__search", Some(&input), 7).is_none()
+        );
+        assert!(
+            cached_read_only_class(root.path(), "mcp__docs__search", Some(&input), 8).is_some()
         );
     }
 }

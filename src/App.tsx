@@ -5,7 +5,6 @@ import {
   IconCircleArrowUp,
   IconDeviceFloppy as Save,
   IconGitBranch as GitBranch,
-  IconLayoutDashboard,
   IconLoader2 as LoaderCircle,
   IconMessageCircleQuestion,
   IconRefresh as RefreshCw,
@@ -17,15 +16,10 @@ import { rememberOfficialAccounts } from "./officialAccountsRequests";
 import { useDraftConfig } from "./useDraftConfig";
 import { ModelPickerDialog } from "./AppDialogs";
 import { SystemSettingsDialog } from "./SystemSettingsDialog";
-import { FeaturePolicyCard, SubagentPolicyCard } from "./FeaturePolicyCard";
-import { ModelSection } from "./ModelSection";
 import { UsageAnalysisPanel } from "./UsageAnalysisPanel";
-import { OperationsPanel } from "./OperationsPanel";
-import { CodeyPluginsSection } from "./CodeyPluginsSection";
-import { CodexExtensionsPage, type ExtensionTransport } from "./features/codex-extensions";
+import { buildSettingsSections } from "./SettingsPages";
 import { canRepairMainProcessInjection, isMainProcessInjectionConfirmed } from "./runtimeStatusPresentation";
 import { repairOperationResult } from "./injectionRepair";
-import { PromptOptimizationCard } from "./PromptOptimizationCard";
 import {
   getNotificationChannelDefinition,
 } from "./notifications";
@@ -38,7 +32,6 @@ import { globalDefaultForRoute, routeProviderId } from "./modelRoutes";
 import { customContextRestoredNote, type ModelRuntimeUpdate } from "./modelSelectionNotice";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { SettingsLayout } from "./SettingsLayout";
-import { SettingsPageHeader } from "./SettingsPageHeader";
 import { useModelSelection } from "./useModelSelection";
 import { useRuntimeStatus } from "./useRuntimeStatus";
 import { useAppUpdates } from "./useAppUpdates";
@@ -64,7 +57,6 @@ import type {
 import { Badge, Button, Tooltip } from "./components/ui";
 
 const Check = IconCheck;
-const extensionRequest: ExtensionTransport = request => invoke("codex_extensions", { request });
 const X = IconX;
 const FEEDBACK_GROUP_QR_BASE_URL =
   "https://pub-2d17a6a8bc22426a92e297a59f55ccc3.r2.dev/qr.png";
@@ -349,6 +341,7 @@ export function App({
         config: Config;
         modelState?: ModelState;
         startupError?: string;
+        configLoadError?: string;
         officialAccountAvailable?: boolean;
         providerStatus?: ProviderStatus;
         fastContextToolsStatus?: FastContextToolsStatus;
@@ -375,8 +368,12 @@ export function App({
       ]);
       if (!current()) return;
       const startupError = next.startupError || result.startupError;
-      if (startupError) {
-        setNotice({ tone: "error", text: `自动启动失败：${startupError}` });
+      const loadErrors = [
+        startupError && `自动启动失败：${startupError}`,
+        result.configLoadError,
+      ].filter(Boolean);
+      if (loadErrors.length > 0) {
+        setNotice({ tone: "error", text: loadErrors.join("；") });
       } else if (next.restartRequired) {
         setNotice({ tone: "info", text: "已保存的配置需重启 Codex 后生效" });
       } else {
@@ -1278,7 +1275,100 @@ export function App({
   const handleModelPickerOpenChange = useStableEvent((open: boolean) => {
     if (!isBusy || open) setModelPickerVisible(open);
   });
-  if (!config || !provider) {
+  const handleRepairCodexConfig = useStableEvent(askRepairCodexConfig);
+  const settingsSections = useMemo(() => {
+    if (!config || !provider) return null;
+    return buildSettingsSections({
+      config,
+      fastContextToolsStatus,
+      operationsStatus,
+      busy,
+      isBusy,
+      pluginMarketplaceStatus,
+      onRepairPluginMarketplace: handleRepairPluginMarketplace,
+      onRepairMainProcessInjection: handleRepairMainProcessInjection,
+      onRepairCodexConfig: handleRepairCodexConfig,
+      configRepairNotice,
+      injectionRepairing: injectionRepairRequested || busy === "repair-main-process-injection",
+      onRestart: handleRestartCodex,
+      restartStatusUnknown: Boolean(restartStatusError),
+      showRestartAction: !embedded,
+      popupContainer,
+      onAnalyzeDiagnosticStorage: handleAnalyzeDiagnosticStorage,
+      onConfigChange: handleConfigChange,
+      onAddChannel: handleAddNotificationChannel,
+      onChannelChange: handleNotificationChannelChange,
+      onRequestRemoveChannel: handleRequestRemoveNotificationChannel,
+      clientPlatform: status.clientPlatform,
+      officialAccountAvailable: status.officialAccountAvailable === true,
+      provider,
+      modelState,
+      dirty,
+      canSyncCurrentProvider,
+      subagentModelOptions,
+      onToggleLocalRouter: handleToggleLocalRouter,
+      onToggleRouteRequestLog: handleToggleRouteRequestLog,
+      onOpenUsageAnalysis: handleOpenUsageAnalysis,
+      onSaveRoute: handleSaveRoute,
+      onSetRouteEnabled: handleSetRouteEnabled,
+      onReorderRoute: handleReorderRoute,
+      onReorderRouteModels: handleReorderRouteModels,
+      onDeleteRoute: handleDeleteRoute,
+      onFetchRouteModels: handleFetchRouteModels,
+      onOfficialAccountsChanged: handleOfficialAccountsChanged,
+      onModelNotice: handleNotice,
+      onPromptNotice: setNotice,
+      onSaveOfficialRouteSettings: handleSaveOfficialRouteSettings,
+      onSetDefaultModel: handleSetRouteDefaultModel,
+      onRequestConfirmation: setConfirmation,
+      onSubagentOptimizationChange: handleSubagentOptimizationChange,
+    });
+  }, [
+    config,
+    provider,
+    fastContextToolsStatus,
+    operationsStatus,
+    busy,
+    isBusy,
+    pluginMarketplaceStatus,
+    handleRepairPluginMarketplace,
+    handleRepairMainProcessInjection,
+    handleRepairCodexConfig,
+    configRepairNotice,
+    injectionRepairRequested,
+    handleRestartCodex,
+    restartStatusError,
+    embedded,
+    popupContainer,
+    handleAnalyzeDiagnosticStorage,
+    handleConfigChange,
+    handleAddNotificationChannel,
+    handleNotificationChannelChange,
+    handleRequestRemoveNotificationChannel,
+    status.clientPlatform,
+    status.officialAccountAvailable,
+    modelState,
+    dirty,
+    canSyncCurrentProvider,
+    subagentModelOptions,
+    handleToggleLocalRouter,
+    handleToggleRouteRequestLog,
+    handleOpenUsageAnalysis,
+    handleSaveRoute,
+    handleSetRouteEnabled,
+    handleReorderRoute,
+    handleReorderRouteModels,
+    handleDeleteRoute,
+    handleFetchRouteModels,
+    handleOfficialAccountsChanged,
+    handleNotice,
+    setNotice,
+    handleSaveOfficialRouteSettings,
+    handleSetRouteDefaultModel,
+    setConfirmation,
+    handleSubagentOptimizationChange,
+  ]);
+  if (!config || !provider || !settingsSections) {
     const loadingContent = (
       <main className="app-shell loading-shell">
         <div className="loading-mark">
@@ -1540,103 +1630,7 @@ export function App({
             </div>
           </div>
         }
-        sections={{
-          overview: (
-            <>
-              <SettingsPageHeader
-                id="overview-title"
-                title="基础功能"
-                icon={<IconLayoutDashboard size={15} />}
-                description="查看 Codex 运行状态，管理客户端功能与通知。"
-              />
-              <OperationsPanel
-                codexAppPath={config.codexAppPath}
-                fastContextToolsStatus={fastContextToolsStatus}
-                status={operationsStatus}
-                busy={busy}
-                isBusy={isBusy}
-                pluginMarketplaceStatus={pluginMarketplaceStatus}
-                onRepairPluginMarketplace={handleRepairPluginMarketplace}
-                onRepairMainProcessInjection={handleRepairMainProcessInjection}
-                onRepairCodexConfig={askRepairCodexConfig}
-                configRepairNotice={configRepairNotice}
-                injectionRepairing={injectionRepairRequested || busy === "repair-main-process-injection"}
-                onRestart={handleRestartCodex}
-                restartStatusUnknown={Boolean(restartStatusError)}
-                showRestartAction={!embedded}
-              />
-              <FeaturePolicyCard
-                config={config}
-                fastContextToolsStatus={fastContextToolsStatus}
-                isMacClient={status.clientPlatform === "macos"}
-                isWindowsClient={status.clientPlatform === "windows"}
-                cleanupBusy={busy === "clear-diagnostic-storage"}
-                onAnalyzeDiagnosticStorage={handleAnalyzeDiagnosticStorage}
-                popupContainer={popupContainer}
-                isBusy={isBusy}
-                onConfigChange={handleConfigChange}
-                onAddChannel={handleAddNotificationChannel}
-                onChannelChange={handleNotificationChannelChange}
-                onRequestRemoveChannel={handleRequestRemoveNotificationChannel}
-              />
-            </>
-          ),
-          models: (
-            <ModelSection
-              config={config}
-              currentProvider={provider ?? null}
-              officialAccountAvailable={status.officialAccountAvailable === true}
-              popupContainer={popupContainer}
-              modelState={modelState}
-              dirty={dirty}
-              canSyncCurrentProvider={canSyncCurrentProvider}
-              isBusy={isBusy}
-              busy={busy}
-              showAccountUsageInHeader={config.showAccountUsageInHeader}
-              subagentModelOptions={subagentModelOptions}
-              onToggleLocalRouter={handleToggleLocalRouter}
-              onToggleRouteRequestLog={handleToggleRouteRequestLog}
-              onOpenUsageAnalysis={handleOpenUsageAnalysis}
-              onSaveRoute={handleSaveRoute}
-              onSetRouteEnabled={handleSetRouteEnabled}
-              onReorderRoute={handleReorderRoute}
-              onReorderRouteModels={handleReorderRouteModels}
-              onDeleteRoute={handleDeleteRoute}
-              onFetchRouteModels={handleFetchRouteModels}
-              onOfficialAccountsChanged={handleOfficialAccountsChanged}
-              onNotice={handleNotice}
-              onSaveOfficialRouteSettings={handleSaveOfficialRouteSettings}
-              onSetDefaultModel={handleSetRouteDefaultModel}
-              onConfigChange={handleConfigChange}
-              onRequestConfirmation={setConfirmation}
-            />
-          ),
-          prompt: (
-            <PromptOptimizationCard
-              config={config}
-              isBusy={isBusy}
-              subagentModelOptions={subagentModelOptions}
-              onConfigChange={handleConfigChange}
-              onNotice={setNotice}
-            />
-          ),
-          subagents: (
-            <SubagentPolicyCard
-              config={config}
-              isBusy={isBusy}
-              subagentModelOptions={subagentModelOptions}
-              onConfigChange={handleConfigChange}
-              onSubagentOptimizationChange={handleSubagentOptimizationChange}
-            />
-          ),
-          plugins: <CodeyPluginsSection container={popupContainer} />,
-          mcp: (active) => (
-            <CodexExtensionsPage kind="mcp" active={active} request={extensionRequest} container={popupContainer} />
-          ),
-          skills: (active) => (
-            <CodexExtensionsPage kind="skill" active={active} request={extensionRequest} container={popupContainer} />
-          ),
-        }}
+        sections={settingsSections}
       />
       )}
 

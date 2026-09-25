@@ -918,8 +918,10 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
             performance_detail: String::new(),
             startup_injection_mode: String::new(),
         },
-        applied_model_config: RwLock::new(config.clone()),
-        applied_subagent_config: RwLock::new(RuntimeSubagentConfig::from_config(&config)),
+        applied_model_config: RwLock::new(AppliedModelConfig::new(config.clone())),
+        applied_subagent_config: RwLock::new(std::sync::Arc::new(
+            RuntimeSubagentConfig::from_config(&config),
+        )),
         subagent_route_catalog_installed: false,
         applied_config: config,
         injection_statuses: Arc::new(RwLock::new(Arc::from([]))),

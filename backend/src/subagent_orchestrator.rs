@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use fs2::FileExt;
@@ -503,7 +504,44 @@ impl LedgerStore {
     }
 }
 
+fn ledger_temp_sweeps() -> &'static Mutex<Vec<(PathBuf, SystemTime)>> {
+    static SWEEPS: Mutex<Vec<(PathBuf, SystemTime)>> = Mutex::new(Vec::new());
+    &SWEEPS
+}
+
+fn ledger_directory_sweep_is_current(session_dir: &Path) -> bool {
+    let Ok(modified) = fs::metadata(session_dir).and_then(|metadata| metadata.modified()) else {
+        return false;
+    };
+    ledger_temp_sweeps()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .iter()
+        .any(|(path, seen)| path == session_dir && *seen == modified)
+}
+
+fn remember_ledger_directory_sweep(session_dir: &Path) {
+    let Ok(modified) = fs::metadata(session_dir).and_then(|metadata| metadata.modified()) else {
+        return;
+    };
+    let mut sweeps = ledger_temp_sweeps()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(seen) = sweeps.iter_mut().find(|(path, _)| path == session_dir) {
+        seen.1 = modified;
+        return;
+    }
+    if sweeps.len() >= 128 {
+        sweeps.remove(0);
+    }
+    sweeps.push((session_dir.to_path_buf(), modified));
+}
+
 fn cleanup_stale_ledger_temps(session_dir: &Path) -> Result<()> {
+    // 临时文件只在进程崩溃时留下。目录修改时间没变时不必每次打开账本都扫描。
+    if ledger_directory_sweep_is_current(session_dir) {
+        return Ok(());
+    }
     let entries = match fs::read_dir(session_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -521,6 +559,7 @@ fn cleanup_stale_ledger_temps(session_dir: &Path) -> Result<()> {
             fs::remove_file(entry.path())?;
         }
     }
+    remember_ledger_directory_sweep(session_dir);
     Ok(())
 }
 
@@ -3010,5 +3049,26 @@ mod tests {
             "/repo/tests"
         );
         assert!(normalize_absolute_path("../repo").is_err());
+    }
+
+    #[test]
+    fn opening_a_ledger_removes_crash_temps_created_after_an_earlier_sweep() {
+        let temp = tempdir().unwrap();
+        drop(LedgerStore::open(temp.path(), "session-a").unwrap());
+        let session_dir = fs::read_dir(temp.path())
+            .unwrap()
+            .find_map(|entry| {
+                let entry = entry.ok()?;
+                entry.file_type().ok()?.is_dir().then(|| entry.path())
+            })
+            .unwrap();
+        let stale = session_dir.join(format!(".{LEDGER_FILE}.codey-crash.tmp"));
+        fs::write(&stale, b"partial").unwrap();
+        drop(LedgerStore::open(temp.path(), "session-a").unwrap());
+        assert!(!stale.exists());
+        let later = session_dir.join(format!(".{LEDGER_FILE}.codey-later.tmp"));
+        fs::write(&later, b"partial").unwrap();
+        drop(LedgerStore::open(temp.path(), "session-a").unwrap());
+        assert!(!later.exists());
     }
 }

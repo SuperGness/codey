@@ -226,6 +226,21 @@ impl RuntimeModelConfig {
     }
 }
 
+struct AppliedModelConfig {
+    catalog: CodeyConfig,
+    snapshot: Arc<RuntimeModelConfig>,
+}
+
+impl AppliedModelConfig {
+    fn new(config: CodeyConfig) -> Self {
+        let snapshot = Arc::new(RuntimeModelConfig::from_config(&config));
+        Self {
+            catalog: config,
+            snapshot,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeSubagentConfig {
     model: String,
@@ -253,8 +268,8 @@ pub struct CodeyRuntime {
     pub codex_app_path: PathBuf,
     pub maintenance: MaintenanceStatus,
     pub applied_config: CodeyConfig,
-    applied_model_config: RwLock<CodeyConfig>,
-    applied_subagent_config: RwLock<RuntimeSubagentConfig>,
+    applied_model_config: RwLock<AppliedModelConfig>,
+    applied_subagent_config: RwLock<Arc<RuntimeSubagentConfig>>,
     subagent_route_catalog_installed: bool,
     pub injection_statuses: Arc<RwLock<Arc<[cdp::InjectionScriptStatus]>>>,
     injection_scripts: cdp::PreparedInjectionScripts,
@@ -1924,16 +1939,16 @@ impl CodeyRuntime {
         self.injection_websocket_url.read().await.clone()
     }
 
-    pub async fn applied_model_config(&self) -> RuntimeModelConfig {
-        RuntimeModelConfig::from_config(&*self.applied_model_config.read().await)
+    pub async fn applied_model_config(&self) -> Arc<RuntimeModelConfig> {
+        Arc::clone(&self.applied_model_config.read().await.snapshot)
     }
 
     pub async fn applied_model_catalog_config(&self) -> CodeyConfig {
-        self.applied_model_config.read().await.clone()
+        self.applied_model_config.read().await.catalog.clone()
     }
 
     pub async fn mark_model_config_applied(&self, config: &CodeyConfig) {
-        *self.applied_model_config.write().await = config.clone();
+        *self.applied_model_config.write().await = AppliedModelConfig::new(config.clone());
     }
 
     pub(crate) fn validate_subagent_route_hot_reload(&self, config: &CodeyConfig) -> Result<()> {
@@ -1991,12 +2006,13 @@ impl CodeyRuntime {
         self.local_router.as_ref().map(LocalRouter::endpoint)
     }
 
-    pub async fn applied_subagent_config(&self) -> RuntimeSubagentConfig {
-        self.applied_subagent_config.read().await.clone()
+    pub async fn applied_subagent_config(&self) -> Arc<RuntimeSubagentConfig> {
+        Arc::clone(&*self.applied_subagent_config.read().await)
     }
 
     pub async fn mark_subagent_config_applied(&self, config: &CodeyConfig) {
-        *self.applied_subagent_config.write().await = RuntimeSubagentConfig::from_config(config);
+        *self.applied_subagent_config.write().await =
+            Arc::new(RuntimeSubagentConfig::from_config(config));
     }
 
     pub fn supports_subagent_config_hot_reload(&self, config: &CodeyConfig) -> bool {
@@ -2188,10 +2204,10 @@ impl CodeyRuntime {
             Self {
                 codex_app_path: app_dir,
                 maintenance,
-                applied_model_config: RwLock::new(runtime_config.clone()),
-                applied_subagent_config: RwLock::new(RuntimeSubagentConfig::from_config(
+                applied_model_config: RwLock::new(AppliedModelConfig::new(runtime_config.clone())),
+                applied_subagent_config: RwLock::new(Arc::new(RuntimeSubagentConfig::from_config(
                     &runtime_config,
-                )),
+                ))),
                 subagent_route_catalog_installed: runtime_config_overrides
                     .iter()
                     .any(|entry| entry.starts_with("model_catalog_json=")),

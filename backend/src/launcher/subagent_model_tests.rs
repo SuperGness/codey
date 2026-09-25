@@ -347,8 +347,10 @@ async fn subagent_catalog_fallback_keeps_live_routes_and_roles_until_restart() {
             performance_detail: String::new(),
             startup_injection_mode: String::new(),
         },
-        applied_model_config: RwLock::new(config.clone()),
-        applied_subagent_config: RwLock::new(RuntimeSubagentConfig::from_config(&config)),
+        applied_model_config: RwLock::new(AppliedModelConfig::new(config.clone())),
+        applied_subagent_config: RwLock::new(std::sync::Arc::new(
+            RuntimeSubagentConfig::from_config(&config),
+        )),
         applied_config: config.clone(),
         subagent_route_catalog_installed: false,
         injection_statuses: Arc::new(RwLock::new(Arc::from([]))),
