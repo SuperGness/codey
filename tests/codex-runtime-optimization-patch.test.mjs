@@ -905,6 +905,24 @@ test("thread title routing prefers official Luna, route Luna, then the default m
       3,
     );
     assert.match(patched, /const unrelated=\{model:tj\}/);
+    const withExtraModelField = [
+      "async function hfe(){let d=await $9({appServerClient:r,",
+      "feature:`thread_title`,prompt:u})}",
+      "async function $9({appServerClient:e,feature:i}){try{",
+      "let h=await V0({model:tj,threadSource:i});",
+      "return WA({feature:i,model:tj}),h}catch(e){",
+      "throw WA({feature:i,model:tj,retryModel:tj}),e}finally{",
+      "WA({feature:i,model:tj})}}",
+      "function yfe(){return {model:tj}}",
+    ].join("");
+    const patchedExtra = runtime.context.__CODEY_PATCH_CODEX_MAIN_THREAD_TITLE_MODEL__(
+      withExtraModelField,
+    );
+    assert.equal(
+      patchedExtra.match(/globalThis\.__CODEY_THREAD_TITLE_MODEL__/g)?.length,
+      4,
+    );
+    assert.match(patchedExtra, /function yfe\(\)\{return \{model:tj\}\}/);
   } finally {
     runtime.restore();
   }
@@ -1478,7 +1496,7 @@ test("startup patch rejects unobserved runtime overrides on timeout without expo
         subagentGateActive: false,
         requireAppServerRuntimeOverrides: true,
       }),
-      /appServerRuntimeOverrideTimeoutMs = 45_000/,
+      /appServerRuntimeOverrideTimeoutMs = 150_000/,
     );
     assert.equal(runtime.result, "codey-startup-patch-installed-v40");
     assert.equal(
@@ -1486,7 +1504,7 @@ test("startup patch rejects unobserved runtime overrides on timeout without expo
       false,
     );
     const pending = runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__();
-    assert.equal(timeoutMs, 45_000);
+    assert.equal(timeoutMs, 150_000);
     expire();
     await assert.rejects(pending, (error) => {
       assert.match(error.message, /未观察到 app-server 启动调用/);

@@ -21,7 +21,11 @@ pub struct CdpTarget {
 
 pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
     let client = cdp_http_client()?;
+    // Chrome 150+ rejects DevTools HTTP when the Host header is an IP literal
+    // and answers the same listener for `localhost`. Older builds and an
+    // IPv6-only socket still need the explicit loopback URLs.
     let urls = [
+        format!("http://localhost:{debug_port}/json"),
         format!("http://127.0.0.1:{debug_port}/json"),
         format!("http://[::1]:{debug_port}/json"),
     ];

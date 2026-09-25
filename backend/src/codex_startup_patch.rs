@@ -24,13 +24,15 @@ const MAX_INSPECTOR_TARGET_RESPONSE_BYTES: usize = 1024 * 1024;
 pub(crate) const STARTUP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const STARTUP_PATCH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 /// 覆盖确认的调试会话上限。须盖住断点恢复前的协议和补丁求值，以及 JS 侧
-/// `appServerRuntimeOverrideTimeoutMs`（45 秒），并留在单次 60 秒启动预算内。
+/// `appServerRuntimeOverrideTimeoutMs`（150 秒）。Codex 先显示窗口再启动
+/// app-server，Windows 商店版冷启动经常要超过一分钟才走到这次 spawn。
 const STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(58);
+    std::time::Duration::from_secs(165);
 /// 单次启动尝试等待 CLI 包装器确认的上限。进程退出、明确失败或确认成功都会提前结束；
-/// Windows 最多两次尝试，清理后重新计时。
+/// Windows 最多两次尝试，清理后重新计时。须盖住上面的调试会话，否则会话还在等
+/// app-server 时外层截止时间会先把它掐断。
 pub(crate) const STARTUP_CLI_READY_TIMEOUT: std::time::Duration =
-    std::time::Duration::from_secs(60);
+    std::time::Duration::from_secs(180);
 /// 回环端口连通性探测时限（渲染进程调试端口、Inspector 端口）。
 const LOOPBACK_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
@@ -1724,13 +1726,15 @@ mod tests {
             APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT
         );
         assert!(STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT > STARTUP_PATCH_INSTALL_TIMEOUT);
-        // 调试会话必须盖住 JS 的 45 秒等待，否则慢启动会先被会话超时掐断。
+        // 调试会话必须盖住 JS 的等待，否则慢启动会先被会话超时掐断。
+        // 外层启动预算再盖住调试会话，避免窗口还没出来就结束这次尝试。
         assert!(
             STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT
-                >= std::time::Duration::from_secs(45) + std::time::Duration::from_secs(10)
+                >= std::time::Duration::from_secs(150) + std::time::Duration::from_secs(10)
         );
+        assert!(STARTUP_CLI_READY_TIMEOUT > STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT);
         assert!(STARTUP_PATCH_TEMPLATE.contains(APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER));
-        assert!(STARTUP_PATCH_TEMPLATE.contains("appServerRuntimeOverrideTimeoutMs = 45_000"));
+        assert!(STARTUP_PATCH_TEMPLATE.contains("appServerRuntimeOverrideTimeoutMs = 150_000"));
     }
 
     #[test]

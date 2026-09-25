@@ -1328,9 +1328,11 @@
   const appServerRuntimeOverrideDegradedResult =
     "codey-app-server-runtime-overrides-degraded";
   // 与 Rust 的调试会话上限成对：这里先超时并带上标记，启动器才会重试而不是直接退出。
+  // Codex 在窗口显示之后才 spawn app-server。Windows 商店版冷启动常常要一分多钟
+  // 才走到这一步，45 秒会在 spawn 发生前把确认掐掉。
   const appServerRuntimeOverrideTimeoutMarker =
     "codey-app-server-runtime-overrides-timeout";
-  const appServerRuntimeOverrideTimeoutMs = 45_000;
+  const appServerRuntimeOverrideTimeoutMs = 150_000;
   const appServerRuntimeOverrideEvidence = {
     version: 1,
     observed: false,
@@ -2133,6 +2135,32 @@
   // official account, otherwise use the selected third-party route's Luna or
   // its default model. The native caller already preserves its provisional
   // local title when metadata generation fails.
+  const matchingBrace = (source, openIndex) => {
+    if (source[openIndex] !== "{") return -1;
+    let depth = 0;
+    let quote = "";
+    for (let index = openIndex; index < source.length; index += 1) {
+      const character = source[index];
+      if (quote) {
+        if (character === "\\") {
+          index += 1;
+          continue;
+        }
+        if (character === quote) quote = "";
+        continue;
+      }
+      if (character === "'" || character === "\"" || character === "`") {
+        quote = character;
+        continue;
+      }
+      if (character === "{") depth += 1;
+      else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) return index;
+      }
+    }
+    return -1;
+  };
   const patchCodexMainThreadTitleModel = (source) => {
     const titleCalls = [...source.matchAll(
       /await\s+([$A-Z_a-z][$\w]*)\(\{[^{}]{0,1000}\bfeature:(`thread_title`|"thread_title"|'thread_title')/g,
@@ -2143,11 +2171,19 @@
     const helperName = titleCalls[0][1];
     const helperStart = source.indexOf(`async function ${helperName}({`);
     const signatureEnd = source.indexOf("}){", helperStart);
-    const helperEnd = source.indexOf("}function ", signatureEnd);
-    if (helperStart < 0 || signatureEnd < 0 || helperEnd < 0) {
+    // 26.917 在同一个辅助函数里又加了一处 model 字段。按函数体配对花括号，
+    // 避免把后面的函数切进来；次数只用来确认切到的仍是这段元数据辅助函数。
+    const bodyOpen = signatureEnd + 2;
+    const bodyClose = signatureEnd < 0 ? -1 : matchingBrace(source, bodyOpen);
+    if (
+      helperStart < 0 ||
+      signatureEnd < 0 ||
+      source[bodyOpen] !== "{" ||
+      bodyClose < 0
+    ) {
       throw new Error("Codey thread title metadata helper not found");
     }
-    const helper = source.slice(helperStart, helperEnd + 1);
+    const helper = source.slice(helperStart, bodyClose + 1);
     const featureName = /\bfeature:([$A-Z_a-z][$\w]*)/.exec(
       source.slice(helperStart, signatureEnd),
     )?.[1];
@@ -2161,7 +2197,7 @@
       "g",
     );
     const modelMatches = helper.match(nativeModelPattern)?.length ?? 0;
-    if (modelMatches !== 3) {
+    if (modelMatches < 3 || modelMatches > 6) {
       throw new Error(
         `Codey thread title metadata model matched ${modelMatches} times`,
       );
@@ -2174,7 +2210,7 @@
       nativeModelPattern,
       `model:${selectedModel}`,
     );
-    return source.slice(0, helperStart) + patchedHelper + source.slice(helperEnd + 1);
+    return source.slice(0, helperStart) + patchedHelper + source.slice(bodyClose + 1);
   };
   Object.defineProperty(
     globalThis,
