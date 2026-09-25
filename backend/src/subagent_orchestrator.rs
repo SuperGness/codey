@@ -520,6 +520,22 @@ fn ledger_directory_sweep_is_current(session_dir: &Path) -> bool {
         .any(|(path, seen)| path == session_dir && *seen == modified)
 }
 
+fn ledger_temp_file_exists(session_dir: &Path) -> bool {
+    let prefix = format!(".{LEDGER_FILE}.codey-");
+    fs::read_dir(session_dir)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_file())
+                && entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(&prefix) && name.ends_with(".tmp"))
+        })
+}
+
 fn remember_ledger_directory_sweep(session_dir: &Path) {
     let Ok(modified) = fs::metadata(session_dir).and_then(|metadata| metadata.modified()) else {
         return;
@@ -539,7 +555,10 @@ fn remember_ledger_directory_sweep(session_dir: &Path) {
 
 fn cleanup_stale_ledger_temps(session_dir: &Path) -> Result<()> {
     // 临时文件只在进程崩溃时留下。目录修改时间没变时不必每次打开账本都扫描。
-    if ledger_directory_sweep_is_current(session_dir) {
+    // Windows can keep a directory timestamp unchanged for files created in
+    // quick succession. If a matching temp file is present, rescan even when
+    // the cached timestamp says the directory is current.
+    if ledger_directory_sweep_is_current(session_dir) && !ledger_temp_file_exists(session_dir) {
         return Ok(());
     }
     let entries = match fs::read_dir(session_dir) {

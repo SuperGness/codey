@@ -298,10 +298,9 @@ async fn retry_pending_device_event(state: &AppState) {
     )
     .await
     .is_ok()
+        && let Ok(path) = pending_device_update_path(&state.store).await
     {
-        if let Ok(path) = pending_device_update_path(&state.store).await {
-            let _ = tokio::fs::remove_file(path).await;
-        }
+        let _ = tokio::fs::remove_file(path).await;
     }
 }
 
@@ -310,13 +309,12 @@ async fn load_or_register_device(
     base_url: &str,
 ) -> Result<DeviceIdentity, String> {
     let path = device_identity_path(&state.store).await?;
-    if let Ok(bytes) = tokio::fs::read(&path).await {
-        if let Ok(identity) = serde_json::from_slice::<DeviceIdentity>(&bytes)
-            && !identity.install_key.trim().is_empty()
-            && !identity.machine_no.trim().is_empty()
-        {
-            return Ok(identity);
-        }
+    if let Ok(bytes) = tokio::fs::read(&path).await
+        && let Ok(identity) = serde_json::from_slice::<DeviceIdentity>(&bytes)
+        && !identity.install_key.trim().is_empty()
+        && !identity.machine_no.trim().is_empty()
+    {
+        return Ok(identity);
     }
 
     let install_key = format!("{}:{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
@@ -547,10 +545,9 @@ pub async fn install_downloaded_update(
             if report_publish_event(state, &pending.publish_id, "failed", Some(&error))
                 .await
                 .is_ok()
+                && let Ok(path) = pending_device_update_path(&state.store).await
             {
-                if let Ok(path) = pending_device_update_path(&state.store).await {
-                    let _ = tokio::fs::remove_file(path).await;
-                }
+                let _ = tokio::fs::remove_file(path).await;
             }
         }
         return Err(error);

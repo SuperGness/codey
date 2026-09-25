@@ -972,6 +972,7 @@ fn request_log_hot_reload_status_contract_is_stable() {
     assert_eq!(failed.error(), Some("sink failed"));
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 #[tokio::test]
 async fn shutdown_cancels_a_restart_waiting_for_the_runtime_lock() {
     let state = Arc::new(AppState::default());
@@ -990,6 +991,17 @@ async fn shutdown_cancels_a_restart_waiting_for_the_runtime_lock() {
     assert!(state.is_shutting_down());
     assert!(!state.restart_in_progress.load(Ordering::Acquire));
     assert!(state.restart_task.lock().await.is_none());
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+#[tokio::test]
+async fn restart_rejects_unsupported_runtime_platform() {
+    let state = Arc::new(AppState::default());
+    let error = schedule_restart_codey_runtime(&state).await.unwrap_err();
+    assert_eq!(
+        error,
+        crate::codex_config::unsupported_runtime_platform_message()
+    );
 }
 
 #[tokio::test]

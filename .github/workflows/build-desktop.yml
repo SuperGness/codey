@@ -60,11 +60,23 @@ jobs:
       - name: Build embedded frontend assets
         run: pnpm run vite:build
 
+      - name: Verify release admin endpoint
+        shell: bash
+        env:
+          CODEY_RELEASE_ADMIN_URL: ${{ vars.CODEY_RELEASE_ADMIN_URL }}
+        run: |
+          set -euo pipefail
+          case "${CODEY_RELEASE_ADMIN_URL%/}" in
+            https://*) ;;
+            *) echo "CODEY_RELEASE_ADMIN_URL must be configured as an HTTPS URL." >&2; exit 1 ;;
+          esac
+
       - name: Build unsigned macOS app
         env:
           CODEY_SKIP_CODESIGN: "1"
           CODEY_SKIP_OVERLAY_BUILD: "1"
           CODEY_UPDATE_BASE_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
+          CODEY_RELEASE_ADMIN_URL: ${{ vars.CODEY_RELEASE_ADMIN_URL }}
         run: pnpm run build
 
       - name: Verify and archive macOS app
@@ -248,10 +260,20 @@ jobs:
       - name: Build embedded frontend assets
         run: pnpm run vite:build
 
+      - name: Verify release admin endpoint
+        shell: pwsh
+        env:
+          CODEY_RELEASE_ADMIN_URL: ${{ vars.CODEY_RELEASE_ADMIN_URL }}
+        run: |
+          if (-not $env:CODEY_RELEASE_ADMIN_URL -or $env:CODEY_RELEASE_ADMIN_URL -notmatch '^https://') {
+            throw "CODEY_RELEASE_ADMIN_URL must be configured as an HTTPS URL."
+          }
+
       - name: Build Windows executable
         env:
           CODEY_SKIP_OVERLAY_BUILD: "1"
           CODEY_UPDATE_BASE_URL: ${{ vars.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
+          CODEY_RELEASE_ADMIN_URL: ${{ vars.CODEY_RELEASE_ADMIN_URL }}
         run: pnpm run build
 
       - name: Build Windows packages
@@ -501,4 +523,3 @@ jobs:
             upload_object "releases/${TAG}/${FILE_NAME}" "$ASSET" "$CONTENT_TYPE" "public, max-age=31536000, immutable"
           done
           upload_object "releases/${TAG}/latest.json" "release-assets/latest.json" "application/json" "no-cache, no-store, max-age=0"
-          upload_object "latest.json" "release-assets/latest.json" "application/json" "no-cache, no-store, max-age=0"
