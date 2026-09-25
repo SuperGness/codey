@@ -22,7 +22,9 @@ pub async fn terminate_other_codey_processes() -> Result<usize> {
     terminate_other_codey_processes_since(SystemTime::now()).await
 }
 
-pub(crate) async fn terminate_other_codey_processes_since(shutdown_started_at: SystemTime) -> Result<usize> {
+pub(crate) async fn terminate_other_codey_processes_since(
+    shutdown_started_at: SystemTime,
+) -> Result<usize> {
     #[cfg(unix)]
     {
         let _ = shutdown_started_at;
