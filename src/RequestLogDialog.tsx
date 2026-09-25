@@ -441,7 +441,7 @@ function getCopiedIdSnapshot() {
   return copiedIdSnapshot;
 }
 
-function publishCopiedId(id: string | null) {
+function setCopiedId(id: string | null) {
   if (Object.is(copiedIdSnapshot, id)) return;
   copiedIdSnapshot = id;
   copiedIdListeners.forEach((listener) => listener());
@@ -450,17 +450,21 @@ function publishCopiedId(id: string | null) {
 function CopyIdButton({
   id,
   label,
+  "aria-label": ariaLabel,
   className,
   iconClassName,
   title,
   onCopy,
+  onClick,
 }: {
   id: string;
   label: string;
+  "aria-label"?: string;
   className: string;
   iconClassName: string;
   title: string;
   onCopy: (id: string) => void;
+  onClick?: () => void;
 }) {
   const copiedId = useSyncExternalStore(subscribeCopiedId, getCopiedIdSnapshot, getCopiedIdSnapshot);
   const copied = copiedId === id;
@@ -468,10 +472,10 @@ function CopyIdButton({
     <Button
       variant="ghost"
       size="xs"
-      aria-label={label}
+      aria-label={ariaLabel ?? label}
       className={className}
       title={title}
-      onClick={() => onCopy(id)}
+      onClick={onClick ?? (() => onCopy(id))}
     >
       <span className="truncate select-all">{copied ? "已复制" : id}</span>
       {copied ? (
@@ -513,6 +517,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                             <CopyIdButton
                               id={item.requestId}
                               label={`复制请求 ID：${item.requestId}`}
+                              aria-label={`复制请求 ID：${item.requestId}`}
                               className="group h-auto min-h-0 justify-start gap-1 rounded-md px-0.5 font-mono text-[10px] font-normal text-[var(--codey-subtle,#8e8e93)] transition-colors hover:text-[var(--codey-text,#1d1d1f)] [&_svg]:size-[11px]"
                               iconClassName="shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
                               title={`请求 ID: ${item.requestId}（点击复制）`}
@@ -538,6 +543,7 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                                 iconClassName="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
                                 title={`${item.codexSessionIsParent ? "父会话" : "会话"} ID: ${item.codexSessionId}（点击复制）`}
                                 onCopy={handleCopyId}
+                                onClick={() => handleCopyId(item.codexSessionId!)}
                               />
                             </div>
                           ) : (
@@ -798,7 +804,7 @@ export function RequestLogDialog({
   useEffect(
     () => () => {
       if (copyToastTimer.current) window.clearTimeout(copyToastTimer.current);
-      publishCopiedId(null);
+      setCopiedId(null);
     },
     [],
   );
@@ -812,7 +818,7 @@ export function RequestLogDialog({
     if (!navigator.clipboard) return;
     void navigator.clipboard.writeText(requestId).then(
       () => {
-        publishCopiedId(requestId);
+        setCopiedId(requestId);
         if (copyToastTimer.current) {
           window.clearTimeout(copyToastTimer.current);
         }
@@ -825,7 +831,7 @@ export function RequestLogDialog({
         });
         copyToastTimer.current = window.setTimeout(() => {
           setCopyToast(null);
-          publishCopiedId(copiedIdSnapshot === requestId ? null : copiedIdSnapshot);
+          setCopiedId(copiedIdSnapshot === requestId ? null : copiedIdSnapshot);
         }, 2200);
       },
       () => undefined,

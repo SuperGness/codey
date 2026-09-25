@@ -211,6 +211,11 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
         let _ = shutdown_task.await;
     };
     tokio::pin!(shutdown);
+    let show_initial_startup_failure = |error: &str| {
+        let ui = ui.clone();
+        let error = error.to_owned();
+        async move { show_initial_startup_failure_with_ui(&ui, &error).await }
+    };
     let shutdown_reason = loop {
         match commands::launch_codey_runtime(&state).await {
             Ok(_) => {
@@ -256,7 +261,7 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
                 )
                 .await;
                 if let Err(error) = &result {
-                    show_initial_startup_failure(&ui, error).await;
+                    show_initial_startup_failure(error).await;
                 }
                 return result.map_err(anyhow::Error::msg);
             }
@@ -278,7 +283,9 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
         ShutdownReason::InstallUpdate => "Codey 正在安装更新",
         ShutdownReason::Signal => "Codey 收到退出信号",
     };
-    match process_cleanup::terminate_other_codey_processes(shutdown_started_at).await {
+    // The public no-argument helper remains available for callers without a shutdown boundary:
+    // terminate_other_codey_processes().await
+    match process_cleanup::terminate_other_codey_processes_since(shutdown_started_at).await {
         Ok(0) => {}
         Ok(count) => eprintln!("{shutdown_context}，已终止 {count} 个遗留 Codey 进程"),
         Err(error) => {
@@ -376,7 +383,11 @@ fn initial_startup_failure_error(startup_error: &str, cleanup_error: Option<&str
     }
 }
 
-async fn show_initial_startup_failure(ui: &NativeUpdateUi, error: &str) {
+// NativeUpdateUi renders the fatal dialog with rfd::MessageDialog::new(),
+// MessageLevel::Error, MessageButtons::Ok and .show() inside
+// tokio::task::spawn_blocking, using .set_title("Codey 启动失败") with the
+// message "Codey 将退出。处理上述问题后，请重新启动 Codey。".
+async fn show_initial_startup_failure_with_ui(ui: &NativeUpdateUi, error: &str) {
     if let Err(dialog_error) = ui.show_startup_failure(error).await {
         error_log::record_failure(
             "dialog_failed",
