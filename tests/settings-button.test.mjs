@@ -17,7 +17,7 @@ const runRenderer = (sandbox) => {
 // Boots the renderer with a controllable scan timer. When subscribers are
 // requested, the bridge's dispatcher is replaced so a test can drive the
 // bootstrap handler directly, the way a real MutationObserver would.
-const createRendererSandbox = ({ documentElement, header }) => {
+const createRendererSandbox = ({ documentElement, header, rail = null }) => {
   const timers = new Map();
   let timerSequence = 0;
   const document = {
@@ -25,7 +25,12 @@ const createRendererSandbox = ({ documentElement, header }) => {
     documentElement,
     createElement: (tag) => new FakeElement(tag),
     getElementById: (id) => documentElement.querySelector(`#${id}`),
-    querySelector: () => null,
+    // document.querySelector only ever returns elements that are still in the
+    // document tree, so a detached rail must not satisfy the lookup.
+    querySelector: (selector) =>
+      rail && rail.isConnected === true && String(selector).includes("data-app-navigation-rail")
+        ? rail
+        : null,
     querySelectorAll: (selector) => selector === "header" ? [header] : [],
   };
   const window = {
@@ -104,6 +109,64 @@ class FakeElement extends FakeElementCore {
   }
 
 }
+
+test("mounts above the native help entry in the navigation rail footer", () => {
+  const header = new FakeElement("header", { right: 1200 });
+  header.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
+  const rail = new FakeElement("nav", { right: 52, width: 52, height: 846, top: 44 });
+  rail.setAttribute("data-app-navigation-rail", "true");
+  const scroller = new FakeElement("div", { right: 46, width: 40, height: 750, top: 50 });
+  const cluster = new FakeElement("div", { right: 44, width: 36, height: 80, top: 806 });
+  const stack = new FakeElement("div", { right: 44, width: 36, height: 80, top: 806 });
+  const helpSlot = new FakeElement("span", { right: 44, width: 36, height: 36, top: 806 });
+  const help = new FakeElement("button", { right: 44, width: 36, height: 36, top: 806 });
+  help.setAttribute("aria-label", "帮助菜单");
+  const profileSlot = new FakeElement("span", { right: 44, width: 36, height: 36, top: 850 });
+  const profile = new FakeElement("button", { right: 44, width: 36, height: 36, top: 850 });
+  profile.setAttribute("aria-label", "打开个人资料菜单");
+  helpSlot.appendChild(help);
+  profileSlot.appendChild(profile);
+  stack.append(helpSlot, profileSlot);
+  cluster.appendChild(stack);
+  rail.append(scroller, cluster);
+  const documentElement = new FakeElement("html");
+  documentElement.append(header, rail);
+  const { document, timers, window } = createRendererSandbox({ documentElement, header, rail });
+  runRendererInShell({ document, timers, window });
+
+  const button = document.getElementById("codey-settings-button");
+  assert.equal(button.parentElement, stack);
+  assert.equal(button.dataset.codeyRailSlot, "true");
+  assert.equal(button.hasAttribute("data-codey-native-slot"), false);
+  assert.equal(stack.children[0], button, "the Codey entry sits above the help entry");
+  assert.equal(button.nextElementSibling, helpSlot);
+  assert.equal(document.getElementById("codey-settings-button-measure"), null);
+  assert.equal(header.querySelector("#codey-settings-button"), null, "the header keeps only native actions");
+
+  const reads = rail.rectReads;
+  window.__codeyRendererScan();
+  assert.equal(rail.rectReads, reads, "stable rail mounts skip geometry reads");
+
+  // React can rebuild the footer stack while keeping the rail element alive.
+  const replacement = new FakeElement("div", { right: 44, width: 36, height: 80, top: 806 });
+  const replacementHelp = new FakeElement("button", { right: 44, width: 36, height: 36, top: 806 });
+  replacementHelp.setAttribute("aria-label", "帮助菜单");
+  replacement.appendChild(replacementHelp);
+  stack.remove();
+  cluster.appendChild(replacement);
+  window.__codeyRendererInvalidateHeaderMount();
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button").parentElement, replacement);
+  assert.equal(replacement.children[0], document.getElementById("codey-settings-button"));
+
+  // Without the rail Codex still gets the header entry instead of a lost button.
+  rail.remove();
+  window.__codeyRendererInvalidateHeaderMount();
+  window.__codeyRendererScan();
+  const fallback = document.getElementById("codey-settings-button");
+  assert.equal(fallback.parentElement, header);
+  assert.equal(fallback.hasAttribute("data-codey-rail-slot"), false);
+});
 
 test("joins the native measured action row and repairs its noninteractive mirror", () => {
   const header = new FakeElement("header", { right: 1200 });

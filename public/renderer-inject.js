@@ -41,7 +41,11 @@
     "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
   ].join(", ");
   const headerSelector = "header, nav";
-  const bootstrapProbeSelector = `${headerSelector}, ${sidebarSelector}`;
+  // Codex 把左侧图标栏收进 nav[data-app-navigation-rail]，图标栏底部的贴底
+  // 堆栈里放着帮助与个人资料按钮，Codey 入口跟随它们落在这里。
+  const navigationRailSelector = '[data-app-navigation-rail="true"]';
+  const railHelpLabelPattern = /帮助|help/i;
+  const bootstrapProbeSelector = `${headerSelector}, ${sidebarSelector}, ${navigationRailSelector}`;
   const settingsIcon = `
     <svg viewBox="0 0 350 350" aria-hidden="true" focusable="false">
       <path d="M70 301c-16 0-24-18-13-30l73-77c8-8 8-20 0-28L65 101C50 86 57 61 78 57c9-2 18 1 25 8l91 91c18 18 18 46 0 64l-66 66c-6 6-2 15 7 15h183" fill="none" stroke="currentColor" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"></path>
@@ -97,14 +101,21 @@
     const style = document.createElement("style");
     style.id = styleId;
     style.textContent = `
-      #${buttonId} { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; z-index: 2147483641; display: inline-grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 8px; padding: 0; margin-inline-start: 8px; margin-inline-end: 18px; background: transparent; color: inherit; cursor: pointer; opacity: .86; user-select: none; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
+      /* Codex 原生小按钮：28×28、圆角 12.5px、图标继承按钮前景色，
+         Codey 入口按同一套数值对齐，保证与相邻原生按钮同色同尺寸。 */
+      #${buttonId} { --codey-icon-size: 16px; --codey-icon-color: currentColor; -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; z-index: 2147483641; display: inline-grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 12.5px; padding: 0; margin-inline-start: 8px; margin-inline-end: 18px; background: transparent; color: inherit; cursor: pointer; opacity: .86; user-select: none; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
       #${buttonId}[data-codey-header-actions="true"] { width: 28px; height: 28px; margin-inline-start: 0; margin-inline-end: 6px; }
-      #${buttonId}[data-codey-native-slot="true"], #${buttonMeasureId} { box-sizing: border-box; flex: 0 0 auto; width: 28px; height: 28px; margin: 0; }
+      #${buttonId}[data-codey-native-slot="true"], #${buttonMeasureId} { box-sizing: border-box; flex: 0 0 auto; width: 28px; height: 28px; margin: 0; color: inherit; }
+      #${buttonId}[data-codey-native-slot="true"] svg { width: 16px; height: 16px; }
+      #${buttonId}[data-codey-rail-slot="true"] { --codey-icon-size: 20px; box-sizing: border-box; flex: 0 0 auto; width: 36px; height: 36px; margin: 0; border-radius: 12.5px; color: color-mix(in srgb, CanvasText 52%, transparent); }
+      #${buttonId}[data-codey-rail-slot="true"] svg { width: 20px; height: 20px; }
+      #${buttonId}[data-codey-rail-slot="true"]:hover { color: CanvasText; }
+      #${buttonId}[data-codey-rail-slot="true"]::after { top: 4px; right: 4px; }
       #${buttonMeasureId} { display: inline-block; pointer-events: none; }
       #${buttonId}:hover { background: rgba(127, 127, 127, .14); opacity: 1; }
       #${buttonId}:active { transform: translateY(1px); }
       #${buttonId}:focus-visible { outline: 2px solid rgba(139, 151, 255, .72); outline-offset: 2px; }
-      #${buttonId} svg { display: block; width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
+      #${buttonId} svg { display: block; flex: 0 0 auto; width: var(--codey-icon-size); height: var(--codey-icon-size); fill: none; stroke: var(--codey-icon-color); stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
       #${buttonId} .codey-settings-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
       #${buttonId} .codey-runtime-badge { position: absolute; top: -2px; right: -2px; display: grid; width: 13px; height: 13px; place-items: center; border: 2px solid Canvas; border-radius: 999px; background: #ff453a; color: #fff; font: 800 9px/1 -apple-system, BlinkMacSystemFont, sans-serif; opacity: 0; transform: scale(.65); transition: opacity .15s ease, transform .15s ease; pointer-events: none; }
       #${buttonId}[data-codey-runtime-state="unavailable"] { background: rgba(255, 69, 58, .12); color: #ff453a; opacity: 1; }
@@ -1007,6 +1018,29 @@
     };
   };
 
+  // 图标栏底部的贴底堆栈：nav 的最后一个可见子容器 → 它的 flex 列容器，
+  // 里面依次是帮助菜单与个人资料菜单。Codey 入口插在帮助菜单之前。
+  const findRailFooterMount = () => {
+    const rail = document.querySelector(navigationRailSelector);
+    if (!(rail instanceof HTMLElement)) return null;
+    const cluster = [...rail.children]
+      .filter((child) => child instanceof HTMLElement
+        && child.getAttribute("aria-hidden") !== "true"
+        && child.getBoundingClientRect().width > 0)
+      .at(-1);
+    const stack = cluster?.firstElementChild;
+    if (!(stack instanceof HTMLElement)) return null;
+    const help = [...stack.querySelectorAll("button")]
+      .find((candidate) => candidate.id !== buttonId
+        && railHelpLabelPattern.test(candidate.getAttribute("aria-label") || ""));
+    if (!(help instanceof HTMLElement)) return null;
+    // 帮助按钮外面可能还包着 radix 的触发层，只取 stack 的直接子容器作锚点。
+    const before = [...stack.children]
+      .find((child) => child instanceof HTMLElement && child.contains(help));
+    if (!(before instanceof HTMLElement)) return null;
+    return { target: stack, before };
+  };
+
   const mountedButtonIsUsable = (button) => {
     if (headerMountDirty || !(button instanceof HTMLElement) || button.isConnected !== true) {
       return false;
@@ -1014,6 +1048,13 @@
     const parent = button.parentElement;
     if (!(parent instanceof HTMLElement) || button.closest("[hidden], [aria-hidden=true]")) {
       return false;
+    }
+    if (button.dataset.codeyRailSlot === "true") {
+      const rail = button.closest?.(navigationRailSelector);
+      return !!rail
+        && rail.isConnected !== false
+        && parent === button.__codeyRailStack
+        && button.nextElementSibling === button.__codeyRailAnchor;
     }
     if (button.dataset.codeyNativeSlot === "true") {
       const measure = document.getElementById(buttonMeasureId);
@@ -1038,7 +1079,8 @@
     addStyle();
     const existingButton = document.getElementById(buttonId);
     if (mountedButtonIsUsable(existingButton)) return;
-    const mount = findHeaderMount();
+    const railMount = findRailFooterMount();
+    const mount = railMount || findHeaderMount();
     if (!mount) {
       existingButton?.remove?.();
       document.getElementById(buttonMeasureId)?.remove();
@@ -1058,6 +1100,26 @@
         openSettings();
       }, true);
     }
+    if (railMount) {
+      button.dataset.codeyRailSlot = "true";
+      delete button.dataset.codeyHeaderActions;
+      delete button.dataset.codeyNativeSlot;
+      document.getElementById(buttonMeasureId)?.remove();
+      button.__codeyActionRow = null;
+      button.__codeyMeasureRow = null;
+      button.__codeyHeaderAnchor = null;
+      button.__codeyRailStack = mount.target;
+      button.__codeyRailAnchor = mount.before;
+      if (button.parentElement !== mount.target || button.nextElementSibling !== mount.before) {
+        mount.target.insertBefore(button, mount.before);
+      }
+      applyUpdateBadge(button);
+      headerMountDirty = false;
+      return;
+    }
+    delete button.dataset.codeyRailSlot;
+    button.__codeyRailStack = null;
+    button.__codeyRailAnchor = null;
     if (mount.before) {
       button.dataset.codeyHeaderActions = "true";
     } else {
