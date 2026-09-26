@@ -800,6 +800,36 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       /const petSettingsId=`settings\.pets\.title`/,
     );
 
+    // Current Codex builds split the pets/Mini preview across three chunks and
+    // drop the semicolon after each import, so every one of them has to be
+    // stubbed from the same settings route chunk.
+    const currentPetSettingsSource = [
+      "import{f as Rt,m as zt,r as Bt,t as Vt}from\"./avatar-mascot-button-7586001b9adf.js\"",
+      "import{n as Ht,t as Ut}from\"./codex-pet-assets-5f01c10f2955.js\"",
+      "import{n as Yt,t as Xt}from\"./use-avatar-options-fda035de15fb.js\"",
+      "const miniSettingsId=`settings.mini.show`;",
+      "function renderMiniSettings(){return [Rt(),Ht(),Yt(),miniSettingsId]}",
+    ].join("\n");
+    electron.protocol.handle("app", async () => new Response(currentPetSettingsSource));
+    const currentPetSettingsResponse = await installedHandler({
+      url: "app://-/assets/pets-settings-route-551771c3ecb9.js",
+    });
+    const patchedCurrentPetSettingsSource =
+      await currentPetSettingsResponse.text();
+    assert.doesNotMatch(
+      patchedCurrentPetSettingsSource,
+      /(avatar-mascot-button|codex-pet-assets|use-avatar-options)-/,
+    );
+    const renderMiniSettings = Function(
+      `${patchedCurrentPetSettingsSource};return renderMiniSettings`,
+    )();
+    assert.deepEqual(renderMiniSettings(), [
+      null,
+      null,
+      null,
+      "settings.mini.show",
+    ]);
+
     const localePropsSource = [
       "function provider(E){return E.localeOverride}",
       "function resolveProps(a,o,r,H3){const dynamicConfigId=`72216192`;",

@@ -412,6 +412,27 @@
       .join("");
     return `const ${firstBinding}=(()=>{const target=function(){return null};return new Proxy(target,{get(target,property,receiver){if(property===Symbol.iterator)return function*(){};if(property===\`map\`||property===\`filter\`||property===\`flatMap\`||property===\`slice\`)return()=>[];if(property===\`then\`)return void 0;return Reflect.get(target,property,receiver)},construct(){return{}}})})()${aliasDeclarations};`;
   };
+  // Older Codex builds imported a single codex-avatar chunk from the settings
+  // chunk; current builds split the preview across the mascot button, the pet
+  // asset table, and the avatar option hook. One settings chunk can import
+  // several of them, so every match is stubbed rather than requiring a unique
+  // one.
+  const petRendererResourceImport =
+    /import(?:\s*([^;"']+?)\s*from)?\s*["']\.\/(?:codex-avatar|codex-pet-assets|avatar-mascot-button|use-avatar-options)(?:[~-][^/"']*)?\.js["']/;
+  const petRendererResourceImportAll = new RegExp(
+    petRendererResourceImport.source,
+    "g",
+  );
+  const replacePetRendererResourceImports = (source, name) => {
+    if (activeRendererPatchFailures?.has(name)) return source;
+    let count = 0;
+    const patched = source.replace(petRendererResourceImportAll, (...args) => {
+      count += 1;
+      return replacePetRendererImportWithStubs(...args);
+    });
+    if (count === 0) return recordIncompatibleRendererGate(source, name, count);
+    return patched;
+  };
   const threadOwnerDiscoveryExpression = (
     coordinationName,
     hostIdName,
@@ -506,20 +527,19 @@
     }
     if (
       disablePet
-      && /settings\.(?:(?:appearance|personalization)\.)?pets(?:[."`]|$)/.test(source)
-      && /import(?:\s*[^;"']+?\s*from)?\s*["']\.\/codex-avatar(?:[~-][^/"']*)?\.js["']/.test(source)
+      && /settings\.(?:(?:appearance|personalization)\.)?(?:pets|mini)(?:[."`]|$)/.test(source)
+      && petRendererResourceImport.test(source)
     ) {
-      // Recent Codex builds keep the Pets settings preview in a regular
-      // settings chunk and statically import codex-avatar from it. Hiding the
-      // controls after React mounts is too late: that import has already pulled
-      // the avatar renderer and every bundled spritesheet into the main window.
-      // Replace only that settings-side dependency with inert callable/iterable
-      // bindings. The shared avatar overlay host stays intact because current
-      // Codex builds also use it for voice controls.
-      patched = replaceUniqueRendererGate(
+      // Codex keeps the pets/Mini settings preview in a settings route chunk
+      // and statically imports the avatar renderer, mascot button, pet asset
+      // table, and avatar option hook from it. Hiding the controls after React
+      // mounts is too late: those imports have already pulled every bundled
+      // spritesheet into the main window. Replace each settings-side dependency
+      // with inert callable/iterable bindings. The shared avatar overlay host
+      // stays intact because current Codex builds also use it for voice
+      // controls.
+      patched = replacePetRendererResourceImports(
         patched,
-        /import(?:\s*([^;"']+?)\s*from)?\s*["']\.\/codex-avatar(?:[~-][^/"']*)?\.js["'];?/g,
-        replacePetRendererImportWithStubs,
         "pet settings avatar resources",
       );
     }
