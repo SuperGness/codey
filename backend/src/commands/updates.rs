@@ -87,6 +87,8 @@ struct DeviceIdentity {
 
 #[derive(Clone, Debug, Deserialize)]
 struct DeviceUpdateResponse {
+    #[serde(rename = "trackDelivery", default)]
+    track_delivery: Option<bool>,
     #[serde(rename = "updateAvailable", default)]
     update_available: bool,
     #[serde(rename = "currentVersion", default)]
@@ -381,15 +383,20 @@ async fn fetch_release_admin_update(
     base_url: &str,
 ) -> Result<UpdateCheck, String> {
     retry_pending_device_event(state).await;
-    let identity = load_or_register_device(state, base_url).await?;
+    // 身份仅用于灰度筛选，注册失败仍可检查公开全量版本。
+    let identity = load_or_register_device(state, base_url).await.ok();
     let endpoint = reqwest::Url::parse(&format!("{base_url}/api/updates/check"))
         .map_err(|_| "发布管理服务地址无效".to_string())?;
-    let response = state
+    let mut request = state
         .http_client
         .get(endpoint)
-        .query(&[("machineNo", identity.machine_no.as_str())])
-        .header("x-machine-no", &identity.machine_no)
-        .header("x-device-key", &identity.install_key)
+        .query(&[("currentVersion", env!("CARGO_PKG_VERSION"))]);
+    if let Some(identity) = &identity {
+        request = request
+            .header("x-machine-no", &identity.machine_no)
+            .header("x-device-key", &identity.install_key);
+    }
+    let response = request
         .header(
             USER_AGENT,
             format!("Codey/{} release-admin-check", env!("CARGO_PKG_VERSION")),
@@ -423,7 +430,11 @@ async fn fetch_release_admin_update(
     let manifest = fetch_configured_update_manifest(state, &manifest_url).await?;
     let mut check = assess_update_manifest(env!("CARGO_PKG_VERSION"), &manifest)?;
     check.release_notes = candidate.release_notes.or(manifest.release_notes);
-    check.publish_id = candidate.publish_id;
+    check.publish_id = if candidate.track_delivery == Some(false) {
+        None
+    } else {
+        candidate.publish_id
+    };
     Ok(check)
 }
 
