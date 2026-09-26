@@ -544,6 +544,9 @@ pub fn codex_runtime_executable_candidates(app_dir: &Path) -> Vec<PathBuf> {
         let resources = app_dir.join("Contents").join("Resources");
         candidates.push(resources.join("codex"));
         candidates.push(resources.join("codex-cli"));
+        // 新版把 CLI 收进 `codex-cli` 包：`bin/codex` 是包清单声明的入口，并且
+        // 与 `codex-code-mode-host` 同级，包装器与宿主校验都依赖这一层布局。
+        candidates.push(resources.join("codex-cli").join("bin").join("codex"));
         candidates.push(resources.join("bin").join("codex"));
         candidates.push(app_dir.join("Contents").join("MacOS").join("codex"));
     } else {
@@ -551,6 +554,7 @@ pub fn codex_runtime_executable_candidates(app_dir: &Path) -> Vec<PathBuf> {
         candidates.push(resources.join("codex.exe"));
         candidates.push(app_dir.join("Resources").join("codex.exe"));
         candidates.push(resources.join("bin").join("codex.exe"));
+        candidates.push(resources.join("codex-cli").join("bin").join("codex.exe"));
         candidates.push(resources.join("codex-cli.exe"));
     }
     candidates
@@ -997,6 +1001,54 @@ mod tests {
         assert_eq!(
             install_dir_from_selected_file(&third_party, true).as_deref(),
             Some(app_dir.as_path())
+        );
+    }
+
+    /// 新版把 CLI 收进 `codex-cli` 包，入口是 `bin/codex`。候选必须跟到包内，
+    /// 否则一次布局调整就等于「找不到内置 CLI」并卡死启动。
+    #[test]
+    fn runtime_executable_follows_the_packaged_cli_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_dir = temp.path().join("ChatGPT.app");
+        let contents = app_dir.join("Contents");
+        let packaged = contents.join("Resources").join("codex-cli").join("bin");
+        std::fs::create_dir_all(&packaged).unwrap();
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        std::fs::write(
+            contents.join("Info.plist"),
+            "<key>CFBundleExecutable</key><string>ChatGPT</string>",
+        )
+        .unwrap();
+        std::fs::write(contents.join("MacOS").join("ChatGPT"), "desktop").unwrap();
+        std::fs::write(packaged.join("codex"), "packaged CLI").unwrap();
+        std::fs::write(packaged.join("codex-code-mode-host"), "packaged host").unwrap();
+
+        assert_eq!(
+            codex_runtime_executable(&app_dir).as_deref(),
+            Some(packaged.join("codex").as_path())
+        );
+
+        // 历史布局仍在时保持原选择。
+        let legacy = contents.join("Resources").join("codex");
+        std::fs::write(&legacy, "legacy CLI").unwrap();
+        assert_eq!(
+            codex_runtime_executable(&app_dir).as_deref(),
+            Some(legacy.as_path())
+        );
+    }
+
+    /// Windows 分支同样要覆盖包内布局；这里只校验候选路径拼接。
+    #[test]
+    fn runtime_executable_candidates_include_the_packaged_windows_layout() {
+        let app_dir = PathBuf::from("Codex");
+        assert!(
+            codex_runtime_executable_candidates(&app_dir).contains(
+                &app_dir
+                    .join("resources")
+                    .join("codex-cli")
+                    .join("bin")
+                    .join("codex.exe")
+            )
         );
     }
 
