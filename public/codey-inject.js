@@ -766,11 +766,39 @@
     event.stopImmediatePropagation?.();
   };
 
+  // Codex 原生按钮的尺寸与前景色由 data-* 属性驱动（data-size 决定 --button-icon-size，
+  // data-color/data-variant 决定次级前景色），只复制 class 会让注入按钮退回默认值、
+  // 图标偏大且是纯黑，所以按参考按钮逐项复制属性，并补上内层容器。
   const inheritNativeButtonClass = (button, reference) => {
-    const className = reference instanceof HTMLElement
-      ? String(reference.getAttribute("class") || "").trim()
-      : "";
+    if (!(reference instanceof HTMLElement)) return;
+    const className = String(reference.getAttribute("class") || "").trim();
     if (className) button.setAttribute("class", className);
+    for (const name of ["data-color", "data-variant", "data-pill", "data-uniform", "data-size", "data-icon-size"]) {
+      const value = reference.getAttribute(name);
+      if (value === null) button.removeAttribute(name);
+      else button.setAttribute(name, value);
+    }
+  };
+
+  // 原生图标统一放在 _ButtonInner 内：它负责 flex 居中，并把图标压到
+  // --button-icon-size（3xs 按钮即 14px）。
+  const wrapNativeButtonIcon = (button, reference) => {
+    const icon = button.querySelector("svg");
+    if (!icon) return;
+    const template = reference instanceof HTMLElement
+      ? reference.querySelector("span")
+      : null;
+    const inner = template instanceof HTMLElement
+      ? document.createElement(template.tagName.toLowerCase())
+      : document.createElement("span");
+    if (template instanceof HTMLElement) {
+      const innerClass = String(template.getAttribute("class") || "").trim();
+      if (innerClass) inner.setAttribute("class", innerClass);
+    } else {
+      inner.className = "_ButtonInner_f5tnh_2";
+    }
+    inner.appendChild(icon);
+    button.appendChild(inner);
   };
 
   const hideSidebarActionTooltip = () => {
@@ -1001,6 +1029,7 @@
       button.setAttribute("aria-label", "导出会话数据");
       inheritNativeButtonClass(button, archiveControl);
       button.innerHTML = sessionExportIcon;
+      wrapNativeButtonIcon(button, archiveControl);
       attachSidebarActionTooltip(button, "导出会话数据");
       ["pointerdown", "mousedown", "mouseup", "touchstart"].forEach((eventName) => {
         button.addEventListener(eventName, stopSidebarActionEvent, true);
@@ -1041,6 +1070,7 @@
       button.setAttribute("aria-label", "导入会话数据");
       inheritNativeButtonClass(button, newTaskControl || optionsControl);
       button.innerHTML = projectImportIcon;
+      wrapNativeButtonIcon(button, newTaskControl || optionsControl);
       attachSidebarActionTooltip(button, "导入会话数据");
       ["pointerdown", "mousedown", "mouseup", "touchstart"].forEach((eventName) => {
         button.addEventListener(eventName, stopSidebarActionEvent, true);
@@ -2524,6 +2554,7 @@
       button.setAttribute("aria-label", "导入会话数据到此项目");
       inheritNativeButtonClass(button, findProjectActionControl(project));
       button.innerHTML = projectImportIcon;
+      wrapNativeButtonIcon(button, findProjectActionControl(project));
       attachSidebarActionTooltip(button, "导入会话数据到此项目");
       const refreshPosition = () => positionProjectImportButton(project, button);
       project.addEventListener("mouseenter", refreshPosition);
@@ -2677,6 +2708,7 @@
       button.setAttribute("aria-label", "永久删除");
       inheritNativeButtonClass(button, archiveControl);
       button.innerHTML = sessionDeleteIcon;
+      wrapNativeButtonIcon(button, archiveControl);
       attachSidebarActionTooltip(button, "永久删除");
       ["pointerdown", "mousedown", "mouseup", "touchstart"].forEach((eventName) => {
         button.addEventListener(eventName, stopSidebarActionEvent, true);
