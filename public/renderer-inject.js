@@ -546,6 +546,16 @@
     return `${resetAt.getMonth() + 1}月${resetAt.getDate()}日 ${time} 重置`;
   };
 
+  // Codex 把侧边栏底部内容收进贴底的绝对定位 footer 容器后，容器内容由 Codex
+  // 自己渲染，可能暂时为空，所以不能再要求它一定含控件。
+  const sidebarFooterSlot = (element) => {
+    const style = window.getComputedStyle(element);
+    if (!style || style.display === "none" || style.visibility === "hidden") return false;
+    return style.position === "absolute"
+      && style.bottom === "0px"
+      && element.getBoundingClientRect().width > 0;
+  };
+
   const findAccountUsageMount = () => {
     const seenNavigations = new Set();
     for (const anchor of queryWithin(document, sidebarSelector)) {
@@ -557,15 +567,18 @@
       if (!(sidebarRoot instanceof HTMLElement)) continue;
       const siblings = Array.from(sidebarRoot.children || []);
       const navigationIndex = siblings.indexOf(navigation);
-      for (const target of siblings.slice(navigationIndex + 1)) {
-        if (!(target instanceof HTMLElement) || target.id === accountUsageId) continue;
-        const controls = target.querySelectorAll?.("button, [role=button], a[href]") || [];
-        if (!controls.length) continue;
-        const before = Array.from(target.children || [])
-          .reverse()
-          .find((child) => child instanceof HTMLElement && child.id !== accountUsageId);
-        if (before) return { target, before };
-      }
+      const trailing = siblings
+        .slice(navigationIndex + 1)
+        .filter((target) => target instanceof HTMLElement && target.id !== accountUsageId);
+      // 老布局的 footer 自带账号控件，新布局只剩 Codex 的贴底容器；两者都接受，
+      // 一律插到容器内最后一个子元素之前，让 Codex 的测量继续覆盖额度块。
+      const target = trailing.find((candidate) => (candidate.querySelectorAll?.("button, [role=button], a[href]")?.length || 0) > 0)
+        || trailing.find(sidebarFooterSlot);
+      if (!target) continue;
+      const before = Array.from(target.children || [])
+        .reverse()
+        .find((child) => child instanceof HTMLElement && child.id !== accountUsageId) || null;
+      return { target, before };
     }
     return null;
   };
