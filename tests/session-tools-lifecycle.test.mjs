@@ -178,7 +178,7 @@ test("failed installation releases registered resources and can be loaded again"
   assert.equal(runtime.intervals.size, 2);
 });
 
-test("dispose cancels scan, watcher, tooltip handoff, sidebar tooltip and running recheck timers", () => {
+test("dispose cancels scan, watcher, sidebar tooltip and running recheck timers", () => {
   const runtime = fixture();
   const { row, spinner } = thread(runtime.document, "thread-1", true);
   runtime.load();
@@ -188,12 +188,6 @@ test("dispose cancels scan, watcher, tooltip handoff, sidebar tooltip and runnin
   runtime.document.dispatchEvent({ type: "pointerdown" });
   runtime.observers[0].callback([{ type: "attributes", attributeName: "aria-label", target: row }]);
 
-  const turn = new FakeElement("div", { "data-turn-key": "turn-1" });
-  const trigger = new FakeElement("button", { "aria-describedby": "rich-tooltip" });
-  turn.appendChild(trigger);
-  runtime.document.body.appendChild(turn);
-  runtime.document.dispatchEvent({ type: "pointerout", target: trigger, stopPropagation() {} });
-
   const archive = new FakeElement("button", { "aria-label": "归档任务" });
   row.appendChild(archive);
   runtime.window.__codeyInstallSessionDeleteButtons(row);
@@ -201,7 +195,7 @@ test("dispose cancels scan, watcher, tooltip handoff, sidebar tooltip and runnin
   assert.ok(button);
   button.dispatchEvent({ type: "mouseenter" });
   const delays = [...runtime.timeouts.values()].map(({ delay }) => delay);
-  for (const delay of [40, 60, 150, 400, 2_000, 30_000]) assert.ok(delays.includes(delay), `missing ${delay} timer`);
+  for (const delay of [40, 60, 400, 2_000, 30_000]) assert.ok(delays.includes(delay), `missing ${delay} timer`);
   const callbacks = [...runtime.timeouts.values()].map(({ callback }) => callback);
   runtime.window.__codeySessionToolsInstall.dispose();
   const queries = runtime.queries();
@@ -238,7 +232,7 @@ test("a listener registration failure releases the listeners already installed",
   const runtime = fixture();
   const register = runtime.document.addEventListener.bind(runtime.document);
   runtime.document.addEventListener = (type, ...args) => {
-    if (type === "pointerover") throw new Error("injected listener failure");
+    if (type === "pointerdown") throw new Error("injected listener failure");
     register(type, ...args);
   };
   assert.throws(runtime.load, /injected listener failure/);

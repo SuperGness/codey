@@ -88,20 +88,6 @@
     "[data-message-id]",
   ].join(", ");
   const canonicalConversationTurnSelector = "[data-turn-key]";
-  // Rich conversation tooltips (notably Hooks details) can be taller than the
-  // collision-limited tooltip box. Clip the overflowing children inside that
-  // box so they cannot cover their trigger and create a pointer enter/leave
-  // loop. Codex has shipped both native button and focusable-span triggers;
-  // aria-describedby is present only while the native tooltip is open.
-  // Toggle a body class from the session-tools observer instead of body:has()
-  // so streaming characterData/childList invalidation does not re-match the
-  // four descendant :has() selectors on every mutation.
-  const conversationRichTooltipOpenClass = "codey-rich-tooltip-open";
-  const conversationRichTooltipTriggerSelector = "button, [role=\"button\"], span[tabindex=\"0\"]";
-  const conversationRichTooltipHandoffMs = 150;
-  const conversationRichTooltipCloseEvent = Symbol("codey-rich-tooltip-close");
-  let conversationRichTooltipHandoffTimer = 0;
-  let conversationRichTooltipHandoffTrigger = null;
   const sidebarScanRootSelector = [
     "header",
     "nav",
@@ -685,7 +671,6 @@
       [data-codey-message-row]:hover > [data-codey-message-select], [data-codey-message-select]:focus-visible, [data-codey-message-select][aria-pressed="true"] { opacity: 1; }
       [data-codey-message-select]:hover { transform: scale(1.06); }
       [data-codey-message-select][aria-pressed="true"] { background: #5968de; border-color: #a5aeff; color: white; }
-      body.${conversationRichTooltipOpenClass} [role="tooltip"] { overflow-x: hidden !important; overflow-y: auto !important; overscroll-behavior: contain; }
       @media (max-width: 760px) { [data-codey-message-select] { left: 4px; top: -34px; } }
       #${toastId} { -webkit-app-region: no-drag !important; position: fixed; right: 20px; bottom: 22px; z-index: 2147483645; max-width: 360px; border: 1px solid rgba(124, 140, 255, .4); border-radius: 11px; padding: 10px 13px; background: rgba(20, 24, 36, .97); color: #eef2ff; box-shadow: 0 12px 36px rgba(0,0,0,.4); font: 12px/1.45 system-ui, sans-serif; }
       #${toastId}[data-tone="error"] { border-color: rgba(248, 113, 113, .6); color: #fecaca; }
@@ -3411,99 +3396,6 @@
     }
   };
 
-  const isConversationRichTooltipTriggerShape = (element) => (
-    Boolean(element?.matches?.(conversationRichTooltipTriggerSelector))
-    && Boolean(element.closest?.(conversationTurnSelector))
-  );
-  const conversationHasOpenRichTooltip = () => {
-    const turns = document.querySelectorAll?.(conversationTurnSelector);
-    if (!turns) return false;
-    for (const turn of turns) {
-      const candidates = turn.querySelectorAll?.(conversationRichTooltipTriggerSelector);
-      if (!candidates) continue;
-      for (const candidate of candidates) {
-        if (candidate.hasAttribute?.("aria-describedby")) return true;
-      }
-    }
-    return false;
-  };
-  const syncConversationRichTooltipOpen = (target) => {
-    const body = document.body;
-    if (!body?.classList || typeof body.classList.toggle !== "function") return;
-    if (target && isConversationRichTooltipTriggerShape(target)) {
-      if (target.hasAttribute?.("aria-describedby")) {
-        body.classList.add(conversationRichTooltipOpenClass);
-        return;
-      }
-      if (!body.classList.contains(conversationRichTooltipOpenClass)) return;
-    } else if (target) {
-      return;
-    }
-    body.classList.toggle(conversationRichTooltipOpenClass, conversationHasOpenRichTooltip());
-  };
-  const conversationRichTooltipFor = (trigger) => String(
-    trigger?.getAttribute?.("aria-describedby") || "",
-  ).split(/\s+/).map((id) => document.getElementById(id)).find((element) => (
-    element?.getAttribute?.("role") === "tooltip"
-  )) || null;
-  const clearConversationRichTooltipHandoff = () => {
-    if (conversationRichTooltipHandoffTimer) {
-      window.clearTimeout(conversationRichTooltipHandoffTimer);
-      conversationRichTooltipHandoffTimer = 0;
-    }
-  };
-  const closeConversationRichTooltip = () => {
-    if (disposed) return;
-    const trigger = conversationRichTooltipHandoffTrigger;
-    clearConversationRichTooltipHandoff();
-    conversationRichTooltipHandoffTrigger = null;
-    if (!(trigger instanceof HTMLElement) || trigger.isConnected === false) return;
-    const event = new PointerEvent("pointerout", {
-      bubbles: true,
-      pointerType: "mouse",
-      relatedTarget: document.body,
-    });
-    Object.defineProperty(event, conversationRichTooltipCloseEvent, { value: true });
-    trigger.dispatchEvent(event);
-  };
-  const holdConversationRichTooltipOpen = (event) => {
-    if (disposed) return;
-    if (event[conversationRichTooltipCloseEvent]) return;
-    const target = event.target instanceof Element ? event.target : null;
-    const relatedTarget = event.relatedTarget instanceof Element ? event.relatedTarget : null;
-    const trigger = target?.closest?.(conversationRichTooltipTriggerSelector);
-    if (
-      trigger
-      && isConversationRichTooltipTriggerShape(trigger)
-      && trigger.hasAttribute("aria-describedby")
-      && !trigger.contains(relatedTarget)
-    ) {
-      event.stopPropagation();
-      clearConversationRichTooltipHandoff();
-      conversationRichTooltipHandoffTrigger = trigger;
-      conversationRichTooltipHandoffTimer = window.setTimeout(
-        closeConversationRichTooltip,
-        conversationRichTooltipHandoffMs,
-      );
-      return;
-    }
-    const activeTrigger = conversationRichTooltipHandoffTrigger;
-    const tooltip = conversationRichTooltipFor(activeTrigger);
-    if (
-      tooltip?.contains(target)
-      && !tooltip.contains(relatedTarget)
-      && !activeTrigger?.contains(relatedTarget)
-    ) closeConversationRichTooltip();
-  };
-  const continueConversationRichTooltipHandoff = (event) => {
-    const target = event.target instanceof Element ? event.target : null;
-    const trigger = conversationRichTooltipHandoffTrigger;
-    if (
-      trigger?.contains(target)
-      || conversationRichTooltipFor(trigger)?.contains(target)
-    ) clearConversationRichTooltipHandoff();
-  };
-
   // Lightweight observer telemetry: per-handler call count, mutation count and
   // wall time, exposed on window.__codeyObserverStats for performance triage.
   // No behavior change; timing falls back to Date.now() where performance is
@@ -3535,10 +3427,6 @@
         ? mutation.target
         : mutation.target?.parentElement;
       if (mutation.type === "attributes") {
-        if (mutation.attributeName === "aria-describedby") {
-          syncConversationRichTooltipOpen(target);
-          continue;
-        }
         if (target && !isCodeyOwned(target)) {
           const threadRow = target.closest?.(sidebarThreadRowSelector) || null;
           const relevantThreadClassChange = threadRow
@@ -3620,7 +3508,6 @@
       "aria-label",
       "aria-expanded",
       "aria-hidden",
-      "aria-describedby",
       "data-turn-key",
       "data-request-user-input-auto-resolution-conversation-id",
       "data-app-action-sidebar-thread-host-id",
@@ -3656,8 +3543,6 @@
     }
     if (initialScanUsesIdleCallback) window.cancelIdleCallback?.(initialScanHandle);
     else window.clearTimeout(initialScanHandle);
-    clearConversationRichTooltipHandoff();
-    conversationRichTooltipHandoffTrigger = null;
     hideSidebarActionTooltip();
     for (const id of threadRunningRecheckTimers.values()) window.clearTimeout(id);
     threadRunningRecheckTimers.clear();
@@ -3696,7 +3581,6 @@
     sessionToolObserver = new MutationObserver(handleSessionToolMutations);
     sessionToolObserver.observe(document.documentElement, sessionToolMutationOptions);
   }
-  syncConversationRichTooltipOpen();
   // forceRefresh bypasses the per-session throttle and re-fetches official
   // thread metadata for every sidebar row, so alt-tabbing must stay debounced.
   let lastForcedThreadTimeRefresh = 0;
@@ -3718,15 +3602,11 @@
     installedListeners.push(
       [document, "visibilitychange", wakeSessionWatcher, undefined],
       [document, "visibilitychange", reconcileOnVisible, undefined],
-      [document, "pointerout", holdConversationRichTooltipOpen, true],
-      [document, "pointerover", continueConversationRichTooltipHandoff, true],
       [document, "pointerdown", wakeSessionWatcher, pointerdownOptions],
       [document, "keydown", wakeSessionWatcherFromKey, true],
     );
     document.addEventListener("visibilitychange", wakeSessionWatcher);
     document.addEventListener("visibilitychange", reconcileOnVisible);
-    document.addEventListener("pointerout", holdConversationRichTooltipOpen, true);
-    document.addEventListener("pointerover", continueConversationRichTooltipHandoff, true);
     document.addEventListener("pointerdown", wakeSessionWatcher, pointerdownOptions);
     document.addEventListener("keydown", wakeSessionWatcherFromKey, true);
   }

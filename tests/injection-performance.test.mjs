@@ -147,7 +147,6 @@ test("renderer core loads session tools after idle time or sidebar use", async (
     /attributeFilter:\s*\[([\s\S]*?)\],\s*childList:\s*true/,
   )?.[1] ?? "";
   assert.match(sessionObserverFilter, /"class"/);
-  assert.match(sessionObserverFilter, /"aria-describedby"/);
   assert.doesNotMatch(sessionObserverFilter, /"style"/);
   assert.doesNotMatch(
     sessionTools,
@@ -157,7 +156,6 @@ test("renderer core loads session tools after idle time or sidebar use", async (
     /const handleSessionToolMutationsImpl = \(mutations\) => \{([\s\S]*?)\n  \};\n  const sessionToolMutationOptions/,
   )?.[1] ?? "";
   assert.match(sessionObserverBody, /addPendingScanRoot\(threadRow\)/);
-  assert.match(sessionObserverBody, /syncConversationRichTooltipOpen\(target\)/);
   assert.match(sessionObserverBody, /reconcileStaleCompletedTask/);
   assert.match(sessionTools, /mutationDispatcher\.subscribe\(\s*handleSessionToolMutations/);
   assert.match(sessionTools, /new MutationObserver\(handleSessionToolMutations\)/);
@@ -571,45 +569,6 @@ test("plugin mutations queue one trailing list refresh while a refresh is in fli
 
   listResolvers.shift()({ plugins: [] });
   await Promise.resolve();
-});
-
-test("oversized conversation detail tooltips stay inside their scrollable surface", async () => {
-  const source = await readSource("public/codey-inject.js");
-  assert.match(source, /const conversationRichTooltipOpenClass = "codey-rich-tooltip-open"/);
-  assert.match(
-    source,
-    /const conversationRichTooltipTriggerSelector = "button, \[role=\\"button\\"\], span\[tabindex=\\"0\\"\]"/,
-  );
-  assert.doesNotMatch(source, /body:has\(\$\{/);
-
-  const rule = source.match(
-    /body\.\$\{conversationRichTooltipOpenClass\} \[role="tooltip"\] \{([^}]*)\}/,
-  )?.[1] || "";
-  assert.match(rule, /overflow-x: hidden !important/);
-  assert.match(rule, /overflow-y: auto !important/);
-  assert.match(rule, /overscroll-behavior: contain/);
-  assert.doesNotMatch(rule, /pointer-events/);
-});
-
-test("conversation rich tooltips reuse the session-tools observer instead of body:has", async () => {
-  const source = await readSource("public/codey-inject.js");
-  assert.match(source, /if \(mutation\.attributeName === "aria-describedby"\) \{/);
-  assert.match(source, /syncConversationRichTooltipOpen\(\);/);
-});
-
-test("pointer handoff keeps conversation rich tooltips open while entering them", async () => {
-  const source = await readSource("public/codey-inject.js");
-  assert.match(source, /const conversationRichTooltipHandoffMs = 150/);
-  assert.match(source, /event\.stopPropagation\(\)/);
-  assert.match(source, /new PointerEvent\("pointerout", \{/);
-  assert.match(
-    source,
-    /document\.addEventListener\("pointerout", holdConversationRichTooltipOpen, true\)/,
-  );
-  assert.match(
-    source,
-    /document\.addEventListener\("pointerover", continueConversationRichTooltipHandoff, true\)/,
-  );
 });
 
 test("adjacent selected turns render as one continuous outline", async () => {
