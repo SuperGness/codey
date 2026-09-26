@@ -1159,6 +1159,56 @@ test("accepts only a unique direct app-server request wrapper", () => {
   );
 });
 
+test("discovers app-shared when the build moves the AppServerManager resolver there", async () => {
+  const entryUrl = "app://-/assets/index-BZNttYfb.js";
+  const appSharedUrl = "app://-/assets/app-shared-588591d226f4.js";
+  const manager = {
+    discardConversationFromCache() {},
+    handleThreadDeletion() {},
+    refreshRecentConversations() {},
+    resumeConversation() {},
+    sendRequest() {
+      return { rateLimits: { limitId: "codex" } };
+    },
+  };
+  const AppServerManagerRpc = Symbol("AppServerManagerRpc");
+  const scope = {
+    get: () => ({ forHost: () => manager }),
+    query: {},
+    set() {},
+    watch() {},
+    when() {},
+  };
+  const row = new FakeElement();
+  row.__reactFiber$codeyTest = {
+    memoizedState: { current: scope },
+    return: null,
+  };
+  const resolver = function appServerManagerForHost(runtimeScope, hostId) {
+    const rpc = runtimeScope.get(AppServerManagerRpc);
+    if (rpc == null) throw new Error("AppServerManager RPC is not connected");
+    return rpc.forHost(hostId);
+  };
+  const { window } = loadInjection({
+    assetModules: new Map([[appSharedUrl, { arbitraryExport: resolver }]]),
+    deferNativeTimeouts: true,
+    entryScriptUrls: [entryUrl],
+    fetchHandler: async (url) => ({
+      ok: url === entryUrl,
+      text: async () => 'import "./app-shared-588591d226f4.js";',
+    }),
+    rows: [row],
+  });
+
+  const controller = await window.__codeyLoadCodexSessionController({
+    feature: "deleteMessages",
+  });
+
+  assert.equal(controller.kind, "manager");
+  assert.equal(controller.manager, manager);
+  assert.equal(window.__codeyPageCapabilities.deleteMessages.status, "available");
+});
+
 test("discovers the current app-initial asset and resolves AppServerManager from React scope", async () => {
   const entryUrl = "app://-/assets/index-BZNttYfb.js";
   const appInitialUrl = "app://-/assets/app-initial-BCLYDefw.js";

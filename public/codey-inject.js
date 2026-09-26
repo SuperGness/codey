@@ -1884,7 +1884,7 @@
 
   const codexAssetReferencesFromSource = (source, baseUrl) => {
     const references = [];
-    const pattern = /["']((?:\.\/(?:assets\/)?|\/assets\/)(?:app-initial|app-server-manager-signals)(?:-[^"'?#/]+)?\.js(?:\?[^"']*)?)["']/g;
+    const pattern = /["']((?:\.\/(?:assets\/)?|\/assets\/)(?:app-initial|app-server-manager-signals|app-shared)(?:-[^"'?#/]+)?\.js(?:\?[^"']*)?)["']/g;
     for (const match of String(source || "").matchAll(pattern)) {
       try {
         const resolved = new URL(match[1], baseUrl).href;
@@ -1902,6 +1902,7 @@
     const discoveredUrls = loadedUrls.filter((url) => (
       url.includes("app-server-manager-signals-")
       || url.includes("app-initial-")
+      || url.includes("app-shared-")
     ));
     const fetchAsset = typeof window.fetch === "function"
       ? window.fetch.bind(window)
@@ -1915,6 +1916,7 @@
       url
       && !url.includes("app-server-manager-signals-")
       && !url.includes("app-initial-")
+      && !url.includes("app-shared-")
     )).slice(0, 6);
     for (const scriptUrl of scriptUrls) {
       try {
@@ -2177,10 +2179,14 @@
     let fallbackDispatcher = typeof window.__codeyCodexSignalDispatcher === "function"
       ? window.__codeyCodexSignalDispatcher
       : null;
+    // 新版 Codex 把 AppServerManager 解析器放在 app-shared 里，app-initial
+    // 只剩单参辅助函数；保留原有优先级，只在 app-initial 无法解析时下沉。
     const managerAssetPriority = (url) => (
       url.includes("app-initial-")
-        ? 2
-        : Number(url.includes("app-server-manager-signals-"))
+        ? 3
+        : url.includes("app-shared-")
+          ? 2
+          : Number(url.includes("app-server-manager-signals-"))
     );
     const urls = (await discoverCodexAppAssetUrls())
       .sort((left, right) => managerAssetPriority(right) - managerAssetPriority(left));
