@@ -1,7 +1,7 @@
 #[cfg(target_os = "macos")]
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -325,6 +325,10 @@ async fn load_or_register_device(
         "platform": current_update_platform(),
         "arch": current_update_arch(),
         "currentVersion": env!("CARGO_PKG_VERSION"),
+        // 设备管理需要一眼看到客户端环境，登记时一并带上。
+        "codexVersion": current_codex_version().await,
+        "osName": current_os_name(),
+        "osVersion": current_os_version(),
     });
     let response = state
         .http_client
@@ -387,10 +391,18 @@ async fn fetch_release_admin_update(
     let identity = load_or_register_device(state, base_url).await.ok();
     let endpoint = reqwest::Url::parse(&format!("{base_url}/api/updates/check"))
         .map_err(|_| "发布管理服务地址无效".to_string())?;
-    let mut request = state
-        .http_client
-        .get(endpoint)
-        .query(&[("currentVersion", env!("CARGO_PKG_VERSION"))]);
+    // Codex 与系统版本随每次检查更新上报，服务端据此判断版本是否适配本机。
+    let mut query = vec![
+        ("currentVersion", env!("CARGO_PKG_VERSION").to_string()),
+        ("osName", current_os_name().to_string()),
+    ];
+    if let Some(codex_version) = current_codex_version().await {
+        query.push(("codexVersion", codex_version));
+    }
+    if let Some(os_version) = current_os_version() {
+        query.push(("osVersion", os_version));
+    }
+    let mut request = state.http_client.get(endpoint).query(&query);
     if let Some(identity) = &identity {
         request = request
             .header("x-machine-no", &identity.machine_no)
@@ -742,6 +754,87 @@ pub(super) fn current_update_arch() -> &'static str {
     } else {
         std::env::consts::ARCH
     }
+}
+
+fn current_os_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Windows"
+    } else if cfg!(target_os = "macos") {
+        "macOS"
+    } else if cfg!(target_os = "linux") {
+        "Linux"
+    } else {
+        std::env::consts::OS
+    }
+}
+
+/// 系统版本只用于发布管理展示，探测一次后缓存，失败时返回 None 而不是阻断检查更新。
+fn current_os_version() -> Option<String> {
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CACHE.get_or_init(platform_os_version).clone()
+}
+
+#[cfg(target_os = "macos")]
+fn platform_os_version() -> Option<String> {
+    let text = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist").ok()?;
+    let marker = "<key>ProductVersion</key>";
+    let rest = &text[text.find(marker)? + marker.len()..];
+    let start = rest.find("<string>")? + "<string>".len();
+    let end = rest[start..].find("</string>")? + start;
+    Some(rest[start..end].trim().to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn platform_os_version() -> Option<String> {
+    // `ver` 输出中的版本号与系统语言无关，只解析其中的数字部分。
+    let output = std::process::Command::new("cmd")
+        .args(["/c", "ver"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let raw = text.split_whitespace().find(|part| {
+        part.chars().filter(|character| *character == '.').count() >= 2
+            && part
+                .chars()
+                .all(|character| character.is_ascii_digit() || character == '.' || character == ']')
+    })?;
+    let version = raw.trim_matches(|character: char| !character.is_ascii_digit());
+    let build = version.split('.').nth(2)?.parse::<u64>().ok()?;
+    // 系统名称已由 osName 上报，这里只补世代与 build，渲染成「Windows 11 26100」。
+    let generation = if build >= 22000 { "11" } else { "10" };
+    Some(format!("{generation} {build}"))
+}
+
+#[cfg(target_os = "linux")]
+fn platform_os_version() -> Option<String> {
+    let text = std::fs::read_to_string("/etc/os-release").ok()?;
+    for key in ["PRETTY_NAME=", "NAME="] {
+        if let Some(value) = text
+            .lines()
+            .find_map(|line| line.strip_prefix(key))
+            .map(|value| value.trim().trim_matches('"').trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Some(value);
+        }
+    }
+    Some("Linux".to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn platform_os_version() -> Option<String> {
+    None
+}
+
+/// Codex 版本在启动阶段已被探测并缓存；缓存缺失时补一次探测。
+async fn current_codex_version() -> Option<String> {
+    if let Some(version) = crate::error_log::cached_codex_version() {
+        return Some(version);
+    }
+    tokio::task::spawn_blocking(|| crate::error_log::refresh_codex_app_version(None, None))
+        .await
+        .ok()
+        .flatten()
 }
 
 fn installable_package_priority(asset: &UpdateManifestAsset) -> Option<u8> {

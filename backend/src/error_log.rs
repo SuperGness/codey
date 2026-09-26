@@ -67,6 +67,11 @@ fn cached_codex_app_version() -> Option<String> {
         .clone()
 }
 
+/// 读取启动阶段探测到的 Codex 版本，供发布管理上报使用。
+pub fn cached_codex_version() -> Option<String> {
+    cached_codex_app_version()
+}
+
 pub fn refresh_codex_app_version(
     app_dir: Option<&Path>,
     saved_app_path: Option<&str>,
