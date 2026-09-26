@@ -2448,6 +2448,7 @@ fn default_subagent_reasoning_effort() -> String {
 }
 
 const DEFAULT_UPDATE_BASE_URL: &str = "https://pub-2d17a6a8bc22426a92e297a59f55ccc3.r2.dev";
+const DEFAULT_RELEASE_ADMIN_URL: &str = "https://codey-release-admin.kimzane9991.workers.dev";
 
 fn update_manifest_url_from_base(configured_base_url: Option<&str>) -> String {
     let base_url = configured_base_url
@@ -2466,7 +2467,7 @@ pub fn default_release_admin_url() -> String {
     option_env!("CODEY_RELEASE_ADMIN_URL")
         .map(str::trim)
         .filter(|url| !url.is_empty())
-        .unwrap_or_default()
+        .unwrap_or(DEFAULT_RELEASE_ADMIN_URL)
         .trim_end_matches('/')
         .to_string()
 }

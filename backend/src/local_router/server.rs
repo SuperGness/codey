@@ -91,6 +91,57 @@ impl RequestLogCatalog {
     }
 }
 
+/// 本地路由监听的端口区间。落在这个高位区间可以避开常见开发服务的低位端口，
+/// 也避开系统临时端口区间里被出站连接随手拿走的那部分端口。
+pub(crate) const ROUTER_PORT_RANGE_START: u16 = 45_000;
+pub(crate) const ROUTER_PORT_RANGE_END: u16 = 55_000;
+/// 从随机起点最多连续探测多少个候选端口，全都不可用时回退由内核分配。
+pub(crate) const ROUTER_PORT_PROBES: u16 = 64;
+
+/// 在区间内从 `offset` 指定的端口开始顺序探测可用端口，候选被占用就换下一个。
+/// `bind` 成功即独占该端口，所以并发启动的多个实例不会拿到同一个端口。
+pub(crate) async fn bind_router_listener_from(offset: u32) -> Result<TcpListener> {
+    let span = u32::from(ROUTER_PORT_RANGE_END - ROUTER_PORT_RANGE_START) + 1;
+    let mut occupied = Vec::new();
+    for step in 0..u32::from(ROUTER_PORT_PROBES) {
+        let port = ROUTER_PORT_RANGE_START + ((offset + step) % span) as u16;
+        match TcpListener::bind(("127.0.0.1", port)).await {
+            Ok(listener) => return Ok(listener),
+            Err(error) => occupied.push((port, error)),
+        }
+    }
+    // 区间内连续候选都被占用时不能让路由起不来，退回到内核分配并留下诊断。
+    record_router_failure_nonblocking(
+        "local_router_port_candidates_unavailable",
+        "bind_local_router",
+        format!(
+            "高位端口区间 {ROUTER_PORT_RANGE_START}-{ROUTER_PORT_RANGE_END} 内连续 {ROUTER_PORT_PROBES} 个候选端口均不可用，回退由内核分配端口"
+        ),
+        serde_json::json!({
+            "probes": occupied
+                .iter()
+                .take(8)
+                .map(|(port, error)| serde_json::json!({
+                    "port": port,
+                    "error": error.to_string(),
+                }))
+                .collect::<Vec<_>>(),
+        }),
+    );
+    TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .context("启动 Codey 本地路由失败")
+}
+
+/// 随机起点避免同一台机器上并发启动的实例都从同一个端口开始竞争。
+pub(crate) async fn bind_router_listener() -> Result<TcpListener> {
+    let seed = Uuid::new_v4();
+    let bytes = seed.as_bytes();
+    let span = u32::from(ROUTER_PORT_RANGE_END - ROUTER_PORT_RANGE_START) + 1;
+    let offset = u32::from(u16::from_le_bytes([bytes[0], bytes[1]])) % span;
+    bind_router_listener_from(offset).await
+}
+
 pub(crate) struct LocalRouter {
     pub(crate) endpoint: RuntimeRouterEndpoint,
     pub(crate) snapshot: Arc<RwLock<Arc<RouterSnapshot>>>,
@@ -131,9 +182,7 @@ impl LocalRouter {
         request_log: Arc<RouteRequestLogController>,
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
     ) -> Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .context("启动 Codey 本地路由失败")?;
+        let listener = bind_router_listener().await?;
         let port = listener
             .local_addr()
             .context("读取 Codey 本地路由监听地址失败")?

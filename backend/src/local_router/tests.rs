@@ -11774,3 +11774,44 @@ async fn chat_stream_keeps_distinct_tools_separate_across_both_shapes() {
         assert_eq!(names, vec!["alpha", "beta"], "{output:#?}");
     }
 }
+
+#[tokio::test]
+async fn router_listener_stays_inside_the_high_port_range_and_never_repeats() {
+    // 绑定成功即独占端口，所以并发/连续启动不会把同一个端口分配两次。
+    let mut listeners: Vec<TcpListener> = Vec::new();
+    for _ in 0..16 {
+        let listener = bind_router_listener().await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(
+            (ROUTER_PORT_RANGE_START..=ROUTER_PORT_RANGE_END).contains(&port),
+            "端口 {port} 落在高位区间之外"
+        );
+        for existing in &listeners {
+            assert_ne!(
+                existing.local_addr().unwrap().port(),
+                port,
+                "端口 {port} 被重复分配"
+            );
+        }
+        listeners.push(listener);
+    }
+}
+
+#[tokio::test]
+async fn an_occupied_candidate_port_is_skipped() {
+    // 占住区间内第一个可用端口，再让探测从它开始，验证会换到下一个候选。
+    let mut first_free = None;
+    for step in 0..u32::from(ROUTER_PORT_PROBES) {
+        let port = ROUTER_PORT_RANGE_START + step as u16;
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
+            first_free = Some((step, listener));
+            break;
+        }
+    }
+    let (offset, blocked) = first_free.expect("高位端口区间内没有可用端口，无法构造跳过占用的场景");
+    let blocked_port = blocked.local_addr().unwrap().port();
+    let listener = bind_router_listener_from(offset).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    assert_ne!(port, blocked_port, "被占用的端口 {blocked_port} 仍被分配");
+    assert!((ROUTER_PORT_RANGE_START..=ROUTER_PORT_RANGE_END).contains(&port));
+}
