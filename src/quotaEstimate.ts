@@ -62,6 +62,20 @@ export type QuotaUsage = {
   inputTokens?: number | null; outputTokens?: number | null; totalTokens?: number | null;
   cachedInputTokens?: number | null; cacheCreationInputTokens?: number | null;
 };
+export type QuotaUsageAggregate = {
+  model: string; serviceTier: string | null; requestedServiceTier: string | null; longContext: boolean;
+  calls: number; inputTokens: number; outputTokens: number; totalTokens: number;
+  cachedInputTokens: number; cacheCreationInputTokens: number; cacheHits: number;
+  missingUsage: number; missingCacheCreation: number;
+  billedCachedInputTokens: number; billedCacheCreationInputTokens: number;
+};
+export type QuotaUsageResult = {
+  queryable: boolean; reason?: string | null; groups: QuotaUsageAggregate[]; totalCalls: number;
+  recordingHealth?: {
+    active: boolean; sampleRatePerMillion: number; droppedFull: number; droppedClosed: number;
+    writeDropped: number; writeFailures: number;
+  };
+};
 const numericFields = ["calls", "input", "output", "tokens", "hits", "cached", "writes",
   "inputCost", "outputCost", "readCost", "writeCost", "cacheCost", "cacheSaving",
   "cost", "unpriced", "missing", "missingWrites", "assumed"] as const;
@@ -89,6 +103,21 @@ const tierLabels: Record<Tier, string> = { standard: "Standard", fast: "Fast", f
 
 export function addQuotaUsage(rows: Map<string, QuotaRow>, item: QuotaUsage) {
   const model = item.model?.trim() || item.requestedModel?.trim() || "未知模型";
+  const input = count(item.inputTokens), cached = count(item.cachedInputTokens);
+  const writes = count(item.cacheCreationInputTokens);
+  const billedCached = Math.min(input, cached);
+  addQuotaAggregate(rows, {
+    model, serviceTier: item.serviceTier ?? null, requestedServiceTier: item.requestedServiceTier ?? null,
+    longContext: input > 272_000, calls: 1, inputTokens: input, outputTokens: count(item.outputTokens),
+    totalTokens: count(item.totalTokens), cachedInputTokens: cached, cacheCreationInputTokens: writes,
+    cacheHits: Number(cached > 0), missingCacheCreation: Number(item.cacheCreationInputTokens == null),
+    missingUsage: Number(item.inputTokens == null || item.outputTokens == null || item.totalTokens == null),
+    billedCachedInputTokens: billedCached, billedCacheCreationInputTokens: Math.min(input - billedCached, writes),
+  });
+}
+
+function addQuotaAggregate(rows: Map<string, QuotaRow>, item: QuotaUsageAggregate) {
+  const model = item.model;
   const modelKey = model.toLowerCase();
   const priceKey = Object.prototype.hasOwnProperty.call(MODEL_PRICES, modelKey) ? modelKey : modelKey.replace(/-\d{4}-\d{2}-\d{2}$/, "");
   const prices = Object.prototype.hasOwnProperty.call(MODEL_PRICES, priceKey) ? MODEL_PRICES[priceKey] : undefined;
@@ -103,30 +132,30 @@ export function addQuotaUsage(rows: Map<string, QuotaRow>, item: QuotaUsage) {
   const cached = count(item.cachedInputTokens), writes = count(item.cacheCreationInputTokens);
   // Context thresholds belong to the model, including tiers whose long-context price is unavailable.
   const hasLongRates = Object.values(prices ?? {}).some(rates => rates.length > 4);
-  const long = hasLongRates && input > 272_000;
+  // The backend classifies and clips each request before summing; never use summed input here.
+  const long = hasLongRates && item.longContext;
   const context = hasLongRates ? long ? ">272K" : "≤272K" : "统一上下文价";
   const tierLabel = tier ? tierLabels[tier] : rawTier ? `未确认（${rawTier}）` : "未确认";
   const key = JSON.stringify([modelKey, tierLabel, context, source]);
   const row = rows.get(key) ?? { ...emptyQuotaRow(model), key, tier: tierLabel, context, source };
   rows.set(key, row);
-  row.calls++; row.input += input; row.output += output; row.tokens += count(item.totalTokens);
-  row.hits += Number(cached > 0); row.cached += cached; row.writes += writes;
-  row.missingWrites += Number(item.cacheCreationInputTokens == null);
-  row.missing += Number(item.inputTokens == null || item.outputTokens == null || item.totalTokens == null);
+  row.calls += item.calls; row.input += input; row.output += output; row.tokens += count(item.totalTokens);
+  row.hits += item.cacheHits; row.cached += cached; row.writes += writes;
+  row.missingWrites += item.missingCacheCreation; row.missing += item.missingUsage;
   const rates = tier ? prices?.[tier] : undefined;
   row.note = !tier ? "缺少可确认的计费档位" : !rates ? "该模型及档位无已核对价格"
     : long && rates.length < 8 ? "该档位未公布长上下文价格" : "";
-  if (row.note) { row.unpriced++; return; }
+  if (row.note) { row.unpriced += item.calls; return; }
   if (!rates) return;
-  row.assumed += Number(!actual || defaulted);
+  row.assumed += !actual || defaulted ? item.calls : 0;
   const offset = long ? 4 : 0;
   const inputRate = rates[offset]!;
   const cachedRate = rates[offset + 1] ?? inputRate;
   const writeRate = rates[offset + 2] ?? inputRate;
   const outputRate = rates[offset + 3]!;
   // Cache reads/writes are portions of input; excess malformed counts cannot create extra charges.
-  const billedCached = Math.min(input, cached);
-  const billedWrites = Math.min(input - billedCached, writes);
+  const billedCached = item.billedCachedInputTokens;
+  const billedWrites = item.billedCacheCreationInputTokens;
   const inputCost = (input - billedCached - billedWrites) * inputRate / 1_000_000;
   const outputCost = output * outputRate / 1_000_000;
   const readCost = billedCached * cachedRate / 1_000_000;
@@ -205,6 +234,20 @@ export function quotaRows(items: readonly QuotaUsage[]) {
   return [...rows.values()].sort((a, b) => b.cost - a.cost || a.key.localeCompare(b.key));
 }
 
+export function quotaAggregateRows(items: readonly QuotaUsageAggregate[]) {
+  const rows = new Map<string, QuotaRow>();
+  for (const item of items) addQuotaAggregate(rows, item);
+  return [...rows.values()].sort((a, b) => b.cost - a.cost || a.key.localeCompare(b.key));
+}
+
+export function estimateQuotaRows(period: QuotaPeriod, rows: QuotaRow[]): QuotaEstimate {
+  const total = sumQuotaRows(rows);
+  const result = total.calls > total.unpriced
+    ? projectQuota(total.cost, period.toUnixMs - period.fromUnixMs, period.usedPercent)
+    : null;
+  return { period, total, result };
+}
+
 /** 只传入单个账号的记录，用该账号的官方已用比例推算它自己的周限。 */
 export function estimateQuota(
   snapshot: AccountUsageSnapshot,
@@ -212,46 +255,5 @@ export function estimateQuota(
   now = Date.now(),
 ): QuotaEstimate {
   const period = quotaPeriod(snapshot, now);
-  const total = sumQuotaRows(quotaRows(periodRows(items, period.fromUnixMs, period.toUnixMs)));
-  const result = total.calls > total.unpriced
-    ? projectQuota(total.cost, period.toUnixMs - period.fromUnixMs, period.usedPercent)
-    : null;
-  return { period, total, result };
-}
-
-type Cursor = { timestampUnixMs: number; requestId: string };
-export type QuotaPage = { queryable: boolean; items: QuotaUsage[]; hasMore: boolean; nextCursor: Cursor | null };
-/// 读取原始记录，供按账号分别统计时先按各自周期筛选再汇总。
-export async function loadQuotaUsage(
-  query: (cursor: Cursor | null) => Promise<QuotaPage>,
-  active: () => boolean,
-  progress: (count: number) => void,
-) {
-  const items: QuotaUsage[] = [];
-  let cursor: Cursor | null = null, loaded = 0;
-  // ponytail: sequential 100-row pages reuse the existing API; move aggregation to SQL if large histories become slow.
-  while (active()) {
-    const page = await query(cursor);
-    if (!active()) return null;
-    if (!page.queryable) throw new Error("当前日志暂不可查询，请开启请求日志记录后重试。");
-    items.push(...page.items);
-    loaded += page.items.length; progress(loaded);
-    if (!page.hasMore) return items;
-    const next = page.nextCursor;
-    if (!next || !page.items.length || (cursor && (next.timestampUnixMs > cursor.timestampUnixMs
-      || (next.timestampUnixMs === cursor.timestampUnixMs && next.requestId >= cursor.requestId)))) {
-      throw new Error("日志分页异常，请刷新数据后重试。");
-    }
-    cursor = next;
-  }
-  return null;
-}
-
-export async function loadQuotaRows(
-  query: (cursor: Cursor | null) => Promise<QuotaPage>,
-  active: () => boolean,
-  progress: (count: number) => void,
-) {
-  const items = await loadQuotaUsage(query, active, progress);
-  return items === null ? null : quotaRows(items);
+  return estimateQuotaRows(period, quotaRows(periodRows(items, period.fromUnixMs, period.toUnixMs)));
 }

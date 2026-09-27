@@ -17,13 +17,25 @@
     }
     if (view === "quota") {
       window.__codeyInvokeApi = async (command, args) => {
-        if (command !== "query_route_request_logs" || args.provider !== "openai") return mock(command, args);
-        return { queryable: true, hasMore: false, items: [
+        if (command !== "query_route_request_log_quota_usage" || args.provider !== "openai") return mock(command, args);
+        const items = [
           { model: "gpt-6-astra", inputTokens: 191090068, outputTokens: 2048123, totalTokens: 193138191, cachedInputTokens: 180000000 },
           { model: "gpt-6-astra", serviceTier: "default", inputTokens: 21349800, outputTokens: 341000, totalTokens: 21690800, cachedInputTokens: 19000000, cacheCreationInputTokens: 50000 },
           { model: "gpt-5.6-luna", inputTokens: 240000, outputTokens: 16000, totalTokens: 256000 },
           { model: "unknown-model", inputTokens: 1000 },
-        ] };
+        ];
+        return { queryable: true, totalCalls: items.length, groups: items.map(item => {
+          const input = item.inputTokens ?? 0, cached = item.cachedInputTokens ?? 0;
+          const billedCached = Math.min(input, cached);
+          return { ...item, serviceTier: item.serviceTier ?? null, requestedServiceTier: null,
+            calls: 1, longContext: input > 272000, outputTokens: item.outputTokens ?? 0,
+            totalTokens: item.totalTokens ?? 0, cachedInputTokens: cached,
+            cacheCreationInputTokens: item.cacheCreationInputTokens ?? 0, cacheHits: Number(cached > 0),
+            missingUsage: Number(item.outputTokens == null || item.totalTokens == null),
+            missingCacheCreation: Number(item.cacheCreationInputTokens == null),
+            billedCachedInputTokens: billedCached,
+            billedCacheCreationInputTokens: Math.min(input - billedCached, item.cacheCreationInputTokens ?? 0) };
+        }) };
       };
     }
     if (view === "usage") {

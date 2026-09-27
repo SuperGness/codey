@@ -13,6 +13,7 @@ export const CODEY_API_COMMANDS = [
   "open_route_request_logs",
   "query_route_request_logs",
   "query_route_request_log_stats",
+  "query_route_request_log_quota_usage",
   "query_route_request_log_models",
   "query_official_account_usage",
   "store_official_account_usage",

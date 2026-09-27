@@ -11179,6 +11179,52 @@ async fn request_log_excludes_non_model_paths_but_keeps_rejected_model_requests(
 }
 
 #[tokio::test]
+async fn request_log_quota_api_returns_aggregates_and_health_with_authentication() {
+    let logs = tempfile::tempdir().unwrap();
+    let (mut config, _, _) = router_config("http://127.0.0.1:9/v1".to_string());
+    config.route_request_log.backend = RouteRequestLogBackend::Sqlite;
+    let router = LocalRouter::start_with_logger(
+        &config,
+        Arc::new(RouteRequestLogController::with_root(
+            logs.path().to_path_buf(),
+        )),
+    )
+    .await
+    .unwrap();
+    let endpoint = router.endpoint();
+    let url = format!(
+        "{}/codey/api/query_route_request_log_quota_usage",
+        endpoint.base_url.trim_end_matches("/v1")
+    );
+    let client = reqwest::Client::new();
+    let unauthorized = client.post(&url).json(&json!({})).send().await.unwrap();
+    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let invalid = client
+        .post(&url)
+        .header(ROUTER_AUTH_HEADER, &endpoint.token)
+        .json(&json!({"toUnixMs": 300}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+    let response = client
+        .post(&url)
+        .header(ROUTER_AUTH_HEADER, &endpoint.token)
+        .json(&json!({"fromUnixMs": 100, "toUnixMs": 300}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let value = response.json::<Value>().await.unwrap();
+    assert_eq!(value["queryable"], true);
+    assert_eq!(value["totalCalls"], 0);
+    assert_eq!(value["groups"], json!([]));
+    assert!(value["recordingHealth"]["enabled"].is_boolean());
+    assert!(value.get("items").is_none());
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn request_log_page_is_public_but_its_api_requires_the_launch_token() {
     let (config, provider_id, model) = router_config("http://127.0.0.1:9/v1".to_string());
     let router = LocalRouter::start(&config).await.unwrap();

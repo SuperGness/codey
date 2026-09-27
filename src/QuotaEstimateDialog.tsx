@@ -6,8 +6,8 @@ import { errorText } from "./appUtils";
 import { listOfficialAccounts } from "./officialAccountsRequests";
 import { formatTimestamp } from "./formatters";
 import { Button, Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Select } from "./components/ui";
-import { estimateQuota, loadQuotaUsage, periodRows, PRICING_CHECKED, PRICING_SOURCE, quotaRows, sumQuotaRows, WEEK_MS } from "./quotaEstimate";
-import type { AccountUsageSnapshot, QuotaEstimate, QuotaPage, QuotaRow } from "./quotaEstimate";
+import { estimateQuotaRows, PRICING_CHECKED, PRICING_SOURCE, quotaAggregateRows, quotaPeriod, sumQuotaRows, WEEK_MS } from "./quotaEstimate";
+import type { AccountUsageSnapshot, QuotaEstimate, QuotaUsageResult, QuotaRow } from "./quotaEstimate";
 import type { OfficialAccount } from "./App.types";
 import { maskEmail } from "./sensitiveText";
 import { createAccountUsageReader } from "./accountUsageRequests";
@@ -152,39 +152,36 @@ export function QuotaEstimateDialog({ container, onClose }: {
         const result = await listOfficialAccounts();
         if (!active) return;
         const targets = estimateTargets(result.accounts ?? []);
-        const stats = await invoke<{ queryable: boolean; recordingHealth?: {
-          active: boolean; sampleRatePerMillion: number; droppedFull: number; droppedClosed: number;
-          writeDropped: number; writeFailures: number;
-        } }>("query_route_request_log_stats", { fromUnixMs: windowStart, toUnixMs: windowEnd });
-        if (!active) return;
-        if (!stats.queryable) throw new Error("当前日志暂不可查询，请开启请求日志记录后重试。");
-        const health = stats.recordingHealth;
-        setHealthWarning(Boolean(health && (!health.active || health.sampleRatePerMillion < 1_000_000
-          || health.droppedFull + health.droppedClosed + health.writeDropped + health.writeFailures > 0)));
+        const queryUsage = async (target: EstimateTarget, fromUnixMs: number, toUnixMs: number) => {
+          const usage = await invoke<QuotaUsageResult>("query_route_request_log_quota_usage", {
+            ...target.filter, fromUnixMs, toUnixMs, unassignedOnly: !target.projectable,
+          });
+          if (!active) return null;
+          if (!usage.queryable) throw new Error("当前日志暂不可查询，请开启请求日志记录后重试。");
+          const health = usage.recordingHealth;
+          if (health && (!health.active || health.sampleRatePerMillion < 1_000_000
+            || health.droppedFull + health.droppedClosed + health.writeDropped + health.writeFailures > 0)) {
+            setHealthWarning(true);
+          }
+          return usage;
+        };
         const collected: EstimateGroup[] = [];
         let usageReads = 0;
         let loadedTotal = 0;
         for (const target of targets) {
           if (!active) return;
-          const loaded = await loadQuotaUsage(cursor => invoke<QuotaPage>("query_route_request_logs", {
-            ...target.filter, fromUnixMs: windowStart, toUnixMs: windowEnd,
-            cursorMode: true, cursor, pageSize: 100,
-          }), () => active, (count) => setLoaded(loadedTotal + count));
-          if (!active || !loaded) return;
-          loadedTotal += loaded.length;
-          // 按供应商查询会同时命中已记录账号的请求，未区分账号的分组只保留没有
-          // 账号字段的历史记录，避免与各账号分组重复统计同一批请求。
-          const items = target.projectable
-            ? loaded
-            : loaded.filter((item) => !item.officialAccountId);
+          const recent = await queryUsage(target, windowStart, windowEnd);
+          if (!active || !recent) return;
+          loadedTotal += recent.totalCalls;
+          setLoaded(loadedTotal);
           // 未记录账号的历史记录只在确实存在时展示，也不消耗官方额度请求。
-          if (!target.projectable && items.length === 0) continue;
-          const rows = quotaRows(items);
+          if (!target.projectable && recent.totalCalls === 0) continue;
+          const rows = quotaAggregateRows(recent.groups);
           const group: EstimateGroup = {
             ...target, rows, total: sumQuotaRows(rows),
             estimate: null, usage: null, usageWarning: "", error: "",
           };
-          if (target.projectable && items.length > 0) {
+          if (target.projectable && recent.totalCalls > 0) {
             if (usageReads > 0) {
               await new Promise((resolve) => setTimeout(resolve, USAGE_QUERY_STAGGER_MS));
               if (!active) return;
@@ -192,15 +189,24 @@ export function QuotaEstimateDialog({ container, onClose }: {
             usageReads += 1;
             try {
               const snapshot = await readAccountUsage(target.accountId, revision > 0);
-              const estimate = estimateQuota(snapshot, items);
+              if (!active) return;
+              const period = quotaPeriod(snapshot);
+              const fromUnixMs = Math.max(windowStart, period.fromUnixMs);
+              const toUnixMs = Math.min(windowEnd, period.toUnixMs);
+              // 近期聚合仅用于资格判断及额度失败时展示；成功后按快照的精确截止时间重新聚合。
+              const exact = fromUnixMs < toUnixMs ? await queryUsage(target, fromUnixMs, toUnixMs) : null;
+              if (!active) return;
+              const periodUsageRows = quotaAggregateRows(exact?.groups ?? []);
+              const estimate = estimateQuotaRows(period, periodUsageRows);
               group.usage = snapshot;
               group.estimate = estimate;
-              group.rows = quotaRows(periodRows(items, estimate.period.fromUnixMs, estimate.period.toUnixMs));
+              group.rows = periodUsageRows;
               group.total = estimate.total;
               group.usageWarning = snapshot.stale
                 ? snapshot.message || "当前使用上次成功获取的官方额度，统计截止时间保持不变。"
                 : "";
             } catch (cause) {
+              if (!active) return;
               group.error = errorText(cause);
             }
           }

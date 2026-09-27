@@ -173,9 +173,9 @@ test("the quota dialog estimates one group per account and keeps untagged record
   // 每个账号用自己的过滤条件读日志、用自己的快照推算。
   assert.match(dialog, /filter: \{ officialAccountId: account\.id \}/);
   assert.match(dialog, /filter: \{ provider: "openai" \}/);
-  assert.match(dialog, /const estimate = estimateQuota\(snapshot, items\)/);
-  // 按供应商查询会命中已记录账号的请求，未区分账号的分组必须再过滤一次。
-  assert.match(dialog, /: loaded\.filter\(\(item\) => !item\.officialAccountId\)/);
+  assert.match(dialog, /const estimate = estimateQuotaRows\(period, periodUsageRows\)/);
+  assert.match(dialog, /unassignedOnly: !target\.projectable/);
+  assert.doesNotMatch(dialog, /query_route_request_logs|query_route_request_log_stats|loadQuotaUsage/);
   assert.match(dialog, /query_official_account_usage"[\s\S]*accountId/);
   // 逐个账号读取官方额度，两次请求之间留出间隔。
   assert.match(dialog, /USAGE_QUERY_STAGGER_MS = \d+/);
@@ -183,21 +183,4 @@ test("the quota dialog estimates one group per account and keeps untagged record
   // 仅供选择有明确账号且有请求记录的官方账号，并通过下拉框按账号切换展示
   assert.match(dialog, /groups\.filter\(\(group\) => group\.projectable && group\.rows\.length > 0\)/);
   assert.match(dialog, /<Select[\s\S]*aria-label="选择官方账号"/);
-});
-
-test("read all cursor pages, retain every model, reject unavailable/failed/stuck pagination and cancel", async () => {
-  let calls = 0;
-  const rows = await quota.loadQuotaRows(async cursor => {
-    calls++;
-    if (!cursor) return { queryable: true, items: Array.from({ length: 60 }, (_, i) => ({ model: `model-${i}` })),
-      hasMore: true, nextCursor: { timestampUnixMs: 100, requestId: "a" } };
-    return { queryable: true, items: [{ model: "gpt-5.4", inputTokens: 1000 }], hasMore: false };
-  }, () => true, () => {});
-  assert.equal(calls, 2); assert.equal(rows.length, 61);
-  await assert.rejects(quota.loadQuotaRows(async () => ({ queryable: false }), () => true, () => {}));
-  await assert.rejects(quota.loadQuotaRows(async () => { throw new Error("offline"); }, () => true, () => {}), /offline/);
-  await assert.rejects(quota.loadQuotaRows(async () => ({ queryable: true, items: [{}], hasMore: true,
-    nextCursor: { timestampUnixMs: 100, requestId: "a" } }), () => true, () => {}), /分页异常/);
-  let active = true;
-  assert.equal(await quota.loadQuotaRows(async () => { active = false; return {}; }, () => active, () => assert.fail()), null);
 });

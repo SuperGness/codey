@@ -2714,6 +2714,179 @@ pub(crate) struct RouteRequestLogModelPage {
     pub next_cursor: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RouteRequestLogQuotaQuery {
+    pub from_unix_ms: u64,
+    pub to_unix_ms: u64,
+    pub provider: Option<String>,
+    pub official_account_id: Option<String>,
+    /// Historical provider targets exclude records already attributed to an account.
+    #[serde(default)]
+    pub unassigned_only: bool,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RouteRequestLogQuotaGroup {
+    pub model: String,
+    pub service_tier: Option<String>,
+    pub requested_service_tier: Option<String>,
+    pub long_context: bool,
+    pub calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_hits: u64,
+    pub missing_usage: u64,
+    pub missing_cache_creation: u64,
+    pub billed_cached_input_tokens: u64,
+    pub billed_cache_creation_input_tokens: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RouteRequestLogQuotaUsage {
+    pub queryable: bool,
+    pub reason: Option<&'static str>,
+    pub groups: Vec<RouteRequestLogQuotaGroup>,
+    pub total_calls: u64,
+}
+
+pub(crate) fn query_route_request_log_quota_usage(
+    root: &Path,
+    backend: RouteRequestLogBackend,
+    query: RouteRequestLogQuotaQuery,
+) -> anyhow::Result<RouteRequestLogQuotaUsage> {
+    let unassigned_only = query.unassigned_only;
+    let query = RouteRequestLogQuery {
+        from_unix_ms: Some(query.from_unix_ms),
+        to_unix_ms: Some(query.to_unix_ms),
+        provider: query.provider,
+        official_account_id: query.official_account_id,
+        cursor_mode: true,
+        ..Default::default()
+    }
+    .normalize()?;
+    anyhow::ensure!(
+        !unassigned_only || query.official_account_id.is_none(),
+        "未归属账号筛选不能同时指定官方账号"
+    );
+    let queryable = backend == RouteRequestLogBackend::Sqlite;
+    let mut result = RouteRequestLogQuotaUsage {
+        queryable,
+        reason: (!queryable).then_some("ndjson_not_queryable"),
+        groups: Vec::new(),
+        total_calls: 0,
+    };
+    let path = root.join(SQLITE_FILE_NAME);
+    if !queryable || !path.is_file() {
+        return Ok(result);
+    }
+    let mut connection = open_query_connection(&path)?;
+    let transaction = connection.transaction()?;
+    let columns = sqlite_optional_columns(&transaction, &path)?;
+    // Older databases cannot prove account identity; never mix other accounts.
+    if query.official_account_id.is_some() && !columns.official_account {
+        return Ok(result);
+    }
+    let (mut filter, values) = sqlite_query_filters(&query, columns.official_account);
+    if unassigned_only && columns.official_account {
+        filter.push_str(" AND (official_account_id IS NULL OR official_account_id = '')");
+    }
+    let tiers = if columns.tiers {
+        "service_tier, requested_service_tier"
+    } else {
+        "NULL, NULL"
+    };
+    // Stream only billing dimensions/counters. No raw records, headers, count
+    // query or pagination are materialized. The existing ordered index also
+    // preserves the latest model spelling without a per-group history buffer.
+    let sql = format!(
+        "SELECT model, requested_model, {tiers}, input_tokens, output_tokens,
+            total_tokens, cached_input_tokens, cache_creation_input_tokens
+         FROM route_request_logs{filter}
+         ORDER BY timestamp_unix_ms DESC, request_id DESC"
+    );
+    let mut statement = transaction.prepare(&sql)?;
+    let mut rows = statement.query(params_from_iter(values.iter()))?;
+    let mut indices = std::collections::HashMap::new();
+    while let Some(row) = rows.next()? {
+        let model: Option<String> = row.get(0)?;
+        let requested: String = row.get(1)?;
+        let model = model
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or_else(|| (!requested.trim().is_empty()).then(|| requested.trim()))
+            .unwrap_or("未知模型");
+        let service_tier = row
+            .get::<_, Option<String>>(2)?
+            .map(|tier| tier.trim().to_owned());
+        let requested_service_tier = row
+            .get::<_, Option<String>>(3)?
+            .map(|tier| tier.trim().to_owned());
+        let input = row_optional_u64(row, 4)?;
+        let output = row_optional_u64(row, 5)?;
+        let total = row_optional_u64(row, 6)?;
+        let cached = row_optional_u64(row, 7)?.unwrap_or_default();
+        let writes = row_optional_u64(row, 8)?;
+        let long_context = input.unwrap_or_default() > 272_000;
+        let key = (
+            model.to_lowercase(),
+            service_tier.clone(),
+            requested_service_tier.clone(),
+            long_context,
+        );
+        let index = *indices.entry(key).or_insert_with(|| {
+            let index = result.groups.len();
+            result.groups.push(RouteRequestLogQuotaGroup {
+                model: model.to_owned(),
+                service_tier,
+                requested_service_tier,
+                long_context,
+                ..Default::default()
+            });
+            index
+        });
+        let group = &mut result.groups[index];
+        let billed_cached = input.unwrap_or_default().min(cached);
+        let billed_writes =
+            (input.unwrap_or_default() - billed_cached).min(writes.unwrap_or_default());
+        for (sum, value) in [
+            (&mut group.calls, 1),
+            (&mut group.input_tokens, input.unwrap_or_default()),
+            (&mut group.output_tokens, output.unwrap_or_default()),
+            (&mut group.total_tokens, total.unwrap_or_default()),
+            (&mut group.cached_input_tokens, cached),
+            (
+                &mut group.cache_creation_input_tokens,
+                writes.unwrap_or_default(),
+            ),
+            (&mut group.cache_hits, u64::from(cached > 0)),
+            (
+                &mut group.missing_usage,
+                u64::from(input.is_none() || output.is_none() || total.is_none()),
+            ),
+            (
+                &mut group.missing_cache_creation,
+                u64::from(writes.is_none()),
+            ),
+            (&mut group.billed_cached_input_tokens, billed_cached),
+            (&mut group.billed_cache_creation_input_tokens, billed_writes),
+        ] {
+            *sum = sum.saturating_add(value);
+        }
+        result.total_calls = result.total_calls.saturating_add(1);
+    }
+    drop(rows);
+    drop(statement);
+    transaction.commit()?;
+    Ok(result)
+}
+
 pub(crate) fn query_route_request_log_models(
     root: &Path,
     backend: RouteRequestLogBackend,
@@ -3494,6 +3667,290 @@ fn rename_if_exists(source: &Path, destination: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quota_query() -> RouteRequestLogQuotaQuery {
+        RouteRequestLogQuotaQuery {
+            from_unix_ms: 100,
+            to_unix_ms: 300,
+            provider: None,
+            official_account_id: None,
+            unassigned_only: false,
+        }
+    }
+
+    // Deliberately omit headers, errors and timings: quota queries must only
+    // project billing dimensions, not deserialize complete request log rows.
+    fn quota_database(root: &Path) -> Connection {
+        let connection = Connection::open(root.join(SQLITE_FILE_NAME)).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE route_request_logs (
+                request_id TEXT PRIMARY KEY, timestamp_unix_ms INTEGER NOT NULL,
+                provider TEXT, provider_name TEXT, official_account_id TEXT,
+                model TEXT, requested_model TEXT NOT NULL DEFAULT '',
+                service_tier TEXT, requested_service_tier TEXT,
+                input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,
+                cached_input_tokens INTEGER, cache_creation_input_tokens INTEGER
+            );
+            CREATE INDEX quota_time ON route_request_logs(timestamp_unix_ms DESC, request_id DESC);"
+        ).unwrap();
+        connection
+    }
+
+    #[test]
+    fn quota_usage_streams_compact_groups_with_exact_account_and_range_filters() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = quota_database(directory.path());
+        for index in 0..150 {
+            connection.execute(
+                "INSERT INTO route_request_logs (request_id,timestamp_unix_ms,provider,official_account_id,model,
+                 input_tokens,output_tokens,total_tokens,cached_input_tokens,cache_creation_input_tokens)
+                 VALUES (?,200,'provider-a','account-a',' model ',100,10,110,30,40)",
+                [format!("request-{index}")],
+            ).unwrap();
+        }
+        connection.execute_batch(
+            "INSERT INTO route_request_logs (request_id,timestamp_unix_ms,provider,official_account_id,model) VALUES
+             ('before',99,'provider-a','account-a','excluded'),
+             ('first',100,'provider-a','account-a','model'),
+             ('last',299,'provider-a','account-a','MODEL'),
+             ('after',300,'provider-a','account-a','excluded'),
+             ('other-account',200,'provider-a','account-b','excluded'),
+             ('case-account',200,'provider-a','ACCOUNT-A','excluded'),
+             ('unassigned',200,'provider-a',NULL,'history'),
+             ('empty-account',200,'provider-a','','history');
+             INSERT INTO route_request_logs(request_id,timestamp_unix_ms,provider,provider_name,official_account_id,model)
+             VALUES ('name-only',200,'other','provider-a','account-a','excluded');"
+        ).unwrap();
+        let query = RouteRequestLogQuotaQuery {
+            provider: Some("PROVIDER-A".into()),
+            official_account_id: Some("account-a".into()),
+            ..quota_query()
+        };
+        let result = query_route_request_log_quota_usage(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            query.clone(),
+        )
+        .unwrap();
+        assert_eq!(result.total_calls, 152);
+        assert_eq!(result.groups.len(), 1);
+        let group = &result.groups[0];
+        assert_eq!(group.model, "MODEL");
+        assert_eq!(group.calls, 152);
+        assert_eq!(group.input_tokens, 15_000);
+        assert_eq!(group.billed_cached_input_tokens, 4_500);
+        assert_eq!(group.billed_cache_creation_input_tokens, 6_000);
+        assert_eq!(group.missing_usage, 2);
+        assert_eq!(group.missing_cache_creation, 2);
+        let encoded = serde_json::to_value(&result).unwrap();
+        assert_eq!(encoded["totalCalls"], 152);
+        assert!(encoded.get("items").is_none());
+        assert!(encoded["groups"][0].get("requestId").is_none());
+        assert!(encoded["groups"][0].get("inputTokens").is_some());
+        let history = query_route_request_log_quota_usage(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuotaQuery {
+                official_account_id: None,
+                unassigned_only: true,
+                ..query.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(history.total_calls, 2);
+        assert_eq!(history.groups[0].model, "history");
+        let injected = query_route_request_log_quota_usage(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuotaQuery {
+                provider: Some("' OR 1=1 --".into()),
+                ..query
+            },
+        )
+        .unwrap();
+        assert_eq!(injected.total_calls, 0);
+    }
+
+    #[test]
+    fn quota_usage_clamps_per_request_and_preserves_missing_and_negative_usage() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = quota_database(directory.path());
+        connection.execute_batch(
+            "INSERT INTO route_request_logs(request_id,timestamp_unix_ms,model,input_tokens,output_tokens,total_tokens,cached_input_tokens,cache_creation_input_tokens) VALUES
+             ('read-cap',200,'model',10,2,12,99,99),
+             ('write-cap',200,'model',10,2,12,3,99),
+             ('missing',200,'model',NULL,NULL,NULL,5,NULL),
+             ('negative',200,'model',-10,-2,-12,-9,-9),
+             ('zero',200,'model',0,0,0,0,0);"
+        ).unwrap();
+        let result = query_route_request_log_quota_usage(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            quota_query(),
+        )
+        .unwrap();
+        let group = &result.groups[0];
+        assert_eq!(group.calls, 5);
+        assert_eq!(group.input_tokens, 20);
+        assert_eq!(group.output_tokens, 4);
+        assert_eq!(group.total_tokens, 24);
+        assert_eq!(group.cached_input_tokens, 107);
+        assert_eq!(group.cache_creation_input_tokens, 198);
+        assert_eq!(group.cache_hits, 3);
+        assert_eq!(group.billed_cached_input_tokens, 13);
+        assert_eq!(group.billed_cache_creation_input_tokens, 7);
+        assert_eq!(group.missing_usage, 1);
+        assert_eq!(group.missing_cache_creation, 1);
+    }
+
+    #[test]
+    fn quota_usage_keeps_per_request_long_context_and_unknown_tier_dimensions() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = quota_database(directory.path());
+        connection.execute_batch(
+            "INSERT INTO route_request_logs(request_id,timestamp_unix_ms,model,requested_model,service_tier,requested_service_tier,input_tokens) VALUES
+             ('normal',200,' model ','ignored',' mystery ',' auto ',272000),
+             ('long',200,'MODEL','ignored',' mystery ',' auto ',272001),
+             ('requested',200,'  ',' fallback ','','priority',1),
+             ('unknown',200,NULL,' ',NULL,NULL,1),
+             ('exact-tier',200,'model','ignored','MYSTERY','auto',1);"
+        ).unwrap();
+        let result = query_route_request_log_quota_usage(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            quota_query(),
+        )
+        .unwrap();
+        assert_eq!(result.total_calls, 5);
+        assert_eq!(result.groups.len(), 5);
+        let long = result
+            .groups
+            .iter()
+            .find(|group| group.long_context)
+            .unwrap();
+        assert_eq!(long.calls, 1);
+        assert_eq!(long.input_tokens, 272001);
+        assert_eq!(long.service_tier.as_deref(), Some("mystery"));
+        assert_eq!(long.requested_service_tier.as_deref(), Some("auto"));
+        assert!(
+            result
+                .groups
+                .iter()
+                .any(|group| !group.long_context && group.input_tokens == 272000)
+        );
+        assert!(result.groups.iter().any(|group| group.model == "fallback" && group.service_tier.as_deref() == Some("")));
+        assert!(result.groups.iter().any(|group| group.model == "未知模型"));
+        assert!(
+            result
+                .groups
+                .iter()
+                .any(|group| group.service_tier.as_deref() == Some("MYSTERY"))
+        );
+    }
+
+    #[test]
+    fn quota_usage_supports_legacy_optional_columns_without_account_leakage() {
+        let directory = tempfile::tempdir().unwrap();
+        let connection = quota_database(directory.path());
+        connection.execute_batch(
+            "ALTER TABLE route_request_logs DROP COLUMN service_tier;
+             ALTER TABLE route_request_logs DROP COLUMN requested_service_tier;
+             ALTER TABLE route_request_logs DROP COLUMN official_account_id;
+             INSERT INTO route_request_logs(request_id,timestamp_unix_ms,provider,requested_model) VALUES ('old',200,'provider-a','legacy');"
+        ).unwrap();
+        let account = query_route_request_log_quota_usage(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuotaQuery {
+                official_account_id: Some("account-a".into()),
+                ..quota_query()
+            },
+        )
+        .unwrap();
+        assert_eq!(account.total_calls, 0);
+        let history = query_route_request_log_quota_usage(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuotaQuery {
+                provider: Some("provider-a".into()),
+                unassigned_only: true,
+                ..quota_query()
+            },
+        )
+        .unwrap();
+        assert_eq!(history.total_calls, 1);
+        assert_eq!(history.groups[0].model, "legacy");
+        assert!(history.groups[0].service_tier.is_none());
+        assert!(history.groups[0].requested_service_tier.is_none());
+        assert_eq!(history.groups[0].missing_usage, 1);
+        assert_eq!(history.groups[0].missing_cache_creation, 1);
+    }
+
+    #[test]
+    fn quota_usage_validates_queries_and_distinguishes_empty_from_unavailable() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = query_route_request_log_quota_usage(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            quota_query(),
+        )
+        .unwrap();
+        assert!(missing.queryable);
+        assert_eq!(missing.total_calls, 0);
+        assert!(missing.reason.is_none());
+        assert!(!directory.path().join(SQLITE_FILE_NAME).exists());
+        let unavailable = query_route_request_log_quota_usage(
+            directory.path(),
+            RouteRequestLogBackend::Ndjson,
+            quota_query(),
+        )
+        .unwrap();
+        assert!(!unavailable.queryable);
+        assert_eq!(unavailable.reason, Some("ndjson_not_queryable"));
+        for query in [
+            RouteRequestLogQuotaQuery {
+                from_unix_ms: 300,
+                ..quota_query()
+            },
+            RouteRequestLogQuotaQuery {
+                to_unix_ms: 0,
+                ..quota_query()
+            },
+            RouteRequestLogQuotaQuery {
+                to_unix_ms: 367 * DAY_MS,
+                ..quota_query()
+            },
+            RouteRequestLogQuotaQuery {
+                to_unix_ms: u64::MAX,
+                ..quota_query()
+            },
+            RouteRequestLogQuotaQuery {
+                provider: Some("x".repeat(MAX_QUERY_FILTER_BYTES + 1)),
+                ..quota_query()
+            },
+            RouteRequestLogQuotaQuery {
+                official_account_id: Some("account-a".into()),
+                unassigned_only: true,
+                ..quota_query()
+            },
+        ] {
+            assert!(
+                query_route_request_log_quota_usage(
+                    directory.path(),
+                    RouteRequestLogBackend::Sqlite,
+                    query
+                )
+                .is_err()
+            );
+        }
+        for json in [
+            r#"{"toUnixMs":300}"#,
+            r#"{"fromUnixMs":100,"toUnixMs":300,"page":1}"#,
+            r#"{"fromUnixMs":-1,"toUnixMs":300}"#,
+        ] {
+            assert!(serde_json::from_str::<RouteRequestLogQuotaQuery>(json).is_err());
+        }
+    }
 
     #[test]
     fn model_candidates_paginate_all_models_and_apply_account_filters() {

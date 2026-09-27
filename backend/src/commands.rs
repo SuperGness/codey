@@ -1129,6 +1129,14 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 Err(error) => Err(format!("模型候选查询参数无效：{error}")),
             }
         }
+        "query_route_request_log_quota_usage" => {
+            match serde_json::from_value::<crate::route_request_log::RouteRequestLogQuotaQuery>(
+                args.clone(),
+            ) {
+                Ok(query) => query_route_request_log_quota_usage(state, query).await,
+                Err(error) => Err(format!("额度用量查询参数无效：{error}")),
+            }
+        }
         "query_route_request_log_stats" => {
             match serde_json::from_value::<RouteRequestLogQuery>(args.clone()) {
                 Ok(query) => query_route_request_log_stats(state, query).await,
@@ -1319,6 +1327,28 @@ pub async fn query_route_request_logs(
     .map_err(|error| format!("请求日志查询任务异常退出：{error}"))?
     .map_err(|error| format!("查询请求日志失败：{error:#}"))?;
     serde_json::to_value(page).map_err(|error| format!("请求日志查询结果序列化失败：{error}"))
+}
+
+async fn query_route_request_log_quota_usage(
+    state: &Arc<AppState>,
+    query: crate::route_request_log::RouteRequestLogQuotaQuery,
+) -> Result<Value, String> {
+    let backend = state.config.read().await.route_request_log.backend;
+    let root = codey_runtime_core::paths::default_app_state_dir();
+    let usage = tokio::task::spawn_blocking(move || {
+        crate::route_request_log::query_route_request_log_quota_usage(&root, backend, query)
+    })
+    .await
+    .map_err(|error| format!("额度用量查询任务异常退出：{error}"))?
+    .map_err(|error| format!("查询额度用量失败：{error:#}"))?;
+    let mut value =
+        serde_json::to_value(usage).map_err(|error| format!("额度用量序列化失败：{error}"))?;
+    let runtime = state.runtime.lock().await.clone();
+    if let Some(runtime) = runtime {
+        value["recordingHealth"] = serde_json::to_value(runtime.request_log_health().await)
+            .map_err(|error| format!("请求日志状态序列化失败：{error}"))?;
+    }
+    Ok(value)
 }
 
 async fn query_route_request_log_stats(

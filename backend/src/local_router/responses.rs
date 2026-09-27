@@ -302,6 +302,50 @@ impl RouterServer {
                     .clone();
                 write_json_response(&mut stream, 200, &json!({"config": catalog})).await?;
             }
+            ("POST", "/codey/api/query_route_request_log_quota_usage") => {
+                let query = match serde_json::from_slice::<
+                    crate::route_request_log::RouteRequestLogQuotaQuery,
+                >(&request.body)
+                {
+                    Ok(query) => query,
+                    Err(error) => {
+                        write_error_response(
+                            &mut stream,
+                            400,
+                            "invalid_request_log_query",
+                            format!("额度用量查询参数无效：{error}"),
+                            None,
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                };
+                let backend = self
+                    .snapshot
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .request_log_backend;
+                let root = self.request_log.root().to_path_buf();
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::route_request_log::query_route_request_log_quota_usage(
+                        &root, backend, query,
+                    )
+                })
+                .await;
+                let message = match result {
+                    Ok(Ok(usage)) => {
+                        let mut value = serde_json::to_value(usage)?;
+                        value["recordingHealth"] =
+                            serde_json::to_value(self.request_log.health().await)?;
+                        write_json_response(&mut stream, 200, &value).await?;
+                        return Ok(());
+                    }
+                    Ok(Err(error)) => format!("查询额度用量失败：{error:#}"),
+                    Err(error) => format!("额度用量查询任务异常退出：{error}"),
+                };
+                write_error_response(&mut stream, 500, "request_log_query_failed", message, None)
+                    .await?;
+            }
             ("POST", "/codey/api/query_route_request_log_models") => {
                 let query = match serde_json::from_slice::<
                     crate::route_request_log::RouteRequestLogModelQuery,
