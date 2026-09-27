@@ -1698,6 +1698,12 @@ impl RouterServer {
                 body_mutated = true;
                 encoded_body = None;
             }
+            if resolved.route.official_account
+                && sanitize_official_upstream_history(&mut body)
+            {
+                body_mutated = true;
+                encoded_body = None;
+            }
         } else {
             // 历史恢复完成后检查密文任务，避免转换时静默丢失正文。
             if let Err(error) = validate_adapted_agent_payloads(&body) {
@@ -2023,6 +2029,12 @@ impl RouterServer {
                     .await;
             }
             if normalize_native_responses_context(&mut upstream_body, discard_opaque_reasoning) {
+                body_mutated = true;
+                encoded_body = None;
+            }
+            if resolved.route.official_account
+                && sanitize_official_upstream_history(&mut upstream_body)
+            {
                 body_mutated = true;
                 encoded_body = None;
             }

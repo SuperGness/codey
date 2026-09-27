@@ -570,6 +570,55 @@ fn port_reasoning_item(item: &mut Value) -> ReasoningPort {
     }
 }
 
+/// 官方上游会校验 input 条目 id 的类型前缀（reasoning 必须 rs 开头，其余
+/// 类型同理），跨线路历史带着上一供应商签发的 id（第三方中转常见 item_
+/// 前缀）会被官方 400 拒绝（invalid_value）。换线路判定依赖内存 binding，
+/// 路由重启后检测不到，因此发往官方上游时恒定清洗，不依赖 route_changed。
+/// 只摘除前缀不符的 id 字段，条目本体保持移植后的形态（摘 id 后的
+/// reasoning 项即官方可接受的 summary 形态）；工具调用配对靠 call_id，
+/// 不受影响。
+pub(crate) fn sanitize_official_upstream_history(body: &mut Value) -> bool {
+    fn official_id_prefix(item_type: &str) -> Option<&'static str> {
+        match item_type {
+            "reasoning" => Some("rs"),
+            "message" => Some("msg"),
+            "function_call" => Some("fc"),
+            _ => None,
+        }
+    }
+    fn strip_foreign_id(item: &mut Value) -> bool {
+        let Some(object) = item.as_object_mut() else {
+            return false;
+        };
+        let Some(prefix) = object
+            .get("type")
+            .and_then(Value::as_str)
+            .and_then(official_id_prefix)
+        else {
+            return false;
+        };
+        let foreign = object
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.starts_with(prefix));
+        if foreign {
+            object.remove("id");
+            return true;
+        }
+        false
+    }
+    let Some(input) = body.get_mut("input") else {
+        return false;
+    };
+    match input {
+        Value::Array(items) => items.iter_mut().fold(false, |changed, item| {
+            strip_foreign_id(item) | changed
+        }),
+        item @ Value::Object(_) => strip_foreign_id(item),
+        _ => false,
+    }
+}
+
 fn reasoning_content_texts(content: Option<&Value>) -> Vec<String> {
     match content {
         Some(Value::Array(parts)) => parts
@@ -804,6 +853,84 @@ mod tests {
         });
         assert!(normalize_native_responses_context(&mut body, true));
         assert_eq!(body["input"], json!([{"role":"user","content":"continue"}]));
+    }
+
+    #[test]
+    fn official_history_sanitizer_strips_foreign_reasoning_id() {
+        let mut body = json!({
+            "input":[
+                {"role":"user","content":"continue"},
+                {"type":"reasoning","id":"item_ec70cb0f2f9fc46a8cdeb347",
+                 "summary":[{"type":"summary_text","text":"检查工具结果"}],"content":[]},
+                {"type":"reasoning","id":"rs_0a1b","summary":[],"encrypted_content":"opaque-state"}
+            ]
+        });
+        assert!(sanitize_official_upstream_history(&mut body));
+        assert_eq!(
+            body["input"][1],
+            json!({"type":"reasoning",
+                   "summary":[{"type":"summary_text","text":"检查工具结果"}],"content":[]})
+        );
+        // 官方签发的 rs id 与密文保持原样。
+        assert_eq!(
+            body["input"][2]["id"],
+            json!("rs_0a1b")
+        );
+        // 清洗是幂等的。
+        assert!(!sanitize_official_upstream_history(&mut body));
+    }
+
+    #[test]
+    fn official_history_sanitizer_strips_foreign_message_and_function_call_ids() {
+        let mut body = json!({
+            "input":[
+                {"type":"message","id":"item_aa11","role":"assistant",
+                 "content":[{"type":"output_text","text":"done"}]},
+                {"type":"function_call","id":"item_bb22","name":"shell",
+                 "call_id":"call_777","arguments":"{}"},
+                {"type":"function_call","id":"fc_99","name":"shell",
+                 "call_id":"call_888","arguments":"{}"}
+            ]
+        });
+        assert!(sanitize_official_upstream_history(&mut body));
+        assert!(body["input"][0].get("id").is_none());
+        assert!(body["input"][1].get("id").is_none());
+        // call_id 是工具配对键，必须保留。
+        assert_eq!(body["input"][1]["call_id"], json!("call_777"));
+        // 官方前缀的 id 保持原样。
+        assert_eq!(body["input"][2]["id"], json!("fc_99"));
+        assert_eq!(body["input"][2]["call_id"], json!("call_888"));
+    }
+
+    #[test]
+    fn official_history_sanitizer_ignores_missing_ids_and_unknown_types() {
+        let mut body = json!({
+            "input":[
+                {"type":"reasoning","summary":[]},
+                {"type":"web_search_call","id":"ws_01"},
+                {"type":"message","id":"msg_ok","role":"user","content":[]}
+            ]
+        });
+        assert!(!sanitize_official_upstream_history(&mut body));
+        assert_eq!(
+            body["input"],
+            json!([
+                {"type":"reasoning","summary":[]},
+                {"type":"web_search_call","id":"ws_01"},
+                {"type":"message","id":"msg_ok","role":"user","content":[]}
+            ])
+        );
+    }
+
+    #[test]
+    fn official_history_sanitizer_handles_absent_and_scalar_input() {
+        let mut no_input = json!({"model":"gpt-6-luna"});
+        assert!(!sanitize_official_upstream_history(&mut no_input));
+        let mut scalar = json!({"input":"prompt"});
+        assert!(!sanitize_official_upstream_history(&mut scalar));
+        let mut single = json!({"input":{"type":"message","id":"item_cc33","role":"user","content":[]}});
+        assert!(sanitize_official_upstream_history(&mut single));
+        assert!(single["input"].get("id").is_none());
     }
 
     #[test]
