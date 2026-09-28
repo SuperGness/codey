@@ -2553,7 +2553,11 @@ mod tests {
         assert!(!store.update_plan_type(&record.id, Some("pro")).unwrap());
         // 空值表示这次没有解析出套餐，保留已有结果。
         assert!(!store.update_plan_type(&record.id, Some("  ")).unwrap());
-        assert!(!store.update_plan_type("acct_missing", Some("free")).unwrap());
+        assert!(
+            !store
+                .update_plan_type("acct_missing", Some("free"))
+                .unwrap()
+        );
 
         let stored = store.get(&record.id).unwrap().unwrap();
         assert_eq!(stored.plan_type.as_deref(), Some("Pro"));
@@ -2574,8 +2578,7 @@ mod tests {
         assert!(store.update_plan_type(&record.id, Some("free")).unwrap());
         // 随后到达的令牌刷新用的是刷新前的快照，套餐还是 plus。
         let mut refreshed = record.clone();
-        apply_token_response(&mut refreshed, &json!({"access_token": "access-race-new"}))
-            .unwrap();
+        apply_token_response(&mut refreshed, &json!({"access_token": "access-race-new"})).unwrap();
         assert_eq!(refreshed.plan_type.as_deref(), Some("plus"));
         let committed = store
             .update_credentials_if_current(&record, &refreshed)

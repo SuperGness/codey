@@ -1061,6 +1061,7 @@ async fn runtime_status_does_not_wait_for_a_lifecycle_operation() {
 #[tokio::test]
 async fn runtime_status_exposes_cached_available_update() {
     let state = Arc::new(AppState::default());
+    *state.config.write().await = CodeyConfig::default();
     *state.available_update.write().await = Some(UpdateCheck {
         current_version: "1.0.0".to_string(),
         latest_version: "2.0.0".to_string(),
