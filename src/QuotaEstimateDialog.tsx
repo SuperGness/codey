@@ -191,12 +191,10 @@ export function QuotaEstimateDialog({ container, onClose }: {
               const snapshot = await readAccountUsage(target.accountId, revision > 0);
               if (!active) return;
               const period = quotaPeriod(snapshot);
-              const fromUnixMs = Math.max(windowStart, period.fromUnixMs);
-              const toUnixMs = Math.min(windowEnd, period.toUnixMs);
               // 近期聚合仅用于资格判断及额度失败时展示；成功后按快照的精确截止时间重新聚合。
-              const exact = fromUnixMs < toUnixMs ? await queryUsage(target, fromUnixMs, toUnixMs) : null;
-              if (!active) return;
-              const periodUsageRows = quotaAggregateRows(exact?.groups ?? []);
+              const exact = await queryUsage(target, period.fromUnixMs, period.toUnixMs);
+              if (!active || !exact) return;
+              const periodUsageRows = quotaAggregateRows(exact.groups);
               const estimate = estimateQuotaRows(period, periodUsageRows);
               group.usage = snapshot;
               group.estimate = estimate;

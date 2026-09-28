@@ -29,6 +29,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 
 function run(options = {}) {
   const calls = [], states = [], delays = [];
+  let currentTime = now;
   let cleanup;
   let queryCount = 0;
   let settled = false;
@@ -38,9 +39,9 @@ function run(options = {}) {
     return value;
   };
   const context = {
-    WEEK_MS: quota.WEEK_MS, Date: { now: () => now }, revision: options.revision ?? 0,
+    WEEK_MS: quota.WEEK_MS, Date: { now: () => currentTime }, revision: options.revision ?? 0,
     USAGE_QUERY_STAGGER_MS: 200, errorText: cause => cause.message || String(cause), maskEmail: value => value,
-    quotaPeriod: value => quota.quotaPeriod(value, now), quotaAggregateRows: quota.quotaAggregateRows,
+    quotaPeriod: value => quota.quotaPeriod(value, currentTime), quotaAggregateRows: quota.quotaAggregateRows,
     estimateQuotaRows: quota.estimateQuotaRows, sumQuotaRows: quota.sumQuotaRows,
     useEffect: callback => { cleanup = callback(); },
     setLoading: value => record("loading", value), setGroups: value => record("groups", value),
@@ -57,6 +58,7 @@ function run(options = {}) {
     readAccountUsage: async (accountId, forceRefresh) => {
       calls.push({ command: "official", accountId, forceRefresh });
       const value = await gate("official", options.snapshot ?? snapshot());
+      currentTime = options.usageReadAt ?? currentTime;
       if (options.officialError?.(accountId)) throw new Error("quota offline");
       return value;
     },
@@ -119,21 +121,41 @@ test("empty and unavailable logs do not read official quota", async () => {
   }
 });
 
-test("no stored accounts retain provider fallback and clamp future snapshot cutoff", async () => {
+test("no stored accounts retain provider fallback and the validated snapshot cutoff", async () => {
   const task = run({ accounts: [], snapshot: snapshot({ fetchedAt: now / 1000 + .5 }) });
   await task.done();
   assert.equal(task.calls[0].args.provider, "openai");
-  assert.equal(task.calls.at(-1).args.toUnixMs, now);
+  assert.equal(task.calls.at(-1).args.toUnixMs, now + 500);
   assert.equal(task.calls[1].accountId, undefined);
 });
 
-test("empty official period intersection is handled locally without a second query", async () => {
+test("an official period starting after the initial read still queries its full interval", async () => {
   const task = run({ snapshot: snapshot({ fetchedAt: now / 1000 + .5,
     secondary: { windowMinutes: 10080, usedPercent: 50, resetsAt: (now + quota.WEEK_MS + 100) / 1000 } }) });
   await task.done();
-  assert.equal(task.calls.length, 2);
-  assert.equal(task.groups()[0].total.calls, 0);
-  assert.equal(task.groups()[0].estimate.result, null);
+  assert.equal(task.calls.length, 3);
+  assert.equal(task.calls.at(-1).args.fromUnixMs, now + 100);
+  assert.equal(task.calls.at(-1).args.toUnixMs, now + 500);
+  assert.equal(task.groups()[0].total.calls, 10000);
+  assert.equal(task.groups()[0].estimate.result.limit, 8);
+});
+
+test("quota fetched after a slow read includes intervening requests up to its snapshot", async () => {
+  const fetchedAt = now + 30000;
+  const timestamps = [now - 1000, now + 1000, fetchedAt - 1, fetchedAt];
+  const task = run({ snapshot: snapshot({ fetchedAt: fetchedAt / 1000 }), usageReadAt: fetchedAt + 1000,
+    query: args => {
+      const calls = timestamps.filter(timestamp => timestamp >= args.fromUnixMs && timestamp < args.toUnixMs).length;
+      return { queryable: true, totalCalls: calls, groups: calls ? [{ ...bucket, calls,
+        inputTokens: calls * 1000000, totalTokens: calls * 1000000 }] : [] };
+    } });
+  await task.done();
+  assert.equal(task.calls[0].args.toUnixMs, now);
+  assert.equal(task.calls.at(-1).args.toUnixMs, fetchedAt);
+  assert.equal(task.groups()[0].estimate.period.toUnixMs, fetchedAt);
+  assert.equal(task.groups()[0].total.calls, 3);
+  assert.equal(task.groups()[0].total.cost, 12);
+  assert.equal(task.groups()[0].estimate.result.limit, 24);
 });
 
 test("invalid quota and exact aggregation failure preserve recent rows without a projection", async () => {
