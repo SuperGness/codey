@@ -864,7 +864,7 @@ if (import.meta.env.DEV) {
         // 预览模式按账号返回不同的额度，避免所有线路显示同一份数据。
         let seed = 0;
         for (const character of accountId) seed = (seed * 31 + character.charCodeAt(0)) % 60;
-        return { status: "ok", fetchedAt, secondary: {
+        return { status: "ok", fetchedAt, planType: account?.planType, secondary: {
           usedPercent: 20 + seed, windowMinutes: 10080, resetsAt: fetchedAt + 3 * 86400,
         } };
       }

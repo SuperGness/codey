@@ -152,8 +152,9 @@ export function buildSettingsSections({
         />
       </>
     ),
-    models: (
+    models: (active: boolean) => (
       <ModelSection
+        active={active}
         config={config}
         currentProvider={provider}
         officialAccountAvailable={officialAccountAvailable}

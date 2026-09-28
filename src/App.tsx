@@ -1586,8 +1586,9 @@ export function App({
               />
             </>
           ),
-          models: (
+          models: (active) => (
             <ModelSection
+              active={active}
               config={config}
               currentProvider={provider ?? null}
               officialAccountAvailable={status.officialAccountAvailable === true}

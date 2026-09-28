@@ -175,6 +175,8 @@ export function sumQuotaRows(rows: QuotaRow[]) {
 }
 export type AccountUsageSnapshot = {
   status: string; message?: string; reason?: string; fetchedAt?: number; stale?: boolean;
+  // 官方额度接口随额度一起返回的当前套餐，比账号记录里添加账号时的快照新。
+  planType?: string;
   primary?: { usedPercent: number; windowMinutes: number; resetsAt?: number } | null;
   secondary?: { usedPercent: number; windowMinutes: number; resetsAt?: number } | null;
 };

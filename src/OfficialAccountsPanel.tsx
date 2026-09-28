@@ -164,6 +164,8 @@ function UsageLine({ snapshot }: { snapshot: AccountUsageSnapshot | null }) {
 export type OfficialAccountsPanelProps = {
   officialAccountAvailable: boolean;
   isBusy: boolean;
+  /** 「线路与模型」菜单是否打开；关闭时不再获取官方额度与套餐数据。 */
+  active: boolean;
   maskSensitive?: boolean;
   popupContainer: HTMLElement | null;
   onAccountsLoaded?: (accounts: OfficialAccount[] | null) => void;
@@ -175,6 +177,7 @@ export type OfficialAccountsPanelProps = {
 export function OfficialAccountsPanel({
   officialAccountAvailable,
   isBusy,
+  active,
   maskSensitive = false,
   popupContainer,
   onAccountsLoaded,
@@ -263,11 +266,14 @@ export function OfficialAccountsPanel({
     }
   }, [refreshRoutes]);
 
-  // 额度轮询跟随账号 id 与失效状态：检测到失效后重读列表不会重启整轮查询，
-  // 避免同一批账号反复请求官方接口；账号重新添加恢复可用时轮询重新开始。
+  // 官方额度和套餐只在「线路与模型」菜单打开期间获取：每次打开都按当前账号
+  // 列表重取一遍（后端 60 秒缓存之外的请求会真的打到官方），菜单关闭后不再
+  // 后台轮询，账号卡片里的套餐也只在打开菜单时更新。查询跟随账号 id 与失效
+  // 状态，检测到失效后重读列表不会重启整轮查询。
   const accountListKey =
     accounts?.map((account) => `${account.id}:${account.invalid ? 1 : 0}`).join("\n") ?? "";
   useEffect(() => {
+    if (!active) return;
     const list = accountsRef.current;
     if (list.length === 0) return;
     let cancelled = false;
@@ -292,7 +298,7 @@ export function OfficialAccountsPanel({
     return () => {
       cancelled = true;
     };
-  }, [accountListKey, refreshUsage]);
+  }, [active, accountListKey, refreshUsage]);
 
   // Poll a pending login until the callback completes or the user closes it.
   useEffect(() => {
@@ -529,7 +535,11 @@ export function OfficialAccountsPanel({
         <ul className="official-account-list">
           {accounts.map((account) => {
             const label = accountLabel(account);
-            const plan = formatPlan(account.planType);
+            // 账号记录里的套餐只反映添加账号时的登录信息。额度查询每次都带
+            // 官方当前的套餐，有它时以它为准，降级后才不会继续显示 Pro。
+            const snapshotPlan = usages[account.id]?.status === "ok" ? usages[account.id]?.planType : undefined;
+            const planType = snapshotPlan || account.planType;
+            const plan = formatPlan(planType);
             return (
               <li
                 key={account.id}
@@ -544,8 +554,8 @@ export function OfficialAccountsPanel({
                       <div className="official-account-line">
                         <strong title={label}>{label}</strong>
                         {plan && (
-                          <span className={planTagClass(account.planType)}>
-                            {account.planType?.toLowerCase() === "pro" ? (
+                          <span className={planTagClass(planType)}>
+                            {planType?.toLowerCase() === "pro" ? (
                               <IconSparkles size={11} stroke={2.2} className="official-account-plan-icon" aria-hidden="true" />
                             ) : null}
                             <span>{plan}</span>

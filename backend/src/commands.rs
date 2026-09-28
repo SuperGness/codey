@@ -2702,10 +2702,13 @@ async fn query_official_account_usage(
         .map(|account_id| account_id.trim().to_string())
         .filter(|account_id| !account_id.is_empty())
     {
-        return query_stored_official_account_usage(state, force_refresh, account_id).await;
+        // 账号列表带来的查询由用户打开「线路与模型」菜单触发，套餐跟着更新。
+        return query_stored_official_account_usage(state, force_refresh, account_id, true).await;
     }
     if let Some(account_id) = header_official_account_id(state).await {
-        return query_stored_official_account_usage(state, force_refresh, account_id).await;
+        // 页头的定时读取只刷新显示，不写回套餐：账号记录里的套餐只在打开的
+        // 线路菜单里更新，后台轮询不会悄悄改账号信息。
+        return query_stored_official_account_usage(state, force_refresh, account_id, false).await;
     }
     let official_proxy;
     {
@@ -2771,6 +2774,7 @@ async fn query_stored_official_account_usage(
     state: &Arc<AppState>,
     force_refresh: bool,
     account_id: String,
+    write_back_plan: bool,
 ) -> Value {
     let store = state.official_accounts();
     let home = codex_home().to_path_buf();
@@ -2829,6 +2833,31 @@ async fn query_stored_official_account_usage(
         )
         .await
     };
+    // 官方额度接口每次都带当前的套餐类型：降级或升级之后它最先变化，账号
+    // 记录跟着更新，卡片和账号列表才不会一直显示历史套餐。页头的定时读取
+    // 只负责显示，不带这个参数，避免后台轮询改账号信息。
+    if write_back_plan
+        && snapshot.get("status").and_then(Value::as_str) == Some("ok")
+        && let Some(plan_type) = snapshot.get("planType").and_then(Value::as_str)
+    {
+        let plan_store = store.clone();
+        let plan_id = account_id.clone();
+        let plan_type = plan_type.to_string();
+        match tokio::task::spawn_blocking(move || {
+            plan_store.update_plan_type(&plan_id, Some(&plan_type))
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => error_log::record_failure(
+                "official_account_plan_update_failed",
+                "query_official_account_usage",
+                format!("{error:#}"),
+                json!({ "accountId": account_id }),
+            ),
+            Err(_) => {}
+        }
+    }
     // 令牌刚刷新过、本地仍判定有效，官方却以 401 拒绝，说明凭据已被撤销。
     // 默认账号尚未刷新的过期令牌会落在此判断之外，不会被误标。
     let credential_rejected = snapshot.get("reason").and_then(Value::as_str)

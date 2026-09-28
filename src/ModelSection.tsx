@@ -65,6 +65,8 @@ type ModelSectionProps = {
   currentProvider: ProviderStatus["provider"] | null;
   officialAccountAvailable: boolean;
   popupContainer: HTMLElement | null;
+  /** 该页是否正显示在设置里：额度等官方数据只在打开「线路与模型」时获取。 */
+  active: boolean;
   modelState: ModelState;
   dirty: boolean;
   canSyncCurrentProvider: boolean;
@@ -217,6 +219,7 @@ function ModelSectionComponent({
   currentProvider,
   officialAccountAvailable,
   popupContainer,
+  active,
   modelState,
   dirty,
   canSyncCurrentProvider,
@@ -762,6 +765,7 @@ function ModelSectionComponent({
               <OfficialAccountsPanel
                 officialAccountAvailable={officialAccountAvailable}
                 isBusy={isBusy}
+                active={active}
                 maskSensitive={maskSensitive}
                 popupContainer={popupContainer}
                 onAccountsLoaded={setOfficialAccounts}
