@@ -186,13 +186,13 @@ pub(crate) fn resume_windows_packaged_thread(
     );
     let result = require_pending_resume(path)
         .and_then(|()| resume_windows_packaged_thread_inner(process_id, thread_id, path));
-    if let Err(error) = &result {
-        if path.exists() {
-            let _ = crate::fs_util::atomic_write_private(
-                path,
-                &serde_json::to_vec(&ResumeFeedbackState::Failed(format!("{error:#}")))?,
-            );
-        }
+    if let Err(error) = &result
+        && path.exists()
+    {
+        let _ = crate::fs_util::atomic_write_private(
+            path,
+            &serde_json::to_vec(&ResumeFeedbackState::Failed(format!("{error:#}")))?,
+        );
     }
     result
 }

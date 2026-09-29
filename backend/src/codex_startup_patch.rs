@@ -847,8 +847,8 @@ fn windows_package_resume_target(
     let mut thread_id = None;
     let mut launch_id = None;
     let mut feedback_path = None;
-    let mut pairs = arguments[1..].chunks_exact(2);
-    for pair in &mut pairs {
+    let (pairs, remainder) = arguments[1..].as_chunks::<2>();
+    for pair in pairs {
         let name = pair[0].to_str().context("Windows Store 启动参数名称无效")?;
         if name.eq_ignore_ascii_case("--launch-state") {
             anyhow::ensure!(feedback_path.is_none(), "Windows Store 启动通知路径重复");
@@ -884,7 +884,7 @@ fn windows_package_resume_target(
         anyhow::ensure!(value != 0, "Windows Store 进程或线程 ID 为空");
         *target = Some(value);
     }
-    anyhow::ensure!(pairs.remainder().is_empty(), "Windows Store 启动参数缺少值");
+    anyhow::ensure!(remainder.is_empty(), "Windows Store 启动参数缺少值");
     let launch_id = launch_id.context("Windows Store 未传递启动标识")?;
     let feedback_path = feedback_path.context("Windows Store 未传递启动通知路径")?;
     anyhow::ensure!(

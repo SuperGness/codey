@@ -245,7 +245,7 @@ button,
   border-radius: 999px;
 }
 
-.settings-modal-header {
+.settings-drawer-header {
   border-bottom: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
   box-shadow: 0 3px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
 }
@@ -931,6 +931,11 @@ button,
   .settings-page .page {
     padding: 16px 14px 28px;
   }
+
+  .settings-page-header {
+    margin-inline: -14px;
+    padding-inline: 14px;
+  }
 }
 
 .section-title {
@@ -1039,7 +1044,7 @@ button,
   z-index: 100;
 }
 
-.settings-modal-body {
+.settings-drawer-body {
   position: relative;
 }
 
@@ -1054,7 +1059,7 @@ button,
 }
 
 .toast-portal-host .toast-region,
-.settings-modal-shell .toast-region,
+.settings-drawer-shell .toast-region,
 .modal__dialog .toast-region {
   position: absolute;
   top: 10px;

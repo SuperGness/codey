@@ -264,6 +264,7 @@ export type Confirmation = {
     | "install-update"
     | "download-update"
     | "disable-auto-update-check"
+    | "discard-settings-changes"
     | "delete-notification-channel"
     | "delete-route"
     | "delete-official-account";

@@ -36,7 +36,7 @@ import { modelIdsEqual, uniqueModelIds } from "./modelIds";
 import { globalDefaultForRoute, routeProviderId } from "./modelRoutes";
 import { customContextRestoredNote, type ModelRuntimeUpdate } from "./modelSelectionNotice";
 import { PromptOptimizationCard } from "./PromptOptimizationCard";
-import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
+import { CodeyBrandMark, SettingsDrawerShell } from "./SettingsDrawerShell";
 import { SettingsPageHeader } from "./SettingsPageHeader";
 import { SettingsLayout } from "./SettingsLayout";
 import { useModelSelection } from "./useModelSelection";
@@ -1010,6 +1010,21 @@ export function App({
     onClose?.();
   }
 
+  function requestCloseSettings() {
+    if (isBusy) return;
+    if (!dirty) {
+      closeSettings();
+      return;
+    }
+    setConfirmation({
+      action: "discard-settings-changes",
+      title: "放弃未保存的更改？",
+      description: "关闭后将丢弃尚未保存的配置修改。你可以取消关闭，继续编辑或保存。",
+      confirmLabel: "放弃更改并关闭",
+      run: closeSettings,
+    });
+  }
+
   function askRestartCodex() {
     if (restartStatusError) {
       void runOperation("restart", async () => {
@@ -1200,7 +1215,7 @@ export function App({
     });
   }
 
-  const handleCloseSettings = useStableEvent(closeSettings);
+  const handleCloseSettings = useStableEvent(requestCloseSettings);
   const handleSaveCurrent = useStableEvent(() => void saveCurrent());
   const handleRepairPluginMarketplace = useStableEvent(
     () => void repairPluginMarketplace(),
@@ -1332,7 +1347,7 @@ export function App({
       </main>
     );
     return embedded ? (
-      <SettingsModalShell
+      <SettingsDrawerShell
         afterClose={onAfterClose}
         container={modalContainer}
         onCancel={handleCloseSettings}
@@ -1340,7 +1355,7 @@ export function App({
         visible={modalVisible}
       >
         {loadingContent}
-      </SettingsModalShell>
+      </SettingsDrawerShell>
     ) : (
       loadingContent
     );
@@ -1717,7 +1732,7 @@ export function App({
     </main>
   );
   return embedded ? (
-    <SettingsModalShell
+    <SettingsDrawerShell
       afterClose={onAfterClose}
       container={modalContainer}
       header={
@@ -1729,7 +1744,7 @@ export function App({
       visible={modalVisible}
     >
       {appContent}
-    </SettingsModalShell>
+    </SettingsDrawerShell>
   ) : (
     appContent
   );

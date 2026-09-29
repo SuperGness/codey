@@ -496,6 +496,7 @@ function ConfirmationDialogComponent({
   onConfirm,
 }: ConfirmationDialogProps) {
   const destructive =
+    confirmation?.action === "discard-settings-changes" ||
     confirmation?.action === "delete-notification-channel" ||
     confirmation?.action === "delete-route" ||
     confirmation?.action === "delete-official-account";

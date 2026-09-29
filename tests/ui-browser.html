@@ -159,7 +159,7 @@
         for (const nested of [true, false]) {
           if (nested) {
             toast.info("打开前的外层提示", { timeout: 0 });
-            await waitFor(() => [...shadow.querySelectorAll('.settings-modal-shell [data-slot="toast"]')].some(t => t.textContent.includes("打开前的外层提示")));
+            await waitFor(() => [...shadow.querySelectorAll('.settings-drawer-shell [data-slot="toast"]')].some(t => t.textContent.includes("打开前的外层提示")));
             shadow.querySelector('button[aria-label="删除Telegram通知渠道"]').click();
             const deadline = performance.now() + 650;
             while (performance.now() < deadline) {
@@ -169,7 +169,7 @@
             await waitFor(() => shadow.querySelector(".confirmation-dialog .toast-portal-host"));
             if (toast.getQueue().visibleToasts.some(t => t.content.title === "打开前的外层提示")) throw new Error("打开嵌套弹窗后仍有旧 Toast");
           }
-          const dialog = shadow.querySelector(nested ? ".confirmation-dialog" : ".settings-modal-shell");
+          const dialog = shadow.querySelector(nested ? ".confirmation-dialog" : ".settings-drawer-shell");
           toast.info("关闭弹窗提示回归验证", { timeout: 0 });
           await waitFor(() => [...dialog.querySelectorAll('[data-slot="toast"]')].some(t => t.textContent.includes("关闭弹窗提示回归验证")));
           if (nested) dialog.querySelector('button[aria-label="关闭"]').click();
@@ -184,14 +184,14 @@
           if (toast.getQueue().visibleToasts.some(t => t.content.title === "关闭弹窗提示回归验证")) throw new Error("关闭后仍有旧 Toast");
         }
         window.__codeySettingsOverlay.open();
-        await waitFor(() => shadow.querySelector(".settings-modal-shell .toast-portal-host"));
+        await waitFor(() => shadow.querySelector(".settings-drawer-shell .toast-portal-host"));
         if (shadow.querySelector('[data-slot="toast"]')) throw new Error("重新打开后出现旧 Toast");
         toast.success("重新打开后可以显示新提示", { timeout: 0 });
-        await waitFor(() => shadow.querySelector('.settings-modal-shell [data-slot="toast"]'));
+        await waitFor(() => shadow.querySelector('.settings-drawer-shell [data-slot="toast"]'));
         const result = document.createElement("pre");
         result.id = "toast-close-result";
         result.textContent = "PASS：打开嵌套弹窗时旧提示未移入，关闭弹窗时提示未移到外层，新提示正常";
-        shadow.querySelector(".settings-modal-body").prepend(result);
+        shadow.querySelector(".settings-drawer-body").prepend(result);
       }
       if (new URLSearchParams(location.search).get("check") === "notification-close") {
         const shadow = document.querySelector("#codey-settings-overlay-host").shadowRoot;
@@ -232,7 +232,7 @@
         const result = document.createElement("pre");
         result.id = "notification-close-result";
         result.textContent = `PASS：新增和编辑通知渠道的关闭按钮、取消、Esc 共检查 ${frames} 帧，表单及模式保留至卸载`;
-        shadow.querySelector(".settings-modal-body").prepend(result);
+        shadow.querySelector(".settings-drawer-body").prepend(result);
       }
       if (new URLSearchParams(location.search).get("check") === "dialog-motion") {
         const shadow = document.querySelector("#codey-settings-overlay-host").shadowRoot;

@@ -6,11 +6,11 @@ import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
 const root = new URL("../", import.meta.url);
 
-test("settings modal keeps dismissal and stacking inside the overlay", async () => {
+test("settings drawer keeps dismissal and stacking inside the overlay", async () => {
   const [appSource, draftSource, shellSource, overlaySource, stylesSource, constants] = await Promise.all([
     readFile(new URL("src/App.tsx", root), "utf8"),
     readFile(new URL("src/useDraftConfig.ts", root), "utf8"),
-    readFile(new URL("src/SettingsModalShell.tsx", root), "utf8"),
+    readFile(new URL("src/SettingsDrawerShell.tsx", root), "utf8"),
     readFile(new URL("src/overlay.tsx", root), "utf8"),
     readFile(new URL("src/styles.css", root), "utf8"),
     loadTypeScriptModule(new URL("../src/overlay.constants.ts", import.meta.url)),
@@ -31,13 +31,14 @@ test("settings modal keeps dismissal and stacking inside the overlay", async () 
   );
   assert.match(
     shellSource,
-    /<Modal[\s\S]*isOpen=\{visible\}[\s\S]*onOpenChange=\{\(open\) => \{\s*if \(!open\) onCancel\(\);/,
+    /<Drawer[\s\S]*isOpen=\{visible\}[\s\S]*onOpenChange=\{\(open\) => \{\s*if \(!open\) onCancel\(\);/,
   );
-  assert.match(shellSource, /<Modal\.Backdrop\s+isDismissable=\{false\}\s+isKeyboardDismissDisabled/);
+  assert.match(shellSource, /<Drawer\.Backdrop\s+isDismissable\s+isKeyboardDismissDisabled/);
   assert.match(shellSource, /<UNSAFE_PortalProvider getContainer=\{getContainer\}>/);
-  assert.match(shellSource, /className="settings-modal-shell /);
+  assert.match(shellSource, /className="settings-drawer-shell /);
+  assert.ok(shellSource.includes('<Drawer.Content placement="right">'));
   assert.doesNotMatch(shellSource, /backdrop-blur|overlayProps=/);
-  assert.match(shellSource, /settings-modal-body flex min-h-0 flex-1 flex-col overflow-hidden/);
+  assert.match(shellSource, /settings-drawer-body flex min-h-0 flex-1 flex-col overflow-hidden/);
   assert.doesNotMatch(overlaySource, /addEventListener\("wheel"/);
   assert.match(
     stylesSource,
@@ -51,7 +52,7 @@ test("settings modal keeps dismissal and stacking inside the overlay", async () 
   assert.equal(constants.SETTINGS_OVERLAY_Z_INDEX_CSS, "2147483647");
 });
 
-test("settings controls and popups share the modal busy and portal boundaries", async () => {
+test("settings controls and popups share the drawer busy and portal boundaries", async () => {
   const [appSource, featurePolicySource, promptSource, channelCardSource, channelDialogSource] =
     await Promise.all([
       readFile(new URL("src/App.tsx", root), "utf8"),
