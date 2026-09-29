@@ -197,8 +197,10 @@ test("Store environment uses supervised native activation with scoped cleanup", 
   const supervision = launcherPlatform.indexOf("tokio::spawn(async move", setup);
   const activation = launcherPlatform.indexOf("codey_runtime_core::launcher::activate_packaged_app(", supervision);
   const verification = launcherPlatform.indexOf("let package_check", activation);
+  const resumed = launcherPlatform.indexOf("wait_for_resume(feedback.as_deref(), process_id).await?", verification);
+  const spawned = launcherPlatform.indexOf("SpawnedCodex {", verification);
   const cleanup = launcherPlatform.indexOf("package_debug_session.finish()", verification);
-  assert.ok(setup >= 0 && supervision > setup && activation > supervision && verification > activation && cleanup > verification);
+  assert.ok(setup >= 0 && supervision > setup && activation > supervision && verification > activation && resumed > verification && spawned > resumed && cleanup > spawned);
   assert.match(source, /if self\.activation_pending/);
   assert.match(launcherPlatform, /wait_for_resume_failure\(feedback\.clone\(\)\)/);
   assert.match(launcherPlatform, /cancel_resume_feedback\(feedback\.as_deref\(\)\)/);
@@ -219,6 +221,8 @@ test("Store debugger resumes only a verified Codex process and its own thread", 
   const verifiedImage = source.indexOf("normalized_windows_path(&image)", image);
   const resumed = source.indexOf("ResumeThread(thread_handle)", verifiedImage);
   assert.ok(ownership >= 0 && packageCheck > ownership && registered > packageCheck && image > registered && verifiedImage > image && resumed > verifiedImage);
+  const confirmation = source.indexOf("serde_json::to_vec(&ResumeFeedbackState::Resumed { process_id })", resumed);
+  assert.ok(confirmation > resumed);
   assert.match(startupPatch, /run_windows_package_resume_helper_if_requested\(\)\?/);
   assert.match(startupPatch, /resume_windows_packaged_thread\(\s*process_id,\s*thread_id,\s*launch_id,\s*&feedback_path,?\s*\)/);
   assert.match(source.slice(verifiedImage, resumed), /require_pending_resume\(feedback\)\?/);

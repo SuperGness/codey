@@ -71,6 +71,7 @@ fn validate_package_record(package: &str) -> Result<()> {
 #[derive(serde::Serialize, serde::Deserialize)]
 enum ResumeFeedbackState {
     Pending,
+    Resumed { process_id: u32 },
     Cancelled,
     Failed(String),
 }
@@ -125,13 +126,40 @@ pub(super) fn cancel_resume_feedback(path: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+pub(super) async fn wait_for_resume(path: Option<&Path>, process_id: u32) -> Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    loop {
+        match read_resume_feedback(path)? {
+            ResumeFeedbackState::Pending => {}
+            ResumeFeedbackState::Resumed {
+                process_id: resumed,
+            } => {
+                anyhow::ensure!(
+                    resumed == process_id,
+                    "Windows Store 线程恢复确认不属于本次激活进程"
+                );
+                return Ok(());
+            }
+            ResumeFeedbackState::Failed(detail) => {
+                anyhow::bail!("Windows Store 线程恢复失败：{detail}");
+            }
+            ResumeFeedbackState::Cancelled => {
+                anyhow::bail!("Windows Store 线程恢复已取消");
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 pub(super) async fn wait_for_resume_failure(path: Option<PathBuf>) -> anyhow::Error {
     let Some(path) = path else {
         return std::future::pending().await;
     };
     loop {
         match read_resume_feedback(&path) {
-            Ok(ResumeFeedbackState::Pending) => {}
+            Ok(ResumeFeedbackState::Pending | ResumeFeedbackState::Resumed { .. }) => {}
             Ok(ResumeFeedbackState::Failed(detail)) => {
                 return anyhow::anyhow!("Windows Store 线程恢复失败：{detail}");
             }
@@ -240,6 +268,11 @@ fn resume_windows_packaged_thread_inner(
             .context("恢复 Windows Store Codex 主线程失败");
     }
     anyhow::ensure!(previous <= 1, "Windows Store Codex 主线程仍处于暂停状态");
+    crate::fs_util::atomic_write_private(
+        feedback,
+        &serde_json::to_vec(&ResumeFeedbackState::Resumed { process_id })?,
+    )
+    .context("保存 Windows Store 线程恢复确认失败")?;
     let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
         "launcher.windows_package_thread_resumed",
         serde_json::json!({"processId": process_id, "threadId": thread_id, "package": package, "previousSuspendCount": previous}),
@@ -486,6 +519,168 @@ fn disable_windows_packaged_environment(package_full_name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn activation_keeps_feedback_until_delayed_helper_resumes_target() {
+        use super::super::windows_activation::ActivationSupervisor;
+        use std::sync::{Arc, atomic::AtomicBool};
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let journal = LaunchJournal::acquire(directory.path()).unwrap();
+        let feedback = ResumeFeedback::new(directory.path()).unwrap();
+        let path = feedback.path.clone();
+        let helper_path = path.clone();
+        let failure_path = path.clone();
+        let (activated, activation_seen) = tokio::sync::oneshot::channel();
+        let (reply, mut response) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(
+            ActivationSupervisor {
+                cancelled: Arc::new(AtomicBool::new(false)),
+                timeout: Duration::from_secs(1),
+                settle_timeout: Duration::from_millis(100),
+            }
+            .run(
+                async move {
+                    // Native activation returns a PID before the debugger runs.
+                    activated.send(()).unwrap();
+                    wait_for_resume(Some(&helper_path), 42).await?;
+                    Ok(42)
+                },
+                wait_for_resume_failure(Some(failure_path)),
+                || async { panic!("successful target must remain running") },
+                move || {
+                    drop(feedback);
+                    drop(journal);
+                    Ok(())
+                },
+                reply,
+            ),
+        );
+        activation_seen.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(matches!(
+            response.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        require_pending_resume(&path).unwrap();
+        assert!(LaunchJournal::acquire(directory.path()).is_err());
+        crate::fs_util::atomic_write_private(
+            &path,
+            &serde_json::to_vec(&ResumeFeedbackState::Resumed { process_id: 42 }).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(response.await.unwrap().unwrap(), 42);
+        task.await.unwrap().unwrap();
+        assert!(!path.exists());
+        assert!(LaunchJournal::acquire(directory.path()).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missing_helper_times_out_and_cancels_resume_before_cleanup() {
+        use super::super::windows_activation::ActivationSupervisor;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        };
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let feedback = ResumeFeedback::new(directory.path()).unwrap();
+        let path = feedback.path.clone();
+        let stops = AtomicUsize::new(0);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (reply, response) = tokio::sync::oneshot::channel();
+        ActivationSupervisor {
+            cancelled: cancelled.clone(),
+            timeout: Duration::from_millis(100),
+            settle_timeout: Duration::from_millis(100),
+        }
+        .run(
+            wait_for_resume(Some(&path), 42),
+            wait_for_resume_failure(Some(path.clone())),
+            || {
+                assert!(cancelled.load(Ordering::Acquire));
+                stops.fetch_add(1, Ordering::Relaxed);
+                let result = cancel_resume_feedback(Some(&path));
+                async { result }
+            },
+            || {
+                assert!(require_pending_resume(&path).is_err());
+                drop(feedback);
+                Ok(())
+            },
+            reply,
+        )
+        .await
+        .unwrap();
+        let error = response.await.unwrap().unwrap_err();
+        assert!(error.is::<tokio::time::error::Elapsed>());
+        assert!(error.is::<super::super::recovery::IntegrationFailure>());
+        assert_eq!(stops.load(Ordering::Relaxed), 2);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn resume_confirmation_requires_matching_success_and_rejects_invalid_states() {
+        use std::time::Duration;
+
+        wait_for_resume(None, 42).await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let feedback = ResumeFeedback::new(directory.path()).unwrap();
+        let path = Some(feedback.path.as_path());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), wait_for_resume(path, 42))
+                .await
+                .is_err()
+        );
+        for (state, expected) in [
+            (ResumeFeedbackState::Resumed { process_id: 43 }, "不属于"),
+            (
+                ResumeFeedbackState::Failed("helper failed".into()),
+                "helper failed",
+            ),
+            (ResumeFeedbackState::Cancelled, "取消"),
+        ] {
+            crate::fs_util::atomic_write_private(
+                &feedback.path,
+                &serde_json::to_vec(&state).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                wait_for_resume(path, 42)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains(expected)
+            );
+        }
+        crate::fs_util::atomic_write_private(
+            &feedback.path,
+            &serde_json::to_vec(&ResumeFeedbackState::Resumed { process_id: 42 }).unwrap(),
+        )
+        .unwrap();
+        wait_for_resume(path, 42).await.unwrap();
+        assert!(require_pending_resume(&feedback.path).is_err());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                wait_for_resume_failure(Some(feedback.path.clone()))
+            )
+            .await
+            .is_err()
+        );
+        std::fs::write(&feedback.path, b"corrupt").unwrap();
+        assert!(
+            wait_for_resume(path, 42)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("无效")
+        );
+        std::fs::remove_file(&feedback.path).unwrap();
+        assert!(wait_for_resume(path, 42).await.is_err());
+    }
 
     const PACKAGE: &str = "OpenAI.Codex_26.924.2738.0_x64__2p2nqsd0c76g0";
 

@@ -364,7 +364,8 @@ pub(super) async fn activate_windows_codex(
 ) -> Result<(SpawnedCodex, bool)> {
     use super::windows_activation::ActivationSupervisor;
     use super::windows_packaged::{
-        WindowsPackageDebugSession, cancel_resume_feedback, wait_for_resume_failure,
+        WindowsPackageDebugSession, cancel_resume_feedback, wait_for_resume,
+        wait_for_resume_failure,
     };
     use std::sync::{
         Arc,
@@ -457,6 +458,10 @@ pub(super) async fn activate_windows_codex(
                 );
                 return Err(WindowsPackageChanged.into());
             }
+            // ActivateApplication can return before Windows runs our debugger.
+            // Keep its state file and package settings until the helper has
+            // actually resumed this process, within the supervised timeout.
+            wait_for_resume(feedback.as_deref(), process_id).await?;
             Ok((
                 SpawnedCodex {
                     child: None,
