@@ -116,11 +116,11 @@ export function useAppUpdates({
   const [automaticallyChecking, setAutomaticallyChecking] = useState(false);
   const manualCheckVersion = useRef(0);
   const updateCheckInFlightRef = useRef<Promise<UpdateCheck> | null>(null);
-  const requestUpdateCheck = useCallback(() => {
+  const requestUpdateCheck = useCallback((forceRefresh = false) => {
     const current = updateCheckInFlightRef.current;
-    if (current) return current;
+    if (current && !forceRefresh) return current;
     const request = withTimeout(
-      invoke<UpdateCheck>("check_for_updates"),
+      invoke<UpdateCheck>("check_for_updates", { forceRefresh }),
       UPDATE_CHECK_TIMEOUT_MS,
       "检查更新超时，请检查网络",
     ).finally(() => {
@@ -270,7 +270,7 @@ export function useAppUpdates({
     setUpdateCheck(null);
     setDownloadedUpdate(null);
     try {
-      const result = await requestUpdateCheck();
+      const result = await requestUpdateCheck(true);
       setUpdateCheck(result);
       publishUpdateAvailability(result);
       const text = updateCheckText(result);
@@ -289,7 +289,18 @@ export function useAppUpdates({
       });
       if (result.updateAvailable && result.selectedAsset) {
         promptedVersionRef.current = result.latestVersion;
-        askDownloadUpdate(result);
+        if (
+          downloadedUpdate?.latestVersion === result.latestVersion &&
+          downloadedUpdate.publishId === result.publishId &&
+          downloadedUpdate.fileName === result.selectedAsset.fileName &&
+          downloadedUpdate.sha256 === result.selectedAsset.sha256 &&
+          downloadedUpdate.size === result.selectedAsset.size
+        ) {
+          setDownloadedUpdate(downloadedUpdate);
+          askInstallDownloadedUpdate(downloadedUpdate);
+        } else {
+          askDownloadUpdate(result);
+        }
       }
     } catch (error) {
       const text = errorText(error);

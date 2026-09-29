@@ -39,9 +39,9 @@ test("settings panels declare render-isolation hooks and stable handlers", async
   assert.match(confirmation, /export const ConfirmationDialogHost = memo\(/);
   assert.doesNotMatch(app, /async function checkForUpdates\(/);
   assert.match(appUpdates, /export function useAppUpdates/);
-  assert.match(appUpdates, /invoke<UpdateCheck>\("check_for_updates"\)/);
+  assert.match(appUpdates, /invoke<UpdateCheck>\("check_for_updates", \{ forceRefresh \}\)/);
   assert.equal(
-    appUpdates.match(/invoke<UpdateCheck>\("check_for_updates"\)/g)?.length,
+    appUpdates.match(/invoke<UpdateCheck>\("check_for_updates",/g)?.length,
     1,
   );
   assert.match(
@@ -49,6 +49,11 @@ test("settings panels declare render-isolation hooks and stable handlers", async
     /updateCheckInFlightRef = useRef<Promise<UpdateCheck> \| null>/,
   );
   assert.match(appUpdates, /const result = await requestUpdateCheck\(\)/);
+  assert.match(appUpdates, /const result = await requestUpdateCheck\(true\)/);
+  assert.match(
+    app,
+    /const handleFooterUpdateClick = useStableEvent\(\(\) => void checkForUpdates\(\)\)/,
+  );
   assert.match(appUpdates, /invoke<UpdateDownload>\("download_update"\)/);
   assert.match(appUpdates, /invoke\("install_downloaded_update"/);
   assert.match(app, /onRepairPluginMarketplace=\{handleRepairPluginMarketplace\}/);

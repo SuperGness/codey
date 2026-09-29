@@ -268,9 +268,9 @@ pub(super) async fn spawn_codex(
             *app_dir = refresh_windows_packaged_app_dir(app_dir)?;
             codey_runtime_core::app_paths::validate_codex_app_dir(app_dir)?;
             error_log::refresh_codex_app_version(Some(app_dir), None);
-            // Ordinary Store activation accepts arguments, not our environment.
-            // Use Inspector only when explicitly enabled by the shipped runtime;
-            // do not register a debugger to make NODE_OPTIONS available.
+            // Store uses a verified desktop process when it needs CLI environment.
+            // Inspector still requires the shipped fuse; never use a package
+            // debugger or rely on NODE_OPTIONS in a packaged Electron runtime.
             let packaged_activation = windows_app_dir_supports_packaged_activation(app_dir);
             let fuses = crate::electron_fuses::detect_electron_fuses(app_dir.to_path_buf()).await;
             let inspect_fuse = fuses.node_cli_inspect;

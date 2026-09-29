@@ -9,8 +9,10 @@ use anyhow::Result;
 #[cfg(windows)]
 use tokio::process::Command;
 
+#[cfg(any(windows, test))]
+use super::recovery;
 #[cfg(windows)]
-use super::{SpawnedCodex, build_codex_command, reap_child_after_cleanup, recovery};
+use super::{SpawnedCodex, build_codex_command, reap_child_after_cleanup};
 #[cfg(windows)]
 use crate::error_log;
 
@@ -20,11 +22,11 @@ const WINDOWS_CODEX_STOP_TIMEOUT: Duration = Duration::from_secs(8);
 const WINDOWS_STARTUP_PATCH_FAILURE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[cfg(windows)]
-pub(super) struct WindowsStartupProcess(std::os::windows::io::OwnedHandle);
+pub(super) struct WindowsStartupProcess(pub(super) std::os::windows::io::OwnedHandle);
 
 #[cfg(windows)]
 impl WindowsStartupProcess {
-    fn package_full_name(&self) -> Result<String> {
+    pub(super) fn package_full_name(&self) -> Result<String> {
         use std::os::windows::io::AsRawHandle;
         use windows::Win32::Foundation::HANDLE;
         use windows::Win32::Storage::Packaging::Appx::{
@@ -121,14 +123,7 @@ pub(super) fn windows_startup_process_details(
 
 #[cfg(any(windows, test))]
 fn windows_package_full_name(app_dir: &Path) -> Option<String> {
-    codey_runtime_core::app_paths::packaged_app_user_model_id(app_dir)?;
-    let path = app_dir.to_string_lossy().replace('\\', "/");
-    let mut parts = path.split('/').filter(|part| !part.is_empty());
-    let mut package_name = parts.next_back()?;
-    if package_name.eq_ignore_ascii_case("app") {
-        package_name = parts.next_back()?;
-    }
-    Some(package_name.to_string())
+    codey_runtime_core::app_paths::packaged_app_full_name(app_dir)
 }
 
 #[cfg(any(windows, test))]
@@ -278,6 +273,21 @@ pub(super) fn requires_codex_home_environment(configured_home: Option<&std::ffi:
     configured_home.is_some_and(|home| !home.to_string_lossy().trim().is_empty())
 }
 
+#[cfg(any(windows, test))]
+fn windows_packaged_launch_needs_environment(
+    environment: &[(String, String)],
+    configured_home: Option<&std::ffi::OsStr>,
+) -> bool {
+    !environment.is_empty() || requires_codex_home_environment(configured_home)
+}
+
+#[cfg(any(windows, test))]
+fn windows_can_fallback_to_activation(environment_required: bool, error: &anyhow::Error) -> bool {
+    // IntegrationFailure is created only before spawn or after confirmed
+    // cleanup. Identity changes require package refresh, never this fallback.
+    !environment_required && error.is::<recovery::IntegrationFailure>()
+}
+
 #[cfg(windows)]
 pub(super) async fn spawn_windows_codex(
     app_dir: &std::path::Path,
@@ -290,10 +300,14 @@ pub(super) async fn spawn_windows_codex(
         !require_wrapper_environment || !environment.is_empty(),
         "Codex CLI 兼容入口缺少运行环境，已停止启动"
     );
+    let needs_packaged_environment = windows_packaged_launch_needs_environment(
+        environment,
+        std::env::var_os("CODEX_HOME").as_deref(),
+    );
+    let environment_required = require_wrapper_environment
+        || requires_codex_home_environment(std::env::var_os("CODEX_HOME").as_deref());
     let environment =
         windows_codex_launch_environment(environment, crate::codex_config::codex_home())?;
-    let require_home_environment =
-        requires_codex_home_environment(std::env::var_os("CODEX_HOME").as_deref());
     if let Some(activation) =
         codey_runtime_core::launcher::build_packaged_activation(app_dir, debug_port, extra_args)
         && let codey_runtime_core::launcher::CodexLaunch::PackagedActivation {
@@ -302,12 +316,27 @@ pub(super) async fn spawn_windows_codex(
             ..
         } = activation
     {
-        // Store activation cannot carry a custom environment. Installing a
-        // package debugger would leave persistent state if Codey crashes.
-        if require_wrapper_environment || require_home_environment {
-            return Err(recovery::recoverable(
-                "Windows Store Codex 不支持本次兼容入口所需的环境变量；已停止集成启动",
-            ));
+        // Ordinary activation cannot carry this launch's CLI wrapper or home.
+        // Create the registered desktop executable suspended and verify its
+        // package identity before resuming; never install a package debugger.
+        if needs_packaged_environment {
+            let command = build_codex_command(app_dir, debug_port, extra_args);
+            let mut child_command = std::process::Command::new(&command[0]);
+            child_command.args(&command[1..]);
+            child_command.envs(environment.iter().map(|(name, value)| (name, value)));
+            child_command.env_remove("WSL_DISTRO_NAME");
+            match super::windows_packaged::spawn_with_environment(app_dir, &child_command) {
+                Ok(spawned) => return Ok((spawned, true)),
+                Err(error) if windows_can_fallback_to_activation(environment_required, &error) => {
+                    // Inspector may still provide the required settings without
+                    // a wrapper. Its existing runtime validation remains mandatory.
+                    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                        "launcher.windows_package_environment_unavailable",
+                        serde_json::json!({"detail": format!("{error:#}"), "fallback": "ordinary_activation"}),
+                    );
+                }
+                Err(error) => return Err(error),
+            }
         }
         let environment_applied = false;
         let activation_result = async {
@@ -1389,12 +1418,28 @@ mod compatibility_tests {
 
     #[test]
     fn windows_package_identity_is_scoped_to_the_codex_package() {
-        let app_dir = Path::new(
-            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.901.20858.0_x64__2p2nqsd0c76g0\app",
-        );
-        assert_eq!(
-            windows_package_full_name(app_dir).as_deref(),
-            Some("OpenAI.Codex_26.901.20858.0_x64__2p2nqsd0c76g0")
+        for entry in [
+            "",
+            "app",
+            "bin",
+            "current",
+            r"versions\current",
+            r"VERSIONS\CURRENT",
+        ] {
+            let app_dir = format!(
+                r"C:\Program Files\WindowsApps\OpenAI.Codex_26.901.20858.0_x64__2p2nqsd0c76g0\{entry}"
+            );
+            assert_eq!(
+                windows_package_full_name(Path::new(&app_dir)).as_deref(),
+                Some("OpenAI.Codex_26.901.20858.0_x64__2p2nqsd0c76g0"),
+                "{entry}"
+            );
+        }
+        assert!(
+            windows_package_full_name(Path::new(
+                r"C:\Program Files\WindowsApps\Other.App_1.2.3.4_x64__2p2nqsd0c76g0\app"
+            ))
+            .is_none()
         );
     }
 
@@ -1445,5 +1490,41 @@ mod compatibility_tests {
         for value in [r"D:\Codex 配置", "relative-codex-home"] {
             assert!(requires_codex_home_environment(Some(OsStr::new(value))));
         }
+    }
+
+    #[test]
+    fn windows_store_delivers_optional_wrapper_and_custom_home_environments() {
+        use std::ffi::OsStr;
+
+        for home in [None, Some(OsStr::new("")), Some(OsStr::new("  "))] {
+            assert!(!windows_packaged_launch_needs_environment(&[], home));
+            // Even an optional wrapper must be delivered when Inspector exists,
+            // so its confirmation remains available if Inspector fails.
+            assert!(windows_packaged_launch_needs_environment(
+                &[("CODEX_CLI_PATH".into(), "Codey.exe".into())],
+                home,
+            ));
+        }
+        assert!(windows_packaged_launch_needs_environment(
+            &[],
+            Some(OsStr::new("relative-home")),
+        ));
+    }
+
+    #[test]
+    fn windows_activation_fallback_requires_optional_environment_and_confirmed_cleanup() {
+        let stopped = recovery::recoverable("environment unavailable");
+        assert!(windows_can_fallback_to_activation(false, &stopped));
+        assert!(!windows_can_fallback_to_activation(true, &stopped));
+        assert!(!windows_can_fallback_to_activation(
+            false,
+            &WindowsPackageChanged.into()
+        ));
+        let unconfirmed = startup_activation_error_after_cleanup(
+            recovery::recoverable("environment unavailable"),
+            Err(anyhow::anyhow!("process still running")),
+            Ok(()),
+        );
+        assert!(!windows_can_fallback_to_activation(false, &unconfirmed));
     }
 }

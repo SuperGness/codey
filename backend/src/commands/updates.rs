@@ -136,7 +136,13 @@ pub(super) async fn invoke(
     args: &Value,
 ) -> Result<Value, String> {
     match command {
-        "check_for_updates" => check_for_updates(state).await,
+        "check_for_updates" => {
+            let force_refresh = args
+                .get("forceRefresh")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            check_for_updates(state, force_refresh).await
+        }
         "get_device_machine_no" => get_device_machine_no(state).await,
         "download_update" => download_update(state).await,
         "update_install_report" => update_install_report(state).await,
@@ -147,8 +153,15 @@ pub(super) async fn invoke(
     }
 }
 
-pub async fn check_for_updates(state: &Arc<AppState>) -> Result<Value, String> {
-    let candidate = check_for_update_candidate(state).await?;
+pub async fn check_for_updates(
+    state: &Arc<AppState>,
+    force_refresh: bool,
+) -> Result<Value, String> {
+    let candidate = if force_refresh {
+        update_candidate_with_ttl(state, Duration::ZERO).await?
+    } else {
+        check_for_update_candidate(state).await?
+    };
     serde_json::to_value(candidate.check).map_err(|error| error.to_string())
 }
 
@@ -1502,6 +1515,54 @@ mod tests {
             )
             .is_none()
         );
+        assert!(
+            reusable_update_candidate(
+                Some(&cached),
+                "https://updates.example.test/manifest.json",
+                checked_at,
+                Duration::ZERO,
+            )
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_update_check_bypasses_fresh_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState {
+            store: ConfigStore::new(directory.path().join("config.json")),
+            ..AppState::default()
+        });
+        // 非 HTTPS 地址让重新获取在校验阶段失败，避免测试依赖外部网络。
+        let manifest_url = "http://updates.example.test/manifest.json";
+        {
+            let mut config = state.config.write().await;
+            config.release_admin_url.clear();
+            config.update_manifest_url = manifest_url.to_string();
+        }
+        let check = assess_update_manifest("1.0.0", &valid_manifest("2.0.0")).unwrap();
+        *state.update_candidate_cache.lock().await = Some(CachedUpdateCandidate {
+            manifest_url: manifest_url.to_string(),
+            candidate: UpdateCandidate {
+                check: check.clone(),
+            },
+            checked_at: Instant::now(),
+        });
+
+        for args in [json!({}), json!({ "forceRefresh": false })] {
+            assert_eq!(
+                invoke(&state, "check_for_updates", &args).await.unwrap(),
+                serde_json::to_value(&check).unwrap(),
+            );
+        }
+        let error = invoke(
+            &state,
+            "check_for_updates",
+            &json!({ "forceRefresh": true }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "更新地址必须使用 HTTPS");
     }
 
     #[test]

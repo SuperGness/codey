@@ -44,6 +44,8 @@ use crate::trace_log_guard;
 mod platform;
 mod process;
 mod recovery;
+#[cfg(windows)]
+mod windows_packaged;
 
 use platform::*;
 #[cfg(windows)]

@@ -293,8 +293,6 @@ export function App({
     updateCheck,
     downloadedUpdate,
     checkForUpdates,
-    askDownloadUpdate,
-    askInstallDownloadedUpdate,
   } = useAppUpdates({
     embedded,
     configLoaded,
@@ -1214,15 +1212,7 @@ export function App({
   const handleRepairMainProcessInjection = useStableEvent(
     () => void repairMainProcessInjection(),
   );
-  const handleFooterUpdateClick = useStableEvent(() => {
-    if (downloadedUpdate) {
-      askInstallDownloadedUpdate();
-    } else if (hasUpdate) {
-      askDownloadUpdate();
-    } else {
-      void checkForUpdates();
-    }
-  });
+  const handleFooterUpdateClick = useStableEvent(() => void checkForUpdates());
   const handleConfigChange = useStableEvent(editConfig);
   const handleAddNotificationChannel = useStableEvent(addNotificationChannel);
   const handleNotificationChannelChange = useStableEvent(
@@ -1363,9 +1353,9 @@ export function App({
   const isDownloadingUpdate = busy === "download-update";
   const isInstallingUpdate = busy === "install-update";
   const updateTooltipText = downloadedUpdate
-    ? `新版本 v${downloadedUpdate.latestVersion} 已下载，点击安装并重启`
+    ? `新版本 v${downloadedUpdate.latestVersion} 已下载，点击检查更新并安装`
     : hasUpdate
-      ? `发现新版本 v${updateCheck?.latestVersion}，点击下载更新`
+      ? `发现新版本 v${updateCheck?.latestVersion}，点击重新检查并更新`
       : isCheckingUpdate
         ? "正在检查更新…"
         : updateResult?.text

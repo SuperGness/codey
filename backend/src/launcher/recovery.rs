@@ -95,6 +95,8 @@ fn native_command(app_dir: &Path, home: &Path) -> std::process::Command {
         .env_remove("ELECTRON_RUN_AS_NODE")
         .env_remove("CODEX_APP_SERVER_FORCE_CLI")
         .env("CODEX_HOME", home);
+    #[cfg(windows)]
+    command.env_remove("WSL_DISTRO_NAME");
     command
 }
 
@@ -106,10 +108,20 @@ async fn launch_native(app_dir: &Path, home: &Path) -> Result<()> {
     codey_runtime_core::app_paths::validate_codex_app_dir(app_dir)?;
     #[cfg(windows)]
     if let Some(app_id) = codey_runtime_core::app_paths::packaged_app_user_model_id(app_dir) {
-        anyhow::ensure!(
-            !requires_codex_home_environment(std::env::var_os("CODEX_HOME").as_deref()),
-            "Store 原生激活不能传入自定义 CODEX_HOME，请从官方入口手动启动"
-        );
+        if requires_codex_home_environment(std::env::var_os("CODEX_HOME").as_deref()) {
+            let spawned =
+                windows_packaged::spawn_with_environment(app_dir, &native_command(app_dir, home))?;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            if let Some(status) = spawned
+                .startup_process
+                .as_ref()
+                .context("原生启动进程句柄缺失")?
+                .exit_code()?
+            {
+                anyhow::ensure!(status == 0, "Codex 原生启动后退出：{status}");
+            }
+            return Ok(());
+        }
         codey_runtime_core::launcher::activate_packaged_app(&app_id, "").await?;
         return Ok(());
     }

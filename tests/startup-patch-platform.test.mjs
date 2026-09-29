@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { loadSpawnCodexSections } from "./helpers/startup-patch.mjs";
+import { readSource } from "./helpers/read-source.mjs";
 
 // Static contracts keep both platforms' spawn_codex wiring visible on any CI host.
 test("Windows startup compatibility failure cleans the process before compatible restart", async () => {
@@ -179,11 +180,29 @@ test("Windows startup patch requires app-server runtime override validation", as
   );
   assert.doesNotMatch(launcherPlatform, /WindowsPackageDebugSession|EnableDebugging|DisableDebugging/);
   assert.match(launcherPlatform, /child_command\.envs\(environment/);
-  const packageSetup = launcherPlatform.indexOf("if require_wrapper_environment || require_home_environment");
+  const packageSetup = launcherPlatform.indexOf("if needs_packaged_environment");
   assert.ok(packageSetup >= 0);
   const activation = launcherPlatform.indexOf("codey_runtime_core::launcher::activate_packaged_app", packageSetup);
   assert.ok(activation > packageSetup);
-  assert.match(launcherPlatform.slice(packageSetup, activation), /return Err\(recovery::recoverable\(/);
+  const environmentBranch = launcherPlatform.slice(packageSetup, activation);
+  assert.ok(environmentBranch.includes("windows_packaged::spawn_with_environment"));
+  assert.ok(environmentBranch.includes("return Ok((spawned, true))"));
+});
+
+test("Store environment launch verifies the suspended process before resuming", async () => {
+  const source = await readSource("backend/src/launcher/windows_packaged.rs");
+  assert.doesNotMatch(source, /EnableDebugging|DisableDebugging|WindowsPackageDebugSession/);
+  assert.ok(source.includes("CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW"));
+  assert.ok(source.includes("process.package_full_name()") || source.includes(".package_full_name()"));
+  assert.ok(source.includes("QueryFullProcessImageNameW"));
+  const verification = source.indexOf(".verify(&expected_package, &executable)");
+  const resume = source.indexOf("pending.resume()", verification);
+  const cleanup = source.indexOf("let stopped = pending.stop()", resume);
+  const handoff = source.indexOf("startup_process: pending.process.take()", cleanup);
+  assert.ok(verification >= 0 && resume > verification && cleanup > resume && handoff > cleanup);
+  assert.ok(source.includes("startup_activation_error_after_cleanup"));
+  assert.ok(source.includes("TerminateProcess(handle, 1)"));
+  assert.ok(source.includes("WaitForSingleObject(handle, 8000)"));
 });
 
 test("macOS startup patch requires app-server runtime override validation", async () => {
