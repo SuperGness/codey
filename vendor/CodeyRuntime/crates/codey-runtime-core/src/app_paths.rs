@@ -383,15 +383,92 @@ pub fn validate_codex_app_dir(app_dir: &Path) -> anyhow::Result<()> {
         anyhow::ensure!(
             !root
                 .components()
-                .any(|part| part.as_os_str().eq_ignore_ascii_case("WindowsApps"))
-                && !root.join("AppxManifest.xml").exists()
-                && !root
-                    .parent()
-                    .is_some_and(|parent| parent.join("AppxManifest.xml").exists()),
+                .any(|part| part.as_os_str().eq_ignore_ascii_case("WindowsApps")),
             "无法安全识别 Windows 打包安装，未按独立安装处理"
         );
+        // Standalone distributions can ship an AppxManifest.xml too. The file
+        // alone does not give the executable a Windows package identity.
+        for directory in [Some(root.as_path()), root.parent()].into_iter().flatten() {
+            if directory
+                .join("AppxManifest.xml")
+                .try_exists()
+                .context("无法检查 Codex 安装清单")?
+            {
+                ensure_unregistered_windows_install(&root)?;
+                break;
+            }
+        }
     }
     Ok(())
+}
+
+fn ensure_unregistered_windows_install(app_dir: &Path) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    {
+        use anyhow::Context;
+
+        // Include all identities: an unrecognized registered package must not
+        // fall back to standalone launch just because its name is unfamiliar.
+        let output = Command::new("powershell")
+            .creation_flags(crate::windows_create_no_window())
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                r#"$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new()
+Get-AppxPackage | ForEach-Object {
+    try { $_ | Select-Object -ExpandProperty InstallLocation }
+    catch {
+        # Removed packages can leave registrations with no installation location.
+        if ($_.Exception.InnerException -isnot [System.IO.FileNotFoundException]) { throw }
+    }
+}"#,
+            ])
+            .output()
+            .context("无法查询 Windows 包注册信息，未按独立安装处理")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "查询 Windows 包注册信息失败，未按独立安装处理"
+        );
+        let locations =
+            String::from_utf8(output.stdout).context("Windows 包注册路径不是有效 UTF-8")?;
+        anyhow::ensure!(
+            !app_dir_is_within_registered_package(app_dir, &locations)?,
+            "无法安全识别 Windows 打包安装，未按独立安装处理：{}",
+            app_dir.display()
+        );
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    anyhow::bail!(
+        "无法核实 Windows 包注册信息，未按独立安装处理：{}",
+        app_dir.display()
+    )
+}
+
+#[cfg(any(windows, test))]
+fn app_dir_is_within_registered_package(app_dir: &Path, locations: &str) -> anyhow::Result<bool> {
+    use anyhow::Context;
+
+    for location in locations
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let location = Path::new(location);
+        anyhow::ensure!(location.is_absolute(), "Windows 包注册路径不是绝对路径");
+        let package_root = std::fs::canonicalize(location)
+            .with_context(|| format!("无法核实 Windows 包注册路径：{}", location.display()))?;
+        if app_dir.ancestors().any(|ancestor| {
+            ancestor
+                .as_os_str()
+                .eq_ignore_ascii_case(package_root.as_os_str())
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn codex_app_version(app_dir: &Path) -> Option<String> {
@@ -1098,6 +1175,64 @@ mod tests {
             write_windows_client(&app);
             assert!(validate_codex_app_dir(&app).is_err(), "{name}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn standalone_client_with_appx_manifest_is_not_a_registered_package() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("Programs/Codex");
+        write_windows_client(&app);
+        // Standalone distributions can retain the Store manifest even though
+        // their executable is flattened out of the manifest's app/ directory.
+        std::fs::write(
+            app.join("AppxManifest.xml"),
+            r#"<Package><Applications><Application Id="App" Executable="app/ChatGPT.exe" /></Applications></Package>"#,
+        )
+        .unwrap();
+        validate_codex_app_dir(&app).unwrap();
+        assert!(packaged_app_user_model_id(&app).is_none());
+        std::fs::rename(
+            app.join("AppxManifest.xml"),
+            app.parent().unwrap().join("AppxManifest.xml"),
+        )
+        .unwrap();
+        validate_codex_app_dir(&app).unwrap();
+        assert!(packaged_app_user_model_id(&app).is_none());
+    }
+
+    #[test]
+    fn registered_package_locations_match_whole_ancestors() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("UnknownPackage");
+        let nested = package.join("app");
+        let sibling = temp.path().join("UnknownPackage-copy");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let locations = format!("\r\n{}\r\n", package.display());
+        for app in [&package, &nested] {
+            let app = std::fs::canonicalize(app).unwrap();
+            assert!(app_dir_is_within_registered_package(&app, &locations).unwrap());
+            #[cfg(windows)]
+            assert!(
+                app_dir_is_within_registered_package(&app, &locations.to_ascii_uppercase())
+                    .unwrap()
+            );
+        }
+        let sibling = std::fs::canonicalize(sibling).unwrap();
+        assert!(!app_dir_is_within_registered_package(&sibling, &locations).unwrap());
+        let parent = std::fs::canonicalize(temp.path()).unwrap();
+        assert!(!app_dir_is_within_registered_package(&parent, &locations).unwrap());
+        assert!(!app_dir_is_within_registered_package(&parent, "\r\n").unwrap());
+    }
+
+    #[test]
+    fn registered_package_locations_fail_closed_on_unverifiable_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = std::fs::canonicalize(temp.path()).unwrap();
+        assert!(app_dir_is_within_registered_package(&app, "relative/package").is_err());
+        let missing = temp.path().join("missing");
+        assert!(app_dir_is_within_registered_package(&app, &missing.to_string_lossy()).is_err());
     }
 
     #[test]
