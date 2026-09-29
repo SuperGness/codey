@@ -844,6 +844,7 @@ pub fn packaged_app_full_name(app_dir: &Path) -> Option<String> {
     None
 }
 
+#[cfg(any(windows, test))]
 fn has_windows_package_marker(app_dir: &Path) -> bool {
     app_dir
         .components()
