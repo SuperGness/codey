@@ -76,6 +76,9 @@ jobs:
         run: cargo fmt --all -- --check
 
       # dist-overlay was just built above; tell build.rs not to run Vite again.
+      - name: Build Antigravity library for ABI tests
+        run: cargo build -p codey-plugin-antigravity-router --locked
+
       - name: Rust tests
         run: cargo test --workspace --locked
         env:
@@ -130,6 +133,9 @@ jobs:
 
       - name: Build embedded frontend assets
         run: pnpm run vite:build
+
+      - name: Build Antigravity library for ABI tests
+        run: cargo build -p codey-plugin-antigravity-router --locked
 
       - name: Test Windows workspace
         run: cargo test --workspace --locked

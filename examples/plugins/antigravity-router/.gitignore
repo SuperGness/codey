@@ -1,0 +1,8 @@
+/target/
+/dist/
+/.runtime/
+/proxy-rust/target/
+/proxy-rust/.pi/
+/auth.json
+/antigravity-accounts.json
+/antigravity-catalog-cache.json
