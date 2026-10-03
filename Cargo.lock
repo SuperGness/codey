@@ -438,6 +438,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "codey-plugin-antigravity-router"
+version = "0.9.0"
+dependencies = [
+ "codey-plugin-sdk",
+ "libloading",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "codey-plugin-header-demo"
 version = "0.1.0"
 dependencies = [

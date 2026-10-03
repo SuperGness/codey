@@ -1,0 +1,91 @@
+name: Antigravity plugin
+
+on:
+  pull_request:
+    paths:
+      - 'examples/plugins/antigravity-router/**'
+      - 'crates/codey-plugin-sdk/**'
+      - 'scripts/package-plugin.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/antigravity-plugin.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'examples/plugins/antigravity-router/**'
+      - 'crates/codey-plugin-sdk/**'
+      - 'scripts/package-plugin.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/antigravity-plugin.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: antigravity-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proxy-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/plugins/antigravity-router/proxy-rust -> target
+      - name: Check proxy formatting
+        run: cargo fmt --manifest-path examples/plugins/antigravity-router/proxy-rust/Cargo.toml -- --check
+      - name: Test proxy with locked dependencies
+        run: cargo test --manifest-path examples/plugins/antigravity-router/proxy-rust/Cargo.toml --locked
+      - name: Build proxy for mock E2E
+        run: cargo build --manifest-path examples/plugins/antigravity-router/proxy-rust/Cargo.toml --release --locked
+      - name: Mock Responses, OAuth rotation, search and image E2E
+        run: node examples/plugins/antigravity-router/tests/e2e-rust-proxy.test.mjs
+
+  windows-package:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            examples/plugins/antigravity-router/proxy-rust -> target
+      - name: Test native ABI and proxy mock E2E
+        shell: powershell
+        run: ./examples/plugins/antigravity-router/scripts/test.ps1
+      - name: Test native package validation rules
+        run: python -m unittest discover -s scripts -p test_package_plugin.py
+      - name: Build native and portable Windows packages
+        shell: powershell
+        run: ./examples/plugins/antigravity-router/scripts/build-release.ps1
+      - name: Verify isolated portable installation
+        shell: powershell
+        run: ./examples/plugins/antigravity-router/scripts/test-portable.ps1 -Bundle ./examples/plugins/antigravity-router/dist/windows-x64/codey-antigravity-0.9.0-windows-x64
+      - name: Upload plugin packages for review
+        uses: actions/upload-artifact@v4
+        with:
+          name: antigravity-windows-x64
+          path: |
+            examples/plugins/antigravity-router/dist/windows-x64/*.codey-plugin
+            examples/plugins/antigravity-router/dist/windows-x64/*.zip
+            examples/plugins/antigravity-router/dist/windows-x64/SHA256SUMS
+          if-no-files-found: error

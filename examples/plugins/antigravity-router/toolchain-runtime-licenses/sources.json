@@ -1,0 +1,5 @@
+{
+  "COPYING.RUNTIME": "https://raw.githubusercontent.com/gcc-mirror/gcc/master/COPYING.RUNTIME",
+  "COPYING3": "https://raw.githubusercontent.com/gcc-mirror/gcc/master/COPYING3",
+  "MINGW-COPYING": "https://raw.githubusercontent.com/mingw-w64/mingw-w64/master/COPYING"
+}

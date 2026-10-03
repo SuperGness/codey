@@ -42,6 +42,8 @@
 
 ## 示例
 
+[Antigravity 插件](../../examples/plugins/antigravity-router/README.md) 演示通过独立 OAuth 代理接入本地 Responses 线路，并提供构建、安装与模拟上游验证脚本。
+
 `examples/plugins/header-demo` 演示配置、`ping` 方法和请求头扩展。在仓库根目录执行：
 
 ```sh

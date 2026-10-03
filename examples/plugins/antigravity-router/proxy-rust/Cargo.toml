@@ -1,0 +1,36 @@
+[workspace]
+
+[package]
+name = "antigravity-proxy"
+version = "0.9.0"
+edition = "2021"
+license = "MIT"
+description = "Antigravity (Cloud Code Assist) provider bridge: OpenAI Responses <-> Gemini wire, with model routing, dynamic discovery, multi-account failover, grounded search, image generation, usage/doctor. Port of pi-antigravity 0.9.0."
+
+[[bin]]
+name = "antigravity-proxy"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "fs"] }
+tokio-util = "0.7"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+futures-util = "0.3"
+reqwest = { version = "0.12", features = ["stream", "json"] }
+serde_json = "1"
+base64 = "0.22"
+sha1 = "0.10"
+sha2 = "0.10"
+rand = "0.8"
+url = "2"
+urlencoding = "2"
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+
+[profile.release]
+opt-level = 2
+lto = false

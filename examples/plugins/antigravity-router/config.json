@@ -1,0 +1,12 @@
+{
+  "_comments": {
+    "baseUrl": "Local proxy only: http://127.0.0.1:<port>/v1. Restart plugin after edits.",
+    "routeId": "Optional exact Codey provider ID. Empty disables lifecycle handling; provider route still registers.",
+    "retryOnce": "Explicit opt-in to one replay after 429. May duplicate tools or billing; keep false."
+  },
+  "lifecycleEnabled": true,
+  "baseUrl": "http://127.0.0.1:8787/v1",
+  "models": ["gemini-3.8-flash", "gemini-3.5-pro", "claude-sonnet-4-6", "claude-opus-4-6"],
+  "routeId": "",
+  "retryOnce": false
+}

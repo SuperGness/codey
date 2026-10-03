@@ -4,6 +4,7 @@ members = [
   "crates/codey-codex-extensions",
   "crates/codey-plugin-sdk",
   "examples/plugins/header-demo",
+  "examples/plugins/antigravity-router",
   "vendor/CodeyRuntime/crates/codey-runtime-core",
   "vendor/CodeyRuntime/crates/codey-runtime-data",
 ]
