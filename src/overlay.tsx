@@ -12,6 +12,7 @@ import operationsStyles from "./styles.operations.css?inline";
 import modelStyles from "./styles.models.css?inline";
 import featureStyles from "./styles.features.css?inline";
 import diagnosticStyles from "./styles.diagnostics.css?inline";
+import remoteControlStyles from "./remote-control.css?inline";
 import responsiveStyles from "./styles.responsive.css?inline";
 import { codeyApiPath, invoke } from "./api";
 import { SETTINGS_OVERLAY_Z_INDEX_CSS } from "./overlay.constants";
@@ -186,6 +187,7 @@ if (!window.__codeySettingsOverlay) {
       modelStyles,
       featureStyles,
       diagnosticStyles,
+      remoteControlStyles,
       responsiveStyles,
     ),
   ];

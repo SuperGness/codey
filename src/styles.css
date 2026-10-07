@@ -1044,6 +1044,16 @@ button,
   z-index: 100;
 }
 
+.toast__content {
+  min-width: 0;
+}
+
+.toast__title,
+.toast__description {
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .settings-modal-body {
   position: relative;
 }

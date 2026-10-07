@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" />
+  <link rel="icon" href="data:," />
+  <title>远程控制界面验证</title>
+  <style>html, body { margin: 0; min-height: 100%; background: #f2f2f5; }</style>
+  <script type="module">
+    import "../src/dev/mockApi";
+    import { toast } from "@heroui/react";
+    window.remoteTestToast = message => toast.danger(message);
+    const mock = window.__codeyInvokeApi;
+    const query = new URLSearchParams(location.search);
+    const publicUrl = "https://questions-fires-transcripts-itself.example.test";
+    const localUrl = "http://192.168.1.8:43129";
+    let state = query.get("state") || "running";
+    let status = { running: state !== "stopped", urls: [publicUrl, localUrl], devices: [], tunnel: { status: "running", message: "HTTPS 临时隧道已开启" } };
+    if (state === "stopped") status = { running: false, urls: [], devices: [] };
+    if (state === "starting") status = { ...status, urls: [localUrl], tunnel: { status: "starting", message: "正在建立 HTTPS 隧道" } };
+    if (state === "failed") status = { ...status, urls: [localUrl], tunnel: { status: "failed", message: "外网连接失败，请检查网络后重试；局域网仍可使用。" } };
+    if (state === "devices") status.devices = [{ id: "phone", name: "我的 iPhone" }, { id: "tablet", name: "工作平板" }];
+    window.__codexSessionDeleteBridge = async (path, args) => {
+      const command = path.split("/").at(-1);
+      if (command === "remote_control_status") return structuredClone(status);
+      if (command === "start_remote_control") {
+        status = { running: true, urls: args.tunnel ? [publicUrl, localUrl] : [localUrl], devices: [], ...(args.tunnel ? { tunnel: { status: "running", message: "HTTPS 临时隧道已开启" } } : {}) };
+        return structuredClone(status);
+      }
+      if (command === "stop_remote_control") { status = { running: false, urls: [], devices: [] }; return {}; }
+      if (command === "revoke_remote_device") { status.devices = status.devices.filter(device => device.id !== args.id); return {}; }
+      if (command === "pair_remote_control") throw new Error("预览环境不会生成真实配对凭据。配对请求已成功发出。");
+      if (command === "check_for_updates") return { status: "upToDate", currentVersion: "1.2.5" };
+      if (command === "update_install_report") return null;
+      return mock(command, args);
+    };
+    if (query.get("theme") === "dark") document.documentElement.classList.add("dark");
+    await import("../src/overlay.tsx");
+    window.__codeySettingsOverlay.open();
+  </script>
+</html>
