@@ -1,6 +1,34 @@
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[test]
+fn model_settings_follow_the_applied_catalog_and_declared_efforts() {
+    let catalog = json!({"status":"ok","models":["route/model"],"model_metadata":[{"model":"route/model","supported_reasoning_efforts":["low","high"]}]});
+    let desktop = json!({"latestModel":"old","latestThreadSettings":{"model":"route/model"}});
+    assert!(validate_model_settings(&catalog, &desktop, &json!({"effort":"high"})).is_ok());
+    assert!(
+        validate_model_settings(
+            &catalog,
+            &desktop,
+            &json!({"model":"route/model","effort":"low"})
+        )
+        .is_ok()
+    );
+    assert!(validate_model_settings(&catalog, &desktop, &json!({"model":"removed"})).is_err());
+    assert!(validate_model_settings(&catalog, &desktop, &json!({"effort":"ultra"})).is_err());
+    assert!(
+        validate_model_settings(
+            &json!({"status":"failed"}),
+            &desktop,
+            &json!({"model":"route/model"})
+        )
+        .is_err()
+    );
+    let mut disabled = catalog;
+    disabled["clear_models"] = json!(true);
+    assert!(validate_model_settings(&disabled, &desktop, &json!({"model":"route/model"})).is_err());
+}
+
 async fn fixture() -> (Arc<Core>, String, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -87,6 +115,49 @@ async fn requires_pairing_rejects_cross_site_and_revokes_existing_sessions() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
+    task.abort();
+}
+
+#[tokio::test]
+async fn model_catalog_requires_pairing_and_handles_a_stopped_host() {
+    let (core, base, task) = fixture().await;
+    let endpoint = format!("{base}/remote/models");
+    let client = client();
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .header("origin", &base)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let cookie = pair(&core, &base).await;
+    assert_eq!(
+        client
+            .post(&endpoint)
+            .header("origin", "https://evil.example")
+            .header("cookie", &cookie)
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let response = client
+        .post(&endpoint)
+        .header("origin", &base)
+        .header("cookie", &cookie)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert!(core.actions.lock().await.is_empty());
     task.abort();
 }
 

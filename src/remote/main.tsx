@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { IconDeviceMobile, IconLogout, IconMessages, IconSettings } from "@tabler/icons-react";
+import { IconArrowLeft, IconDeviceMobile, IconLogout } from "@tabler/icons-react";
 import { App } from "../App";
 import { UiProvider } from "../UiProvider";
 import { codeyApiPath } from "../api";
@@ -45,6 +45,16 @@ function RemoteApp() {
     return () => window.removeEventListener("codey-remote-unauthorized", unauthorized);
   }, []);
 
+  useEffect(() => {
+    const viewport = window.visualViewport;
+    const resize = () => {
+      document.documentElement.style.setProperty("--remote-viewport-height", `${viewport?.height || window.innerHeight}px`);
+      document.documentElement.style.setProperty("--remote-viewport-top", `${viewport?.offsetTop || 0}px`);
+    };
+    resize(); viewport?.addEventListener("resize", resize); viewport?.addEventListener("scroll", resize);
+    return () => { viewport?.removeEventListener("resize", resize); viewport?.removeEventListener("scroll", resize); };
+  }, []);
+
   async function pair(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setError("");
     try { await remoteRequest("/remote/pair", { code: code.trim(), name: name.trim() }); setCode(""); setAuthenticated(true); }
@@ -60,21 +70,18 @@ function RemoteApp() {
       <label>设备名称<input autoComplete="off" maxLength={80} required value={name} onChange={event => setName(event.target.value)} /></label>
       <label>配对码<input type="password" autoComplete="off" spellCheck={false} required value={code} onChange={event => setCode(event.target.value)} placeholder="扫码后自动填写" /></label>
       <button className="remote-primary" disabled={busy || !name.trim() || !code.trim()}>{busy ? "正在连接…" : "配对并连接"}</button>
-      {error && <p className="remote-error" role="alert">{error}</p>}
+      {error && <p className="remote-client-error" role="alert">{error}</p>}
     </form>
   </main>;
 
-  return <div className="remote-shell">
-    <header className="remote-topbar"><strong>Codey <span>远程控制</span></strong><button aria-label="退出此设备" onClick={() => {
+  function logout() {
       void remoteRequest("/remote/logout", {}).then(() => { clearSubmissions(); setAuthenticated(false); }).catch(error => setError(String(error)));
-    }}><IconLogout size={18} /><span>退出</span></button></header>
-    <nav className="remote-tabs" aria-label="远程功能">
-      <button aria-current={tab === "workspace" ? "page" : undefined} onClick={() => setTab("workspace")}><IconMessages size={18} />Codex 工作区</button>
-      <button aria-current={tab === "panel" ? "page" : undefined} onClick={() => setTab("panel")}><IconSettings size={18} />Codey 控制面板</button>
-    </nav>
-    <div className="remote-workspace-container" hidden={tab !== "workspace"}><Workspace active={tab === "workspace"} onUnauthorized={() => setAuthenticated(false)} /></div>
+  }
+  return <div className="remote-shell">
+    {tab === "panel" && <header className="remote-topbar"><button aria-label="返回 Codex" onClick={() => setTab("workspace")}><IconArrowLeft size={18} /></button><strong>Codey 控制台</strong><button aria-label="退出此设备" onClick={logout}><IconLogout size={18} /></button></header>}
+    <div className="remote-codex-workspace-container" hidden={tab !== "workspace"}><Workspace active={tab === "workspace"} onUnauthorized={() => setAuthenticated(false)} onPanel={() => setTab("panel")} onLogout={logout} /></div>
     {tab === "panel" && <div className="remote-panel"><UiProvider><App /></UiProvider></div>}
-    {error && <p className="remote-error" role="alert">{error}</p>}
+    {error && <p className="remote-client-error" role="alert">{error}</p>}
   </div>;
 }
 

@@ -25,7 +25,7 @@ pub(super) fn projects(home: &Path) -> Result<Value, String> {
         .filter_map(|project| {
             let id = project["id"].as_str()?;
             let cwd = project["rootPaths"].as_array()?.first()?.as_str()?;
-            Some(json!({"id":id,"name":project["name"].as_str().unwrap_or(cwd),"cwd":cwd}))
+            Some(json!({"id":id,"name":project["name"].as_str().unwrap_or(cwd),"cwd":cwd,"rootPaths":project["rootPaths"]}))
         })
         .collect();
     Ok(json!(rows))

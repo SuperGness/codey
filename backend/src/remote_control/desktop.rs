@@ -345,23 +345,73 @@ pub(super) fn action_params(
             ))
         }
         "settings" => {
-            let model = args["model"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty() && s.len() <= 256)
-                .ok_or("模型名称无效")?;
-            let effort = args["effort"]
-                .as_str()
-                .filter(|s| {
-                    matches!(
-                        *s,
-                        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
-                    )
-                })
-                .ok_or("思考强度无效")?;
+            let mut settings = json!({});
+            if let Some(model) = args.get("model") {
+                let model = model
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty() && s.len() <= 512)
+                    .ok_or("模型名称无效")?;
+                settings["model"] = json!(model);
+            }
+            if let Some(effort) = args.get("effort") {
+                let effort = effort
+                    .as_str()
+                    .filter(|s| {
+                        matches!(
+                            *s,
+                            "none"
+                                | "minimal"
+                                | "low"
+                                | "medium"
+                                | "high"
+                                | "xhigh"
+                                | "max"
+                                | "ultra"
+                        )
+                    })
+                    .ok_or("思考强度无效")?;
+                settings["effort"] = json!(effort);
+            }
+            if let Some(mode) = args.get("permissionMode") {
+                // Same built-in permission profiles as the desktop composer.
+                // Apply only an explicit selection, leaving custom policies alone.
+                let (profile, approval, sandbox) = match mode.as_str() {
+                    Some("read-only") => (
+                        ":read-only",
+                        "on-request",
+                        json!({"type":"readOnly","networkAccess":false}),
+                    ),
+                    Some("auto") => {
+                        let cwd = state["cwd"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .ok_or("尚未取得会话工作目录")?;
+                        (
+                            ":workspace",
+                            "on-request",
+                            json!({"type":"workspaceWrite","writableRoots":[cwd],"networkAccess":false,"excludeTmpdirEnvVar":false,"excludeSlashTmp":false}),
+                        )
+                    }
+                    Some("full-access") => (
+                        ":danger-full-access",
+                        "never",
+                        json!({"type":"dangerFullAccess"}),
+                    ),
+                    _ => return Err("权限模式无效".into()),
+                };
+                settings["approvalPolicy"] = json!(approval);
+                settings["approvalsReviewer"] = json!("user");
+                settings["sandboxPolicy"] = sandbox;
+                settings["permissions"] = json!(profile);
+                settings["activePermissionProfile"] = json!({"id":profile,"extends":null});
+            }
+            if settings.as_object().is_none_or(|value| value.is_empty()) {
+                return Err("请选择要修改的会话设置".into());
+            }
             Ok((
                 "thread-follower-update-thread-settings",
                 2,
-                json!({"threadSettings":{"model":model,"effort":effort}}),
+                json!({"threadSettings":settings}),
             ))
         }
         "history" => Ok(("thread-follower-load-complete-history", 1, json!({}))),
@@ -543,6 +593,62 @@ mod tests {
         assert!(desktop.apply_event(event).unwrap());
         let patch = json!({"type":"broadcast","method":"thread-stream-state-changed","version":11,"sourceClientId":"owner","params":{"hostId":"local","conversationId":"t","change":{"type":"patches","revision":3,"baseRevision":2,"patches":[]}}});
         assert!(desktop.apply_event(patch).unwrap_err().contains("失步"));
+    }
+
+    #[test]
+    fn settings_are_partial_and_permissions_use_native_profiles() {
+        let state = json!({"id":"t","cwd":"E:/code/codey","latestThreadSettings":{"approvalPolicy":"custom","model":"keep"}});
+        let (_, version, model) = action_params(
+            &state,
+            "settings",
+            &json!({"model":"route/model","effort":"high"}),
+        )
+        .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(
+            model,
+            json!({"threadSettings":{"model":"route/model","effort":"high"}})
+        );
+        let (_, _, effort) = action_params(&state, "settings", &json!({"effort":"low"})).unwrap();
+        assert_eq!(effort, json!({"threadSettings":{"effort":"low"}}));
+        for (mode, profile, sandbox, approval) in [
+            ("read-only", ":read-only", "readOnly", "on-request"),
+            ("auto", ":workspace", "workspaceWrite", "on-request"),
+            (
+                "full-access",
+                ":danger-full-access",
+                "dangerFullAccess",
+                "never",
+            ),
+        ] {
+            let (method, _, payload) =
+                action_params(&state, "settings", &json!({"permissionMode":mode})).unwrap();
+            let settings = &payload["threadSettings"];
+            assert_eq!(method, "thread-follower-update-thread-settings");
+            assert_eq!(settings["permissions"], profile);
+            assert_eq!(settings["activePermissionProfile"]["id"], profile);
+            assert_eq!(settings["approvalPolicy"], approval);
+            assert_eq!(settings["sandboxPolicy"]["type"], sandbox);
+            assert!(settings.get("model").is_none());
+            assert!(payload.get("activeTurnId").is_none());
+            if mode == "auto" {
+                assert_eq!(
+                    settings["sandboxPolicy"]["writableRoots"],
+                    json!(["E:/code/codey"])
+                );
+            }
+        }
+        for args in [
+            json!({}),
+            json!({"model":""}),
+            json!({"effort":"invalid"}),
+            json!({"permissionMode":"custom"}),
+            json!({"model":null}),
+            json!({"permissionMode":true}),
+        ] {
+            assert!(action_params(&state, "settings", &args).is_err());
+        }
+        assert!(action_params(&json!({}), "settings", &json!({"permissionMode":"auto"})).is_err());
     }
 
     #[test]

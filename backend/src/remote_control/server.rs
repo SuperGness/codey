@@ -35,7 +35,7 @@ type Body = UnsyncBoxBody<Bytes, Infallible>;
 type Reply = Response<Body>;
 const MAX_BODY: usize = 1024 * 1024;
 const COOKIE: &str = "codey_remote";
-const HTML: &str = "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover\"><meta name=\"color-scheme\" content=\"light\"><title>Codey 远程控制</title><link rel=\"stylesheet\" href=\"/remote.css\"></head><body><div id=\"root\"></div><script src=\"/remote.js\" defer></script></body></html>";
+const HTML: &str = "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content\"><meta name=\"color-scheme\" content=\"light dark\"><title>Codex · Codey 远程控制</title><link rel=\"stylesheet\" href=\"/remote.css\"></head><body><div id=\"root\"></div><script src=\"/remote.js\" defer></script></body></html>";
 
 pub(super) struct Core {
     pub auth: Mutex<Auth>,
@@ -360,6 +360,14 @@ async fn route(core: Arc<Core>, mut request: Request<Incoming>) -> Reply {
             .await
             .map_err(|_| "读取项目任务失败".to_string())
             .and_then(std::convert::identity),
+            "/remote/models" => {
+                let Some(state) = core.state.upgrade() else {
+                    return failure(StatusCode::SERVICE_UNAVAILABLE, "Codey 正在退出");
+                };
+                Ok(state
+                    .bridge_request("/codex-model-catalog".into(), json!({}))
+                    .await)
+            }
             "/remote/action" | "/remote/create" => action_once(&core, &token, &path, &args).await,
             _ if path.starts_with("/api/") => {
                 let command = path.trim_start_matches("/api/");
@@ -525,14 +533,14 @@ async fn action_once(core: &Core, token: &str, path: &str, args: &Value) -> Resu
         )
         .await
     } else {
-        perform_action(args).await
+        perform_action(core, args).await
     };
     let value = result.unwrap_or_else(|error| json!({"status":"failed","message":error}));
     ledger.insert(id.to_string(), (digest, value.clone()));
     Ok(value)
 }
 
-async fn perform_action(args: &Value) -> Result<Value, String> {
+async fn perform_action(core: &Core, args: &Value) -> Result<Value, String> {
     let thread = args["threadId"].as_str().ok_or("缺少会话标识")?;
     super::desktop::validate_thread(thread)?;
     let action = args["action"].as_str().ok_or("缺少会话操作")?;
@@ -543,7 +551,44 @@ async fn perform_action(args: &Value) -> Result<Value, String> {
         return Ok(json!({"status":"ok"}));
     }
     let mut desktop = Desktop::follow(thread).await?;
+    if action == "settings" && (args.get("model").is_some() || args.get("effort").is_some()) {
+        let state = core.state.upgrade().ok_or("Codey 正在退出")?;
+        let catalog = state
+            .bridge_request("/codex-model-catalog".into(), json!({}))
+            .await;
+        validate_model_settings(&catalog, &desktop.state, args)?;
+    }
     desktop.action(action, args).await
+}
+
+fn validate_model_settings(catalog: &Value, desktop: &Value, args: &Value) -> Result<(), String> {
+    if catalog["status"] != "ok" || catalog["clear_models"] == true {
+        return Err("模型目录暂不可用，请刷新模型列表".into());
+    }
+    let model = args.get("model").unwrap_or_else(|| {
+        desktop["latestThreadSettings"]
+            .get("model")
+            .unwrap_or(&desktop["latestModel"])
+    });
+    if !catalog["models"]
+        .as_array()
+        .is_some_and(|models| models.contains(model))
+    {
+        return Err("该模型已不可用，请刷新模型列表后重新选择".into());
+    }
+    if let Some(effort) = args.get("effort") {
+        let supported = catalog["model_metadata"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|entry| entry["model"] == *model)
+            .and_then(|entry| entry["supported_reasoning_efforts"].as_array())
+            .is_some_and(|values| values.contains(effort));
+        if !supported {
+            return Err("该模型不支持此思考程度，请刷新模型列表".into());
+        }
+    }
+    Ok(())
 }
 
 fn redact_panel_config(mut value: Value) -> Value {

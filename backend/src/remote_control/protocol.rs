@@ -116,7 +116,7 @@ fn text_content(content: &Value) -> String {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|part| part["text"].as_str())
+        .filter_map(|part| part.as_str().or(part["text"].as_str()))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -145,16 +145,7 @@ fn item_view(item: &Value) -> Value {
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
-        "reasoning" => (
-            "activity",
-            item["summary"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        ),
+        "reasoning" => ("activity", text_content(&item["summary"])),
         "planImplementation" => ("assistant", text_content(&item["planContent"])),
         "error" => ("error", text_content(&item["message"])),
         _ => (
@@ -162,7 +153,49 @@ fn item_view(item: &Value) -> Value {
             serde_json::to_string_pretty(item).unwrap_or_default(),
         ),
     };
-    json!({"id": item["id"], "kind": kind, "role": role, "text": text, "status": item["status"]})
+    let content = item
+        .get("content")
+        .or(item.get("input"))
+        .unwrap_or(&Value::Null);
+    let attachments: Vec<Value> = content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|part| match part["type"].as_str()? {
+            "image" => Some(json!({"name":"图片","url":part["url"]})),
+            "localImage" | "file" => {
+                let path = part["path"].as_str().unwrap_or("附件");
+                Some(json!({"name":path.rsplit(['/', '\\']).next().unwrap_or("附件")}))
+            }
+            _ => None,
+        })
+        .collect();
+    json!({"id": item["id"], "kind": kind, "role": role, "text": text, "status": item["status"], "attachments":attachments})
+}
+
+fn permission_mode(settings: &Value) -> &'static str {
+    let profile = settings["activePermissionProfile"]["id"]
+        .as_str()
+        .or(settings["permissions"].as_str());
+    if settings["approvalsReviewer"]
+        .as_str()
+        .is_some_and(|value| value != "user")
+    {
+        return "custom";
+    }
+    match (
+        profile,
+        settings["sandboxPolicy"]["type"].as_str(),
+        settings["approvalPolicy"].as_str(),
+    ) {
+        (Some(":read-only"), _, Some("on-request"))
+        | (None, Some("readOnly"), Some("on-request")) => "read-only",
+        (Some(":workspace"), _, Some("on-request"))
+        | (None, Some("workspaceWrite"), Some("on-request")) => "auto",
+        (Some(":danger-full-access"), _, Some("never"))
+        | (None, Some("dangerFullAccess"), Some("never")) => "full-access",
+        _ => "custom",
+    }
 }
 
 pub(super) fn request_supported(request: &Value) -> bool {
@@ -227,7 +260,8 @@ pub(super) fn view(state: &Value) -> Value {
             let opening = text_content(&turn["params"]["input"]);
             if !opening.is_empty() { messages.insert(0, json!({"role":"user", "kind":"userMessage", "text":opening})); }
         }
-        json!({"id":turn["turnId"], "status":turn["status"], "messages":messages, "error":turn["error"]})
+        json!({"id":turn["turnId"], "status":turn["status"], "messages":messages, "error":turn["error"],
+            "startedAt":turn["turnStartedAtMs"], "completedAt":turn["turnCompletedAtMs"]})
     }).collect::<Vec<_>>();
     let mut requests: Vec<Value> = state["requests"].as_array().into_iter().flatten().map(|request| {
         let supported = request_supported(request);
@@ -235,8 +269,10 @@ pub(super) fn view(state: &Value) -> Value {
             "params": if supported { request["params"].clone() } else { json!({"message":"请在电脑端处理此类请求"}) }})
     }).collect();
     requests.extend(async_requests(state));
-    json!({"id":state["id"], "title":state["title"], "cwd":state["cwd"], "model":state["latestModel"],
-        "effort":state["latestReasoningEffort"].as_str().or(state["latestThreadSettings"]["effort"].as_str()),
+    json!({"id":state["id"], "title":state["title"], "cwd":state["cwd"],
+        "model":state["latestThreadSettings"]["model"].as_str().or(state["latestModel"].as_str()),
+        "effort":state["latestThreadSettings"]["effort"].as_str().or(state["latestReasoningEffort"].as_str()),
+        "permissionMode":permission_mode(&state["latestThreadSettings"]),
         "status":state["threadRuntimeStatus"]["type"], "turns":turns, "requests":requests,
         "historyComplete":state["turnHistory"]["history"]["isComplete"].as_bool().or(state["turnsPagination"]["hasLoadedOldest"].as_bool()).unwrap_or(true)})
 }
@@ -244,6 +280,56 @@ pub(super) fn view(state: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_exposes_current_composer_settings_and_preserves_rich_content() {
+        let state = json!({"id":"t","latestModel":"old","latestReasoningEffort":"low",
+        "latestThreadSettings":{"model":"new","effort":"high","permissions":":workspace","approvalPolicy":"on-request","approvalsReviewer":"user"},
+        "turns":[{"turnId":"one","turnStartedAtMs":1000,"turnCompletedAtMs":4000,"items":[
+            {"type":"userMessage","content":[{"type":"text","text":"查看附件"},{"type":"localImage","path":"C:\\private\\image.png"}]},
+            {"type":"reasoning","summary":["第一步",{"text":"第二步"}]},
+            {"type":"agentMessage","text":"**完成**\n\n```js\nconst x = 1;\n```"}
+        ]}]});
+        let result = view(&state);
+        assert_eq!(result["model"], "new");
+        assert_eq!(result["effort"], "high");
+        assert_eq!(result["permissionMode"], "auto");
+        assert_eq!(result["turns"][0]["completedAt"], 4000);
+        assert_eq!(
+            result["turns"][0]["messages"][0]["attachments"][0],
+            json!({"name":"image.png"})
+        );
+        assert_eq!(result["turns"][0]["messages"][1]["text"], "第一步\n第二步");
+        assert!(
+            result["turns"][0]["messages"][2]["text"]
+                .as_str()
+                .unwrap()
+                .contains("```js")
+        );
+        assert!(!result.to_string().contains("private"));
+        assert_eq!(
+            permission_mode(
+                &json!({"permissions":"company-policy","sandboxPolicy":{"type":"dangerFullAccess"},"approvalPolicy":"never"})
+            ),
+            "custom"
+        );
+        assert_eq!(
+            permission_mode(
+                &json!({"sandboxPolicy":{"type":"readOnly"},"approvalPolicy":"on-request"})
+            ),
+            "read-only"
+        );
+        assert_eq!(
+            permission_mode(&json!({"permissions":":danger-full-access","approvalPolicy":"never"})),
+            "full-access"
+        );
+        assert_eq!(
+            permission_mode(
+                &json!({"permissions":":workspace","approvalPolicy":"on-request","approvalsReviewer":"guardian_subagent"})
+            ),
+            "custom"
+        );
+    }
 
     #[test]
     fn patches_support_native_paths_and_json_pointers() {

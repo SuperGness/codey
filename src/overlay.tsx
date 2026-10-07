@@ -75,8 +75,8 @@ function RequestLogPage() {
     };
   }, []);
 
-  if (error) return <main className="p-6 text-sm text-[var(--codey-red,#b91c1c)]">{error}</main>;
-  if (!catalog) return <main className="p-6 text-sm text-[var(--codey-muted,#6e6e73)]">正在加载请求日志…</main>;
+  if (error) return <main className="p-6 text-sm text-(--codey-red,#b91c1c)">{error}</main>;
+  if (!catalog) return <main className="p-6 text-sm text-(--codey-muted,#6e6e73)">正在加载请求日志…</main>;
   return (
     <RequestLogDialog
       catalog={catalog}
