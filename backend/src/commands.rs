@@ -116,6 +116,7 @@ const STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_VISIBLE_SESSION_TIMESTAMPS: usize = 200;
 
 pub struct AppState {
+    pub(crate) remote_control: crate::remote_control::RemoteControl,
     pub store: ConfigStore,
     pub config: RwLock<CodeyConfig>,
     config_write_lock: Mutex<()>,
@@ -247,6 +248,7 @@ impl Default for AppState {
         let persisted_waiting_notifications = initial_waiting_notifications(&store, &[]);
         let (shutdown_reason, _) = watch::channel(None);
         Self {
+            remote_control: crate::remote_control::RemoteControl::default(),
             store,
             config: RwLock::new(config),
             config_write_lock: Mutex::new(()),
@@ -1069,6 +1071,11 @@ async fn resolve_session_name_cached(
 
 pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Value {
     let result = match command {
+        "remote_control_status"
+        | "start_remote_control"
+        | "stop_remote_control"
+        | "pair_remote_control"
+        | "revoke_remote_device" => crate::remote_control::invoke(state, command, &args).await,
         "load_codey_config" => load_codey_config(state).await,
         "save_codey_config" => match codey_config_save_input(&args) {
             Ok(input) => save_codey_config_input(state, input).await,

@@ -1,6 +1,7 @@
 import { useId, useState, type ReactNode, type RefObject } from "react";
 import {
   IconBook2,
+  IconDeviceMobile,
   IconLayoutDashboard,
   IconPlugConnected,
   IconRoute,
@@ -14,6 +15,7 @@ const SETTINGS_PAGES = [
   { id: "models", title: "线路与模型", icon: IconRoute, group: "核心配置" },
   { id: "prompt", title: "提示词优化", icon: IconSparkles, group: "核心配置" },
   { id: "subagents", title: "子代理优化", icon: IconUsersGroup, group: "核心配置" },
+  { id: "remote", title: "远程控制", icon: IconDeviceMobile, group: "核心配置" },
   { id: "plugins", title: "Codey 插件", icon: IconPlugConnected, group: "扩展生态" },
   { id: "mcp", title: "MCP 管理", icon: IconServer, group: "扩展生态" },
   { id: "skills", title: "Skill 管理", icon: IconBook2, group: "扩展生态" },

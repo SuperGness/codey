@@ -1,4 +1,9 @@
 export const CODEY_API_COMMANDS = [
+  "remote_control_status",
+  "start_remote_control",
+  "stop_remote_control",
+  "pair_remote_control",
+  "revoke_remote_device",
   "load_codey_config",
   "save_codey_config",
   "sync_current_provider",
@@ -79,6 +84,7 @@ export function codeyApiPath(command: string): `/api/${CodeyApiCommand}` {
 
 declare global {
   interface Window {
+    __codeyRemoteClient?: boolean;
     __codeyInvokeApi?: (
       command: CodeyApiCommand,
       args: Record<string, unknown>,

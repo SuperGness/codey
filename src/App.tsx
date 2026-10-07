@@ -39,6 +39,7 @@ import { PromptOptimizationCard } from "./PromptOptimizationCard";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { SettingsPageHeader } from "./SettingsPageHeader";
 import { SettingsLayout } from "./SettingsLayout";
+import { RemoteControlPanel } from "./RemoteControlPanel";
 import { useModelSelection } from "./useModelSelection";
 import { useRuntimeStatus } from "./useRuntimeStatus";
 import { useAppUpdates } from "./useAppUpdates";
@@ -1667,6 +1668,7 @@ export function App({
               onSubagentOptimizationChange={handleSubagentOptimizationChange}
             />
           ),
+          remote: (active) => <RemoteControlPanel active={active} />,
           plugins: <CodeyPluginsSection container={popupContainer} />,
           mcp: (active) => (
             <CodexExtensionsPage kind="mcp" active={active} request={extensionRequest} container={popupContainer} />

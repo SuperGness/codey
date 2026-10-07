@@ -16,6 +16,16 @@ const outputs = new Map(
     asset.type === "chunk" ? asset.code : asset.source,
   ])),
 );
+const remote = await build({
+  root,
+  configFile: join(root, "vite.remote.config.ts"),
+  build: { write: false },
+});
+for (const bundle of [remote].flat()) {
+  for (const asset of bundle.output) {
+    outputs.set(asset.fileName, asset.type === "chunk" ? asset.code : asset.source);
+  }
+}
 
 // public/ 下的注入脚本以源码形态维护，但会被逐字节嵌入 Codey 二进制并在
 // Codex 渲染进程内求值。这里统一压缩到 dist-overlay/inject/，cdp.rs 只嵌入

@@ -40,6 +40,7 @@ mod process_cleanup;
 mod process_tree;
 mod prompt_optimization;
 mod provider_models;
+mod remote_control;
 mod route_request_log;
 mod session_index_cleanup;
 mod session_metadata;
@@ -272,6 +273,7 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
     };
 
     let shutdown_started_at = std::time::SystemTime::now();
+    state.remote_control.shutdown().await;
     let cleanup = stop_runtime_with_retry(&state).await;
     if let Err(error) = &cleanup {
         error_log::record_failure(
