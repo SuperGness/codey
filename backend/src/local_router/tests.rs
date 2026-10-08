@@ -10961,6 +10961,13 @@ async fn router_proxies_image_generation_to_the_default_openai_route() {
         .unwrap();
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get("x-codex-turn-state")
+            .and_then(|value| value.to_str().ok()),
+        Some("sticky-token")
+    );
     assert_eq!(response.json::<Value>().await.unwrap()["created"], 1);
     let (path, authorization, body) = upstream_task.await.unwrap();
     assert_eq!(path, "/v1/images/generations");
@@ -11011,16 +11018,18 @@ async fn router_proxies_image_generation_to_the_default_openai_route() {
     assert_eq!(image.status, "succeeded");
     assert_eq!(image.model.as_deref(), Some("gpt-image-2"));
     assert_eq!(image.total_tokens, None);
-    // HTTP 上游路径要同时记录请求头与响应头；凭据脱敏，粘性路由令牌保留。
+    // HTTP 上游路径同时记录请求头与响应头；凭据和粘性路由令牌只在日志中脱敏。
     let request_headers = image.upstream_request_headers.as_deref().unwrap();
     assert!(request_headers.contains("authorization: [REDACTED]"));
     assert!(request_headers.contains("content-type: application/json"));
     let response_headers = image.upstream_response_headers.as_deref().unwrap();
     assert!(
-        response_headers.contains("x-codex-turn-state: sticky-token"),
+        response_headers.contains("x-codex-turn-state: [REDACTED]"),
         "recorded response headers: {response_headers}"
     );
     assert!(response_headers.contains("set-cookie: [REDACTED]"));
+    assert!(!response_headers.contains("sticky-token"));
+    assert!(!response_headers.contains("private-value"));
     let rejected = page
         .items
         .iter()

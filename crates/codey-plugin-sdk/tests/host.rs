@@ -4,6 +4,8 @@
 #[allow(dead_code)]
 #[path = "../../../backend/src/fs_util.rs"]
 mod fs_util;
+// 独立宿主测试不调用桌面路由入口；未使用代码检查仍由后端 crate 覆盖。
+#[allow(dead_code)]
 #[path = "../../../backend/src/codey_plugins/mod.rs"]
 mod host;
 
