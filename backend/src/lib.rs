@@ -25,6 +25,7 @@ mod local_router;
 mod maintenance_lock;
 mod message_delete;
 mod model_catalog;
+mod model_context;
 mod model_id;
 mod model_list;
 mod native_update_ui;

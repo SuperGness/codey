@@ -215,7 +215,7 @@ pub(crate) fn parse_route_descriptor(value: Value) -> Result<PluginRouteSpec, St
             .find(|candidate| candidate.eq_ignore_ascii_case(&model))
             .ok_or_else(|| format!("插件线路上下文声明的模型不在模型列表中：{model}"))?
             .clone();
-        crate::config::ModelContextConfig {
+        crate::model_context::ModelContextConfig {
             context_window_tokens: caps.context_window,
             auto_compact_token_limit: Some(caps.auto_compact_token_limit),
             reserve_output_tokens: caps.reserve_output_tokens,
