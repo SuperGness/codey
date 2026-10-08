@@ -6,7 +6,21 @@ async page => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.emulateMedia({ colorScheme: 'dark' });
   const assert = (ok, message) => { if (!ok) throw new Error(message); };
-  const ready = () => page.waitForFunction(() => { const select = document.querySelector('select[aria-label="模型"]'); return select && !select.disabled; });
+  const ready = async () => {
+    // Let React finish the settings response and reconnect effect before checking the new socket.
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.waitForFunction(() => { const select = document.querySelector('select[aria-label="模型"]'); return select && !select.disabled; });
+  };
+  const advanced = async () => {
+    await page.getByRole('button', { name: '调整模型与思考强度' }).click();
+    await page.getByRole('button', { name: /^高级设置：/ }).click();
+    await page.getByRole('dialog', { name: '高级设置' }).waitFor();
+  };
+  const chooseSettings = async (name, value) => {
+    await advanced();
+    await page.getByLabel(name, { exact: true }).selectOption(value); await ready();
+    await page.getByRole('button', { name: '关闭高级设置' }).click();
+  };
   const openFirst = async () => { await page.getByRole('button', { name: /重新设计界面/ }).click(); await ready(); };
   const layout = async () => {
     await page.waitForFunction(() => Math.abs(document.querySelector('.remote-shell').getBoundingClientRect().height - (window.visualViewport?.height || innerHeight)) < 1);
@@ -31,17 +45,47 @@ async page => {
   assert(await page.locator('.hljs-keyword').count() > 0, 'Code highlighting missing');
   assert(await page.locator('.remote-work-log[open]').count() === 0, 'Work log should start folded');
   await page.screenshot({ path: 'output/playwright/remote-mobile-chat-dark.png' });
-  await page.getByLabel('思考程度', { exact: true }).selectOption('ultra'); await ready();
+  assert(await page.getByRole('img', { name: '快速模式已启用' }).count() === 0, 'Standard mode displays lightning');
+  const beforeSlider = await page.evaluate(() => window.remoteFixture.actions.length);
+  await page.getByRole('button', { name: '调整模型与思考强度' }).click();
+  const slider = page.getByRole('slider', { name: '思考强度' });
+  assert(await slider.getAttribute('aria-valuetext') === '高', 'Slider did not show the current effort');
+  const bounds = await slider.boundingBox();
+  await page.mouse.move(bounds.x + 22, bounds.y + bounds.height / 2); await page.mouse.down();
+  await page.mouse.move(bounds.x + bounds.width - 22, bounds.y + bounds.height / 2, { steps: 8 });
+  assert(await slider.getAttribute('aria-valuetext') === 'Ultra', 'Dragging did not preview the effort');
+  assert(await page.evaluate(() => window.remoteFixture.actions.length) === beforeSlider, 'Dragging sent settings before release');
+  await page.mouse.up(); await ready();
+  assert(await page.getByLabel('思考程度', { exact: true }).inputValue() === 'ultra', 'Slider did not commit on release');
+  assert(await page.evaluate(() => window.remoteFixture.actions.length) === beforeSlider + 1, 'Slider submitted more than once');
+  await slider.focus(); await page.keyboard.press('Home'); await ready();
+  assert(await page.getByLabel('思考程度', { exact: true }).inputValue() === 'low', 'Keyboard cannot adjust the slider');
+  await page.keyboard.press('Escape');
+  assert(await page.getByRole('button', { name: '调整模型与思考强度' }).evaluate(element => element === document.activeElement), 'Popover did not restore focus');
+  const beforeAttachments = await page.evaluate(() => window.remoteFixture.actions.length);
+  for (const name of ['相机', '照片']) {
+    await page.getByRole('button', { name: '添加附件', exact: true }).click();
+    await page.getByRole('button', { name, exact: true }).click();
+    await page.getByText(`${name}功能暂未开放`, { exact: true }).waitFor();
+  }
+  assert(await page.evaluate(() => window.remoteFixture.actions.length) === beforeAttachments, 'Attachment placeholders sent an action');
+  assert(await page.locator('input[type="file"]').count() === 0, 'Placeholder requested local files');
+  await advanced(); await page.keyboard.press('Escape');
+  assert(await page.getByRole('dialog').count() === 0, 'Escape did not close the advanced sheet');
+  assert(await page.getByRole('button', { name: '调整模型与思考强度' }).evaluate(element => element === document.activeElement), 'Sheet did not restore focus');
+  await chooseSettings('思考程度', 'ultra'); await ready();
   assert(await page.getByLabel('思考程度', { exact: true }).inputValue() === 'ultra', 'Effort did not synchronize');
-  await page.getByLabel('模型', { exact: true }).selectOption('route-demo/gpt-6-sol'); await ready();
+  await chooseSettings('模型', 'route-demo/gpt-6-sol'); await ready();
   assert(await page.getByLabel('思考程度', { exact: true }).inputValue() === 'low', 'Unsupported effort not replaced with model default');
   assert(await page.getByLabel('思考程度', { exact: true }).locator('option').count() === 2, 'Unsupported effort shown');
   await page.getByLabel('权限', { exact: true }).selectOption('full-access'); await ready();
   assert(await page.getByLabel('权限', { exact: true }).inputValue() === 'full-access', 'Permission did not synchronize');
-  await page.getByLabel('速度模式', { exact: true }).selectOption('priority'); await ready();
+  await chooseSettings('速度模式', 'priority'); await ready();
   assert(await page.getByLabel('速度模式', { exact: true }).inputValue() === 'priority', 'Fast did not synchronize');
-  await page.getByLabel('速度模式', { exact: true }).selectOption('default'); await ready();
+  assert(await page.getByRole('img', { name: '快速模式已启用' }).count() === 1, 'Fast did not display lightning');
+  await chooseSettings('速度模式', 'default'); await ready();
   assert(await page.getByLabel('速度模式', { exact: true }).inputValue() === 'default', 'Fast could not be disabled');
+  assert(await page.getByRole('img', { name: '快速模式已启用' }).count() === 0, 'Disabled Fast retained lightning');
   const input = page.getByLabel('发送给 Codex 的指令');
   await input.fill('保留这份草稿');
   await page.getByRole('button', { name: '返回会话列表' }).click();
@@ -90,9 +134,9 @@ async page => {
   assert(await page.getByLabel('思考程度', { exact: true }).inputValue() === 'ultra', 'Desktop default effort was not selected');
   assert(await page.getByLabel('速度模式', { exact: true }).inputValue() === 'priority', 'Desktop default speed was not selected');
   await input.fill('手机端新建验证');
-  await page.getByLabel('模型', { exact: true }).selectOption('route-demo/gpt-6-sol');
+  await chooseSettings('模型', 'route-demo/gpt-6-sol');
   await page.getByLabel('权限', { exact: true }).selectOption('read-only');
-  await page.getByLabel('速度模式', { exact: true }).selectOption('default');
+  await chooseSettings('速度模式', 'default');
   await page.getByLabel('项目', { exact: true }).selectOption('codey');
   assert(await input.inputValue() === '', 'Draft leaked into another project');
   await page.getByLabel('项目', { exact: true }).selectOption('proxy');

@@ -115,10 +115,42 @@ test("conversation retains user messages and folds tool output with a readable d
   assert.match(html, /检查<strong>通过<\/strong>/);
 });
 
-test("composer exposes native selectors and does not offer unsupported effort values", () => {
-  const html = render(Composer, { draft: "", onDraft() {}, view: { model: "route/model", effort: "high", serviceTier: "priority", permissionMode: "auto", turns: [] }, models: [{ id: "route/model", label: "My model", route: "My route", efforts: ["low", "high"], defaultEffort: "low" }], connected: true, busy: false, uncertain: false, onSend() {}, onStop() {}, onSettings() {}, catalogError: "", onReloadModels() {} });
+const composerProps = { draft: "", onDraft() {}, view: { model: "route/model", effort: "high", serviceTier: "priority", permissionMode: "auto", turns: [] }, models: [{ id: "route/model", label: "My model", route: "My route", efforts: ["low", "high"], defaultEffort: "low" }], connected: true, busy: false, uncertain: false, onSend() {}, onStop() {}, onSettings() {}, catalogError: "", onReloadModels() {} };
+
+test("composer keeps supported native selectors inside a closed advanced sheet", () => {
+  const html = render(Composer, composerProps);
   assert.match(html, /aria-label="权限"/); assert.match(html, /aria-label="模型"/); assert.match(html, /aria-label="思考程度"/);
   assert.match(html, /<optgroup label="My route">/); assert.match(html, /value="high" selected=""/);
-  assert.doesNotMatch(html, /value="ultra"/); assert.match(html, /aria-label="发送消息" disabled=""/);
-  assert.match(html, /aria-label="速度模式"/); assert.match(html, /value="priority" selected="">Fast/);
+  assert.doesNotMatch(html, /value="ultra"/); assert.match(html, /aria-label="语音对话"/);
+  assert.match(html, /aria-label="速度模式"/); assert.match(html, /value="priority" selected="">快速/);
+  assert.match(html, /<dialog[^>]+aria-label="高级设置"/); assert.doesNotMatch(html, /<dialog[^>]+\bopen=/);
+  assert.match(html, /aria-label="添加附件" aria-expanded="false"/);
+  assert.match(html, /placeholder="向 Codex 提问"/);
+});
+
+test("lightning is present only for the explicit Fast service tier", () => {
+  assert.match(render(Composer, composerProps), /aria-label="快速模式已启用"/);
+  for (const serviceTier of ["default", null, undefined, "flex"]) {
+    assert.doesNotMatch(render(Composer, { ...composerProps, view: { ...composerProps.view, serviceTier } }), /aria-label="快速模式已启用"/);
+  }
+});
+
+test("composer preserves send, steer and stop controls with disconnection and uncertain outcomes", () => {
+  const props = { ...composerProps, draft: "继续工作" };
+  assert.match(render(Composer, props), /aria-label="发送消息"><svg/);
+  for (const state of [{ connected: false }, { busy: true }, { uncertain: true }]) {
+    assert.match(render(Composer, { ...props, ...state }), /aria-label="发送消息" disabled=""/);
+  }
+  const active = { ...props, view: { ...props.view, turns: [{ status: "inProgress" }] } };
+  assert.match(render(Composer, active), /aria-label="停止任务"/);
+  assert.match(render(Composer, active), /aria-label="补充指令"/);
+  assert.doesNotMatch(render(Composer, active), /aria-label="语音对话"/);
+});
+
+test("unavailable catalog keeps desktop selections visible and prevents unsupported changes", () => {
+  const html = render(Composer, { ...composerProps, models: [], catalogError: "模型列表暂时无法加载" });
+  assert.match(html, /aria-label="模型" disabled=""/);
+  assert.match(html, /aria-label="思考程度" disabled=""/);
+  assert.match(html, /value="route\/model" disabled="" selected=""/);
+  assert.match(html, /模型列表暂时无法加载/); assert.match(html, />重试<\/button>/);
 });

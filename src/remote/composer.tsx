@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef, type FormEvent } from "react";
-import { IconArrowUp, IconBolt, IconBrain, IconChevronDown, IconCpu, IconPlayerStop, IconShield, IconShieldExclamation } from "@tabler/icons-react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { IconArrowUp, IconBoltFilled, IconBrandGooglePodcasts, IconBrandSpeedtest, IconCamera, IconChevronRight, IconExclamationMark, IconMicrophone, IconPhoto, IconPlayerStopFilled, IconPlus, IconSelector, IconShield } from "@tabler/icons-react";
 import { effortLabels, permissionLabels, type ModelOption, type View, type ThreadSettings } from "./workspace-data";
 
 export function Composer({ draft, onDraft, view, models, connected, busy, uncertain, onSend, onStop, onSettings, catalogError, onReloadModels }: {
@@ -8,34 +8,114 @@ export function Composer({ draft, onDraft, view, models, connected, busy, uncert
   onStop: () => void; onSettings: (settings: ThreadSettings) => void; catalogError: string; onReloadModels: () => void;
 }) {
   const input = useRef<HTMLTextAreaElement>(null);
+  const dock = useRef<HTMLDivElement>(null);
+  const gauge = useRef<HTMLButtonElement>(null);
+  const add = useRef<HTMLButtonElement>(null);
+  const sheet = useRef<HTMLDialogElement>(null);
+  const swipeStart = useRef<number | null>(null);
+  const [panel, setPanel] = useState<"power" | "attachments" | null>(null);
+  const [advanced, setAdvanced] = useState(false);
+  // Native selects may match :focus-visible after a click; only Tab navigation needs a row outline.
+  const [keyboardNavigation, setKeyboardNavigation] = useState(false);
+  const [notice, setNotice] = useState("");
+  const id = useId();
   useLayoutEffect(() => { if (input.current) { input.current.style.height = "auto"; input.current.style.height = `${Math.min(input.current.scrollHeight, 180)}px`; } }, [draft]);
+  useEffect(() => {
+    if (!panel) return;
+    dock.current?.querySelector<HTMLButtonElement>(panel === "power" ? ".remote-power-model" : ".remote-attachment-popover button")?.focus({ preventScroll: true });
+    const dismiss = (event: PointerEvent) => { if (!dock.current?.contains(event.target as Node)) setPanel(null); };
+    const blur = (event: FocusEvent) => { if (!dock.current?.contains(event.target as Node)) setPanel(null); };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setPanel(null); (panel === "power" ? gauge : add).current?.focus({ preventScroll: true });
+    };
+    document.addEventListener("pointerdown", dismiss); document.addEventListener("keydown", escape); document.addEventListener("focusin", blur);
+    return () => { document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", escape); document.removeEventListener("focusin", blur); };
+  }, [panel]);
+  useEffect(() => {
+    if (advanced) sheet.current?.showModal();
+    else if (sheet.current?.open) { sheet.current.close(); gauge.current?.focus({ preventScroll: true }); }
+  }, [advanced]);
   const active = view?.turns.some(turn => turn.status === "inProgress");
   const selected = models.find(model => model.id === view?.model);
+  const modelName = selected?.label || view?.model || "选择模型";
+  const efforts = Object.keys(effortLabels).filter(effort => selected?.efforts.includes(effort));
   const routes = [...new Set(models.map(model => model.route))];
   const disabled = busy || !connected;
   const permission = view?.permissionMode || "custom";
   const tier = view?.serviceTier || "default";
-  return <div className="remote-composer-dock">
+  function togglePanel(next: "power" | "attachments") { setNotice(""); setPanel(current => current === next ? null : next); }
+  function placeholder(name: string) { if (panel === "attachments") add.current?.focus({ preventScroll: true }); setPanel(null); setNotice(`${name}功能暂未开放`); }
+  return <div className="remote-composer-dock" ref={dock}>
     {catalogError && <div className="remote-catalog-error" role="status">{catalogError}<button type="button" onClick={onReloadModels} disabled={busy}>重试</button></div>}
-    <form className="remote-composer" onSubmit={onSend}>
-      <textarea ref={input} aria-label="发送给 Codex 的指令" placeholder={active ? "补充当前任务的指令…" : "向 Codex 提问，或描述一个任务"} value={draft} onChange={event => onDraft(event.target.value)} rows={2} maxLength={100000} onKeyDown={event => {
+    {panel === "power" && <section id={`${id}-power`} className="remote-power-popover" aria-label="模型与思考强度">
+      <EffortControl modelName={modelName} efforts={efforts} effort={view?.effort || ""} disabled={disabled} onChange={effort => onSettings({ effort })} onAdvanced={() => { setPanel(null); setKeyboardNavigation(false); setAdvanced(true); }} />
+    </section>}
+    {panel === "attachments" && <section id={`${id}-attachments`} className="remote-attachment-popover" aria-label="添加附件">
+      <button type="button" onClick={() => placeholder("相机")}><span><IconCamera size={28} stroke={1.8} /></span>相机</button>
+      <button type="button" onClick={() => placeholder("照片")}><span><IconPhoto size={28} stroke={1.8} /></span>照片</button>
+    </section>}
+    <form className="remote-composer" onSubmit={event => { setPanel(null); setNotice(""); onSend(event); }}>
+      <textarea ref={input} aria-label="发送给 Codex 的指令" placeholder={active ? "补充当前任务的指令…" : "向 Codex 提问"} value={draft} onFocus={() => setPanel(null)} onChange={event => { onDraft(event.target.value); setNotice(""); }} rows={1} maxLength={100000} onKeyDown={event => {
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing && window.matchMedia("(pointer: fine)").matches) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); }
       }} />
       <div className="remote-composer-toolbar">
-        <div className="remote-composer-settings">
-          <label className={`remote-picker remote-permission-picker${permission === "full-access" ? " is-full-access" : ""}`} title="权限设置">{permission === "full-access" ? <IconShieldExclamation size={17} /> : <IconShield size={17} />}<span>{permissionLabels[permission] || "自定义权限"}</span><IconChevronDown size={12} /><select aria-label="权限" value={permission} disabled={disabled} onChange={event => onSettings({ permissionMode: event.target.value })}>
+        <div className="remote-composer-tools">
+          <button ref={add} type="button" className="remote-composer-icon" aria-label="添加附件" aria-expanded={panel === "attachments"} aria-controls={`${id}-attachments`} onClick={() => togglePanel("attachments")}><IconPlus size={26} stroke={1.8} /></button>
+          <label className={`remote-permission-picker${permission === "full-access" ? " is-full-access" : ""}`} title={permissionLabels[permission] || "自定义权限"}><IconShield size={23} stroke={1.8} />{permission === "full-access" && <IconExclamationMark className="remote-shield-mark" size={13} stroke={2.3} />}<select aria-label="权限" value={permission} disabled={disabled} onChange={event => onSettings({ permissionMode: event.target.value })}>
             {permission === "custom" && <option value="custom" disabled>自定义权限（沿用桌面）</option>}<option value="read-only">只读 · 修改前询问</option><option value="auto">默认权限 · 工作区内读写</option><option value="full-access">完全访问 · 无沙箱限制</option>
           </select></label>
-          <label className="remote-picker remote-model-picker" title={selected?.label || view?.model || "模型"}><IconCpu size={16} /><span>{selected?.label || view?.model || "模型"}</span><IconChevronDown size={12} /><select aria-label="模型" value={view?.model || ""} disabled={disabled || !models.length} onChange={event => {
-            const next = models.find(model => model.id === event.target.value);
-            if (next) onSettings({ model: next.id, effort: next.efforts.includes(view?.effort || "") ? view!.effort! : next.defaultEffort || undefined });
-          }}>{!selected && <option value={view?.model || ""} disabled>{view?.model || "选择模型"}</option>}{routes.map(route => <optgroup key={route} label={route}>{models.filter(model => model.route === route).map(model => <option key={model.id} value={model.id}>{model.label}</option>)}</optgroup>)}</select></label>
-          <label className="remote-picker remote-effort-picker" title="思考程度"><IconBrain size={16} /><span>{effortLabels[view?.effort || ""] || view?.effort || "思考"}</span><IconChevronDown size={12} /><select aria-label="思考程度" value={view?.effort || ""} disabled={disabled || !selected?.efforts.length} onChange={event => onSettings({ effort: event.target.value })}>{!selected?.efforts.includes(view?.effort || "") && <option value={view?.effort || ""} disabled>{view?.effort || "默认"}</option>}{selected?.efforts.map(effort => <option value={effort} key={effort}>{effortLabels[effort]}</option>)}</select></label>
-          <label className="remote-picker remote-speed-picker" title="速度模式"><IconBolt size={16} /><span>{tier === "priority" ? "Fast" : tier === "default" ? "标准" : tier}</span><IconChevronDown size={12} /><select aria-label="速度模式" value={tier} disabled={disabled} onChange={event => onSettings({ serviceTier: event.target.value })}>{!["default", "priority"].includes(tier) && <option value={tier} disabled>{tier}</option>}<option value="default">标准</option><option value="priority">Fast</option></select></label>
         </div>
-        <div className="remote-send-actions">{active && <button type="button" className="remote-stop" aria-label="停止任务" disabled={disabled} onClick={onStop}><IconPlayerStop size={17} /></button>}<button className="remote-send" aria-label={active ? "补充指令" : "发送消息"} disabled={disabled || !draft.trim() || uncertain}><IconArrowUp size={21} /></button></div>
+        <div className="remote-send-actions">
+          {tier === "priority" && <span className="remote-fast-indicator" role="img" aria-label="快速模式已启用" title="快速模式已启用"><IconBoltFilled size={24} /></span>}
+          <button ref={gauge} type="button" className="remote-composer-icon" aria-label="调整模型与思考强度" aria-expanded={panel === "power" || advanced} aria-controls={`${id}-${advanced ? "advanced" : "power"}`} onClick={() => togglePanel("power")}><IconBrandSpeedtest size={27} stroke={1.8} /></button>
+          <button type="button" className="remote-composer-icon" aria-label="语音输入" onClick={() => placeholder("语音输入")}><IconMicrophone size={25} stroke={1.8} /></button>
+          {active && <button type="button" className="remote-stop" aria-label="停止任务" disabled={disabled} onClick={onStop}><IconPlayerStopFilled size={17} /></button>}
+          {draft.trim() ? <button className="remote-send" aria-label={active ? "补充指令" : "发送消息"} disabled={disabled || uncertain}><IconArrowUp size={22} /></button> : !active && <button type="button" className="remote-voice" aria-label="语音对话" onClick={() => placeholder("语音对话")}><IconBrandGooglePodcasts size={22} stroke={2.2} /></button>}
+        </div>
       </div>
     </form>
-    <p className="remote-composer-note">{busy ? "正在同步…" : active ? "任务在电脑上继续执行 · 设置用于后续轮次" : permission === "full-access" ? "完全访问：可修改电脑文件并访问网络" : "任务在电脑的原工作区中执行"}</p>
+    <p className="remote-composer-note" role="status">{notice || (busy ? "正在同步…" : active ? "任务在电脑上继续执行 · 设置用于后续轮次" : permission === "full-access" ? "完全访问：可修改电脑文件并访问网络" : "任务在电脑的原工作区中执行")}</p>
+    <dialog ref={sheet} id={`${id}-advanced`} className="remote-advanced-sheet" aria-label="高级设置" tabIndex={-1} data-keyboard-navigation={keyboardNavigation || undefined} onPointerDownCapture={() => setKeyboardNavigation(false)} onKeyDownCapture={event => { if (event.key === "Tab") setKeyboardNavigation(true); }} onCancel={event => { event.preventDefault(); setAdvanced(false); }} onClick={event => {
+      if (event.target !== event.currentTarget) return;
+      const bounds = event.currentTarget.getBoundingClientRect();
+      if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) setAdvanced(false);
+    }}>
+      <button type="button" className="remote-sheet-handle" aria-label="关闭高级设置" onClick={() => setAdvanced(false)} onPointerDown={event => { swipeStart.current = event.clientY; event.currentTarget.setPointerCapture(event.pointerId); }} onPointerUp={event => { if (swipeStart.current !== null && event.clientY - swipeStart.current > 35) setAdvanced(false); swipeStart.current = null; }} onPointerCancel={() => { swipeStart.current = null; }}><span /></button>
+      <h3>高级<IconChevronRight size={19} stroke={2.3} /></h3>
+      <div className="remote-settings-group">
+        <label className="remote-settings-row"><span>模型</span><span className="remote-settings-value remote-model-value" title={modelName}>{modelName}</span><IconSelector size={17} /><select aria-label="模型" value={view?.model || ""} disabled={disabled || !models.length} onChange={event => {
+          const next = models.find(model => model.id === event.target.value);
+          if (next) onSettings({ model: next.id, effort: next.efforts.includes(view?.effort || "") ? view!.effort! : next.defaultEffort || undefined });
+        }}>{!selected && <option value={view?.model || ""} disabled>{view?.model || "选择模型"}</option>}{routes.map(route => <optgroup key={route} label={route}>{models.filter(model => model.route === route).map(model => <option key={model.id} value={model.id}>{model.label}</option>)}</optgroup>)}</select></label>
+        <label className="remote-settings-row"><span>智能</span><span className="remote-settings-value">{effortLabels[view?.effort || ""] || view?.effort || "默认"}</span><IconSelector size={17} /><select aria-label="思考程度" value={view?.effort || ""} disabled={disabled || !selected?.efforts.length} onChange={event => onSettings({ effort: event.target.value })}>{!selected?.efforts.includes(view?.effort || "") && <option value={view?.effort || ""} disabled>{view?.effort || "默认"}</option>}{selected?.efforts.map(effort => <option value={effort} key={effort}>{effortLabels[effort]}</option>)}</select></label>
+      </div>
+      <div className="remote-settings-group remote-speed-group">
+        <label className="remote-settings-row"><span>速度</span><span className="remote-settings-value">{tier === "priority" ? "快速" : tier === "default" ? "标准" : tier}</span><IconSelector size={17} /><select aria-label="速度模式" value={tier} disabled={disabled} onChange={event => onSettings({ serviceTier: event.target.value })}>{!["default", "priority"].includes(tier) && <option value={tier} disabled>{tier}</option>}<option value="default">标准</option><option value="priority">快速</option></select></label>
+      </div>
+    </dialog>
   </div>;
+}
+
+function EffortControl({ modelName, efforts, effort, disabled, onChange, onAdvanced }: {
+  modelName: string; efforts: string[]; effort: string; disabled: boolean; onChange: (effort: string) => void; onAdvanced: () => void;
+}) {
+  const [preview, setPreview] = useState<number | null>(null);
+  const current = efforts.indexOf(effort);
+  const index = preview ?? Math.max(0, current);
+  const label = preview !== null ? effortLabels[efforts[index]] : effortLabels[effort] || effort || "默认";
+  const unavailable = disabled || efforts.length < 2;
+  useEffect(() => { setPreview(null); }, [disabled, effort, modelName]);
+  function commit(value: number) {
+    setPreview(null);
+    if (!unavailable && efforts[value] && efforts[value] !== effort) onChange(efforts[value]);
+  }
+  return <>
+    <button type="button" className="remote-power-model" aria-label={`高级设置：${modelName}`} aria-haspopup="dialog" onClick={onAdvanced}><span title={modelName}>{modelName}</span><span>{label}</span><IconSelector size={17} /></button>
+    <div className={`remote-effort-slider${unavailable ? " is-disabled" : ""}`} style={{ "--effort-fraction": efforts.length > 1 ? index / (efforts.length - 1) : 0 } as CSSProperties}>
+      <div className="remote-effort-track" aria-hidden="true"><span className="remote-effort-fill" /><div className="remote-effort-ticks">{efforts.map((value, position) => <span key={value} className={position < index ? "is-filled" : ""} />)}</div><span className="remote-effort-thumb" /></div>
+      <input type="range" aria-label="思考强度" aria-valuetext={label} aria-disabled={unavailable} min={0} max={Math.max(1, efforts.length - 1)} step={1} value={index} disabled={efforts.length < 2} onChange={event => { if (!unavailable) setPreview(event.target.valueAsNumber); }} onPointerDown={event => { if (unavailable) event.preventDefault(); else event.currentTarget.setPointerCapture(event.pointerId); }} onPointerUp={event => commit(event.currentTarget.valueAsNumber)} onPointerCancel={() => setPreview(null)} onKeyDown={event => { if (unavailable && event.key !== "Tab") event.preventDefault(); }} onKeyUp={event => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commit(event.currentTarget.valueAsNumber); }} onBlur={event => { if (preview !== null) commit(event.currentTarget.valueAsNumber); }} />
+    </div>
+    {!efforts.length && <p className="remote-effort-unavailable">当前模型未提供可调整的思考强度</p>}
+  </>;
 }

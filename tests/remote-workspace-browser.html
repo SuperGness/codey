@@ -28,7 +28,7 @@
     const views = new Map();
     const sockets = new Set();
     const fixture = window.remoteFixture = {
-      actions: [], creations: [], connections: 0, firstTurn: "accepted", failNext: false, failCreate: false, catalogFails: false, unauthorized: false,
+      catalog, actions: [], creations: [], connections: 0, firstTurn: "accepted", failNext: false, failCreate: false, catalogFails: false, unauthorized: false,
       defaults: { model: "route-demo/gpt-6-astra", effort: "ultra", serviceTier: "priority" }, defaultsFail: false, defaultsDelay: 0,
       disconnect() { for (const socket of [...sockets]) socket.close(); },
       unavailable() { for (const socket of [...sockets]) socket.onmessage?.({ data: JSON.stringify({ type: "disconnected", message: "桌面暂时无法读取此会话" }) }); },
