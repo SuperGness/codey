@@ -68,8 +68,8 @@
         if (fixture.failNext) { fixture.failNext = false; throw new TypeError("模拟连接中断"); }
         const view = state(args.threadId);
         if (args.action === "settings") for (const key of ["model", "effort", "permissionMode", "serviceTier"]) if (key in args) view[key] = args[key];
-        if (args.action === "send") view.turns.push({ id: `turn-${view.turns.length + 1}`, status: "inProgress", messages: [{ role: "user", kind: "userMessage", text: args.text }, { role: "activity", kind: "reasoning", text: "正在处理你的补充要求…" }] });
-        if (args.action === "steer") view.turns.at(-1).messages.push({ role: "user", kind: "steeringUserMessage", text: args.text });
+        if (args.action === "send") view.turns.push({ id: `turn-${view.turns.length + 1}`, status: "inProgress", messages: [{ role: "user", kind: "userMessage", text: args.text, attachments: args.images }, { role: "activity", kind: "reasoning", text: "正在处理你的补充要求…" }] });
+        if (args.action === "steer") view.turns.at(-1).messages.push({ role: "user", kind: "steeringUserMessage", text: args.text, attachments: args.images });
         if (args.action === "interrupt") view.turns.at(-1).status = "interrupted";
         fixture.emit(); return reply({ status: "ok" });
       }
@@ -77,9 +77,9 @@
         fixture.creations.push(args);
         if (fixture.failCreate) { fixture.failCreate = false; throw new TypeError("模拟创建响应中断"); }
         const id = crypto.randomUUID(); const cwd = projects.find(project => project.id === args.projectId)?.cwd;
-        threads.unshift({ id, title: args.text.slice(0, 20), cwd, updatedAt: Date.now() });
+        threads.unshift({ id, title: args.text.slice(0, 20) || "图片会话", cwd, updatedAt: Date.now() });
         const view = state(id);
-        view.turns = fixture.firstTurn === "not-started" ? [] : [{ id: "first-turn", status: "inProgress", messages: [{ role: "user", kind: "userMessage", text: args.text }] }];
+        view.turns = fixture.firstTurn === "not-started" ? [] : [{ id: "first-turn", status: "inProgress", messages: [{ role: "user", kind: "userMessage", text: args.text, attachments: args.images }] }];
         for (const key of ["model", "effort", "permissionMode", "serviceTier"]) if (key in args) view[key] = args[key];
         return reply({ id, firstTurn: fixture.firstTurn });
       }

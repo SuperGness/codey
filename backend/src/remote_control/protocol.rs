@@ -257,8 +257,8 @@ pub(super) fn view(state: &Value) -> Value {
     let turns = turns(state).into_iter().map(|turn| {
         let mut messages: Vec<Value> = ordered_items(&turn["items"]).into_iter().map(item_view).collect();
         if !messages.iter().any(|item| item["role"] == "user") {
-            let opening = text_content(&turn["params"]["input"]);
-            if !opening.is_empty() { messages.insert(0, json!({"role":"user", "kind":"userMessage", "text":opening})); }
+            let opening = item_view(&json!({"type":"userMessage", "content":turn["params"]["input"]}));
+            if opening["text"].as_str().is_some_and(|text| !text.is_empty()) || opening["attachments"].as_array().is_some_and(|images| !images.is_empty()) { messages.insert(0, opening); }
         }
         json!({"id":turn["turnId"], "status":turn["status"], "messages":messages, "error":turn["error"],
             "startedAt":turn["turnStartedAtMs"], "completedAt":turn["turnCompletedAtMs"]})
@@ -347,6 +347,19 @@ mod tests {
         assert_eq!(state, json!({"items":["b"], "a/b":{"~key":2}}));
         assert!(apply_patches(&mut state, &json!([{"op":"remove","path":"/items/9"}])).is_err());
         assert!(apply_patches(&mut state, &json!([{"op":"copy","path":[]}])).is_err());
+    }
+
+    #[test]
+    fn images_survive_opening_fallback_and_steering_without_duplicate_messages() {
+        let input = json!([{"type":"image","url":"data:image/gif;base64,R0lGODlh"}]);
+        let mut state = json!({"turns":[{"params":{"input":input},"items":[]}]});
+        let result = view(&state);
+        assert_eq!(result["turns"][0]["messages"][0]["attachments"][0]["url"], input[0]["url"]);
+        state["turns"][0]["items"] = json!([{"type":"userMessage","content":input},{"type":"steeringUserMessage","input":input}]);
+        let result = view(&state);
+        let messages = result["turns"][0]["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["attachments"], messages[0]["attachments"]);
     }
 
     #[test]

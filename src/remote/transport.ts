@@ -35,11 +35,13 @@ const pending = new Map<string, Submission>();
 const storageKey = (scope: string) => `codey-remote-pending:${scope}`;
 
 export function readSubmission(scope: string): Submission | null {
+  const current = pending.get(scope);
+  if (current) return current;
   try {
     const value = JSON.parse(sessionStorage.getItem(storageKey(scope)) || "null");
     if (value && typeof value.id === "string" && /^[a-f0-9-]{36}$/.test(value.id) && value.args && typeof value.args === "object") return value;
   } catch { /* Private browsing may disable storage; keep the in-memory record. */ }
-  return pending.get(scope) || null;
+  return null;
 }
 
 // A page reload must not turn an unconfirmed mutation into a new request.
@@ -49,7 +51,15 @@ export function rememberSubmission(scope: string, args: Record<string, unknown>)
   if (previous && JSON.stringify(previous.args) === JSON.stringify(args)) return previous;
   const record = { id: requestId(), args };
   pending.set(scope, record);
-  try { sessionStorage.setItem(storageKey(scope), JSON.stringify(record)); } catch { /* See readSubmission. */ }
+  try { sessionStorage.setItem(storageKey(scope), JSON.stringify(record)); }
+  catch {
+    // Large photos can exceed the tab's storage quota. Persist a small marker
+    // so a reload still prevents duplicate submission and asks for reselection.
+    try {
+      const images = Array.isArray(args.images) ? args.images.map(image => ({ name: image.name, size: image.size, url: "" })) : undefined;
+      sessionStorage.setItem(storageKey(scope), JSON.stringify({ id: record.id, args: { ...args, images } }));
+    } catch { /* Private browsing may disable storage entirely. Keep memory. */ }
+  }
   return record;
 }
 

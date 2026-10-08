@@ -65,11 +65,16 @@ async page => {
   const beforeAttachments = await page.evaluate(() => window.remoteFixture.actions.length);
   for (const name of ['相机', '照片']) {
     await page.getByRole('button', { name: '添加附件', exact: true }).click();
+    const choosing = page.waitForEvent('filechooser');
     await page.getByRole('button', { name, exact: true }).click();
-    await page.getByText(`${name}功能暂未开放`, { exact: true }).waitFor();
+    const chooser = await choosing;
+    assert(chooser.isMultiple() === (name === '照片'), 'Camera and photo selection modes differ');
+    await chooser.setFiles([]);
+    await chooser.element().dispatchEvent('cancel');
+    await page.locator('.remote-composer-note').filter({ hasText: '已取消' }).waitFor();
   }
-  assert(await page.evaluate(() => window.remoteFixture.actions.length) === beforeAttachments, 'Attachment placeholders sent an action');
-  assert(await page.locator('input[type="file"]').count() === 0, 'Placeholder requested local files');
+  assert(await page.evaluate(() => window.remoteFixture.actions.length) === beforeAttachments, 'Cancelling photo selection sent an action');
+  assert(await page.locator('input[capture="environment"]').count() === 1, 'Camera capture is missing');
   await advanced(); await page.keyboard.press('Escape');
   assert(await page.getByRole('dialog').count() === 0, 'Escape did not close the advanced sheet');
   assert(await page.getByRole('button', { name: '调整模型与思考强度' }).evaluate(element => element === document.activeElement), 'Sheet did not restore focus');

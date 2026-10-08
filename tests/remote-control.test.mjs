@@ -70,3 +70,27 @@ test("an unconfirmed submission retains its ID across reloads and explicit verif
     else delete globalThis.sessionStorage;
   }
 });
+
+test("photo storage quota preserves in-memory data and a reload-safe duplicate guard", async () => {
+  const storage = new Map();
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+  Object.defineProperty(globalThis, "sessionStorage", { configurable: true, value: {
+    getItem: key => storage.get(key) ?? null,
+    setItem: (key, value) => { if (value.includes("data:image")) throw new DOMException("full", "QuotaExceededError"); storage.set(key, value); },
+    removeItem: key => storage.delete(key),
+  } });
+  try {
+    const images = [{ name: "camera.png", size: 1, url: "data:image/png;base64,YQ==" }];
+    const record = rememberSubmission("photos", { action: "send", text: "", images });
+    assert.deepEqual(readSubmission("photos").args.images, images);
+    const persisted = JSON.parse(storage.get("codey-remote-pending:photos"));
+    assert.equal(persisted.id, record.id);
+    assert.deepEqual(persisted.args.images, [{ ...images[0], url: "" }]);
+    storage.set("codey-remote-pending:reloaded-photos", JSON.stringify(persisted));
+    assert.deepEqual(readSubmission("reloaded-photos"), persisted);
+    forgetSubmission("photos"); forgetSubmission("reloaded-photos");
+    assert.equal(storage.size, 0);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "sessionStorage", descriptor); else delete globalThis.sessionStorage;
+  }
+});

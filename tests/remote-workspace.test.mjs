@@ -115,7 +115,7 @@ test("conversation retains user messages and folds tool output with a readable d
   assert.match(html, /检查<strong>通过<\/strong>/);
 });
 
-const composerProps = { draft: "", onDraft() {}, view: { model: "route/model", effort: "high", serviceTier: "priority", permissionMode: "auto", turns: [] }, models: [{ id: "route/model", label: "My model", route: "My route", efforts: ["low", "high"], defaultEffort: "low" }], connected: true, busy: false, uncertain: false, onSend() {}, onStop() {}, onSettings() {}, catalogError: "", onReloadModels() {} };
+const composerProps = { draft: "", onDraft() {}, images: [], onImages() {}, view: { model: "route/model", effort: "high", serviceTier: "priority", permissionMode: "auto", turns: [] }, models: [{ id: "route/model", label: "My model", route: "My route", efforts: ["low", "high"], defaultEffort: "low" }], connected: true, busy: false, uncertain: false, onSend() {}, onStop() {}, onSettings() {}, catalogError: "", onReloadModels() {} };
 
 test("composer keeps supported native selectors inside a closed advanced sheet", () => {
   const html = render(Composer, composerProps);
@@ -153,4 +153,16 @@ test("unavailable catalog keeps desktop selections visible and prevents unsuppor
   assert.match(html, /aria-label="思考程度" disabled=""/);
   assert.match(html, /value="route\/model" disabled="" selected=""/);
   assert.match(html, /模型列表暂时无法加载/); assert.match(html, />重试<\/button>/);
+});
+
+test("image-only drafts enable send and missing photo data cannot be silently submitted", () => {
+  const props = { ...composerProps, images: [{ name: "photo.png", url: "data:image/png;base64,YQ==", size: 1 }] };
+  const html = render(Composer, props);
+  assert.match(html, /capture="environment"/);
+  assert.match(html, /aria-label="选择照片"[^>]*multiple=""/);
+  assert.match(html, /aria-label="发送消息"><svg/);
+  assert.match(html, /aria-label="移除图片 photo.png"/);
+  for (const state of [{ busy: true }, { uncertain: true }, { images: [{ ...props.images[0], url: "" }] }]) {
+    assert.match(render(Composer, { ...props, ...state }), /aria-label="发送消息" disabled=""/);
+  }
 });

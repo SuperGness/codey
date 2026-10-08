@@ -301,10 +301,7 @@ pub(super) fn action_params(
         .find(|turn| turn["status"] == "inProgress");
     match action {
         "send" | "steer" => {
-            let text = args["text"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty() && s.len() <= 100_000)
-                .ok_or("请输入有效消息，最多 100000 字节")?;
+            let input = super::images::message_input(args)?;
             let id = args["requestId"].as_str().ok_or("消息缺少请求标识")?;
             validate_thread(id)?;
             if action == "send" && active.is_some() {
@@ -314,7 +311,7 @@ pub(super) fn action_params(
                 return Err("当前没有可补充指令的任务，请直接发送".into());
             }
             let request = json!({"threadId":state["id"], "clientUserMessageId":id,
-                "input":[{"type":"text", "text":text, "text_elements":[]}]});
+                "input":input});
             let context =
                 json!({"inheritThreadSettings":true, "attachments":[], "commentAttachments":[]});
             if action == "send" {
@@ -712,6 +709,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sends_and_steers_image_only_input_with_restore_data_within_frame_budget() {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let mut bytes = vec![0; 4 * 1024 * 1024];
+        bytes[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+        let url = format!("data:image/jpeg;base64,{}", STANDARD.encode(bytes));
+        let args = json!({"text":"","images":[{"url":url}],"requestId":Uuid::new_v4().to_string()});
+        let (_, _, send) = action_params(&json!({"id":"t"}), "send", &args).unwrap();
+        let input = &send["turnStart"]["request"]["input"];
+        assert_eq!(input, &json!([{"type":"image","url":url}]));
+        let active = json!({"id":"t","turns":[{"status":"inProgress"}]});
+        let (_, _, steer) = action_params(&active, "steer", &args).unwrap();
+        assert_eq!(&steer["input"], input);
+        assert_eq!(&steer["restoreMessage"]["request"]["input"], input);
+        assert!(steer.to_string().len() + 1024 < MAX_FRAME);
+        assert!(action_params(&active, "send", &args).is_err());
+        assert!(action_params(&json!({}), "steer", &args).is_err());
+    }
+
     async fn read_frame(stream: &mut tokio::io::DuplexStream) -> Value {
         let size = stream.read_u32_le().await.unwrap() as usize;
         let mut bytes = vec![0; size];
@@ -746,6 +762,7 @@ mod tests {
             assert_eq!(action["targetClientId"], "desktop-owner");
             assert_eq!(action["method"], "thread-follower-start-turn");
             assert_eq!(action["params"]["conversationId"], thread_copy);
+            assert_eq!(action["params"]["turnStart"]["request"]["input"][1]["type"], "image");
             assert_eq!(
                 action["params"]["turnStart"]["context"]["inheritThreadSettings"],
                 true
@@ -764,7 +781,7 @@ mod tests {
             desktop
                 .action(
                     "send",
-                    &json!({"text":"test","requestId":Uuid::new_v4().to_string()})
+                    &json!({"text":"test","images":[{"url":"data:image/gif;base64,R0lGODlh"}],"requestId":Uuid::new_v4().to_string()})
                 )
                 .await
                 .unwrap()["status"],

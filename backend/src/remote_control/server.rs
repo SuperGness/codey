@@ -34,6 +34,8 @@ use crate::commands::AppState;
 type Body = UnsyncBoxBody<Bytes, Infallible>;
 type Reply = Response<Body>;
 const MAX_BODY: usize = 1024 * 1024;
+// Four MiB of images expanded as base64, plus escaped message text and metadata.
+const MAX_MESSAGE_BODY: usize = 7 * 1024 * 1024;
 const COOKIE: &str = "codey_remote";
 const HTML: &str = "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content\"><meta name=\"color-scheme\" content=\"light dark\"><title>Codex · Codey 远程控制</title><link rel=\"stylesheet\" href=\"/remote.css\"></head><body><div id=\"root\"></div><script src=\"/remote.js\" defer></script></body></html>";
 
@@ -227,7 +229,7 @@ fn handle(
     })
 }
 
-async fn read_json(request: Request<Incoming>) -> Result<Value, &'static str> {
+async fn read_json(request: Request<Incoming>, max_body: usize) -> Result<Value, &'static str> {
     if request
         .headers()
         .get("content-type")
@@ -242,7 +244,7 @@ async fn read_json(request: Request<Incoming>) -> Result<Value, &'static str> {
         while let Some(frame) = body.frame().await {
             let frame = frame.map_err(|_| "读取远程请求失败")?;
             if let Some(data) = frame.data_ref() {
-                if bytes.len() + data.len() > MAX_BODY {
+                if bytes.len() + data.len() > max_body {
                     return Err("远程请求过大");
                 }
                 bytes.extend_from_slice(data);
@@ -299,7 +301,8 @@ async fn route(core: Arc<Core>, mut request: Request<Incoming>) -> Reply {
     if request.method() != hyper::Method::POST {
         return failure(StatusCode::METHOD_NOT_ALLOWED, "请求方法不支持");
     }
-    let args = match read_json(request).await {
+    let max_body = if matches!(path.as_str(), "/remote/action" | "/remote/create") { MAX_MESSAGE_BODY } else { MAX_BODY };
+    let args = match read_json(request, max_body).await {
         Ok(args) if args.is_object() => args,
         Ok(_) => return failure(StatusCode::BAD_REQUEST, "远程请求须为 JSON 对象"),
         Err(error) => return failure(StatusCode::BAD_REQUEST, error),

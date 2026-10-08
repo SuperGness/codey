@@ -1,6 +1,7 @@
 mod auth;
 mod create;
 mod desktop;
+mod images;
 mod protocol;
 mod server;
 mod store;

@@ -65,8 +65,11 @@ async page => {
   await page.getByLabel('发送给 Codex 的指令').fill('多行草稿\n'.repeat(14));
   await gauge.click(); await layout('.remote-power-popover'); await page.keyboard.press('Escape');
   await page.getByRole('button', { name: '添加附件', exact: true }).click(); await layout('.remote-attachment-popover');
+  const choosing = page.waitForEvent('filechooser');
   await page.getByRole('button', { name: '照片', exact: true }).click();
-  await page.getByText('照片功能暂未开放', { exact: true }).waitFor();
+  const chooser = await choosing;
+  await chooser.setFiles([]); await chooser.element().dispatchEvent('cancel');
+  await page.getByText('已取消选择照片。', { exact: true }).waitFor();
   await page.getByLabel('发送给 Codex 的指令').fill('');
   await page.setViewportSize({ width: 390, height: 844 });
   await gauge.click();

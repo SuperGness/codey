@@ -5,6 +5,7 @@ import { modelOptions, defaultThreadSettings, projectForThread, type Thread, typ
 import { Sidebar } from "./sidebar";
 import { Composer } from "./composer";
 import { ConversationTurn, RichText } from "./messages";
+import type { DraftImage } from "./images";
 
 export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { active: boolean; onUnauthorized: () => void; onPanel: () => void; onLogout: () => void }) {
   const [threads, setThreads] = useState<Thread[]>([]);
@@ -23,6 +24,7 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
   const [defaultsError, setDefaultsError] = useState("");
   const [defaultsRevision, setDefaultsRevision] = useState(0);
   const [draft, setDraft] = useState("");
+  const [images, setImages] = useState<DraftImage[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [catalog, setCatalog] = useState<ModelCatalog>({});
@@ -33,7 +35,7 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
   const scroll = useRef<HTMLDivElement>(null);
   const listVersion = useRef(0);
   const pinned = useRef(true);
-  const drafts = useRef(new Map<string, { text: string; uncertain: boolean; settings: ThreadSettings }>());
+  const drafts = useRef(new Map<string, { text: string; images: DraftImage[]; uncertain: boolean; settings: ThreadSettings }>());
   const models = modelOptions(catalog);
   const selectedId = selected?.id;
   const draftScope = creating ? `create:${project}` : selectedId;
@@ -127,7 +129,7 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
   }, [active, selectedId, revision]);
 
   useEffect(() => { if (pinned.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [view]);
-  useEffect(() => { if (draftScope) drafts.current.set(draftScope, { text: draft, uncertain, settings: draftSettings }); }, [draftScope, draft, uncertain, draftSettings]);
+  useEffect(() => { if (draftScope) drafts.current.set(draftScope, { text: draft, images, uncertain, settings: draftSettings }); }, [draftScope, draft, images, uncertain, draftSettings]);
 
   async function action(action: string, args: Record<string, unknown> = {}) {
     if (!selectedId) return;
@@ -144,6 +146,7 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
     const previous = drafts.current.get(scope);
     const pending = readSubmission(scope);
     setDraft(previous?.text || String(pending?.args.text || ""));
+    setImages(previous?.images || (Array.isArray(pending?.args.images) ? pending.args.images as DraftImage[] : []));
     setUncertain(previous?.uncertain || !!pending);
     setDraftSettings(previous?.settings || Object.fromEntries(["model", "effort", "permissionMode", "serviceTier"].flatMap(key => typeof pending?.args[key] === "string" || (key === "serviceTier" && pending?.args[key] === null) ? [[key, pending!.args[key]]] : [])));
   }
@@ -156,13 +159,13 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
 
   async function send(event: React.FormEvent) {
     event.preventDefault();
-    if (busy || uncertain || !draft.trim()) return;
+    if (busy || uncertain || (!draft.trim() && !images.length) || images.some(image => !image.url)) return;
     if (creating) {
       if (!draftProject || !draftScope || !defaultsReady) return;
       const scope = draftScope;
       const text = draft;
       setDraftSettings(composerSettings);
-      const submission = rememberSubmission(scope, { projectId: project, text, ...composerSettings });
+      const submission = rememberSubmission(scope, { projectId: project, text, images, ...composerSettings });
       await run(async () => {
         try {
           const result = await remoteRequest<{ id: string; firstTurn: string }>("/remote/create", { ...submission.args, requestId: submission.id });
@@ -171,8 +174,9 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
           open({ id: result.id, title: "新会话", cwd: draftProject.cwd, updatedAt: Date.now() });
           if (result.firstTurn !== "accepted") {
             setDraft(text);
+            setImages(images);
             if (result.firstTurn !== "not-started" && result.firstTurn !== "not-requested") {
-              rememberSubmission(result.id, { action: "send", text }); setUncertain(true);
+              rememberSubmission(result.id, { action: "send", text, images }); setUncertain(true);
             }
             setError("会话已创建，请检查第一条消息是否已发送。");
           }
@@ -183,11 +187,11 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
     }
     if (!selectedId || !connected) return;
     const mode = activeTurn ? "steer" : "send";
-    const submission = rememberSubmission(selectedId, { action: mode, text: draft });
+    const submission = rememberSubmission(selectedId, { action: mode, text: draft, images });
     await run(async () => {
       try {
         await remoteRequest("/remote/action", { threadId: selectedId, ...submission.args, requestId: submission.id });
-        setDraft(""); forgetSubmission(selectedId); setUncertain(false); pinned.current = true;
+        setDraft(""); setImages([]); forgetSubmission(selectedId); setUncertain(false); pinned.current = true;
       } catch (error) { setUncertain(true); throw error; }
     });
   }
@@ -216,7 +220,7 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
       </div>
       {error && <p className="remote-client-error" role="alert">{error}</p>}
       {uncertain && <div className="remote-uncertain"><p>消息未确认。请查看会话是否已收到，确认后再决定是否重新发送。</p><button onClick={() => { if (draftScope) forgetSubmission(draftScope); setUncertain(false); setError(""); }}>已核对，允许再次发送</button></div>}
-      <Composer key={draftScope} draft={draft} onDraft={setDraft} view={composerView} models={models} connected={creating ? !!draftProject && defaultsReady : connected} busy={busy} uncertain={uncertain} onSend={event => void send(event)} onStop={() => { if (activeTurn) void run(() => action("interrupt", { turnId: activeTurn.id })); }} onSettings={settings => { if (creating) setDraftSettings({ ...composerSettings, ...settings }); else void run(async () => { await action("settings", settings); setRevision(n => n + 1); }); }} catalogError={[catalogError, creating ? defaultsError : ""].filter(Boolean).join(" ")} onReloadModels={() => { void loadModels(); setDefaultsRevision(n => n + 1); }} />
+      <Composer key={draftScope} draft={draft} onDraft={setDraft} images={images} onImages={setImages} view={composerView} models={models} connected={creating ? !!draftProject && defaultsReady : connected} busy={busy} uncertain={uncertain} onSend={event => void send(event)} onStop={() => { if (activeTurn) void run(() => action("interrupt", { turnId: activeTurn.id })); }} onSettings={settings => { if (creating) setDraftSettings({ ...composerSettings, ...settings }); else void run(async () => { await action("settings", settings); setRevision(n => n + 1); }); }} catalogError={[catalogError, creating ? defaultsError : ""].filter(Boolean).join(" ")} onReloadModels={() => { void loadModels(); setDefaultsRevision(n => n + 1); }} />
     </>}</main>
   </div>;
 }

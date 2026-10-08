@@ -173,4 +173,17 @@ mod tests {
                 .contains("速度模式")
         );
     }
+
+    #[test]
+    fn first_message_supports_photos_without_text_and_rejects_invalid_images() {
+        let project = json!({"id":"p","cwd":"E:/code/codey"});
+        let url = "data:image/gif;base64,R0lGODlh";
+        let mut args = json!({"text":"","images":[{"url":url}],"requestId":uuid::Uuid::new_v4().to_string()});
+        let params = creation_params(&project, &args).unwrap();
+        assert_eq!(params["input"], json!([{"type":"image","url":url}]));
+        assert_eq!(params["attachments"], json!([]));
+        assert_eq!(params["useAppServerPermissionDefault"], true);
+        args["images"][0]["url"] = json!("https://example.test/private.png");
+        assert!(creation_params(&project, &args).is_err());
+    }
 }
