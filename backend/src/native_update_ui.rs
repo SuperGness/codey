@@ -44,22 +44,43 @@ impl NativeUpdateUi {
             .ok()
             .zip(semver::Version::parse(current_version).ok())
             .is_some_and(|(target, current)| target < current);
-        let notes = release_notes
-            .map(str::trim)
-            .filter(|notes| !notes.is_empty())
-            .map(|notes| format!("\n\n更新日志：\n{notes}"))
-            .unwrap_or_default();
-        show_dialog(
-            if rollback { format!("回退 Codey 至 v{latest_version}") } else { format!("发现 Codey v{latest_version} 更新") },
-            if rollback { format!("管理员已授权将 v{current_version} 降级至 v{latest_version}。请保存工作；确认后下载安装旧版本并重启，安装前将再次校验授权。{notes}") } else { format!(
-                "当前版本为 v{current_version}。是否现在下载、校验并安装更新？安装时会退出 Codex 和 Codey，并尝试启动新版。{notes}"
-            ) },
-            DialogKind::Confirm,
-            if rollback { "回退并重启" } else { "更新并重启" }.to_string(),
-            Some("稍后".to_string()),
-        )
-        .await
-        .map(|result| result == DialogResult::Primary)
+        let pages = release_notes.map(update_note_pages).unwrap_or_default();
+        let notes = update_note_preview(&pages);
+        let title = if rollback {
+            format!("回退 Codey 至 v{latest_version}")
+        } else {
+            format!("发现 Codey v{latest_version} 更新")
+        };
+        let description = if rollback {
+            format!(
+                "管理员已授权将 v{current_version} 降级至 v{latest_version}。\n请保存工作；确认后下载安装旧版本并重启，安装前将再次校验授权。{notes}"
+            )
+        } else {
+            format!(
+                "当前版本为 v{current_version}。\n是否现在下载、校验并安装更新？安装时会退出 Codex 和 Codey，并尝试启动新版。{notes}"
+            )
+        };
+        loop {
+            match show_dialog_with_extra(
+                title.clone(),
+                description.clone(),
+                DialogKind::Confirm,
+                if rollback {
+                    "回退并重启"
+                } else {
+                    "更新并重启"
+                }
+                .to_string(),
+                Some("稍后".to_string()),
+                (!pages.is_empty()).then(|| "查看完整日志".to_string()),
+            )
+            .await?
+            {
+                DialogResult::Primary => return Ok(true),
+                DialogResult::Secondary => return Ok(false),
+                DialogResult::Extra => show_update_note_pages(latest_version, &pages).await?,
+            }
+        }
     }
 
     pub async fn show_update_failure(&self, error: &str) -> Result<(), String> {
@@ -182,9 +203,188 @@ pub(crate) async fn confirm_context_recovery_with_reason(
 enum DialogResult {
     Primary,
     Secondary,
+    Extra,
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+// 原生消息框没有滚动区，预览和详情按显示行分页；原始日志与生成规则不变。
+fn update_note_pages(notes: &str) -> Vec<String> {
+    const LINE_WIDTH: usize = 64;
+    const PAGE_LINES: usize = 10;
+    let mut lines = Vec::new();
+    for line in notes.trim().lines() {
+        let line = line
+            .trim()
+            .strip_prefix("**")
+            .and_then(|title| title.strip_suffix("**"))
+            .filter(|title| matches!(*title, "新增功能" | "体验优化" | "问题修复"))
+            .unwrap_or(line);
+        let mut wrapped = String::new();
+        let mut width = 0;
+        for ch in line.chars() {
+            let char_width = if ch.is_ascii() { 1 } else { 2 };
+            if width + char_width > LINE_WIDTH {
+                lines.push(std::mem::take(&mut wrapped));
+                width = 0;
+            }
+            wrapped.push(ch);
+            width += char_width;
+        }
+        lines.push(wrapped);
+    }
+    lines
+        .chunks(PAGE_LINES)
+        .map(|page| page.join("\n"))
+        .collect()
+}
+
+fn update_note_preview(pages: &[String]) -> String {
+    let Some(first) = pages.first() else {
+        return String::new();
+    };
+    let preview = first.lines().take(6).collect::<Vec<_>>().join("\n");
+    let more = if pages.len() > 1 || first.lines().count() > 6 {
+        "\n…\n其余内容可通过查看完整日志阅读。"
+    } else {
+        ""
+    };
+    format!("\n\n更新说明：\n{preview}{more}")
+}
+
+#[cfg(test)]
+mod update_note_tests {
+    use super::*;
+
+    #[test]
+    fn long_notes_have_a_short_preview_and_complete_bounded_pages() {
+        let notes = (0..40)
+            .map(|index| format!("- 第{index}项：{}🌟", "必要的更新说明".repeat(20)))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        let pages = update_note_pages(&notes);
+        assert!(pages.len() > 1);
+        for page in &pages {
+            assert!(page.lines().count() <= 10);
+            for line in page.lines() {
+                let width: usize = line
+                    .chars()
+                    .map(|ch| if ch.is_ascii() { 1 } else { 2 })
+                    .sum();
+                assert!(width <= 64);
+            }
+        }
+        let rendered: String = pages.concat().chars().filter(|ch| *ch != '\n').collect();
+        let original: String = notes
+            .chars()
+            .filter(|ch| !matches!(ch, '\r' | '\n'))
+            .collect();
+        assert_eq!(rendered, original);
+        let preview = update_note_preview(&pages);
+        assert!(preview.chars().count() < 300);
+        assert!(preview.contains("其余内容"));
+        assert!(!preview.contains("第39项"));
+        assert!(pages.last().unwrap().contains("🌟"));
+    }
+
+    #[test]
+    fn empty_and_short_notes_do_not_gain_an_omission_message() {
+        assert!(update_note_pages(" \r\n \t").is_empty());
+        assert!(update_note_preview(&[]).is_empty());
+        let pages = update_note_pages("- 修复启动问题\r\n- 优化更新提示");
+        assert_eq!(pages, ["- 修复启动问题\n- 优化更新提示"]);
+        let preview = update_note_preview(&pages);
+        assert!(preview.contains("修复启动问题\n- 优化更新提示"));
+        assert!(!preview.contains('…'));
+    }
+
+    #[test]
+    fn category_headings_are_readable_in_plain_text_dialogs() {
+        let pages = update_note_pages(
+            "**新增功能**\n- 支持账号切换\n\n**体验优化**\n- 简化更新提示\n\n**问题修复**\n- 修复启动失败",
+        );
+        let text = pages.join("\n");
+        assert!(!text.contains("**"));
+        for expected in [
+            "新增功能",
+            "体验优化",
+            "问题修复",
+            "支持账号切换",
+            "简化更新提示",
+            "修复启动失败",
+        ] {
+            assert!(text.contains(expected));
+        }
+        assert_eq!(update_note_pages("**保留其他文字**"), ["**保留其他文字**"]);
+    }
+
+    #[test]
+    fn ascii_words_and_rollback_reason_are_retained_across_pages() {
+        let notes = format!(
+            "回退原因：兼容性问题\n{}\n最后一条更新",
+            "LongReleaseIdentifier".repeat(80)
+        );
+        let pages = update_note_pages(&notes);
+        assert!(update_note_preview(&pages).contains("回退原因：兼容性问题"));
+        let rendered = pages.join("\n").replace('\n', "");
+        assert_eq!(rendered, notes.replace('\n', ""));
+        assert!(pages.last().unwrap().contains("最后一条更新"));
+    }
+
+    #[test]
+    fn viewing_notes_and_dismissing_never_accept_an_update() {
+        for (label, expected) in [
+            (Some("查看完整日志"), DialogResult::Extra),
+            (Some("稍后"), DialogResult::Secondary),
+            (None, DialogResult::Secondary),
+            (Some("更新并重启"), DialogResult::Primary),
+        ] {
+            assert_eq!(
+                dialog_result_for_label(
+                    DialogKind::Confirm,
+                    label,
+                    "更新并重启",
+                    Some("查看完整日志")
+                ),
+                expected
+            );
+        }
+        assert_eq!(
+            dialog_result_for_label(DialogKind::RestoreContext, None, "恢复", None),
+            DialogResult::Secondary
+        );
+        assert_eq!(
+            dialog_result_for_label(DialogKind::Failure, None, "退出", None),
+            DialogResult::Primary
+        );
+    }
+}
+
+async fn show_update_note_pages(version: &str, pages: &[String]) -> Result<(), String> {
+    let mut index = 0;
+    while let Some(page) = pages.get(index) {
+        let last = index + 1 == pages.len();
+        match show_dialog_with_extra(
+            format!("Codey v{version} 更新日志（{}/{}）", index + 1, pages.len()),
+            page.clone(),
+            DialogKind::Confirm,
+            if last {
+                "返回更新提示"
+            } else {
+                "下一页"
+            }
+            .to_string(),
+            Some("关闭日志".to_string()),
+            (index > 0).then(|| "上一页".to_string()),
+        )
+        .await?
+        {
+            DialogResult::Primary if !last => index += 1,
+            DialogResult::Extra if index > 0 => index -= 1,
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
 async fn show_dialog(
     title: String,
     description: String,
@@ -192,9 +392,52 @@ async fn show_dialog(
     primary_label: String,
     secondary_label: Option<String>,
 ) -> Result<DialogResult, String> {
+    show_dialog_with_extra(
+        title,
+        description,
+        kind,
+        primary_label,
+        secondary_label,
+        None,
+    )
+    .await
+}
+
+fn dialog_result_for_label(
+    kind: DialogKind,
+    label: Option<&str>,
+    primary_label: &str,
+    extra_label: Option<&str>,
+) -> DialogResult {
+    if kind == DialogKind::Failure || label == Some(primary_label) {
+        DialogResult::Primary
+    } else if label.is_some() && label == extra_label {
+        DialogResult::Extra
+    } else {
+        DialogResult::Secondary
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+async fn show_dialog_with_extra(
+    title: String,
+    description: String,
+    kind: DialogKind,
+    primary_label: String,
+    secondary_label: Option<String>,
+    extra_label: Option<String>,
+) -> Result<DialogResult, String> {
     tokio::task::spawn_blocking(move || {
         let primary_label_for_result = primary_label.clone();
+        let extra_label_for_result = extra_label.clone();
         let buttons = match secondary_label {
+            Some(secondary_label) if extra_label.is_some() => {
+                rfd::MessageButtons::YesNoCancelCustom(
+                    primary_label,
+                    extra_label.unwrap(),
+                    secondary_label,
+                )
+            }
             Some(secondary_label) => {
                 rfd::MessageButtons::OkCancelCustom(primary_label, secondary_label)
             }
@@ -210,25 +453,29 @@ async fn show_dialog(
             })
             .set_buttons(buttons)
             .show();
-        match (kind, result) {
-            (DialogKind::Failure, _) => DialogResult::Primary,
-            (_, rfd::MessageDialogResult::Custom(label)) if label == primary_label_for_result => {
-                DialogResult::Primary
-            }
-            (_, _) => DialogResult::Secondary,
-        }
+        let label = match &result {
+            rfd::MessageDialogResult::Custom(label) => Some(label.as_str()),
+            _ => None,
+        };
+        dialog_result_for_label(
+            kind,
+            label,
+            &primary_label_for_result,
+            extra_label_for_result.as_deref(),
+        )
     })
     .await
     .map_err(|error| format!("原生更新对话框任务异常退出：{error}"))
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-async fn show_dialog(
+async fn show_dialog_with_extra(
     _title: String,
     _description: String,
     kind: DialogKind,
     _primary_label: String,
     _secondary_label: Option<String>,
+    _extra_label: Option<String>,
 ) -> Result<DialogResult, String> {
     Ok(match kind {
         DialogKind::Confirm | DialogKind::RestoreContext => DialogResult::Secondary,

@@ -260,14 +260,18 @@ test("发布更新日志会同时显示在检查结果和下载确认中", async
   h.options.setConfirmation = value => { confirmation = value; };
   const update = {
     ...available,
-    releaseNotes: "修复启动稳定性",
+    releaseNotes: "- 修复启动稳定性\n- 优化更新说明",
     selectedAsset: { fileName: "Codey-1.2.0.dmg", size: 1048576, url: "https://example.com" },
   };
   const checking = h.render().checkForUpdates();
   h.requests[0].resolve(update);
   await checking;
   assert.ok(confirmation);
-  assert.match(confirmation.description, /修复启动稳定性/);
+  assert.equal(confirmation.releaseNotes, update.releaseNotes);
+  assert.doesNotMatch(confirmation.description, /修复启动稳定性/);
+  assert.match(confirmation.description, /当前版本/);
+  assert.match(confirmation.description, /是否立即下载更新/);
+  assert.match(h.render().updateResult.text, /修复启动稳定性/);
 });
 
 test("发现更新后定时器链仍在，可用更新被清空后继续自动检查", async () => {

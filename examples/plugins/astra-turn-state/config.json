@@ -1,0 +1,12 @@
+{
+  "degradedAccountEmail": "",
+  "healthyAccountEmail": "",
+  "mintModel": "",
+  "timeoutMs": 15000,
+  "_comments": {
+    "degradedAccountEmail": "填写需要借用 Turn State 的官方账号邮箱；宿主会按邮箱唯一匹配已保存账号。",
+    "healthyAccountEmail": "填写提供 Turn State 的另一个已保存官方账号邮箱；必须与目标账号不同。",
+    "mintModel": "可选的模型 ID；留空时使用请求 metadata.model。仅允许字母、数字、点、下划线、斜线和连字符。",
+    "timeoutMs": "请求宿主从健康账号获取 Turn State 的超时时间，范围为 1000 到 30000 毫秒。"
+  }
+}

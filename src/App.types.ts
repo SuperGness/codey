@@ -273,6 +273,7 @@ export type Confirmation = {
     | "delete-official-account";
   title: string;
   description: string;
+  releaseNotes?: string;
   confirmLabel: string;
   run: () => void;
   /// 用户点"稍后"/关闭对话框时触发，用于记录"本次不再提示"。

@@ -11,7 +11,7 @@ Codey 是 Codex 桌面客户端的增强启动器，集中管理模型线路、�
 - 会话管理：查看任务状态，导入导出会话，删除指定轮次并恢复备份。
 - 手机远程：通过局域网或内置 HTTPS 隧道按项目继续电脑上的 Codex 会话，拍照或选择照片发送，调整模型与执行设置，并管理 Codey 控制台。
 - 扩展管理：管理 MCP、Skill 和可信 Codey 插件，支持配置、启停、导入导出、插件包拖拽导入及日志查看与清理。
-- 插件线路：支持手动填写或按插件配置轮换密钥，传输插件可按配置邮箱绑定已保存账号；停用时仅保留已填写密钥的普通线路。
+- 插件线路：支持手动填写或按配置轮换密钥、绑定已保存账号，以及在官方请求前通过另一个账号取得请求状态；停用时仅保留已填写密钥的普通线路。
 - 任务数量：插件可按需查询正在运行和失败的任务数量。
 - 页面增强：改善插件市场与常用会话操作，支持精选插件离线恢复。
 - 桌面操作：通过可选的 Codey Computer Use 插件读取应用状态并执行点击、输入和滚动。
@@ -40,6 +40,8 @@ Codey 是 Codex 桌面客户端的增强启动器，集中管理模型线路、�
 PPT Bridge 和 Excel Shield 插件的协议适配迁移自 Kaixxrua/excel-codex-bridge，原项目采用 Unlicense。
 
 远程会话协议适配参考 [codex-mobile-bridge](https://github.com/try2love/codex-mobile-bridge)，采用 MIT 许可；可选隧道使用 [cloudflared](https://github.com/cloudflare/cloudflared)，采用 Apache-2.0 许可。
+
+Astra Turn State 插件的预请求流程参考 [spumon1/SUCK_MY_ASTRA](https://github.com/spumon1/SUCK_MY_ASTRA)，原项目采用 MIT License，Copyright (c) 2026 boooot。
 
     This product includes FastCtx
     (https://github.com/yc-duan/fastctx), Copyright (c) 2026 yc-duan,

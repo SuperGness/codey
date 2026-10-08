@@ -71,12 +71,36 @@ test("deduplicates exact note text while preserving its evidence", () => {
   assert.deepEqual(mergeNoteResults([
     { notes: "- 修复启动流程\n- 增加更新检查", evidence: [firstEvidence, secondEvidence] },
     { notes: "- 修复启动流程", evidence: [duplicateEvidence] },
-  ]), { notes: "- 修复启动流程\n- 增加更新检查", evidence: [firstEvidence, secondEvidence] });
+  ]), { notes: "**体验优化**\n- 修复启动流程\n- 增加更新检查", evidence: [firstEvidence, secondEvidence] });
 });
 
 test("ignores empty batch results", () => {
   assert.deepEqual(mergeNoteResults([{ notes: "", evidence: [] }]), { notes: "", evidence: [] });
   for (const result of [null, { notes: "", evidence: [{}] }, { notes: "- 无证据结论", evidence: [] }]) assert.throws(() => mergeNoteResults([result]));
+});
+
+test("merging grouped batches preserves category order, deduplication and original evidence", () => {
+  const fix = { category: "问题修复", note: "修复启动失败", file: "start.js", excerpt: "+const fixed = true;" };
+  const feature = { category: "新增功能", note: "支持查看日志", file: "update.js", excerpt: "+const details = true;" };
+  const legacy = { note: "简化更新提示", file: "update.js", excerpt: "+const compact = true;" };
+  const result = mergeNoteResults([
+    { notes: "**问题修复**\n- 修复启动失败", evidence: [fix] },
+    { notes: "**新增功能**\n- 支持查看日志", evidence: [feature] },
+    { notes: "- 简化更新提示\n- 修复启动失败", evidence: [legacy, fix] },
+  ]);
+  assert.equal(result.notes, "**新增功能**\n- 支持查看日志\n\n**体验优化**\n- 简化更新提示\n\n**问题修复**\n- 修复启动失败");
+  assert.deepEqual(result.evidence, [feature, legacy, fix]);
+  assert.throws(() => mergeNoteResults([{ notes: "**新增功能**\n- 修复启动失败", evidence: [fix] }]), /证据不一致/);
+  assert.throws(() => mergeNoteResults([{ notes: "**问题修复**", evidence: [] }]), /分类必须包含内容/);
+});
+
+test("unknown categories are rejected while missing categories remain compatible", () => {
+  const input = createNoteBatchInput([{ file: "app.js", diff: "+const changed = true;\n" }]);
+  const ref = [...input.references.keys()][0];
+  assert.throws(() => resolveNoteEntries({ entries: [{ category: "其他", note: "调整提示", ref }] }, input.references), /日志分类必须/);
+  const result = resolveNoteEntries({ entries: [{ note: "调整提示", ref }] }, input.references);
+  assert.equal(result.notes, "**体验优化**\n- 调整提示");
+  assert.equal(result.evidence[0].category, "体验优化");
 });
 
 test("reference entries restore exact original evidence without AI copying paths or code", () => {

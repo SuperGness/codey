@@ -177,6 +177,7 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
             codey_plugin_sdk::lifecycle::CAPABILITY,
             codey_plugin_sdk::lifecycle::AUTH_CAPABILITY,
             codey_plugin_sdk::lifecycle::API_KEY_CAPABILITY,
+            codey_plugin_sdk::lifecycle::TURN_STATE_CAPABILITY,
             codey_plugin_sdk::provider::CAPABILITY,
             codey_plugin_sdk::transport::CAPABILITY,
             codey_plugin_sdk::transport::ACCOUNT_CAPABILITY,
@@ -210,6 +211,13 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
         .capabilities
         .iter()
         .any(|s| s == codey_plugin_sdk::lifecycle::API_KEY_CAPABILITY);
+    let turn_state = manifest
+        .capabilities
+        .iter()
+        .any(|s| s == codey_plugin_sdk::lifecycle::TURN_STATE_CAPABILITY);
+    if turn_state && !lifecycle {
+        return Err("request.lifecycle.turn_state 需要 request.lifecycle.v1 能力".into());
+    }
     if api_key && (!lifecycle || manifest.api_key_urls.is_empty())
         || !api_key && !manifest.api_key_urls.is_empty()
     {

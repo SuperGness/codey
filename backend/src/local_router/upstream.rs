@@ -446,6 +446,7 @@ pub(crate) fn is_sensitive_upstream_header(name: &str) -> bool {
             | "cookie"
             | "x-api-key"
             | "x-oai-attestation"
+            | "x-codex-turn-state"
             | "x-tenant"
             | "x-codey-router-token"
             | "sec-websocket-key"

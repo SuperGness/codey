@@ -3,12 +3,14 @@ use super::{HeaderPatch, Manifest, Native, allowed_header_name, validate_patches
 use codey_plugin_sdk::lifecycle::{
     API_KEY_CAPABILITY, AUTH_CAPABILITY, Action, CAPABILITY, METHOD_AFTER_HEADERS,
     METHOD_BEFORE_SEND, METHOD_CANCELLED, METHOD_COMPLETED, METHOD_FAILED, METHOD_RESUME,
+    TURN_STATE_CAPABILITY,
 };
 pub use codey_plugin_sdk::lifecycle::{Response as LifecycleResponse, Stage as LifecycleStage};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fmt,
+    path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -63,13 +65,19 @@ pub(super) struct LifecyclePlugin {
     auth: bool,
     api_key_capability: bool,
     api_key_urls: Vec<reqwest::Url>,
+    turn_state_capability: bool,
     continue_on_failure: bool,
     max_wait: Duration,
     invoke_timeout: Duration,
+    log_dir: Option<PathBuf>,
 }
 
 impl LifecyclePlugin {
-    pub(super) fn native(manifest: &Manifest, instance: Arc<Mutex<Native>>) -> Arc<Self> {
+    pub(super) fn native(
+        manifest: &Manifest,
+        instance: Arc<Mutex<Native>>,
+        log_dir: PathBuf,
+    ) -> Arc<Self> {
         Arc::new(Self {
             id: manifest.id.clone(),
             callback: Arc::new(move |method, params| {
@@ -93,10 +101,21 @@ impl LifecyclePlugin {
                 .iter()
                 .filter_map(|url| super::package::api_key_url(url).ok())
                 .collect(),
+            turn_state_capability: manifest
+                .capabilities
+                .iter()
+                .any(|s| s == TURN_STATE_CAPABILITY),
             continue_on_failure: manifest.lifecycle_failure_policy.as_deref() == Some("continue"),
             max_wait: Duration::from_millis(manifest.lifecycle_max_wait_ms.unwrap_or(30_000)),
             invoke_timeout: Duration::from_secs(3),
+            log_dir: Some(log_dir),
         })
+    }
+
+    fn log(&self, event: &'static str) {
+        if let Some(log_dir) = &self.log_dir {
+            let _ = codey_plugin_sdk::append_log(log_dir, "plugin.log", event);
+        }
     }
 
     pub(super) fn set_active(&self, active: bool) {
@@ -249,6 +268,8 @@ pub struct LifecycleRequest {
     upstream_url: Option<reqwest::Url>,
     // No Debug/serialization: the selected credential stays private to this request.
     selected_api_key: Option<(String, reqwest::header::HeaderValue)>,
+    selected_turn_state: Option<(String, super::turn_state::State)>,
+    turn_state_request: Option<(String, super::turn_state::Request)>,
 }
 
 impl LifecycleRequest {
@@ -274,6 +295,8 @@ impl LifecycleRequest {
             transport: None,
             upstream_url: None,
             selected_api_key: None,
+            selected_turn_state: None,
+            turn_state_request: None,
         }
     }
 
@@ -287,6 +310,8 @@ impl LifecycleRequest {
             transport: None,
             upstream_url: None,
             selected_api_key: None,
+            selected_turn_state: None,
+            turn_state_request: None,
         }
     }
     pub fn is_active(&self) -> bool {
@@ -300,6 +325,9 @@ impl LifecycleRequest {
     pub(crate) fn set_upstream_target(&mut self, url: &reqwest::Url) -> Result<(), LifecycleError> {
         if self.selected_api_key.is_some() && self.upstream_url.as_ref() != Some(url) {
             return Err(failure("plugin_api_key_target_changed"));
+        }
+        if self.turn_state_request.is_some() && self.upstream_url.as_ref() != Some(url) {
+            return Err(failure("plugin_turn_state_target_changed"));
         }
         self.upstream_url = Some(url.clone());
         Ok(())
@@ -330,6 +358,103 @@ impl LifecycleRequest {
                 headers.remove(name);
             }
             headers.insert(reqwest::header::AUTHORIZATION, value.clone());
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn mint_turn_state(
+        &mut self,
+        client: &reqwest::Client,
+    ) -> Result<(), LifecycleError> {
+        let Some((owner, request)) = self.turn_state_request.as_ref() else {
+            return Ok(());
+        };
+        if self.selected_turn_state.is_some() {
+            return Ok(());
+        }
+        let plugin = self
+            .entries
+            .iter()
+            .find(|entry| entry.plugin.id == *owner)
+            .ok_or_else(|| failure("plugin_turn_state_unauthorized"))?
+            .plugin
+            .clone();
+        if !plugin.turn_state_capability || !plugin.is_active() {
+            return Err(failure("plugin_turn_state_unauthorized"));
+        }
+        let request = request.clone();
+        plugin.log("turn_state_requested");
+        let mut future = Box::pin(super::turn_state::mint(client, &request));
+        loop {
+            tokio::select! {
+                result = &mut future => {
+                    let state = match result {
+                        Ok(state) => state,
+                        Err(error) => {
+                            plugin.log("turn_state_failed");
+                            return Err(failure(error));
+                        }
+                    };
+                    plugin.log("turn_state_minted");
+                    self.selected_turn_state = Some((owner.clone(), state));
+                    return Ok(());
+                }
+                _ = sleep(Duration::from_millis(50)) => {
+                    if !plugin.is_active() {
+                        return Err(failure("plugin_disabled"));
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn apply_turn_state(
+        &self,
+        headers: &mut reqwest::header::HeaderMap,
+    ) -> Result<(), LifecycleError> {
+        let Some((owner, state)) = &self.selected_turn_state else {
+            return Ok(());
+        };
+        if !self.entries.iter().any(|entry| {
+            entry.plugin.id == *owner
+                && entry.plugin.turn_state_capability
+                && entry.plugin.is_active()
+        }) {
+            return Err(failure("plugin_turn_state_unauthorized"));
+        }
+        let borrowed_cookie = state
+            .cookie
+            .to_str()
+            .map_err(|_| failure("plugin_turn_state_invalid_cookie"))?;
+        let mut cookies = headers
+            .get("cookie")
+            .map(|value| {
+                value
+                    .to_str()
+                    .map_err(|_| failure("plugin_turn_state_invalid_cookie"))
+            })
+            .transpose()?
+            .unwrap_or_default()
+            .split(';')
+            .map(str::trim)
+            .filter(|part| {
+                part.split_once('=')
+                    .is_none_or(|(name, _)| !matches!(name.trim(), "__cflb" | "__oailb"))
+            })
+            .filter(|part| !part.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        cookies.extend(
+            borrowed_cookie
+                .split(';')
+                .map(|part| part.trim().to_owned()),
+        );
+        let merged_cookie = reqwest::header::HeaderValue::from_str(&cookies.join("; "))
+            .map_err(|_| failure("plugin_turn_state_invalid_cookie"))?;
+        headers.insert("cookie", merged_cookie);
+        headers.insert("x-codex-turn-state", state.turn_state.clone());
+        if let Some(entry) = self.entries.iter().find(|entry| entry.plugin.id == *owner) {
+            entry.plugin.log("turn_state_applied");
         }
         Ok(())
     }
@@ -374,6 +499,7 @@ impl LifecycleRequest {
                     "apiKeySelected",
                     "upstreamUrl",
                     "officialAccount",
+                    "turnStateAuthorized",
                 ] {
                     object.remove(name);
                 }
@@ -400,6 +526,20 @@ impl LifecycleRequest {
                         json!(transport.map(|(official, _)| official)),
                     );
                 }
+                if plugin.turn_state_capability {
+                    let authorized = transport == Some((true, true))
+                        && self.metadata.get("requestKind").and_then(Value::as_str)
+                            == Some("responses")
+                        && upstream_url
+                            .as_ref()
+                            .is_some_and(|url| url.as_str() == super::turn_state::ENDPOINT)
+                        && self
+                            .metadata
+                            .get("officialAccountEmail")
+                            .and_then(Value::as_str)
+                            .is_some();
+                    object.insert("turnStateAuthorized".into(), json!(authorized));
+                }
             }
             let mut params = json!({"metadata":metadata,"requestId":self.metadata.get("requestId"),
                 "stage":stage,"attempt":attempt,"headers":selected,"response":selected_response});
@@ -418,7 +558,9 @@ impl LifecycleRequest {
             let action = match result {
                 Ok(action) => action,
                 Err(error)
-                    if plugin.continue_on_failure && !error.code.starts_with("plugin_api_key_") =>
+                    if plugin.continue_on_failure
+                        && !error.code.starts_with("plugin_api_key_")
+                        && !error.code.starts_with("plugin_turn_state_") =>
                 {
                     continue;
                 }
@@ -427,6 +569,9 @@ impl LifecycleRequest {
             match action {
                 ParsedAction::Continue(next, api_key) => {
                     if let Some(api_key) = api_key {
+                        if self.turn_state_request.is_some() {
+                            return Err(failure("plugin_turn_state_conflict"));
+                        }
                         if let Some((owner, _)) = &self.selected_api_key {
                             return Err(failure(if owner == &plugin.id {
                                 "plugin_api_key_already_selected"
@@ -452,6 +597,12 @@ impl LifecycleRequest {
                     }
                     patches.extend(next);
                 }
+                ParsedAction::BorrowTurnState(request) => {
+                    if self.selected_api_key.is_some() || self.turn_state_request.is_some() {
+                        return Err(failure("plugin_turn_state_conflict"));
+                    }
+                    self.turn_state_request = Some((plugin.id.clone(), request));
+                }
                 ParsedAction::Retry(next) => {
                     patches.extend(next);
                     return Ok(LifecycleDecision::Retry(patches));
@@ -470,6 +621,8 @@ impl LifecycleRequest {
         }
         self.finished = true;
         self.selected_api_key.take();
+        self.selected_turn_state.take();
+        self.turn_state_request.take();
         let method = match outcome {
             LifecycleOutcome::Completed => METHOD_COMPLETED,
             LifecycleOutcome::Failed => METHOD_FAILED,
@@ -491,6 +644,7 @@ impl LifecycleRequest {
                     metadata.remove("apiKeySelected");
                     metadata.remove("upstreamUrl");
                     metadata.remove("officialAccount");
+                    metadata.remove("turnStateAuthorized");
                 }
                 params["status"] = json!(status);
                 params["code"] = json!(code);
@@ -529,6 +683,7 @@ fn selected_headers(
 
 enum ParsedAction {
     Continue(Vec<HeaderPatch>, Option<String>),
+    BorrowTurnState(super::turn_state::Request),
     Retry(Vec<HeaderPatch>),
     Wait(String, Duration),
     Abort(LifecycleError),
@@ -560,6 +715,40 @@ fn parse_action(
                 unreachable!()
             };
             Ok(ParsedAction::Continue(patches, api_key))
+        }
+        Action::BorrowTurnState {
+            target_account_email,
+            source_account_email,
+            model,
+            timeout_ms,
+        } => {
+            if stage != LifecycleStage::BeforeSend
+                || target_account_email.is_empty()
+                || source_account_email.is_empty()
+                || target_account_email.len() > 320
+                || source_account_email.len() > 320
+                || !target_account_email.is_ascii()
+                || !source_account_email.is_ascii()
+                || target_account_email
+                    .bytes()
+                    .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+                || source_account_email
+                    .bytes()
+                    .any(|b| b.is_ascii_control() || b.is_ascii_whitespace())
+                || model.is_empty()
+                || model.len() > 128
+                || !model
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-/._".contains(&b))
+                || !(1000..=30000).contains(&timeout_ms)
+            {
+                return Err(failure("plugin_turn_state_invalid_action"));
+            }
+            Ok(ParsedAction::BorrowTurnState(super::turn_state::Request {
+                source_account_email,
+                model,
+                timeout: Duration::from_millis(timeout_ms),
+            }))
         }
         Action::Retry { headers: patches } => parse_header_action(patches, stage, headers, true),
         Action::Wait {
@@ -677,9 +866,51 @@ async fn dispatch_one(
                 return Err(failure("plugin_api_key_invalid"));
             }
         }
+        if value.get("action").and_then(Value::as_str) == Some("borrowTurnState") {
+            let authorized = entry
+                .context
+                .as_ref()
+                .and_then(|context| context["metadata"]["turnStateAuthorized"].as_bool())
+                == Some(true);
+            if !plugin.turn_state_capability || !authorized {
+                return Err(failure("plugin_turn_state_unauthorized"));
+            }
+            if method != METHOD_BEFORE_SEND
+                || stage != LifecycleStage::BeforeSend
+                || entry
+                    .context
+                    .as_ref()
+                    .and_then(|context| context["attempt"].as_u64())
+                    != Some(0)
+            {
+                return Err(failure("plugin_turn_state_invalid_stage"));
+            }
+            let target = value.get("targetAccountEmail").and_then(Value::as_str);
+            let official = entry
+                .context
+                .as_ref()
+                .and_then(|context| context["metadata"]["officialAccountEmail"].as_str());
+            if !target
+                .zip(official)
+                .is_some_and(|(target, official)| target.eq_ignore_ascii_case(official))
+            {
+                return Err(failure("plugin_turn_state_target_mismatch"));
+            }
+            let source = value.get("sourceAccountEmail").and_then(Value::as_str);
+            if source
+                .zip(target)
+                .is_some_and(|(source, target)| source.eq_ignore_ascii_case(target))
+            {
+                return Err(failure("plugin_turn_state_source_mismatch"));
+            }
+        }
         let sensitive_action = value.get("apiKey").is_some();
+        let turn_state_action =
+            value.get("action").and_then(Value::as_str) == Some("borrowTurnState");
         let action = parse_action(value, stage, &plugin.request_headers).map_err(|error| {
-            if sensitive_action && !error.code.starts_with("plugin_api_key_") {
+            if turn_state_action && !error.code.starts_with("plugin_turn_state_") {
+                failure("plugin_turn_state_invalid_action")
+            } else if sensitive_action && !error.code.starts_with("plugin_api_key_") {
                 failure("plugin_api_key_invalid_action")
             } else {
                 error
@@ -751,9 +982,11 @@ impl TestPlugin {
                 auth: false,
                 api_key_capability: false,
                 api_key_urls: Vec::new(),
+                turn_state_capability: false,
                 continue_on_failure: false,
                 max_wait: Duration::from_millis(300),
                 invoke_timeout: Duration::from_millis(100),
+                log_dir: None,
             }),
         }
     }

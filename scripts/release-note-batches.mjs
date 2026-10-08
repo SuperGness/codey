@@ -1,4 +1,46 @@
 const DEFAULT_MAX_BYTES = 48 * 1024;
+const NOTE_CATEGORIES = ["新增功能", "体验优化", "问题修复"];
+const DEFAULT_NOTE_CATEGORY = "体验优化";
+
+function noteCategory(entry) {
+  const category = entry.category ?? DEFAULT_NOTE_CATEGORY;
+  if (!NOTE_CATEGORIES.includes(category)) throw new Error("日志分类必须为新增功能、体验优化或问题修复");
+  return category;
+}
+
+export function formatNoteResults(candidates) {
+  const evidence = NOTE_CATEGORIES.flatMap(category => candidates.filter(candidate => noteCategory(candidate) === category));
+  const sections = NOTE_CATEGORIES.flatMap(category => {
+    const entries = evidence.filter(candidate => noteCategory(candidate) === category);
+    return entries.length ? [`**${category}**\n${entries.map(entry => `- ${entry.note}`).join("\n")}`] : [];
+  });
+  return { notes: sections.join("\n\n"), evidence };
+}
+
+export function parseNoteLines(notes) {
+  const lines = notes.trim().split(/\r?\n/).filter(line => line.trim());
+  const grouped = lines.some(line => /^\*\*/.test(line));
+  const entries = [];
+  let category;
+  let categoryIndex = -1;
+  let sectionHasNotes = false;
+  for (const line of lines) {
+    const heading = /^\*\*(新增功能|体验优化|问题修复)\*\*$/.exec(line);
+    if (heading) {
+      const nextIndex = NOTE_CATEGORIES.indexOf(heading[1]);
+      if (nextIndex <= categoryIndex || (category && !sectionHasNotes)) throw new Error("日志分类必须按固定顺序排列且包含内容");
+      category = heading[1];
+      categoryIndex = nextIndex;
+      sectionHasNotes = false;
+    } else {
+      if (!line.startsWith("- ") || (grouped && !category)) throw new Error("每条日志必须使用列表格式并对应一条差异证据");
+      entries.push({ note: line.slice(2), category });
+      sectionHasNotes = true;
+    }
+  }
+  if (category && !sectionHasNotes) throw new Error("日志分类必须包含内容");
+  return entries;
+}
 
 function serializedBytes(value) {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
@@ -102,29 +144,36 @@ export function resolveNoteEntries(value, references) {
     if (!entry || typeof entry.note !== "string" || !entry.note.trim() || /[\r\n]/.test(entry.note)) throw new Error(`第 ${index + 1} 条日志文字无效`);
     const reference = typeof entry.ref === "string" ? references.get(entry.ref) : null;
     if (!reference) throw new Error(`第 ${index + 1} 条日志引用的变更编号不属于当前批次`);
-    return { note: entry.note.trim(), ...reference };
+    return { note: entry.note.trim(), category: noteCategory(entry), ...reference };
   });
-  return { notes: evidence.map(item => `- ${item.note}`).join("\n"), evidence };
+  return formatNoteResults(evidence);
 }
 
-export function mergeNoteResults(results) {
+export function collectNoteCandidates(results) {
   if (!Array.isArray(results)) throw new TypeError("日志结果必须是数组");
-  const notes = [];
-  const evidence = [];
-  const seen = new Set();
+  const candidates = [];
   for (const result of results) {
     if (!result || typeof result.notes !== "string" || !Array.isArray(result.evidence)) throw new Error("分批日志结果无效");
     if (result.notes === "" && result.evidence.length === 0) continue;
-    const lines = result.notes.trim().split(/\r?\n/).filter((line) => line.trim());
+    const lines = parseNoteLines(result.notes);
     if (lines.length !== result.evidence.length) throw new Error("分批日志与差异证据数量不一致");
     for (const [index, line] of lines.entries()) {
-      if (!line.startsWith("- ") || typeof result.evidence[index]?.note !== "string" || result.evidence[index].note !== line.slice(2)) throw new Error("分批日志与差异证据不一致");
-      const note = result.evidence[index].note;
-      if (seen.has(note)) continue;
-      seen.add(note);
-      notes.push(`- ${note}`);
-      evidence.push(result.evidence[index]);
+      if (typeof result.evidence[index]?.note !== "string" || result.evidence[index].note !== line.note || (line.category && line.category !== noteCategory(result.evidence[index]))) throw new Error("分批日志与差异证据不一致");
+      candidates.push(result.evidence[index]);
     }
   }
-  return { notes: notes.join("\n"), evidence };
+  return candidates;
+}
+
+export function mergeNoteResults(results) {
+  const candidates = collectNoteCandidates(results);
+  const evidence = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const note = candidate.note;
+    if (seen.has(note)) continue;
+    seen.add(note);
+    evidence.push(candidate);
+  }
+  return formatNoteResults(evidence);
 }

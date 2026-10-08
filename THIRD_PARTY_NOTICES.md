@@ -26,6 +26,12 @@ The complete MIT notices are preserved in `licenses/PetDragRecovery/LICENSE`
 and `licenses/ChatGPTOverlayFix/LICENSE`. Codey's adaptation provides one-shot
 recovery through its Rust backend, without the upstream Node host or watcher.
 
+## Astra Turn State
+
+账号预请求流程参考 [spumon1/SUCK_MY_ASTRA](https://github.com/spumon1/SUCK_MY_ASTRA)，
+采用 MIT License，Copyright (c) 2026 boooot。完整许可证保留于
+`examples/plugins/astra-turn-state/THIRD_PARTY_LICENSES.txt`，并嵌入插件动态库。
+
 ## Bundled context tool
 
 Codey's optional built-in context tool sidecar includes FastCtx.

@@ -30,7 +30,7 @@
 
 显示说明时优先使用同级字段名，再查找祖先对象的点分隔字段名；数组路径省略下标，例如 `stateConfigs.model` 可说明每项的 `model`。真实的同名含点字段优先，存在歧义时应把说明放在嵌套对象自身的 `_comments` 中。没有对应字段的说明保留在文件中，不生成可编辑项。
 
-请求扩展统一声明 `request.lifecycle.v1`，使用 SDK 的 `lifecycle` 协议类型。宿主在发送前、收到响应头、等待恢复及请求结束时调用插件；插件可修改授权的请求头，或返回等待、受限重发及终止动作。多个插件按 ID 排序执行，返回值整体验证后才应用。处理异常时默认终止请求，可显式声明异常时继续。
+请求扩展统一声明 `request.lifecycle.v1`，使用 SDK 的 `lifecycle` 协议类型。宿主在发送前、收到响应头、等待恢复及请求结束时调用插件；插件可修改授权的请求头，或返回等待、受限重发及终止动作。额外声明 `request.lifecycle.turn_state` 可请求宿主从另一个已保存官方账号取得状态头和路由 Cookie，见 `examples/plugins/astra-turn-state`。多个插件按 ID 排序执行，返回值整体验证后才应用。处理异常时默认终止请求，可显式声明异常时继续，敏感动作校验失败除外。
 
 其他管理方法由插件自行定义，通过 `invoke_codey_plugin` 调用。`request.beforeSend`、`request.afterHeaders`、`request.resume`、`request.completed`、`request.failed` 和 `request.cancelled` 只由宿主调度，管理接口会拒绝同名调用。完整的权限、事件、动作及传输边界见 [请求生命周期协议](REQUEST_LIFECYCLE.md)。
 

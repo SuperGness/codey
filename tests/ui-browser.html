@@ -38,7 +38,27 @@
         }) };
       };
     }
-    if (view === "usage") {
+    if (view === "update") {
+      await import("../src/tailwind.css");
+      await import("../src/styles.css");
+      const { ConfirmationDialog } = await import("../src/AppDialogs.tsx");
+      const state = new URLSearchParams(location.search).get("state");
+      const notes = [
+        "优化更新日志布局，较长内容可在弹窗内滚动阅读。",
+        "更新说明改为简短条目，自动合并重复内容。",
+        "修复插件导入失败后无法重新尝试的问题。",
+        "优化模型目录刷新，保留当前缓存与选择。",
+      ];
+      const releaseNotes = state === "empty" ? undefined : state === "long"
+        ? Array.from({ length: 40 }, (_, index) => `- ${notes[index % notes.length]} ${index === 0 ? "VeryLongReleaseIdentifier".repeat(12) : ""}`).join("\r\n")
+        : state === "grouped" ? "**新增功能**\n- 支持按分类生成更新日志。\n\n**体验优化**\n- 更新提示默认展示简短预览。\n\n**问题修复**\n- 修复长日志挤占弹窗的问题。\n- 修复插件导入失败后无法重试的问题。"
+        : notes.map(note => `- ${note}`).join("\n");
+      createRoot(document.getElementById("root")).render(React.createElement(UiProvider, null,
+        React.createElement(ConfirmationDialog, {
+          confirmation: { action: "download-update", title: "发现 Codey 新版本 v1.2.6", description: "当前版本为 v1.2.5，检测到新版本 v1.2.6。\n\n是否立即下载更新？", releaseNotes, confirmLabel: "立即更新", run() {} },
+          container: null, onClose() {}, onConfirm() {},
+        })));
+    } else if (view === "usage") {
       await import("../src/tailwind.css");
       await import("../src/styles.css");
       const scenario = new URLSearchParams(location.search).get("state");

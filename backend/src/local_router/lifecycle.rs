@@ -353,6 +353,8 @@ where
             }
         }
         lifecycle.apply_api_key(headers)?;
+        await_upstream(downstream, lifecycle.mint_turn_state(client)).await??;
+        lifecycle.apply_turn_state(headers)?;
         if let Some(probe) = downstream.request_log_probe() {
             probe.set_upstream_request_headers(&format_upstream_headers(headers));
         }

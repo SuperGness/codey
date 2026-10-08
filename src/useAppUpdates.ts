@@ -325,13 +325,11 @@ export function useAppUpdates({
       title: target.rollback ? `回退 Codey 至 v${target.latestVersion}` : `发现 Codey 新版本 v${target.latestVersion}`,
       description: [
         target.rollback ? `管理员已授权从 v${target.currentVersion} 降级至 v${target.latestVersion}。回退原因：${target.rollback.reason}。请保存工作，确认后下载安装旧版本并重启。` : `当前版本为 v${target.currentVersion}，检测到新版本 v${target.latestVersion}。`,
-        target.releaseNotes?.trim()
-          ? `更新日志：\n${target.releaseNotes.trim()}`
-          : null,
         "是否立即下载更新？",
       ]
         .filter(Boolean)
         .join("\n\n"),
+      releaseNotes: target.releaseNotes?.trim() || undefined,
       confirmLabel: target.rollback ? "下载回退版本" : "立即更新",
       run: () => void downloadUpdate(target),
       // 用户已经在这次运行里明确推迟过这个版本，自动检查就不再反复弹窗。

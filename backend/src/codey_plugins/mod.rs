@@ -3,6 +3,7 @@ pub mod lifecycle;
 mod logs;
 mod provider;
 pub(crate) mod transport;
+pub(crate) mod turn_state;
 
 #[allow(unused_imports)]
 pub(crate) use provider::{PluginRouteSpec, RouteChange, set_route_handler};
@@ -1115,7 +1116,11 @@ impl Manager {
         generations.retain(|generation| generation.strong_count() > 0);
         generations.push(native.lifetime());
         let instance = Arc::new(Mutex::new(native));
-        let lifecycle = lifecycle::LifecyclePlugin::native(&manifest, instance.clone());
+        let lifecycle = lifecycle::LifecyclePlugin::native(
+            &manifest,
+            instance.clone(),
+            prepared.context.log_dir.clone(),
+        );
         self.live.insert(
             prepared.id.clone(),
             Active {

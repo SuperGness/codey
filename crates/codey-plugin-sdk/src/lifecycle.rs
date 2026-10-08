@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 pub const CAPABILITY: &str = "request.lifecycle.v1";
 pub const AUTH_CAPABILITY: &str = "request.lifecycle.auth";
 pub const API_KEY_CAPABILITY: &str = "request.lifecycle.api_key";
+pub const TURN_STATE_CAPABILITY: &str = "request.lifecycle.turn_state";
 
 /// 只由宿主在请求生命周期中调用。管理接口必须拒绝这些方法名。
 pub const METHOD_BEFORE_SEND: &str = "request.beforeSend";
@@ -84,6 +85,15 @@ pub enum Action {
         /// Sensitive; only an authorized initial beforeSend may select a key.
         #[serde(default, rename = "apiKey", skip_serializing_if = "Option::is_none")]
         api_key: Option<String>,
+    },
+    BorrowTurnState {
+        #[serde(rename = "targetAccountEmail")]
+        target_account_email: String,
+        #[serde(rename = "sourceAccountEmail")]
+        source_account_email: String,
+        model: String,
+        #[serde(rename = "timeoutMs")]
+        timeout_ms: u64,
     },
     Wait {
         token: String,

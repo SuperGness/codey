@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useId, useMemo, useState } from "react";
 import {
   IconAlertTriangle as AlertTriangle,
   IconCheck as Check,
@@ -498,6 +498,9 @@ function ConfirmationDialogComponent({
   onClose,
   onConfirm,
 }: ConfirmationDialogProps) {
+  const [showFullNotes, setShowFullNotes] = useState(false);
+  const notesId = useId();
+  useEffect(() => setShowFullNotes(false), [confirmation]);
   const destructive =
     confirmation?.action === "discard-settings-changes" ||
     confirmation?.action === "delete-notification-channel" ||
@@ -506,14 +509,87 @@ function ConfirmationDialogComponent({
   const isUpdate =
     confirmation?.action === "download-update" ||
     confirmation?.action === "install-update";
+  const noteGroups = useMemo(() => {
+    const groups: Array<{ title: string; lines: string[] }> = [];
+    if (!isUpdate) return groups;
+    let group = { title: "", lines: [] as string[] };
+    groups.push(group);
+    for (const line of confirmation?.releaseNotes?.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) ?? []) {
+      const heading = /^\*\*(新增功能|体验优化|问题修复)\*\*$/.exec(line);
+      if (heading) {
+        group = { title: heading[1], lines: [] };
+        groups.push(group);
+      } else {
+        group.lines.push(line.replace(/^[-*•]\s+/, ""));
+      }
+    }
+    return groups.filter((group) => group.lines.length > 0);
+  }, [isUpdate, confirmation?.releaseNotes]);
+  const noteLines = noteGroups.flatMap((group) => group.lines);
+  const hasMoreNotes = noteLines.length > 3 || noteLines.some((line) => Array.from(line).length > 60);
+  let remainingNotes = showFullNotes ? noteLines.length : 3;
+  const visibleNoteGroups = noteGroups.map((group) => {
+    const lines = group.lines.slice(0, remainingNotes);
+    remainingNotes -= lines.length;
+    return { ...group, lines };
+  }).filter((group) => group.lines.length > 0);
   return (
     <Dialog open={Boolean(confirmation)} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="confirmation-dialog" container={container}>
-        <DialogHeader>
+      <DialogContent
+        className={isUpdate
+          ? "confirmation-dialog update-confirmation-dialog sm:w-[560px] max-h-[calc(100dvh-32px)]"
+          : "confirmation-dialog"}
+        container={container}
+      >
+        <DialogHeader className={isUpdate ? "shrink-0" : undefined}>
           <DialogTitle>{confirmation?.title}</DialogTitle>
-          <DialogDescription>{confirmation?.description}</DialogDescription>
+          <DialogDescription className={isUpdate ? "whitespace-pre-wrap [overflow-wrap:anywhere]" : undefined}>
+            {confirmation?.description}
+          </DialogDescription>
         </DialogHeader>
-        <DialogFooter>
+        {noteLines.length > 0 && (
+          <section className="mt-4 flex min-h-0 flex-col gap-2">
+            <div className="flex shrink-0 items-center justify-between gap-3">
+              <h3 className="m-0 text-xs font-medium text-foreground">更新日志</h3>
+              {hasMoreNotes && (
+                <Button
+                  variant="link"
+                  size="xs"
+                  aria-expanded={showFullNotes}
+                  aria-controls={notesId}
+                  onClick={() => setShowFullNotes((show) => !show)}
+                >
+                  {showFullNotes ? "收起日志" : `查看完整日志（${noteLines.length} 条）`}
+                </Button>
+              )}
+            </div>
+            <div
+              id={notesId}
+              className="update-release-notes min-h-0 max-h-[min(360px,45dvh)] overflow-y-auto overscroll-contain rounded-lg border border-default p-4 text-sm leading-7 text-muted [overflow-wrap:anywhere]"
+              role="region"
+              aria-label="更新日志内容"
+              tabIndex={0}
+            >
+              <div className="space-y-3">
+                {visibleNoteGroups.map((group, groupIndex) => (
+                  <div key={groupIndex}>
+                    {group.title && <h4 className="m-0 mb-1 text-xs font-semibold text-foreground">{group.title}</h4>}
+                    <ul className="m-0 list-disc space-y-2 pl-4">
+                      {group.lines.map((line, index) => (
+                        <li key={index} className="pl-1 whitespace-pre-wrap">
+                          <span className={showFullNotes || !hasMoreNotes ? undefined : "line-clamp-2"}>
+                            {line}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
+        <DialogFooter className={isUpdate ? "shrink-0" : undefined}>
           <Button variant="outline" onClick={onClose}>
             {isUpdate ? "稍后" : "取消"}
           </Button>

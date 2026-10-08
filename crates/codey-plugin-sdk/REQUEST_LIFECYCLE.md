@@ -24,13 +24,15 @@
 
 需要为非官方原生 Responses 线路轮换 Key 的可信插件必须同时声明 `request.lifecycle.v1`、`request.lifecycle.api_key` 与非空 `apiKeyUrls`。该列表最多 32 个精确 HTTPS endpoint，回环 mock 允许 HTTP；路径仅允许 `/responses`、`/responses/compact` 及其 `/v1` 前缀形式。禁止通配符、用户信息、query、fragment、重复规范 URL 和任意其他路径。旧 manifest 不声明该能力时默认空列表；列表与能力缺一会被拒绝。此权限独立于官方认证上下文，普通头名单始终不能授权 Authorization。
 
+`request.lifecycle.turn_state` 需同时声明生命周期能力，允许宿主使用另一个已保存官方账号发起独立预请求，再安装状态头和路由 Cookie；插件不接收来源凭据或 Cookie。仅适用宿主原生 HTTP Responses、官方账号和固定的 `https://chatgpt.com/backend-api/codex/responses` 地址，不支持自定义网关、压缩或传输插件。宿主仅向声明此能力的控制事件提供 `metadata.turnStateAuthorized`。
+
 ## 事件与顺序
 
 每个逻辑请求固定一份已启用插件实例快照，按插件 ID 顺序调用。运行中启用的新实例只参与后续请求；停用或替换会撤销旧实例在等待中的控制权。同一个实例串行执行回调，正常并发请求异步排队，等待期间不占用原生线程。
 
 | 方法 | 时机 | 返回值 |
 | --- | --- | --- |
-| `request.beforeSend` | 每次上游 HTTP 发送前 | `continue`、`wait`、`abort` |
+| `request.beforeSend` | 每次上游 HTTP 发送前 | `continue`、`wait`、`abort`、已授权的 `borrowTurnState` |
 | `request.afterHeaders` | 收到上游响应头，下游响应尚未开始 | `continue`、`wait`、`retry`、`abort` |
 | `request.resume` | 宿主轮询同一插件的等待任务 | 沿用原阶段允许的动作 |
 | `request.completed` | HTTP 响应成功传输完成 | 忽略 |
@@ -82,6 +84,12 @@
 已授权插件仅可在首次 `request.beforeSend` 的 `continue` 返回独立的 `apiKey` 字符串。值必须为非空可见 ASCII，最长 8192 字节。宿主在最终发送前安装敏感 Bearer HeaderValue，并移除竞争认证头；它不经过 HeaderPatch、插件广播或请求日志。同一插件实例的 SDK 回调互斥，Key 选择与轮询游标推进可在一个回调中完成。一个逻辑请求选定后固定，重试复用；再选、多个插件覆盖、未授权目标、官方线路、协议转换、响应头阶段及 resume 均拒绝，敏感校验失败不受 continue 失败策略放行。原生传输仍处理原始正文与 SSE，不提供转发网关或协议转换；上游客户端不跟随重定向。SDK Action 不实现 Debug，避免打印 Key。
 
 ```json
+{"action":"borrowTurnState","targetAccountEmail":"target@example.com","sourceAccountEmail":"source@example.com","model":"gpt-5.4","timeoutMs":15000}
+```
+
+此动作仅允许首次 `request.beforeSend`，目标邮箱必须匹配当前官方账号，来源邮箱须唯一匹配另一个已保存账号。宿主发送独立的流式 ping，取得响应头后关闭流，仅提取 `X-Codex-Turn-State` 和有效的 `__cflb`、`__oailb` Cookie，发送前替换原有两个请求头；目标账号的认证信息保持不变。超时包含账号刷新和响应头等待，范围为 1000–30000 毫秒；失败终止原请求，不受 continue 策略放行。状态只存于当前逻辑请求，重试复用，结束释放；停用和可检测的下游取消会中断预请求。每个逻辑请求只能选择一次，不能与 API Key 动作混用。预请求增加来源账号用量和发送延迟，上游效果需自行确认。
+
+```json
 {"action":"wait","token":"job-7","pollAfterMs":100}
 ```
 
@@ -113,4 +121,4 @@ WebSocket 下游关闭可中断等待。HTTP 的 FIN 与合法写半关闭无法
 
 打包脚本支持 `--capability request.lifecycle.v1`、重复的 `--header` 与 `--response-header`、`--lifecycle-failure-policy` 和 `--lifecycle-max-wait-ms`。头名单及生命周期参数必须显式搭配生命周期能力，缺失时直接报错。需要认证上下文时另加 `--capability request.lifecycle.auth`；需要选取 API Key 时另加 `--capability request.lifecycle.api_key` 及重复的 `--api-key-url` 精确授权地址，域名须使用 ASCII 或 Punycode，避免不同 IDNA 规则改变授权目标。安装包必须包含 `config.json`；打包时省略 `--config` 会生成空对象模板。
 
-此协议只提供请求控制。账号卡片、代理管理等界面需要独立的前端扩展接口，生命周期声明不会自动挂载插件界面。
+需要上述预请求能力时另加 `--capability request.lifecycle.turn_state`，无需声明认证能力或 Cookie 头名单；示例见 `examples/plugins/astra-turn-state`。此协议只提供请求控制，生命周期声明不会自动挂载插件界面。
