@@ -1286,11 +1286,10 @@ impl CodeyConfig {
             .iter()
             .filter(|p| p.enabled && p.plugin_owner_id.is_some())
         {
-            if let Some(transport) = profile
-                .plugin_route_spec
-                .as_ref()
-                .and_then(|s| s.transport.as_ref())
-            {
+            let Some(spec) = profile.plugin_route_spec.as_ref() else {
+                continue;
+            };
+            if let Some(transport) = spec.transport.as_ref() {
                 for (model, caps) in &transport.models {
                     contexts.insert(
                         runtime_catalog_model_id(profile, model, qualify_official),
@@ -1299,6 +1298,20 @@ impl CodeyConfig {
                             auto_compact_token_limit: Some(caps.auto_compact_token_limit),
                             reserve_output_tokens: None,
                         },
+                    );
+                }
+            }
+            for (model, caps) in &spec.model_contexts {
+                let policy = ModelContextConfig {
+                    context_window_tokens: caps.context_window,
+                    auto_compact_token_limit: Some(caps.auto_compact_token_limit),
+                    reserve_output_tokens: caps.reserve_output_tokens,
+                };
+                // Persisted configuration may predate host validation.
+                if spec.models.contains(model) && policy.validate().is_ok() {
+                    contexts.insert(
+                        runtime_catalog_model_id(profile, model, qualify_official),
+                        policy,
                     );
                 }
             }
@@ -4841,6 +4854,31 @@ mod tests {
         config.reconcile_after_route_removal("route-a");
         assert!(config.misc_model.is_empty());
         assert!(config.misc_model_catalog_id().is_none());
+    }
+
+    #[test]
+    fn plugin_http_contexts_are_route_scoped_and_disabled_routes_are_excluded() {
+        let mut config = CodeyConfig::default();
+        let profile = &mut config.profiles[0];
+        profile.id = "plugin-route".into();
+        profile.official_account = false;
+        profile.plugin_owner_id = Some("dev.context".into());
+        profile.plugin_route_spec = Some(serde_json::from_value::<crate::codey_plugins::PluginRouteSpec>(
+            serde_json::json!({"name":"Context","baseUrl":"http://127.0.0.1:8787/v1",
+                "upstreamProtocol":"openaiResponses","models":["demo"],"headers":{},
+                "modelContexts":{"demo":{"contextWindow":200000,"autoCompactTokenLimit":180000,"reserveOutputTokens":8192}}})
+        ).unwrap());
+        let key = runtime_catalog_model_id(
+            &config.profiles[0],
+            "demo",
+            config.qualifies_official_model_ids(),
+        );
+        let policy = config.runtime_plugin_model_contexts().remove(&key).unwrap();
+        assert_eq!(policy.context_window_tokens, 200000);
+        assert_eq!(policy.reserve_output_tokens, Some(8192));
+        assert_eq!(policy.auto_compact_token_limit, Some(180000));
+        config.profiles[0].enabled = false;
+        assert!(config.runtime_plugin_model_contexts().is_empty());
     }
 
     #[test]

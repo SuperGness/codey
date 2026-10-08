@@ -1,4 +1,4 @@
-//! 插件线路只在启用时向宿主提交描述。管理接口不能调用描述方法。
+//! 插件线路在启用和宿主同步模型时提交描述。管理接口不能调用描述方法。
 use super::Manifest;
 use super::native::Native;
 use codey_plugin_sdk::provider::{CAPABILITY, METHOD_DESCRIBE, RouteDescriptor};
@@ -27,8 +27,16 @@ pub struct PluginRouteSpec {
     pub base_url: String,
     pub upstream_protocol: String,
     pub models: Vec<String>,
+    #[serde(default)]
+    pub supports_websockets: bool,
+    #[serde(default)]
+    pub supports_remote_compaction: bool,
+    #[serde(default)]
+    pub supports_native_web_search: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub model_reasoning_efforts: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_contexts: BTreeMap<String, codey_plugin_sdk::provider::ModelContext>,
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub short_name: String,
@@ -140,6 +148,15 @@ pub(crate) fn parse_route_descriptor(value: Value) -> Result<PluginRouteSpec, St
     if !ROUTE_PROTOCOLS.contains(&descriptor.upstream_protocol.as_str()) {
         return Err("插件线路协议不受支持".into());
     }
+    if (descriptor.supports_websockets
+        || descriptor.supports_remote_compaction
+        || descriptor.supports_native_web_search)
+        && (descriptor.upstream_protocol != "openaiResponses" || descriptor.transport.is_some())
+    {
+        return Err(
+            "原生 WebSocket、远程压缩和 Web Search 声明仅支持标准 HTTP Responses 线路".into(),
+        );
+    }
     if descriptor.models.is_empty() || descriptor.models.len() > MAX_MODELS {
         return Err(format!("插件线路需要 1 到 {MAX_MODELS} 个模型"));
     }
@@ -191,6 +208,27 @@ pub(crate) fn parse_route_descriptor(value: Value) -> Result<PluginRouteSpec, St
             return Err(format!("插件线路模型思考强度声明重复：{canonical_model}"));
         }
     }
+    let mut model_contexts = BTreeMap::new();
+    for (model, caps) in descriptor.model_contexts {
+        let canonical_model = models
+            .iter()
+            .find(|candidate| candidate.eq_ignore_ascii_case(&model))
+            .ok_or_else(|| format!("插件线路上下文声明的模型不在模型列表中：{model}"))?
+            .clone();
+        crate::config::ModelContextConfig {
+            context_window_tokens: caps.context_window,
+            auto_compact_token_limit: Some(caps.auto_compact_token_limit),
+            reserve_output_tokens: caps.reserve_output_tokens,
+        }
+        .validate()
+        .map_err(|error| format!("插件模型 {canonical_model} 上下文声明无效：{error}"))?;
+        if model_contexts
+            .insert(canonical_model.clone(), caps)
+            .is_some()
+        {
+            return Err(format!("插件线路模型上下文声明重复：{canonical_model}"));
+        }
+    }
     if descriptor.headers.len() > 32 {
         return Err("插件线路请求头超过 32 项".into());
     }
@@ -236,6 +274,13 @@ pub(crate) fn parse_route_descriptor(value: Value) -> Result<PluginRouteSpec, St
             {
                 return Err("插件模型上下文声明无效".into());
             }
+            if model_contexts.get(model).is_some_and(|context| {
+                context.context_window != caps.context_window
+                    || context.auto_compact_token_limit != caps.auto_compact_token_limit
+                    || context.reserve_output_tokens.is_some()
+            }) {
+                return Err("插件模型上下文与传输声明冲突".into());
+            }
         }
     }
     Ok(PluginRouteSpec {
@@ -243,7 +288,11 @@ pub(crate) fn parse_route_descriptor(value: Value) -> Result<PluginRouteSpec, St
         base_url: descriptor.base_url,
         upstream_protocol: descriptor.upstream_protocol,
         models,
+        supports_websockets: descriptor.supports_websockets,
+        supports_remote_compaction: descriptor.supports_remote_compaction,
+        supports_native_web_search: descriptor.supports_native_web_search,
         model_reasoning_efforts,
+        model_contexts,
         headers,
         short_name: String::new(),
         transport: descriptor.transport,
@@ -270,6 +319,39 @@ mod tests {
         let spec = parse_route_descriptor(descriptor()).unwrap();
         assert_eq!(spec.headers.get("x-region").map(String::as_str), Some("us"));
         assert_eq!(spec.models, vec!["demo-model"]);
+        assert!(!spec.supports_websockets);
+        assert!(!spec.supports_remote_compaction);
+        assert!(!spec.supports_native_web_search);
+    }
+
+    #[test]
+    fn native_capabilities_require_http_responses() {
+        for field in [
+            "supportsWebsockets",
+            "supportsRemoteCompaction",
+            "supportsNativeWebSearch",
+        ] {
+            let mut value = descriptor();
+            value[field] = json!(true);
+            let spec = parse_route_descriptor(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(spec).unwrap()[field], true);
+            for protocol in ["openaiChatCompletions", "anthropicMessages"] {
+                value["upstreamProtocol"] = json!(protocol);
+                assert!(
+                    parse_route_descriptor(value.clone())
+                        .unwrap_err()
+                        .contains("标准 HTTP Responses")
+                );
+            }
+            value["upstreamProtocol"] = json!("openaiResponses");
+            value["headers"] = json!([]);
+            value["transport"] = json!({"accountEmail":"user@example.com"});
+            assert!(
+                parse_route_descriptor(value)
+                    .unwrap_err()
+                    .contains("标准 HTTP Responses")
+            );
+        }
     }
 
     #[test]
@@ -283,6 +365,43 @@ mod tests {
             spec.model_reasoning_efforts["demo-model"],
             ["low", "medium", "high", "xhigh"]
         );
+    }
+
+    #[test]
+    fn parse_accepts_http_contexts_and_rejects_unsafe_budgets() {
+        let mut value = descriptor();
+        value["modelContexts"] = json!({"DEMO-MODEL": {
+            "contextWindow": 200000, "autoCompactTokenLimit": 180000,
+            "reserveOutputTokens": 8192
+        }});
+        let spec = parse_route_descriptor(value.clone()).unwrap();
+        assert_eq!(spec.model_contexts["demo-model"].context_window, 200000);
+        for contexts in [
+            json!({"other":{"contextWindow":200000,"autoCompactTokenLimit":180000}}),
+            json!({"demo-model":{"contextWindow":1023,"autoCompactTokenLimit":900}}),
+            json!({"demo-model":{"contextWindow":200000,"autoCompactTokenLimit":180001}}),
+            json!({"demo-model":{"contextWindow":200000,"autoCompactTokenLimit":180000,"reserveOutputTokens":50000}}),
+            json!({"demo-model":{"contextWindow":200000,"autoCompactTokenLimit":0}}),
+            json!({"demo-model":{"contextWindow":200000,"autoCompactTokenLimit":180000},"DEMO-MODEL":{"contextWindow":200000,"autoCompactTokenLimit":180000}}),
+            json!({" demo-model ":{"contextWindow":200000,"autoCompactTokenLimit":180000}}),
+        ] {
+            value["modelContexts"] = contexts;
+            assert!(parse_route_descriptor(value.clone()).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn legacy_transport_contexts_remain_valid_but_conflicting_maps_fail() {
+        let mut value = descriptor();
+        value["headers"] = json!([]);
+        value["transport"] = json!({"accountEmail":"user@example.com","models": {
+            "demo-model":{"contextWindow":200000,"autoCompactTokenLimit":190000}
+        }});
+        assert!(parse_route_descriptor(value.clone()).is_ok());
+        value["modelContexts"] = json!({"demo-model": {
+            "contextWindow":200000,"autoCompactTokenLimit":180000
+        }});
+        assert!(parse_route_descriptor(value).unwrap_err().contains("冲突"));
     }
 
     #[test]

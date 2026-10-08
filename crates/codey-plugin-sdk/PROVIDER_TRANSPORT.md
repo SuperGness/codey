@@ -4,6 +4,12 @@
 
 ## 线路与账号
 
+标准 HTTP 线路的 `provider.describe` 可额外返回 `supportsWebsockets`、`supportsRemoteCompaction`、`supportsNativeWebSearch`（缺省均为 `false`）。声明为 `true` 仅适用于没有 `transport` 的 `openaiResponses` 线路；远程压缩须实现独立 Responses compact 契约，原生搜索须实现 Responses `web_search` 结果契约。声明不改变 C ABI v1；旧宿主会拒绝未知字段，插件应注明最低宿主要求。
+
+可选 `modelContexts` 将已声明模型 ID 映射到 `contextWindow`、`autoCompactTokenLimit` 和可选 `reserveOutputTokens`。仅声明真实上游预算，未知窗口应省略。窗口为 1024 至 10000000，压缩阈值须为正且不超过窗口的 90% 和扣除输出预留后的有效窗口；用户预算覆盖优先。若与 `transport.models` 同时声明，同一模型预算必须一致，且不能新增输出预留。
+
+宿主同步插件线路模型时会重新调用 `provider.describe`，固定实例并核对配置、归属和线路连接；只更新当前线路的模型、预算和能力。标准 HTTP 的实际 `/models` 目录决定成员，自定义 transport 使用新的描述目录。已删除的插件模型不会被旧手动标记保留；独立手动模型、用户能力开关及空选择保留。连接描述变化需要重新加载插件，刷新不会创建已删除的线路。
+
 `provider.describe` 沿用线路描述，协议须为 `openaiResponses`，`headers` 须为空，并增加 `transport`：
 
 线路也可以返回可选的 `modelReasoningEfforts`，将模型 ID 映射到允许的思考档位。宿主会把它作为线路能力上限，用户可配置范围内的档位并自定义上游取值，但不能借取值启用未声明的 `max` 或 `ultra`；缺省时保持原有自动适配。旧版宿主会拒绝描述中的未知字段，需升级宿主后才能启用带此字段的插件。

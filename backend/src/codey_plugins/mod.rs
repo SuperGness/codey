@@ -201,6 +201,71 @@ pub fn get_config_file(id: &str) -> Result<ConfigFile, String> {
 pub fn plugin_directory(id: &str) -> Result<PathBuf, String> {
     manager()?.plugin_directory(id)
 }
+
+/// Internal refresh lease: configuration/enable mutations cannot replace the
+/// instance while the upstream catalogue and its description are being read.
+pub(crate) struct RouteRefresh {
+    active: Active,
+    route_id: String,
+    reservation: LoadingReservation,
+}
+
+pub(crate) fn reserve_route_refresh(id: &str, route_id: &str) -> Result<RouteRefresh, String> {
+    let mut guard = manager()?;
+    if guard.stopping {
+        return Err("插件管理器正在关闭".into());
+    }
+    guard.reject_if_loading(id)?;
+    let record = guard.state.plugins.get(id).ok_or("插件未安装")?;
+    if !record.enabled || record.route_profile_id.as_deref() != Some(route_id) {
+        return Err("插件线路归属已变化，请重新载入后同步".into());
+    }
+    let active = guard.live.get(id).cloned().ok_or("插件尚未启用")?;
+    if parse_config(&guard.get_config_file(id)?.content)? != active.config {
+        return Err("插件配置已修改，请重新加载插件后同步模型".into());
+    }
+    guard.loading.insert(id.to_owned());
+    Ok(RouteRefresh {
+        active,
+        route_id: route_id.to_owned(),
+        reservation: LoadingReservation {
+            id: id.to_owned(),
+            armed: true,
+        },
+    })
+}
+
+impl RouteRefresh {
+    pub(crate) fn describe(&self) -> Result<PluginRouteSpec, String> {
+        let mut native = self
+            .active
+            .instance
+            .lock()
+            .map_err(|_| "插件实例锁已损坏")?;
+        provider::describe_if_declared(&self.active.manifest, &mut native)?
+            .ok_or_else(|| "插件未声明线路提供能力".into())
+    }
+
+    pub(crate) fn validate_current(&self) -> Result<(), String> {
+        let guard = manager()?;
+        let id = &self.reservation.id;
+        let record = guard.state.plugins.get(id).ok_or("插件未安装")?;
+        if guard.stopping
+            || !record.enabled
+            || record.route_profile_id.as_deref() != Some(self.route_id.as_str())
+            || guard
+                .live
+                .get(id)
+                .is_none_or(|active| !Arc::ptr_eq(&active.instance, &self.active.instance))
+        {
+            return Err("同步模型期间插件线路已变化，请重试".into());
+        }
+        if parse_config(&guard.get_config_file(id)?.content)? != self.active.config {
+            return Err("同步模型期间插件配置已变化，请重试".into());
+        }
+        Ok(())
+    }
+}
 pub fn clear_logs(id: &str) -> Result<PluginList, String> {
     let manager = manager()?;
     logs::clear(&manager.plugin_directory(id)?)?;

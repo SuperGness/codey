@@ -440,6 +440,15 @@ pub async fn fetch_route_models(
     }
     profile.validate()?;
     let provider_id = profile.provider_id().to_string();
+    let plugin_refresh = if profile.official_account {
+        None
+    } else {
+        profile
+            .plugin_owner_id
+            .as_deref()
+            .map(|plugin_id| crate::codey_plugins::reserve_route_refresh(plugin_id, route_id))
+            .transpose()?
+    };
     let fetched_account_entries = if profile.official_account {
         Some(fetch_official_route_models(state, &profile).await?)
     } else {
@@ -465,6 +474,23 @@ pub async fn fetch_route_models(
             .await
             .map_err(|error| error.to_string())?
     };
+    let (plugin_refresh, refreshed_plugin_spec) = if let Some(refresh) = plugin_refresh {
+        tokio::task::spawn_blocking(move || {
+            let spec = refresh.describe()?;
+            Ok::<_, String>((Some(refresh), Some(spec)))
+        })
+        .await
+        .map_err(|error| format!("刷新插件线路描述失败：{error}"))??
+    } else {
+        (None, None)
+    };
+    // Custom transports do not expose a standard /models endpoint; their fresh
+    // description is the catalogue, rather than the persisted pre-refresh list.
+    let fetched_models = refreshed_plugin_spec
+        .as_ref()
+        .filter(|spec| spec.transport.is_some())
+        .map(|spec| spec.models.clone())
+        .unwrap_or(fetched_models);
     let visible_fetched_models = regular_route_models(fetched_models.clone());
     timings.mark("fetchModelsMs");
     let _config_write_guard = state.config_write_lock.lock().await;
@@ -477,10 +503,37 @@ pub async fn fetch_route_models(
         .iter()
         .find(|profile| profile.id == route_id)
         .ok_or_else(|| "同步模型期间线路已被删除，请重试".to_string())?;
-    if latest_profile.provider_id() != provider_id {
+    if latest_profile.provider_id() != provider_id
+        || latest_profile.plugin_owner_id != profile.plugin_owner_id
+        || latest_profile.plugin_route_spec != profile.plugin_route_spec
+    {
         return Err("同步模型期间线路接入配置已变化，请重试".to_string());
     }
-    latest = if profile.official_account {
+    if let Some(refresh) = &plugin_refresh {
+        refresh.validate_current()?;
+    }
+    latest = if let Some(spec) = refreshed_plugin_spec {
+        let mut next = latest;
+        crate::plugin_routes::refresh_models(
+            &mut next,
+            profile
+                .plugin_owner_id
+                .as_deref()
+                .ok_or("插件线路缺少归属")?,
+            route_id,
+            spec,
+            &visible_fetched_models,
+        )?;
+        set_provider_auto_review_support(
+            &mut next,
+            &provider_id,
+            models_support_auto_review(&fetched_models),
+        );
+        if next.current_provider_id() == Some(provider_id.as_str()) {
+            subagent_policy::reconcile_for_current_provider(&mut next, codex_home(), false);
+        }
+        next
+    } else if profile.official_account {
         let mut next = latest;
         next.upstream_models_by_provider
             .insert(provider_id.clone(), fetched_models.clone());
@@ -527,6 +580,7 @@ pub async fn fetch_route_models(
         }
     };
     *state.config.write().await = latest.clone();
+    drop(plugin_refresh);
     drop(_config_write_guard);
     timings.mark("saveConfigMs");
     let hot_reload = hot_reload_runtime_models(state).await;

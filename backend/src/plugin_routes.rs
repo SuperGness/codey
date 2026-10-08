@@ -117,6 +117,136 @@ pub(crate) fn release(config: &mut CodeyConfig, plugin_id: &str) {
     *config = std::mem::take(config).normalize();
 }
 
+/// Refresh only this existing route. A catalogue refresh cannot recreate a
+/// deleted route, detach another route, or change the connection being fetched.
+pub(crate) fn refresh_models(
+    config: &mut CodeyConfig,
+    plugin_id: &str,
+    route_id: &str,
+    spec: PluginRouteSpec,
+    fetched_models: &[String],
+) -> Result<(), String> {
+    if !config.local_router_enabled {
+        return Err(READ_ONLY_ROUTE_ERROR.into());
+    }
+    let mut spec = normalize_spec(spec)?;
+    let profile = config
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.id == route_id)
+        .ok_or("同步模型期间线路已被删除，请重试")?;
+    if !profile.enabled
+        || profile.plugin_owner_id.as_deref() != Some(plugin_id)
+        || !structure_matches(profile)
+    {
+        return Err("同步模型期间插件线路归属或结构已变化，请重试".into());
+    }
+    let previous = profile
+        .plugin_route_spec
+        .as_ref()
+        .ok_or("插件线路缺少描述")?
+        .clone();
+    if spec.name != previous.name
+        || spec.base_url != previous.base_url
+        || spec.upstream_protocol != previous.upstream_protocol
+        || spec.headers != previous.headers
+        || spec
+            .transport
+            .as_ref()
+            .map(|transport| &transport.account_email)
+            != previous
+                .transport
+                .as_ref()
+                .map(|transport| &transport.account_email)
+    {
+        return Err("插件线路连接描述已变化，请重新加载插件后同步".into());
+    }
+    if fetched_models.is_empty() {
+        return Err("插件上游模型列表为空".into());
+    }
+    // The successfully fetched directory owns model membership; a stale static
+    // fallback in describe must never resurrect a retired upstream model.
+    spec.models = fetched_models.to_vec();
+    let fetched = |model: &str| {
+        fetched_models
+            .iter()
+            .any(|candidate| model_id::equal(candidate, model))
+    };
+    spec.model_contexts.retain(|model, _| fetched(model));
+    spec.model_reasoning_efforts
+        .retain(|model, _| fetched(model));
+    if let Some(transport) = &mut spec.transport {
+        transport.models.retain(|model, _| fetched(model));
+    }
+    let provider_id = profile.provider_id().to_string();
+    apply_spec(profile, plugin_id, &spec, true);
+    // Legacy sync inferred missing selected models as manual. Previously
+    // declared plugin models remain managed even if they acquired that marker.
+    let manual = config
+        .manual_third_party_models_by_provider
+        .get(&provider_id)
+        .into_iter()
+        .flatten()
+        .filter(|model| {
+            !previous
+                .models
+                .iter()
+                .any(|declared| model_id::equal(declared, model))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected = match config.selected_models_by_provider.get(&provider_id) {
+        None => fetched_models.to_vec(),
+        Some(selected) if lists_match(selected, &previous.models) => fetched_models.to_vec(),
+        Some(selected) => selected
+            .iter()
+            .filter(|model| {
+                fetched(model)
+                    || manual
+                        .iter()
+                        .any(|candidate| model_id::equal(candidate, model))
+            })
+            .cloned()
+            .collect(),
+    };
+    config
+        .selected_models_by_provider
+        .insert(provider_id.clone(), selected);
+    let mut supported = fetched_models.to_vec();
+    for model in &manual {
+        if !fetched(model) {
+            supported.push(model.clone());
+        }
+    }
+    config.retain_model_contexts(&provider_id, &supported);
+    config
+        .upstream_models_by_provider
+        .insert(provider_id.clone(), supported);
+    if manual.is_empty() {
+        config
+            .manual_third_party_models_by_provider
+            .remove(&provider_id);
+    } else {
+        config
+            .manual_third_party_models_by_provider
+            .insert(provider_id.clone(), manual);
+    }
+    if let Some(models) = config
+        .declared_official_models_by_provider
+        .get_mut(&provider_id)
+    {
+        models.retain(|model| {
+            fetched(model)
+                || !previous
+                    .models
+                    .iter()
+                    .any(|declared| model_id::equal(declared, model))
+        });
+    }
+    *config = std::mem::take(config).normalize();
+    Ok(())
+}
+
 pub(crate) fn retain_plugin_ownership(
     profile: &mut ProviderProfile,
     previous: &ProviderProfile,
@@ -179,6 +309,16 @@ fn normalize_spec(mut spec: PluginRouteSpec) -> Result<PluginRouteSpec, String> 
     ) {
         return Err("插件线路协议不受支持".into());
     }
+    if (spec.supports_websockets
+        || spec.supports_remote_compaction
+        || spec.supports_native_web_search)
+        && (spec.upstream_protocol != UPSTREAM_PROTOCOL_OPENAI_RESPONSES
+            || spec.transport.is_some())
+    {
+        return Err(
+            "原生 WebSocket、远程压缩和 Web Search 声明仅支持标准 HTTP Responses 线路".into(),
+        );
+    }
     spec.headers = spec
         .headers
         .iter()
@@ -193,6 +333,27 @@ fn apply_spec(
     spec: &PluginRouteSpec,
     keep_user_fields: bool,
 ) {
+    // A changed declaration takes effect immediately. An unchanged declaration
+    // preserves the user's explicit switch when the plugin refreshes its route.
+    let previous = profile.plugin_route_spec.as_ref();
+    profile.supports_websockets = refreshed_capability(
+        profile.supports_websockets,
+        previous.map(|spec| spec.supports_websockets),
+        spec.supports_websockets,
+        keep_user_fields,
+    );
+    profile.supports_remote_compaction = refreshed_capability(
+        profile.supports_remote_compaction,
+        previous.map(|spec| spec.supports_remote_compaction),
+        spec.supports_remote_compaction,
+        keep_user_fields,
+    );
+    profile.supports_native_web_search = refreshed_capability(
+        profile.supports_native_web_search,
+        previous.map(|spec| spec.supports_native_web_search),
+        spec.supports_native_web_search,
+        keep_user_fields,
+    );
     profile.name = spec.name.clone();
     profile.base_url = spec.base_url.clone();
     profile.upstream_protocol = spec.upstream_protocol.clone();
@@ -206,12 +367,14 @@ fn apply_spec(
         profile.api_key_configured = false;
         profile.upstream_proxy.clear();
         profile.enabled = true;
-        profile.supports_remote_compaction = false;
-        profile.supports_websockets = false;
-        profile.supports_native_web_search = false;
         profile.supports_auto_review = false;
     }
     profile.plugin_owner_id = Some(plugin_id.to_string());
+    if spec.upstream_protocol != UPSTREAM_PROTOCOL_OPENAI_RESPONSES {
+        profile.supports_websockets = false;
+        profile.supports_remote_compaction = false;
+        profile.supports_native_web_search = false;
+    }
     if spec.transport.is_some() {
         profile.api_key.clear();
         profile.api_key_configured = false;
@@ -226,6 +389,19 @@ fn apply_spec(
     stored.short_name = profile.short_name.clone();
     stored.base_url = profile.normalized_base_url();
     profile.plugin_route_spec = Some(stored);
+}
+
+fn refreshed_capability(
+    current: bool,
+    previous: Option<bool>,
+    next: bool,
+    keep_user_fields: bool,
+) -> bool {
+    if keep_user_fields && previous == Some(next) {
+        current
+    } else {
+        next
+    }
 }
 
 fn sync_stored_specs(config: &mut CodeyConfig) {
@@ -359,11 +535,165 @@ mod tests {
             base_url: url.into(),
             upstream_protocol: UPSTREAM_PROTOCOL_OPENAI_RESPONSES.into(),
             models: vec!["demo-model".into()],
+            supports_websockets: false,
+            supports_remote_compaction: false,
+            supports_native_web_search: false,
             model_reasoning_efforts: BTreeMap::new(),
+            model_contexts: Default::default(),
             headers: BTreeMap::from([("x-region".into(), "us".into())]),
             short_name: String::new(),
             transport: None,
         }
+    }
+
+    #[test]
+    fn model_sync_refreshes_persisted_windows_and_retires_managed_models() {
+        let mut config = CodeyConfig::default();
+        let mut before = spec("https://relay.example/v1");
+        before.models.push("retired".into());
+        before.supports_native_web_search = true;
+        let id = upsert(&mut config, "dev.sync", before.clone(), true)
+            .unwrap()
+            .unwrap();
+        let profile = config
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == id)
+            .unwrap();
+        // A user opt-out remains an opt-out when the declaration is unchanged.
+        profile.supports_native_web_search = false;
+        let provider = profile.provider_id().to_string();
+        config.selected_models_by_provider.insert(
+            provider.clone(),
+            vec!["demo-model".into(), "retired".into(), "custom".into()],
+        );
+        config
+            .manual_third_party_models_by_provider
+            .insert(provider.clone(), vec!["retired".into(), "custom".into()]);
+        let mut next = before;
+        next.model_contexts.insert(
+            "demo-model".into(),
+            codey_plugin_sdk::provider::ModelContext {
+                context_window: 200_000,
+                auto_compact_token_limit: 180_000,
+                reserve_output_tokens: Some(8192),
+            },
+        );
+        // describe can contain a static fallback; fetched membership wins.
+        refresh_models(
+            &mut config,
+            "dev.sync",
+            &id,
+            next.clone(),
+            &["demo-model".into()],
+        )
+        .unwrap();
+        assert_eq!(
+            config.selected_models_by_provider[&provider],
+            ["demo-model", "custom"]
+        );
+        assert_eq!(
+            config.upstream_models_by_provider[&provider],
+            ["demo-model", "custom"]
+        );
+        assert_eq!(
+            config.manual_third_party_models_by_provider[&provider],
+            ["custom"]
+        );
+        let profile = config
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .unwrap();
+        assert!(!profile.supports_native_web_search);
+        assert_eq!(
+            profile.plugin_route_spec.as_ref().unwrap().models,
+            ["demo-model"]
+        );
+        // Verify the serialized stored description feeds the runtime budget.
+        let mut restored: CodeyConfig =
+            serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+        assert!(
+            restored
+                .runtime_plugin_model_contexts()
+                .values()
+                .any(|context| {
+                    context.context_window_tokens == 200_000
+                        && context.auto_compact_token_limit == Some(180_000)
+                })
+        );
+        next.model_contexts
+            .get_mut("demo-model")
+            .unwrap()
+            .context_window = 300_000;
+        next.model_contexts
+            .get_mut("demo-model")
+            .unwrap()
+            .auto_compact_token_limit = 270_000;
+        refresh_models(&mut restored, "dev.sync", &id, next, &["demo-model".into()]).unwrap();
+        assert!(
+            restored
+                .runtime_plugin_model_contexts()
+                .values()
+                .any(|context| {
+                    context.context_window_tokens == 300_000
+                        && context.auto_compact_token_limit == Some(270_000)
+                })
+        );
+    }
+
+    #[test]
+    fn model_sync_rejects_changed_ownership_connection_and_deleted_routes() {
+        let mut config = CodeyConfig::default();
+        let descriptor = spec("https://relay.example/v1");
+        let id = upsert(&mut config, "dev.sync", descriptor.clone(), true)
+            .unwrap()
+            .unwrap();
+        let before = serde_json::to_value(&config).unwrap();
+        let models = vec!["demo-model".into()];
+        assert!(
+            refresh_models(&mut config, "dev.other", &id, descriptor.clone(), &models).is_err()
+        );
+        let mut changed = descriptor.clone();
+        changed.base_url = "https://other.example/v1".into();
+        assert!(refresh_models(&mut config, "dev.sync", &id, changed, &models).is_err());
+        assert_eq!(serde_json::to_value(&config).unwrap(), before);
+        config.profiles.retain(|profile| profile.id != id);
+        assert!(refresh_models(&mut config, "dev.sync", &id, descriptor, &models).is_err());
+        assert!(config.profiles.iter().all(|profile| profile.id != id));
+    }
+
+    #[test]
+    fn model_sync_keeps_an_explicit_empty_selection() {
+        let mut config = CodeyConfig::default();
+        let descriptor = spec("https://relay.example/v1");
+        let id = upsert(&mut config, "dev.sync", descriptor.clone(), true)
+            .unwrap()
+            .unwrap();
+        let provider = config
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .unwrap()
+            .provider_id()
+            .to_string();
+        config
+            .selected_models_by_provider
+            .insert(provider.clone(), vec![]);
+        refresh_models(
+            &mut config,
+            "dev.sync",
+            &id,
+            descriptor,
+            &["demo-model".into(), "new-model".into()],
+        )
+        .unwrap();
+        assert!(
+            config
+                .selected_models_by_provider
+                .get(&provider)
+                .is_none_or(Vec::is_empty)
+        );
     }
 
     #[test]
@@ -616,6 +946,115 @@ mod tests {
             .api_key = "fake-key".into();
         release(&mut config, "dev.transport");
         assert!(config.profiles.iter().all(|p| p.id != id));
+    }
+
+    #[test]
+    fn declared_native_capabilities_survive_creation_edits_and_refresh() {
+        let mut config = CodeyConfig::default();
+        let mut descriptor = spec("https://relay.example/v1");
+        descriptor.supports_websockets = true;
+        descriptor.supports_remote_compaction = true;
+        descriptor.supports_native_web_search = true;
+        let id = upsert(&mut config, "dev.native", descriptor.clone(), true)
+            .unwrap()
+            .unwrap();
+        let previous = config.profiles.iter().find(|p| p.id == id).unwrap().clone();
+        assert!(previous.supports_websockets);
+        assert!(previous.supports_remote_compaction);
+        assert!(previous.supports_native_web_search);
+        assert!(config.route_supports_remote_compaction_this_launch(&previous));
+        assert!(config.route_supports_native_web_search_this_launch(&previous));
+        let mut edited = previous.clone();
+        retain_plugin_ownership(&mut edited, &previous).unwrap();
+        assert!(
+            edited.supports_websockets
+                && edited.supports_remote_compaction
+                && edited.supports_native_web_search
+        );
+        edited.supports_websockets = false;
+        edited.supports_remote_compaction = false;
+        edited.supports_native_web_search = false;
+        retain_plugin_ownership(&mut edited, &previous).unwrap();
+        *config.profiles.iter_mut().find(|p| p.id == id).unwrap() = edited;
+        upsert(&mut config, "dev.native", descriptor.clone(), false).unwrap();
+        let profile = config.profiles.iter().find(|p| p.id == id).unwrap();
+        assert!(
+            !profile.supports_websockets
+                && !profile.supports_remote_compaction
+                && !profile.supports_native_web_search
+        );
+        descriptor.supports_websockets = false;
+        descriptor.supports_remote_compaction = false;
+        descriptor.supports_native_web_search = false;
+        upsert(&mut config, "dev.native", descriptor.clone(), false).unwrap();
+        descriptor.supports_websockets = true;
+        descriptor.supports_remote_compaction = true;
+        descriptor.supports_native_web_search = true;
+        upsert(&mut config, "dev.native", descriptor.clone(), false).unwrap();
+        let profile = config.profiles.iter().find(|p| p.id == id).unwrap();
+        assert!(
+            profile.supports_websockets
+                && profile.supports_remote_compaction
+                && profile.supports_native_web_search
+        );
+        descriptor.supports_websockets = false;
+        descriptor.supports_remote_compaction = false;
+        descriptor.supports_native_web_search = false;
+        upsert(&mut config, "dev.native", descriptor, false).unwrap();
+        let profile = config.profiles.iter().find(|p| p.id == id).unwrap();
+        assert!(
+            !profile.supports_websockets
+                && !profile.supports_remote_compaction
+                && !profile.supports_native_web_search
+        );
+    }
+
+    #[test]
+    fn unsupported_native_declarations_cannot_bypass_descriptor_parsing() {
+        for field in [0, 1, 2] {
+            let mut descriptor = spec("https://relay.example/v1");
+            match field {
+                0 => descriptor.supports_websockets = true,
+                1 => descriptor.supports_remote_compaction = true,
+                _ => descriptor.supports_native_web_search = true,
+            }
+            for protocol in [
+                UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+                UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+            ] {
+                descriptor.upstream_protocol = protocol.into();
+                let mut config = CodeyConfig::default();
+                let before = config.profiles.len();
+                assert!(
+                    upsert(&mut config, "dev.native", descriptor.clone(), true)
+                        .unwrap_err()
+                        .contains("标准 HTTP Responses")
+                );
+                assert_eq!(config.profiles.len(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn switching_to_an_adapted_protocol_clears_user_native_opt_ins() {
+        let mut config = CodeyConfig::default();
+        let mut descriptor = spec("https://relay.example/v1");
+        let id = upsert(&mut config, "dev.native", descriptor.clone(), true)
+            .unwrap()
+            .unwrap();
+        let profile = config.profiles.iter_mut().find(|p| p.id == id).unwrap();
+        profile.supports_websockets = true;
+        profile.supports_remote_compaction = true;
+        profile.supports_native_web_search = true;
+        descriptor.upstream_protocol = UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+        upsert(&mut config, "dev.native", descriptor, false).unwrap();
+        let profile = config.profiles.iter().find(|p| p.id == id).unwrap();
+        assert!(
+            !profile.supports_websockets
+                && !profile.supports_remote_compaction
+                && !profile.supports_native_web_search
+        );
+        assert!(profile.validate().is_ok());
     }
 
     #[test]
