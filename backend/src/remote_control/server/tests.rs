@@ -119,44 +119,46 @@ async fn requires_pairing_rejects_cross_site_and_revokes_existing_sessions() {
 }
 
 #[tokio::test]
-async fn model_catalog_requires_pairing_and_handles_a_stopped_host() {
+async fn composer_reads_require_pairing_and_handle_a_stopped_host() {
     let (core, base, task) = fixture().await;
-    let endpoint = format!("{base}/remote/models");
     let client = client();
-    assert_eq!(
-        client
+    let cookie = pair(&core, &base).await;
+    for path in ["/remote/models", "/remote/defaults"] {
+        let endpoint = format!("{base}{path}");
+        assert_eq!(
+            client
+                .post(&endpoint)
+                .header("origin", &base)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .post(&endpoint)
+                .header("origin", "https://evil.example")
+                .header("cookie", &cookie)
+                .json(&json!({}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let response = client
             .post(&endpoint)
             .header("origin", &base)
-            .json(&json!({}))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
-    );
-    let cookie = pair(&core, &base).await;
-    assert_eq!(
-        client
-            .post(&endpoint)
-            .header("origin", "https://evil.example")
             .header("cookie", &cookie)
             .json(&json!({}))
             .send()
             .await
-            .unwrap()
-            .status(),
-        StatusCode::FORBIDDEN
-    );
-    let response = client
-        .post(&endpoint)
-        .header("origin", &base)
-        .header("cookie", &cookie)
-        .json(&json!({}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(response.headers()["cache-control"], "no-store");
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
     assert!(core.actions.lock().await.is_empty());
     task.abort();
 }

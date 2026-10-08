@@ -5,9 +5,10 @@ export type Approval = { id: string | number; method: string; supported: boolean
 export type Attachment = { name: string; url?: string };
 export type Message = { id?: string; role: string; kind: string; text: string; status?: string; attachments?: Attachment[] };
 export type Turn = { id: string; status: string; error?: unknown; startedAt?: number; completedAt?: number; messages: Message[] };
-export type View = { id: string; title?: string; cwd?: string; model?: string; effort?: string; permissionMode?: string; status?: string; turns: Turn[]; requests: Approval[]; historyComplete: boolean };
+export type ThreadSettings = { model?: string; effort?: string; serviceTier?: string | null; permissionMode?: string };
+export type View = ThreadSettings & { id: string; title?: string; cwd?: string; status?: string; turns: Turn[]; requests: Approval[]; historyComplete: boolean };
 export type ModelOption = { id: string; label: string; route: string; efforts: string[]; defaultEffort: string };
-export type ModelCatalog = { models?: string[]; clear_models?: boolean; model_metadata?: { model: string; display_name?: string; model_display_name?: string; route_name?: string; supported_reasoning_efforts?: string[]; default_reasoning_effort?: string }[] };
+export type ModelCatalog = { models?: string[]; default_model?: string; clear_models?: boolean; model_metadata?: { model: string; display_name?: string; model_display_name?: string; route_name?: string; supported_reasoning_efforts?: string[]; default_reasoning_effort?: string }[] };
 
 export const effortLabels: Record<string, string> = { none: "无", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "超高", max: "Max", ultra: "Ultra" };
 export const permissionLabels: Record<string, string> = { "read-only": "只读", auto: "默认权限", "full-access": "完全访问", custom: "自定义权限" };
@@ -52,6 +53,17 @@ export function modelOptions(catalog: ModelCatalog): ModelOption[] {
     const efforts = [...new Set(entry?.supported_reasoning_efforts || [])].filter(value => value in effortLabels);
     return { id, label: entry?.model_display_name || entry?.display_name || id, route: entry?.route_name || "模型", efforts, defaultEffort: efforts.includes(entry?.default_reasoning_effort || "") ? entry!.default_reasoning_effort! : efforts[0] || "" };
   });
+}
+
+export function defaultThreadSettings(catalog: ModelCatalog, saved: ThreadSettings): ThreadSettings {
+  const models = modelOptions(catalog);
+  const model = models.find(model => model.id === saved.model)
+    || models.find(model => model.id === catalog.default_model) || models[0];
+  if (!model) return saved;
+  return {
+    ...saved, model: model.id,
+    effort: model.efforts.includes(saved.effort || "") ? saved.effort : model.defaultEffort || undefined,
+  };
 }
 
 export function relativeTime(timestamp: number, now = Date.now()): string {

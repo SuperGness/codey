@@ -372,6 +372,12 @@ pub(super) fn action_params(
                     .ok_or("思考强度无效")?;
                 settings["effort"] = json!(effort);
             }
+            if let Some(tier) = args.get("serviceTier") {
+                if !tier.is_null() && !matches!(tier.as_str(), Some("priority" | "default")) {
+                    return Err("速度模式无效".into());
+                }
+                settings["serviceTier"] = tier.clone();
+            }
             if let Some(mode) = args.get("permissionMode") {
                 // Same built-in permission profiles as the desktop composer.
                 // Apply only an explicit selection, leaving custom policies alone.
@@ -611,6 +617,11 @@ mod tests {
         );
         let (_, _, effort) = action_params(&state, "settings", &json!({"effort":"low"})).unwrap();
         assert_eq!(effort, json!({"threadSettings":{"effort":"low"}}));
+        for tier in [json!("priority"), json!("default"), Value::Null] {
+            let (_, _, payload) =
+                action_params(&state, "settings", &json!({"serviceTier":tier})).unwrap();
+            assert_eq!(payload, json!({"threadSettings":{"serviceTier":tier}}));
+        }
         for (mode, profile, sandbox, approval) in [
             ("read-only", ":read-only", "readOnly", "on-request"),
             ("auto", ":workspace", "workspaceWrite", "on-request"),
@@ -645,6 +656,10 @@ mod tests {
             json!({"permissionMode":"custom"}),
             json!({"model":null}),
             json!({"permissionMode":true}),
+            json!({"serviceTier":"fast"}),
+            json!({"serviceTier":""}),
+            json!({"serviceTier":true}),
+            json!({"serviceTier":1}),
         ] {
             assert!(action_params(&state, "settings", &args).is_err());
         }

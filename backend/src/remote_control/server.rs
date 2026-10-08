@@ -368,6 +368,12 @@ async fn route(core: Arc<Core>, mut request: Request<Incoming>) -> Reply {
                     .bridge_request("/codex-model-catalog".into(), json!({}))
                     .await)
             }
+            "/remote/defaults" => {
+                let Some(state) = core.state.upgrade() else {
+                    return failure(StatusCode::SERVICE_UNAVAILABLE, "Codey 正在退出");
+                };
+                super::create::defaults(&state, &args).await
+            }
             "/remote/action" | "/remote/create" => action_once(&core, &token, &path, &args).await,
             _ if path.starts_with("/api/") => {
                 let command = path.trim_start_matches("/api/");

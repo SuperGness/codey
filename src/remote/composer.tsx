@@ -1,11 +1,11 @@
 import { useLayoutEffect, useRef, type FormEvent } from "react";
-import { IconArrowUp, IconBrain, IconChevronDown, IconCpu, IconPlayerStop, IconShield, IconShieldExclamation } from "@tabler/icons-react";
-import { effortLabels, permissionLabels, type ModelOption, type View } from "./workspace-data";
+import { IconArrowUp, IconBolt, IconBrain, IconChevronDown, IconCpu, IconPlayerStop, IconShield, IconShieldExclamation } from "@tabler/icons-react";
+import { effortLabels, permissionLabels, type ModelOption, type View, type ThreadSettings } from "./workspace-data";
 
 export function Composer({ draft, onDraft, view, models, connected, busy, uncertain, onSend, onStop, onSettings, catalogError, onReloadModels }: {
   draft: string; onDraft: (draft: string) => void; view: View | null; models: ModelOption[];
   connected: boolean; busy: boolean; uncertain: boolean; onSend: (event: FormEvent) => void;
-  onStop: () => void; onSettings: (settings: Record<string, string>) => void; catalogError: string; onReloadModels: () => void;
+  onStop: () => void; onSettings: (settings: ThreadSettings) => void; catalogError: string; onReloadModels: () => void;
 }) {
   const input = useRef<HTMLTextAreaElement>(null);
   useLayoutEffect(() => { if (input.current) { input.current.style.height = "auto"; input.current.style.height = `${Math.min(input.current.scrollHeight, 180)}px`; } }, [draft]);
@@ -14,6 +14,7 @@ export function Composer({ draft, onDraft, view, models, connected, busy, uncert
   const routes = [...new Set(models.map(model => model.route))];
   const disabled = busy || !connected;
   const permission = view?.permissionMode || "custom";
+  const tier = view?.serviceTier || "default";
   return <div className="remote-composer-dock">
     {catalogError && <div className="remote-catalog-error" role="status">{catalogError}<button type="button" onClick={onReloadModels} disabled={busy}>重试</button></div>}
     <form className="remote-composer" onSubmit={onSend}>
@@ -27,9 +28,10 @@ export function Composer({ draft, onDraft, view, models, connected, busy, uncert
           </select></label>
           <label className="remote-picker remote-model-picker" title={selected?.label || view?.model || "模型"}><IconCpu size={16} /><span>{selected?.label || view?.model || "模型"}</span><IconChevronDown size={12} /><select aria-label="模型" value={view?.model || ""} disabled={disabled || !models.length} onChange={event => {
             const next = models.find(model => model.id === event.target.value);
-            if (next) onSettings({ model: next.id, ...(next.efforts.length ? { effort: next.efforts.includes(view?.effort || "") ? view!.effort! : next.defaultEffort } : {}) });
+            if (next) onSettings({ model: next.id, effort: next.efforts.includes(view?.effort || "") ? view!.effort! : next.defaultEffort || undefined });
           }}>{!selected && <option value={view?.model || ""} disabled>{view?.model || "选择模型"}</option>}{routes.map(route => <optgroup key={route} label={route}>{models.filter(model => model.route === route).map(model => <option key={model.id} value={model.id}>{model.label}</option>)}</optgroup>)}</select></label>
           <label className="remote-picker remote-effort-picker" title="思考程度"><IconBrain size={16} /><span>{effortLabels[view?.effort || ""] || view?.effort || "思考"}</span><IconChevronDown size={12} /><select aria-label="思考程度" value={view?.effort || ""} disabled={disabled || !selected?.efforts.length} onChange={event => onSettings({ effort: event.target.value })}>{!selected?.efforts.includes(view?.effort || "") && <option value={view?.effort || ""} disabled>{view?.effort || "默认"}</option>}{selected?.efforts.map(effort => <option value={effort} key={effort}>{effortLabels[effort]}</option>)}</select></label>
+          <label className="remote-picker remote-speed-picker" title="速度模式"><IconBolt size={16} /><span>{tier === "priority" ? "Fast" : tier === "default" ? "标准" : tier}</span><IconChevronDown size={12} /><select aria-label="速度模式" value={tier} disabled={disabled} onChange={event => onSettings({ serviceTier: event.target.value })}>{!["default", "priority"].includes(tier) && <option value={tier} disabled>{tier}</option>}<option value="default">标准</option><option value="priority">Fast</option></select></label>
         </div>
         <div className="remote-send-actions">{active && <button type="button" className="remote-stop" aria-label="停止任务" disabled={disabled} onClick={onStop}><IconPlayerStop size={17} /></button>}<button className="remote-send" aria-label={active ? "补充指令" : "发送消息"} disabled={disabled || !draft.trim() || uncertain}><IconArrowUp size={21} /></button></div>
       </div>

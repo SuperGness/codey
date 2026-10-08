@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { IconArrowDown, IconArrowLeft, IconDeviceLaptop, IconRefresh, IconSquarePlus } from "@tabler/icons-react";
 import { RemoteError, remoteRequest, requestId, readSubmission, rememberSubmission, forgetSubmission } from "./transport";
-import { modelOptions, projectForThread, type Thread, type Project, type Approval, type View, type ModelCatalog, type ModelOption } from "./workspace-data";
+import { modelOptions, defaultThreadSettings, projectForThread, type Thread, type Project, type Approval, type View, type ModelCatalog, type ThreadSettings } from "./workspace-data";
 import { Sidebar } from "./sidebar";
 import { Composer } from "./composer";
 import { ConversationTurn, RichText } from "./messages";
@@ -18,11 +18,14 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
   const [archived, setArchived] = useState(false);
   const [project, setProject] = useState("");
   const [creating, setCreating] = useState(false);
-  const [draftSettings, setDraftSettings] = useState<Record<string, string>>({});
+  const [draftSettings, setDraftSettings] = useState<ThreadSettings>({});
+  const [creationDefaults, setCreationDefaults] = useState<{ project: string; settings: ThreadSettings } | null>(null);
+  const [defaultsError, setDefaultsError] = useState("");
+  const [defaultsRevision, setDefaultsRevision] = useState(0);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [models, setModels] = useState<ModelOption[]>([]);
+  const [catalog, setCatalog] = useState<ModelCatalog>({});
   const [catalogError, setCatalogError] = useState("");
   const [loading, setLoading] = useState(true);
   const [atBottom, setAtBottom] = useState(true);
@@ -30,11 +33,14 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
   const scroll = useRef<HTMLDivElement>(null);
   const listVersion = useRef(0);
   const pinned = useRef(true);
-  const drafts = useRef(new Map<string, { text: string; uncertain: boolean; settings: Record<string, string> }>());
+  const drafts = useRef(new Map<string, { text: string; uncertain: boolean; settings: ThreadSettings }>());
+  const models = modelOptions(catalog);
   const selectedId = selected?.id;
   const draftScope = creating ? `create:${project}` : selectedId;
   const draftProject = projects.find(p => p.id === project);
-  const composerView: View | null = creating ? { id: "", turns: [], requests: [], historyComplete: true, ...draftSettings } : view;
+  const defaultsReady = creationDefaults?.project === project;
+  const composerSettings = { ...defaultThreadSettings(catalog, defaultsReady ? creationDefaults.settings : {}), ...draftSettings };
+  const composerView: View | null = creating ? { id: "", turns: [], requests: [], historyComplete: true, ...composerSettings } : view;
   const activeTurn = view ? [...view.turns].reverse().find(turn => turn.status === "inProgress") : undefined;
 
   function fail(error: unknown) {
@@ -64,13 +70,27 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
   }, [active, archived, search]);
 
   async function loadModels() {
-    try { setModels(modelOptions(await remoteRequest<ModelCatalog>("/remote/models", {}))); setCatalogError(""); }
+    try { setCatalog(await remoteRequest<ModelCatalog>("/remote/models", {})); setCatalogError(""); }
     catch (error) {
       if (error instanceof RemoteError && error.status === 401) onUnauthorized();
       setCatalogError("模型列表暂时无法加载，仍沿用桌面设置。");
     }
   }
   useEffect(() => { if (active) void loadModels(); }, [active]);
+
+  useEffect(() => {
+    if (!active || !creating || !project) return;
+    let disposed = false;
+    setCreationDefaults(null); setDefaultsError("");
+    void remoteRequest<ThreadSettings>("/remote/defaults", { projectId: project }).then(settings => {
+      if (!disposed) setCreationDefaults({ project, settings });
+    }).catch(error => {
+      if (disposed) return;
+      if (error instanceof RemoteError && error.status === 401) onUnauthorized();
+      setDefaultsError("桌面默认设置暂时无法加载，请重试。");
+    });
+    return () => { disposed = true; };
+  }, [active, creating, project, defaultsRevision]);
 
   useEffect(() => {
     if (!active || !selectedId) return;
@@ -125,7 +145,7 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
     const pending = readSubmission(scope);
     setDraft(previous?.text || String(pending?.args.text || ""));
     setUncertain(previous?.uncertain || !!pending);
-    setDraftSettings(previous?.settings || Object.fromEntries(["model", "effort", "permissionMode"].flatMap(key => typeof pending?.args[key] === "string" ? [[key, pending.args[key] as string]] : [])));
+    setDraftSettings(previous?.settings || Object.fromEntries(["model", "effort", "permissionMode", "serviceTier"].flatMap(key => typeof pending?.args[key] === "string" || (key === "serviceTier" && pending?.args[key] === null) ? [[key, pending!.args[key]]] : [])));
   }
 
   function open(thread: Thread) {
@@ -138,10 +158,11 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
     event.preventDefault();
     if (busy || uncertain || !draft.trim()) return;
     if (creating) {
-      if (!draftProject || !draftScope) return;
+      if (!draftProject || !draftScope || !defaultsReady) return;
       const scope = draftScope;
       const text = draft;
-      const submission = rememberSubmission(scope, { projectId: project, text, ...draftSettings });
+      setDraftSettings(composerSettings);
+      const submission = rememberSubmission(scope, { projectId: project, text, ...composerSettings });
       await run(async () => {
         try {
           const result = await remoteRequest<{ id: string; firstTurn: string }>("/remote/create", { ...submission.args, requestId: submission.id });
@@ -173,7 +194,7 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
 
   function startCreating(target?: Project) {
     const next = target?.id || project;
-    setProject(next); setCreating(true); setSelected(null); setView(null); setConnected(false); setConnectionError(""); setError("");
+    setProject(next); setCreating(true); setCreationDefaults(null); setDefaultsRevision(n => n + 1); setSelected(null); setView(null); setConnected(false); setConnectionError(""); setError("");
     restoreDraft(`create:${next}`); pinned.current = true; setAtBottom(true);
   }
   const selectedProject = selected ? projectForThread(selected, projects) : undefined;
@@ -195,7 +216,7 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
       </div>
       {error && <p className="remote-client-error" role="alert">{error}</p>}
       {uncertain && <div className="remote-uncertain"><p>消息未确认。请查看会话是否已收到，确认后再决定是否重新发送。</p><button onClick={() => { if (draftScope) forgetSubmission(draftScope); setUncertain(false); setError(""); }}>已核对，允许再次发送</button></div>}
-      <Composer draft={draft} onDraft={setDraft} view={composerView} models={models} connected={creating ? !!draftProject : connected} busy={busy} uncertain={uncertain} onSend={event => void send(event)} onStop={() => { if (activeTurn) void run(() => action("interrupt", { turnId: activeTurn.id })); }} onSettings={settings => { if (creating) setDraftSettings(current => ({ ...current, ...settings })); else void run(async () => { await action("settings", settings); setRevision(n => n + 1); }); }} catalogError={catalogError} onReloadModels={() => void loadModels()} />
+      <Composer draft={draft} onDraft={setDraft} view={composerView} models={models} connected={creating ? !!draftProject && defaultsReady : connected} busy={busy} uncertain={uncertain} onSend={event => void send(event)} onStop={() => { if (activeTurn) void run(() => action("interrupt", { turnId: activeTurn.id })); }} onSettings={settings => { if (creating) setDraftSettings({ ...composerSettings, ...settings }); else void run(async () => { await action("settings", settings); setRevision(n => n + 1); }); }} catalogError={[catalogError, creating ? defaultsError : ""].filter(Boolean).join(" ")} onReloadModels={() => { void loadModels(); setDefaultsRevision(n => n + 1); }} />
     </>}</main>
   </div>;
 }

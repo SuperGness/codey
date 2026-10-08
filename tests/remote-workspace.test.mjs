@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
 const source = new URL("../src/remote/", import.meta.url);
-const { groupThreads, projectForThread, modelOptions, relativeTime, messageUrl, imageUrl } = await loadTypeScriptModule(new URL("workspace-data.ts", source));
+const { groupThreads, projectForThread, modelOptions, defaultThreadSettings, relativeTime, messageUrl, imageUrl } = await loadTypeScriptModule(new URL("workspace-data.ts", source));
 const projects = [
   { id: "codey", name: "Codey", cwd: "E:\\code\\codey", rootPaths: ["E:\\code\\codey", "E:/linked/worktree"] },
   { id: "nested", name: "Nested", cwd: "e:/code/codey/packages/app" },
@@ -52,6 +52,21 @@ test("model choices retain applied order, route identity and supported reasoning
   assert.deepEqual(modelOptions({ models: ["disabled"], clear_models: true }), []);
   assert.deepEqual(modelOptions({}), []);
   assert.deepEqual(modelOptions({ models: ["unknown"] })[0].efforts, []);
+});
+
+test("new drafts prefer desktop defaults and normalize missing or unsupported selections against the applied catalog", () => {
+  const catalog = { models: ["route/a", "route/b"], default_model: "route/b", model_metadata: [
+    { model: "route/a", supported_reasoning_efforts: ["low", "ultra"], default_reasoning_effort: "low" },
+    { model: "route/b", supported_reasoning_efforts: ["low", "high"], default_reasoning_effort: "high" },
+  ] };
+  assert.deepEqual(defaultThreadSettings(catalog, { model: "route/a", effort: "ultra", serviceTier: "priority" }), { model: "route/a", effort: "ultra", serviceTier: "priority" });
+  assert.deepEqual(defaultThreadSettings(catalog, {}), { model: "route/b", effort: "high" });
+  assert.deepEqual(defaultThreadSettings(catalog, { model: "removed", effort: "ultra", serviceTier: "default" }), { model: "route/b", effort: "high", serviceTier: "default" });
+  assert.deepEqual(defaultThreadSettings({ ...catalog, default_model: "removed" }, {}), { model: "route/a", effort: "low" });
+  const saved = { model: "route/a", effort: "ultra", serviceTier: null };
+  assert.deepEqual(defaultThreadSettings({}, saved), saved);
+  assert.deepEqual(defaultThreadSettings({ ...catalog, clear_models: true }, saved), saved);
+  assert.deepEqual(defaultThreadSettings({ models: ["plain"] }, saved), { model: "plain", effort: undefined, serviceTier: null });
 });
 
 test("message URLs never turn filesystem paths, executable protocols or SVG data into browser requests", () => {
@@ -101,8 +116,9 @@ test("conversation retains user messages and folds tool output with a readable d
 });
 
 test("composer exposes native selectors and does not offer unsupported effort values", () => {
-  const html = render(Composer, { draft: "", onDraft() {}, view: { model: "route/model", effort: "high", permissionMode: "auto", turns: [] }, models: [{ id: "route/model", label: "My model", route: "My route", efforts: ["low", "high"], defaultEffort: "low" }], connected: true, busy: false, uncertain: false, onSend() {}, onStop() {}, onSettings() {}, catalogError: "", onReloadModels() {} });
+  const html = render(Composer, { draft: "", onDraft() {}, view: { model: "route/model", effort: "high", serviceTier: "priority", permissionMode: "auto", turns: [] }, models: [{ id: "route/model", label: "My model", route: "My route", efforts: ["low", "high"], defaultEffort: "low" }], connected: true, busy: false, uncertain: false, onSend() {}, onStop() {}, onSettings() {}, catalogError: "", onReloadModels() {} });
   assert.match(html, /aria-label="权限"/); assert.match(html, /aria-label="模型"/); assert.match(html, /aria-label="思考程度"/);
   assert.match(html, /<optgroup label="My route">/); assert.match(html, /value="high" selected=""/);
   assert.doesNotMatch(html, /value="ultra"/); assert.match(html, /aria-label="发送消息" disabled=""/);
+  assert.match(html, /aria-label="速度模式"/); assert.match(html, /value="priority" selected="">Fast/);
 });

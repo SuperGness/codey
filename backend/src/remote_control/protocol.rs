@@ -272,6 +272,7 @@ pub(super) fn view(state: &Value) -> Value {
     json!({"id":state["id"], "title":state["title"], "cwd":state["cwd"],
         "model":state["latestThreadSettings"]["model"].as_str().or(state["latestModel"].as_str()),
         "effort":state["latestThreadSettings"]["effort"].as_str().or(state["latestReasoningEffort"].as_str()),
+        "serviceTier":state["latestThreadSettings"]["serviceTier"],
         "permissionMode":permission_mode(&state["latestThreadSettings"]),
         "status":state["threadRuntimeStatus"]["type"], "turns":turns, "requests":requests,
         "historyComplete":state["turnHistory"]["history"]["isComplete"].as_bool().or(state["turnsPagination"]["hasLoadedOldest"].as_bool()).unwrap_or(true)})
@@ -346,6 +347,17 @@ mod tests {
         assert_eq!(state, json!({"items":["b"], "a/b":{"~key":2}}));
         assert!(apply_patches(&mut state, &json!([{"op":"remove","path":"/items/9"}])).is_err());
         assert!(apply_patches(&mut state, &json!([{"op":"copy","path":[]}])).is_err());
+    }
+
+    #[test]
+    fn view_tracks_fast_and_cleared_service_tiers_from_desktop_patches() {
+        let mut state = json!({"id":"t","latestThreadSettings":{"serviceTier":"priority"}});
+        assert_eq!(view(&state)["serviceTier"], "priority");
+        for tier in [json!("default"), Value::Null] {
+            apply_patches(&mut state, &json!([{"op":"replace","path":["latestThreadSettings","serviceTier"],"value":tier}])).unwrap();
+            assert_eq!(view(&state)["serviceTier"], tier);
+        }
+        assert_eq!(view(&json!({"id":"t"}))["serviceTier"], Value::Null);
     }
 
     #[test]

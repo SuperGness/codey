@@ -24,17 +24,8 @@ pub(super) async fn open(state: &Arc<AppState>, id: &str) -> Result<(), String> 
 // Called only for the first submitted message; an untouched phone draft does
 // not create a persisted thread or a second app-server.
 pub(super) async fn create(state: &Arc<AppState>, args: &Value) -> Result<Value, String> {
-    let projects =
-        tokio::task::spawn_blocking(|| super::store::projects(crate::codex_config::codex_home()))
-            .await
-            .map_err(|_| "读取项目任务失败")??;
-    let project = projects
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|project| project["id"] == args["projectId"])
-        .ok_or("请选择 Codex 中已保存的本地项目")?;
-    let params = creation_params(project, args)?;
+    let project = saved_project(args).await?;
+    let params = creation_params(&project, args)?;
     let cwd = params["cwd"].as_str().ok_or("项目目录无效")?;
     if !Path::new(cwd).is_dir() {
         return Err("项目目录不存在，请在电脑端检查工作区".into());
@@ -42,6 +33,25 @@ pub(super) async fn create(state: &Arc<AppState>, args: &Value) -> Result<Value,
     let result = desktop_request(state, json!({"action":"create","params":params})).await?;
     super::desktop::validate_thread(result["id"].as_str().ok_or("创建会话结果无效")?)?;
     Ok(result)
+}
+
+pub(super) async fn defaults(state: &Arc<AppState>, args: &Value) -> Result<Value, String> {
+    let project = saved_project(args).await?;
+    desktop_request(state, json!({"action":"defaults","cwd":project["cwd"]})).await
+}
+
+async fn saved_project(args: &Value) -> Result<Value, String> {
+    let projects =
+        tokio::task::spawn_blocking(|| super::store::projects(crate::codex_config::codex_home()))
+            .await
+            .map_err(|_| "读取项目任务失败")??;
+    projects
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|project| project["id"] == args["projectId"])
+        .cloned()
+        .ok_or_else(|| "请选择 Codex 中已保存的本地项目".into())
 }
 
 fn creation_params(project: &Value, args: &Value) -> Result<Value, String> {
@@ -60,6 +70,7 @@ fn creation_params(project: &Value, args: &Value) -> Result<Value, String> {
     });
     if args.get("model").is_some()
         || args.get("effort").is_some()
+        || args.get("serviceTier").is_some()
         || args.get("permissionMode").is_some()
     {
         let (_, _, settings) =
@@ -70,6 +81,9 @@ fn creation_params(project: &Value, args: &Value) -> Result<Value, String> {
         }
         if let Some(model) = settings.get("model") {
             params["collaborationMode"] = json!({"mode":"default","settings":{"model":model,"reasoning_effort":settings["effort"],"developer_instructions":null}});
+        }
+        if let Some(tier) = settings.get("serviceTier") {
+            params["serviceTier"] = tier.clone();
         }
         if settings.get("permissions").is_some() {
             params["useAppServerPermissionDefault"] = json!(false);
@@ -102,6 +116,7 @@ mod tests {
         assert_eq!(params["useAppServerPermissionDefault"], true);
         assert!(params.get("initialTitle").is_none());
         assert!(params.get("permissionsConfig").is_none());
+        assert!(params.get("serviceTier").is_none());
     }
 
     #[test]
@@ -138,6 +153,24 @@ mod tests {
                 &json!({"text":"ok","requestId":args["requestId"],"effort":"high"})
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn creation_passes_fast_and_explicit_standard_to_the_first_turn() {
+        let project = json!({"id":"p","cwd":"E:/code/codey"});
+        for tier in [json!("priority"), json!("default"), Value::Null] {
+            let args = json!({"text":"开始","requestId":uuid::Uuid::new_v4().to_string(),"serviceTier":tier});
+            let params = creation_params(&project, &args).unwrap();
+            assert_eq!(params.get("serviceTier"), Some(&tier));
+            assert_eq!(params["collaborationMode"], Value::Null);
+            assert_eq!(params["useAppServerPermissionDefault"], true);
+        }
+        let args = json!({"text":"开始","requestId":uuid::Uuid::new_v4().to_string(),"serviceTier":"fast"});
+        assert!(
+            creation_params(&project, &args)
+                .unwrap_err()
+                .contains("速度模式")
         );
     }
 }

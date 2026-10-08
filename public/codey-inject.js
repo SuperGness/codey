@@ -2396,9 +2396,38 @@
     return matches.length === 1 ? matches[0] : null;
   };
 
+  const remoteModelSettingsOverride = (scope, cwd) => {
+    if (typeof scope?.get !== "function") return null;
+    // When startup overrides win config/batchWrite, the native composer keeps
+    // its last selection in a signal family keyed by host and working directory.
+    // Read only already-instantiated entries; do not mount unrelated signals.
+    const nodes = new Set([scope.node, ...scope.chain?.values?.() || []]);
+    for (const directory of new Set([cwd ?? null, null])) {
+      const matches = new Map();
+      for (const node of nodes) {
+        for (const [family, bindings] of node?.familyBindings?.entries?.() || []) {
+          if (family?.kind !== "signal-family" || !bindings?.has?.(`local:${directory ?? ""}`)) continue;
+          try {
+            const value = scope.get(family, { hostId: "local", cwd: directory });
+            if (!value || typeof value.model !== "string" || !value.model.trim()
+              || typeof value.reasoningEffort !== "string"
+              || !(value.profile === null || typeof value.profile === "string")
+              || Object.keys(value).some(key => !["model", "reasoningEffort", "profile"].includes(key))) continue;
+            const settings = { model: value.model, effort: value.reasoningEffort };
+            matches.set(JSON.stringify(settings), settings);
+          } catch { continue; }
+        }
+      }
+      if (matches.size > 1) throw new Error("桌面默认模型设置不明确，请在电脑端重新选择模型");
+      if (matches.size === 1) return [...matches.values()][0];
+    }
+    return null;
+  };
+
   const remoteCreationContext = async () => {
     const factories = new Set();
     const resolvers = new Set();
+    const serviceTierReaders = new Set();
     for (const url of await discoverCodexAppAssetUrls()) {
       if (!url.includes("app-initial-") && !url.includes("app-shared-")) continue;
       try {
@@ -2408,6 +2437,13 @@
         const resolver = appServerManagerResolverFromModule(module);
         if (factory) factories.add(factory);
         if (resolver) resolvers.add(resolver);
+        for (const value of Object.values(module || {})) {
+          if (typeof value !== "function") continue;
+          const source = Function.prototype.toString.call(value);
+          if (source.includes("Failed to read service tier for request") && source.includes("service_tier")) {
+            serviceTierReaders.add(value);
+          }
+        }
       } catch {
         continue;
       }
@@ -2425,7 +2461,7 @@
           reader = inputs;
           return candidate;
         });
-        if (manager && reader) return { manager, reader };
+        if (manager && reader) return { manager, reader, readServiceTier: serviceTierReaders.size === 1 ? [...serviceTierReaders][0] : null };
       }
     }
     throw new Error("当前 Codex 暂不支持远程新建会话，请更新 Codey 后重试");
@@ -2455,9 +2491,27 @@
       if (result?.status !== "ready") throw new Error("桌面尚未就绪，暂时无法读取此会话");
       return { status: "ok" };
     }
-    if (args.action !== "create") throw new Error("不支持的远程会话操作");
-    const { manager, reader } = await remoteCreationContext();
+    if (args.action !== "create" && args.action !== "defaults") throw new Error("不支持的远程会话操作");
+    const { manager, reader, readServiceTier } = await remoteCreationContext();
     assertCurrent();
+    if (args.action === "defaults") {
+      if (typeof manager.sendRequest !== "function") throw new Error("当前 Codex 暂不支持读取默认设置");
+      const { config } = await manager.sendRequest("config/read", { includeLayers: false, cwd: args.cwd });
+      assertCurrent();
+      if (!config || typeof config !== "object") throw new Error("桌面默认设置格式不兼容");
+      const override = remoteModelSettingsOverride(reader.params?.scope, args.cwd);
+      const model = override?.model ?? config.model;
+      const effort = override?.effort ?? config.model_reasoning_effort;
+      const tier = readServiceTier && reader.params?.scope
+        ? await readServiceTier(reader.params.scope, "local", model) : config.service_tier;
+      assertCurrent();
+      // Only expose composer settings: config/read may also contain credentials.
+      return {
+        ...(typeof model === "string" ? { model } : {}),
+        ...(typeof effort === "string" ? { effort } : {}),
+        serviceTier: tier === "priority" ? "priority" : "default",
+      };
+    }
     const result = await manager.startConversation(args.params, {
       readThreadCreationInputs: async (...values) => {
         assertCurrent();

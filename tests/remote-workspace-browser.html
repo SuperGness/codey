@@ -21,7 +21,7 @@
       { id: "00000000-0000-4000-8000-000000000030", title: "远程控制验收", cwd: "E:/tasks", updatedAt: Date.now() - 1000 },
       { id: "00000000-0000-4000-8000-000000000031", title: "重建世界海陆地图", cwd: "E:/tasks", updatedAt: Date.now() - 86400000 },
     ];
-    const catalog = { models: ["route-demo/gpt-6-astra", "route-demo/gpt-6-sol"], model_metadata: [
+    const catalog = { models: ["route-demo/gpt-6-astra", "route-demo/gpt-6-sol"], default_model: "route-demo/gpt-6-sol", model_metadata: [
       { model: "route-demo/gpt-6-astra", model_display_name: "GPT-6 Astra", route_name: "示例线路", supported_reasoning_efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], default_reasoning_effort: "high" },
       { model: "route-demo/gpt-6-sol", model_display_name: "GPT-6 Sol", route_name: "示例线路", supported_reasoning_efforts: ["low", "high"], default_reasoning_effort: "low" },
     ] };
@@ -29,12 +29,13 @@
     const sockets = new Set();
     const fixture = window.remoteFixture = {
       actions: [], creations: [], connections: 0, firstTurn: "accepted", failNext: false, failCreate: false, catalogFails: false, unauthorized: false,
+      defaults: { model: "route-demo/gpt-6-astra", effort: "ultra", serviceTier: "priority" }, defaultsFail: false, defaultsDelay: 0,
       disconnect() { for (const socket of [...sockets]) socket.close(); },
       unavailable() { for (const socket of [...sockets]) socket.onmessage?.({ data: JSON.stringify({ type: "disconnected", message: "桌面暂时无法读取此会话" }) }); },
       emit() { for (const socket of sockets) socket.emit(); },
     };
     const state = id => {
-      if (!views.has(id)) views.set(id, { ...threads.find(thread => thread.id === id), model: catalog.models[0], effort: "high", permissionMode: "auto", historyComplete: true, requests: [], turns: [{ id: "turn-1", status: "completed", startedAt: Date.now() - 120000, completedAt: Date.now(), messages: [
+      if (!views.has(id)) views.set(id, { ...threads.find(thread => thread.id === id), model: catalog.models[0], effort: "high", serviceTier: "default", permissionMode: "auto", historyComplete: true, requests: [], turns: [{ id: "turn-1", status: "completed", startedAt: Date.now() - 120000, completedAt: Date.now(), messages: [
         { id: "u1", role: "user", kind: "userMessage", text: "参考官方界面，按项目整理会话，让手机上也可以正常工作。" },
         { id: "c1", role: "activity", kind: "commandExecution", status: "completed", text: "pnpm check\n检查通过" },
         { id: "r1", role: "activity", kind: "reasoning", text: "先检查项目导航，再验证输入框和消息渲染。" },
@@ -56,12 +57,17 @@
       if (path === "/remote/session" || path === "/remote/logout") return reply({ status: "ok" });
       if (path === "/remote/projects") return reply(projects);
       if (path === "/remote/models") return fixture.catalogFails ? reply({ status: "failed", message: "offline" }, 503) : reply(catalog);
+      if (path === "/remote/defaults") {
+        const defaults = { ...fixture.defaults };
+        if (fixture.defaultsDelay) await new Promise(resolve => setTimeout(resolve, fixture.defaultsDelay));
+        return fixture.defaultsFail ? reply({ status: "failed", message: "offline" }, 503) : reply(defaults);
+      }
       if (path === "/remote/threads") return reply(args.archived ? [] : threads.filter(thread => `${thread.title} ${thread.cwd}`.toLowerCase().includes((args.search || "").toLowerCase())));
       if (path === "/remote/action") {
         fixture.actions.push(args);
         if (fixture.failNext) { fixture.failNext = false; throw new TypeError("模拟连接中断"); }
         const view = state(args.threadId);
-        if (args.action === "settings") for (const key of ["model", "effort", "permissionMode"]) if (args[key]) view[key] = args[key];
+        if (args.action === "settings") for (const key of ["model", "effort", "permissionMode", "serviceTier"]) if (key in args) view[key] = args[key];
         if (args.action === "send") view.turns.push({ id: `turn-${view.turns.length + 1}`, status: "inProgress", messages: [{ role: "user", kind: "userMessage", text: args.text }, { role: "activity", kind: "reasoning", text: "正在处理你的补充要求…" }] });
         if (args.action === "steer") view.turns.at(-1).messages.push({ role: "user", kind: "steeringUserMessage", text: args.text });
         if (args.action === "interrupt") view.turns.at(-1).status = "interrupted";
@@ -74,7 +80,7 @@
         threads.unshift({ id, title: args.text.slice(0, 20), cwd, updatedAt: Date.now() });
         const view = state(id);
         view.turns = fixture.firstTurn === "not-started" ? [] : [{ id: "first-turn", status: "inProgress", messages: [{ role: "user", kind: "userMessage", text: args.text }] }];
-        for (const key of ["model", "effort", "permissionMode"]) if (args[key]) view[key] = args[key];
+        for (const key of ["model", "effort", "permissionMode", "serviceTier"]) if (key in args) view[key] = args[key];
         return reply({ id, firstTurn: fixture.firstTurn });
       }
       if (String(path).startsWith("/api/")) return reply(await panel(String(path).slice(5), args));
