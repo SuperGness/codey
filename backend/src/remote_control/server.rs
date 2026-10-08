@@ -301,7 +301,11 @@ async fn route(core: Arc<Core>, mut request: Request<Incoming>) -> Reply {
     if request.method() != hyper::Method::POST {
         return failure(StatusCode::METHOD_NOT_ALLOWED, "请求方法不支持");
     }
-    let max_body = if matches!(path.as_str(), "/remote/action" | "/remote/create") { MAX_MESSAGE_BODY } else { MAX_BODY };
+    let max_body = if matches!(path.as_str(), "/remote/action" | "/remote/create") {
+        MAX_MESSAGE_BODY
+    } else {
+        MAX_BODY
+    };
     let args = match read_json(request, max_body).await {
         Ok(args) if args.is_object() => args,
         Ok(_) => return failure(StatusCode::BAD_REQUEST, "远程请求须为 JSON 对象"),

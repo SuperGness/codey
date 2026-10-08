@@ -354,7 +354,10 @@ mod tests {
         let input = json!([{"type":"image","url":"data:image/gif;base64,R0lGODlh"}]);
         let mut state = json!({"turns":[{"params":{"input":input},"items":[]}]});
         let result = view(&state);
-        assert_eq!(result["turns"][0]["messages"][0]["attachments"][0]["url"], input[0]["url"]);
+        assert_eq!(
+            result["turns"][0]["messages"][0]["attachments"][0]["url"],
+            input[0]["url"]
+        );
         state["turns"][0]["items"] = json!([{"type":"userMessage","content":input},{"type":"steeringUserMessage","input":input}]);
         let result = view(&state);
         let messages = result["turns"][0]["messages"].as_array().unwrap();

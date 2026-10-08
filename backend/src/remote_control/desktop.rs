@@ -762,7 +762,10 @@ mod tests {
             assert_eq!(action["targetClientId"], "desktop-owner");
             assert_eq!(action["method"], "thread-follower-start-turn");
             assert_eq!(action["params"]["conversationId"], thread_copy);
-            assert_eq!(action["params"]["turnStart"]["request"]["input"][1]["type"], "image");
+            assert_eq!(
+                action["params"]["turnStart"]["request"]["input"][1]["type"],
+                "image"
+            );
             assert_eq!(
                 action["params"]["turnStart"]["context"]["inheritThreadSettings"],
                 true

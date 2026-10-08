@@ -28,7 +28,11 @@ fn main() {
             Path::new("../dist-overlay/codey-overlay.js").is_file(),
             "CODEY_SKIP_OVERLAY_BUILD=1 但 dist-overlay/codey-overlay.js 不存在，请先运行 pnpm run vite:build"
         );
-        assert!(Path::new("../dist-overlay/codey-remote.js").is_file() && Path::new("../dist-overlay/codey-remote.css").is_file(), "远程页面资源不存在，请先运行 pnpm run vite:build");
+        assert!(
+            Path::new("../dist-overlay/codey-remote.js").is_file()
+                && Path::new("../dist-overlay/codey-remote.css").is_file(),
+            "远程页面资源不存在，请先运行 pnpm run vite:build"
+        );
     } else {
         let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
         match Command::new(npm)

@@ -279,13 +279,32 @@ async fn photo_body_budget_only_applies_to_authenticated_message_endpoints() {
     let args = json!({"requestId":uuid::Uuid::new_v4().to_string(),"text":"","images":[{"url":"a".repeat(MAX_BODY)}]});
     let client = client();
     for path in ["/remote/create", "/remote/pair", "/api/load_codey_config"] {
-        let response = client.post(format!("{base}{path}"))
-            .header("origin", &base).header("cookie", &cookie).json(&args).send().await.unwrap();
+        let response = client
+            .post(format!("{base}{path}"))
+            .header("origin", &base)
+            .header("cookie", &cookie)
+            .json(&args)
+            .send()
+            .await
+            .unwrap();
         let result: Value = response.json().await.unwrap();
-        assert_eq!(result["message"], if path == "/remote/create" { "Codey 正在退出" } else { "远程请求过大" });
+        assert_eq!(
+            result["message"],
+            if path == "/remote/create" {
+                "Codey 正在退出"
+            } else {
+                "远程请求过大"
+            }
+        );
     }
     assert_eq!(core.actions.lock().await.len(), 1);
-    let response = client.post(format!("{base}/remote/create")).header("origin", &base).json(&json!({})).send().await.unwrap();
+    let response = client
+        .post(format!("{base}/remote/create"))
+        .header("origin", &base)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     task.abort();
 }
