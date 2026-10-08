@@ -909,6 +909,67 @@ async fn ensure_mcp_reload_function_ready(websocket_url: &str) {
     }
 }
 
+pub(crate) async fn remote_control_request(
+    websocket_url: &str,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    // A request client is sufficient for MCP reload, but remote operations need
+    // the native manager adapter. Load it before starting an awaited CDP call.
+    let ready = codey_runtime_core::bridge::evaluate_script(
+        websocket_url,
+        r#"typeof window.__codeyRemoteControl === "function""#,
+    )
+    .await
+    .map_err(|_| "无法连接 Codex 桌面，请检查 Codey 是否正在运行")?;
+    if runtime_value(&ready).and_then(serde_json::Value::as_bool) != Some(true) {
+        let loaded = codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
+            websocket_url,
+            &prepared_session_tools_load_script(),
+            false,
+            SESSION_TOOLS_INJECT_TIMEOUT,
+        )
+        .await
+        .map_err(|_| "桌面会话接口加载失败，请重新连接")?;
+        if runtime_value(&loaded).and_then(serde_json::Value::as_str) != Some("") {
+            return Err("桌面会话接口尚未就绪，请更新或重启 Codey".into());
+        }
+    }
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "系统时间无效")?
+        .as_millis()
+        + 60_000;
+    // CDP returns object references by default. Send JSON text like the other
+    // structured renderer probes so both resume and create return their value.
+    let script = format!(
+        r#"(async () => {{
+          if (typeof window.__codeyRemoteControl !== "function") return JSON.stringify({{status:"failed",message:"桌面会话接口尚未就绪，请更新或重启 Codey"}});
+          try {{ return JSON.stringify(await window.__codeyRemoteControl({args}, {expires_at})); }}
+          catch {{ return JSON.stringify({{status:"failed",message:"桌面未确认远程操作，请检查会话状态后重试"}}); }}
+        }})()"#
+    );
+    let response = codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
+        websocket_url,
+        &script,
+        true,
+        Duration::from_secs(65),
+    )
+    .await
+    .map_err(|_| "桌面响应中断或超时，操作可能已提交；请先查看会话，不要重复发送".to_string())?;
+    let value = runtime_value(&response)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|payload| serde_json::from_str::<serde_json::Value>(payload).ok())
+        .filter(|value| value.is_object())
+        .ok_or("桌面会话接口返回了无效结果")?;
+    if value["status"] == "failed" {
+        return Err(value["message"]
+            .as_str()
+            .unwrap_or("桌面未确认远程操作")
+            .to_string());
+    }
+    Ok(value)
+}
+
 pub async fn refresh_model_whitelist(
     websocket_url: &str,
     expected_catalog: &serde_json::Value,
@@ -1435,6 +1496,160 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_control_loads_the_adapter_before_submitting_once() {
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::json;
+
+        let encoded = |value: serde_json::Value| {
+            Some(json!({"result":{"type":"string","value":value.to_string()}}))
+        };
+        let resumed = json!({"status":"ok"});
+        let created = json!({"id":"thread","firstTurn":"accepted"});
+        let invalid = Err("桌面会话接口返回了无效结果".to_string());
+        let interrupted =
+            Err("桌面响应中断或超时，操作可能已提交；请先查看会话，不要重复发送".to_string());
+        for (ready, action, payload, expected) in [
+            (
+                true,
+                "resume",
+                encoded(resumed.clone()),
+                Ok(resumed.clone()),
+            ),
+            (false, "resume", encoded(resumed.clone()), Ok(resumed)),
+            (
+                true,
+                "create",
+                encoded(created.clone()),
+                Ok(created.clone()),
+            ),
+            (false, "create", encoded(created.clone()), Ok(created)),
+            (
+                false,
+                "create",
+                encoded(json!({"status":"failed","message":"桌面未就绪"})),
+                Err("桌面未就绪".to_string()),
+            ),
+            (
+                true,
+                "resume",
+                encoded(json!({"status":"failed"})),
+                Err("桌面未确认远程操作".to_string()),
+            ),
+            (
+                true,
+                "resume",
+                Some(json!({"result":{"type":"object","objectId":"remote-object"}})),
+                invalid.clone(),
+            ),
+            (
+                true,
+                "create",
+                Some(json!({"result":{"type":"string","value":"private native detail"}})),
+                invalid.clone(),
+            ),
+            (true, "create", encoded(json!(null)), invalid.clone()),
+            (true, "resume", encoded(json!([])), invalid.clone()),
+            (true, "resume", encoded(json!(true)), invalid.clone()),
+            (
+                true,
+                "create",
+                Some(json!({"result":{"type":"undefined"}})),
+                invalid,
+            ),
+            (
+                true,
+                "create",
+                Some(json!({"exceptionDetails":{"text":"private native error"}})),
+                interrupted.clone(),
+            ),
+            (true, "create", None, interrupted),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let mut loaded = ready;
+                let mut submissions = 0;
+                loop {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    while let Some(Ok(message)) = socket.next().await {
+                        let Ok(text) = message.to_text() else {
+                            continue;
+                        };
+                        let request: serde_json::Value = serde_json::from_str(text).unwrap();
+                        let evaluate = request["method"] == "Runtime.evaluate";
+                        let awaited = evaluate && request["params"]["awaitPromise"] == true;
+                        let result = if awaited {
+                            assert!(loaded, "the adapter must load before the awaited operation");
+                            submissions += 1;
+                            let expression = request["params"]["expression"].as_str().unwrap();
+                            assert!(expression.contains("window.__codeyRemoteControl("));
+                            assert!(!expression.contains("__codeyLoadSessionTools"));
+                            let deadline: u128 = expression
+                                .split(", ")
+                                .last()
+                                .unwrap()
+                                .split(')')
+                                .next()
+                                .unwrap()
+                                .parse()
+                                .unwrap();
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap()
+                                .as_millis();
+                            assert!(deadline > now && deadline <= now + 60_000);
+                            let Some(payload) = &payload else {
+                                socket.close(None).await.unwrap();
+                                return submissions;
+                            };
+                            payload.clone()
+                        } else if evaluate {
+                            let expression = request["params"]["expression"].as_str().unwrap();
+                            if expression == r#"typeof window.__codeyRemoteControl === "function""# {
+                                json!({"result":{"value":loaded}})
+                            } else {
+                                assert!(expression.contains("__codeySessionToolsInjectLoaded"));
+                                loaded = true;
+                                json!({"result":{"value":""}})
+                            }
+                        } else {
+                            json!({})
+                        };
+                        socket
+                            .send(tokio_tungstenite::tungstenite::Message::Text(
+                                json!({"id":request["id"],"result":result})
+                                    .to_string()
+                                    .into(),
+                            ))
+                            .await
+                            .unwrap();
+                        if awaited {
+                            return submissions;
+                        }
+                    }
+                }
+            });
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                remote_control_request(
+                    &format!("ws://{address}"),
+                    &json!({"action":action,"threadId":"thread","params":{"input":[]}}),
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(result, expected);
+            assert!(!format!("{result:?}").contains("private native"));
+            assert_eq!(
+                server.await.unwrap(),
+                1,
+                "an uncertain operation must never be replayed"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn mcp_reload_requires_a_confirmed_renderer_response() {

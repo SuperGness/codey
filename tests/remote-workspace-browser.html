@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
+  <link rel="icon" href="data:," />
+  <title>远程工作区验证（模拟数据）</title>
+  <div id="root"></div>
+  <script type="module">
+    import "../src/dev/mockApi";
+    const panel = window.__codeyInvokeApi;
+    const projects = [
+      { id: "codey", name: "codey", cwd: "E:/code/codey" },
+      { id: "proxy", name: "codex-proxy-plugin", cwd: "E:/code/codex-proxy-plugin" },
+      { id: "empty", name: "FreeRTOS-LTS", cwd: "E:/code/FreeRTOS-LTS" },
+    ];
+    const titles = ["重新设计界面", "添加手机远程控制功能", "优化项目启动速度", "修复远程控制连接", "检查模型配置", "整理项目文档", "更新测试用例"];
+    const threads = [
+      ...titles.map((title, i) => ({ id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`, title, cwd: "\\\\?\\E:\\code\\codey", updatedAt: Date.now() - (i + 1) * 3600000 })),
+      { id: "00000000-0000-4000-8000-000000000020", title: "重构插件并集成到 codey", cwd: projects[1].cwd, updatedAt: Date.now() - 7200000 },
+      { id: "00000000-0000-4000-8000-000000000030", title: "远程控制验收", cwd: "E:/tasks", updatedAt: Date.now() - 1000 },
+      { id: "00000000-0000-4000-8000-000000000031", title: "重建世界海陆地图", cwd: "E:/tasks", updatedAt: Date.now() - 86400000 },
+    ];
+    const catalog = { models: ["route-demo/gpt-6-astra", "route-demo/gpt-6-sol"], default_model: "route-demo/gpt-6-sol", model_metadata: [
+      { model: "route-demo/gpt-6-astra", model_display_name: "GPT-6 Astra", route_name: "示例线路", supported_reasoning_efforts: ["low", "medium", "high", "xhigh", "max", "ultra"], default_reasoning_effort: "high" },
+      { model: "route-demo/gpt-6-sol", model_display_name: "GPT-6 Sol", route_name: "示例线路", supported_reasoning_efforts: ["low", "high"], default_reasoning_effort: "low" },
+    ] };
+    const views = new Map();
+    const sockets = new Set();
+    const fixture = window.remoteFixture = {
+      catalog, actions: [], creations: [], connections: 0, firstTurn: "accepted", failNext: false, failCreate: false, catalogFails: false, unauthorized: false,
+      defaults: { model: "route-demo/gpt-6-astra", effort: "ultra", serviceTier: "priority" }, defaultsFail: false, defaultsDelay: 0,
+      disconnect() { for (const socket of [...sockets]) socket.close(); },
+      unavailable() { for (const socket of [...sockets]) socket.onmessage?.({ data: JSON.stringify({ type: "disconnected", message: "桌面暂时无法读取此会话" }) }); },
+      emit() { for (const socket of sockets) socket.emit(); },
+    };
+    const state = id => {
+      if (!views.has(id)) views.set(id, { ...threads.find(thread => thread.id === id), model: catalog.models[0], effort: "high", serviceTier: "default", permissionMode: "auto", historyComplete: true, requests: [], turns: [{ id: "turn-1", status: "completed", startedAt: Date.now() - 120000, completedAt: Date.now(), messages: [
+        { id: "u1", role: "user", kind: "userMessage", text: "参考官方界面，按项目整理会话，让手机上也可以正常工作。" },
+        { id: "c1", role: "activity", kind: "commandExecution", status: "completed", text: "pnpm check\n检查通过" },
+        { id: "r1", role: "activity", kind: "reasoning", text: "先检查项目导航，再验证输入框和消息渲染。" },
+        { id: "a1", role: "assistant", kind: "agentMessage", text: "已按你的参考调整界面：\n\n- **按项目分组**，保留最近会话。\n- 输入框支持选择模型、权限和思考程度。\n- 对话支持 Markdown，工具过程可以展开查看。\n\n下面是验证结果：\n\n| 检查项目 | 状态 |\n| --- | --- |\n| 项目导航 | 通过 |\n| 对话渲染 | 通过 |\n\n```ts\nconst message = '从手机继续工作';\nconsole.log(message);\n```\n\n可以继续补充要求，任务会在电脑原工作区中执行。" },
+      ] }] });
+      return views.get(id);
+    };
+    window.WebSocket = class {
+      constructor(url) { fixture.connections++; this.id = decodeURIComponent(url.split("/").at(-1)); sockets.add(this); this.timer = setTimeout(() => this.emit(), 40); }
+      emit() { this.onmessage?.({ data: JSON.stringify({ type: "state", state: state(this.id) }) }); }
+      close() { clearTimeout(this.timer); sockets.delete(this); this.onclose?.(); }
+    };
+    const nativeFetch = window.fetch;
+    window.fetch = async (path, options) => {
+      if (!String(path).startsWith("/remote/") && !String(path).startsWith("/api/")) return nativeFetch(path, options);
+      const args = JSON.parse(options?.body || "{}");
+      const reply = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+      if (fixture.unauthorized) return reply({ status: "failed", message: "连接已失效" }, 401);
+      if (path === "/remote/session" || path === "/remote/logout") return reply({ status: "ok" });
+      if (path === "/remote/projects") return reply(projects);
+      if (path === "/remote/models") return fixture.catalogFails ? reply({ status: "failed", message: "offline" }, 503) : reply(catalog);
+      if (path === "/remote/defaults") {
+        const defaults = { ...fixture.defaults };
+        if (fixture.defaultsDelay) await new Promise(resolve => setTimeout(resolve, fixture.defaultsDelay));
+        return fixture.defaultsFail ? reply({ status: "failed", message: "offline" }, 503) : reply(defaults);
+      }
+      if (path === "/remote/threads") return reply(args.archived ? [] : threads.filter(thread => `${thread.title} ${thread.cwd}`.toLowerCase().includes((args.search || "").toLowerCase())));
+      if (path === "/remote/action") {
+        fixture.actions.push(args);
+        if (fixture.failNext) { fixture.failNext = false; throw new TypeError("模拟连接中断"); }
+        const view = state(args.threadId);
+        if (args.action === "settings") for (const key of ["model", "effort", "permissionMode", "serviceTier"]) if (key in args) view[key] = args[key];
+        if (args.action === "send") view.turns.push({ id: `turn-${view.turns.length + 1}`, status: "inProgress", messages: [{ role: "user", kind: "userMessage", text: args.text, attachments: args.images }, { role: "activity", kind: "reasoning", text: "正在处理你的补充要求…" }] });
+        if (args.action === "steer") view.turns.at(-1).messages.push({ role: "user", kind: "steeringUserMessage", text: args.text, attachments: args.images });
+        if (args.action === "interrupt") view.turns.at(-1).status = "interrupted";
+        fixture.emit(); return reply({ status: "ok" });
+      }
+      if (path === "/remote/create") {
+        fixture.creations.push(args);
+        if (fixture.failCreate) { fixture.failCreate = false; throw new TypeError("模拟创建响应中断"); }
+        const id = crypto.randomUUID(); const cwd = projects.find(project => project.id === args.projectId)?.cwd;
+        threads.unshift({ id, title: args.text.slice(0, 20) || "图片会话", cwd, updatedAt: Date.now() });
+        const view = state(id);
+        view.turns = fixture.firstTurn === "not-started" ? [] : [{ id: "first-turn", status: "inProgress", messages: [{ role: "user", kind: "userMessage", text: args.text, attachments: args.images }] }];
+        for (const key of ["model", "effort", "permissionMode", "serviceTier"]) if (key in args) view[key] = args[key];
+        return reply({ id, firstTurn: fixture.firstTurn });
+      }
+      if (String(path).startsWith("/api/")) return reply(await panel(String(path).slice(5), args));
+      return reply({ status: "failed", message: "未实现的模拟接口" }, 404);
+    };
+    await import("../src/remote/main.tsx");
+  </script>
+</html>

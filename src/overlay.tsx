@@ -12,6 +12,7 @@ import operationsStyles from "./styles.operations.css?inline";
 import modelStyles from "./styles.models.css?inline";
 import featureStyles from "./styles.features.css?inline";
 import diagnosticStyles from "./styles.diagnostics.css?inline";
+import remoteControlStyles from "./remote-control.css?inline";
 import responsiveStyles from "./styles.responsive.css?inline";
 import { codeyApiPath, invoke } from "./api";
 import { SETTINGS_OVERLAY_Z_INDEX_CSS } from "./overlay.constants";
@@ -74,8 +75,8 @@ function RequestLogPage() {
     };
   }, []);
 
-  if (error) return <main className="p-6 text-sm text-[var(--codey-red,#b91c1c)]">{error}</main>;
-  if (!catalog) return <main className="p-6 text-sm text-[var(--codey-muted,#6e6e73)]">正在加载请求日志…</main>;
+  if (error) return <main className="p-6 text-sm text-(--codey-red,#b91c1c)">{error}</main>;
+  if (!catalog) return <main className="p-6 text-sm text-(--codey-muted,#6e6e73)">正在加载请求日志…</main>;
   return (
     <RequestLogDialog
       catalog={catalog}
@@ -186,6 +187,7 @@ if (!window.__codeySettingsOverlay) {
       modelStyles,
       featureStyles,
       diagnosticStyles,
+      remoteControlStyles,
       responsiveStyles,
     ),
   ];

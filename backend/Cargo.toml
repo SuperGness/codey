@@ -38,7 +38,9 @@ fastctx = { git = "https://github.com/yc-duan/fastctx", rev = "22b40ea324a186a92
 fs2.workspace = true
 futures-util.workspace = true
 http-body = "1"
-hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system"], default-features = false }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system", "tokio"], default-features = false }
 memchr = "2"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { workspace = true, features = ["socks"] }
@@ -90,6 +92,8 @@ windows = { version = "0.58", default-features = false, features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+flate2 = "1"
+tar = "0.4"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["objc2", "std"] }
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [

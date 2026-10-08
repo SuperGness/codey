@@ -23,7 +23,10 @@
     "react-aria": "^3.52.1",
     "react-aria-components": "^1.21.1",
     "react-dom": "^19.0.0",
-    "react-stately": "^3.50.0"
+    "react-markdown": "^10.1.0",
+    "react-stately": "^3.50.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.3.0",
