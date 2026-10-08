@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { IconArrowDown, IconArrowLeft, IconDeviceLaptop, IconRefresh, IconSquarePlus, IconX } from "@tabler/icons-react";
+import { IconArrowDown, IconArrowLeft, IconDeviceLaptop, IconRefresh, IconSquarePlus } from "@tabler/icons-react";
 import { RemoteError, remoteRequest, requestId, readSubmission, rememberSubmission, forgetSubmission } from "./transport";
 import { modelOptions, projectForThread, type Thread, type Project, type Approval, type View, type ModelCatalog, type ModelOption } from "./workspace-data";
 import { Sidebar } from "./sidebar";
@@ -17,8 +17,8 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
   const [search, setSearch] = useState("");
   const [archived, setArchived] = useState(false);
   const [project, setProject] = useState("");
-  const [title, setTitle] = useState("");
   const [creating, setCreating] = useState(false);
+  const [draftSettings, setDraftSettings] = useState<Record<string, string>>({});
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -28,11 +28,13 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
   const [atBottom, setAtBottom] = useState(true);
   const [uncertain, setUncertain] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
-  const dialog = useRef<HTMLDialogElement>(null);
   const listVersion = useRef(0);
   const pinned = useRef(true);
-  const drafts = useRef(new Map<string, { text: string; uncertain: boolean }>());
+  const drafts = useRef(new Map<string, { text: string; uncertain: boolean; settings: Record<string, string> }>());
   const selectedId = selected?.id;
+  const draftScope = creating ? `create:${project}` : selectedId;
+  const draftProject = projects.find(p => p.id === project);
+  const composerView: View | null = creating ? { id: "", turns: [], requests: [], historyComplete: true, ...draftSettings } : view;
   const activeTurn = view ? [...view.turns].reverse().find(turn => turn.status === "inProgress") : undefined;
 
   function fail(error: unknown) {
@@ -69,12 +71,12 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
     }
   }
   useEffect(() => { if (active) void loadModels(); }, [active]);
-  useEffect(() => { if (creating) dialog.current?.showModal(); else dialog.current?.close(); }, [creating]);
 
   useEffect(() => {
     if (!active || !selectedId) return;
     setConnected(false); setConnectionError("");
     let disposed = false;
+    let unavailable = false;
     let timer: number | undefined;
     let socket: WebSocket;
     let delay = 2000;
@@ -82,10 +84,10 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
       if (disposed) return;
       socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/remote/events/${encodeURIComponent(selectedId)}`);
       socket.onmessage = event => {
-        if (disposed) return;
+        if (disposed || unavailable) return;
         try {
           const message = JSON.parse(event.data);
-          if (message.type === "disconnected") { setConnected(false); setConnectionError(message.message); return; }
+          if (message.type === "disconnected") { setConnected(false); setConnectionError(message.message); unavailable = true; socket.close(); return; }
           const next = message.state as View;
           if (message.type !== "state" || next.id !== selectedId) return;
           setView(next); setConnected(true); setConnectionError(""); delay = 2000;
@@ -97,7 +99,7 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
         void remoteRequest("/remote/session").catch(error => {
           if (!disposed && error instanceof RemoteError && error.status === 401) { disposed = true; window.clearTimeout(timer); onUnauthorized(); }
         });
-        timer = window.setTimeout(connect, delay); delay = Math.min(delay * 2, 30000);
+        if (!unavailable) { timer = window.setTimeout(connect, delay); delay = Math.min(delay * 2, 30000); }
       };
     };
     connect();
@@ -105,7 +107,7 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
   }, [active, selectedId, revision]);
 
   useEffect(() => { if (pinned.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; }, [view]);
-  useEffect(() => { if (selectedId) drafts.current.set(selectedId, { text: draft, uncertain }); }, [selectedId, draft, uncertain]);
+  useEffect(() => { if (draftScope) drafts.current.set(draftScope, { text: draft, uncertain, settings: draftSettings }); }, [draftScope, draft, uncertain, draftSettings]);
 
   async function action(action: string, args: Record<string, unknown> = {}) {
     if (!selectedId) return;
@@ -118,17 +120,47 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
     finally { setBusy(false); }
   }
 
-  async function open(thread: Thread) {
-    const previous = drafts.current.get(thread.id);
-    const pending = readSubmission(thread.id);
-    setSelected(thread); setView(null); setConnected(false); setDraft(previous?.text || String(pending?.args.text || "")); setError(""); setUncertain(previous?.uncertain || !!pending); pinned.current = true; setAtBottom(true);
-    await remoteRequest("/remote/action", { threadId: thread.id, action: "open", requestId: requestId() });
-    setRevision(n => n + 1);
+  function restoreDraft(scope: string) {
+    const previous = drafts.current.get(scope);
+    const pending = readSubmission(scope);
+    setDraft(previous?.text || String(pending?.args.text || ""));
+    setUncertain(previous?.uncertain || !!pending);
+    setDraftSettings(previous?.settings || Object.fromEntries(["model", "effort", "permissionMode"].flatMap(key => typeof pending?.args[key] === "string" ? [[key, pending.args[key] as string]] : [])));
+  }
+
+  function open(thread: Thread) {
+    if (selectedId === thread.id) return;
+    setCreating(false); setSelected(thread); setView(null); setConnected(false); setConnectionError(""); setError("");
+    restoreDraft(thread.id); pinned.current = true; setAtBottom(true);
   }
 
   async function send(event: React.FormEvent) {
     event.preventDefault();
-    if (!selectedId || busy || uncertain || !connected || !draft.trim()) return;
+    if (busy || uncertain || !draft.trim()) return;
+    if (creating) {
+      if (!draftProject || !draftScope) return;
+      const scope = draftScope;
+      const text = draft;
+      const submission = rememberSubmission(scope, { projectId: project, text, ...draftSettings });
+      await run(async () => {
+        try {
+          const result = await remoteRequest<{ id: string; firstTurn: string }>("/remote/create", { ...submission.args, requestId: submission.id });
+          if (!result.id) throw new Error("新建结果尚未确认，请先检查会话列表");
+          forgetSubmission(scope); drafts.current.delete(scope);
+          open({ id: result.id, title: "新会话", cwd: draftProject.cwd, updatedAt: Date.now() });
+          if (result.firstTurn !== "accepted") {
+            setDraft(text);
+            if (result.firstTurn !== "not-started" && result.firstTurn !== "not-requested") {
+              rememberSubmission(result.id, { action: "send", text }); setUncertain(true);
+            }
+            setError("会话已创建，请检查第一条消息是否已发送。");
+          }
+          void refresh();
+        } catch (error) { setUncertain(true); throw error; }
+      });
+      return;
+    }
+    if (!selectedId || !connected) return;
     const mode = activeTurn ? "steer" : "send";
     const submission = rememberSubmission(selectedId, { action: mode, text: draft });
     await run(async () => {
@@ -139,33 +171,22 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
     });
   }
 
-  function startCreating(target?: Project) { if (target) setProject(target.id); setError(""); setCreating(true); }
+  function startCreating(target?: Project) {
+    const next = target?.id || project;
+    setProject(next); setCreating(true); setSelected(null); setView(null); setConnected(false); setConnectionError(""); setError("");
+    restoreDraft(`create:${next}`); pinned.current = true; setAtBottom(true);
+  }
   const selectedProject = selected ? projectForThread(selected, projects) : undefined;
-  return <div className={`remote-codex-workspace${selected ? " has-selection" : ""}`}>
-    <Sidebar threads={threads} projects={projects} selectedId={selectedId} busy={busy} loading={loading} search={search} archived={archived} error={!selected && !creating ? error : ""} onSearch={setSearch} onArchived={setArchived} onOpen={thread => void run(() => open(thread))} onCreate={startCreating} onRefresh={() => { void refresh(); void loadModels(); }} onPanel={onPanel} onLogout={onLogout} />
-    <dialog ref={dialog} className="remote-create-dialog" aria-labelledby="remote-create-title" onCancel={event => { if (busy) event.preventDefault(); }} onClose={() => setCreating(false)}>
-      <div className="remote-dialog-heading"><h2 id="remote-create-title">新建会话</h2><button type="button" className="remote-icon-button" aria-label="关闭新建会话" disabled={busy} onClick={() => setCreating(false)}><IconX size={20} /></button></div>
-      <form className="remote-create" onSubmit={event => { event.preventDefault(); void run(async () => {
-        const submission = rememberSubmission("create", { projectId: project, title });
-        const result = await remoteRequest<{ id: string }>("/remote/create", { ...submission.args, requestId: submission.id });
-        forgetSubmission("create"); setCreating(false); setTitle(""); await refresh();
-        await open({ id: result.id, title, cwd: projects.find(p => p.id === project)?.cwd || "", updatedAt: Date.now() });
-      }); }}>
-        <label>项目<select value={project} disabled={busy} onChange={event => setProject(event.target.value)}>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
-        <label>会话名称<input required autoFocus disabled={busy} placeholder="这次想做什么？" maxLength={120} value={title} onChange={event => setTitle(event.target.value)} /></label>
-        <button className="remote-primary" disabled={busy || !project || !title.trim()}>创建会话</button>
-        {!projects.length && <p>请先在电脑 Codex 中保存本地项目。</p>}
-        {error && <p role="alert" className="remote-client-error">{error}</p>}
-      </form>
-    </dialog>
-    <main className="remote-chat">{!selected ? <div className="remote-welcome"><IconDeviceLaptop size={36} stroke={1.25} /><h2>今天想做些什么？</h2><p>选择项目或会话，继续电脑上的工作。</p><button className="remote-primary" onClick={() => startCreating()}><IconSquarePlus size={18} />新建会话</button></div> : <>
-      <header className="remote-chat-header"><button className="remote-back remote-icon-button" aria-label="返回会话列表" disabled={busy} onClick={() => { setSelected(null); void refresh(); }}><IconArrowLeft size={22} /></button><div><h2>{view?.title || selected.title}</h2><p><span className={connected ? "remote-chat-status-dot is-connected" : "remote-chat-status-dot"} />{selectedProject?.name || selected.cwd.split(/[\\/]/).filter(Boolean).pop() || "本地电脑"}<span>·</span>{connected ? activeTurn ? "正在工作" : "已连接" : "连接中"}</p></div><button className="remote-icon-button" disabled={busy} aria-label="新建会话" onClick={() => startCreating(selectedProject)}><IconSquarePlus size={20} /></button><button className="remote-icon-button" disabled={busy} aria-label="重新连接" onClick={() => void run(async () => { await action("open"); setRevision(n => n + 1); })}><IconRefresh size={18} /></button></header>
+  return <div className={`remote-codex-workspace${selected || creating ? " has-selection" : ""}`}>
+    <Sidebar threads={threads} projects={projects} selectedId={selectedId} busy={busy} loading={loading} search={search} archived={archived} error={!selected && !creating ? error : ""} onSearch={setSearch} onArchived={setArchived} onOpen={open} onCreate={startCreating} onRefresh={() => { void refresh(); void loadModels(); }} onPanel={onPanel} onLogout={onLogout} />
+    <main className="remote-chat">{!selected && !creating ? <div className="remote-welcome"><IconDeviceLaptop size={36} stroke={1.25} /><h2>今天想做些什么？</h2><p>选择项目或会话，继续电脑上的工作。</p><button className="remote-primary" onClick={() => startCreating()}><IconSquarePlus size={18} />新建会话</button></div> : <>
+      <header className="remote-chat-header"><button className="remote-back remote-icon-button" aria-label="返回会话列表" disabled={busy} onClick={() => { setSelected(null); setCreating(false); void refresh(); }}><IconArrowLeft size={22} /></button><div><h2>{creating ? "新会话" : view?.title || selected?.title}</h2>{creating ? <label className="remote-draft-project">项目<select aria-label="项目" value={project} disabled={busy} onChange={event => startCreating(projects.find(p => p.id === event.target.value))}>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label> : <p><span className={connected ? "remote-chat-status-dot is-connected" : "remote-chat-status-dot"} />{selectedProject?.name || selected?.cwd.split(/[\\/]/).filter(Boolean).pop() || "本地电脑"}<span>·</span>{connected ? activeTurn ? "正在工作" : "已连接" : connectionError ? "未连接" : "连接中"}</p>}</div><button className="remote-icon-button" disabled={busy} aria-label="新建会话" onClick={() => startCreating(selectedProject)}><IconSquarePlus size={20} /></button>{!creating && <button className="remote-icon-button" disabled={busy} aria-label="重新连接" onClick={() => setRevision(n => n + 1)}><IconRefresh size={18} /></button>}</header>
       {connectionError && <p className="remote-connection" role="status">{connectionError}</p>}
       <div className="remote-transcript">
       <div className="remote-messages" ref={scroll} onScroll={event => { const element = event.currentTarget; pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100; setAtBottom(pinned.current); }}>
         {view && !view.historyComplete && <button disabled={busy || !connected} onClick={() => void run(async () => { await action("history"); setRevision(n => n + 1); })}>加载完整历史</button>}
-        {!view && <p className="remote-chat-loading">正在获取桌面会话…</p>}
-        {view?.turns.length === 0 && <div className="remote-chat-empty"><h2>从一个想法开始</h2><p>描述任务，让 Codex 在 {selectedProject?.name || "当前工作区"} 中开始工作。</p></div>}
+        {!creating && !view && <p className="remote-chat-loading">{connectionError ? "暂时无法读取会话，请点击重新连接。" : "正在获取桌面会话…"}</p>}
+        {(creating || view?.turns.length === 0) && <div className="remote-chat-empty"><h2>从一个想法开始</h2><p>{creating && !draftProject ? "请先在电脑 Codex 中保存本地项目。" : `描述任务，让 Codex 在 ${draftProject && creating ? draftProject.name : selectedProject?.name || "当前工作区"} 中开始工作。`}</p></div>}
         {view?.turns.map((turn, index) => <ConversationTurn key={turn.id || index} turn={turn} />)}
         {view?.requests.map(request => <ApprovalCard key={String(request.id)} request={request} disabled={busy || !connected} onRespond={args => run(() => action("respond", { approvalId: request.id, ...args }))} />)}
         {activeTurn && <p className="remote-working" role="status"><span className="remote-chat-status-dot is-connected" />Codex 正在工作…</p>}
@@ -173,8 +194,8 @@ export function Workspace({ active, onUnauthorized, onPanel, onLogout }: { activ
       {!atBottom && <button className="remote-jump remote-icon-button" aria-label="滚动到最新消息" onClick={() => { if (scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight; pinned.current = true; setAtBottom(true); }}><IconArrowDown size={20} /></button>}
       </div>
       {error && <p className="remote-client-error" role="alert">{error}</p>}
-      {uncertain && <div className="remote-uncertain"><p>消息未确认。请查看会话是否已收到，确认后再决定是否重新发送。</p><button onClick={() => { if (selectedId) forgetSubmission(selectedId); setUncertain(false); setError(""); }}>已核对，允许再次发送</button></div>}
-      <Composer draft={draft} onDraft={setDraft} view={view} models={models} connected={connected} busy={busy} uncertain={uncertain} onSend={event => void send(event)} onStop={() => { if (activeTurn) void run(() => action("interrupt", { turnId: activeTurn.id })); }} onSettings={settings => void run(async () => { await action("settings", settings); setRevision(n => n + 1); })} catalogError={catalogError} onReloadModels={() => void loadModels()} />
+      {uncertain && <div className="remote-uncertain"><p>消息未确认。请查看会话是否已收到，确认后再决定是否重新发送。</p><button onClick={() => { if (draftScope) forgetSubmission(draftScope); setUncertain(false); setError(""); }}>已核对，允许再次发送</button></div>}
+      <Composer draft={draft} onDraft={setDraft} view={composerView} models={models} connected={creating ? !!draftProject : connected} busy={busy} uncertain={uncertain} onSend={event => void send(event)} onStop={() => { if (activeTurn) void run(() => action("interrupt", { turnId: activeTurn.id })); }} onSettings={settings => { if (creating) setDraftSettings(current => ({ ...current, ...settings })); else void run(async () => { await action("settings", settings); setRevision(n => n + 1); }); }} catalogError={catalogError} onReloadModels={() => void loadModels()} />
     </>}</main>
   </div>;
 }

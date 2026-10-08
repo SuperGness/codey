@@ -2194,6 +2194,7 @@
   const sessionControllerLooksUsable = (controller, feature = "session") => {
     if (!controller) return false;
     if (feature === "usage" || feature === "mcpReload") return typeof controller.manager?.sendRequest === "function";
+    if (feature === "remote") return typeof controller.manager?.resumeConversation === "function";
     if (feature === "reconcile") return sessionControllerCanReconcileCompletedConversation(controller);
     const methods = feature === "deleteMessages"
       ? ["prepareMessageDeletion", "finishMessageDeletion"]
@@ -2279,7 +2280,7 @@
         continue;
       }
     }
-    if (fallbackDispatcher && !requireCompletionReconcile && feature !== "usage" && feature !== "mcpReload" && feature !== "deleteMessages") {
+    if (fallbackDispatcher && !requireCompletionReconcile && feature !== "usage" && feature !== "mcpReload" && feature !== "deleteMessages" && feature !== "remote") {
       window.__codeyCodexSignalDispatcher = fallbackDispatcher;
       const controller = legacySessionController(fallbackDispatcher);
       window.__codeyCodexSessionController = controller;
@@ -2383,6 +2384,97 @@
     }
   };
   window.__codeyReloadMcpServers = reloadMcpServers;
+
+  const remoteCreationInputsFactoryFromModule = (module) => {
+    const matches = [...new Set(Object.values(module || {}))].filter((value) => {
+      if (typeof value !== "function" || value.length !== 2) return false;
+      const source = Function.prototype.toString.call(value);
+      return /\bscope\s*:/.test(source) && /\bhostId\s*:/.test(source)
+        && /\brequestClient\s*:\s*[\w$]+\.get\(/.test(source)
+        && /\bdynamicTools\s*:\s*new\b/.test(source);
+    });
+    return matches.length === 1 ? matches[0] : null;
+  };
+
+  const remoteCreationContext = async () => {
+    const factories = new Set();
+    const resolvers = new Set();
+    for (const url of await discoverCodexAppAssetUrls()) {
+      if (!url.includes("app-initial-") && !url.includes("app-shared-")) continue;
+      try {
+        const module = typeof window.__codeyImportCodexAsset === "function"
+          ? await window.__codeyImportCodexAsset(url) : await import(url);
+        const factory = remoteCreationInputsFactoryFromModule(module);
+        const resolver = appServerManagerResolverFromModule(module);
+        if (factory) factories.add(factory);
+        if (resolver) resolvers.add(resolver);
+      } catch {
+        continue;
+      }
+    }
+    // Newer Codex exports the creation reader from app-initial and the manager
+    // resolver from app-shared. Resolve both against the same local scope.
+    for (const resolver of resolvers) {
+      for (const factory of factories) {
+        let reader = null;
+        const manager = appServerManagerFromReact((scope, hostId) => {
+          const candidate = resolver(scope, hostId);
+          if (typeof candidate?.startConversation !== "function") return null;
+          const inputs = factory(scope, hostId);
+          if (typeof inputs?.readCreationInputs !== "function") return null;
+          reader = inputs;
+          return candidate;
+        });
+        if (manager && reader) return { manager, reader };
+      }
+    }
+    throw new Error("当前 Codex 暂不支持远程新建会话，请更新 Codey 后重试");
+  };
+
+  // Keep creation and resumption inside the desktop's native manager. In
+  // particular, its creation-input reader installs the same tools, project
+  // instructions and permission defaults as the desktop composer.
+  const remoteControl = async (args, expiresAt) => {
+    const assertCurrent = () => {
+      if (disposed || Date.now() >= expiresAt) throw new Error("远程操作已过期，请检查会话状态");
+    };
+    assertCurrent();
+    if (args.action === "resume") {
+      const controller = await getCodexSessionController("remote");
+      const manager = controller.manager;
+      if (typeof manager?.resumeConversation !== "function") {
+        throw new Error("当前 Codex 暂不支持远程读取会话，请更新 Codey 后重试");
+      }
+      assertCurrent();
+      // resumeConversation also discovers an owner in another window and
+      // follows it. Never steal ownership with a second app-server process.
+      const result = await manager.resumeConversation({
+        conversationId: args.threadId, model: null, serviceTier: null,
+        reasoningEffort: null, workspaceRoots: [], collaborationMode: null,
+      });
+      if (result?.status !== "ready") throw new Error("桌面尚未就绪，暂时无法读取此会话");
+      return { status: "ok" };
+    }
+    if (args.action !== "create") throw new Error("不支持的远程会话操作");
+    const { manager, reader } = await remoteCreationContext();
+    assertCurrent();
+    const result = await manager.startConversation(args.params, {
+      readThreadCreationInputs: async (...values) => {
+        assertCurrent();
+        const inputs = await reader.readCreationInputs(...values);
+        assertCurrent();
+        return inputs;
+      },
+    });
+    if (result?.status !== "created" || !result.conversationId) {
+      throw new Error("新建结果尚未确认，请先检查会话列表，勿重复发送");
+    }
+    return {
+      id: result.conversationId,
+      firstTurn: result.firstTurn?.status || "outcome-unknown",
+    };
+  };
+  window.__codeyRemoteControl = remoteControl;
 
   const reconcileStaleCompletedTask = async () => {
     if (disposed || document.visibilityState === "hidden") return false;
@@ -3631,6 +3723,7 @@
     if (window.__codeyShowRuntimeToast === showRuntimeToast) delete window.__codeyShowRuntimeToast;
     if (window.__codeyReadAccountRateLimits === readAccountRateLimits) delete window.__codeyReadAccountRateLimits;
     if (window.__codeyReloadMcpServers === reloadMcpServers) delete window.__codeyReloadMcpServers;
+    if (window.__codeyRemoteControl === remoteControl) delete window.__codeyRemoteControl;
     window.__codeySessionToolsInjectLoaded = false;
   };
   window.__codeySessionToolsInstall = {

@@ -13,7 +13,7 @@ export const effortLabels: Record<string, string> = { none: "无", minimal: "最
 export const permissionLabels: Record<string, string> = { "read-only": "只读", auto: "默认权限", "full-access": "完全访问", custom: "自定义权限" };
 
 function normalizedPath(path: string): string {
-  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const normalized = path.replace(/\\/g, "/").replace(/^\/\/\?\/UNC\//i, "//").replace(/^\/\/\?\//, "").replace(/\/+$/, "");
   return /^[a-z]:/i.test(normalized) || normalized.startsWith("//") ? normalized.toLowerCase() : normalized;
 }
 

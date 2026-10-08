@@ -16,7 +16,7 @@
     ];
     const titles = ["重新设计界面", "添加手机远程控制功能", "优化项目启动速度", "修复远程控制连接", "检查模型配置", "整理项目文档", "更新测试用例"];
     const threads = [
-      ...titles.map((title, i) => ({ id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`, title, cwd: projects[0].cwd, updatedAt: Date.now() - (i + 1) * 3600000 })),
+      ...titles.map((title, i) => ({ id: `00000000-0000-4000-8000-${String(i + 1).padStart(12, "0")}`, title, cwd: "\\\\?\\E:\\code\\codey", updatedAt: Date.now() - (i + 1) * 3600000 })),
       { id: "00000000-0000-4000-8000-000000000020", title: "重构插件并集成到 codey", cwd: projects[1].cwd, updatedAt: Date.now() - 7200000 },
       { id: "00000000-0000-4000-8000-000000000030", title: "远程控制验收", cwd: "E:/tasks", updatedAt: Date.now() - 1000 },
       { id: "00000000-0000-4000-8000-000000000031", title: "重建世界海陆地图", cwd: "E:/tasks", updatedAt: Date.now() - 86400000 },
@@ -27,7 +27,12 @@
     ] };
     const views = new Map();
     const sockets = new Set();
-    const fixture = window.remoteFixture = { actions: [], failNext: false, catalogFails: false, unauthorized: false, disconnect() { for (const socket of [...sockets]) socket.close(); }, emit() { for (const socket of sockets) socket.emit(); } };
+    const fixture = window.remoteFixture = {
+      actions: [], creations: [], connections: 0, firstTurn: "accepted", failNext: false, failCreate: false, catalogFails: false, unauthorized: false,
+      disconnect() { for (const socket of [...sockets]) socket.close(); },
+      unavailable() { for (const socket of [...sockets]) socket.onmessage?.({ data: JSON.stringify({ type: "disconnected", message: "桌面暂时无法读取此会话" }) }); },
+      emit() { for (const socket of sockets) socket.emit(); },
+    };
     const state = id => {
       if (!views.has(id)) views.set(id, { ...threads.find(thread => thread.id === id), model: catalog.models[0], effort: "high", permissionMode: "auto", historyComplete: true, requests: [], turns: [{ id: "turn-1", status: "completed", startedAt: Date.now() - 120000, completedAt: Date.now(), messages: [
         { id: "u1", role: "user", kind: "userMessage", text: "参考官方界面，按项目整理会话，让手机上也可以正常工作。" },
@@ -38,7 +43,7 @@
       return views.get(id);
     };
     window.WebSocket = class {
-      constructor(url) { this.id = decodeURIComponent(url.split("/").at(-1)); sockets.add(this); this.timer = setTimeout(() => this.emit(), 40); }
+      constructor(url) { fixture.connections++; this.id = decodeURIComponent(url.split("/").at(-1)); sockets.add(this); this.timer = setTimeout(() => this.emit(), 40); }
       emit() { this.onmessage?.({ data: JSON.stringify({ type: "state", state: state(this.id) }) }); }
       close() { clearTimeout(this.timer); sockets.delete(this); this.onclose?.(); }
     };
@@ -63,9 +68,14 @@
         fixture.emit(); return reply({ status: "ok" });
       }
       if (path === "/remote/create") {
+        fixture.creations.push(args);
+        if (fixture.failCreate) { fixture.failCreate = false; throw new TypeError("模拟创建响应中断"); }
         const id = crypto.randomUUID(); const cwd = projects.find(project => project.id === args.projectId)?.cwd;
-        threads.unshift({ id, title: args.title, cwd, updatedAt: Date.now() });
-        state(id).turns = []; return reply({ id });
+        threads.unshift({ id, title: args.text.slice(0, 20), cwd, updatedAt: Date.now() });
+        const view = state(id);
+        view.turns = fixture.firstTurn === "not-started" ? [] : [{ id: "first-turn", status: "inProgress", messages: [{ role: "user", kind: "userMessage", text: args.text }] }];
+        for (const key of ["model", "effort", "permissionMode"]) if (args[key]) view[key] = args[key];
+        return reply({ id, firstTurn: fixture.firstTurn });
       }
       if (String(path).startsWith("/api/")) return reply(await panel(String(path).slice(5), args));
       return reply({ status: "failed", message: "未实现的模拟接口" }, 404);

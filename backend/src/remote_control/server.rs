@@ -446,6 +446,8 @@ fn event_stream(
         .await;
         let result = async {
             if *shutdown.borrow() || !authorized(&core,&token) { return Err("设备授权已撤销".to_string()); }
+            let state = core.state.upgrade().ok_or("Codey 正在退出")?;
+            super::create::open(&state, &thread).await?;
             let mut desktop = Desktop::follow(&thread).await?;
             let mut changed = true;
             let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
@@ -523,14 +525,16 @@ async fn action_once(core: &Core, token: &str, path: &str, args: &Value) -> Resu
         ),
     );
     let result = if path == "/remote/create" {
-        let state = core.state.upgrade().ok_or("Codey 正在退出")?;
-        let app_path = state.config.read().await.codex_app_path.clone();
-        super::create::create(
-            crate::codex_config::codex_home().to_path_buf(),
-            app_path,
-            args["projectId"].as_str().unwrap_or_default().to_string(),
-            args["title"].as_str().unwrap_or_default().to_string(),
-        )
+        async {
+            let state = core.state.upgrade().ok_or("Codey 正在退出")?;
+            if args.get("model").is_some() || args.get("effort").is_some() {
+                let catalog = state
+                    .bridge_request("/codex-model-catalog".into(), json!({}))
+                    .await;
+                validate_model_settings(&catalog, &json!({}), args)?;
+            }
+            super::create::create(&state, args).await
+        }
         .await
     } else {
         perform_action(core, args).await
@@ -545,9 +549,9 @@ async fn perform_action(core: &Core, args: &Value) -> Result<Value, String> {
     super::desktop::validate_thread(thread)?;
     let action = args["action"].as_str().ok_or("缺少会话操作")?;
     if action == "open" {
-        if Desktop::follow(thread).await.is_err() {
-            super::create::open(thread).await?;
-        }
+        let state = core.state.upgrade().ok_or("Codey 正在退出")?;
+        super::create::open(&state, thread).await?;
+        Desktop::follow(thread).await?;
         return Ok(json!({"status":"ok"}));
     }
     let mut desktop = Desktop::follow(thread).await?;

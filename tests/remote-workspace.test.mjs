@@ -17,10 +17,17 @@ const projects = [
 const thread = (id, cwd, updatedAt = 1) => ({ id, cwd, title: id, updatedAt });
 
 test("project grouping normalizes Windows paths, supports secondary roots and prefers the deepest project", () => {
-  for (const cwd of ["e:/CODE/codey/", "E:\\code\\codey\\src", "E:/linked/worktree/src"]) assert.equal(projectForThread(thread("t", cwd), projects)?.id, "codey");
+  for (const cwd of ["e:/CODE/codey/", "E:\\code\\codey\\src", "E:/linked/worktree/src", "\\\\?\\E:\\code\\codey", "//?/E:/code/codey/src"]) assert.equal(projectForThread(thread("t", cwd), projects)?.id, "codey");
   assert.equal(projectForThread(thread("t", "E:/code/codey/packages/app/src"), projects)?.id, "nested");
   for (const cwd of ["E:/code/codey-other", "/work/app", ""]) assert.equal(projectForThread(thread("t", cwd), projects), undefined);
   assert.equal(projectForThread(thread("t", "/work/App/subdir"), projects)?.id, "unix");
+});
+
+test("project grouping matches extended UNC paths on either side without merging sibling directories", () => {
+  const shares = [{ id: "share", cwd: "\\\\server\\share\\project" }];
+  assert.equal(projectForThread(thread("t", "\\\\?\\UNC\\SERVER\\share\\project\\src"), shares)?.id, "share");
+  assert.equal(projectForThread(thread("t", "//server/share/project-other"), shares), undefined);
+  assert.equal(projectForThread(thread("t", "E:/code/codey"), [{ id: "p", cwd: "\\\\?\\E:\\code\\codey" }])?.id, "p");
 });
 
 test("groups preserve project order and empty projects without duplicating recent threads", () => {
