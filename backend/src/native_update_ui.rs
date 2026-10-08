@@ -356,6 +356,30 @@ mod update_note_tests {
             DialogResult::Primary
         );
     }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
+    #[tokio::test]
+    async fn headless_dialog_never_confirms_updates_or_context_recovery() {
+        for (kind, expected) in [
+            (DialogKind::Confirm, DialogResult::Secondary),
+            (DialogKind::RestoreContext, DialogResult::Secondary),
+            (DialogKind::Failure, DialogResult::Primary),
+        ] {
+            for extra_label in [None, Some("查看完整日志".to_string())] {
+                let result = show_dialog_with_extra(
+                    "Codey".to_string(),
+                    "需要用户确认".to_string(),
+                    kind,
+                    "继续".to_string(),
+                    Some("取消".to_string()),
+                    extra_label,
+                )
+                .await
+                .unwrap();
+                assert_eq!(result, expected);
+            }
+        }
+    }
 }
 
 async fn show_update_note_pages(version: &str, pages: &[String]) -> Result<(), String> {
@@ -473,14 +497,16 @@ async fn show_dialog_with_extra(
     _title: String,
     _description: String,
     kind: DialogKind,
-    _primary_label: String,
+    primary_label: String,
     _secondary_label: Option<String>,
-    _extra_label: Option<String>,
+    extra_label: Option<String>,
 ) -> Result<DialogResult, String> {
-    Ok(match kind {
-        DialogKind::Confirm | DialogKind::RestoreContext => DialogResult::Secondary,
-        DialogKind::Failure => DialogResult::Primary,
-    })
+    Ok(dialog_result_for_label(
+        kind,
+        None,
+        &primary_label,
+        extra_label.as_deref(),
+    ))
 }
 
 #[cfg(target_os = "macos")]
