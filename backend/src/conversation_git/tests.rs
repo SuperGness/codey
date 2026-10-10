@@ -3225,6 +3225,7 @@ async fn model_receives_full_diff_and_conventional_chinese_message_rules() {
         }
         let request = String::from_utf8(bytes).unwrap();
         assert!(request.contains("diff --git a/owned.txt b/owned.txt"));
+        assert!(request.contains("diff --git a/owned_extra.txt b/owned_extra.txt"));
         assert!(!request.contains("other.txt"));
         let split = request.find("\r\n\r\n").unwrap();
         let payload: Value = serde_json::from_str(&request[split + 4..]).unwrap();
@@ -3235,8 +3236,8 @@ async fn model_receives_full_diff_and_conventional_chinese_message_rules() {
                 .iter()
                 .any(|item| { item["role"] == "system" && item["content"] == MESSAGE_INSTRUCTION })
         );
-        assert!(MESSAGE_INSTRUCTION.contains("单文件的简单改动允许只写标题"));
-        assert!(MESSAGE_INSTRUCTION.contains("必须附正文，不得只给标题"));
+        assert!(MESSAGE_INSTRUCTION.contains("正文可选"));
+        assert!(MESSAGE_INSTRUCTION.contains("任何改动都允许只写标题"));
         assert!(MESSAGE_INSTRUCTION.contains("不编造影响、测试结果或性能收益"));
         let body =
             json!({"choices":[{"message":{"role":"assistant", "content":"chore(files): 更新当前对话文件内容"}}]})
@@ -3254,7 +3255,7 @@ async fn model_receives_full_diff_and_conventional_chinese_message_rules() {
     let result = crate::prompt_optimization::optimize_prompt_resolved(
         &reqwest::Client::new(),
         &crate::prompt_optimization::ResolvedPromptOptimizationConfig::from_custom(&config),
-        "diff --git a/owned.txt b/owned.txt\n-old\n+new\n",
+        "diff --git a/owned.txt b/owned.txt\n-old\n+new\ndiff --git a/owned_extra.txt b/owned_extra.txt\n-old\n+new\n",
     )
     .await
     .unwrap();
@@ -3266,33 +3267,15 @@ async fn model_receives_full_diff_and_conventional_chinese_message_rules() {
 }
 
 #[test]
-fn detailed_commit_body_is_required_for_multiple_files_or_large_changes() {
-    let simple = "diff --git a/owned.txt b/owned.txt\n@@ -1 +1 @@\n-old\n+new\n";
+fn commit_body_is_optional_and_model_details_are_preserved() {
     let title = "fix: 更新文件内容";
     let scoped = "fix(files): 更新文件内容\n\n- 调整文件内容，保留原有接口。";
     let unscoped = "fix: 更新文件内容\n\n- 调整文件内容，保留原有接口。";
-    assert_eq!(validate_message_for_diff(title, simple).unwrap(), title);
-    let multiple = format!("{simple}diff --git a/other.txt b/other.txt\n@@ -1 +1 @@\n-old\n+new\n");
-    let large = format!(
-        "diff --git a/owned.txt b/owned.txt\n@@ -1 +1 @@\n{}",
-        "+value\n".repeat(80)
-    );
-    let many_hunks = format!(
-        "diff --git a/owned.txt b/owned.txt\n{}",
-        "@@ -1 +1 @@\n-old\n+new\n".repeat(4)
-    );
-    for diff in [&multiple, &large, &many_hunks] {
-        assert!(validate_message_for_diff(title, diff).is_err());
-        assert!(validate_message_for_diff(&format!("{title}\n\n  "), diff).is_err());
-        assert_eq!(validate_message_for_diff(scoped, diff).unwrap(), scoped);
-        assert_eq!(validate_message_for_diff(unscoped, diff).unwrap(), unscoped);
-    }
-    let smaller = format!(
-        "diff --git a/owned.txt b/owned.txt\n@@ -1 +1 @@\n{}",
-        "+value\n".repeat(79)
-    );
-    assert!(validate_message_for_diff(title, &smaller).is_ok());
-    assert!(validate_message_for_diff("fix: 更新内容\n缺少空行", &multiple).is_err());
+    assert_eq!(validate_message(title).unwrap(), title);
+    assert_eq!(validate_message(&format!("{title}\n\n  ")).unwrap(), title);
+    assert_eq!(validate_message(scoped).unwrap(), scoped);
+    assert_eq!(validate_message(unscoped).unwrap(), unscoped);
+    assert!(validate_message("fix: 更新内容\n缺少空行").is_err());
 }
 
 #[tokio::test]

@@ -28,9 +28,8 @@ pub(crate) const MESSAGE_INSTRUCTION: &str = concat!(
     "ci 持续集成，chore 其他维护，revert 撤销明确的既有改动。按主要实际改动选择，不确定时用 chore，不强行归为 feat 或 fix。",
     "scope 可选；提供时从 diff 中受影响的功能或模块提炼，例如 conversation-git、local-router、request-log；",
     "scope 使用 1 至 40 个小写英文字母、数字、连字符或斜杠，必须以字母开头，分隔符之间不能为空，不写完整文件路径；跨多个无共同模块的改动用 app。",
-    "摘要用中文动词简洁、准确地概括主要改动。单文件的简单改动允许只写标题。",
-    "涉及多个文件，或单文件包含复杂逻辑、多个行为变化、较大范围改动时，必须附正文，不得只给标题。",
-    "正文写一至三条具体说明，分别描述实际修改及 diff 能直接证明的影响或边界；按相关功能归纳，不逐个罗列文件，不重复标题，不凑条数。",
+    "摘要用中文动词简洁、准确地概括主要改动。正文可选，由你根据实际改动判断是否需要，任何改动都允许只写标题，不按文件数量或改动规模强制添加正文。",
+    "需要正文时写一至三条具体说明，分别描述实际修改及 diff 能直接证明的影响或边界；按相关功能归纳，不逐个罗列文件，不重复标题，不凑条数。",
     "无法从 diff 确认影响时只说明具体修改，不编造影响、测试结果或性能收益。正文与标题之间空一行，总计不超过 300 字。",
     "仅当 diff 明确证明破坏兼容时允许 type!: 中文摘要 或 type(scope)!: 中文摘要（! 与冒号之间不要空格），并在摘要或正文说明具体兼容性变化。",
     "示例格式：fix(conversation-git): 校验当前对话的提交范围。示例不代表本次改动。",
@@ -1091,29 +1090,6 @@ pub(crate) fn validate_message(message: &str) -> Result<String> {
         "模型提交正文与标题之间须空一行，请重新生成"
     );
     Ok(message.into())
-}
-
-pub(crate) fn validate_message_for_diff(message: &str, diff: &str) -> Result<String> {
-    let message = validate_message(message)?;
-    let files = diff
-        .lines()
-        .filter(|line| line.starts_with("diff --git "))
-        .count();
-    let changed_lines = diff
-        .lines()
-        .filter(|line| {
-            (line.starts_with('+') && !line.starts_with("+++"))
-                || (line.starts_with('-') && !line.starts_with("---"))
-        })
-        .count();
-    let hunks = diff.lines().filter(|line| line.starts_with("@@ ")).count();
-    if files > 1 || changed_lines >= 80 || hunks >= 4 {
-        ensure!(
-            message.lines().skip(2).any(|line| !line.trim().is_empty()),
-            "多文件或较复杂的改动须包含具体提交正文，模型只生成了标题，请重新生成"
-        );
-    }
-    Ok(message)
 }
 
 pub(crate) fn save_preview(snapshot: Snapshot, message: String, model: String) -> Result<Value> {

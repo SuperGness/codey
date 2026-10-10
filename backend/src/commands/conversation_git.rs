@@ -81,17 +81,15 @@ pub(super) async fn invoke(
         )
         .await
         .map_err(|error| format!("生成提交说明失败：{error}"))?;
-        messages.push(
-            conversation_git::validate_message_for_diff(&message, &input)
-                .map_err(|error| error.to_string())?,
-        );
+        messages
+            .push(conversation_git::validate_message(&message).map_err(|error| error.to_string())?);
     }
     let message = if messages.len() == 1 {
         messages.pop().unwrap()
     } else {
         let mut summary_request = request.clone();
         summary_request.instruction = format!(
-            "{} 输入为分段分析同一次多文件提交得到的 JSON 提交说明列表。合并为一个说明，必须保留具体正文，只使用列表明确描述的改动，scope 可选，不新增推断。",
+            "{} 输入为分段分析同一次提交得到的 JSON 提交说明列表。合并为一个说明，正文由你按实际改动判断是否需要；有正文时保留具体信息，只使用列表明确描述的改动，scope 可选，不新增推断。",
             conversation_git::MESSAGE_INSTRUCTION.replace(
                 "输入只包含本次实际提交的完整 diff",
                 "输入只包含本次实际提交的分析结果"
@@ -107,8 +105,8 @@ pub(super) async fn invoke(
         .map_err(|error| format!("汇总提交说明失败：{error}"))?;
         conversation_git::validate_message(&message).map_err(|error| error.to_string())?
     };
-    let message = conversation_git::validate_message_for_diff(&message, &snapshot.diff)
-        .map_err(|error| error.to_string())?;
+    let message =
+        conversation_git::validate_message(&message).map_err(|error| error.to_string())?;
     let current =
         tokio::task::spawn_blocking(move || conversation_git::snapshot(codex_home(), &session))
             .await
