@@ -305,9 +305,15 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       url: "app://-/assets/app-initial-current-codex-build.js",
     });
     const patchedCurrentRendererSource = await currentRendererResponse.text();
+    // The Fast control no longer depends on the current model exposing more
+    // than one service tier. Only the draft guard survives.
     assert.match(
       patchedCurrentRendererSource,
-      /Ee=!w&&M\.availableOptions\.length>1/,
+      /Ee=!w&&!0/,
+    );
+    assert.doesNotMatch(
+      patchedCurrentRendererSource,
+      /Ee=[^;]*availableOptions\.length>1/,
     );
     assert.match(patchedCurrentRendererSource, /Re=!w&&!K&&xe!=null/);
     assert.match(patchedCurrentRendererSource, /pe=!r/);
@@ -347,7 +353,11 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
         await reorderedServiceTierControlResponse.text();
       assert.match(
         patchedReorderedServiceTierControlSource,
-        /show=(?:settings\.availableOptions\.length>1&&!draft|!draft&&settings\.availableOptions\.length>1)/,
+        /show=(?:!0&&!draft|!draft&&!0|!draft)/,
+      );
+      assert.doesNotMatch(
+        patchedReorderedServiceTierControlSource,
+        /show=[^;]*availableOptions\.length>1/,
       );
       assert.doesNotMatch(
         patchedReorderedServiceTierControlSource,
@@ -387,7 +397,11 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     const patchedElectron151Source = await electron151Response.text();
     assert.match(
       patchedElectron151Source,
-      /De=!w&&N\.availableOptions\.length>1/,
+      /De=!w&&!0/,
+    );
+    assert.doesNotMatch(
+      patchedElectron151Source,
+      /De=[^,]*availableOptions\.length>1/,
     );
     assert.doesNotMatch(
       patchedElectron151Source,
@@ -436,6 +450,10 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       /unrelated=!draft&&allowed&&settings\.availableOptions\.length>1/,
     );
     assert.match(
+      patchedScopedServiceTierSource,
+      /show=!draft/,
+    );
+    assert.doesNotMatch(
       patchedScopedServiceTierSource,
       /show=!draft&&settings\.availableOptions\.length>1/,
     );

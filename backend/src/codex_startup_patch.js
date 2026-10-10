@@ -702,34 +702,27 @@
       source.includes("isServiceTierAllowed") &&
       source.includes("availableOptions.length")
     ) {
-      // The current model's options decide whether the speed control exists.
+      // 速度档入口不再跟随当前模型声明的档位数量，始终保留在输入区。
       patched = replaceNearestRendererGateBeforeAnchor(
         patched,
         [
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?\s*&&\s*!\s*([$A-Z_a-z][$\w]*)\s*&&\s*[$A-Z_a-z][$\w]*(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (_match, assignment, _resultName, settingsName, draftName) =>
-              `${assignment}${settingsName}.availableOptions.length>1&&!${draftName}`,
+            replacement: (_match, assignment, _resultName, _settingsName, draftName) =>
+              `${assignment}!${draftName}`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?\s*&&\s*[$A-Z_a-z][$\w]*\s*&&\s*!\s*([$A-Z_a-z][$\w]*)(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (_match, assignment, _resultName, settingsName, draftName) =>
-              `${assignment}${settingsName}.availableOptions.length>1&&!${draftName}`,
+            replacement: (_match, assignment, _resultName, _settingsName, draftName) =>
+              `${assignment}!${draftName}`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?\s*&&\s*[$A-Z_a-z][$\w]*(?!\s*&&\s*!)(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (_match, assignment, _resultName, settingsName) =>
-              `${assignment}${settingsName}.availableOptions.length>1`,
+            replacement: (_match, assignment) => `${assignment}!0`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*!\s*([$A-Z_a-z][$\w]*)\s*&&\s*)\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?\s*&&\s*[$A-Z_a-z][$\w]*(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (
-              _match,
-              preservedPrefix,
-              _resultName,
-              _draftName,
-              settingsName,
-            ) => `${preservedPrefix}${settingsName}.availableOptions.length>1`,
+            replacement: (_match, preservedPrefix) => `${preservedPrefix}!0`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*!\s*([$A-Z_a-z][$\w]*)\s*&&\s*\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
@@ -738,8 +731,8 @@
               assignment,
               _resultName,
               draftName,
-              settingsName,
-            ) => `${assignment}!${draftName}&&${settingsName}.availableOptions.length>1`,
+              _settingsName,
+            ) => `${assignment}!${draftName}`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?\s*&&\s*!\s*([$A-Z_a-z][$\w]*)(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
@@ -747,24 +740,17 @@
               _match,
               assignment,
               _resultName,
-              settingsName,
+              _settingsName,
               draftName,
-            ) => `${assignment}${settingsName}.availableOptions.length>1&&!${draftName}`,
+            ) => `${assignment}!${draftName}`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (_match, assignment, _resultName, settingsName) =>
-              `${assignment}${settingsName}.availableOptions.length>1`,
+            replacement: (_match, assignment) => `${assignment}!0`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*!\s*([$A-Z_a-z][$\w]*)\s*&&\s*)[$A-Z_a-z][$\w]*\s*&&\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (
-              _match,
-              preservedPrefix,
-              _resultName,
-              _draftName,
-              settingsName,
-            ) => `${preservedPrefix}${settingsName}.availableOptions.length>1`,
+            replacement: (_match, preservedPrefix) => `${preservedPrefix}!0`,
           },
         ],
         undefined,

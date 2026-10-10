@@ -508,7 +508,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
         false,
         () => {},
       ).show,
-      false,
+      true,
     );
     assert.equal(
       modelAwareRuntime.speedCommand(
