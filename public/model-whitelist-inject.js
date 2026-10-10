@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "64";
+  const patchVersion = "65";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -334,7 +334,6 @@
       ? (threadId ? knownThreadProvider(source) : paramsProviderId(source))
       : "";
     const routedProviderId = route?.supportsRemoteCompaction === true
-      || modelKey(route?.providerId) === remoteCompactionProviderId
       ? remoteCompactionProviderId : localRouterProviderId;
     const turnSendsUpstreamModel = method === "turn/start" && Boolean(routeProviderId);
     const officialRoute = isOfficialRoute(route);
@@ -496,7 +495,8 @@
           sourceModel,
           routeName,
           officialAccount: metadataBoolean(metadata, "official_account"),
-          supportsRemoteCompaction: metadataBoolean(metadata, "supports_remote_compaction"),
+          supportsRemoteCompaction: typeof metadata?.supports_remote_compaction === "boolean"
+            ? metadata.supports_remote_compaction : modelKey(providerId) === remoteCompactionProviderId,
         }];
       }).filter(([, route]) => (
         route.providerId && route.routeProviderId && route.sourceModel
@@ -3096,12 +3096,85 @@
     deliveryState.responsePatchInstalled = true;
   }
 
+  let requestGatePending = null;
+  const requestGateRestorers = [];
+  const installRequestClientGate = (client) => {
+    if (disposed) throw new Error("模型请求校验已重新加载");
+    if (!client || client.hostId !== "local") throw new Error("未找到本机模型请求入口");
+    const prototype = Object.getPrototypeOf(client);
+    const methods = ["enqueueRequest", "createRequest", "onResult"];
+    const descriptors = methods.map((name) => Object.getOwnPropertyDescriptor(prototype, name));
+    if (descriptors.some((descriptor) => !descriptor?.writable || typeof descriptor.value !== "function")) {
+      throw new Error("当前客户端的模型请求入口不可校验");
+    }
+    const [enqueue, create, result] = descriptors.map((descriptor) => descriptor.value);
+    // Electron may already have the synchronous source gate. Its identity and
+    // response events remain authoritative; avoid wrapping it a second time.
+    if (Function.prototype.toString.call(enqueue).includes("__codeyModelWhitelistPatch")) return true;
+    const replacements = [
+      function (method, params, ...args) {
+        if (this.hostId !== "local" || disposed) return enqueue.call(this, method, params, ...args);
+        (window.__codeyAppServerRequestClients ||= new Map()).set(this.hostId, this);
+        const routed = rewrittenOutgoingMessage({ type: "mcp-request", request: { method, params } });
+        if (blockedProviderRequest(routed)) {
+          showBlockedProviderNotice(routed);
+          return Promise.reject(new Error("Codey blocked incompatible compaction mode"));
+        }
+        return enqueue.call(this, routed.request.method, routed.request.params, ...args);
+      },
+      function (...args) {
+        const created = create.apply(this, args);
+        if (this.hostId === "local" && !disposed && created?.request) {
+          rememberOutgoingThreadRequest({ type: "mcp-request", request: created.request });
+          rememberOutgoingModelListRequest({ type: "mcp-request", request: created.request });
+        }
+        return created;
+      },
+      function (id, value, ...args) {
+        if (this.hostId === "local" && !disposed) {
+          const method = this.requestPromises?.get(id)?.method;
+          rememberThreadProvidersFromResponse(null, { id, result: value });
+          if (method === "model/list") value = patchedModelPayload(value).value;
+        }
+        return result.call(this, id, value, ...args);
+      },
+    ];
+    methods.forEach((name, index) => {
+      Object.defineProperty(prototype, name, { ...descriptors[index], value: replacements[index] });
+      requestGateRestorers.push(() => {
+        if (prototype[name] === replacements[index]) Object.defineProperty(prototype, name, descriptors[index]);
+      });
+    });
+    (window.__codeyAppServerRequestClients ||= new Map()).set(client.hostId, client);
+    return true;
+  };
+  const ensureRequestGate = () => {
+    if (disposed) return Promise.reject(new Error("模型请求校验已重新加载"));
+    if (nativeSelectionOnly || window.__codeyModelRequestSourceGateInstalled === true) return Promise.resolve(true);
+    if (requestGateRestorers.length) return Promise.resolve(true);
+    if (requestGatePending) return requestGatePending;
+    requestGatePending = Promise.resolve().then(async () => {
+      const knownClient = window.__codeyAppServerRequestClients?.get?.("local");
+      if (knownClient) return installRequestClientGate(knownClient);
+      if (typeof window.__codeyLoadCodexRequestClient !== "function"
+        && typeof window.__codexSessionDeleteBridge === "function") {
+        await window.__codexSessionDeleteBridge("/internal/codey/session-tools/load", {}, { timeoutMs: 20_000 });
+      }
+      if (typeof window.__codeyLoadCodexRequestClient !== "function") throw new Error("模型请求校验尚未就绪");
+      const client = await window.__codeyLoadCodexRequestClient();
+      if (disposed) throw new Error("模型请求校验已重新加载");
+      return installRequestClientGate(client);
+    }).finally(() => { requestGatePending = null; });
+    return requestGatePending;
+  };
+
   const api = {
     version: patchVersion,
     nativeSelectionOnly,
     apply: applyModelWhitelist,
     refresh: loadModelCatalog,
     setCatalog: setModelCatalog,
+    ensureRequestGate,
     // The Codex renderer calls electronBridge before emitting its diagnostic
     // CustomEvent. The startup source gate invokes this synchronous hook at the
     // real transport boundary so thread/start receives modelProvider in time.
@@ -3130,6 +3203,8 @@
     }),
     dispose() {
       disposed = true;
+      requestGateRestorers.reverse().forEach((restore) => restore());
+      requestGateRestorers.length = 0;
       restoreNativeFastPermissions();
       window.clearTimeout(refreshTimer);
       refreshTimer = 0;

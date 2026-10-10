@@ -905,6 +905,11 @@
         "interaction heartbeat",
       );
     }
+    if (patched.includes("globalThis.__codeyModelWhitelistPatch?.trackOutgoingMessage")
+      && patched.includes("let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage")
+      && patched.includes("globalThis.__codeyModelWhitelistPatch?.rewriteIncomingResult")) {
+      patched += "\n;globalThis.__codeyModelRequestSourceGateInstalled=true;\n";
+    }
     return patched;
   };
   const discoveredCodexRendererAssets = new Set();

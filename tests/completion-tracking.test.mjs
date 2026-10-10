@@ -461,6 +461,20 @@ test("usage-only manager remains available when deletion and reconciliation are 
   assert.equal(runtime.window.__codeyPageCapabilities.deleteMessages.status, "unavailable");
 });
 
+test("native model routing discovers the local request client without sending a request", async () => {
+  const client = { hostId: "local", enqueueRequest() { throw Error("must not send"); }, createRequest() {}, onResult() {} };
+  const manager = { requestClient: client, sendRequest() { throw Error("must not send"); } };
+  const runtime = loadInjection({ localAppServerManager: manager, initialSessionId: "" });
+  assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client);
+  assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available");
+});
+
+test("native model routing cannot use a remote or incomplete client", async () => {
+  const manager = { requestClient: { hostId: "remote" }, getConversation() { return null; } };
+  const runtime = loadInjection({ localAppServerManager: manager, initialSessionId: "" });
+  await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
+});
+
 test("MCP reload prefers the patched AppServerRequestClient over fiber discovery", async () => {
   const requests = [];
   const runtime = loadInjection({ initialSessionId: "" });

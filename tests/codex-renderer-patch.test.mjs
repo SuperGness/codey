@@ -636,6 +636,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "Date",
       `${patchedAppServerRequestSource};return AppServerRequestClient`,
     )(appServerGlobal, Date);
+    assert.equal(appServerGlobal.__codeyModelRequestSourceGateInstalled, true);
     const requestClient = new AppServerRequestClient();
     await requestClient.enqueueRequest("thread/start", {
       model: "route-mt6lv4lx-i2bfax/gpt-5.5",

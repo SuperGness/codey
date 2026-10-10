@@ -721,6 +721,22 @@ async fn inject_with_scripts(
     )
     .await
     .with_context(|| format!("向 Codex renderer {} 安装 CDP bridge 失败", target.id))?;
+    // Native macOS does not pass through Electron's renderer asset hook. The
+    // diagnostic send event occurs after its frozen bridge has sent the request.
+    // Require a synchronous request-client guard before reporting startup ready.
+    codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
+        &websocket_url,
+        r#"(async () => {
+          const patch = window.__codeyModelWhitelistPatch;
+          if (!patch || await patch.ensureRequestGate?.() !== true) {
+            throw new Error("当前 Codex 的模型请求校验未安装，请从 Codey 重启后重试");
+          }
+        })()"#,
+        true,
+        Duration::from_secs(20),
+    )
+    .await
+    .context("安装 Codex 模型请求校验失败")?;
     phase.store(InjectionPhase::VerifyOverlay as u8, Ordering::Release);
     ensure_settings_overlay_ready(&websocket_url)
         .await

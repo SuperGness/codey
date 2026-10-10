@@ -2193,6 +2193,11 @@
 
   const sessionControllerLooksUsable = (controller, feature = "session") => {
     if (!controller) return false;
+    if (feature === "modelRouting") {
+      const client = controller.manager?.requestClient;
+      return client?.hostId === "local"
+        && ["enqueueRequest", "createRequest", "onResult"].every((method) => declaredMethod(client, method));
+    }
     if (feature === "usage" || feature === "mcpReload") return typeof controller.manager?.sendRequest === "function";
     if (feature === "reconcile") return sessionControllerCanReconcileCompletedConversation(controller);
     const methods = feature === "deleteMessages"
@@ -2203,7 +2208,7 @@
   };
 
   const capabilityProbes = new Map();
-  const capabilityLabels = { usage: "官方额度读取", mcpReload: "MCP 配置刷新", reconcile: "完成状态同步", deleteMessages: "消息删除", refresh: "会话列表刷新", session: "会话管理" };
+  const capabilityLabels = { usage: "官方额度读取", mcpReload: "MCP 配置刷新", reconcile: "完成状态同步", deleteMessages: "消息删除", modelRouting: "模型请求校验", refresh: "会话列表刷新", session: "会话管理" };
   const capabilityMessage = (feature) => `当前 Codex 暂不支持${capabilityLabels[feature] || "此功能"}，请稍后重试`;
   const pageCapabilities = Object.create(null);
   window.__codeyPageCapabilities = pageCapabilities;
@@ -2260,7 +2265,7 @@
         // 旧安装的迟到探测不能替换新安装已确认的接口。
         if (disposed) throw unavailableCapability(feature);
         const resolvers = [
-          feature === "deleteMessages" ? appServerManagerRegistryResolverFromModule(module) : null,
+          feature === "deleteMessages" || feature === "modelRouting" ? appServerManagerRegistryResolverFromModule(module) : null,
           appServerManagerResolverFromModule(module),
         ].filter(Boolean);
         for (const resolver of resolvers) {
@@ -2279,7 +2284,7 @@
         continue;
       }
     }
-    if (fallbackDispatcher && !requireCompletionReconcile && feature !== "usage" && feature !== "mcpReload" && feature !== "deleteMessages") {
+    if (fallbackDispatcher && !requireCompletionReconcile && feature !== "usage" && feature !== "mcpReload" && feature !== "deleteMessages" && feature !== "modelRouting") {
       window.__codeyCodexSignalDispatcher = fallbackDispatcher;
       const controller = legacySessionController(fallbackDispatcher);
       window.__codeyCodexSessionController = controller;
@@ -2321,6 +2326,12 @@
     return state.pending;
   };
   window.__codeyLoadCodexSessionController = loadCodexSessionController;
+  window.__codeyLoadCodexRequestClient = async () => (
+    (await loadCodexSessionController({ feature: "modelRouting" })).manager.requestClient
+  );
+  // Native macOS uses a frozen bridge. Install the request-client guard after
+  // these module/scope discovery helpers are available, including after reload.
+  void window.__codeyModelWhitelistPatch?.ensureRequestGate?.().catch(() => {});
 
   const loadCodexSignalDispatcher = async () => {
     const controller = await loadCodexSessionController();

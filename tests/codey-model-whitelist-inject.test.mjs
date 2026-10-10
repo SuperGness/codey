@@ -31,6 +31,86 @@ test("mixed routes select compaction independently for new and forked threads", 
   runtime.patch.dispose();
 });
 
+test("an explicit false capability overrides a stale remote provider hint", async () => {
+  const catalog = { ...mixedCompactionCatalog, model_metadata: mixedCompactionCatalog.model_metadata.map((entry) => (
+    entry.route_provider_id === "remote" ? { ...entry, supports_remote_compaction: false } : entry
+  )) };
+  const runtime = await loadPatch(catalog, [statsigClient()]);
+  for (const method of ["thread/start", "thread/resume", "thread/fork"]) {
+    const routed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, { model: "remote/shared" }));
+    assert.equal(routed.request.params.modelProvider, "codey_router");
+  }
+  runtime.patch.dispose();
+});
+
+test("the native request client blocks a compaction change before its frozen bridge sends", async () => {
+  const sends = [];
+  const bridge = Object.freeze({ sendMessageFromView: (request) => sends.push(request) });
+  class NativeClient {
+    constructor(hostId = "local") { this.hostId = hostId; this.requestPromises = new Map(); }
+    enqueueRequest(method, params, ...options) {
+      const created = this.createRequest(method, params, options);
+      bridge.sendMessageFromView(created.request);
+      return created.promise;
+    }
+    createRequest(method, params, options) {
+      const id = String(sends.length + 1);
+      const promise = new Promise((resolve) => this.requestPromises.set(id, { method, resolve }));
+      return { request: { id, method, params, options }, promise };
+    }
+    onResult(id, result) { this.requestPromises.get(id)?.resolve(result); this.requestPromises.delete(id); }
+  }
+  const originals = [NativeClient.prototype.enqueueRequest, NativeClient.prototype.createRequest, NativeClient.prototype.onResult];
+  const client = new NativeClient();
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { requestClient: client });
+  assert.equal(await runtime.patch.ensureRequestGate(), true);
+  assert.equal(await runtime.patch.ensureRequestGate(), true);
+  const started = client.enqueueRequest("thread/start", { model: "remote/shared" }, "widget", 7);
+  assert.equal(sends[0].params.modelProvider, "codey_router_remote");
+  assert.deepEqual(sends[0].options, ["widget", 7]);
+  // No renderer response event: the native resolver must confirm the carrier
+  // before consumers update React state and send another request.
+  client.onResult("1", { modelProvider: "codey_router_remote", thread: { id: "native", model: "shared" } });
+  await started;
+  for (const method of ["thread/settings/update", "turn/start", "thread/resume"]) {
+    await assert.rejects(client.enqueueRequest(method, { threadId: "native", model: "local/shared" }), /incompatible compaction mode/);
+  }
+  assert.equal(sends.length, 1, "incompatible requests never reach the frozen bridge");
+  const remote = new NativeClient("remote-host");
+  const bypassed = remote.enqueueRequest("thread/start", { model: "local/shared" });
+  assert.equal(sends[1].params.modelProvider, undefined);
+  remote.onResult("2", {});
+  await bypassed;
+  const listed = client.enqueueRequest("model/list", {});
+  client.onResult("3", { data: [{ model: "stale" }] });
+  const models = await listed;
+  assert.ok(models.data.some((entry) => entry.model === "remote/shared"));
+  assert.equal(models.data.some((entry) => entry.model === "stale"), false);
+  runtime.patch.dispose();
+  assert.deepEqual([NativeClient.prototype.enqueueRequest, NativeClient.prototype.createRequest, NativeClient.prototype.onResult], originals);
+});
+
+test("disposing before a cached native gate installs leaves the client unchanged", async () => {
+  class NativeClient {
+    constructor() { this.hostId = "local"; }
+    enqueueRequest() {}
+    createRequest() {}
+    onResult() {}
+  }
+  const original = NativeClient.prototype.enqueueRequest;
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { cachedRequestClient: new NativeClient() });
+  const pending = runtime.patch.ensureRequestGate();
+  runtime.patch.dispose();
+  await assert.rejects(pending, /已重新加载/);
+  assert.equal(NativeClient.prototype.enqueueRequest, original);
+});
+
+test("native request gate fails when the client cannot be verified", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { requestClient: { hostId: "local" } });
+  await assert.rejects(runtime.patch.ensureRequestGate(), /不可校验/);
+  runtime.patch.dispose();
+});
+
 test("resume and fork retain the saved route after remote compaction is disabled", async () => {
   const catalog = {
     ...mixedCompactionCatalog,
@@ -193,7 +273,7 @@ test(`Fast stays available across routes and models (native selection: ${nativeS
 async function loadPatch(
   catalogResponse,
   clients,
-  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false } = {},
+  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false, requestClient = null, cachedRequestClient = null } = {},
 ) {
   const [bridgeSource, source] = await Promise.all([
     readFile(new URL("../public/codey-bridge.js", import.meta.url), "utf8"),
@@ -305,6 +385,8 @@ async function loadPatch(
     },
   };
   if (storage) window.localStorage = storage;
+  if (requestClient) window.__codeyLoadCodexRequestClient = async () => requestClient;
+  if (cachedRequestClient) window.__codeyAppServerRequestClients = new Map([["local", cachedRequestClient]]);
   if (bridgeReady) window.__codexSessionDeleteBridge = bridge;
   Function("window", "document", "globalThis", "console", bridgeSource)(
     window,
@@ -796,7 +878,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "64");
+  assert.equal(patch.version, "65");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
