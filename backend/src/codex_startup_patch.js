@@ -651,6 +651,20 @@
       );
     }
     if (
+      source.includes("supportsIndependentSpeedModes") &&
+      source.includes("ultrafast_mode")
+    ) {
+      // Ultrafast 与 Fast 是两条独立的授权字段。上一条只放开了 fast_mode，
+      // 这里把 ultrafast_mode 的判定一并收敛，避免上游把它默认置否后
+      // 速度档控件静默消失。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\bultrafast\s*:\s*)\([^;{}\n]{0,400}?\)\s*&&\s*[$A-Z_a-z][$\w]*\s*\?\.\s*ultrafast_mode\s*!==\s*!1/g,
+        (_match, prefix) => `${prefix}!0`,
+        "ultrafast tier entitlement",
+      );
+    }
+    if (
       source.includes("isServiceTierAllowed") &&
       source.includes("serviceTierForRequest:") &&
       source.includes("availableOptions:")
