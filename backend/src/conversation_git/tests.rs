@@ -927,6 +927,55 @@ fn history_replays_successful_explicit_formatter_after_committed_add() {
 }
 
 #[test]
+fn wrapped_rustfmt_after_readonly_checks_recovers_format() {
+    let repo = Repo::new();
+    let base = "fn main(){let value=1;}\n";
+    fs::write(repo.root.join("owned.rs"), base).unwrap();
+    git(&repo.root, &["add", "--", "owned.rs"], None, None).unwrap();
+    git(&repo.root, &["commit", "-m", "Rust baseline"], None, None).unwrap();
+    git(&repo.root, &["push"], None, None).unwrap();
+    repo.append_record(
+        SESSION,
+        &repo.native_change(
+            SESSION,
+            "owned.rs",
+            "@@ -1 +1 @@\n-fn main(){let value=1;}\n+fn main(){let value=2;}\n",
+            1,
+        ),
+    );
+    let command = format!(
+        "cd {} && git diff --stat && rustfmt --edition 2024 owned.rs 2>&1 | head -5; git diff --stat",
+        repo.root.display()
+    );
+    repo.append_record(
+        SESSION,
+        &json!({"timestamp":"2026-10-08T00:00:03.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"wrapped-fmt","arguments":json!({"cmd":command}).to_string()}}),
+    );
+    repo.append_record(
+        SESSION,
+        &json!({"timestamp":"2026-10-08T00:00:03.200Z","type":"response_item","payload":{"type":"function_call_output","call_id":"wrapped-fmt","output":"Chunk ID: aaa\nWall time: 0.1 seconds\nProcess exited with code 0\nOriginal token count: 0\nOutput:\n"}}),
+    );
+    let formatted = format_rust(&repo.root, "2024", b"fn main(){let value=2;}\n").unwrap();
+    fs::write(repo.root.join("owned.rs"), &formatted).unwrap();
+    let recovered = history::recover(&repo.home, SESSION, &repo.root, &repo.root).unwrap();
+    let before = head_entry(&repo.root, "HEAD", "owned.rs").unwrap();
+    let after = disk_entry(&repo.root, "owned.rs").unwrap();
+    assert!(
+        recovered
+            .replay("owned.rs", before.as_ref(), after.as_ref())
+            .is_ok()
+    );
+    assert_eq!(
+        snapshot(&repo.home, SESSION).unwrap().changes[0]
+            .after
+            .as_ref()
+            .unwrap()
+            .bytes,
+        formatted
+    );
+}
+
+#[test]
 fn historical_cargo_format_tracks_only_prior_owned_files_and_resolves_polls() {
     for outcome in ["success", "failed", "running", "unsafe"] {
         let repo = Repo::new();

@@ -671,11 +671,87 @@ fn formatter_calls(name: &str, args: &Value) -> Option<(Vec<Option<Value>>, usiz
 fn has_formatter(name: &str, args: &Value) -> bool {
     formatter_calls(name, args).is_some_and(|(calls, _)| {
         calls.iter().flatten().any(|args| {
-            args["cmd"]
-                .as_str()
-                .is_some_and(|cmd| cmd.starts_with("rustfmt "))
+            args["cmd"].as_str().is_some_and(|command| {
+                command
+                    .split(';')
+                    .flat_map(|statement| statement.split(" && "))
+                    .any(|segment| segment.trim_start().starts_with("rustfmt "))
+            })
         })
     })
+}
+
+// 常见的验证命令会把 rustfmt 夹在只读检查之间；只接受工作区内的固定形式，避免把其它
+// 命令的回执误当成格式化记录。
+fn explicit_rustfmt_targets(command: &str, workspace: &Path) -> Option<(String, Vec<String>)> {
+    let mut found: Option<(String, Vec<String>)> = None;
+    for statement in command.split(';') {
+        for segment in statement.split(" && ") {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            if let Some(directory) = segment.strip_prefix("cd ") {
+                if Path::new(directory.trim()).canonicalize().ok().as_deref() != Some(workspace) {
+                    return None;
+                }
+                continue;
+            }
+            if matches!(
+                segment,
+                "git diff --stat" | "git diff --check" | "git status --short"
+            ) {
+                continue;
+            }
+            let (main, pipeline) = match segment.split_once(" | ") {
+                Some((main, tail)) => (main, Some(tail)),
+                None => (segment, None),
+            };
+            if let Some(tail) = pipeline {
+                let size = tail.strip_prefix("head -")?;
+                if size.is_empty() || !size.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return None;
+                }
+            }
+            let mut tokens = main
+                .split_whitespace()
+                .filter(|token| *token != "2>&1")
+                .peekable();
+            if tokens.next()? != "rustfmt" || found.is_some() {
+                return None;
+            }
+            let mut edition = None;
+            let mut paths = Vec::new();
+            while let Some(token) = tokens.next() {
+                if token == "--edition" {
+                    if edition.is_some() {
+                        return None;
+                    }
+                    edition = tokens.next().map(str::to_string);
+                } else if token.starts_with('-') {
+                    return None;
+                } else {
+                    paths.push(token.to_string());
+                }
+            }
+            let edition = edition?;
+            if !matches!(edition.as_str(), "2015" | "2018" | "2021" | "2024")
+                || paths.is_empty()
+                || paths.len() > MAX_FILES
+                || paths.iter().any(|path| {
+                    !path.ends_with(".rs")
+                        || path.starts_with('-')
+                        || !path
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"_./:-".contains(&byte))
+                })
+            {
+                return None;
+            }
+            found = Some((edition, paths));
+        }
+    }
+    found
 }
 
 fn cargo_formatter(name: &str, args: &Value) -> bool {
@@ -849,11 +925,16 @@ fn completed_formatters(
         let value = if response.is_object() && response.get("exit_code").is_some() {
             response.clone()
         } else {
-            match tracking::output_text(response)
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-            {
+            match tracking::output_text(response).and_then(|text| {
+                serde_json::from_str::<Value>(&text)
+                    .ok()
+                    .filter(Value::is_object)
+            }) {
                 Some(value) => value,
-                None => return Ok(Vec::new()),
+                None => match terminal_receipt(response) {
+                    Some(value) => value,
+                    None => return Ok(Vec::new()),
+                },
             }
         };
         vec![value]
@@ -875,21 +956,32 @@ fn completed_formatters(
         {
             continue;
         }
-        let tokens: Vec<_> = command.split_whitespace().collect();
-        if tokens.len() < 4
-            || tokens[0] != "rustfmt"
-            || tokens[1] != "--edition"
-            || !matches!(tokens[2], "2015" | "2018" | "2021" | "2024")
-        {
-            continue;
-        }
         if let Some(workdir) = args["workdir"].as_str()
             && Path::new(workdir).canonicalize().ok().as_deref() != Some(workspace)
         {
             continue;
         }
-        if tokens.len() - 3 > MAX_FILES
-            || tokens[3..].iter().any(|path| {
+        let (edition, targets): (String, Vec<String>) = if wrapped {
+            let tokens: Vec<_> = command.split_whitespace().collect();
+            if tokens.len() < 4
+                || tokens[0] != "rustfmt"
+                || tokens[1] != "--edition"
+                || !matches!(tokens[2], "2015" | "2018" | "2021" | "2024")
+            {
+                continue;
+            }
+            (
+                tokens[2].to_string(),
+                tokens[3..].iter().map(|path| path.to_string()).collect(),
+            )
+        } else {
+            let Some((edition, targets)) = explicit_rustfmt_targets(command, workspace) else {
+                continue;
+            };
+            (edition, targets)
+        };
+        if targets.len() > MAX_FILES
+            || targets.iter().any(|path| {
                 !path.ends_with(".rs")
                     || path.starts_with('-')
                     || !path
@@ -900,7 +992,7 @@ fn completed_formatters(
             continue;
         }
         let mut paths = BTreeSet::new();
-        for raw in &tokens[3..] {
+        for raw in &targets {
             paths.insert(relative_path(root, workspace, raw)?);
         }
         for path in paths {
@@ -908,7 +1000,7 @@ fn completed_formatters(
                 path,
                 Edit::FormatRust {
                     root: root.to_path_buf(),
-                    edition: tokens[2].into(),
+                    edition: edition.clone(),
                 },
             ));
         }
