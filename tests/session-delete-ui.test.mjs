@@ -22,14 +22,14 @@ class FakeElement extends FakeElementCore {
     this.innerHTML = "";
   }
 
-  click() {
+  async click() {
     const event = {
       composedPath: () => [this],
       preventDefault() {},
       stopImmediatePropagation() {},
       stopPropagation() {},
     };
-    for (const listener of this.listeners.get("click") || []) listener(event);
+    await Promise.all((this.listeners.get("click") || []).map((listener) => listener(event)));
   }
 
   getBoundingClientRect() {
@@ -246,7 +246,7 @@ function loadInjection({
 
 const deleteMenuItem = (onSelect) => ({ id: "delete-thread", onSelect });
 
-test("injects the sidebar delete icon and opens the official permanent delete entry", () => {
+test("injects the sidebar delete icon and opens the official permanent delete entry", async () => {
   const calls = [];
   const runtime = loadInjection({
     menuItems: [
@@ -271,7 +271,7 @@ test("injects the sidebar delete icon and opens the official permanent delete en
   assert.equal(deleteButton.getAttribute("aria-expanded"), null);
   assert.equal(runtime.thread.querySelectorAll("[data-codey-session-delete]").length, 1);
 
-  deleteButton.click();
+  await deleteButton.click();
 
   assert.deepEqual(calls, ["delete"]);
   assert.equal(runtime.document.body.querySelector("[role=dialog]"), null);
@@ -281,7 +281,7 @@ test("injects the sidebar delete icon and opens the official permanent delete en
   );
 });
 
-test("reads the delete entry from the nearest row menu, including submenus", () => {
+test("reads the delete entry from the nearest row menu, including submenus", async () => {
   const calls = [];
   const runtime = loadInjection({
     menuItems: [
@@ -297,33 +297,77 @@ test("reads the delete entry from the nearest row menu, including submenus", () 
     outerMenuItems: [deleteMenuItem(() => calls.push("outer-delete"))],
   });
 
-  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  await runtime.thread.querySelector("[data-codey-session-delete]").click();
 
   assert.deepEqual(calls, ["inner-delete"]);
 });
 
-test("falls back to the official context menu when the delete entry is missing", () => {
+test("awaits the official menu and ignores repeated clicks while it loads", async () => {
+  const calls = [];
+  let resolveItems;
+  const menuItems = new Promise((resolve) => { resolveItems = resolve; });
+  const runtime = loadInjection({ menuItems });
+  const button = runtime.thread.querySelector("[data-codey-session-delete]");
+
+  const firstClick = button.click();
+  assert.equal(button.disabled, true);
+  await button.click();
+  resolveItems([deleteMenuItem(() => calls.push("delete"))]);
+  await firstClick;
+
+  assert.deepEqual(calls, ["delete"]);
+  assert.equal(button.disabled, false);
+  assert.equal(runtime.dispatched.length, 0);
+  assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete"), false);
+});
+
+test("handles an asynchronous menu failure and allows retrying", async () => {
+  const runtime = loadInjection({ menuItems: Promise.reject(new Error("menu unavailable")) });
+  const button = runtime.thread.querySelector("[data-codey-session-delete]");
+
+  await button.click();
+
+  assert.equal(button.disabled, false);
+  assert.equal(runtime.dispatched.length, 0);
+  assert.equal(runtime.documentElement.querySelector("#codey-runtime-toast").dataset.tone, "error");
+  let selected = false;
+  attachRowFiber(runtime.thread, { menuItems: [deleteMenuItem(() => { selected = true; })] });
+  await button.click();
+  assert.equal(selected, true);
+});
+
+test("reports a failed official delete action without opening the context menu", async () => {
+  const runtime = loadInjection({
+    menuItems: [deleteMenuItem(async () => { throw new Error("dialog unavailable"); })],
+  });
+  const button = runtime.thread.querySelector("[data-codey-session-delete]");
+
+  await button.click();
+
+  assert.equal(button.disabled, false);
+  assert.equal(runtime.dispatched.length, 0);
+  assert.match(runtime.documentElement.querySelector("#codey-runtime-toast").textContent, /请重试/);
+});
+
+test("reports a missing delete entry without opening the official context menu", async () => {
   const runtime = loadInjection({
     menuItems: [{ id: "archive-thread", onSelect: () => {} }],
   });
 
-  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  await runtime.thread.querySelector("[data-codey-session-delete]").click();
 
-  assert.equal(runtime.dispatched.length, 1);
-  assert.equal(runtime.dispatched[0].type, "contextmenu");
-  assert.equal(runtime.dispatched[0].bubbles, true);
-  assert.equal(runtime.dispatched[0].cancelable, true);
-  assert.equal(runtime.dispatched[0].composed, true);
+  assert.equal(runtime.dispatched.length, 0);
+  assert.equal(runtime.documentElement.querySelector("#codey-runtime-toast").dataset.tone, "error");
   assert.equal(
     runtime.bridgeCalls.some(({ path }) => path === "/session/delete"),
     false,
   );
 });
 
-test("reports a missing official entry instead of deleting on its own", () => {
+test("reports a missing official entry instead of deleting on its own", async () => {
   const runtime = loadInjection({ mouseEvent: null });
 
-  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  await runtime.thread.querySelector("[data-codey-session-delete]").click();
 
   const toast = runtime.documentElement.querySelector("#codey-runtime-toast");
   assert.ok(toast);

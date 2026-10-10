@@ -2631,13 +2631,13 @@
   // the backend on its own.
   const sessionDeleteMenuItemId = "delete-thread";
 
-  const sidebarRowMenuItems = (row) => {
+  const sidebarRowMenuItems = async (row) => {
     const fiberKey = Object.keys(row).find((key) => key.startsWith("__reactFiber$"));
     for (let fiber = fiberKey ? row[fiberKey] : null; fiber; fiber = fiber.return) {
       const getItems = fiber.memoizedProps?.getItems;
       if (typeof getItems !== "function") continue;
       try {
-        const items = getItems();
+        const items = await getItems();
         if (Array.isArray(items)) return items;
       } catch {
         return null;
@@ -2656,21 +2656,17 @@
     return null;
   };
 
-  const openOfficialSessionDelete = (row) => {
-    const menuItem = findMenuItemById(sidebarRowMenuItems(row), sessionDeleteMenuItemId);
-    if (typeof menuItem?.onSelect === "function") {
-      menuItem.onSelect();
-      return true;
-    }
-    // Unknown Codex builds: let the row open its own context menu so deletion
-    // still runs through the official implementation.
-    if (typeof MouseEvent === "function" && typeof row.dispatchEvent === "function") {
-      row.dispatchEvent(new MouseEvent("contextmenu", {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-      }));
-      return true;
+  const openOfficialSessionDelete = async (row) => {
+    try {
+      const menuItem = findMenuItemById(await sidebarRowMenuItems(row), sessionDeleteMenuItemId);
+      if (disposed) return false;
+      if (typeof menuItem?.onSelect === "function" && !menuItem.disabled) {
+        await menuItem.onSelect();
+        return true;
+      }
+    } catch {
+      if (!disposed) showRuntimeToast("无法打开 Codex 永久删除确认，请重试", "error");
+      return false;
     }
     showRuntimeToast("当前 Codex 版本未提供永久删除入口", "error");
     return false;
@@ -2747,9 +2743,15 @@
       ["pointerdown", "mousedown", "mouseup", "touchstart"].forEach((eventName) => {
         button.addEventListener(eventName, stopSidebarActionEvent, true);
       });
-      button.addEventListener("click", (event) => {
+      button.addEventListener("click", async (event) => {
         stopSidebarActionEvent(event);
-        openOfficialSessionDelete(thread);
+        if (button.disabled) return;
+        button.disabled = true;
+        try {
+          await openOfficialSessionDelete(thread);
+        } finally {
+          button.disabled = false;
+        }
       }, true);
       placementTarget.insertAdjacentElement("afterend", button);
     });
