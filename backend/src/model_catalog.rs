@@ -65,12 +65,12 @@ const REASONING_LEVEL_DESCRIPTIONS: [(&str, &str); 6] = [
 const FAST_SERVICE_TIER_ID: &str = "priority";
 const FAST_SPEED_TIER_ID: &str = "fast";
 /// Ultrafast 是 Fast 之上的速度档。上游目录目前只声明 Fast，所以这一档由 Codey
-/// 本地合成；只对原生提供 Fast 的 6.1 Sol 系列开放，避免替其他模型承诺上游没有
-/// 的能力。客户端同时要求 `service_tiers` 里出现该档，只补
-/// `additional_speed_tiers` 会被 Codex 判定为“未声明”并丢弃。
+/// 本地合成。开放的判据是上游对 Fast 的描述：账号快照里只有 6.1 Sol 和 6 Astra
+/// 标成 “2x speed”，其余模型是 “1.5x speed”。客户端同时要求 `service_tiers`
+/// 里出现该档，只补 `additional_speed_tiers` 会被 Codex 判定为“未声明”并丢弃。
 const ULTRAFAST_SERVICE_TIER_ID: &str = "ultrafast";
 const ULTRAFAST_SPEED_TIER_ID: &str = "ultrafast";
-const ULTRAFAST_MODEL_SLUGS: [&str; 1] = ["gpt-6.1-sol"];
+const ULTRAFAST_MODEL_SLUGS: [&str; 2] = ["gpt-6.1-sol", "gpt-6-astra"];
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
 /// Official account models Codey exposes. Upstream retires a model by dropping
 /// it from the Codex model cache, so a retired slug has to leave this list in
@@ -2321,7 +2321,12 @@ fn remove_fast_speed_controls(model: &mut Value) {
     }
 }
 
-/// 只有 6.1 Sol 系列补 Ultrafast。路由前缀与 `-wm` 这类后缀先归一化再比较，
+/// 上游会为同一个模型下发多个 slug：`-wm` 是 Work 模式，`-priority` 是 Fast 档，
+/// `-ultrafast` 是预留的 Ultrafast 档。只认这几种后缀，免得把 `gpt-6-astra-max`
+/// 这类无关变体也当成同族。
+const SPEED_VARIANT_SUFFIXES: [&str; 3] = ["-wm", "-priority", "-ultrafast"];
+
+/// 只有上游标成 “2x speed” 的模型补 Ultrafast。路由前缀和后缀先归一化再比较，
 /// 否则 `route-x/gpt-6.1-sol` 和 `gpt-6.1-sol-wm` 都会漏掉。
 fn supports_ultrafast_speed(model: &Value) -> bool {
     let slug = model.get("slug").and_then(Value::as_str).unwrap_or("");
@@ -2330,10 +2335,12 @@ fn supports_ultrafast_speed(model: &Value) -> bool {
         .to_ascii_lowercase();
     ULTRAFAST_MODEL_SLUGS.iter().any(|candidate| {
         upstream.as_str() == *candidate
-            || upstream
-                .as_str()
-                .strip_prefix(candidate)
-                .is_some_and(|suffix| suffix.starts_with('-'))
+            || SPEED_VARIANT_SUFFIXES.iter().any(|suffix| {
+                upstream
+                    .as_str()
+                    .strip_suffix(*suffix)
+                    .is_some_and(|base| base == *candidate)
+            })
     })
 }
 
@@ -3065,7 +3072,7 @@ mod tests {
     }
 
     #[test]
-    fn account_snapshot_six_one_sol_declares_ultrafast_speed() {
+    fn account_snapshot_ultrafast_follows_the_two_x_fast_family() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
         let snapshot = json!({
@@ -3076,6 +3083,12 @@ mod tests {
                     "display_name": "GPT-6.1-Sol",
                     "visibility": "list",
                     "description": "GPT-6.1-Sol"
+                },
+                {
+                    "slug": "gpt-6-astra",
+                    "display_name": "GPT-6-Astra",
+                    "visibility": "list",
+                    "description": "GPT-6-Astra"
                 },
                 {
                     "slug": "gpt-5.6-sol",
@@ -3099,15 +3112,16 @@ mod tests {
         )
         .unwrap();
         let models = catalog["models"].as_array().unwrap();
-        let sol61 = models
-            .iter()
-            .find(|model| model["slug"] == "gpt-6.1-sol")
-            .unwrap();
-        // Fast 仍是第一档，Ultrafast 追加在它后面，选择器的默认顺序不变。
-        assert_eq!(sol61["service_tiers"][0]["id"], FAST_SERVICE_TIER_ID);
-        assert_native_fast(sol61);
-        assert_native_ultrafast(sol61);
-        // 其他模型不会被顺带升级成上游没有承诺的速度档。
+        for slug in ["gpt-6.1-sol", "gpt-6-astra"] {
+            let Some(model) = models.iter().find(|model| model["slug"] == slug) else {
+                panic!("目录里缺少 {slug}");
+            };
+            // Fast 仍是第一档，Ultrafast 追加在它后面，选择器的默认顺序不变。
+            assert_eq!(model["service_tiers"][0]["id"], FAST_SERVICE_TIER_ID);
+            assert_native_fast(model);
+            assert_native_ultrafast(model);
+        }
+        // 上游只按 1.5x 声明 Fast 的模型不会被顺带升级。
         let sol56 = models
             .iter()
             .find(|model| model["slug"] == "gpt-5.6-sol")
@@ -3159,23 +3173,28 @@ mod tests {
     }
 
     #[test]
-    fn ultrafast_speed_support_covers_the_six_one_sol_family_only() {
+    fn ultrafast_speed_support_is_limited_to_the_two_x_fast_family() {
         for slug in [
             "gpt-6.1-sol",
             "gpt-6.1-sol-wm",
             "gpt-6.1-sol-priority",
             "route-mu5dql1a/gpt-6.1-sol",
             "my%20route/gpt-6.1-sol-wm",
+            "gpt-6-astra",
+            "gpt-6-astra-wm",
+            "codey-official-account-x/gpt-6-astra",
         ] {
             let model = json!({ "slug": slug });
             assert!(supports_ultrafast_speed(&model), "{slug} 应支持 Ultrafast");
         }
         for slug in [
             "gpt-5.6-sol",
+            "gpt-5.6-luna",
             "gpt-6-sol",
+            "gpt-6-luna",
             "gpt-6.1-sol2",
-            "gpt-6.1",
-            "route-x/gpt-6-astra",
+            "gpt-6-astra2",
+            "route-x/gpt-6-astra-max",
         ] {
             let model = json!({ "slug": slug });
             assert!(!supports_ultrafast_speed(&model), "{slug} 不应支持 Ultrafast");
