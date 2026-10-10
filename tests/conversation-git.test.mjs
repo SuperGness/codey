@@ -10,6 +10,14 @@ const deferred = () => { let resolve; const promise = new Promise((done) => { re
 
 function harness({ enabled = true, visible = true, optimizer = true, status, preview, execute, now = () => Date.now() } = {}) {
   class Element extends FakeElementCore {
+    get classList() {
+      const classes = () => new Set((this.className || "").split(/\s+/).filter(Boolean));
+      return {
+        add: (...names) => { this.className = [...new Set([...classes(), ...names])].join(" "); },
+        remove: (...names) => { this.className = [...classes()].filter((name) => !names.includes(name)).join(" "); },
+        contains: (name) => classes().has(name),
+      };
+    }
     replaceChildren(...children) { [...this.children].forEach((child) => child.remove()); this.append(...children); }
     getBoundingClientRect() { return { left: 100, top: 600 }; }
     focus() { document.activeElement = this; }
@@ -24,10 +32,12 @@ function harness({ enabled = true, visible = true, optimizer = true, status, pre
   host.appendChild(anchor); document.body.appendChild(host);
   const optimize = new Element("button"); optimize.id = "codey-prompt-optimize-button";
   if (optimizer) host.appendChild(optimize);
-  const state = { sessionId: "session-a", enabled, visible };
+  const state = { sessionId: "session-a", enabled, visible, contextAvailable: true, targetAvailable: true };
   const window = new Element("window");
   window.innerWidth = 1200; window.innerHeight = 800;
-  window.__codeyPromptOptimize = { composerContext: () => ({ sessionId: state.sessionId, target: { host, anchor } }) };
+  window.location = { href: "https://codex.local/session-a" };
+  window.__codeyPromptOptimize = { composerContext: () => state.contextAvailable
+    ? { sessionId: state.sessionId, target: state.targetAvailable ? { host, anchor } : null } : null };
   const calls = [];
   window.__codexSessionDeleteBridge = async (path, payload) => {
     calls.push({ path, payload });
@@ -80,6 +90,108 @@ test("shows only enabled conversations with backend-confirmed Git changes beside
     if (enabled && visible) assert.equal(env.optimize.nextElementSibling, env.button());
     if (!enabled) assert.equal(env.calls.filter((call) => call.path.endsWith("_status")).length, 0);
   }
+});
+
+test("keeps confirmed visibility through brief composer loss and blocks stale actions", async () => {
+  const env = harness(); await env.load();
+  const button = env.button();
+  env.state.contextAvailable = false;
+  env.mutate();
+  assert.equal(button.style.display, "inline-flex");
+  assert.equal(button.disabled, true);
+  assert.equal(env.window.__codeyConversationGit.snapshot().sessionId, "session-a");
+  await env.click(button);
+  assert.equal(env.calls.some((call) => call.path.endsWith("_preview")), false);
+  env.state.contextAvailable = true;
+  env.mutate(); await env.runTimers();
+  assert.equal(button.style.display, "inline-flex");
+  assert.equal(button.disabled, false);
+  assert.equal(env.timerDelays().includes(100), false);
+});
+
+test("restores the Git button when the native toolbar removes only the injected button", async () => {
+  const env = harness(); await env.load();
+  const button = env.button();
+  button.remove();
+  env.mutate([{ type: "childList", target: env.host, addedNodes: [], removedNodes: [button] }]);
+  assert.equal(env.button(), button);
+  assert.equal(button.style.display, "inline-flex");
+});
+
+test("keeps the button during temporary missing toolbar or conversation ID", async () => {
+  const env = harness(); await env.load();
+  env.state.targetAvailable = false;
+  env.mutate();
+  assert.equal(env.button().style.display, "inline-flex");
+  env.state.targetAvailable = true;
+  env.state.sessionId = null;
+  env.mutate();
+  assert.equal(env.button().style.display, "inline-flex");
+  env.state.sessionId = "session-a";
+  env.mutate(); await env.runTimers();
+  assert.equal(env.window.__codeyConversationGit.snapshot().visible, true);
+});
+
+test("a pending status result does not hide the button during toolbar rebuilding", async () => {
+  const pending = deferred();
+  let count = 0;
+  const env = harness({ status: () => ++count === 1 ? { visible: true } : pending.promise });
+  await env.load();
+  await env.tick();
+  env.state.targetAvailable = false;
+  env.mutate();
+  pending.resolve({ visible: true }); await flush();
+  assert.equal(env.button().style.display, "inline-flex");
+  assert.equal(env.button().disabled, true);
+  env.state.targetAvailable = true;
+  env.mutate();
+  assert.equal(env.button().disabled, false);
+});
+
+test("hides after persistent context loss or navigation to another route", async () => {
+  let now = 0;
+  const env = harness({ now: () => now }); await env.load();
+  env.state.contextAvailable = false;
+  env.mutate();
+  now = 1_001;
+  await env.runTimers();
+  assert.equal(env.button().style.display, "none");
+  assert.equal(env.window.__codeyConversationGit.snapshot().sessionId, null);
+  env.state.contextAvailable = true;
+  env.mutate(); await env.runTimers();
+  assert.equal(env.button().style.display, "inline-flex");
+  env.window.location.href = "https://codex.local/session-b";
+  env.state.contextAvailable = false;
+  env.mutate();
+  assert.equal(env.button().style.display, "none");
+});
+
+test("preserves recent visibility on query failure but hides confirmed absence", async () => {
+  let result = { visible: true };
+  const env = harness({ status: () => {
+    if (result instanceof Error) throw result;
+    return result;
+  } }); await env.load();
+  result = new Error("桥接暂时不可用");
+  await env.tick();
+  assert.equal(env.button().style.display, "inline-flex");
+  result = { visible: false, unavailable: true, reason: "读取会话暂时失败" };
+  await env.tick();
+  assert.equal(env.button().style.display, "inline-flex");
+  result = { visible: false, reason: "没有文件改动" };
+  await env.tick();
+  assert.equal(env.button().style.display, "none");
+});
+
+test("does not keep a failed query's visibility beyond the cache lifetime", async () => {
+  let now = 0, fail = false;
+  const env = harness({ now: () => now, status: () => {
+    if (fail) throw new Error("暂时失败");
+    return { visible: true };
+  } }); await env.load();
+  fail = true; now = 30_001;
+  await env.tick();
+  assert.equal(env.button().style.display, "none");
 });
 
 test("works when prompt optimization is disabled and requires preview confirmation before execution", async () => {

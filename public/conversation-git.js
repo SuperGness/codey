@@ -17,6 +17,11 @@
   let panel = null;
   let timer = 0;
   let timerDelay = 0;
+  let missingContextAt = null;
+  let contextRetryTimer = 0;
+  let contextLocation = "";
+  const contextGraceMs = 1_000;
+  const locationKey = () => window.location?.href || "";
   const context = () => window.__codeyPromptOptimize?.composerContext?.();
   const call = async (name, payload) => {
     if (typeof window.__codexSessionDeleteBridge !== "function") throw new Error("Codey bridge 尚未就绪");
@@ -189,16 +194,284 @@
     #${id}-panel .codey-git-commit-msg {
       border-left: 3px solid light-dark(#0969da, #388bfd);
     }
-    #${id}-panel details {
+    #${id}-panel .codey-git-diff-details {
       margin-top: 10px;
     }
-    #${id}-panel details summary {
+    #${id}-panel .codey-git-diff-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      list-style: none;
       cursor: pointer;
-      font-size: 12px;
-      font-weight: 500;
-      color: light-dark(#0969da, #58a6ff);
       user-select: none;
-      margin-bottom: 6px;
+      padding: 4px 0 8px;
+      margin: 0;
+    }
+    #${id}-panel .codey-git-diff-summary::-webkit-details-marker,
+    #${id}-panel .codey-git-diff-summary::marker {
+      display: none;
+    }
+    #${id}-panel .codey-git-diff-summary-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    #${id}-panel .codey-git-diff-chevron {
+      display: inline-block;
+      width: 5px;
+      height: 5px;
+      border-right: 2px solid light-dark(#57606a, #8b949e);
+      border-bottom: 2px solid light-dark(#57606a, #8b949e);
+      transform: rotate(-45deg);
+      transition: transform .18s ease;
+      margin: 0 2px 0 1px;
+    }
+    #${id}-panel details[open] .codey-git-diff-chevron {
+      transform: rotate(45deg);
+    }
+    #${id}-panel .codey-git-diff-summary-title {
+      font-size: 12px;
+      font-weight: 600;
+      color: light-dark(#1f2328, #f0f6fc);
+      transition: color .15s ease;
+    }
+    #${id}-panel .codey-git-diff-summary:hover .codey-git-diff-summary-title {
+      color: light-dark(#0969da, #58a6ff);
+    }
+    #${id}-panel .codey-git-stat-badge {
+      display: inline-flex;
+      align-items: center;
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 0 6px;
+      height: 18px;
+      line-height: 18px;
+      border-radius: 999px;
+    }
+    #${id}-panel .codey-git-stat-add {
+      background: light-dark(rgba(46, 160, 67, .14), rgba(46, 160, 67, .2));
+      color: light-dark(#1a7f37, #3fb950);
+    }
+    #${id}-panel .codey-git-stat-del {
+      background: light-dark(rgba(248, 81, 73, .14), rgba(248, 81, 73, .2));
+      color: light-dark(#cf222e, #f85149);
+    }
+    #${id}-panel .codey-git-stat-files {
+      background: light-dark(rgba(0, 0, 0, .05), rgba(255, 255, 255, .08));
+      color: light-dark(#57606a, #8b949e);
+      font-family: system-ui, -apple-system, sans-serif;
+      font-weight: 500;
+    }
+    #${id}-panel .codey-git-copy-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 500;
+      line-height: 1.2;
+      border: 1px solid light-dark(rgba(0,0,0,.12), rgba(255,255,255,.16));
+      border-radius: 6px;
+      background: light-dark(#f6f8fa, #21262d);
+      color: light-dark(#57606a, #8b949e);
+      cursor: pointer;
+      transition: all .15s ease;
+    }
+    #${id}-panel .codey-git-copy-btn:hover {
+      background: light-dark(#eef0f3, #30363d);
+      color: light-dark(#1f2328, #f0f6fc);
+      border-color: light-dark(rgba(0,0,0,.22), rgba(255,255,255,.26));
+    }
+    #${id}-panel .codey-git-copy-btn.codey-git-copied {
+      color: light-dark(#1a7f37, #3fb950);
+      border-color: light-dark(rgba(46,160,67,.4), rgba(46,160,67,.5));
+      background: light-dark(rgba(46,160,67,.08), rgba(46,160,67,.14));
+    }
+    #${id}-panel .codey-git-diff {
+      white-space: pre;
+      overflow-wrap: normal;
+      word-break: normal;
+      overflow: auto;
+      max-height: 32vh;
+      margin: 0;
+      padding: 0;
+      border: 1px solid light-dark(rgba(0,0,0,.12), rgba(255,255,255,.14));
+      border-radius: 8px;
+      background: light-dark(#ffffff, #0d1117);
+      color: light-dark(#1f2328, #e6edf3);
+      font: 12px/1.55 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      tab-size: 2;
+      box-shadow: inset 0 1px 2px light-dark(rgba(0,0,0,.03), rgba(0,0,0,.2));
+    }
+    #${id}-panel .codey-diff-file-header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 10px;
+      background: light-dark(#f6f8fa, #161b22);
+      border-bottom: 1px solid light-dark(rgba(0,0,0,.08), rgba(255,255,255,.1));
+      font-size: 12px;
+      user-select: text;
+    }
+    #${id}-panel .codey-diff-file-header:not(:first-child) {
+      border-top: 1px solid light-dark(rgba(0,0,0,.12), rgba(255,255,255,.14));
+      margin-top: 6px;
+    }
+    #${id}-panel .codey-diff-file-title {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }
+    #${id}-panel .codey-diff-file-icon {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      color: light-dark(#656d76, #8b949e);
+    }
+    #${id}-panel .codey-diff-file-path {
+      font-weight: 600;
+      color: light-dark(#1f2328, #f0f6fc);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #${id}-panel .codey-diff-file-badge {
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-weight: 500;
+      flex: 0 0 auto;
+    }
+    #${id}-panel .codey-diff-file-badge-new {
+      background: light-dark(rgba(46,160,67,.14), rgba(46,160,67,.2));
+      color: light-dark(#1a7f37, #3fb950);
+    }
+    #${id}-panel .codey-diff-file-badge-del {
+      background: light-dark(rgba(248,81,73,.14), rgba(248,81,73,.2));
+      color: light-dark(#cf222e, #f85149);
+    }
+    #${id}-panel .codey-diff-file-badge-ren {
+      background: light-dark(rgba(9,105,218,.12), rgba(56,139,253,.18));
+      color: light-dark(#0969da, #58a6ff);
+    }
+    #${id}-panel .codey-diff-file-stats {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 11px;
+      font-weight: 600;
+      flex: 0 0 auto;
+    }
+    #${id}-panel .codey-diff-file-meta {
+      display: none;
+    }
+    #${id}-panel .codey-diff-hunk {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      padding: 3px 10px;
+      background: light-dark(#ddf4ff, rgba(56, 139, 253, 0.14));
+      border-top: 1px solid light-dark(rgba(9, 105, 218, 0.1), rgba(56, 139, 253, 0.16));
+      border-bottom: 1px solid light-dark(rgba(9, 105, 218, 0.1), rgba(56, 139, 253, 0.16));
+      font-size: 11.5px;
+      user-select: text;
+    }
+    #${id}-panel .codey-diff-hunk-tag {
+      font-weight: 600;
+      color: light-dark(#0969da, #58a6ff);
+      flex: 0 0 auto;
+    }
+    #${id}-panel .codey-diff-hunk-ctx {
+      color: light-dark(#57606a, #8b949e);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: pre;
+    }
+    #${id}-panel .codey-diff-row {
+      display: flex;
+      min-width: 100%;
+      box-sizing: border-box;
+      line-height: 20px;
+      transition: background-color .1s ease;
+    }
+    #${id}-panel .codey-diff-gutter {
+      flex: 0 0 34px;
+      box-sizing: border-box;
+      text-align: right;
+      padding-right: 8px;
+      user-select: none;
+      font-size: 11px;
+      color: light-dark(#8c959f, #6e7681);
+      opacity: .75;
+    }
+    #${id}-panel .codey-git-diff:not([data-has-hunk="true"]) .codey-diff-gutter {
+      display: none;
+    }
+    #${id}-panel .codey-diff-gutter[data-num]::before {
+      content: attr(data-num);
+    }
+    #${id}-panel .codey-diff-sign {
+      flex: 0 0 16px;
+      box-sizing: border-box;
+      text-align: center;
+      user-select: none;
+      font-weight: 600;
+    }
+    #${id}-panel .codey-diff-text {
+      flex: 1 1 auto;
+      white-space: pre;
+      padding-right: 12px;
+    }
+    #${id}-panel .codey-diff-row-add {
+      background: light-dark(#e6ffec, rgba(46, 160, 67, 0.16));
+      color: light-dark(#1a7f37, #3fb950);
+    }
+    #${id}-panel .codey-diff-row-add .codey-diff-gutter {
+      background: light-dark(#dafbe1, rgba(46, 160, 67, 0.22));
+      color: light-dark(#1a7f37, #3fb950);
+    }
+    #${id}-panel .codey-diff-row-add .codey-diff-sign {
+      color: light-dark(#1a7f37, #3fb950);
+    }
+    #${id}-panel .codey-diff-row-add:hover {
+      background: light-dark(#d1f8d8, rgba(46, 160, 67, 0.22));
+    }
+    #${id}-panel .codey-diff-row-del {
+      background: light-dark(#ffebe9, rgba(248, 81, 73, 0.16));
+      color: light-dark(#cf222e, #f85149);
+    }
+    #${id}-panel .codey-diff-row-del .codey-diff-gutter {
+      background: light-dark(#ffdcd7, rgba(248, 81, 73, 0.22));
+      color: light-dark(#cf222e, #f85149);
+    }
+    #${id}-panel .codey-diff-row-del .codey-diff-sign {
+      color: light-dark(#cf222e, #f85149);
+    }
+    #${id}-panel .codey-diff-row-del:hover {
+      background: light-dark(#ffceca, rgba(248, 81, 73, 0.22));
+    }
+    #${id}-panel .codey-diff-row-ctx:hover {
+      background: light-dark(rgba(0, 0, 0, .03), rgba(255, 255, 255, .03));
+    }
+    #${id}-panel .codey-diff-row-notice {
+      background: light-dark(#fff8c5, rgba(210, 153, 34, 0.15));
+      color: light-dark(#9a6700, #e3b341);
+      font-style: italic;
+      padding-left: 68px;
+    }
+    #${id}-panel .codey-diff-empty {
+      padding: 24px;
+      text-align: center;
+      color: light-dark(#656d76, #8b949e);
+      font-size: 13px;
     }
     #${id}-panel .codey-git-actions {
       display: flex;
@@ -304,6 +577,273 @@
     container.appendChild(actions);
     actions.querySelector("button")?.focus();
   };
+  const createSvg = (tag) => typeof document.createElementNS === "function"
+    ? document.createElementNS("http://www.w3.org/2000/svg", tag)
+    : document.createElement(tag);
+  const makeCopyIcon = () => {
+    const svg = createSvg("svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "12");
+    svg.setAttribute("height", "12");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.6");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    const rect = createSvg("rect");
+    rect.setAttribute("x", "5"); rect.setAttribute("y", "5");
+    rect.setAttribute("width", "9"); rect.setAttribute("height", "9");
+    rect.setAttribute("rx", "1.5");
+    svg.appendChild(rect);
+    const path = createSvg("path");
+    path.setAttribute("d", "M3 11V3a1.5 1.5 0 0 1 1.5-1.5H11");
+    svg.appendChild(path);
+    return svg;
+  };
+  const makeCheckIcon = () => {
+    const svg = createSvg("svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "12");
+    svg.setAttribute("height", "12");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    const path = createSvg("path");
+    path.setAttribute("d", "M3 8.5l3.5 3.5 6.5-7");
+    svg.appendChild(path);
+    return svg;
+  };
+  const makeFileIcon = () => {
+    const svg = createSvg("svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "13");
+    svg.setAttribute("height", "13");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "1.5");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    const path1 = createSvg("path");
+    path1.setAttribute("d", "M9 2H4a1.5 1.5 0 0 0-1.5 1.5v9A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V6L9 2z");
+    svg.appendChild(path1);
+    const path2 = createSvg("path");
+    path2.setAttribute("d", "M9 2v4h4");
+    svg.appendChild(path2);
+    return svg;
+  };
+  const parseDiff = (diffText) => {
+    if (!diffText || !diffText.trim()) return [];
+    const lines = diffText.split(/\r?\n/);
+    if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+    const files = [];
+    let currentFile = null;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.startsWith("diff --git ")) {
+        const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+        const path = match ? (match[2] !== "/dev/null" ? match[2] : match[1]) : line.slice(11);
+        currentFile = { path, isNew: false, isDeleted: false, isRenamed: false, metaLines: [], hunks: [], additions: 0, deletions: 0 };
+        files.push(currentFile);
+        continue;
+      }
+      if (!currentFile) {
+        currentFile = { path: "", isNew: false, isDeleted: false, isRenamed: false, metaLines: [], hunks: [], additions: 0, deletions: 0 };
+        files.push(currentFile);
+      }
+      if (line.startsWith("new file mode ")) currentFile.isNew = true;
+      if (line.startsWith("deleted file mode ")) currentFile.isDeleted = true;
+      if (line.startsWith("rename from ") || line.startsWith("rename to ")) currentFile.isRenamed = true;
+
+      if (currentFile.hunks.length === 0 && (
+        line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ") ||
+        line.startsWith("new file mode ") || line.startsWith("deleted file mode ") ||
+        line.startsWith("old mode ") || line.startsWith("new mode ") ||
+        line.startsWith("similarity index ") || line.startsWith("rename from ") ||
+        line.startsWith("rename to ") || line.startsWith("Binary files ")
+      )) {
+        currentFile.metaLines.push(line);
+        continue;
+      }
+
+      const hunkMatch = line.match(/^@@ (-[0-9]+(?:,[0-9]+)? \+[0-9]+(?:,[0-9]+)?) @@(.*)$/);
+      if (hunkMatch) {
+        const range = hunkMatch[1].match(/-(\d+)(?:,\d+)? \+(\d+)(?:,\d+)?/);
+        currentFile.hunks.push({
+          oldStart: range ? parseInt(range[1], 10) : 0,
+          newStart: range ? parseInt(range[2], 10) : 0,
+          rawHeader: `@@ ${hunkMatch[1]} @@`,
+          heading: hunkMatch[2] || "",
+          lines: [],
+        });
+        continue;
+      }
+
+      let currentHunk = currentFile.hunks[currentFile.hunks.length - 1];
+      if (!currentHunk) {
+        currentHunk = { oldStart: 0, newStart: 0, rawHeader: "", heading: "", lines: [] };
+        currentFile.hunks.push(currentHunk);
+      }
+      if (line.startsWith("+") && !line.startsWith("+++")) currentFile.additions++;
+      else if (line.startsWith("-") && !line.startsWith("---")) currentFile.deletions++;
+      currentHunk.lines.push(line);
+    }
+    return files;
+  };
+  const renderDiff = (pre, diffText) => {
+    pre.replaceChildren();
+    const files = parseDiff(diffText);
+    if (!files.length) {
+      const empty = element("div", "无差异内容");
+      empty.className = "codey-diff-empty";
+      pre.appendChild(empty);
+      return { additions: 0, deletions: 0, fileCount: 0 };
+    }
+
+    let totalAdditions = 0;
+    let totalDeletions = 0;
+    let hasAnyHunk = false;
+    let namedCount = 0;
+
+    files.forEach((file) => {
+      totalAdditions += file.additions;
+      totalDeletions += file.deletions;
+      if (file.path) namedCount++;
+      if (file.hunks.some((h) => Boolean(h.rawHeader))) hasAnyHunk = true;
+    });
+
+    if (hasAnyHunk) pre.setAttribute("data-has-hunk", "true");
+
+    files.forEach((file) => {
+      if (file.path) {
+        const header = element("div");
+        header.className = "codey-diff-file-header";
+
+        const title = element("div");
+        title.className = "codey-diff-file-title";
+        title.appendChild(makeFileIcon());
+        const pathSpan = element("span", file.path);
+        pathSpan.className = "codey-diff-file-path";
+        title.appendChild(pathSpan);
+
+        if (file.isNew) {
+          const badge = element("span", "新增");
+          badge.className = "codey-diff-file-badge codey-diff-file-badge-new";
+          title.appendChild(badge);
+        } else if (file.isDeleted) {
+          const badge = element("span", "已删除");
+          badge.className = "codey-diff-file-badge codey-diff-file-badge-del";
+          title.appendChild(badge);
+        } else if (file.isRenamed) {
+          const badge = element("span", "重命名");
+          badge.className = "codey-diff-file-badge codey-diff-file-badge-ren";
+          title.appendChild(badge);
+        }
+        header.appendChild(title);
+
+        const stats = element("div");
+        stats.className = "codey-diff-file-stats";
+        if (file.additions > 0) {
+          const add = element("span", `+${file.additions}`);
+          add.className = "codey-git-stat-add";
+          stats.appendChild(add);
+        }
+        if (file.deletions > 0) {
+          const del = element("span", `-${file.deletions}`);
+          del.className = "codey-git-stat-del";
+          stats.appendChild(del);
+        }
+        header.appendChild(stats);
+        pre.appendChild(header);
+      }
+
+      file.metaLines.forEach((meta) => {
+        const metaRow = element("div", meta);
+        metaRow.className = "codey-diff-file-meta";
+        pre.appendChild(metaRow);
+      });
+
+      file.hunks.forEach((hunk) => {
+        if (hunk.rawHeader) {
+          const hunkRow = element("div");
+          hunkRow.className = "codey-diff-hunk";
+          const tag = element("span", hunk.rawHeader);
+          tag.className = "codey-diff-hunk-tag";
+          hunkRow.appendChild(tag);
+          if (hunk.heading) {
+            const ctx = element("span", hunk.heading);
+            ctx.className = "codey-diff-hunk-ctx";
+            hunkRow.appendChild(ctx);
+          }
+          pre.appendChild(hunkRow);
+        }
+
+        let oldNum = hunk.oldStart;
+        let newNum = hunk.newStart;
+
+        hunk.lines.forEach((line) => {
+          const row = element("div");
+          row.className = "codey-diff-row";
+
+          let curOld = "";
+          let curNew = "";
+          let sign = " ";
+          let type = "ctx";
+
+          if (line.startsWith("+") && !line.startsWith("+++")) {
+            type = "add";
+            sign = "+";
+            if (hunk.rawHeader) curNew = String(newNum++);
+          } else if (line.startsWith("-") && !line.startsWith("---")) {
+            type = "del";
+            sign = "-";
+            if (hunk.rawHeader) curOld = String(oldNum++);
+          } else if (line.startsWith("\\")) {
+            type = "notice";
+            sign = "\\";
+          } else {
+            type = "ctx";
+            sign = " ";
+            if (hunk.rawHeader) {
+              curOld = String(oldNum++);
+              curNew = String(newNum++);
+            }
+          }
+
+          row.classList.add(`codey-diff-row-${type}`);
+
+          const gutterOld = element("span");
+          gutterOld.className = "codey-diff-gutter codey-diff-gutter-old";
+          if (curOld) gutterOld.setAttribute("data-num", curOld);
+          row.appendChild(gutterOld);
+
+          const gutterNew = element("span");
+          gutterNew.className = "codey-diff-gutter codey-diff-gutter-new";
+          if (curNew) gutterNew.setAttribute("data-num", curNew);
+          row.appendChild(gutterNew);
+
+          const signSpan = element("span", sign);
+          signSpan.className = "codey-diff-sign";
+          row.appendChild(signSpan);
+
+          const hasPrefix = line.startsWith("+") || line.startsWith("-") || line.startsWith(" ");
+          const text = hasPrefix ? line.slice(1) : line;
+          const textSpan = element("span", text);
+          textSpan.className = "codey-diff-text";
+          row.appendChild(textSpan);
+
+          pre.appendChild(row);
+        });
+      });
+    });
+
+    return { additions: totalAdditions, deletions: totalDeletions, fileCount: namedCount };
+  };
   const preview = async () => {
     if (busy || !sessionId) return;
     const current = sessionId, epoch = generation;
@@ -365,8 +905,73 @@
       container.appendChild(logPre);
 
       const details = element("details"); details.open = true;
-      details.appendChild(element("summary", "本次完整改动"));
-      details.appendChild(element("pre", result.diff));
+      details.className = "codey-git-diff-details";
+
+      const summary = element("summary");
+      summary.className = "codey-git-diff-summary";
+
+      const summaryLeft = element("div");
+      summaryLeft.className = "codey-git-diff-summary-left";
+
+      const chevron = element("span");
+      chevron.className = "codey-git-diff-chevron";
+      summaryLeft.appendChild(chevron);
+
+      const summaryTitle = element("span", "本次完整改动");
+      summaryTitle.className = "codey-git-diff-summary-title";
+      summaryLeft.appendChild(summaryTitle);
+
+      const diffPre = element("pre", result.diff);
+      diffPre.className = "codey-git-diff";
+      const stats = renderDiff(diffPre, result.diff);
+
+      if (stats.additions > 0) {
+        const addBadge = element("span", `+${stats.additions}`);
+        addBadge.className = "codey-git-stat-badge codey-git-stat-add";
+        summaryLeft.appendChild(addBadge);
+      }
+      if (stats.deletions > 0) {
+        const delBadge = element("span", `-${stats.deletions}`);
+        delBadge.className = "codey-git-stat-badge codey-git-stat-del";
+        summaryLeft.appendChild(delBadge);
+      }
+      if (stats.fileCount > 1) {
+        const filesBadge = element("span", `${stats.fileCount} 个文件`);
+        filesBadge.className = "codey-git-stat-badge codey-git-stat-files";
+        summaryLeft.appendChild(filesBadge);
+      }
+      summary.appendChild(summaryLeft);
+
+      const summaryRight = element("div");
+      summaryRight.className = "codey-git-diff-summary-right";
+      const copyBtn = element("button");
+      copyBtn.type = "button";
+      copyBtn.className = "codey-git-copy-btn";
+      copyBtn.appendChild(makeCopyIcon());
+      const copyLabel = element("span", "复制 Diff");
+      copyBtn.appendChild(copyLabel);
+      copyBtn.addEventListener("click", async (e) => {
+        e?.stopPropagation?.();
+        e?.preventDefault?.();
+        try {
+          if (typeof navigator !== "undefined" && navigator?.clipboard?.writeText) {
+            await navigator.clipboard.writeText(result.diff);
+          }
+          copyBtn.replaceChildren(makeCheckIcon(), element("span", "已复制"));
+          copyBtn.classList.add("codey-git-copied");
+          setTimeout(() => {
+            copyBtn.replaceChildren(makeCopyIcon(), element("span", "复制 Diff"));
+            copyBtn.classList.remove("codey-git-copied");
+          }, 1800);
+        } catch {
+          // ignore copy failure
+        }
+      });
+      summaryRight.appendChild(copyBtn);
+      summary.appendChild(summaryRight);
+
+      details.appendChild(summary);
+      details.appendChild(diffPre);
       container.appendChild(details);
 
       const actions = element("div"); actions.className = "codey-git-actions";
@@ -436,12 +1041,15 @@
   };
   button.addEventListener("click", (event) => {
     event.preventDefault(); event.stopPropagation();
-    if (busy || !status?.visible) return;
+    const current = context();
+    if (busy || !status?.visible || current?.sessionId !== sessionId || !current?.target) return;
     if (panel) { close(); return; }
     void preview();
   });
   const renderButton = (current = context()) => {
     const target = current?.target;
+    if (enabled && status?.visible && !target && missingContextAt !== null &&
+        locationKey() === contextLocation && Date.now() - missingContextAt < contextGraceMs) return;
     if (!enabled || !status?.visible || !target) { button.style.display = "none"; return; }
     const optimizer = document.getElementById("codey-prompt-optimize-button");
     const anchor = optimizer?.parentElement === target.host && optimizer.style.display !== "none" ? optimizer : target.anchor;
@@ -450,8 +1058,28 @@
   };
   const syncContext = () => {
     const current = context();
-    if (current?.sessionId !== sessionId) {
-      sessionId = current?.sessionId || null; generation += 1; status = null; close(); button.style.display = "none";
+    const location = locationKey();
+    const incomplete = !current?.sessionId || !current?.target;
+    // 同一路由的输入框短暂重建时保留展示，操作仍要求实时会话身份一致。
+    if (incomplete && sessionId && (!current?.sessionId || current.sessionId === sessionId) && location === contextLocation) {
+      missingContextAt ??= Date.now();
+      if (Date.now() - missingContextAt < contextGraceMs) {
+        button.disabled = true;
+        if (!contextRetryTimer) contextRetryTimer = setTimeout(() => {
+          contextRetryTimer = 0;
+          void refresh();
+        }, 100);
+        return null;
+      }
+    } else {
+      missingContextAt = null;
+      if (contextRetryTimer) { clearTimeout(contextRetryTimer); contextRetryTimer = 0; }
+    }
+    contextLocation = location;
+    button.disabled = busy;
+    const nextSession = current?.sessionId || null;
+    if (nextSession !== sessionId) {
+      sessionId = nextSession; generation += 1; status = null; close(); button.style.display = "none";
       const cached = statusCache.get(sessionId);
       if (cached && Date.now() - cached.at < statusCacheTtlMs) status = cached.result;
       else statusCache.delete(sessionId);
@@ -462,7 +1090,7 @@
   const refresh = async () => {
     if (timer) { clearTimeout(timer); timer = 0; }
     const current = syncContext();
-    if (!enabled || !sessionId || !current?.target) { button.style.display = "none"; return; }
+    if (!enabled || !sessionId || !current?.target) return;
     if (document.hidden) return;
     const active = checks.get(sessionId);
     // 同一会话合并查询，新会话可使用第二个名额，快速导航只保留最后一次补查。
@@ -473,6 +1101,7 @@
     checks.set(selected, { epoch });
     try {
       const result = await call("/api/conversation_git_status", { sessionId: selected });
+      if (result?.unavailable) throw new Error(result.reason || "Git 状态暂时不可用");
       if (!valid(selected, epoch)) {
         if (context()?.sessionId !== sessionId || (selected === sessionId && epoch !== generation)) refreshPending = true;
         return;
@@ -485,7 +1114,13 @@
       }
       renderButton();
     } catch (failure) {
-      if (valid(selected, epoch)) { statusCache.delete(selected); status = { visible: false, reason: String(failure?.message || failure) }; button.style.display = "none"; }
+      if (valid(selected, epoch)) {
+        const cached = statusCache.get(selected);
+        const visible = status?.visible === true && cached && Date.now() - cached.at < statusCacheTtlMs;
+        status = { visible: Boolean(visible), reason: String(failure?.message || failure) };
+        if (!visible) statusCache.delete(selected);
+        renderButton();
+      }
     } finally {
       checks.delete(selected);
       if (context()?.sessionId !== sessionId) refreshPending = true;
@@ -534,6 +1169,7 @@
     const ownNode = (node) => node?.id === id || node?.id === `${id}-panel` || node?.closest?.(`#${id}, #${id}-panel`);
     if (mutations.some((mutation) => {
       if (ownNode(mutation.target)) return false;
+      if (!button.isConnected && [...(mutation.removedNodes || [])].includes(button)) return true;
       const nodes = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])];
       return !nodes.length || nodes.some((node) => !ownNode(node));
     })) schedule();
