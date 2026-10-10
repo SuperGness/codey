@@ -664,7 +664,7 @@
   display: flex;
   flex-direction: column;
   border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.08);
-  border-radius: 12px;
+  border-radius: 11px;
   background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.018);
   overflow: hidden;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
@@ -673,8 +673,8 @@
 .route-option-item {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 10px 14px;
+  gap: 3px;
+  padding: 8px 12px;
   min-width: 0;
   transition: background 0.15s ease;
 }
@@ -683,15 +683,22 @@
   background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.02);
 }
 
-.route-option-item + .route-option-item {
+/* 第二行：并排双开关网格 */
+.route-option-grid-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   border-top: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
+}
+
+.route-option-grid-row .route-option-col + .route-option-col {
+  border-left: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
 }
 
 .route-option-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
 }
 
 .route-option-title-group {
@@ -705,8 +712,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   border-radius: 6px;
   background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.04);
   color: var(--mac-text-secondary);
@@ -728,9 +735,9 @@
 
 .route-option-title {
   color: var(--mac-text-primary);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
-  line-height: 1.35;
+  line-height: 1.3;
 }
 
 .route-option-info-trigger {
@@ -751,23 +758,32 @@
 .route-option-item .route-field-hint {
   color: var(--mac-text-secondary);
   font-size: 11px;
-  line-height: 1.45;
+  line-height: 1.35;
   white-space: normal;
-  padding-left: 30px;
+  padding-left: 28px;
   margin: 0;
 }
 
+/* 第二行并排开关的提示文案保持单行自然展示 */
+.route-option-grid-row .route-option-item .route-field-hint {
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 压缩接口子配置面板（内嵌紧凑卡片） */
 .route-option-subpanel {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 6px;
-  margin-left: 30px;
-  padding: 10px 12px;
+  gap: 5px;
+  margin-top: 5px;
+  margin-left: 28px;
+  padding: 8px 10px;
   border-radius: 8px;
   background: var(--codey-surface, #ffffff);
   border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.08);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
   animation: route-subpanel-in 0.18s ease-out;
 }
 
@@ -790,23 +806,23 @@
 }
 
 .route-option-subpanel-label {
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--mac-text-primary);
 }
 
 .route-option-subpanel-badge {
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 500;
   color: var(--codey-blue, #007aff);
   background: var(--codey-blue-soft, #eaf3ff);
-  padding: 1px 6px;
+  padding: 1px 5px;
   border-radius: 4px;
 }
 
 .route-option-subpanel-hint {
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: 10.5px;
+  line-height: 1.35;
   color: var(--mac-text-secondary);
   margin: 0;
 }

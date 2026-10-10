@@ -1648,14 +1648,15 @@ function ModelSectionComponent({
                       <span className="route-protocol-section-badge">按需扩展</span>
                     </div>
                     <div className="route-protocol-options">
+                      {/* 第一行：原生远程压缩（独立占行，支持展开子面板） */}
                       <div
-                        className="route-option-item"
+                        className="route-option-item route-option-item-full"
                         data-active={Boolean(routeDraft.supportsRemoteCompaction)}
                       >
                         <div className="route-option-header">
                           <div className="route-option-title-group">
                             <span className="route-option-icon" aria-hidden="true">
-                              <IconArchive size={15} />
+                              <IconArchive size={14} />
                             </span>
                             <strong className="route-option-title">原生远程压缩</strong>
                             <Tooltip content="仅在上游明确支持时开启，并选择服务商支持的压缩接口；该线路可独立使用远程压缩，能力变更需重启 Codex。">
@@ -1711,64 +1712,67 @@ function ModelSectionComponent({
                         )}
                       </div>
 
-                      <div
-                        className="route-option-item"
-                        data-active={Boolean(routeDraft.supportsWebsockets)}
-                      >
-                        <div className="route-option-header">
-                          <div className="route-option-title-group">
-                            <span className="route-option-icon" aria-hidden="true">
-                              <IconBolt size={15} />
-                            </span>
-                            <strong className="route-option-title">WebSocket</strong>
-                            <Tooltip content="优先尝试复用长连接；使用代理或连接失败时转为流式 HTTP。能力变更需重启 Codex，实际速度取决于上游和网络。">
-                              <span className="route-option-info-trigger" aria-label="WebSocket 详细说明">
-                                <IconInfoCircle size={13} />
+                      {/* 第二行：并排两个轻量开关（WebSocket + 原生网页搜索） */}
+                      <div className="route-option-grid-row">
+                        <div
+                          className="route-option-item route-option-col"
+                          data-active={Boolean(routeDraft.supportsWebsockets)}
+                        >
+                          <div className="route-option-header">
+                            <div className="route-option-title-group">
+                              <span className="route-option-icon" aria-hidden="true">
+                                <IconBolt size={14} />
                               </span>
-                            </Tooltip>
+                              <strong className="route-option-title">WebSocket</strong>
+                              <Tooltip content="优先尝试复用长连接；使用代理或连接失败时转为流式 HTTP。能力变更需重启 Codex，实际速度取决于上游和网络。">
+                                <span className="route-option-info-trigger" aria-label="WebSocket 详细说明">
+                                  <IconInfoCircle size={13} />
+                                </span>
+                              </Tooltip>
+                            </div>
+                            <Switch
+                              size="sm"
+                              checked={Boolean(routeDraft.supportsWebsockets)}
+                              disabled={isBusy}
+                              onCheckedChange={(checked) =>
+                                updateRouteDraft({ supportsWebsockets: checked })}
+                              aria-label="WebSocket"
+                            />
                           </div>
-                          <Switch
-                            size="sm"
-                            checked={Boolean(routeDraft.supportsWebsockets)}
-                            disabled={isBusy}
-                            onCheckedChange={(checked) =>
-                              updateRouteDraft({ supportsWebsockets: checked })}
-                            aria-label="WebSocket"
-                          />
+                          <p className="route-field-hint">
+                            优先长连接，失败转流式 HTTP
+                          </p>
                         </div>
-                        <p className="route-field-hint">
-                          优先长连接，失败转流式 HTTP
-                        </p>
-                      </div>
 
-                      <div
-                        className="route-option-item"
-                        data-active={Boolean(routeDraft.supportsNativeWebSearch)}
-                      >
-                        <div className="route-option-header">
-                          <div className="route-option-title-group">
-                            <span className="route-option-icon" aria-hidden="true">
-                              <IconWorld size={15} />
-                            </span>
-                            <strong className="route-option-title">原生网页搜索</strong>
-                            <Tooltip content="仅在上游和所选模型都明确支持时开启。">
-                              <span className="route-option-info-trigger" aria-label="原生网页搜索详细说明">
-                                <IconInfoCircle size={13} />
+                        <div
+                          className="route-option-item route-option-col"
+                          data-active={Boolean(routeDraft.supportsNativeWebSearch)}
+                        >
+                          <div className="route-option-header">
+                            <div className="route-option-title-group">
+                              <span className="route-option-icon" aria-hidden="true">
+                                <IconWorld size={14} />
                               </span>
-                            </Tooltip>
+                              <strong className="route-option-title">原生网页搜索</strong>
+                              <Tooltip content="仅在上游和所选模型都明确支持时开启。">
+                                <span className="route-option-info-trigger" aria-label="原生网页搜索详细说明">
+                                  <IconInfoCircle size={13} />
+                                </span>
+                              </Tooltip>
+                            </div>
+                            <Switch
+                              size="sm"
+                              checked={Boolean(routeDraft.supportsNativeWebSearch)}
+                              disabled={isBusy}
+                              onCheckedChange={(checked) =>
+                                updateRouteDraft({ supportsNativeWebSearch: checked })}
+                              aria-label="原生网页搜索"
+                            />
                           </div>
-                          <Switch
-                            size="sm"
-                            checked={Boolean(routeDraft.supportsNativeWebSearch)}
-                            disabled={isBusy}
-                            onCheckedChange={(checked) =>
-                              updateRouteDraft({ supportsNativeWebSearch: checked })}
-                            aria-label="原生网页搜索"
-                          />
+                          <p className="route-field-hint">
+                            仅在上游与模型支持时开启
+                          </p>
                         </div>
-                        <p className="route-field-hint">
-                          仅在上游与模型支持时开启
-                        </p>
                       </div>
                     </div>
                   </div>
