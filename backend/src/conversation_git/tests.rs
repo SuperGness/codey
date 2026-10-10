@@ -1308,7 +1308,7 @@ fn shared_file_binds_unselected_disk_changes_and_rejects_ambiguous_history() {
 #[test]
 fn batched_head_entries_preserve_bytes_paths_modes_and_absence() {
     let repo = Repo::new();
-    let mut paths = vec![
+    let paths = vec![
         "owned.txt".to_string(),
         "missing.txt".to_string(),
         "space file".to_string(),
@@ -1317,7 +1317,11 @@ fn batched_head_entries_preserve_bytes_paths_modes_and_absence() {
         "nested/file".to_string(),
     ];
     #[cfg(unix)]
-    paths.extend(["tab\tfile".into(), "line\nfile".into(), "[literal]*".into()]);
+    let paths = {
+        let mut paths = paths;
+        paths.extend(["tab\tfile".into(), "line\nfile".into(), "[literal]*".into()]);
+        paths
+    };
     fs::create_dir(repo.root.join("nested")).unwrap();
     for path in &paths[2..] {
         fs::write(repo.root.join(path), b"\0\xff\nbody\n\0").unwrap();

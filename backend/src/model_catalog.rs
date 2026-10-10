@@ -3197,7 +3197,10 @@ mod tests {
             "route-x/gpt-6-astra-max",
         ] {
             let model = json!({ "slug": slug });
-            assert!(!supports_ultrafast_speed(&model), "{slug} 不应支持 Ultrafast");
+            assert!(
+                !supports_ultrafast_speed(&model),
+                "{slug} 不应支持 Ultrafast"
+            );
         }
     }
 
@@ -3222,10 +3225,7 @@ mod tests {
 
         remove_ultrafast_speed_controls(&mut model);
         assert_eq!(model["service_tiers"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            model["additional_speed_tiers"],
-            json!([FAST_SPEED_TIER_ID])
-        );
+        assert_eq!(model["additional_speed_tiers"], json!([FAST_SPEED_TIER_ID]));
     }
 
     #[test]
