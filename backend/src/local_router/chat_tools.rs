@@ -871,6 +871,74 @@ pub(crate) fn normalize_responses_tool_list(tools: Option<&mut Value>) -> bool {
     changed
 }
 
+/// 协作工具的 `message` 参数带 `encrypted` 标记时，Responses 上游会把任务正文替换成
+/// 只有它能解开的令牌。子代理线路没有该密钥，正文会随协议转换一起丢失，因此转发前
+/// 摘掉标记，让上游按明文返回任务正文。
+pub(crate) fn strip_collaboration_message_encryption(body: &mut Value) -> bool {
+    let Some(body) = body.as_object_mut() else {
+        return false;
+    };
+    let mut changed = strip_message_encryption_in_tool_list(body.get_mut("tools"));
+    let input = body.get_mut("input");
+    match input {
+        Some(Value::Array(items)) => {
+            for item in items {
+                changed |= strip_message_encryption_in_tool_list(item.get_mut("tools"));
+            }
+        }
+        Some(item) => changed |= strip_message_encryption_in_tool_list(item.get_mut("tools")),
+        None => {}
+    }
+    changed
+}
+
+fn strip_message_encryption_in_tool_list(tools: Option<&mut Value>) -> bool {
+    let Some(tools) = tools.and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for tool in tools {
+        if is_collaboration_message_tool(tool) {
+            changed |= remove_message_encrypted_marker(tool.get_mut("parameters"));
+            changed |= remove_message_encrypted_marker(tool.get_mut("input_schema"));
+            if let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) {
+                changed |= remove_message_encrypted_marker(function.get_mut("parameters"));
+            }
+        }
+        for field in ["tools", "children"] {
+            changed |= strip_message_encryption_in_tool_list(tool.get_mut(field));
+        }
+    }
+    changed
+}
+
+fn remove_message_encrypted_marker(schema: Option<&mut Value>) -> bool {
+    schema
+        .and_then(Value::as_object_mut)
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.get_mut("message"))
+        .and_then(Value::as_object_mut)
+        .is_some_and(|message| message.remove("encrypted").is_some())
+}
+
+fn is_collaboration_message_tool(tool: &Value) -> bool {
+    let Some(tool) = tool.as_object() else {
+        return false;
+    };
+    let is_message_tool = |name: Option<&Value>| {
+        name.and_then(Value::as_str)
+            .is_some_and(|name| COLLABORATION_MESSAGE_TOOLS.contains(&name))
+    };
+    is_message_tool(tool.get("name"))
+        || is_message_tool(
+            tool.get("function")
+                .and_then(|function| function.get("name")),
+        )
+}
+
+const COLLABORATION_MESSAGE_TOOLS: [&str; 3] = ["spawn_agent", "send_message", "followup_task"];
+
 pub(crate) fn normalize_tool_parameter_root(schema: &mut Value) -> bool {
     let mut changed = match restrict_tool_parameter_schema_to_object(schema) {
         Some(changed) => changed,
@@ -2411,6 +2479,92 @@ mod tests {
         assert!(schema.get("required").is_none());
         // 合并后 schema 弱于原定义，strict 必须关闭。
         assert_eq!(body["tools"][0]["strict"], false);
+    }
+
+    #[test]
+    fn strips_encrypted_marker_only_from_collaboration_messages() {
+        let mut body = json!({
+            "tools": [{
+                "type": "namespace",
+                "name": "agents",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "task_name": {"type": "string"},
+                                "message": {"type": "string", "encrypted": true}
+                            },
+                            "required": ["task_name", "message"]
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "wait_agent",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"message": {"type": "string", "encrypted": true}}
+                        }
+                    }
+                ]
+            }, {
+                "type": "function",
+                "name": "followup_task",
+                "function": {
+                    "name": "followup_task",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }
+            }]
+        });
+
+        assert!(strip_collaboration_message_encryption(&mut body));
+
+        let spawn = &body["tools"][0]["tools"][0]["parameters"]["properties"];
+        assert!(spawn["message"].get("encrypted").is_none());
+        assert_eq!(spawn["message"]["type"], "string");
+        assert_eq!(spawn["task_name"]["type"], "string");
+        // 同命名空间下的其它工具不受影响。
+        assert_eq!(
+            body["tools"][0]["tools"][1]["parameters"]["properties"]["message"]["encrypted"],
+            true
+        );
+        assert!(
+            body["tools"][1]["function"]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+
+        // 标记已摘除后再次调用不产生改动。
+        assert!(!strip_collaboration_message_encryption(&mut body));
+    }
+
+    #[test]
+    fn strips_encrypted_marker_from_input_tool_lists() {
+        let mut body = json!({
+            "input": [{
+                "type": "tool_search_output",
+                "tools": [{
+                    "type": "function",
+                    "name": "send_message",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }]
+            }]
+        });
+
+        assert!(strip_collaboration_message_encryption(&mut body));
+        assert!(
+            body["input"][0]["tools"][0]["input_schema"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
     }
 
     #[test]

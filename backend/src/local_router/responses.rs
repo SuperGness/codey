@@ -1714,6 +1714,12 @@ impl RouterServer {
             body_mutated = true;
             encoded_body = None;
         }
+        // 官方上游看到协作工具的加密标记就会把任务正文换成只有它能解开的令牌，
+        // 第三方子代理线路没有该密钥。摘掉标记让正文以明文返回，跨线路派发才能送达。
+        if strip_collaboration_message_encryption(&mut body) {
+            body_mutated = true;
+            encoded_body = None;
+        }
         let stream_requested = body
             .as_object()
             .and_then(|body| body.get("stream"))
