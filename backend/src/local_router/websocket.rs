@@ -1286,6 +1286,11 @@ pub(crate) async fn proxy_native_response_to_websocket(
     let status = response.status().as_u16();
     let retry_advice = ResponseRetryAdvice::from_headers(response.headers());
     let upstream_request_id = upstream_request_id_from_headers(response.headers());
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.chars().take(128).collect::<String>());
     let xai_fix = current_xai_response_fix();
     let mut prepared = await_upstream(
         downstream,
@@ -1431,7 +1436,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
                     failure.event["response"]["error"]["codey"]["upstreamRequestId"] =
                         request_id.into();
                 }
-                return downstream.write_response_failure(&failure).await;
+                return write_probed_websocket_failure(downstream, &failure, probe).await;
             }
             let result = downstream.write_json(status, &value).await;
             if result.is_ok()
@@ -1443,28 +1448,37 @@ pub(crate) async fn proxy_native_response_to_websocket(
             result
         }
         Err(error) => {
-            let detail = String::from_utf8_lossy(&body);
-            downstream
-                .write_error(
-                    if (200..300).contains(&status) {
-                        502
-                    } else {
-                        status
-                    },
-                    "upstream_protocol_error",
-                    if detail.trim().is_empty() {
-                        format!("Responses WebSocket 上游响应不是有效 JSON：{error}")
-                    } else {
-                        format!(
-                            "Responses WebSocket 上游返回无法解析的响应：{}",
-                            detail.trim().chars().take(512).collect::<String>()
-                        )
-                    },
-                    None,
-                )
-                .await
+            let message = format!(
+                "Responses HTTP 上游返回无法解析的响应（HTTP {status}，Content-Type: {}），需要 JSON 或 SSE；请检查线路地址和上游协议。解析错误：{error}",
+                content_type.as_deref().unwrap_or("未提供")
+            );
+            let failure = ResponsesFailure::new(
+                if (200..300).contains(&status) {
+                    502
+                } else {
+                    status
+                },
+                "upstream_protocol_error",
+                message,
+                None,
+            );
+            write_probed_websocket_failure(downstream, &failure, probe).await
         }
     }
+}
+
+async fn write_probed_websocket_failure(
+    downstream: &mut WebSocketResponsesDownstream,
+    failure: &ResponsesFailure,
+    probe: Option<&RouteRequestLogProbe>,
+) -> Result<()> {
+    // 内部下游直接写出错误时，外层观察器看不到 write_error 调用。
+    if let Some(probe) = probe {
+        probe.mark_error(failure.status, &failure.code);
+        probe.observe_event(&failure.normalized_event());
+    }
+    observe_lifecycle_response_failure(&failure.normalized_event());
+    downstream.write_response_failure(failure).await
 }
 
 pub(crate) fn responses_body_looks_like_sse(text: &str) -> bool {

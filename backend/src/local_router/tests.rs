@@ -872,6 +872,144 @@ fn websocket_error_events_are_terminal_and_connection_limits_force_reconnect() {
     ));
 }
 
+#[tokio::test]
+async fn websocket_http_fallback_decodes_gzip_json_and_sse() {
+    let response = r#"{"id":"resp-gzip","object":"response","status":"completed","output":[]}"#;
+    let sse = format!("data: {{\"type\":\"response.completed\",\"response\":{response}}}\n\n");
+    for (content_type, body) in [
+        ("application/json", response),
+        ("text/event-stream", sse.as_str()),
+        // 保留对响应类型标注错误但正文合法的上游的兼容。
+        ("text/html", response),
+        ("application/json", sse.as_str()),
+    ] {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = upstream.local_addr().unwrap();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, body.as_bytes()).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            read_http_request(&mut socket).await.unwrap();
+            socket.write_all(format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\ncontent-encoding: gzip\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                compressed.len()
+            ).as_bytes()).await.unwrap();
+            socket.write_all(&compressed).await.unwrap();
+        });
+        let response = upstream_http_client_builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/responses"))
+            .send()
+            .await
+            .unwrap();
+        // 解压后的正文不能继续带压缩长度或编码，避免 HTTP 下游重复解压。
+        assert!(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_ENCODING)
+                .is_none()
+        );
+        assert!(
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .is_none()
+        );
+        let (socket, mut peer) = local_websocket_pair().await;
+        let mut downstream = WebSocketResponsesDownstream::new(socket);
+        proxy_native_response_to_websocket(&mut downstream, response, None)
+            .await
+            .unwrap();
+        loop {
+            let WebSocketMessage::Text(text) =
+                tokio::time::timeout(Duration::from_secs(2), peer.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("expected a JSON event");
+            };
+            let event: Value = serde_json::from_str(text.as_str()).unwrap();
+            assert_ne!(event["type"], "response.failed");
+            if event["type"] == "response.completed" {
+                assert_eq!(event["response"]["id"], "resp-gzip");
+                break;
+            }
+        }
+        upstream_task.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn websocket_http_fallback_gzip_html_marks_failed_despite_http_200() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    std::io::Write::write_all(&mut encoder, b"<html>private gateway page</html>").unwrap();
+    let compressed = encoder.finish().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut socket, _) = upstream.accept().await.unwrap();
+        read_http_request(&mut socket).await.unwrap();
+        socket.write_all(format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-encoding: gzip\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            compressed.len()
+        ).as_bytes()).await.unwrap();
+        socket.write_all(&compressed).await.unwrap();
+    });
+    let response = upstream_http_client_builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("http://{address}/responses"))
+        .send()
+        .await
+        .unwrap();
+    let (socket, mut peer) = local_websocket_pair().await;
+    let mut downstream = WebSocketResponsesDownstream::new(socket);
+    let probe = RouteRequestLogProbe::detached_test_probe();
+    let lifecycle_failure = super::lifecycle::CURRENT_LIFECYCLE_FAILURE
+        .scope(std::cell::RefCell::new(None), async {
+            let result =
+                proxy_native_response_to_websocket(&mut downstream, response, Some(&probe)).await;
+            result.as_ref().unwrap();
+            let (status, code, _) = probe.projected_metadata_for_test();
+            assert_eq!(status.as_deref(), Some("failed"));
+            assert_eq!(code.as_deref(), Some("upstream_protocol_error"));
+            let observed = ObservedResponsesDownstream::new(&mut downstream, Some(probe.clone()));
+            observed.finish_result(&result, "downstream_proxy_write_failed");
+            super::lifecycle::CURRENT_LIFECYCLE_FAILURE.with(|failure| failure.borrow().clone())
+        })
+        .await;
+    assert_eq!(
+        lifecycle_failure,
+        Some((502, "upstream_protocol_error".into()))
+    );
+    // 成功写出错误事件后的外层收尾不能把失败状态改成成功。
+    let (status, _, _) = probe.projected_metadata_for_test();
+    assert_eq!(status.as_deref(), Some("failed"));
+    let WebSocketMessage::Text(text) = peer.next().await.unwrap().unwrap() else {
+        panic!("expected an error event");
+    };
+    let event: Value = serde_json::from_str(text.as_str()).unwrap();
+    assert_eq!(event["type"], "response.failed");
+    assert_eq!(event["response"]["error"]["codey"]["httpStatus"], 502);
+    let message = event["response"]["error"]["message"].as_str().unwrap();
+    assert!(message.contains("HTTP 200"), "{message}");
+    assert!(message.contains("text/html"), "{message}");
+    assert!(!message.contains("private gateway page"), "{message}");
+    assert!(!message.contains('\u{fffd}'), "{message}");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), peer.next())
+            .await
+            .is_err()
+    );
+    upstream_task.await.unwrap();
+}
+
 #[test]
 fn upstream_websocket_liveness_sends_heartbeat_and_expires_missing_pong() {
     let connected_at = Instant::now();
