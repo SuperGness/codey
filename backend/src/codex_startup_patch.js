@@ -1125,9 +1125,11 @@
   const localRouterProviderIds = new Set(["codey_router", "codey_router_remote"]);
   const defaultRouterProvider = runtimeConfigValue(nativeRuntimeConfigOverrides, "model_provider");
   const localRouterRuntimeEnabled = localRouterProviderIds.has(defaultRouterProvider);
-  const routerProviderForParams = (params) => {
+  const routerProviderForParams = (method, params) => {
     const requestedModel = typeof params?.model === "string" ? params.model.trim() : "";
-    if (!requestedModel && localRouterProviderIds.has(params?.modelProvider)) return params.modelProvider;
+    // Resume/fork inherit their model from history. A saved carrier or the
+    // launch default does not prove that history's route still supports compact.
+    if (!requestedModel && method !== "thread/start") return "codey_router";
     const model = requestedModel || runtimeConfigValue(nativeRuntimeConfigOverrides, "model");
     if (!model) return defaultRouterProvider;
     const catalogPath = runtimeConfigValue(nativeRuntimeConfigOverrides, "model_catalog_json");
@@ -1158,7 +1160,7 @@
         !["thread/start", "thread/resume", "thread/fork"].includes(message?.method)) {
       return message;
     }
-    const params = { ...message.params, modelProvider: routerProviderForParams(message.params) };
+    const params = { ...message.params, modelProvider: routerProviderForParams(message.method, message.params) };
     delete params.model_provider;
     if (params.config != null && typeof params.config === "object" && !Array.isArray(params.config)) {
       params.config = Object.fromEntries(Object.entries(params.config).filter(([key]) =>

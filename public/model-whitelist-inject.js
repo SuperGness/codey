@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "63";
+  const patchVersion = "64";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -2545,7 +2545,7 @@
     if (!modelBoundRequestMethods.has(method)) return params;
     let source = params && typeof params === "object" ? params : {};
     const hasModelOverride = Object.hasOwn(source, "model");
-    const restoredBinding = !hasModelOverride && (method === "thread/resume" || method === "turn/start")
+    const restoredBinding = !hasModelOverride && (method === "thread/resume" || method === "thread/fork" || method === "turn/start")
       ? threadRoutes.get(threadIdFromParams(source)) : null;
     if (restoredBinding) source = { ...source, model: restoredBinding.sourceModel };
     const requestedModel = typeof source.model === "string"
@@ -2608,7 +2608,7 @@
       ? routeForThreadModel(threadId, requestedModel)
       : null;
     const stickyThreadRoute = (
-      (method === "turn/start" || method === "thread/resume")
+      (method === "turn/start" || method === "thread/resume" || method === "thread/fork")
       && !hasModelOverride
     ) ? routeForThread(threadId) : null;
     const existingRoute = requestedProvider
@@ -2686,7 +2686,7 @@
     // HTTP-only Codey carrier without rewriting its rollout. Preserve an
     // unknown model exactly so the gateway can report it rather than falling
     // back to an unrelated default.
-    if (method === "thread/resume") {
+    if (method === "thread/resume" || method === "thread/fork") {
       return routedRequestParams(method, source, requestedModel, null);
     }
     // An explicit unknown or deleted model must never be silently replaced by

@@ -31,6 +31,38 @@ test("mixed routes select compaction independently for new and forked threads", 
   runtime.patch.dispose();
 });
 
+test("resume and fork retain the saved route after remote compaction is disabled", async () => {
+  const catalog = {
+    ...mixedCompactionCatalog,
+    default_model: "gpt-6-astra",
+    model_metadata: mixedCompactionCatalog.model_metadata.map((entry) => entry.route_provider_id === "remote"
+      ? { ...entry, provider_id: "codey_router", supports_remote_compaction: false } : entry),
+  };
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["saved", { routeProviderId: "remote", sourceModel: "shared" }],
+  ]));
+  const runtime = await loadPatch(catalog, [statsigClient()], { storage });
+  for (const method of ["thread/resume", "thread/fork"]) {
+    const routed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, {
+      threadId: "saved", modelProvider: "codey_router_remote",
+    }));
+    assert.equal(routed.request.params.model, "remote/shared");
+    assert.equal(routed.request.params.modelProvider, "codey_router");
+  }
+  runtime.patch.dispose();
+});
+
+test("unknown model-less forks do not inherit the remote default route", async () => {
+  const runtime = await loadPatch({ ...mixedCompactionCatalog, default_model: "gpt-6-astra" }, [statsigClient()]);
+  const routed = runtime.patch.rewriteOutgoingMessage(compactionRequest("thread/fork", {
+    threadId: "unknown", modelProvider: "codey_router_remote",
+  }));
+  assert.equal(Object.hasOwn(routed.request.params, "model"), false);
+  assert.equal(routed.request.params.modelProvider, "codey_router");
+  runtime.patch.dispose();
+});
+
 test("a loaded thread blocks a compaction mode change and preserves it for restart", async () => {
   const storage = memoryStorage();
   const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { storage });
@@ -764,7 +796,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "63");
+  assert.equal(patch.version, "64");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],

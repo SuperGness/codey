@@ -192,8 +192,9 @@ test("native thread routing uses exact per-route compaction capabilities", async
         const result = route({ method, params: { model, modelProvider: "codey_router_remote" } }, "local");
         assert.equal(result.params.modelProvider, provider);
       }
-      assert.equal(route({ method, params: {} }, "local").params.modelProvider, "codey_router_remote");
-      assert.equal(route({ method, params: { modelProvider: "codey_router" } }, "local").params.modelProvider, "codey_router");
+      const defaultProvider = method === "thread/start" ? "codey_router_remote" : "codey_router";
+      assert.equal(route({ method, params: {} }, "local").params.modelProvider, defaultProvider);
+      assert.equal(route({ method, params: { modelProvider: "codey_router" } }, "local").params.modelProvider, defaultProvider);
     }
     await writeFile(catalogPath, JSON.stringify({ models: [] }));
     assert.equal(route({ method: "thread/start", params: { model: "remote/shared" } }, "local").params.modelProvider, "codey_router");
@@ -201,6 +202,43 @@ test("native thread routing uses exact per-route compaction capabilities", async
     runtime.restore();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("model-less resume and fork use local compaction without inheriting the launch model", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codey-compaction-resume-"));
+  const catalogPath = join(directory, "catalog.json");
+  await writeFile(catalogPath, JSON.stringify({ models: [
+    { slug: "saved/shared", codey_remote_compaction: false },
+    { slug: "default/shared", codey_remote_compaction: true },
+  ] }));
+  try {
+    for (const provider of ["codey_router", "codey_router_remote"]) {
+      for (const catalog of [[], [`model_catalog_json=${JSON.stringify(catalogPath)}`]]) {
+        const runtime = await loadPatchInIsolatedContext([
+          `model_provider="${provider}"`, 'model="default/shared"', ...catalog,
+        ]);
+        try {
+          const route = runtime.context.__CODEY_ROUTE_LOCAL_APP_SERVER_MESSAGE__;
+          for (const method of ["thread/resume", "thread/fork"]) {
+            for (const model of [undefined, null, "", "   "]) {
+              const params = { threadId: "saved", modelProvider: "codey_router_remote" };
+              if (model !== undefined) params.model = model;
+              const message = Object.freeze({ id: 21, method, params: Object.freeze(params) });
+              const result = route(message, "local");
+              assert.deepEqual({ ...result.params }, { ...params, modelProvider: "codey_router" });
+              assert.equal(message.params.modelProvider, "codey_router_remote");
+            }
+          }
+          if (catalog.length) {
+            for (const method of ["thread/resume", "thread/fork"]) {
+              assert.equal(route({ method, params: { model: "saved/shared", modelProvider: "codey_router_remote" } }, "local").params.modelProvider, "codey_router");
+              assert.equal(route({ method, params: { model: "default/shared", modelProvider: "codey_router" } }, "local").params.modelProvider, "codey_router_remote");
+            }
+          }
+        } finally { runtime.restore(); }
+      }
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("app-server transport drift reports the anchor shape for diagnostics", async () => {

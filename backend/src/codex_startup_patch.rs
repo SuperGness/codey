@@ -772,6 +772,7 @@ fn route_local_app_server_input(
                 Some("thread/start" | "thread/resume" | "thread/fork")
             )
         {
+            let method = message["method"].as_str().unwrap().to_string();
             if message.get("params").is_none_or(serde_json::Value::is_null) {
                 message["params"] = serde_json::json!({});
             }
@@ -779,7 +780,7 @@ fn route_local_app_server_input(
                 .get_mut("params")
                 .and_then(serde_json::Value::as_object_mut)
             {
-                let provider = router_provider_for_params(params, runtime_overrides);
+                let provider = router_provider_for_params(&method, params, runtime_overrides);
                 params.insert("modelProvider".into(), provider.into());
                 params.remove("model_provider");
                 if let Some(config) = params
@@ -1158,6 +1159,7 @@ fn runtime_override_string(overrides: &[String], name: &str) -> Option<String> {
 
 #[cfg(any(windows, target_os = "macos", test))]
 fn router_provider_for_params(
+    method: &str,
     params: &serde_json::Map<String, serde_json::Value>,
     overrides: &[String],
 ) -> &'static str {
@@ -1182,10 +1184,10 @@ fn router_provider_for_params(
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|model| !model.is_empty());
-    if requested_model.is_none()
-        && let Some(provider) = explicit_provider
-    {
-        return provider;
+    // 缺少模型的恢复和分支请求沿用历史模型；旧 Provider 和启动默认模型
+    // 都不能证明该历史所属线路的当前能力，保守使用 Codex 本地摘要。
+    if requested_model.is_none() && method != "thread/start" {
+        return ROUTER_PROVIDER_ID;
     }
     let default_model = runtime_override_string(overrides, "model");
     let model = requested_model.or(default_model
@@ -1757,19 +1759,70 @@ mod tests {
         }
         let empty = serde_json::Map::new();
         assert_eq!(
-            router_provider_for_params(&empty, &overrides),
+            router_provider_for_params("thread/start", &empty, &overrides),
             "codey_router_remote"
         );
         let params = serde_json::json!({"modelProvider":"codey_router"});
         assert_eq!(
-            router_provider_for_params(params.as_object().unwrap(), &overrides),
-            "codey_router"
+            router_provider_for_params("thread/start", params.as_object().unwrap(), &overrides),
+            "codey_router_remote"
         );
         std::fs::remove_file(&path).unwrap();
         assert_eq!(
-            router_provider_for_params(&empty, &overrides),
+            router_provider_for_params("thread/start", &empty, &overrides),
             "codey_router"
         );
+    }
+
+    #[test]
+    fn model_less_history_requests_keep_the_model_and_use_local_compaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({"models":[
+                {"slug":"remote/shared", "codey_remote_compaction":true}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        for default_provider in ["codey_router", "codey_router_remote"] {
+            for with_catalog in [false, true] {
+                let mut overrides = vec![
+                    format!("model_provider=\"{default_provider}\""),
+                    "model=\"remote/shared\"".into(),
+                ];
+                if with_catalog {
+                    overrides.push(format!(
+                        "model_catalog_json={}",
+                        toml_edit::Value::from(path.to_str().unwrap())
+                    ));
+                }
+                for method in ["thread/resume", "thread/fork"] {
+                    for model in [
+                        None,
+                        Some(serde_json::Value::Null),
+                        Some("".into()),
+                        Some("  ".into()),
+                    ] {
+                        let mut params = serde_json::json!({
+                            "threadId":"saved", "modelProvider":"codey_router_remote"
+                        });
+                        if let Some(model) = model {
+                            params["model"] = model;
+                        }
+                        let input =
+                            serde_json::json!({"method":method,"params":params}).to_string();
+                        let mut output = Vec::new();
+                        route_local_app_server_input(input.as_bytes(), &mut output, &overrides)
+                            .unwrap();
+                        let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+                        params["modelProvider"] = "codey_router".into();
+                        assert_eq!(result["params"], params);
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(any(windows, target_os = "macos"))]
