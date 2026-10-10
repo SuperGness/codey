@@ -19,6 +19,35 @@ struct RecordedEdit {
 }
 
 impl RecordedEdit {
+    /// 原生补丁先按记录坐标套用，坐标不成立时才退回按内容唯一定位。
+    /// 与 `verified_apply` 的严格模式相反，这里放宽的只是单个补丁的定位方式；
+    /// 整条链仍须与 HEAD 和磁盘字节精确一致，共享文件的归属还要经过三方合并校验。
+    fn replay_apply(&self, value: Option<&Entry>) -> Result<Option<Entry>> {
+        ensure!(
+            self.start
+                .zip(self.end)
+                .is_some_and(|(start, end)| start <= end),
+            "编辑时间记录不完整"
+        );
+        let Edit::NativePatch(diff) = &self.edit else {
+            return self.verified_apply(value);
+        };
+        let before = value.context("缺少原生编辑基线")?;
+        let text = std::str::from_utf8(&before.bytes)?;
+        let (result, inverse) = match apply_native_patch_checked(text, diff, false, false) {
+            Ok(applied) => applied,
+            Err(_) => apply_native_patch_checked(text, diff, false, true)?,
+        };
+        ensure!(
+            apply_native_patch(&result, &inverse, false)?.as_bytes() == before.bytes,
+            "原生编辑无法唯一还原基线"
+        );
+        Ok(Some(Entry {
+            mode: before.mode.clone(),
+            bytes: result.into_bytes(),
+        }))
+    }
+
     fn verified_apply(&self, value: Option<&Entry>) -> Result<Option<Entry>> {
         ensure!(
             self.start
@@ -942,6 +971,10 @@ fn segment_paths(home: &Path, anchor: &Path, id: &str) -> Result<Vec<PathBuf>> {
 }
 
 fn read_transcript(home: &Path, raw: &Path) -> Result<Transcript> {
+    read_transcript_mode(home, raw, false)
+}
+
+fn read_transcript_mode(home: &Path, raw: &Path, display_only: bool) -> Result<Transcript> {
     let path = crate::session_transfer::checked_rollout_path(home, raw)?;
     ensure!(
         !path.components().any(|part| part.as_os_str() == "imported"),
@@ -992,7 +1025,11 @@ fn read_transcript(home: &Path, raw: &Path) -> Result<Transcript> {
             segment.clone(),
             metadata.len(),
             metadata.modified()?,
-            digest(&read_bounded(&segment, MAX_TRANSCRIPT_BYTES)?),
+            if display_only {
+                String::new()
+            } else {
+                digest(&read_bounded(&segment, MAX_TRANSCRIPT_BYTES)?)
+            },
         ));
         segments.push((created, segment));
     }
@@ -1002,9 +1039,20 @@ fn read_transcript(home: &Path, raw: &Path) -> Result<Transcript> {
         .lock()
         .map_err(|_| anyhow::anyhow!("历史缓存不可用"))?
         .get(&path)
-        && *old == signature
+        && (*old == signature
+            || (display_only
+                && old.len() == signature.len()
+                && old
+                    .iter()
+                    .zip(&signature)
+                    .all(|(old, new)| old.0 == new.0 && old.1 == new.1 && old.2 == new.2)))
     {
         return Ok(transcript.clone());
+    }
+    // 展示缓存仅依据元数据复用已经完整解析的历史；缓存缺失时完整读取。
+    // 预览和提交始终走内容摘要校验，不以展示缓存作为文件归属证明。
+    if display_only {
+        return read_transcript(home, raw);
     }
     let mut result = Transcript {
         bytes: total_bytes,
@@ -1348,7 +1396,7 @@ impl History {
         {
             return false;
         }
-        let mut records = records.clone();
+        let mut records: Vec<_> = records.iter().collect();
         records.sort_by_key(|record| (record.start, record.ordinal));
         let mut value = head.clone();
         for record in records.iter().rev() {
@@ -1462,7 +1510,7 @@ impl History {
             let mut value = before.cloned();
             let mut valid = true;
             for record in &ordered[start..] {
-                let result = record.verified_apply(value.as_ref());
+                let result = record.replay_apply(value.as_ref());
                 match result {
                     Ok(next) => value = next,
                     Err(_) => {
@@ -1540,6 +1588,8 @@ impl History {
                 "{path} 的主代理与子代理编辑顺序不明确，无法自动分离"
             );
         }
+        // 记录按时间排序，每段能完整套用到 HEAD 的后缀各给出一个候选；候选唯一才说明本对话
+        // 改动与当前 HEAD 的对应关系明确，否则无法确定该提交哪一段。
         let mut candidates = Vec::new();
         for start in 0..records.len() {
             let candidate = (|| -> Result<Entry> {
@@ -1607,6 +1657,25 @@ pub(super) fn recover(
     root: &Path,
     workspace: &Path,
 ) -> Result<History> {
+    recover_mode(home, session, root, workspace, false)
+}
+
+pub(super) fn recover_for_display(
+    home: &Path,
+    session: &str,
+    root: &Path,
+    workspace: &Path,
+) -> Result<History> {
+    recover_mode(home, session, root, workspace, true)
+}
+
+fn recover_mode(
+    home: &Path,
+    session: &str,
+    root: &Path,
+    workspace: &Path,
+    display_only: bool,
+) -> Result<History> {
     let (thread, _) =
         crate::session_transfer::find_thread(home, session)?.context("未找到本地对话")?;
     let path = home.join(
@@ -1627,7 +1696,7 @@ pub(super) fn recover(
             visited.insert(actor.clone()) && visited.len() <= MAX_ACTORS,
             "历史子代理身份重复或数量过多"
         );
-        let transcript = read_transcript(home, &path)?;
+        let transcript = read_transcript_mode(home, &path, display_only)?;
         bytes += transcript.bytes;
         ensure!(
             bytes <= MAX_FAMILY_BYTES,

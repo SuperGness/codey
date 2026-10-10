@@ -21,13 +21,16 @@ pub(super) async fn invoke(
     config.validate()?;
     let session = string_argument(args, "sessionId")?;
     if command == "conversation_git_status" {
-        let result =
-            tokio::task::spawn_blocking(move || conversation_git::status(codex_home(), &session))
-                .await
-                .map_err(|error| error.to_string())?;
+        let result = tokio::task::spawn_blocking(move || {
+            conversation_git::display_status(codex_home(), &session)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
         return Ok(match result {
             Ok(value) => value,
-            Err(error) => json!({"visible": false, "reason": format!("{error:#}")}),
+            Err(error) => {
+                json!({"visible": false, "unavailable": true, "reason": format!("{error:#}")})
+            }
         });
     }
     if command == "conversation_git_execute" {

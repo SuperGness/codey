@@ -276,6 +276,16 @@ fn digest(bytes: &[u8]) -> String {
 
 // 文件输出避免 stdout 管道堵塞；所有命令有时间、输出上限和独立参数。
 fn git(root: &Path, args: &[&str], index: Option<&Path>, input: Option<&[u8]>) -> Result<Vec<u8>> {
+    git_with_output_limit(root, args, index, input, MAX_BYTES)
+}
+
+fn git_with_output_limit(
+    root: &Path,
+    args: &[&str],
+    index: Option<&Path>,
+    input: Option<&[u8]>,
+    output_limit: u64,
+) -> Result<Vec<u8>> {
     let stdout = tempfile::tempfile()?;
     let stderr = tempfile::tempfile()?;
     let mut command = Command::new("git");
@@ -332,16 +342,16 @@ fn git(root: &Path, args: &[&str], index: Option<&Path>, input: Option<&[u8]>) -
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    fn read_output(mut file: File) -> Result<Vec<u8>> {
+    fn read_output(mut file: File, limit: u64) -> Result<Vec<u8>> {
         use std::io::{Seek, SeekFrom};
-        ensure!(file.metadata()?.len() <= MAX_BYTES, "Git 输出超过安全上限");
+        ensure!(file.metadata()?.len() <= limit, "Git 输出超过安全上限");
         file.seek(SeekFrom::Start(0))?;
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         Ok(bytes)
     }
-    let output = read_output(stdout)?;
-    let errors = read_output(stderr)?;
+    let output = read_output(stdout, output_limit)?;
+    let errors = read_output(stderr, MAX_BYTES)?;
     ensure!(
         status.success(),
         "Git 操作失败：{}{}",
@@ -612,6 +622,122 @@ fn head_entry(root: &Path, head: &str, path: &str) -> Result<Option<Entry>> {
         mode: fields[0].into(),
         bytes: git(root, &["cat-file", "blob", fields[2]], None, None)?,
     }))
+}
+
+// 路径由调用方逐项校验；树记录按 NUL 分隔，blob 内容按明确字节数读取。
+fn head_entries(
+    root: &Path,
+    head: &str,
+    paths: &[String],
+) -> Result<BTreeMap<String, Option<Entry>>> {
+    ensure!(paths.len() <= MAX_FILES, "Git 文件范围过大");
+    if paths.len() == 1 {
+        return Ok(BTreeMap::from([(
+            paths[0].clone(),
+            head_entry(root, head, &paths[0])?,
+        )]));
+    }
+    let mut entries: BTreeMap<_, _> = paths.iter().map(|path| (path.clone(), None)).collect();
+    if paths.is_empty() {
+        return Ok(entries);
+    }
+    let mut args = vec!["ls-tree", "-l", "-z", head, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let output = git(root, &args, None, None)?;
+    let mut objects = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        let (meta, path) = std::str::from_utf8(record)?
+            .split_once('\t')
+            .context("无法读取 Git 文件信息")?;
+        ensure!(
+            entries.contains_key(path) && seen.insert(path.to_string()),
+            "Git 文件范围不匹配"
+        );
+        let fields: Vec<_> = meta.split_whitespace().collect();
+        ensure!(
+            fields.len() == 4 && fields[1] == "blob" && matches!(fields[0], "100644" | "100755"),
+            "暂不支持子模块、目录或符号链接"
+        );
+        ensure!(
+            matches!(fields[2].len(), 40 | 64)
+                && fields[2].bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "Git 对象身份无效"
+        );
+        let size: u64 = fields[3].parse()?;
+        ensure!(size <= MAX_BYTES, "Git 文件内容超过安全上限");
+        objects.push((
+            path.to_string(),
+            fields[0].to_string(),
+            fields[2].to_string(),
+            size,
+        ));
+    }
+    let mut start = 0;
+    while start < objects.len() {
+        let mut end = start;
+        let mut bytes = 0;
+        while end < objects.len() && bytes + objects[end].3 <= MAX_BYTES {
+            bytes += objects[end].3;
+            end += 1;
+        }
+        let batch = &objects[start..end];
+        let input = batch
+            .iter()
+            .map(|object| format!("{}\n", object.2))
+            .collect::<String>();
+        // 内容总量仍限制为 MAX_BYTES，额外预算仅容纳有界的协议头。
+        let output = git_with_output_limit(
+            root,
+            &["cat-file", "--batch"],
+            None,
+            Some(input.as_bytes()),
+            MAX_BYTES + (MAX_FILES as u64 * 128),
+        )?;
+        let mut cursor = 0;
+        for (path, mode, oid, size) in batch {
+            let header_end = output[cursor..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|length| cursor + length)
+                .context("Git 批量内容缺少对象头")?;
+            let fields: Vec<_> = std::str::from_utf8(&output[cursor..header_end])?
+                .split_whitespace()
+                .collect();
+            ensure!(
+                fields.len() == 3
+                    && fields[0] == oid
+                    && fields[1] == "blob"
+                    && fields[2].parse::<u64>()? == *size,
+                "Git 批量对象信息不匹配"
+            );
+            let content_start = header_end + 1;
+            let content_end = content_start
+                .checked_add(*size as usize)
+                .context("Git 批量内容长度无效")?;
+            let content = output
+                .get(content_start..content_end)
+                .context("Git 批量内容不完整")?;
+            ensure!(
+                output.get(content_end) == Some(&b'\n'),
+                "Git 批量内容分隔符无效"
+            );
+            entries.insert(
+                path.clone(),
+                Some(Entry {
+                    mode: mode.clone(),
+                    bytes: content.to_vec(),
+                }),
+            );
+            cursor = content_end + 1;
+        }
+        ensure!(cursor == output.len(), "Git 批量内容含额外对象");
+        start = end;
+    }
+    Ok(entries)
 }
 
 fn disk_entry(root: &Path, path: &str) -> Result<Option<Entry>> {
@@ -893,7 +1019,16 @@ pub(crate) fn snapshot(home: &Path, session: &str) -> Result<Snapshot> {
     build_snapshot(home, &session, &workspace)
 }
 
+#[cfg(test)]
 pub(crate) fn status(home: &Path, session: &str) -> Result<Value> {
+    status_mode(home, session, false)
+}
+
+pub(crate) fn display_status(home: &Path, session: &str) -> Result<Value> {
+    status_mode(home, session, true)
+}
+
+fn status_mode(home: &Path, session: &str, display_only: bool) -> Result<Value> {
     let (session, workspace, _) = source(home, session)?;
     let root = PathBuf::from(
         git_text(&workspace, &["rev-parse", "--show-toplevel"])
@@ -901,6 +1036,12 @@ pub(crate) fn status(home: &Path, session: &str) -> Result<Value> {
     )
     .canonicalize()?;
     let head = git_text(&root, &["rev-parse", "--verify", "HEAD"])?;
+    if display_only {
+        let visible = tracking::has_dirty_files(home, &session, &root, &workspace, &head)?;
+        return Ok(
+            json!({"visible": visible, "reason": if visible { "" } else { "当前对话没有可确认的未提交文件改动" }}),
+        );
+    }
     let files = tracking::dirty_paths(home, &session, &root, &workspace, &head)?;
     Ok(json!({"visible": true, "files": files, "reason": ""}))
 }

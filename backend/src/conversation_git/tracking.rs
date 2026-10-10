@@ -25,9 +25,10 @@ fn has_current_live_edit(ledger: &Ledger, session: &str, path: &str, head: Optio
         .values()
         .any(|pending| pending.session == session && pending.candidates.contains_key(path))
         || ledger.files.get(path).is_some_and(|claim| {
-            claim.sessions.contains(session)
-                && claim.baseline == fingerprint(head)
-                && claim.expected != fingerprint(head)
+            claim.sessions.contains(session) && {
+                let head = fingerprint(head);
+                claim.baseline == head && claim.expected != head
+            }
         })
 }
 
@@ -560,10 +561,148 @@ pub(super) fn dirty_paths(
     workspace: &Path,
     head: &str,
 ) -> Result<Vec<String>> {
-    let history = history::recover(home, session, root, workspace)?;
+    dirty_paths_mode(
+        home,
+        session,
+        root,
+        workspace,
+        head,
+        false,
+        &mut BTreeMap::new(),
+    )
+}
+
+fn remember_display_heads(
+    cache: &mut BTreeMap<String, Option<Entry>>,
+    entries: BTreeMap<String, Option<Entry>>,
+) {
+    let bytes: usize = cache
+        .values()
+        .chain(entries.values())
+        .flatten()
+        .map(|entry| entry.bytes.len())
+        .sum();
+    // 同次查询的缓存最多保留一批最大文件内容，避免候选文件多时累积大量内存。
+    if bytes > MAX_BYTES as usize * 8 {
+        cache.clear();
+    }
+    cache.extend(entries);
+}
+
+fn load_display_heads(
+    root: &Path,
+    workspace: &Path,
+    head: &str,
+    paths: &[String],
+    cache: &mut BTreeMap<String, Option<Entry>>,
+) -> Result<()> {
+    let missing: Vec<_> = paths
+        .iter()
+        .filter(|path| !cache.contains_key(*path))
+        .cloned()
+        .collect();
+    let validated = missing.iter().try_for_each(|path| {
+        relative_path(
+            root,
+            workspace,
+            root.join(path).to_str().context("文件名编码不受支持")?,
+        )
+        .map(|_| ())
+    });
+    // 批次中后面的无效文件不能影响前面已可确认的改动；失败时按原顺序逐项读取。
+    if validated.is_ok()
+        && let Ok(entries) = head_entries(root, head, &missing)
+    {
+        remember_display_heads(cache, entries);
+    }
+    Ok(())
+}
+
+pub(super) fn has_dirty_files(
+    home: &Path,
+    session: &str,
+    root: &Path,
+    workspace: &Path,
+    head: &str,
+) -> Result<bool> {
+    let mut heads = BTreeMap::new();
+    // 执行记录已能确认当前改动时，按钮展示无需重新恢复整个会话。
+    // 未找到有效候选再查询历史；完整提交范围仍由 changes 独立校验。
+    {
+        let path = ledger_path(home, root);
+        let ledger = {
+            let _lock = lock_ledger(&path)?;
+            load(&path)?
+        };
+        let mut candidates: BTreeSet<_> = ledger
+            .files
+            .iter()
+            .filter(|(_, claim)| claim.sessions.contains(session))
+            .map(|(path, _)| path.clone())
+            .collect();
+        for pending in ledger
+            .pending
+            .values()
+            .filter(|pending| pending.session == session)
+        {
+            candidates.extend(pending.candidates.keys().cloned());
+        }
+        ensure!(
+            candidates.len() <= MAX_FILES,
+            "当前对话文件过多，请拆分提交"
+        );
+        let candidates: Vec<_> = candidates.into_iter().collect();
+        for paths in candidates.chunks(8) {
+            load_display_heads(root, workspace, head, paths, &mut heads)?;
+            for path in paths {
+                relative_path(
+                    root,
+                    workspace,
+                    root.join(path).to_str().context("文件名编码不受支持")?,
+                )?;
+                if !heads.contains_key(path) {
+                    remember_display_heads(
+                        &mut heads,
+                        BTreeMap::from([(path.clone(), head_entry(root, head, path)?)]),
+                    );
+                }
+                let before = heads[path].as_ref();
+                if has_current_live_edit(&ledger, session, path, before)
+                    && before != disk_entry(root, path)?.as_ref()
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    dirty_paths_mode(home, session, root, workspace, head, true, &mut heads)
+        .map(|files| !files.is_empty())
+}
+
+fn dirty_paths_mode(
+    home: &Path,
+    session: &str,
+    root: &Path,
+    workspace: &Path,
+    head: &str,
+    display_only: bool,
+    heads: &mut BTreeMap<String, Option<Entry>>,
+) -> Result<Vec<String>> {
+    let history = if display_only {
+        history::recover_for_display(home, session, root, workspace)?
+    } else {
+        history::recover(home, session, root, workspace)?
+    };
     let path = ledger_path(home, root);
-    let _lock = lock_ledger(&path)?;
+    let lock = lock_ledger(&path)?;
     let ledger = load(&path)?;
+    // 展示使用当前记录的快照，耗时的 Git 和磁盘读取无需阻塞新的编辑回执。
+    let _lock = if display_only {
+        drop(lock);
+        None
+    } else {
+        Some(lock)
+    };
     let mut candidates: BTreeSet<String> = ledger
         .files
         .iter()
@@ -583,21 +722,44 @@ pub(super) fn dirty_paths(
         "当前对话文件过多，请拆分提交"
     );
     let mut files = Vec::new();
-    for path in candidates {
-        relative_path(
-            root,
-            workspace,
-            root.join(&path).to_str().context("文件名编码不受支持")?,
-        )?;
-        let before = head_entry(root, head, &path)?;
-        if before != disk_entry(root, &path)?
-            && (has_current_live_edit(&ledger, session, &path, before.as_ref())
-                || !history.changes_in_head(&path, before.as_ref()))
-        {
-            files.push(path);
+    let candidates: Vec<_> = candidates.into_iter().collect();
+    for paths in candidates.chunks(if display_only { 8 } else { 1 }) {
+        if display_only {
+            load_display_heads(root, workspace, head, paths, heads)?;
+        }
+        for path in paths {
+            relative_path(
+                root,
+                workspace,
+                root.join(path).to_str().context("文件名编码不受支持")?,
+            )?;
+            let uncached;
+            let before = if display_only {
+                if !heads.contains_key(path) {
+                    remember_display_heads(
+                        heads,
+                        BTreeMap::from([(path.clone(), head_entry(root, head, path)?)]),
+                    );
+                }
+                heads[path].as_ref()
+            } else {
+                uncached = head_entry(root, head, path)?;
+                uncached.as_ref()
+            };
+            if before != disk_entry(root, path)?.as_ref()
+                && (has_current_live_edit(&ledger, session, path, before)
+                    || !history.changes_in_head(path, before))
+            {
+                files.push(path.clone());
+                if display_only {
+                    return Ok(files);
+                }
+            }
         }
     }
-    ensure!(!files.is_empty(), "当前对话没有可确认的未提交文件改动");
+    if !display_only {
+        ensure!(!files.is_empty(), "当前对话没有可确认的未提交文件改动");
+    }
     Ok(files)
 }
 

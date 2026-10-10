@@ -115,7 +115,10 @@ fn diagnose_local_conversation_git_status() {
             .canonicalize()
             .unwrap();
         let head = git_text(&root, &["rev-parse", "--verify", "HEAD"]).unwrap();
-        let history = history::recover(&home, &session, &root, &workspace).unwrap();
+        let history = match history::recover(&home, &session, &root, &workspace) {
+            Ok(value) => value,
+            Err(error) => panic!("历史恢复失败: {error:#}"),
+        };
         if let (Ok(base), Ok(target), Ok(path)) = (
             std::env::var("CODEY_GIT_DIAGNOSTIC_BASE"),
             std::env::var("CODEY_GIT_DIAGNOSTIC_TARGET"),
@@ -654,9 +657,10 @@ fn repeated_context_search_refuses_overflow_instead_of_truncating_candidates() {
     fs::write(repo.root.join("owned.txt"), &base).unwrap();
     git(&repo.root, &["add", "--", "owned.txt"], None, None).unwrap();
     git(&repo.root, &["commit", "-m", "many candidates"], None, None).unwrap();
+    // 记录坐标落在文件之外，只能退回按内容定位；17 个相同行超过候选上限时必须整体拒绝。
     repo.append_record(
         SESSION,
-        &repo.native_change(SESSION, "owned.txt", "@@ -1 +1 @@\n-same\n+mine\n", 1),
+        &repo.native_change(SESSION, "owned.txt", "@@ -40 +40 @@\n-same\n+mine\n", 1),
     );
     fs::write(
         repo.root.join("owned.txt"),
@@ -1301,6 +1305,206 @@ fn shared_file_binds_unselected_disk_changes_and_rejects_ambiguous_history() {
     assert!(format!("{error:#}").contains("不能唯一对应当前 HEAD"));
 }
 
+#[test]
+fn batched_head_entries_preserve_bytes_paths_modes_and_absence() {
+    let repo = Repo::new();
+    let mut paths = vec![
+        "owned.txt".to_string(),
+        "missing.txt".to_string(),
+        "space file".to_string(),
+        "binary".to_string(),
+        "empty".to_string(),
+        "nested/file".to_string(),
+    ];
+    #[cfg(unix)]
+    paths.extend(["tab\tfile".into(), "line\nfile".into(), "[literal]*".into()]);
+    fs::create_dir(repo.root.join("nested")).unwrap();
+    for path in &paths[2..] {
+        fs::write(repo.root.join(path), b"\0\xff\nbody\n\0").unwrap();
+    }
+    fs::write(repo.root.join("empty"), b"").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(repo.root.join("binary"), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(&repo.root, &["add", "--all"], None, None).unwrap();
+    git(&repo.root, &["commit", "-m", "batch entries"], None, None).unwrap();
+    let head = git_text(&repo.root, &["rev-parse", "HEAD"]).unwrap();
+    fs::remove_file(repo.root.join("owned.txt")).unwrap();
+    fs::write(repo.root.join("missing.txt"), b"new file").unwrap();
+    let batched = head_entries(&repo.root, &head, &paths).unwrap();
+    for path in &paths {
+        assert_eq!(batched[path], head_entry(&repo.root, &head, path).unwrap());
+    }
+    assert!(batched["missing.txt"].is_none());
+    assert_ne!(
+        batched["owned.txt"],
+        disk_entry(&repo.root, "owned.txt").unwrap()
+    );
+    assert!(head_entries(&repo.root, &head, &[]).unwrap().is_empty());
+}
+
+#[test]
+fn batched_head_entries_split_content_and_enforce_file_limit() {
+    let repo = Repo::new();
+    let paths = vec!["large-a".to_string(), "large-b".to_string()];
+    for (index, path) in paths.iter().enumerate() {
+        fs::write(repo.root.join(path), vec![index as u8; MAX_BYTES as usize]).unwrap();
+    }
+    fs::write(repo.root.join("oversized"), vec![0; MAX_BYTES as usize + 1]).unwrap();
+    git(&repo.root, &["add", "--all"], None, None).unwrap();
+    git(&repo.root, &["commit", "-m", "batch limits"], None, None).unwrap();
+    let head = git_text(&repo.root, &["rev-parse", "HEAD"]).unwrap();
+    let batched = head_entries(&repo.root, &head, &paths).unwrap();
+    for path in &paths {
+        assert_eq!(batched[path], head_entry(&repo.root, &head, path).unwrap());
+    }
+    assert!(head_entries(&repo.root, &head, &["owned.txt".into(), "oversized".into()]).is_err());
+    assert!(head_entries(&repo.root, &head, &vec!["owned.txt".into(); MAX_FILES + 1]).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn batched_head_entries_reject_symlinks_and_directories() {
+    let repo = Repo::new();
+    std::os::unix::fs::symlink("owned.txt", repo.root.join("link")).unwrap();
+    fs::create_dir(repo.root.join("directory")).unwrap();
+    fs::write(repo.root.join("directory/file"), b"content").unwrap();
+    git(&repo.root, &["add", "--all"], None, None).unwrap();
+    git(
+        &repo.root,
+        &["commit", "-m", "unsupported entries"],
+        None,
+        None,
+    )
+    .unwrap();
+    let head = git_text(&repo.root, &["rev-parse", "HEAD"]).unwrap();
+    for path in ["link", "directory"] {
+        assert!(head_entries(&repo.root, &head, &["owned.txt".into(), path.into()]).is_err());
+    }
+}
+
+#[test]
+fn display_batched_comparison_finds_later_changes_and_reverted_files() {
+    let repo = Repo::new();
+    let paths: Vec<_> = (0..9).map(|i| format!("batch-{i}.txt")).collect();
+    for path in &paths {
+        fs::write(repo.root.join(path), "old\n").unwrap();
+    }
+    git(&repo.root, &["add", "--all"], None, None).unwrap();
+    git(&repo.root, &["commit", "-m", "batch baseline"], None, None).unwrap();
+    for path in &paths {
+        repo.edit(SESSION, path, "old", "new");
+        if path != paths.last().unwrap() {
+            fs::write(repo.root.join(path), "old\n").unwrap();
+        }
+    }
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        true
+    );
+    fs::write(repo.root.join(paths.last().unwrap()), "old\n").unwrap();
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        false
+    );
+}
+
+#[test]
+fn display_batched_comparison_handles_large_reverted_candidates() {
+    let repo = Repo::new();
+    let paths: Vec<_> = (0..9).map(|i| format!("large-{i}.txt")).collect();
+    let baseline = format!("old\n{}", "x".repeat(MAX_BYTES as usize - 4));
+    for path in &paths {
+        fs::write(repo.root.join(path), &baseline).unwrap();
+    }
+    git(&repo.root, &["add", "--all"], None, None).unwrap();
+    git(&repo.root, &["commit", "-m", "large baseline"], None, None).unwrap();
+    for path in &paths {
+        repo.edit(SESSION, path, "old", "new");
+        fs::write(repo.root.join(path), &baseline).unwrap();
+    }
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        false
+    );
+    fs::write(
+        repo.root.join(paths.last().unwrap()),
+        baseline.replacen("old", "new", 1),
+    )
+    .unwrap();
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        true
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn display_batch_failure_preserves_early_valid_change() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("zz-later.txt"), "old\n").unwrap();
+    git(&repo.root, &["add", "--all"], None, None).unwrap();
+    git(&repo.root, &["commit", "-m", "later baseline"], None, None).unwrap();
+    repo.edit(SESSION, "owned.txt", "old", "new");
+    repo.edit(SESSION, "zz-later.txt", "old", "new");
+    fs::remove_file(repo.root.join("zz-later.txt")).unwrap();
+    std::os::unix::fs::symlink("owned.txt", repo.root.join("zz-later.txt")).unwrap();
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        true
+    );
+    assert!(snapshot(&repo.home, SESSION).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn display_batch_failure_still_rejects_invalid_first_path() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("aa-first.txt"), "old\n").unwrap();
+    git(&repo.root, &["add", "--all"], None, None).unwrap();
+    git(&repo.root, &["commit", "-m", "first baseline"], None, None).unwrap();
+    repo.edit(SESSION, "owned.txt", "old", "new");
+    repo.edit(SESSION, "aa-first.txt", "old", "new");
+    fs::remove_file(repo.root.join("aa-first.txt")).unwrap();
+    std::os::unix::fs::symlink("owned.txt", repo.root.join("aa-first.txt")).unwrap();
+    assert!(display_status(&repo.home, SESSION).is_err());
+}
+
+#[test]
+#[ignore = "显式运行多文件 HEAD 读取耗时比较"]
+fn benchmark_batched_head_comparison() {
+    let repo = Repo::new();
+    let paths: Vec<_> = (0..64).map(|i| format!("compare-{i}.txt")).collect();
+    for path in &paths {
+        fs::write(repo.root.join(path), "baseline\n".repeat(1024)).unwrap();
+    }
+    git(&repo.root, &["add", "--all"], None, None).unwrap();
+    git(
+        &repo.root,
+        &["commit", "-m", "comparison benchmark"],
+        None,
+        None,
+    )
+    .unwrap();
+    let head = git_text(&repo.root, &["rev-parse", "HEAD"]).unwrap();
+    let start = Instant::now();
+    let individual: BTreeMap<_, _> = paths
+        .iter()
+        .map(|path| (path.clone(), head_entry(&repo.root, &head, path).unwrap()))
+        .collect();
+    let individual_time = start.elapsed();
+    let start = Instant::now();
+    let mut batched = BTreeMap::new();
+    for chunk in paths.chunks(8) {
+        batched.extend(head_entries(&repo.root, &head, chunk).unwrap());
+    }
+    let batched_time = start.elapsed();
+    assert_eq!(individual, batched);
+    eprintln!("64 文件 HEAD 读取：逐项 {individual_time:?}，每批 8 个 {batched_time:?}");
+}
+
 struct Repo {
     directory: tempfile::TempDir,
     root: PathBuf,
@@ -1756,6 +1960,151 @@ fn auxiliary_catalog_database_does_not_hide_historical_changes() {
         json!(["owned.txt"])
     );
     assert!(status(&repo.home, OTHER).is_err());
+}
+
+#[test]
+fn display_status_uses_live_tracking_without_waiting_for_full_history() {
+    let repo = Repo::new();
+    repo.edit(SESSION, "owned.txt", "old", "new");
+    // 模拟生成中的历史末行尚未保存完整：已完成的执行记录足以展示入口。
+    let path = repo
+        .home
+        .join("sessions")
+        .join(format!("rollout-{SESSION}.jsonl"));
+    writeln!(
+        OpenOptions::new().append(true).open(path).unwrap(),
+        "{{unfinished"
+    )
+    .unwrap();
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        true
+    );
+    assert!(
+        snapshot(&repo.home, SESSION).is_err(),
+        "预览仍须完整核验历史"
+    );
+    assert_eq!(display_status(&repo.home, OTHER).unwrap()["visible"], false);
+    fs::write(repo.root.join("owned.txt"), "old\n").unwrap();
+    assert!(
+        display_status(&repo.home, SESSION).is_err(),
+        "已撤销的执行记录不能单独显示入口"
+    );
+}
+
+#[test]
+fn display_fast_path_does_not_authorize_mixed_conversation_files() {
+    let repo = Repo::new();
+    repo.edit(SESSION, "owned.txt", "old", "mine");
+    repo.edit(OTHER, "owned.txt", "mine", "mixed");
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        true
+    );
+    assert!(
+        snapshot(&repo.home, SESSION).is_err(),
+        "入口可见不能替代跨会话归属校验"
+    );
+}
+
+#[test]
+fn display_history_cache_tracks_appended_records_and_commit_state() {
+    let repo = Repo::new();
+    repo.old_patch(SESSION, "owned.txt", "old", "new", 1);
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        true
+    );
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        true
+    );
+    fs::write(repo.root.join("owned.txt"), "old\n").unwrap();
+    repo.old_patch(SESSION, "other.txt", "other", "next", 2);
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        true
+    );
+    assert_eq!(
+        snapshot(&repo.home, SESSION).unwrap().public()["files"],
+        json!(["other.txt"])
+    );
+    git(&repo.root, &["add", "--", "other.txt"], None, None).unwrap();
+    git(&repo.root, &["commit", "-m", "save"], None, None).unwrap();
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        false,
+        "历史缓存不能跳过当前 HEAD 与文件检查"
+    );
+}
+
+#[test]
+fn display_cache_cannot_replace_preview_content_verification() {
+    let repo = Repo::new();
+    repo.old_patch(SESSION, "owned.txt", "old", "new", 1);
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        true
+    );
+    let path = repo
+        .home
+        .join("sessions")
+        .join(format!("rollout-{SESSION}.jsonl"));
+    let metadata = fs::metadata(&path).unwrap();
+    let original = fs::read_to_string(&path).unwrap();
+    // 同长度改写并恢复修改时间，展示缓存仍可命中，提交证明必须重读内容。
+    let rewritten = original.replace("-old\\n+new", "-bad\\n+new");
+    assert_ne!(original, rewritten);
+    assert_eq!(original.len(), rewritten.len());
+    fs::write(&path, rewritten).unwrap();
+    File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(fs::FileTimes::new().set_modified(metadata.modified().unwrap()))
+        .unwrap();
+    assert!(snapshot(&repo.home, SESSION).is_err());
+}
+
+#[test]
+#[ignore = "显式运行合成大会话的只读状态耗时比较"]
+fn benchmark_large_conversation_display_status() {
+    let repo = Repo::new();
+    let path = repo
+        .home
+        .join("sessions")
+        .join(format!("rollout-{SESSION}.jsonl"));
+    let record =
+        json!({"type":"response_item", "payload":{"type":"message", "content":"x".repeat(16_384)}})
+            .to_string();
+    let mut file = OpenOptions::new().append(true).open(path).unwrap();
+    for _ in 0..2_048 {
+        writeln!(file, "{record}").unwrap();
+    }
+    drop(file);
+    repo.old_patch(SESSION, "owned.txt", "old", "new", 1);
+    let start = std::time::Instant::now();
+    assert_eq!(status(&repo.home, SESSION).unwrap()["visible"], true);
+    let cold = start.elapsed();
+    let start = std::time::Instant::now();
+    assert_eq!(status(&repo.home, SESSION).unwrap()["visible"], true);
+    let strict = start.elapsed();
+    let start = std::time::Instant::now();
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        true
+    );
+    let cached = start.elapsed();
+    repo.edit(SESSION, "other.txt", "other", "live");
+    let start = std::time::Instant::now();
+    assert_eq!(
+        display_status(&repo.home, SESSION).unwrap()["visible"],
+        true
+    );
+    eprintln!(
+        "32 MiB history: cold={cold:?}, full-check={strict:?}, display-cache={cached:?}, live-display={:?}",
+        start.elapsed()
+    );
 }
 
 #[test]
