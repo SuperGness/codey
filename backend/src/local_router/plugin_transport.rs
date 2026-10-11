@@ -157,24 +157,8 @@ async fn send_inner(
         }
     };
     let mut response = tokio_tungstenite::tungstenite::http::Response::builder().status(status);
-    if response_headers.len() > 32 {
-        return Err("plugin_invalid_headers".into());
-    }
-    for (name, value) in response_headers {
-        // 插件输出标准、解码后的正文；不接受跳转、Cookie 或传输编码。
-        if [
-            "content-type",
-            "cache-control",
-            "retry-after",
-            "x-request-id",
-        ]
-        .contains(&name.to_ascii_lowercase().as_str())
-        {
-            if value.len() > 8192 {
-                return Err("plugin_invalid_headers".into());
-            }
-            response = response.header(name, value);
-        }
+    for (name, value) in wire::filter_response_headers(response_headers)? {
+        response = response.header(name, value);
     }
     let stream = futures_util::stream::try_unfold(
         (request, 0usize),
@@ -356,6 +340,96 @@ mod tests {
             assert_eq!(stopped.load(Ordering::SeqCst), 1);
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn transport_rejects_case_insensitive_duplicate_headers_and_cancels() {
+        let cancelled = Arc::new(AtomicUsize::new(0));
+        let count = cancelled.clone();
+        let plugin = TestPlugin::new("test.transport", move |method, _| {
+            if method == wire::READ {
+                return Ok(json!({"type":"headers","status":200,"headers":{
+                    "Content-Type":"text/event-stream", "content-type":"application/json"
+                }}));
+            }
+            if method == wire::CANCEL {
+                count.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(json!({}))
+        });
+        with_test_transport("test.transport", plugin, async {
+            let response = send(&target(), Operation::Responses, &headers(), Bytes::new()).await;
+            assert_eq!(response.status(), 502);
+            assert!(
+                response
+                    .text()
+                    .await
+                    .unwrap()
+                    .contains("plugin_invalid_headers")
+            );
+            wait_cancel(&cancelled).await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn pending_transport_obeys_router_body_deadlines_and_cancels() {
+        for total_deadline in [false, true] {
+            let reads = AtomicUsize::new(0);
+            let cancelled = Arc::new(AtomicUsize::new(0));
+            let count = cancelled.clone();
+            let plugin = TestPlugin::new("test.transport", move |method, _| {
+                if method == wire::READ {
+                    return Ok(if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                        json!({"type":"headers","status":200,"headers":{"content-type":"text/event-stream"}})
+                    } else {
+                        json!({"type":"pending"})
+                    });
+                }
+                if method == wire::CANCEL {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(json!({}))
+            })
+            // 虚拟时间跳跃时，后台回调可能尚未完成；让路由器的期限先到期。
+            .with_invoke_timeout(UPSTREAM_READ_IDLE_TIMEOUT + Duration::from_secs(1));
+            with_test_transport("test.transport", plugin, async {
+                let response =
+                    send(&target(), Operation::Responses, &headers(), Bytes::new()).await;
+                let mut prepared = prepare_upstream_response(response, "plugin test", None)
+                    .await
+                    .unwrap();
+                tokio::time::pause();
+                let duration = if total_deadline {
+                    Duration::from_secs(1)
+                } else {
+                    UPSTREAM_READ_IDLE_TIMEOUT
+                };
+                if total_deadline {
+                    prepared.deadline = tokio::time::Instant::now() + duration;
+                }
+                {
+                    let read = read_prepared_upstream_chunk(&mut prepared, "plugin test", None);
+                    tokio::pin!(read);
+                    // 先轮询读取任务，确保空闲超时计时器已创建，再推进时间。
+                    assert!(futures_util::poll!(&mut read).is_pending());
+                    tokio::time::advance(duration + Duration::from_millis(1)).await;
+                    let error = read.await.unwrap_err();
+                    if total_deadline {
+                        assert!(error.is::<UpstreamResponseDeadline>());
+                    } else {
+                        assert!(
+                            error.is::<UpstreamReadIdleTimeout>(),
+                            "unexpected error: {error:#}"
+                        );
+                    }
+                }
+                tokio::time::resume();
+                drop(prepared);
+                wait_cancel(&cancelled).await;
+            })
+            .await;
+        }
     }
     #[tokio::test]
     async fn plugin_transport_rejects_bad_frames_and_redacts_plugin_errors() {

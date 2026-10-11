@@ -28,6 +28,7 @@ pub(crate) struct RuntimeRouterEndpoint {
     pub base_url: String,
     pub token: String,
     pub supports_websockets: bool,
+    /// 至少一条线路支持原生远程压缩；不影响统一 Provider 的选择。
     pub supports_remote_compaction: bool,
     /// Official ChatGPT routes are available this launch. Codex keeps its
     /// native OpenAI login for this provider; the independent router header
@@ -65,6 +66,10 @@ pub(crate) struct RequestLogCatalog {
 pub(crate) struct RequestLogProfile {
     pub(crate) id: String,
     pub(crate) name: String,
+    pub(crate) short_name: String,
+    pub(crate) official_account: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) official_account_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source_provider_id: Option<String>,
 }
@@ -79,6 +84,9 @@ impl RequestLogCatalog {
                 .map(|profile| RequestLogProfile {
                     id: profile.id.clone(),
                     name: profile.name.clone(),
+                    short_name: profile.display_short_name(),
+                    official_account: profile.official_account,
+                    official_account_id: profile.official_account_id.clone(),
                     source_provider_id: profile.source_provider_id.clone(),
                 })
                 .collect(),
@@ -834,6 +842,7 @@ impl RouterSnapshot {
                     && config.route_supports_websockets_this_launch(profile),
                 supports_remote_compaction: config
                     .route_supports_remote_compaction_this_launch(profile),
+                remote_compaction_protocol: profile.remote_compaction_protocol,
                 models: HashSet::new(),
                 websocket_config: [0; 32],
                 context_config: [0; 32],
@@ -1163,6 +1172,7 @@ pub(crate) struct RouteTarget {
     pub(crate) plugin_transport: Option<plugin_transport::Target>,
     pub(crate) supports_websockets: bool,
     pub(crate) supports_remote_compaction: bool,
+    pub(crate) remote_compaction_protocol: crate::config::RemoteCompactionProtocol,
     pub(crate) models: HashSet<String>,
     pub(crate) websocket_config: [u8; 32],
     pub(crate) context_config: [u8; 32],

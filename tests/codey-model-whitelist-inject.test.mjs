@@ -6,6 +6,204 @@ import { FakeElementCore } from "./helpers/fake-element.mjs";
 
 const MODEL_CONFIG_ID = "107580212";
 
+const mixedCompactionCatalog = {
+  status: "ok", models: ["local/shared", "remote/shared", "gpt-6-astra"],
+  default_model: "local/shared",
+  model_metadata: [
+    { model: "local/shared", source_model: "shared", route_provider_id: "local", provider_id: "codey_router", supports_remote_compaction: false },
+    { model: "remote/shared", source_model: "shared", route_provider_id: "remote", provider_id: "codey_router_remote", supports_remote_compaction: true },
+    { model: "gpt-6-astra", source_model: "gpt-6-astra", route_provider_id: "openai", provider_id: "codey_router_remote", supports_remote_compaction: true, official_account: true },
+  ],
+};
+const compactionRequest = (method, params, id = method) => ({ type: "mcp-request", request: { id, method, params } });
+const compactionReply = (runtime, id, result) => runtime.dispatchWindowEvent("message", {
+  data: { type: "mcp-response", message: { id, result } },
+});
+
+test("all routes use the single router for new and forked threads, including legacy metadata", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+  for (const method of ["thread/start", "thread/fork"]) {
+    for (const model of ["local/shared", "remote/shared", "gpt-6-astra", "unknown/shared"]) {
+      const routed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, { model }));
+      assert.equal(routed.request.params.modelProvider, "codey_router");
+    }
+  }
+  runtime.patch.dispose();
+});
+
+test("an explicit false capability overrides a stale remote provider hint", async () => {
+  const catalog = { ...mixedCompactionCatalog, model_metadata: mixedCompactionCatalog.model_metadata.map((entry) => (
+    entry.route_provider_id === "remote" ? { ...entry, supports_remote_compaction: false } : entry
+  )) };
+  const runtime = await loadPatch(catalog, [statsigClient()]);
+  for (const method of ["thread/start", "thread/resume", "thread/fork"]) {
+    const routed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, { model: "remote/shared" }));
+    assert.equal(routed.request.params.modelProvider, "codey_router");
+  }
+  runtime.patch.dispose();
+});
+
+test("the native request client sends route changes through its frozen bridge", async () => {
+  const sends = [];
+  const bridge = Object.freeze({ sendMessageFromView: (request) => sends.push(request) });
+  class NativeClient {
+    constructor(hostId = "local") { this.hostId = hostId; this.requestPromises = new Map(); }
+    enqueueRequest(method, params, ...options) {
+      const created = this.createRequest(method, params, options);
+      bridge.sendMessageFromView(created.request);
+      return created.promise;
+    }
+    createRequest(method, params, options) {
+      const id = String(sends.length + 1);
+      const promise = new Promise((resolve) => this.requestPromises.set(id, { method, resolve }));
+      return { request: { id, method, params, options }, promise };
+    }
+    onResult(id, result) { this.requestPromises.get(id)?.resolve(result); this.requestPromises.delete(id); }
+  }
+  const originals = [NativeClient.prototype.enqueueRequest, NativeClient.prototype.createRequest, NativeClient.prototype.onResult];
+  const client = new NativeClient();
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { requestClient: client });
+  assert.equal(await runtime.patch.ensureRequestGate(), true);
+  assert.equal(await runtime.patch.ensureRequestGate(), true);
+  const started = client.enqueueRequest("thread/start", { model: "remote/shared" }, "widget", 7);
+  assert.equal(sends[0].params.modelProvider, "codey_router");
+  assert.deepEqual(sends[0].options, ["widget", 7]);
+  // No renderer response event: the native resolver must confirm the carrier
+  // before consumers update React state and send another request.
+  client.onResult("1", { modelProvider: "codey_router_remote", thread: { id: "native", model: "shared" } });
+  await started;
+  for (const method of ["thread/settings/update", "turn/start", "thread/resume"]) {
+    const pending = client.enqueueRequest(method, { threadId: "native", model: "local/shared" });
+    const sent = sends.at(-1);
+    assert.equal(sent.params.modelProvider, method === "thread/resume" ? "codey_router" : undefined);
+    client.onResult(sent.id, { modelProvider: "codey_router", thread: { id: "native", model: "shared" } });
+    await pending;
+  }
+  assert.equal(sends.length, 4, "Codey route changes reach the frozen bridge");
+  const remote = new NativeClient("remote-host");
+  const bypassed = remote.enqueueRequest("thread/start", { model: "local/shared" });
+  assert.equal(sends[4].params.modelProvider, undefined);
+  remote.onResult("5", {});
+  await bypassed;
+  const listed = client.enqueueRequest("model/list", {});
+  client.onResult("6", { data: [{ model: "stale" }] });
+  const models = await listed;
+  assert.ok(models.data.some((entry) => entry.model === "remote/shared"));
+  assert.equal(models.data.some((entry) => entry.model === "stale"), false);
+  runtime.patch.dispose();
+  assert.deepEqual([NativeClient.prototype.enqueueRequest, NativeClient.prototype.createRequest, NativeClient.prototype.onResult], originals);
+});
+
+test("disposing before a cached native gate installs leaves the client unchanged", async () => {
+  class NativeClient {
+    constructor() { this.hostId = "local"; }
+    enqueueRequest() {}
+    createRequest() {}
+    onResult() {}
+  }
+  const original = NativeClient.prototype.enqueueRequest;
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { cachedRequestClient: new NativeClient() });
+  const pending = runtime.patch.ensureRequestGate();
+  runtime.patch.dispose();
+  await assert.rejects(pending, /已重新加载/);
+  assert.equal(NativeClient.prototype.enqueueRequest, original);
+});
+
+test("native request gate fails when the client cannot be verified", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { requestClient: { hostId: "local" } });
+  await assert.rejects(runtime.patch.ensureRequestGate(), /不可校验/);
+  runtime.patch.dispose();
+});
+
+test("resume and fork retain the saved route after remote compaction is disabled", async () => {
+  const catalog = {
+    ...mixedCompactionCatalog,
+    default_model: "gpt-6-astra",
+    model_metadata: mixedCompactionCatalog.model_metadata.map((entry) => entry.route_provider_id === "remote"
+      ? { ...entry, provider_id: "codey_router", supports_remote_compaction: false } : entry),
+  };
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["saved", { routeProviderId: "remote", sourceModel: "shared" }],
+  ]));
+  const runtime = await loadPatch(catalog, [statsigClient()], { storage });
+  for (const method of ["thread/resume", "thread/fork"]) {
+    const routed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, {
+      threadId: "saved", modelProvider: "codey_router_remote",
+    }));
+    assert.equal(routed.request.params.model, "remote/shared");
+    assert.equal(routed.request.params.modelProvider, "codey_router");
+  }
+  runtime.patch.dispose();
+});
+
+test("unknown model-less forks do not inherit the remote default route", async () => {
+  const runtime = await loadPatch({ ...mixedCompactionCatalog, default_model: "gpt-6-astra" }, [statsigClient()]);
+  const routed = runtime.patch.rewriteOutgoingMessage(compactionRequest("thread/fork", {
+    threadId: "unknown", modelProvider: "codey_router_remote",
+  }));
+  assert.equal(Object.hasOwn(routed.request.params, "model"), false);
+  assert.equal(routed.request.params.modelProvider, "codey_router");
+  runtime.patch.dispose();
+});
+
+test("loaded Codey threads switch both directions without a blocked provider request", async () => {
+  for (const currentProvider of ["codey_router", "codey_router_remote"]) {
+    const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+    runtime.patch.rewriteOutgoingMessage(compactionRequest("thread/start", { model: "local/shared" }));
+    compactionReply(runtime, "thread/start", { modelProvider: currentProvider, thread: { id: "mixed", model: "shared" } });
+    for (const model of ["remote/shared", "local/shared", "gpt-6-astra"]) {
+      for (const method of ["thread/settings/update", "thread/resume", "turn/start"]) {
+        const changed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, { threadId: "mixed", model }));
+        assert.equal(runtime.patch.isBlockedOutgoingMessage(changed), false);
+        assert.equal(Object.getOwnPropertySymbols(changed.request.params).some((key) => (
+          key.description === "codeyBlockedProviderRequest"
+        )), false);
+        assert.equal(changed.request.params.modelProvider, method === "thread/resume" ? "codey_router" : undefined);
+      }
+    }
+    runtime.patch.dispose();
+  }
+});
+
+for (const returnedProvider of [undefined, "codey_router", "codey_router_remote"]) {
+  test(`resume retains compatibility with its known Codey carrier (returned provider: ${returnedProvider})`, async () => {
+    const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+    runtime.patch.rewriteOutgoingMessage(compactionRequest("thread/resume", { threadId: "loaded", model: "remote/shared", modelProvider: "codey_router" }));
+    compactionReply(runtime, "thread/resume", { modelProvider: returnedProvider, thread: { id: "loaded", model: "shared", modelProvider: "codey_router" } });
+    const turn = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId: "loaded" }));
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), false);
+    runtime.patch.dispose();
+  });
+}
+
+test("a resume response without any provider cannot confirm the requested carrier", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+  runtime.patch.rewriteOutgoingMessage(compactionRequest("thread/resume", { threadId: "unknown", model: "remote/shared" }));
+  compactionReply(runtime, "thread/resume", { thread: { id: "unknown", model: "shared" } });
+  const turn = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId: "unknown", model: "remote/shared" }));
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), true);
+  runtime.patch.dispose();
+});
+
+test("non-Codey providers still require migration before route changes", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+  for (const modelProvider of ["openai", "local-official", "external-provider"]) {
+    for (const method of ["thread/settings/update", "turn/start"]) {
+      const changed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, {
+        threadId: modelProvider, model: "remote/shared", modelProvider,
+      }));
+      assert.equal(runtime.patch.isBlockedOutgoingMessage(changed), true);
+      const blockedKey = Object.getOwnPropertySymbols(changed.request.params).find((key) => (
+        key.description === "codeyBlockedProviderRequest"
+      ));
+      assert.equal(changed.request.params[blockedKey].reason, "provider_migration_required");
+      assert.equal(changed.request.params[blockedKey].targetProviderId, "codey_router");
+    }
+  }
+  runtime.patch.dispose();
+});
+
 for (const nativeSelectionOnly of [false, true]) {
 test(`Fast stays available across routes and models (native selection: ${nativeSelectionOnly})`, async () => {
   const body = new FakeElementCore("body", { connected: true });
@@ -90,7 +288,7 @@ test(`Fast stays available across routes and models (native selection: ${nativeS
 async function loadPatch(
   catalogResponse,
   clients,
-  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false } = {},
+  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false, requestClient = null, cachedRequestClient = null } = {},
 ) {
   const [bridgeSource, source] = await Promise.all([
     readFile(new URL("../public/codey-bridge.js", import.meta.url), "utf8"),
@@ -202,6 +400,8 @@ async function loadPatch(
     },
   };
   if (storage) window.localStorage = storage;
+  if (requestClient) window.__codeyLoadCodexRequestClient = async () => requestClient;
+  if (cachedRequestClient) window.__codeyAppServerRequestClients = new Map([["local", cachedRequestClient]]);
   if (bridgeReady) window.__codexSessionDeleteBridge = bridge;
   Function("window", "document", "globalThis", "console", bridgeSource)(
     window,
@@ -693,7 +893,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "62");
+  assert.equal(patch.version, "66");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -1077,7 +1277,7 @@ test("a raw model keeps its persisted thread route when multiple routes share th
       type: "mcp-response",
       message: {
         id: "persisted-route-start",
-        result: { thread: { id: "persisted-thread", model: "shared-model" } },
+        result: { modelProvider: "codey_router", thread: { id: "persisted-thread", model: "shared-model" } },
       },
     },
   });
@@ -2096,6 +2296,7 @@ test("an id-less app-server resume records its router migration after request cr
       message: {
         id: "created-after-preflight",
         result: {
+          modelProvider: "codey_router",
           thread: {
             id: "id-less-resume-thread",
             modelProvider: "openai",
@@ -2177,6 +2378,7 @@ test("a legacy custom-carrier thread resumes onto the router and continues on a 
       message: {
         id: "resume-legacy-custom-thread",
         result: {
+          modelProvider: "codey_router",
           thread: {
             id: "legacy-custom-thread",
             model: "gpt-5.6-sol",
@@ -2267,6 +2469,7 @@ test("an external-provider thread resumes onto the router and switches to an off
       message: {
         id: "resume-external-official-thread",
         result: {
+          modelProvider: "codey_router",
           thread: {
             id: "external-official-thread",
             model: "legacy-vendor-model",
@@ -2325,6 +2528,10 @@ test("every official route requires the local router even on a legacy OpenAI tas
         type: "mcp-request", request: { method, params: { threadId: "official-task", model } },
       });
       assert.equal(runtime.patch.isBlockedOutgoingMessage(request), true);
+      const blockedKey = Object.getOwnPropertySymbols(request.request.params).find((key) => (
+        key.description === "codeyBlockedProviderRequest"
+      ));
+      assert.equal(request.request.params[blockedKey].reason, "provider_migration_required");
     }
     const resume = runtime.patch.rewriteOutgoingMessage({
       type: "mcp-request", request: {
@@ -2556,6 +2763,7 @@ test("a prewarmed gateway thread switches models without an invalid turn provide
       message: {
         id: "prewarm-router-draft",
         result: {
+          modelProvider: "codey_router",
           thread: { id: "draft-thread", modelProvider: "codey_router" },
         },
       },
@@ -3036,12 +3244,12 @@ test("model picker menu groups models under route headings without changing mode
 
   runtime.patch.enhanceModelMenus();
 
-  assert.equal(menu.children[0].textContent, "官方线路");
+  assert.equal(menu.children[0].textContent, "[官] 官方线路");
   assert.equal(menu.children[1], officialItem);
   assert.equal(officialItem.textContent, "gpt-5.6-sol");
   assert.equal(officialItem.dataset.codeyRouteModel, "gpt-5.6-sol");
   assert.equal(officialItem.getAttribute("aria-label"), "官方线路 / gpt-5.6-sol");
-  assert.equal(menu.children[2].textContent, "中转线路");
+  assert.equal(menu.children[2].textContent, "[中转] 中转线路");
   assert.equal(menu.children[3], relayItem);
   assert.equal(relayItem.textContent, "gpt-5.6-sol");
   assert.equal(relayItem.dataset.codeyRouteModel, "relay/gpt-5.6-sol");
@@ -3068,6 +3276,68 @@ test("model picker menu groups models under route headings without changing mode
     model: "gpt-5.6-sol",
     responsesapiClientMetadata: { codey_route: "relay" },
   });
+  runtime.patch.dispose();
+});
+
+test("model picker headings use name fallbacks and update when a short name changes", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const menu = body.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+  const officialItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  officialItem.textContent = "gpt-6-luna";
+  const relayItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  relayItem.textContent = "relay/gpt-6-luna";
+  const catalog = {
+    status: "ok",
+    models: ["gpt-6-luna", "relay/gpt-6-luna"],
+    default_model: "gpt-6-luna",
+    model_metadata: [
+      {
+        model: "gpt-6-luna",
+        route_name: "Plus",
+        provider_id: "openai",
+        source_model: "gpt-6-luna",
+      },
+      {
+        model: "relay/gpt-6-luna",
+        route_name: "😀备用",
+        provider_id: "relay",
+        source_model: "gpt-6-luna",
+      },
+    ],
+  };
+  const runtime = await loadPatch(catalog, [statsigClient()], { documentBody: body });
+  runtime.patch.enhanceModelMenus();
+  const headings = () => menu.children
+    .filter((child) => child.dataset.codeyRouteHeading)
+    .map((heading) => heading.textContent);
+  assert.deepEqual(headings(), ["[Pl] Plus", "[😀备] 😀备用"]);
+
+  await runtime.patch.setCatalog({
+    ...catalog,
+    model_metadata: catalog.model_metadata.map((metadata) => ({
+      ...metadata,
+      route_prefix: metadata.provider_id === "relay" ? "晚" : "Pl",
+    })),
+  });
+  runtime.patch.enhanceModelMenus();
+  assert.deepEqual(headings(), ["[Pl] Plus", "[晚] 😀备用"]);
+  await runtime.patch.setCatalog({
+    ...catalog,
+    model_metadata: catalog.model_metadata.map((metadata) => ({
+      ...metadata,
+      route_name: "",
+      route_prefix: metadata.provider_id === "relay" ? "晚" : "Pl",
+    })),
+  });
+  runtime.patch.enhanceModelMenus();
+  assert.deepEqual(headings(), ["Pl", "晚"]);
+  assert.equal(relayItem.dataset.codeyRouteModel, "relay/gpt-6-luna");
   runtime.patch.dispose();
 });
 
@@ -3198,7 +3468,7 @@ test("an open model picker hides a route row removed by a hot catalog update", a
   assert.deepEqual(
     menu.children.filter((child) => child.dataset.codeyRouteHeading)
       .map((heading) => heading.textContent),
-    ["OpenAI 官方直登"],
+    ["[官] OpenAI 官方直登"],
   );
 
   // A virtualized native row can be reused for a current model later. The
@@ -4306,6 +4576,30 @@ test("the catalog load retries when the bridge appears after injection", async (
   runtime.patch.dispose();
 });
 
+test("cold resume and fork preserve null models before and after the catalog arrives", async () => {
+  const runtime = await loadPatch({
+    status: "ok", models: ["unrelated"], default_model: "unrelated",
+  }, [statsigClient()], { bridgeReady: false });
+  for (const loaded of [false, true]) {
+    if (loaded) {
+      runtime.connectBridge();
+      await runtime.runNextTimer();
+    }
+    for (const method of ["thread/resume", "thread/fork"]) {
+      for (const modelParams of [{ model: null }, {}]) {
+        const params = Object.freeze({ threadId: "cold", ...modelParams });
+        const rewritten = runtime.patch.rewriteOutgoingMessage({
+          type: "mcp-request", request: { method, params },
+        }).request.params;
+        assert.equal(rewritten.model, modelParams.model);
+        assert.equal(Object.hasOwn(rewritten, "model"), Object.hasOwn(modelParams, "model"));
+        assert.equal(rewritten.modelProvider, "codey_router");
+      }
+    }
+  }
+  runtime.patch.dispose();
+});
+
 test("failed catalog responses preserve the native allowlist", async () => {
   const client = statsigClient();
   const { patch } = await loadPatch({
@@ -4405,6 +4699,27 @@ test("persisted encoded aliases recover on a fresh renderer and history-only ref
   } }, [statsigClient()]);
   assert.equal(reopened.patch.rewriteOutgoingMessage(original).request.params.model, "new%2Froute/vendor/model");
   reopened.patch.dispose();
+});
+
+test("a null-model resume restores its saved route instead of selecting the global default", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["restored", { routeProviderId: "current", sourceModel: "vendor/model" }],
+  ]));
+  const catalog = historicalRouteCatalog(["current"]);
+  const unrelated = historicalRouteCatalog(["another"], "different-model");
+  const runtime = await loadPatch({
+    ...catalog, models: [...unrelated.models, ...catalog.models],
+    default_model: unrelated.default_model,
+    model_metadata: [...unrelated.model_metadata, ...catalog.model_metadata],
+  }, [statsigClient()], { storage });
+  const resumed = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request", request: { method: "thread/resume", params: {
+      threadId: "restored", model: null, modelProvider: "codey_router",
+    } },
+  });
+  assert.equal(resumed.request.params.model, "current/vendor/model");
+  runtime.patch.dispose();
 });
 
 test("a model-less resume restores and persists the same model after its route disappears", async () => {
@@ -4511,7 +4826,7 @@ test("native mode can resume from a legacy binding without a model override and 
     "a failed resume must not update the runtime provider");
   runtime.patch.rewriteOutgoingMessage(request);
   runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
-    id: "resume", result: { thread: { id: "old", modelProvider: "codey_router", model: "vendor/model" } },
+    id: "resume", result: { modelProvider: "native", thread: { id: "old", modelProvider: "codey_router", model: "vendor/model" } },
   } } });
   const continued = runtime.patch.rewriteOutgoingMessage(turn);
   assert.equal(continued, turn, "native app-server now owns the sticky model");

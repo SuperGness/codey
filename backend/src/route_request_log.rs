@@ -39,6 +39,16 @@ const MAX_QUERY_PAGE_SIZE: u64 = 100;
 const MAX_QUERY_SEARCH_BYTES: usize = 256;
 const MAX_QUERY_FILTER_BYTES: usize = 128;
 const DAY_MS: u64 = 86_400_000;
+/// 生成阶段每秒输出 Token 数。口径与写入侧的 `output_tokens_per_second` 一致：
+/// 需要已知输出 Token 数与首内容耗时，且首内容之后仍有可计量的时间，
+/// 否则返回 NULL，聚合时自动忽略。
+const OUTPUT_SPEED_SQL: &str = "CASE
+        WHEN output_tokens > 0
+            AND total_duration_ms > COALESCE(downstream_first_content_ms, ttft_ms)
+        THEN output_tokens * 1000.0 / (
+            total_duration_ms - COALESCE(downstream_first_content_ms, ttft_ms)
+        )
+    END";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -209,7 +219,7 @@ impl RequestTokenUsage {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RouteRequestLogEntry {
     pub requested_service_tier: Option<String>,
@@ -248,6 +258,9 @@ pub(crate) struct RouteRequestLogEntry {
     pub upstream_header_ms: Option<u64>,
     pub total_duration_ms: u64,
     pub queue_delay_ms: u64,
+    /// 输出速度（生成阶段每秒输出 Token 数），无法计算时不记录。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens_per_second: Option<f64>,
     pub token_usage: RequestTokenUsage,
     pub usage_reported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -452,7 +465,7 @@ impl RouteRequestLogQuery {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RouteRequestLogQueryPage {
     pub status: &'static str,
@@ -479,6 +492,7 @@ pub(crate) struct RouteRequestLogSummary {
     pub cancelled_count: u64,
     pub avg_duration: Option<f64>,
     pub avg_ttft: Option<f64>,
+    pub avg_output_tokens_per_second: Option<f64>,
     pub avg_router_pre_upstream: Option<f64>,
     pub avg_upstream_header: Option<f64>,
     pub avg_upstream_first_byte: Option<f64>,
@@ -509,6 +523,7 @@ pub(crate) struct RouteRequestLogTrend {
     pub total_tokens_sum: Option<u64>,
     pub avg_duration: Option<f64>,
     pub avg_ttft: Option<f64>,
+    pub avg_output_tokens_per_second: Option<f64>,
     pub avg_downstream_first_content: Option<f64>,
 }
 
@@ -541,7 +556,7 @@ pub(crate) struct RouteRequestLogAnalytics {
     pub wal_bytes: u64,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RouteRequestLogQueryItem {
     pub requested_service_tier: Option<String>,
@@ -566,6 +581,8 @@ pub(crate) struct RouteRequestLogQueryItem {
     pub upstream_header_ms: Option<u64>,
     pub total_duration_ms: u64,
     pub queue_delay_ms: u64,
+    /// 输出速度（生成阶段每秒输出 Token 数），无法计算时为 None。
+    pub output_tokens_per_second: Option<f64>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub cached_input_tokens: Option<u64>,
@@ -1396,6 +1413,14 @@ impl RouteRequestLogProbe {
         }
         let token_usage = std::mem::take(&mut pending.token_usage);
         let usage_reported = token_usage.reported();
+        // 输出速度只覆盖首内容之后的生成阶段；首内容耗时缺失时无法区分
+        // 等待与生成，按不可计算处理。
+        let output_tokens_per_second = output_tokens_per_second(
+            token_usage.output_tokens,
+            total_duration_ms,
+            load_duration_ms(&self.shared.downstream_first_content_micros)
+                .or_else(|| load_duration_ms(&self.shared.first_byte_micros)),
+        );
         let usage_unavailable_reason = if usage_reported {
             None
         } else {
@@ -1441,6 +1466,7 @@ impl RouteRequestLogProbe {
             upstream_header_ms: load_duration_ms(&self.shared.upstream_header_micros),
             total_duration_ms,
             queue_delay_ms: 0,
+            output_tokens_per_second,
             usage_reported,
             usage_unavailable_reason,
             token_usage,
@@ -2507,7 +2533,8 @@ fn query_sqlite_route_request_logs(
             first_byte_source, subagent, upstream_error_summary,
             codex_session_id, codex_session_is_parent, {tier_columns},
             upstream_request_headers, {account_column}, {request_shape_columns},
-            {response_header_column}, {response_model_column}
+            {response_header_column}, {response_model_column},
+            {OUTPUT_SPEED_SQL} AS output_tokens_per_second
          FROM route_request_logs{where_clause}
          ORDER BY timestamp_unix_ms DESC, request_id DESC
          {pagination}"
@@ -2663,19 +2690,24 @@ fn sqlite_query_filters(
     }
 }
 
-const SUMMARY_COLUMNS: &str = "COUNT(*),
+fn summary_columns() -> String {
+    format!(
+        "COUNT(*),
     COALESCE(SUM(status = 'succeeded'), 0), COALESCE(SUM(status = 'failed'), 0),
     COALESCE(SUM(status = 'incomplete'), 0), COALESCE(SUM(status = 'cancelled'), 0),
     AVG(CASE WHEN total_duration_ms >= 0 THEN total_duration_ms END),
     AVG(CASE WHEN COALESCE(downstream_first_content_ms, ttft_ms) >= 0
         THEN COALESCE(downstream_first_content_ms, ttft_ms) END),
+    AVG({OUTPUT_SPEED_SQL}),
     AVG(CASE WHEN router_pre_upstream_ms >= 0 THEN router_pre_upstream_ms END),
     AVG(CASE WHEN upstream_header_ms >= 0 THEN upstream_header_ms END),
     AVG(CASE WHEN upstream_first_byte_ms >= 0 THEN upstream_first_byte_ms END),
     AVG(CASE WHEN downstream_first_content_ms >= 0 THEN downstream_first_content_ms END),
     AVG(CASE WHEN queue_delay_ms >= 0 THEN queue_delay_ms END),
     SUM(input_tokens), SUM(output_tokens), SUM(total_tokens), SUM(cached_input_tokens),
-    COALESCE(SUM(usage_reported != 0), 0), COUNT(total_tokens)";
+    COALESCE(SUM(usage_reported != 0), 0), COUNT(total_tokens)"
+    )
+}
 
 fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequestLogSummary> {
     let total = row_u64(row, 0)?;
@@ -2688,18 +2720,19 @@ fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequestLog
         cancelled_count: row_u64(row, 4)?,
         avg_duration: row.get(5)?,
         avg_ttft: row.get(6)?,
-        avg_router_pre_upstream: row.get(7)?,
-        avg_upstream_header: row.get(8)?,
-        avg_upstream_first_byte: row.get(9)?,
-        avg_downstream_first_content: row.get(10)?,
-        avg_queue_delay: row.get(11)?,
+        avg_output_tokens_per_second: row.get(7)?,
+        avg_router_pre_upstream: row.get(8)?,
+        avg_upstream_header: row.get(9)?,
+        avg_upstream_first_byte: row.get(10)?,
+        avg_downstream_first_content: row.get(11)?,
+        avg_queue_delay: row.get(12)?,
         success_rate: (total > 0).then(|| succeeded_count as f64 * 100.0 / total as f64),
-        input_tokens_sum: row_optional_u64(row, 12)?,
-        output_tokens_sum: row_optional_u64(row, 13)?,
-        total_tokens_sum: row_optional_u64(row, 14)?,
-        cached_tokens_sum: row_optional_u64(row, 15)?,
-        usage_reported_count: row_u64(row, 16)?,
-        total_tokens_known_count: row_u64(row, 17)?,
+        input_tokens_sum: row_optional_u64(row, 13)?,
+        output_tokens_sum: row_optional_u64(row, 14)?,
+        total_tokens_sum: row_optional_u64(row, 15)?,
+        cached_tokens_sum: row_optional_u64(row, 16)?,
+        usage_reported_count: row_u64(row, 17)?,
+        total_tokens_known_count: row_u64(row, 18)?,
     })
 }
 
@@ -3023,8 +3056,9 @@ pub(crate) fn query_route_request_log_stats(
         };
     }
     let (where_clause, values) = sqlite_query_filters(&query, optional_columns.official_account);
+    let summary_columns = summary_columns();
     result.summary = transaction.query_row(
-        &format!("SELECT {SUMMARY_COLUMNS} FROM route_request_logs{where_clause}"),
+        &format!("SELECT {summary_columns} FROM route_request_logs{where_clause}"),
         params_from_iter(values.iter()),
         summary_from_row,
     )?;
@@ -3047,7 +3081,7 @@ pub(crate) fn query_route_request_log_stats(
             "COUNT(*) DESC, group_key"
         };
         let sql = format!(
-            "SELECT {SUMMARY_COLUMNS}, COALESCE({column}, '') AS group_key
+            "SELECT {summary_columns}, COALESCE({column}, '') AS group_key
             FROM route_request_logs{where_clause} GROUP BY group_key
             ORDER BY {order} LIMIT 51"
         );
@@ -3055,7 +3089,7 @@ pub(crate) fn query_route_request_log_stats(
             .prepare(&sql)?
             .query_map(params_from_iter(values.iter()), |row| {
                 Ok(RouteRequestLogGroup {
-                    key: row.get(18)?,
+                    key: row.get(19)?,
                     summary: summary_from_row(row)?,
                 })
             })?
@@ -3068,6 +3102,7 @@ pub(crate) fn query_route_request_log_stats(
     let sql = format!("SELECT timestamp_unix_ms / {bucket_ms} * {bucket_ms} AS bucket,
         COUNT(*), SUM(total_tokens), AVG(CASE WHEN total_duration_ms >= 0 THEN total_duration_ms END),
         AVG(CASE WHEN COALESCE(downstream_first_content_ms, ttft_ms) >= 0 THEN COALESCE(downstream_first_content_ms, ttft_ms) END),
+        AVG({OUTPUT_SPEED_SQL}),
         AVG(CASE WHEN downstream_first_content_ms >= 0 THEN downstream_first_content_ms END)
         FROM route_request_logs{where_clause} GROUP BY bucket ORDER BY bucket");
     result.trend = transaction
@@ -3079,7 +3114,8 @@ pub(crate) fn query_route_request_log_stats(
                 total_tokens_sum: row_optional_u64(row, 2)?,
                 avg_duration: row.get(3)?,
                 avg_ttft: row.get(4)?,
-                avg_downstream_first_content: row.get(5)?,
+                avg_output_tokens_per_second: row.get(5)?,
+                avg_downstream_first_content: row.get(6)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -3259,6 +3295,7 @@ fn query_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequest
         upstream_bytes: row_optional_u64(row, 54)?,
         upstream_response_headers: row.get(55)?,
         upstream_response_model: row.get(56)?,
+        output_tokens_per_second: row.get(57)?,
     })
 }
 
@@ -3535,6 +3572,24 @@ fn mix64(mut value: u64) -> u64 {
 
 fn to_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+/// 生成阶段每秒输出 Token 数。需要已知输出 Token 数和首个可见内容时间，
+/// 且首内容之后仍有可计量的时间；条件不足时返回 None。
+fn output_tokens_per_second(
+    output_tokens: Option<u64>,
+    total_duration_ms: u64,
+    first_content_ms: Option<u64>,
+) -> Option<f64> {
+    let output_tokens = output_tokens?;
+    if output_tokens == 0 {
+        return None;
+    }
+    let generation_ms = total_duration_ms.checked_sub(first_content_ms?)?;
+    if generation_ms == 0 {
+        return None;
+    }
+    Some(output_tokens as f64 * 1_000.0 / generation_ms as f64)
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -4040,6 +4095,7 @@ mod tests {
             upstream_header_ms: Some(3),
             total_duration_ms: 45,
             queue_delay_ms: 0,
+            output_tokens_per_second: None,
             token_usage: RequestTokenUsage {
                 input_tokens: Some(10),
                 output_tokens: Some(5),
@@ -4564,6 +4620,14 @@ mod tests {
         assert_eq!(stats.summary.incomplete_count, 1);
         assert_eq!(stats.summary.avg_duration, Some(30.0));
         assert_eq!(stats.summary.avg_ttft, Some(7.0));
+        let avg_output_tokens_per_second = stats
+            .summary
+            .avg_output_tokens_per_second
+            .expect("只有 c 具备完整的输出速度口径");
+        assert!(
+            (avg_output_tokens_per_second - 10_000.0 / 46.0).abs() < 1e-9,
+            "{avg_output_tokens_per_second}"
+        );
         assert_eq!(stats.summary.input_tokens_sum, Some(15));
         assert_eq!(stats.summary.output_tokens_sum, Some(15));
         assert_eq!(stats.summary.total_tokens_sum, Some(30));
@@ -4571,6 +4635,10 @@ mod tests {
         assert_eq!(stats.summary.usage_reported_count, 2);
         assert_eq!(stats.groups.len(), 3);
         assert_eq!(stats.trend[0].total, 3);
+        assert_eq!(
+            stats.trend[0].avg_output_tokens_per_second,
+            stats.summary.avg_output_tokens_per_second
+        );
         let missing = query_route_request_log_stats(
             directory.path(),
             RouteRequestLogBackend::Sqlite,
@@ -4582,6 +4650,7 @@ mod tests {
         .unwrap();
         assert_eq!(missing.summary.total, 1);
         assert_eq!(missing.summary.total_tokens_sum, None);
+        assert_eq!(missing.summary.avg_output_tokens_per_second, None);
         let empty = query_route_request_log_stats(
             directory.path(),
             RouteRequestLogBackend::Sqlite,
@@ -4593,6 +4662,7 @@ mod tests {
         .unwrap();
         assert_eq!(empty.summary.total, 0);
         assert_eq!(empty.summary.avg_duration, None);
+        assert_eq!(empty.summary.avg_output_tokens_per_second, None);
         assert_eq!(empty.summary.success_rate, None);
         let normalized = RouteRequestLogQuery {
             provider: Some("PROVIDER-A".into()),
@@ -5383,6 +5453,7 @@ mod tests {
             upstream_header_ms: None,
             total_duration_ms: 1,
             queue_delay_ms: 0,
+            output_tokens_per_second: None,
             input_tokens: None,
             output_tokens: None,
             cached_input_tokens: None,
@@ -5440,6 +5511,7 @@ mod tests {
         assert!(value.get("routerPreUpstreamMs").unwrap().is_null());
         assert!(value.get("upstreamFirstByteMs").unwrap().is_null());
         assert!(value.get("downstreamFirstContentMs").unwrap().is_null());
+        assert!(value.get("outputTokensPerSecond").unwrap().is_null());
         // 上游未回报实际使用模型时该字段为空。
         assert!(value.get("upstreamResponseModel").unwrap().is_null());
         assert!(value.get("request_id").is_none());
@@ -5458,6 +5530,19 @@ mod tests {
         assert!(value.get("routerPreUpstreamMs").is_none());
         assert!(value.get("upstreamFirstByteMs").is_none());
         assert!(value.get("downstreamFirstContentMs").is_none());
+    }
+
+    #[test]
+    fn output_speed_requires_tokens_time_and_a_generation_window() {
+        assert_eq!(
+            output_tokens_per_second(Some(100), 1_000, Some(200)),
+            Some(125.0)
+        );
+        assert_eq!(output_tokens_per_second(Some(100), 1_000, None), None);
+        assert_eq!(output_tokens_per_second(Some(100), 200, Some(200)), None);
+        assert_eq!(output_tokens_per_second(Some(100), 100, Some(200)), None);
+        assert_eq!(output_tokens_per_second(Some(0), 1_000, Some(200)), None);
+        assert_eq!(output_tokens_per_second(None, 1_000, Some(200)), None);
     }
 
     #[cfg(unix)]

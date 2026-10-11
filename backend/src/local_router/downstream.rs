@@ -134,6 +134,17 @@ impl std::fmt::Display for DownstreamClosed {
 
 impl std::error::Error for DownstreamClosed {}
 
+#[derive(Debug)]
+pub(crate) struct DownstreamResponseInterrupt;
+
+impl std::fmt::Display for DownstreamResponseInterrupt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("下游请求中断当前 Responses 响应")
+    }
+}
+
+impl std::error::Error for DownstreamResponseInterrupt {}
+
 pub(crate) struct ObservedResponsesDownstream<'a, D>
 where
     D: ResponsesDownstream + ?Sized,
@@ -501,29 +512,15 @@ pub(crate) struct WebSocketResponsesDownstream {
     pub(crate) stream_id: Option<String>,
     pub(crate) adapted_history: AdaptedResponsesHistory,
     pub(crate) native_history: NativeResponsesHistory,
+    pub(crate) steering: SteeringState,
+    pub(crate) pending_interrupt: Option<Value>,
+    pub(crate) interrupt_forwarding: bool,
     pub(crate) terminal_started: bool,
     pub(crate) pending_messages: VecDeque<(WebSocketMessage, Option<OwnedSemaphorePermit>)>,
     pub(crate) pending_budget_blocked: bool,
     pub(crate) request_body_budget: Arc<Semaphore>,
     pub(crate) config_changes: tokio::sync::watch::Receiver<u64>,
     pub(crate) idle_registry: Arc<Mutex<IdleDownstreamRegistry>>,
-}
-
-/// Streaming items are retained for a later replay, so only items a replayed
-/// request can carry are worth keeping. Reasoning kept only as a summary is
-/// replayable; reasoning with nothing at all is not.
-fn replayable_streamed_item(item: &Value) -> bool {
-    match item.get("type").and_then(Value::as_str) {
-        Some("reasoning") => {
-            item.get("encrypted_content")
-                .and_then(Value::as_str)
-                .is_some_and(|content| !content.is_empty())
-                || reasoning_item_has_text(item)
-                || summary_replay_text(item).is_some()
-        }
-        Some("item_reference" | "compaction") => false,
-        _ => true,
-    }
 }
 
 /// Tool calls announce their payload in a separate event, so an item whose
@@ -567,12 +564,14 @@ fn same_history_item(left: &Value, right: &Value) -> bool {
 pub(crate) struct AdaptedResponsesHistory {
     pub(crate) last: Option<(String, Vec<Value>)>,
     pub(crate) pending_input: Option<Vec<Value>>,
+    pub(crate) requires_native_http: bool,
     /// Items the upstream streamed for the current turn. Streaming upstreams
     /// announce tool calls through output-item events and may omit them from
     /// the terminal `response.output`, so the terminal array alone cannot be
     /// trusted to describe the turn. Each entry carries whether the payload
     /// has arrived.
     pending_output: Vec<(usize, Value, bool)>,
+    pending_output_overflowed: bool,
     last_bytes: usize,
     budget: RetainedMemoryBudget,
 }
@@ -583,6 +582,7 @@ impl AdaptedResponsesHistory {
     pub(crate) fn clear_pending(&mut self) {
         self.pending_input = None;
         self.pending_output.clear();
+        self.pending_output_overflowed = false;
         self.budget
             .resize(self.last_bytes)
             .expect("releasing retained history budget cannot fail");
@@ -606,10 +606,7 @@ impl AdaptedResponsesHistory {
             .map(|index| index as usize);
         match kind {
             "response.output_item.added" | "response.output_item.done" => {
-                let Some(item) = event
-                    .get("item")
-                    .filter(|item| item.is_object() && replayable_streamed_item(item))
-                else {
+                let Some(item) = event.get("item").filter(|item| item.is_object()) else {
                     return;
                 };
                 // A skeleton announced by `added` still needs its arguments.
@@ -662,6 +659,7 @@ impl AdaptedResponsesHistory {
             return;
         }
         if self.pending_output.len() >= STREAMED_OUTPUT_ITEM_LIMIT {
+            self.pending_output_overflowed = true;
             return;
         }
         self.pending_output.push((index, item, complete));
@@ -698,9 +696,12 @@ impl AdaptedResponsesHistory {
             if !complete {
                 continue;
             }
-            if merged
-                .iter()
-                .any(|existing| same_history_item(existing, &item))
+            // 匿名输出也可能同时出现在流式事件和终态中；仅按位置去重，
+            // 保留不同位置上内容相同的合法消息。
+            if merged.get(index) == Some(&item)
+                || merged
+                    .iter()
+                    .any(|existing| same_history_item(existing, &item))
             {
                 continue;
             }
@@ -737,6 +738,8 @@ impl AdaptedResponsesHistory {
         previous_history: Option<&Self>,
     ) -> Result<bool> {
         self.pending_input = None;
+        self.pending_output.clear();
+        self.pending_output_overflowed = false;
         self.budget.resize(self.last_bytes)?;
         // Count without allocating a second encoded request. Reserve before
         // cloning history into pending state and the expanded request body.
@@ -788,6 +791,9 @@ impl AdaptedResponsesHistory {
         };
         let mut context = previous.cloned().unwrap_or_default();
         context.extend(input);
+        self.requires_native_http = previous_history
+            .is_some_and(|history| history.requires_native_http)
+            || context.iter().any(native_item_requires_http);
         if !expand || previous_response_id.is_none() {
             self.pending_input = Some(context);
             return Ok(false);
@@ -800,10 +806,14 @@ impl AdaptedResponsesHistory {
 
     pub(crate) fn remember(&mut self, response_id: &str, output: &[Value]) -> Result<()> {
         if self.pending_input.is_none() {
-            self.pending_output.clear();
+            self.clear_pending();
             return Ok(());
         }
+        if self.pending_output_overflowed {
+            anyhow::bail!("流式输出条目超过会话历史上限，无法确认完整上下文，请重新发送完整输入");
+        }
         let output = self.take_streamed_output(output);
+        self.requires_native_http |= output.iter().any(native_item_requires_http);
         let bytes = bounded_json_bytes(
             self.pending_input
                 .as_ref()

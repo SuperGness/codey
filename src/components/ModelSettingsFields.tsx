@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { cn } from "@heroui/react";
 import { IconChevronRight } from "@tabler/icons-react";
 
@@ -6,6 +7,7 @@ import {
   DEFAULT_CONTEXT_WINDOW_TOKENS,
   MAX_CONTEXT_WINDOW_TOKENS,
 } from "../modelContextPresets";
+import { formatTokenK, parseTokenK } from "../tokenUnits";
 import {
   MODEL_REASONING_EFFORT_LEVELS,
   normalizeReasoningEfforts,
@@ -29,6 +31,56 @@ export type ModelSettingsFieldsProps = {
   policy?: ModelContextConfig;
   reasoning?: ModelSettingsReasoningProps;
 };
+
+type TokenKInputProps = {
+  ariaLabel: string;
+  disabled: boolean;
+  maxTokens: number;
+  minTokens: number;
+  onChange: (tokens: number | undefined) => void;
+  placeholder: string;
+  value: number | null | undefined;
+};
+
+/// 以 K 为单位编辑 Token 数值，保留输入过程中的合法小数，失焦时回落到当前值。
+export function TokenKInput({
+  ariaLabel,
+  disabled,
+  maxTokens,
+  minTokens,
+  onChange,
+  placeholder,
+  value,
+}: TokenKInputProps) {
+  const [text, setText] = useState(value == null ? "" : formatTokenK(value));
+  useEffect(() => {
+    setText(value == null ? "" : formatTokenK(value));
+  }, [value]);
+
+  return (
+    <Input
+      type="text"
+      inputMode="decimal"
+      disabled={disabled}
+      className="h-7 rounded-md border-[rgb(var(--codey-ink-rgb,0,0,0))]/10 bg-[var(--codey-surface,#fff)] text-xs focus:border-[var(--codey-blue,#007aff)]"
+      aria-label={ariaLabel}
+      placeholder={placeholder}
+      value={text}
+      onChange={(event) => {
+        const raw = event.target.value;
+        setText(raw);
+        if (raw.trim() === "") {
+          onChange(undefined);
+          return;
+        }
+        const parsed = parseTokenK(raw);
+        if (parsed == null || parsed < minTokens || parsed > maxTokens) return;
+        onChange(parsed);
+      }}
+      onBlur={() => setText(value == null ? "" : formatTokenK(value))}
+    />
+  );
+}
 
 /// 单个模型的上下文预算与思考强度声明。
 export function ModelSettingsFields({
@@ -57,7 +109,7 @@ export function ModelSettingsFields({
     : MODEL_REASONING_EFFORT_LEVELS;
   const summaryBadges: string[] = [];
   if (policy?.contextWindowTokens) {
-    summaryBadges.push(`${policy.contextWindowTokens.toLocaleString()} Token`);
+    summaryBadges.push(`${formatTokenK(policy.contextWindowTokens)}K Token`);
   }
   if (!followsTemplate && declaredLevels.length > 0) {
     summaryBadges.push(declaredLevels.join(" / "));
@@ -97,7 +149,7 @@ export function ModelSettingsFields({
       <div className="mt-1.5 rounded-[9px] border border-[rgb(var(--codey-ink-rgb,0,0,0))]/[0.08] bg-[var(--codey-surface-sunken,#f8f8fa)] p-3 shadow-[0_1px_2px_rgba(0,0,0,0.02)]">
         <div className="mb-2.5 flex items-start justify-between gap-2">
           <p className="text-[11px] leading-[1.45] text-[var(--codey-muted,#6e6e73)]">
-            自定义值优先于上游模板；清空窗口恢复默认。未知模型默认使用 {DEFAULT_CONTEXT_WINDOW_TOKENS} Token 保守预算，不代表服务端容量。窗口与压缩阈值的修改需重启 Codex 生效。
+            自定义值优先于上游模板；清空窗口恢复默认。未知模型默认使用 {formatTokenK(DEFAULT_CONTEXT_WINDOW_TOKENS)}K Token 保守预算，不代表服务端容量。窗口与压缩阈值的修改需重启 Codex 生效。
           </p>
           {policy && (
             <button
@@ -117,10 +169,10 @@ export function ModelSettingsFields({
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
           <label className="flex flex-col gap-1">
             <span className="text-[11px] font-medium text-[var(--codey-text-soft,#4b5563)]">
-              窗口 <span className="text-[10px] text-[var(--codey-subtle,#86868b)]">（Token）</span>
+              窗口 <span className="text-[10px] text-[var(--codey-subtle,#86868b)]">（K Token）</span>
             </span>
             <ModelContextWindowCombobox
-              ariaLabel={`${model} 窗口 Token`}
+              ariaLabel={`${model} 窗口 K Token`}
               disabled={disabled}
               placeholder="跟随模型目录"
               value={policy?.contextWindowTokens}
@@ -134,30 +186,23 @@ export function ModelSettingsFields({
             />
           </label>
           {([
-            ["autoCompactTokenLimit", "压缩阈值", 1, "自动"],
-            ["reserveOutputTokens", "输出预留", 1, "不单独预留"],
-          ] as const).map(([field, label, min, placeholder]) => (
+            ["autoCompactTokenLimit", "压缩阈值", "自动"],
+            ["reserveOutputTokens", "输出预留", "不单独预留"],
+          ] as const).map(([field, label, placeholder]) => (
             <label key={field} className="flex flex-col gap-1">
               <span className="text-[11px] font-medium text-[var(--codey-text-soft,#4b5563)]">
-                {label} <span className="text-[10px] text-[var(--codey-subtle,#86868b)]">（Token）</span>
+                {label} <span className="text-[10px] text-[var(--codey-subtle,#86868b)]">（K Token）</span>
               </span>
-              <Input
-                type="number"
-                min={min}
-                max={MAX_CONTEXT_WINDOW_TOKENS}
-                step={1}
+              <TokenKInput
                 disabled={disabled || !policy}
-                className="h-7 rounded-md border-[rgb(var(--codey-ink-rgb,0,0,0))]/10 bg-[var(--codey-surface,#fff)] text-xs focus:border-[var(--codey-blue,#007aff)]"
-                aria-label={`${model} ${label} Token`}
+                ariaLabel={`${model} ${label} K Token`}
                 placeholder={placeholder}
-                value={policy?.[field] ?? ""}
-                onChange={(event) => {
+                maxTokens={MAX_CONTEXT_WINDOW_TOKENS}
+                minTokens={1}
+                value={policy?.[field]}
+                onChange={(tokens) => {
                   if (!policy) return;
-                  const raw = event.target.value;
-                  onChange({
-                    ...policy,
-                    [field]: raw === "" ? undefined : Number(raw),
-                  });
+                  onChange({ ...policy, [field]: tokens });
                 }}
               />
             </label>

@@ -20,6 +20,12 @@ const UPDATE_DOWNLOAD_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_UPDATE_MANIFEST_BYTES: usize = 1024 * 1024;
 static DEVICE_IDENTITY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[derive(Clone, Copy)]
+enum UpdateRequestMode {
+    Automatic,
+    Manual,
+}
+
 #[cfg(test)]
 struct TestDeviceVersions {
     codex: Option<String>,
@@ -172,7 +178,8 @@ pub(super) async fn invoke(
                 .get("forceRefresh")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            check_for_updates(state, force_refresh).await
+            let manual = args.get("manual").and_then(Value::as_bool).unwrap_or(false);
+            check_for_updates(state, force_refresh, manual).await
         }
         "get_device_machine_no" => get_device_machine_no(state).await,
         "download_update" => download_update(state, args).await,
@@ -187,12 +194,19 @@ pub(super) async fn invoke(
 pub async fn check_for_updates(
     state: &Arc<AppState>,
     force_refresh: bool,
+    manual: bool,
 ) -> Result<Value, String> {
-    let candidate = if force_refresh {
-        update_candidate_with_ttl(state, Duration::ZERO).await?
+    let mode = if manual {
+        UpdateRequestMode::Manual
     } else {
-        check_for_update_candidate(state).await?
+        UpdateRequestMode::Automatic
     };
+    let cache_ttl = if force_refresh {
+        Duration::ZERO
+    } else {
+        UPDATE_CHECK_CACHE_TTL
+    };
+    let candidate = update_candidate_with_ttl(state, cache_ttl, mode).await?;
     serde_json::to_value(candidate.check).map_err(|error| error.to_string())
 }
 
@@ -212,7 +226,9 @@ async fn get_device_machine_no(state: &AppState) -> Result<Value, String> {
 }
 
 pub async fn download_update(state: &Arc<AppState>, args: &Value) -> Result<Value, String> {
-    let candidate = update_candidate_with_ttl(state, UPDATE_DOWNLOAD_CACHE_TTL).await?;
+    let candidate =
+        update_candidate_with_ttl(state, UPDATE_DOWNLOAD_CACHE_TTL, UpdateRequestMode::Manual)
+            .await?;
     if args.get("expectedVersion").and_then(Value::as_str)
         != Some(candidate.check.latest_version.as_str())
         || args.get("expectedPolicyId").and_then(Value::as_str)
@@ -220,7 +236,8 @@ pub async fn download_update(state: &Arc<AppState>, args: &Value) -> Result<Valu
     {
         return Err("更新目标已变化，请重新检查并确认更新".to_string());
     }
-    let download = download_update_candidate(state, &candidate).await?;
+    let download =
+        download_update_candidate_with_mode(state, &candidate, UpdateRequestMode::Manual).await?;
     serde_json::to_value(download).map_err(|error| error.to_string())
 }
 
@@ -264,41 +281,84 @@ pub async fn update_install_report(state: &Arc<AppState>) -> Result<Value, Strin
 pub(crate) async fn check_for_update_candidate(
     state: &Arc<AppState>,
 ) -> Result<UpdateCandidate, String> {
-    update_candidate_with_ttl(state, UPDATE_CHECK_CACHE_TTL).await
+    update_candidate_with_ttl(state, UPDATE_CHECK_CACHE_TTL, UpdateRequestMode::Automatic).await
 }
 
 async fn update_candidate_with_ttl(
     state: &Arc<AppState>,
     cache_ttl: Duration,
+    mode: UpdateRequestMode,
 ) -> Result<UpdateCandidate, String> {
+    let policy = update_policy(state, mode).await?;
     let release_admin_url = configured_release_admin_url(state).await?;
     let manifest_url = if let Some(base) = &release_admin_url {
         format!("release-admin:{base}")
     } else {
         configured_update_manifest_url(state).await?
     };
+    let cache_key = format!("{}:{manifest_url}", policy.as_str());
     let mut cache = state.update_candidate_cache.lock().await;
+    if update_policy(state, mode).await? != policy {
+        return Err("更新策略已变化，请重新检查更新".to_string());
+    }
     let now = Instant::now();
-    if let Some(candidate) =
-        reusable_update_candidate(cache.as_ref(), &manifest_url, now, cache_ttl)
-    {
+    if let Some(candidate) = reusable_update_candidate(cache.as_ref(), &cache_key, now, cache_ttl) {
         return Ok(candidate);
     }
 
     let check = if release_admin_url.is_some() {
-        fetch_release_admin_update(state, release_admin_url.as_deref().unwrap()).await?
+        fetch_release_admin_update(state, release_admin_url.as_deref().unwrap(), mode).await?
     } else {
         let manifest = fetch_configured_update_manifest(state, &manifest_url).await?;
         assess_update_manifest(env!("CARGO_PKG_VERSION"), &manifest)?
     };
+    let check = filter_update_policy(check, policy)?;
+    if update_policy(state, mode).await? != policy {
+        return Err("更新策略已变化，请重新检查更新".to_string());
+    }
     *state.available_update.write().await = check.update_available.then(|| check.clone());
     let candidate = UpdateCandidate { check };
     *cache = Some(CachedUpdateCandidate {
-        manifest_url,
+        manifest_url: cache_key,
         candidate: candidate.clone(),
         checked_at: Instant::now(),
     });
     Ok(candidate)
+}
+
+async fn update_policy(
+    state: &AppState,
+    mode: UpdateRequestMode,
+) -> Result<crate::config::CodeyUpdatePolicy, String> {
+    let policy = state.config.read().await.codey_update_policy;
+    if policy == crate::config::CodeyUpdatePolicy::Off {
+        return match mode {
+            UpdateRequestMode::Automatic => Err("已关闭自动检查更新".to_string()),
+            UpdateRequestMode::Manual => Ok(crate::config::CodeyUpdatePolicy::Stable),
+        };
+    }
+    Ok(policy)
+}
+
+fn filter_update_policy(
+    mut check: UpdateCheck,
+    policy: crate::config::CodeyUpdatePolicy,
+) -> Result<UpdateCheck, String> {
+    if policy == crate::config::CodeyUpdatePolicy::Stable
+        && !Version::parse(&check.latest_version)
+            .map_err(|error| error.to_string())?
+            .pre
+            .is_empty()
+    {
+        check.update_available = false;
+        check.latest_version = check.current_version.clone();
+        check.selected_asset = None;
+        check.release_notes = None;
+        check.publish_id = None;
+        check.policy_id = None;
+        check.rollback = None;
+    }
+    Ok(check)
 }
 
 async fn configured_release_admin_url(state: &AppState) -> Result<Option<String>, String> {
@@ -464,9 +524,11 @@ struct DeviceIdentityResponse {
 async fn fetch_release_admin_update(
     state: &AppState,
     base_url: &str,
+    mode: UpdateRequestMode,
 ) -> Result<UpdateCheck, String> {
+    let policy = update_policy(state, mode).await?;
     retry_pending_device_event(state).await;
-    // 身份仅用于灰度筛选，注册失败仍可检查公开全量版本。
+    // 注册失败仍可检查公开版本，定向推送必须验证设备身份。
     let identity = load_or_register_device(state, base_url).await.ok();
     let endpoint = reqwest::Url::parse(&format!("{base_url}/api/updates/check"))
         .map_err(|_| "发布管理服务地址无效".to_string())?;
@@ -474,6 +536,7 @@ async fn fetch_release_admin_update(
     let mut query = vec![
         ("currentVersion", env!("CARGO_PKG_VERSION").to_string()),
         ("rollbackProtocol", "1".to_string()),
+        ("updatePolicy", policy.as_str().to_string()),
         ("osName", current_os_name().to_string()),
     ];
     if let Some(codex_version) = current_codex_version().await {
@@ -487,6 +550,9 @@ async fn fetch_release_admin_update(
         request = request
             .header("x-machine-no", &identity.machine_no)
             .header("x-device-key", &identity.install_key);
+    }
+    if update_policy(state, mode).await? != policy {
+        return Err("更新策略已变化，请重新检查更新".to_string());
     }
     let response = request
         .header(
@@ -538,7 +604,10 @@ async fn fetch_release_admin_update(
     } else {
         candidate.publish_id
     };
-    Ok(check)
+    if update_policy(state, mode).await? != policy {
+        return Err("更新策略已变化，请重新检查更新".to_string());
+    }
+    filter_update_policy(check, policy)
 }
 
 // 只有管理服务明确授权的源版本客户端才允许降级。
@@ -592,8 +661,20 @@ pub(crate) async fn download_update_candidate(
     state: &Arc<AppState>,
     candidate: &UpdateCandidate,
 ) -> Result<UpdateDownload, String> {
+    download_update_candidate_with_mode(state, candidate, UpdateRequestMode::Automatic).await
+}
+
+async fn download_update_candidate_with_mode(
+    state: &Arc<AppState>,
+    candidate: &UpdateCandidate,
+    mode: UpdateRequestMode,
+) -> Result<UpdateDownload, String> {
+    let policy = update_policy(state, mode).await?;
+    if !filter_update_policy(candidate.check.clone(), policy)?.update_available {
+        return Err("更新目标不符合当前更新策略".to_string());
+    }
     if let Some(base_url) = configured_release_admin_url(state).await? {
-        let fresh = fetch_release_admin_update(state, &base_url).await?;
+        let fresh = fetch_release_admin_update(state, &base_url, mode).await?;
         validate_same_update(&candidate.check, &fresh)?;
     }
     if !candidate.check.update_available {
@@ -698,7 +779,9 @@ pub async fn install_downloaded_update(
 ) -> Result<Value, String> {
     // 旧一轮的报告先清掉，否则下面的启动握手会把残留文件误认为助手已接手。
     crate::update_helper::clear_update_install_report(state.store.path());
-    if let Err(error) = start_downloaded_update(state, &file_path).await {
+    if let Err(error) =
+        start_downloaded_update_with_mode(state, &file_path, UpdateRequestMode::Manual).await
+    {
         if let Some(mut pending) = read_pending_device_update(state).await {
             pending.status = Some("failed".to_string());
             pending.message = Some(error.clone());
@@ -750,7 +833,15 @@ pub(crate) async fn start_downloaded_update(
     state: &AppState,
     file_path: &str,
 ) -> Result<(), String> {
-    let expected_update = resolve_expected_update(state).await?;
+    start_downloaded_update_with_mode(state, file_path, UpdateRequestMode::Automatic).await
+}
+
+async fn start_downloaded_update_with_mode(
+    state: &AppState,
+    file_path: &str,
+    mode: UpdateRequestMode,
+) -> Result<(), String> {
+    let expected_update = resolve_expected_update(state, mode).await?;
     let verified = verify_downloaded_update(&state.store, file_path, &expected_update).await?;
     if configured_release_admin_url(state).await?.is_some() {
         let bytes = tokio::fs::read(verified.path.with_extension("approval.json"))
@@ -760,18 +851,29 @@ pub(crate) async fn start_downloaded_update(
             .map_err(|_| "更新确认信息无效，请重新下载".to_string())?;
         validate_same_update(&approved, &expected_update)?;
         // 哈希校验可能耗时，启动安装器前再确认当前策略。
-        let fresh = resolve_expected_update(state).await?;
+        let fresh = resolve_expected_update(state, mode).await?;
         validate_same_update(&approved, &fresh)?;
+    }
+    if !filter_update_policy(expected_update, update_policy(state, mode).await?)?.update_available {
+        return Err("更新目标不符合当前更新策略".to_string());
     }
     spawn_update_installer(&verified.path, &verified.asset)
 }
 
 /// 管理端更新每次安装前重新校验，连接失败时停止安装。
-async fn resolve_expected_update(state: &AppState) -> Result<UpdateCheck, String> {
+async fn resolve_expected_update(
+    state: &AppState,
+    mode: UpdateRequestMode,
+) -> Result<UpdateCheck, String> {
+    let policy = update_policy(state, mode).await?;
     if let Some(base_url) = configured_release_admin_url(state).await? {
-        let check = fetch_release_admin_update(state, &base_url).await?;
+        let check = fetch_release_admin_update(state, &base_url, mode).await?;
         if !check.update_available {
             return Err("当前发布或回退授权已失效，请重新检查更新".to_string());
+        }
+        let check = filter_update_policy(check, policy)?;
+        if !check.update_available {
+            return Err("更新目标不符合当前更新策略".to_string());
         }
         return Ok(check);
     }
@@ -781,11 +883,18 @@ async fn resolve_expected_update(state: &AppState) -> Result<UpdateCheck, String
         && check.policy_id.is_none()
         && check.selected_asset.is_some()
     {
+        let check = filter_update_policy(check, policy)?;
+        if !check.update_available {
+            return Err("更新目标不符合当前更新策略".to_string());
+        }
         return Ok(check);
     }
     let manifest_url = configured_update_manifest_url(state).await?;
     let manifest = fetch_configured_update_manifest(state, &manifest_url).await?;
-    let check = assess_update_manifest(env!("CARGO_PKG_VERSION"), &manifest)?;
+    let check = filter_update_policy(
+        assess_update_manifest(env!("CARGO_PKG_VERSION"), &manifest)?,
+        policy,
+    )?;
     if !check.update_available {
         return Err("当前已是最新版本，无需安装更新".to_string());
     }
@@ -1446,6 +1555,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = AppState {
             store: ConfigStore::new(directory.path().join("config.json")),
+            config: tokio::sync::RwLock::new(crate::config::CodeyConfig::default()),
             http_client: reqwest::Client::builder().no_proxy().build().unwrap(),
             ..AppState::default()
         };
@@ -1505,7 +1615,19 @@ mod tests {
             assert_eq!(first.install_key, second.install_key);
             let displayed = get_device_machine_no(&state).await.unwrap();
             assert_eq!(displayed, json!(first.machine_no));
-            fetch_release_admin_update(&state, &base_url).await.unwrap();
+            fetch_release_admin_update(&state, &base_url, UpdateRequestMode::Automatic)
+                .await
+                .unwrap();
+            state.config.write().await.codey_update_policy = crate::config::CodeyUpdatePolicy::Off;
+            assert!(
+                fetch_release_admin_update(&state, &base_url, UpdateRequestMode::Automatic)
+                    .await
+                    .unwrap_err()
+                    .contains("自动检查")
+            );
+            fetch_release_admin_update(&state, &base_url, UpdateRequestMode::Manual)
+                .await
+                .unwrap();
             first
         };
         let result = tokio::time::timeout(
@@ -1546,6 +1668,16 @@ mod tests {
         assert!(report.contains(&format!("x-device-key: {}\r\n", identity.install_key)));
         assert!(report.contains("codexVersion=1.2.3-test"));
         assert!(report.contains("osVersion=test-os-version"));
+        let checks: Vec<_> = requests
+            .iter()
+            .filter(|request| request.starts_with("GET /api/updates/check?"))
+            .collect();
+        assert_eq!(checks.len(), 2);
+        assert!(
+            checks
+                .iter()
+                .all(|request| request.contains("updatePolicy=stable"))
+        );
     }
 
     fn valid_asset() -> UpdateManifestAsset {
@@ -1764,6 +1896,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState {
             store: ConfigStore::new(directory.path().join("config.json")),
+            config: tokio::sync::RwLock::new(crate::config::CodeyConfig::default()),
             ..AppState::default()
         });
         // 非 HTTPS 地址让重新获取在校验阶段失败，避免测试依赖外部网络。
@@ -1775,7 +1908,7 @@ mod tests {
         }
         let check = assess_update_manifest("1.0.0", &valid_manifest("2.0.0")).unwrap();
         *state.update_candidate_cache.lock().await = Some(CachedUpdateCandidate {
-            manifest_url: manifest_url.to_string(),
+            manifest_url: format!("stable:{manifest_url}"),
             candidate: UpdateCandidate {
                 check: check.clone(),
             },
@@ -1796,6 +1929,161 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error, "更新地址必须使用 HTTPS");
+        state.config.write().await.codey_update_policy =
+            crate::config::CodeyUpdatePolicy::Experimental;
+        assert_eq!(
+            check_for_updates(&state, false, false).await.unwrap_err(),
+            "更新地址必须使用 HTTPS"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_stops_automatic_updates_before_network() {
+        let state = Arc::new(AppState::default());
+        state.config.write().await.codey_update_policy = crate::config::CodeyUpdatePolicy::Off;
+        for refresh in [false, true] {
+            assert!(
+                check_for_updates(&state, refresh, false)
+                    .await
+                    .unwrap_err()
+                    .contains("自动检查")
+            );
+        }
+        let candidate = UpdateCandidate {
+            check: assess_update_manifest("1.0.0", &valid_manifest("2.0.0")).unwrap(),
+        };
+        assert!(
+            download_update_candidate(&state, &candidate)
+                .await
+                .unwrap_err()
+                .contains("自动检查")
+        );
+        assert!(
+            resolve_expected_update(&state, UpdateRequestMode::Automatic)
+                .await
+                .unwrap_err()
+                .contains("自动检查")
+        );
+        assert!(
+            start_downloaded_update(&state, "unused")
+                .await
+                .unwrap_err()
+                .contains("自动检查")
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_allows_manual_stable_checks_downloads_and_install_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState {
+            store: ConfigStore::new(directory.path().join("config.json")),
+            ..AppState::default()
+        });
+        let manifest_url = "http://updates.example.test/manifest.json";
+        {
+            let mut config = state.config.write().await;
+            config.codey_update_policy = crate::config::CodeyUpdatePolicy::Off;
+            config.release_admin_url.clear();
+            config.update_manifest_url = manifest_url.to_string();
+        }
+        let check = install_check("2.0.0", "codey-update.pkg", b"verified");
+        *state.update_candidate_cache.lock().await = Some(CachedUpdateCandidate {
+            manifest_url: format!("stable:{manifest_url}"),
+            candidate: UpdateCandidate {
+                check: check.clone(),
+            },
+            checked_at: Instant::now(),
+        });
+        *state.available_update.write().await = Some(check.clone());
+        assert_eq!(
+            invoke(&state, "check_for_updates", &json!({"manual": true}))
+                .await
+                .unwrap(),
+            serde_json::to_value(&check).unwrap()
+        );
+        assert_eq!(
+            resolve_expected_update(&state, UpdateRequestMode::Manual)
+                .await
+                .unwrap(),
+            check
+        );
+        assert_eq!(
+            invoke(
+                &state,
+                "check_for_updates",
+                &json!({"manual": true, "forceRefresh": true})
+            )
+            .await
+            .unwrap_err(),
+            "更新地址必须使用 HTTPS"
+        );
+        assert_eq!(
+            download_update(&state, &json!({})).await.unwrap_err(),
+            "更新目标已变化，请重新检查并确认更新"
+        );
+        assert!(
+            start_downloaded_update_with_mode(&state, "relative.pkg", UpdateRequestMode::Manual)
+                .await
+                .unwrap_err()
+                .contains("绝对路径")
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_policy_rejects_manual_prerelease_downloads_and_install_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState {
+            store: ConfigStore::new(directory.path().join("config.json")),
+            ..AppState::default()
+        });
+        {
+            let mut config = state.config.write().await;
+            config.codey_update_policy = crate::config::CodeyUpdatePolicy::Off;
+            config.release_admin_url.clear();
+        }
+        let candidate = UpdateCandidate {
+            check: install_check("2.0.0-beta.1", "codey-update.pkg", b"verified"),
+        };
+        *state.available_update.write().await = Some(candidate.check.clone());
+        assert_eq!(
+            download_update_candidate_with_mode(&state, &candidate, UpdateRequestMode::Manual)
+                .await
+                .unwrap_err(),
+            "更新目标不符合当前更新策略"
+        );
+        assert_eq!(
+            resolve_expected_update(&state, UpdateRequestMode::Manual)
+                .await
+                .unwrap_err(),
+            "更新目标不符合当前更新策略"
+        );
+    }
+
+    #[test]
+    fn stable_policy_filters_prereleases_but_experimental_allows_both() {
+        use crate::config::CodeyUpdatePolicy::{Experimental, Stable};
+        let beta = assess_update_manifest("1.0.0", &valid_manifest("2.0.0-beta.1")).unwrap();
+        assert!(
+            !filter_update_policy(beta.clone(), Stable)
+                .unwrap()
+                .update_available
+        );
+        assert!(
+            filter_update_policy(beta, Experimental)
+                .unwrap()
+                .update_available
+        );
+        let stable = assess_update_manifest("2.0.0-beta.2", &valid_manifest("2.0.0")).unwrap();
+        assert!(
+            filter_update_policy(stable.clone(), Stable)
+                .unwrap()
+                .update_available
+        );
+        assert!(
+            filter_update_policy(stable, Experimental)
+                .unwrap()
+                .update_available
+        );
     }
 
     #[test]

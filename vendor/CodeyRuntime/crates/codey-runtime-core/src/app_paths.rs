@@ -439,12 +439,20 @@ pub fn validate_codex_app_dir(app_dir: &Path) -> anyhow::Result<()> {
         root.join("resources")
     };
     let archive = resources.join("app.asar");
-    let package = if archive.try_exists().context("无法检查 Codex 应用归档")? {
+    let package = if archive
+        .try_exists()
+        .with_context(|| format!("无法检查 Codex 应用归档：{}", archive.display()))?
+    {
         asar_app_package(&archive)
     } else {
         read_app_package_json(&resources.join("app/package.json"))
     }
-    .context("无法读取 Codex 应用身份，安装可能不完整或版本不受支持")?;
+    .with_context(|| {
+        format!(
+            "无法读取 Codex 应用身份，安装可能不完整或版本不受支持；安装目录：{}",
+            root.display()
+        )
+    })?;
     let name = package.get("name").and_then(serde_json::Value::as_str);
     let product = package
         .get("productName")
@@ -569,31 +577,36 @@ fn codex_resources_app_version(resources_dir: &Path) -> Option<String> {
 }
 
 fn app_package_json_version(path: &Path) -> Option<String> {
-    let package = read_app_package_json(path)?;
+    let package = read_app_package_json(path).ok()?;
     normalize_version_value(package.get("version")?.as_str()?)
 }
 
-fn read_app_package_json(path: &Path) -> Option<serde_json::Value> {
+fn read_app_package_json(path: &Path) -> anyhow::Result<serde_json::Value> {
+    use anyhow::Context;
     use std::io::Read;
 
     let mut contents = Vec::new();
     std::fs::File::open(path)
-        .ok()?
+        .with_context(|| format!("无法打开应用元数据：{}", path.display()))?
         .take(MAX_APP_PACKAGE_JSON_BYTES + 1)
         .read_to_end(&mut contents)
-        .ok()?;
-    if contents.len() as u64 > MAX_APP_PACKAGE_JSON_BYTES {
-        return None;
-    }
-    serde_json::from_slice(&contents).ok()
+        .with_context(|| format!("无法读取应用元数据：{}", path.display()))?;
+    anyhow::ensure!(
+        contents.len() as u64 <= MAX_APP_PACKAGE_JSON_BYTES,
+        "应用元数据超过大小上限 {MAX_APP_PACKAGE_JSON_BYTES} 字节：{}",
+        path.display()
+    );
+    serde_json::from_slice(&contents)
+        .with_context(|| format!("无法解析应用元数据 JSON：{}", path.display()))
 }
 
 fn asar_app_version(path: &Path) -> Option<String> {
-    let package = asar_app_package(path)?;
+    let package = asar_app_package(path).ok()?;
     normalize_version_value(package.get("version")?.as_str()?)
 }
 
-fn asar_app_package(path: &Path) -> Option<serde_json::Value> {
+fn asar_app_package(path: &Path) -> anyhow::Result<serde_json::Value> {
+    use anyhow::Context;
     use std::io::{Read, Seek, SeekFrom};
 
     // 只解析根 package.json 的索引，其余文件条目由反序列化器跳过。
@@ -616,47 +629,83 @@ fn asar_app_package(path: &Path) -> Option<serde_json::Value> {
         unpacked: bool,
     }
 
-    let mut archive = std::fs::File::open(path).ok()?;
-    let archive_size = archive.metadata().ok()?.len();
-    let mut prefix = [0u8; 16];
-    archive.read_exact(&mut prefix).ok()?;
-    let size_pickle_length = u32::from_le_bytes(prefix[0..4].try_into().ok()?);
-    let header_size = u32::from_le_bytes(prefix[4..8].try_into().ok()?);
-    let payload_size = u32::from_le_bytes(prefix[8..12].try_into().ok()?);
-    let json_size = u32::from_le_bytes(prefix[12..16].try_into().ok()?);
-    if size_pickle_length != 4
-        || header_size.checked_sub(4)? != payload_size
-        || !(8..=MAX_ASAR_HEADER_BYTES).contains(&header_size)
-        || json_size == 0
-        || json_size > header_size - 8
-        || header_size - 8 - json_size > 3
-    {
-        return None;
-    }
-    let data_start = 8 + u64::from(header_size);
-    if data_start > archive_size {
-        return None;
-    }
-    let mut header_json = vec![0u8; json_size as usize];
-    archive.read_exact(&mut header_json).ok()?;
-    let header: Header = serde_json::from_slice(&header_json).ok()?;
-    let package = header.files.package;
-    if package.size > MAX_APP_PACKAGE_JSON_BYTES {
-        return None;
-    }
-    if package.unpacked {
-        return read_app_package_json(&path.with_extension("asar.unpacked").join("package.json"));
-    }
+    let read_package = || -> anyhow::Result<serde_json::Value> {
+        let mut archive = std::fs::File::open(path).context("无法打开 ASAR 文件")?;
+        let archive_size = archive.metadata().context("无法读取 ASAR 文件大小")?.len();
+        let mut prefix = [0u8; 16];
+        archive
+            .read_exact(&mut prefix)
+            .context("无法读取 ASAR 长度信息，归档可能被截断")?;
+        let size_pickle_length = u32::from_le_bytes(prefix[0..4].try_into()?);
+        let header_size = u32::from_le_bytes(prefix[4..8].try_into()?);
+        let payload_size = u32::from_le_bytes(prefix[8..12].try_into()?);
+        let json_size = u32::from_le_bytes(prefix[12..16].try_into()?);
+        anyhow::ensure!(
+            size_pickle_length == 4,
+            "ASAR 长度信息无效：size_pickle_length={size_pickle_length}，应为 4"
+        );
+        anyhow::ensure!(
+            (8..=MAX_ASAR_HEADER_BYTES).contains(&header_size),
+            "ASAR 索引长度无效：{header_size}，允许范围为 8..={MAX_ASAR_HEADER_BYTES} 字节"
+        );
+        anyhow::ensure!(
+            header_size - 4 == payload_size,
+            "ASAR 索引长度不一致：header_size={header_size}，payload_size={payload_size}"
+        );
+        anyhow::ensure!(
+            json_size > 0 && json_size <= header_size - 8 && header_size - 8 - json_size <= 3,
+            "ASAR 索引 JSON 长度或填充无效：json_size={json_size}，header_size={header_size}"
+        );
+        let data_start = 8 + u64::from(header_size);
+        anyhow::ensure!(
+            data_start <= archive_size,
+            "ASAR 索引超出归档长度，归档可能被截断：索引结束位置 {data_start}，归档长度 {archive_size}"
+        );
+        let mut header_json = vec![0u8; json_size as usize];
+        archive
+            .read_exact(&mut header_json)
+            .context("无法读取 ASAR 索引 JSON")?;
+        let header: Header = serde_json::from_slice(&header_json)
+            .context("无法解析 ASAR 根 package.json 索引 JSON")?;
+        let package = header.files.package;
+        anyhow::ensure!(
+            package.size <= MAX_APP_PACKAGE_JSON_BYTES,
+            "ASAR package.json 超过大小上限 {MAX_APP_PACKAGE_JSON_BYTES} 字节：{}",
+            package.size
+        );
+        if package.unpacked {
+            return read_app_package_json(
+                &path.with_extension("asar.unpacked").join("package.json"),
+            );
+        }
 
-    let offset = package.offset?.parse::<u64>().ok()?;
-    let start = data_start.checked_add(offset)?;
-    if start.checked_add(package.size)? > archive_size {
-        return None;
-    }
-    archive.seek(SeekFrom::Start(start)).ok()?;
-    let mut contents = vec![0u8; package.size as usize];
-    archive.read_exact(&mut contents).ok()?;
-    serde_json::from_slice(&contents).ok()
+        let offset = package
+            .offset
+            .context("ASAR package.json 索引缺少 offset")?;
+        let offset = offset
+            .parse::<u64>()
+            .with_context(|| format!("ASAR package.json offset 无效：{offset}"))?;
+        let start = data_start
+            .checked_add(offset)
+            .context("ASAR package.json offset 导致起始位置溢出")?;
+        let end = start
+            .checked_add(package.size)
+            .context("ASAR package.json 大小导致结束位置溢出")?;
+        anyhow::ensure!(
+            end <= archive_size,
+            "ASAR package.json 超出归档长度，归档可能被截断：offset={offset}，size={}，归档长度 {archive_size}",
+            package.size
+        );
+        archive
+            .seek(SeekFrom::Start(start))
+            .context("无法定位 ASAR package.json")?;
+        let mut contents = vec![0u8; package.size as usize];
+        archive
+            .read_exact(&mut contents)
+            .context("无法读取 ASAR package.json")?;
+        serde_json::from_slice(&contents).context("无法解析 ASAR package.json JSON")
+    };
+    read_package().with_context(|| format!("无法读取 Codex 应用归档：{}", path.display()))
 }
 
 #[cfg(windows)]
@@ -1563,6 +1612,197 @@ mod tests {
         .unwrap();
         std::fs::write(app.join("resources/app.asar"), b"truncated").unwrap();
         assert!(validate_codex_app_dir(&app).is_err());
+    }
+
+    #[test]
+    fn identity_read_errors_preserve_installation_path_and_json_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("Codex");
+        write_windows_client(&app);
+        std::fs::remove_file(app.join("resources/app.asar")).unwrap();
+        let root = std::fs::canonicalize(&app).unwrap();
+        let metadata = root.join("resources/app/package.json");
+        let missing = validate_codex_app_dir(&app).unwrap_err();
+        let diagnostic = format!("{missing:#}");
+        assert!(
+            diagnostic.contains(&format!("安装目录：{}", root.display())),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains(&format!("无法打开应用元数据：{}", metadata.display())),
+            "{diagnostic}"
+        );
+        assert_eq!(
+            missing.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+
+        std::fs::create_dir_all(metadata.parent().unwrap()).unwrap();
+        std::fs::write(&metadata, b"{invalid").unwrap();
+        let error = validate_codex_app_dir(&app).unwrap_err();
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains(&format!("无法解析应用元数据 JSON：{}", metadata.display())),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("line 1 column"), "{diagnostic}");
+        assert!(error.downcast_ref::<serde_json::Error>().is_some());
+    }
+
+    #[test]
+    fn identity_validation_falls_back_only_when_the_archive_is_absent() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("Codex");
+        write_windows_client(&app);
+        let archive = app.join("resources/app.asar");
+        let fallback = app.join("resources/app/package.json");
+        std::fs::create_dir_all(fallback.parent().unwrap()).unwrap();
+        std::fs::write(&fallback, codex_client_package().to_string()).unwrap();
+        std::fs::write(&archive, b"truncated").unwrap();
+        let error = validate_codex_app_dir(&app).unwrap_err();
+        let diagnostic = format!("{error:#}");
+        let archive = std::fs::canonicalize(archive).unwrap();
+        assert!(
+            diagnostic.contains(&archive.display().to_string()),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.contains("无法读取 ASAR 长度信息"),
+            "{diagnostic}"
+        );
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
+        std::fs::remove_file(archive).unwrap();
+        validate_codex_app_dir(&app).unwrap();
+    }
+
+    #[test]
+    fn asar_read_errors_preserve_archive_path_and_specific_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("app.asar");
+        let package = br#"{"version":"26.915.31945"}"#;
+        let valid = test_asar(
+            serde_json::json!({ "size": package.len(), "offset": "0" }),
+            package,
+        );
+        let mut invalid_length = valid.clone();
+        invalid_length[0..4].copy_from_slice(&0u32.to_le_bytes());
+        let mut invalid_index_json = valid.clone();
+        invalid_index_json[16] = b'!';
+        for (bytes, reason) in [
+            (invalid_length, "ASAR 长度信息无效"),
+            (valid[..16].to_vec(), "ASAR 索引超出归档长度"),
+            (
+                invalid_index_json,
+                "无法解析 ASAR 根 package.json 索引 JSON",
+            ),
+            (
+                test_asar(serde_json::json!({}), &[]),
+                "missing field `size`",
+            ),
+            (
+                test_asar(serde_json::json!({ "size": 0 }), &[]),
+                "索引缺少 offset",
+            ),
+            (
+                test_asar(serde_json::json!({ "size": 0, "offset": "invalid" }), &[]),
+                "offset 无效：invalid",
+            ),
+            (
+                test_asar(
+                    serde_json::json!({ "size": 0, "offset": u64::MAX.to_string() }),
+                    &[],
+                ),
+                "起始位置溢出",
+            ),
+            (
+                test_asar(
+                    serde_json::json!({ "size": MAX_APP_PACKAGE_JSON_BYTES + 1, "offset": "0" }),
+                    &[],
+                ),
+                "超过大小上限",
+            ),
+            (
+                valid[..valid.len() - 1].to_vec(),
+                "ASAR package.json 超出归档长度",
+            ),
+            (
+                test_asar(serde_json::json!({ "size": 1, "offset": "0" }), b"!"),
+                "无法解析 ASAR package.json JSON",
+            ),
+        ] {
+            std::fs::write(&archive, bytes).unwrap();
+            let error = asar_app_package(&archive).unwrap_err();
+            let diagnostic = format!("{error:#}");
+            assert!(
+                diagnostic.contains(&archive.display().to_string()),
+                "{diagnostic}"
+            );
+            assert!(diagnostic.contains(reason), "{diagnostic}");
+        }
+    }
+
+    #[test]
+    fn unpacked_package_read_errors_preserve_both_paths_and_size_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("app.asar");
+        let unpacked = temp.path().join("app.asar.unpacked").join("package.json");
+        let entry = serde_json::json!({ "size": 1, "unpacked": true });
+        std::fs::write(&archive, test_asar(entry, &[])).unwrap();
+        let missing = asar_app_package(&archive).unwrap_err();
+        let diagnostic = format!("{missing:#}");
+        for path in [&archive, &unpacked] {
+            assert!(
+                diagnostic.contains(&path.display().to_string()),
+                "{diagnostic}"
+            );
+        }
+        assert!(diagnostic.contains("无法打开应用元数据"), "{diagnostic}");
+        assert_eq!(
+            missing.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
+
+        std::fs::create_dir_all(unpacked.parent().unwrap()).unwrap();
+        std::fs::write(
+            &unpacked,
+            vec![b' '; MAX_APP_PACKAGE_JSON_BYTES as usize + 1],
+        )
+        .unwrap();
+        let error = asar_app_package(&archive).unwrap_err();
+        let diagnostic = format!("{error:#}");
+        for path in [&archive, &unpacked] {
+            assert!(
+                diagnostic.contains(&path.display().to_string()),
+                "{diagnostic}"
+            );
+        }
+        assert!(
+            diagnostic.contains("应用元数据超过大小上限"),
+            "{diagnostic}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_existence_errors_preserve_the_archive_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("Codex");
+        write_windows_client(&app);
+        let archive = std::fs::canonicalize(&app)
+            .unwrap()
+            .join("resources/app.asar");
+        std::fs::remove_file(&archive).unwrap();
+        std::os::unix::fs::symlink("app.asar", &archive).unwrap();
+        let error = validate_codex_app_dir(&app).unwrap_err();
+        assert!(
+            format!("{error:#}")
+                .contains(&format!("无法检查 Codex 应用归档：{}", archive.display())),
+            "{error:#}"
+        );
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
     }
 
     #[cfg(unix)]

@@ -331,6 +331,7 @@ export type SelectOption = { disabled?: boolean; label: React.ReactNode; value: 
 export interface SelectProps {
   "aria-label"?: string;
   "aria-labelledby"?: string;
+  "aria-required"?: boolean;
   className?: string;
   disabled?: boolean;
   filter?: boolean;
@@ -660,5 +661,4 @@ export function DrawerDescription({ id, className, ...props }: React.HTMLAttribu
   const labels = React.useContext(DrawerLabelContext);
   return <p {...props} id={id ?? labels?.descriptionId} className={cn("m-0 text-xs leading-relaxed text-muted", className)} />;
 }
-
 

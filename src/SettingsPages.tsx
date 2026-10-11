@@ -162,6 +162,7 @@ export function buildSettingsSections({
       <ModelSection
         active={active}
         config={config}
+        runtimeStatus={operationsStatus}
         currentProvider={provider}
         officialAccountAvailable={officialAccountAvailable}
         popupContainer={popupContainer}

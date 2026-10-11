@@ -18,7 +18,7 @@ export function validateThirdPartyRouteShortName(
     return `短名称最多 ${MAX_ROUTE_SHORT_NAME_CHARACTERS} 个字符`;
   }
   if (shortName === OFFICIAL_ROUTE_SHORT_NAME) {
-    return `“${OFFICIAL_ROUTE_SHORT_NAME}”仅供官方账号使用`;
+    return `短名称 ${OFFICIAL_ROUTE_SHORT_NAME} 仅供官方账号使用`;
   }
   if (
     profiles.some(
@@ -27,7 +27,7 @@ export function validateThirdPartyRouteShortName(
         profile.shortName?.trim() === shortName,
     )
   ) {
-    return `短名称“${shortName}”已被其他线路使用`;
+    return `短名称 ${shortName} 已被其他线路使用`;
   }
   return "";
 }
@@ -38,8 +38,7 @@ export function validateOfficialRouteShortName(
   currentRouteId = "",
 ) {
   const shortName = value.trim();
-  // 留空表示沿用默认短名称「官」。
-  if (!shortName) return "";
+  if (!shortName) return "请输入短名称";
   if (routeShortNameCharacterCount(shortName) > MAX_ROUTE_SHORT_NAME_CHARACTERS) {
     return `短名称最多 ${MAX_ROUTE_SHORT_NAME_CHARACTERS} 个字符`;
   }
@@ -60,15 +59,22 @@ export function validateOfficialRouteShortName(
 
 export function fallbackRouteShortName(name: string) {
   return Array.from(name.trim())
-    .slice(0, MAX_ROUTE_SHORT_NAME_CHARACTERS)
+    .slice(0, 2)
     .join("");
 }
 
 export function routeDisplayPrefix(profile: Profile) {
-  if (profile.authMode === "officialAccount" || profile.officialAccount) {
-    return profile.shortName?.trim() || OFFICIAL_ROUTE_SHORT_NAME;
-  }
   return profile.shortName?.trim() || fallbackRouteShortName(profile.name);
+}
+
+export function prefixedRouteName(profile: Profile) {
+  return formatRouteName(profile.name, routeDisplayPrefix(profile));
+}
+
+export function formatRouteName(name: string, shortName: string) {
+  const routeName = name.trim();
+  const prefix = shortName.trim();
+  return routeName ? (prefix ? `[${prefix}] ${routeName}` : routeName) : prefix;
 }
 
 export function prefixedRouteModelName(profile: Profile, modelName: string) {

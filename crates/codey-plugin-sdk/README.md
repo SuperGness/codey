@@ -30,23 +30,70 @@
 
 显示说明时优先使用同级字段名，再查找祖先对象的点分隔字段名；数组路径省略下标，例如 `stateConfigs.model` 可说明每项的 `model`。真实的同名含点字段优先，存在歧义时应把说明放在嵌套对象自身的 `_comments` 中。没有对应字段的说明保留在文件中，不生成可编辑项。
 
-请求扩展统一声明 `request.lifecycle.v1`，使用 SDK 的 `lifecycle` 协议类型。宿主在发送前、收到响应头、等待恢复及请求结束时调用插件；插件可修改授权的请求头，或返回等待、受限重发及终止动作。额外声明 `request.lifecycle.turn_state` 可请求宿主从另一个已保存官方账号取得状态头和路由 Cookie，见 `examples/plugins/astra-turn-state`。多个插件按 ID 排序执行，返回值整体验证后才应用。处理异常时默认终止请求，可显式声明异常时继续，敏感动作校验失败除外。
+请求扩展统一声明 `request.lifecycle.v1`，使用 SDK 的 `lifecycle` 协议类型。宿主在发送前、收到响应头、等待恢复及请求结束时调用插件；插件可修改授权的请求头，或返回等待、受限重发及终止动作。额外声明 `request.lifecycle.turn_state` 可请求宿主从另一个已保存官方账号取得状态头和路由 Cookie。多个插件按 ID 排序执行，返回值整体验证后才应用。处理异常时默认终止请求，可显式声明异常时继续，敏感动作校验失败除外。
 
 其他管理方法由插件自行定义，通过 `invoke_codey_plugin` 调用。`request.beforeSend`、`request.afterHeaders`、`request.resume`、`request.completed`、`request.failed` 和 `request.cancelled` 只由宿主调度，管理接口会拒绝同名调用。完整的权限、事件、动作及传输边界见 [请求生命周期协议](REQUEST_LIFECYCLE.md)。
 
-声明 `appserver.call.v1` 后，插件发送 `{"schema":"codey.appserver.v1","call":"codey://getTasks"}` 查询正在运行和失败的任务数量。未列入 `schema/appserver.v1.json` 的调用不会执行。
+`appserver.call.v1` 是兼容性能力声明，不授予 HTTP 访问权限。任务数量查询通过本地路由的 `POST /codey/api/appserver` 发送 `codey.appserver.v1` JSON，并携带 `Authorization: Bearer <本地路由令牌>`；`PluginContext` 不提供路由地址或令牌，调用方需另行取得。SDK 只提供协议类型与序列化工具，不发起网络请求。未列入 `schema/appserver.v1.json` 的调用不会执行。
+
+```rust
+use codey_plugin_sdk::{appserver::{Request, TaskCounts, SCHEMA}, serde_json::{self, Value}};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let body = serde_json::to_vec(&Request::get_tasks())?;
+    // 这里只演示协议编解码；实际响应来自经过认证的 HTTP 请求。
+    let response: Value = serde_json::from_str(
+        r#"{"schema":"codey.appserver.v1","result":{"running":2,"failed":0}}"#,
+    )?;
+    if response["schema"] != SCHEMA || response.get("error").is_some() {
+        return Err("任务查询失败或响应协议不匹配".into());
+    }
+    let counts: TaskCounts = serde_json::from_value(response["result"].clone())?;
+    assert!(!body.is_empty());
+    assert_eq!(counts.running, 2);
+    Ok(())
+}
+```
 
 声明 `provider.route.v1` 后，宿主在启用时调用 `provider.describe`。返回对象包含 `name`、`baseUrl`、`upstreamProtocol`（`openaiResponses`、`openaiChatCompletions` 或 `anthropicMessages`）、至少 1 个且最多 32 个 `models`，以及可选 `headers`。线路名最多 15 个字符。请求头不能携带密钥，名称限制与生命周期相同；普通线路的密钥由用户填写。该调用不能通过管理接口进入。
 
-同时声明 `provider.transport.v1` 与 `provider.account.v1` 可接管本插件线路的请求传输，通过邮箱绑定已保存账号并声明模型上下文预算。正文通过有界分块传递，客户端断开或插件停用时取消请求；管理接口拒绝整个 `provider.request.*` 前缀。完整协议与清理约定见 [供应商传输协议](PROVIDER_TRANSPORT.md)，迁移示例见 `../../plugins/excel-bridge`。
+同时声明 `provider.transport.v1` 与 `provider.account.v1` 可接管本插件线路的请求传输，通过邮箱绑定已保存账号并声明模型上下文预算。正文通过有界分块传递，客户端断开或插件停用时取消请求；管理接口拒绝整个 `provider.request.*` 前缀。使用 `transport::Frame::headers` 构造经过宿主规则校验的响应头帧，使用 `Frame::error` 构造隐藏未知错误文本的错误帧；这些辅助接口不改变 ABI。完整协议与清理约定见 [供应商传输协议](PROVIDER_TRANSPORT.md)。
 
-## 示例
+## 只读预检查
 
-`examples/plugins/header-demo` 演示配置、`ping` 方法和请求头扩展。在仓库根目录执行：
+已有 Codey 管理桥接支持以下命令；无需安装或启用插件，也不调用插件方法。SDK 不提供桥接连接或认证令牌，原生插件不能仅靠能力声明取得管理权限。
 
-```sh
-cargo build -p codey-plugin-header-demo
-python3 scripts/package-plugin.py --library target/debug/libcodey_plugin_header_demo.dylib --config examples/plugins/header-demo/config.json --output /tmp/header-demo.codey-plugin --id dev.codey.header-demo --name 请求头示例 --version 0.1.0 --capability request.lifecycle.v1 --header x-plugin-demo
+| 命令 | 参数 | 返回值 |
+| --- | --- | --- |
+| `get_codey_plugin_host_info` | `{}` | `host::HostInfo`：ABI、平台、架构、接受的能力声明和大小限制 |
+| `validate_codey_plugin_config` | `{content: string}` | `config::ValidationResult`：`valid`、UTF-8 `byteLength`、`maxBytes` 和可空的 `error` |
+
+`acceptedCapabilities` 来自实际安装校验名单，不表示插件已获授权；能力依赖、启用和权限检查仍然生效。大小限制包括配置、ABI 消息、安装包、传输块和传输正文。返回值不含本地路径、插件列表、配置或凭据。
+
+格式无效时预检查正常返回 `valid:false`，错误码为 `too_large`、`invalid_json`、`invalid_root`、`invalid_comments_object` 或 `invalid_comment_value`；`error.message` 使用固定说明，JSON 语法错误在可定位时提供从 1 开始的 `line` 和字节列号 `column`，不回传字段名或原始错误。缺少或传错 `content` 类型时沿用管理桥接错误。通过检查只说明格式满足宿主规则，业务约束仍由插件初始化验证；保存时仍须提供配置摘要并重新校验。Vite 预览没有真实宿主，会明确拒绝这两个命令。
+
+前端模块可直接调用，类型定义位于 `src/codeyPlugins.ts`：
+
+```ts
+import { invoke } from "./api";
+import type { CodeyPluginHostInfo, CodeyPluginConfigValidation } from "./codeyPlugins";
+
+const host = await invoke<CodeyPluginHostInfo>("get_codey_plugin_host_info");
+const report = await invoke<CodeyPluginConfigValidation>(
+  "validate_codey_plugin_config", { content: '{"enabled":true}' });
+if (!report.valid) throw new Error(report.error?.message ?? "配置格式无效");
 ```
 
-示例命令的动态库路径适用于 macOS；其他平台使用对应扩展名。若设置了 Cargo target-dir，应替换制品路径。打包工具不覆盖已有输出，省略 `--config` 时写入空对象模板。示例只添加测试请求头，首次验证建议使用本地模拟上游。
+离线 Rust 工具可直接调用 `config::validate(text)`，与宿主安装和保存共用解析规则；需要运行配置时调用 `config::parse(text)`，返回递归移除 `_comments` 后的 JSON。后者的 `ConfigError` 保留详细字段路径，不应直接用于需要隐藏配置键名的诊断输出。两者仅处理内存文本，不写文件、不验证业务或加载动态库。
+
+## 本地开发
+
+仓库不包含可直接构建的业务插件示例。本地插件在 `plugins/` 下开发，该目录及 `.codey-plugin` 产物不提交到 Git；SDK、脚手架和 Skill 保留版本控制。在仓库根目录生成独立插件：
+
+```sh
+python3 .agents/skills/codey-plugin-creator/scripts/create_codey_plugin.py header-demo --path plugins/header-demo --capability request.lifecycle.v1
+cargo build --manifest-path plugins/header-demo/Cargo.toml --target-dir plugins/header-demo/target
+python3 scripts/package-plugin.py --library plugins/header-demo/target/debug/libcodey_plugin_header_demo.dylib --config plugins/header-demo/config.json --output "$HOME/Desktop/header-demo/header-demo-macos-aarch64-0.1.0.codey-plugin" --id dev.codey.header-demo --name 请求头示例 --version 0.1.0 --platform macos --arch aarch64 --capability request.lifecycle.v1
+```
+
+上述动态库路径适用于 macOS，Windows 使用 `codey_plugin_header_demo.dll`，Linux 使用 `.so`；指定 `--target` 后路径多一层目标三元组，设置 target-dir 时以 Cargo 输出为准。打包工具不负责跨平台构建，`--platform` 和 `--arch` 仅描述已构建动态库的目标，不改变库格式；每个平台需使用匹配工具链构建。工具不覆盖已有输出，省略 `--config` 时写入空对象模板。脚手架生命周期处理默认只返回继续，业务请求头需自行实现。

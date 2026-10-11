@@ -56,7 +56,7 @@
   let scanTimer = 0;
   let updateCheckTimer = 0;
   let updateCheckInFlight = false;
-  let autoUpdateChecksEnabled = null;
+  let codeyUpdatePolicy = null;
   let updateCheckGeneration = 0;
   let runtimeHealthTimer = 0;
   let runtimeHealthCheckInFlight = false;
@@ -239,7 +239,7 @@
   };
 
   const setUpdateAvailability = (result, { dispatch = true } = {}) => {
-    window.__codeyUpdateAvailability = result?.updateAvailable === true
+    window.__codeyUpdateAvailability = codeyUpdatePolicy !== "off" && (codeyUpdatePolicy !== "stable" || !result?.latestVersion?.includes("-")) && result?.updateAvailable === true
       ? result
       : null;
     applyUpdateBadge();
@@ -341,9 +341,11 @@
     }
   };
 
-  const setAutomaticUpdateChecks = (enabled) => {
-    if (autoUpdateChecksEnabled === enabled) return;
-    autoUpdateChecksEnabled = enabled;
+  const setAutomaticUpdateChecks = (policy) => {
+    if (codeyUpdatePolicy === policy) return;
+    const previous = codeyUpdatePolicy;
+    codeyUpdatePolicy = policy;
+    if (previous !== null) setUpdateAvailability(null);
     updateCheckGeneration += 1;
     window.clearTimeout(updateCheckTimer);
     updateCheckTimer = 0;
@@ -352,17 +354,17 @@
   const scheduleUpdateCheck = (delayMs = updateCheckIntervalMs) => {
     window.clearTimeout(updateCheckTimer);
     updateCheckTimer = 0;
-    if (autoUpdateChecksEnabled === false || hasDetectedUpdate()) return;
+    if (codeyUpdatePolicy === "off" || hasDetectedUpdate()) return;
     updateCheckTimer = window.setTimeout(() => {
       updateCheckTimer = 0;
       // 尚未读取到设置时先重试状态查询，避免关闭后仍发起更新请求。
-      if (autoUpdateChecksEnabled === null) void hydrateUpdateAvailability();
+      if (codeyUpdatePolicy === null) void hydrateUpdateAvailability();
       else void checkForUpdatesSilently();
     }, delayMs);
   };
 
   const checkForUpdatesSilently = async () => {
-    if (autoUpdateChecksEnabled !== true || updateCheckInFlight || hasDetectedUpdate()) return;
+    if (!["stable", "experimental"].includes(codeyUpdatePolicy) || updateCheckInFlight || hasDetectedUpdate()) return;
     updateCheckInFlight = true;
     const generation = updateCheckGeneration;
     try {
@@ -370,7 +372,7 @@
         callBridge(updateCheckPath, {}, { timeoutMs: updateCheckTimeoutMs }),
         updateCheckTimeoutMs,
       );
-      if (autoUpdateChecksEnabled !== true || generation !== updateCheckGeneration) return;
+      if (!["stable", "experimental"].includes(codeyUpdatePolicy) || generation !== updateCheckGeneration) return;
       if (result?.status !== "failed" && result?.updateAvailable === true) {
         setUpdateAvailability(result);
         return;
@@ -392,7 +394,7 @@
         "读取更新状态超时",
       );
       if (generation !== updateCheckGeneration || !status || status.status === "failed") return;
-      setAutomaticUpdateChecks(status.autoCheckCodeyUpdates !== false);
+      setAutomaticUpdateChecks(status.codeyUpdatePolicy ?? (status.autoCheckCodeyUpdates === false ? "off" : "stable"));
       setUpdateAvailability(status?.availableUpdate || null);
     } catch {
       if (generation === updateCheckGeneration) setUpdateAvailability(null);
@@ -1316,10 +1318,10 @@
     if (!hasDetectedUpdate()) scheduleUpdateCheck();
   });
   window.addEventListener?.(configChangedEvent, (event) => {
-    const enabled = event.detail?.config?.autoCheckCodeyUpdates;
-    if (typeof enabled === "boolean" && autoUpdateChecksEnabled !== enabled) {
-      setAutomaticUpdateChecks(enabled);
-      if (enabled) scheduleUpdateCheck(0);
+    const policy = event.detail?.config?.codeyUpdatePolicy;
+    if (["off", "stable", "experimental"].includes(policy) && codeyUpdatePolicy !== policy) {
+      setAutomaticUpdateChecks(policy);
+      if (policy !== "off") scheduleUpdateCheck(0);
     }
     accountUsageLastResult = null;
     accountUsagePollingEnabled = true;

@@ -22,7 +22,7 @@ class PackageScopeTests(unittest.TestCase):
         self.library.write_bytes(b"test library; never executed")
         self.sequence = 0
 
-    def package(self, urls=(), capabilities=(LIFECYCLE, API_KEY)):
+    def package(self, urls=(), capabilities=(LIFECYCLE, API_KEY), extra=()):
         self.sequence += 1
         output = self.root / f"fixture-{self.sequence}.codey-plugin"
         command = [sys.executable, str(SCRIPT), "--library", str(self.library),
@@ -32,6 +32,7 @@ class PackageScopeTests(unittest.TestCase):
             command.extend(["--capability", capability])
         for url in urls:
             command.extend(["--api-key-url", url])
+        command.extend(extra)
         result = subprocess.run(command, capture_output=True, text=True)
         manifest = None
         if result.returncode == 0:
@@ -40,6 +41,34 @@ class PackageScopeTests(unittest.TestCase):
         else:
             self.assertFalse(output.exists())
         return result, manifest
+
+    def test_invalid_ids_fail_before_writing_a_package(self):
+        for identifier in ("", "Dev.Foo", "9foo", "dev..foo", "dev.foo.", "a" * 97):
+            with self.subTest(identifier=identifier):
+                result, _ = self.package(capabilities=(), extra=("--id", identifier))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ID", result.stderr)
+        result, manifest = self.package(capabilities=(), extra=("--id", "dev._demo-"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(manifest["id"], "dev._demo-")
+
+    def test_sensitive_and_invalid_headers_fail_before_writing(self):
+        for flag in ("--header", "--response-header"):
+            for header in ("Authorization", "COOKIE", "x-codey-private", "sec-test",
+                           "x-access-token", "x-credential", "bad name", "X-K", "x" * 129):
+                with self.subTest(flag=flag, header=header):
+                    result, _ = self.package(capabilities=(LIFECYCLE,), extra=(flag, header))
+                    self.assertNotEqual(result.returncode, 0)
+        result, _ = self.package(capabilities=(LIFECYCLE,), extra=("--header", "Content-Type"))
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_safe_request_headers_and_readable_response_metadata_are_preserved(self):
+        result, manifest = self.package(capabilities=(LIFECYCLE,), extra=(
+            "--header", "X-Test", "--response-header", "Content-Type",
+            "--response-header", "content-length", "--response-header", "Retry-After"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(manifest["headerNames"], ["X-Test"])
+        self.assertEqual(manifest["responseHeaderNames"], ["Content-Type", "content-length", "Retry-After"])
 
     def test_unicode_hosts_cannot_change_the_authorized_domain(self):
         for url in ["https://faß.de/v1/responses", "https://例子.测试/responses"]:

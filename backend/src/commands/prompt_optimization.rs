@@ -18,7 +18,7 @@ static LOOPBACK_OPTIMIZER_CLIENT: OnceLock<Client> = OnceLock::new();
 const CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
 const CODEX_INSTALLATION_ID_FILE: &str = "installation_id";
 
-fn optimizer_client(uses_codey_route: bool) -> Result<&'static Client, String> {
+pub(super) fn optimizer_client(uses_codey_route: bool) -> Result<&'static Client, String> {
     let slot = if uses_codey_route {
         &LOOPBACK_OPTIMIZER_CLIENT
     } else {
@@ -37,7 +37,7 @@ fn optimizer_client(uses_codey_route: bool) -> Result<&'static Client, String> {
     Ok(slot.get_or_init(|| client))
 }
 
-async fn resolve_request_config(
+pub(super) async fn resolve_request_config(
     state: &Arc<AppState>,
     optimization: &PromptOptimizationConfig,
 ) -> Result<prompt_optimization::ResolvedPromptOptimizationConfig, String> {

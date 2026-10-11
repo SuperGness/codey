@@ -61,6 +61,7 @@
     }
   };
   let scanTimer = 0;
+  let scanTimerDelay = 0;
   let repositionTimer = 0;
   let configLoadTimer = 0;
   let configLoadBackoffMs = 120;
@@ -100,32 +101,61 @@
         display: none;
         flex: 0 0 auto;
         align-items: center;
-        gap: 4px;
+        gap: 5px;
         box-sizing: border-box;
         min-height: 26px !important;
         height: 26px !important;
         margin: 0 0 0 6px;
-        padding: 0 8px;
-        border: 0;
+        padding: 0 9px;
+        border: 1px solid light-dark(rgba(0,0,0,.12), rgba(255,255,255,.16));
         border-radius: 999px;
-        background: rgba(30, 30, 30, .92);
-        color: #f5f5f5;
-        font: 12px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: light-dark(#24292f, rgba(255, 255, 255, .12));
+        color: light-dark(#ffffff, #f0f6fc);
+        font: 500 12px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         cursor: pointer;
         user-select: none;
-        box-shadow: 0 1px 4px rgba(0, 0, 0, .35);
-        opacity: .88;
-        transition: opacity .15s ease, transform .15s ease;
+        box-shadow: 0 1px 3px light-dark(rgba(0,0,0,.15), rgba(0,0,0,.4));
+        opacity: .92;
+        transition: opacity .15s ease, background-color .15s ease, transform .15s ease, box-shadow .15s ease;
       }
-      #${buttonId}:hover { opacity: 1; }
-      #${buttonId}:active { transform: translateY(1px); }
-      #${buttonId}:disabled { cursor: not-allowed; box-shadow: none; opacity: .42; }
-      #${buttonId}[data-busy="true"] { cursor: wait; opacity: .7; }
-      #${buttonId} svg { flex: 0 0 auto; width: 12px; height: 12px; }
-      #${buttonId} [data-codey-optimize-spinner] { display: none; animation: codey-prompt-optimize-spin .75s linear infinite; }
-      #${buttonId}[data-busy="true"] [data-codey-optimize-icon] { display: none; }
-      #${buttonId}[data-busy="true"] [data-codey-optimize-spinner] { display: block; }
-      @keyframes codey-prompt-optimize-spin { to { transform: rotate(360deg); } }
+      #${buttonId}:hover {
+        opacity: 1;
+        background: light-dark(#32383f, rgba(255,255,255,.2));
+        border-color: light-dark(rgba(0,0,0,.2), rgba(255,255,255,.26));
+        transform: translateY(-0.5px);
+        box-shadow: 0 2px 6px light-dark(rgba(0,0,0,.2), rgba(0,0,0,.5));
+      }
+      #${buttonId}:active {
+        transform: translateY(0.5px);
+        box-shadow: 0 1px 2px light-dark(rgba(0,0,0,.1), rgba(0,0,0,.3));
+      }
+      #${buttonId}:disabled {
+        cursor: not-allowed;
+        box-shadow: none;
+        opacity: .45;
+      }
+      #${buttonId}[data-busy="true"] {
+        cursor: wait;
+        opacity: .7;
+      }
+      #${buttonId} svg {
+        flex: 0 0 auto;
+        width: 13px;
+        height: 13px;
+      }
+      #${buttonId} [data-codey-optimize-spinner] {
+        display: none;
+        animation: codey-prompt-optimize-spin .75s linear infinite;
+      }
+      #${buttonId}[data-busy="true"] [data-codey-optimize-icon] {
+        display: none;
+      }
+      #${buttonId}[data-busy="true"] [data-codey-optimize-spinner] {
+        display: block;
+      }
+      @keyframes codey-prompt-optimize-spin {
+        to { transform: rotate(360deg); }
+      }
       #${toastId} { -webkit-app-region: no-drag !important; position: fixed; right: 20px; bottom: 22px; z-index: 2147483645; max-width: 360px; border: 1px solid rgba(124, 140, 255, .4); border-radius: 11px; padding: 10px 13px; background: rgba(20, 24, 36, .97); color: #eef2ff; box-shadow: 0 12px 36px rgba(0,0,0,.4); font: 12px/1.45 system-ui, sans-serif; }
       #${toastId}[data-tone="error"] { border-color: rgba(248, 113, 113, .6); color: #fecaca; }
     `;
@@ -322,18 +352,18 @@
     );
   };
 
-  const findAccessInsertionTarget = () => {
-    if (!inputElement?.parentElement) return null;
-    const inputRect = inputElement.getBoundingClientRect();
+  const findAccessInsertionTarget = (input = inputElement) => {
+    if (!input?.parentElement) return null;
+    const inputRect = input.getBoundingClientRect();
     const seen = new Set();
     let bestControl = null;
     let bestScore = Number.NEGATIVE_INFINITY;
-    let scope = inputElement.parentElement;
+    let scope = input.parentElement;
     let depth = 0;
     while (scope && depth < 8) {
       for (const control of scope.querySelectorAll?.(composerControlSelector) ||
         []) {
-        if (inputElement.contains?.(control)) continue;
+        if (input.contains?.(control)) continue;
         if (seen.has(control) || !isVisibleControl(control)) continue;
         seen.add(control);
         const score = accessControlScore(control, inputRect);
@@ -347,7 +377,7 @@
       depth += 1;
     }
     if (!bestControl) return null;
-    if (!hasComposerActionContext(inputElement)) return null;
+    if (!hasComposerActionContext(input)) return null;
 
     let anchor = bestControl;
     let host = bestControl.parentElement;
@@ -396,7 +426,7 @@
     if (!isVisible(inputElement)) {
       inputElement = null;
       button.style.display = "none";
-      scheduleScan();
+      scheduleScan(true);
       return;
     }
     const target = findAccessInsertionTarget();
@@ -628,12 +658,18 @@
     updateButtonPosition();
   };
 
-  const scheduleScan = () => {
-    if (!enabled || scanTimer) return;
+  const scheduleScan = (urgent = false) => {
+    if (!enabled) return;
+    const delay = urgent ? 0 : scanDelayMs;
+    if (scanTimer) {
+      if (delay >= scanTimerDelay) return;
+      clearTimeout(scanTimer);
+    }
+    scanTimerDelay = delay;
     scanTimer = setTimeout(() => {
       scanTimer = 0;
       refreshButton();
-    }, scanDelayMs);
+    }, delay);
   };
 
   const scheduleReposition = () => {
@@ -718,7 +754,19 @@
         mutationRequiresComposerScan(mutation)
       );
     });
-    if (hasExternalMutation) scheduleScan();
+    if (hasExternalMutation) {
+      const conversationChanged = mutations.some((mutation) =>
+        mutation.type === "attributes" && mutation.attributeName === "data-above-composer-conversation-id",
+      );
+      const needsMount = !inputElement?.isConnected || !button?.isConnected || button.style.display === "none";
+      const composerChanged = needsMount && mutations.some((mutation) =>
+        nodeTouchesTrackedComposer(mutation.target) ||
+        [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])].some((node) =>
+          nodeTouchesTrackedComposer(node, true) || nodeContainsComposerCandidate(node),
+        ),
+      );
+      scheduleScan(conversationChanged || composerChanged);
+    }
   };
 
   const composerMutationOptions = {
@@ -829,8 +877,8 @@
   });
   window.addEventListener("scroll", scheduleReposition, true);
   window.addEventListener("resize", scheduleReposition);
-  window.addEventListener("hashchange", scheduleScan);
-  window.addEventListener("popstate", scheduleScan);
+  window.addEventListener("hashchange", () => scheduleScan(true));
+  window.addEventListener("popstate", () => scheduleScan(true));
   document.addEventListener(
     "input",
     (event) => {
@@ -845,6 +893,11 @@
   loadConfig();
 
   window.__codeyPromptOptimize = {
+    composerContext: () => {
+      const input = findComposerInput();
+      if (!input) return null;
+      return { sessionId: findComposerConversationId(input), target: findAccessInsertionTarget(input) };
+    },
     snapshot: () => ({
       ready: ready,
       enabled: enabled,

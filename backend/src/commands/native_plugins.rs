@@ -10,6 +10,13 @@ mod package_upload;
 
 pub(super) async fn invoke(command: &str, args: &Value) -> Result<Value, String> {
     match command {
+        "get_codey_plugin_host_info" => {
+            serde_json::to_value(codey_plugins::host_info()).map_err(|error| error.to_string())
+        }
+        "validate_codey_plugin_config" => {
+            let content = string_argument(args, "content")?;
+            blocking(move || Ok(codey_plugin_sdk::config::validate(&content))).await
+        }
         "list_codey_plugins" => blocking(codey_plugins::list).await,
         "get_codey_plugin_config_file" => {
             let id = string_argument(args, "pluginId")?;
@@ -119,8 +126,44 @@ mod tests {
     use serde_json::json;
 
     #[tokio::test]
+    async fn readonly_commands_do_not_require_an_installed_plugin() {
+        let value = invoke("get_codey_plugin_host_info", &json!({}))
+            .await
+            .unwrap();
+        let info: codey_plugin_sdk::host::HostInfo = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(info.abi_version, codey_plugin_sdk::ABI_VERSION);
+        assert_eq!(
+            info.limits.max_config_bytes,
+            codey_plugin_sdk::config::MAX_CONFIG_BYTES
+        );
+        assert_eq!(info.platform, std::env::consts::OS);
+        assert_eq!(info.arch, std::env::consts::ARCH);
+        assert_eq!(value.as_object().unwrap().len(), 5);
+
+        let result = invoke(
+            "validate_codey_plugin_config",
+            &json!({
+                "content": r#"{"_comments":{"secret-key":false},"token":"secret-value"}"#
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["valid"], false);
+        assert_eq!(result["error"]["code"], "invalid_comment_value");
+        assert!(!result.to_string().contains("secret-key"));
+        assert!(!result.to_string().contains("secret-value"));
+        let result = invoke("validate_codey_plugin_config", &json!({"content":"{}"}))
+            .await
+            .unwrap();
+        assert_eq!(result["valid"], true);
+        assert!(result["error"].is_null());
+    }
+
+    #[tokio::test]
     async fn invalid_plugin_arguments_are_rejected_before_execution() {
         for (command, args) in [
+            ("validate_codey_plugin_config", json!({})),
+            ("validate_codey_plugin_config", json!({"content":{}})),
             (
                 "set_codey_plugin_enabled",
                 json!({"pluginId":"demo","enabled":"true"}),

@@ -1,5 +1,11 @@
 allowBuilds:
   esbuild: true
+minimumReleaseAgeExclude:
+  - '@internationalized/number@3.6.9'
+  - '@react-types/shared@3.37.0'
+  - react-aria-components@1.22.0
+  - react-aria@3.53.0
+  - react-stately@3.51.0
 patchedDependencies:
-  '@heroui/styles@3.2.4': patches/@heroui__styles@3.2.4.patch
-  react-aria@3.52.1: patches/react-aria@3.52.1.patch
+  '@heroui/styles@3.2.6': patches/@heroui__styles@3.2.6.patch
+  react-aria@3.53.0: patches/react-aria@3.53.0.patch

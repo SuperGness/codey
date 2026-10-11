@@ -136,10 +136,6 @@ jobs:
         env:
           CODEY_SKIP_OVERLAY_BUILD: "1"
 
-      - name: Compile native overlay helper and test identity guards
-        shell: powershell
-        run: ./tests/overlay-recovery-native.ps1
-
       - name: Lint Windows workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
         env:

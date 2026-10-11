@@ -33,6 +33,7 @@ fn refresh_model_catalog_or_fallback_at(
     let runtime_model_reasoning_efforts = config.runtime_model_reasoning_efforts();
     let runtime_model_contexts = config.runtime_model_contexts();
     let runtime_plugin_model_contexts = config.runtime_plugin_model_contexts();
+    let runtime_display_names = config.runtime_catalog_display_names();
     let refresh = try_refresh_model_catalog(config, home);
     let reused_cached_catalog = refresh.is_err();
     let result = model_catalog_fallback(
@@ -40,6 +41,7 @@ fn refresh_model_catalog_or_fallback_at(
         home,
         &native_web_search_models,
         &image_detail_original_models,
+        &config.runtime_remote_compaction_model_aliases(),
     );
     match result {
         Ok(fallback) => {
@@ -66,6 +68,7 @@ fn refresh_model_catalog_or_fallback_at(
                         plugin_contexts: &runtime_plugin_model_contexts,
                         contexts: &runtime_model_contexts,
                         reasoning_efforts: &runtime_model_reasoning_efforts,
+                        display_names: &runtime_display_names,
                     },
                 )
             {
@@ -271,6 +274,7 @@ pub(crate) fn model_catalog_fallback(
     home: &std::path::Path,
     native_web_search_models: &[String],
     image_detail_original_models: &[String],
+    remote_compaction_models: &[String],
 ) -> Result<bool, String> {
     match result {
         Ok(()) => Ok(false),
@@ -279,6 +283,7 @@ pub(crate) fn model_catalog_fallback(
                 home,
                 native_web_search_models,
                 image_detail_original_models,
+                remote_compaction_models,
             )
             .map(|available| !available)
             .map_err(|fallback_error| fallback_error.to_string())
@@ -293,6 +298,7 @@ fn try_refresh_model_catalog(config: &CodeyConfig, home: &std::path::Path) -> an
     let websocket_models = config.runtime_websocket_model_aliases();
     let native_web_search_models = config.runtime_native_web_search_model_aliases();
     let image_detail_original_models = config.runtime_image_detail_original_model_aliases();
+    let remote_compaction_models = config.runtime_remote_compaction_model_aliases();
     model_catalog::refresh_for_provider_with_contexts(
         home,
         config.official_account_available_this_launch && use_builtin_official_catalog,
@@ -304,11 +310,13 @@ fn try_refresh_model_catalog(config: &CodeyConfig, home: &std::path::Path) -> an
             websocket_models: Some(&websocket_models),
             native_web_search_models: Some(&native_web_search_models),
             image_detail_original_models: Some(&image_detail_original_models),
+            remote_compaction_models: Some(&remote_compaction_models),
         },
         model_catalog::CatalogOverrides {
             plugin_contexts: &config.runtime_plugin_model_contexts(),
             contexts: &config.runtime_model_contexts(),
             reasoning_efforts: &config.runtime_model_reasoning_efforts(),
+            display_names: &config.runtime_catalog_display_names(),
         },
         &config.codex_app_path,
     )

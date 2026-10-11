@@ -415,7 +415,9 @@ test("updating draft notes preserves the tag, commit and ownership and rejects a
       assert.equal(url, "https://api.github.com/repos/owner/codey/releases/10");
       assert.equal(options.method, "PATCH");
       const body = JSON.parse(options.body);
-      assert.deepEqual(Object.keys(body).sort(), ["body", "tag_name"]);
+      assert.deepEqual(Object.keys(body).sort(), ["body", "name", "prerelease", "tag_name"]);
+      assert.equal(body.name, `正式版 ${build.tag}`);
+      assert.equal(body.prerelease, false);
       assert.ok(!("target_commitish" in body));
       return Response.json({ ...release, ...body, tag_name: changed ? "untagged-test" : body.tag_name || "untagged-test" });
     };

@@ -1,7 +1,7 @@
 import type { Config, ModelState, Profile, ProviderStatus } from "./App.types";
 import { modelKey, uniqueModelIds } from "./modelIds";
 import { routeModelAlias, routeProviderId } from "./modelRoutes";
-import { routeDisplayPrefix } from "./routeShortNames";
+import { fallbackRouteShortName, routeDisplayPrefix } from "./routeShortNames";
 import { resolveModelReasoningEfforts } from "./modelReasoningEfforts";
 
 const THIRD_PARTY_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"];
@@ -160,14 +160,10 @@ export function buildSubagentModelOptions(
     if (!providerId) return [];
     const official = currentProvider?.official ??
       matchingProfile?.authMode === "officialAccount";
-    const routeName = currentProvider?.name.trim() ||
-      matchingProfile?.name.trim() ||
-      providerId;
-    const routePrefix = matchingProfile
-      ? routeDisplayPrefix(matchingProfile)
-      : official
-        ? "官"
-        : routeName.slice(0, 2);
+    const routeName = matchingProfile
+      ? matchingProfile.name.trim()
+      : currentProvider?.name.trim() || providerId;
+    const routePrefix = matchingProfile?.shortName?.trim() || fallbackRouteShortName(routeName);
     const officialModels = modelState.officialModels
       .filter((model) => model.supported)
       .map((model) => model.slug);
@@ -203,7 +199,7 @@ export function buildSubagentModelOptions(
         value: routeModelAlias(profile, modelId),
         routeId: profile.id,
         providerId,
-        routeName: profile.name.trim() || providerId,
+        routeName: profile.name.trim(),
         routePrefix: routeDisplayPrefix(profile),
         official,
       });

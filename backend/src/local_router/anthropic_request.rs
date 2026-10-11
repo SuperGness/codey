@@ -60,7 +60,7 @@ pub(crate) fn responses_to_anthropic_messages_request(
     let max_tokens = chat
         .get("max_tokens")
         .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_ANTHROPIC_MAX_TOKENS);
+        .unwrap_or_else(|| default_anthropic_max_tokens(&model));
     if max_tokens == 0 {
         anyhow::bail!("max_output_tokens 必须大于 0");
     }

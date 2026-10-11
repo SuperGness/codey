@@ -5,6 +5,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Mutex;
 
 pub mod appserver;
+pub mod config;
+pub mod host;
 pub mod lifecycle;
 pub mod provider;
 pub mod transport;

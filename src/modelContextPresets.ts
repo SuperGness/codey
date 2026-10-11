@@ -14,5 +14,5 @@ export const CONTEXT_WINDOW_PRESETS: ReadonlyArray<{
   { label: "256K", value: 256_000 },
   { label: "400K", value: 400_000 },
   { label: "512K", value: 512_000 },
-  { label: "1M", value: 1_000_000 },
+  { label: "1000K", value: 1_000_000 },
 ];

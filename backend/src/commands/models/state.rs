@@ -28,10 +28,11 @@ fn alias_set(aliases: Vec<String>) -> std::collections::BTreeSet<String> {
 }
 
 pub(crate) fn remote_compaction_transport_requires_restart(
-    applied: &CodeyConfig,
-    current: &CodeyConfig,
+    _applied: &CodeyConfig,
+    _current: &CodeyConfig,
 ) -> bool {
-    applied.runtime_supports_remote_compaction() != current.runtime_supports_remote_compaction()
+    // 统一 Provider 后，网关可按线路热切换原生或等价压缩。
+    false
 }
 
 pub(crate) fn native_web_search_capability_requires_restart(
@@ -150,6 +151,8 @@ pub(crate) fn provider_route_snapshots_for_runtime(
     provider_route_snapshots(config)
         .into_iter()
         .map(|(provider_id, mut route)| {
+            // 原生压缩能力由统一网关随配置热更新。
+            route.supports_remote_compaction = false;
             if route.official_account {
                 route.base_url.clear();
             }
@@ -186,15 +189,13 @@ pub(crate) fn config_with_launch_pinned_transport(
         };
         profile.supports_websockets = previous.supports_websockets;
         profile.supports_native_web_search = previous.supports_native_web_search;
-        profile.supports_remote_compaction = previous.supports_remote_compaction;
-        // 协议决定上面三个能力的实际取值，必须一起固定在启动时的状态。
+        // 协议影响 WebSocket 和网页搜索能力，保持启动时的状态。
         profile.upstream_protocol = previous.upstream_protocol.clone();
         if profile.official_account && previous.official_account {
             let launch_scoped_official_change = profile.api_key != previous.api_key
                 || profile.auth_mode != previous.auth_mode
                 || profile.model_request_headers != previous.model_request_headers
                 || profile.upstream_protocol != previous.upstream_protocol
-                || profile.supports_remote_compaction != previous.supports_remote_compaction
                 || profile.supports_websockets != previous.supports_websockets
                 || profile.supports_native_web_search != previous.supports_native_web_search;
             if launch_scoped_official_change {
@@ -246,6 +247,7 @@ pub(crate) fn renderer_model_catalog_value(
                 "route_name": entry.route_name,
                 "route_prefix": entry.route_prefix,
                 "provider_id": entry.request_provider_id,
+                "supports_remote_compaction": entry.native_remote_compaction,
                 "source_model": entry.request_model,
                 "official_account": entry.official_account,
                 "supported_reasoning_efforts": entry.supported_reasoning_efforts,
@@ -355,6 +357,7 @@ pub(crate) struct RendererRouteModelEntry {
     pub(crate) provider_id: String,
     pub(crate) request_provider_id: String,
     pub(crate) request_model: String,
+    pub(crate) native_remote_compaction: bool,
     pub(crate) official_account: bool,
     pub(crate) route_name: String,
     pub(crate) route_prefix: String,
@@ -415,15 +418,7 @@ pub(crate) fn renderer_route_model_catalog(
             .unwrap_or_default()
         };
         let route_name = profile.name.trim();
-        let route_name = if route_name.is_empty() {
-            provider_id.as_str()
-        } else {
-            route_name
-        };
-        let route_prefix = match profile.short_name.trim() {
-            "" if profile.official_account => OFFICIAL_ROUTE_SHORT_NAME.to_string(),
-            short_name => short_name.to_string(),
-        };
+        let route_prefix = profile.display_short_name();
         let mut official_models = state
             .official_models
             .iter()
@@ -478,7 +473,9 @@ pub(crate) fn renderer_route_model_catalog(
             // 单账号时官方模型沿用原生 ID，多账号时按上面生成的线路前缀为准，
             // 请求转发仍统一走本地路由。
             let (request_provider_id, request_model) = (
-                config.runtime_gateway_provider_id().to_string(),
+                config
+                    .runtime_gateway_provider_id_for_profile(profile)
+                    .to_string(),
                 model.clone(),
             );
             let is_default = default_model
@@ -489,6 +486,8 @@ pub(crate) fn renderer_route_model_catalog(
                 provider_id: provider_id.clone(),
                 request_provider_id,
                 request_model,
+                native_remote_compaction: config
+                    .route_supports_remote_compaction_this_launch(profile),
                 official_account: profile.official_account,
                 route_name: route_name.to_string(),
                 route_prefix: route_prefix.clone(),

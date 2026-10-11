@@ -1,8 +1,0 @@
-{
-  "apiKeys": [""],
-  "models": ["deepseek-v4-flash"],
-  "_comments": {
-    "apiKeys": "按顺序填写一个或多个真实 Key；空 Key 会拒绝启用。单 Key 也可改用 apiKey 字段，两种字段只能保留一种。",
-    "models": "填写日日新实际支持的模型 ID。请求仍直连官方 /v1/responses。"
-  }
-}

@@ -6,6 +6,7 @@ import {
   MAX_CONTEXT_WINDOW_TOKENS,
   MIN_CONTEXT_WINDOW_TOKENS,
 } from "../modelContextPresets";
+import { formatTokenK, parseTokenK } from "../tokenUnits";
 
 export type ModelContextWindowComboboxProps = {
   ariaLabel?: string;
@@ -19,12 +20,12 @@ export function ModelContextWindowCombobox({
   ariaLabel = "上下文窗口",
   disabled = false,
   onChange,
-  placeholder = "256K",
+  placeholder = "256",
   value,
 }: ModelContextWindowComboboxProps) {
-  const [text, setText] = useState(value == null ? "" : String(value));
+  const [text, setText] = useState(value == null ? "" : formatTokenK(value));
   useEffect(() => {
-    setText(value == null ? "" : String(value));
+    setText(value == null ? "" : formatTokenK(value));
   }, [value]);
 
   const data = useMemo(() => {
@@ -32,14 +33,14 @@ export function ModelContextWindowCombobox({
     const matched = query
       ? CONTEXT_WINDOW_PRESETS.filter(
           (preset) =>
-            String(preset.value).includes(query) ||
+            `${formatTokenK(preset.value)}K`.toLocaleLowerCase().includes(query) ||
             preset.label.toLocaleLowerCase().includes(query),
         )
       : CONTEXT_WINDOW_PRESETS;
     return (matched.length ? matched : CONTEXT_WINDOW_PRESETS).map((preset) => ({
       id: String(preset.value),
-      label: `${preset.label}（${preset.value} Token）`,
-      textValue: preset.label,
+      label: preset.label,
+      textValue: formatTokenK(preset.value),
     }));
   }, [text]);
 
@@ -50,10 +51,9 @@ export function ModelContextWindowCombobox({
       onChange(undefined);
       return;
     }
-    if (!/^(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)$/.test(normalized)) return;
-    const parsed = Number(normalized.replace(/,/g, ""));
+    const parsed = parseTokenK(normalized);
     if (
-      Number.isSafeInteger(parsed) &&
+      parsed != null &&
       parsed >= MIN_CONTEXT_WINDOW_TOKENS &&
       parsed <= MAX_CONTEXT_WINDOW_TOKENS
     ) {
@@ -72,12 +72,12 @@ export function ModelContextWindowCombobox({
       isDisabled={disabled}
       menuTrigger="focus"
       onInputChange={commit}
-      onBlur={() => setText(value == null ? "" : String(value))}
+      onBlur={() => setText(value == null ? "" : formatTokenK(value))}
       onSelectionChange={(key) => {
         if (key == null) return;
         const next = Number(String(key));
         if (!Number.isFinite(next)) return;
-        setText(String(next));
+        setText(formatTokenK(next));
         onChange(next);
       }}
     >
@@ -86,7 +86,7 @@ export function ModelContextWindowCombobox({
           placeholder={placeholder}
           autoComplete="off"
           spellCheck={false}
-          inputMode="numeric"
+          inputMode="decimal"
           className="h-7 min-h-7"
         />
         <ComboBox.Trigger />

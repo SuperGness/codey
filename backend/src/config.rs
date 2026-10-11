@@ -10,6 +10,22 @@ use uuid::Uuid;
 pub use crate::notifications::WebhookConfig;
 use crate::{local_router, model_catalog, model_id};
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteCompactionProtocol {
+    #[default]
+    Responses,
+    CompactEndpoint,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteCompactionBlocker {
+    pub(crate) route_id: String,
+    pub(crate) route_name: String,
+    pub(crate) reason: &'static str,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderProfile {
@@ -56,6 +72,9 @@ pub struct ProviderProfile {
     /// compaction when it was explicitly enabled by the source configuration.
     #[serde(default)]
     pub supports_remote_compaction: bool,
+    /// 上游压缩协议；旧配置保持原生 Responses 行为，兼容端点由用户明确选择。
+    #[serde(default)]
+    pub remote_compaction_protocol: RemoteCompactionProtocol,
     /// Whether this route supports the Responses WebSocket transport.
     /// Official ChatGPT-account routes normalize to enabled; third-party
     /// routes remain disabled unless the user explicitly opts in.
@@ -90,21 +109,6 @@ pub fn default_official_route_name(index: usize) -> String {
     format!("{OFFICIAL_ROUTE_NAME_PREFIX}{index}")
 }
 
-/// 官方账号默认短名称与线路名同号，例如「官1」。短名称最长两个字符，
-/// 编号越过 9 之后依次使用「官A」这类字母编号。
-pub fn default_official_route_short_name(index: usize) -> String {
-    let prefix = OFFICIAL_ROUTE_SHORT_NAME;
-    if index <= 9 {
-        return format!("{prefix}{index}");
-    }
-    let letter = OFFICIAL_ROUTE_SHORT_NAME_LETTERS
-        .chars()
-        .nth(index - 10)
-        .or_else(|| OFFICIAL_ROUTE_SHORT_NAME_LETTERS.chars().last())
-        .unwrap_or('Z');
-    format!("{prefix}{letter}")
-}
-
 /// Stable profile id of the derived official route that belongs to one stored
 /// account. The id doubles as the route-scoped provider id, so several
 /// accounts can be selected side by side in one conversation.
@@ -134,16 +138,13 @@ pub fn is_official_profile_id(provider_id: &str) -> bool {
 }
 
 fn default_route_short_name(name: &str) -> String {
-    name.trim()
-        .chars()
-        .take(MAX_ROUTE_SHORT_NAME_CHARS)
-        .collect()
+    name.trim().chars().take(2).collect()
 }
 
 /// Keeps one official account's preferred short name when it is still free and
 /// otherwise numbers the following accounts so route-scoped model ids stay
 /// readable.
-fn unique_official_route_short_name(preferred: &str, used: &BTreeSet<String>) -> String {
+pub(crate) fn unique_official_route_short_name(preferred: &str, used: &BTreeSet<String>) -> String {
     let preferred = preferred.trim();
     if !preferred.is_empty() && !used.contains(preferred) {
         return preferred.to_string();
@@ -222,7 +223,7 @@ impl ProviderProfile {
         Self {
             id: Uuid::new_v4().to_string(),
             enabled: true,
-            short_name: default_route_short_name(&name),
+            short_name: String::new(),
             name,
             base_url: String::new(),
             api_key: String::new(),
@@ -238,6 +239,7 @@ impl ProviderProfile {
             official_account: false,
             official_account_id: None,
             supports_remote_compaction: false,
+            remote_compaction_protocol: RemoteCompactionProtocol::default(),
             supports_websockets: false,
             supports_native_web_search: false,
             supports_auto_review: false,
@@ -255,6 +257,15 @@ impl ProviderProfile {
         self.source_provider_id
             .as_deref()
             .unwrap_or(self.id.as_str())
+    }
+
+    pub(crate) fn display_short_name(&self) -> String {
+        let short_name = self.short_name.trim();
+        if short_name.is_empty() {
+            default_route_short_name(&self.name)
+        } else {
+            short_name.to_string()
+        }
     }
 
     pub(crate) fn runtime_wire_api(&self) -> Result<&'static str, String> {
@@ -279,7 +290,6 @@ impl ProviderProfile {
     }
 
     /// 旧配置没有认证类型，仅为无 API Key 的官方端点恢复账号线路。
-    /// 这类线路的短名称使用官方默认值，不参与按线路名生成短名称的迁移。
     fn resolves_to_official_account_route(&self) -> bool {
         self.official_account
             || self.auth_mode.trim() == AUTH_MODE_OFFICIAL_ACCOUNT
@@ -292,9 +302,6 @@ impl ProviderProfile {
     pub(crate) fn normalize(&mut self) {
         self.id = self.id.trim().to_string();
         self.name = self.name.trim().to_string();
-        if self.name.is_empty() {
-            self.name = "未命名线路".to_string();
-        }
         self.short_name = self.short_name.trim().to_string();
         self.base_url = self.base_url.trim().trim_end_matches('/').to_string();
         self.api_key = self.api_key.trim().to_string();
@@ -316,11 +323,9 @@ impl ProviderProfile {
         self.auth_mode = normalize_auth_mode(&self.auth_mode, self.official_account);
         if self.auth_mode == AUTH_MODE_OFFICIAL_ACCOUNT {
             self.official_account = true;
-            if self.short_name.is_empty() {
-                self.short_name = OFFICIAL_ROUTE_SHORT_NAME.to_string();
-            }
             self.api_key.clear();
             self.supports_remote_compaction = true;
+            self.remote_compaction_protocol = RemoteCompactionProtocol::Responses;
             self.supports_websockets = true;
             self.supports_native_web_search = true;
             self.supports_auto_review = true;
@@ -357,16 +362,21 @@ impl ProviderProfile {
         if self.id.trim().is_empty() {
             return Err("线路 ID 不能为空".to_string());
         }
-        if self.provider_id() == local_router::ROUTER_PROVIDER_ID {
+        if local_router::is_router_provider(self.provider_id()) {
             return Err(format!(
                 "线路不能使用 Codey 内部 Provider ID「{}」",
-                local_router::ROUTER_PROVIDER_ID
+                self.provider_id()
             ));
         }
-        let name = self.name.trim();
-        if name.is_empty() {
-            return Err("线路名称不能为空".to_string());
+        let short_name = self.display_short_name();
+        if short_name.is_empty() {
+            return Err("请输入短名称".to_string());
         }
+        let name = if self.name.trim().is_empty() {
+            short_name.as_str()
+        } else {
+            self.name.trim()
+        };
         local_router::prepare_upstream_headers(
             self,
             local_router::UpstreamProtocol::from_profile(
@@ -389,9 +399,6 @@ impl ProviderProfile {
             )?;
         }
         let short_name = self.short_name.trim();
-        if short_name.is_empty() {
-            return Err(format!("线路「{name}」缺少短名称"));
-        }
         if short_name.chars().count() > MAX_ROUTE_SHORT_NAME_CHARS {
             return Err(format!(
                 "线路「{name}」的短名称最多 {MAX_ROUTE_SHORT_NAME_CHARS} 个字符"
@@ -727,14 +734,49 @@ impl RouteRequestLogConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CodeyUpdatePolicy {
+    Off,
+    #[default]
+    Stable,
+    Experimental,
+}
+
+impl<'de> Deserialize<'de> for CodeyUpdatePolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value {
+            serde_json::Value::Bool(false) => Ok(Self::Off),
+            serde_json::Value::Bool(true) => Ok(Self::Stable),
+            serde_json::Value::String(value) => match value.as_str() {
+                "off" => Ok(Self::Off),
+                "stable" => Ok(Self::Stable),
+                "experimental" => Ok(Self::Experimental),
+                _ => Err(serde::de::Error::custom("Codey 更新策略无效")),
+            },
+            _ => Err(serde::de::Error::custom("Codey 更新策略无效")),
+        }
+    }
+}
+
+impl CodeyUpdatePolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Stable => "stable",
+            Self::Experimental => "experimental",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeyConfig {
     #[serde(default)]
     pub settings_revision: u64,
-    /// 控制启动和运行期间的自动更新检查，包括 Codex 启动失败后的检查。
-    #[serde(default = "default_true")]
-    pub auto_check_codey_updates: bool,
+    #[serde(default, alias = "autoCheckCodeyUpdates")]
+    pub codey_update_policy: CodeyUpdatePolicy,
     /// Controls whether Codey installs and uses its process-local multi-route
     /// gateway. Missing values default to enabled so existing installations
     /// keep their current behavior after upgrading.
@@ -755,6 +797,8 @@ pub struct CodeyConfig {
     pub webhook: WebhookConfig,
     #[serde(default)]
     pub prompt_optimization: PromptOptimizationConfig,
+    #[serde(default)]
+    pub conversation_git: crate::conversation_git::ConversationGitConfig,
     #[serde(default)]
     pub codex_app_path: String,
     #[serde(default)]
@@ -945,7 +989,7 @@ impl Default for CodeyConfig {
         let profile = ProviderProfile::new("默认配置");
         Self {
             settings_revision: 0,
-            auto_check_codey_updates: true,
+            codey_update_policy: CodeyUpdatePolicy::Stable,
             local_router_enabled: true,
             route_request_log: RouteRequestLogConfig::default(),
             stream_max_retries: default_stream_max_retries(),
@@ -953,6 +997,7 @@ impl Default for CodeyConfig {
             profiles: vec![profile],
             webhook: WebhookConfig::default(),
             prompt_optimization: PromptOptimizationConfig::default(),
+            conversation_git: crate::conversation_git::ConversationGitConfig::default(),
             codex_app_path: String::new(),
             user_scripts: Vec::new(),
             selected_models_by_provider: BTreeMap::new(),
@@ -996,20 +1041,27 @@ impl CodeyConfig {
         self.route_request_log.normalize();
         self.profiles
             .retain(|profile| !profile.id.trim().is_empty());
+        for profile in &mut self.profiles {
+            profile.normalize();
+        }
         let mut used_short_names = self
             .profiles
             .iter()
-            .filter(|profile| !profile.short_name.trim().is_empty())
-            .map(|profile| profile.short_name.trim().to_string())
+            .map(|profile| profile.short_name.clone())
+            .filter(|short_name| !short_name.is_empty())
             .collect::<BTreeSet<_>>();
         for profile in &mut self.profiles {
-            if !profile.resolves_to_official_account_route() && profile.short_name.trim().is_empty()
-            {
-                profile.short_name =
-                    unique_default_route_short_name(&profile.name, &used_short_names);
+            if profile.short_name.is_empty() && !profile.is_unconfigured_default() {
+                profile.short_name = if profile.official_account {
+                    unique_official_route_short_name(
+                        &profile.display_short_name(),
+                        &used_short_names,
+                    )
+                } else {
+                    unique_default_route_short_name(&profile.name, &used_short_names)
+                };
                 used_short_names.insert(profile.short_name.clone());
             }
-            profile.normalize();
         }
         if self.profiles.is_empty() {
             let profile = ProviderProfile::new("默认配置");
@@ -1053,6 +1105,7 @@ impl CodeyConfig {
         }
         self.webhook.normalize();
         self.prompt_optimization.normalize();
+        self.conversation_git.model = self.conversation_git.model.trim().to_string();
         self
     }
 
@@ -1144,7 +1197,7 @@ impl CodeyConfig {
                     .unwrap_or(true);
                 official_profile.normalize();
                 official_profile.short_name = unique_official_route_short_name(
-                    &official_profile.short_name,
+                    &official_profile.display_short_name(),
                     &used_short_names,
                 );
                 used_short_names.insert(official_profile.short_name.clone());
@@ -1605,7 +1658,10 @@ impl CodeyConfig {
         self.local_router_enabled && self.usable_official_routes().count() > 1
     }
 
-    pub(crate) fn runtime_gateway_provider_id(&self) -> &'static str {
+    pub(crate) fn runtime_gateway_provider_id_for_profile(
+        &self,
+        _profile: &ProviderProfile,
+    ) -> &'static str {
         local_router::ROUTER_PROVIDER_ID
     }
 
@@ -1777,29 +1833,86 @@ impl CodeyConfig {
             && profile.upstream_protocol == UPSTREAM_PROTOCOL_OPENAI_RESPONSES
     }
 
-    /// Advertise the OpenAI provider identity only when every runtime route
-    /// supports native compaction. Codex derives this capability from the
-    /// shared provider, so one adapted Chat/Anthropic route must disable it for
-    /// the whole runtime even when an official account route is also present.
+    /// 这里只汇总可用能力；压缩方式由网关按所选线路热切换。
     pub(crate) fn runtime_supports_remote_compaction(&self) -> bool {
-        let mut has_runtime_route = false;
-        for profile in &self.profiles {
-            if !profile.enabled || profile.provider_id().trim().is_empty() {
-                continue;
-            }
-            if profile.official_account {
-                if !self.official_route_usable(profile) {
-                    continue;
-                }
-            } else if profile.normalized_base_url().is_empty() {
-                continue;
-            }
-            has_runtime_route = true;
-            if !self.route_supports_remote_compaction_this_launch(profile) {
-                return false;
-            }
+        self.remote_compaction_runtime_profiles()
+            .any(|profile| self.route_supports_remote_compaction_this_launch(profile))
+    }
+
+    pub(crate) fn remote_compaction_route_capabilities(&self) -> BTreeMap<String, bool> {
+        self.remote_compaction_runtime_profiles()
+            .map(|profile| {
+                (
+                    profile.provider_id().to_string(),
+                    self.route_supports_remote_compaction_this_launch(profile),
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn remote_compaction_mode(&self) -> &'static str {
+        let routes = self.remote_compaction_route_capabilities();
+        if !routes.values().any(|enabled| *enabled) {
+            "local"
+        } else if routes.values().all(|enabled| *enabled) {
+            "remote"
+        } else {
+            "mixed"
         }
-        has_runtime_route
+    }
+
+    pub(crate) fn runtime_remote_compaction_model_aliases(&self) -> Vec<String> {
+        let qualify_official = self.qualifies_official_model_ids();
+        self.remote_compaction_runtime_profiles()
+            .filter(|profile| self.route_supports_remote_compaction_this_launch(profile))
+            .flat_map(|profile| {
+                let models = if profile.official_account {
+                    self.enabled_official_route_models(profile.provider_id())
+                } else {
+                    self.enabled_route_models(profile.provider_id())
+                };
+                models
+                    .into_iter()
+                    .map(move |model| runtime_catalog_model_id(profile, &model, qualify_official))
+            })
+            .collect()
+    }
+
+    fn remote_compaction_runtime_profiles(&self) -> impl Iterator<Item = &ProviderProfile> {
+        self.profiles.iter().filter(|profile| {
+            profile.enabled
+                && !profile.provider_id().trim().is_empty()
+                && if profile.official_account {
+                    self.official_route_usable(profile)
+                } else {
+                    !profile.normalized_base_url().is_empty()
+                }
+        })
+    }
+
+    pub(crate) fn remote_compaction_blockers(&self) -> Vec<RemoteCompactionBlocker> {
+        self.remote_compaction_runtime_profiles()
+            .filter(|profile| !self.route_supports_remote_compaction_this_launch(profile))
+            .map(|profile| RemoteCompactionBlocker {
+                route_id: profile.id.clone(),
+                route_name: if profile.name.trim().is_empty() {
+                    profile.display_short_name()
+                } else {
+                    profile.name.clone()
+                },
+                reason: if profile
+                    .plugin_route_spec
+                    .as_ref()
+                    .is_some_and(|s| s.transport.is_some())
+                {
+                    "插件传输不支持原生压缩"
+                } else if profile.upstream_protocol != UPSTREAM_PROTOCOL_OPENAI_RESPONSES {
+                    "上游协议不支持原生压缩"
+                } else {
+                    "未开启远程压缩"
+                },
+            })
+            .collect()
     }
 
     pub fn manual_third_party_models(&self) -> &[String] {
@@ -1954,7 +2067,9 @@ impl CodeyConfig {
             };
             for upstream_model in models {
                 let alias = local_router::model_alias(provider_id, &upstream_model);
-                let request_provider_id = self.runtime_gateway_provider_id().to_string();
+                let request_provider_id = self
+                    .runtime_gateway_provider_id_for_profile(profile)
+                    .to_string();
                 targets.push(RuntimeModelTarget {
                     route_id: profile.id.clone(),
                     provider_id: provider_id.to_string(),
@@ -2060,6 +2175,42 @@ impl CodeyConfig {
             model_id::dedupe_preserving_first(upstream.iter().map(String::as_str)),
             model_id::dedupe_preserving_first(selected.iter().map(String::as_str)),
         )
+    }
+
+    /// Native display names keyed by the route-qualified runtime catalog id.
+    ///
+    /// Codex renders this field directly in places Codey cannot patch, such as
+    /// the synthetic model-change divider. Raw ids keep the native official
+    /// names so a single-account setup stays unchanged; aliased ids gain the
+    /// same `[短名] 模型名` form the Codey model menu already shows.
+    pub(crate) fn runtime_catalog_display_names(&self) -> BTreeMap<String, String> {
+        let qualify_official = self.qualifies_official_model_ids();
+        let mut names = BTreeMap::new();
+        for profile in &self.profiles {
+            if !profile.enabled {
+                continue;
+            }
+            let provider_id = profile.provider_id();
+            if profile.official_account {
+                if !self.official_route_usable(profile) {
+                    continue;
+                }
+                for model in self.enabled_official_route_models(provider_id) {
+                    let id = runtime_catalog_model_id(profile, &model, qualify_official);
+                    if id.contains('/') {
+                        names.insert(id, route_model_display_name(profile, &model));
+                    }
+                }
+                continue;
+            }
+            for model in self.enabled_route_models(provider_id) {
+                names.insert(
+                    local_router::model_alias(provider_id, &model),
+                    route_model_display_name(profile, &model),
+                );
+            }
+        }
+        names
     }
 
     /// Catalog id of one runtime model target. It matches the ids produced by
@@ -2299,6 +2450,12 @@ fn runtime_catalog_model_id(
     }
 }
 
+/// One line for the Codex model picker and other native surfaces: route short
+/// name plus the upstream model, without the internal provider selector.
+fn route_model_display_name(profile: &ProviderProfile, model: &str) -> String {
+    format!("[{}] {}", profile.display_short_name(), model.trim())
+}
+
 fn model_references_provider(model: &str, provider_id: &str) -> bool {
     let prefix = local_router::model_alias(provider_id, "");
     model
@@ -2374,7 +2531,7 @@ pub(crate) fn validate_provider_profiles(profiles: &[ProviderProfile]) -> Result
         // Official and third-party routes share one namespace because the
         // short name prefixes every route-scoped model name.
         let short_name = profile.short_name.trim();
-        if !short_names.insert(short_name.to_string()) {
+        if !short_name.is_empty() && !short_names.insert(short_name.to_string()) {
             return Err(format!("多条线路使用了相同的短名称：{short_name}"));
         }
     }
@@ -3129,7 +3286,8 @@ mod tests {
         assert!(profile.official_account);
         assert_eq!(profile.auth_mode, AUTH_MODE_OFFICIAL_ACCOUNT);
         assert_eq!(profile.upstream_protocol, UPSTREAM_PROTOCOL_OFFICIAL);
-        assert_eq!(profile.short_name, OFFICIAL_ROUTE_SHORT_NAME);
+        assert_eq!(profile.short_name, "Op");
+        assert_eq!(profile.display_short_name(), "Op");
         assert!(profile.validate().is_ok());
         assert_eq!(loaded.clone().normalize(), loaded);
 
@@ -3277,7 +3435,7 @@ mod tests {
     }
 
     #[test]
-    fn third_party_short_names_are_required_limited_and_migrated() {
+    fn legacy_short_names_are_migrated_and_custom_names_stay_limited() {
         let mut route = ProviderProfile::new("中转线路");
         route.id = "relay".into();
         route.base_url = "https://relay.example/v1".into();
@@ -3285,7 +3443,8 @@ mod tests {
 
         route.short_name.clear();
         route.normalize();
-        assert_eq!(route.validate().unwrap_err(), "线路「中转线路」缺少短名称");
+        assert!(route.validate().is_ok());
+        assert_eq!(route.display_short_name(), "中转");
 
         route.short_name = "中转线路".into();
         assert!(route.validate().is_ok());
@@ -3303,12 +3462,13 @@ mod tests {
             ..CodeyConfig::default()
         }
         .normalize();
-        assert_eq!(migrated.profiles[0].short_name, "中转线路");
+        assert_eq!(migrated.profiles[0].short_name, "中转");
+        assert_eq!(migrated.profiles[0].display_short_name(), "中转");
         assert!(migrated.profiles[0].validate().is_ok());
     }
 
     #[test]
-    fn legacy_short_name_migration_keeps_route_prefixes_unique() {
+    fn legacy_empty_short_names_receive_unique_defaults() {
         let mut first = ProviderProfile::new("线路 A");
         first.id = "route-a".into();
         first.short_name.clear();
@@ -3328,8 +3488,10 @@ mod tests {
         }
         .normalize();
 
-        assert_eq!(migrated.profiles[0].short_name, "线路 A");
-        assert_eq!(migrated.profiles[1].short_name, "线路 B");
+        assert_eq!(migrated.profiles[0].short_name, "线路");
+        assert_eq!(migrated.profiles[1].short_name, "线1");
+        assert_eq!(migrated.profiles[0].display_short_name(), "线路");
+        assert_eq!(migrated.profiles[1].display_short_name(), "线1");
         assert!(validate_provider_profiles(&migrated.profiles).is_ok());
     }
 
@@ -3353,7 +3515,36 @@ mod tests {
     }
 
     #[test]
-    fn official_routes_keep_a_custom_short_name_and_fall_back_to_the_official_one() {
+    fn short_name_only_routes_preserve_blank_names_through_serialization() {
+        for official in [false, true] {
+            let mut route = ProviderProfile::new("");
+            route.id = "route-id".into();
+            route.short_name = "主".into();
+            route.base_url = "https://relay.example/v1".into();
+            route.api_key = "relay-key".into();
+            if official {
+                route.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+            }
+            route.normalize();
+            assert!(route.validate().is_ok());
+            let config = CodeyConfig {
+                active_profile_id: route.id.clone(),
+                profiles: vec![route],
+                ..CodeyConfig::default()
+            }
+            .normalize();
+            let saved = serde_json::to_string(&config).unwrap();
+            let reloaded = serde_json::from_str::<CodeyConfig>(&saved)
+                .unwrap()
+                .normalize();
+            assert_eq!(reloaded.profiles[0].name, "");
+            assert_eq!(reloaded.profiles[0].short_name, "主");
+            assert_eq!(reloaded.profiles[0].provider_id(), "route-id");
+        }
+    }
+
+    #[test]
+    fn official_routes_keep_a_custom_short_name_and_fall_back_to_the_name() {
         let mut route = ProviderProfile::new("Official");
         route.short_name = "自定".into();
         route.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
@@ -3364,7 +3555,12 @@ mod tests {
 
         route.short_name.clear();
         route.normalize();
-        assert_eq!(route.short_name, OFFICIAL_ROUTE_SHORT_NAME);
+        assert!(route.short_name.is_empty());
+        assert_eq!(route.display_short_name(), "Of");
+        route.name = "Plus".into();
+        assert_eq!(route.display_short_name(), "Pl");
+        route.name = "😀备用".into();
+        assert_eq!(route.display_short_name(), "😀备");
         assert!(route.validate().is_ok());
 
         route.short_name = "官方线路".into();
@@ -3377,22 +3573,14 @@ mod tests {
     #[test]
     fn generated_official_account_names_follow_the_add_order() {
         assert_eq!(default_official_route_name(1), "官方账号1");
-        assert_eq!(default_official_route_short_name(1), "官1");
-        assert_eq!(default_official_route_short_name(2), "官2");
-        assert_eq!(default_official_route_short_name(9), "官9");
-        // 默认短名称保持两个字符，编号超过 9 之后改用字母。
-        assert_eq!(default_official_route_short_name(10), "官A");
-        for index in 1..=300 {
-            let short_name = default_official_route_short_name(index);
-            assert!(short_name.chars().count() <= MAX_ROUTE_SHORT_NAME_CHARS);
-        }
+        assert_eq!(default_official_route_name(10), "官方账号10");
 
         let mut route = ProviderProfile::new(default_official_route_name(1));
-        route.short_name = default_official_route_short_name(1);
         route.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
         route.normalize();
         assert_eq!(route.name, "官方账号1");
-        assert_eq!(route.short_name, "官1");
+        assert!(route.short_name.is_empty());
+        assert_eq!(route.display_short_name(), "官方");
         assert!(route.validate().is_ok());
     }
 
@@ -3487,6 +3675,54 @@ mod tests {
                 "relay/shared-model",
                 "relay/manual-model",
             ]
+        );
+    }
+
+    #[test]
+    fn runtime_catalog_display_names_use_route_short_names_for_aliased_ids() {
+        let mut first = ProviderProfile::new("Official");
+        first.id = "codey-official-account-one".into();
+        first.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+        first.official_account_id = Some("acct-one".into());
+        first.short_name = "main".into();
+        first.normalize();
+
+        let mut second = ProviderProfile::new("Official Two");
+        second.id = "codey-official-account-two".into();
+        second.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+        second.official_account_id = Some("acct-two".into());
+        second.short_name = "alt".into();
+        second.normalize();
+
+        let mut relay = ProviderProfile::new("Relay");
+        relay.id = "relay".into();
+        relay.short_name = "pro".into();
+        relay.base_url = "https://relay.example/v1".into();
+        relay.api_key = "relay-key".into();
+        relay.normalize();
+
+        let mut config = CodeyConfig {
+            active_profile_id: first.id.clone(),
+            profiles: vec![first, second, relay],
+            local_router_enabled: true,
+            official_account_available_this_launch: true,
+            ..CodeyConfig::default()
+        };
+        config
+            .selected_models_by_provider
+            .insert("relay".into(), vec!["shared-model".into()]);
+
+        let names = config.runtime_catalog_display_names();
+
+        assert_eq!(
+            names.get("relay/shared-model").map(String::as_str),
+            Some("[pro] shared-model")
+        );
+        assert_eq!(
+            names
+                .get("codey-official-account-one/gpt-5.6-sol")
+                .map(String::as_str),
+            Some("[main] gpt-5.6-sol")
         );
     }
 
@@ -3685,7 +3921,100 @@ mod tests {
     }
 
     #[test]
-    fn third_party_remote_compaction_is_advertised_only_when_every_runtime_route_supports_it() {
+    fn remote_compaction_protocol_migrates_and_normalizes_official_routes() {
+        let mut legacy = serde_json::to_value(ProviderProfile::new("Relay")).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("remoteCompactionProtocol");
+        let mut profile: ProviderProfile = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            profile.remote_compaction_protocol,
+            RemoteCompactionProtocol::Responses
+        );
+        profile.remote_compaction_protocol = RemoteCompactionProtocol::CompactEndpoint;
+        let serialized = serde_json::to_value(&profile).unwrap();
+        assert_eq!(serialized["remoteCompactionProtocol"], "compactEndpoint");
+        let decoded: ProviderProfile = serde_json::from_value(serialized).unwrap();
+        assert_eq!(
+            decoded.remote_compaction_protocol,
+            RemoteCompactionProtocol::CompactEndpoint
+        );
+        profile.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+        profile.normalize();
+        assert_eq!(
+            profile.remote_compaction_protocol,
+            RemoteCompactionProtocol::Responses
+        );
+    }
+
+    #[test]
+    fn remote_compaction_blockers_match_runtime_eligibility() {
+        let mut capable = ProviderProfile::new("Responses");
+        capable.id = "capable".into();
+        capable.base_url = "https://relay.example/v1".into();
+        capable.supports_remote_compaction = true;
+        let mut disabled = capable.clone();
+        disabled.id = "disabled".into();
+        disabled.enabled = false;
+        disabled.supports_remote_compaction = false;
+        let mut unavailable = ProviderProfile::new("Unavailable official");
+        unavailable.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+        unavailable.normalize();
+        let mut config = CodeyConfig {
+            profiles: vec![
+                capable.clone(),
+                disabled,
+                unavailable,
+                ProviderProfile::new("Empty URL"),
+            ],
+            ..CodeyConfig::default()
+        };
+        assert!(config.runtime_supports_remote_compaction());
+        assert!(config.remote_compaction_blockers().is_empty());
+
+        let mut switched_off = capable.clone();
+        switched_off.id = "off".into();
+        switched_off.name.clear();
+        switched_off.short_name = "备".into();
+        switched_off.supports_remote_compaction = false;
+        let mut adapted = capable.clone();
+        adapted.id = "chat".into();
+        adapted.upstream_protocol = UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+        let mut plugin = capable;
+        plugin.id = "plugin".into();
+        plugin.plugin_route_spec = Some(crate::codey_plugins::PluginRouteSpec {
+            name: "Plugin".into(),
+            base_url: "https://unused.invalid".into(),
+            upstream_protocol: UPSTREAM_PROTOCOL_OPENAI_RESPONSES.into(),
+            models: vec![],
+            model_reasoning_efforts: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            short_name: String::new(),
+            transport: Some(codey_plugin_sdk::transport::TransportOptions {
+                account_email: "user@example.com".into(),
+                models: BTreeMap::new(),
+                image_generation: false,
+                image_edit: false,
+            }),
+        });
+        config.profiles.extend([switched_off, adapted, plugin]);
+        assert!(config.runtime_supports_remote_compaction());
+        assert_eq!(config.remote_compaction_mode(), "mixed");
+        let blockers = config.remote_compaction_blockers();
+        assert_eq!(blockers.len(), 3);
+        assert_eq!(blockers[0].route_id, "off");
+        assert_eq!(blockers[0].route_name, "备");
+        assert_eq!(blockers[0].reason, "未开启远程压缩");
+        assert_eq!(blockers[1].reason, "上游协议不支持原生压缩");
+        assert_eq!(blockers[2].reason, "插件传输不支持原生压缩");
+        config.profiles.clear();
+        assert!(!config.runtime_supports_remote_compaction());
+        assert!(config.remote_compaction_blockers().is_empty());
+    }
+
+    #[test]
+    fn remote_compaction_uses_one_provider_for_mixed_routes() {
         let mut capable = ProviderProfile::new("Responses Route");
         capable.id = "route-capable".into();
         capable.base_url = "https://responses.example/v1".into();
@@ -3709,7 +4038,24 @@ mod tests {
         unsupported.supports_remote_compaction = true;
         unsupported.normalize();
         config.profiles.push(unsupported);
-        assert!(!config.runtime_supports_remote_compaction());
+        assert!(config.runtime_supports_remote_compaction());
+        assert_eq!(config.remote_compaction_mode(), "mixed");
+        assert_eq!(
+            config.runtime_gateway_provider_id_for_profile(&config.profiles[0]),
+            local_router::ROUTER_PROVIDER_ID
+        );
+        assert_eq!(
+            config.runtime_gateway_provider_id_for_profile(&config.profiles[1]),
+            local_router::ROUTER_PROVIDER_ID
+        );
+        config.selected_models_by_provider = BTreeMap::from([
+            ("route-capable".into(), vec!["shared-model".into()]),
+            ("route-chat".into(), vec!["shared-model".into()]),
+        ]);
+        assert_eq!(
+            config.runtime_remote_compaction_model_aliases(),
+            ["route-capable/shared-model"]
+        );
     }
 
     #[test]
@@ -3737,8 +4083,8 @@ mod tests {
         chat.normalize();
         config.profiles.push(chat);
         assert!(
-            !config.runtime_supports_remote_compaction(),
-            "a shared provider must not advertise native compaction to an adapted Chat route"
+            config.runtime_supports_remote_compaction(),
+            "the official account remains eligible when another route uses local compaction"
         );
 
         config.official_account_available_this_launch = false;
@@ -4053,7 +4399,8 @@ mod tests {
             config.profiles[1].official_account_id.as_deref(),
             Some("acct-two")
         );
-        assert_ne!(config.profiles[0].short_name, config.profiles[1].short_name);
+        assert_eq!(config.profiles[0].display_short_name(), "主力");
+        assert_eq!(config.profiles[1].display_short_name(), "备用");
         assert!(config.qualifies_official_model_ids());
 
         // 同一段对话里两条官方线路的模型必须能区分，模型名带上线路前缀。
@@ -4259,12 +4606,15 @@ mod tests {
     }
 
     #[test]
-    fn auto_check_codey_updates_defaults_to_enabled_and_preserves_explicit_value() {
-        assert!(CodeyConfig::default().auto_check_codey_updates);
+    fn codey_update_policy_migrates_legacy_and_preserves_channels() {
+        assert_eq!(
+            CodeyConfig::default().codey_update_policy,
+            CodeyUpdatePolicy::Stable
+        );
         let legacy = serde_json::from_str::<CodeyConfig>(r#"{}"#)
             .unwrap()
             .normalize();
-        assert!(legacy.auto_check_codey_updates);
+        assert_eq!(legacy.codey_update_policy, CodeyUpdatePolicy::Stable);
 
         for enabled in [false, true] {
             let config = serde_json::from_value::<CodeyConfig>(serde_json::json!({
@@ -4272,12 +4622,30 @@ mod tests {
             }))
             .unwrap()
             .normalize();
-            assert_eq!(config.auto_check_codey_updates, enabled);
+            let expected = if enabled {
+                CodeyUpdatePolicy::Stable
+            } else {
+                CodeyUpdatePolicy::Off
+            };
+            assert_eq!(config.codey_update_policy, expected);
             assert_eq!(
-                serde_json::to_value(config).unwrap()["autoCheckCodeyUpdates"],
-                enabled
+                serde_json::to_value(config).unwrap()["codeyUpdatePolicy"],
+                expected.as_str()
             );
         }
+        for policy in ["off", "stable", "experimental"] {
+            let config: CodeyConfig =
+                serde_json::from_value(serde_json::json!({"codeyUpdatePolicy": policy})).unwrap();
+            let serialized = serde_json::to_value(config).unwrap();
+            assert_eq!(serialized["codeyUpdatePolicy"], policy);
+            assert!(serialized.get("autoCheckCodeyUpdates").is_none());
+        }
+        assert!(
+            serde_json::from_value::<CodeyConfig>(
+                serde_json::json!({"codeyUpdatePolicy": "unknown"})
+            )
+            .is_err()
+        );
     }
 
     #[test]

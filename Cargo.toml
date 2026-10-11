@@ -3,7 +3,6 @@ members = [
   "backend",
   "crates/codey-codex-extensions",
   "crates/codey-plugin-sdk",
-  "examples/plugins/header-demo",
   "vendor/CodeyRuntime/crates/codey-runtime-core",
   "vendor/CodeyRuntime/crates/codey-runtime-data",
 ]

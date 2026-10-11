@@ -72,7 +72,6 @@ test("tag-triggered desktop releases independently enforce Rust quality gates", 
     windowsCheck,
     /cargo clippy --workspace --all-targets --locked -- -D warnings/,
   );
-  assert.match(windowsCheck, /overlay-recovery-native\.ps1/);
   assert.match(publish, /- macos-check/);
   assert.match(publish, /- windows-check/);
   assert.doesNotMatch(workflowJob("windows", "windows-check"), /cargo test --workspace/);

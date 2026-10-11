@@ -45,4 +45,6 @@ Desktop.ini
 **/*.rs.bk
 
 
+# Local plugin projects stay outside version control; SDK, templates and skills remain tracked.
 /plugins
+*.codey-plugin

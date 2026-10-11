@@ -10,6 +10,7 @@ use std::sync::{
 use std::time::Duration;
 
 mod config_repair;
+mod conversation_git;
 mod diagnostics;
 mod extensions;
 mod models;
@@ -1143,10 +1144,9 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         }
         "clear_route_request_logs" => clear_route_request_logs(state).await,
         "restart_codey" => schedule_restart_codey_runtime(state).await,
-        "clear_diagnostic_storage"
-        | "repair_codex_overlays"
-        | "repair_codex_config"
-        | "repair_main_process_injection" => diagnostics::invoke(state, command, &args).await,
+        "clear_diagnostic_storage" | "repair_codex_config" | "repair_main_process_injection" => {
+            diagnostics::invoke(state, command, &args).await
+        }
         "test_notification_channel" => {
             match argument::<NotificationChannelConfig>(&args, "channel") {
                 Ok(channel) => test_notification_channel(state, channel).await,
@@ -1176,6 +1176,9 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             Ok(text) => optimize_prompt_command(state, text).await,
             Err(error) => Err(error),
         },
+        "conversation_git_status" | "conversation_git_preview" | "conversation_git_execute" => {
+            conversation_git::invoke(state, command, &args).await
+        }
         "test_prompt_optimization" => {
             match optional_argument::<PromptOptimizationConfig>(&args, "config") {
                 Ok(draft) => test_prompt_optimization_command(state, draft).await,
@@ -1197,7 +1200,9 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         "codex_extensions" => extensions::invoke(state, &args).await,
         "repair_plugin_marketplace" => repair_plugin_marketplace().await,
         "prepare_computer_use" => prepare_computer_use().await,
-        "list_codey_plugins"
+        "get_codey_plugin_host_info"
+        | "validate_codey_plugin_config"
+        | "list_codey_plugins"
         | "get_codey_plugin_config_file"
         | "select_codey_plugin_package"
         | "inspect_codey_plugin"
@@ -1594,7 +1599,7 @@ pub async fn save_codey_config(
 
 struct CodeyConfigSaveInput {
     config: CodeyConfig,
-    auto_check_codey_updates_present: bool,
+    codey_update_policy_present: bool,
     model_reasoning_efforts_present: bool,
     model_context_present: bool,
     local_router_enabled_present: bool,
@@ -1611,7 +1616,7 @@ impl CodeyConfigSaveInput {
     fn complete(config: CodeyConfig) -> Self {
         Self {
             config,
-            auto_check_codey_updates_present: true,
+            codey_update_policy_present: true,
             model_reasoning_efforts_present: true,
             model_context_present: true,
             local_router_enabled_present: true,
@@ -1633,7 +1638,8 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
     let fields = config_value
         .as_object()
         .ok_or_else(|| "参数 config 无效：必须是 object".to_string())?;
-    let auto_check_codey_updates_present = fields.contains_key("autoCheckCodeyUpdates");
+    let codey_update_policy_present =
+        fields.contains_key("codeyUpdatePolicy") || fields.contains_key("autoCheckCodeyUpdates");
     let local_router_enabled_present = fields.contains_key("localRouterEnabled");
     let model_reasoning_efforts_present = fields.contains_key("modelReasoningEffortsByProvider");
     let model_context_present = fields.contains_key("modelContextByProvider");
@@ -1647,7 +1653,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         .map_err(|error| format!("参数 config 无效：{error}"))?;
     Ok(CodeyConfigSaveInput {
         config,
-        auto_check_codey_updates_present,
+        codey_update_policy_present,
         model_reasoning_efforts_present,
         model_context_present,
         local_router_enabled_present,
@@ -1683,7 +1689,7 @@ async fn save_codey_config_locked(
 ) -> Result<SavedCodeyConfig, String> {
     let CodeyConfigSaveInput {
         config: mut config_input,
-        auto_check_codey_updates_present,
+        codey_update_policy_present,
         model_reasoning_efforts_present,
         model_context_present,
         local_router_enabled_present,
@@ -1794,8 +1800,8 @@ async fn save_codey_config_locked(
                     .contains_key(provider_id)
             });
     }
-    if auto_check_codey_updates_present {
-        config.auto_check_codey_updates = config_input.auto_check_codey_updates;
+    if codey_update_policy_present {
+        config.codey_update_policy = config_input.codey_update_policy;
     }
     if local_router_enabled_present {
         config.local_router_enabled = config_input.local_router_enabled;
@@ -1822,6 +1828,8 @@ async fn save_codey_config_locked(
         .merge_redacted_secrets(&previous.prompt_optimization);
     config_input.prompt_optimization.validate()?;
     config.prompt_optimization = config_input.prompt_optimization;
+    config_input.conversation_git.validate()?;
+    config.conversation_git = config_input.conversation_git;
     config.codex_app_path = config_input.codex_app_path;
     config.user_scripts = config_input.user_scripts;
     config.disable_trace_log_writes = config_input.disable_trace_log_writes;
@@ -1963,6 +1971,12 @@ async fn save_codey_config_locked(
         }
     };
     *state.config.write().await = config.clone();
+    if previous.codey_update_policy != config.codey_update_policy {
+        *state.available_update.write().await = None;
+        if let Ok(mut cache) = state.update_candidate_cache.try_lock() {
+            *cache = None;
+        }
+    }
     if let Some(report) = trace_guard_report {
         state.trace_log_write_protection_active.store(
             report.protection_active(config.disable_trace_log_writes),
@@ -2123,6 +2137,14 @@ fn merge_profile_secrets(
         } else {
             profile.plugin_owner_id = None;
             profile.plugin_route_spec = None;
+        }
+        if profile.short_name.trim().is_empty()
+            && !profile.is_unconfigured_default()
+            && !previous_profile.is_some_and(|saved| {
+                saved.short_name.trim().is_empty() && saved.name.trim() == profile.name.trim()
+            })
+        {
+            return Err("请输入短名称".to_string());
         }
         profile.normalize();
         // 线路名上限与渲染层一致。旧配置里已经超限的名称只要这次没有改动就
@@ -2464,6 +2486,7 @@ enum SubagentHotReloadStatus {
     Unchanged,
     Applied,
     Repaired,
+    PendingRestart,
     Superseded,
     Failed,
 }
@@ -2476,6 +2499,14 @@ pub(super) struct SubagentHotReloadOutcome {
 }
 
 impl SubagentHotReloadOutcome {
+    fn pending_restart(reason: impl Into<String>) -> Self {
+        Self {
+            status: SubagentHotReloadStatus::PendingRestart,
+            error: Some(reason.into()),
+            ..Self::default()
+        }
+    }
+
     fn unchanged() -> Self {
         Self {
             status: SubagentHotReloadStatus::Unchanged,
@@ -2523,7 +2554,10 @@ impl SubagentHotReloadOutcome {
     }
 
     pub(super) fn requires_restart(&self) -> bool {
-        self.status == SubagentHotReloadStatus::Failed
+        matches!(
+            self.status,
+            SubagentHotReloadStatus::Failed | SubagentHotReloadStatus::PendingRestart
+        )
     }
 
     pub(super) fn health(&self) -> &'static str {
@@ -2532,6 +2566,7 @@ impl SubagentHotReloadOutcome {
             SubagentHotReloadStatus::Unchanged => "healthy",
             SubagentHotReloadStatus::Applied => "applied",
             SubagentHotReloadStatus::Repaired => "repaired",
+            SubagentHotReloadStatus::PendingRestart => "pending_restart",
             SubagentHotReloadStatus::Superseded => "superseded",
             SubagentHotReloadStatus::Failed => "restart_required",
         }
@@ -2605,12 +2640,11 @@ pub(super) async fn hot_reload_runtime_subagent_config(
         Ok(config) => config,
         Err(error) => return SubagentHotReloadOutcome::failed(format!("{error:#}")),
     };
-    let result = tokio::task::spawn_blocking(move || {
-        reconcile_runtime_subagent_roles(&runtime_config).map_err(|error| format!("{error:#}"))
-    })
-    .await
-    .map_err(|error| format!("子代理运行时文件更新任务异常退出：{error}"))
-    .and_then(std::convert::identity);
+    let result =
+        tokio::task::spawn_blocking(move || reconcile_runtime_subagent_roles(&runtime_config))
+            .await
+            .map_err(|error| anyhow::anyhow!("子代理运行时文件更新任务异常退出：{error}"))
+            .and_then(std::convert::identity);
     match result {
         Ok(report) => {
             if !report.repaired && !applied_config_changed {
@@ -2646,6 +2680,9 @@ pub(super) async fn hot_reload_runtime_subagent_config(
             )
         }
         Err(error) => {
+            if error.is::<crate::codex_config::SubagentRoleRegistrationChanged>() {
+                return SubagentHotReloadOutcome::pending_restart(error.to_string());
+            }
             let error = format!("{error:#}");
             error_log::record_failure(
                 "patch_verification_failed",
@@ -3011,6 +3048,7 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.slim_codex_pet != current.slim_codex_pet
         || applied.gpu_launch_mode != current.gpu_launch_mode
         || applied.fast_context_tools != current.fast_context_tools
+        || applied.conversation_git.enabled != current.conversation_git.enabled
         || applied.subagent_optimization != current.subagent_optimization
         || !applied
             .misc_model

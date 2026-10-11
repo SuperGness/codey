@@ -1027,11 +1027,11 @@ test("falls back to a passive periodic check when backend update state hangs", a
   );
 });
 
-test("saved automatic update preference controls renderer polling and manual update badges", async () => {
+test("saved update policy controls renderer polling and rejects badges when off", async () => {
   const calls = [];
   const fixture = createStartupUpdateFixture(async (path) => {
     calls.push(path);
-    if (path === "/backend/status") return { autoCheckCodeyUpdates: false };
+    if (path === "/backend/status") return { codeyUpdatePolicy: "off" };
     if (path === "/backend/health") return { status: "ok" };
     if (path === "/account/usage") return { status: "disabled" };
     if (path === "/api/check_for_updates") return { updateAvailable: false };
@@ -1042,7 +1042,7 @@ test("saved automatic update preference controls renderer polling and manual upd
   assert.equal(updateTimers().length, 0);
   assert.equal(calls.includes("/api/check_for_updates"), false);
 
-  fixture.window.dispatchEvent({ type: "codey:config-changed", detail: { config: { autoCheckCodeyUpdates: true } } });
+  fixture.window.dispatchEvent({ type: "codey:config-changed", detail: { config: { codeyUpdatePolicy: "stable" } } });
   for (const timer of fixture.activeTimers().filter((timer) => timer.delay === 0)) {
     timer.cleared = true;
     timer.callback();
@@ -1051,18 +1051,18 @@ test("saved automatic update preference controls renderer polling and manual upd
   assert.equal(calls.filter((path) => path === "/api/check_for_updates").length, 1);
   assert.equal(updateTimers().length, 1);
 
-  fixture.window.dispatchEvent({ type: "codey:config-changed", detail: { config: { autoCheckCodeyUpdates: false } } });
+  fixture.window.dispatchEvent({ type: "codey:config-changed", detail: { config: { codeyUpdatePolicy: "off" } } });
   assert.equal(updateTimers().length, 0);
   fixture.window.dispatchEvent({ type: "codey:config-changed" });
   assert.equal(updateTimers().length, 0);
   fixture.window.dispatchEvent({ type: "codey-update-availability-changed", detail: { updateAvailable: true, latestVersion: "2.0.0" } });
-  assert.equal(fixture.document.getElementById("codey-settings-button").getAttribute("data-codey-update-available"), "true");
+  assert.equal(fixture.document.getElementById("codey-settings-button").getAttribute("data-codey-update-available"), null);
 });
 
 test("disabling renderer automatic checks ignores an in-flight update response", async () => {
   let resolveUpdate;
   const fixture = createStartupUpdateFixture(async (path) => {
-    if (path === "/backend/status") return { autoCheckCodeyUpdates: true };
+    if (path === "/backend/status") return { codeyUpdatePolicy: "stable" };
     if (path === "/backend/health") return { status: "ok" };
     if (path === "/api/check_for_updates") return new Promise((resolve) => { resolveUpdate = resolve; });
     throw new Error(`unexpected bridge path: ${path}`);
@@ -1073,7 +1073,7 @@ test("disabling renderer automatic checks ignores an in-flight update response",
   timer.cleared = true;
   timer.callback();
   assert.equal(typeof resolveUpdate, "function");
-  fixture.window.dispatchEvent({ type: "codey:config-changed", detail: { config: { autoCheckCodeyUpdates: false } } });
+  fixture.window.dispatchEvent({ type: "codey:config-changed", detail: { config: { codeyUpdatePolicy: "off" } } });
   resolveUpdate({ updateAvailable: true, latestVersion: "2.0.0" });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(fixture.window.__codeyUpdateAvailability, null);

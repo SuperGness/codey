@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use serde_json::{Map, Value};
 
 use crate::subagent::api::TraceContext;
-use crate::subagent::rules::{RoleAccess, RolePolicy, RuleSet};
+use crate::subagent::rules::RuleSet;
 
 use super::identity::consistent_string_field;
 
@@ -22,7 +22,6 @@ pub(super) struct TaskCapsule {
 pub(super) struct PreparedContract {
     pub(super) capsule: TaskCapsule,
     pub(super) role: String,
-    pub(super) policy: RolePolicy,
     pub(super) workspace_root: Option<String>,
     pub(super) trace: TraceContext,
     pub(super) capabilities: Vec<String>,
@@ -50,35 +49,29 @@ pub(super) fn prepare_task_capsule(
         return Err(contract_error("message 为空"));
     }
     validate_task_id(task_name)?;
-    let policy = rule_set
+    rule_set
         .role_policy(role)
         .ok_or_else(|| contract_error(&format!("未知或不允许的 agent_type `{role}`")))?;
     let workspace_root = hook_workspace_root
         .map(normalize_coordination_path)
         .transpose()
         .map_err(|error| contract_error(&format!("工作目录无效：{error}")))?;
-    if policy.access == RoleAccess::Write && workspace_root.is_none() {
-        return Err(contract_error("写入角色缺少可信工作目录"));
+    if workspace_root.is_none() {
+        return Err(contract_error("子代理缺少可信工作目录"));
     }
-    let mut capabilities = match policy.access {
-        RoleAccess::ReadOnly => vec!["files.read".to_string()],
-        // ponytail: one workspace-wide writer lock; add narrower native ownership
-        // only if the executor exposes a trusted path field.
-        RoleAccess::Write => vec![
-            "command.execute".to_string(),
-            "files.read".to_string(),
-            "workspace.write".to_string(),
-        ],
-    };
-    if policy.visual {
-        capabilities.push("visual.inspect".to_string());
-    }
+    // All roles share capabilities. Only trusted native workspace metadata can
+    // establish independent resource scopes; task text cannot narrow the lock.
+    let capabilities = vec![
+        "command.execute".to_string(),
+        "files.read".to_string(),
+        "workspace.write".to_string(),
+        "visual.inspect".to_string(),
+    ];
     Ok(PreparedContract {
         capsule: TaskCapsule {
             id: task_name.to_string(),
         },
         role: role.to_string(),
-        policy,
         workspace_root,
         trace: TraceContext::new(None),
         capabilities,

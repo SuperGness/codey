@@ -571,6 +571,9 @@ pub(crate) async fn write_official_account_route_settings(
     let route_name = route_name.trim().to_string();
     let route_short_name = route_short_name.trim().to_string();
     let upstream_proxy = upstream_proxy.trim().to_string();
+    if route_short_name.is_empty() {
+        return Err("请输入短名称".to_string());
+    }
     // 与渲染层的线路名上限保持一致，避免直接调用后端接口写入界面无法保存的名称。
     if route_name.chars().count() > MAX_ROUTE_NAME_CHARS {
         return Err(format!("线路名最多 {MAX_ROUTE_NAME_CHARS} 个字符"));
@@ -604,7 +607,7 @@ pub(crate) async fn write_official_account_route_settings(
 
     let store = state.official_accounts();
     let saved_id = account_id.clone();
-    let saved_name = (!route_name.is_empty()).then_some(route_name);
+    let saved_name = Some(route_name);
     let saved_short_name = (!route_short_name.is_empty()).then_some(route_short_name);
     let saved_proxy = (!upstream_proxy.is_empty()).then_some(upstream_proxy);
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {

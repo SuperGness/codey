@@ -25,6 +25,27 @@ use crate::launcher::{
 
 const CODEX_APP_VERSION_CACHE_TTL: Duration = Duration::from_secs(30);
 
+fn remote_compaction_status_value(
+    config: &crate::config::CodeyConfig,
+    applied: Option<&crate::config::CodeyConfig>,
+) -> Value {
+    let configured = config.local_router_enabled && config.runtime_supports_remote_compaction();
+    let active = applied
+        .filter(|applied| applied.local_router_enabled)
+        .map(|applied| applied.runtime_supports_remote_compaction());
+    json!({
+        "configured": configured,
+        "active": active,
+        "configuredMode": if config.local_router_enabled { config.remote_compaction_mode() } else { "local" },
+        "activeMode": applied.filter(|applied| applied.local_router_enabled).map(|applied| applied.remote_compaction_mode()),
+        "restartRequired": applied.is_some_and(|applied| {
+            applied.local_router_enabled != config.local_router_enabled
+                || super::models::remote_compaction_transport_requires_restart(applied, config)
+        }),
+        "blockingRoutes": config.remote_compaction_blockers(),
+    })
+}
+
 mod injection_repair;
 pub(super) use injection_repair::schedule_main_process_injection_repair;
 
@@ -87,7 +108,7 @@ pub(super) async fn runtime_status_with_options(
         .map(|profile| profile.name.clone())
         .unwrap_or_default();
     let configured_codex_app_path = config.codex_app_path.clone();
-    let auto_check_codey_updates = config.auto_check_codey_updates;
+    let codey_update_policy = config.codey_update_policy;
     let official_account_available = config.official_account_available_this_launch;
     let official_account_status = config.official_account_status_this_launch;
     let runtime_codex_app_path = runtime
@@ -116,6 +137,10 @@ pub(super) async fn runtime_status_with_options(
         .as_ref()
         .is_some_and(|runtime| runtime.applied_config.subagent_optimization);
     let configured_notification_channel_count = config.webhook.enabled_channel_count();
+    let remote_compaction = remote_compaction_status_value(
+        &config,
+        runtime.as_ref().map(|runtime| &runtime.applied_config),
+    );
     let trace_log_write_protection_active = state
         .trace_log_write_protection_active
         .load(Ordering::Acquire);
@@ -135,13 +160,14 @@ pub(super) async fn runtime_status_with_options(
     let mut status = json!({
         "running": runtime.is_some(),
         "appVersion": env!("CARGO_PKG_VERSION"),
-        "autoCheckCodeyUpdates": auto_check_codey_updates,
+        "codeyUpdatePolicy": codey_update_policy,
         "clientPlatform": current_update_platform(),
         "activeProfileId": active_profile_id,
         "activeProfileName": active_profile_name,
         "officialAccountAvailable": official_account_available,
         "officialAccountStatus": official_account_status,
         "restartRequired": restart_required,
+        "remoteCompaction": remote_compaction,
         "restartInProgress": state.restart_in_progress.load(Ordering::Acquire),
     });
     if let (Some(status), Some(feature_status)) = (
@@ -167,7 +193,11 @@ pub(super) async fn runtime_status_with_options(
         if let Some(error) = startup_error {
             object.insert("startupError".into(), Value::String(error));
         }
-        if let Some(update) = available_update {
+        if let Some(update) = available_update
+            && codey_update_policy != crate::config::CodeyUpdatePolicy::Off
+            && (codey_update_policy == crate::config::CodeyUpdatePolicy::Experimental
+                || !update.latest_version.contains('-'))
+        {
             object.insert(
                 "availableUpdate".into(),
                 serde_json::to_value(update).expect("update metadata must be JSON-serializable"),
@@ -649,6 +679,48 @@ mod tests {
     };
     use crate::commands::{AppShutdownReason, AppState};
     use crate::config::{CodeyConfig, ProviderProfile};
+
+    #[test]
+    fn remote_compaction_status_separates_saved_and_running_capabilities() {
+        use super::remote_compaction_status_value;
+        use serde_json::json;
+
+        let mut route = ProviderProfile::new("Relay");
+        route.id = "relay".into();
+        route.base_url = "https://relay.example/v1".into();
+        let local = CodeyConfig {
+            local_router_enabled: true,
+            profiles: vec![route],
+            ..CodeyConfig::default()
+        };
+        let mut remote = local.clone();
+        remote.profiles[0].supports_remote_compaction = true;
+        let mut unmanaged = remote.clone();
+        unmanaged.local_router_enabled = false;
+        for (saved, applied, configured, active, restart) in [
+            (&remote, None, true, json!(null), false),
+            // 统一 Provider 后，线路原生压缩能力变化由网关热切换，不再要求重启。
+            (&remote, Some(&local), true, json!(false), false),
+            (&local, Some(&remote), false, json!(true), false),
+            (&remote, Some(&remote), true, json!(true), false),
+            (&local, Some(&local), false, json!(false), false),
+            (&unmanaged, Some(&remote), false, json!(true), true),
+            (&remote, Some(&unmanaged), true, json!(null), true),
+            (&unmanaged, Some(&unmanaged), false, json!(null), false),
+        ] {
+            let value = remote_compaction_status_value(saved, applied);
+            assert_eq!(value["configured"], configured);
+            assert_eq!(value["active"], active);
+            assert_eq!(value["restartRequired"], restart);
+        }
+        let value = remote_compaction_status_value(&local, Some(&remote));
+        assert_eq!(
+            value["blockingRoutes"],
+            json!([{
+                "routeId": "relay", "routeName": "Relay", "reason": "未开启远程压缩"
+            }])
+        );
+    }
 
     #[test]
     fn runtime_feature_status_has_a_stable_public_json_contract() {

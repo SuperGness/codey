@@ -495,7 +495,10 @@ fn import_session_bundle<R: BufRead>(
     })
 }
 
-fn find_thread(home: &Path, session_id: &str) -> Result<Option<(Map<String, Value>, PathBuf)>> {
+pub(crate) fn find_thread(
+    home: &Path,
+    session_id: &str,
+) -> Result<Option<(Map<String, Value>, PathBuf)>> {
     for db_path in codex_session_db_paths_from_home(home) {
         if !db_path.exists() {
             continue;
@@ -1279,7 +1282,7 @@ fn remove_transfer_file(home: &Path, kind: TransferKind, transfer_id: &str) -> R
         .with_context(|| format!("清理会话传输临时文件失败：{}", path.display()))
 }
 
-fn checked_rollout_path(home: &Path, rollout_path: &Path) -> Result<PathBuf> {
+pub(crate) fn checked_rollout_path(home: &Path, rollout_path: &Path) -> Result<PathBuf> {
     let canonical_home = home
         .canonicalize()
         .with_context(|| format!("找不到 Codex 数据目录：{}", home.display()))?;

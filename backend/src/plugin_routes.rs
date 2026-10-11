@@ -7,7 +7,7 @@ use crate::config::{
     ProviderProfile, UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
     UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS, UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
 };
-use crate::local_router::ROUTER_PROVIDER_ID;
+use crate::local_router::is_router_provider;
 use crate::model_id;
 
 const READ_ONLY_ROUTE_ERROR: &str = "本地路由已关闭，本地线路配置当前为只读；请先启用本地路由";
@@ -78,7 +78,7 @@ pub(crate) fn upsert(
     apply_spec(&mut profile, plugin_id, &spec, false);
     let profile_id = profile.id.clone();
     let provider_id = profile.provider_id().to_string();
-    if provider_id == ROUTER_PROVIDER_ID
+    if is_router_provider(&provider_id)
         || crate::codex_config::RESERVED_BUILTIN_PROVIDER_IDS.contains(&provider_id.as_str())
     {
         return Err("插件线路不能使用保留的 Provider ID".into());

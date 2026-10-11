@@ -117,7 +117,7 @@ function modelSectionProps(overrides = {}) {
   const props = {
     config: {
       activeProfileId: "route-a",
-      autoCheckCodeyUpdates: true,
+      codeyUpdatePolicy: "stable",
       codexAppPath: "",
       declaredOfficialModelsByProvider: {},
       defaultModel: "route-a/k3",
@@ -168,6 +168,7 @@ function modelSectionProps(overrides = {}) {
       webhook: { channels: [] },
     },
     busy: null,
+    runtimeStatus: { running: false },
     canSyncCurrentProvider: true,
     currentProvider: null,
     dirty: false,

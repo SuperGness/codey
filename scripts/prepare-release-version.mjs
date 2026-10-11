@@ -4,13 +4,8 @@ import { join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 const execute = promisify(execFile);
-const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?$/;
-
-export function validateReleaseVersion(version) {
-  const match = typeof version === "string" && version.length <= 128 ? version.match(semver) : null;
-  if (!match || !match.slice(1, 4).every((part) => Number.isSafeInteger(Number(part)))) throw new Error("发布版本号必须为有效的 SemVer，不支持 v 前缀或构建元数据");
-  return version;
-}
+import { validateReleaseVersion } from "./release-policy.mjs";
+export { validateReleaseVersion } from "./release-policy.mjs";
 
 function section(text, name) {
   const headers = [...text.matchAll(/^\s*(\[\[?[^\]\r\n]+\]\]?)\s*(?:#[^\r\n]*)?$/gm)];

@@ -41,7 +41,7 @@
 | end | 无 | 正常结束 |
 | error | code | 固定错误码，不含请求或凭据 |
 
-headers 至多 32 项，单值最多 8192 字节；宿主只转发 content-type、cache-control、retry-after、x-request-id，不接受 Cookie、重定向或传输编码。插件输出解码后的 JSON 或标准 Responses SSE，累计正文最多 64 MiB。回调错误与 error 帧只保留 SDK 定义的公开错误码；响应头下发前按错误类别返回状态码，下发后仅终止流，不伪造成功，也不自动重放工具请求。插件自行过滤上游错误正文及诊断头，避免泄漏敏感信息。
+headers 至多 32 项，单值最多 8192 字节；宿主只转发 content-type、cache-control、retry-after、x-request-id，并统一名称为小写，拒绝这些字段的大小写重复及无效值，不接受 Cookie、重定向或传输编码。SDK 的 `Frame::headers` 与 `filter_response_headers` 复用同一校验，`Frame::error` 将未知错误文本替换为公开错误码。插件输出解码后的 JSON 或标准 Responses SSE，累计正文最多 64 MiB。回调错误与 error 帧只保留 SDK 定义的公开错误码；响应头下发前按错误类别返回状态码，下发后仅终止流，不伪造成功，也不自动重放工具请求。插件自行过滤上游错误正文及诊断头，避免泄漏敏感信息。
 
 ## 清理与存储
 

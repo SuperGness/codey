@@ -12,6 +12,7 @@ import type { Key } from "@heroui/react";
 import { IconAlertTriangle } from "@tabler/icons-react";
 import type { SubagentModelOption } from "../subagentModels";
 import { resolveSubagentModelOption } from "../subagentModels";
+import { formatRouteName } from "../routeShortNames";
 
 type ModelOption = {
   id: string;
@@ -57,7 +58,7 @@ export function ModelCombobox({
     }
     const list = Array.from(result.entries()).map(([id, group]) => ({
       id,
-      label: `[${group[0].routePrefix}]${group[0].routeName}`,
+      label: formatRouteName(group[0].routeName, group[0].routePrefix),
       options: group.map((option) => ({
         id: option.value,
         label: option.label,

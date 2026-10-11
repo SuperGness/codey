@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, oneshot};
 
 use super::AppState;
 use crate::codex_config::codex_home;
-use crate::config::{CodeyConfig, ConfigStore, OFFICIAL_ROUTE_SHORT_NAME};
+use crate::config::{CodeyConfig, ConfigStore};
 use crate::notifications::{
     NotificationChannelConfig, NotificationChannelKind, NotificationDispatcher, NotificationEvent,
 };
@@ -819,12 +819,7 @@ fn webhook_display_model(config: &CodeyConfig, requested_model: &str) -> String 
 }
 
 fn format_webhook_model_name(profile: &crate::config::ProviderProfile, model: &str) -> String {
-    let short_name = profile.short_name.trim();
-    let prefix = if short_name.is_empty() && profile.official_account {
-        OFFICIAL_ROUTE_SHORT_NAME
-    } else {
-        short_name
-    };
+    let prefix = profile.display_short_name();
     if prefix.is_empty() {
         model.to_string()
     } else {
@@ -1881,7 +1876,7 @@ mod tests {
                 &config,
                 &local_router::model_alias("official", "gpt-5.6-sol"),
             ),
-            "[官] gpt-5.6-sol"
+            "[官方] gpt-5.6-sol"
         );
         assert_eq!(
             webhook_display_model(&config, "claude-opus-4-8"),

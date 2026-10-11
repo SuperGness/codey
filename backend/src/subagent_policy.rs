@@ -7,7 +7,7 @@ use crate::config::{
 use crate::model_catalog;
 use crate::model_id;
 #[cfg(test)]
-use crate::subagent::rules::{RoleAccess, RolePolicy};
+use crate::subagent::rules::RolePolicy;
 
 #[cfg(test)]
 pub(crate) fn role_policy(role: &str) -> Option<RolePolicy> {
@@ -256,7 +256,7 @@ mod tests {
             assert_eq!(
                 role_policy(role),
                 Some(RolePolicy {
-                    access: RoleAccess::Write,
+                    access: "write".into(),
                     visual: true,
                 }),
                 "{role}"

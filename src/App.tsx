@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "@heroui/react";
 import {
+  IconBrandGithub,
   IconCheck,
   IconCircleArrowUp,
   IconDeviceFloppy as Save,
@@ -34,7 +35,8 @@ import type { DiagnosticStorageCleanup, DiagnosticStorageTarget } from "./diagno
 import { DiagnosticCleanupNotice } from "./DiagnosticCleanupNotice";
 import { modelIdsEqual, uniqueModelIds } from "./modelIds";
 import { globalDefaultForRoute, routeProviderId } from "./modelRoutes";
-import { customContextRestoredNote, type ModelRuntimeUpdate } from "./modelSelectionNotice";
+import { prefixedRouteName } from "./routeShortNames";
+import { customContextRestoredNote, subagentUpdateNote, type ModelRuntimeUpdate } from "./modelSelectionNotice";
 import { PromptOptimizationCard } from "./PromptOptimizationCard";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { SettingsPageHeader } from "./SettingsPageHeader";
@@ -298,7 +300,7 @@ export function App({
   } = useAppUpdates({
     embedded,
     configLoaded,
-    autoCheckCodeyUpdates: config?.autoCheckCodeyUpdates !== false,
+    codeyUpdatePolicy: persistedConfigRef.current?.codeyUpdatePolicy ?? "stable",
     isBusy,
     setBusy,
     setNotice,
@@ -424,19 +426,19 @@ export function App({
     }
   }
 
-  function changeAutomaticUpdateChecks(enabled: boolean) {
+  function changeUpdatePolicy(policy: Config["codeyUpdatePolicy"]) {
     if (!config || isBusy) return;
-    if (enabled) {
-      editConfig({ ...config, autoCheckCodeyUpdates: true });
+    if (policy !== "experimental" || config.codeyUpdatePolicy === "experimental") {
+      editConfig({ ...config, codeyUpdatePolicy: policy });
       return;
     }
     setConfirmation({
-      action: "disable-auto-update-check",
-      title: "关闭自动检查 Codey 更新？",
-      description: "关闭后，若 Codex 更新导致 Codey 插件无法启动，需要手动下载最新版插件包。",
-      confirmLabel: "确认关闭",
+      action: "enable-experimental-updates",
+      title: "切换到实验版更新？",
+      description: "实验版尚未经过充分验证，可能出现功能异常、启动失败或数据兼容问题。请先备份重要数据，避免在关键工作环境使用。确认并保存设置后生效；取消会保留原设置。",
+      confirmLabel: "了解风险，使用实验版",
       run: () => {
-        setConfig((current) => current ? { ...current, autoCheckCodeyUpdates: false } : current);
+        setConfig((current) => current ? { ...current, codeyUpdatePolicy: policy } : current);
         setDirty(true);
       },
     });
@@ -791,7 +793,7 @@ export function App({
     const route = config.profiles.find((profile) => profile.id === routeId);
     setConfirmation({
       action: "delete-route",
-      title: `删除线路「${route?.name || "未命名线路"}」？`,
+      title: `删除线路「${route ? prefixedRouteName(route) : "未命名线路"}」？`,
       description: "该线路及其模型选择会立即从对话模型选择器移除。此操作无法撤销。",
       confirmLabel: "删除线路",
       run: () => void deleteRoute(routeId),
@@ -965,6 +967,7 @@ export function App({
       const result = await persist(config);
       const subagentHotReloaded = Boolean(result.subagentConfigHotReloaded);
       const subagentHotReloadFailed = Boolean(result.subagentConfigHotReloadError);
+      const subagentNote = subagentUpdateNote(result);
       const subagentConfigRepaired = Boolean(result.subagentConfigRepaired);
       const requestLogHealth = result.routeRequestLogHealth;
       const requestLogHotReloadFailed = requestLogHealth === "failed";
@@ -974,15 +977,13 @@ export function App({
         : "";
       let noticeTone: "success" | "info" | "error" =
         result.restartRequired || subagentHotReloadFailed ? "info" : "success";
-      let noticeText = result.restartRequired
+      let noticeText = result.restartRequired && !subagentNote
         ? "Codey 设置已保存，启动参数将在重启 Codex 后生效"
         : "Codey 设置已保存";
       if (subagentConfigRepaired) {
         noticeText = "Codey 设置已保存；子代理配置已同步";
       } else if (subagentHotReloaded) {
         noticeText = "Codey 设置已保存；子代理配置已实时更新";
-      } else if (subagentHotReloadFailed) {
-        noticeText = "Codey 设置已保存；子代理配置暂未能热更新，重启 Codex 后生效";
       }
       if (requestLogHotReloadFailed) {
         noticeTone = "error";
@@ -997,6 +998,10 @@ export function App({
       }
       if (retryCountChanged && result.restartRequired) {
         noticeText = "Codey 设置已保存；会话重试次数将在重启 Codex 后生效";
+      }
+      if (subagentNote) {
+        noticeText += `；${subagentNote}`;
+        if (noticeTone === "success") noticeTone = "info";
       }
       setNotice({ tone: noticeTone, text: noticeText });
     });
@@ -1397,20 +1402,32 @@ export function App({
       </div>
 
       {embedded && (
-        <div className="config-header-feedback justify-self-center">
+        <div className="flex items-center gap-3 justify-self-center max-[760px]:gap-2">
+          <div className="config-header-feedback">
+            <Button
+              aria-describedby="codey-feedback-qr-description"
+              aria-label="问题反馈群，鼠标悬停或键盘聚焦查看二维码"
+              className="h-8! whitespace-nowrap px-3.5 text-xs max-[760px]:w-8! max-[760px]:px-0!"
+              variant="brand-outline"
+            >
+              <IconMessageCircleQuestion aria-hidden="true" />
+              <span className="max-[760px]:hidden">问题反馈群</span>
+            </Button>
+            <div className="feedback-qr-popover" role="tooltip">
+              <img src={feedbackGroupQrUrl} alt="问题反馈群二维码" />
+              <span id="codey-feedback-qr-description">扫码加入问题反馈群</span>
+            </div>
+          </div>
           <Button
-            aria-describedby="codey-feedback-qr-description"
-            aria-label="问题反馈群，鼠标悬停或键盘聚焦查看二维码"
-            className="h-8! whitespace-nowrap px-3.5 text-xs max-[760px]:w-8! max-[760px]:px-0!"
+            aria-label="打开 Codey GitHub 仓库"
+            className="h-8! w-8! min-w-8! px-0!"
+            onClick={() => window.open("https://github.com/SuperGness/codey", "_blank", "noopener,noreferrer")}
+            size="icon-sm"
+            title="GitHub 仓库"
             variant="brand-outline"
           >
-            <IconMessageCircleQuestion aria-hidden="true" />
-            <span className="max-[760px]:hidden">问题反馈群</span>
+            <IconBrandGithub aria-hidden="true" />
           </Button>
-          <div className="feedback-qr-popover" role="tooltip">
-            <img src={feedbackGroupQrUrl} alt="问题反馈群二维码" />
-            <span id="codey-feedback-qr-description">扫码加入问题反馈群</span>
-          </div>
         </div>
       )}
 
@@ -1623,6 +1640,7 @@ export function App({
             <ModelSection
               active={active}
               config={config}
+              runtimeStatus={status}
               currentProvider={provider ?? null}
               officialAccountAvailable={status.officialAccountAvailable === true}
               popupContainer={popupContainer}
@@ -1730,8 +1748,8 @@ export function App({
         busy={busy}
         onRepairCodexConfig={askRepairCodexConfig}
         configRepairNotice={configRepairNotice}
-        autoCheckCodeyUpdates={config.autoCheckCodeyUpdates !== false}
-        onAutoCheckCodeyUpdatesChange={changeAutomaticUpdateChecks}
+        codeyUpdatePolicy={config.codeyUpdatePolicy}
+        onCodeyUpdatePolicyChange={changeUpdatePolicy}
       />
     </main>
   );

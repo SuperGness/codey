@@ -152,8 +152,11 @@ test("model save notices distinguish delivery, pending restart and subagent erro
     [{ modelHotReloaded: true, modelHotReloadDeferred: true, restartRequired: true }, "info", "，需重启 Codex 后生效"],
     [{ modelHotReloaded: false, restartRequired: true }, "info", "，需重启 Codex 后生效"],
     [{ modelHotReloaded: false, modelHotReloadError: "CDP failed" }, "info", "；模型刷新失败，需重启 Codex 后生效"],
-    [{ modelHotReloaded: false, subagentConfigHotReloadError: "reload failed" }, "info", "；子代理配置更新失败，需重启 Codex 后生效"],
-    [{ modelHotReloaded: true, subagentConfigHotReloadError: "reload failed" }, "info", "；子代理配置更新失败，需重启 Codex 后生效"],
+    [{ modelHotReloaded: false, subagentConfigHotReloadError: "reload failed" }, "info", "；子代理配置未能实时更新：reload failed"],
+    [{ modelHotReloaded: true, subagentConfigHotReloadError: "reload failed" }, "info", "；子代理配置未能实时更新：reload failed"],
+    [{ subagentConfigHealth: "pending_restart", restartRequired: true }, "info", "；当前 Codex 尚未注册新增的子代理角色，请重启一次以启用动态角色配置"],
+    [{ subagentConfigHealth: "pending_restart", subagentConfigHotReloadError: "角色变化，等待重启" }, "info", "；角色变化，等待重启"],
+    [{ subagentConfigHealth: "superseded", subagentConfigHotReloadError: "较新的配置已保存" }, "info", "；较新的配置已保存"],
     [{ modelHotReloaded: true, subagentConfigRepaired: true }, "success", ""],
     [{ modelHotReloaded: true, subagentConfigHotReloaded: true }, "success", ""],
   ]) {

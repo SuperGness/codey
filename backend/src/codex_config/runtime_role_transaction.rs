@@ -11,7 +11,11 @@ struct RuntimeAgentFileSnapshot {
     contents: Option<Vec<u8>>,
 }
 
-pub(super) fn refresh_runtime_subagent_roles_at(config: &CodeyConfig, marker: &Path) -> Result<()> {
+pub(super) fn refresh_runtime_subagent_roles_at(
+    config: &CodeyConfig,
+    marker: &Path,
+    remote_compaction_models: Option<&HashSet<String>>,
+) -> Result<()> {
     anyhow::ensure!(
         config.subagent_optimization,
         "当前 Codey 配置未启用子代理协作优化"
@@ -32,15 +36,19 @@ pub(super) fn refresh_runtime_subagent_roles_at(config: &CodeyConfig, marker: &P
         &config.subagent_model,
         &config.subagent_reasoning_effort,
     );
-    anyhow::ensure!(
-        state.subagent_roles.keys().eq(runtime_roles.keys()),
-        "Codey 子代理角色启用状态已变化，需要重启 Codex 以重新注册可用角色"
-    );
+    let registered_roles = registered_roles_for_lease(&state);
+    let registration_roles = runtime_registration_roles(
+        &runtime_roles,
+        &registered_roles,
+        &config.subagent_model,
+        &config.subagent_reasoning_effort,
+    )?;
     let fastctx_instructions = runtime_fastctx_instructions(&constraints_dir, &state)?;
     let plans = plan_runtime_agent_files(
         &constraints_dir,
-        &runtime_roles,
+        &registration_roles,
         fastctx_instructions.as_deref(),
+        remote_compaction_models,
     )
     .context("预检 Codey 子代理运行时配置失败；未写入运行时配置")?;
     let expected_hashes = runtime_agent_plan_hashes(&plans);
@@ -65,18 +73,23 @@ pub(super) fn refresh_runtime_subagent_roles_at(config: &CodeyConfig, marker: &P
         )?;
         let registrations = prepare_runtime_agent_files(
             &constraints_dir,
-            &runtime_roles,
+            &registration_roles,
             fastctx_instructions.as_deref(),
+            remote_compaction_models,
         )?;
-        verify_runtime_agent_files(&registrations, runtime_roles.len())?;
+        verify_runtime_agent_files(&registrations, registration_roles.len())?;
         state.subagent_model.clone_from(&config.subagent_model);
         state
             .subagent_reasoning_effort
             .clone_from(&config.subagent_reasoning_effort);
         state.subagent_roles.clone_from(&runtime_roles);
+        state
+            .registered_subagent_roles
+            .clone_from(&registered_roles);
         state.runtime_home.clone_from(&runtime_home);
         state.runtime_agent_schema_version = RUNTIME_AGENT_SCHEMA_VERSION;
         state.runtime_agent_hashes.clone_from(&expected_hashes);
+        state.remote_compaction_models = remote_compaction_models.cloned().unwrap_or_default();
         write_lease(marker, &state)?;
         crate::subagent_gate::commit_runtime_subagent_policy(
             &runtime_home,

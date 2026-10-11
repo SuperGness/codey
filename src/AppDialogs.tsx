@@ -323,7 +323,6 @@ function ModelPickerDialogComponent({
                   />
                   <div className="grid min-w-0 flex-1 gap-px">
                     <strong className="break-words text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">{model.displayName}</strong>
-                    <small className="break-words text-[11px] text-[var(--codey-subtle,#86868b)]">{model.slug}</small>
                   </div>
                   {!routeConfigReadOnly && <ModelSettingsFields model={model.slug} policy={draftModelContexts[model.slug]} disabled={isBusy}
                     onChange={(policy) => onUpdateDraftModelContext(model.slug, policy)} />}

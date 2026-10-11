@@ -26,6 +26,7 @@ import { loadRequestLogModels, type ModelPage } from "./requestLogModels";
 import { errorText } from "./appUtils";
 import { formatBytes, formatTimestamp } from "./formatters";
 import { modelIdsEqual } from "./modelIds";
+import { formatRouteName } from "./routeShortNames";
 import { QuotaEstimateDialog } from "./QuotaEstimateDialog";
 import type { LogAnalytics } from "./usageAnalysis";
 import { maskEmail } from "./sensitiveText";
@@ -64,6 +65,7 @@ type RouteRequestLogItem = {
   downstreamFirstContentMs?: number | null;
   upstreamHeaderMs?: number | null;
   totalDurationMs: number;
+  outputTokensPerSecond?: number | null;
   queueDelayMs: number;
   inputTokens?: number | null;
   outputTokens?: number | null;
@@ -139,7 +141,7 @@ type ActionNotice = {
 
 export type RequestLogCatalog = {
   officialAccountAvailable: boolean;
-  profiles: Array<Pick<Profile, "id" | "name" | "sourceProviderId" | "officialAccount" | "officialAccountId">>;
+  profiles: Array<Pick<Profile, "id" | "name" | "shortName" | "sourceProviderId" | "officialAccount" | "officialAccountId">>;
   selectedModelsByProvider: Config["selectedModelsByProvider"];
   declaredOfficialModelsByProvider: Config["declaredOfficialModelsByProvider"];
   upstreamModelsByProvider: Config["upstreamModelsByProvider"];
@@ -332,6 +334,11 @@ function formatCacheHitRate(input?: number | null, cached?: number | null) {
   return `${(cached / input * 100).toFixed(1)}%`;
 }
 
+function formatTokensPerSecond(value?: number | null) {
+  if (value == null || !Number.isFinite(value) || value <= 0) return "—";
+  return `${value.toFixed(1)} tok/s`;
+}
+
 // 日志只保留请求体的形态摘要，这里把形态和项数还原成可读文字。
 function requestShapeText(state?: string | null, items?: number | null, hasPreviousResponseId?: boolean | null) {
   if (!state) return null;
@@ -487,8 +494,23 @@ function CopyIdButton({
   );
 }
 
+function requestLogProviderLabel(item: RouteRequestLogItem, profiles: RequestLogCatalog["profiles"]) {
+  const profile = profiles.find((profile) =>
+    Boolean(item.provider) && (profile.sourceProviderId === item.provider || profile.id === item.provider)
+    && (!item.officialAccountId || profile.officialAccountId === item.officialAccountId),
+  ) ?? (item.officialAccountId
+    ? profiles.find((profile) => profile.officialAccountId === item.officialAccountId)
+    : undefined);
+  if (profile) {
+    const label = formatRouteName(profile.name, profile.shortName || "");
+    if (label) return label;
+  }
+  return item.providerName || item.provider || "—";
+}
+
 function buildRequestLogRow(
   item: RouteRequestLogItem,
+  providerLabel: string,
   officialAccountLabel: (accountId?: string | null) => string,
   handleCopyId: (requestId: string) => void,
 ): RequestLogTableRow {
@@ -563,9 +585,9 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                               ) : null}
                               <strong
                                 className="truncate font-semibold text-[var(--codey-text,#1d1d1f)]"
-                                title={item.providerName || item.provider || undefined}
+                                title={providerLabel}
                               >
-                                {item.providerName || item.provider || "—"}
+                                {providerLabel}
                               </strong>
                             </div>
                             {item.officialAccountId ? (
@@ -685,6 +707,12 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                               <span className="text-[var(--codey-muted,#6e6e73)]">总用时</span>
                               <span className="text-[11px] text-[var(--codey-text-soft,#48484a)] tabular-nums">
                                 {formatDuration(item.totalDurationMs)}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <span className="text-[var(--codey-muted,#6e6e73)]">速度</span>
+                              <span className="text-[11px] text-[var(--codey-text-soft,#48484a)] tabular-nums">
+                                {formatTokensPerSecond(item.outputTokensPerSecond)}
                               </span>
                             </div>
                           </div>
@@ -864,7 +892,7 @@ export function RequestLogDialog({
     const providers = new Map<string, string>();
     for (const profile of catalog.profiles) {
       const value = profile.sourceProviderId || profile.id;
-      if (value) providers.set(value, profile.name || value);
+      if (value) providers.set(value, formatRouteName(profile.name, profile.shortName || "") || value);
     }
     return [
       { label: "全部供应商", value: "all" },
@@ -1120,8 +1148,8 @@ export function RequestLogDialog({
   };
 
   const requestLogRows = useMemo(
-    () => (result?.items ?? []).map((item) => buildRequestLogRow(item, officialAccountLabel, handleCopyId)),
-    [result?.items, officialAccountLabel, handleCopyId],
+    () => (result?.items ?? []).map((item) => buildRequestLogRow(item, requestLogProviderLabel(item, catalog.profiles), officialAccountLabel, handleCopyId)),
+    [result?.items, catalog.profiles, officialAccountLabel, handleCopyId],
   );
 
   if (!opened) return null;
@@ -1419,6 +1447,7 @@ export function RequestLogDialog({
                     <span>总请求: <strong className="font-semibold text-[var(--codey-text,#1d1d1f)]">{stats.total.toLocaleString()}</strong> 条</span>
                     <span>成功率: <strong className={`font-semibold ${stats.successRate != null && stats.successRate >= 95 ? "text-emerald-600 dark:text-emerald-400" : stats.successRate != null && stats.successRate >= 80 ? "text-amber-600 dark:text-amber-400" : "text-rose-600 dark:text-rose-400"}`}>{stats.successRate != null ? `${stats.successRate.toFixed(1)}%` : "—"}</strong></span>
                     <span className="hidden md:inline">TTFT: <strong className="font-semibold text-[var(--codey-text,#1d1d1f)]">{formatDuration(stats.avgTtft)}</strong></span>
+                    <span className="hidden md:inline">速度: <strong className="font-semibold text-[var(--codey-text,#1d1d1f)]">{formatTokensPerSecond(stats.avgOutputTokensPerSecond)}</strong></span>
                     <span className="hidden lg:inline">Token: <strong className="font-semibold text-[var(--codey-text,#1d1d1f)]">{formatTokens(stats.totalTokensSum)}</strong></span>
                   </div>
                 ) : (
@@ -1514,7 +1543,7 @@ export function RequestLogDialog({
                       </span>
                     </div>
                     <span className="text-[10px] text-[var(--codey-subtle,#8e8e93)] truncate">
-                      平均总耗时 {formatDuration(stats.avgDuration)}
+                      平均总耗时 {formatDuration(stats.avgDuration)} · 平均输出 {formatTokensPerSecond(stats.avgOutputTokensPerSecond)}
                     </span>
                   </div>
                   <div className="request-log-metric">
@@ -1990,6 +2019,10 @@ export function RequestLogDialog({
                         <span className="font-mono text-amber-600 dark:text-amber-400">{formatDuration(selectedItem.queueDelayMs)}</span>
                       </div>
                     ) : null}
+                    <div className="flex items-center justify-between">
+                      <span className="text-[var(--codey-muted,#6e6e73)]">输出速度</span>
+                      <span className="font-mono">{formatTokensPerSecond(selectedItem.outputTokensPerSecond)}</span>
+                    </div>
                   </div>
                 </div>
 
@@ -2061,7 +2094,7 @@ export function RequestLogDialog({
                   <div>
                     <dt className="text-[11px] text-[var(--codey-subtle,#8e8e93)]">供应商</dt>
                     <dd className="m-0 mt-0.5 font-medium text-[var(--codey-text,#1d1d1f)]">
-                      {selectedItem.providerName || selectedItem.provider || "—"}
+                      {requestLogProviderLabel(selectedItem, catalog.profiles)}
                     </dd>
                   </div>
                   {selectedItem.officialAccountId ? (

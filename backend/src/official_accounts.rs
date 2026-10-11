@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use crate::config::{default_official_route_name, default_official_route_short_name};
+use crate::config::default_official_route_name;
 
 pub const ACCOUNTS_DIR_NAME: &str = "official-accounts";
 const DEFAULT_FILE_NAME: &str = "default.json";
@@ -489,18 +489,9 @@ fn route_index(value: Option<&str>) -> Option<usize> {
         .map(|position| position + 10)
 }
 
-/// 当前可用的最小编号；需要补短名称时跳过短名称已被占用的编号。
-fn smallest_free_official_index(
-    used_indices: &BTreeSet<usize>,
-    used_short_names: &BTreeSet<String>,
-    needs_short_name: bool,
-) -> usize {
+fn smallest_free_official_index(used_indices: &BTreeSet<usize>) -> usize {
     (1..)
-        .find(|index| {
-            !used_indices.contains(index)
-                && (!needs_short_name
-                    || !used_short_names.contains(&default_official_route_short_name(*index)))
-        })
+        .find(|index| !used_indices.contains(index))
         .unwrap_or(1)
 }
 
@@ -761,7 +752,7 @@ impl OfficialAccountStore {
         let mut record = self
             .get(id)?
             .ok_or_else(|| anyhow!("找不到官方账号：{id}"))?;
-        record.route_name = route_setting(route_name);
+        record.route_name = route_name.map(|name| name.trim().to_string());
         record.route_short_name = route_setting(route_short_name);
         record.upstream_proxy = route_setting(upstream_proxy);
         record.base_url = route_setting(base_url);
@@ -779,48 +770,49 @@ impl OfficialAccountStore {
         self.write(&record)
     }
 
-    /// 给还没有线路设置的账号补上按添加顺序生成的默认名称，例如「官方账号1」
-    /// 和「官1」。编号取当前未被占用的最小编号，所以移除账号后新增的账号不会
-    /// 和已有名称重复；已经保存过设置的账号原样保留。
+    /// 为历史账号补齐缺失的名称和短名称，保留主动清空的线路名称。
     pub fn ensure_generated_route_settings(&self) -> Result<()> {
         let _guard = self.lock_writes()?;
         let records = self.list()?;
         let missing = |value: Option<&str>| trimmed_setting(value).is_none();
+        let mut used_short_names = records
+            .iter()
+            .filter_map(|record| trimmed_setting(record.route_short_name.as_deref()))
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
         let mut used_indices = BTreeSet::new();
-        let mut used_short_names = BTreeSet::new();
         for record in &records {
             for value in [&record.route_name, &record.route_short_name] {
                 if let Some(index) = route_index(value.as_deref()) {
                     used_indices.insert(index);
                 }
             }
-            if let Some(short_name) = trimmed_setting(record.route_short_name.as_deref()) {
-                used_short_names.insert(short_name.to_string());
-            }
         }
         for record in &records {
-            let needs_name = missing(record.route_name.as_deref());
+            let needs_name = record.route_name.is_none();
             let needs_short_name = missing(record.route_short_name.as_deref());
             if !needs_name && !needs_short_name {
                 continue;
             }
-            // 只缺其中一项时沿用已保存另一半的编号，名称和短名称保持同号。
             let index = route_index(record.route_name.as_deref())
                 .or_else(|| route_index(record.route_short_name.as_deref()))
-                .filter(|index| {
-                    !needs_short_name
-                        || !used_short_names.contains(&default_official_route_short_name(*index))
-                })
-                .unwrap_or_else(|| {
-                    smallest_free_official_index(&used_indices, &used_short_names, needs_short_name)
-                });
-            used_indices.insert(index);
+                .unwrap_or_else(|| smallest_free_official_index(&used_indices));
             let mut updated = record.clone();
             if needs_name {
+                used_indices.insert(index);
                 updated.route_name = Some(default_official_route_name(index));
             }
             if needs_short_name {
-                let short_name = default_official_route_short_name(index);
+                let short_name = updated
+                    .route_name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .chars()
+                    .take(2)
+                    .collect::<String>();
+                let short_name =
+                    crate::config::unique_official_route_short_name(&short_name, &used_short_names);
                 used_short_names.insert(short_name.clone());
                 updated.route_short_name = Some(short_name);
             }
@@ -2318,17 +2310,17 @@ mod tests {
                 (
                     "acct_1".to_string(),
                     "官方账号1".to_string(),
-                    "官1".to_string()
+                    "官方".to_string()
                 ),
                 (
                     "acct_2".to_string(),
                     "官方账号2".to_string(),
-                    "官2".to_string()
+                    "官1".to_string()
                 ),
                 (
                     "acct_3".to_string(),
                     "官方账号3".to_string(),
-                    "官3".to_string()
+                    "官2".to_string()
                 ),
             ]
         );
@@ -2349,6 +2341,14 @@ mod tests {
         assert_eq!(custom.route_name.as_deref(), Some("主力官方号"));
         assert_eq!(custom.route_short_name.as_deref(), Some("主"));
 
+        store
+            .update_route_settings("acct_2", Some("Plus".into()), None, None, None)
+            .unwrap();
+        store.ensure_generated_route_settings().unwrap();
+        let cleared = store.get("acct_2").unwrap().unwrap();
+        assert_eq!(cleared.route_name.as_deref(), Some("Plus"));
+        assert_eq!(cleared.route_short_name.as_deref(), Some("Pl"));
+
         // 移除账号 1 后新增的账号取当前最小编号，不会和账号 3 的「官方账号3」重复。
         store.remove("acct_1").unwrap();
         let added_later = OfficialAccountRecord::from_auth(
@@ -2360,23 +2360,22 @@ mod tests {
         store.ensure_generated_route_settings().unwrap();
         let renumbered = store.get("acct_4").unwrap().unwrap();
         assert_eq!(renumbered.route_name.as_deref(), Some("官方账号1"));
-        assert_eq!(renumbered.route_short_name.as_deref(), Some("官1"));
+        assert_eq!(renumbered.route_short_name.as_deref(), Some("官方"));
         let untouched = store.get("acct_3").unwrap().unwrap();
         assert_eq!(untouched.route_name.as_deref(), Some("官方账号3"));
-        assert_eq!(untouched.route_short_name.as_deref(), Some("官3"));
+        assert_eq!(untouched.route_short_name.as_deref(), Some("官2"));
 
-        // 只缺一半设置时，补上的名称沿用另一半的编号。
         store
             .update_route_settings("acct_3", Some("官方账号7".into()), None, None, None)
             .unwrap();
         store.ensure_generated_route_settings().unwrap();
         let paired = store.get("acct_3").unwrap().unwrap();
         assert_eq!(paired.route_name.as_deref(), Some("官方账号7"));
-        assert_eq!(paired.route_short_name.as_deref(), Some("官7"));
+        assert_eq!(paired.route_short_name.as_deref(), Some("官1"));
     }
 
     #[test]
-    fn generated_short_names_keep_numbering_after_the_ninth_account() {
+    fn generated_route_settings_keep_unique_short_names_after_the_ninth_account() {
         let dir = TempDir::new().unwrap();
         let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
         for index in 1..=11u64 {
@@ -2390,33 +2389,25 @@ mod tests {
         }
 
         store.ensure_generated_route_settings().unwrap();
-        // 短名称只有两个字符，第 10 个账号起改用字母编号。
-        assert_eq!(
-            store
-                .get("acct_10")
-                .unwrap()
-                .unwrap()
-                .route_short_name
-                .as_deref(),
-            Some("官A")
-        );
-        assert_eq!(
-            store
-                .get("acct_11")
-                .unwrap()
-                .unwrap()
-                .route_short_name
-                .as_deref(),
-            Some("官B")
+        let short_names = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|record| record.route_short_name.unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(short_names.len(), 11);
+        assert!(
+            short_names
+                .iter()
+                .all(|name| !name.is_empty() && name.chars().count() <= 4)
         );
 
-        // 字母编号对应同一个编号，重复补齐不会重新分配已用值。
         store.ensure_generated_route_settings().unwrap();
         let names = store
             .list()
             .unwrap()
             .into_iter()
-            .filter_map(|record| record.route_short_name)
+            .filter_map(|record| record.route_name)
             .collect::<BTreeSet<_>>();
         assert_eq!(names.len(), 11);
     }

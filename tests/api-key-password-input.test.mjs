@@ -92,7 +92,7 @@ function modelSectionProps() {
   return {
     config: {
       activeProfileId: "route-a",
-      autoCheckCodeyUpdates: true,
+      codeyUpdatePolicy: "stable",
       codexAppPath: "",
       declaredOfficialModelsByProvider: {},
       defaultModel: "",
@@ -234,6 +234,17 @@ test("线路 Key 输入在打开编辑弹窗后渲染为带 autoComplete=new-pas
   assert.equal(elementProps(input).type, undefined, "可见性不由组件硬编码");
   assert.equal(typeof elementProps(input).onVisibilityChange, "function");
   assert.equal(elementProps(input).value, "");
+  assert.equal(elementProps(input).required, true);
+  assert.equal(elementProps(input)["aria-required"], true);
+  for (const id of ["route-short-name-input", "route-url-input"]) {
+    const [requiredInput] = collectElements(tree, (element) => elementProps(element).id === id);
+    assert.equal(elementProps(requiredInput).required, true);
+    assert.equal(elementProps(requiredInput)["aria-required"], "true");
+  }
+  const nameFields = collectElements(tree, (element) => ["route-short-name-input", "route-name-input"].includes(elementProps(element).id));
+  assert.deepEqual(nameFields.map((field) => elementProps(field).id), ["route-short-name-input", "route-name-input"]);
+  assert.equal(elementProps(nameFields[1]).required, undefined);
+  assert.equal(elementProps(nameFields[0]).value, "线路");
   assert.equal(
     collectElements(tree, (element) => elementProps(element).type === "password")
       .length,
@@ -244,4 +255,21 @@ test("线路 Key 输入在打开编辑弹窗后渲染为带 autoComplete=new-pas
   // 可见性切换必须真的接回组件状态。
   elementProps(input).onVisibilityChange();
   assert.equal(rerender().visibility, true);
+});
+
+test("官方编辑页短名必填并排在线路名之前", () => {
+  modelSection.reset();
+  const props = modelSectionProps();
+  Object.assign(props.config.profiles[0], { authMode: "officialAccount", officialAccount: true, shortName: "主", name: "" });
+  const initial = modelSection.exports.ModelSection(props);
+  const [edit] = collectElements(initial, (element) => elementProps(element)["aria-label"] === "编辑线路 ");
+  elementProps(edit).onClick();
+  modelSection.restart();
+  const tree = modelSection.exports.ModelSection(props);
+  const fields = collectElements(tree, (element) => ["official-route-short-name-input", "official-route-name-input"].includes(elementProps(element).id));
+  assert.deepEqual(fields.map((field) => elementProps(field).id), ["official-route-short-name-input", "official-route-name-input"]);
+  assert.equal(elementProps(fields[0]).required, true);
+  assert.equal(elementProps(fields[0])["aria-required"], "true");
+  assert.equal(elementProps(fields[1]).required, undefined);
+  assert.equal(elementProps(fields[1]).value, "");
 });

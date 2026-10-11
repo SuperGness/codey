@@ -133,6 +133,9 @@ pub(crate) fn append_chat_message_item(
     messages: &mut Vec<Value>,
     tool_bridge: &mut ResponsesToolBridge,
 ) -> Result<()> {
+    if let Some(message) = codey_summary_message(item)? {
+        return append_chat_message_item(&message, messages, tool_bridge);
+    }
     match item {
         Value::String(text) => push_chat_text_message(messages, "user", text),
         Value::Object(object) => match object.get("type").and_then(Value::as_str) {
@@ -844,7 +847,9 @@ pub(crate) fn normalize_responses_tool_list(tools: Option<&mut Value>) -> bool {
         let Some(tool) = tool.as_object_mut() else {
             continue;
         };
+        let mut relaxed_schema = false;
         if let Some(parameters) = tool.get_mut("parameters") {
+            relaxed_schema |= tool_parameter_root_needs_relaxation(parameters);
             changed |= normalize_tool_parameter_root(parameters);
         }
         if let Some(parameters) = tool
@@ -852,10 +857,15 @@ pub(crate) fn normalize_responses_tool_list(tools: Option<&mut Value>) -> bool {
             .and_then(Value::as_object_mut)
             .and_then(|function| function.get_mut("parameters"))
         {
+            relaxed_schema |= tool_parameter_root_needs_relaxation(parameters);
             changed |= normalize_tool_parameter_root(parameters);
         }
         if let Some(input_schema) = tool.get_mut("input_schema") {
+            relaxed_schema |= tool_parameter_root_needs_relaxation(input_schema);
             changed |= normalize_tool_parameter_root(input_schema);
+        }
+        if relaxed_schema {
+            changed |= disable_tool_strict(tool);
         }
         for field in ["tools", "children"] {
             changed |= normalize_responses_tool_list(tool.get_mut(field));
@@ -864,13 +874,546 @@ pub(crate) fn normalize_responses_tool_list(tools: Option<&mut Value>) -> bool {
     changed
 }
 
+/// 协作工具的 `message` 参数带 `encrypted` 标记时，Responses 上游会把任务正文替换成
+/// 只有它能解开的令牌。子代理线路没有该密钥，正文会随协议转换一起丢失，因此转发前
+/// 摘掉标记，让上游按明文返回任务正文。
+pub(crate) fn strip_collaboration_message_encryption(body: &mut Value) -> bool {
+    let Some(body) = body.as_object_mut() else {
+        return false;
+    };
+    let mut changed = strip_message_encryption_in_tool_list(body.get_mut("tools"));
+    let input = body.get_mut("input");
+    match input {
+        Some(Value::Array(items)) => {
+            for item in items {
+                changed |= strip_message_encryption_in_tool_list(item.get_mut("tools"));
+            }
+        }
+        Some(item) => changed |= strip_message_encryption_in_tool_list(item.get_mut("tools")),
+        None => {}
+    }
+    changed
+}
+
+fn strip_message_encryption_in_tool_list(tools: Option<&mut Value>) -> bool {
+    let Some(tools) = tools.and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for tool in tools {
+        if is_collaboration_message_tool(tool) {
+            changed |= remove_message_encrypted_marker(tool.get_mut("parameters"));
+            changed |= remove_message_encrypted_marker(tool.get_mut("input_schema"));
+            if let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) {
+                changed |= remove_message_encrypted_marker(function.get_mut("parameters"));
+            }
+        }
+        for field in ["tools", "children"] {
+            changed |= strip_message_encryption_in_tool_list(tool.get_mut(field));
+        }
+    }
+    changed
+}
+
+fn remove_message_encrypted_marker(schema: Option<&mut Value>) -> bool {
+    schema
+        .and_then(Value::as_object_mut)
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.get_mut("message"))
+        .and_then(Value::as_object_mut)
+        .is_some_and(|message| message.remove("encrypted").is_some())
+}
+
+fn is_collaboration_message_tool(tool: &Value) -> bool {
+    let Some(tool) = tool.as_object() else {
+        return false;
+    };
+    let is_message_tool = |name: Option<&Value>| {
+        name.and_then(Value::as_str)
+            .is_some_and(|name| COLLABORATION_MESSAGE_TOOLS.contains(&name))
+    };
+    is_message_tool(tool.get("name"))
+        || is_message_tool(
+            tool.get("function")
+                .and_then(|function| function.get("name")),
+        )
+}
+
+const COLLABORATION_MESSAGE_TOOLS: [&str; 3] = ["spawn_agent", "send_message", "followup_task"];
+
 pub(crate) fn normalize_tool_parameter_root(schema: &mut Value) -> bool {
-    match restrict_tool_parameter_schema_to_object(schema) {
+    let mut changed = match restrict_tool_parameter_schema_to_object(schema) {
         Some(changed) => changed,
         None => {
             *schema = json!({"type":"object","properties":{}});
-            true
+            return true;
         }
+    };
+    if let Some(root) = schema.as_object_mut() {
+        for keyword in TOP_LEVEL_FORBIDDEN_SCHEMA_KEYWORDS {
+            if root.remove(*keyword).is_some() {
+                changed = true;
+            }
+        }
+    }
+    changed |= flatten_tool_parameter_root_union(schema);
+    changed
+}
+
+const TOP_LEVEL_FORBIDDEN_SCHEMA_KEYWORDS: &[&str] = &["enum", "const", "not"];
+
+/// 归一化会删掉顶层联合结构和 enum/const/not，合并后的约束弱于原定义，
+/// 这类工具必须同时关闭 strict，否则等于向语义不同的 schema 声明强校验。
+fn tool_parameter_root_needs_relaxation(schema: &Value) -> bool {
+    let Value::Object(object) = schema else {
+        // 非对象 schema 会被替换成空 object。
+        return true;
+    };
+    if ["anyOf", "oneOf", "allOf"]
+        .iter()
+        .any(|keyword| object.get(*keyword).is_some_and(Value::is_array))
+    {
+        return true;
+    }
+    if TOP_LEVEL_FORBIDDEN_SCHEMA_KEYWORDS
+        .iter()
+        .any(|keyword| object.contains_key(*keyword))
+    {
+        return true;
+    }
+    // 顶层声明了其它类型，或声明成含 null 等类型的数组时，原定义会被收窄成 object。
+    match object.get("type") {
+        Some(Value::String(name)) => name != "object",
+        Some(Value::Array(names)) => !(names.len() == 1 && names[0].as_str() == Some("object")),
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// 部分上游拒绝顶层带 anyOf/oneOf/allOf 的函数参数 schema。这里把顶层联合结构合并成
+/// 单个 object：属性名取各分支并集，同名属性的定义不一致时退回公共类型，required 在
+/// anyOf/oneOf 上取交集、在 allOf 上取并集。合并后 schema 弱于原定义，调用方会关闭 strict。
+fn flatten_tool_parameter_root_union(schema: &mut Value) -> bool {
+    let Some(root) = schema.as_object() else {
+        return false;
+    };
+    if !["anyOf", "oneOf", "allOf"]
+        .iter()
+        .any(|keyword| root.get(*keyword).is_some_and(Value::is_array))
+    {
+        return false;
+    }
+    let definitions = root
+        .get("$defs")
+        .or_else(|| root.get("definitions"))
+        .cloned();
+    let definitions = definitions.as_ref().and_then(Value::as_object);
+
+    let union_branches: Vec<&Value> = ["anyOf", "oneOf"]
+        .iter()
+        .filter_map(|keyword| root.get(*keyword).and_then(Value::as_array))
+        .flatten()
+        .collect();
+    let all_of_branches: Vec<&Value> = root
+        .get("allOf")
+        .and_then(Value::as_array)
+        .map(|branches| branches.iter().collect())
+        .unwrap_or_default();
+
+    let mut property_defs: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut property_index: HashMap<String, usize> = HashMap::new();
+    let mut degraded: HashSet<String> = HashSet::new();
+    let mut union_presence: HashMap<String, usize> = HashMap::new();
+    for branch in &union_branches {
+        let names = collect_schema_properties(
+            branch,
+            definitions,
+            0,
+            &mut property_defs,
+            &mut property_index,
+            &mut degraded,
+        );
+        for name in names {
+            *union_presence.entry(name).or_insert(0) += 1;
+        }
+    }
+    for branch in &all_of_branches {
+        collect_schema_properties(
+            branch,
+            definitions,
+            0,
+            &mut property_defs,
+            &mut property_index,
+            &mut degraded,
+        );
+    }
+    let mut root_properties: Vec<String> = Vec::new();
+    if let Some(existing) = root.get("properties").and_then(Value::as_object) {
+        for (name, value) in existing {
+            push_property_definition(
+                &mut property_defs,
+                &mut property_index,
+                name,
+                expand_local_schema_ref(value, definitions),
+            );
+            root_properties.push(name.clone());
+        }
+    }
+    // 某属性只在部分 anyOf/oneOf 分支里出现时，其余分支并不约束它，
+    // 合并后必须放宽到公共类型，否则等于凭空收紧了可选范围。
+    if !union_branches.is_empty() {
+        for name in union_presence.keys() {
+            if union_presence[name] < union_branches.len() && !root_properties.contains(name) {
+                degraded.insert(name.clone());
+            }
+        }
+    }
+    let required = collect_required_keys(schema, definitions, 0);
+
+    let mut properties = serde_json::Map::new();
+    for (name, definitions) in property_defs {
+        let partially_defined = degraded.contains(&name);
+        properties.insert(
+            name,
+            merge_property_schemas(&definitions, partially_defined),
+        );
+    }
+    let Some(root) = schema.as_object_mut() else {
+        return false;
+    };
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        root.remove(keyword);
+    }
+    root.insert("properties".to_string(), Value::Object(properties));
+    if required.is_empty() {
+        root.remove("required");
+    } else {
+        root.insert(
+            "required".to_string(),
+            Value::Array(required.into_iter().map(Value::String).collect()),
+        );
+    }
+    true
+}
+
+fn disable_tool_strict(tool: &mut serde_json::Map<String, Value>) -> bool {
+    let mut changed = false;
+    if tool.get("strict") == Some(&Value::Bool(true)) {
+        tool.insert("strict".to_string(), Value::Bool(false));
+        changed = true;
+    }
+    if let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut)
+        && function.get("strict") == Some(&Value::Bool(true))
+    {
+        function.insert("strict".to_string(), Value::Bool(false));
+        changed = true;
+    }
+    changed
+}
+
+fn expand_local_schema_ref(
+    value: &Value,
+    definitions: Option<&serde_json::Map<String, Value>>,
+) -> Value {
+    expand_local_schema_ref_at(value, definitions, 0)
+}
+
+fn expand_local_schema_ref_at(
+    value: &Value,
+    definitions: Option<&serde_json::Map<String, Value>>,
+    depth: usize,
+) -> Value {
+    if depth >= 8 {
+        return value.clone();
+    }
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| expand_local_schema_ref_at(item, definitions, depth + 1))
+                .collect(),
+        ),
+        Value::Object(object) => {
+            let resolved_target = object
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(local_schema_ref_name)
+                .and_then(|name| definitions.and_then(|definitions| definitions.get(name)));
+            match resolved_target {
+                Some(target) => {
+                    let Value::Object(mut resolved) =
+                        expand_local_schema_ref_at(target, definitions, depth + 1)
+                    else {
+                        return Value::Object(object.clone());
+                    };
+                    for (key, item) in object {
+                        if key != "$ref" {
+                            resolved.insert(
+                                key.clone(),
+                                expand_local_schema_ref_at(item, definitions, depth + 1),
+                            );
+                        }
+                    }
+                    Value::Object(resolved)
+                }
+                None => Value::Object(
+                    object
+                        .iter()
+                        .map(|(key, item)| {
+                            (
+                                key.clone(),
+                                expand_local_schema_ref_at(item, definitions, depth + 1),
+                            )
+                        })
+                        .collect(),
+                ),
+            }
+        }
+        _ => value.clone(),
+    }
+}
+
+fn local_schema_ref_name(reference: &str) -> Option<&str> {
+    reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))
+}
+
+/// 递归收集一个分支直接或嵌套定义的属性，并记录只出现在部分 anyOf/oneOf 分支里的属性。
+fn collect_schema_properties(
+    branch: &Value,
+    definitions: Option<&serde_json::Map<String, Value>>,
+    depth: usize,
+    property_defs: &mut Vec<(String, Vec<Value>)>,
+    property_index: &mut HashMap<String, usize>,
+    degraded: &mut HashSet<String>,
+) -> Vec<String> {
+    if depth >= 8 {
+        return Vec::new();
+    }
+    let resolved = expand_local_schema_ref(branch, definitions);
+    let Some(object) = resolved.as_object() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        for (name, value) in properties {
+            push_property_definition(property_defs, property_index, name, value.clone());
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        let Some(branches) = object.get(keyword).and_then(Value::as_array) else {
+            continue;
+        };
+        if branches.is_empty() {
+            continue;
+        }
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut union_names: Vec<String> = Vec::new();
+        for nested in branches {
+            let nested_names = collect_schema_properties(
+                nested,
+                definitions,
+                depth + 1,
+                property_defs,
+                property_index,
+                degraded,
+            );
+            for name in nested_names {
+                *counts.entry(name.clone()).or_insert(0) += 1;
+                if !union_names.contains(&name) {
+                    union_names.push(name);
+                }
+            }
+        }
+        // allOf 所有分支同时生效，缺少不构成放宽；anyOf/oneOf 的其它分支不约束该属性。
+        if keyword != "allOf" {
+            for (name, count) in &counts {
+                if *count < branches.len() {
+                    degraded.insert(name.clone());
+                }
+            }
+        }
+        for name in union_names {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+fn push_property_definition(
+    property_defs: &mut Vec<(String, Vec<Value>)>,
+    property_index: &mut HashMap<String, usize>,
+    name: &str,
+    value: Value,
+) {
+    match property_index.get(name).copied() {
+        Some(index) => property_defs[index].1.push(value),
+        None => {
+            property_index.insert(name.to_string(), property_defs.len());
+            property_defs.push((name.to_string(), vec![value]));
+        }
+    }
+}
+
+/// 计算一个 schema 一定要求出现的属性：自身 required、allOf 分支的并集、
+/// anyOf/oneOf 各分支的交集。无法解析的分支按不约束处理，宁可放宽也不收紧。
+fn collect_required_keys(
+    schema: &Value,
+    definitions: Option<&serde_json::Map<String, Value>>,
+    depth: usize,
+) -> Vec<String> {
+    if depth >= 8 {
+        return Vec::new();
+    }
+    let resolved = expand_local_schema_ref(schema, definitions);
+    let Some(object) = resolved.as_object() else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = object
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| {
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        let Some(branches) = object.get(keyword).and_then(Value::as_array) else {
+            continue;
+        };
+        if branches.is_empty() {
+            continue;
+        }
+        let branch_keys: Vec<Vec<String>> = branches
+            .iter()
+            .map(|branch| collect_required_keys(branch, definitions, depth + 1))
+            .collect();
+        if keyword == "allOf" {
+            for required in branch_keys {
+                extend_unique(&mut keys, required);
+            }
+        } else {
+            let mut intersection = branch_keys.into_iter();
+            let Some(mut common) = intersection.next() else {
+                continue;
+            };
+            for required in intersection {
+                common.retain(|key| required.contains(key));
+            }
+            extend_unique(&mut keys, common);
+        }
+    }
+    keys
+}
+
+fn extend_unique(target: &mut Vec<String>, items: Vec<String>) {
+    for item in items {
+        if !target.contains(&item) {
+            target.push(item);
+        }
+    }
+}
+
+/// 同名属性在不同分支里定义不同时，只保留各分支共有的类型信息。
+fn merge_property_schemas(definitions: &[Value], degraded: bool) -> Value {
+    let Some(first) = definitions.first() else {
+        return json!({});
+    };
+    if !degraded && definitions.iter().all(|definition| definition == first) {
+        return first.clone();
+    }
+    let mut kinds: Vec<&'static str> = Vec::new();
+    for definition in definitions {
+        let Some(kind) = schema_value_kind(definition) else {
+            return json!({});
+        };
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    if kinds.len() != 1 {
+        return json!({});
+    }
+    let mut merged = json!({"type": kinds[0]});
+    if let Some(description) = first.get("description").and_then(Value::as_str)
+        && definitions.iter().all(|definition| {
+            definition.get("description").and_then(Value::as_str) == Some(description)
+        })
+    {
+        merged["description"] = Value::String(description.to_string());
+    }
+    merged
+}
+
+fn schema_value_kind(schema: &Value) -> Option<&'static str> {
+    let object = schema.as_object()?;
+    if let Some(kind) = object.get("type").and_then(json_schema_type_name) {
+        return Some(kind);
+    }
+    if let Some(value) = object.get("const") {
+        return Some(json_value_kind(value));
+    }
+    let values = object.get("enum").and_then(Value::as_array)?;
+    let first = values.first()?;
+    let kind = json_value_kind(first);
+    values
+        .iter()
+        .all(|value| json_value_kind(value) == kind)
+        .then_some(kind)
+}
+
+fn json_schema_type_name(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::String(name) => json_schema_type_from_str(name),
+        Value::Array(names) => {
+            let mut names = names
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(json_schema_type_from_str);
+            let first = names.next()?;
+            names.next().is_none().then_some(first)
+        }
+        _ => None,
+    }
+}
+
+fn json_schema_type_from_str(name: &str) -> Option<&'static str> {
+    match name {
+        "string" => Some("string"),
+        "number" => Some("number"),
+        "integer" => Some("integer"),
+        "boolean" => Some("boolean"),
+        "object" => Some("object"),
+        "array" => Some("array"),
+        "null" => Some("null"),
+        _ => None,
+    }
+}
+
+fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) => {
+            if number.is_i64() || number.is_u64() {
+                "integer"
+            } else {
+                "number"
+            }
+        }
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
     }
 }
 
@@ -1906,10 +2449,21 @@ mod tests {
     fn normalizes_final_upstream_tool_schema_shapes() {
         let mut body = json!({
             "tools": [{
+                "type": "function",
                 "name": "automation_update",
+                "strict": true,
                 "input_schema": {
                     "anyOf": [
-                        {"type": "object", "properties": {"mode": {"type": "string"}}},
+                        {
+                            "type": "object",
+                            "properties": {"mode": {"type": "string"}},
+                            "required": ["mode"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"mode": {"type": "string"}, "id": {"type": "integer"}},
+                            "required": ["id"]
+                        },
                         {"type": "null"}
                     ]
                 }
@@ -1917,14 +2471,220 @@ mod tests {
         });
 
         assert!(normalize_responses_tool_parameter_roots(&mut body));
-        assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+        let schema = &body["tools"][0]["input_schema"];
+        assert_eq!(schema["type"], "object");
+        for keyword in ["anyOf", "oneOf", "allOf"] {
+            assert!(schema.get(keyword).is_none(), "{keyword}");
+        }
+        assert_eq!(schema["properties"]["mode"]["type"], "string");
+        assert_eq!(schema["properties"]["id"]["type"], "integer");
+        // anyOf 缺少 required 的分支不约束任何字段，交集为空。
+        assert!(schema.get("required").is_none());
+        // 合并后 schema 弱于原定义，strict 必须关闭。
+        assert_eq!(body["tools"][0]["strict"], false);
+    }
+
+    #[test]
+    fn strips_encrypted_marker_only_from_collaboration_messages() {
+        let mut body = json!({
+            "tools": [{
+                "type": "namespace",
+                "name": "agents",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "task_name": {"type": "string"},
+                                "message": {"type": "string", "encrypted": true}
+                            },
+                            "required": ["task_name", "message"]
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "wait_agent",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"message": {"type": "string", "encrypted": true}}
+                        }
+                    }
+                ]
+            }, {
+                "type": "function",
+                "name": "followup_task",
+                "function": {
+                    "name": "followup_task",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }
+            }]
+        });
+
+        assert!(strip_collaboration_message_encryption(&mut body));
+
+        let spawn = &body["tools"][0]["tools"][0]["parameters"]["properties"];
+        assert!(spawn["message"].get("encrypted").is_none());
+        assert_eq!(spawn["message"]["type"], "string");
+        assert_eq!(spawn["task_name"]["type"], "string");
+        // 同命名空间下的其它工具不受影响。
         assert_eq!(
-            body["tools"][0]["input_schema"]["anyOf"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
+            body["tools"][0]["tools"][1]["parameters"]["properties"]["message"]["encrypted"],
+            true
         );
+        assert!(
+            body["tools"][1]["function"]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+
+        // 标记已摘除后再次调用不产生改动。
+        assert!(!strip_collaboration_message_encryption(&mut body));
+    }
+
+    #[test]
+    fn strips_encrypted_marker_from_input_tool_lists() {
+        let mut body = json!({
+            "input": [{
+                "type": "tool_search_output",
+                "tools": [{
+                    "type": "function",
+                    "name": "send_message",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }]
+            }]
+        });
+
+        assert!(strip_collaboration_message_encryption(&mut body));
+        assert!(
+            body["input"][0]["tools"][0]["input_schema"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn flattens_conflicting_property_constraints_to_their_common_type() {
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"mode": {"const": "view"}, "kind": {"type": "string"}},
+                    "required": ["mode"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"mode": {"const": "create"}, "kind": {"type": "string"}},
+                    "required": ["mode"]
+                }
+            ]
+        });
+
+        assert!(normalize_tool_parameter_root(&mut schema));
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("oneOf").is_none());
+        assert_eq!(schema["properties"]["mode"], json!({"type": "string"}));
+        assert_eq!(schema["properties"]["kind"], json!({"type": "string"}));
+        assert_eq!(schema["required"], json!(["mode"]));
+    }
+
+    #[test]
+    fn flattens_ref_branches_against_root_definitions() {
+        let mut schema = json!({
+            "anyOf": [
+                {"$ref": "#/$defs/create"},
+                {"$ref": "#/$defs/delete"}
+            ],
+            "$defs": {
+                "create": {
+                    "type": "object",
+                    "properties": {"prompt": {"type": "string"}},
+                    "required": ["prompt"]
+                },
+                "delete": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"]
+                }
+            }
+        });
+
+        assert!(normalize_tool_parameter_root(&mut schema));
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("anyOf").is_none());
+        assert_eq!(schema["properties"]["prompt"]["type"], "string");
+        assert_eq!(schema["properties"]["id"]["type"], "string");
+        assert!(schema.get("required").is_none());
+        assert!(schema.get("$defs").is_some());
+    }
+
+    #[test]
+    fn drops_forbidden_top_level_schema_keywords() {
+        let mut schema = json!({
+            "type": "object",
+            "enum": ["a", "b"],
+            "const": "a",
+            "not": {"type": "null"},
+            "properties": {"mode": {"type": "string"}}
+        });
+
+        assert!(normalize_tool_parameter_root(&mut schema));
+        for keyword in ["enum", "const", "not"] {
+            assert!(schema.get(keyword).is_none(), "{keyword}");
+        }
+        assert_eq!(schema["properties"]["mode"]["type"], "string");
+    }
+
+    #[test]
+    fn flattens_nested_unions_and_relaxes_absent_properties() {
+        let mut schema = json!({
+            "oneOf": [
+                {"$ref": "#/$defs/create"},
+                {"$ref": "#/$defs/query"},
+                {"type": "null"}
+            ],
+            "type": "object",
+            "$defs": {
+                "create": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {"prompt": {"const": "a"}, "limit": {"type": "integer"}},
+                            "required": ["prompt"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"prompt": {"const": "b"}},
+                            "required": ["prompt"]
+                        }
+                    ]
+                },
+                "query": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }
+            }
+        });
+
+        assert!(normalize_tool_parameter_root(&mut schema));
+        for keyword in ["anyOf", "oneOf", "allOf"] {
+            assert!(schema.get(keyword).is_none(), "{keyword}");
+        }
+        // prompt 在 create 的两个嵌套分支里都能取到 string，query 只在 query 分支出现。
+        assert_eq!(schema["properties"]["prompt"]["type"], "string");
+        assert_eq!(schema["properties"]["query"], json!({"type": "string"}));
+        // limit 只在 create 的一个嵌套分支里定义，不能保留 integer 约束。
+        assert!(schema["properties"]["limit"].get("type").is_some());
+        // 只有 query 分支要求 query，交集为空。
+        assert!(schema.get("required").is_none());
     }
 
     #[test]

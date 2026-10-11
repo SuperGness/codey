@@ -7,6 +7,7 @@ export type LogSummary = {
   successRate: number | null;
   avgDuration: number | null;
   avgTtft: number | null;
+  avgOutputTokensPerSecond: number | null;
   avgRouterPreUpstream: number | null;
   avgUpstreamHeader: number | null;
   avgUpstreamFirstByte: number | null;
@@ -27,7 +28,7 @@ export type LogAnalytics = LogSummary & {
   toUnixMs: number;
   groups: Array<LogSummary & { key: string }>;
   groupsTruncated: boolean;
-  trend: Array<{ timestampUnixMs: number; total: number; totalTokensSum: number | null; avgDuration: number | null; avgTtft: number | null; avgDownstreamFirstContent: number | null }>;
+  trend: Array<{ timestampUnixMs: number; total: number; totalTokensSum: number | null; avgDuration: number | null; avgTtft: number | null; avgOutputTokensPerSecond: number | null; avgDownstreamFirstContent: number | null }>;
   bucketMs: number;
   dailyTrend?: UsageDay[];
   databaseBytes?: number;

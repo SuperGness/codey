@@ -11,17 +11,12 @@ const LIVE_RULE_FILE: &str = "subagent-rules-v1.json";
 const LAST_GOOD_RULE_FILE: &str = "subagent-rules-v1.last-good.json";
 const EMBEDDED_RULES: &str = include_str!("../../resources/subagent-rules.default.json");
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum RoleAccess {
-    ReadOnly,
-    Write,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+// Keep the on-disk rule shape compatible. These fixed values are validated,
+// never used to branch on a role's runtime permissions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RolePolicy {
-    pub access: RoleAccess,
+    pub access: String,
     pub visual: bool,
 }
 
@@ -162,25 +157,18 @@ impl RuleSet {
     }
 
     fn validate_security_baseline(&self) -> Result<()> {
-        const EXPECTED_ROLES: [(&str, RoleAccess, bool); 6] = [
-            ("codey_quick_scan", RoleAccess::Write, true),
-            ("codey_deep_research", RoleAccess::Write, true),
-            ("codey_visual_analysis", RoleAccess::Write, true),
-            ("codey_worker", RoleAccess::Write, true),
-            ("codey_visual_worker", RoleAccess::Write, true),
-            ("default", RoleAccess::Write, true),
-        ];
+        const EXPECTED_ROLES: [&str; 6] = crate::config::SUBAGENT_ROLE_IDS;
         anyhow::ensure!(
             self.roles.len() == EXPECTED_ROLES.len(),
             "子代理动态规则不能新增或删除运行时角色"
         );
-        for (role, expected_access, expected_visual) in EXPECTED_ROLES {
+        for role in EXPECTED_ROLES {
             let policy = self
                 .roles
                 .get(role)
                 .with_context(|| format!("子代理规则缺少受保护角色 {role}"))?;
             anyhow::ensure!(
-                policy.access == expected_access && policy.visual == expected_visual,
+                policy.access == "write" && policy.visual,
                 "子代理动态规则不能改变角色 {role} 的 access/visual 安全属性"
             );
             let spawn = self.evaluate(&RuleContext {
@@ -210,18 +198,11 @@ impl RuleSet {
                 tool_class: ToolClass::Visual,
             });
             anyhow::ensure!(
-                visual.effect
-                    == if expected_visual {
-                        RuleEffect::Allow
-                    } else {
-                        RuleEffect::Deny
-                    },
-                "子代理规则必须按 visual 属性限制角色 {role} 的视觉工具"
+                visual.effect == RuleEffect::Allow,
+                "子代理规则必须允许角色 {role} 的视觉工具"
             );
         }
-        for role in
-            std::iter::once(None).chain(EXPECTED_ROLES.iter().map(|(role, _, _)| Some(*role)))
-        {
+        for role in std::iter::once(None).chain(EXPECTED_ROLES.iter().map(|role| Some(*role))) {
             for tool in [
                 "wait_agent",
                 "list_agents",
@@ -308,7 +289,7 @@ impl RuleSet {
     }
 
     pub(crate) fn role_policy(&self, role: &str) -> Option<RolePolicy> {
-        self.roles.get(role).copied()
+        self.roles.get(role).cloned()
     }
 
     pub(crate) fn evaluate(&self, context: &RuleContext<'_>) -> RuleDecision {
@@ -517,7 +498,14 @@ pub(crate) fn classify_tool(tool_name: &str) -> ToolClass {
         ToolClass::Network
     } else if matches!(
         normalized.as_str(),
-        "read_file" | "inspect_local_file" | "grep" | "glob" | "tool_search"
+        "read_file"
+            | "inspect_local_file"
+            | "grep"
+            | "glob"
+            | "tool_search"
+            | "read_mcp_resource"
+            | "list_mcp_resources"
+            | "list_mcp_resource_templates"
     ) {
         ToolClass::Read
     } else if matches!(
@@ -591,6 +579,11 @@ pub(crate) fn normalize_tool_name(tool_name: &str) -> String {
         "grep" | "mcp__codey_fastctx__grep" => Some("grep"),
         "glob" | "mcp__codey_fastctx__glob" => Some("glob"),
         "tool_search" => Some("tool_search"),
+        "read_mcp_resource" | "functions.read_mcp_resource" => Some("read_mcp_resource"),
+        "list_mcp_resources" | "functions.list_mcp_resources" => Some("list_mcp_resources"),
+        "list_mcp_resource_templates" | "functions.list_mcp_resource_templates" => {
+            Some("list_mcp_resource_templates")
+        }
         "view_image" | "functions.view_image" => Some("view_image"),
         "mcp__cua_repl__js" => Some("cua_repl_js"),
         "mcp__cua_repl__js_reset" => Some("cua_repl_js_reset"),
@@ -606,7 +599,13 @@ pub(crate) fn normalize_tool_name(tool_name: &str) -> String {
         "read_thread_terminal" | "codex_app__read_thread_terminal" => Some("read_thread_terminal"),
         "web_search" => Some("web_search"),
         "websearch" => Some("websearch"),
-        "web.run" | "web/run" | "web::run" | "web__run" | "web_run" | "webrun" => Some("web_run"),
+        "web.run"
+        | "web/run"
+        | "web::run"
+        | "web__run"
+        | "web_run"
+        | "webrun"
+        | "mcp__codex_apps__search_service_web_run" => Some("web_run"),
         "open" => Some("open"),
         "find" => Some("find"),
         "screenshot" => Some("screenshot"),
@@ -730,21 +729,9 @@ mod tests {
                 "{role}"
             );
         }
-        for class in [ToolClass::Read, ToolClass::Network] {
-            assert_eq!(
-                rules
-                    .evaluate(&RuleContext {
-                        actor: RuleActor::Root,
-                        role: None,
-                        tool_name: "root-read",
-                        tool_class: class,
-                    })
-                    .effect,
-                RuleEffect::Allow,
-                "{class:?}"
-            );
-        }
         for class in [
+            ToolClass::Read,
+            ToolClass::Network,
             ToolClass::Write,
             ToolClass::Command,
             ToolClass::Visual,
@@ -861,7 +848,7 @@ mod tests {
         let mutations: [fn(&mut RuleSet); 3] = [
             |rules: &mut RuleSet| rules.fallback = RuleEffect::Allow,
             |rules: &mut RuleSet| {
-                rules.roles.get_mut("codey_quick_scan").unwrap().access = RoleAccess::ReadOnly;
+                rules.roles.get_mut("codey_quick_scan").unwrap().access = "read_only".into();
             },
             |rules: &mut RuleSet| {
                 rules.rules.push(RuleDefinition {
@@ -890,10 +877,7 @@ mod tests {
             let loaded = load(temp.path());
             assert_eq!(loaded.source, RuleSource::Embedded);
             assert_eq!(loaded.rules.fallback, RuleEffect::Deny);
-            assert_eq!(
-                loaded.rules.roles["codey_quick_scan"].access,
-                RoleAccess::Write
-            );
+            assert_eq!(loaded.rules.roles["codey_quick_scan"].access, "write");
             assert!(loaded.warning.is_some());
         }
     }

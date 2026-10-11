@@ -10,6 +10,17 @@ use std::{
 pub const MAX_PACKAGE: u64 = 64 * 1024 * 1024;
 const MAX_EXTRACTED: u64 = 128 * 1024 * 1024;
 
+pub(super) const ACCEPTED_CAPABILITIES: &[&str] = &[
+    codey_plugin_sdk::appserver::CAPABILITY,
+    codey_plugin_sdk::lifecycle::CAPABILITY,
+    codey_plugin_sdk::lifecycle::AUTH_CAPABILITY,
+    codey_plugin_sdk::lifecycle::API_KEY_CAPABILITY,
+    codey_plugin_sdk::lifecycle::TURN_STATE_CAPABILITY,
+    codey_plugin_sdk::provider::CAPABILITY,
+    codey_plugin_sdk::transport::CAPABILITY,
+    codey_plugin_sdk::transport::ACCOUNT_CAPABILITY,
+];
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Inspection {
@@ -171,20 +182,11 @@ pub fn validate_manifest(manifest: &Manifest) -> Result<(), String> {
     }
     let lifecycle = super::lifecycle::enabled(manifest);
     let mut capabilities = HashSet::new();
-    if manifest.capabilities.iter().any(|s| {
-        ![
-            codey_plugin_sdk::appserver::CAPABILITY,
-            codey_plugin_sdk::lifecycle::CAPABILITY,
-            codey_plugin_sdk::lifecycle::AUTH_CAPABILITY,
-            codey_plugin_sdk::lifecycle::API_KEY_CAPABILITY,
-            codey_plugin_sdk::lifecycle::TURN_STATE_CAPABILITY,
-            codey_plugin_sdk::provider::CAPABILITY,
-            codey_plugin_sdk::transport::CAPABILITY,
-            codey_plugin_sdk::transport::ACCOUNT_CAPABILITY,
-        ]
-        .contains(&s.as_str())
-            || !capabilities.insert(s)
-    }) {
+    if manifest
+        .capabilities
+        .iter()
+        .any(|s| !ACCEPTED_CAPABILITIES.contains(&s.as_str()) || !capabilities.insert(s))
+    {
         return Err("插件声明了尚未支持的扩展能力".into());
     }
     let transport = manifest

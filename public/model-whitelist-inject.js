@@ -1,9 +1,11 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "62";
+  const patchVersion = "66";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
+  const legacyRemoteCompactionProviderId = "codey_router_remote";
+  const routerProviderIds = new Set([localRouterProviderId, legacyRemoteCompactionProviderId]);
   const legacyOfficialRouteProviderIds = new Set([
     officialProviderId,
     "local-official",
@@ -11,6 +13,7 @@
   const gatewayProviderIds = new Set([
     officialProviderId,
     localRouterProviderId,
+    legacyRemoteCompactionProviderId,
   ]);
   const existingPatch = window.__codeyModelWhitelistPatch;
   if (existingPatch?.version === patchVersion
@@ -58,6 +61,7 @@
   const routeMetadataParam = "responsesapiClientMetadata";
   const routeMetadataKey = "codey_route";
   const persistedThreadRoutesKey = "codey.thread-route-bindings.v1";
+  const persistedRequestedRoutesKey = "codey.thread-requested-routes.v1";
   const persistedDefaultModelHistoryKey = "codey.default-model-history.v1";
   let catalog = {
     loaded: false,
@@ -105,7 +109,11 @@
   // erase a successful runtime migration.
   const threadPersistedProviders = new Map();
   const threadRuntimeProviders = new Map();
+  const unconfirmedThreadProviders = new Set();
   const threadRoutes = new Map();
+  // A blocked provider migration is an intent for the next process, not an active
+  // binding. Keep it separate so reopening a loaded thread cannot fake migration.
+  const threadRequestedRoutes = new Map();
   const pendingThreadRequests = new Map();
   const maxTrackedThreadProviders = 2048;
   const maxPendingThreadRequests = 256;
@@ -162,39 +170,42 @@
       maxTrackedThreadProviders,
     );
   };
-  const persistThreadRoutes = () => {
+  const persistThreadRoutes = (routes = threadRoutes, key = persistedThreadRoutesKey) => {
     try {
       window.localStorage?.setItem(
-        persistedThreadRoutesKey,
-        JSON.stringify(Array.from(threadRoutes.entries())),
+        key,
+        JSON.stringify(Array.from(routes.entries())),
       );
     } catch {
       // Routing remains safe for this launch when renderer storage is unavailable.
     }
   };
-  const rememberBoundedThreadRoute = (threadId, route) => {
+  const rememberBoundedThreadRoute = (threadId, route, routes = threadRoutes, key = persistedThreadRoutesKey) => {
     const routeProviderId = requestProviderId(route?.routeProviderId);
     const sourceModel = typeof route?.sourceModel === "string"
       ? route.sourceModel.trim()
       : "";
     if (!threadId || !routeProviderId || !sourceModel) return;
-    const previous = threadRoutes.get(threadId);
+    const previous = routes.get(threadId);
     const changed = !previous
       || modelKey(previous.routeProviderId) !== modelKey(routeProviderId)
       || modelKey(previous.sourceModel) !== modelKey(sourceModel);
     rememberBoundedMap(
-      threadRoutes,
+      routes,
       threadId,
       { routeProviderId, sourceModel },
       maxTrackedThreadProviders,
     );
     // Refresh the in-memory LRU on every turn, but avoid synchronously
     // serializing the entire binding table when the persisted value is unchanged.
-    if (changed) persistThreadRoutes();
+    if (changed) persistThreadRoutes(routes, key);
   };
-  const restoreThreadRoutes = () => {
+  const clearRequestedThreadRoute = (threadId) => {
+    if (threadRequestedRoutes.delete(threadId)) persistThreadRoutes(threadRequestedRoutes, persistedRequestedRoutesKey);
+  };
+  const restoreThreadRoutes = (routes = threadRoutes, key = persistedThreadRoutesKey) => {
     try {
-      const entries = JSON.parse(window.localStorage?.getItem(persistedThreadRoutesKey) || "[]");
+      const entries = JSON.parse(window.localStorage?.getItem(key) || "[]");
       if (!Array.isArray(entries)) return;
       for (const entry of entries.slice(-maxTrackedThreadProviders)) {
         if (!Array.isArray(entry) || entry.length !== 2) continue;
@@ -205,7 +216,7 @@
           ? route.sourceModel.trim()
           : "";
         if (threadId && routeProviderId && sourceModel) {
-          threadRoutes.set(threadId, { routeProviderId, sourceModel });
+          routes.set(threadId, { routeProviderId, sourceModel });
         }
       }
     } catch {
@@ -266,11 +277,14 @@
     route?.officialAccount === true
     || legacyOfficialRouteProviderIds.has(modelKey(route?.routeProviderId))
   );
-  const providersAreCompatible = (method, currentProviderId, targetProviderId) => (
+  const providersAreCompatible = (method, currentProviderId, targetProviderId, threadId) => (
     modelKey(currentProviderId) === modelKey(targetProviderId)
+    || (routerProviderIds.has(modelKey(currentProviderId))
+      && routerProviderIds.has(modelKey(targetProviderId)))
     || (
       method === "thread/resume"
-      && modelKey(targetProviderId) === localRouterProviderId
+      && routerProviderIds.has(modelKey(targetProviderId))
+      && !threadRuntimeProviders.has(threadId)
     )
   );
   const markPatchedProvider = (params, providerId) => {
@@ -333,7 +347,8 @@
       routedModel = cleanText(route?.sourceModel) || model;
     }
     const next = { ...source };
-    if (routedModel || Object.hasOwn(source, "model")) next.model = routedModel;
+    // null 表示沿用对话模型；空字符串会让 app-server 报没有可用模型。
+    if (routedModel) next.model = routedModel;
     delete next.model_provider;
     if (threadProviderRequestMethods.has(method)) {
       next.modelProvider = routedProviderId;
@@ -362,16 +377,14 @@
     }
     let blocked = false;
     if (providerBoundExistingThreadMethods.has(method) && routedProviderId) {
-      // `turn/start` has no modelProvider field, so provider migration must
-      // happen during `thread/resume`. Resume may move any persisted provider
-      // onto Codey's runtime router; later turns can then switch routes safely.
-      // A late injection may have missed the resume response. Unknown carriers
-      // must resume too, rather than leaking a route alias to an old upstream.
+      // Only an unloaded thread can migrate from an external provider during
+      // resume. Both Codey provider IDs share the same gateway carrier.
       if (
         threadId
-        && (!currentProviderId
-          ? method === "turn/start" && routedProviderId === localRouterProviderId
-          : !providersAreCompatible(method, currentProviderId, routedProviderId))
+        && ((method !== "thread/resume" && unconfirmedThreadProviders.has(threadId)
+          && !routerProviderIds.has(modelKey(currentProviderId))) || (!currentProviderId
+          ? method !== "thread/resume"
+          : !providersAreCompatible(method, currentProviderId, routedProviderId, threadId)))
       ) {
         blocked = true;
         markBlockedProviderRequest(next, {
@@ -383,10 +396,14 @@
           routeName: cleanText(route?.routeName),
           reason: "provider_migration_required",
         });
+        if (routeProviderId) rememberBoundedThreadRoute(
+          threadId, route, threadRequestedRoutes, persistedRequestedRoutesKey,
+        );
       }
     }
-    if (!blocked && threadId && routeProviderId) {
+    if (!blocked && threadId && routeProviderId && !threadProviderRequestMethods.has(method)) {
       rememberBoundedThreadRoute(threadId, route);
+      clearRequestedThreadRoute(threadId);
     }
     markPatchedRoute(next, route);
     return markPatchedProvider(next, routedProviderId);
@@ -470,9 +487,9 @@
         ) {
           sourceModel = sourceModel.slice(selectorPrefix.length).replace(/#\d+$/, "").trim();
         }
-        const routeName = metadataText(metadata, "route_name")
-          || displayNameParts(metadataText(metadata, "display_name")).routeName
-          || providerId;
+        const routeName = typeof metadata.route_name === "string"
+          ? metadata.route_name.trim()
+          : displayNameParts(metadataText(metadata, "display_name")).routeName || providerId;
         return [model, {
           selectorModel: model,
           providerId,
@@ -480,6 +497,8 @@
           sourceModel,
           routeName,
           officialAccount: metadataBoolean(metadata, "official_account"),
+          supportsRemoteCompaction: typeof metadata?.supports_remote_compaction === "boolean"
+            ? metadata.supports_remote_compaction : modelKey(providerId) === legacyRemoteCompactionProviderId,
         }];
       }).filter(([, route]) => (
         route.providerId && route.routeProviderId && route.sourceModel
@@ -693,11 +712,15 @@
     const route = sourceCatalog.routeMetadata[canonicalModelName];
     const metadataDisplayName = metadataText(metadata, "display_name");
     const displayParts = displayNameParts(metadataDisplayName);
-    const routeName = metadataText(metadata, "route_name")
-      || route?.routeName
-      || displayParts.routeName
-      || cleanText(route?.providerId)
-      || "";
+    const routeName = typeof metadata?.route_name === "string"
+      ? metadata.route_name.trim()
+      : route?.routeName ?? (displayParts.routeName || cleanText(route?.providerId) || "");
+    const routePrefix = metadataText(metadata, "route_prefix")
+      || /^\[([^\[\]]+)\]/.exec(metadataDisplayName)?.[1]?.trim()
+      || sourceCatalog.routePrefixByProviderKey?.get(modelKey(
+        metadataText(metadata, "route_provider_id") || route?.routeProviderId || route?.providerId,
+      ))
+      || Array.from(routeName).slice(0, 2).join("");
     const sourceModel = metadataText(metadata, "source_model") || route?.sourceModel || "";
     const modelLabel = metadataText(metadata, "model_display_name")
       || sourceModel
@@ -714,6 +737,7 @@
       || canonicalModelName;
     return {
       routeName,
+      routeLabel: routeName ? (routePrefix ? `[${routePrefix}] ${routeName}` : routeName) : routePrefix,
       modelName: modelLabel,
       displayName,
       providerId: cleanText(route?.providerId) || metadataText(metadata, "provider_id"),
@@ -1251,7 +1275,7 @@
     for (const modelName of catalog.models) {
       const presentation = modelPresentation(modelName);
       const displayName = cleanText(presentation.displayName);
-      if (!displayName || !presentation.routeName || !presentation.modelName) continue;
+      if (!displayName || !presentation.routeLabel || !presentation.modelName) continue;
       for (const menuLabel of [displayName, cleanText(modelName)]) {
         if (menuLabel) byMenuLabel.set(menuLabel, { modelName, presentation, menuLabel });
       }
@@ -1280,7 +1304,7 @@
         }
         const existingModel = item.dataset?.codeyRouteModel || "";
         const existingPresentation = existingModel ? modelPresentation(existingModel) : null;
-        const existingPresentationStillMatches = existingPresentation?.routeName
+        const existingPresentationStillMatches = existingPresentation?.routeLabel
           && catalog.modelNamesByKey.has(modelKey(existingModel))
           && [existingPresentation.displayName, existingPresentation.modelName]
             .map(cleanText)
@@ -1288,7 +1312,7 @@
         const matched = existingPresentationStillMatches
           ? { modelName: existingModel, presentation: existingPresentation, menuLabel: itemText }
           : byMenuLabel.get(itemText);
-        if (!matched?.presentation?.routeName || !matched.presentation.modelName) {
+        if (!matched?.presentation?.routeLabel || !matched.presentation.modelName) {
           const supersededModel = (
             existingModel && !catalog.modelNamesByKey.has(modelKey(existingModel))
               ? existingModel
@@ -1308,14 +1332,14 @@
         item.classList?.add?.("codey-model-route-item");
         item.setAttribute?.(
           "aria-label",
-          `${matched.presentation.routeName} / ${matched.presentation.modelName}`,
+          `${matched.presentation.routeName || matched.presentation.routeLabel} / ${matched.presentation.modelName}`,
         );
         replaceTextOnce(
           item,
           matched.menuLabel,
           matched.presentation.modelName,
         );
-        enhancedItems.push({ item, routeName: matched.presentation.routeName });
+        enhancedItems.push({ item, routeName: matched.presentation.routeLabel });
         itemParents.add(item.parentElement || container);
       }
       const itemsByParent = new Map();
@@ -2373,7 +2397,7 @@
         ? model.slice(prefix.length).trim()
         : model;
     })();
-    const providerRoute = providerId && modelKey(providerId) !== localRouterProviderId
+    const providerRoute = providerId && !routerProviderIds.has(modelKey(providerId))
       ? uniqueRouteForProviderModel(providerId, providerModel)
       : null;
     if (providerRoute?.selectorModel) return providerRoute;
@@ -2522,8 +2546,9 @@
   const patchedRequestParams = (method, params) => {
     if (!modelBoundRequestMethods.has(method)) return params;
     let source = params && typeof params === "object" ? params : {};
-    const hasModelOverride = Object.hasOwn(source, "model");
-    const restoredBinding = !hasModelOverride && (method === "thread/resume" || method === "turn/start")
+    const hasModelOverride = Object.hasOwn(source, "model")
+      && (method === "thread/settings/update" || source.model != null);
+    const restoredBinding = !hasModelOverride && (method === "thread/resume" || method === "thread/fork" || method === "turn/start")
       ? threadRoutes.get(threadIdFromParams(source)) : null;
     if (restoredBinding) source = { ...source, model: restoredBinding.sourceModel };
     const requestedModel = typeof source.model === "string"
@@ -2534,6 +2559,7 @@
       if (source.model === null) {
         const threadId = threadIdFromParams(source);
         if (threadId && threadRoutes.delete(threadId)) persistThreadRoutes();
+        clearRequestedThreadRoute(threadId);
         pendingRouteIntent = null;
         return params;
       }
@@ -2578,11 +2604,14 @@
       : null;
     const threadId = threadIdFromParams(source);
     const userIntentRoute = pendingIntentRouteForRequest();
+    const requestedBinding = threadRequestedRoutes.get(threadId);
+    const requestedThreadRoute = requestedBinding && method !== "thread/start" && method !== "thread/fork"
+      ? routeForHintedRawModel(requestedBinding.routeProviderId, requestedBinding.sourceModel) : null;
     const threadRoute = requestedModel
       ? routeForThreadModel(threadId, requestedModel)
       : null;
     const stickyThreadRoute = (
-      (method === "turn/start" || method === "thread/resume")
+      (method === "turn/start" || method === "thread/resume" || method === "thread/fork")
       && !hasModelOverride
     ) ? routeForThread(threadId) : null;
     const existingRoute = requestedProvider
@@ -2623,6 +2652,7 @@
       };
     })();
     const route = userIntentRoute
+      || (method !== "thread/settings/update" ? requestedThreadRoute : null)
       || refreshedDefaultRoute
       || metadataRoute
       || previouslyPatchedRoute
@@ -2659,7 +2689,7 @@
     // HTTP-only Codey carrier without rewriting its rollout. Preserve an
     // unknown model exactly so the gateway can report it rather than falling
     // back to an unrelated default.
-    if (method === "thread/resume") {
+    if (method === "thread/resume" || method === "thread/fork") {
       return routedRequestParams(method, source, requestedModel, null);
     }
     // An explicit unknown or deleted model must never be silently replaced by
@@ -2774,26 +2804,31 @@
     if (pending?.nativeModelUpdate && threadRoutes.delete(pending.threadId)) persistThreadRoutes();
     const result = message.result;
     const resultThread = result?.thread;
-    const fallbackProvider = pending?.method === "thread/start"
-      || pending?.method === "thread/resume"
-      || pending?.method === "thread/fork"
-      ? pending.providerId
-      : pending?.threadId
-        ? threadPersistedProviders.get(pending.threadId)
-        : "";
+    const fallbackProvider = threadPersistedProviders.get(resultThread?.id || pending?.threadId);
     const resultProvider = requestProviderId(result?.modelProvider) || fallbackProvider;
     // Top-level modelProvider reports the live carrier; thread.modelProvider
     // can still describe the persisted rollout after a successful resume.
-    const runtimeProvider = requestProviderId(result?.modelProvider) || ((
-      pending?.method === "thread/start"
-      || pending?.method === "thread/resume"
-      || pending?.method === "thread/fork"
-    ) ? pending.providerId : pending?.threadId
-      ? threadRuntimeProviders.get(pending.threadId)
-      : resultProvider);
+    const reportedRuntimeProvider = requestProviderId(result?.modelProvider);
+    const resultThreadId = resultThread?.id || pending?.threadId;
+    if (reportedRuntimeProvider) unconfirmedThreadProviders.delete(resultThreadId);
+    else if (resultThreadId && threadProviderRequestMethods.has(pending?.method)) {
+      rememberBounded(unconfirmedThreadProviders, resultThreadId, maxTrackedThreadProviders);
+    }
+    const runtimeProvider = reportedRuntimeProvider
+      || threadRuntimeProviders.get(resultThread?.id || pending?.threadId);
     rememberThreadPersistedProvider(resultThread, resultProvider);
     rememberThreadRuntimeProvider(resultThread || pending?.threadId, runtimeProvider);
-    rememberThreadRoute(resultThread, pending?.route);
+    const routeProvider = threadProviderRequestMethods.has(pending?.method)
+      ? reportedRuntimeProvider : runtimeProvider;
+    const confirmedRoute = pending?.route && routeProvider && modelKey(routeProvider) === modelKey(
+      pending.providerId || pending.route.providerId,
+    ) ? pending.route : null;
+    if (pending?.method === "thread/resume" && pending.route && !confirmedRoute) {
+      rememberBoundedThreadRoute(resultThread?.id || pending.threadId,
+        pending.route, threadRequestedRoutes, persistedRequestedRoutesKey);
+    }
+    if (confirmedRoute) clearRequestedThreadRoute(resultThread?.id || pending?.threadId);
+    if (!pending?.route || confirmedRoute) rememberThreadRoute(resultThread, confirmedRoute);
     for (const thread of Array.isArray(result?.data) ? result.data : []) {
       rememberThreadPersistedProvider(thread);
       rememberThreadRoute(thread);
@@ -2801,7 +2836,7 @@
     const directThread = data?.thread;
     rememberThreadPersistedProvider(directThread, resultProvider);
     rememberThreadRuntimeProvider(directThread || pending?.threadId, runtimeProvider);
-    rememberThreadRoute(directThread, pending?.route);
+    if (!pending?.route || confirmedRoute) rememberThreadRoute(directThread, confirmedRoute);
   };
 
   const rememberOutgoingModelListRequest = (detail) => {
@@ -2834,7 +2869,7 @@
     const binding = !Object.hasOwn(params, "model") ? threadRoutes.get(threadId) : null;
     const historicalSource = historicalSourceModel(model);
     const currentProvider = knownThreadProvider(params);
-    const oldCarrier = modelKey(currentProvider) === localRouterProviderId
+    const oldCarrier = routerProviderIds.has(modelKey(currentProvider))
       || (modelKey(currentProvider) === "codey" && modelKey(catalog.nativeProviderId) !== "codey");
     if (!historicalSource && !binding && !oldCarrier) return params;
     const sourceModel = historicalSource || binding?.sourceModel || model;
@@ -2909,11 +2944,8 @@
   const showBlockedProviderNotice = (detail) => {
     const blocked = blockedProviderRequest(detail);
     if (!blocked) return false;
-    const target = blocked.routeName || blocked.targetProviderId || "所选线路";
-    const current = blocked.currentProviderId
-      ? `当前任务仍绑定在 ${blocked.currentProviderId}`
-      : "当前任务的运行时供应商身份尚未确认";
-    const message = blocked.message || `${current}，尚未完成迁入 Codey 统一路由，暂时不能安全发送到「${target}」。请重新打开该任务后重试；恢复完成后即可跨供应商切换。本次消息已在本地拦截，未请求任何上游。`;
+    const target = blocked.routeName || "所选线路";
+    const message = blocked.message || `暂时无法确认此任务的线路配置。请重启 Codex 后恢复任务，或用 ${target} 新建任务。`;
     console.warn("[Codey] provider migration required before routed turn", blocked);
     try {
       const noticeId = "codey-provider-mismatch-notice";
@@ -3055,6 +3087,7 @@
   });
   installGroupedModelMenuObserver();
   restoreThreadRoutes();
+  if (!nativeSelectionOnly) restoreThreadRoutes(threadRequestedRoutes, persistedRequestedRoutesKey);
   restoreDefaultModelHistory();
   window.addEventListener?.("focus", handleFocus);
   if (!nativeSelectionOnly) installModelRequestDispatchPatch();
@@ -3064,12 +3097,85 @@
     deliveryState.responsePatchInstalled = true;
   }
 
+  let requestGatePending = null;
+  const requestGateRestorers = [];
+  const installRequestClientGate = (client) => {
+    if (disposed) throw new Error("模型请求校验已重新加载");
+    if (!client || client.hostId !== "local") throw new Error("未找到本机模型请求入口");
+    const prototype = Object.getPrototypeOf(client);
+    const methods = ["enqueueRequest", "createRequest", "onResult"];
+    const descriptors = methods.map((name) => Object.getOwnPropertyDescriptor(prototype, name));
+    if (descriptors.some((descriptor) => !descriptor?.writable || typeof descriptor.value !== "function")) {
+      throw new Error("当前客户端的模型请求入口不可校验");
+    }
+    const [enqueue, create, result] = descriptors.map((descriptor) => descriptor.value);
+    // Electron may already have the synchronous source gate. Its identity and
+    // response events remain authoritative; avoid wrapping it a second time.
+    if (Function.prototype.toString.call(enqueue).includes("__codeyModelWhitelistPatch")) return true;
+    const replacements = [
+      function (method, params, ...args) {
+        if (this.hostId !== "local" || disposed) return enqueue.call(this, method, params, ...args);
+        (window.__codeyAppServerRequestClients ||= new Map()).set(this.hostId, this);
+        const routed = rewrittenOutgoingMessage({ type: "mcp-request", request: { method, params } });
+        if (blockedProviderRequest(routed)) {
+          showBlockedProviderNotice(routed);
+          return Promise.reject(new Error("Codey blocked provider migration"));
+        }
+        return enqueue.call(this, routed.request.method, routed.request.params, ...args);
+      },
+      function (...args) {
+        const created = create.apply(this, args);
+        if (this.hostId === "local" && !disposed && created?.request) {
+          rememberOutgoingThreadRequest({ type: "mcp-request", request: created.request });
+          rememberOutgoingModelListRequest({ type: "mcp-request", request: created.request });
+        }
+        return created;
+      },
+      function (id, value, ...args) {
+        if (this.hostId === "local" && !disposed) {
+          const method = this.requestPromises?.get(id)?.method;
+          rememberThreadProvidersFromResponse(null, { id, result: value });
+          if (method === "model/list") value = patchedModelPayload(value).value;
+        }
+        return result.call(this, id, value, ...args);
+      },
+    ];
+    methods.forEach((name, index) => {
+      Object.defineProperty(prototype, name, { ...descriptors[index], value: replacements[index] });
+      requestGateRestorers.push(() => {
+        if (prototype[name] === replacements[index]) Object.defineProperty(prototype, name, descriptors[index]);
+      });
+    });
+    (window.__codeyAppServerRequestClients ||= new Map()).set(client.hostId, client);
+    return true;
+  };
+  const ensureRequestGate = () => {
+    if (disposed) return Promise.reject(new Error("模型请求校验已重新加载"));
+    if (nativeSelectionOnly || window.__codeyModelRequestSourceGateInstalled === true) return Promise.resolve(true);
+    if (requestGateRestorers.length) return Promise.resolve(true);
+    if (requestGatePending) return requestGatePending;
+    requestGatePending = Promise.resolve().then(async () => {
+      const knownClient = window.__codeyAppServerRequestClients?.get?.("local");
+      if (knownClient) return installRequestClientGate(knownClient);
+      if (typeof window.__codeyLoadCodexRequestClient !== "function"
+        && typeof window.__codexSessionDeleteBridge === "function") {
+        await window.__codexSessionDeleteBridge("/internal/codey/session-tools/load", {}, { timeoutMs: 20_000 });
+      }
+      if (typeof window.__codeyLoadCodexRequestClient !== "function") throw new Error("模型请求校验尚未就绪");
+      const client = await window.__codeyLoadCodexRequestClient();
+      if (disposed) throw new Error("模型请求校验已重新加载");
+      return installRequestClientGate(client);
+    }).finally(() => { requestGatePending = null; });
+    return requestGatePending;
+  };
+
   const api = {
     version: patchVersion,
     nativeSelectionOnly,
     apply: applyModelWhitelist,
     refresh: loadModelCatalog,
     setCatalog: setModelCatalog,
+    ensureRequestGate,
     // The Codex renderer calls electronBridge before emitting its diagnostic
     // CustomEvent. The startup source gate invokes this synchronous hook at the
     // real transport boundary so thread/start receives modelProvider in time.
@@ -3098,6 +3204,8 @@
     }),
     dispose() {
       disposed = true;
+      requestGateRestorers.reverse().forEach((restore) => restore());
+      requestGateRestorers.length = 0;
       restoreNativeFastPermissions();
       window.clearTimeout(refreshTimer);
       refreshTimer = 0;
@@ -3134,7 +3242,9 @@
       pendingThreadRequests.clear();
       threadPersistedProviders.clear();
       threadRuntimeProviders.clear();
+      unconfirmedThreadProviders.clear();
       threadRoutes.clear();
+      threadRequestedRoutes.clear();
       pendingRouteIntent = null;
     },
   };

@@ -64,6 +64,16 @@ fn failed_reconciliation_forces_a_restart_but_superseded_work_does_not() {
     assert_eq!(superseded.health(), "superseded");
 }
 
+#[test]
+fn role_registration_changes_are_pending_restart_without_claiming_application() {
+    let outcome = SubagentHotReloadOutcome::pending_restart("roles changed");
+    assert!(outcome.requires_restart());
+    assert!(!outcome.reloaded());
+    assert!(!outcome.repaired());
+    assert_eq!(outcome.health(), "pending_restart");
+    assert_eq!(outcome.error(), Some("roles changed"));
+}
+
 #[tokio::test]
 async fn hot_reload_commit_is_serialized_with_config_writers() {
     let state = Arc::new(AppState::default());

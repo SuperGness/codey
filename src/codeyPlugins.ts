@@ -8,6 +8,23 @@ export type CodeyPlugin = {
 };
 export type CodeyPluginsResult = { plugins: CodeyPlugin[]; platform: string; arch: string };
 export type CodeyPluginConfigFile = { pluginId: string; version: string; path: string; content: string; sha256: string };
+/** 宿主接受的能力声明；不代表插件已启用或获得权限。 */
+export type CodeyPluginHostInfo = {
+  abiVersion: number; platform: string; arch: string;
+  acceptedCapabilities: string[];
+  limits: {
+    maxConfigBytes: number; maxMessageBytes: number; maxPackageBytes: number;
+    transportChunkBytes: number; maxTransportBodyBytes: number;
+  };
+};
+/** 只验证格式，不执行插件；错误不含配置键名或值。 */
+export type CodeyPluginConfigValidation = {
+  valid: boolean; byteLength: number; maxBytes: number;
+  error: {
+    code: "too_large" | "invalid_json" | "invalid_root" | "invalid_comments_object" | "invalid_comment_value";
+    message: string; line?: number; column?: number;
+  } | null;
+};
 export function parseCodeyPluginsResult(value: unknown): CodeyPluginsResult {
   const object = (item: unknown): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item);
   if (!object(value) || !Array.isArray(value.plugins) || typeof value.platform !== "string" || typeof value.arch !== "string") throw new Error("插件列表响应无效，请刷新后重试。");

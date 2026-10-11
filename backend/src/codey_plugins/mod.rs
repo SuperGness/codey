@@ -66,8 +66,32 @@ where
 {
     T::deserialize(deserializer).map(Some)
 }
-const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const MAX_CONFIG_BYTES: u64 = codey_plugin_sdk::config::MAX_CONFIG_BYTES as u64;
 const MAX_STATE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// 静态协议信息；不初始化插件管理器，也不读取配置或加载动态库。
+pub fn host_info() -> codey_plugin_sdk::host::HostInfo {
+    use codey_plugin_sdk::{
+        host::{HostInfo, HostLimits},
+        transport,
+    };
+    HostInfo {
+        abi_version: codey_plugin_sdk::ABI_VERSION,
+        platform: std::env::consts::OS.into(),
+        arch: std::env::consts::ARCH.into(),
+        accepted_capabilities: package::ACCEPTED_CAPABILITIES
+            .iter()
+            .map(|value| (*value).into())
+            .collect(),
+        limits: HostLimits {
+            max_config_bytes: codey_plugin_sdk::config::MAX_CONFIG_BYTES,
+            max_message_bytes: codey_plugin_sdk::MAX_MESSAGE_BYTES,
+            max_package_bytes: MAX_PACKAGE,
+            transport_chunk_bytes: transport::CHUNK_BYTES,
+            max_transport_body_bytes: transport::MAX_BODY_BYTES,
+        },
+    }
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1227,51 +1251,8 @@ fn verify_library(path: &Path, expected_sha256: &str) -> Result<(), String> {
 }
 
 fn parse_config(content: &str) -> Result<Value, String> {
-    if content.len() as u64 > MAX_CONFIG_BYTES {
-        return Err("配置文件超过 1 MiB".into());
-    }
-    let mut value: Value = serde_json::from_str(content)
-        .map_err(|e| format!("config.json 不是有效 JSON，请打开配置文件修复：{e}"))?;
-    if !value.is_object() {
-        return Err("config.json 的根值必须是 JSON 对象".into());
-    }
-    remove_config_comments(&mut value, "$")?;
-    Ok(value)
-}
-
-// 仅移除运行配置中的说明，保存和冲突检查始终使用文件原文。
-fn remove_config_comments(value: &mut Value, path: &str) -> Result<(), String> {
-    match value {
-        Value::Object(object) => {
-            if let Some(comments) = object.remove("_comments") {
-                let comments_path = format!("{path}[\"_comments\"]");
-                let entries = comments
-                    .as_object()
-                    .ok_or_else(|| format!("{comments_path} 必须是对象，每项说明必须是字符串"))?;
-                for (key, description) in entries {
-                    if !description.is_string() {
-                        return Err(format!(
-                            "{comments_path}[{}] 说明必须是字符串",
-                            serde_json::to_string(key).unwrap()
-                        ));
-                    }
-                }
-            }
-            for (key, child) in object {
-                remove_config_comments(
-                    child,
-                    &format!("{path}[{}]", serde_json::to_string(key).unwrap()),
-                )?;
-            }
-        }
-        Value::Array(array) => {
-            for (index, child) in array.iter_mut().enumerate() {
-                remove_config_comments(child, &format!("{path}[{index}]"))?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+    // 保存与冲突检查仍使用文件原文；这里只生成插件运行配置。
+    codey_plugin_sdk::config::parse(content).map_err(|error| error.to_string())
 }
 
 fn checked_config_file(path: &Path) -> Result<(), String> {
@@ -1420,6 +1401,26 @@ fn checked_child_directory(parent: &Path, name: &str, create: bool) -> Result<Pa
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn advertised_capabilities_are_accepted_with_required_manifest_fields() {
+        let info = host_info();
+        let mut manifest = fixture_package().inspection.manifest;
+        manifest.capabilities = info.accepted_capabilities.clone();
+        manifest.api_key_urls = vec!["https://example.test/v1/responses".into()];
+        package::validate_manifest(&manifest).unwrap();
+        manifest
+            .capabilities
+            .push("unknown.future.capability".into());
+        assert!(package::validate_manifest(&manifest).is_err());
+        let encoded = serde_json::to_value(&info).unwrap();
+        assert_eq!(
+            serde_json::from_value::<codey_plugin_sdk::host::HostInfo>(encoded).unwrap(),
+            info
+        );
+        assert_eq!(info.limits.max_config_bytes as u64, MAX_CONFIG_BYTES);
+        assert_eq!(info.limits.max_package_bytes, MAX_PACKAGE);
+    }
 
     #[test]
     fn state_file_read_preserves_the_size_limit_and_does_not_rewrite_input() {

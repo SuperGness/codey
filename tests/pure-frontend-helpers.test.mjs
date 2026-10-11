@@ -4,13 +4,30 @@ import test from "node:test";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
 const root = new URL("../", import.meta.url);
-const [urlValidation, formatters, appUtils, runtimeStatusSnapshot] =
+const [urlValidation, formatters, appUtils, runtimeStatusSnapshot, tokenUnits] =
   await Promise.all([
     loadTypeScriptModule(new URL("src/urlValidation.ts", root)),
     loadTypeScriptModule(new URL("src/formatters.ts", root)),
     loadTypeScriptModule(new URL("src/appUtils.ts", root)),
     loadTypeScriptModule(new URL("src/runtimeStatusSnapshot.ts", root)),
+    loadTypeScriptModule(new URL("src/tokenUnits.ts", root)),
   ]);
+
+test("token budgets convert between whole tokens and K text", () => {
+  const { formatTokenK, parseTokenK } = tokenUnits;
+  assert.equal(formatTokenK(128_000), "128");
+  assert.equal(formatTokenK(128_500), "128.5");
+  assert.equal(formatTokenK(1_024), "1.024");
+  assert.equal(formatTokenK(1_000_000), "1000");
+  assert.equal(parseTokenK("256"), 256_000);
+  assert.equal(parseTokenK(" 1,000 "), 1_000_000);
+  assert.equal(parseTokenK("0.5"), 500);
+  assert.equal(parseTokenK("1K"), 1_000);
+  assert.equal(parseTokenK("128k"), 128_000);
+  for (const value of ["", "abc", "1e3", "1.2345", "-3", "K"]) {
+    assert.equal(parseTokenK(value), undefined);
+  }
+});
 
 test("outbound API URL validation rejects non-http schemes, credentials and blanks", () => {
   const { validateOutboundApiUrl } = urlValidation;

@@ -447,6 +447,12 @@ pub(crate) const DEFAULT_ANTHROPIC_MAX_TOKENS: u64 = 8192;
 /// 输出上限。64000 能盖住已验证的 high / ultra，也没有超过 Claude 4.5 一代的输出能力。
 const CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS: u64 = 64_000;
 
+/// 模型名无法判定能力时使用的输出上限。
+/// `max_tokens` 是 Anthropic Messages 的必填字段，必须给出一个值；第三方模型走这条
+/// 协议时没有可信的能力数据，沿用 8192 会让长回复在中途被截断。64000 满足思考预算
+/// 必须严格小于输出上限的约束，也留出足够的输出空间。
+pub(crate) const ANTHROPIC_FALLBACK_MAX_TOKENS: u64 = 64_000;
+
 /// 客户端没有声明输出上限时，为会触发思考预算约束的请求补上上限。
 /// 已有 `max_output_tokens` 或 `max_tokens` 时保持原值。非 Claude 的 Chat / Responses
 /// 请求不补，避免把 GPT、DeepSeek 的输出上限改掉。
@@ -491,6 +497,19 @@ fn reasoning_effort_needs_output_headroom(effort: &str) -> bool {
         || effort.eq_ignore_ascii_case("medium"))
 }
 
+/// Anthropic Messages 必填 `max_tokens`，客户端省略时代码补上的值。
+/// 已知 Claude 型号按自身输出能力取值，旧型号仍落到 8192；无法判定能力的第三方
+/// 模型用 `ANTHROPIC_FALLBACK_MAX_TOKENS`，避免用老型号的数值截断长回复。
+pub(crate) fn default_anthropic_max_tokens(model: &str) -> u64 {
+    match claude_output_token_cap(model) {
+        Some(cap) => cap.clamp(
+            DEFAULT_ANTHROPIC_MAX_TOKENS,
+            CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS,
+        ),
+        None => ANTHROPIC_FALLBACK_MAX_TOKENS,
+    }
+}
+
 fn omitted_reasoning_output_limit(model: &str, bridge: ProtocolBridge) -> Option<u64> {
     match claude_output_token_cap(model) {
         Some(cap) => {
@@ -498,7 +517,7 @@ fn omitted_reasoning_output_limit(model: &str, bridge: ProtocolBridge) -> Option
             (limit > DEFAULT_ANTHROPIC_MAX_TOKENS).then_some(limit)
         }
         None if bridge == ProtocolBridge::ResponsesToAnthropicMessages => {
-            Some(CLAUDE_HIGH_EFFORT_OUTPUT_TOKENS)
+            Some(ANTHROPIC_FALLBACK_MAX_TOKENS)
         }
         None => None,
     }
@@ -778,5 +797,42 @@ mod tests {
         .unwrap();
         assert_eq!(anthropic["max_tokens"], 64_000);
         assert_eq!(anthropic["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn omitted_anthropic_max_tokens_follows_model_capability() {
+        let cases = [
+            // 旧型号能力有限，仍按 8192 兜底。
+            ("claude-3-5-sonnet-20241022", 8_192_u64),
+            ("claude-3-opus-20240229", 8_192),
+            // 现代 Claude 型号按自身能力取值。
+            ("claude-opus-4-1-20250805", 32_000),
+            ("claude-opus-5", 64_000),
+            ("claude-sonnet-4-6", 64_000),
+            // 第三方模型没有可信能力数据，不再沿用 8192 截断长回复。
+            ("deepseek-v4.1-flash", ANTHROPIC_FALLBACK_MAX_TOKENS),
+            ("provider-model", ANTHROPIC_FALLBACK_MAX_TOKENS),
+        ];
+        for (model, expected) in cases {
+            assert_eq!(default_anthropic_max_tokens(model), expected, "{model}");
+        }
+    }
+
+    #[test]
+    fn omitted_anthropic_limit_keeps_the_required_field_for_third_party_models() {
+        let anthropic = responses_to_anthropic_messages_body(&json!({
+            "model": "deepseek-v4.1-flash",
+            "input": [{"type":"message","role":"user","content":"hi"}],
+            "reasoning": {"effort": "medium"}
+        }))
+        .unwrap();
+        assert_eq!(anthropic["max_tokens"], ANTHROPIC_FALLBACK_MAX_TOKENS);
+
+        let claude = responses_to_anthropic_messages_body(&json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "input": [{"type":"message","role":"user","content":"hi"}]
+        }))
+        .unwrap();
+        assert_eq!(claude["max_tokens"], 8_192);
     }
 }

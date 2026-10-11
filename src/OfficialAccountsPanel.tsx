@@ -190,6 +190,7 @@ export function OfficialAccountsPanel({
   const [pending, setPending] = useState<string | null>(null);
   const [confirmAccount, setConfirmAccount] = useState<OfficialAccount | null>(null);
   const [usages, setUsages] = useState<Record<string, AccountUsageSnapshot | null>>({});
+  const [usagePending, setUsagePending] = useState<Record<string, number>>({});
   const [login, setLogin] = useState<LoginStart | null>(null);
   const [loginError, setLoginError] = useState("");
   const [copied, setCopied] = useState(false);
@@ -244,6 +245,7 @@ export function OfficialAccountsPanel({
   accountsRef.current = accounts ?? [];
 
   const refreshUsage = useCallback(async (accountId: string, force: boolean) => {
+    setUsagePending((current) => ({ ...current, [accountId]: (current[accountId] ?? 0) + 1 }));
     setUsages((current) => ({ ...current, [accountId]: current[accountId] ?? null }));
     try {
       const snapshot = await invoke<AccountUsageSnapshot>("query_official_account_usage", {
@@ -263,6 +265,8 @@ export function OfficialAccountsPanel({
       }
     } catch (error) {
       setUsages((current) => ({ ...current, [accountId]: { status: "error", message: errorText(error) } }));
+    } finally {
+      setUsagePending((current) => ({ ...current, [accountId]: Math.max(0, (current[accountId] ?? 0) - 1) }));
     }
   }, [refreshRoutes]);
 
@@ -540,6 +544,7 @@ export function OfficialAccountsPanel({
             const snapshotPlan = usages[account.id]?.status === "ok" ? usages[account.id]?.planType : undefined;
             const planType = snapshotPlan || account.planType;
             const plan = formatPlan(planType);
+            const usageLoading = Boolean(usagePending[account.id]);
             return (
               <li
                 key={account.id}
@@ -578,12 +583,12 @@ export function OfficialAccountsPanel({
                       variant="link"
                       color="primary"
                       size="icon-sm"
-                      disabled={disabled}
+                      disabled={disabled || usageLoading}
                       onClick={() => void refreshUsage(account.id, true)}
-                      aria-label="刷新额度"
+                      aria-label={usageLoading ? "正在刷新额度" : "刷新额度"}
                       title="刷新额度"
                     >
-                      <IconRefresh size={13} aria-hidden="true" />
+                      <IconRefresh size={13} className={usageLoading ? "animate-spin" : undefined} aria-hidden="true" />
                     </Button>
                     {!account.isDefault && !account.invalid && (
                       <Button

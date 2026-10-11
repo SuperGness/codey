@@ -51,6 +51,18 @@ use crate::route_request_log::{
 };
 
 pub(crate) const ROUTER_PROVIDER_ID: &str = "codey_router";
+/// Codey 曾为原生远程压缩单独创建 Provider。旧配置可能残留这张表，这里只用于
+/// 识别旧数据、清理残留表，以及让前端把旧绑定当作同一网关载体，不再作为启动选择。
+pub(crate) const REMOTE_COMPACTION_PROVIDER_ID: &str = "codey_router_remote";
+/// 启动时实际写入 Codex 配置的 Provider。压缩能力统一声明，由网关按线路分流。
+pub(crate) const ROUTER_PROVIDER_IDS: [&str; 1] = [ROUTER_PROVIDER_ID];
+/// Codey 拥有或被 Codey 接管过的全部 Provider ID，用于占用检查和残留清理。
+pub(crate) const OWNED_ROUTER_PROVIDER_IDS: [&str; 2] =
+    [ROUTER_PROVIDER_ID, REMOTE_COMPACTION_PROVIDER_ID];
+
+pub(crate) fn is_router_provider(id: &str) -> bool {
+    OWNED_ROUTER_PROVIDER_IDS.contains(&id)
+}
 pub(crate) const ROUTER_AUTH_HEADER: &str = "x-codey-router-token";
 const TURN_METADATA_HEADER: &str = "x-codex-turn-metadata";
 const ROUTE_METADATA_KEY: &str = "codey_route";
@@ -183,6 +195,7 @@ mod sse;
 mod sse_anthropic;
 mod sse_chat;
 mod sse_responses;
+mod steering;
 mod upstream;
 mod upstream_response;
 mod websocket;
@@ -210,6 +223,7 @@ pub(crate) use sse::*;
 pub(crate) use sse_anthropic::*;
 pub(crate) use sse_chat::*;
 pub(crate) use sse_responses::*;
+pub(crate) use steering::*;
 pub(crate) use upstream::*;
 pub(crate) use upstream_response::*;
 pub(crate) use websocket::*;
@@ -230,6 +244,9 @@ mod tail_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod compaction_tests;
 
 #[cfg(test)]
 mod safety_tests;

@@ -247,7 +247,7 @@ async fn official_history_sanitization_does_not_change_third_party_requests() {
 }
 
 #[tokio::test]
-async fn official_history_is_sanitized_after_websocket_reconnect_and_http_fallback() {
+async fn official_history_is_sanitized_for_websocket_and_opaque_http_continuations() {
     for websocket in [true, false] {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (server, model) =
@@ -272,15 +272,8 @@ async fn official_history_is_sanitized_after_websocket_reconnect_and_http_fallba
                     .unwrap();
                 request
             } else {
-                // 官方线路会尝试 WebSocket；握手失败后才走 HTTP 回退。
-                let handshake = read_http_request(&mut stream).await.unwrap();
-                assert_eq!(handshake.method, "GET");
-                write_json_response(&mut stream, 404, &json!({"error":"WebSocket unsupported"}))
-                    .await
-                    .unwrap();
-                drop(stream);
-                let (mut stream, _) = listener.accept().await.unwrap();
                 let request = read_http_request(&mut stream).await.unwrap();
+                assert_eq!(request.method, "POST");
                 write_json_response(&mut stream, 200, &response)
                     .await
                     .unwrap();
@@ -305,7 +298,14 @@ async fn official_history_is_sanitized_after_websocket_reconnect_and_http_fallba
         downstream
             .prepare_native_http_fallback(&resolved.route, &headers, &mut original)
             .unwrap();
-        downstream.write_event(&json!({"type":"response.completed","response":{"id":"resp-first","status":"completed","output":foreign_history_items()}})).await.unwrap();
+        let mut history = foreign_history_items();
+        if websocket {
+            history[0]
+                .as_object_mut()
+                .unwrap()
+                .remove("encrypted_content");
+        }
+        downstream.write_event(&json!({"type":"response.completed","response":{"id":"resp-first","status":"completed","output":history}})).await.unwrap();
         peer.next().await.unwrap().unwrap();
         downstream.clear_stream_id();
         let body = json!({"model":model,"stream":true,"previous_response_id":"resp-first","input":"follow up"});

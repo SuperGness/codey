@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
+import shlex
 import textwrap
 from pathlib import Path
 
@@ -26,8 +29,9 @@ def crate_name(value: str) -> str:
 
 
 def plugin_id(value: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*", value):
-        raise ValueError("plugin id must use dot, dash, underscore, and alphanumeric segments")
+    if (len(value) > 96 or not re.fullmatch(r"[a-z][a-z0-9._-]*", value)
+            or ".." in value or value.endswith(".")):
+        raise ValueError("plugin id must start with a lowercase letter, use lowercase letters, digits, ._- within 96 characters, and contain neither .. nor a trailing dot")
     return value
 
 
@@ -39,35 +43,47 @@ def write(path: Path, content: str, force: bool) -> None:
 
 
 def main() -> int:
+    repository = Path(__file__).resolve().parents[4]
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("name", help="crate/folder name, for example header-demo")
-    parser.add_argument("--path", type=Path, default=Path.cwd())
+    parser.add_argument("--path", type=Path, default=repository / "plugins",
+                        help="plugin directory or parent directory (default: repository plugins/)")
     parser.add_argument("--id")
     parser.add_argument("--display-name")
     parser.add_argument("--version", default="0.1.0")
-    parser.add_argument("--sdk-path", default="../../../crates/codey-plugin-sdk")
-    parser.add_argument("--capability", action="append", choices=["request.lifecycle.v1", "request.lifecycle.auth", "provider.route.v1", "provider.transport.v1", "provider.account.v1", "appserver.call.v1"], default=[])
+    parser.add_argument("--sdk-path", help="SDK path relative to the generated crate, or an absolute path")
+    parser.add_argument("--capability", action="append", choices=["request.lifecycle.v1", "request.lifecycle.auth", "request.lifecycle.api_key", "request.lifecycle.turn_state", "provider.route.v1", "provider.transport.v1", "provider.account.v1", "appserver.call.v1"], default=[])
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
-    folder = folder_name(args.name)
-    crate = crate_name(folder)
-    identifier = plugin_id(args.id or f"dev.codey.{crate.replace('_', '-')}")
+    try:
+        folder = folder_name(args.name)
+        crate = crate_name(folder)
+        identifier = plugin_id(args.id if args.id is not None else f"dev.codey.{crate.replace('_', '-')}")
+    except ValueError as error:
+        parser.error(str(error))
     display = args.display_name or crate.replace("_", " ").title()
     root = args.path.expanduser().resolve()
     if root.name != folder:
         root = root / folder
 
     lifecycle = "request.lifecycle.v1" in args.capability
-    auth = "request.lifecycle.auth" in args.capability
-    if auth and not lifecycle:
-        parser.error("request.lifecycle.auth requires request.lifecycle.v1")
+    if any(capability.startswith("request.lifecycle.") and capability != "request.lifecycle.v1" for capability in args.capability) and not lifecycle:
+        parser.error("request lifecycle extensions require request.lifecycle.v1")
     if len(set(args.capability)) != len(args.capability):
         parser.error("capabilities must not be repeated")
     transport = "provider.transport.v1" in args.capability
     account = "provider.account.v1" in args.capability
     if (transport and "provider.route.v1" not in args.capability) or account != transport:
         parser.error("provider transport requires provider.route.v1, provider.transport.v1, and provider.account.v1")
+
+    sdk_path = args.sdk_path
+    if sdk_path is None:
+        sdk = repository / "crates/codey-plugin-sdk"
+        try:
+            sdk_path = os.path.relpath(sdk, root)
+        except ValueError:  # Separate Windows drives cannot use a relative path.
+            sdk_path = str(sdk)
 
     lifecycle_methods = """
             "request.beforeSend" | "request.afterHeaders" => Ok(json!({"action": "continue"})),
@@ -108,14 +124,16 @@ def main() -> int:
     cargo = textwrap.dedent(f"""\
         [package]
         name = "codey-plugin-{crate}"
-        version = "{args.version}"
+        version = {json.dumps(args.version, ensure_ascii=False)}
         edition = "2024"
+
+        [workspace]
 
         [lib]
         crate-type = ["cdylib"]
 
         [dependencies]
-        codey-plugin-sdk = {{ path = "{args.sdk_path}" }}
+        codey-plugin-sdk = {{ path = {json.dumps(sdk_path, ensure_ascii=False)} }}
     """)
     source = textwrap.dedent(f"""
         use codey_plugin_sdk::{{Plugin, PluginContext, serde_json::{{json, Value}}}};
@@ -161,18 +179,28 @@ def main() -> int:
     if transport:
         readme += "\nThis scaffold rejects transport requests until implemented. Follow crates/codey-plugin-sdk/PROVIDER_TRANSPORT.md for bounded I/O, cancellation, credential handling, and runtime cleanup.\n"
 
+    files = {"Cargo.toml": cargo, "src/lib.rs": source, "config.json": config, "README.md": readme}
     try:
-        write(root / "Cargo.toml", cargo, args.force)
-        write(root / "src/lib.rs", source, args.force)
-        write(root / "config.json", config, args.force)
-        write(root / "README.md", readme, args.force)
-    except (FileExistsError, ValueError) as error:
+        # Check every destination before creating anything, including parent files.
+        for relative in files:
+            destination = root / relative
+            if destination.exists() or destination.is_symlink():
+                if not args.force or not destination.is_file() or destination.is_symlink():
+                    raise FileExistsError(f"refusing to overwrite {destination}; pass --force to replace a regular file")
+            for parent in destination.parents:
+                if parent.exists() and not parent.is_dir():
+                    raise FileExistsError(f"destination parent is not a directory: {parent}")
+        for relative, content in files.items():
+            write(root / relative, content, args.force)
+    except (OSError, ValueError) as error:
         parser.error(str(error))
 
     print(root)
-    print(f"cargo build --manifest-path {root / 'Cargo.toml'}")
+    print(f"cargo build --manifest-path {shlex.quote(str(root / 'Cargo.toml'))}")
     capability_flags = ''.join(f' --capability {capability}' for capability in args.capability)
-    print(f"python3 scripts/package-plugin.py --library <target-library> --config {root / 'config.json'} --output /tmp/{crate}.codey-plugin --id {identifier} --name {display!r} --version {args.version}{capability_flags}")
+    print(f"python3 {shlex.quote(str(repository / 'scripts/package-plugin.py'))} --library <target-library> --config {shlex.quote(str(root / 'config.json'))} --output <desktop>/{folder}/{folder}-<platform>-<arch>-{shlex.quote(args.version)}.codey-plugin --id {identifier} --name {shlex.quote(display)} --version {shlex.quote(args.version)} --platform <platform> --arch <arch>{capability_flags}")
+    if "request.lifecycle.api_key" in args.capability:
+        print("Add --api-key-url <exact-authorized-Responses-URL> when packaging API Key access.")
     return 0
 
 

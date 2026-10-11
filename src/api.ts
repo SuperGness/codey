@@ -35,7 +35,6 @@ export const CODEY_API_COMMANDS = [
   "clear_route_request_logs",
   "restart_codey",
   "clear_diagnostic_storage",
-  "repair_codex_overlays",
   "test_notification_channel",
   "start_wechat_claw_login",
   "poll_wechat_claw_login",
@@ -53,6 +52,8 @@ export const CODEY_API_COMMANDS = [
   "repair_main_process_injection",
   "repair_codex_config",
   "list_codey_plugins",
+  "get_codey_plugin_host_info",
+  "validate_codey_plugin_config",
   "get_codey_plugin_config_file",
   "select_codey_plugin_package",
   "inspect_codey_plugin",
@@ -65,6 +66,9 @@ export const CODEY_API_COMMANDS = [
   "clear_codey_plugin_logs",
   "invoke_codey_plugin",
   "codex_extensions",
+  "conversation_git_status",
+  "conversation_git_preview",
+  "conversation_git_execute",
 ] as const;
 
 export type CodeyApiCommand = (typeof CODEY_API_COMMANDS)[number];

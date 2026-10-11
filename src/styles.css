@@ -513,8 +513,7 @@ button,
   gap: 10px;
 }
 
-.sidebar-update-version,
-.sidebar-auto-update {
+.sidebar-update-version {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -538,10 +537,6 @@ button,
   color: var(--codey-blue);
   font-size: 11px;
   overflow-wrap: anywhere;
-}
-
-.sidebar-auto-update > :last-child {
-  flex: none;
 }
 
 .settings-nav-group {
@@ -913,10 +908,6 @@ button,
 
   .sidebar-update-version {
     justify-content: flex-start;
-  }
-
-  .sidebar-auto-update {
-    grid-column: 1 / -1;
   }
 
   .sidebar-update-status {

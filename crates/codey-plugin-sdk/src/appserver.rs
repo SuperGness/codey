@@ -1,4 +1,5 @@
-//! 插件调用宿主 app-server 的协议。请求和响应都使用 `codey.appserver.v1`。
+//! 本地路由 app-server 的 JSON 协议类型；不提供 HTTP 客户端或认证授权。
+//! 请求和响应都使用 `codey.appserver.v1`。
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -8,13 +9,24 @@ pub const SCHEMA: &str = "codey.appserver.v1";
 /// 已开放的 app-server 方法。未列入的调用不会执行，也不会启动共享进程。
 pub const METHODS: &[&str] = &[];
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     pub schema: String,
     pub call: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<Map<String, Value>>,
+}
+
+impl Request {
+    /// 构造无需参数的任务数量查询；此类型不负责 HTTP 连接或认证。
+    pub fn get_tasks() -> Self {
+        Self {
+            schema: SCHEMA.into(),
+            call: "codey://getTasks".into(),
+            params: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,7 +38,7 @@ pub enum Call {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskCounts {
     pub running: u32,
@@ -105,6 +117,27 @@ fn schema_error() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_request_round_trips_and_result_decodes() {
+        let request = Request::get_tasks();
+        let bytes = serde_json::to_vec(&request).unwrap();
+        assert_eq!(parse(&bytes).unwrap(), Call::Tasks);
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(value.get("params").is_none());
+        let response = success(TaskCounts {
+            running: 2,
+            failed: 1,
+        });
+        let counts: TaskCounts = serde_json::from_value(response["result"].clone()).unwrap();
+        assert_eq!(
+            counts,
+            TaskCounts {
+                running: 2,
+                failed: 1
+            }
+        );
+    }
 
     #[test]
     fn schema_accepts_listed_calls_only() {

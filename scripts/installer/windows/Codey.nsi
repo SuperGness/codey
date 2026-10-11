@@ -41,10 +41,6 @@ Section "Codey" SEC_CODEY
   SetOutPath "$INSTDIR\licenses\FastCtx"
   File "${PROJECT_ROOT}\licenses\FastCtx\LICENSE-APACHE"
   File "${PROJECT_ROOT}\licenses\FastCtx\NOTICE"
-  SetOutPath "$INSTDIR\licenses\PetDragRecovery"
-  File "${PROJECT_ROOT}\licenses\PetDragRecovery\LICENSE"
-  SetOutPath "$INSTDIR\licenses\ChatGPTOverlayFix"
-  File "${PROJECT_ROOT}\licenses\ChatGPTOverlayFix\LICENSE"
   SetOutPath "$INSTDIR\licenses\ComputerUse"
   File "${PROJECT_ROOT}\vendor\ComputerUse\LICENSE"
   SetOutPath "$INSTDIR"
@@ -52,7 +48,6 @@ Section "Codey" SEC_CODEY
 
   CreateDirectory "$SMPROGRAMS\Codey"
   CreateShortcut "$SMPROGRAMS\Codey\Codey.lnk" "$INSTDIR\Codey.exe" "" "$INSTDIR\Codey.exe" 0
-  CreateShortcut "$SMPROGRAMS\Codey\恢复 Codex 浮窗.lnk" "$INSTDIR\Codey.exe" "--repair-codex-overlays" "$INSTDIR\Codey.exe" 0
   CreateShortcut "$SMPROGRAMS\Codey\Uninstall Codey.lnk" "$INSTDIR\Uninstall.exe"
 
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "Codey"
@@ -78,7 +73,6 @@ SectionEnd
 Section "Uninstall"
   Delete "$DESKTOP\Codey.lnk"
   Delete "$SMPROGRAMS\Codey\Codey.lnk"
-  Delete "$SMPROGRAMS\Codey\恢复 Codex 浮窗.lnk"
   Delete "$SMPROGRAMS\Codey\Uninstall Codey.lnk"
   RMDir "$SMPROGRAMS\Codey"
   Delete "$INSTDIR\Codey.exe"
@@ -90,10 +84,6 @@ Section "Uninstall"
   Delete "$INSTDIR\licenses\FastCtx\LICENSE-APACHE"
   Delete "$INSTDIR\licenses\FastCtx\NOTICE"
   RMDir "$INSTDIR\licenses\FastCtx"
-  Delete "$INSTDIR\licenses\PetDragRecovery\LICENSE"
-  RMDir "$INSTDIR\licenses\PetDragRecovery"
-  Delete "$INSTDIR\licenses\ChatGPTOverlayFix\LICENSE"
-  RMDir "$INSTDIR\licenses\ChatGPTOverlayFix"
   Delete "$INSTDIR\licenses\ComputerUse\LICENSE"
   RMDir "$INSTDIR\licenses\ComputerUse"
   RMDir "$INSTDIR\licenses"

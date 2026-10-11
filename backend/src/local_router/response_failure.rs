@@ -134,6 +134,16 @@ pub(crate) fn normalize_response_failure(
     if !matches!(kind, Some("error" | "response.failed")) {
         return false;
     }
+    // Codex uses this bare WebSocket error to discard its response chain and
+    // resend the full request. Wrapping it as response.failed (or changing its
+    // code to invalid_prompt) turns a recoverable continuation into a fatal error.
+    if kind == Some("error")
+        && event.pointer("/error/code").and_then(Value::as_str)
+            == Some("previous_response_not_found")
+    {
+        observe_lifecycle_response_failure(event);
+        return false;
+    }
     let original_event = event.clone();
     let bare = kind == Some("error");
     let context_exceeded = is_context_length_error(event);
@@ -343,6 +353,24 @@ mod tests {
             failure.normalized_event()["response"]["error"]["code"],
             "upstream_unreachable"
         );
+    }
+
+    #[test]
+    fn previous_response_not_found_preserves_the_client_recovery_signal() {
+        for status in [None, Some(400), Some(404)] {
+            let mut event = json!({
+                "type":"error", "sequence_number":7, "stream_id":"stream-1",
+                "error":{"type":"invalid_request_error", "code":"previous_response_not_found",
+                    "message":"Previous response was not found. Retrying the full request."}
+            });
+            if let Some(status) = status {
+                event["status"] = status.into();
+            }
+            let original = event.clone();
+            assert!(!normalize_response_failure(&mut event, None));
+            assert_eq!(event, original);
+            assert_eq!(normalized_response_event(&event).as_ref(), &original);
+        }
     }
 
     #[test]

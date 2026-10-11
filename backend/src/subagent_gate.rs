@@ -10,27 +10,22 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::subagent::protocol::{self, AgentState as ObservedAgentState};
-use crate::subagent::rules::{self, RuleActor, RuleContext, RuleEffect, ToolClass};
 use crate::subagent::{
     api::TraceContext,
     telemetry::{ExecutionStatus, SubagentTraceEvent, TraceEventKind, TraceRecorder},
 };
 
-mod read_only_sql;
 mod runtime_policy;
 mod state;
 #[cfg(test)]
 mod tests;
-mod tool_capability_cache;
 
-use read_only_sql::database_mcp_is_read_only;
 use runtime_policy::{RuntimeSubagentPolicy, read_optional_runtime_policy_file};
 pub(crate) use runtime_policy::{
     begin_runtime_subagent_policy_update, clear_runtime_subagent_policy,
     commit_runtime_subagent_policy, runtime_subagent_policy_matches, runtime_subagent_policy_paths,
 };
 use state::*;
-use tool_capability_cache::{cached_read_only_class, looks_read_only, record_read_only};
 
 pub(crate) const HOOK_ARGUMENT: &str = "--codey-subagent-gate-hook";
 pub(crate) const COMBINED_HOOK_ARGUMENT: &str = "--codey-subagent-gate-hook-with-fastctx";
@@ -129,12 +124,18 @@ struct ObservedRuntimeSubagentSelection {
 enum HookMode {
     SubagentOnly,
     WithFastctx,
+    ConversationGit,
 }
 
 pub fn run_hook_if_requested() -> Result<bool> {
     let mode = match std::env::args_os().nth(1).as_deref() {
         Some(argument) if argument == OsStr::new(HOOK_ARGUMENT) => HookMode::SubagentOnly,
         Some(argument) if argument == OsStr::new(COMBINED_HOOK_ARGUMENT) => HookMode::WithFastctx,
+        Some(argument)
+            if argument == OsStr::new(crate::conversation_git::tracking::HOOK_ARGUMENT) =>
+        {
+            HookMode::ConversationGit
+        }
         _ => return Ok(false),
     };
     let gate_active = runtime_gate_is_active(std::env::var_os(RUNTIME_ACTIVE_ENV).as_deref());
@@ -147,6 +148,27 @@ pub fn run_hook_if_requested() -> Result<bool> {
         MAX_HOOK_INPUT_BYTES,
         "读取 Codex 子代理门禁 Hook 输入失败",
     )?;
+    if mode == HookMode::ConversationGit {
+        if crate::config::ConfigStore::default()
+            .load()?
+            .conversation_git
+            .enabled
+        {
+            let result = serde_json::from_slice::<Value>(&raw)
+                .map_err(anyhow::Error::from)
+                .and_then(|input| {
+                    crate::conversation_git::tracking::observe(
+                        crate::codex_config::codex_home(),
+                        &input,
+                    )
+                });
+            if let Err(error) = result {
+                eprintln!("Codey 文件基线记录失败：{error:#}");
+            }
+        }
+        write_hook_output(&json!({}))?;
+        return Ok(true);
+    }
     let input = match parse_hook_input(&raw) {
         Ok(input) => input,
         Err(output) => {
@@ -161,6 +183,7 @@ pub fn run_hook_if_requested() -> Result<bool> {
         HookMode::WithFastctx => {
             combined_hook_output_for_runtime(&input, &state_root, &runtime_id, gate_active)
         }
+        HookMode::ConversationGit => unreachable!(),
     }
     .unwrap_or_else(|error| {
         eprintln!("Codey 子代理门禁 Hook 失败：{error:#}");
@@ -610,7 +633,7 @@ fn user_prompt_submit_output(
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": format!(
-                "Codey 检测到本轮用户输入到达时仍有 {active} 个子代理未确认终态。当前用户输入优先于旧任务描述：先调用一次不带筛选的 agents.list_agents 对账；若用户明确取消或缩小了某个子任务，只中断仍非终态且被明确取消的 target。应用新输入后，如仍有计划内未派发的独立任务，按该任务角色重新计算并发上限；存在空余槽位时调用 agents.spawn_agent 补位，否则继续 wait/list。普通状态询问或补充信息不得被解释为取消全部代理；所有活动 attempt 结算前不得恢复非协作本地工作。{compatibility}"
+                "Codey 检测到本轮用户输入到达时仍有 {active} 个子代理未确认终态。当前用户输入优先于旧任务描述：先调用一次不带筛选的 agents.list_agents 对账；若用户明确取消或缩小了某个子任务，只中断仍非终态且被明确取消的 target。应用新输入后，如仍有计划内未派发的独立任务，检查剩余并发额度；存在空余槽位时调用 agents.spawn_agent 补位，否则继续 wait/list。普通状态询问或补充信息不得被解释为取消全部代理；所有活动 attempt 结算前不得恢复非协作本地工作。{compatibility}"
             )
         }
     }))
@@ -960,7 +983,7 @@ fn pre_tool_use_output(
             return Ok(pre_tool_reason_denial(&reason));
         }
         if let Some(agent_id) = child_agent_id {
-            if let Some(reason) = crate::subagent_orchestrator::authorize_child_tool_with_context(
+            if let Some(reason) = crate::subagent_orchestrator::authorize_child_tool_with_workspace(
                 state_root,
                 runtime_id,
                 &input.session_id,
@@ -971,6 +994,7 @@ fn pre_tool_use_output(
                     tool_name,
                     tool_input: input.tool_input.as_ref(),
                 },
+                nonempty(input.cwd.as_deref()),
                 now_ms,
             )? {
                 return Ok(pre_tool_reason_denial(&reason));
@@ -1073,16 +1097,6 @@ fn pre_tool_use_output(
     {
         return Ok(json!({}));
     }
-    if active > 0
-        && trusted_root_turn
-        && verified_local_read_only_active_count(state_root, runtime_id, &input.session_id, now_ms)?
-            == Some(active)
-        && input.tool_name.as_deref().is_some_and(|tool_name| {
-            root_read_tool_allowed(state_root, tool_name, input.tool_input.as_ref())
-        })
-    {
-        return Ok(json!({}));
-    }
     if active == 0 {
         return Ok(json!({}));
     }
@@ -1130,8 +1144,14 @@ fn runtime_role_admission_denial(state_root: &Path, role: &str) -> Result<Option
     if policy.roles.contains_key(role) {
         Ok(None)
     } else if crate::config::SUBAGENT_ROLE_IDS.contains(&role) {
+        let available = policy
+            .roles
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join("、");
         Ok(Some(format!(
-            "CODEY_SUBAGENT_ROLE_DISABLED: Codey 子代理角色 `{role}` 已关闭；请在设置中开启后重试，或改用已启用角色。未创建调度账本记录。"
+            "CODEY_SUBAGENT_ROLE_DISABLED: Codey 子代理角色 `{role}` 已关闭；当前可用角色：{available}。请改用已启用角色。未创建调度账本记录。"
         )))
     } else {
         Ok(Some(format!(
@@ -1161,23 +1181,6 @@ fn post_tool_use_output(
     let Some(tool_name) = input.tool_name.as_deref() else {
         return Ok(json!({}));
     };
-    if !input_has_subagent_context(input)
-        && rules::classify_tool(tool_name) == ToolClass::Unknown
-        && looks_read_only(tool_name)
-        && input
-            .tool_response
-            .as_ref()
-            .is_some_and(tool_response_is_successful)
-    {
-        let policy_revision = rules::load_logged(state_root).rules.revision;
-        let _ = record_read_only(
-            state_root,
-            tool_name,
-            input.tool_input.as_ref(),
-            policy_revision,
-            now_ms,
-        );
-    }
     if is_contract_spawn_tool(tool_name) {
         crate::subagent_orchestrator::post_spawn(
             state_root,
@@ -1343,14 +1346,6 @@ fn post_tool_use_output(
     if active == 0 {
         return Ok(json!({}));
     }
-    let root_local_reads_allowed =
-        trusted_root_turn_matches(input, state_root, runtime_id, now_ms)?
-            && verified_local_read_only_active_count(
-                state_root,
-                runtime_id,
-                &input.session_id,
-                now_ms,
-            )? == Some(active);
     let protocol_issue = protocol_issue_reason(state_root, runtime_id, &input.session_id)?;
     if is_single_agent_status_tool(tool_name) {
         let returned_update =
@@ -1364,14 +1359,12 @@ fn post_tool_use_output(
             active,
             input.tool_response.as_ref(),
             protocol_issue.as_deref(),
-            root_local_reads_allowed,
         ))
     } else {
         Ok(post_list_continuation(
             active,
             input.tool_response.as_ref(),
             protocol_issue.as_deref(),
-            root_local_reads_allowed,
         ))
     }
 }
@@ -1707,7 +1700,6 @@ fn post_wait_continuation(
     active: usize,
     tool_response: Option<&Value>,
     protocol_issue: Option<&str>,
-    root_local_reads_allowed: bool,
 ) -> Value {
     let returned_update = render_untrusted_tool_result(tool_response, "wait_agent");
     let task_body_recovery = tool_response
@@ -1721,15 +1713,11 @@ fn post_wait_continuation(
     let compatibility = protocol_issue
         .map(|issue| format!("\n\nHook 协议兼容性诊断：{issue}。"))
         .unwrap_or_default();
-    let local_read_guidance = if root_local_reads_allowed {
-        " 当前账本与活动 marker 已共同证明剩余子代理均已绑定且只具备 `files.read`；可信根代理可继续使用规则确认的本地读取、网页检索、MCP Resource 与数据库 schema/只读 SQL 工具消化本次部分结果。写入、命令、视觉、无法证明只读的工具和结束任务仍被拒绝；完成有界读取后继续 wait/list 汇合。"
-    } else {
-        " 在所有子代理进入终态或被根成功中断并 fence 前，不得恢复非协作本地工作、形成最终结论或结束当前任务。"
-    };
+    let local_read_guidance = " 在所有子代理进入终态或被根成功中断并 fence 前，不得恢复非协作本地工作、形成最终结论或结束当前任务。";
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动标记尚未核销。保留下方内容；可继续使用 agents.wait_agent 或不带筛选的 agents.list_agents 对账。只有当前调用仍携带并匹配本批首个根派生调用的 turn_id 时，才可使用 agents.spawn_agent、agents.send_message、agents.followup_task 或 agents.interrupt_agent 协调；缺少该绑定时按匿名主体 fail-closed。completed、errored、shutdown、not_found、FINAL_ANSWER 和 task_complete 都视为终态；任一 attempt 终态或被根成功中断并 fence 后，如仍有计划内未派发的独立任务，按该任务角色重新计算并发上限，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待。后来仍显示已 fence target 为活动的上游快照不得触发再次等待。不得自动重派已结束或已放弃的旧任务；不得仅因运行时长、状态未变化或缺少新消息中断或回收子代理。工具明确未注册时不要重复调用；使用当前可用的 list_agents 或 agent_status 核对，收到工具不可用回执后，若 30 秒内仍无可用状态回复且没有子代理工具正在执行，下一次根调用才会触发恢复，不得把失联任务当作成功。{local_read_guidance}{task_body_recovery}{compatibility}\n\n本次 wait_agent 已返回内容：\n{returned_update}"
+            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动标记尚未核销。保留下方内容；可继续使用 agents.wait_agent 或不带筛选的 agents.list_agents 对账。只有当前调用仍携带并匹配本批首个根派生调用的 turn_id 时，才可使用 agents.spawn_agent、agents.send_message、agents.followup_task 或 agents.interrupt_agent 协调；缺少该绑定时按匿名主体 fail-closed。completed、errored、shutdown、not_found、FINAL_ANSWER 和 task_complete 都视为终态；任一 attempt 终态或被根成功中断并 fence 后，如仍有计划内未派发的独立任务，检查剩余并发额度，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待。后来仍显示已 fence target 为活动的上游快照不得触发再次等待。不得自动重派已结束或已放弃的旧任务；不得仅因运行时长、状态未变化或缺少新消息中断或回收子代理。工具明确未注册时不要重复调用；使用当前可用的 list_agents 或 agent_status 核对，收到工具不可用回执后，若 30 秒内仍无可用状态回复且没有子代理工具正在执行，下一次根调用才会触发恢复，不得把失联任务当作成功。{local_read_guidance}{task_body_recovery}{compatibility}\n\n本次 wait_agent 已返回内容：\n{returned_update}"
         ),
     })
 }
@@ -1738,21 +1726,16 @@ fn post_list_continuation(
     active: usize,
     tool_response: Option<&Value>,
     protocol_issue: Option<&str>,
-    root_local_reads_allowed: bool,
 ) -> Value {
     let returned_update = render_untrusted_tool_result(tool_response, "list_agents");
     let compatibility = protocol_issue
         .map(|issue| format!("\n\nHook 协议兼容性诊断：{issue}。"))
         .unwrap_or_default();
-    let local_read_guidance = if root_local_reads_allowed {
-        " 当前账本与活动 marker 已共同证明剩余子代理均已绑定且只具备 `files.read`；可信根代理可继续使用规则确认的本地读取、网页检索、MCP Resource 与数据库 schema/只读 SQL 工具消化已返回证据，但写入、命令、视觉、无法证明只读的工具和结束任务仍被拒绝，随后必须继续汇合。"
-    } else {
-        " 所有活动代理结算前继续保持全局本地工具屏障。"
-    };
+    let local_read_guidance = " 所有活动代理结算前继续保持全局本地工具屏障。";
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：agents.list_agents 核对后仍有 {active} 个子代理尚未确认进入终态。任一 attempt 已终态或被成功中断并 fence 后，如仍有计划内未派发的独立任务，可信根代理应按该任务角色重新计算并发上限，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待、转向或停止。completed、errored、shutdown 和 not_found 不再阻塞。不得仅因运行时长、状态未变化或缺少新消息中断子代理；只有用户明确取消或有证据确认任务无法继续时才中断一次。中断获得结构化成功回执后，确认遗留工具和写入任务已停止再接管，不再等待该 target 的上游状态变化，只有中断失败或目标无法匹配时才继续对账。每次等待保持有界并继续核对，不得自动重派已结束或已放弃的旧任务。若 pending_init 实际已僵死，门禁会在持续 10 分钟无法进展后释放遗留状态。{local_read_guidance}{compatibility}\n\n本次 list_agents 已返回内容：\n{returned_update}"
+            "Codey 子代理汇合门禁：agents.list_agents 核对后仍有 {active} 个子代理尚未确认进入终态。任一 attempt 已终态或被成功中断并 fence 后，如仍有计划内未派发的独立任务，可信根代理应检查剩余并发额度，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待、转向或停止。completed、errored、shutdown 和 not_found 不再阻塞。不得仅因运行时长、状态未变化或缺少新消息中断子代理；只有用户明确取消或有证据确认任务无法继续时才中断一次。中断获得结构化成功回执后，确认遗留工具和写入任务已停止再接管，不再等待该 target 的上游状态变化，只有中断失败或目标无法匹配时才继续对账。每次等待保持有界并继续核对，不得自动重派已结束或已放弃的旧任务。若 pending_init 实际已僵死，门禁会在持续 10 分钟无法进展后释放遗留状态。{local_read_guidance}{compatibility}\n\n本次 list_agents 已返回内容：\n{returned_update}"
         ),
     })
 }
@@ -2126,85 +2109,6 @@ fn object_reports_agent_completion(values: &Map<String, Value>) -> bool {
 
 fn normalized_ascii_identifier(value: &str) -> String {
     protocol::normalize_identifier(value)
-}
-
-fn verified_local_read_only_active_count(
-    state_root: &Path,
-    runtime_id: &str,
-    session_id: &str,
-    now_ms: u64,
-) -> Result<Option<usize>> {
-    let marker_hashes = active_marker_hashes_for_runtime(state_root, runtime_id, session_id)?;
-    crate::subagent_orchestrator::verified_local_read_only_active_count(
-        state_root,
-        runtime_id,
-        session_id,
-        &marker_hashes,
-        now_ms,
-    )
-}
-
-fn root_read_tool_allowed(state_root: &Path, tool_name: &str, tool_input: Option<&Value>) -> bool {
-    let Some(tool_class) = root_read_tool_class(tool_name, tool_input) else {
-        return false;
-    };
-    crate::subagent::rules::load_logged(state_root)
-        .rules
-        .evaluate(&RuleContext {
-            actor: RuleActor::Root,
-            role: None,
-            tool_name,
-            tool_class,
-        })
-        .effect
-        == RuleEffect::Allow
-}
-
-fn tool_response_is_successful(response: &Value) -> bool {
-    let Some(object) = response.as_object() else {
-        return true;
-    };
-    if object.contains_key("error") || object.contains_key("errors") {
-        return false;
-    }
-    !object
-        .get("status")
-        .and_then(Value::as_str)
-        .is_some_and(|status| matches!(status, "error" | "failed" | "rejected"))
-}
-
-pub(crate) fn cached_read_only_tool(
-    state_root: &Path,
-    tool_name: &str,
-    tool_input: Option<&Value>,
-    policy_revision: u64,
-) -> bool {
-    if cached_read_only_class(state_root, tool_name, tool_input, policy_revision).is_some() {
-        return true;
-    }
-    false
-}
-
-fn root_read_tool_class(tool_name: &str, tool_input: Option<&Value>) -> Option<ToolClass> {
-    let tool_class = crate::subagent::rules::classify_tool(tool_name);
-    if matches!(tool_class, ToolClass::Read | ToolClass::Network) {
-        return Some(tool_class);
-    }
-
-    let normalized = tool_name.trim().to_ascii_lowercase();
-    if matches!(
-        normalized.as_str(),
-        "read_mcp_resource"
-            | "functions.read_mcp_resource"
-            | "list_mcp_resources"
-            | "functions.list_mcp_resources"
-            | "list_mcp_resource_templates"
-            | "functions.list_mcp_resource_templates"
-    ) {
-        return Some(ToolClass::Read);
-    }
-
-    database_mcp_is_read_only(&normalized, tool_input).then_some(ToolClass::Read)
 }
 
 fn is_collaboration_tool(tool_name: &str) -> bool {

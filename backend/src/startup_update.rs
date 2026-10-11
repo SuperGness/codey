@@ -73,7 +73,7 @@ struct LiveBackend<'a> {
 #[async_trait]
 impl StartupUpdateBackend for LiveBackend<'_> {
     async fn auto_check_enabled(&self) -> bool {
-        self.state.config.read().await.auto_check_codey_updates
+        self.state.config.read().await.codey_update_policy != crate::config::CodeyUpdatePolicy::Off
     }
 
     async fn check(&self) -> Result<UpdateCandidate, String> {

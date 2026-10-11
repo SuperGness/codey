@@ -16,15 +16,15 @@
     "vite:build": "node scripts/build-overlay.mjs"
   },
   "dependencies": {
-    "@heroui/react": "3.2.4",
-    "@heroui/styles": "3.2.4",
+    "@heroui/react": "3.2.6",
+    "@heroui/styles": "3.2.6",
     "@tabler/icons-react": "^3.45.0",
     "react": "^19.0.0",
-    "react-aria": "^3.52.1",
-    "react-aria-components": "^1.21.1",
+    "react-aria": "^3.53.0",
+    "react-aria-components": "^1.22.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
-    "react-stately": "^3.50.0",
+    "react-stately": "^3.51.0",
     "rehype-highlight": "^7.0.2",
     "remark-gfm": "^4.0.1"
   },

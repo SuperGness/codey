@@ -2,12 +2,13 @@
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveReleaseVersion } from "./release-policy.mjs";
 
 const args = process.argv.slice(2);
 if (args[0] === "--") args.shift();
 if (args[0] !== "--help" && args[0] !== "-h") {
   const version = args[0]?.replace(/^v/i, "");
-  if (!version || !/^\d+\.\d+\.\d+-[0-9A-Za-z.-]+(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
+  try { args[0] = resolveReleaseVersion(version, "experimental").version; } catch {
     console.error("Usage: pnpm run prerelease -- <version>-<identifier> [release options]");
     process.exit(1);
   }

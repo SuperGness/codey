@@ -651,6 +651,20 @@
       );
     }
     if (
+      source.includes("supportsIndependentSpeedModes") &&
+      source.includes("ultrafast_mode")
+    ) {
+      // Ultrafast 与 Fast 是两条独立的授权字段。上一条只放开了 fast_mode，
+      // 这里把 ultrafast_mode 的判定一并收敛，避免上游把它默认置否后
+      // 速度档控件静默消失。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\bultrafast\s*:\s*)\([^;{}\n]{0,400}?\)\s*&&\s*[$A-Z_a-z][$\w]*\s*\?\.\s*ultrafast_mode\s*!==\s*!1/g,
+        (_match, prefix) => `${prefix}!0`,
+        "ultrafast tier entitlement",
+      );
+    }
+    if (
       source.includes("isServiceTierAllowed") &&
       source.includes("serviceTierForRequest:") &&
       source.includes("availableOptions:")
@@ -688,34 +702,27 @@
       source.includes("isServiceTierAllowed") &&
       source.includes("availableOptions.length")
     ) {
-      // The current model's options decide whether the speed control exists.
+      // 速度档入口不再跟随当前模型声明的档位数量，始终保留在输入区。
       patched = replaceNearestRendererGateBeforeAnchor(
         patched,
         [
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?\s*&&\s*!\s*([$A-Z_a-z][$\w]*)\s*&&\s*[$A-Z_a-z][$\w]*(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (_match, assignment, _resultName, settingsName, draftName) =>
-              `${assignment}${settingsName}.availableOptions.length>1&&!${draftName}`,
+            replacement: (_match, assignment, _resultName, _settingsName, draftName) =>
+              `${assignment}!${draftName}`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?\s*&&\s*[$A-Z_a-z][$\w]*\s*&&\s*!\s*([$A-Z_a-z][$\w]*)(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (_match, assignment, _resultName, settingsName, draftName) =>
-              `${assignment}${settingsName}.availableOptions.length>1&&!${draftName}`,
+            replacement: (_match, assignment, _resultName, _settingsName, draftName) =>
+              `${assignment}!${draftName}`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?\s*&&\s*[$A-Z_a-z][$\w]*(?!\s*&&\s*!)(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (_match, assignment, _resultName, settingsName) =>
-              `${assignment}${settingsName}.availableOptions.length>1`,
+            replacement: (_match, assignment) => `${assignment}!0`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*!\s*([$A-Z_a-z][$\w]*)\s*&&\s*)\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?\s*&&\s*[$A-Z_a-z][$\w]*(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (
-              _match,
-              preservedPrefix,
-              _resultName,
-              _draftName,
-              settingsName,
-            ) => `${preservedPrefix}${settingsName}.availableOptions.length>1`,
+            replacement: (_match, preservedPrefix) => `${preservedPrefix}!0`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*!\s*([$A-Z_a-z][$\w]*)\s*&&\s*\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
@@ -724,8 +731,8 @@
               assignment,
               _resultName,
               draftName,
-              settingsName,
-            ) => `${assignment}!${draftName}&&${settingsName}.availableOptions.length>1`,
+              _settingsName,
+            ) => `${assignment}!${draftName}`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*\(?\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1\s*\)?\s*&&\s*!\s*([$A-Z_a-z][$\w]*)(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
@@ -733,24 +740,17 @@
               _match,
               assignment,
               _resultName,
-              settingsName,
+              _settingsName,
               draftName,
-            ) => `${assignment}${settingsName}.availableOptions.length>1&&!${draftName}`,
+            ) => `${assignment}!${draftName}`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (_match, assignment, _resultName, settingsName) =>
-              `${assignment}${settingsName}.availableOptions.length>1`,
+            replacement: (_match, assignment) => `${assignment}!0`,
           },
           {
             pattern: /(\b([$A-Z_a-z][$\w]*)\s*=\s*!\s*([$A-Z_a-z][$\w]*)\s*&&\s*)[$A-Z_a-z][$\w]*\s*&&\s*([$A-Z_a-z][$\w]*)\.availableOptions\.length\s*>\s*1(?=\s*[,;][\s\S]{0,8192}?`composer\.toggleFastMode`)/g,
-            replacement: (
-              _match,
-              preservedPrefix,
-              _resultName,
-              _draftName,
-              settingsName,
-            ) => `${preservedPrefix}${settingsName}.availableOptions.length>1`,
+            replacement: (_match, preservedPrefix) => `${preservedPrefix}!0`,
           },
         ],
         undefined,
@@ -904,6 +904,11 @@
         "ensureHeartbeat(){}",
         "interaction heartbeat",
       );
+    }
+    if (patched.includes("globalThis.__codeyModelWhitelistPatch?.trackOutgoingMessage")
+      && patched.includes("let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage")
+      && patched.includes("globalThis.__codeyModelWhitelistPatch?.rewriteIncomingResult")) {
+      patched += "\n;globalThis.__codeyModelRequestSourceGateInstalled=true;\n";
     }
     return patched;
   };
@@ -1108,7 +1113,10 @@
     }
     return null;
   };
-  const localRouterRuntimeEnabled = runtimeConfigValue(nativeRuntimeConfigOverrides, "model_provider") === "codey_router";
+  const localRouterProviderIds = new Set(["codey_router", "codey_router_remote"]);
+  const defaultRouterProvider = runtimeConfigValue(nativeRuntimeConfigOverrides, "model_provider");
+  const localRouterRuntimeEnabled = localRouterProviderIds.has(defaultRouterProvider);
+  const routerProviderForParams = () => "codey_router";
   if (localRouterRuntimeEnabled) {
     // A shared daemon or external WebSocket can retain another provider and
     // never read this launch's overrides. Use Codex's own process-local mode.
@@ -1121,7 +1129,8 @@
         !["thread/start", "thread/resume", "thread/fork"].includes(message?.method)) {
       return message;
     }
-    const params = { ...message.params, modelProvider: "codey_router" };
+    const params = { ...message.params, modelProvider: routerProviderForParams(message.method, message.params) };
+    delete params.model_provider;
     if (params.config != null && typeof params.config === "object" && !Array.isArray(params.config)) {
       params.config = Object.fromEntries(Object.entries(params.config).filter(([key]) =>
         key !== "model_provider" && !key.startsWith("model_provider.") &&
@@ -1586,7 +1595,7 @@
       const configs = JSON.parse(environment.CODEY_CODEX_CLI_WRAPPER_OVERRIDES);
       if (!Array.isArray(configs) || !configs.every((config) => typeof config === "string")) return false;
       const effectiveConfigs = uniqueRuntimeConfigsByKey(configs);
-      return runtimeConfigValue(effectiveConfigs, "model_provider") === "codey_router" &&
+      return localRouterProviderIds.has(runtimeConfigValue(effectiveConfigs, "model_provider")) &&
         uniqueRuntimeConfigsByKey(nativeRuntimeConfigOverrides)
           .every((config) => effectiveConfigs.includes(config));
     } catch {

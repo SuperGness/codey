@@ -4,6 +4,34 @@ import ts from "typescript";
 
 import { readSource } from "./helpers/read-source.mjs";
 
+test("request log provider labels use route short names and distinguish official accounts", async () => {
+  const viewer = await readSource("src/RequestLogDialog.tsx");
+  const routeNames = await readSource("src/routeShortNames.ts");
+  const source = [
+    routeNames.match(/export function fallbackRouteShortName\([\s\S]*?\n\}/)?.[0],
+    routeNames.match(/export function formatRouteName\([\s\S]*?\n\}/)?.[0],
+    viewer.match(/function requestLogProviderLabel\([\s\S]*?\n\}/)?.[0],
+  ];
+  source.forEach((part) => assert.ok(part));
+  const compiled = ts.transpileModule(source.join("\n").replaceAll("export function", "function"), {}).outputText;
+  const label = new Function(`${compiled}; return requestLogProviderLabel;`)();
+  const profiles = [
+    { id: "local-a", sourceProviderId: "route-a", name: "线路甲", shortName: "甲" },
+    { id: "route-b", name: "", shortName: "乙" },
+    { id: "official-a", sourceProviderId: "official", name: "官方甲", shortName: "官甲", officialAccountId: "account-a" },
+    { id: "official-b", sourceProviderId: "official", name: "官方乙", shortName: "官乙", officialAccountId: "account-b" },
+  ];
+  assert.equal(label({ provider: "route-a", providerName: "route-a" }, profiles), "[甲] 线路甲");
+  assert.equal(label({ provider: "local-a" }, profiles), "[甲] 线路甲");
+  assert.equal(label({ provider: "route-b" }, profiles), "乙");
+  assert.equal(label({ provider: "official", officialAccountId: "account-b" }, profiles), "[官乙] 官方乙");
+  assert.equal(label({ provider: "removed", providerName: "历史线路" }, profiles), "历史线路");
+  assert.equal(label({ provider: "removed" }, profiles), "removed");
+  assert.equal(label({}, profiles), "—");
+  assert.equal(label({ provider: "legacy" }, [{ id: "legacy", name: "自建" }]), "自建");
+  assert.equal(label({ provider: "empty", providerName: "历史线路" }, [{ id: "empty", name: "", shortName: "" }]), "历史线路");
+});
+
 test("request log cache hit rate uses input tokens and preserves unknown usage", async () => {
   const viewer = await readSource("src/RequestLogDialog.tsx");
   const source = viewer.match(/function formatCacheHitRate\([\s\S]*?\n\}/)?.[0];
@@ -16,6 +44,34 @@ test("request log cache hit rate uses input tokens and preserves unknown usage",
   for (const [input, cached] of [[null, 0], [100, null], [undefined, undefined], [0, 0], [-1, 0], [100, -1], [100, 101], [Infinity, 1], [100, NaN]]) {
     assert.equal(format(input, cached), "—");
   }
+});
+
+test("request log output speed uses one decimal and preserves unknown values", async () => {
+  const [viewer, usage, preview] = await Promise.all([
+    readSource("src/RequestLogDialog.tsx"),
+    readSource("src/usageAnalysis.ts"),
+    readSource("src/dev/mockApi.ts"),
+  ]);
+  const source = viewer.match(/function formatTokensPerSecond\([\s\S]*?\n\}/)?.[0];
+  assert.ok(source);
+  const compiled = ts.transpileModule(source, {}).outputText;
+  const format = new Function(`${compiled}; return formatTokensPerSecond;`)();
+  assert.equal(format(123.44), "123.4 tok/s");
+  assert.equal(format(123.46), "123.5 tok/s");
+  assert.equal(format(1), "1.0 tok/s");
+  for (const value of [null, undefined, 0, -1, NaN, Infinity, -Infinity]) {
+    assert.equal(format(value), "—");
+  }
+  assert.match(viewer, /outputTokensPerSecond\?: number \| null;/);
+  assert.match(viewer, /速度<\/span>[\s\S]*?formatTokensPerSecond\(item\.outputTokensPerSecond\)/);
+  assert.match(viewer, /输出速度<\/span>[\s\S]*?formatTokensPerSecond\(selectedItem\.outputTokensPerSecond\)/);
+  assert.match(viewer, /平均总耗时 \{formatDuration\(stats\.avgDuration\)\} · 平均输出 \{formatTokensPerSecond\(stats\.avgOutputTokensPerSecond\)\}/);
+  assert.match(viewer, /hidden md:inline">速度:[\s\S]*?formatTokensPerSecond\(stats\.avgOutputTokensPerSecond\)/);
+  assert.equal((usage.match(/avgOutputTokensPerSecond: number \| null/g) ?? []).length, 2);
+  assert.match(preview, /totalDurationMs - \(downstreamFirstContentMs \?\? ttftMs \?\? totalDurationMs\)/);
+  assert.match(preview, /outputTokensPerSecond: outputTokens != null && outputTokens > 0 && outputDurationMs > 0/);
+  assert.match(preview, /outputTokens \* 1_000 \/ outputDurationMs : undefined/);
+  assert.match(preview, /avgOutputTokensPerSecond: outputSpeeds\.length \? sum\(outputSpeeds\)! \/ outputSpeeds\.length : null/);
 });
 
 test("request log model cell shows the model sent upstream and the upstream model when it differs", async () => {

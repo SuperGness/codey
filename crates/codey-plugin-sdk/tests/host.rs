@@ -14,8 +14,9 @@ use host::lifecycle::{
 };
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, io::Write, path::Path, process::Command};
+use std::{collections::BTreeMap, env::consts, fs, io::Write, path::Path, process::Command};
 
+const PLUGIN_ID: &str = "dev.codey.header-demo";
 const INITIAL_CONFIG: &str = concat!(
     "{\n  \"_comments\": {\"value\": \"用于请求头\"},\n",
     "  \"value\": \"hello-codey\",\n",
@@ -25,36 +26,25 @@ const INITIAL_CONFIG: &str = concat!(
 );
 
 fn package(path: &Path, library: &[u8], version: &str) {
-    package_with_header(path, library, version, "x-plugin-demo");
-}
-
-fn package_with_header(path: &Path, library: &[u8], version: &str, header: &str) {
-    package_with_options(path, library, version, header, false);
+    package_with_options(path, library, version, "x-plugin-demo", false);
 }
 
 fn package_with_options(path: &Path, library: &[u8], version: &str, header: &str, transport: bool) {
-    let filename = if cfg!(target_os = "macos") {
-        "libplugin.dylib"
-    } else if cfg!(target_os = "windows") {
-        "plugin.dll"
-    } else {
-        "libplugin.so"
-    };
+    let filename = library_filename("plugin");
     let manifest = json!({
-        "id":"dev.codey.header-demo","name":"Demo","version":version,
+        "id":PLUGIN_ID,"name":"Demo","version":version,
         "abiVersion":1,"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,
         "entry":format!("lib/{filename}"),"librarySha256":format!("{:x}",Sha256::digest(library)),
         "capabilities": if transport { vec!["request.lifecycle.v1", "provider.route.v1", "provider.transport.v1", "provider.account.v1"] } else { vec!["request.lifecycle.v1"] },
         "headerNames":[header]
     });
-    let config = INITIAL_CONFIG;
     let mut archive = zip::ZipWriter::new(fs::File::create(path).unwrap());
     for (name, bytes) in [
         (
             "manifest.json".to_owned(),
             serde_json::to_vec(&manifest).unwrap(),
         ),
-        ("config.json".to_owned(), config.as_bytes().to_vec()),
+        ("config.json".to_owned(), INITIAL_CONFIG.as_bytes().to_vec()),
         (format!("lib/{filename}"), library.to_vec()),
     ] {
         archive
@@ -65,6 +55,69 @@ fn package_with_options(path: &Path, library: &[u8], version: &str, header: &str
     archive.finish().unwrap();
 }
 
+fn library_filename(name: &str) -> String {
+    format!("{}{name}{}", consts::DLL_PREFIX, consts::DLL_SUFFIX)
+}
+
+fn build_plugin(root: &Path) -> Vec<u8> {
+    // Compile a separate consumer project, with no Codey workspace membership.
+    let project = root.join("standalone-plugin");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        include_str!("fixtures/header_plugin.rs"),
+    )
+    .unwrap();
+    let sdk_path = serde_json::to_string(env!("CARGO_MANIFEST_DIR")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "codey-plugin-header-demo"
+version = "0.1.0"
+edition = "2024"
+[lib]
+crate-type = ["cdylib"]
+[dependencies]
+codey-plugin-sdk = {{ path = {sdk_path} }}
+[workspace]
+"#
+        ),
+    )
+    .unwrap();
+    let target = root.join("target");
+    let build = Command::new("cargo")
+        .args(["build", "--offline", "--target-dir"])
+        .arg(&target)
+        .arg("--config")
+        .arg(format!("build.build-dir={:?}", root.join("build")))
+        .current_dir(&project)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let path = target
+        .join("debug")
+        .join(library_filename("codey_plugin_header_demo"));
+    unsafe {
+        let library = libloading::Library::new(&path).unwrap();
+        assert!(
+            library
+                .get::<codey_plugin_sdk::EntryPoint>(b"codey_plugin_entry_v1")
+                .is_ok()
+        );
+        assert!(
+            library
+                .get::<codey_plugin_sdk::EntryPoint>(b"codey_plugin_entry_with_context_v1")
+                .is_err()
+        );
+    }
+    fs::read(path).unwrap()
+}
+
 fn uninstall_loaded_plugin(root: &Path, remove_data: bool) {
     #[cfg(windows)]
     let trash_before: std::collections::BTreeSet<_> = fs::read_dir(root)
@@ -72,7 +125,7 @@ fn uninstall_loaded_plugin(root: &Path, remove_data: bool) {
         .map(|entry| entry.unwrap().path())
         .collect();
 
-    let result = host::uninstall("dev.codey.header-demo", remove_data);
+    let result = host::uninstall(PLUGIN_ID, remove_data);
     #[cfg(not(windows))]
     {
         let _ = root;
@@ -121,6 +174,13 @@ fn uninstall_loaded_plugin(root: &Path, remove_data: bool) {
 
 #[tokio::test]
 async fn complete_native_plugin_lifecycle() {
+    // 预检查不能初始化管理器、创建目录或加载插件；后续安装仍须显式初始化。
+    assert!(host::list().is_err());
+    let info = host::host_info();
+    assert_eq!(info.platform, consts::OS);
+    assert_eq!(info.arch, consts::ARCH);
+    assert!(codey_plugin_sdk::config::validate(INITIAL_CONFIG).valid);
+    assert!(host::list().is_err());
     if let Some(root) = std::env::var_os("CODEY_TEST_TRANSPORT_STARTUP_ROOT") {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = calls.clone();
@@ -144,85 +204,8 @@ async fn complete_native_plugin_lifecycle() {
         host::shutdown();
         return;
     }
-    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let temp = tempfile::tempdir().unwrap();
-    // Compile a separate consumer project, with no Codey workspace membership.
-    let project = temp.path().join("standalone-plugin");
-    fs::create_dir_all(project.join("src")).unwrap();
-    let mut source =
-        fs::read_to_string(workspace.join("examples/plugins/header-demo/src/lib.rs")).unwrap();
-    // Only the temporary fixture exposes the exact configuration received at create.
-    for (before, after) in [
-        (
-            "value: String,",
-            "value: String,\n    received_config: Value,",
-        ),
-        (
-            "value: value.into(),",
-            "value: value.into(),\n            received_config: config.clone(),",
-        ),
-        (
-            "match method {",
-            "match method {\n            \"provider.describe\" => Ok(json!({\"name\":\"Fixture\",\"baseUrl\":\"https://example.invalid/v1\",\"upstreamProtocol\":\"openaiResponses\",\"models\":[\"fixture-model\"],\"headers\":[],\"transport\":{\"accountEmail\":\"fixture@example.com\",\"models\":{},\"imageGeneration\":false,\"imageEdit\":false}})),\n            \"provider.request.stop\" => Ok(json!({})),\n            \"config.received\" => Ok(self.received_config.clone()),",
-        ),
-        (
-            "\"request.completed\" | \"request.failed\" | \"request.cancelled\" => Ok(json!({})),",
-            "\"request.completed\" | \"request.failed\" | \"request.cancelled\" => { std::fs::write(self.context.data_dir.join(\"terminal-received.txt\"), method).map_err(|e| e.to_string())?; Ok(json!({})) },",
-        ),
-    ] {
-        assert_eq!(
-            source.matches(before).count(),
-            1,
-            "fixture source changed: {before}"
-        );
-        source = source.replace(before, after);
-    }
-    fs::write(project.join("src/lib.rs"), source).unwrap();
-    let sdk_path = serde_json::to_string(env!("CARGO_MANIFEST_DIR")).unwrap();
-    fs::write(project.join("Cargo.toml"), format!(
-        "[package]\nname = \"codey-plugin-header-demo\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[lib]\ncrate-type = [\"cdylib\"]\n[dependencies]\ncodey-plugin-sdk = {{ path = {sdk_path} }}\n[workspace]\n"
-    )).unwrap();
-    let target = temp.path().join("target");
-    let build = Command::new("cargo")
-        .args([
-            "build",
-            "--offline",
-            "-p",
-            "codey-plugin-header-demo",
-            "--target-dir",
-        ])
-        .arg(&target)
-        .arg("--config")
-        .arg(format!("build.build-dir={:?}", temp.path().join("build")))
-        .current_dir(&project)
-        .output()
-        .unwrap();
-    assert!(
-        build.status.success(),
-        "{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-    let name = if cfg!(target_os = "macos") {
-        "libcodey_plugin_header_demo.dylib"
-    } else if cfg!(target_os = "windows") {
-        "codey_plugin_header_demo.dll"
-    } else {
-        "libcodey_plugin_header_demo.so"
-    };
-    let library = fs::read(target.join("debug").join(name)).unwrap();
-    unsafe {
-        let library = libloading::Library::new(target.join("debug").join(name)).unwrap();
-        assert!(
-            library
-                .get::<codey_plugin_sdk::EntryPoint>(b"codey_plugin_entry_v1")
-                .is_ok()
-        );
-        assert!(
-            library
-                .get::<codey_plugin_sdk::EntryPoint>(b"codey_plugin_entry_with_context_v1")
-                .is_err()
-        );
-    }
+    let library = build_plugin(temp.path());
     let path = temp.path().join("demo.codey-plugin");
     package(&path, &library, "1.0.0");
     host::initialize(temp.path().join("host")).unwrap();
@@ -231,30 +214,30 @@ async fn complete_native_plugin_lifecycle() {
     assert!(host::list().unwrap().plugins.is_empty());
     let installed = host::install(&path, &inspection.sha256).unwrap();
     assert!(!installed.plugins[0].enabled);
-    let initial_config = host::get_config_file("dev.codey.header-demo").unwrap();
+    let initial_config = host::get_config_file(PLUGIN_ID).unwrap();
     assert_eq!(initial_config.content, INITIAL_CONFIG);
-    assert_eq!(initial_config.plugin_id, "dev.codey.header-demo");
+    assert_eq!(initial_config.plugin_id, PLUGIN_ID);
     assert_eq!(initial_config.version, "1.0.0");
     assert_eq!(initial_config.path, installed.plugins[0].config_path);
     assert_eq!(
         fs::read_to_string(&initial_config.path).unwrap(),
         initial_config.content
     );
-    assert!(host::invoke("dev.codey.header-demo", "ping", json!(null)).is_err());
+    assert!(host::invoke(PLUGIN_ID, "ping", json!(null)).is_err());
     // A failed consent persistence must not publish a newly loaded instance.
     let state_path = temp.path().join("host/state.json");
     let saved_state = temp.path().join("saved-state.json");
     fs::rename(&state_path, &saved_state).unwrap();
     fs::create_dir(&state_path).unwrap();
-    assert!(host::set_enabled("dev.codey.header-demo", true).is_err());
+    assert!(host::set_enabled(PLUGIN_ID, true).is_err());
     assert!(!LifecycleRequest::new(json!({}), None).is_active());
-    assert!(host::invoke("dev.codey.header-demo", "ping", json!(null)).is_err());
+    assert!(host::invoke(PLUGIN_ID, "ping", json!(null)).is_err());
     assert!(!host::list().unwrap().plugins[0].enabled);
     fs::remove_dir(&state_path).unwrap();
     fs::rename(&saved_state, &state_path).unwrap();
-    host::set_enabled("dev.codey.header-demo", true).unwrap();
+    host::set_enabled(PLUGIN_ID, true).unwrap();
     assert_eq!(
-        host::invoke("dev.codey.header-demo", "config.received", json!(null)).unwrap(),
+        host::invoke(PLUGIN_ID, "config.received", json!(null)).unwrap(),
         json!({
             "value": "hello-codey",
             "nested": {"enabled": true},
@@ -263,16 +246,13 @@ async fn complete_native_plugin_lifecycle() {
             "_commentsLike": "原样保留"
         })
     );
-    let context = host::invoke("dev.codey.header-demo", "storage.context", json!(null)).unwrap();
+    let context = host::invoke(PLUGIN_ID, "storage.context", json!(null)).unwrap();
     let plugin_dir = temp
         .path()
         .join("host/installed/dev.codey.header-demo")
         .canonicalize()
         .unwrap();
-    assert_eq!(
-        host::plugin_directory("dev.codey.header-demo").unwrap(),
-        plugin_dir
-    );
+    assert_eq!(host::plugin_directory(PLUGIN_ID).unwrap(), plugin_dir);
     assert!(host::plugin_directory("../dev.codey.header-demo").is_err());
     assert!(host::plugin_directory("dev.codey.missing").is_err());
     assert_eq!(context["pluginDir"], plugin_dir.to_str().unwrap());
@@ -281,18 +261,13 @@ async fn complete_native_plugin_lifecycle() {
         plugin_dir.join("data").to_str().unwrap()
     );
     assert_eq!(context["logDir"], plugin_dir.join("logs").to_str().unwrap());
-    host::invoke(
-        "dev.codey.header-demo",
-        "storage.write",
-        json!({"saved":42}),
-    )
-    .unwrap();
+    host::invoke(PLUGIN_ID, "storage.write", json!({"saved":42})).unwrap();
     assert!(plugin_dir.join("logs/plugin.log").exists());
     assert!(plugin_dir.join("logs/host.log").exists());
-    let cleared = host::clear_logs("dev.codey.header-demo").unwrap();
+    let cleared = host::clear_logs(PLUGIN_ID).unwrap();
     assert_eq!(cleared.plugins[0].log_size_bytes, Some(0));
     assert_eq!(
-        host::invoke("dev.codey.header-demo", "ping", json!({"echo":1})).unwrap()["value"],
+        host::invoke(PLUGIN_ID, "ping", json!({"echo":1})).unwrap()["value"],
         "hello-codey"
     );
     for invalid in [
@@ -302,10 +277,7 @@ async fn complete_native_plugin_lifecycle() {
         "{\"_comments\":null}",
         "{\"rules\":[{\"_comments\":{\"model\":42}}]}",
     ] {
-        assert!(
-            host::save_config_file("dev.codey.header-demo", invalid, &initial_config.sha256)
-                .is_err()
-        );
+        assert!(host::save_config_file(PLUGIN_ID, invalid, &initial_config.sha256).is_err());
     }
     let mut request = LifecycleRequest::new(
         json!({"requestId":"test-request","accountId":"account-handle"}),
@@ -348,25 +320,17 @@ async fn complete_native_plugin_lifecycle() {
     .await
     .unwrap();
     let comment_edit = INITIAL_CONFIG.replace("用于请求头", "更新说明");
-    let configured = host::save_config_file(
-        "dev.codey.header-demo",
-        &comment_edit,
-        &initial_config.sha256,
-    )
-    .unwrap();
+    let configured =
+        host::save_config_file(PLUGIN_ID, &comment_edit, &initial_config.sha256).unwrap();
     assert!(!configured.plugins[0].restart_required);
-    let comment_config = host::get_config_file("dev.codey.header-demo").unwrap();
+    let comment_config = host::get_config_file(PLUGIN_ID).unwrap();
     assert_eq!(comment_config.content, comment_edit);
     assert_ne!(comment_config.sha256, initial_config.sha256);
     assert!(
-        host::save_config_file(
-            "dev.codey.header-demo",
-            INITIAL_CONFIG,
-            &initial_config.sha256
-        )
-        .err()
-        .unwrap()
-        .contains("外部修改")
+        host::save_config_file(PLUGIN_ID, INITIAL_CONFIG, &initial_config.sha256)
+            .err()
+            .unwrap()
+            .contains("外部修改")
     );
     assert_eq!(
         fs::read_to_string(&initial_config.path).unwrap(),
@@ -377,59 +341,49 @@ async fn complete_native_plugin_lifecycle() {
     fs::write(&initial_config.path, &external_comment_edit).unwrap();
     assert!(!host::list().unwrap().plugins[0].restart_required);
     assert!(
-        host::save_config_file(
-            "dev.codey.header-demo",
-            &comment_edit,
-            &comment_config.sha256
-        )
-        .err()
-        .unwrap()
-        .contains("外部修改")
+        host::save_config_file(PLUGIN_ID, &comment_edit, &comment_config.sha256)
+            .err()
+            .unwrap()
+            .contains("外部修改")
     );
-    let current_config = host::get_config_file("dev.codey.header-demo").unwrap();
+    let current_config = host::get_config_file(PLUGIN_ID).unwrap();
     let edited_config = "{\n    \"value\": \"new-value\"\n}\n";
-    let configured = host::save_config_file(
-        "dev.codey.header-demo",
-        edited_config,
-        &current_config.sha256,
-    )
-    .unwrap();
+    let configured =
+        host::save_config_file(PLUGIN_ID, edited_config, &current_config.sha256).unwrap();
     assert_eq!(
         fs::read_to_string(&initial_config.path).unwrap(),
         edited_config
     );
-    assert!(host::save_config_file("dev.codey.header-demo", "{}", &initial_config.sha256).is_err());
+    assert!(host::save_config_file(PLUGIN_ID, "{}", &initial_config.sha256).is_err());
     assert_eq!(
-        host::get_config_file("dev.codey.header-demo")
-            .unwrap()
-            .content,
+        host::get_config_file(PLUGIN_ID).unwrap().content,
         edited_config
     );
     assert!(configured.plugins[0].restart_required);
     assert_eq!(
-        host::invoke("dev.codey.header-demo", "ping", json!(null)).unwrap()["value"],
+        host::invoke(PLUGIN_ID, "ping", json!(null)).unwrap()["value"],
         "hello-codey"
     );
-    host::set_enabled("dev.codey.header-demo", false).unwrap();
-    host::set_enabled("dev.codey.header-demo", true).unwrap();
+    host::set_enabled(PLUGIN_ID, false).unwrap();
+    host::set_enabled(PLUGIN_ID, true).unwrap();
     assert_eq!(
-        host::invoke("dev.codey.header-demo", "storage.read", json!(null)).unwrap(),
+        host::invoke(PLUGIN_ID, "storage.read", json!(null)).unwrap(),
         json!({"saved":42})
     );
     assert_eq!(
-        host::invoke("dev.codey.header-demo", "storage.context", json!(null)).unwrap(),
+        host::invoke(PLUGIN_ID, "storage.context", json!(null)).unwrap(),
         context
     );
     assert_eq!(
-        host::invoke("dev.codey.header-demo", "ping", json!(null)).unwrap()["value"],
+        host::invoke(PLUGIN_ID, "ping", json!(null)).unwrap()["value"],
         "new-value"
     );
     package(&path, &library, "1.1.0");
     let inspection = host::inspect(&path).unwrap();
     let upgraded = host::install(&path, &inspection.sha256).unwrap();
     assert!(upgraded.plugins[0].enabled && upgraded.plugins[0].restart_required);
-    assert!(host::uninstall("dev.codey.header-demo", false).is_err());
-    host::set_enabled("dev.codey.header-demo", false).unwrap();
+    assert!(host::uninstall(PLUGIN_ID, false).is_err());
+    host::set_enabled(PLUGIN_ID, false).unwrap();
     #[cfg(unix)]
     for relative in ["installed", "installed/dev.codey.header-demo"] {
         let source = temp.path().join("host").join(relative);
@@ -437,7 +391,7 @@ async fn complete_native_plugin_lifecycle() {
         fs::rename(&source, &outside).unwrap();
         let entries_before = fs::read_dir(&outside).unwrap().count();
         std::os::unix::fs::symlink(&outside, &source).unwrap();
-        assert!(host::uninstall("dev.codey.header-demo", true).is_err());
+        assert!(host::uninstall(PLUGIN_ID, true).is_err());
         assert_eq!(fs::read_dir(&outside).unwrap().count(), entries_before);
         assert_eq!(host::list().unwrap().plugins.len(), 1);
         fs::remove_file(&source).unwrap();
@@ -447,33 +401,28 @@ async fn complete_native_plugin_lifecycle() {
     assert!(plugin_dir.join("data/example.json").exists());
     assert!(plugin_dir.join("logs/plugin.log").exists());
     assert!(!plugin_dir.join("versions").exists());
-    assert!(host::list().unwrap().plugins.is_empty());
     host::install(&path, &inspection.sha256).unwrap();
     assert_eq!(
-        host::get_config_file("dev.codey.header-demo")
-            .unwrap()
-            .content,
+        host::get_config_file(PLUGIN_ID).unwrap().content,
         edited_config
     );
-    host::set_enabled("dev.codey.header-demo", true).unwrap();
+    host::set_enabled(PLUGIN_ID, true).unwrap();
     assert_eq!(
-        host::invoke("dev.codey.header-demo", "storage.read", json!(null)).unwrap(),
+        host::invoke(PLUGIN_ID, "storage.read", json!(null)).unwrap(),
         json!({"saved":42})
     );
-    host::set_enabled("dev.codey.header-demo", false).unwrap();
+    host::set_enabled(PLUGIN_ID, false).unwrap();
     uninstall_loaded_plugin(&temp.path().join("host"), true);
     assert!(!plugin_dir.exists());
     host::install(&path, &inspection.sha256).unwrap();
     assert_eq!(
-        host::get_config_file("dev.codey.header-demo")
-            .unwrap()
-            .content,
+        host::get_config_file(PLUGIN_ID).unwrap().content,
         initial_config.content
     );
-    package_with_header(&path, &library, "1.2.0", "x-different-header");
+    package_with_options(&path, &library, "1.2.0", "x-different-header", false);
     let inspection = host::inspect(&path).unwrap();
     host::install(&path, &inspection.sha256).unwrap();
-    host::set_enabled("dev.codey.header-demo", true).unwrap();
+    host::set_enabled(PLUGIN_ID, true).unwrap();
     let mut request = LifecycleRequest::new(json!({"requestId":"unauthorized-header"}), None);
     let error = request
         .dispatch(LifecycleStage::BeforeSend, 0, BTreeMap::new(), None)
@@ -484,24 +433,19 @@ async fn complete_native_plugin_lifecycle() {
     package(&path, &library, "1.3.0");
     let inspection = host::inspect(&path).unwrap();
     host::install(&path, &inspection.sha256).unwrap();
-    let config_file = host::get_config_file("dev.codey.header-demo").unwrap();
-    host::save_config_file(
-        "dev.codey.header-demo",
-        "{\"value\":\"recovered\"}",
-        &config_file.sha256,
-    )
-    .unwrap();
-    host::set_enabled("dev.codey.header-demo", false).unwrap();
-    host::set_enabled("dev.codey.header-demo", true).unwrap();
+    let config_file = host::get_config_file(PLUGIN_ID).unwrap();
+    host::save_config_file(PLUGIN_ID, "{\"value\":\"recovered\"}", &config_file.sha256).unwrap();
+    host::set_enabled(PLUGIN_ID, false).unwrap();
+    host::set_enabled(PLUGIN_ID, true).unwrap();
     assert_eq!(
-        host::invoke("dev.codey.header-demo", "ping", json!(null)).unwrap()["value"],
+        host::invoke(PLUGIN_ID, "ping", json!(null)).unwrap()["value"],
         "recovered"
     );
     assert_eq!(
-        host::invoke("dev.codey.header-demo", "storage.context", json!(null)).unwrap(),
+        host::invoke(PLUGIN_ID, "storage.context", json!(null)).unwrap(),
         context
     );
-    host::set_enabled("dev.codey.header-demo", false).unwrap();
+    host::set_enabled(PLUGIN_ID, false).unwrap();
     package_with_options(&path, &library, "1.4.0", "x-plugin-demo", true);
     let inspection = host::inspect(&path).unwrap();
     host::install(&path, &inspection.sha256).unwrap();
@@ -521,13 +465,13 @@ async fn complete_native_plugin_lifecycle() {
             Ok(None)
         }
     }));
-    host::set_enabled("dev.codey.header-demo", true).unwrap();
-    host::set_enabled("dev.codey.header-demo", false).unwrap();
-    host::set_enabled("dev.codey.header-demo", true).unwrap();
+    host::set_enabled(PLUGIN_ID, true).unwrap();
+    host::set_enabled(PLUGIN_ID, false).unwrap();
+    host::set_enabled(PLUGIN_ID, true).unwrap();
     host::shutdown();
     assert!(!LifecycleRequest::new(json!({}), None).is_active());
-    assert!(host::invoke("dev.codey.header-demo", "ping", json!(null)).is_err());
-    assert!(host::set_enabled("dev.codey.header-demo", true).is_err());
+    assert!(host::invoke(PLUGIN_ID, "ping", json!(null)).is_err());
+    assert!(host::set_enabled(PLUGIN_ID, true).is_err());
     let restarted = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "complete_native_plugin_lifecycle", "--nocapture"])
         .env(

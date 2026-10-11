@@ -121,4 +121,4 @@ WebSocket 下游关闭可中断等待。HTTP 的 FIN 与合法写半关闭无法
 
 打包脚本支持 `--capability request.lifecycle.v1`、重复的 `--header` 与 `--response-header`、`--lifecycle-failure-policy` 和 `--lifecycle-max-wait-ms`。头名单及生命周期参数必须显式搭配生命周期能力，缺失时直接报错。需要认证上下文时另加 `--capability request.lifecycle.auth`；需要选取 API Key 时另加 `--capability request.lifecycle.api_key` 及重复的 `--api-key-url` 精确授权地址，域名须使用 ASCII 或 Punycode，避免不同 IDNA 规则改变授权目标。安装包必须包含 `config.json`；打包时省略 `--config` 会生成空对象模板。
 
-需要上述预请求能力时另加 `--capability request.lifecycle.turn_state`，无需声明认证能力或 Cookie 头名单；示例见 `examples/plugins/astra-turn-state`。此协议只提供请求控制，生命周期声明不会自动挂载插件界面。
+需要上述预请求能力时另加 `--capability request.lifecycle.turn_state`，无需声明认证能力或 Cookie 头名单。此协议只提供请求控制，生命周期声明不会自动挂载插件界面。

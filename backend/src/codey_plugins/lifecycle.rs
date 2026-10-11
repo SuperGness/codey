@@ -991,6 +991,11 @@ impl TestPlugin {
         }
     }
 
+    pub(crate) fn with_invoke_timeout(mut self, timeout: Duration) -> Self {
+        Arc::get_mut(&mut self.plugin).unwrap().invoke_timeout = timeout;
+        self
+    }
+
     pub(crate) fn with_api_key_urls(mut self, urls: &[&str]) -> Self {
         let plugin = Arc::get_mut(&mut self.plugin).unwrap();
         plugin.api_key_capability = true;

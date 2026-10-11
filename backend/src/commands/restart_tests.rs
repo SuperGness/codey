@@ -193,7 +193,7 @@ fn unknown_official_auth_does_not_force_openai_auth_for_third_party_launches() {
         crate::config::LaunchOfficialAccountStatus::Unknown
     );
     assert!(!next.router_requires_openai_auth());
-    assert_eq!(next.profiles, vec![official, relay]);
+    assert_eq!(next.profiles, previous.profiles);
     assert_eq!(next.active_profile_id, "relay");
 }
 
@@ -270,6 +270,32 @@ fn full_config_save_restores_route_secrets_and_source_owned_identity() {
             .get("X-Private-Route")
             .map(String::as_str),
         Some("edited-header")
+    );
+}
+
+#[test]
+fn full_config_save_requires_short_names_and_preserves_blank_long_names() {
+    let mut saved = crate::config::ProviderProfile::new("主线路");
+    saved.id = "route-profile".into();
+    saved.short_name = "主".into();
+    saved.base_url = "https://relay.example/v1".into();
+    saved.api_key = "saved-secret".into();
+    let previous = CodeyConfig {
+        active_profile_id: saved.id.clone(),
+        profiles: vec![saved.clone()],
+        ..CodeyConfig::default()
+    }
+    .normalize();
+    let mut draft = saved;
+    draft.name.clear();
+    let merged = merge_profile_secrets(vec![draft.clone()], &previous).unwrap();
+    assert_eq!(merged[0].name, "");
+    assert_eq!(merged[0].short_name, "主");
+    assert_eq!(merged[0].provider_id(), "route-profile");
+    draft.short_name = " ".into();
+    assert_eq!(
+        merge_profile_secrets(vec![draft], &previous).unwrap_err(),
+        "请输入短名称"
     );
 }
 
@@ -356,10 +382,11 @@ fn renderer_model_catalog_keeps_supported_models_before_configured_models() {
         catalog["model_metadata"][0],
         json!({
             "model": "source-provider/gpt-5.6-sol",
-            "display_name": "[默认配置] gpt-5.6-sol",
+            "display_name": "[默认] gpt-5.6-sol",
             "route_name": "默认配置",
-            "route_prefix": "默认配置",
+            "route_prefix": "默认",
             "provider_id": "codey_router",
+            "supports_remote_compaction": false,
             "source_model": "gpt-5.6-sol",
             "official_account": false,
             "route_provider_id": "source-provider",
@@ -373,10 +400,11 @@ fn renderer_model_catalog_keeps_supported_models_before_configured_models() {
         catalog["model_metadata"][5],
         json!({
             "model": "source-provider/provider-fast-coder",
-            "display_name": "[默认配置] provider-fast-coder",
+            "display_name": "[默认] provider-fast-coder",
             "route_name": "默认配置",
-            "route_prefix": "默认配置",
+            "route_prefix": "默认",
             "provider_id": "codey_router",
+            "supports_remote_compaction": false,
             "source_model": "provider-fast-coder",
             "official_account": false,
             "route_provider_id": "source-provider",
@@ -493,10 +521,11 @@ fn renderer_model_catalog_routes_official_account_models_through_the_codey_route
         catalog["model_metadata"][0],
         json!({
             "model": "gpt-5.6-sol",
-            "display_name": "[官] gpt-5.6-sol",
+            "display_name": "[默认] gpt-5.6-sol",
             "route_name": "默认配置",
-            "route_prefix": "官",
+            "route_prefix": "默认",
             "provider_id": crate::local_router::ROUTER_PROVIDER_ID,
+            "supports_remote_compaction": true,
             "source_model": "gpt-5.6-sol",
             "official_account": true,
             "route_provider_id": "openai",
@@ -906,6 +935,19 @@ fn restart_sensitive_config_changes_are_detected() {
         &enabled_subagent,
         &changed_task_role
     ));
+    for enabled in [false, true] {
+        changed_task_role
+            .subagent_roles
+            .get_mut(crate::config::SUBAGENT_ROLE_QUICK_SCAN)
+            .unwrap()
+            .enabled = enabled;
+        assert!(!config_requires_restart(
+            &enabled_subagents,
+            &enabled_models,
+            &RuntimeSubagentConfig::from_config(&changed_task_role),
+            &changed_task_role
+        ));
+    }
 
     let mut two_routes = applied;
     let mut second_route = crate::config::ProviderProfile::new("Route B");
@@ -1083,11 +1125,11 @@ async fn runtime_status_exposes_cached_available_update() {
     assert_eq!(status["availableUpdate"]["currentVersion"], "1.0.0");
     assert_eq!(status["availableUpdate"]["latestVersion"], "2.0.0");
     assert_eq!(status["availableUpdate"]["updateAvailable"], true);
-    assert_eq!(status["autoCheckCodeyUpdates"], true);
-    state.config.write().await.auto_check_codey_updates = false;
+    assert_eq!(status["codeyUpdatePolicy"], "stable");
+    state.config.write().await.codey_update_policy = crate::config::CodeyUpdatePolicy::Off;
     assert_eq!(
-        runtime_status(&state).await.unwrap()["autoCheckCodeyUpdates"],
-        false
+        runtime_status(&state).await.unwrap()["codeyUpdatePolicy"],
+        "off"
     );
 }
 
@@ -1242,4 +1284,28 @@ fn manual_model_selection_rejects_official_models_in_the_other_model_input() {
         validate_manual_model_selection(&official, &[], &[" GPT-5.6-SOL ".into()]).unwrap_err();
 
     assert!(error.contains("已在官方模型列表中"));
+}
+
+#[test]
+fn conversation_git_toggle_requires_restart_but_model_change_is_live() {
+    let applied = CodeyConfig::default();
+    let mut current = applied.clone();
+    current.conversation_git.enabled = true;
+    current.conversation_git.model = "model".into();
+    assert!(config_requires_restart_with_route_status(
+        false,
+        &applied,
+        &RuntimeModelConfig::from_config(&applied),
+        &RuntimeSubagentConfig::from_config(&applied),
+        &current
+    ));
+    let enabled = current.clone();
+    current.conversation_git.model = "another-model".into();
+    assert!(!config_requires_restart_with_route_status(
+        false,
+        &enabled,
+        &RuntimeModelConfig::from_config(&enabled),
+        &RuntimeSubagentConfig::from_config(&enabled),
+        &current
+    ));
 }

@@ -165,12 +165,14 @@ fn apply_account_route_overrides(
     index: usize,
 ) {
     // 账号没有保存过线路名时，用「官方账号1」这类按添加顺序生成的名称兜底。
-    profile.name = trimmed(record.route_name.as_deref())
-        .map(ToString::to_string)
+    profile.name = record
+        .route_name
+        .as_deref()
+        .map(|name| name.trim().to_string())
         .unwrap_or_else(|| crate::config::default_official_route_name(index));
     profile.short_name = trimmed(record.route_short_name.as_deref())
         .map(ToString::to_string)
-        .unwrap_or_else(|| crate::config::default_official_route_short_name(index));
+        .unwrap_or_default();
     if let Some(proxy) = trimmed(record.upstream_proxy.as_deref()) {
         profile.upstream_proxy = proxy.to_string();
     }
@@ -394,6 +396,7 @@ fn profile_from_provider(
         official_account: provider.official,
         official_account_id: None,
         supports_remote_compaction: provider.supports_remote_compaction,
+        remote_compaction_protocol: crate::config::RemoteCompactionProtocol::default(),
         supports_websockets: provider.official,
         supports_native_web_search: provider.official,
         supports_auto_review: provider.official,
@@ -982,7 +985,8 @@ experimental_bearer_token = "sk-relay"
         // 收编为第一个账号后立刻带上按添加顺序生成的默认名称。
         let default_name = profile.name.clone();
         assert_eq!(default_name, "官方账号1");
-        assert_eq!(profile.short_name, "官1");
+        assert_eq!(profile.short_name, "官方");
+        assert_eq!(profile.display_short_name(), "官方");
         assert!(profile.upstream_proxy.is_empty());
 
         let account_id = store.default_account_id().unwrap().unwrap();
@@ -1013,6 +1017,43 @@ experimental_bearer_token = "sk-relay"
         );
 
         store
+            .update_route_settings(&account_id, Some("Plus".into()), None, None, None)
+            .unwrap();
+        let OfficialAccountProfileStatus::Available(profile) =
+            launch_status(home.path(), &store).unwrap()
+        else {
+            panic!("the official route should stay available");
+        };
+        assert_eq!(profile.short_name, "Pl");
+        assert_eq!(profile.display_short_name(), "Pl");
+
+        store
+            .update_route_settings(
+                &account_id,
+                Some(String::new()),
+                Some("主".into()),
+                None,
+                None,
+            )
+            .unwrap();
+        let OfficialAccountProfileStatus::Available(profile) =
+            launch_status(home.path(), &store).unwrap()
+        else {
+            panic!("the short-name-only official route should stay available");
+        };
+        assert_eq!(profile.name, "");
+        assert_eq!(profile.short_name, "主");
+        assert_eq!(
+            store
+                .get(&account_id)
+                .unwrap()
+                .unwrap()
+                .route_name
+                .as_deref(),
+            Some("")
+        );
+
+        store
             .update_route_settings(&account_id, None, None, None, None)
             .unwrap();
         let OfficialAccountProfileStatus::Available(profile) =
@@ -1021,7 +1062,8 @@ experimental_bearer_token = "sk-relay"
             panic!("the official route should stay available");
         };
         assert_eq!(profile.name, default_name);
-        assert_eq!(profile.short_name, "官1");
+        assert_eq!(profile.short_name, "官方");
+        assert_eq!(profile.display_short_name(), "官方");
         assert!(profile.upstream_proxy.is_empty());
         assert!(profile.base_url.is_empty());
         assert_eq!(
@@ -1076,9 +1118,9 @@ experimental_bearer_token = "sk-relay"
         );
         // 默认名称按添加顺序编号，和默认账号排在最前的显示顺序无关。
         assert_eq!(launch.profiles[0].name, "官方账号2");
-        assert_eq!(launch.profiles[0].short_name, "官2");
+        assert_eq!(launch.profiles[0].short_name, "官1");
         assert_eq!(launch.profiles[1].name, "官方账号1");
-        assert_eq!(launch.profiles[1].short_name, "官1");
+        assert_eq!(launch.profiles[1].short_name, "官方");
         // 生成结果写回账号记录，面板编辑时看到的就是线路列表里的名称。
         let stored = store.list().unwrap();
         assert_eq!(
@@ -1123,7 +1165,7 @@ experimental_bearer_token = "sk-relay"
         );
         // 编号按全部账号的添加顺序计算，失效账号离场不会让剩余线路改号。
         assert_eq!(launch.profiles[0].name, "官方账号2");
-        assert_eq!(launch.profiles[0].short_name, "官2");
+        assert_eq!(launch.profiles[0].short_name, "官1");
 
         // 全部账号失效时不再留下任何官方线路。
         let mut remaining = store.get("acct-two").unwrap().unwrap();

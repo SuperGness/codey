@@ -7,10 +7,24 @@ export type ModelRuntimeUpdate = {
   modelHotReloadError?: string;
   subagentConfigHotReloaded?: boolean;
   subagentConfigRepaired?: boolean;
+  subagentConfigHealth?: string;
   subagentConfigHotReloadError?: string;
   modelCatalogFallback?: boolean;
   customContextsRestored?: boolean;
 };
+
+export function subagentUpdateNote(result: ModelRuntimeUpdate): string {
+  if (result.subagentConfigHealth === "pending_restart") {
+    return result.subagentConfigHotReloadError
+      || "当前 Codex 尚未注册新增的子代理角色，请重启一次以启用动态角色配置";
+  }
+  if (result.subagentConfigHealth === "superseded") {
+    return result.subagentConfigHotReloadError || "子代理配置已被更新的设置取代，请确认当前设置";
+  }
+  return result.subagentConfigHotReloadError
+    ? `子代理配置未能实时更新：${result.subagentConfigHotReloadError}`
+    : "";
+}
 
 export function modelSelectionNotice(
   result: ModelRuntimeUpdate,
@@ -44,10 +58,11 @@ function savedModelNotice(result: ModelRuntimeUpdate, summary: string): Notice {
     };
   }
 
-  if (result.subagentConfigHotReloadError) {
+  const subagentNote = subagentUpdateNote(result);
+  if (subagentNote) {
     return {
       tone: "info",
-      text: `${summary}；子代理配置更新失败，需重启 Codex 后生效`,
+      text: `${summary}；${subagentNote}`,
     };
   }
 

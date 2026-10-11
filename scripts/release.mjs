@@ -3,9 +3,9 @@ import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { releaseIdentity } from "./release-policy.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const semverPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 function usage() {
   console.log(`Usage:
@@ -75,14 +75,14 @@ function parseArguments(argv) {
   }
 
   const normalizedVersion = version.replace(/^v/i, "");
-  if (!semverPattern.test(normalizedVersion)) {
+  try { releaseIdentity(normalizedVersion); } catch {
     fail(`Version must be SemVer without a v prefix: ${version}`);
   }
 
   return {
     ...options,
     version: normalizedVersion,
-    tag: `v${normalizedVersion}`,
+    tag: releaseIdentity(normalizedVersion).tag,
   };
 }
 

@@ -30,9 +30,6 @@ fn run() -> anyhow::Result<()> {
     if codey_lib::run_node_options_repair_if_requested()? {
         return Ok(());
     }
-    if codey_lib::run_overlay_recovery_if_requested()? {
-        return Ok(());
-    }
     if codey_lib::run_fastctx_route_hook_if_requested()? {
         return Ok(());
     }

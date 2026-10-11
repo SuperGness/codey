@@ -6,10 +6,36 @@ import json
 import ipaddress
 import pathlib
 import platform
+import re
 import sys
 from typing import Union, cast
 import zipfile
 from urllib.parse import urlsplit, urlunsplit
+
+
+def valid_id(value):
+    # Keep this rule aligned with codey_plugins::package::valid_id.
+    return (len(value) <= 96 and re.fullmatch(r"[a-z][a-z0-9._-]*", value) is not None
+            and ".." not in value and not value.endswith("."))
+
+
+def allowed_header_name(value, response=False):
+    # Lifecycle response metadata is readable, while credentials stay private.
+    if not value.isascii():
+        return False
+    name = value.lower()
+    if response and name in {"content-type", "content-length", "content-encoding", "retry-after"}:
+        return True
+    return (len(name) <= 128 and re.fullmatch(r"[a-z0-9!#$%&'*+.^_`|~\-]+", name) is not None
+            and name not in {
+                "authorization", "proxy-authorization", "cookie", "set-cookie", "host",
+                "connection", "keep-alive", "proxy-connection", "te", "trailer",
+                "transfer-encoding", "upgrade", "content-length", "content-type",
+                "content-encoding", "accept-encoding", "chatgpt-account-id",
+                "openai-organization", "openai-project", "api-key", "x-api-key",
+            }
+            and not name.startswith(("x-codey-", "sec-"))
+            and not any(part in name for part in ("token", "credential", "authorization")))
 
 
 reconfigure = getattr(sys.stderr, "reconfigure", None)
@@ -34,6 +60,8 @@ parser.add_argument("--lifecycle-max-wait-ms", type=int)
 args = parser.parse_args()
 if args.output.suffix != ".codey-plugin":
     parser.error("输出文件必须使用 .codey-plugin 扩展名")
+if not valid_id(args.id):
+    parser.error("插件 ID 无效：须以小写字母开头，只含小写字母、数字及 ._-，最多 96 字符，不含连续点或末尾点")
 capabilities = list(args.capability)
 transport = "provider.transport.v1" in capabilities
 if (transport and "provider.route.v1" not in capabilities) or (("provider.account.v1" in capabilities) != transport):
@@ -83,9 +111,11 @@ if args.lifecycle_max_wait_ms is not None and not 1 <= args.lifecycle_max_wait_m
     parser.error("生命周期等待上限必须是 1–600000 毫秒")
 if args.header and not lifecycle:
     parser.error("请求头参数需要 --capability request.lifecycle.v1")
-for names in (args.header, args.response_header):
+for names, response in ((args.header, False), (args.response_header, True)):
     if len(names) > 32 or len({name.lower() for name in names}) != len(names):
         parser.error("请求头和响应头各最多声明 32 项，名称不能重复")
+    if any(not allowed_header_name(name, response) for name in names):
+        parser.error("插件声明了禁止使用或无效的请求头或响应头")
 library = args.library.read_bytes()
 config = b"{}\n"
 if args.config is not None:

@@ -9,6 +9,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { createWriteStream } from "node:fs";
 import { prepareReleaseVersion, readSourceVersion, validateReleaseVersion } from "./prepare-release-version.mjs";
+import { releaseIdentity } from "./release-policy.mjs";
 import { chunkNotePatches, createNoteBatchInput, formatNoteResults, mergeNoteResults, parseNoteLines, resolveNoteEntries } from "./release-note-batches.mjs";
 
 const execute = promisify(execFile);
@@ -130,7 +131,8 @@ async function ownedRelease(build) {
 
 export async function updateReleaseNotes(release, build, notes) {
   validateRelease(release, build);
-  const updated = await github(`releases/${release.id}`, "PATCH", { tag_name: build.tag, body: `${notes || "更新日志待管理员补充。"}\n\n${marker(build)}` });
+  const identity = releaseIdentity(build.version);
+  const updated = await github(`releases/${release.id}`, "PATCH", { tag_name: identity.tag, name: identity.name, prerelease: identity.prerelease, body: `${notes || "更新日志待管理员补充。"}\n\n${marker(build)}` });
   validateRelease(updated, { ...build, release_id: release.id });
   if (updated.draft !== release.draft) throw new Error("GitHub Release 草稿状态意外变更");
   return updated;
@@ -350,7 +352,8 @@ async function publish() {
     const tag = await github("git/tags", "POST", { tag: build.tag, message: `${build.tag}\n\n${marker(build)}`, object: build.source_sha, type: "commit" });
     await github("git/refs", "POST", { ref: `refs/tags/${build.tag}`, sha: tag.sha });
   }
-  const release = existingRelease || await github("releases", "POST", { tag_name: build.tag, target_commitish: build.source_sha, name: build.tag, draft: true, prerelease: build.version.includes("-"), body: `${notes.notes || "更新日志待管理员补充。"}\n\n${marker(build)}` });
+  const identity = releaseIdentity(build.version);
+  const release = existingRelease || await github("releases", "POST", { tag_name: identity.tag, target_commitish: build.source_sha, name: identity.name, draft: true, prerelease: identity.prerelease, body: `${notes.notes || "更新日志待管理员补充。"}\n\n${marker(build)}` });
   if (!release.draft) throw new Error("已有 Release 已公开，不能重新打包");
   for (const path of paths) {
     await uploadGithubAsset(release, path);

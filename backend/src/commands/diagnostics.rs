@@ -171,7 +171,6 @@ pub(super) async fn invoke(
 ) -> Result<Value, String> {
     match command {
         "clear_diagnostic_storage" => clear_diagnostic_storage(state, args).await,
-        "repair_codex_overlays" => crate::overlay_recovery::repair().await,
         "repair_codex_config" => super::config_repair::repair_codex_config(state).await,
         "repair_main_process_injection" => {
             super::runtime::schedule_main_process_injection_repair(state).await

@@ -621,8 +621,15 @@ fn provider_secret_merge_preserves_user_remote_compaction_setting() {
 
     let mut disabled = saved.clone();
     disabled.supports_remote_compaction = false;
+    disabled.remote_compaction_protocol = crate::config::RemoteCompactionProtocol::CompactEndpoint;
+    disabled.api_key.clear();
     let merged = merge_profile_secrets(vec![disabled], &previous).unwrap();
     assert!(!merged[0].supports_remote_compaction);
+    assert_eq!(
+        merged[0].remote_compaction_protocol,
+        crate::config::RemoteCompactionProtocol::CompactEndpoint
+    );
+    assert_eq!(merged[0].api_key, "saved-secret");
 
     let mut previous_disabled_profile = saved;
     previous_disabled_profile.supports_remote_compaction = false;
@@ -660,12 +667,14 @@ fn route_name_limit_matches_the_renderer_and_legacy_names_stay_saveable() {
 
     let mut at_limit = legacy.clone();
     at_limit.name = "名".repeat(15);
+    at_limit.short_name = "旧".to_string();
     let merged = merge_profile_secrets(vec![at_limit.clone()], &previous).unwrap();
     assert_eq!(merged[0].name, at_limit.name);
 
     // 改名以后超过上限会被拒绝,直接调用后端接口也无法写进界面存不下的名称。
     let mut renamed = legacy.clone();
     renamed.name = "名".repeat(16);
+    renamed.short_name = "旧".to_string();
     let error = merge_profile_secrets(vec![renamed], &previous).unwrap_err();
     assert!(error.contains("最多 15 个字符"), "{error}");
 }
@@ -922,6 +931,7 @@ fn saving_a_route_keeps_the_official_account_id_when_the_form_omits_it() {
     let mut incoming = saved.clone();
     incoming.official_account_id = None;
     incoming.name = "主力".to_string();
+    incoming.short_name = "主".to_string();
     let previous = CodeyConfig {
         profiles: vec![saved],
         ..CodeyConfig::default()
@@ -1511,7 +1521,7 @@ async fn native_model_cache_without_saved_route_does_not_block_settings_or_reena
 }
 
 #[tokio::test]
-async fn auto_check_codey_updates_save_persists_explicit_and_legacy_values() {
+async fn codey_update_policy_save_persists_explicit_and_legacy_values() {
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState {
         store: ConfigStore::new(directory.path().join("config.json")),
@@ -1520,25 +1530,36 @@ async fn auto_check_codey_updates_save_persists_explicit_and_legacy_values() {
 
     for enabled in [false, true] {
         let mut payload = serde_json::to_value(state.config.read().await.clone()).unwrap();
+        payload.as_object_mut().unwrap().remove("codeyUpdatePolicy");
         payload["autoCheckCodeyUpdates"] = json!(enabled);
         let input = codey_config_save_input(&json!({ "config": payload })).unwrap();
         save_codey_config_locked(&state, input).await.unwrap();
-        assert_eq!(state.config.read().await.auto_check_codey_updates, enabled);
-        assert_eq!(
-            state.store.load().unwrap().auto_check_codey_updates,
-            enabled
-        );
+        let expected = if enabled {
+            crate::config::CodeyUpdatePolicy::Stable
+        } else {
+            crate::config::CodeyUpdatePolicy::Off
+        };
+        assert_eq!(state.config.read().await.codey_update_policy, expected);
+    }
+    for policy in [
+        crate::config::CodeyUpdatePolicy::Off,
+        crate::config::CodeyUpdatePolicy::Stable,
+        crate::config::CodeyUpdatePolicy::Experimental,
+    ] {
+        let mut payload = serde_json::to_value(state.config.read().await.clone()).unwrap();
+        payload["codeyUpdatePolicy"] = json!(policy);
+        let input = codey_config_save_input(&json!({ "config": payload })).unwrap();
+        save_codey_config_locked(&state, input).await.unwrap();
+        assert_eq!(state.config.read().await.codey_update_policy, policy);
+        assert_eq!(state.store.load().unwrap().codey_update_policy, policy);
 
         let mut legacy = serde_json::to_value(state.config.read().await.clone()).unwrap();
-        legacy
-            .as_object_mut()
-            .unwrap()
-            .remove("autoCheckCodeyUpdates");
+        legacy.as_object_mut().unwrap().remove("codeyUpdatePolicy");
         legacy["slimCodexPet"] = json!(false);
         let input = codey_config_save_input(&json!({ "config": legacy })).unwrap();
         save_codey_config_locked(&state, input).await.unwrap();
         let saved = state.config.read().await.clone();
-        assert_eq!(saved.auto_check_codey_updates, enabled);
+        assert_eq!(saved.codey_update_policy, policy);
         assert!(!saved.slim_codex_pet);
         assert_eq!(state.store.load().unwrap(), saved);
     }

@@ -13,6 +13,39 @@ pub const STOP: &str = "provider.request.stop";
 pub const CHUNK_BYTES: usize = 64 * 1024;
 pub const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
+/// 校验传输响应头，统一名称大小写，并移除宿主不会转发的字段。
+/// 重复名称、无效值或超出协议限制时返回固定错误码。
+pub fn filter_response_headers(
+    headers: BTreeMap<String, String>,
+) -> Result<BTreeMap<String, String>, String> {
+    if headers.len() > 32 {
+        return Err("plugin_invalid_headers".into());
+    }
+    let mut filtered = BTreeMap::new();
+    for (name, value) in headers {
+        let name = name.to_ascii_lowercase();
+        if ![
+            "content-type",
+            "cache-control",
+            "retry-after",
+            "x-request-id",
+        ]
+        .contains(&name.as_str())
+        {
+            continue;
+        }
+        if value.len() > 8192
+            || !value
+                .bytes()
+                .all(|byte| byte == b'\t' || (byte >= 32 && byte != 127))
+            || filtered.insert(name, value).is_some()
+        {
+            return Err("plugin_invalid_headers".into());
+        }
+    }
+    Ok(filtered)
+}
+
 pub fn is_reserved(method: &str) -> bool {
     method.starts_with("provider.request.")
 }
@@ -97,6 +130,56 @@ pub fn error_http_status(code: &str) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn response_header_helpers_enforce_host_boundaries() {
+        let headers = BTreeMap::from([
+            ("Content-Type".into(), "text/event-stream".into()),
+            ("Set-Cookie".into(), "private=value".into()),
+        ]);
+        let value = serde_json::to_value(Frame::headers(200, headers).unwrap()).unwrap();
+        assert_eq!(value["headers"]["content-type"], "text/event-stream");
+        assert_eq!(value["headers"].as_object().unwrap().len(), 1);
+        for headers in [
+            BTreeMap::from([
+                ("Content-Type".into(), "text/event-stream".into()),
+                ("content-type".into(), "application/json".into()),
+            ]),
+            BTreeMap::from([("x-request-id".into(), "x".repeat(8193))]),
+            BTreeMap::from([("x-request-id".into(), "bad\r\nvalue".into())]),
+            (0..33)
+                .map(|index| (format!("x-{index}"), String::new()))
+                .collect(),
+        ] {
+            assert_eq!(
+                Frame::headers(200, headers).unwrap_err(),
+                "plugin_invalid_headers"
+            );
+        }
+        assert!(Frame::headers(199, BTreeMap::new()).is_err());
+        assert!(Frame::headers(600, BTreeMap::new()).is_err());
+        assert!(
+            Frame::headers(
+                599,
+                BTreeMap::from([("x-request-id".into(), "x".repeat(8192))])
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn error_frame_helper_redacts_unknown_errors() {
+        for (input, expected) in [
+            ("request_timeout", "request_timeout"),
+            ("Bearer secret", "plugin_upstream_failed"),
+        ] {
+            let value = serde_json::to_value(Frame::error(input)).unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({"type": "error", "code": expected})
+            );
+        }
+    }
+
     #[test]
     fn transport_error_codes_never_expose_unknown_text() {
         assert_eq!(public_error_code("upstream_timeout"), "upstream_timeout");
@@ -187,4 +270,24 @@ pub enum Frame {
     Error {
         code: String,
     },
+}
+
+impl Frame {
+    /// 构造经过校验的响应头帧；正文仍由插件按传输协议分块提供。
+    pub fn headers(status: u16, headers: BTreeMap<String, String>) -> Result<Self, String> {
+        if !(200..=599).contains(&status) {
+            return Err("plugin_invalid_frame_order".into());
+        }
+        Ok(Self::Headers {
+            status,
+            headers: filter_response_headers(headers)?,
+        })
+    }
+
+    /// 构造公开错误帧，未知错误文本统一替换，避免泄漏凭据或正文。
+    pub fn error(code: &str) -> Self {
+        Self::Error {
+            code: public_error_code(code).into(),
+        }
+    }
 }

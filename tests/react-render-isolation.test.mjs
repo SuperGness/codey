@@ -39,7 +39,7 @@ test("settings panels declare render-isolation hooks and stable handlers", async
   assert.match(confirmation, /export const ConfirmationDialogHost = memo\(/);
   assert.doesNotMatch(app, /async function checkForUpdates\(/);
   assert.match(appUpdates, /export function useAppUpdates/);
-  assert.match(appUpdates, /invoke<UpdateCheck>\("check_for_updates", \{ forceRefresh \}\)/);
+  assert.match(appUpdates, /invoke<UpdateCheck>\("check_for_updates",\s*\{\s*forceRefresh/);
   assert.equal(
     appUpdates.match(/invoke<UpdateCheck>\("check_for_updates",/g)?.length,
     1,
@@ -49,7 +49,7 @@ test("settings panels declare render-isolation hooks and stable handlers", async
     /updateCheckInFlightRef = useRef<Promise<UpdateCheck> \| null>/,
   );
   assert.match(appUpdates, /const result = await requestUpdateCheck\(\)/);
-  assert.match(appUpdates, /const result = await requestUpdateCheck\(true\)/);
+  assert.match(appUpdates, /const result = await requestUpdateCheck\(true/);
   assert.match(
     app,
     /const handleFooterUpdateClick = useStableEvent\(\(\) => void checkForUpdates\(\)\)/,
@@ -84,8 +84,8 @@ test("settings panels declare render-isolation hooks and stable handlers", async
   assert.match(sections, /OpenAI Chat Completions/);
   assert.match(sections, /Anthropic Messages/);
   assert.doesNotMatch(sections, /route-auth-mode-label/);
-  assert.equal(sections.match(/<Select\s/g)?.length, 2);
-  assert.equal(sections.match(/<ModelCombobox\s/g)?.length, 2);
+  assert.equal(sections.match(/<Select\s/g)?.length, 3);
+  assert.equal(sections.match(/<ModelCombobox\s/g)?.length, 3);
   assert.doesNotMatch(sections, /<select/);
   assert.match(sections, /visibleProfiles\.map\(\(profile\) =>/);
   assert.doesNotMatch(sections, /route-list-pane|route-manager-balanced|<Listy/);

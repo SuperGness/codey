@@ -625,7 +625,7 @@
 }
 
 .route-editor-row-names {
-  grid-template-columns: 1fr 130px;
+  grid-template-columns: minmax(0, 3fr) minmax(0, 7fr);
 }
 
 .route-editor-span-all {
@@ -633,30 +633,64 @@
   margin-top: -2px;
 }
 
+.route-protocol-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.route-protocol-section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--mac-text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.route-protocol-section-badge {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--mac-text-secondary);
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.04);
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
+}
+
 .route-protocol-options {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  display: flex;
+  flex-direction: column;
   border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.08);
-  border-radius: 10px;
-  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.02);
+  border-radius: 11px;
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.018);
   overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
 }
 
 .route-option-item {
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  gap: 4px;
-  padding: 9px 12px;
+  gap: 3px;
+  padding: 8px 12px;
   min-width: 0;
   transition: background 0.15s ease;
 }
 
 .route-option-item:hover {
-  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.025);
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.02);
 }
 
-.route-option-item + .route-option-item {
+/* 第二行：并排双开关网格 */
+.route-option-grid-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border-top: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
+}
+
+.route-option-grid-row .route-option-col + .route-option-col {
   border-left: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
 }
 
@@ -670,8 +704,26 @@
 .route-option-title-group {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
+}
+
+.route-option-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.04);
+  color: var(--mac-text-secondary);
+  flex-shrink: 0;
+  transition: all 0.18s ease;
+}
+
+.route-option-item[data-active="true"] .route-option-icon {
+  background: var(--codey-blue-soft, #eaf3ff);
+  color: var(--codey-blue, #007aff);
 }
 
 .route-option-content {
@@ -685,8 +737,7 @@
   color: var(--mac-text-primary);
   font-size: 12px;
   font-weight: 600;
-  line-height: 1.35;
-  white-space: nowrap;
+  line-height: 1.3;
 }
 
 .route-option-info-trigger {
@@ -695,6 +746,8 @@
   justify-content: center;
   color: var(--mac-text-tertiary);
   cursor: help;
+  padding: 1px;
+  border-radius: 4px;
   transition: color 0.15s ease;
 }
 
@@ -706,9 +759,72 @@
   color: var(--mac-text-secondary);
   font-size: 11px;
   line-height: 1.35;
+  white-space: normal;
+  padding-left: 28px;
+  margin: 0;
+}
+
+/* 第二行并排开关的提示文案保持单行自然展示 */
+.route-option-grid-row .route-option-item .route-field-hint {
+  font-size: 10.5px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 压缩接口子配置面板（内嵌紧凑卡片） */
+.route-option-subpanel {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-top: 5px;
+  margin-left: 28px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--codey-surface, #ffffff);
+  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.08);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
+  animation: route-subpanel-in 0.18s ease-out;
+}
+
+@keyframes route-subpanel-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.route-option-subpanel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.route-option-subpanel-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--mac-text-primary);
+}
+
+.route-option-subpanel-badge {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--codey-blue, #007aff);
+  background: var(--codey-blue-soft, #eaf3ff);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.route-option-subpanel-hint {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--mac-text-secondary);
+  margin: 0;
 }
 
 .official-route-editor {
@@ -814,18 +930,36 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-bottom: 10px;
+  gap: 16px;
+  padding-bottom: 11px;
   border-bottom: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.05);
+}
+
+.route-auxiliary-header:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
 }
 
 [data-theme="dark"] .route-auxiliary-header {
   border-bottom-color: rgba(255, 255, 255, 0.05);
 }
 
+[data-theme="dark"] .route-auxiliary-header:last-child {
+  border-bottom: none;
+}
+
 .route-auxiliary-title-wrap {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.route-auxiliary-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .route-auxiliary-title {
@@ -837,7 +971,14 @@
 
 .route-auxiliary-subtitle {
   font-size: 11.5px;
+  line-height: 1.5;
   color: var(--mac-text-secondary);
+}
+
+.route-auxiliary-action {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 .route-auxiliary-grid {

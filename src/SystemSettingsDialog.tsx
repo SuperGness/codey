@@ -1,8 +1,10 @@
 import { memo, useEffect, useState } from "react";
+import { Tabs } from "@heroui/react";
 import {
   IconCheck,
   IconCopy,
   IconFolder,
+  IconHelpCircle,
   IconLoader2 as LoaderCircle,
   IconSettings,
   IconTool,
@@ -16,10 +18,10 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  Switch,
   Tooltip,
 } from "./components/ui";
 import { invoke } from "./api";
+import type { Config } from "./App.types";
 
 export type SystemSettingsDialogProps = {
   open: boolean;
@@ -32,8 +34,8 @@ export type SystemSettingsDialogProps = {
   busy: string | null;
   onRepairCodexConfig: () => void;
   configRepairNotice?: { tone: "info" | "success" | "error"; text: string } | null;
-  autoCheckCodeyUpdates: boolean;
-  onAutoCheckCodeyUpdatesChange: (checked: boolean) => void;
+  codeyUpdatePolicy: Config["codeyUpdatePolicy"];
+  onCodeyUpdatePolicyChange: (policy: Config["codeyUpdatePolicy"]) => void;
 };
 
 function SystemSettingsDialogComponent({
@@ -47,8 +49,8 @@ function SystemSettingsDialogComponent({
   busy,
   onRepairCodexConfig,
   configRepairNotice,
-  autoCheckCodeyUpdates,
-  onAutoCheckCodeyUpdatesChange,
+  codeyUpdatePolicy,
+  onCodeyUpdatePolicyChange,
 }: SystemSettingsDialogProps) {
   const [copied, setCopied] = useState(false);
   const [machineNo, setMachineNo] = useState<string | null>(null);
@@ -261,18 +263,31 @@ function SystemSettingsDialogComponent({
             )}
           </div>
 
-          {/* 自动检查更新开关 */}
-          <div className="flex items-center justify-between gap-3 rounded-xl border border-[var(--codey-border-subtle)] bg-[var(--codey-surface-muted)] p-3">
-            <span id="system-settings-auto-update-label" className="text-xs font-semibold text-[var(--codey-text)]">
-              自动检查 Codey 更新
-            </span>
-            <Switch
-              size="sm"
-              aria-labelledby="system-settings-auto-update-label"
-              checked={autoCheckCodeyUpdates}
-              disabled={isBusy}
-              onCheckedChange={onAutoCheckCodeyUpdatesChange}
-            />
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--codey-border-subtle)] bg-[var(--codey-surface-muted)] p-3">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="text-xs font-semibold text-[var(--codey-text)]">Codey 更新策略</span>
+              <Tooltip content="保存后生效。不检查仅关闭自动检查，仍可手动检查稳定版。" position="top">
+                <span
+                  className="inline-flex shrink-0 cursor-help items-center text-[var(--codey-muted)] transition-colors hover:text-[var(--codey-text)]"
+                  aria-label="Codey 更新策略说明"
+                >
+                  <IconHelpCircle size={14} aria-hidden="true" />
+                </span>
+              </Tooltip>
+            </div>
+            <Tabs
+              selectedKey={codeyUpdatePolicy}
+              onSelectionChange={(key) => onCodeyUpdatePolicyChange(String(key) as Config["codeyUpdatePolicy"])}
+              className="shrink-0"
+            >
+              <Tabs.ListContainer>
+                <Tabs.List aria-label="Codey 更新策略">
+                  <Tabs.Tab id="off" isDisabled={isBusy} className="text-xs">不检查<Tabs.Indicator /></Tabs.Tab>
+                  <Tabs.Tab id="stable" isDisabled={isBusy} className="text-xs">稳定版<Tabs.Indicator /></Tabs.Tab>
+                  <Tabs.Tab id="experimental" isDisabled={isBusy} className="text-xs">实验版<Tabs.Indicator /></Tabs.Tab>
+                </Tabs.List>
+              </Tabs.ListContainer>
+            </Tabs>
           </div>
         </div>
 
