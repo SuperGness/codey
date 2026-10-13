@@ -2,7 +2,6 @@
 // main.tsx via a dynamic import that only exists in Vite dev builds, so this
 // module never ships in the production overlay.
 import type { ProviderStatus, Config, ModelState, OfficialAccount, Profile } from "../App.types";
-import type { QuotaUsage, QuotaUsageAggregate } from "../quotaEstimate";
 import { pluginConfigBusinessValuesEqual, validatePluginConfigText, type CodeyPlugin } from "../codeyPlugins";
 import { createCodexExtensionsPreview } from "./codexExtensionsMock";
 import {
@@ -20,6 +19,21 @@ import {
   previewCrashpadPendingStats,
   previewTraceLogStats,
 } from "../previewTraceLogStats";
+
+function eligiblePreviewOutputDurationMs(item: {
+  outputTokens?: number | null;
+  totalDurationMs: number;
+  routerPreUpstreamMs?: number | null;
+  upstreamFirstByteMs?: number | null;
+}) {
+  const { outputTokens, totalDurationMs, routerPreUpstreamMs, upstreamFirstByteMs } = item;
+  if (outputTokens == null || !Number.isFinite(outputTokens) || outputTokens < 100
+    || !Number.isFinite(totalDurationMs) || totalDurationMs < 0
+    || routerPreUpstreamMs == null || !Number.isFinite(routerPreUpstreamMs) || routerPreUpstreamMs < 0
+    || upstreamFirstByteMs == null || !Number.isFinite(upstreamFirstByteMs) || upstreamFirstByteMs < 0) return undefined;
+  const durationMs = totalDurationMs - routerPreUpstreamMs - upstreamFirstByteMs;
+  return durationMs >= 100 ? durationMs : undefined;
+}
 
 // 在 Vite 开发模式下，若未通过 Codey Bridge/Token 访问，自动注入 Mock 接口方便 UI 调试
 if (import.meta.env.DEV) {
@@ -251,8 +265,8 @@ if (import.meta.env.DEV) {
       showAccountUsageInHeader: true,
     };
     let previewOfficialAccounts: OfficialAccount[] = [
-      { id: "acct_preview_1", email: "preview@example.com", planType: "pro", accountId: "acct_preview_1", addedAt: 1_757_000_000, isDefault: true },
-      { id: "acct_preview_2", email: "backup@example.com", planType: "plus", accountId: "acct_preview_2", addedAt: 1_757_100_000, isDefault: false, routeName: "备用官方线路", routeShortName: "备2" },
+      { id: "acct_preview_1", email: "preview@example.com", planType: "pro", accountId: "acct_preview_1", addedAt: 1_757_000_000, isDefault: true, siwcStatus: "active" },
+      { id: "acct_preview_2", email: "backup@example.com", planType: "plus", accountId: "acct_preview_2", addedAt: 1_757_100_000, isDefault: false, routeName: "备用官方线路", routeShortName: "备2", siwcStatus: "invalid", siwcInvalidReason: "官方直连授权已被撤销，需要重新授权" },
       // 预览失效账号：卡片标红、隐藏切换默认入口，额度显示失效原因。
       { id: "acct_preview_3", email: "blocked@example.com", planType: "plus", accountId: "acct_preview_3", addedAt: 1_757_200_000, isDefault: false, invalid: true, invalidReason: "官方已撤销该账号的登录凭据，需要重新添加账号" },
     ];
@@ -427,7 +441,7 @@ if (import.meta.env.DEV) {
       | undefined = previewCrashpadPendingStats;
     const previewRouteRequestLogs = Array.from({ length: 47 }, (_, index) => {
       // 预览里按线路区分官方与第三方请求，官方请求额外带上账号，方便核对
-      // 请求日志的账号筛选和周限估算的分账号统计。
+      // 请求日志的账号筛选和分账号统计。
       const account = index % 3 === 2
         ? previewOfficialAccounts[index % previewOfficialAccounts.length]
         : null;
@@ -438,10 +452,19 @@ if (import.meta.env.DEV) {
       const outputTokens = failed ? undefined : 240 + index * 29;
       const cachedInputTokens = index % 4 === 0 ? 640 + index * 11 : undefined;
       const codexSessionIsParent = index % 8 === 0;
+      // 缺少路由前置或上游首包计时的记录保持未知；下游内容延迟不参与速度计算。
+      const missingRouterTiming = index % 11 === 7;
+      const missingUpstreamTiming = index % 11 === 8;
+      const buffered = index === 0;
       const ttftMs = failed ? undefined : 190 + index * 13;
-      const downstreamFirstContentMs = failed ? undefined : 215 + index * 14;
-      const totalDurationMs = failed ? 1_640 + index * 31 : 2_350 + index * 91;
-      const outputDurationMs = totalDurationMs - (downstreamFirstContentMs ?? ttftMs ?? totalDurationMs);
+      const downstreamFirstContentMs = failed ? undefined : buffered ? 112_374 : 215 + index * 14;
+      const totalDurationMs = buffered ? 112_480 : failed ? 1_640 + index * 31 : 2_350 + index * 91;
+      const routerPreUpstreamMs = failed || missingRouterTiming ? undefined : buffered ? 23 : 12 + index;
+      const upstreamFirstByteMs = failed || missingUpstreamTiming ? undefined : buffered ? 1_992 : 190 + index * 13;
+      const recordedOutputTokens = buffered ? 18_728 : outputTokens;
+      const outputDurationMs = eligiblePreviewOutputDurationMs({
+        outputTokens: recordedOutputTokens, totalDurationMs, routerPreUpstreamMs, upstreamFirstByteMs,
+      });
       return {
         requestId: `preview-request-${String(index + 1).padStart(4, "0")}`,
         traceId: `preview-trace-${String(index + 1).padStart(4, "0")}`,
@@ -467,20 +490,20 @@ if (import.meta.env.DEV) {
         reasoningEffort: (["low", "medium", "high"] as const)[index % 3],
         thinkingBudgetTokens: undefined,
         ttftMs,
-        routerPreUpstreamMs: failed ? undefined : 12 + index,
-        upstreamFirstByteMs: failed ? undefined : 190 + index * 13,
+        routerPreUpstreamMs,
+        upstreamFirstByteMs,
         downstreamFirstContentMs,
         upstreamHeaderMs: 120 + index * 8,
         totalDurationMs,
-        outputTokensPerSecond: outputTokens != null && outputTokens > 0 && outputDurationMs > 0
-          ? outputTokens * 1_000 / outputDurationMs : undefined,
+        outputTokensPerSecond: recordedOutputTokens != null && outputDurationMs != null
+          ? recordedOutputTokens * 1_000 / outputDurationMs : undefined,
         queueDelayMs: index % 5,
         inputTokens: failed ? undefined : inputTokens,
-        outputTokens,
+        outputTokens: recordedOutputTokens,
         cachedInputTokens: failed ? undefined : cachedInputTokens,
         cacheCreationInputTokens: undefined,
-        reasoningOutputTokens: outputTokens ? Math.floor(outputTokens / 4) : undefined,
-        totalTokens: failed ? undefined : inputTokens + (outputTokens ?? 0),
+        reasoningOutputTokens: recordedOutputTokens ? Math.floor(recordedOutputTokens / 4) : undefined,
+        totalTokens: failed ? undefined : inputTokens + (recordedOutputTokens ?? 0),
         usageReported: !failed,
         usageUnavailableReason: failed ? "upstream_error" : undefined,
         requestProtocol: protocol,
@@ -879,6 +902,35 @@ if (import.meta.env.DEV) {
         const available = previewOfficialAccounts.some((account) => account.isDefault);
         return { status: "ok", accounts: previewOfficialAccounts, defaultAccountId: previewDefaultOfficialAccountId(), officialAccountAvailable: available, config: previewConfig, modelState: previewModelState, restartRequired: false, ...(removed?.isDefault && !available ? { warning: "当前没有默认官方账号，官方线路已停用" } : {}) };
       }
+      if (command === "start_official_account_siwc") {
+        return { status: "wait", loginId: `preview-siwc-login-${args.accountId}`, authUrl: "https://auth.openai.com/api/accounts/authorize?client_id=dynamic_agent_client&state=preview", browserOpened: true };
+      }
+      if (command === "poll_official_account_siwc") {
+        previewOfficialLoginPolls += 1;
+        if (previewOfficialLoginPolls < 3) return { status: "wait" };
+        previewOfficialLoginPolls = 0;
+        const target = previewOfficialAccounts.find((account) => `preview-siwc-login-${account.id}` === args.loginId)
+          ?? previewOfficialAccounts.find((account) => account.siwcStatus === "invalid" || account.siwcStatus === "none" || !account.siwcStatus);
+        if (target) {
+          target.siwcStatus = "active";
+          delete target.siwcInvalidReason;
+        }
+        previewDeriveOfficialProfiles();
+        return { status: "ok", accounts: previewOfficialAccounts, defaultAccountId: previewDefaultOfficialAccountId(), officialAccountAvailable: true, config: previewConfig, modelState: previewModelState, restartRequired: false };
+      }
+      if (command === "cancel_official_account_siwc") {
+        previewOfficialLoginPolls = 0;
+        return { status: "ok" };
+      }
+      if (command === "remove_official_account_siwc") {
+        const target = previewOfficialAccounts.find((account) => account.id === args.accountId);
+        if (target) {
+          target.siwcStatus = "none";
+          delete target.siwcInvalidReason;
+        }
+        previewDeriveOfficialProfiles();
+        return { status: "ok", accounts: previewOfficialAccounts, defaultAccountId: previewDefaultOfficialAccountId(), officialAccountAvailable: true, config: previewConfig, modelState: previewModelState, restartRequired: false };
+      }
       if (command === "save_official_account_route_settings") {
         const account = previewOfficialAccounts.find((item) => item.id === args.accountId);
         if (!account) return { status: "failed", message: "找不到官方账号" };
@@ -925,7 +977,7 @@ if (import.meta.env.DEV) {
           usedPercent: 20 + seed, windowMinutes: 10080, resetsAt: fetchedAt + 3 * 86400,
         } };
       }
-      if (command === "query_route_request_logs" || command === "query_route_request_log_stats" || command === "query_route_request_log_models" || command === "query_route_request_log_quota_usage") {
+      if (command === "query_route_request_logs" || command === "query_route_request_log_stats" || command === "query_route_request_log_models") {
         const page = Math.max(1, Number(args.page) || 1);
         const pageSize = Math.min(100, Math.max(1, Number(args.pageSize) || 20));
         const search = String(args.search || "").trim().toLocaleLowerCase();
@@ -963,35 +1015,6 @@ if (import.meta.env.DEV) {
           ].some((value) => value?.toLocaleLowerCase().includes(search));
         });
         filtered.sort((left, right) => right.timestampUnixMs - left.timestampUnixMs || right.requestId.localeCompare(left.requestId));
-        if (command === "query_route_request_log_quota_usage") {
-          const groups = new Map<string, QuotaUsageAggregate>();
-          for (const item of filtered) {
-            const usage: QuotaUsage = item;
-            const model = item.model?.trim() || item.requestedModel?.trim() || "未知模型";
-            const serviceTier = usage.serviceTier?.trim() || null;
-            const requestedServiceTier = usage.requestedServiceTier?.trim() || null;
-            const input = item.inputTokens ?? 0, cached = item.cachedInputTokens ?? 0;
-            const writes = item.cacheCreationInputTokens ?? 0;
-            const longContext = input > 272_000;
-            const key = JSON.stringify([model.toLowerCase(), serviceTier, requestedServiceTier, longContext]);
-            const group = groups.get(key) ?? { model, serviceTier, requestedServiceTier, longContext,
-              calls: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, cachedInputTokens: 0,
-              cacheCreationInputTokens: 0, cacheHits: 0, missingUsage: 0, missingCacheCreation: 0,
-              billedCachedInputTokens: 0, billedCacheCreationInputTokens: 0 };
-            group.calls++; group.inputTokens += input; group.outputTokens += item.outputTokens ?? 0;
-            group.totalTokens += item.totalTokens ?? 0; group.cachedInputTokens += cached;
-            group.cacheCreationInputTokens += writes; group.cacheHits += Number(cached > 0);
-            group.missingUsage += Number(item.inputTokens == null || item.outputTokens == null || item.totalTokens == null);
-            group.missingCacheCreation += Number(item.cacheCreationInputTokens == null);
-            const billedCached = Math.min(input, cached);
-            group.billedCachedInputTokens += billedCached;
-            group.billedCacheCreationInputTokens += Math.min(input - billedCached, writes);
-            groups.set(key, group);
-          }
-          return { queryable: true, groups: [...groups.values()], totalCalls: filtered.length,
-            recordingHealth: { active: true, sampleRatePerMillion: 1_000_000,
-              droppedFull: 0, droppedClosed: 0, writeDropped: 0, writeFailures: 0 } };
-        }
         if (command === "query_route_request_log_models") {
           const models = [...new Set(filtered.map((item) => item.model ?? item.requestedModel))]
             .filter((model) => model && (!args.afterModel || model > String(args.afterModel))).sort();
@@ -1007,13 +1030,15 @@ if (import.meta.env.DEV) {
             const succeededCount = rows.filter((item) => item.status === "succeeded").length;
             const durations = rows.map((item) => item.totalDurationMs);
             const ttfts = rows.map((item) => item.downstreamFirstContentMs ?? item.ttftMs).filter((value): value is number => value != null);
-            const outputSpeeds = rows.map((item) => item.outputTokensPerSecond).filter((value): value is number => value != null && Number.isFinite(value) && value > 0);
+            const eligibleSpeeds = rows.filter((item) => eligiblePreviewOutputDurationMs(item) != null);
+            const speedTokens = sum(eligibleSpeeds.map((item) => item.outputTokens));
+            const speedDurationMs = sum(eligibleSpeeds.map((item) => eligiblePreviewOutputDurationMs(item)));
             return {
               total, succeededCount, failedCount: total - succeededCount, incompleteCount: 0, cancelledCount: 0,
               successRate: total ? succeededCount / total * 100 : null,
               avgDuration: total ? sum(durations)! / total : null,
               avgTtft: ttfts.length ? sum(ttfts)! / ttfts.length : null,
-              avgOutputTokensPerSecond: outputSpeeds.length ? sum(outputSpeeds)! / outputSpeeds.length : null,
+              avgOutputTokensPerSecond: speedTokens != null && speedDurationMs != null && speedDurationMs > 0 ? speedTokens * 1_000 / speedDurationMs : null,
               avgRouterPreUpstream: null, avgUpstreamHeader: null, avgUpstreamFirstByte: null,
               avgDownstreamFirstContent: ttfts.length ? sum(ttfts)! / ttfts.length : null, avgQueueDelay: null,
               inputTokensSum: sum(rows.map((item) => item.inputTokens)),

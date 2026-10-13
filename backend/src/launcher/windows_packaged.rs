@@ -853,11 +853,23 @@ mod tests {
 
     #[test]
     fn journal_serializes_live_launches_and_releases_lock_on_drop() {
+        use std::time::{Duration, Instant};
+
         let directory = tempfile::tempdir().unwrap();
         let first = LaunchJournal::acquire(directory.path()).unwrap();
         assert!(LaunchJournal::acquire(directory.path()).is_err());
         drop(first);
-        assert!(LaunchJournal::acquire(directory.path()).is_ok());
+        // 并行测试可能短暂耗尽文件描述符，重试有上限，仍要求锁被及时释放。
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match LaunchJournal::acquire(directory.path()) {
+                Ok(_) => break,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("启动锁未在释放后及时恢复：{error:#}"),
+            }
+        }
     }
 
     #[test]

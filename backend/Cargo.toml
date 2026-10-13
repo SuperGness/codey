@@ -45,6 +45,7 @@ memchr = "2"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 regex = "1"
 reqwest = { workspace = true, features = ["socks", "gzip"] }
+ring = "0.17"
 rusqlite = { workspace = true, features = ["hooks"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 semver = "1"
@@ -56,7 +57,6 @@ tokio = { workspace = true, features = ["io-std", "io-util", "net", "signal", "s
 tokio-tungstenite.workspace = true
 toml_edit.workspace = true
 uuid.workspace = true
-unicode-normalization = "0.1"
 webpki-roots = "0.26"
 zstd = "0.13"
 

@@ -47,10 +47,9 @@ test("request log cache hit rate uses input tokens and preserves unknown usage",
 });
 
 test("request log output speed uses one decimal and preserves unknown values", async () => {
-  const [viewer, usage, preview] = await Promise.all([
+  const [viewer, usage] = await Promise.all([
     readSource("src/RequestLogDialog.tsx"),
     readSource("src/usageAnalysis.ts"),
-    readSource("src/dev/mockApi.ts"),
   ]);
   const source = viewer.match(/function formatTokensPerSecond\([\s\S]*?\n\}/)?.[0];
   assert.ok(source);
@@ -65,13 +64,49 @@ test("request log output speed uses one decimal and preserves unknown values", a
   assert.match(viewer, /outputTokensPerSecond\?: number \| null;/);
   assert.match(viewer, /速度<\/span>[\s\S]*?formatTokensPerSecond\(item\.outputTokensPerSecond\)/);
   assert.match(viewer, /输出速度<\/span>[\s\S]*?formatTokensPerSecond\(selectedItem\.outputTokensPerSecond\)/);
-  assert.match(viewer, /平均总耗时 \{formatDuration\(stats\.avgDuration\)\} · 平均输出 \{formatTokensPerSecond\(stats\.avgOutputTokensPerSecond\)\}/);
-  assert.match(viewer, /hidden md:inline">速度:[\s\S]*?formatTokensPerSecond\(stats\.avgOutputTokensPerSecond\)/);
+  assert.match(viewer, /平均总耗时 \{formatDuration\(stats\.avgDuration\)\} · <span[^>]*>平均输出 \{formatTokensPerSecond\(stats\.avgOutputTokensPerSecond\)\}/);
+  assert.match(viewer, /hidden md:inline"[^>]*>速度:[\s\S]*?formatTokensPerSecond\(stats\.avgOutputTokensPerSecond\)/);
   assert.equal((usage.match(/avgOutputTokensPerSecond: number \| null/g) ?? []).length, 2);
-  assert.match(preview, /totalDurationMs - \(downstreamFirstContentMs \?\? ttftMs \?\? totalDurationMs\)/);
-  assert.match(preview, /outputTokensPerSecond: outputTokens != null && outputTokens > 0 && outputDurationMs > 0/);
-  assert.match(preview, /outputTokens \* 1_000 \/ outputDurationMs : undefined/);
-  assert.match(preview, /avgOutputTokensPerSecond: outputSpeeds\.length \? sum\(outputSpeeds\)! \/ outputSpeeds\.length : null/);
+});
+
+test("request log preview measures all output after the upstream first byte and aggregates by duration", async () => {
+  const preview = await readSource("src/dev/mockApi.ts");
+  const durationSource = preview.match(/function eligiblePreviewOutputDurationMs\([\s\S]*?\n\}\n/)?.[0];
+  const rowsSource = preview.match(/const previewRouteRequestLogs = Array\.from\([\s\S]*?\n    \}\);/)?.[0];
+  const aggregateSource = preview.match(/const aggregate = \(rows: typeof filtered\) => \{[\s\S]*?\n          \};/)?.[0];
+  for (const source of [durationSource, rowsSource, aggregateSource]) assert.ok(source);
+  const compiled = ts.transpileModule([
+    "const previewOfficialAccounts = [];",
+    durationSource, rowsSource, aggregateSource,
+  ].join("\n"), {}).outputText;
+  const { duration, rows, aggregate } = new Function(`${compiled}; return {
+    duration: eligiblePreviewOutputDurationMs, rows: previewRouteRequestLogs, aggregate,
+  };`)();
+  const buffered = rows[0];
+  assert.equal(duration(buffered), 110_465);
+  assert.equal(buffered.outputTokensPerSecond.toFixed(1), "169.5");
+  assert.ok(buffered.reasoningOutputTokens > 0);
+  assert.equal(buffered.outputTokensPerSecond, buffered.outputTokens * 1_000 / duration(buffered));
+  assert.equal(rows[7].outputTokensPerSecond, undefined);
+  assert.equal(rows[8].outputTokensPerSecond, undefined);
+  const base = { outputTokens: 100, totalDurationMs: 300, routerPreUpstreamMs: 50, upstreamFirstByteMs: 150 };
+  assert.equal(duration(base), 100);
+  assert.equal(duration({ ...base, downstreamFirstContentMs: null, ttftMs: 299 }), 100);
+  for (const changes of [
+    { outputTokens: 99 }, { outputTokens: null }, { outputTokens: NaN },
+    { routerPreUpstreamMs: null }, { upstreamFirstByteMs: undefined },
+    { routerPreUpstreamMs: -1 }, { upstreamFirstByteMs: -1 },
+    { totalDurationMs: -1 }, { totalDurationMs: Infinity },
+    { routerPreUpstreamMs: NaN }, { upstreamFirstByteMs: Infinity },
+    { totalDurationMs: 299 }, { upstreamFirstByteMs: 301 },
+  ]) assert.equal(duration({ ...base, ...changes }), undefined);
+  const short = { ...rows[1], ...base, outputTokensPerSecond: 1_000 };
+  const invalid = { ...short, upstreamFirstByteMs: null, outputTokens: 999_999 };
+  const expected = (buffered.outputTokens + short.outputTokens) * 1_000 / (110_465 + 100);
+  assert.equal(aggregate([buffered, short, invalid]).avgOutputTokensPerSecond, expected);
+  assert.notEqual(expected, (buffered.outputTokensPerSecond + short.outputTokensPerSecond) / 2);
+  assert.equal(aggregate([invalid]).avgOutputTokensPerSecond, null);
+  assert.equal(aggregate([]).avgOutputTokensPerSecond, null);
 });
 
 test("request log model cell shows the model sent upstream and the upstream model when it differs", async () => {
@@ -224,11 +259,9 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /请求日志加载失败/);
   assert.match(viewer, /没有匹配的请求日志/);
   for (const heading of [
-    "时间 / 请求 ID",
-    "会话 ID",
+    "时间 / 标识",
     "供应商 / 上游",
-    "模型",
-    "思考强度",
+    "模型 / 思考",
     "上游协议",
     "状态",
     "耗时",
@@ -277,10 +310,9 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /codexSessionId\?: string \| null/);
   assert.match(viewer, /codexSessionIsParent\?: boolean \| null/);
   assert.match(viewer, /item\.codexSessionIsParent[\s\S]*父/);
-  assert.match(viewer, /flex w-36 max-w-36 items-center gap-1\.5 overflow-hidden/);
-  assert.match(viewer, /className="shrink-0 whitespace-nowrap"/);
-  assert.match(viewer, /onClick=\{\(\) => handleCopyId\(item\.codexSessionId!\)\}/);
-  assert.match(viewer, /navigator\.clipboard\.writeText\(requestId\)\.then\([\s\S]*setCopiedId\(requestId\)/);
+  assert.match(viewer, /<CopyIdButton\s+id=\{item\.codexSessionId\}/);
+  assert.match(viewer, /onCopy=\{\(id, copiedKey\) => handleCopyId\(id, \{ copiedKey \}\)\}/);
+  assert.match(viewer, /navigator\.clipboard\.writeText\(requestId\)\.then\([\s\S]*setCopiedId\(options\?\.copiedKey \?\? requestId\)/);
   assert.match(viewer, /复制\$\{item\.codexSessionIsParent \? "父会话" : "会话"\} ID/);
   assert.match(viewer, /setCopyToast\(\{/);
   assert.match(viewer, /role="status"/);

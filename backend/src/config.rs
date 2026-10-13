@@ -68,6 +68,11 @@ pub struct ProviderProfile {
     /// account. Every stored account owns exactly one derived official route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub official_account_id: Option<String>,
+    /// 该官方账号当前持有可用的 SIWC（官方直连）凭据；由账号同步写入。
+    /// 直连线路只走 OpenAI 公开 API，backend-api 专属能力（WS 传输、远程
+    /// 压缩等）随之关闭，凭据失效时回落到 Codex 通道。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub official_siwc: bool,
     /// Preserve the exact Codex provider identity required for remote
     /// compaction when it was explicitly enabled by the source configuration.
     #[serde(default)]
@@ -238,6 +243,7 @@ impl ProviderProfile {
             plugin_route_spec: None,
             official_account: false,
             official_account_id: None,
+            official_siwc: false,
             supports_remote_compaction: false,
             remote_compaction_protocol: RemoteCompactionProtocol::default(),
             supports_websockets: false,
@@ -333,6 +339,7 @@ impl ProviderProfile {
             self.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
         } else {
             self.official_account = false;
+            self.official_siwc = false;
             if self.upstream_protocol == UPSTREAM_PROTOCOL_OFFICIAL {
                 self.upstream_protocol = UPSTREAM_PROTOCOL_OPENAI_RESPONSES.to_string();
             }
@@ -1690,7 +1697,8 @@ impl CodeyConfig {
             return false;
         }
         if profile.official_account {
-            return self.official_route_usable(profile);
+            // SIWC 直连只提供公开 API 的 HTTP Responses，没有上游 WS。
+            return self.official_route_usable(profile) && !profile.official_siwc;
         }
         profile.supports_websockets
             && profile.upstream_protocol == UPSTREAM_PROTOCOL_OPENAI_RESPONSES
@@ -1827,7 +1835,9 @@ impl CodeyConfig {
             return false;
         }
         if profile.official_account {
-            return self.official_route_usable(profile);
+            // 远程压缩走 Codex backend-api 的 /responses/compact，SIWC 直连
+            // 线路没有该端点。
+            return self.official_route_usable(profile) && !profile.official_siwc;
         }
         profile.supports_remote_compaction
             && profile.upstream_protocol == UPSTREAM_PROTOCOL_OPENAI_RESPONSES

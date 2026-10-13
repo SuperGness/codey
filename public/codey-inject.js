@@ -103,6 +103,9 @@
   const taskListSectionHeadings = new Set(["task", "tasks", "recent", "recents", "任务", "最近"]);
   const threadRunningLossGraceMs = 2_000;
   const threadTimestampRefreshIntervalMs = 60_000;
+  // 桥接应答丢失（如注入重试期间桥接被重装）时不能永久占住 inFlight，
+  // 一次超时置失败后按常规周期重试即可。
+  const threadTimestampFetchTimeoutMs = 10_000;
   const completedTaskReconcileIntervalMs = 15_000;
   const threadTimestampBridgePath = "/session/timestamps";
   const maxPendingThreadTimestampRefs = 200;
@@ -1758,7 +1761,11 @@
     threadUpdatedAtFetchInFlight = true;
     try {
       const sessionIds = [...new Set(refs.map(({ sessionId }) => sessionId))];
-      const result = await callBridge(threadTimestampBridgePath, { sessionIds });
+      const result = await callBridge(
+        threadTimestampBridgePath,
+        { sessionIds },
+        { timeoutMs: threadTimestampFetchTimeoutMs },
+      );
       if (disposed) return;
       if (result?.status !== "ok" || !result.timestamps || typeof result.timestamps !== "object") {
         throw new Error(result?.message || "Codey thread timestamp bridge is unavailable");
@@ -2307,7 +2314,9 @@
     const state = capabilityProbes.get(feature) || { failures: 0, retryAt: 0, pending: null };
     capabilityProbes.set(feature, state);
     if (state.pending) return state.pending;
-    if (Date.now() < state.retryAt) throw unavailableCapability(feature);
+    // modelRouting 的调用方只有请求入口校验，重试节奏由宿主注入流程控制；
+    // 这里套用指数退避会让一次早期探测失败冻结后续所有注入尝试。
+    if (feature !== "modelRouting" && Date.now() < state.retryAt) throw unavailableCapability(feature);
     const discover = () => discoverCodexSessionController(feature);
     // MCP 刷新由宿主 CDP 预算约束；5 秒发现上限会让慢机或尚未 hydrate 的
     // 页面在导入/启停后误报失败，只能重启 Codex。

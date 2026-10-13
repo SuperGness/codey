@@ -268,6 +268,10 @@ pub(crate) fn official_models_base_url(
         return account_base_url
             .unwrap_or_else(|| crate::codex_config::CHATGPT_CODEX_BASE_URL.to_string());
     }
+    // SIWC 目录只来自公开 API；账号保存的自定义网关是 Codex 平面的设置。
+    if profile.official_siwc {
+        return crate::official_accounts::SIWC_BASE_URL.to_string();
+    }
     account_base_url.unwrap_or_else(|| crate::codex_provider::official_route_base_url(profile))
 }
 
@@ -306,19 +310,42 @@ pub(crate) async fn fetch_official_route_models(
     profile: &ProviderProfile,
 ) -> Result<Vec<Value>, String> {
     let record = official_models_account(state, profile).await?;
-    let access_token = record
-        .auth
-        .get("tokens")
-        .and_then(|tokens| tokens.get("access_token"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .ok_or_else(|| "官方账号登录信息缺少访问令牌".to_string())?;
-    let base_url = official_models_base_url(profile, record.base_url.as_deref());
+    // SIWC 直连目录只反映公开 API 实际可用的模型：用 SIWC access token 打
+    // `/v1/models`，不带 client_version 参数和 backend-api 专用请求头。
+    let siwc = record
+        .siwc
+        .as_ref()
+        .filter(|_| profile.official_siwc && record.siwc_active());
+    let access_token = match siwc {
+        Some(siwc) => siwc.access_token.trim().to_string(),
+        None => record
+            .auth
+            .get("tokens")
+            .and_then(|tokens| tokens.get("access_token"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(ToString::to_string)
+            .ok_or_else(|| "官方账号登录信息缺少访问令牌".to_string())?,
+    };
+    if access_token.is_empty() {
+        return Err("官方直连凭据缺少访问令牌".to_string());
+    }
+    // SIWC 凭据在 profile 标记之后失效时，目录跟随回落到 Codex 平面，
+    // 不能把 Codex 令牌发给公开 API 的地址。
+    let base_url = if siwc.is_some() {
+        crate::official_accounts::SIWC_BASE_URL.to_string()
+    } else {
+        official_models_base_url(profile, record.base_url.as_deref())
+    };
     let base_url = base_url.trim().trim_end_matches('/');
     let codex_app_path = state.config.read().await.codex_app_path.clone();
     let client_version = installed_codex_client_version(&codex_app_path);
-    let endpoint = official_models_endpoint(base_url, client_version.as_deref());
+    let endpoint = if siwc.is_some() {
+        format!("{base_url}/models")
+    } else {
+        official_models_endpoint(base_url, client_version.as_deref())
+    };
     let client = if profile.upstream_proxy.trim().is_empty() {
         state.http_client.clone()
     } else {
@@ -336,10 +363,12 @@ pub(crate) async fn fetch_official_route_models(
         .get(endpoint)
         .timeout(std::time::Duration::from_secs(20))
         .header("accept", "application/json")
-        .header("user-agent", "codex_cli_rs")
         .bearer_auth(access_token);
-    if let Some(chatgpt_account_id) = record.account_id.as_deref() {
-        request = request.header("chatgpt-account-id", chatgpt_account_id);
+    if siwc.is_none() {
+        request = request.header("user-agent", "codex_cli_rs");
+        if let Some(chatgpt_account_id) = record.account_id.as_deref() {
+            request = request.header("chatgpt-account-id", chatgpt_account_id);
+        }
     }
     let response = request
         .send()
@@ -351,6 +380,19 @@ pub(crate) async fn fetch_official_route_models(
             .await
             .map_err(|error| error.to_string())?;
     if !status.is_success() {
+        // 401 说明直连凭据已被官方拒绝（撤销或轮换过期），标记后路由回落
+        // 到 Codex 平面；限流等其他错误不动凭据状态。
+        if siwc.is_some() && status == reqwest::StatusCode::UNAUTHORIZED {
+            let store = state.official_accounts();
+            let account_id = record.id.clone();
+            if let Ok(Ok(true)) = tokio::task::spawn_blocking(move || {
+                store.mark_siwc_invalid(&account_id, "官方直连凭据被官方拒绝，请重新授权")
+            })
+            .await
+            {
+                crate::official_accounts::notify_siwc_invalidated(&record.id);
+            }
+        }
         return Err(format!("官方模型列表接口返回 {status}"));
     }
     let payload: Value = serde_json::from_slice(&body)
@@ -361,6 +403,14 @@ pub(crate) async fn fetch_official_route_models(
         .cloned()
         .unwrap_or_default()
         .into_iter()
+        // SIWC 目录只接受 visibility=list 的条目；其它平面的目录不额外过滤。
+        .filter(|model| {
+            siwc.is_none()
+                || model
+                    .get("visibility")
+                    .and_then(Value::as_str)
+                    .is_none_or(|visibility| visibility == "list")
+        })
         .filter(|model| {
             model
                 .get("slug")
@@ -373,6 +423,12 @@ pub(crate) async fn fetch_official_route_models(
                 && let Some(id) = model.get("id").cloned()
             {
                 model["slug"] = id;
+            }
+            // SIWC 条目带 display_name；对齐目录现有字段名。
+            if model.get("display_name").and_then(Value::as_str).is_none()
+                && let Some(name) = model.get("name").cloned()
+            {
+                model["display_name"] = name;
             }
             model
         })
@@ -642,6 +698,24 @@ mod tests {
         assert_eq!(
             official_models_base_url(&profile, Some("https://gateway.example/codex/")),
             "https://gateway.example/codex"
+        );
+    }
+
+    #[test]
+    fn siwc_route_lists_models_on_the_public_api() {
+        let mut profile = ProviderProfile::new("官方直连");
+        profile.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+        profile.id = official_profile_id("acct-siwc");
+        profile.official_siwc = true;
+        profile.normalize();
+        // 自定义网关只对 Codex 平面生效，SIWC 目录固定走公开 API。
+        assert_eq!(
+            official_models_base_url(&profile, Some("https://gateway.example/codex/")),
+            crate::official_accounts::SIWC_BASE_URL
+        );
+        assert_eq!(
+            official_models_base_url(&profile, None),
+            crate::official_accounts::SIWC_BASE_URL
         );
     }
 

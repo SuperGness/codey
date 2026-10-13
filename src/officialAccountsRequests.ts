@@ -18,10 +18,6 @@ export function rememberOfficialAccounts(result: OfficialAccountsResult) {
   };
 }
 
-export function invalidateOfficialAccounts() {
-  cache = {};
-}
-
 export function listOfficialAccounts(options?: { force?: boolean }) {
   const force = options?.force === true;
   if (!force && cache.result && cache.expiresAt && Date.now() < cache.expiresAt) {

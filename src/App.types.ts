@@ -190,6 +190,9 @@ export type OfficialAccount = {
   baseUrl?: string;
   invalid?: boolean;
   invalidReason?: string;
+  /** 官方直连（SIWC）凭据状态：none 未启用 / active 可用 / invalid 已失效。 */
+  siwcStatus?: "none" | "active" | "invalid";
+  siwcInvalidReason?: string;
   isDefault: boolean;
 };
 
@@ -280,7 +283,9 @@ export type Confirmation = {
     | "discard-settings-changes"
     | "delete-notification-channel"
     | "delete-route"
-    | "delete-official-account";
+    | "delete-official-account"
+    | "disable-official-account-siwc"
+    | "set-default-official-account";
   title: string;
   description: string;
   releaseNotes?: string;

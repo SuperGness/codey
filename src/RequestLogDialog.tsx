@@ -1,5 +1,5 @@
 import type React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Alert, CloseButton, Drawer, Pagination, Spinner, Table } from "@heroui/react";
 import { UNSAFE_PortalProvider } from "react-aria";
 import {
@@ -10,6 +10,7 @@ import {
   IconChevronUp,
   IconCopy,
   IconDatabaseOff,
+  IconHierarchy,
   IconLoader2,
   IconQuestionMark,
   IconRefresh,
@@ -27,7 +28,6 @@ import { errorText } from "./appUtils";
 import { formatBytes, formatTimestamp } from "./formatters";
 import { modelIdsEqual } from "./modelIds";
 import { formatRouteName } from "./routeShortNames";
-import { QuotaEstimateDialog } from "./QuotaEstimateDialog";
 import type { LogAnalytics } from "./usageAnalysis";
 import { maskEmail } from "./sensitiveText";
 import {
@@ -43,6 +43,16 @@ import {
   Select,
   Tooltip,
 } from "./components/ui";
+
+const fallbackReasonLabels: Record<string, string> = {
+  websocket_not_supported: "当前线路不支持上游 WebSocket，使用 HTTP/SSE",
+  websocket_history_requires_http: "当前续接历史需通过 HTTP/SSE 恢复",
+  websocket_history_unavailable: "WebSocket 续接历史不可用，尝试通过 HTTP/SSE 恢复",
+  websocket_backoff: "WebSocket 正在探测或等待重试，暂用 HTTP/SSE",
+  websocket_endpoint_unsupported: "上游端点不支持 WebSocket，改用 HTTP/SSE",
+  websocket_connect_failed: "WebSocket 握手失败，改用 HTTP/SSE",
+  websocket_to_http_sse: "上游由 WebSocket 转为 HTTP/SSE，旧记录未区分具体原因",
+};
 
 type RouteRequestLogItem = {
   requestId: string;
@@ -204,16 +214,14 @@ function PortalScope({ container, children }: { container: HTMLElement | null | 
 type RequestLogTableColumn<Row> = { title: string; width: number; render: (record: Row) => React.ReactNode };
 type RequestLogTableRow = { key: string; item: RouteRequestLogItem; cells: React.ReactNode[] };
 const REQUEST_LOG_TABLE_COLUMNS: RequestLogTableColumn<RequestLogTableRow>[] = [
-  { title: "时间 / 请求 ID", width: 180, render: (record) => record.cells[0] },
-  { title: "会话 ID", width: 190, render: (record) => record.cells[1] },
-  { title: "供应商 / 上游", width: 180, render: (record) => record.cells[2] },
-  { title: "模型", width: 232, render: (record) => record.cells[3] },
-  { title: "思考强度", width: 100, render: (record) => record.cells[4] },
-  { title: "上游协议", width: 100, render: (record) => record.cells[5] },
-  { title: "状态", width: 120, render: (record) => record.cells[6] },
-  { title: "耗时", width: 150, render: (record) => record.cells[7] },
-  { title: "Token 用量", width: 230, render: (record) => record.cells[8] },
-  { title: "缓存 Token", width: 130, render: (record) => record.cells[9] },
+  { title: "时间 / 标识", width: 240, render: (record) => record.cells[0] },
+  { title: "供应商 / 上游", width: 180, render: (record) => record.cells[1] },
+  { title: "模型 / 思考", width: 250, render: (record) => record.cells[2] },
+  { title: "上游协议", width: 96, render: (record) => record.cells[3] },
+  { title: "状态", width: 120, render: (record) => record.cells[4] },
+  { title: "耗时", width: 150, render: (record) => record.cells[5] },
+  { title: "Token 用量", width: 230, render: (record) => record.cells[6] },
+  { title: "缓存 Token", width: 130, render: (record) => record.cells[7] },
 ];
 
 function RequestLogTable({ columns, rows = [], onRowAction }: {
@@ -226,7 +234,7 @@ function RequestLogTable({ columns, rows = [], onRowAction }: {
       <Table.ScrollContainer className="overflow-auto">
         <Table.Content
           aria-label="请求日志"
-          className="min-w-[1600px]"
+          className="min-w-[1400px]"
           onRowAction={(key) => onRowAction(String(key))}
         >
           <Table.Header>
@@ -427,6 +435,21 @@ function reasoningLabel(item: RouteRequestLogItem) {
   return "—";
 }
 
+// 思考强度按档位着色：低档位克制、高档位醒目，与协议徽章的用色体系一致。
+function reasoningTagClass(label: string) {
+  const normalized = label.trim().toLowerCase();
+  if (normalized === "low" || normalized === "minimal" || normalized === "none") {
+    return "request-log-effort-low";
+  }
+  if (normalized === "high") {
+    return "request-log-effort-high";
+  }
+  if (normalized === "max" || normalized === "xhigh") {
+    return "request-log-effort-max";
+  }
+  return "request-log-effort-medium";
+}
+
 function unavailableMessage(reason?: string) {
   if (reason === "ndjson_not_queryable") {
     return "当前请求日志使用 NDJSON 存储，无法在线分页查询。开启页面上的日志记录开关后会切换为 SQLite。";
@@ -435,6 +458,7 @@ function unavailableMessage(reason?: string) {
 }
 
 let copiedIdSnapshot: string | null = null;
+let copiedIdResetTimer: number | null = null;
 const copiedIdListeners = new Set<() => void>();
 
 function subscribeCopiedId(listener: () => void) {
@@ -450,8 +474,16 @@ function getCopiedIdSnapshot() {
 
 function setCopiedId(id: string | null) {
   if (Object.is(copiedIdSnapshot, id)) return;
+  if (copiedIdResetTimer != null) {
+    window.clearTimeout(copiedIdResetTimer);
+    copiedIdResetTimer = null;
+  }
   copiedIdSnapshot = id;
   copiedIdListeners.forEach((listener) => listener());
+  // 标记按按钮实例区分，2.2s 后自动复位，与复制提示的停留时间一致。
+  if (id != null) {
+    copiedIdResetTimer = window.setTimeout(() => setCopiedId(null), 2200);
+  }
 }
 
 function CopyIdButton({
@@ -462,7 +494,6 @@ function CopyIdButton({
   iconClassName,
   title,
   onCopy,
-  onClick,
 }: {
   id: string;
   label: string;
@@ -470,11 +501,12 @@ function CopyIdButton({
   className: string;
   iconClassName: string;
   title: string;
-  onCopy: (id: string) => void;
-  onClick?: () => void;
+  onCopy: (id: string, copiedKey: string) => void;
 }) {
+  // 已复制标记按按钮实例区分：相同 ID 出现在多行时，只有被点击的那个显示「已复制」。
+  const copiedKey = useId();
   const copiedId = useSyncExternalStore(subscribeCopiedId, getCopiedIdSnapshot, getCopiedIdSnapshot);
-  const copied = copiedId === id;
+  const copied = copiedId === copiedKey;
   return (
     <Button
       variant="ghost"
@@ -482,7 +514,7 @@ function CopyIdButton({
       aria-label={ariaLabel ?? label}
       className={className}
       title={title}
-      onClick={onClick ?? (() => onCopy(id))}
+      onClick={() => onCopy(id, copiedKey)}
     >
       <span className="truncate select-all">{copied ? "已复制" : id}</span>
       {copied ? (
@@ -512,7 +544,7 @@ function buildRequestLogRow(
   item: RouteRequestLogItem,
   providerLabel: string,
   officialAccountLabel: (accountId?: string | null) => string,
-  handleCopyId: (requestId: string) => void,
+  handleCopyId: (requestId: string, options?: { label?: string; subtext?: string; copiedKey?: string }) => void,
 ): RequestLogTableRow {
    const presentation = statusPresentation[item.status] ?? { label: item.status || "未知", variant: "secondary" as const };
    const hasUpstreamError = [item.statusCode, item.upstreamStatusCode].some((statusCode) => statusCode != null && (statusCode < 200 || statusCode >= 300));
@@ -523,6 +555,7 @@ function buildRequestLogRow(
    const usageUnavailable = usageUnavailablePresentation(item.usageUnavailableReason);
    const cacheHitRate = formatCacheHitRate(item.inputTokens, item.cachedInputTokens);
    const cancellation = cancellationPresentation(item);
+   const reasoning = reasoningLabel(item);
    const displayedTtft = item.downstreamFirstContentMs ?? item.ttftMs;
    const timingTitle = item.downstreamFirstContentMs == null
      ? `首字耗时 (旧指标，上游首包): ${formatDuration(item.ttftMs)}`
@@ -532,59 +565,61 @@ function buildRequestLogRow(
    const upstreamModel = (item.upstreamResponseModel ?? "").trim();
    const upstreamModelDiffers = Boolean(upstreamModel) && !modelIdsEqual(upstreamModel, sentModel);
 return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
-                          <div className="grid min-w-36 max-w-44 gap-0.5 font-mono">
-                            <span className="whitespace-nowrap text-[11px] text-[var(--codey-text,#1d1d1f)]">
+                          <div className="grid min-w-0 gap-0.5">
+                            <span className="whitespace-nowrap font-mono text-[11px] font-medium leading-4 text-[var(--codey-text,#1d1d1f)]">
                               {formatTimestamp(item.timestampUnixMs)}
                             </span>
-                            <CopyIdButton
-                              id={item.requestId}
-                              label={`复制请求 ID：${item.requestId}`}
-                              aria-label={`复制请求 ID：${item.requestId}`}
-                              className="group h-auto min-h-0 justify-start gap-1 rounded-md px-0.5 font-mono text-[10px] font-normal text-[var(--codey-subtle,#8e8e93)] transition-colors hover:text-[var(--codey-text,#1d1d1f)] [&_svg]:size-[11px]"
-                              iconClassName="shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
-                              title={`请求 ID: ${item.requestId}（点击复制）`}
-                              onCopy={handleCopyId}
-                            />
-                          </div>
-                        </div>,
-<div className="w-40 max-w-40 overflow-hidden">
-                          {item.codexSessionId ? (
-                            <div className="flex w-36 max-w-36 items-center gap-1.5 overflow-hidden">
-                              {item.codexSessionIsParent ? (
-                                <Badge
-                                  variant="secondary"
-                                  className="shrink-0 whitespace-nowrap"
-                                >
-                                  父
-                                </Badge>
-                              ) : null}
+                            <div className="request-log-kv">
+                              <span className="request-log-kv-label">请求</span>
                               <CopyIdButton
-                                id={item.codexSessionId}
-                                label={`复制${item.codexSessionIsParent ? "父会话" : "会话"} ID：${item.codexSessionId}`}
-                                className="group h-auto min-h-0 min-w-0 justify-start gap-1 rounded-md px-0.5 font-mono text-[10px] font-normal text-[var(--codey-muted,#6e6e73)] transition-colors hover:text-[var(--codey-text,#1d1d1f)] [&_svg]:size-[11px]"
-                                iconClassName="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
-                                title={`${item.codexSessionIsParent ? "父会话" : "会话"} ID: ${item.codexSessionId}（点击复制）`}
-                                onCopy={handleCopyId}
-                                onClick={() => handleCopyId(item.codexSessionId!)}
+                                id={item.requestId}
+                                label={`复制请求 ID：${item.requestId}`}
+                                aria-label={`复制请求 ID：${item.requestId}`}
+                                className="group h-auto min-h-0 min-w-0 flex-1 justify-start gap-1 rounded-md px-0.5 font-mono text-[10px] font-normal text-[var(--codey-subtle,#8e8e93)] transition-colors hover:text-[var(--codey-text,#1d1d1f)] [&_svg]:size-[11px]"
+                                iconClassName="shrink-0 opacity-0 transition-opacity group-hover:opacity-100"
+                                title={`请求 ID: ${item.requestId}（点击复制）`}
+                                onCopy={(id, copiedKey) => handleCopyId(id, { copiedKey })}
                               />
                             </div>
-                          ) : (
-                            <span className="text-[var(--codey-subtle,#8e8e93)]">—</span>
-                          )}
+                            <div className="request-log-kv">
+                              <span className="request-log-kv-label">会话</span>
+                              {item.codexSessionId ? (
+                                <CopyIdButton
+                                  id={item.codexSessionId}
+                                  label={`复制${item.codexSessionIsParent ? "父会话" : "会话"} ID：${item.codexSessionId}`}
+                                  className="group h-auto min-h-0 min-w-0 justify-start gap-1 rounded-md px-0.5 font-mono text-[10px] font-normal text-[var(--codey-subtle,#8e8e93)] transition-colors hover:text-[var(--codey-text,#1d1d1f)] [&_svg]:size-[11px]"
+                                  iconClassName="shrink-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+                                  title={`${item.codexSessionIsParent ? "父会话" : "会话"} ID: ${item.codexSessionId}（点击复制）`}
+                                  onCopy={(id, copiedKey) => handleCopyId(id, { copiedKey })}
+                                />
+                              ) : (
+                                <span className="text-[var(--codey-subtle,#8e8e93)]">—</span>
+                              )}
+                              {item.codexSessionId && item.codexSessionIsParent ? (
+                                <span
+                                  className="request-log-parent-tag"
+                                  title="该 ID 为父会话 ID"
+                                >
+                                  <IconHierarchy size={10} aria-hidden="true" />
+                                  父
+                                </span>
+                              ) : null}
+                            </div>
+                          </div>
                         </div>,
                         <div>
                           <div className="grid min-w-32 max-w-56 gap-0.5">
                             <div className="flex min-w-0 items-center gap-1">
                               {item.officialAccountId ? (
                                 <span
-                                  className="shrink-0 rounded bg-blue-50 dark:bg-blue-950 px-1 py-px text-[10px] font-medium text-blue-600 dark:text-blue-400"
+                                  className="request-log-official-tag"
                                   title="官方账号"
                                 >
                                   官
                                 </span>
                               ) : null}
                               <strong
-                                className="truncate font-semibold text-[var(--codey-text,#1d1d1f)]"
+                                className="truncate font-medium text-[var(--codey-text,#1d1d1f)]"
                                 title={providerLabel}
                               >
                                 {providerLabel}
@@ -609,12 +644,22 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                           </div>
                         </div>,
 <div className="grid min-w-32 max-w-56 gap-0.5">
-                          <span
-                            className="truncate font-medium text-[var(--codey-text,#1d1d1f)]"
-                            title={sentModel ? `请求模型（发往上游）：${sentModel}` : undefined}
-                          >
-                            {sentModel || "—"}
-                          </span>
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <span
+                              className="truncate font-medium text-[var(--codey-text,#1d1d1f)]"
+                              title={sentModel ? `请求模型（发往上游）：${sentModel}` : undefined}
+                            >
+                              {sentModel || "—"}
+                            </span>
+                            {reasoning !== "—" ? (
+                              <span
+                                className={`request-log-meta-tag ${reasoningTagClass(reasoning)}`}
+                                title={`思考强度：${reasoning}`}
+                              >
+                                {reasoning}
+                              </span>
+                            ) : null}
+                          </div>
                           {upstreamModelDiffers ? (
                             <span
                               className="flex min-w-0 items-center gap-1 text-[10px] text-[var(--codey-subtle,#8e8e93)]"
@@ -625,7 +670,6 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                             </span>
                           ) : null}
                         </div>,
-<div className="whitespace-nowrap text-[var(--codey-text-soft,#48484a)]">{reasoningLabel(item)}</div>,
 <div>
                           <Badge
                             variant="secondary"
@@ -689,37 +733,37 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                             ) : null}
                           </div>
                         </div>,
-<div className="whitespace-nowrap tabular-nums">
-                          <div className="grid gap-0.5 text-[11px] leading-4">
+<div className="whitespace-nowrap">
+                          <div className="grid gap-0.5">
                             <div
-                              className="flex items-center gap-1"
+                              className="request-log-kv"
                               title={timingTitle}
                             >
-                              <span className="text-[var(--codey-muted,#6e6e73)]">首字</span>
-                              <span className="text-[11px] font-medium text-[var(--codey-text,#1d1d1f)] tabular-nums">
+                              <span className="request-log-kv-label">首字</span>
+                              <span className="request-log-kv-value font-medium text-[var(--codey-text,#1d1d1f)]">
                                 {formatDuration(displayedTtft)}
                               </span>
                             </div>
                             <div
-                              className="flex items-center gap-1"
+                              className="request-log-kv"
                               title={`总耗时: ${formatDuration(item.totalDurationMs)}`}
                             >
-                              <span className="text-[var(--codey-muted,#6e6e73)]">总用时</span>
-                              <span className="text-[11px] text-[var(--codey-text-soft,#48484a)] tabular-nums">
+                              <span className="request-log-kv-label">总用时</span>
+                              <span className="request-log-kv-value text-[var(--codey-text-soft,#48484a)]">
                                 {formatDuration(item.totalDurationMs)}
                               </span>
                             </div>
-                            <div className="flex items-center gap-1">
-                              <span className="text-[var(--codey-muted,#6e6e73)]">速度</span>
-                              <span className="text-[11px] text-[var(--codey-text-soft,#48484a)] tabular-nums">
+                            <div className="request-log-kv" title="全部输出 Token（含思考）除以上游首包后的响应时间；计时不完整或输出样本不足时未知">
+                              <span className="request-log-kv-label">速度</span>
+                              <span className="request-log-kv-value text-[var(--codey-text-soft,#48484a)]">
                                 {formatTokensPerSecond(item.outputTokensPerSecond)}
                               </span>
                             </div>
                           </div>
                         </div>,
-<div className="grid gap-0.5 whitespace-nowrap tabular-nums">
-                          <div className="flex items-center gap-1">
-                            <span className="text-[11px] text-[var(--codey-muted,#6e6e73)]">总计:</span>
+<div className="grid gap-0.5 whitespace-nowrap">
+                          <div className="request-log-kv">
+                            <span className="request-log-kv-label">总计</span>
                           {item.totalTokens == null ? (
                             <div className="flex min-w-20 items-center gap-1">
                               <span className="text-[10px] font-medium text-[var(--codey-subtle,#8e8e93)]">
@@ -743,18 +787,24 @@ return { key: `${item.timestampUnixMs}:${item.requestId}`, item, cells: [<div>
                               </Tooltip>
                             </div>
                           ) : (
-                            <strong className="text-sm font-bold text-[var(--codey-text,#1d1d1f)]">{formatTokens(item.totalTokens)}</strong>
+                            <strong className="request-log-kv-value font-semibold text-[var(--codey-text,#1d1d1f)]">{formatTokens(item.totalTokens)}</strong>
                           )}
                           </div>
-                          <div className="text-[10px] leading-4 text-[var(--codey-muted,#6e6e73)]">
-                            输入: {formatTokens(item.inputTokens)} <span aria-hidden="true" className="text-[var(--codey-subtle,#c7c7cc)]">|</span> 输出: {formatTokens(item.outputTokens)}
+                          <div className="request-log-kv text-[var(--codey-muted,#6e6e73)]">
+                            <span className="request-log-kv-label">输入</span>
+                            <span className="request-log-kv-value request-log-kv-value--fixed">{formatTokens(item.inputTokens)}</span>
+                            <span className="request-log-kv-label">输出</span>
+                            <span className="request-log-kv-value">{formatTokens(item.outputTokens)}</span>
                           </div>
-                          <div className="text-[10px] leading-4 text-[var(--codey-muted,#6e6e73)]">推理: {formatTokens(item.reasoningOutputTokens)}</div>
+                          <div className="request-log-kv text-[var(--codey-muted,#6e6e73)]">
+                            <span className="request-log-kv-label">推理</span>
+                            <span className="request-log-kv-value">{formatTokens(item.reasoningOutputTokens)}</span>
+                          </div>
                         </div>,
-<div className="grid gap-0.5 whitespace-nowrap tabular-nums" title="缓存命中率 = 缓存输入 Token / 输入 Token；未上报或无法计算时显示 —">
-                          <strong className="text-sm font-bold text-[var(--codey-text,#1d1d1f)]">{formatTokens(item.cachedInputTokens)}</strong>
-                          <span className={`text-[10px] font-semibold leading-4 ${cacheHitRate === "—" ? "text-[var(--codey-muted,#6e6e73)]" : "text-[var(--codey-red,#c74735)]"}`}>
-                            {cacheHitRate} 命中
+<div className="grid gap-0.5 whitespace-nowrap" title="缓存命中率 = 缓存输入 Token / 输入 Token；未上报或无法计算时显示 —">
+                          <strong className="request-log-kv-value font-semibold text-[var(--codey-text,#1d1d1f)]">{formatTokens(item.cachedInputTokens)}</strong>
+                          <span className="text-[11px] leading-4 text-[var(--codey-muted,#6e6e73)]">
+                            {cacheHitRate === "—" ? "—" : `${cacheHitRate} 命中`}
                           </span>
                         </div>] }
 }
@@ -767,7 +817,6 @@ export function RequestLogDialog({
   standalone = false,
 }: RequestLogDialogProps) {
   const [searchInput, setSearchInput] = useState("");
-  const [quotaOpen, setQuotaOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [provider, setProvider] = useState("all");
   const [officialAccount, setOfficialAccount] = useState("all");
@@ -842,24 +891,23 @@ export function RequestLogDialog({
   const modelsTask = useRef(Promise.resolve());
   const clearInFlight = useRef(false);
 
-  const handleCopyId = useCallback((requestId: string, customLabel?: string, toastSubtext = requestId) => {
+  const handleCopyId = useCallback((requestId: string, options?: { label?: string; subtext?: string; copiedKey?: string }) => {
     if (!navigator.clipboard) return;
     void navigator.clipboard.writeText(requestId).then(
       () => {
-        setCopiedId(requestId);
+        setCopiedId(options?.copiedKey ?? requestId);
         if (copyToastTimer.current) {
           window.clearTimeout(copyToastTimer.current);
         }
         const isSession = requestId.includes("-") || (requestId.length === 36 && !requestId.startsWith("req_"));
         const defaultLabel = isSession ? "会话 ID" : "请求 ID";
-        const label = customLabel || defaultLabel;
+        const label = options?.label || defaultLabel;
         setCopyToast({
           text: `已复制${label}`,
-          subtext: toastSubtext,
+          subtext: options?.subtext ?? requestId,
         });
         copyToastTimer.current = window.setTimeout(() => {
           setCopyToast(null);
-          setCopiedId(copiedIdSnapshot === requestId ? null : copiedIdSnapshot);
         }, 2200);
       },
       () => undefined,
@@ -1157,7 +1205,6 @@ export function RequestLogDialog({
   return (
     <div className="request-log-workspace relative flex h-full min-h-0 flex-1 flex-col">
       <style>{requestLogStyles}</style>
-      {quotaOpen && officialRoutesPresent && <QuotaEstimateDialog container={standalone ? document.body : container} onClose={() => setQuotaOpen(false)} />}
       <div className="request-log-header">
         <div className="request-log-heading">
           <div><p className="request-log-eyebrow">CODEY / 内置路由</p><h1>请求日志</h1></div>
@@ -1195,9 +1242,6 @@ export function RequestLogDialog({
         </div>
 
         <div className="request-log-actions">
-          {officialRoutesPresent && (
-            <Button variant="link" color="primary" size="sm" onClick={() => setQuotaOpen(true)}>周限额度估算</Button>
-          )}
           <Button
             variant="outline"
             size="sm"
@@ -1393,7 +1437,7 @@ export function RequestLogDialog({
           </div>
 
           {timeRange === "custom" ? (
-            <div className="flex flex-wrap items-center gap-2 border-t border-[rgb(var(--codey-ink-rgb,0,0,0))]/6 pt-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
               <label className="flex items-center gap-1.5 text-xs text-[var(--codey-muted,#6e6e73)]">
                 <span>开始时间</span>
                 <Input
@@ -1447,11 +1491,11 @@ export function RequestLogDialog({
                     <span>总请求: <strong className="font-semibold text-[var(--codey-text,#1d1d1f)]">{stats.total.toLocaleString()}</strong> 条</span>
                     <span>成功率: <strong className={`font-semibold ${stats.successRate != null && stats.successRate >= 95 ? "text-emerald-600 dark:text-emerald-400" : stats.successRate != null && stats.successRate >= 80 ? "text-amber-600 dark:text-amber-400" : "text-rose-600 dark:text-rose-400"}`}>{stats.successRate != null ? `${stats.successRate.toFixed(1)}%` : "—"}</strong></span>
                     <span className="hidden md:inline">TTFT: <strong className="font-semibold text-[var(--codey-text,#1d1d1f)]">{formatDuration(stats.avgTtft)}</strong></span>
-                    <span className="hidden md:inline">速度: <strong className="font-semibold text-[var(--codey-text,#1d1d1f)]">{formatTokensPerSecond(stats.avgOutputTokensPerSecond)}</strong></span>
+                    <span className="hidden md:inline" title="合格请求的全部输出 Token（含思考）除以上游首包后的总响应时间">速度: <strong className="font-semibold text-[var(--codey-text,#1d1d1f)]">{formatTokensPerSecond(stats.avgOutputTokensPerSecond)}</strong></span>
                     <span className="hidden lg:inline">Token: <strong className="font-semibold text-[var(--codey-text,#1d1d1f)]">{formatTokens(stats.totalTokensSum)}</strong></span>
                   </div>
                 ) : (
-                  <span className="text-[11px] text-[var(--codey-muted,#73767d)] shrink-0 hidden sm:inline">按筛选范围统计</span>
+                  <span className="text-[11px] text-[var(--codey-muted,#6e6e73)] shrink-0 hidden sm:inline">按筛选范围统计</span>
                 )}
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -1495,32 +1539,32 @@ export function RequestLogDialog({
                     <div className="flex items-baseline justify-between gap-1">
                       <span className="text-[11px] font-medium text-[var(--codey-muted,#73767d)]">总请求数</span>
                       <div className="flex items-baseline gap-1">
-                        <span className="text-[15px] font-bold text-[var(--codey-text,#1d1d1f)] tabular-nums">
+                        <span className="text-[15px] font-semibold text-[var(--codey-text,#1d1d1f)] tabular-nums">
                           {stats.total.toLocaleString()}
                         </span>
-                        <span className="text-[10px] text-[var(--codey-subtle,#8e8e93)]">条</span>
+                        <span className="text-[10px] text-[var(--codey-muted,#6e6e73)]">条</span>
                       </div>
                     </div>
                   </div>
                   <div className="request-log-metric">
                     <div className="flex items-baseline justify-between gap-1">
                       <span className="text-[11px] font-medium text-[var(--codey-muted,#73767d)]">上游首字节</span>
-                      <span className="text-[15px] font-bold text-[var(--codey-text,#1d1d1f)] tabular-nums">{formatDuration(stats.avgUpstreamFirstByte)}</span>
+                      <span className="text-[15px] font-semibold text-[var(--codey-text,#1d1d1f)] tabular-nums">{formatDuration(stats.avgUpstreamFirstByte)}</span>
                     </div>
-                    <span className="text-[10px] text-[var(--codey-subtle,#8e8e93)] truncate">路由准备 {formatDuration(stats.avgRouterPreUpstream)} · 响应头 {formatDuration(stats.avgUpstreamHeader)}</span>
+                    <span className="text-[10px] text-[var(--codey-muted,#6e6e73)] truncate">路由准备 {formatDuration(stats.avgRouterPreUpstream)} · 响应头 {formatDuration(stats.avgUpstreamHeader)}</span>
                   </div>
                   <div className="request-log-metric">
                     <div className="flex items-baseline justify-between gap-1">
                       <span className="text-[11px] font-medium text-[var(--codey-muted,#73767d)]">下游首段内容</span>
-                      <span className="text-[15px] font-bold text-[var(--codey-text,#1d1d1f)] tabular-nums">{formatDuration(stats.avgDownstreamFirstContent)}</span>
+                      <span className="text-[15px] font-semibold text-[var(--codey-text,#1d1d1f)] tabular-nums">{formatDuration(stats.avgDownstreamFirstContent)}</span>
                     </div>
-                    <span className="text-[10px] text-[var(--codey-subtle,#8e8e93)] truncate">日志排队 {formatDuration(stats.avgQueueDelay)}</span>
+                    <span className="text-[10px] text-[var(--codey-muted,#6e6e73)] truncate">日志排队 {formatDuration(stats.avgQueueDelay)}</span>
                   </div>
                   <div className="request-log-metric">
                     <div className="flex items-baseline justify-between gap-1">
                       <span className="text-[11px] font-medium text-[var(--codey-muted,#73767d)]">请求成功率</span>
                       <span
-                        className={`text-[15px] font-bold tabular-nums ${
+                        className={`text-[15px] font-semibold tabular-nums ${
                           stats.successRate != null && stats.successRate >= 95
                             ? "text-emerald-600 dark:text-emerald-400"
                             : stats.successRate != null && stats.successRate >= 80
@@ -1531,65 +1575,65 @@ export function RequestLogDialog({
                         {stats.successRate != null ? `${stats.successRate.toFixed(1)}%` : "—"}
                       </span>
                     </div>
-                    <span className="text-[10px] text-[var(--codey-subtle,#8e8e93)] truncate">
+                    <span className="text-[10px] text-[var(--codey-muted,#6e6e73)] truncate">
                       成功 {stats.succeededCount} · 失败 {stats.failedCount} · 其他 {stats.incompleteCount + stats.cancelledCount}
                     </span>
                   </div>
                   <div className="request-log-metric">
                     <div className="flex items-baseline justify-between gap-1">
-                      <span className="text-[11px] font-medium text-[var(--codey-muted,#73767d)]">平均首字耗时 (TTFT)</span>
-                      <span className="text-[15px] font-bold text-[var(--codey-text,#1d1d1f)] tabular-nums">
+                      <span className="text-[11px] font-medium text-[var(--codey-muted,#73767d)] whitespace-nowrap">平均首字耗时 (TTFT)</span>
+                      <span className="text-[15px] font-semibold text-[var(--codey-text,#1d1d1f)] tabular-nums">
                         {formatDuration(stats.avgTtft)}
                       </span>
                     </div>
-                    <span className="text-[10px] text-[var(--codey-subtle,#8e8e93)] truncate">
-                      平均总耗时 {formatDuration(stats.avgDuration)} · 平均输出 {formatTokensPerSecond(stats.avgOutputTokensPerSecond)}
+                    <span className="text-[10px] text-[var(--codey-muted,#6e6e73)] truncate">
+                      平均总耗时 {formatDuration(stats.avgDuration)} · <span title="合格请求的全部输出 Token（含思考）除以上游首包后的总响应时间">平均输出 {formatTokensPerSecond(stats.avgOutputTokensPerSecond)}</span>
                     </span>
                   </div>
                   <div className="request-log-metric">
                     <div className="flex items-baseline justify-between gap-1">
-                      <span className="text-[11px] font-medium text-[var(--codey-muted,#73767d)]">所选范围 Token 消耗</span>
+                      <span className="text-[11px] font-medium text-[var(--codey-muted,#73767d)] whitespace-nowrap">所选范围 Token 消耗</span>
                       <div className="flex items-baseline gap-1">
-                        <span className="text-[15px] font-bold text-[var(--codey-text,#1d1d1f)] tabular-nums">
+                        <span className="text-[15px] font-semibold text-[var(--codey-text,#1d1d1f)] tabular-nums">
                           {formatTokens(stats.totalTokensSum)}
                         </span>
-                        <span className="text-[10px] text-[var(--codey-subtle,#8e8e93)]">tokens</span>
+                        <span className="text-[10px] text-[var(--codey-muted,#6e6e73)]">tokens</span>
                       </div>
                     </div>
-                    <span className="text-[10px] text-purple-600 dark:text-purple-400 truncate">
+                    <span className="text-[10px] text-[var(--codey-muted,#6e6e73)] truncate">
                       输入 {formatTokens(stats.inputTokensSum)} · 输出 {formatTokens(stats.outputTokensSum)} · 总量已知 {stats.totalTokensKnownCount.toLocaleString()} / {stats.total.toLocaleString()} 条
                     </span>
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-2 rounded-lg border border-[rgb(var(--codey-ink-rgb,0,0,0))]/8 bg-[var(--codey-surface-muted,#fafafa)] p-2.5 text-xs">
+                <div className="request-log-analytics">
                   <div className="flex flex-wrap items-center justify-between gap-1 text-[var(--codey-muted,#6e6e73)]">
                     <div className="flex items-center gap-1.5 font-medium text-[var(--codey-text,#1d1d1f)]">
                       <span>趋势与分组统计</span>
-                      <span className="text-[10px] font-normal text-[var(--codey-subtle,#8e8e93)]">
+                      <span className="text-[10px] font-normal text-[var(--codey-muted,#6e6e73)]">
                         · 成功率包含失败、未完成和中断请求
                       </span>
                     </div>
-                    <span className="text-[10px] text-[var(--codey-subtle,#8e8e93)]">
+                    <span className="text-[10px] text-[var(--codey-muted,#6e6e73)]">
                       {new Date(stats.fromUnixMs).toLocaleString()} 至 {new Date(stats.toUnixMs).toLocaleString()}（不含结束时间）
                       {stats.databaseBytes != null ? ` · 存储约 ${((stats.databaseBytes + (stats.walBytes ?? 0)) / 1_048_576).toFixed(1)} MiB` : ""}
                     </span>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-3 max-[820px]:grid-cols-1">
-                    {/* 时间趋势卡片 */}
-                    <div className="flex flex-col overflow-hidden rounded-lg border border-[rgb(var(--codey-ink-rgb,0,0,0))]/6 bg-[var(--codey-surface,#fff)] shadow-2xs">
-                      <div className="flex items-center justify-between border-b border-[rgb(var(--codey-ink-rgb,0,0,0))]/6 bg-[var(--codey-surface-sunken,#f8f8fa)] px-3 py-1.5">
+                  <div className="request-log-analytics-grid">
+                    {/* 时间趋势 */}
+                    <div className="request-log-analytics-section">
+                      <div className="request-log-analytics-title">
                         <span className="text-[11px] font-semibold text-[var(--codey-text,#1d1d1f)]">
                           {stats.bucketMs === 3_600_000 ? "每小时" : "每天"}趋势
                         </span>
-                        <span className="text-[10px] text-[var(--codey-subtle,#8e8e93)]">
+                        <span className="text-[10px] text-[var(--codey-muted,#6e6e73)]">
                           UTC 划分，本地时间显示
                         </span>
                       </div>
-                      <div className="max-h-36 overflow-auto">
+                      <div className="request-log-analytics-scroll">
                         <table className="w-full text-left text-[11px]">
-                          <thead className="sticky top-0 z-[1] bg-[var(--codey-surface-sunken,#f8f8fa)] text-[10px] font-medium text-[var(--codey-muted,#6e6e73)] shadow-[0_1px_0_rgba(0,0,0,0.06)]">
+                          <thead className="sticky top-0 z-[1] bg-[var(--codey-surface,#fff)] text-[10px] font-medium text-[var(--codey-muted,#6e6e73)] shadow-[0_1px_0_rgba(0,0,0,0.06)]">
                             <tr>
                               <th className="py-1.5 px-2.5 font-medium">时间</th>
                               <th className="py-1.5 px-2.5 text-right font-medium">请求数</th>
@@ -1607,7 +1651,7 @@ export function RequestLogDialog({
                               </tr>
                             ) : (
                               stats.trend.map((bucket) => (
-                                <tr key={bucket.timestampUnixMs} className="transition-colors hover:bg-blue-50/30">
+                                <tr key={bucket.timestampUnixMs} className="transition-colors hover:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/4">
                                   <td className="py-1 px-2.5 whitespace-nowrap text-[var(--codey-text,#1d1d1f)]">
                                     {new Date(bucket.timestampUnixMs).toLocaleString(undefined, {
                                       month: "2-digit",
@@ -1636,19 +1680,19 @@ export function RequestLogDialog({
                       </div>
                     </div>
 
-                    {/* 分组统计卡片 */}
-                    <div className="flex flex-col overflow-hidden rounded-lg border border-[rgb(var(--codey-ink-rgb,0,0,0))]/6 bg-[var(--codey-surface,#fff)] shadow-2xs">
-                      <div className="flex items-center justify-between border-b border-[rgb(var(--codey-ink-rgb,0,0,0))]/6 bg-[var(--codey-surface-sunken,#f8f8fa)] px-3 py-1.5">
+                    {/* 分组统计 */}
+                    <div className="request-log-analytics-section">
+                      <div className="request-log-analytics-title">
                         <span className="text-[11px] font-semibold text-[var(--codey-text,#1d1d1f)]">
                           {groupByLabels[groupBy] || "所选维度"}统计
                         </span>
-                        <span className="text-[10px] text-[var(--codey-subtle,#8e8e93)]">
+                        <span className="text-[10px] text-[var(--codey-muted,#6e6e73)]">
                           {stats.groupsTruncated ? "最多展示 50 组" : `共 ${stats.groups.length} 组`}
                         </span>
                       </div>
-                      <div className="max-h-36 overflow-auto">
+                      <div className="request-log-analytics-scroll">
                         <table className="w-full text-left text-[11px]">
-                          <thead className="sticky top-0 z-[1] bg-[var(--codey-surface-sunken,#f8f8fa)] text-[10px] font-medium text-[var(--codey-muted,#6e6e73)] shadow-[0_1px_0_rgba(0,0,0,0.06)]">
+                          <thead className="sticky top-0 z-[1] bg-[var(--codey-surface,#fff)] text-[10px] font-medium text-[var(--codey-muted,#6e6e73)] shadow-[0_1px_0_rgba(0,0,0,0.06)]">
                             <tr>
                               <th className="py-1.5 px-2.5 font-medium">分组</th>
                               <th className="py-1.5 px-2.5 text-right font-medium">请求数</th>
@@ -1672,7 +1716,7 @@ export function RequestLogDialog({
                                     ? officialAccountLabels.get(group.key)
                                     : undefined) || group.key || "未知";
                                 return (
-                                  <tr key={group.key} className="transition-colors hover:bg-blue-50/30">
+                                  <tr key={group.key} className="transition-colors hover:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/4">
                                     <td className="py-1 px-2.5 text-[var(--codey-text,#1d1d1f)]" title={label}>
                                       <div className="flex flex-wrap items-center gap-x-2">
                                       <span className="max-w-[240px] truncate">{label}</span>
@@ -2019,7 +2063,7 @@ export function RequestLogDialog({
                         <span className="font-mono text-amber-600 dark:text-amber-400">{formatDuration(selectedItem.queueDelayMs)}</span>
                       </div>
                     ) : null}
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between" title="全部输出 Token（含思考）除以上游首包后的响应时间；计时不完整或输出样本不足时未知">
                       <span className="text-[var(--codey-muted,#6e6e73)]">输出速度</span>
                       <span className="font-mono">{formatTokensPerSecond(selectedItem.outputTokensPerSecond)}</span>
                     </div>
@@ -2180,7 +2224,7 @@ export function RequestLogDialog({
                         <button
                           type="button"
                           className="text-blue-600 dark:text-blue-400 hover:text-blue-700 ml-1 cursor-pointer"
-                          onClick={() => handleCopyId(selectedItem.codexSessionId!, selectedItem.codexSessionIsParent ? "父会话 ID" : "会话 ID")}
+                          onClick={() => handleCopyId(selectedItem.codexSessionId!, { label: selectedItem.codexSessionIsParent ? "父会话 ID" : "会话 ID" })}
                         >
                           复制
                         </button>
@@ -2248,7 +2292,7 @@ export function RequestLogDialog({
                         <button
                           type="button"
                           className="inline-flex items-center rounded p-0.5 text-[var(--codey-subtle,#8e8e93)] transition-colors hover:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/8 hover:text-[var(--codey-text,#1d1d1f)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                          onClick={() => handleCopyId(selectedItem.upstreamRequestHeaders!, "上游请求头", "请求头内容")}
+                          onClick={() => handleCopyId(selectedItem.upstreamRequestHeaders!, { label: "上游请求头", subtext: "请求头内容" })}
                           aria-label="复制上游请求头"
                           title="复制上游请求头"
                         >
@@ -2275,7 +2319,7 @@ export function RequestLogDialog({
                         <button
                           type="button"
                           className="inline-flex items-center rounded p-0.5 text-[var(--codey-subtle,#8e8e93)] transition-colors hover:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/8 hover:text-[var(--codey-text,#1d1d1f)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-                          onClick={() => handleCopyId(selectedItem.upstreamResponseHeaders!, "上游响应头", "响应头内容")}
+                          onClick={() => handleCopyId(selectedItem.upstreamResponseHeaders!, { label: "上游响应头", subtext: "响应头内容" })}
                           aria-label="复制上游响应头"
                           title="复制上游响应头"
                         >
@@ -2333,11 +2377,11 @@ export function RequestLogDialog({
                     {selectedItem.fallbackCount > 0 ? (
                       <div>
                         <span className="text-[11px] font-medium text-amber-800 dark:text-amber-300">
-                          降级重试：已尝试 {selectedItem.fallbackCount} 次
+                          回退与重试：{selectedItem.fallbackCount} 次
                         </span>
                         {selectedItem.fallbackReason ? (
                           <p className="m-0 mt-1 text-[11px] text-[var(--codey-muted,#6e6e73)]">
-                            原因: {selectedItem.fallbackReason}
+                            原因：{fallbackReasonLabels[selectedItem.fallbackReason] ?? selectedItem.fallbackReason}
                           </p>
                         ) : null}
                       </div>
@@ -2359,7 +2403,7 @@ export function RequestLogDialog({
               <Button
                 size="sm"
                 variant="default"
-                onClick={() => handleCopyId(JSON.stringify(selectedItem, null, 2), "完整日志 JSON")}
+                onClick={() => handleCopyId(JSON.stringify(selectedItem, null, 2), { label: "完整日志 JSON" })}
               >
                 <IconCopy size={13} aria-hidden="true" />
                 复制完整 JSON
@@ -2376,7 +2420,7 @@ export function RequestLogDialog({
         <div
           role="status"
           aria-live="polite"
-          className="pointer-events-auto fixed bottom-6 right-6 z-[1000] flex max-w-[min(420px,calc(100vw-32px))] items-center gap-2.5 rounded-xl border border-[rgb(var(--codey-ink-rgb,0,0,0))]/10 border-l-4 border-l-[#34c759] bg-[var(--codey-surface,#fff)]/95 px-4 py-3 text-xs text-[var(--codey-text,#1d1d1f)] shadow-[0_12px_32px_rgba(0,0,0,0.14)] backdrop-blur-2xl transition-all duration-200"
+          className="pointer-events-auto fixed bottom-6 right-6 z-[1000] flex max-w-[min(420px,calc(100vw-32px))] items-center gap-2.5 rounded-xl border border-[rgb(var(--codey-ink-rgb,0,0,0))]/10 bg-[var(--codey-surface,#fff)]/95 px-4 py-3 text-xs text-[var(--codey-text,#1d1d1f)] shadow-[0_12px_32px_rgba(0,0,0,0.14)] backdrop-blur-2xl transition-all duration-200"
         >
           <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400">
             <IconCheck size={15} stroke={2.5} aria-hidden="true" />

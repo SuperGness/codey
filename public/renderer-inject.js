@@ -837,7 +837,7 @@
     const response = await window.__codeyReadAccountRateLimits();
     const snapshot = normalizeAppServerAccountUsage(response);
     if (snapshot.status !== "ok") return snapshot;
-    // Publish Codex's managed-auth result so the independent log window can reuse it.
+    // 同步 Codex 管理的账号额度，让官方账号面板可以复用当前快照。
     if (Number.isSafeInteger(backendResult?.authGeneration)) {
       const stored = await callBridge("/api/store_official_account_usage", {
         authGeneration: backendResult.authGeneration, snapshot,
@@ -846,37 +846,6 @@
       snapshot.authGeneration = backendResult.authGeneration;
     }
     return snapshot;
-  };
-
-  let quotaUsageRequest = null;
-  window.__codeyReadQuotaAccountUsage = ({ forceRefresh = false } = {}) => {
-    const displayed = accountUsagePollingEnabled && accountUsageLastResult?.status === "ok"
-      ? accountUsageLastResult : null;
-    const now = Date.now();
-    const age = now - Number(displayed?.fetchedAt) * 1000;
-    const weekly = [displayed?.primary, displayed?.secondary]
-      .find((value) => Number(value?.windowMinutes) === 10080);
-    if (!forceRefresh && displayed && age >= 0 && age < accountUsageRefreshIntervalMs
-      && Number(weekly?.resetsAt) * 1000 > now) return Promise.resolve(displayed);
-    if (quotaUsageRequest) return quotaUsageRequest;
-    quotaUsageRequest = (async () => {
-      let result = await withTimeout(
-        callBridge("/api/query_official_account_usage", { forceRefresh }, { timeoutMs: accountUsageTimeoutMs }),
-        accountUsageTimeoutMs, "读取官方周额度超时",
-      );
-      if (result?.status === "error" || result?.stale) {
-        try {
-          const fallback = await withTimeout(readAccountUsageFromAppServer(result), accountUsageTimeoutMs, "读取 Codex 周额度超时");
-          if (fallback?.status === "ok") result = fallback;
-        } catch { /* Keep the backend error when the fallback is unavailable. */ }
-      }
-      // A dialog query never enables the account display or its polling.
-      if (displayed && accountUsagePollingEnabled && accountUsageLastResult === displayed && result?.status === "ok") {
-        renderAccountUsage(result);
-      }
-      return result;
-    })().finally(() => { quotaUsageRequest = null; });
-    return quotaUsageRequest;
   };
 
   const checkAccountUsage = async () => {

@@ -33,6 +33,9 @@ use crate::config::default_official_route_name;
 pub const ACCOUNTS_DIR_NAME: &str = "official-accounts";
 const DEFAULT_FILE_NAME: &str = "default.json";
 const CODEX_AUTH_FILE_NAME: &str = "auth.json";
+/// SIWC 凭据物化文件后缀。账号记录是权威数据，这份文件只给本地路由按
+/// 请求读取，避免每次解析整条账号记录。
+const SIWC_FILE_SUFFIX: &str = ".siwc.json";
 static STORE_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 struct StoreWriteGuard {
@@ -67,6 +70,73 @@ const MIN_REFRESH_TOKEN_CHARS: usize = 20;
 // Records
 // ---------------------------------------------------------------------------
 
+/// 「Sign in with ChatGPT」授权拿到的第二套凭据（OpenAI 官方 token sharing）。
+/// 与 `auth` 字段的 Codex 凭据完全独立：access/refresh/id token、签发 client_id
+/// 以及账户身份都保存在这里，绝不写进 Codex auth.json 文档。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SiwcCredential {
+    /// OpenAI 为该账号注册签发的 client_id（`oaiapp_*`）；首次注册固定提交
+    /// `dynamic_agent_client`，回调签发的值存到这里，后续刷新/重授权必须复用。
+    pub client_id: String,
+    /// 授权回调+换票响应里实际授予的 scope 列表。
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: String,
+    /// 保留 id_token 用于重授权时的 `id_token_hint`（跳过账号选择页）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
+    /// 秒级 Unix 时间戳。
+    #[serde(default)]
+    pub expires_at: u64,
+    /// token 响应里的 `earliest_refresh_at`（秒），到达后应尽早刷新。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_refresh_at: Option<u64>,
+    #[serde(default)]
+    pub saved_at: u64,
+    /// 验签后的 id_token 身份，用于账户匹配与展示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub: Option<String>,
+    /// 与 Codex 凭据的 invalidReason 语义一致，但只影响 SIWC 平面。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_since: Option<u64>,
+}
+
+impl SiwcCredential {
+    pub fn invalid(&self) -> bool {
+        self.invalid_reason.is_some()
+    }
+
+    pub fn mark_invalid(&mut self, reason: impl Into<String>, when_unix_seconds: u64) {
+        self.invalid_reason = Some(reason.into());
+        self.invalid_since = Some(when_unix_seconds);
+    }
+
+    /// 授权是否包含订阅调用 scope。缺失时凭据保留但直连不可用，
+    /// 用户重新授权（带上完整 scope）后可恢复。
+    pub fn plan_scope_granted(&self) -> bool {
+        self.scopes.iter().any(|scope| scope == SIWC_PLAN_SCOPE)
+    }
+
+    /// 距过期不足 margin 或者已越过 earliest_refresh_at 时需要刷新。
+    pub fn needs_refresh(&self, now_unix_seconds: u64, margin_seconds: u64) -> bool {
+        if self.expires_at == 0 {
+            return true;
+        }
+        if self.expires_at <= now_unix_seconds.saturating_add(margin_seconds) {
+            return true;
+        }
+        self.earliest_refresh_at
+            .is_some_and(|earliest| now_unix_seconds >= earliest)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct OfficialAccountRecord {
@@ -99,6 +169,11 @@ pub struct OfficialAccountRecord {
     pub invalid_since: Option<u64>,
     /// Complete Codex `auth.json` document for this account.
     pub auth: Value,
+    /// SIWC（官方直连）第二凭据槽。`None` 表示该账号只走 Codex backend-api
+    /// 通道；有值且未失效时对话流量改走 `api.openai.com/v1`，额度等
+    /// backend-api 专属能力仍使用 `auth`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub siwc: Option<SiwcCredential>,
 }
 
 /// Renderer-facing view of an account. Never carries tokens.
@@ -128,6 +203,11 @@ pub struct OfficialAccountSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invalid_reason: Option<String>,
     pub is_default: bool,
+    /// SIWC 直连凭据状态：`none` 未启用 / `active` 可用 / `invalid` 已失效
+    /// 需要重新授权。卡片据此展示「官方直连」tag 与操作入口。
+    pub siwc_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub siwc_invalid_reason: Option<String>,
 }
 
 impl OfficialAccountRecord {
@@ -199,6 +279,7 @@ impl OfficialAccountRecord {
             invalid_reason: None,
             invalid_since: None,
             auth,
+            siwc: None,
         })
     }
 
@@ -241,12 +322,31 @@ impl OfficialAccountRecord {
             invalid: self.invalid(),
             invalid_reason: self.invalid_reason.clone(),
             is_default: default_id == Some(self.id.as_str()),
+            siwc_status: if self.siwc_active() {
+                "active".to_string()
+            } else if self.siwc.is_some() {
+                "invalid".to_string()
+            } else {
+                "none".to_string()
+            },
+            siwc_invalid_reason: self
+                .siwc
+                .as_ref()
+                .and_then(|siwc| siwc.invalid_reason.clone()),
         }
     }
 
     /// 官方是否明确拒绝过该账号的凭据。额度查询和切换默认都会先看这个标记。
     pub fn invalid(&self) -> bool {
         self.invalid_reason.is_some()
+    }
+
+    /// SIWC 直连凭据存在且未被标记失效。路由快照据此把对话切到
+    /// `api.openai.com/v1`；失效时自动回落到 Codex backend-api 通道。
+    pub fn siwc_active(&self) -> bool {
+        self.siwc
+            .as_ref()
+            .is_some_and(|siwc| !siwc.invalid() && siwc.plan_scope_granted())
     }
 
     pub fn invalid_reason(&self) -> Option<&str> {
@@ -576,6 +676,10 @@ impl OfficialAccountStore {
             let path = entry.path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json")
                 || path.file_name().and_then(|name| name.to_str()) == Some(DEFAULT_FILE_NAME)
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(SIWC_FILE_SUFFIX))
             {
                 continue;
             }
@@ -691,6 +795,8 @@ impl OfficialAccountStore {
             record.route_short_name = saved.route_short_name;
             record.upstream_proxy = saved.upstream_proxy;
             record.base_url = saved.base_url;
+            // 重新登录只替换 Codex 凭据，SIWC 槽位按账号保留。
+            record.siwc = saved.siwc;
         }
         self.write(&record)
     }
@@ -831,6 +937,8 @@ impl OfficialAccountStore {
         let _guard = self.lock_writes()?;
         crate::fs_util::remove_file_if_exists(&self.account_path(id))
             .with_context(|| format!("删除官方账号失败：{id}"))?;
+        crate::fs_util::remove_file_if_exists(&self.siwc_path(id))
+            .with_context(|| format!("删除官方直连凭据失败：{id}"))?;
         if self.default_account_id()?.as_deref() == Some(id) {
             self.set_default_account_id_unlocked(None)?;
         }
@@ -983,6 +1091,227 @@ impl OfficialAccountStore {
             .with_context(|| format!("移除 Codex 登录信息失败：{}", path.display()))?;
         Ok(true)
     }
+
+    // -----------------------------------------------------------------------
+    // SIWC（官方直连）凭据槽
+    // -----------------------------------------------------------------------
+
+    /// 本地路由按请求读取的 SIWC 物化文件。
+    pub(crate) fn siwc_path(&self, id: &str) -> PathBuf {
+        self.dir
+            .join(format!("{}{}", sanitize_id(id), SIWC_FILE_SUFFIX))
+    }
+
+    /// 把 SIWC 凭据挂到既有账号上。要求身份匹配由调用方完成；这里只保证
+    /// 同一 sub/client_id 不会被两个账号条目同时持有。
+    pub fn attach_siwc(&self, id: &str, credential: &SiwcCredential) -> Result<()> {
+        let _guard = self.lock_writes()?;
+        let mut record = self
+            .get(id)?
+            .ok_or_else(|| anyhow!("找不到官方账号：{id}"))?;
+        for other in self.list()? {
+            if other.id == id {
+                continue;
+            }
+            let Some(other_siwc) = &other.siwc else {
+                continue;
+            };
+            let same_subject = credential
+                .sub
+                .as_deref()
+                .is_some_and(|sub| other_siwc.sub.as_deref() == Some(sub));
+            let same_client = credential.client_id == other_siwc.client_id;
+            if same_subject || same_client {
+                anyhow::bail!(
+                    "该 ChatGPT 账号已在另一个官方账号条目（{}）上启用官方直连，请先在对应账号停用",
+                    other
+                        .route_name
+                        .as_deref()
+                        .or(other.email.as_deref())
+                        .unwrap_or(other.id.as_str())
+                );
+            }
+        }
+        record.siwc = Some(credential.clone());
+        self.write(&record)?;
+        self.write_siwc_file(id, &record)
+            .with_context(|| format!("保存官方直连凭据失败：{id}"))
+    }
+
+    /// 只清理 SIWC 槽位；Codex 凭据与线路设置保持不变。
+    pub fn clear_siwc(&self, id: &str) -> Result<()> {
+        let _guard = self.lock_writes()?;
+        if let Some(mut record) = self.get(id)?
+            && record.siwc.take().is_some()
+        {
+            self.write(&record)?;
+        }
+        crate::fs_util::remove_file_if_exists(&self.siwc_path(id))
+            .with_context(|| format!("删除官方直连凭据失败：{id}"))
+    }
+
+    /// 轮换安全地替换 SIWC 凭据：`expected` 提供时要求记录里的 refresh
+    /// token 仍等于它，否则说明另一个刷新已经轮换过，直接返回当前值。
+    /// 记录先写、物化文件后写：崩溃间隙只会让路由多看到一次旧凭据，
+    /// 下一次刷新会以记录为准修复文件。
+    pub(crate) fn update_siwc_if_current(
+        &self,
+        id: &str,
+        expected: Option<&SiwcCredential>,
+        updated: &SiwcCredential,
+    ) -> Result<Option<SiwcCredential>> {
+        let _guard = self.lock_writes()?;
+        let Some(mut record) = self.get(id)? else {
+            return Ok(None);
+        };
+        if let Some(expected) = expected
+            && record.siwc.as_ref().is_none_or(|current| {
+                current.refresh_token != expected.refresh_token
+                    || current.client_id != expected.client_id
+            })
+        {
+            return Ok(record.siwc);
+        }
+        record.siwc = Some(updated.clone());
+        self.write(&record)?;
+        self.write_siwc_file(id, &record)?;
+        Ok(record.siwc)
+    }
+
+    /// 只更新 SIWC 失效标记，不动令牌本体；物化文件同步带上失效原因，
+    /// 路由无需再发注定失败的上游请求。返回值表示本次是否真正写入了标记，
+    /// 调用方据此决定是否触发线路重建。
+    pub(crate) fn mark_siwc_invalid(&self, id: &str, reason: &str) -> Result<bool> {
+        let _guard = self.lock_writes()?;
+        let Some(mut record) = self.get(id)? else {
+            return Ok(false);
+        };
+        let Some(mut credential) = record.siwc.clone() else {
+            return Ok(false);
+        };
+        if credential.invalid_reason.as_deref() == Some(reason) {
+            return Ok(false);
+        }
+        credential.mark_invalid(reason.to_string(), unix_timestamp());
+        record.siwc = Some(credential);
+        self.write(&record)?;
+        self.write_siwc_file(id, &record)?;
+        Ok(true)
+    }
+
+    /// 从账号记录物化路由要读的 SIWC 文件。`record.siwc` 为空时删除文件。
+    fn write_siwc_file(&self, id: &str, record: &OfficialAccountRecord) -> Result<()> {
+        let path = self.siwc_path(id);
+        let Some(credential) = &record.siwc else {
+            return crate::fs_util::remove_file_if_exists(&path)
+                .with_context(|| format!("删除官方直连凭据失败：{}", path.display()));
+        };
+        let file = SiwcFileCredential {
+            client_id: credential.client_id.clone(),
+            access_token: credential.access_token.clone(),
+            refresh_token: credential.refresh_token.clone(),
+            expires_at: credential.expires_at,
+            earliest_refresh_at: credential.earliest_refresh_at,
+            saved_at: credential.saved_at,
+            proxy_url: record.upstream_proxy.clone(),
+            invalid_reason: credential.invalid_reason.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&file)?;
+        crate::fs_util::atomic_write_private_with_parent(&path, &bytes)
+            .with_context(|| format!("保存官方直连凭据失败：{}", path.display()))
+    }
+
+    /// 物化文件缺失或落后于记录时补写；路由懒刷新复用它保持一致。
+    pub(crate) fn sync_siwc_file(&self, id: &str) -> Result<()> {
+        let file = read_siwc_credential_file(&self.siwc_path(id))
+            .ok()
+            .flatten();
+        let _guard = self.lock_writes()?;
+        let Some(record) = self.get(id)? else {
+            return Ok(());
+        };
+        let stale = match (&record.siwc, &file) {
+            (None, None) => false,
+            (None, Some(_)) | (Some(_), None) => true,
+            (Some(credential), Some(file)) => {
+                file.access_token != credential.access_token
+                    || file.refresh_token != credential.refresh_token
+                    || file.expires_at != credential.expires_at
+                    || file.invalid_reason != credential.invalid_reason
+            }
+        };
+        if stale {
+            self.write_siwc_file(id, &record)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// 本地路由读取的 SIWC 凭据视图。与 `SiwcCredential` 分离，路由不接触
+/// id_token 与账号身份信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SiwcFileCredential {
+    pub client_id: String,
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: String,
+    #[serde(default)]
+    pub expires_at: u64,
+    #[serde(default)]
+    pub earliest_refresh_at: Option<u64>,
+    #[serde(default)]
+    pub saved_at: u64,
+    /// 账号线路设置的代理地址快照；SIWC 流量与 Codex 流量走同一出口。
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub invalid_reason: Option<String>,
+}
+
+impl SiwcFileCredential {
+    pub(crate) fn needs_refresh(&self, now_unix_seconds: u64, margin_seconds: u64) -> bool {
+        if self.expires_at == 0 || self.refresh_token.trim().is_empty() {
+            return self.expires_at == 0;
+        }
+        if self.expires_at <= now_unix_seconds.saturating_add(margin_seconds) {
+            return true;
+        }
+        self.earliest_refresh_at
+            .is_some_and(|earliest| now_unix_seconds >= earliest)
+    }
+}
+
+pub(crate) fn read_siwc_credential_file(path: &Path) -> Result<Option<SiwcFileCredential>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取官方直连凭据失败：{}", path.display()));
+        }
+    };
+    let credential: SiwcFileCredential = serde_json::from_slice(&bytes)
+        .with_context(|| format!("官方直连凭据格式无效：{}", path.display()))?;
+    Ok(Some(credential))
+}
+
+/// `ext_agent_host_id`：本机持久化的 `urn:uuid:*` 标识，SIWC 注册与重授权
+/// 都携带它，OpenAI 据此把同一台设备的授权归并到同一注册。
+pub(crate) fn agent_host_id(config_dir: &Path) -> Result<String> {
+    let path = config_dir.join("agent-host-id");
+    if let Ok(raw) = fs::read_to_string(&path) {
+        let value = raw.trim();
+        if let Some(uuid) = value.strip_prefix("urn:uuid:")
+            && uuid::Uuid::parse_str(uuid).is_ok()
+        {
+            return Ok(value.to_string());
+        }
+    }
+    let value = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+    crate::fs_util::atomic_write_private_with_parent(&path, value.as_bytes())
+        .with_context(|| format!("保存设备标识失败：{}", path.display()))?;
+    Ok(value)
 }
 
 // ---------------------------------------------------------------------------
@@ -1838,6 +2167,887 @@ fn record_from_token_response(payload: &Value) -> Result<OfficialAccountRecord> 
         "last_refresh": rfc3339_now(),
     });
     OfficialAccountRecord::from_auth(auth, unix_timestamp())
+}
+
+// ---------------------------------------------------------------------------
+// SIWC（Sign in with ChatGPT）授权：官方文档的 open-source token sharing 流程
+// ---------------------------------------------------------------------------
+
+pub(crate) const SIWC_AUTHORIZE_URL: &str = "https://auth.openai.com/api/accounts/authorize";
+pub(crate) const SIWC_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/oauth/token";
+pub(crate) const SIWC_RESOURCE: &str = "https://api.openai.com/v1";
+/// 直连推理固定走官方公开 API：SIWC 令牌不能发给 Codex backend-api，也不能
+/// 改指用户自定义网关。
+pub(crate) const SIWC_BASE_URL: &str = "https://api.openai.com/v1";
+/// 回调必须与授权请求里的 redirect_uri 完全一致；文档要求 127.0.0.1 而非
+/// localhost，/auth/callback 与 /callback 是两个不同地址。
+pub(crate) const SIWC_REDIRECT_URI: &str = "http://127.0.0.1:1455/auth/callback";
+pub(crate) const SIWC_CALLBACK_PORT: u16 = 1455;
+/// 首次注册的入口 client_id；回调签发的 `oaiapp_*` 才是账号的持久身份。
+const SIWC_DYNAMIC_CLIENT_ID: &str = "dynamic_agent_client";
+const SIWC_AGENT_NAME_HINT: &str = "Codey";
+const SIWC_SCOPE: &str =
+    "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
+/// 缺少该 scope 时凭据保留但直连不可用，界面引导重新授权。
+const SIWC_PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
+/// `SiwcCredential::invalid_reason` 的固定值之一：授权成功但订阅调用未开启。
+pub(crate) const SIWC_PLAN_SCOPE_MISSING_REASON: &str = "siwc_plan_scope_missing";
+const SIWC_ISSUER: &str = "https://auth.openai.com";
+const SIWC_DISCOVERY_URL: &str = "https://auth.openai.com/.well-known/openid-configuration";
+const SIWC_DISCOVERY_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+/// SIWC access token 约一小时过期；距过期不足该值就在使用前刷新。
+pub(crate) const SIWC_REFRESH_MARGIN_SECONDS: u64 = TOKEN_REFRESH_MARGIN_SECONDS;
+
+#[derive(Debug, Clone)]
+pub enum SiwcLoginPhase {
+    Waiting,
+    /// 授权链路完成后的凭据；命令层校验账号身份后才真正写回记录。
+    Completed(Box<SiwcCredential>),
+    Failed(String),
+}
+
+#[derive(Debug)]
+pub struct SiwcLoginSession {
+    pub auth_url: String,
+    /// 这次授权要附着的账号，回调完成也只能写回它。
+    pub account_id: String,
+    created_at: Instant,
+    phase: Arc<Mutex<SiwcLoginPhase>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SiwcLoginSession {
+    pub fn phase(&self) -> SiwcLoginPhase {
+        self.phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn expired(&self) -> bool {
+        self.created_at.elapsed() > LOGIN_TIMEOUT
+    }
+
+    pub fn cancel(&self) {
+        self.task.abort();
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct SiwcLoginSessions {
+    sessions: HashMap<String, SiwcLoginSession>,
+}
+
+impl SiwcLoginSessions {
+    pub fn insert(&mut self, id: String, session: SiwcLoginSession) {
+        self.sessions.insert(id, session);
+    }
+
+    pub fn get(&self, id: &str) -> Option<&SiwcLoginSession> {
+        self.sessions.get(id)
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<SiwcLoginSession> {
+        self.sessions.remove(id)
+    }
+
+    /// SIWC 与 Codex 登录共用回调端口，新会话开始前必须停掉旧监听。
+    pub fn cancel_all(&mut self) {
+        for (_, session) in self.sessions.drain() {
+            session.cancel();
+        }
+    }
+
+    pub fn remove_expired(&mut self) {
+        let expired = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.expired())
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in expired {
+            if let Some(session) = self.sessions.remove(&id) {
+                session.cancel();
+            }
+        }
+    }
+}
+
+/// 为既有账号启动 SIWC 授权。已有 SIWC 凭据时走重授权：复用签发的
+/// client_id，带 `id_token_hint` 跳过账号选择页；否则用
+/// `dynamic_agent_client` 注册新客户端，回调里收签发的 client_id。
+pub async fn start_siwc_login(
+    client: reqwest::Client,
+    account: &OfficialAccountRecord,
+    host_id: &str,
+) -> Result<SiwcLoginSession> {
+    let listener = bind_callback_listener(SIWC_CALLBACK_PORT).await?;
+    let pkce = pkce_pair();
+    let state = uuid::Uuid::new_v4().simple().to_string();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let saved = account.siwc.as_ref();
+    let issued_client_id = saved
+        .map(|siwc| siwc.client_id.trim())
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string);
+    let registration = issued_client_id.is_none();
+    let auth_url = build_siwc_authorize_url(
+        issued_client_id
+            .as_deref()
+            .unwrap_or(SIWC_DYNAMIC_CLIENT_ID),
+        &state,
+        &nonce,
+        &pkce.challenge,
+        host_id,
+        registration,
+        // 重授权带 id_token_hint 与 login_hint；首次注册不带，只带
+        // agent_name_hint 与本机标识。
+        if registration {
+            None
+        } else {
+            saved.and_then(|siwc| siwc.id_token.as_deref())
+        },
+        if registration {
+            None
+        } else {
+            saved
+                .and_then(|siwc| siwc.email.as_deref())
+                .or(account.email.as_deref())
+        },
+    );
+    let phase = Arc::new(Mutex::new(SiwcLoginPhase::Waiting));
+    let task_phase = Arc::clone(&phase);
+    let account_id = account.id.clone();
+    let task = tokio::spawn(async move {
+        let outcome = tokio::time::timeout(
+            LOGIN_TIMEOUT,
+            run_siwc_callback_server(
+                listener,
+                client,
+                state,
+                nonce,
+                pkce.verifier,
+                issued_client_id,
+            ),
+        )
+        .await;
+        let next = match outcome {
+            Ok(Ok(credential)) => SiwcLoginPhase::Completed(Box::new(credential)),
+            Ok(Err(error)) => SiwcLoginPhase::Failed(format!("{error:#}")),
+            Err(_) => SiwcLoginPhase::Failed("授权等待超时，请重新发起官方直连授权".to_string()),
+        };
+        *task_phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+    });
+    Ok(SiwcLoginSession {
+        auth_url,
+        account_id,
+        created_at: Instant::now(),
+        phase,
+        task,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_siwc_authorize_url(
+    client_id: &str,
+    state: &str,
+    nonce: &str,
+    challenge: &str,
+    host_id: &str,
+    registration: bool,
+    id_token_hint: Option<&str>,
+    login_hint: Option<&str>,
+) -> String {
+    let mut url = reqwest::Url::parse(SIWC_AUTHORIZE_URL).expect("static authorize url");
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs
+            .append_pair("response_type", "code")
+            .append_pair("client_id", client_id)
+            .append_pair("redirect_uri", SIWC_REDIRECT_URI)
+            .append_pair("scope", SIWC_SCOPE)
+            .append_pair("resource", SIWC_RESOURCE)
+            .append_pair("state", state)
+            .append_pair("nonce", nonce)
+            .append_pair("code_challenge", challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("ext_agent_host_id", host_id);
+        if registration {
+            pairs.append_pair("agent_name_hint", SIWC_AGENT_NAME_HINT);
+        }
+        if let Some(hint) = id_token_hint {
+            pairs.append_pair("id_token_hint", hint);
+        }
+        if let Some(hint) = login_hint {
+            pairs.append_pair("login_hint", hint);
+        }
+    }
+    url.to_string()
+}
+
+async fn run_siwc_callback_server(
+    listener: TcpListener,
+    client: reqwest::Client,
+    expected_state: String,
+    expected_nonce: String,
+    verifier: String,
+    expected_client_id: Option<String>,
+) -> Result<SiwcCredential> {
+    loop {
+        let (mut socket, _) = listener.accept().await.context("接受授权回调连接失败")?;
+        let request = match read_request_head(&mut socket).await {
+            Ok(request) => request,
+            Err(_) => continue,
+        };
+        let Some(target) = request_target(&request) else {
+            let _ = write_response(&mut socket, 400, "Bad Request").await;
+            continue;
+        };
+        let Some(query) = target.strip_prefix("/auth/callback") else {
+            let _ = write_response(&mut socket, 404, "Not Found").await;
+            continue;
+        };
+        let params = query_params(query.trim_start_matches('?'));
+        if params.get("state").map(String::as_str) != Some(expected_state.as_str()) {
+            let _ = write_response(
+                &mut socket,
+                400,
+                "授权状态校验失败，请回到 Codey 重新开始。",
+            )
+            .await;
+            continue;
+        }
+        if let Some(error) = params.get("error") {
+            let description = params.get("error_description").cloned().unwrap_or_default();
+            let _ = write_response(&mut socket, 200, "授权已取消，可关闭此页面。").await;
+            bail!("ChatGPT 授权被拒绝：{error} {description}");
+        }
+        let Some(code) = params.get("code").filter(|code| !code.is_empty()) else {
+            let _ = write_response(&mut socket, 400, "缺少授权码，请回到 Codey 重新开始。").await;
+            continue;
+        };
+        let result = async {
+            let client_id = siwc_client_id_from_callback(
+                expected_client_id.as_deref(),
+                params.get("client_id").map(String::as_str),
+            )?;
+            let payload = exchange_siwc_code(&client, code, &verifier, &client_id).await?;
+            siwc_credential_from_token_response(&client, &payload, &client_id, &expected_nonce)
+                .await
+        }
+        .await;
+        match result {
+            Ok(credential) => {
+                let _ = write_response(&mut socket, 200, "授权成功，已回到 Codey，可关闭此页面。")
+                    .await;
+                return Ok(credential);
+            }
+            Err(error) => {
+                let _ =
+                    write_response(&mut socket, 500, "授权校验失败，请回到 Codey 查看错误。").await;
+                return Err(error);
+            }
+        }
+    }
+}
+
+/// 回调返回的签发 client_id 决定凭据写进哪个注册。首次注册必须带回它；
+/// 重授权可省略，但若带回必须和账号保存的一致——两条规则都不允许静默换
+/// 客户端，否则令牌会落到错误的注册名下。
+fn siwc_client_id_from_callback(expected: Option<&str>, returned: Option<&str>) -> Result<String> {
+    let returned = returned.map(str::trim).filter(|value| !value.is_empty());
+    match (expected, returned) {
+        (Some(expected), Some(returned)) if returned != expected => {
+            bail!("回调返回的 client_id 与账号已保存的注册不一致")
+        }
+        (Some(expected), _) => Ok(expected.to_string()),
+        (None, Some(returned)) => Ok(returned.to_string()),
+        (None, None) => bail!("授权回调缺少签发的 client_id"),
+    }
+}
+
+async fn exchange_siwc_code(
+    client: &reqwest::Client,
+    code: &str,
+    verifier: &str,
+    client_id: &str,
+) -> Result<Value> {
+    let response = client
+        .post(SIWC_TOKEN_URL)
+        .timeout(Duration::from_secs(20))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", SIWC_REDIRECT_URI),
+            ("client_id", client_id),
+            ("code_verifier", verifier),
+            ("resource", SIWC_RESOURCE),
+        ])
+        .send()
+        .await
+        .context("向 OpenAI 换取官方直连令牌失败")?;
+    let status = response.status();
+    let body =
+        crate::http_response::read_bounded_body(response, 256 * 1024, "换取令牌响应").await?;
+    if !status.is_success() {
+        bail!("OpenAI 令牌接口返回 {status}");
+    }
+    serde_json::from_slice(&body).context("令牌响应格式无效")
+}
+
+/// 由 token 响应构建 SIWC 凭据：验签 id_token、核对 nonce/audience、检查
+/// 订阅调用 scope。scope 缺失时凭据保留但标记不可用（文档要求保留授权态，
+/// 用户重新授权后可恢复）。
+async fn siwc_credential_from_token_response(
+    client: &reqwest::Client,
+    payload: &Value,
+    client_id: &str,
+    nonce: &str,
+) -> Result<SiwcCredential> {
+    let access_token = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .context("令牌响应缺少 access_token")?;
+    let refresh_token = payload
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .context("令牌响应缺少 refresh_token")?;
+    let id_token = payload
+        .get("id_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .context("令牌响应缺少 id_token，无法校验授权身份")?;
+    let identity = verify_siwc_id_token(client, id_token, client_id, nonce).await?;
+    let scopes = payload
+        .get("scope")
+        .and_then(Value::as_str)
+        .map(|scope| {
+            scope
+                .split_whitespace()
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let now = unix_timestamp();
+    let mut credential = SiwcCredential {
+        client_id: client_id.to_string(),
+        scopes,
+        access_token: access_token.to_string(),
+        refresh_token: refresh_token.to_string(),
+        id_token: Some(id_token.to_string()),
+        expires_at: payload
+            .get("expires_in")
+            .and_then(Value::as_u64)
+            .map(|seconds| now.saturating_add(seconds))
+            .unwrap_or_else(|| now.saturating_add(3600)),
+        earliest_refresh_at: payload.get("earliest_refresh_at").and_then(Value::as_u64),
+        saved_at: now,
+        email: identity.email,
+        sub: Some(identity.sub),
+        invalid_reason: None,
+        invalid_since: None,
+    };
+    if !credential.plan_scope_granted() {
+        credential.mark_invalid(SIWC_PLAN_SCOPE_MISSING_REASON.to_string(), unix_timestamp());
+    }
+    Ok(credential)
+}
+
+/// 由刷新响应更新凭据：轮换返回的 refresh_token 必须整组替换，旧值立即作废。
+fn apply_siwc_token_response(credential: &mut SiwcCredential, payload: &Value) -> Result<()> {
+    let access_token = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .context("令牌响应缺少 access_token")?;
+    credential.access_token = access_token.to_string();
+    if let Some(refresh_token) = payload
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        credential.refresh_token = refresh_token.to_string();
+    }
+    if let Some(id_token) = payload
+        .get("id_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        credential.id_token = Some(id_token.to_string());
+    }
+    if let Some(seconds) = payload.get("expires_in").and_then(Value::as_u64) {
+        credential.expires_at = unix_timestamp().saturating_add(seconds);
+    }
+    if let Some(earliest) = payload.get("earliest_refresh_at").and_then(Value::as_u64) {
+        credential.earliest_refresh_at = Some(earliest);
+    }
+    if let Some(scope) = payload.get("scope").and_then(Value::as_str) {
+        credential.scopes = scope
+            .split_whitespace()
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .collect();
+    }
+    credential.saved_at = unix_timestamp();
+    credential.invalid_reason = None;
+    credential.invalid_since = None;
+    if !credential.plan_scope_granted() {
+        credential.mark_invalid(SIWC_PLAN_SCOPE_MISSING_REASON.to_string(), unix_timestamp());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SIWC 令牌刷新与撤销
+// ---------------------------------------------------------------------------
+
+/// SIWC 刷新端点返回的错误里，这些 code 表示 refresh token 不可再用，
+/// 需要重新授权；`invalid_client` 说明签发的注册已失效，同样按失效处理。
+#[derive(Debug)]
+pub struct SiwcInvalid {
+    reason: String,
+    detail: Option<String>,
+}
+
+impl SiwcInvalid {
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+}
+
+impl std::fmt::Display for SiwcInvalid {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.detail.as_deref() {
+            Some(detail) => write!(formatter, "{}：{detail}", self.reason),
+            None => write!(formatter, "{}", self.reason),
+        }
+    }
+}
+
+impl std::error::Error for SiwcInvalid {}
+
+fn siwc_invalid_from_body(body: &[u8]) -> Option<SiwcInvalid> {
+    let payload = serde_json::from_slice::<Value>(body).ok()?;
+    let code = payload.get("error").and_then(Value::as_str)?;
+    let unusable = matches!(
+        code,
+        "invalid_grant"
+            | "invalid_refresh_token"
+            | "token_expired"
+            | "refresh_token_expired"
+            | "refresh_token_invalidated"
+            | "refresh_token_reused"
+    );
+    let (reason, detail_key) = if unusable {
+        ("官方直连授权已被撤销，需要重新授权", "error_description")
+    } else if code == "invalid_client" {
+        (
+            "官方直连的注册凭据已失效，请停用后重新启用",
+            "error_description",
+        )
+    } else {
+        return None;
+    };
+    Some(SiwcInvalid {
+        reason: reason.to_string(),
+        detail: payload
+            .get(detail_key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+            .map(ToString::to_string),
+    })
+}
+
+static SIWC_REFRESH_LOCKS: std::sync::LazyLock<
+    Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 同账号刷新串行化：refresh token 轮换后旧值作废，并发刷新会让先完成的
+/// 那份凭据立刻失效。
+fn siwc_refresh_lock(account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    SIWC_REFRESH_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(account_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// SIWC 凭据临期时刷新；账号移除、凭据缺失或仍有效时返回 Ok(false)。
+/// 刷新失败只影响 SIWC 槽位，Codex 凭据不受牵连。
+pub async fn refresh_siwc_if_stale(
+    client: &reqwest::Client,
+    store: &OfficialAccountStore,
+    account_id: &str,
+    proxied_clients: Option<&Mutex<HashMap<String, reqwest::Client>>>,
+) -> Result<bool> {
+    let lock = siwc_refresh_lock(account_id);
+    let _guard = lock.lock().await;
+    let record = {
+        let store = store.clone();
+        let account_id = account_id.to_string();
+        tokio::task::spawn_blocking(move || store.get(&account_id))
+            .await
+            .context("读取官方账号任务异常退出")??
+    };
+    let Some(record) = record else {
+        return Ok(false);
+    };
+    let Some(credential) = record.siwc.clone() else {
+        return Ok(false);
+    };
+    if credential.invalid() {
+        return Ok(false);
+    }
+    if !credential.needs_refresh(unix_timestamp(), SIWC_REFRESH_MARGIN_SECONDS) {
+        // 记录仍然有效时顺手修复缺失或落后的物化文件。
+        store_sync_siwc_file(store, account_id).await;
+        return Ok(false);
+    }
+    if credential.refresh_token.trim().is_empty() {
+        let reason = "官方直连缺少 refresh token，请重新授权";
+        mark_siwc_invalid(store, account_id, reason).await;
+        return Err(anyhow::Error::new(SiwcInvalid {
+            reason: reason.to_string(),
+            detail: None,
+        }));
+    }
+    let request_client =
+        official_http_client(client, proxied_clients, record.upstream_proxy.as_deref())?;
+    let response = request_client
+        .post(SIWC_TOKEN_URL)
+        .timeout(Duration::from_secs(20))
+        // 不带 scope：保留首次授权得到的全部授权范围。
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", credential.client_id.as_str()),
+            ("refresh_token", credential.refresh_token.as_str()),
+            ("resource", SIWC_RESOURCE),
+        ])
+        .send()
+        .await
+        .context("刷新官方直连令牌请求失败")?;
+    let status = response.status();
+    let body =
+        crate::http_response::read_bounded_body(response, 256 * 1024, "刷新令牌响应").await?;
+    if !status.is_success() {
+        if let Some(invalid) = siwc_invalid_from_body(&body) {
+            mark_siwc_invalid(store, account_id, invalid.reason()).await;
+            return Err(anyhow::Error::new(invalid));
+        }
+        bail!("刷新官方直连令牌失败：{status}");
+    }
+    let payload: Value = serde_json::from_slice(&body).context("刷新令牌响应格式无效")?;
+    let mut updated = credential.clone();
+    apply_siwc_token_response(&mut updated, &payload)?;
+    let result = {
+        let store = store.clone();
+        let account_id = account_id.to_string();
+        let expected = credential.clone();
+        let updated = updated.clone();
+        tokio::task::spawn_blocking(move || {
+            store.update_siwc_if_current(&account_id, Some(&expected), &updated)
+        })
+        .await
+        .context("写回官方直连凭据任务异常退出")??
+    };
+    // None：账号已被移除或凭据槽消失；返回当前值即可，无需再写。
+    Ok(result.is_some())
+}
+
+async fn mark_siwc_invalid(store: &OfficialAccountStore, account_id: &str, reason: &str) {
+    let store = store.clone();
+    let account_id = account_id.to_string();
+    let reason = reason.to_string();
+    let marked_id = account_id.clone();
+    let marked =
+        tokio::task::spawn_blocking(move || store.mark_siwc_invalid(&marked_id, &reason)).await;
+    if matches!(marked, Ok(Ok(true))) {
+        notify_siwc_invalidated(&account_id);
+    }
+}
+
+/// 凭据首次转入失效时通知宿主重建派生线路：直连路径上的请求在路由侧
+/// 观察到 401 后只是标记记录，没有这个回调的话快照要等到下一次账号
+/// 同步才会回落到 Codex 平面。
+type SiwcInvalidatedListener = Arc<dyn Fn(String) + Send + Sync>;
+
+static SIWC_INVALIDATED_LISTENER: Mutex<Option<SiwcInvalidatedListener>> = Mutex::new(None);
+
+pub fn set_siwc_invalidated_listener(listener: Option<SiwcInvalidatedListener>) {
+    *SIWC_INVALIDATED_LISTENER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = listener;
+}
+
+pub(crate) fn notify_siwc_invalidated(account_id: &str) {
+    let listener = SIWC_INVALIDATED_LISTENER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(listener) = listener {
+        listener(account_id.to_string());
+    }
+}
+
+async fn store_sync_siwc_file(store: &OfficialAccountStore, account_id: &str) {
+    let store = store.clone();
+    let account_id = account_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || store.sync_siwc_file(&account_id)).await;
+}
+
+/// 停用/移除账号时撤销 SIWC 的可续期会话。返回 Err 表示远端撤销未被确认，
+/// 调用方应继续本地清理并提示用户可在 ChatGPT 设置里断开应用。
+pub async fn revoke_siwc_session(
+    client: &reqwest::Client,
+    credential: &SiwcCredential,
+) -> Result<()> {
+    if credential.refresh_token.trim().is_empty() {
+        return Ok(());
+    }
+    let discovery = siwc_discovery(client).await?;
+    let endpoint = discovery
+        .get("revocation_endpoint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("OpenAI 未提供撤销端点")?;
+    let response = client
+        .post(endpoint)
+        .timeout(Duration::from_secs(10))
+        .form(&[
+            ("token", credential.refresh_token.as_str()),
+            ("token_type_hint", "refresh_token"),
+            ("client_id", credential.client_id.as_str()),
+        ])
+        .send()
+        .await
+        .context("撤销官方直连授权请求失败")?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    bail!("撤销官方直连授权返回 {}", response.status())
+}
+
+// ---------------------------------------------------------------------------
+// id_token 验签
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct SiwcIdentity {
+    sub: String,
+    email: Option<String>,
+}
+
+static SIWC_DISCOVERY_CACHE: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
+
+/// OpenAI 发现文档：jwks_uri、issuer、revocation_endpoint 都在这里读。
+/// 缓存半天内的结果，验签 miss 或过期时重新拉取。
+async fn siwc_discovery(client: &reqwest::Client) -> Result<Value> {
+    {
+        let cache = SIWC_DISCOVERY_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((fetched, document)) = cache.as_ref()
+            && fetched.elapsed() < SIWC_DISCOVERY_TTL
+        {
+            return Ok(document.clone());
+        }
+    }
+    let response = client
+        .get(SIWC_DISCOVERY_URL)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .context("获取 OpenAI 发现文档失败")?;
+    if !response.status().is_success() {
+        bail!("获取 OpenAI 发现文档返回 {}", response.status());
+    }
+    let body =
+        crate::http_response::read_bounded_body(response, 128 * 1024, "OpenAI 发现文档").await?;
+    let document: Value = serde_json::from_slice(&body).context("OpenAI 发现文档格式无效")?;
+    *SIWC_DISCOVERY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((Instant::now(), document.clone()));
+    Ok(document)
+}
+
+fn decode_jwt_segment(segment: &str) -> Result<Value> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(segment)
+        .or_else(|_| URL_SAFE.decode(segment))
+        .context("JWT 分段编码无效")?;
+    serde_json::from_slice(&bytes).context("JWT 分段格式无效")
+}
+
+/// 验签 OpenAI 签发的 id_token：RS256 签名（发现文档 JWKS）、issuer、
+/// audience、过期与 nonce。返回验签后的账号身份。
+async fn verify_siwc_id_token(
+    client: &reqwest::Client,
+    id_token: &str,
+    expected_audience: &str,
+    expected_nonce: &str,
+) -> Result<SiwcIdentity> {
+    let mut parts = id_token.split('.');
+    let (header, payload, signature) =
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(header), Some(payload), Some(signature), None)
+                if !header.is_empty() && !payload.is_empty() && !signature.is_empty() =>
+            {
+                (header, payload, signature)
+            }
+            _ => bail!("id_token 不是合法的 JWT"),
+        };
+    let header_json = decode_jwt_segment(header)?;
+    if header_json.get("alg").and_then(Value::as_str) != Some("RS256") {
+        bail!("id_token 签名算法不是预期的 RS256");
+    }
+    let kid = header_json
+        .get("kid")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("id_token 缺少签名 kid")?;
+    let signature_bytes = URL_SAFE_NO_PAD
+        .decode(signature)
+        .or_else(|_| URL_SAFE.decode(signature))
+        .context("id_token 签名编码无效")?;
+    let claims = decode_jwt_segment(payload)?;
+    let signing_input = format!("{header}.{payload}");
+
+    let mut verified = verify_siwc_signature(client, kid, &signing_input, &signature_bytes).await?;
+    if !verified {
+        // kid 或缓存的 JWKS 可能已轮换，清掉缓存再试一次。
+        *SIWC_DISCOVERY_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        verified = verify_siwc_signature(client, kid, &signing_input, &signature_bytes).await?;
+    }
+    if !verified {
+        bail!("id_token 签名验证失败");
+    }
+
+    let discovery = siwc_discovery(client).await?;
+    let issuer = discovery
+        .get("issuer")
+        .and_then(Value::as_str)
+        .unwrap_or(SIWC_ISSUER);
+    if claims.get("iss").and_then(Value::as_str) != Some(issuer) {
+        bail!("id_token 的签发方不是预期的 OpenAI 授权服务");
+    }
+    let audience_matches = match claims.get("aud") {
+        Some(Value::String(audience)) => audience == expected_audience,
+        Some(Value::Array(audiences)) => audiences
+            .iter()
+            .any(|audience| audience.as_str() == Some(expected_audience)),
+        _ => false,
+    };
+    if !audience_matches {
+        bail!("id_token 的 audience 与本次授权的 client_id 不一致");
+    }
+    let now = unix_timestamp();
+    let expires = claims
+        .get("exp")
+        .and_then(Value::as_u64)
+        .context("id_token 缺少过期时间")?;
+    if expires.saturating_add(60) <= now {
+        bail!("id_token 已过期");
+    }
+    if claims.get("nonce").and_then(Value::as_str) != Some(expected_nonce) {
+        bail!("id_token 的 nonce 与本次授权不一致");
+    }
+    let sub = claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("id_token 缺少账号身份标识")?
+        .to_string();
+    let email = claims
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    Ok(SiwcIdentity { sub, email })
+}
+
+/// 用发现文档里的 JWKS 验证 RS256 签名；找不到匹配 kid 返回 Ok(false)。
+async fn verify_siwc_signature(
+    client: &reqwest::Client,
+    kid: &str,
+    signing_input: &str,
+    signature: &[u8],
+) -> Result<bool> {
+    let discovery = siwc_discovery(client).await?;
+    let jwks_uri = discovery
+        .get("jwks_uri")
+        .and_then(Value::as_str)
+        .context("OpenAI 发现文档缺少 jwks_uri")?;
+    let response = client
+        .get(jwks_uri)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .context("获取 OpenAI 签名公钥失败")?;
+    if !response.status().is_success() {
+        bail!("获取 OpenAI 签名公钥返回 {}", response.status());
+    }
+    let body =
+        crate::http_response::read_bounded_body(response, 128 * 1024, "OpenAI 签名公钥").await?;
+    let jwks: Value = serde_json::from_slice(&body).context("OpenAI 签名公钥格式无效")?;
+    let keys = jwks
+        .get("keys")
+        .and_then(Value::as_array)
+        .context("OpenAI 签名公钥列表缺失")?;
+    for key in keys {
+        if key.get("kid").and_then(Value::as_str) != Some(kid)
+            || key.get("kty").and_then(Value::as_str) != Some("RSA")
+        {
+            continue;
+        }
+        let (Some(n), Some(e)) = (
+            key.get("n").and_then(Value::as_str),
+            key.get("e").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let (Ok(n), Ok(e)) = (
+            URL_SAFE_NO_PAD.decode(n).or_else(|_| URL_SAFE.decode(n)),
+            URL_SAFE_NO_PAD.decode(e).or_else(|_| URL_SAFE.decode(e)),
+        ) else {
+            continue;
+        };
+        let components = ring::signature::RsaPublicKeyComponents { n: &n, e: &e };
+        if components
+            .verify(
+                &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+                signing_input.as_bytes(),
+                signature,
+            )
+            .is_ok()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -3144,5 +4354,337 @@ mod tests {
             !needs_token_refresh(&record),
             "a freshly stored long-lived token is left alone"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // SIWC（官方直连）
+    // ------------------------------------------------------------------
+
+    fn siwc_credential(client_id: &str, scopes: &[&str]) -> SiwcCredential {
+        SiwcCredential {
+            client_id: client_id.to_string(),
+            scopes: scopes.iter().map(ToString::to_string).collect(),
+            access_token: "siwc-access".to_string(),
+            refresh_token: format!("siwc-refresh-{client_id}"),
+            id_token: Some("siwc-id-token".to_string()),
+            expires_at: unix_timestamp() + 3600,
+            earliest_refresh_at: None,
+            saved_at: unix_timestamp(),
+            email: Some("a@example.com".to_string()),
+            sub: Some("sub-1".to_string()),
+            invalid_reason: None,
+            invalid_since: None,
+        }
+    }
+
+    #[test]
+    fn siwc_callback_client_id_rules() {
+        // 首次注册：回调必须带回签发的 client_id。
+        assert!(siwc_client_id_from_callback(None, None).is_err());
+        assert_eq!(
+            siwc_client_id_from_callback(None, Some(" oaiapp_abc ")).unwrap(),
+            "oaiapp_abc"
+        );
+        // 重授权：可省略，但带回时必须与已保存注册一致。
+        assert_eq!(
+            siwc_client_id_from_callback(Some("oaiapp_abc"), None).unwrap(),
+            "oaiapp_abc"
+        );
+        assert_eq!(
+            siwc_client_id_from_callback(Some("oaiapp_abc"), Some("oaiapp_abc")).unwrap(),
+            "oaiapp_abc"
+        );
+        assert!(siwc_client_id_from_callback(Some("oaiapp_abc"), Some("oaiapp_other")).is_err());
+    }
+
+    #[test]
+    fn siwc_plan_scope_controls_activation() {
+        let full = siwc_credential(
+            "oaiapp_1",
+            &[
+                "openid",
+                "profile",
+                "email",
+                "offline_access",
+                "resource.invoke",
+                "chatgpt.tokens.use.direct",
+            ],
+        );
+        assert!(full.plan_scope_granted());
+
+        let mut record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        record.siwc = Some(full);
+        assert!(record.siwc_active());
+        assert_eq!(record.summary(None).siwc_status, "active");
+
+        // 缺 scope：凭据保留但标记不可用，summary 落到 invalid。
+        record.siwc = Some(siwc_credential("oaiapp_1", &["openid", "profile", "email"]));
+        record
+            .siwc
+            .as_mut()
+            .unwrap()
+            .mark_invalid(SIWC_PLAN_SCOPE_MISSING_REASON, unix_timestamp());
+        assert!(!record.siwc_active());
+        let summary = record.summary(None);
+        assert_eq!(summary.siwc_status, "invalid");
+        assert_eq!(
+            summary.siwc_invalid_reason.as_deref(),
+            Some(SIWC_PLAN_SCOPE_MISSING_REASON)
+        );
+        // 确认凭据槽不存在时状态是 none。
+        record.siwc = None;
+        assert_eq!(record.summary(None).siwc_status, "none");
+    }
+
+    #[test]
+    fn siwc_attach_writes_materialized_file_and_rejects_cross_account_reuse() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path());
+        let first = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        let second = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_2", "b@example.com", "2026-01-01T00:00:00Z"),
+            2,
+        )
+        .unwrap();
+        store.upsert(&first).unwrap();
+        store.upsert(&second).unwrap();
+
+        let credential = siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]);
+        store.attach_siwc(&first.id, &credential).unwrap();
+        let materialized = read_siwc_credential_file(&store.siwc_path(&first.id))
+            .unwrap()
+            .expect("attach must write the router-facing credential file");
+        assert_eq!(materialized.client_id, "oaiapp_a");
+        assert_eq!(materialized.access_token, "siwc-access");
+
+        // 同一 ChatGPT 身份不能挂到第二个账号条目上。
+        let duplicate = siwc_credential("oaiapp_other", &[SIWC_PLAN_SCOPE]);
+        assert!(store.attach_siwc(&second.id, &duplicate).is_err());
+        let same_client = SiwcCredential {
+            sub: Some("sub-other".to_string()),
+            ..siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE])
+        };
+        assert!(store.attach_siwc(&second.id, &same_client).is_err());
+    }
+
+    #[test]
+    fn siwc_invalidation_stays_off_the_codex_plane() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path());
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        store
+            .attach_siwc(&record.id, &siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]))
+            .unwrap();
+        store
+            .mark_siwc_invalid(&record.id, "官方直连授权已被撤销")
+            .unwrap();
+        let stored = store.get(&record.id).unwrap().unwrap();
+        // 直连失效不改变 Codex 凭据的有效性，账号本身不标红。
+        assert!(!stored.invalid());
+        assert!(stored.invalid_reason.is_none());
+        assert!(!stored.siwc_active());
+        // 物化文件携带失效原因，路由据此跳过注定失败的上游请求。
+        let file = read_siwc_credential_file(&store.siwc_path(&record.id))
+            .unwrap()
+            .unwrap();
+        assert!(file.invalid_reason.is_some());
+    }
+
+    #[test]
+    fn siwc_update_requires_current_refresh_token() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path());
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        store
+            .attach_siwc(&record.id, &siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]))
+            .unwrap();
+
+        // 期望的 refresh token 与存储不符（另一个刷新已轮换）时不写回。
+        let stale_expected = SiwcCredential {
+            refresh_token: "rotated-away".to_string(),
+            ..siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE])
+        };
+        let rotated = SiwcCredential {
+            access_token: "rotated-access".to_string(),
+            ..siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE])
+        };
+        let current = store
+            .update_siwc_if_current(&record.id, Some(&stale_expected), &rotated)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.access_token, "siwc-access");
+
+        // 期望匹配时才轮换；写回后物化文件跟着新令牌走。
+        let expected = store.get(&record.id).unwrap().unwrap().siwc.unwrap();
+        let current = store
+            .update_siwc_if_current(&record.id, Some(&expected), &rotated)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.access_token, "rotated-access");
+        let file = read_siwc_credential_file(&store.siwc_path(&record.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(file.access_token, "rotated-access");
+    }
+
+    #[test]
+    fn siwc_clear_keeps_codex_credentials_and_drops_the_file() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path());
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        store
+            .attach_siwc(&record.id, &siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]))
+            .unwrap();
+        assert!(store.siwc_path(&record.id).exists());
+        store.clear_siwc(&record.id).unwrap();
+        assert!(!store.siwc_path(&record.id).exists());
+        let stored = store.get(&record.id).unwrap().unwrap();
+        assert!(stored.siwc.is_none());
+        // Codex 凭据不动。
+        assert_eq!(
+            stored.auth["tokens"]["access_token"].as_str(),
+            Some("access-acct_1")
+        );
+        // 移除整个账号时物化文件一并删除。
+        store
+            .attach_siwc(&record.id, &siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]))
+            .unwrap();
+        store.remove(&record.id).unwrap();
+        assert!(!store.siwc_path(&record.id).exists());
+    }
+
+    #[test]
+    fn siwc_refresh_needed_near_expiry_and_after_earliest() {
+        let mut credential = siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]);
+        let now = unix_timestamp();
+        credential.expires_at = now + 24 * 3600;
+        assert!(!credential.needs_refresh(now, SIWC_REFRESH_MARGIN_SECONDS));
+        credential.expires_at = now + SIWC_REFRESH_MARGIN_SECONDS - 1;
+        assert!(credential.needs_refresh(now, SIWC_REFRESH_MARGIN_SECONDS));
+        credential.expires_at = now + 24 * 3600;
+        credential.earliest_refresh_at = Some(now - 1);
+        assert!(credential.needs_refresh(now, SIWC_REFRESH_MARGIN_SECONDS));
+        credential.earliest_refresh_at = Some(now + 3600);
+        assert!(!credential.needs_refresh(now, SIWC_REFRESH_MARGIN_SECONDS));
+        credential.expires_at = 0;
+        assert!(credential.needs_refresh(now, SIWC_REFRESH_MARGIN_SECONDS));
+    }
+
+    #[test]
+    fn siwc_authorize_url_registration_vs_reauth() {
+        let registration = build_siwc_authorize_url(
+            SIWC_DYNAMIC_CLIENT_ID,
+            "state-1",
+            "nonce-1",
+            "challenge-1",
+            "urn:uuid:host-1",
+            true,
+            None,
+            None,
+        );
+        let url = reqwest::Url::parse(&registration).unwrap();
+        let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(url.as_str().split('?').next(), Some(SIWC_AUTHORIZE_URL));
+        assert_eq!(params["client_id"], SIWC_DYNAMIC_CLIENT_ID);
+        assert_eq!(params["redirect_uri"], SIWC_REDIRECT_URI);
+        assert_eq!(params["resource"], SIWC_RESOURCE);
+        assert_eq!(params["scope"], SIWC_SCOPE);
+        assert_eq!(params["state"], "state-1");
+        assert_eq!(params["nonce"], "nonce-1");
+        assert_eq!(params["code_challenge"], "challenge-1");
+        assert_eq!(params["code_challenge_method"], "S256");
+        assert_eq!(params["ext_agent_host_id"], "urn:uuid:host-1");
+        assert_eq!(params["agent_name_hint"], SIWC_AGENT_NAME_HINT);
+        assert!(!params.contains_key("id_token_hint"));
+        assert!(SIWC_REDIRECT_URI.starts_with("http://127.0.0.1:"));
+
+        let reauth = build_siwc_authorize_url(
+            "oaiapp_abc",
+            "state-2",
+            "nonce-2",
+            "challenge-2",
+            "urn:uuid:host-1",
+            false,
+            Some("id-token-hint"),
+            Some("a@example.com"),
+        );
+        let params: HashMap<_, _> = reqwest::Url::parse(&reauth)
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect();
+        assert_eq!(params["client_id"], "oaiapp_abc");
+        assert_eq!(params["id_token_hint"], "id-token-hint");
+        assert_eq!(params["login_hint"], "a@example.com");
+        // 重授权不再重复注册客户端名。
+        assert!(!params.contains_key("agent_name_hint"));
+    }
+
+    #[test]
+    fn siwc_refresh_error_mapping_only_marks_terminal_codes() {
+        for code in [
+            "invalid_grant",
+            "invalid_refresh_token",
+            "token_expired",
+            "refresh_token_expired",
+            "refresh_token_invalidated",
+            "refresh_token_reused",
+            "invalid_client",
+        ] {
+            let body =
+                serde_json::to_vec(&json!({"error": code, "error_description": "d"})).unwrap();
+            assert!(
+                siwc_invalid_from_body(&body).is_some(),
+                "{code} must mark the credential unusable"
+            );
+        }
+        for body in [
+            serde_json::to_vec(&json!({"error": "temporarily_unavailable"})).unwrap(),
+            serde_json::to_vec(&json!({"error": "server_error"})).unwrap(),
+            serde_json::to_vec(&json!({"error": "slow_down"})).unwrap(),
+            serde_json::to_vec(&json!({"detail": "not-an-oauth-error"})).unwrap(),
+            b"not json".to_vec(),
+        ] {
+            assert!(siwc_invalid_from_body(&body).is_none());
+        }
+    }
+
+    #[test]
+    fn siwc_summary_never_carries_tokens() {
+        let mut record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        record.siwc = Some(siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]));
+        let payload = serde_json::to_value(record.summary(None)).unwrap();
+        let text = payload.to_string();
+        assert!(!text.contains("siwc-access"));
+        assert!(!text.contains("siwc-refresh"));
+        assert!(!text.contains("siwc-id-token"));
+        assert!(payload.get("siwc").is_none());
     }
 }

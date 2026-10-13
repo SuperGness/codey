@@ -149,6 +149,8 @@ fn launch_official_profiles(
         .map(|record| {
             let mut profile = official_profile_from_snapshot(snapshot);
             profile.official_account_id = Some(record.id.clone());
+            // SIWC 凭据有效时这条线路切到官方直连平面；失效自动回落。
+            profile.official_siwc = record.siwc_active();
             let index = added_order.get(&record.id).copied().unwrap_or(1);
             apply_account_route_overrides(&mut profile, record, index);
             profile
@@ -395,6 +397,7 @@ fn profile_from_provider(
         plugin_route_spec: None,
         official_account: provider.official,
         official_account_id: None,
+        official_siwc: false,
         supports_remote_compaction: provider.supports_remote_compaction,
         remote_compaction_protocol: crate::config::RemoteCompactionProtocol::default(),
         supports_websockets: provider.official,
@@ -817,7 +820,11 @@ pub(crate) fn normalize_official_gateway_base_url(
 
 /// Upstream base URL for one official route. A saved gateway replaces the
 /// official endpoint; anything else stays on the default Codex gateway.
+/// SIWC 直连走 OpenAI 公开 API，账号保存的自定义网关只对 Codex 平面生效。
 pub(crate) fn official_route_base_url(profile: &ProviderProfile) -> String {
+    if profile.official_siwc {
+        return crate::official_accounts::SIWC_BASE_URL.to_string();
+    }
     let custom = profile.normalized_base_url();
     if custom.is_empty() || is_official_base_url(&custom) {
         crate::codex_config::CHATGPT_CODEX_BASE_URL.to_string()
@@ -925,6 +932,7 @@ experimental_bearer_token = "sk-relay"
                     "account_id": format!("chatgpt-{id}"),
                 },
             }),
+            siwc: None,
         }
     }
 

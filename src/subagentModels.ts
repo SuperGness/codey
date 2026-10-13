@@ -121,7 +121,7 @@ export function buildSubagentModelOptions(
       : undefined;
     const stored = Object.entries(config.modelReasoningEffortsByProvider?.[providerId] ?? {})
       .find(([model]) => modelKey(model) === modelKey(modelId))?.[1];
-    const boundedEfforts = capability
+    const boundedEfforts = !official
       ? resolveModelReasoningEfforts(efforts, stored, capability).efforts.map((effort) => effort.value)
       : efforts;
     const supportedReasoningEfforts = boundedEfforts.length > 0 ? boundedEfforts : ["low"];

@@ -39,16 +39,44 @@ const MAX_QUERY_PAGE_SIZE: u64 = 100;
 const MAX_QUERY_SEARCH_BYTES: usize = 256;
 const MAX_QUERY_FILTER_BYTES: usize = 128;
 const DAY_MS: u64 = 86_400_000;
-/// 生成阶段每秒输出 Token 数。口径与写入侧的 `output_tokens_per_second` 一致：
-/// 需要已知输出 Token 数与首内容耗时，且首内容之后仍有可计量的时间，
-/// 否则返回 NULL，聚合时自动忽略。
+/// 输出不足 100 token，或上游首字节之后的响应窗口短于 100 毫秒时不计
+/// 速度，避免短回复的网络突发导致统计失真。
+const SPEED_MIN_OUTPUT_TOKENS: u64 = 100;
+const SPEED_MIN_GENERATION_MS: u64 = 100;
+
+/// 上游响应阶段每秒输出 Token 数，口径与写入侧的 `output_tokens_per_second` 一致。
+/// 上游首字节时间以发送上游请求为起点，先加路由前置耗时，再从请求总耗时扣除。
+/// 分步减法及非负校验避免非法历史计时与整数加法溢出，条件不足时返回 NULL。
 const OUTPUT_SPEED_SQL: &str = "CASE
-        WHEN output_tokens > 0
-            AND total_duration_ms > COALESCE(downstream_first_content_ms, ttft_ms)
-        THEN output_tokens * 1000.0 / (
-            total_duration_ms - COALESCE(downstream_first_content_ms, ttft_ms)
-        )
+        WHEN total_duration_ms >= 0
+            AND router_pre_upstream_ms >= 0
+            AND upstream_first_byte_ms >= 0
+            AND router_pre_upstream_ms <= total_duration_ms
+            AND upstream_first_byte_ms <= total_duration_ms - router_pre_upstream_ms
+            AND output_tokens >= 100
+            AND total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms >= 100
+        THEN output_tokens * 1000.0 / (total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms)
     END";
+
+/// 汇总速度与单条速度口径一致，但按合格请求的输出总量除以生成总时长，
+/// 逐条取平均会被短请求带偏。
+const OUTPUT_SPEED_SUM_SQL: &str = "SUM(CASE
+        WHEN total_duration_ms >= 0
+            AND router_pre_upstream_ms >= 0
+            AND upstream_first_byte_ms >= 0
+            AND router_pre_upstream_ms <= total_duration_ms
+            AND upstream_first_byte_ms <= total_duration_ms - router_pre_upstream_ms
+            AND output_tokens >= 100
+            AND total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms >= 100
+        THEN output_tokens END) * 1000.0 / SUM(CASE
+        WHEN total_duration_ms >= 0
+            AND router_pre_upstream_ms >= 0
+            AND upstream_first_byte_ms >= 0
+            AND router_pre_upstream_ms <= total_duration_ms
+            AND upstream_first_byte_ms <= total_duration_ms - router_pre_upstream_ms
+            AND output_tokens >= 100
+            AND total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms >= 100
+        THEN total_duration_ms - router_pre_upstream_ms - upstream_first_byte_ms END)";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -258,7 +286,7 @@ pub(crate) struct RouteRequestLogEntry {
     pub upstream_header_ms: Option<u64>,
     pub total_duration_ms: u64,
     pub queue_delay_ms: u64,
-    /// 输出速度（生成阶段每秒输出 Token 数），无法计算时不记录。
+    /// 输出速度（上游响应阶段每秒输出 Token 数），无法计算时不记录。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens_per_second: Option<f64>,
     pub token_usage: RequestTokenUsage,
@@ -581,7 +609,7 @@ pub(crate) struct RouteRequestLogQueryItem {
     pub upstream_header_ms: Option<u64>,
     pub total_duration_ms: u64,
     pub queue_delay_ms: u64,
-    /// 输出速度（生成阶段每秒输出 Token 数），无法计算时为 None。
+    /// 输出速度（上游响应阶段每秒输出 Token 数），无法计算时为 None。
     pub output_tokens_per_second: Option<f64>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -1413,13 +1441,13 @@ impl RouteRequestLogProbe {
         }
         let token_usage = std::mem::take(&mut pending.token_usage);
         let usage_reported = token_usage.reported();
-        // 输出速度只覆盖首内容之后的生成阶段；首内容耗时缺失时无法区分
-        // 等待与生成，按不可计算处理。
+        // 下游可见内容可能受缓冲或协议转换影响，速度按上游首字节后的响应
+        // 窗口近似统计，包含全部输出 token（含推理）和少量响应写尾耗时。
         let output_tokens_per_second = output_tokens_per_second(
             token_usage.output_tokens,
             total_duration_ms,
-            load_duration_ms(&self.shared.downstream_first_content_micros)
-                .or_else(|| load_duration_ms(&self.shared.first_byte_micros)),
+            load_duration_ms(&self.shared.router_pre_upstream_micros),
+            load_duration_ms(&self.shared.first_byte_micros),
         );
         let usage_unavailable_reason = if usage_reported {
             None
@@ -2698,7 +2726,7 @@ fn summary_columns() -> String {
     AVG(CASE WHEN total_duration_ms >= 0 THEN total_duration_ms END),
     AVG(CASE WHEN COALESCE(downstream_first_content_ms, ttft_ms) >= 0
         THEN COALESCE(downstream_first_content_ms, ttft_ms) END),
-    AVG({OUTPUT_SPEED_SQL}),
+    {OUTPUT_SPEED_SUM_SQL},
     AVG(CASE WHEN router_pre_upstream_ms >= 0 THEN router_pre_upstream_ms END),
     AVG(CASE WHEN upstream_header_ms >= 0 THEN upstream_header_ms END),
     AVG(CASE WHEN upstream_first_byte_ms >= 0 THEN upstream_first_byte_ms END),
@@ -2752,179 +2780,6 @@ pub(crate) struct RouteRequestLogModelPage {
     pub queryable: bool,
     pub models: Vec<String>,
     pub next_cursor: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct RouteRequestLogQuotaQuery {
-    pub from_unix_ms: u64,
-    pub to_unix_ms: u64,
-    pub provider: Option<String>,
-    pub official_account_id: Option<String>,
-    /// Historical provider targets exclude records already attributed to an account.
-    #[serde(default)]
-    pub unassigned_only: bool,
-}
-
-#[derive(Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RouteRequestLogQuotaGroup {
-    pub model: String,
-    pub service_tier: Option<String>,
-    pub requested_service_tier: Option<String>,
-    pub long_context: bool,
-    pub calls: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-    pub cached_input_tokens: u64,
-    pub cache_creation_input_tokens: u64,
-    pub cache_hits: u64,
-    pub missing_usage: u64,
-    pub missing_cache_creation: u64,
-    pub billed_cached_input_tokens: u64,
-    pub billed_cache_creation_input_tokens: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RouteRequestLogQuotaUsage {
-    pub queryable: bool,
-    pub reason: Option<&'static str>,
-    pub groups: Vec<RouteRequestLogQuotaGroup>,
-    pub total_calls: u64,
-}
-
-pub(crate) fn query_route_request_log_quota_usage(
-    root: &Path,
-    backend: RouteRequestLogBackend,
-    query: RouteRequestLogQuotaQuery,
-) -> anyhow::Result<RouteRequestLogQuotaUsage> {
-    let unassigned_only = query.unassigned_only;
-    let query = RouteRequestLogQuery {
-        from_unix_ms: Some(query.from_unix_ms),
-        to_unix_ms: Some(query.to_unix_ms),
-        provider: query.provider,
-        official_account_id: query.official_account_id,
-        cursor_mode: true,
-        ..Default::default()
-    }
-    .normalize()?;
-    anyhow::ensure!(
-        !unassigned_only || query.official_account_id.is_none(),
-        "未归属账号筛选不能同时指定官方账号"
-    );
-    let queryable = backend == RouteRequestLogBackend::Sqlite;
-    let mut result = RouteRequestLogQuotaUsage {
-        queryable,
-        reason: (!queryable).then_some("ndjson_not_queryable"),
-        groups: Vec::new(),
-        total_calls: 0,
-    };
-    let path = root.join(SQLITE_FILE_NAME);
-    if !queryable || !path.is_file() {
-        return Ok(result);
-    }
-    let mut connection = open_query_connection(&path)?;
-    let transaction = connection.transaction()?;
-    let columns = sqlite_optional_columns(&transaction, &path)?;
-    // Older databases cannot prove account identity; never mix other accounts.
-    if query.official_account_id.is_some() && !columns.official_account {
-        return Ok(result);
-    }
-    let (mut filter, values) = sqlite_query_filters(&query, columns.official_account);
-    if unassigned_only && columns.official_account {
-        filter.push_str(" AND (official_account_id IS NULL OR official_account_id = '')");
-    }
-    let tiers = if columns.tiers {
-        "service_tier, requested_service_tier"
-    } else {
-        "NULL, NULL"
-    };
-    // Stream only billing dimensions/counters. No raw records, headers, count
-    // query or pagination are materialized. The existing ordered index also
-    // preserves the latest model spelling without a per-group history buffer.
-    let sql = format!(
-        "SELECT model, requested_model, {tiers}, input_tokens, output_tokens,
-            total_tokens, cached_input_tokens, cache_creation_input_tokens
-         FROM route_request_logs{filter}
-         ORDER BY timestamp_unix_ms DESC, request_id DESC"
-    );
-    let mut statement = transaction.prepare(&sql)?;
-    let mut rows = statement.query(params_from_iter(values.iter()))?;
-    let mut indices = std::collections::HashMap::new();
-    while let Some(row) = rows.next()? {
-        let model: Option<String> = row.get(0)?;
-        let requested: String = row.get(1)?;
-        let model = model
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .or_else(|| (!requested.trim().is_empty()).then(|| requested.trim()))
-            .unwrap_or("未知模型");
-        let service_tier = row
-            .get::<_, Option<String>>(2)?
-            .map(|tier| tier.trim().to_owned());
-        let requested_service_tier = row
-            .get::<_, Option<String>>(3)?
-            .map(|tier| tier.trim().to_owned());
-        let input = row_optional_u64(row, 4)?;
-        let output = row_optional_u64(row, 5)?;
-        let total = row_optional_u64(row, 6)?;
-        let cached = row_optional_u64(row, 7)?.unwrap_or_default();
-        let writes = row_optional_u64(row, 8)?;
-        let long_context = input.unwrap_or_default() > 272_000;
-        let key = (
-            model.to_lowercase(),
-            service_tier.clone(),
-            requested_service_tier.clone(),
-            long_context,
-        );
-        let index = *indices.entry(key).or_insert_with(|| {
-            let index = result.groups.len();
-            result.groups.push(RouteRequestLogQuotaGroup {
-                model: model.to_owned(),
-                service_tier,
-                requested_service_tier,
-                long_context,
-                ..Default::default()
-            });
-            index
-        });
-        let group = &mut result.groups[index];
-        let billed_cached = input.unwrap_or_default().min(cached);
-        let billed_writes =
-            (input.unwrap_or_default() - billed_cached).min(writes.unwrap_or_default());
-        for (sum, value) in [
-            (&mut group.calls, 1),
-            (&mut group.input_tokens, input.unwrap_or_default()),
-            (&mut group.output_tokens, output.unwrap_or_default()),
-            (&mut group.total_tokens, total.unwrap_or_default()),
-            (&mut group.cached_input_tokens, cached),
-            (
-                &mut group.cache_creation_input_tokens,
-                writes.unwrap_or_default(),
-            ),
-            (&mut group.cache_hits, u64::from(cached > 0)),
-            (
-                &mut group.missing_usage,
-                u64::from(input.is_none() || output.is_none() || total.is_none()),
-            ),
-            (
-                &mut group.missing_cache_creation,
-                u64::from(writes.is_none()),
-            ),
-            (&mut group.billed_cached_input_tokens, billed_cached),
-            (&mut group.billed_cache_creation_input_tokens, billed_writes),
-        ] {
-            *sum = sum.saturating_add(value);
-        }
-        result.total_calls = result.total_calls.saturating_add(1);
-    }
-    drop(rows);
-    drop(statement);
-    transaction.commit()?;
-    Ok(result)
 }
 
 pub(crate) fn query_route_request_log_models(
@@ -3102,7 +2957,7 @@ pub(crate) fn query_route_request_log_stats(
     let sql = format!("SELECT timestamp_unix_ms / {bucket_ms} * {bucket_ms} AS bucket,
         COUNT(*), SUM(total_tokens), AVG(CASE WHEN total_duration_ms >= 0 THEN total_duration_ms END),
         AVG(CASE WHEN COALESCE(downstream_first_content_ms, ttft_ms) >= 0 THEN COALESCE(downstream_first_content_ms, ttft_ms) END),
-        AVG({OUTPUT_SPEED_SQL}),
+        {OUTPUT_SPEED_SUM_SQL},
         AVG(CASE WHEN downstream_first_content_ms >= 0 THEN downstream_first_content_ms END)
         FROM route_request_logs{where_clause} GROUP BY bucket ORDER BY bucket");
     result.trend = transaction
@@ -3574,19 +3429,21 @@ fn to_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
 
-/// 生成阶段每秒输出 Token 数。需要已知输出 Token 数和首个可见内容时间，
-/// 且首内容之后仍有可计量的时间；条件不足时返回 None。
+/// 上游响应阶段每秒输出 Token 数。需要已知输出 Token 数和两段上游计时，
+/// 且满足最小输出量与最短生成窗口；条件不足时返回 None。
 fn output_tokens_per_second(
     output_tokens: Option<u64>,
     total_duration_ms: u64,
-    first_content_ms: Option<u64>,
+    router_pre_upstream_ms: Option<u64>,
+    upstream_first_byte_ms: Option<u64>,
 ) -> Option<f64> {
     let output_tokens = output_tokens?;
-    if output_tokens == 0 {
+    if output_tokens < SPEED_MIN_OUTPUT_TOKENS {
         return None;
     }
-    let generation_ms = total_duration_ms.checked_sub(first_content_ms?)?;
-    if generation_ms == 0 {
+    let first_byte_ms = router_pre_upstream_ms?.checked_add(upstream_first_byte_ms?)?;
+    let generation_ms = total_duration_ms.checked_sub(first_byte_ms)?;
+    if generation_ms < SPEED_MIN_GENERATION_MS {
         return None;
     }
     Some(output_tokens as f64 * 1_000.0 / generation_ms as f64)
@@ -3729,290 +3586,6 @@ fn rename_if_exists(source: &Path, destination: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn quota_query() -> RouteRequestLogQuotaQuery {
-        RouteRequestLogQuotaQuery {
-            from_unix_ms: 100,
-            to_unix_ms: 300,
-            provider: None,
-            official_account_id: None,
-            unassigned_only: false,
-        }
-    }
-
-    // Deliberately omit headers, errors and timings: quota queries must only
-    // project billing dimensions, not deserialize complete request log rows.
-    fn quota_database(root: &Path) -> Connection {
-        let connection = Connection::open(root.join(SQLITE_FILE_NAME)).unwrap();
-        connection.execute_batch(
-            "CREATE TABLE route_request_logs (
-                request_id TEXT PRIMARY KEY, timestamp_unix_ms INTEGER NOT NULL,
-                provider TEXT, provider_name TEXT, official_account_id TEXT,
-                model TEXT, requested_model TEXT NOT NULL DEFAULT '',
-                service_tier TEXT, requested_service_tier TEXT,
-                input_tokens INTEGER, output_tokens INTEGER, total_tokens INTEGER,
-                cached_input_tokens INTEGER, cache_creation_input_tokens INTEGER
-            );
-            CREATE INDEX quota_time ON route_request_logs(timestamp_unix_ms DESC, request_id DESC);"
-        ).unwrap();
-        connection
-    }
-
-    #[test]
-    fn quota_usage_streams_compact_groups_with_exact_account_and_range_filters() {
-        let directory = tempfile::tempdir().unwrap();
-        let connection = quota_database(directory.path());
-        for index in 0..150 {
-            connection.execute(
-                "INSERT INTO route_request_logs (request_id,timestamp_unix_ms,provider,official_account_id,model,
-                 input_tokens,output_tokens,total_tokens,cached_input_tokens,cache_creation_input_tokens)
-                 VALUES (?,200,'provider-a','account-a',' model ',100,10,110,30,40)",
-                [format!("request-{index}")],
-            ).unwrap();
-        }
-        connection.execute_batch(
-            "INSERT INTO route_request_logs (request_id,timestamp_unix_ms,provider,official_account_id,model) VALUES
-             ('before',99,'provider-a','account-a','excluded'),
-             ('first',100,'provider-a','account-a','model'),
-             ('last',299,'provider-a','account-a','MODEL'),
-             ('after',300,'provider-a','account-a','excluded'),
-             ('other-account',200,'provider-a','account-b','excluded'),
-             ('case-account',200,'provider-a','ACCOUNT-A','excluded'),
-             ('unassigned',200,'provider-a',NULL,'history'),
-             ('empty-account',200,'provider-a','','history');
-             INSERT INTO route_request_logs(request_id,timestamp_unix_ms,provider,provider_name,official_account_id,model)
-             VALUES ('name-only',200,'other','provider-a','account-a','excluded');"
-        ).unwrap();
-        let query = RouteRequestLogQuotaQuery {
-            provider: Some("PROVIDER-A".into()),
-            official_account_id: Some("account-a".into()),
-            ..quota_query()
-        };
-        let result = query_route_request_log_quota_usage(
-            directory.path(),
-            RouteRequestLogBackend::Sqlite,
-            query.clone(),
-        )
-        .unwrap();
-        assert_eq!(result.total_calls, 152);
-        assert_eq!(result.groups.len(), 1);
-        let group = &result.groups[0];
-        assert_eq!(group.model, "MODEL");
-        assert_eq!(group.calls, 152);
-        assert_eq!(group.input_tokens, 15_000);
-        assert_eq!(group.billed_cached_input_tokens, 4_500);
-        assert_eq!(group.billed_cache_creation_input_tokens, 6_000);
-        assert_eq!(group.missing_usage, 2);
-        assert_eq!(group.missing_cache_creation, 2);
-        let encoded = serde_json::to_value(&result).unwrap();
-        assert_eq!(encoded["totalCalls"], 152);
-        assert!(encoded.get("items").is_none());
-        assert!(encoded["groups"][0].get("requestId").is_none());
-        assert!(encoded["groups"][0].get("inputTokens").is_some());
-        let history = query_route_request_log_quota_usage(
-            directory.path(),
-            RouteRequestLogBackend::Sqlite,
-            RouteRequestLogQuotaQuery {
-                official_account_id: None,
-                unassigned_only: true,
-                ..query.clone()
-            },
-        )
-        .unwrap();
-        assert_eq!(history.total_calls, 2);
-        assert_eq!(history.groups[0].model, "history");
-        let injected = query_route_request_log_quota_usage(
-            directory.path(),
-            RouteRequestLogBackend::Sqlite,
-            RouteRequestLogQuotaQuery {
-                provider: Some("' OR 1=1 --".into()),
-                ..query
-            },
-        )
-        .unwrap();
-        assert_eq!(injected.total_calls, 0);
-    }
-
-    #[test]
-    fn quota_usage_clamps_per_request_and_preserves_missing_and_negative_usage() {
-        let directory = tempfile::tempdir().unwrap();
-        let connection = quota_database(directory.path());
-        connection.execute_batch(
-            "INSERT INTO route_request_logs(request_id,timestamp_unix_ms,model,input_tokens,output_tokens,total_tokens,cached_input_tokens,cache_creation_input_tokens) VALUES
-             ('read-cap',200,'model',10,2,12,99,99),
-             ('write-cap',200,'model',10,2,12,3,99),
-             ('missing',200,'model',NULL,NULL,NULL,5,NULL),
-             ('negative',200,'model',-10,-2,-12,-9,-9),
-             ('zero',200,'model',0,0,0,0,0);"
-        ).unwrap();
-        let result = query_route_request_log_quota_usage(
-            directory.path(),
-            RouteRequestLogBackend::Sqlite,
-            quota_query(),
-        )
-        .unwrap();
-        let group = &result.groups[0];
-        assert_eq!(group.calls, 5);
-        assert_eq!(group.input_tokens, 20);
-        assert_eq!(group.output_tokens, 4);
-        assert_eq!(group.total_tokens, 24);
-        assert_eq!(group.cached_input_tokens, 107);
-        assert_eq!(group.cache_creation_input_tokens, 198);
-        assert_eq!(group.cache_hits, 3);
-        assert_eq!(group.billed_cached_input_tokens, 13);
-        assert_eq!(group.billed_cache_creation_input_tokens, 7);
-        assert_eq!(group.missing_usage, 1);
-        assert_eq!(group.missing_cache_creation, 1);
-    }
-
-    #[test]
-    fn quota_usage_keeps_per_request_long_context_and_unknown_tier_dimensions() {
-        let directory = tempfile::tempdir().unwrap();
-        let connection = quota_database(directory.path());
-        connection.execute_batch(
-            "INSERT INTO route_request_logs(request_id,timestamp_unix_ms,model,requested_model,service_tier,requested_service_tier,input_tokens) VALUES
-             ('normal',200,' model ','ignored',' mystery ',' auto ',272000),
-             ('long',200,'MODEL','ignored',' mystery ',' auto ',272001),
-             ('requested',200,'  ',' fallback ','','priority',1),
-             ('unknown',200,NULL,' ',NULL,NULL,1),
-             ('exact-tier',200,'model','ignored','MYSTERY','auto',1);"
-        ).unwrap();
-        let result = query_route_request_log_quota_usage(
-            directory.path(),
-            RouteRequestLogBackend::Sqlite,
-            quota_query(),
-        )
-        .unwrap();
-        assert_eq!(result.total_calls, 5);
-        assert_eq!(result.groups.len(), 5);
-        let long = result
-            .groups
-            .iter()
-            .find(|group| group.long_context)
-            .unwrap();
-        assert_eq!(long.calls, 1);
-        assert_eq!(long.input_tokens, 272001);
-        assert_eq!(long.service_tier.as_deref(), Some("mystery"));
-        assert_eq!(long.requested_service_tier.as_deref(), Some("auto"));
-        assert!(
-            result
-                .groups
-                .iter()
-                .any(|group| !group.long_context && group.input_tokens == 272000)
-        );
-        assert!(result.groups.iter().any(|group| group.model == "fallback" && group.service_tier.as_deref() == Some("")));
-        assert!(result.groups.iter().any(|group| group.model == "未知模型"));
-        assert!(
-            result
-                .groups
-                .iter()
-                .any(|group| group.service_tier.as_deref() == Some("MYSTERY"))
-        );
-    }
-
-    #[test]
-    fn quota_usage_supports_legacy_optional_columns_without_account_leakage() {
-        let directory = tempfile::tempdir().unwrap();
-        let connection = quota_database(directory.path());
-        connection.execute_batch(
-            "ALTER TABLE route_request_logs DROP COLUMN service_tier;
-             ALTER TABLE route_request_logs DROP COLUMN requested_service_tier;
-             ALTER TABLE route_request_logs DROP COLUMN official_account_id;
-             INSERT INTO route_request_logs(request_id,timestamp_unix_ms,provider,requested_model) VALUES ('old',200,'provider-a','legacy');"
-        ).unwrap();
-        let account = query_route_request_log_quota_usage(
-            directory.path(),
-            RouteRequestLogBackend::Sqlite,
-            RouteRequestLogQuotaQuery {
-                official_account_id: Some("account-a".into()),
-                ..quota_query()
-            },
-        )
-        .unwrap();
-        assert_eq!(account.total_calls, 0);
-        let history = query_route_request_log_quota_usage(
-            directory.path(),
-            RouteRequestLogBackend::Sqlite,
-            RouteRequestLogQuotaQuery {
-                provider: Some("provider-a".into()),
-                unassigned_only: true,
-                ..quota_query()
-            },
-        )
-        .unwrap();
-        assert_eq!(history.total_calls, 1);
-        assert_eq!(history.groups[0].model, "legacy");
-        assert!(history.groups[0].service_tier.is_none());
-        assert!(history.groups[0].requested_service_tier.is_none());
-        assert_eq!(history.groups[0].missing_usage, 1);
-        assert_eq!(history.groups[0].missing_cache_creation, 1);
-    }
-
-    #[test]
-    fn quota_usage_validates_queries_and_distinguishes_empty_from_unavailable() {
-        let directory = tempfile::tempdir().unwrap();
-        let missing = query_route_request_log_quota_usage(
-            directory.path(),
-            RouteRequestLogBackend::Sqlite,
-            quota_query(),
-        )
-        .unwrap();
-        assert!(missing.queryable);
-        assert_eq!(missing.total_calls, 0);
-        assert!(missing.reason.is_none());
-        assert!(!directory.path().join(SQLITE_FILE_NAME).exists());
-        let unavailable = query_route_request_log_quota_usage(
-            directory.path(),
-            RouteRequestLogBackend::Ndjson,
-            quota_query(),
-        )
-        .unwrap();
-        assert!(!unavailable.queryable);
-        assert_eq!(unavailable.reason, Some("ndjson_not_queryable"));
-        for query in [
-            RouteRequestLogQuotaQuery {
-                from_unix_ms: 300,
-                ..quota_query()
-            },
-            RouteRequestLogQuotaQuery {
-                to_unix_ms: 0,
-                ..quota_query()
-            },
-            RouteRequestLogQuotaQuery {
-                to_unix_ms: 367 * DAY_MS,
-                ..quota_query()
-            },
-            RouteRequestLogQuotaQuery {
-                to_unix_ms: u64::MAX,
-                ..quota_query()
-            },
-            RouteRequestLogQuotaQuery {
-                provider: Some("x".repeat(MAX_QUERY_FILTER_BYTES + 1)),
-                ..quota_query()
-            },
-            RouteRequestLogQuotaQuery {
-                official_account_id: Some("account-a".into()),
-                unassigned_only: true,
-                ..quota_query()
-            },
-        ] {
-            assert!(
-                query_route_request_log_quota_usage(
-                    directory.path(),
-                    RouteRequestLogBackend::Sqlite,
-                    query
-                )
-                .is_err()
-            );
-        }
-        for json in [
-            r#"{"toUnixMs":300}"#,
-            r#"{"fromUnixMs":100,"toUnixMs":300,"page":1}"#,
-            r#"{"fromUnixMs":-1,"toUnixMs":300}"#,
-        ] {
-            assert!(serde_json::from_str::<RouteRequestLogQuotaQuery>(json).is_err());
-        }
-    }
 
     #[test]
     fn model_candidates_paginate_all_models_and_apply_account_filters() {
@@ -4549,22 +4122,30 @@ mod tests {
         a.timestamp_unix_ms = 100;
         a.total_duration_ms = 0;
         a.downstream_first_content_ms = Some(0);
+        a.token_usage.output_tokens = Some(150);
         a.token_usage.input_tokens = Some(5);
         a.token_usage.total_tokens = Some(10);
+        a.ttft_ms = Some(0);
         let mut b = a.clone();
         b.request_id = "b".into();
-        b.total_duration_ms = 30;
+        b.total_duration_ms = 900;
         b.status = RequestStatus::Failed;
         b.token_usage = RequestTokenUsage::default();
+        b.token_usage.output_tokens = Some(300);
         b.usage_reported = false;
         b.downstream_first_content_ms = None;
-        b.ttft_ms = None;
+        b.upstream_first_byte_ms = None;
+        b.ttft_ms = Some(100);
         let mut c = sample_entry("c");
         c.timestamp_unix_ms = 100;
-        c.total_duration_ms = 60;
+        c.total_duration_ms = 260;
         c.status = RequestStatus::Incomplete;
-        c.token_usage.output_tokens = Some(10);
+        c.token_usage.output_tokens = Some(160);
         c.token_usage.total_tokens = Some(20);
+        c.downstream_first_content_ms = Some(60);
+        c.router_pre_upstream_ms = Some(20);
+        c.upstream_first_byte_ms = Some(40);
+        c.ttft_ms = Some(60);
         let mut outside = sample_entry("outside");
         outside.timestamp_unix_ms = 200;
         sink.write_batch(&[queued(a), queued(b), queued(c.clone()), queued(outside)])
@@ -4597,6 +4178,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(second.items[0].request_id, "b");
+        // 明细行与统计口径一致：b 缺少上游首字节时间时速度保持未知。
+        assert_eq!(second.items[0].output_tokens_per_second, None);
+        assert_eq!(
+            first.items[0].output_tokens_per_second,
+            Some(160_000.0 / 200.0)
+        );
         let third = query_route_request_logs(
             directory.path(),
             RouteRequestLogBackend::Sqlite,
@@ -4618,18 +4205,12 @@ mod tests {
         assert_eq!(stats.summary.succeeded_count, 1);
         assert_eq!(stats.summary.failed_count, 1);
         assert_eq!(stats.summary.incomplete_count, 1);
-        assert_eq!(stats.summary.avg_duration, Some(30.0));
-        assert_eq!(stats.summary.avg_ttft, Some(7.0));
-        let avg_output_tokens_per_second = stats
-            .summary
-            .avg_output_tokens_per_second
-            .expect("只有 c 具备完整的输出速度口径");
-        assert!(
-            (avg_output_tokens_per_second - 10_000.0 / 46.0).abs() < 1e-9,
-            "{avg_output_tokens_per_second}"
-        );
+        assert_eq!(stats.summary.avg_duration, Some(386.6666666666667));
+        assert_eq!(stats.summary.avg_ttft, Some(53.333333333333336));
+        // a 的计时逆序，b 缺少上游首字节时间，均被排除；只剩 c 参与汇总。
+        assert_eq!(stats.summary.avg_output_tokens_per_second, Some(800.0));
         assert_eq!(stats.summary.input_tokens_sum, Some(15));
-        assert_eq!(stats.summary.output_tokens_sum, Some(15));
+        assert_eq!(stats.summary.output_tokens_sum, Some(610));
         assert_eq!(stats.summary.total_tokens_sum, Some(30));
         assert_eq!(stats.summary.total_tokens_known_count, 2);
         assert_eq!(stats.summary.usage_reported_count, 2);
@@ -4650,7 +4231,18 @@ mod tests {
         .unwrap();
         assert_eq!(missing.summary.total, 1);
         assert_eq!(missing.summary.total_tokens_sum, None);
+        // 缺少上游首字节时间时保持未知，不回退到 ttft。
         assert_eq!(missing.summary.avg_output_tokens_per_second, None);
+        let unknown_speed = query_route_request_log_stats(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery {
+                request_id: Some("a".into()),
+                ..query.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(unknown_speed.summary.avg_output_tokens_per_second, None);
         let empty = query_route_request_log_stats(
             directory.path(),
             RouteRequestLogBackend::Sqlite,
@@ -4690,6 +4282,126 @@ mod tests {
             "{plan}"
         );
         assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
+
+    #[test]
+    fn aggregate_output_speed_uses_total_tokens_over_total_generation_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(SQLITE_FILE_NAME);
+        let mut sink = SqliteSink::open(&path, 30).unwrap();
+        let mut fast = sample_entry("fast");
+        fast.total_duration_ms = 1_100;
+        fast.downstream_first_content_ms = Some(100);
+        fast.router_pre_upstream_ms = Some(20);
+        fast.upstream_first_byte_ms = Some(80);
+        fast.token_usage.output_tokens = Some(100);
+        let mut slow = sample_entry("slow");
+        slow.request_id = "slow".into();
+        slow.trace_id = "slow".into();
+        slow.total_duration_ms = 5_000;
+        slow.downstream_first_content_ms = Some(1_000);
+        slow.router_pre_upstream_ms = Some(200);
+        slow.upstream_first_byte_ms = Some(800);
+        slow.token_usage.output_tokens = Some(500);
+        sink.write_batch(&[queued(fast), queued(slow)]).unwrap();
+
+        let stats = query_route_request_log_stats(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery {
+                from_unix_ms: Some(0),
+                to_unix_ms: Some(10_000),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // fast 为 1 秒 100 token，slow 为 4 秒 500 token；汇总按总量相除，
+        // 不像逐条求平均那样让短请求等权。
+        assert_eq!(stats.summary.avg_output_tokens_per_second, Some(120.0));
+    }
+
+    #[test]
+    fn sqlite_output_speed_uses_upstream_timing_and_rejects_invalid_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(SQLITE_FILE_NAME);
+        let mut sink = SqliteSink::open(&path, 30).unwrap();
+        let mut buffered = sample_entry("buffered");
+        buffered.timestamp_unix_ms = 100;
+        buffered.total_duration_ms = 112_480;
+        buffered.router_pre_upstream_ms = Some(23);
+        buffered.upstream_first_byte_ms = Some(1_992);
+        buffered.downstream_first_content_ms = Some(112_374);
+        buffered.token_usage.output_tokens = Some(18_728);
+        buffered.token_usage.reasoning_output_tokens = Some(1_000);
+        // 旧的落盘速度不参与查询，历史记录也按当前计时口径重新计算。
+        buffered.output_tokens_per_second = Some(176_679.0);
+        let expected = output_tokens_per_second(Some(18_728), 112_480, Some(23), Some(1_992));
+        assert_eq!(expected, Some(18_728_000.0 / 110_465.0));
+        let mut no_downstream = buffered.clone();
+        no_downstream.request_id = "no-downstream".into();
+        no_downstream.downstream_first_content_ms = None;
+        no_downstream.ttft_ms = Some(112_479);
+        sink.write_batch(&[queued(buffered.clone()), queued(no_downstream)])
+            .unwrap();
+
+        // SQLite 历史记录可含负数；分步减法也应拒绝会使加法溢出的计时。
+        let invalid = [
+            ("missing-router", 112_480, None, Some(1_992)),
+            ("missing-byte", 112_480, Some(23), None),
+            ("negative-total", -1, Some(23), Some(1_992)),
+            ("negative-router", 112_480, Some(-1), Some(1_992)),
+            ("negative-byte", 112_480, Some(23), Some(-1)),
+            ("inverted-router", 100, Some(101), Some(0)),
+            ("inverted-byte", 100, Some(50), Some(51)),
+            ("short-window", 299, Some(50), Some(150)),
+            ("overflow", i64::MAX, Some(i64::MAX), Some(i64::MAX)),
+        ];
+        for (request_id, total, router, first_byte) in invalid {
+            let mut entry = buffered.clone();
+            entry.request_id = request_id.into();
+            sink.write_batch(&[queued(entry)]).unwrap();
+            sink.connection
+                .execute(
+                    "UPDATE route_request_logs SET total_duration_ms = ?1,
+                        router_pre_upstream_ms = ?2, upstream_first_byte_ms = ?3
+                        WHERE request_id = ?4",
+                    rusqlite::params![total, router, first_byte, request_id],
+                )
+                .unwrap();
+        }
+        let query = RouteRequestLogQuery {
+            from_unix_ms: Some(100),
+            to_unix_ms: Some(200),
+            group_by: Some("provider".into()),
+            ..Default::default()
+        };
+        let page = query_route_request_logs(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            query.clone(),
+        )
+        .unwrap();
+        assert_eq!(page.items.len(), invalid.len() + 2);
+        for entry in page.items {
+            let valid = matches!(entry.request_id.as_str(), "buffered" | "no-downstream");
+            assert_eq!(
+                entry.output_tokens_per_second,
+                if valid { expected } else { None },
+                "{}",
+                entry.request_id
+            );
+        }
+        let stats =
+            query_route_request_log_stats(directory.path(), RouteRequestLogBackend::Sqlite, query)
+                .unwrap();
+        assert_eq!(stats.summary.avg_output_tokens_per_second, expected);
+        assert_eq!(stats.groups.len(), 1);
+        assert_eq!(
+            stats.groups[0].summary.avg_output_tokens_per_second,
+            expected
+        );
+        assert_eq!(stats.trend.len(), 1);
+        assert_eq!(stats.trend[0].avg_output_tokens_per_second, expected);
     }
 
     #[test]
@@ -5533,16 +5245,52 @@ mod tests {
     }
 
     #[test]
-    fn output_speed_requires_tokens_time_and_a_generation_window() {
+    fn output_speed_requires_the_shared_thresholds_and_a_generation_window() {
         assert_eq!(
-            output_tokens_per_second(Some(100), 1_000, Some(200)),
+            output_tokens_per_second(Some(100), 1_000, Some(50), Some(150)),
             Some(125.0)
         );
-        assert_eq!(output_tokens_per_second(Some(100), 1_000, None), None);
-        assert_eq!(output_tokens_per_second(Some(100), 200, Some(200)), None);
-        assert_eq!(output_tokens_per_second(Some(100), 100, Some(200)), None);
-        assert_eq!(output_tokens_per_second(Some(0), 1_000, Some(200)), None);
-        assert_eq!(output_tokens_per_second(None, 1_000, Some(200)), None);
+        assert_eq!(
+            output_tokens_per_second(Some(100), 1_000, None, Some(200)),
+            None
+        );
+        assert_eq!(
+            output_tokens_per_second(Some(100), 1_000, Some(0), None),
+            None
+        );
+        assert_eq!(
+            output_tokens_per_second(Some(100), 200, Some(50), Some(150)),
+            None
+        );
+        assert_eq!(
+            output_tokens_per_second(Some(100), 100, Some(50), Some(150)),
+            None
+        );
+        assert_eq!(
+            output_tokens_per_second(Some(100), u64::MAX, Some(u64::MAX), Some(1)),
+            None
+        );
+        // 输出或生成窗口任意一项低于门槛都不计速度，避免短回复失真。
+        assert_eq!(
+            output_tokens_per_second(Some(99), 10_000, Some(0), Some(0)),
+            None
+        );
+        assert_eq!(
+            output_tokens_per_second(Some(1_000), 299, Some(50), Some(150)),
+            None
+        );
+        assert_eq!(
+            output_tokens_per_second(Some(1_000), 300, Some(50), Some(150)),
+            Some(10_000.0)
+        );
+        assert_eq!(
+            output_tokens_per_second(Some(0), 1_000, Some(50), Some(150)),
+            None
+        );
+        assert_eq!(
+            output_tokens_per_second(None, 1_000, Some(50), Some(150)),
+            None
+        );
     }
 
     #[cfg(unix)]

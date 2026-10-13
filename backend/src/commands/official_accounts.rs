@@ -18,7 +18,8 @@ use crate::config::{
 };
 use crate::official_accounts::{
     LoginPhase, OfficialAccountInvalid, OfficialAccountRecord, OfficialAccountStore,
-    refresh_if_stale_cached, start_login,
+    SiwcLoginPhase, agent_host_id, refresh_if_stale_cached, refresh_siwc_if_stale,
+    revoke_siwc_session, start_login, start_siwc_login,
 };
 
 pub(super) async fn invoke(
@@ -84,6 +85,22 @@ pub(super) async fn invoke(
         },
         "remove_official_account" => match string_argument(args, "accountId") {
             Ok(account_id) => remove_official_account(state, account_id).await,
+            Err(error) => Err(error),
+        },
+        "start_official_account_siwc" => match string_argument(args, "accountId") {
+            Ok(account_id) => start_official_account_siwc(state, account_id).await,
+            Err(error) => Err(error),
+        },
+        "poll_official_account_siwc" => match string_argument(args, "loginId") {
+            Ok(login_id) => poll_official_account_siwc(state, login_id).await,
+            Err(error) => Err(error),
+        },
+        "cancel_official_account_siwc" => match string_argument(args, "loginId") {
+            Ok(login_id) => cancel_official_account_siwc(state, login_id).await,
+            Err(error) => Err(error),
+        },
+        "remove_official_account_siwc" => match string_argument(args, "accountId") {
+            Ok(account_id) => remove_official_account_siwc(state, account_id).await,
             Err(error) => Err(error),
         },
         "save_official_account_route_settings" => match (
@@ -171,6 +188,8 @@ pub(super) async fn start_official_account_login(state: &Arc<AppState>) -> Resul
     {
         let mut logins = state.official_account_logins.lock().await;
         logins.cancel_all();
+        // SIWC 授权与 Codex 登录共用同一回调端口，开始前把另一边也停掉。
+        state.official_siwc_logins.lock().await.cancel_all();
     }
     // Give the aborted listener a moment to release the callback port.
     tokio::task::yield_now().await;
@@ -236,6 +255,192 @@ pub(super) async fn cancel_official_account_login(
         session.cancel();
     }
     Ok(json!({ "status": "ok" }))
+}
+
+/// 为既有官方账号启动 SIWC 二次授权。授权完成后凭据只写回发起授权的账号；
+/// 已有 SIWC 凭据时走重授权，复用签发的 client_id。
+pub(super) async fn start_official_account_siwc(
+    state: &Arc<AppState>,
+    account_id: String,
+) -> Result<Value, String> {
+    let account_id = account_id.trim().to_string();
+    if account_id.is_empty() {
+        return Err("缺少要启用官方直连的官方账号".to_string());
+    }
+    let store = state.official_accounts();
+    let config_dir = state
+        .store
+        .path()
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let lookup_id = account_id.clone();
+    let (record, host_id) =
+        tokio::task::spawn_blocking(move || -> anyhow::Result<(OfficialAccountRecord, String)> {
+            let record = store
+                .get(&lookup_id)?
+                .ok_or_else(|| anyhow::anyhow!("找不到官方账号：{lookup_id}"))?;
+            let host_id = agent_host_id(&config_dir)?;
+            Ok((record, host_id))
+        })
+        .await
+        .map_err(|error| format!("读取官方账号任务异常退出：{error}"))?
+        .map_err(|error| format!("{error:#}"))?;
+    if record.invalid() {
+        return Err("该官方账号凭据已失效，请先重新添加账号再启用官方直连".to_string());
+    }
+    {
+        // 两条 OAuth 流程共用同一回调端口，开始前互相清场。
+        let mut logins = state.official_account_logins.lock().await;
+        logins.cancel_all();
+        state.official_siwc_logins.lock().await.cancel_all();
+    }
+    tokio::task::yield_now().await;
+    let session = start_siwc_login(state.http_client.clone(), &record, &host_id)
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+    let auth_url = session.auth_url.clone();
+    let login_id = uuid::Uuid::new_v4().to_string();
+    state
+        .official_siwc_logins
+        .lock()
+        .await
+        .insert(login_id.clone(), session);
+    let browser_opened = {
+        let url = auth_url.clone();
+        tokio::task::spawn_blocking(move || open_system_browser(&url))
+            .await
+            .map_err(|error| format!("打开系统浏览器任务异常退出：{error}"))?
+            .is_ok()
+    };
+    Ok(json!({
+        "status": "wait",
+        "loginId": login_id,
+        "authUrl": auth_url,
+        "browserOpened": browser_opened,
+    }))
+}
+
+pub(super) async fn poll_official_account_siwc(
+    state: &Arc<AppState>,
+    login_id: String,
+) -> Result<Value, String> {
+    let (phase, account_id) = {
+        let mut logins = state.official_siwc_logins.lock().await;
+        logins.remove_expired();
+        let session_state = logins
+            .get(&login_id)
+            .map(|session| (session.phase(), session.account_id.clone()));
+        let Some((phase, account_id)) = session_state else {
+            return Ok(json!({
+                "status": "expired",
+                "message": "授权已过期或已取消，请重新启用官方直连",
+            }));
+        };
+        if !matches!(phase, SiwcLoginPhase::Waiting) {
+            logins.remove(&login_id);
+        }
+        (phase, account_id)
+    };
+    match phase {
+        SiwcLoginPhase::Waiting => Ok(json!({ "status": "wait" })),
+        SiwcLoginPhase::Failed(message) => Ok(json!({ "status": "failed", "message": message })),
+        SiwcLoginPhase::Completed(credential) => {
+            let payload = attach_siwc_credential(state, &account_id, *credential).await?;
+            Ok(merge(payload, json!({ "status": "ok" })))
+        }
+    }
+}
+
+/// 授权完成后校验账号身份并写回凭据：SIWC id_token 里的 email 必须和账号
+/// 记录的 email 一致，防止授权到另一个 ChatGPT 账号后静默默认花它的额度。
+async fn attach_siwc_credential(
+    state: &Arc<AppState>,
+    account_id: &str,
+    credential: crate::official_accounts::SiwcCredential,
+) -> Result<Value, String> {
+    let store = state.official_accounts();
+    let account_id = account_id.to_string();
+    let task_account_id = account_id.clone();
+    let credential_email = credential.email.clone();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let account_id = task_account_id;
+        let record = store
+            .get(&account_id)?
+            .ok_or_else(|| anyhow::anyhow!("找不到官方账号：{account_id}"))?;
+        if let (Some(expected), Some(actual)) = (
+            record
+                .email
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            credential_email
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ) && !expected.eq_ignore_ascii_case(actual)
+        {
+            anyhow::bail!(
+                "授权的 ChatGPT 账号（{actual}）与当前账号（{expected}）不一致，请确认后重试"
+            );
+        }
+        store.attach_siwc(&account_id, &credential)
+    })
+    .await
+    .map_err(|error| format!("写回官方直连凭据任务异常退出：{error}"))?
+    .map_err(|error| format!("{error:#}"))?;
+    // 凭据槽变化改变对话平面，立即重算派生线路。
+    let payload = refresh_official_route_after_account_change(state).await?;
+    Ok(merge(payload, json!({ "accountId": account_id })))
+}
+
+pub(super) async fn cancel_official_account_siwc(
+    state: &Arc<AppState>,
+    login_id: String,
+) -> Result<Value, String> {
+    if let Some(session) = state.official_siwc_logins.lock().await.remove(&login_id) {
+        session.cancel();
+    }
+    Ok(json!({ "status": "ok" }))
+}
+
+/// 停用官方直连：尽力撤销远端 refresh token 后清掉本地凭据槽；撤销未被
+/// 确认时不阻塞本地清理，把提示带回前端。
+pub(super) async fn remove_official_account_siwc(
+    state: &Arc<AppState>,
+    account_id: String,
+) -> Result<Value, String> {
+    let account_id = account_id.trim().to_string();
+    if account_id.is_empty() {
+        return Err("缺少要停用官方直连的官方账号".to_string());
+    }
+    let store = state.official_accounts();
+    let lookup_id = account_id.clone();
+    let record = tokio::task::spawn_blocking(move || store.get(&lookup_id))
+        .await
+        .map_err(|error| format!("读取官方账号任务异常退出：{error}"))?
+        .map_err(|error| format!("{error:#}"))?
+        .ok_or_else(|| format!("找不到官方账号：{account_id}"))?;
+    let remote_confirmed = match record.siwc.as_ref() {
+        Some(credential) => revoke_siwc_session(&state.http_client, credential)
+            .await
+            .is_ok(),
+        None => true,
+    };
+    let clear_store = state.official_accounts();
+    let clear_id = account_id.clone();
+    tokio::task::spawn_blocking(move || clear_store.clear_siwc(&clear_id))
+        .await
+        .map_err(|error| format!("清理官方直连凭据任务异常退出：{error}"))?
+        .map_err(|error| format!("{error:#}"))?;
+    let mut payload = refresh_official_route_after_account_change(state).await?;
+    if !remote_confirmed {
+        payload = merge(
+            payload,
+            json!({ "warning": "远端授权撤销未被确认，可稍后在 ChatGPT 设置里断开该应用" }),
+        );
+    }
+    Ok(merge(payload, json!({ "accountId": account_id })))
 }
 
 pub(super) async fn import_current_codex_login(state: &Arc<AppState>) -> Result<Value, String> {
@@ -323,79 +528,130 @@ pub(super) async fn refresh_official_account_tokens(
         .await
         .map_err(|error| format!("读取官方账号任务异常退出：{error}"))?
         .map_err(|error| format!("{error:#}"))?;
-    if is_default {
-        return Ok(record);
-    }
-    // 已确认失效的账号不再尝试刷新令牌：官方每次都会拒绝，重复轮询只会
-    // 反复请求官方接口、抬高风控概率。额度查询拿到本地原因后直接返回失效
-    // 状态，重新添加账号会写入新凭据并清除标记。
-    if record.invalid() {
-        return Ok(record);
-    }
-    let expected = record.clone();
-    let proxy = super::official_account_usage_proxy(state, account_id).await;
-    match refresh_if_stale_cached(
-        &state.http_client,
-        &mut record,
-        proxy.as_deref(),
-        Some(&state.official_proxied_clients),
-    )
-    .await
-    {
-        Ok(true) => {
-            let refreshed_store = store.clone();
-            let refreshed = record.clone();
-            record = tokio::task::spawn_blocking(move || {
-                refreshed_store.update_credentials_if_current(&expected, &refreshed)
-            })
+    // 默认账号的 Codex 凭据由 Codex 自己维护，跳过这里的刷新；SIWC 凭据
+    // 始终是 Codey 维护的，默认账号也要走下面的 SIWC 刷新腿。
+    if !is_default {
+        // 已确认失效的账号不再尝试刷新令牌：官方每次都会拒绝，重复轮询只会
+        // 反复请求官方接口、抬高风控概率。额度查询拿到本地原因后直接返回失效
+        // 状态，重新添加账号会写入新凭据并清除标记。
+        if !record.invalid() {
+            let expected = record.clone();
+            let proxy = super::official_account_usage_proxy(state, account_id).await;
+            match refresh_if_stale_cached(
+                &state.http_client,
+                &mut record,
+                proxy.as_deref(),
+                Some(&state.official_proxied_clients),
+            )
             .await
-            .map_err(|error| format!("保存官方账号任务异常退出：{error}"))?
-            .map_err(|error| format!("{error:#}"))?
-            .ok_or_else(|| "官方账号已移除，忽略旧的刷新结果".to_string())?;
-        }
-        Ok(false) => {}
-        Err(error) => {
-            // 官方明确拒绝凭据时把失效状态写回账号记录，账号列表和额度查询
-            // 都以它为准；网络故障等其他错误只记日志，不改账号状态。
-            if let Some(invalid) = error.downcast_ref::<OfficialAccountInvalid>() {
-                record.mark_invalid(invalid.reason());
-                let marked_store = store.clone();
-                let marked = record.clone();
-                record = tokio::task::spawn_blocking(move || {
-                    marked_store.update_credentials_if_current(&expected, &marked)
-                })
-                .await
-                .map_err(|error| format!("保存官方账号任务异常退出：{error}"))?
-                .map_err(|error| format!("{error:#}"))?
-                .ok_or_else(|| "官方账号已移除，忽略旧的刷新结果".to_string())?;
-                if !record.invalid() {
-                    return Ok(record);
+            {
+                Ok(true) => {
+                    let refreshed_store = store.clone();
+                    let refreshed = record.clone();
+                    record = tokio::task::spawn_blocking(move || {
+                        refreshed_store.update_credentials_if_current(&expected, &refreshed)
+                    })
+                    .await
+                    .map_err(|error| format!("保存官方账号任务异常退出：{error}"))?
+                    .map_err(|error| format!("{error:#}"))?
+                    .ok_or_else(|| "官方账号已移除，忽略旧的刷新结果".to_string())?;
                 }
-                error_log::record_failure(
-                    "official_account_invalid",
-                    "refresh_official_account_tokens",
-                    format!("{error:#}"),
-                    json!({
-                        "accountId": account_id,
-                        "detail": invalid.detail(),
-                    }),
-                );
-                // 失效账号的线路要立刻从配置里下线，避免本地路由继续把它
-                // 当成可用线路展示。
-                refresh_official_routes_after_invalid_account(
-                    state,
-                    "refresh_official_account_tokens",
-                    account_id,
-                )
-                .await;
-            } else {
-                error_log::record_failure(
-                    "official_account_refresh_failed",
-                    "refresh_official_account_tokens",
-                    format!("{error:#}"),
-                    json!({ "accountId": account_id }),
-                );
+                Ok(false) => {}
+                Err(error) => {
+                    // 官方明确拒绝凭据时把失效状态写回账号记录，账号列表和额度查询
+                    // 都以它为准；网络故障等其他错误只记日志，不改账号状态。
+                    if let Some(invalid) = error.downcast_ref::<OfficialAccountInvalid>() {
+                        record.mark_invalid(invalid.reason());
+                        let marked_store = store.clone();
+                        let marked = record.clone();
+                        record = tokio::task::spawn_blocking(move || {
+                            marked_store.update_credentials_if_current(&expected, &marked)
+                        })
+                        .await
+                        .map_err(|error| format!("保存官方账号任务异常退出：{error}"))?
+                        .map_err(|error| format!("{error:#}"))?
+                        .ok_or_else(|| "官方账号已移除，忽略旧的刷新结果".to_string())?;
+                        if !record.invalid() {
+                            return Ok(record);
+                        }
+                        error_log::record_failure(
+                            "official_account_invalid",
+                            "refresh_official_account_tokens",
+                            format!("{error:#}"),
+                            json!({
+                                "accountId": account_id,
+                                "detail": invalid.detail(),
+                            }),
+                        );
+                        // 失效账号的线路要立刻从配置里下线，避免本地路由继续把它
+                        // 当成可用线路展示。
+                        refresh_official_routes_after_invalid_account(
+                            state,
+                            "refresh_official_account_tokens",
+                            account_id,
+                        )
+                        .await;
+                    } else {
+                        error_log::record_failure(
+                            "official_account_refresh_failed",
+                            "refresh_official_account_tokens",
+                            format!("{error:#}"),
+                            json!({ "accountId": account_id }),
+                        );
+                    }
+                }
             }
+        }
+    }
+    // SIWC 是独立的凭据平面：Codex 凭据有效时才刷新（账号整体失效意味着
+    // 线路已下线，没必要再碰远端）。SIWC 刷新失败只标记直连槽位，对话会
+    // 在线路重算后自动回落到 Codex 平面。
+    if !record.invalid() && record.siwc.is_some() {
+        match refresh_siwc_if_stale(
+            &state.http_client,
+            &store,
+            account_id,
+            Some(&state.official_proxied_clients),
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(error) => {
+                if let Some(invalid) = error.downcast_ref::<crate::official_accounts::SiwcInvalid>()
+                {
+                    error_log::record_failure(
+                        "official_siwc_invalid",
+                        "refresh_official_account_tokens",
+                        format!("{error:#}"),
+                        json!({
+                            "accountId": account_id,
+                            "detail": invalid.detail(),
+                        }),
+                    );
+                    refresh_official_routes_after_invalid_account(
+                        state,
+                        "refresh_official_account_tokens",
+                        account_id,
+                    )
+                    .await;
+                } else {
+                    error_log::record_failure(
+                        "official_siwc_refresh_failed",
+                        "refresh_official_account_tokens",
+                        format!("{error:#}"),
+                        json!({ "accountId": account_id }),
+                    );
+                }
+            }
+        }
+        // 刷新直接写库，本地副本里还是旧令牌；重新读取让调用方拿到
+        // 最新的 SIWC 凭据（模型列表等按它取 access token）。
+        let reread_store = store.clone();
+        let reread_id = account_id.to_string();
+        if let Ok(Ok(Some(latest))) =
+            tokio::task::spawn_blocking(move || reread_store.get(&reread_id)).await
+        {
+            record = latest;
         }
     }
     Ok(record)
@@ -459,6 +715,28 @@ pub(super) async fn remove_official_account(
     let account_id = account_id.trim().to_string();
     if account_id.is_empty() {
         return Err("缺少要移除的官方账号".to_string());
+    }
+    // 删除账号前尽力撤销 SIWC 授权；远端不可达不阻塞本地清理，凭据文件
+    // 会随账号记录一起删除。
+    let lookup_store = state.official_accounts();
+    let lookup_id = account_id.clone();
+    let siwc_credential = tokio::task::spawn_blocking(move || {
+        lookup_store
+            .get(&lookup_id)
+            .map(|record| record.and_then(|record| record.siwc))
+    })
+    .await
+    .ok()
+    .and_then(|result| result.ok().flatten());
+    if let Some(credential) = siwc_credential
+        && let Err(error) = revoke_siwc_session(&state.http_client, &credential).await
+    {
+        error_log::record_failure(
+            "official_siwc_revoke_failed",
+            "remove_official_account",
+            format!("{error:#}"),
+            json!({ "accountId": account_id }),
+        );
     }
     let store = state.official_accounts();
     let home = codex_home().to_path_buf();

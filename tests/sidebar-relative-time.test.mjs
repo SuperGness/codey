@@ -1286,7 +1286,10 @@ test("accepts only a unique semantic AppServerManager resolver", () => {
 
 test("timestamp metadata uses only the bounded bridge route", () => {
   assert.match(source, /threadTimestampBridgePath = "\/session\/timestamps"/);
-  assert.match(source, /callBridge\(threadTimestampBridgePath, \{ sessionIds \}\)/);
+  assert.match(
+    source,
+    /callBridge\(\s*threadTimestampBridgePath,\s*\{ sessionIds \},\s*\{ timeoutMs: threadTimestampFetchTimeoutMs \},?\s*\)/,
+  );
   assert.doesNotMatch(source, /method: "thread\/(?:list|read)"/);
   assert.doesNotMatch(source, /fetch\(url\)/);
 });

@@ -194,7 +194,7 @@ pub(crate) fn responses_websocket_stream_id(body: &Value) -> Result<Option<Strin
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UpstreamWebSocketAttempt {
-    UseHttp,
+    UseHttp(&'static str),
     Completed,
 }
 

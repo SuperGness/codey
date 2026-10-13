@@ -172,6 +172,181 @@ pub(crate) async fn read_cached_official_auth(
     cache.store(auth_path, result, now).ok()
 }
 
+// ---------------------------------------------------------------------------
+// SIWC（官方直连）凭据解析
+// ---------------------------------------------------------------------------
+
+/// SIWC 凭据文件的读取缓存；与 `OfficialAuthCaches` 相同的
+/// 指纹+短 TTL 策略，但缓存的是直连凭据视图。
+#[derive(Debug)]
+pub(crate) struct SiwcAuthCache {
+    cached: Option<std::result::Result<Arc<crate::official_accounts::SiwcFileCredential>, String>>,
+    fingerprint: Option<crate::account_usage::OfficialAuthFingerprint>,
+    expires_at: Option<Instant>,
+    last_used: u64,
+}
+
+/// 多账号 SIWC 文件缓存；键是文件路径，一个账号的凭据不会答到另一个账号。
+#[derive(Debug, Default)]
+pub(crate) struct SiwcAuthCaches {
+    caches: HashMap<String, SiwcAuthCache>,
+    usage_clock: u64,
+}
+
+impl SiwcAuthCaches {
+    fn for_path(&mut self, path: &Path) -> &mut SiwcAuthCache {
+        let key = path.to_string_lossy().into_owned();
+        if !self.caches.contains_key(&key)
+            && self.caches.len() >= 24
+            && let Some(oldest) = self
+                .caches
+                .iter()
+                .min_by_key(|(_, cache)| cache.last_used)
+                .map(|(key, _)| key.clone())
+        {
+            self.caches.remove(&oldest);
+        }
+        self.usage_clock = self.usage_clock.saturating_add(1);
+        let last_used = self.usage_clock;
+        let cache = self.caches.entry(key).or_insert_with(|| SiwcAuthCache {
+            cached: None,
+            fingerprint: None,
+            expires_at: None,
+            last_used,
+        });
+        cache.last_used = last_used;
+        cache
+    }
+}
+
+impl SiwcAuthCache {
+    fn get(
+        &mut self,
+        path: &Path,
+        now: Instant,
+    ) -> Option<std::result::Result<Arc<crate::official_accounts::SiwcFileCredential>, String>>
+    {
+        const REVALIDATE: Duration = Duration::from_secs(1);
+        if self.expires_at.is_some_and(|expires_at| now < expires_at) {
+            return self.cached.clone();
+        }
+        if self.cached.is_none() || self.fingerprint.is_none() {
+            return None;
+        }
+        if crate::account_usage::official_auth_fingerprint(path) != self.fingerprint {
+            return None;
+        }
+        self.expires_at = Some(now + REVALIDATE);
+        self.cached.clone()
+    }
+
+    fn store(
+        &mut self,
+        path: &Path,
+        result: Result<crate::official_accounts::SiwcFileCredential>,
+        now: Instant,
+    ) -> Result<Arc<crate::official_accounts::SiwcFileCredential>> {
+        const REVALIDATE: Duration = Duration::from_secs(1);
+        let result = result.map(Arc::new).map_err(|error| error.to_string());
+        self.fingerprint = crate::account_usage::official_auth_fingerprint(path);
+        self.cached = Some(result.clone());
+        self.expires_at = Some(now + REVALIDATE);
+        result.map_err(anyhow::Error::msg)
+    }
+}
+
+async fn read_cached_siwc_auth(
+    path: &Path,
+    caches: &Mutex<SiwcAuthCaches>,
+) -> Result<Arc<crate::official_accounts::SiwcFileCredential>> {
+    let now = Instant::now();
+    if let Some(result) = caches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .for_path(path)
+        .get(path, now)
+    {
+        return result.map_err(anyhow::Error::msg);
+    }
+    let read_path = path.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::official_accounts::read_siwc_credential_file(&read_path)
+            .and_then(|credential| credential.context("官方直连凭据文件缺失"))
+    })
+    .await
+    .context("读取官方直连凭据任务异常退出")?;
+    let now = Instant::now();
+    let mut caches = caches
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let cache = caches.for_path(path);
+    if let Some(cached) = cache.get(path, now) {
+        return cached.map_err(anyhow::Error::msg);
+    }
+    cache.store(path, result, now)
+}
+
+/// 解析 SIWC 线路的上游凭据：读物化文件，临期时走串行刷新，只返回
+/// Authorization——公开 API 不需要也不会接受 `chatgpt-account-id`。
+///
+/// 返回值与 `resolve_official_upstream_auth` 共用同一类型；
+/// `account_id` 恒为 None，调用方不再注入账号头。
+pub(crate) async fn resolve_siwc_upstream_auth(
+    siwc_path: &Path,
+    account_id: &str,
+    caches: &Mutex<SiwcAuthCaches>,
+    default_client: &reqwest::Client,
+    proxied_clients: &Mutex<HashMap<String, reqwest::Client>>,
+) -> Result<OfficialUpstreamAuth> {
+    let credential = read_cached_siwc_auth(siwc_path, caches).await?;
+    if let Some(reason) = credential.invalid_reason.as_deref() {
+        anyhow::bail!("官方直连授权已失效（{reason}），请在账号卡片重新授权");
+    }
+    if credential.needs_refresh(
+        crate::official_accounts::unix_timestamp(),
+        crate::official_accounts::SIWC_REFRESH_MARGIN_SECONDS,
+    ) {
+        let store = crate::official_accounts::OfficialAccountStore::for_config_path(
+            &crate::config::default_config_path(),
+        );
+        if let Err(error) = crate::official_accounts::refresh_siwc_if_stale(
+            default_client,
+            &store,
+            account_id,
+            Some(proxied_clients),
+        )
+        .await
+        {
+            // 刷新失败但磁盘令牌仍未过期时继续用它：一次网络抖动不该打断
+            // 还能用的对话；令牌真过期了才报错。
+            let current = read_cached_siwc_auth(siwc_path, caches).await?;
+            let now = crate::official_accounts::unix_timestamp();
+            if current.expires_at != 0
+                && current.expires_at > now
+                && current.invalid_reason.is_none()
+            {
+                return Ok(OfficialUpstreamAuth {
+                    authorization: format!("Bearer {}", current.access_token),
+                    account_id: None,
+                });
+            }
+            return Err(error);
+        }
+        let credential = read_cached_siwc_auth(siwc_path, caches).await?;
+        if let Some(reason) = credential.invalid_reason.as_deref() {
+            anyhow::bail!("官方直连授权已失效（{reason}），请在账号卡片重新授权");
+        }
+        return Ok(OfficialUpstreamAuth {
+            authorization: format!("Bearer {}", credential.access_token),
+            account_id: None,
+        });
+    }
+    Ok(OfficialUpstreamAuth {
+        authorization: format!("Bearer {}", credential.access_token),
+        account_id: None,
+    })
+}
+
 pub(crate) fn route_display_name(route: &RouteTarget) -> &str {
     let route_name = route.route_name.trim();
     if route_name.is_empty() {

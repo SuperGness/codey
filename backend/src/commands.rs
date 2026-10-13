@@ -141,6 +141,8 @@ pub struct AppState {
     /// startup waits overlap.
     official_account_probe_prewarm: Mutex<Option<OfficialAccountProbePrewarm>>,
     official_account_logins: Mutex<crate::official_accounts::LoginSessions>,
+    /// SIWC 授权会话与 Codex 登录共用同一回调端口，两边同时只允许一条进行。
+    official_siwc_logins: Mutex<crate::official_accounts::SiwcLoginSessions>,
     /// 令牌刷新按账号串行执行。多个请求同时轮换同一个 refresh token 会让
     /// 先写回的凭据立刻失效。
     official_account_refresh_lock: Mutex<()>,
@@ -268,6 +270,7 @@ impl Default for AppState {
             wechat_claw_login_http_client: std::sync::OnceLock::new(),
             official_account_probe_prewarm: Mutex::new(None),
             official_account_logins: Mutex::new(crate::official_accounts::LoginSessions::default()),
+            official_siwc_logins: Mutex::new(crate::official_accounts::SiwcLoginSessions::default()),
             official_account_refresh_lock: Mutex::new(()),
             account_usage_cache: Arc::new(Mutex::new(account_usage::AccountUsageCaches::default())),
             runtime: Mutex::new(None),
@@ -1128,14 +1131,6 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 Err(error) => Err(format!("模型候选查询参数无效：{error}")),
             }
         }
-        "query_route_request_log_quota_usage" => {
-            match serde_json::from_value::<crate::route_request_log::RouteRequestLogQuotaQuery>(
-                args.clone(),
-            ) {
-                Ok(query) => query_route_request_log_quota_usage(state, query).await,
-                Err(error) => Err(format!("额度用量查询参数无效：{error}")),
-            }
-        }
         "query_route_request_log_stats" => {
             match serde_json::from_value::<RouteRequestLogQuery>(args.clone()) {
                 Ok(query) => query_route_request_log_stats(state, query).await,
@@ -1164,6 +1159,10 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         | "import_official_account_credential"
         | "set_default_official_account"
         | "remove_official_account"
+        | "start_official_account_siwc"
+        | "poll_official_account_siwc"
+        | "cancel_official_account_siwc"
+        | "remove_official_account_siwc"
         | "save_official_account_route_settings" => {
             official_accounts::invoke(state, command, &args).await
         }
@@ -1176,9 +1175,11 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             Ok(text) => optimize_prompt_command(state, text).await,
             Err(error) => Err(error),
         },
-        "conversation_git_status" | "conversation_git_preview" | "conversation_git_execute" => {
-            conversation_git::invoke(state, command, &args).await
-        }
+        "conversation_git_status"
+        | "conversation_git_preview"
+        | "conversation_git_execute"
+        | "conversation_git_push_preview"
+        | "conversation_git_cancel" => conversation_git::invoke(state, command, &args).await,
         "test_prompt_optimization" => {
             match optional_argument::<PromptOptimizationConfig>(&args, "config") {
                 Ok(draft) => test_prompt_optimization_command(state, draft).await,
@@ -1332,28 +1333,6 @@ pub async fn query_route_request_logs(
     .map_err(|error| format!("请求日志查询任务异常退出：{error}"))?
     .map_err(|error| format!("查询请求日志失败：{error:#}"))?;
     serde_json::to_value(page).map_err(|error| format!("请求日志查询结果序列化失败：{error}"))
-}
-
-async fn query_route_request_log_quota_usage(
-    state: &Arc<AppState>,
-    query: crate::route_request_log::RouteRequestLogQuotaQuery,
-) -> Result<Value, String> {
-    let backend = state.config.read().await.route_request_log.backend;
-    let root = codey_runtime_core::paths::default_app_state_dir();
-    let usage = tokio::task::spawn_blocking(move || {
-        crate::route_request_log::query_route_request_log_quota_usage(&root, backend, query)
-    })
-    .await
-    .map_err(|error| format!("额度用量查询任务异常退出：{error}"))?
-    .map_err(|error| format!("查询额度用量失败：{error:#}"))?;
-    let mut value =
-        serde_json::to_value(usage).map_err(|error| format!("额度用量序列化失败：{error}"))?;
-    let runtime = state.runtime.lock().await.clone();
-    if let Some(runtime) = runtime {
-        value["recordingHealth"] = serde_json::to_value(runtime.request_log_health().await)
-            .map_err(|error| format!("请求日志状态序列化失败：{error}"))?;
-    }
-    Ok(value)
 }
 
 async fn query_route_request_log_stats(
@@ -2010,6 +1989,23 @@ pub(crate) fn install_plugin_route_handler(state: Arc<AppState>) {
                 .map_err(|error| error.to_string())
         })
     }));
+    let weak = Arc::downgrade(&state);
+    crate::official_accounts::set_siwc_invalidated_listener(Some(Arc::new(move |account_id| {
+        let Some(state) = weak.upgrade() else {
+            return;
+        };
+        let Some(runtime) = state.runtime_handle.clone() else {
+            return;
+        };
+        runtime.spawn(async move {
+            official_accounts::refresh_official_routes_after_invalid_account(
+                &state,
+                "siwc_invalidation",
+                &account_id,
+            )
+            .await;
+        });
+    })));
     let state = Arc::clone(&state);
     crate::codey_plugins::set_route_handler(Arc::new(move |plugin_id, change| {
         let (route_id, changed) = apply_plugin_route_change(&state, plugin_id, change)?;

@@ -158,8 +158,6 @@ type RouteDraftErrors = {
 // 官方线路的编辑入口只改线路名、短名称、网关和代理，模型列举交给同步入口。
 type OfficialRouteDialogScope = "settings" | "models";
 
-export { MAX_ROUTE_NAME_CHARACTERS };
-
 const UPSTREAM_PROXY_TOOLTIP_CONTENT = (
   <div className="space-y-1.5 text-xs text-left leading-relaxed">
     <div className="font-semibold">上游代理格式与提示</div>

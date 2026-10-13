@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -66,6 +66,34 @@ impl Drop for BridgePumpHandle {
     }
 }
 
+/// 同一 target 上已注册的持久文档脚本标识（按 WebSocket 地址区分目标）。重复
+/// 装桥时先注销上一批再注册，否则每次重试或看门狗重建都会让脚本在后续导航里
+/// 多执行一遍。标识只在同一 target 上有效；目标销毁后的残项随下次装桥清掉。
+static DOCUMENT_SCRIPT_REGISTRATIONS: OnceLock<Mutex<HashMap<String, Vec<String>>>> =
+    OnceLock::new();
+
+fn document_script_registrations() -> &'static Mutex<HashMap<String, Vec<String>>> {
+    DOCUMENT_SCRIPT_REGISTRATIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// addScriptToEvaluateOnNewDocument 的响应带 `result.identifier`；注册一条记
+/// 一条，装桥中途失败留下的残项也能被下次装桥完整注销。
+fn remember_document_script(websocket_url: &str, response: &Value) {
+    let Some(identifier) = response
+        .get("result")
+        .and_then(|result| result.get("identifier"))
+        .and_then(Value::as_str)
+    else {
+        return;
+    };
+    document_script_registrations()
+        .lock()
+        .expect("document script registry poisoned")
+        .entry(websocket_url.to_string())
+        .or_default()
+        .push(identifier.to_string());
+}
+
 static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(100);
 
 pub fn build_bridge_script(binding_name: &str) -> String {
@@ -79,6 +107,21 @@ fn build_bridge_script_for_session(binding_name: &str, session_token: &str) -> S
         r#"
 (() => {{
   const bridgeSession = {session_token};
+  // 重新注入会替换回调表，先把上一代表里仍在等待的调用全部置为失败，
+  // 否则它们的 Promise 永远挂起，调用方（如会话时间戳刷新）会被一次性卡死。
+  const previousCallbacks = window.__codexSessionDeleteCallbacks;
+  if (previousCallbacks && typeof previousCallbacks.forEach === "function") {{
+    previousCallbacks.forEach((callback) => {{
+      try {{
+        if (callback?.timeout) window.clearTimeout(callback.timeout);
+        callback?.resolve?.({{
+          status: "failed",
+          code: "bridge_reinstalled",
+          message: "Codey 桥接已重新注入，请重试",
+        }});
+      }} catch {{}}
+    }});
+  }}
   window.__codexSessionDeleteCallbacks = new Map();
   window.__codexSessionDeleteSeq = 0;
   const takeCallback = (id) => {{
@@ -215,14 +258,32 @@ pub async fn install_bridge(
         .send_command(3, "Runtime.addBinding", json!({ "name": binding_name }))
         .await?;
 
+    // 重复装桥先注销同一 target 上的旧持久脚本：注册标识没有枚举接口，只能由
+    // 上一次装桥记下。注销失败不阻断安装，残项随下次装桥再清。
+    let stale_registrations = document_script_registrations()
+        .lock()
+        .expect("document script registry poisoned")
+        .remove(websocket_url)
+        .unwrap_or_default();
+    for identifier in stale_registrations {
+        let _ = session
+            .send_command(
+                next_message_id(),
+                "Page.removeScriptToEvaluateOnNewDocument",
+                json!({ "identifier": identifier }),
+            )
+            .await;
+    }
+
     let bridge_script = build_bridge_script_for_session(binding_name, &session_token);
-    session
+    let response = session
         .send_command(
             4,
             "Page.addScriptToEvaluateOnNewDocument",
             json!({ "source": bridge_script }),
         )
         .await?;
+    remember_document_script(websocket_url, &response);
     let response = session
         .send_command(
             5,
@@ -234,13 +295,14 @@ pub async fn install_bridge(
 
     for script in new_document_scripts {
         let message_id = next_message_id();
-        session
+        let response = session
             .send_command(
                 message_id,
                 "Page.addScriptToEvaluateOnNewDocument",
                 json!({ "source": script }),
             )
             .await?;
+        remember_document_script(websocket_url, &response);
         let message_id = next_message_id();
         let response = session
             .send_command(
@@ -425,6 +487,7 @@ async fn run_bridge_pump(
     let mut ready = VecDeque::<BridgeCompletion>::new();
     let mut concurrent = FuturesUnordered::<BridgeCallFuture>::new();
     let mut serial = FuturesUnordered::<BridgeCallFuture>::new();
+    let mut git_work = FuturesUnordered::<BridgeCallFuture>::new();
     let mut stream_open = true;
 
     while let Some(message) = binding_calls.pop_front() {
@@ -437,11 +500,20 @@ async fn run_bridge_pump(
     }
 
     loop {
-        while concurrent.len() < BRIDGE_MAX_CONCURRENT_READ_HANDLERS {
-            let Some(call) = pending_concurrent.pop_front() else {
-                break;
+        while let Some(index) = pending_concurrent.iter().position(|call| {
+            if bridge_path_is_git_work(&call.path) {
+                git_work.len() < 4
+            } else {
+                concurrent.len() < BRIDGE_MAX_CONCURRENT_READ_HANDLERS
+            }
+        }) {
+            let call = pending_concurrent.remove(index).unwrap();
+            let lane = if bridge_path_is_git_work(&call.path) {
+                &mut git_work
+            } else {
+                &mut concurrent
             };
-            concurrent.push(execute_bridge_call(Arc::clone(&handler), call));
+            lane.push(execute_bridge_call(Arc::clone(&handler), call));
         }
         if serial.is_empty()
             && let Some(call) = pending_serial.pop_front()
@@ -459,6 +531,7 @@ async fn run_bridge_pump(
         if !stream_open
             && concurrent.is_empty()
             && serial.is_empty()
+            && git_work.is_empty()
             && pending_concurrent.is_empty()
             && pending_serial.is_empty()
         {
@@ -476,6 +549,11 @@ async fn run_bridge_pump(
                 }
             }
             completion = concurrent.next(), if !concurrent.is_empty() => {
+                if let Some(completion) = completion {
+                    ready.push_back(completion);
+                }
+            }
+            completion = git_work.next(), if !git_work.is_empty() => {
                 if let Some(completion) = completion {
                     ready.push_back(completion);
                 }
@@ -572,19 +650,31 @@ fn queue_bridge_dispatch(
     }
 }
 
-fn bridge_path_can_run_concurrently(path: &str) -> bool {
+fn bridge_path_is_git_work(path: &str) -> bool {
     matches!(
         path,
-        "/settings/get"
-            | "/codex-model-catalog"
-            | "/backend/status"
-            | "/backend/health"
-            | "/account/usage"
-            | "/session/completion-state"
-            | "/api/check_for_updates"
-            | "/session/wake-watcher"
-            | "/plugins/list"
+        "/api/conversation_git_preview"
+            | "/api/conversation_git_push_preview"
+            | "/api/conversation_git_execute"
     )
+}
+
+fn bridge_path_can_run_concurrently(path: &str) -> bool {
+    bridge_path_is_git_work(path)
+        || matches!(
+            path,
+            "/settings/get"
+                | "/codex-model-catalog"
+                | "/backend/status"
+                | "/backend/health"
+                | "/account/usage"
+                | "/session/completion-state"
+                | "/api/check_for_updates"
+                | "/session/wake-watcher"
+                | "/plugins/list"
+                | "/api/conversation_git_status"
+                | "/api/conversation_git_cancel"
+        )
 }
 
 fn execute_bridge_call(handler: BridgeHandler, call: BridgeCall) -> BridgeCallFuture {

@@ -1,4 +1,4 @@
-export const TOKENS_PER_K = 1_000;
+const TOKENS_PER_K = 1_000;
 
 /// 把 Token 数换算成 K 单位的显示文本，最多保留三位小数并去掉多余的零。
 export function formatTokenK(tokens: number): string {

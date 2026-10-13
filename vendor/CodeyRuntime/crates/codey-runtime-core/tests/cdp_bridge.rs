@@ -39,6 +39,10 @@ fn bridge_script_defines_expected_globals_and_binding() {
     assert!(script.contains("options = {}"));
     assert!(script.contains("bridge_timeout"));
     assert!(script.contains("takeCallback(id)"));
+    // Reinjection must settle callbacks still waiting on the previous
+    // registration so their callers can recover instead of hanging forever.
+    assert!(script.contains("bridge_reinstalled"));
+    assert!(script.contains("previousCallbacks.forEach"));
 }
 
 #[test]
@@ -520,6 +524,102 @@ async fn install_bridge_immediately_evaluates_new_document_scripts() {
         .await
         .expect("server task should finish without panicking");
     pump.close().await;
+}
+
+#[tokio::test]
+async fn reinstall_removes_previous_document_script_registrations() {
+    // 同一 target 上重复装桥必须注销上一批持久脚本，否则脚本会在后续导航里
+    // 重复执行。注册标识没有枚举接口，只能由装桥方逐条记下再逐一注销。
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let url = websocket_url(listener.local_addr().unwrap());
+    let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let server = {
+        let events = Arc::clone(&events);
+        tokio::spawn(async move {
+            let mut registration = 0u64;
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.expect("client should connect");
+                let mut socket = accept_async(stream)
+                    .await
+                    .expect("websocket should upgrade");
+                // 每次安装以桥接脚本与一个注入脚本各一对 add/evaluate 收尾；
+                // 重装时中间的 removeScriptToEvaluateOnNewDocument 不计入。
+                let mut adds = 0u32;
+                let mut evaluates = 0u32;
+                while adds < 2 || evaluates < 2 {
+                    let command = recv_json(&mut socket).await;
+                    match command["method"].as_str().unwrap_or_default() {
+                        "Page.addScriptToEvaluateOnNewDocument" => {
+                            adds += 1;
+                            registration += 1;
+                            let identifier = format!("reg-{registration}");
+                            events.lock().unwrap().push(format!("add:{identifier}"));
+                            send_json(
+                                &mut socket,
+                                json!({
+                                    "id": command["id"],
+                                    "result": { "identifier": identifier },
+                                }),
+                            )
+                            .await;
+                        }
+                        "Page.removeScriptToEvaluateOnNewDocument" => {
+                            let identifier = command["params"]["identifier"]
+                                .as_str()
+                                .expect("remove should carry an identifier")
+                                .to_string();
+                            events.lock().unwrap().push(format!("remove:{identifier}"));
+                            send_json(&mut socket, json!({ "id": command["id"], "result": {} }))
+                                .await;
+                        }
+                        "Runtime.evaluate" => {
+                            evaluates += 1;
+                            send_json(&mut socket, json!({ "id": command["id"], "result": {} }))
+                                .await;
+                        }
+                        _ => {
+                            send_json(&mut socket, json!({ "id": command["id"], "result": {} }))
+                                .await;
+                        }
+                    }
+                }
+            }
+        })
+    };
+
+    let first = bridge::install_bridge(
+        &url,
+        BRIDGE_BINDING_NAME,
+        noop_handler(),
+        &["window.first = true;".to_string()],
+    )
+    .await
+    .expect("first bridge should install");
+    let second = bridge::install_bridge(
+        &url,
+        BRIDGE_BINDING_NAME,
+        noop_handler(),
+        &["window.second = true;".to_string()],
+    )
+    .await
+    .expect("reinstall should remove stale registrations before adding new ones");
+
+    server.await.expect("CDP server should finish");
+    assert_eq!(
+        *events.lock().unwrap(),
+        vec![
+            "add:reg-1".to_string(),
+            "add:reg-2".to_string(),
+            "remove:reg-1".to_string(),
+            "remove:reg-2".to_string(),
+            "add:reg-3".to_string(),
+            "add:reg-4".to_string(),
+        ]
+    );
+    first.close().await;
+    second.close().await;
 }
 
 #[tokio::test]
@@ -1065,6 +1165,57 @@ async fn bridge_read_routes_bypass_a_slow_serial_handler() {
     request_rx
         .await
         .expect("server task should finish without panicking");
+    pump.close().await;
+}
+
+#[tokio::test]
+async fn git_work_does_not_block_status_cancellation_or_serial_settings() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let server_release = Arc::clone(&release);
+    let (url, request_rx) = spawn_cdp_server(move |mut socket| async move {
+        for expected_id in 1..=5 {
+            let command = recv_json(&mut socket).await;
+            assert_eq!(command["id"], expected_id);
+            send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
+        }
+        for (id, path) in [
+            ("preview", "/api/conversation_git_preview"),
+            ("status", "/api/conversation_git_status"),
+            ("cancel", "/api/conversation_git_cancel"),
+            ("settings", "/settings/set"),
+        ] {
+            send_json(&mut socket, json!({"method":"Runtime.bindingCalled", "params":{
+                "payload":serde_json::to_string(&json!({"id":id,"path":path,"payload":{}})).unwrap()
+            }})).await;
+        }
+        let mut completed = Vec::new();
+        for _ in 0..3 {
+            let response = tokio::time::timeout(Duration::from_secs(2), recv_json(&mut socket))
+                .await
+                .expect("Git preview must not block unrelated handlers");
+            completed.push(response.to_string());
+        }
+        for id in ["status", "cancel", "settings"] {
+            assert!(completed.iter().any(|response| response.contains(id)));
+        }
+        server_release.notify_one();
+        assert_expression_contains_request(&recv_json(&mut socket).await, "preview");
+        close_socket(&mut socket).await;
+    })
+    .await;
+    let handler = Arc::new(move |path: String, _: serde_json::Value| {
+        let release = Arc::clone(&release);
+        Box::pin(async move {
+            if path == "/api/conversation_git_preview" {
+                release.notified().await;
+            }
+            Ok(json!({"status":"ok"}))
+        }) as Pin<Box<dyn Future<Output = anyhow::Result<serde_json::Value>> + Send>>
+    });
+    let pump = bridge::install_bridge(&url, BRIDGE_BINDING_NAME, handler, &[])
+        .await
+        .unwrap();
+    request_rx.await.unwrap();
     pump.close().await;
 }
 

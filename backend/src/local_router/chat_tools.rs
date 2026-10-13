@@ -221,13 +221,109 @@ pub(crate) fn append_responses_agent_message_object(
     tool_bridge: &mut ResponsesToolBridge,
 ) -> Result<()> {
     let mut message = object.clone();
-    message.insert("role".to_string(), Value::String("assistant".to_string()));
+    let role = if agent_message_carries_instruction(object) {
+        "user"
+    } else {
+        "assistant"
+    };
+    message.insert("role".to_string(), Value::String(role.to_string()));
     if !message.contains_key("content")
         && let Some(text) = message.get("message").and_then(Value::as_str)
     {
         message.insert("content".to_string(), Value::String(text.to_string()));
     }
     append_responses_message_object(&message, messages, tool_bridge)
+}
+
+/// 协作消息在对话历史中的方向由收发双方决定。上级发给下级的 NEW_TASK 与
+/// MESSAGE 是任务指令，必须作为用户消息回放；下级回报上级的 FINAL_ANSWER
+/// 与 MESSAGE 属于助手历史。协议转换若一律写成 assistant，模型会把任务正文
+/// 当成自己先前说过的话，从而报告任务正文缺失。
+fn agent_message_carries_instruction(object: &serde_json::Map<String, Value>) -> bool {
+    let content_texts = match object.get("content") {
+        Some(Value::Array(parts)) => parts.iter().filter_map(agent_message_part_text).collect(),
+        Some(Value::String(text)) => vec![text.as_str()],
+        Some(part @ Value::Object(_)) => agent_message_part_text(part).into_iter().collect(),
+        _ => Vec::new(),
+    };
+    let texts = content_texts
+        .into_iter()
+        .chain(
+            ["message", "text"]
+                .into_iter()
+                .filter_map(|field| object.get(field).and_then(Value::as_str)),
+        )
+        .collect::<Vec<_>>();
+    // FINAL_ANSWER 只向下级返回结果，始终属于助手历史。
+    if texts
+        .iter()
+        .any(|text| has_collaboration_header(text, "FINAL_ANSWER"))
+    {
+        return false;
+    }
+    let new_task = texts
+        .iter()
+        .any(|text| has_collaboration_header(text, "NEW_TASK"));
+    // MESSAGE 两个方向都会出现：上级用它补充要求，下级用它回报进度。
+    let message = texts
+        .iter()
+        .any(|text| has_collaboration_header(text, "MESSAGE"));
+    if !new_task && !message {
+        return false;
+    }
+    // 先按收发双方的层级判断方向，路径信息不足时退回 NEW_TASK 与根代理判断。
+    match agent_message_direction(object) {
+        Some(directed_to_child) => directed_to_child,
+        None => new_task || !agent_message_targets_root(object),
+    }
+}
+
+fn agent_message_part_text(part: &Value) -> Option<&str> {
+    part.get("text")
+        .or_else(|| part.get("input_text"))
+        .or_else(|| part.get("output_text"))
+        .and_then(Value::as_str)
+}
+
+fn agent_message_targets_root(object: &serde_json::Map<String, Value>) -> bool {
+    object
+        .get("recipient")
+        .and_then(Value::as_str)
+        .is_some_and(|recipient| recipient.trim() == "/root")
+}
+
+/// 返回 `Some(true)` 表示上级发给下级，`Some(false)` 表示下级回报上级，
+/// `None` 表示路径信息不足。只看收发双方的前缀层级，不假设根代理名称。
+fn agent_message_direction(object: &serde_json::Map<String, Value>) -> Option<bool> {
+    let author = object.get("author").and_then(Value::as_str)?.trim();
+    let recipient = object.get("recipient").and_then(Value::as_str)?.trim();
+    if author.is_empty() || recipient.is_empty() || author == recipient {
+        return None;
+    }
+    if path_nested_below(recipient, author) {
+        Some(true)
+    } else if path_nested_below(author, recipient) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn path_nested_below(candidate: &str, ancestor: &str) -> bool {
+    candidate
+        .strip_prefix(ancestor)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn has_collaboration_header(text: &str, message_type: &str) -> bool {
+    let head = text.trim_start();
+    let marker = format!("Message Type: {message_type}");
+    head.strip_prefix(&marker).is_some_and(|rest| {
+        rest.is_empty()
+            || rest.starts_with('\n')
+            || rest.starts_with("\r\n")
+            || rest.starts_with(' ')
+    })
 }
 
 pub(crate) fn append_responses_message_object(
@@ -876,32 +972,47 @@ pub(crate) fn normalize_responses_tool_list(tools: Option<&mut Value>) -> bool {
 
 /// 协作工具的 `message` 参数带 `encrypted` 标记时，Responses 上游会把任务正文替换成
 /// 只有它能解开的令牌。子代理线路没有该密钥，正文会随协议转换一起丢失，因此转发前
-/// 摘掉标记，让上游按明文返回任务正文。
-pub(crate) fn strip_collaboration_message_encryption(body: &mut Value) -> bool {
+/// 摘掉标记，让上游按明文返回任务正文。官方上游按模型保留配置逐字校验
+/// `collaboration` 命名空间的 schema；未能改到别名命名空间时，官方线路保留其中的标记。
+pub(crate) fn strip_collaboration_message_encryption(
+    body: &mut Value,
+    preserve_reserved_namespace: bool,
+) -> bool {
     let Some(body) = body.as_object_mut() else {
         return false;
     };
-    let mut changed = strip_message_encryption_in_tool_list(body.get_mut("tools"));
-    let input = body.get_mut("input");
-    match input {
+    let preserve = preserve_reserved_namespace;
+    let mut changed =
+        strip_message_encryption_in_tool_scope(body.get_mut("tools"), false, preserve);
+    match body.get_mut("input") {
         Some(Value::Array(items)) => {
             for item in items {
-                changed |= strip_message_encryption_in_tool_list(item.get_mut("tools"));
+                changed |=
+                    strip_message_encryption_in_tool_scope(item.get_mut("tools"), false, preserve);
             }
         }
-        Some(item) => changed |= strip_message_encryption_in_tool_list(item.get_mut("tools")),
+        Some(item) => {
+            changed |=
+                strip_message_encryption_in_tool_scope(item.get_mut("tools"), false, preserve)
+        }
         None => {}
     }
     changed
 }
 
-fn strip_message_encryption_in_tool_list(tools: Option<&mut Value>) -> bool {
+fn strip_message_encryption_in_tool_scope(
+    tools: Option<&mut Value>,
+    reserved: bool,
+    preserve_reserved_namespace: bool,
+) -> bool {
     let Some(tools) = tools.and_then(Value::as_array_mut) else {
         return false;
     };
     let mut changed = false;
     for tool in tools {
-        if is_collaboration_message_tool(tool) {
+        let nested_reserved =
+            reserved || (preserve_reserved_namespace && is_reserved_collaboration_namespace(tool));
+        if !reserved && is_collaboration_message_tool(tool) {
             changed |= remove_message_encrypted_marker(tool.get_mut("parameters"));
             changed |= remove_message_encrypted_marker(tool.get_mut("input_schema"));
             if let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) {
@@ -909,10 +1020,18 @@ fn strip_message_encryption_in_tool_list(tools: Option<&mut Value>) -> bool {
             }
         }
         for field in ["tools", "children"] {
-            changed |= strip_message_encryption_in_tool_list(tool.get_mut(field));
+            changed |= strip_message_encryption_in_tool_scope(
+                tool.get_mut(field),
+                nested_reserved,
+                preserve_reserved_namespace,
+            );
         }
     }
     changed
+}
+
+fn is_reserved_collaboration_namespace(tool: &Value) -> bool {
+    tool.get("name").and_then(Value::as_str) == Some("collaboration")
 }
 
 fn remove_message_encrypted_marker(schema: Option<&mut Value>) -> bool {
@@ -2525,7 +2644,7 @@ mod tests {
             }]
         });
 
-        assert!(strip_collaboration_message_encryption(&mut body));
+        assert!(strip_collaboration_message_encryption(&mut body, false));
 
         let spawn = &body["tools"][0]["tools"][0]["parameters"]["properties"];
         assert!(spawn["message"].get("encrypted").is_none());
@@ -2543,7 +2662,62 @@ mod tests {
         );
 
         // 标记已摘除后再次调用不产生改动。
-        assert!(!strip_collaboration_message_encryption(&mut body));
+        assert!(!strip_collaboration_message_encryption(&mut body, false));
+    }
+
+    #[test]
+    fn keeps_encrypted_marker_inside_reserved_collaboration_namespace() {
+        let mut body = json!({
+            "tools": [{
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{
+                    "type": "function",
+                    "name": "followup_task",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }]
+            }, {
+                "type": "namespace",
+                "name": "agents",
+                "tools": [{
+                    "type": "function",
+                    "name": "followup_task",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }]
+            }]
+        });
+
+        let mut third_party = body.clone();
+        assert!(strip_collaboration_message_encryption(&mut body, true));
+        // 官方上游按模型保留配置逐字校验 collaboration.* 的 schema，标记必须原样保留。
+        assert_eq!(
+            body["tools"][0]["tools"][0]["parameters"]["properties"]["message"]["encrypted"],
+            true
+        );
+        // agents 命名空间不是上游保留项，仍按明文派发摘掉标记。
+        assert!(
+            body["tools"][1]["tools"][0]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+        assert!(!strip_collaboration_message_encryption(&mut body, true));
+
+        // 第三方线路不校验保留 schema，两个命名空间都摘掉标记。
+        assert!(strip_collaboration_message_encryption(
+            &mut third_party,
+            false
+        ));
+        assert!(
+            third_party["tools"][0]["tools"][0]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
     }
 
     #[test]
@@ -2562,7 +2736,7 @@ mod tests {
             }]
         });
 
-        assert!(strip_collaboration_message_encryption(&mut body));
+        assert!(strip_collaboration_message_encryption(&mut body, false));
         assert!(
             body["input"][0]["tools"][0]["input_schema"]["properties"]["message"]
                 .get("encrypted")

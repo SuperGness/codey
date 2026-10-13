@@ -675,12 +675,9 @@ fn render_catalog_for_provider(
         .collect::<Vec<_>>();
 
     for model in &mut catalog_models {
-        let declares_fast_support = declares_fast_speed_support(model);
         ensure_catalog_compatibility(model);
         expose_supported_model(model);
-        if declares_fast_support {
-            add_fast_speed_controls(model);
-        }
+        add_fast_speed_controls(model);
         if supports_ultrafast_speed(model) {
             add_ultrafast_speed_controls(model);
         }
@@ -1152,7 +1149,6 @@ fn ordered_catalog_sources(home: &Path) -> Vec<PathBuf> {
 
 fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
     let mut catalogs = Vec::new();
-    let mut bundled_fast_model_slugs = HashSet::new();
     let mut last_error = None;
     let mut account_snapshot_models = None;
     for path in paths {
@@ -1187,12 +1183,6 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
     if let Some(value) = codey_runtime_core::model_suffix::bundled_model_catalog() {
         let models = official_models_from_value(&value);
         if !models.is_empty() {
-            bundled_fast_model_slugs.extend(models.iter().filter_map(|model| {
-                declares_fast_speed_support(model)
-                    .then(|| model.get("slug").and_then(Value::as_str))
-                    .flatten()
-                    .map(ToString::to_string)
-            }));
             catalogs.push(models);
         }
     }
@@ -1246,6 +1236,7 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
                     .unwrap_or(slug)
                     .to_string();
                 normalize_official_model(&mut model, slug, &display_name, seen.len() - 1);
+                add_fast_speed_controls(&mut model);
                 Some(model)
             })
             .collect::<Vec<_>>();
@@ -1276,11 +1267,7 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
             let fallbacks = matching_models;
             complete_reasoning_metadata(&mut model, &fallbacks);
             normalize_official_model(&mut model, slug, display_name, priority);
-            if bundled_fast_model_slugs.contains(*slug) {
-                add_fast_speed_controls(&mut model);
-            } else {
-                remove_fast_speed_controls(&mut model);
-            }
+            add_fast_speed_controls(&mut model);
             if supports_ultrafast_speed(&model) {
                 add_ultrafast_speed_controls(&mut model);
             } else {
@@ -2265,6 +2252,7 @@ fn expose_supported_model(model: &mut Value) {
     }
 }
 
+#[cfg(test)]
 fn declares_fast_speed_support(model: &Value) -> bool {
     model
         .get("service_tiers")
@@ -2317,19 +2305,6 @@ fn add_fast_speed_controls(model: &mut Value) {
         }
     } else {
         model["additional_speed_tiers"] = json!([FAST_SPEED_TIER_ID]);
-    }
-}
-
-fn remove_fast_speed_controls(model: &mut Value) {
-    if let Some(service_tiers) = model.get_mut("service_tiers").and_then(Value::as_array_mut) {
-        service_tiers
-            .retain(|tier| tier.get("id").and_then(Value::as_str) != Some(FAST_SERVICE_TIER_ID));
-    }
-    if let Some(speed_tiers) = model
-        .get_mut("additional_speed_tiers")
-        .and_then(Value::as_array_mut)
-    {
-        speed_tiers.retain(|tier| tier.as_str() != Some(FAST_SPEED_TIER_ID));
     }
 }
 

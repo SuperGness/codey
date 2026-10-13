@@ -908,10 +908,11 @@ fn interrupt_revokes_queued_writer_before_acknowledgement() {
     replacement_write.tool_name = Some("apply_patch".into());
     replacement_write.tool_input = write.tool_input.clone();
     attest_test_child(&replacement_write, root, runtime_id);
+    // Writing is no longer gated by cross-session resource claims, so the
+    // replacement attempt may proceed while the old attempt is still active.
     assert_eq!(
-        handle_hook_for_runtime_at(&replacement_write, root, runtime_id, 34).unwrap()["hookSpecificOutput"]
-            ["permissionDecision"],
-        "deny"
+        handle_hook_for_runtime_at(&replacement_write, root, runtime_id, 34).unwrap(),
+        json!({})
     );
 
     // Failure cannot re-enable child writes or prematurely release the root.
@@ -3751,6 +3752,9 @@ fn collaboration_tool_aliases_are_allowed() {
         "agents/interrupt_agent",
         "agents::send_message",
         "followup_task",
+        "collaboration.followup_task",
+        "collaboration__spawn_agent",
+        "collaboration/list_agents",
         "functions.wait",
         "functions/wait",
         "functions:wait",
@@ -3759,6 +3763,9 @@ fn collaboration_tool_aliases_are_allowed() {
     ] {
         assert!(is_collaboration_tool(tool), "{tool}");
     }
+    assert!(is_wait_agent_tool("collaboration.wait_agent"));
+    assert!(is_followup_task_tool("collaboration.followup_task"));
+    assert!(!is_collaboration_tool("collaboration.exec_command"));
     assert!(!is_collaboration_tool("functions.exec"));
     assert!(!is_collaboration_tool("update_plan"));
     assert!(is_wait_agent_tool("functions.wait"));

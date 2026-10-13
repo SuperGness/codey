@@ -903,95 +903,102 @@ pub(super) fn changes(
         .map(|(path, _)| path.clone())
         .collect();
     paths.extend(history.paths().cloned());
-    for path in &paths {
-        relative_path(
-            root,
-            workspace,
-            root.join(path).to_str().context("文件名编码不受支持")?,
-        )?;
-        let before = head_entry(root, head, path)?;
-        let disk = disk_entry(root, path)?;
-        if before == disk {
-            continue;
+    let paths: Vec<_> = paths.into_iter().collect();
+    for batch in paths.chunks(8) {
+        check_cancelled()?;
+        for path in batch {
+            relative_path(
+                root,
+                workspace,
+                root.join(path).to_str().context("文件名编码不受支持")?,
+            )?;
         }
-        if !has_current_live_edit(&ledger, session, path, before.as_ref())
-            && history.changes_in_head(path, before.as_ref())
-        {
-            continue;
-        }
-        ensure!(
-            !ledger
-                .pending
-                .values()
-                .any(|pending| pending.candidates.contains_key(path)),
-            "{path} 仍有编辑未完成或缺少完成回执，已停止提交"
-        );
-        let after = if let Some(claim) = ledger.files.get(path) {
-            ensure!(
-                before.is_some() && disk.is_some()
-                    || claim.sessions == BTreeSet::from([session.to_string()]),
-                "{path} 的新增或删除含其他对话的编辑记录，无法确认完整归属，已停止提交"
-            );
-            if claim.valid
-                && claim.sessions == BTreeSet::from([session.to_string()])
-                && claim.baseline == fingerprint(before.as_ref())
-                && claim.expected == fingerprint(disk.as_ref())
-            {
-                disk.clone()
-            } else if (claim.sessions == BTreeSet::from([session.to_string()])
-                || claim.expected != fingerprint(disk.as_ref())
-                || before.is_none()
-                || disk.is_none())
-                && history.replay(path, before.as_ref(), disk.as_ref()).is_ok()
-            {
-                // 本对话无效摘要或过时摘要只能由完整重放证明替代，其他对话的当前归属仍需分离。
-                disk.clone()
-            } else {
-                let candidate = history
-                    .isolate_changes(root, path, before.as_ref(), disk.as_ref())
-                    .with_context(|| {
-                        if claim.sessions != BTreeSet::from([session.to_string()]) {
-                            format!("{path} 含其他对话的编辑记录，无法自动分离，已停止提交")
-                        } else {
-                            format!("{path} 的编辑基线或对话归属不明确，已停止提交")
-                        }
-                    })?;
-                // 混合归属却没有可独立保留的剩余改动时，仍不能把整份文件认领为本对话。
-                ensure!(
-                    claim.sessions == BTreeSet::from([session.to_string()])
-                        || Some(&candidate) != disk.as_ref(),
-                    "{path} 含其他对话的编辑记录且无法确认独立改动，已停止提交"
-                );
-                Some(candidate)
-            }
-        } else {
-            if before.is_none() || disk.is_none() {
-                history.replay(path, before.as_ref(), disk.as_ref()).with_context(|| {
-                    format!("{path} 的新增或删除缺少完整的成功记录，或后续内容与记录不一致，已停止提交")
-                })?;
-                changes.push(Change {
-                    path: path.clone(),
-                    before,
-                    after: disk.clone(),
-                    disk,
-                });
+        let mut heads = head_entries(root, head, batch)?;
+        for path in batch {
+            let before = heads.remove(path).context("Git 文件范围不匹配")?;
+            let disk = disk_entry(root, path)?;
+            if before == disk {
                 continue;
             }
-            match history.replay(path, before.as_ref(), disk.as_ref()) {
-                Ok(()) => disk.clone(),
-                Err(error) => Some(
-                    history
-                        .isolate_changes(root, path, before.as_ref(), disk.as_ref())
-                        .with_context(|| format!("{error:#}"))?,
-                ),
+            if !has_current_live_edit(&ledger, session, path, before.as_ref())
+                && history.changes_in_head(path, before.as_ref())
+            {
+                continue;
             }
-        };
-        changes.push(Change {
-            path: path.clone(),
-            before,
-            after,
-            disk,
-        });
+            ensure!(
+                !ledger
+                    .pending
+                    .values()
+                    .any(|pending| pending.candidates.contains_key(path)),
+                "{path} 仍有编辑未完成或缺少完成回执，已停止提交"
+            );
+            let after = if let Some(claim) = ledger.files.get(path) {
+                ensure!(
+                    before.is_some() && disk.is_some()
+                        || claim.sessions == BTreeSet::from([session.to_string()]),
+                    "{path} 的新增或删除含其他对话的编辑记录，无法确认完整归属，已停止提交"
+                );
+                if claim.valid
+                    && claim.sessions == BTreeSet::from([session.to_string()])
+                    && claim.baseline == fingerprint(before.as_ref())
+                    && claim.expected == fingerprint(disk.as_ref())
+                {
+                    disk.clone()
+                } else if (claim.sessions == BTreeSet::from([session.to_string()])
+                    || claim.expected != fingerprint(disk.as_ref())
+                    || before.is_none()
+                    || disk.is_none())
+                    && history.replay(path, before.as_ref(), disk.as_ref()).is_ok()
+                {
+                    // 本对话无效摘要或过时摘要只能由完整重放证明替代，其他对话的当前归属仍需分离。
+                    disk.clone()
+                } else {
+                    let candidate = history
+                        .isolate_changes(root, path, before.as_ref(), disk.as_ref())
+                        .with_context(|| {
+                            if claim.sessions != BTreeSet::from([session.to_string()]) {
+                                format!("{path} 含其他对话的编辑记录，无法自动分离，已停止提交")
+                            } else {
+                                format!("{path} 的编辑基线或对话归属不明确，已停止提交")
+                            }
+                        })?;
+                    // 混合归属却没有可独立保留的剩余改动时，仍不能把整份文件认领为本对话。
+                    ensure!(
+                        claim.sessions == BTreeSet::from([session.to_string()])
+                            || Some(&candidate) != disk.as_ref(),
+                        "{path} 含其他对话的编辑记录且无法确认独立改动，已停止提交"
+                    );
+                    Some(candidate)
+                }
+            } else {
+                if before.is_none() || disk.is_none() {
+                    history.replay(path, before.as_ref(), disk.as_ref()).with_context(|| {
+                    format!("{path} 的新增或删除缺少完整的成功记录，或后续内容与记录不一致，已停止提交")
+                })?;
+                    changes.push(Change {
+                        path: path.clone(),
+                        before,
+                        after: disk.clone(),
+                        disk,
+                    });
+                    continue;
+                }
+                match history.replay(path, before.as_ref(), disk.as_ref()) {
+                    Ok(()) => disk.clone(),
+                    Err(error) => Some(
+                        history
+                            .isolate_changes(root, path, before.as_ref(), disk.as_ref())
+                            .with_context(|| format!("{error:#}"))?,
+                    ),
+                }
+            };
+            changes.push(Change {
+                path: path.clone(),
+                before,
+                after,
+                disk,
+            });
+        }
     }
     ensure!(!changes.is_empty(), "当前对话没有可确认的未提交文件改动");
     ensure!(changes.len() <= MAX_FILES, "当前对话文件过多，请拆分提交");

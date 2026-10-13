@@ -44,7 +44,7 @@ fn gate_denied_edit_reconciles_only_exact_pending_call_without_granting_ownershi
             let output = if scenario == "failed" {
                 "编辑失败"
             } else {
-                "Tool call blocked by PreToolUse hook: CODEY_SUBAGENT_WORKSPACE_BUSY: 活动任务已占用该文件，本次工具未执行。. Tool: mcp__codey_fastctx__replace"
+                "Tool call blocked by PreToolUse hook: Codey 子代理门禁：该调用未执行。. Tool: mcp__codey_fastctx__replace"
             };
             repo.append_record(
                 SESSION,
@@ -120,6 +120,34 @@ fn formatter_process_receives_eof_and_collects_output_without_pipes() {
     .unwrap();
     assert_eq!(fs::read(marker).unwrap(), input);
     assert!(output.ends_with(&input));
+}
+
+#[test]
+fn cancelling_blocking_validation_stops_process_and_restores_thread_context() {
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("heartbeat");
+    let cancellation = Arc::new(Cancellation::default());
+    let cancel = Arc::clone(&cancellation);
+    let watched = marker.clone();
+    let thread = std::thread::spawn(move || {
+        let started = Instant::now();
+        while !watched.exists() && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        cancel.cancel();
+    });
+    let error = with_cancellation(cancellation, || {
+        let mut command = formatter_child_command(&marker);
+        command.env("CODEY_FORMATTER_TEST_WAIT", "1");
+        run_formatter(&mut command, b"input", Duration::from_secs(30))
+    })
+    .unwrap_err();
+    thread.join().unwrap();
+    assert!(error.to_string().contains("已取消"));
+    check_cancelled().unwrap();
+    let modified = fs::metadata(&marker).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(fs::metadata(&marker).unwrap().modified().unwrap(), modified);
 }
 
 #[test]
@@ -1894,6 +1922,33 @@ fn display_batch_failure_still_rejects_invalid_first_path() {
 }
 
 #[test]
+#[ignore = "显式运行多文件快照和安全复核耗时比较"]
+fn benchmark_snapshot_revalidation() {
+    let repo = Repo::new();
+    let paths: Vec<_> = (0..64).map(|i| format!("snapshot-{i}.txt")).collect();
+    for path in &paths {
+        fs::write(repo.root.join(path), "baseline\n").unwrap();
+    }
+    git(&repo.root, &["add", "--all"], None, None).unwrap();
+    git(&repo.root, &["commit", "-m", "baseline"], None, None).unwrap();
+    for path in &paths {
+        repo.edit(SESSION, path, "baseline", "changed");
+    }
+    let start = Instant::now();
+    let prepared = snapshot(&repo.home, SESSION).unwrap();
+    let snapshot_time = start.elapsed();
+    assert_eq!(prepared.changes.len(), 64);
+    let start = Instant::now();
+    revalidate_snapshot(&repo.home, &prepared).unwrap();
+    eprintln!(
+        "64 文件：完整快照 {snapshot_time:?}，安全复核 {:?}",
+        start.elapsed()
+    );
+    fs::write(repo.root.join(&paths[63]), "unrecorded\n").unwrap();
+    assert!(revalidate_snapshot(&repo.home, &prepared).is_err());
+}
+
+#[test]
 #[ignore = "显式运行多文件 HEAD 读取耗时比较"]
 fn benchmark_batched_head_comparison() {
     let repo = Repo::new();
@@ -3094,7 +3149,7 @@ fn no_edits_reverted_committed_failed_or_non_git_have_no_eligible_files() {
 }
 
 #[test]
-fn rejects_conflict_detached_head_index_lock_and_unpublished_commits() {
+fn rejects_conflicts_and_busy_index() {
     let repo = Repo::new();
     let prepared = repo.snapshot();
     fs::write(repo.root.join(".git/MERGE_HEAD"), &prepared.head).unwrap();
@@ -3113,6 +3168,65 @@ fn rejects_conflict_detached_head_index_lock_and_unpublished_commits() {
             .contains("暂存区正被")
     );
     fs::remove_file(repo.root.join(".git/index.lock")).unwrap();
+}
+
+#[test]
+fn detached_head_commits_only_and_explains_why_push_is_unavailable() {
+    const DETACHED: &str = "44444444-4444-4444-8444-444444444444";
+    let repo = Repo::new();
+    repo.session(DETACHED, None);
+    repo.edit(DETACHED, "owned.txt", "old", "new");
+    git(&repo.root, &["checkout", "--detach"], None, None).unwrap();
+    let prepared = snapshot(&repo.home, DETACHED).unwrap();
+    let preview = save_preview(
+        prepared.clone(),
+        "chore(files): 更新文件".into(),
+        "model".into(),
+    )
+    .unwrap();
+    assert!(preview["branch"].is_null() && preview["remote"].is_null());
+    assert!(
+        preview["pushReason"]
+            .as_str()
+            .unwrap()
+            .contains("分离 HEAD")
+    );
+    let token = preview["token"].as_str().unwrap();
+    assert!(
+        execute(&repo.home, DETACHED, token, "model", true)
+            .unwrap_err()
+            .to_string()
+            .contains("分离 HEAD")
+    );
+    let preview = save_preview(
+        prepared.clone(),
+        "chore(files): 更新文件".into(),
+        "model".into(),
+    )
+    .unwrap();
+    let token = preview["token"].as_str().unwrap();
+    let result = execute(&repo.home, DETACHED, token, "model", false).unwrap();
+    assert_eq!(result["status"], "committed");
+    assert_eq!(
+        git_text(&repo.root, &["rev-parse", "HEAD"]).unwrap(),
+        result["commit"].as_str().unwrap()
+    );
+    assert_eq!(
+        git_text(&repo.root, &["rev-parse", "--symbolic-full-name", "HEAD"]).unwrap(),
+        "HEAD"
+    );
+    assert_eq!(
+        git_text(&repo.root, &["rev-parse", "refs/heads/main"]).unwrap(),
+        prepared.head
+    );
+}
+
+#[test]
+fn unpushed_local_commits_are_listed_and_fast_forwarded_with_the_commit() {
+    const AHEAD: &str = "55555555-5555-4555-8555-555555555555";
+    let repo = Repo::new();
+    repo.session(AHEAD, None);
+    repo.edit(AHEAD, "owned.txt", "old", "new");
     git(
         &repo.root,
         &["commit", "--allow-empty", "-m", "unpublished"],
@@ -3120,15 +3234,232 @@ fn rejects_conflict_detached_head_index_lock_and_unpublished_commits() {
         None,
     )
     .unwrap();
-    let newer = snapshot(&repo.home, SESSION).unwrap();
+    let unpublished = git_text(&repo.root, &["rev-parse", "HEAD"]).unwrap();
+    // 名称尾部相同的远端分支不能被当作上游分支。
+    git(
+        &repo.root,
+        &["push", "origin", "HEAD:refs/heads/x/refs/heads/main"],
+        None,
+        None,
+    )
+    .unwrap();
+    let prepared = snapshot(&repo.home, AHEAD).unwrap();
+    let preview = save_preview(prepared, "chore(files): 更新文件".into(), "model".into()).unwrap();
+    assert_eq!(preview["remote"], "origin");
+    assert_eq!(preview["upstreamBranch"], "main");
+    assert_eq!(preview["unpushedCount"], 1);
+    let listed = preview["unpushedCommits"].as_array().unwrap();
+    assert!(listed.len() == 1 && listed[0].as_str().unwrap().ends_with(" unpublished"));
+    let token = preview["token"].as_str().unwrap();
+    let result = execute(&repo.home, AHEAD, token, "model", true).unwrap();
+    assert_eq!(result["status"], "pushed");
     assert!(
-        commit_and_push(&newer, "chore(files): 更新文件", None)
-            .unwrap_err()
-            .to_string()
-            .contains("不同步")
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("1 个未推送提交")
     );
-    git(&repo.root, &["checkout", "--detach"], None, None).unwrap();
-    assert!(snapshot(&repo.home, SESSION).is_err());
+    let commit = result["commit"].as_str().unwrap();
+    assert_eq!(
+        git_text(&repo.remote, &["rev-parse", "refs/heads/main"]).unwrap(),
+        commit
+    );
+    assert_eq!(
+        git_text(&repo.root, &["rev-parse", &format!("{commit}^")]).unwrap(),
+        unpublished
+    );
+    // 推送后同步远端跟踪分支，本地不再显示领先。
+    assert_eq!(
+        git_text(&repo.root, &["rev-parse", "refs/remotes/origin/main"]).unwrap(),
+        commit
+    );
+}
+
+#[test]
+fn push_failure_rechecks_the_remote_without_repeating_the_push() {
+    let repo = Repo::new();
+    let prepared = repo.snapshot();
+    let target = push_target(&prepared).unwrap();
+    let tracking = tracking_branch(&prepared, &target).unwrap();
+    let outcome = commit_transaction(&prepared, "fix: 更新文件", false, None).unwrap();
+    let commit = outcome["commit"].as_str().unwrap();
+    let timeout = || Err(anyhow::anyhow!("模拟传输超时"));
+    let before = push_outcome(&repo.root, &target, Some(&tracking), commit, timeout());
+    assert_eq!(before["status"], "committed");
+    assert_eq!(before["pushStatus"], "unknown");
+    git(
+        &repo.root,
+        &["push", &target.url, &format!("{commit}:{}", target.merge)],
+        None,
+        None,
+    )
+    .unwrap();
+    let recovered = push_outcome(&repo.root, &target, Some(&tracking), commit, timeout());
+    assert_eq!(recovered["status"], "pushed");
+    assert_eq!(
+        git_text(&repo.root, &["rev-parse", "refs/remotes/origin/main"]).unwrap(),
+        commit
+    );
+    let mut missing = target.clone();
+    missing.url = "../missing-remote.git".into();
+    let unknown = push_outcome(&repo.root, &missing, None, commit, timeout());
+    assert_eq!(unknown["status"], "committed");
+    assert_eq!(unknown["pushStatus"], "unknown");
+    assert_eq!(
+        git_text(&repo.root, &["rev-parse", "HEAD"]).unwrap(),
+        commit
+    );
+}
+
+#[test]
+fn tracking_sync_does_not_follow_a_changed_upstream() {
+    let repo = Repo::new();
+    let prepared = repo.snapshot();
+    let target = push_target(&prepared).unwrap();
+    let tracking = tracking_branch(&prepared, &target).unwrap();
+    git(
+        &repo.root,
+        &["update-ref", "refs/remotes/origin/other", &prepared.head],
+        None,
+        None,
+    )
+    .unwrap();
+    git(
+        &repo.root,
+        &["config", "branch.main.merge", "refs/heads/other"],
+        None,
+        None,
+    )
+    .unwrap();
+    let commit = git_text(
+        &repo.root,
+        &[
+            "commit-tree",
+            &prepared.tree,
+            "-p",
+            &prepared.head,
+            "-m",
+            "new",
+        ],
+    )
+    .unwrap();
+    assert!(tracking_branch(&prepared, &target).is_none());
+    update_tracking_branch(&repo.root, Some(&tracking), &commit);
+    assert_eq!(
+        git_text(&repo.root, &["rev-parse", "refs/remotes/origin/main"]).unwrap(),
+        commit
+    );
+    assert_eq!(
+        git_text(&repo.root, &["rev-parse", "refs/remotes/origin/other"]).unwrap(),
+        prepared.head
+    );
+}
+
+#[test]
+fn tracking_sync_does_not_overwrite_a_concurrent_fetch() {
+    let repo = Repo::new();
+    let prepared = repo.snapshot();
+    let target = push_target(&prepared).unwrap();
+    let tracking = tracking_branch(&prepared, &target).unwrap();
+    let commit = git_text(
+        &repo.root,
+        &[
+            "commit-tree",
+            &prepared.tree,
+            "-p",
+            &prepared.head,
+            "-m",
+            "new",
+        ],
+    )
+    .unwrap();
+    let fetched = git_text(
+        &repo.root,
+        &[
+            "commit-tree",
+            &prepared.tree,
+            "-p",
+            &commit,
+            "-m",
+            "fetched",
+        ],
+    )
+    .unwrap();
+    git(
+        &repo.root,
+        &["update-ref", "refs/remotes/origin/main", &fetched],
+        None,
+        None,
+    )
+    .unwrap();
+    update_tracking_branch(&repo.root, Some(&tracking), &commit);
+    assert_eq!(
+        git_text(&repo.root, &["rev-parse", "refs/remotes/origin/main"]).unwrap(),
+        fetched
+    );
+}
+
+#[test]
+fn push_target_explains_unsynced_and_unpublished_branches() {
+    let repo = Repo::new();
+    let prepared = repo.snapshot();
+    let reason = |snapshot: &Snapshot| format!("{:#}", push_target(snapshot).unwrap_err());
+    // 直接在远端生成提交，本地对象库中没有它。
+    let tree = git_text(&repo.root, &["rev-parse", "HEAD^{tree}"]).unwrap();
+    let remote_only = git_text(
+        &repo.remote,
+        &[
+            "-c",
+            "user.name=Git Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit-tree",
+            &tree,
+            "-p",
+            &prepared.head,
+            "-m",
+            "remote only",
+        ],
+    )
+    .unwrap();
+    git(
+        &repo.remote,
+        &["update-ref", "refs/heads/main", &remote_only],
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(reason(&prepared).contains("远端 origin/main 有本地没有的新提交"));
+    git(&repo.root, &["fetch", "origin"], None, None).unwrap();
+    assert!(reason(&prepared).contains("本地落后 origin/main 1 个提交"));
+    git(
+        &repo.root,
+        &["commit", "--allow-empty", "-m", "local"],
+        None,
+        None,
+    )
+    .unwrap();
+    let diverged = snapshot(&repo.home, SESSION).unwrap();
+    assert!(reason(&diverged).contains("已分叉（本地领先 1 个、远端领先 1 个提交）"));
+    git(&repo.root, &["checkout", "-b", "feature"], None, None).unwrap();
+    git(
+        &repo.root,
+        &["config", "branch.feature.remote", "origin"],
+        None,
+        None,
+    )
+    .unwrap();
+    git(
+        &repo.root,
+        &["config", "branch.feature.merge", "refs/heads/feature"],
+        None,
+        None,
+    )
+    .unwrap();
+    let feature = snapshot(&repo.home, SESSION).unwrap();
+    assert!(reason(&feature).contains("远端没有上游分支 origin/feature"));
+    git(&repo.root, &["branch", "--unset-upstream"], None, None).unwrap();
+    assert!(reason(&feature).contains("当前分支没有上游分支"));
 }
 
 #[test]
@@ -3166,7 +3497,7 @@ fn remote_advance_stops_before_creating_commit() {
         commit_and_push(&prepared, "chore(files): 更新文件", None)
             .unwrap_err()
             .to_string()
-            .contains("不同步")
+            .contains("本地落后")
     );
     assert_eq!(
         git_text(&repo.root, &["rev-parse", "HEAD"]).unwrap(),
@@ -3470,6 +3801,63 @@ fn preview_tokens_are_bound_to_session_model_state_and_single_use() {
 }
 
 #[test]
+fn local_preview_is_network_independent_and_requires_separate_push_confirmation() {
+    let repo = Repo::new();
+    let prepared = repo.snapshot();
+    let request = uuid::Uuid::new_v4().to_string();
+    let preview = save_local_preview(
+        prepared.clone(),
+        "fix: 更新文件".into(),
+        "model".into(),
+        request.clone(),
+    )
+    .unwrap();
+    assert_eq!(preview["pushPending"], true);
+    let token = preview["token"].as_str().unwrap();
+    assert!(prepare_push_preview(OTHER, token, "model").is_err());
+    assert!(
+        execute(&repo.home, SESSION, token, "model", true)
+            .unwrap_err()
+            .to_string()
+            .contains("尚未校验")
+    );
+    let preview = save_local_preview(
+        prepared.clone(),
+        "fix: 更新文件".into(),
+        "model".into(),
+        request.clone(),
+    )
+    .unwrap();
+    let token = preview["token"].as_str().unwrap();
+    assert_eq!(
+        prepare_push_preview(SESSION, token, "model").unwrap()["remote"],
+        "origin"
+    );
+    cancel_preview(OTHER, &request, Some(token)).unwrap();
+    assert!(PREVIEWS.get().unwrap().lock().unwrap().contains_key(token));
+    cancel_preview(SESSION, &request, None).unwrap();
+    assert!(!PREVIEWS.get().unwrap().lock().unwrap().contains_key(token));
+    let preview = save_local_preview(
+        prepared,
+        "fix: 更新文件".into(),
+        "model".into(),
+        uuid::Uuid::new_v4().to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        execute(
+            &repo.home,
+            SESSION,
+            preview["token"].as_str().unwrap(),
+            "model",
+            false
+        )
+        .unwrap()["status"],
+        "committed"
+    );
+}
+
+#[test]
 fn execute_supports_commit_only_without_push() {
     let repo = Repo::new();
     let prepared = repo.snapshot();
@@ -3736,7 +4124,7 @@ fn remote_target_changes_after_preview_are_rejected() {
     let repo = Repo::new();
     let prepared = repo.snapshot();
     let mut target = push_target(&prepared).unwrap();
-    target.1 = "refs/heads/different".into();
+    target.merge = "refs/heads/different".into();
     assert!(
         commit_and_push(&prepared, "chore(files): 更新文件", Some(&target))
             .unwrap_err()

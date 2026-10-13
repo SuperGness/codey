@@ -612,6 +612,7 @@ mod tests {
             account_id: "local-account".into(),
             email: Some("member@example.com".into()),
             path: PathBuf::from("/unused/auth.json"),
+            siwc_path: None,
             accepts_incoming_authorization: false,
         });
         // 非官方线路即使意外携带账号元数据，也不能将邮箱交给插件。

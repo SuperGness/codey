@@ -100,7 +100,7 @@ const WORKSPACE_WRITE_SUBAGENT_GUIDANCE: &str = r#"## 子代理使用
 - 协作工具不可用时不要循环调用；依赖有界恢复路径收敛。
 "#;
 
-pub(crate) const SUBAGENT_GUIDANCE: &str = r#"## 子代理使用
+const COMMAND_WORKSPACE_CLAIM_SUBAGENT_GUIDANCE: &str = r#"## 子代理使用
 
 主动识别可独立推进的检索、实现和核验任务；存在明确分工或上下文隔离收益时，尽早使用子代理，无需用户逐次要求。先做确定边界所需的少量检查，再派发独立任务，不必等主代理完成同一调查后再分工。单步即可完成、步骤无法分离或委派没有实际收益的任务由主代理直接处理；不按文件数量或预计工具调用次数决定是否委派。
 
@@ -125,14 +125,60 @@ pub(crate) const SUBAGENT_GUIDANCE: &str = r#"## 子代理使用
 - 协作工具不可用时不要循环调用；依赖有界恢复路径收敛。
 "#;
 
+pub(crate) const SUBAGENT_GUIDANCE: &str = r#"## 子代理使用
+
+主动识别可独立推进的检索、实现和核验任务；存在明确分工或上下文隔离收益时，尽早使用子代理，无需用户逐次要求。先做确定边界所需的少量检查，再派发独立任务，不必等主代理完成同一调查后再分工。单步即可完成、步骤无法分离或委派没有实际收益的任务由主代理直接处理；不按文件数量或预计工具调用次数决定是否委派。
+
+最多同时运行 2 个子代理，同一工作区允许并行调查、审查和修改。角色只区分任务分工与模型，各角色工具能力一致。子代理的实际访问由 Codex 原生沙箱、审批策略和可写根目录约束。同一文件的并发修改容易互相覆盖，派发并行写入任务时应明确文件归属，修改前重新读取文件。多个写入者必须同时修改同一片代码时，改为串行执行或为每个写入者准备独立 worktree，由 Git 在合并阶段显式暴露冲突；审查结论须注明依据的代码版本或内容，并在汇合后复核。
+
+### 派发
+
+- 按当前客户端提供的工具接口调用 `agents.spawn_agent`；原生接口直接调用，客户端明确提供工具目录和专用转发入口时，使用该入口及目录中的准确名称和参数。不要通过 JavaScript 聚合执行器调用协作工具。按任务选择 `codey_quick_scan`、`codey_deep_research`、`codey_visual_analysis`、`codey_worker` 或 `codey_visual_worker`；`default` 仅兼容旧配置。`task_name` 只含小写字母、数字和下划线。
+- `message` 是唯一任务胶囊：写清目标、范围、允许操作、交付格式和必要背景。独立审查明确要求只读取和回报，写入任务明确文件归属；任务正文不构成资源隔离或权限证明。各角色均获得 `command.execute`、`files.read`、`workspace.write` 和 `visual.inspect`，实际权限仍由 Codex 原生权限决定。
+- 派发并行写入任务前确认文件归属不重叠；同一文件可能互相覆盖时，改派到其他文件或等前一个 attempt 结算。确实需要同时修改同一片代码时，改为串行执行或为每个写入者准备独立 worktree。任务正文与自报文件范围不构成额外权限，实际权限始终由 Codex 原生权限决定。
+
+### 返回与验收
+
+- 每个子代理只执行一轮且不得继续派生。返回首行使用 `status: completed | partial | blocked`，正文只保留影响决策的结论、最多 5 条带 `file:line`/符号/链接的证据和明确 gaps；多代理证据冲突时比较出处。
+- 子代理结果是候选产物，不是验收结论。所有代理结算后，由根代理结合用户要求、变更差异和必要的确定性检查统一验收。
+
+### 生命周期
+
+- 先派发不超过当前并发上限的独立任务，再进入 wait/list。任一 attempt 终态或被成功中断并 fence 后，检查剩余并发额度并使用新 `task_name` 补位。活动 attempt 期间只使用必要的 `agents.*` 协作工具，普通本地工作和 Stop 仍受生命周期门禁限制。
+- `MESSAGE` 只保存证据并继续等待。`completed`、`errored`、`error`、`failed`、`shutdown`、`not_found`、`FINAL_ANSWER` 和 `task_complete` 为终态；`pending_init`、`running`、`interrupted` 仍是非终态，除非根代理成功中断并永久放弃该 attempt。
+- 仅对已绑定、仍在运行且未被 fence 的 attempt 使用 `followup_task`，每个 attempt 最多追加 3 轮。成功中断永久 fence 该 attempt；不要再等待或追派。重复 task ID 时只做一次无筛选 `agents.list_agents` 对账；原代理不存在则由根代理接管，只有任务范围实质改变时才用新 task ID 最多重派一次。
+- 协作工具不可用时不要循环调用；依赖有界恢复路径收敛。
+"#;
+
 pub(crate) const SUBAGENT_GUIDANCE_VERSIONS: &[&str] = &[
     SUBAGENT_GUIDANCE,
+    COMMAND_WORKSPACE_CLAIM_SUBAGENT_GUIDANCE,
     WORKSPACE_WRITE_SUBAGENT_GUIDANCE,
     WRITE_AT_SPAWN_SUBAGENT_GUIDANCE,
     ROLE_RESTRICTED_SUBAGENT_GUIDANCE,
     legacy::DIRECT_SUBAGENT_GUIDANCE,
     CONSERVATIVE_SUBAGENT_GUIDANCE,
     legacy::DELEGATION_V2_GUIDANCE,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_7_1,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_7_3,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_7_5,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_PREVIOUS_V1,
+    legacy::LEGACY_PREVIOUS_SUBAGENT_GUIDANCE_V5,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_7_8,
+    legacy::LEGACY_PREVIOUS_SUBAGENT_GUIDANCE_V7,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_7_9,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_8_0,
+    legacy::LEGACY_PREVIOUS_SUBAGENT_GUIDANCE_V10,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_8_2,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_8_3,
+    legacy::LEGACY_PREVIOUS_SUBAGENT_GUIDANCE_V11,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_8_5,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_8_7,
+    legacy::LEGACY_PREVIOUS_SUBAGENT_GUIDANCE_V11B,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_9_0,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_9_7,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_9_12,
+    legacy::LEGACY_SUBAGENT_GUIDANCE_V0_9_13,
 ];
 
 const PRE_INTERRUPT_FENCING_USAGE_HINT: &str = "\
@@ -250,7 +296,7 @@ every attempt is terminal or fenced. Then the root agent validates the combined 
 continues the work or finishes. While an attempt is active, Codey's gate blocks non-collaboration \
 tools and Stop. If collaboration tools are unavailable, do not loop on an unregistered tool.";
 
-pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT: &str = "\
+const COMMAND_WORKSPACE_CLAIM_COLLABORATION_USAGE_HINT: &str = "\
 `agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools use the current \
 client's declared tool interface. Native clients expose direct commentary tools; never call them through \
 `functions.exec` as a JavaScript aggregate. If a client explicitly exposes a tool catalog through a \
@@ -288,6 +334,39 @@ every attempt is terminal or fenced. Then the root agent validates the combined 
 continues the work or finishes. While an attempt is active, Codey's gate blocks non-collaboration \
 tools and Stop. If collaboration tools are unavailable, do not loop on an unregistered tool.";
 
+pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT: &str = "\
+`agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools use the current \
+client's declared tool interface. Native clients expose direct commentary tools; never call them through \
+`functions.exec` as a JavaScript aggregate. If a client explicitly exposes a tool catalog through a \
+transport-only endpoint, use that documented endpoint with the exact catalog name and argument schema. \
+A catalog-listed collaboration tool is available even without a same-named direct schema. Do not invent \
+wrappers or bypass lifecycle and permission checks. Before waiting, dispatch independent tasks up to \
+the concurrency limit of two; investigation, review and edits may share a workspace. Roles have the same \
+tool capabilities; native sandbox, approval policy, permission profile and writable roots bound what \
+each tool can touch. Because concurrent edits to one file can overwrite each other, assign distinct files \
+when dispatching parallel writers, and re-read a file before editing it. When two writers must change the \
+same code, serialize them or give each an isolated worktree and let Git surface the conflict at merge time. \
+Review may see changing files; \
+report the revision or content examined and recheck conclusions after all attempts settle. \
+While any attempt is active, use only the relevant `agents.spawn_agent`, `agents.send_message`, \
+`agents.followup_task`, `agents.interrupt_agent`, `agents.list_agents`, or `agents.wait_agent`. \
+After a terminal or successfully fenced update, check remaining capacity before dispatching the next \
+planned, unspawned task with a new `task_name`; otherwise return to `agents.wait_agent` with \
+`timeout_ms: 30000`. `MESSAGE` and mailbox updates are not completion. Use `followup_task` only for \
+a bound nonterminal attempt. If `CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT` is denied, do not \
+retry or wait for that target; take over or use a fresh `task_name` for a materially changed task. \
+Treat `FINAL_ANSWER`, `task_complete`, `completed`, `errored`, `error`, `failed`, `shutdown`, and \
+`not_found` as terminal. A successful root interrupt permanently abandons and fences that attempt \
+and settles it for the lifecycle ledger; do not wait for or follow up that target. Interrupt revokes \
+child tool access before the provider call. Queued followups may still start another turn; they cannot \
+restore tool access. Match evidence and write reports to the exact task and attempt; never transfer \
+another attempt's no-change claim or infer a transport stall from elapsed time alone. If a wait times \
+out or lacks per-agent terminal details, call unfiltered `agents.list_agents` before waiting again. \
+Continue until all planned work has been performed and every attempt is terminal or fenced. Then the \
+root agent validates the combined result and either continues the work or finishes. While an attempt \
+is active, Codey's gate blocks non-collaboration tools and Stop. If collaboration tools are unavailable, \
+do not loop on an unregistered tool.";
+
 pub(crate) const ROOT_AGENT_MULTI_AGENT_MODE_HINT: &str = "Proactive multi-agent delegation is \
 active. Any earlier instruction requiring an explicit user request before spawning sub-agents no \
 longer applies. Proactively identify independent research, implementation, and verification tasks and \
@@ -303,8 +382,10 @@ This is a preference, not a restriction: an explicit user choice, unavailable or
 or a clear task-specific advantage can justify another available role. Roles select task specialization \
 and models, with the same tool capabilities subject to native permissions and runtime availability. There is no fixed spawn \
 budget: the concurrency limit is two; same-workspace investigation, review and edits of distinct files \
-may run concurrently. Known file edits claim their complete target paths; opaque operations retain \
-workspace scope. `CODEY_SUBAGENT_CONCURRENCY_LIMIT` means wait for a slot, not failure; when any child settles, \
+may run concurrently. Native sandbox, approval policy and writable roots bound each tool. \
+Give parallel writers distinct files and re-read a file before editing it. When two writers must change \
+the same code, serialize them or give each an isolated worktree and let Git surface the conflict at merge time. \
+`CODEY_SUBAGENT_CONCURRENCY_LIMIT` means wait for a slot, not failure; when any child settles, \
 check remaining capacity and fill a slot from the remaining planned independent work when allowed. If an active child \
 cannot decrypt its task body, use `agents.send_message` exactly once to restate the complete task; do not \
 interrupt or respawn it. If that fails, take over. After all attempts settle, validate their combined result \
@@ -316,6 +397,7 @@ mode remains active until a later multi-agent mode developer message changes it.
 /// Remove the previous owned paragraph when installing the current guidance.
 pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS: &[&str] = &[
     ROOT_AGENT_COLLABORATION_USAGE_HINT,
+    COMMAND_WORKSPACE_CLAIM_COLLABORATION_USAGE_HINT,
     WORKSPACE_WRITE_COLLABORATION_USAGE_HINT,
     WRITE_AT_SPAWN_COLLABORATION_USAGE_HINT,
     ROLE_BASED_COLLABORATION_USAGE_HINT,
@@ -831,15 +913,24 @@ mod tests {
         assert!(combined.contains("mailbox updates are not completion"));
         assert!(combined.contains("`MESSAGE`"));
         assert!(combined.contains("concurrency limit of two"));
-        assert!(
-            combined.contains(
-                "investigation, review and edits of different files may share a workspace"
-            )
-        );
-        assert!(combined.contains("Multi-file claims are all-or-nothing"));
-        assert!(combined.contains("Re-read deferred files before editing"));
-        assert!(combined.contains("denies that tool, not task startup"));
-        assert!(combined.contains("`CODEY_SUBAGENT_WORKSPACE_BUSY`"));
+        assert!(combined.contains("investigation, review and edits may share a workspace"));
+        assert!(combined.contains(
+            "native sandbox, approval policy, permission profile and writable roots bound what"
+        ));
+        for retired in [
+            "claim their complete target paths",
+            "claim workspace writing",
+            "claim writing resources",
+            "Claims last until the attempt settles",
+            "Multi-file claims are all-or-nothing",
+            "Task prose cannot narrow actual tool scope",
+        ] {
+            assert!(!combined.contains(retired), "{retired}");
+        }
+        assert!(combined.contains("re-read a file before editing it"));
+        assert!(combined.contains("give each an isolated worktree"));
+        assert!(combined.contains("serialize them or give each an isolated worktree"));
+        assert!(!combined.contains("`CODEY_SUBAGENT_WORKSPACE_BUSY`"));
         assert!(combined.contains("`agents.send_message`"));
         assert!(combined.contains("Use `followup_task` only for"));
         assert!(combined.contains("`CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT`"));
@@ -934,9 +1025,25 @@ mod tests {
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("another available role"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("There is no fixed spawn budget"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("concurrency limit is two"));
+        for retired in [
+            "Known file edits claim their complete target paths",
+            "opaque operations retain workspace scope",
+            "unresolved targets require conservative exclusion",
+        ] {
+            assert!(
+                !ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains(retired),
+                "{retired}"
+            );
+        }
+        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("Give parallel writers distinct files"));
+        assert!(
+            ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("give each an isolated worktree"),
+            "{}",
+            ROOT_AGENT_MULTI_AGENT_MODE_HINT
+        );
         assert!(
             ROOT_AGENT_MULTI_AGENT_MODE_HINT
-                .contains("Known file edits claim their complete target paths")
+                .contains("serialize them or give each an isolated worktree")
         );
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("`CODEY_SUBAGENT_CONCURRENCY_LIMIT`"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("check remaining capacity"));
@@ -962,8 +1069,11 @@ mod tests {
         assert!(SUBAGENT_GUIDANCE.contains("最多同时运行 2 个"));
         assert!(SUBAGENT_GUIDANCE.contains("检查剩余并发额度"));
         assert!(SUBAGENT_GUIDANCE.contains("各角色工具能力一致"));
-        assert!(SUBAGENT_GUIDANCE.contains("同一工作区允许并行调查、审查和修改不同文件"));
-        assert!(SUBAGENT_GUIDANCE.contains("多文件编辑整体取得占用后才放行"));
+        assert!(SUBAGENT_GUIDANCE.contains("同一工作区允许并行调查、审查和修改"));
+        assert!(SUBAGENT_GUIDANCE.contains("由 Codex 原生沙箱、审批策略和可写根目录约束"));
+        assert!(SUBAGENT_GUIDANCE.contains("修改前重新读取文件"));
+        assert!(SUBAGENT_GUIDANCE.contains("为每个写入者准备独立 worktree"));
+        assert!(SUBAGENT_GUIDANCE.contains("改为串行执行或为每个写入者准备独立 worktree"));
         assert!(SUBAGENT_GUIDANCE.contains("普通本地工作和 Stop 仍受生命周期门禁限制"));
         assert!(SUBAGENT_GUIDANCE.contains("status: completed | partial | blocked"));
         assert!(SUBAGENT_GUIDANCE.contains("多代理证据冲突时比较出处"));
@@ -977,6 +1087,57 @@ mod tests {
         assert!(!SUBAGENT_GUIDANCE.contains("resolve_batch"));
         assert!(!SUBAGENT_GUIDANCE.contains("# codey-accept:"));
         assert!(SUBAGENT_GUIDANCE.contains("`completed`、`errored`、`error`、`failed`"));
+    }
+
+    #[test]
+    fn active_guidance_drops_retired_write_claim_semantics() {
+        for text in [
+            SUBAGENT_GUIDANCE,
+            ROOT_AGENT_COLLABORATION_USAGE_HINT,
+            ROOT_AGENT_MULTI_AGENT_MODE_HINT,
+        ] {
+            for retired in [
+                "CODEY_SUBAGENT_WORKSPACE_BUSY",
+                "CODEY_SUBAGENT_ADMISSION_BUSY",
+                "CODEY_SUBAGENT_WRITE_SCOPE_LIMIT",
+                "写入占用",
+                "写入预留",
+                "claim writing resources",
+                "writer reservation",
+                "all-or-nothing",
+            ] {
+                assert!(!text.contains(retired), "{retired}");
+            }
+        }
+        assert!(SUBAGENT_GUIDANCE.contains("派发并行写入任务前确认文件归属不重叠"));
+        assert!(SUBAGENT_GUIDANCE.contains("改为串行执行或为每个写入者准备独立 worktree"));
+        assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("assign distinct files"));
+        assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("let Git surface the conflict"));
+        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("Give parallel writers distinct files"));
+        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("let Git surface the conflict"));
+    }
+
+    #[test]
+    fn owned_guidance_versions_are_unique_and_resolvable() {
+        for versions in [
+            SUBAGENT_GUIDANCE_VERSIONS,
+            ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS,
+        ] {
+            let mut seen = std::collections::BTreeSet::new();
+            for version in versions {
+                let trimmed = version.trim();
+                assert!(!trimmed.is_empty());
+                assert!(seen.insert(trimmed), "duplicate owned guidance version");
+            }
+        }
+        assert_eq!(
+            SUBAGENT_GUIDANCE_VERSIONS[0].trim(),
+            SUBAGENT_GUIDANCE.trim()
+        );
+        assert_eq!(
+            ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS[0].trim(),
+            ROOT_AGENT_COLLABORATION_USAGE_HINT.trim()
+        );
     }
 
     #[test]

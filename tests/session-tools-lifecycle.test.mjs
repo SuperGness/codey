@@ -59,8 +59,8 @@ function fixture({ idle = true, bridge, controller, pathname = "/" } = {}) {
   const window = new FakeElement("window");
   Object.assign(window, {
     __codeyCodexSessionController: controller,
-    __codexSessionDeleteBridge(path, payload) {
-      calls.push({ path, payload });
+    __codexSessionDeleteBridge(path, payload, options) {
+      calls.push({ path, payload, options });
       return bridge?.(path, payload) ?? Promise.resolve({ status: "ok", timestamps: {} });
     },
     clearTimeout: (id) => timeouts.delete(id),
@@ -252,6 +252,21 @@ test("a dispatcher inspection failure unsubscribes the installed mutation handle
   };
   assert.throws(runtime.load, /injected dispatcher failure/);
   assert.equal(subscriptions, 0);
+});
+
+test("the sidebar timestamp fetch passes a bounded bridge timeout", async () => {
+  const runtime = fixture();
+  const { row } = thread(runtime.document, "thread-1");
+  runtime.load();
+  runtime.window.__codeyInstallThreadUpdatedTimes(row);
+  runtime.runTimeout(40);
+  const call = runtime.calls.find(({ path }) => path === "/session/timestamps");
+  assert.ok(call);
+  assert.ok(
+    Number.isFinite(call.options?.timeoutMs) && call.options.timeoutMs > 0,
+    "a lost bridge response must not freeze timestamp refreshes",
+  );
+  await settle();
 });
 
 test("an old timestamp response neither updates rows nor schedules the queued batch after reload", async () => {

@@ -1559,6 +1559,8 @@ mod tests {
             http_client: reqwest::Client::builder().no_proxy().build().unwrap(),
             ..AppState::default()
         };
+        // AppState::default() 会读取真实用户配置，更新策略必须显式固定。
+        state.config.write().await.codey_update_policy = crate::config::CodeyUpdatePolicy::Stable;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -1903,6 +1905,7 @@ mod tests {
         let manifest_url = "http://updates.example.test/manifest.json";
         {
             let mut config = state.config.write().await;
+            config.codey_update_policy = crate::config::CodeyUpdatePolicy::Stable;
             config.release_admin_url.clear();
             config.update_manifest_url = manifest_url.to_string();
         }

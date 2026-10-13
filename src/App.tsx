@@ -388,13 +388,8 @@ export function App({
         setNotice({ tone: "error", text: loadErrors.join("；") });
       } else if (next.restartRequired) {
         setNotice({ tone: "info", text: "已保存的配置需重启 Codex 后生效" });
-      } else {
-        setNotice({
-          tone: next.running ? "success" : "info",
-          text: next.running
-            ? "当前线路和模型目录已同步"
-            : "Codey 运行时已就绪",
-        });
+      } else if (!next.running) {
+        setNotice({ tone: "info", text: "Codey 运行时已就绪" });
       }
     } catch (error) {
       window.clearTimeout(timer);

@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const panel = await readFile(new URL("../src/OfficialAccountsPanel.tsx", import.meta.url), "utf8");
-const quota = await readFile(new URL("../src/quotaEstimate.ts", import.meta.url), "utf8");
 const store = await readFile(new URL("../backend/src/official_accounts.rs", import.meta.url), "utf8");
 const commands = await readFile(new URL("../backend/src/commands.rs", import.meta.url), "utf8");
 
@@ -43,11 +42,14 @@ test("额度接口返回的实时套餐回写到账号记录", () => {
 });
 
 test("账号卡片优先显示额度接口的当前套餐", () => {
-  assert.match(quota, /planType\?: string;/);
   assert.match(panel, /const snapshotPlan = usages\[account\.id\]\?\.status === "ok"/);
   assert.match(panel, /const planType = snapshotPlan \|\| account\.planType;/);
   assert.match(panel, /const plan = formatPlan\(planType\);/);
   assert.match(panel, /planTagClass\(planType\)/);
-  assert.match(panel, /planType\?\.toLowerCase\(\) === "pro"/);
+  assert.match(panel, /planType\?\.toLowerCase\(\)\.startsWith\("pro"\) \? \([\s\S]*?<IconSparkles/);
+  const badgeClass = panel.match(/function planTagClass\([\s\S]*?\n\}/)?.[0];
+  assert.ok(badgeClass, "应存在套餐徽标分类函数");
+  assert.match(badgeClass, /const p = plan\?\.toLowerCase\(\)\.trim\(\);/);
+  assert.match(badgeClass, /if \(p\?\.startsWith\("pro"\)\) return "official-account-plan-badge is-pro";/);
   assert.doesNotMatch(panel, /planTagClass\(account\.planType\)/);
 });

@@ -258,6 +258,7 @@ impl LocalRouter {
             official_auth_cache: Arc::new(Mutex::new(
                 crate::account_usage::OfficialAuthCaches::default(),
             )),
+            siwc_auth_cache: Arc::new(Mutex::new(SiwcAuthCaches::default())),
             request_log: Arc::clone(&request_log),
         };
         let server = Arc::new(server);
@@ -626,6 +627,9 @@ pub(crate) struct RouterServer {
     pub(crate) account_usage_cache:
         Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
     pub(crate) official_auth_cache: Arc<Mutex<crate::account_usage::OfficialAuthCaches>>,
+    /// SIWC 直连凭据的读取缓存；与 `official_auth_cache` 分开，两套
+    /// 凭据互不覆盖。
+    pub(crate) siwc_auth_cache: Arc<Mutex<SiwcAuthCaches>>,
     pub(crate) request_log: Arc<RouteRequestLogController>,
 }
 
@@ -803,8 +807,18 @@ impl RouterSnapshot {
             if provider_id.is_empty() {
                 continue;
             }
+            // 凭据平面先于上游地址决定：SIWC 直连时对话走官方公开 API，
+            // 账号保存的自定义网关只对 Codex backend-api 平面生效。
+            let official_auth = official_route_auth(profile);
+            let uses_siwc = official_auth
+                .as_ref()
+                .is_some_and(|auth| auth.siwc_path.is_some());
             let base_url = if profile.official_account {
-                crate::codex_provider::official_route_base_url(profile)
+                if uses_siwc {
+                    crate::official_accounts::SIWC_BASE_URL.to_string()
+                } else {
+                    crate::codex_provider::official_route_base_url(profile)
+                }
             } else {
                 profile.normalized_base_url()
             };
@@ -829,7 +843,7 @@ impl RouterSnapshot {
                 official_account: profile.official_account,
                 // Each stored account reads its own credential document, so
                 // several official routes never share one login.
-                official_auth: official_route_auth(profile),
+                official_auth,
                 plugin_transport: profile.plugin_owner_id.as_ref().and_then(|id| {
                     profile
                         .plugin_route_spec
@@ -838,10 +852,12 @@ impl RouterSnapshot {
                         .as_ref()
                         .map(|options| plugin_transport::Target::new(id.clone(), options.clone()))
                 }),
+                // SIWC 上游没有持久会话端点；无论配置快照如何都不开 WS。
                 supports_websockets: protocol == UpstreamProtocol::OpenAiResponses
+                    && !uses_siwc
                     && config.route_supports_websockets_this_launch(profile),
-                supports_remote_compaction: config
-                    .route_supports_remote_compaction_this_launch(profile),
+                supports_remote_compaction: !uses_siwc
+                    && config.route_supports_remote_compaction_this_launch(profile),
                 remote_compaction_protocol: profile.remote_compaction_protocol,
                 models: HashSet::new(),
                 websocket_config: [0; 32],
@@ -1185,6 +1201,9 @@ pub(crate) struct OfficialRouteAuth {
     pub(crate) account_id: String,
     pub(crate) email: Option<String>,
     pub(crate) path: PathBuf,
+    /// SIWC 直连凭据的物化文件；有值时该线路的对话流量走官方公开 API，
+    /// `path` 里的 Codex 凭据只留给 backend-api 专属能力。
+    pub(crate) siwc_path: Option<PathBuf>,
     pub(crate) accepts_incoming_authorization: bool,
 }
 
@@ -1198,19 +1217,25 @@ fn official_route_auth(profile: &crate::config::ProviderProfile) -> Option<Offic
         &crate::config::default_config_path(),
     );
     let path = store.credential_path(codex_home, &account_id);
+    let record = store.get(&account_id).ok().flatten();
     // 账号邮箱随路由快照读取，生命周期不接受客户端提供的邮箱。
-    let email = store
-        .get(&account_id)
-        .ok()
-        .flatten()
-        .and_then(|record| record.email);
+    let email = record.as_ref().and_then(|record| record.email.clone());
+    // SIWC 槽位有效时路由切到直连平面；失效凭据回落到 Codex 通道，下一次
+    // 账号同步会同时刷新 `profile.official_siwc`。
+    let siwc_path = record
+        .as_ref()
+        .is_some_and(|record| record.siwc_active())
+        .then(|| store.siwc_path(&account_id));
     // Codex refreshes the default account's copy in place and sends its token
-    // with every request; idle accounts keep their own stored document.
-    let accepts_incoming_authorization = path == codex_home.join("auth.json");
+    // with every request; idle accounts keep their own stored document. SIWC
+    // 线路不接受下游自带的令牌——那是 Codex 凭据，对公开 API 无效。
+    let accepts_incoming_authorization =
+        siwc_path.is_none() && path == codex_home.join("auth.json");
     Some(OfficialRouteAuth {
         account_id,
         email,
         path,
+        siwc_path,
         accepts_incoming_authorization,
     })
 }
@@ -1227,6 +1252,14 @@ pub(crate) fn default_route_rank(auth: Option<&OfficialRouteAuth>) -> u8 {
 }
 
 impl RouteTarget {
+    /// 该线路是否处于 SIWC 直连平面：上游是 OpenAI 公开 API，凭据来自账号的
+    /// SIWC 槽位，与 Codex backend-api 线路的请求头、请求体规则都不同。
+    pub(crate) fn uses_siwc(&self) -> bool {
+        self.official_auth
+            .as_ref()
+            .is_some_and(|auth| auth.siwc_path.is_some())
+    }
+
     fn websocket_config_fingerprint(&self) -> [u8; 32] {
         let mut digest = Sha256::new();
         digest.update([u8::from(self.supports_websockets)]);

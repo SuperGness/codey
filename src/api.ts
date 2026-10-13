@@ -18,7 +18,6 @@ export const CODEY_API_COMMANDS = [
   "open_route_request_logs",
   "query_route_request_logs",
   "query_route_request_log_stats",
-  "query_route_request_log_quota_usage",
   "query_route_request_log_models",
   "query_official_account_usage",
   "store_official_account_usage",
@@ -31,6 +30,10 @@ export const CODEY_API_COMMANDS = [
   "import_official_account_credential",
   "set_default_official_account",
   "remove_official_account",
+  "start_official_account_siwc",
+  "poll_official_account_siwc",
+  "cancel_official_account_siwc",
+  "remove_official_account_siwc",
   "save_official_account_route_settings",
   "clear_route_request_logs",
   "restart_codey",
@@ -68,6 +71,8 @@ export const CODEY_API_COMMANDS = [
   "codex_extensions",
   "conversation_git_status",
   "conversation_git_preview",
+  "conversation_git_push_preview",
+  "conversation_git_cancel",
   "conversation_git_execute",
 ] as const;
 

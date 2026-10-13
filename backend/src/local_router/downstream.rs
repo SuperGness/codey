@@ -87,7 +87,7 @@ pub(crate) trait ResponsesDownstream: Send {
         _discard_opaque_reasoning: bool,
         _probe: Option<&RouteRequestLogProbe>,
     ) -> Result<UpstreamWebSocketAttempt> {
-        Ok(UpstreamWebSocketAttempt::UseHttp)
+        Ok(UpstreamWebSocketAttempt::UseHttp("websocket_not_supported"))
     }
 
     async fn try_proxy_upstream_websocket(
@@ -361,7 +361,7 @@ where
                     probe.finish_success();
                 }
             }
-            Ok(UpstreamWebSocketAttempt::UseHttp) => {}
+            Ok(UpstreamWebSocketAttempt::UseHttp(_)) => {}
             Err(error) => {
                 if let Some(probe) = self.probe.as_ref() {
                     if error.is::<DownstreamClosed>() {

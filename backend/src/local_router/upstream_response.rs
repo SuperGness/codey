@@ -380,12 +380,16 @@ pub(crate) async fn write_proxy_response(
     if let Some(probe) = probe {
         probe.mark_response_started(status);
     }
-    let xai_fix = current_xai_response_fix();
-    let mut sse_rewriter =
-        (upstream_is_sse && (validate_responses || xai_fix.is_some())).then(|| {
-            ResponsesSseRewriter::new(xai_fix.as_ref(), validate_responses, retry_advice.as_ref())
+    let response_fix = current_native_response_fix();
+    let mut sse_rewriter = (upstream_is_sse && (validate_responses || response_fix.is_some()))
+        .then(|| {
+            ResponsesSseRewriter::new(
+                response_fix.as_ref(),
+                validate_responses,
+                retry_advice.as_ref(),
+            )
         });
-    let mut buffered_json = xai_fix
+    let mut buffered_json = response_fix
         .as_ref()
         .filter(|_| !upstream_is_sse)
         .map(|_| Vec::new());
@@ -452,9 +456,9 @@ pub(crate) async fn write_proxy_response(
         }
     }
     if let Some(buffered) = buffered_json {
-        let output = xai_fix
+        let output = response_fix
             .as_ref()
-            .expect("xAI JSON rewrite is only armed with a response fix")
+            .expect("JSON rewrite is only armed with a response fix")
             .rewrite_json_bytes(&buffered);
         if !output.is_empty() {
             write_chunked_frame(stream, &output, "写入上游响应块失败").await?;

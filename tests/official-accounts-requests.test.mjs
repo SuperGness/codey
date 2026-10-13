@@ -7,7 +7,6 @@ const source = {
   panel: await readFile(new URL("../src/OfficialAccountsPanel.tsx", import.meta.url), "utf8"),
   models: await readFile(new URL("../src/ModelSection.tsx", import.meta.url), "utf8"),
   logs: await readFile(new URL("../src/RequestLogDialog.tsx", import.meta.url), "utf8"),
-  quota: await readFile(new URL("../src/QuotaEstimateDialog.tsx", import.meta.url), "utf8"),
   app: await readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
 };
 
@@ -23,9 +22,7 @@ test("控制台各入口走共享读取，不再各自直接 invoke 列表", () 
   assert.match(source.panel, /rememberOfficialAccounts\(result\)/);
   assert.match(source.models, /await listOfficialAccounts\(\)/);
   assert.match(source.logs, /listOfficialAccounts\(\)/);
-  assert.match(source.quota, /await listOfficialAccounts\(\)/);
   assert.match(source.app, /rememberOfficialAccounts\(result\)/);
   assert.doesNotMatch(source.models, /invoke<OfficialAccountsResult>\("list_official_accounts"\)/);
   assert.doesNotMatch(source.logs, /invoke<OfficialAccountsResult>\("list_official_accounts"\)/);
-  assert.doesNotMatch(source.quota, /invoke<OfficialAccountsResult>\("list_official_accounts"\)/);
 });

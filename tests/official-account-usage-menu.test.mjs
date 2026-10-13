@@ -6,7 +6,6 @@ const panel = await readFile(new URL("../src/OfficialAccountsPanel.tsx", import.
 const models = await readFile(new URL("../src/ModelSection.tsx", import.meta.url), "utf8");
 const layout = await readFile(new URL("../src/SettingsLayout.tsx", import.meta.url), "utf8");
 const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
-const pages = await readFile(new URL("../src/SettingsPages.tsx", import.meta.url), "utf8");
 
 test("设置页只在首次打开对应菜单后挂载模块", () => {
   assert.match(layout, /const \[visitedPages, setVisitedPages\]/);
@@ -16,8 +15,6 @@ test("设置页只在首次打开对应菜单后挂载模块", () => {
 test("线路与模型菜单把激活状态透传到官方账号面板", () => {
   assert.match(app, /models: \(active\) => \(/);
   assert.match(app, /<ModelSection\s+active=\{active\}/);
-  assert.match(pages, /models: \(active: boolean\) => \(/);
-  assert.match(pages, /<ModelSection\s+active=\{active\}/);
   const section = models.match(/<OfficialAccountsPanel[\s\S]*?\/>/)?.[0];
   assert.ok(section, "应在 ModelSection 内渲染官方账号面板");
   assert.match(section, /active=\{active\}/);

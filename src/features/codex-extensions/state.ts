@@ -127,7 +127,7 @@ export function editorError(draft: EditorDraft): string {
     return "SKILL.md 需要 YAML 元数据，其中包含 name 和 description。";
   return "";
 }
-export function resourceSource(entry: McpEntry | SkillEntry): string {
+function resourceSource(entry: McpEntry | SkillEntry): string {
   return "ownership" in entry ? entry.ownership : entry.transport;
 }
 export function canToggle(entry: McpEntry | SkillEntry): boolean {

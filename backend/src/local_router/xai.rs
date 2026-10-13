@@ -102,18 +102,6 @@ impl XaiResponseFix {
         changed |= rewrite_completed_integer_arguments(value);
         changed
     }
-
-    pub(crate) fn rewrite_json_bytes<'a>(&self, bytes: &'a [u8]) -> Cow<'a, [u8]> {
-        let Ok(mut value) = serde_json::from_slice::<Value>(bytes) else {
-            return Cow::Borrowed(bytes);
-        };
-        if !self.apply(&mut value) {
-            return Cow::Borrowed(bytes);
-        }
-        serde_json::to_vec(&value)
-            .map(Cow::Owned)
-            .unwrap_or(Cow::Borrowed(bytes))
-    }
 }
 
 fn promote_additional_tools(body: &mut Value) -> bool {
@@ -1035,7 +1023,10 @@ mod tests {
         assert!(!fix.apply(&mut delta));
         assert_eq!(delta["delta"], "92116.0");
         let original = br#"{"type":"response.created","response":{"id":"resp"}}"#;
-        assert!(matches!(fix.rewrite_json_bytes(original), Cow::Borrowed(_)));
+        assert!(matches!(
+            NativeResponseFix::from(fix).rewrite_json_bytes(original),
+            Cow::Borrowed(_)
+        ));
     }
 
     #[test]
@@ -1051,7 +1042,8 @@ mod tests {
         let frame = format!(
             "event: response.output_item.done\ndata: {{\"type\":\"function_call\",\"name\":{flat:?},\"arguments\":\"{{\\\"n\\\":1.0}}\"}}\n\n"
         );
-        let mut rewriter = ResponsesSseRewriter::new(Some(&prepared.response), true, None);
+        let fix = NativeResponseFix::from(prepared.response);
+        let mut rewriter = ResponsesSseRewriter::new(Some(&fix), true, None);
         let split = frame.len() / 2;
         assert!(
             rewriter

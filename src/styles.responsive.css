@@ -7,15 +7,11 @@
     padding-left: 0;
   }
 
-  .settings-page .official-account-usage-item {
-    min-width: 0;
-    flex-wrap: wrap;
-    row-gap: 3px;
-    white-space: normal;
+  .settings-page .official-account-usage-grid {
+    grid-template-columns: 1fr;
   }
 
-  .settings-page .official-account-usage-reset {
-    flex-basis: 100%;
+  .settings-page .official-account-usage-cell-foot {
     white-space: normal;
   }
 }

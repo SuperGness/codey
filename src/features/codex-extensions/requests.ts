@@ -51,7 +51,7 @@ const caches = new WeakMap<
     { expires: number; value?: Inventory; pending?: Promise<Inventory> }
   >
 >();
-export function scopeKey(scope: Scope) {
+function scopeKey(scope: Scope) {
   return JSON.stringify(scope);
 }
 export function withTimeout<T>(

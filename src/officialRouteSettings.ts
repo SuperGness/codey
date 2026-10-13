@@ -6,7 +6,7 @@ import {
 } from "./urlValidation";
 
 export const MAX_ROUTE_NAME_CHARACTERS = 15;
-export const MAX_OFFICIAL_ROUTE_NAME_CHARACTERS = MAX_ROUTE_NAME_CHARACTERS;
+const MAX_OFFICIAL_ROUTE_NAME_CHARACTERS = MAX_ROUTE_NAME_CHARACTERS;
 
 export type OfficialRouteSettingsDraft = {
   routeName: string;

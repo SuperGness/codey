@@ -429,27 +429,10 @@ impl WebSocketResponsesDownstream {
         probe: Option<&RouteRequestLogProbe>,
     ) -> Result<UpstreamWebSocketAttempt> {
         let auth_identity = UpstreamWebSocketAuthIdentity::from_headers(headers);
-        let official_web_search = route.official_account
-            && body
-                .get("tools")
-                .and_then(Value::as_array)
-                .is_some_and(|tools| {
-                    tools.iter().any(|tool| {
-                        matches!(
-                            tool.get("type").and_then(Value::as_str),
-                            Some(
-                                "web_search"
-                                    | "web_search_preview"
-                                    | "web_search_2025_08_26"
-                                    | "web_search_preview_2025_03_11"
-                            )
-                        )
-                    })
-                });
-        if !route.supports_websockets || official_web_search {
+        if !route.supports_websockets {
             self.native_history
                 .prepare_for_route(route, auth_identity, body);
-            return Ok(UpstreamWebSocketAttempt::UseHttp);
+            return Ok(UpstreamWebSocketAttempt::UseHttp("websocket_not_supported"));
         }
         let upstream_url = route
             .upstream_websocket_url
@@ -489,7 +472,9 @@ impl WebSocketResponsesDownstream {
             .native_history
             .prepare_for_route(route, effective_auth, body);
         if route.official_account && self.native_history.requires_http() {
-            return Ok(UpstreamWebSocketAttempt::UseHttp);
+            return Ok(UpstreamWebSocketAttempt::UseHttp(
+                "websocket_history_requires_http",
+            ));
         }
         if !cached_matches {
             // A response ID belongs to its original upstream socket. Reconnect
@@ -497,13 +482,19 @@ impl WebSocketResponsesDownstream {
             if previous_response_key.is_some()
                 && self.native_history.restore(history_key, body).is_err()
             {
-                return Ok(UpstreamWebSocketAttempt::UseHttp);
+                return Ok(UpstreamWebSocketAttempt::UseHttp(
+                    "websocket_history_unavailable",
+                ));
             }
             self.upstream.take();
         }
         normalize_native_responses_context(body, discard_opaque_reasoning);
         if route.official_account {
             sanitize_official_upstream_history(body);
+        }
+        let collaboration_alias = current_collaboration_alias();
+        if let Some(alias) = &collaboration_alias {
+            alias.alias_history(body);
         }
         if route.upstream_url.as_ref().is_ok_and(|url| {
             should_replay_reasoning_text(
@@ -522,7 +513,7 @@ impl WebSocketResponsesDownstream {
             let Some(_probe_guard) =
                 UpstreamWebSocketProbe::acquire(&self.websocket_backoffs, &backoff_key)
             else {
-                return Ok(UpstreamWebSocketAttempt::UseHttp);
+                return Ok(UpstreamWebSocketAttempt::UseHttp("websocket_backoff"));
             };
             match self
                 .wait_for_upstream(connect_upstream_responses_websocket(
@@ -567,7 +558,9 @@ impl WebSocketResponsesDownstream {
                                 "requestId": current_router_request_id(),
                             }),
                         );
-                        return Ok(UpstreamWebSocketAttempt::UseHttp);
+                        return Ok(UpstreamWebSocketAttempt::UseHttp(
+                            "websocket_endpoint_unsupported",
+                        ));
                     }
                     let (failure_count, backoff_duration) = self
                         .websocket_backoffs
@@ -588,7 +581,9 @@ impl WebSocketResponsesDownstream {
                             "requestId": current_router_request_id(),
                         }),
                     );
-                    return Ok(UpstreamWebSocketAttempt::UseHttp);
+                    return Ok(UpstreamWebSocketAttempt::UseHttp(
+                        "websocket_connect_failed",
+                    ));
                 }
             }
         };
@@ -737,6 +732,12 @@ impl WebSocketResponsesDownstream {
                         };
                     let mut raw_json_text = raw_json_text;
                     for mut event in events {
+                        if collaboration_alias
+                            .as_ref()
+                            .is_some_and(|alias| alias.apply(&mut event))
+                        {
+                            raw_json_text = None;
+                        }
                         if responses_event_is_failure(&event) {
                             if let Some(probe) = probe {
                                 let original = raw_json_text
@@ -1291,7 +1292,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
         .get(reqwest::header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.chars().take(128).collect::<String>());
-    let xai_fix = current_xai_response_fix();
+    let response_fix = current_native_response_fix();
     let mut prepared = await_upstream(
         downstream,
         prepare_upstream_response(response, "读取 Responses HTTP 上游响应失败", probe),
@@ -1327,7 +1328,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
                 let mut event = serde_json::from_str::<Value>(&data)
                     .context("Responses HTTP 上游 SSE data 不是有效 JSON")?;
                 normalize_response_failure(&mut event, retry_advice.as_ref());
-                if let Some(fix) = xai_fix.as_ref() {
+                if let Some(fix) = response_fix.as_ref() {
                     fix.apply(&mut event);
                 }
                 terminal |= responses_event_is_terminal(&event);
@@ -1359,7 +1360,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
             let mut event = serde_json::from_str::<Value>(&data)
                 .context("Responses HTTP 上游 SSE 末尾 data 不是有效 JSON")?;
             normalize_response_failure(&mut event, retry_advice.as_ref());
-            if let Some(fix) = xai_fix.as_ref() {
+            if let Some(fix) = response_fix.as_ref() {
                 fix.apply(&mut event);
             }
             terminal |= responses_event_is_terminal(&event);
@@ -1406,7 +1407,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
         downstream.start_event_stream().await?;
         for mut event in events {
             normalize_response_failure(&mut event, retry_advice.as_ref());
-            if let Some(fix) = xai_fix.as_ref() {
+            if let Some(fix) = response_fix.as_ref() {
                 fix.apply(&mut event);
             }
             if let Some(probe) = probe {
@@ -1423,7 +1424,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
     }
     match serde_json::from_slice::<Value>(&body) {
         Ok(mut value) => {
-            if let Some(fix) = xai_fix.as_ref() {
+            if let Some(fix) = response_fix.as_ref() {
                 fix.apply(&mut value);
             }
             if let Some(probe) = probe {
@@ -1595,7 +1596,7 @@ mod http_fallback_history_tests {
     use super::*;
 
     #[tokio::test]
-    async fn search_http_selection_preserves_other_websocket_requests() {
+    async fn declared_search_tools_preserve_websocket_selection() {
         let (config, provider_id, model) = router_config("http://127.0.0.1:9/v1".into());
         let snapshot = RouterSnapshot::from_config(&config);
         let mut route = snapshot.routes[&provider_id].as_ref().clone();
@@ -1607,6 +1608,10 @@ mod http_fallback_history_tests {
             (true, json!([])),
             (true, json!([{"type":"function","name":"web_search"}])),
             (true, json!([{"type":"tool_search"}])),
+            (true, json!([{"type":"web_search"}])),
+            (true, json!([{"type":"web_search_preview"}])),
+            (true, json!([{"type":"web_search_2025_08_26"}])),
+            (true, json!([{"type":"web_search_preview_2025_03_11"}])),
             (false, json!([{"type":"web_search"}])),
             (false, json!([{"type":"web_search_preview"}])),
         ] {
@@ -1626,7 +1631,7 @@ mod http_fallback_history_tests {
         let snapshot = RouterSnapshot::from_config(&config);
         let mut route = snapshot.routes[&provider_id].as_ref().clone();
         route.official_account = true;
-        route.supports_websockets = true;
+        route.supports_websockets = false;
         let route = &route;
         let (socket, mut peer) = local_websocket_pair().await;
         let mut downstream = WebSocketResponsesDownstream::new(socket);
@@ -1683,7 +1688,7 @@ mod http_fallback_history_tests {
                 .proxy_upstream_websocket(route, &headers, &mut second, false, None)
                 .await
                 .unwrap(),
-            UpstreamWebSocketAttempt::UseHttp
+            UpstreamWebSocketAttempt::UseHttp("websocket_not_supported")
         );
         assert!(
             downstream

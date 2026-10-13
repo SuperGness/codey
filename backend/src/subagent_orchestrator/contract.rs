@@ -1,7 +1,7 @@
 //! Native `agents.spawn_agent` task-capsule validation.
 //!
-//! Resource paths are conservative coordination metadata. Codex remains the
-//! filesystem authority.
+//! The workspace path is normalized for identity binding between the parent
+//! and child attempts. Codex remains the filesystem authority.
 
 use std::fs;
 use std::path::PathBuf;
@@ -53,14 +53,14 @@ pub(super) fn prepare_task_capsule(
         .role_policy(role)
         .ok_or_else(|| contract_error(&format!("未知或不允许的 agent_type `{role}`")))?;
     let workspace_root = hook_workspace_root
-        .map(normalize_coordination_path)
+        .map(normalize_workspace_path)
         .transpose()
         .map_err(|error| contract_error(&format!("工作目录无效：{error}")))?;
     if workspace_root.is_none() {
         return Err(contract_error("子代理缺少可信工作目录"));
     }
-    // All roles share capabilities. Only trusted native workspace metadata can
-    // establish independent resource scopes; task text cannot narrow the lock.
+    // All roles share capabilities. Only trusted native workspace metadata
+    // establishes the workspace identity; task text cannot change it.
     let capabilities = vec![
         "command.execute".to_string(),
         "files.read".to_string(),
@@ -105,11 +105,11 @@ pub(super) fn validate_task_id(value: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Canonicalize existing ancestors when possible so coordination claims for
-/// obvious aliases overlap. These paths are scheduling metadata, not a file
-/// ACL: metadata/canonicalization failures fall back to the lexical absolute
-/// path, while the Codex executor remains the only filesystem authority.
-pub(super) fn normalize_coordination_path(value: &str) -> std::result::Result<String, String> {
+/// Canonicalize existing ancestors when possible so workspace identity matches
+/// for obvious path aliases. Metadata/canonicalization failures fall back to
+/// the lexical absolute path, while the Codex executor remains the only
+/// filesystem authority.
+pub(super) fn normalize_workspace_path(value: &str) -> std::result::Result<String, String> {
     let lexical = normalize_absolute_path(value)?;
     let path = PathBuf::from(&lexical);
     if !path.is_absolute() {

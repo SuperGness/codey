@@ -115,6 +115,7 @@ fn test_server(config: &CodeyConfig) -> RouterServer {
         official_auth_path: PathBuf::from("/nonexistent/codey-lifecycle-test-auth"),
         account_usage_cache: Arc::default(),
         official_auth_cache: Arc::default(),
+        siwc_auth_cache: Arc::default(),
         request_log: Arc::new(RouteRequestLogController::new()),
     }
 }
@@ -304,6 +305,12 @@ async fn official_history_is_sanitized_for_websocket_and_opaque_http_continuatio
                 .as_object_mut()
                 .unwrap()
                 .remove("encrypted_content");
+        } else {
+            history.as_array_mut().unwrap().push(json!({
+                "type":"web_search_call",
+                "status":"completed",
+                "action":{"type":"search","query":"test"}
+            }));
         }
         downstream.write_event(&json!({"type":"response.completed","response":{"id":"resp-first","status":"completed","output":history}})).await.unwrap();
         peer.next().await.unwrap().unwrap();
@@ -329,10 +336,16 @@ async fn official_history_is_sanitized_for_websocket_and_opaque_http_continuatio
             .unwrap();
         assert!(sent.get("previous_response_id").is_none());
         let items = sent["input"].as_array().unwrap();
-        assert_eq!(items.len(), 6);
+        assert_eq!(items.len(), if websocket { 6 } else { 7 });
         assert_eq!(items[0], json!({"role":"user","content":"original task"}));
         assert_portable_official_history(&items[1..5]);
-        assert_eq!(items[5], json!({"role":"user","content":"follow up"}));
+        if !websocket {
+            assert_eq!(items[5]["type"], "web_search_call");
+        }
+        assert_eq!(
+            items.last().unwrap(),
+            &json!({"role":"user","content":"follow up"})
+        );
     }
 }
 

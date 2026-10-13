@@ -114,3 +114,89 @@ test("子代理同名模型按各自线路限制档位，普通线路保留六�
   const narrowed = graph.exports.buildSubagentModelOptions(config, state, false);
   assert.deepEqual(narrowed.find((item) => item.routeId === "ppt").supportedReasoningEfforts, ["high"]);
 });
+
+test("普通子代理线路按所属 provider 读取声明，修改声明与切换线路后重新计算", () => {
+  const graph = createModuleGraph(new URL("../src/subagentModels.ts", import.meta.url));
+  const modelId = "devin/swe-2";
+  const config = {
+    activeProfileId: "current-route",
+    localRouterEnabled: true,
+    profiles: [
+      { id: "current-route", sourceProviderId: "current-provider", name: "Current", authMode: "apiKey" },
+      { id: "other-route", sourceProviderId: "other-provider", name: "Other", authMode: "apiKey" },
+    ],
+    selectedModelsByProvider: { "current-provider": [modelId], "other-provider": [modelId] },
+    declaredOfficialModelsByProvider: {},
+    modelReasoningEffortsByProvider: {
+      "other-provider": { [modelId.toUpperCase()]: efforts([...capability, "max"]) },
+      "other-route": { [modelId]: efforts(["ultra"]) },
+    },
+  };
+  const state = {
+    officialModels: [], officialModelIds: [], thirdPartyModels: [modelId],
+    thirdPartyModelMetadata: [{ slug: modelId, supportedReasoningEfforts: capability, defaultReasoningEffort: "high" }],
+  };
+  const build = (providerId = "current-provider") => graph.exports.buildSubagentModelOptions(
+    config, state, false, { id: providerId, official: false },
+  );
+  const options = build();
+  assert.deepEqual(options.find((item) => item.routeId === "current-route").supportedReasoningEfforts, capability);
+  assert.deepEqual(options.find((item) => item.routeId === "other-route").supportedReasoningEfforts, [...capability, "max"]);
+  config.modelReasoningEffortsByProvider["other-provider"][modelId.toUpperCase()] = efforts(["max"]);
+  const changed = build("other-provider").find((item) => item.routeId === "other-route");
+  assert.deepEqual(changed.supportedReasoningEfforts, ["max"]);
+  assert.equal(changed.defaultReasoningEffort, "max");
+  config.localRouterEnabled = false;
+  assert.deepEqual(build("other-provider")[0].supportedReasoningEfforts, ["max"]);
+  assert.deepEqual(build()[0].supportedReasoningEfforts, capability);
+  delete config.modelReasoningEffortsByProvider["other-provider"];
+  assert.deepEqual(build("other-provider")[0].supportedReasoningEfforts, capability);
+});
+
+test("子代理保留声明的上游取值并遵守插件能力范围", () => {
+  const graph = createModuleGraph(new URL("../src/subagentModels.ts", import.meta.url));
+  const config = {
+    localRouterEnabled: true,
+    profiles: [
+      { id: "plain", name: "Plain", authMode: "apiKey" },
+      { id: "plugin", name: "Plugin", authMode: "apiKey", pluginOwnerId: "plugin", pluginRouteSpec: { modelReasoningEfforts: { [model]: capability } } },
+    ],
+    selectedModelsByProvider: { plain: [model], plugin: [model] },
+    declaredOfficialModelsByProvider: {},
+    modelReasoningEffortsByProvider: {
+      plain: { [model]: [{ level: "xhigh", value: "max" }] },
+      plugin: { [model]: [{ level: "xhigh", value: "max" }, ...efforts(["max", "ultra"])] },
+    },
+  };
+  const state = { officialModels: [], officialModelIds: [], thirdPartyModelMetadata: [] };
+  const options = graph.exports.buildSubagentModelOptions(config, state, false);
+  assert.deepEqual(options.find((item) => item.routeId === "plain").supportedReasoningEfforts, ["max"]);
+  assert.deepEqual(options.find((item) => item.routeId === "plugin").supportedReasoningEfforts, ["xhigh"]);
+});
+
+test("官方子代理同名模型保持官方能力，不采用第三方或用户声明", () => {
+  const graph = createModuleGraph(new URL("../src/subagentModels.ts", import.meta.url));
+  const config = {
+    localRouterEnabled: true,
+    profiles: [
+      { id: "plain", name: "Plain", authMode: "apiKey" },
+      { id: "official", name: "Official", authMode: "officialAccount" },
+    ],
+    selectedModelsByProvider: { plain: [model], official: [model] },
+    declaredOfficialModelsByProvider: {},
+    modelReasoningEffortsByProvider: {
+      plain: { [model]: efforts(["max"]) },
+      official: { [model]: efforts(["ultra"]) },
+    },
+  };
+  const state = {
+    officialModels: [{ slug: model, supportedReasoningEfforts: capability, defaultReasoningEffort: "high" }],
+    officialModelIds: [model],
+    thirdPartyModelMetadata: [{ slug: model, supportedReasoningEfforts: template }],
+  };
+  const options = graph.exports.buildSubagentModelOptions(config, state, true);
+  assert.deepEqual(options.find((item) => item.routeId === "plain").supportedReasoningEfforts, ["max"]);
+  const official = options.find((item) => item.routeId === "official");
+  assert.deepEqual(official.supportedReasoningEfforts, capability);
+  assert.equal(official.defaultReasoningEffort, "high");
+});

@@ -13,6 +13,7 @@
   const maxChecks = 2;
   let refreshPending = false;
   let busy = false;
+  let previewWork = null;
   let status = null;
   let panel = null;
   let timer = 0;
@@ -546,7 +547,23 @@
     }
   `;
   document.documentElement.appendChild(style);
-  const close = () => { panel?.remove(); panel = null; button.setAttribute("aria-expanded", "false"); };
+  const cancelWork = (work) => {
+    for (const requestId of [work.requestId, work.pushRequestId].filter(Boolean)) {
+      void call("/api/conversation_git_cancel", { sessionId: work.sessionId, requestId, token: work.token }).catch(() => {});
+    }
+  };
+  const close = () => {
+    if (previewWork) {
+      const work = previewWork;
+      previewWork = null;
+      work.cancelled = true;
+      cancelWork(work);
+      busy = false;
+      button.disabled = false;
+      delete button.dataset.busy;
+    }
+    panel?.remove(); panel = null; button.setAttribute("aria-expanded", "false");
+  };
   const valid = (current, epoch) => enabled && generation === epoch && context()?.sessionId === current;
   const element = (tag, text) => {
     const node = document.createElement(tag);
@@ -848,6 +865,8 @@
     if (busy || !sessionId) return;
     const current = sessionId, epoch = generation;
     const container = makePanel(true);
+    const work = { sessionId: current, requestId: crypto.randomUUID(), cancelled: false, executing: false };
+    previewWork = work;
     busy = true;
     button.disabled = true;
     button.dataset.busy = "true";
@@ -866,20 +885,19 @@
     cancelInitial.focus();
 
     try {
-      const result = await call("/api/conversation_git_preview", { sessionId: current });
-      if (!valid(current, epoch) || panel !== container) return;
+      const result = await call("/api/conversation_git_preview", { sessionId: current, requestId: work.requestId });
+      work.token = result?.token;
+      if (!valid(current, epoch) || panel !== container || work.cancelled) { cancelWork(work); return; }
       if (!result?.token || !result.message || !Array.isArray(result.files) || !result.diff) {
         throw new Error("提交预览不完整，请重试");
       }
       container.replaceChildren();
 
       const header = element("div"); header.className = "codey-git-header";
-      header.appendChild(element("strong", `提交到 ${result.branch}`));
-      if (result.remote && result.upstreamBranch) {
-        const remoteInfo = element("span", ` · 推送到 ${result.remote}/${result.upstreamBranch}`);
-        remoteInfo.className = "codey-git-remote-info";
-        header.appendChild(remoteInfo);
-      }
+      header.appendChild(element("strong", result.branch ? `提交到 ${result.branch}` : "提交到当前分离 HEAD"));
+      const remoteInfo = element("span");
+      remoteInfo.className = "codey-git-remote-info";
+      header.appendChild(remoteInfo);
       container.appendChild(header);
 
       const filesHeader = element("div", `变更文件 (${result.files.length})`);
@@ -974,13 +992,44 @@
       details.appendChild(diffPre);
       container.appendChild(details);
 
+      // 推送条件由后台在预览时判定；不可推送时只保留仅提交。
+      const pushDetails = element("div");
+      pushDetails.setAttribute("aria-live", "polite");
+      container.appendChild(pushDetails);
+      const renderPush = () => {
+        pushDetails.replaceChildren();
+        remoteInfo.textContent = result.remote && result.upstreamBranch ? ` · 推送到 ${result.remote}/${result.upstreamBranch}` : "";
+        const notice = result.pushPending ? "正在检查推送条件，可先提交到本地仓库。"
+          : result.pushReason ? `无法推送：${result.pushReason}`
+          : result.unpushedCount > 0 ? `提交并推送会同时推送此前未推送的 ${result.unpushedCount} 个提交` : "";
+        if (notice) {
+          const pushNotice = element("p", notice);
+          pushNotice.className = "codey-git-partial-notice";
+          pushDetails.appendChild(pushNotice);
+        }
+        const listed = !result.pushPending && !result.pushReason && Array.isArray(result.unpushedCommits) ? result.unpushedCommits : [];
+        if (listed.length) {
+          const commits = element("ul"); commits.className = "codey-git-file-list";
+          listed.forEach((commit) => commits.appendChild(element("li", commit)));
+          if (listed.length < result.unpushedCount) commits.appendChild(element("li", "…"));
+          pushDetails.appendChild(commits);
+        }
+        commitAndPush.disabled = Boolean(result.pushPending || result.pushReason);
+        commitAndPush.title = result.pushPending ? "正在检查推送条件" : result.pushReason || "";
+      };
+
       const actions = element("div"); actions.className = "codey-git-actions";
       const cancel = action("取消", () => { close(); button.focus(); });
       cancel.className = "codey-git-btn codey-git-btn-cancel";
 
       const commitAction = async (push) => {
-        if (busy) return;
+        if (busy || (push && (result.pushPending || result.pushReason))) return;
         if (!valid(current, epoch)) { close(); return; }
+        work.executing = true;
+        previewWork = null;
+        if (work.pushRequestId && result.pushPending) {
+          void call("/api/conversation_git_cancel", { sessionId: current, requestId: work.pushRequestId }).catch(() => {});
+        }
         statusCache.clear();
         busy = true;
         cancel.disabled = true;
@@ -1026,17 +1075,33 @@
 
       const commitAndPush = action("提交并推送", () => void commitAction(true));
       commitAndPush.className = "codey-git-btn codey-git-btn-primary";
-
+      renderPush();
       actions.append(cancel, commitOnly, commitAndPush);
       container.appendChild(actions);
-      commitAndPush.focus();
+      (result.pushReason || result.pushPending ? commitOnly : commitAndPush).focus();
+      if (result.pushPending) {
+        work.pushRequestId = crypto.randomUUID();
+        const updatePush = (checked) => {
+          if (!valid(current, epoch) || panel !== container || work.cancelled || work.executing) return;
+          Object.assign(result, checked, { pushPending: false });
+          renderPush();
+        };
+        void call("/api/conversation_git_push_preview", { sessionId: current, token: result.token, requestId: work.pushRequestId })
+          .then((checked) => {
+            if (!checked?.pushReason && !(checked?.remote && checked?.upstreamBranch)) throw new Error("推送预览不完整，请重新预览");
+            updatePush(checked);
+          })
+          .catch((failure) => updatePush({ pushReason: String(failure?.message || failure) }));
+      }
     } catch (failure) {
       if (valid(current, epoch) && panel === container) error(container, String(failure?.message || failure));
     } finally {
-      busy = false;
-      button.disabled = false;
-      delete button.dataset.busy;
-      if (refreshPending) void refresh();
+      if (previewWork === work && !work.executing) {
+        busy = false;
+        button.disabled = false;
+        delete button.dataset.busy;
+        if (refreshPending) void refresh();
+      }
     }
   };
   button.addEventListener("click", (event) => {
@@ -1154,7 +1219,7 @@
   document.addEventListener("visibilitychange", schedule);
   document.addEventListener("keydown", (event) => {
     if (!panel) return;
-    if (event.key === "Escape" && !busy) { close(); button.focus(); }
+    if (event.key === "Escape" && (!busy || previewWork)) { close(); button.focus(); }
     if (event.key === "Tab") {
       const controls = [...panel.querySelectorAll("button:not(:disabled), summary")];
       const first = controls[0], last = controls.at(-1);

@@ -1233,6 +1233,7 @@ async fn inject_initial_renderer(
         Err(failure) => failure,
     };
     let error_message = format!("{failure:#}");
+    let failure_detail = failure.detail().map(str::to_string);
     let failure_metadata = error_log::FailureMetadata {
         stage: Some("startup.renderer_injection".to_string()),
         recoverable: Some(false),
@@ -1247,6 +1248,7 @@ async fn inject_initial_renderer(
             "appPath": app_dir,
             "debugPort": debug_port,
             "processId": spawned.process_id,
+            "lastError": failure_detail,
         }),
     );
 
@@ -1439,6 +1441,7 @@ fn spawn_injection_watchdog(
                         },
                         serde_json::json!({
                             "debugPort": debug_port,
+                            "lastError": error.detail(),
                         }),
                     )
                     .await;

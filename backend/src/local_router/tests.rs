@@ -1526,7 +1526,7 @@ async fn declared_responses_route_reuses_upstream_websocket() {
 }
 
 #[tokio::test]
-async fn official_web_search_uses_http_before_upstream_websocket_send() {
+async fn official_web_search_declarations_keep_websocket_for_plain_continuations() {
     let auth_home = tempfile::tempdir().unwrap();
     let auth_path = auth_home.path().join("auth.json");
     std::fs::write(
@@ -1543,24 +1543,42 @@ async fn official_web_search_uses_http_before_upstream_websocket_send() {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = upstream.local_addr().unwrap();
         let upstream_task = tokio::spawn(async move {
-            let (mut stream, _) = upstream.accept().await.unwrap();
-            let request = read_http_request(&mut stream).await.unwrap();
-            assert_eq!(request.method, "POST");
-            let body: Value = serde_json::from_slice(&request.body).unwrap();
-            let event = json!({
-                "type":"response.completed",
-                "response":{
-                    "id":"resp-search",
-                    "status":"completed",
-                    "model":body["model"],
-                    "output":[]
-                }
-            });
-            let sse = format!("data: {event}\n\n");
-            write_static_response(&mut stream, "text/event-stream", sse.as_bytes())
-                .await
-                .unwrap();
-            (request.path, body)
+            let (stream, _) = upstream.accept().await.unwrap();
+            let mut upstream_socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let mut requests = Vec::new();
+            for sequence in 1..=2 {
+                let message = tokio::time::timeout(Duration::from_secs(5), upstream_socket.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let WebSocketMessage::Text(text) = message else {
+                    panic!("expected response.create");
+                };
+                let body: Value = serde_json::from_str(text.as_str()).unwrap();
+                upstream_socket
+                    .send(WebSocketMessage::Text(
+                        json!({
+                            "type":"response.completed",
+                            "response":{
+                                "id":format!("resp-search-{sequence}"),
+                                "status":"completed",
+                                "model":body["model"],
+                                "output":[{
+                                    "type":"reasoning",
+                                    "encrypted_content":"encrypted-reasoning",
+                                    "summary":[]
+                                }]
+                            }
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                requests.push(body);
+            }
+            requests
         });
         let (mut config, provider_id, model) = router_config(format!("http://{address}/v1"));
         config.profiles[0].supports_websockets = true;
@@ -1572,6 +1590,7 @@ async fn official_web_search_uses_http_before_upstream_websocket_send() {
             account_id: "test-account".into(),
             email: None,
             path: auth_path.clone(),
+            siwc_path: None,
             accepts_incoming_authorization: false,
         });
         *router.snapshot.write().unwrap() = Arc::new(snapshot);
@@ -1580,37 +1599,43 @@ async fn official_web_search_uses_http_before_upstream_websocket_send() {
             {"type":"function","name":"local_tool","parameters":{"type":"object"}},
             {"type":tool_type,"search_context_size":"high"}
         ]);
-        socket
-            .send(WebSocketMessage::Text(
-                json!({
-                    "type":"response.create",
-                    "model":model_alias(&provider_id, &model),
-                    "input":"search the web",
-                    "tools":tools,
-                    "tool_choice":"auto"
-                })
-                .to_string()
-                .into(),
-            ))
-            .await
-            .unwrap();
-        let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let WebSocketMessage::Text(text) = message else {
-            panic!("expected response.completed");
-        };
-        let event: Value = serde_json::from_str(text.as_str()).unwrap();
-        assert_eq!(event["type"], "response.completed", "{event}");
-        let (path, body) = upstream_task.await.unwrap();
-        assert_eq!(path, "/v1/responses");
-        assert_eq!(body["model"], model);
-        assert_eq!(body["stream"], true);
-        assert_eq!(body["tools"], tools);
-        assert_eq!(body["tool_choice"], "auto");
-        assert!(body.get("type").is_none());
+        for sequence in 1..=2 {
+            let mut body = json!({
+                "type":"response.create",
+                "model":model_alias(&provider_id, &model),
+                "input":format!("plain task {sequence}"),
+                "tools":tools,
+                "tool_choice":"auto"
+            });
+            if sequence == 2 {
+                body["previous_response_id"] = json!("resp-search-1");
+            }
+            socket
+                .send(WebSocketMessage::Text(body.to_string().into()))
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let WebSocketMessage::Text(text) = message else {
+                panic!("expected response.completed");
+            };
+            let event: Value = serde_json::from_str(text.as_str()).unwrap();
+            assert_eq!(event["type"], "response.completed", "{tool_type}: {event}");
+            assert_eq!(event["response"]["id"], format!("resp-search-{sequence}"));
+        }
+        let requests = upstream_task.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for body in &requests {
+            assert_eq!(body["type"], "response.create");
+            assert_eq!(body["model"], model);
+            assert_eq!(body["tools"], tools);
+            assert_eq!(body["tool_choice"], "auto");
+            assert!(body.get("stream").is_none());
+        }
+        assert_eq!(requests[1]["previous_response_id"], "resp-search-1");
         assert!(router.websocket_backoffs.lock().unwrap().entries.is_empty());
         socket.close(None).await.unwrap();
         router.stop().await.unwrap();
@@ -1621,7 +1646,6 @@ async fn official_web_search_uses_http_before_upstream_websocket_send() {
 async fn official_opaque_continuation_uses_http_with_complete_history() {
     for output in [
         json!({"type":"web_search_call","status":"completed","action":{"type":"search","query":"test"}}),
-        json!({"type":"reasoning","encrypted_content":"encrypted-reasoning","summary":[]}),
         json!({"type":"compaction","encrypted_content":"encrypted-compaction"}),
     ] {
         let auth_home = tempfile::tempdir().unwrap();
@@ -1678,6 +1702,7 @@ async fn official_opaque_continuation_uses_http_with_complete_history() {
             account_id: "test-account".into(),
             email: None,
             path: auth_path,
+            siwc_path: None,
             accepts_incoming_authorization: false,
         });
         *router.snapshot.write().unwrap() = Arc::new(snapshot);
@@ -2372,7 +2397,7 @@ async fn unknown_previous_response_id_uses_http_fallback_instead_of_websocket_re
             )
             .await
             .unwrap(),
-        UpstreamWebSocketAttempt::UseHttp
+        UpstreamWebSocketAttempt::UseHttp("websocket_history_unavailable")
     );
 
     let (first_request, reused_existing_socket, opened_replacement) = upstream_task.await.unwrap();
@@ -2663,6 +2688,7 @@ async fn connections_that_have_not_gone_idle_still_report_router_busy() {
 
 #[tokio::test]
 async fn unsupported_websocket_handshake_falls_back_to_http_until_config_changes() {
+    let logs = tempfile::tempdir().unwrap();
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async move {
@@ -2713,7 +2739,16 @@ async fn unsupported_websocket_handshake_falls_back_to_http_until_config_changes
 
     let (mut config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
     config.profiles[0].supports_websockets = true;
-    let router = LocalRouter::start(&config).await.unwrap();
+    config.route_request_log.enabled = true;
+    config.route_request_log.backend = crate::config::RouteRequestLogBackend::Sqlite;
+    let router = LocalRouter::start_with_logger(
+        &config,
+        Arc::new(RouteRequestLogController::with_root(
+            logs.path().to_path_buf(),
+        )),
+    )
+    .await
+    .unwrap();
     let endpoint = router.endpoint();
     let alias = model_alias(&provider_id, &model);
     let mut socket = connect_router_websocket(&endpoint).await;
@@ -2748,6 +2783,27 @@ async fn unsupported_websocket_handshake_falls_back_to_http_until_config_changes
     assert_eq!(requests[0].2["stream"], true);
     assert!(requests[0].2.get("stream_id").is_none());
     router.stop().await.unwrap();
+    let page = crate::route_request_log::query_route_request_logs(
+        logs.path(),
+        crate::config::RouteRequestLogBackend::Sqlite,
+        crate::route_request_log::RouteRequestLogQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(page.total, 2);
+    assert!(page.items.iter().all(|item| item.fallback_count == 1));
+    let mut reasons: Vec<_> = page
+        .items
+        .iter()
+        .map(|item| item.fallback_reason.as_deref())
+        .collect();
+    reasons.sort();
+    assert_eq!(
+        reasons,
+        vec![
+            Some("websocket_backoff"),
+            Some("websocket_endpoint_unsupported")
+        ]
+    );
 }
 
 #[tokio::test]
@@ -4029,12 +4085,14 @@ fn codex_login_route_outranks_stored_accounts_for_default_quota() {
         account_id: "test-default".into(),
         email: None,
         path: std::path::PathBuf::from("/codex/home/auth.json"),
+        siwc_path: None,
         accepts_incoming_authorization: true,
     };
     let idle = OfficialRouteAuth {
         account_id: "test-idle".into(),
         email: None,
         path: std::path::PathBuf::from("/codey/accounts/test-idle.json"),
+        siwc_path: None,
         accepts_incoming_authorization: false,
     };
     assert!(default_route_rank(Some(&login)) < default_route_rank(Some(&idle)));
@@ -5704,6 +5762,140 @@ fn agent_message_items_convert_to_assistant_history() {
             {"type":"text","text":"The visual worker saw an error banner."},
             {"type":"text","text":"The selected route is Chat Completions."}
         ])
+    );
+}
+
+#[test]
+fn collaboration_new_task_and_message_convert_to_user_messages() {
+    let mut body = json!({
+        "model":"provider-model",
+        "input":[
+            {"role":"user","content":"continue"},
+            {
+                "type":"agent_message",
+                "author":"/root",
+                "recipient":"/root/child",
+                "content":[
+                    {"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/child\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":"只读核对任务"}
+                ]
+            },
+            {
+                "type":"agent_message",
+                "author":"/root",
+                "recipient":"/root/child",
+                "content":[
+                    {"type":"input_text","text":"Message Type: MESSAGE\nTask name: /root/child\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":"补充说明"}
+                ]
+            },
+            {
+                "type":"agent_message",
+                "author":"/root/child",
+                "recipient":"/root",
+                "content":[
+                    {"type":"input_text","text":"Message Type: FINAL_ANSWER\nTask name: /root/child\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":"已完成"}
+                ]
+            },
+            {
+                "type":"agent_message",
+                "author":"/root/child",
+                "recipient":"/root",
+                "content":[
+                    {"type":"input_text","text":"Message Type: MESSAGE\nTask name: /root\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":"进度更新"}
+                ]
+            },
+            {
+                "type":"agent_message",
+                "author":"/root/child",
+                "recipient":"/root/child/grandchild",
+                "content":[
+                    {"type":"input_text","text":"Message Type: MESSAGE\nTask name: /root/child/grandchild\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":"下发给孙代理的补充要求"}
+                ]
+            },
+            {
+                "type":"agent_message",
+                "author":"/root/child/grandchild",
+                "recipient":"/root/child",
+                "content":[
+                    {"type":"input_text","text":"Message Type: MESSAGE\nTask name: /root/child\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":"孙代理的进度更新"}
+                ]
+            }
+        ]
+    });
+    // 非原生线路发送前会把明文协作正文还原为可见文本，这里对齐该顺序。
+    assert!(normalize_encrypted_agent_payloads(&mut body));
+
+    let chat = responses_to_chat_completions_body(&body).unwrap();
+    let chat_messages = chat["messages"].as_array().unwrap();
+    let chat_text = |role: &str| {
+        chat_messages
+            .iter()
+            .filter(|message| message["role"] == role)
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        chat_text("user").contains("Message Type: NEW_TASK")
+            && chat_text("user").contains("Message Type: MESSAGE")
+            && chat_text("user").contains("只读核对任务"),
+        "主代理派发的任务与补充说明必须是用户消息：{chat_messages:?}"
+    );
+    assert!(
+        chat_text("assistant").contains("Message Type: FINAL_ANSWER"),
+        "子代理返回的最终答复必须保持助手消息：{chat_messages:?}"
+    );
+    assert!(
+        chat_text("assistant").contains("Message Type: MESSAGE")
+            && chat_text("assistant").contains("进度更新"),
+        "子代理发回根代理的进度消息必须保持助手历史：{chat_messages:?}"
+    );
+    assert!(
+        chat_text("user").contains("下发给孙代理的补充要求"),
+        "上级代理发给下级代理的补充要求必须是用户消息：{chat_messages:?}"
+    );
+    assert!(
+        chat_text("assistant").contains("孙代理的进度更新"),
+        "下级代理发回上级代理的进度消息必须保持助手历史，不能因为收件人不是根代理就当成用户消息：{chat_messages:?}"
+    );
+
+    let anthropic = responses_to_anthropic_messages_body(&body).unwrap();
+    let anthropic_messages = anthropic["messages"].as_array().unwrap();
+    let anthropic_text = |role: &str| {
+        anthropic_messages
+            .iter()
+            .filter(|message| message["role"] == role)
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert!(
+        anthropic_text("user").contains("Message Type: NEW_TASK")
+            && anthropic_text("user").contains("Message Type: MESSAGE")
+            && anthropic_text("user").contains("只读核对任务"),
+        "Anthropic Messages 线路同样必须把任务正文放在用户消息中：{anthropic_messages:?}"
+    );
+    assert!(
+        anthropic_text("assistant").contains("Message Type: FINAL_ANSWER"),
+        "Anthropic Messages 线路的子代理答复必须保持助手角色：{anthropic_messages:?}"
+    );
+    assert!(
+        anthropic_text("assistant").contains("Message Type: MESSAGE")
+            && anthropic_text("assistant").contains("进度更新"),
+        "Anthropic Messages 线路的子代理进度消息必须保持助手角色：{anthropic_messages:?}"
+    );
+    assert!(
+        anthropic_text("user").contains("下发给孙代理的补充要求"),
+        "Anthropic Messages 线路的上级下发补充要求必须是用户消息：{anthropic_messages:?}"
+    );
+    assert!(
+        anthropic_text("assistant").contains("孙代理的进度更新"),
+        "Anthropic Messages 线路的下级回报必须保持助手角色：{anthropic_messages:?}"
     );
 }
 
@@ -7757,6 +7949,92 @@ fn websocket_failure_event_keeps_provider_codes_and_adds_route_context() {
         error_summary.as_deref(),
         Some("type=bad_response_status_code; code=bad_response_status_code")
     );
+}
+
+#[tokio::test]
+async fn native_responses_alias_reserved_collaboration_tools_for_plaintext_delivery() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await.unwrap();
+        let events = [
+            json!({"type":"response.output_item.done","output_index":0,"item":{
+                "type":"function_call","id":"fc_1","namespace":"agents","name":"followup_task",
+                "call_id":"call-1","arguments":"{\"target\":\"/root/a\",\"message\":\"run tests\"}"}}),
+            json!({"type":"response.completed","response":{"id":"resp_1","status":"completed",
+                "output":[{"type":"function_call","id":"fc_1","namespace":"agents",
+                "name":"followup_task","call_id":"call-1",
+                "arguments":"{\"target\":\"/root/a\",\"message\":\"run tests\"}"}]}}),
+        ];
+        let body: String = events
+            .iter()
+            .map(|event| format!("data: {event}\n\n"))
+            .collect();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        serde_json::from_slice::<Value>(&request.body).unwrap()
+    });
+    let (config, provider_id, model) =
+        router_config(format!("http://{upstream_address}/v1/responses"));
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .json(&json!({
+            "model": model_alias(&provider_id, &model),
+            "stream": true,
+            "input": [
+                {"role":"user","content":"delegate"},
+                {"type":"function_call","namespace":"collaboration","name":"followup_task",
+                 "call_id":"call-0","arguments":"{\"target\":\"/root/a\",\"message\":\"earlier\"}",
+                 "encrypted_function_args":[]},
+                {"type":"function_call_output","call_id":"call-0","output":"queued"}
+            ],
+            "tools": [{
+                "type":"namespace","name":"collaboration","tools":[{
+                    "type":"function","name":"followup_task","parameters":{
+                        "type":"object",
+                        "properties":{
+                            "target":{"type":"string"},
+                            "message":{"type":"string","encrypted":true}
+                        }
+                    }
+                }]
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body = response.text().await.unwrap();
+    let sent = upstream_task.await.unwrap();
+    router.stop().await.unwrap();
+
+    assert_eq!(sent["tools"][0]["name"], "agents");
+    assert!(
+        sent["tools"][0]["tools"][0]["parameters"]["properties"]["message"]
+            .get("encrypted")
+            .is_none()
+    );
+    assert_eq!(sent["input"][1]["namespace"], "agents");
+
+    let events = parse_responses_websocket_sse_events(&body).unwrap();
+    let item = &events[0]["item"];
+    assert_eq!(item["namespace"], "collaboration");
+    assert_eq!(item["encrypted_function_args"], json!([]));
+    let output = &events[1]["response"]["output"][0];
+    assert_eq!(output["namespace"], "collaboration");
+    assert_eq!(output["encrypted_function_args"], json!([]));
 }
 
 #[tokio::test]
@@ -10797,6 +11075,9 @@ async fn native_passthrough_rewrites_plaintext_agent_payload_before_send() {
 
     let body = upstream_task.await.unwrap();
     assert_eq!(body["model"], model);
+    // 新任务即使在原生直通线路也保持 agent_message 形态，只有协议转换线路
+    // 才需要把它改写成用户消息；这里确认正文可见且未被当成助手历史。
+    assert_eq!(body["input"][1]["type"], "agent_message");
     assert_eq!(
         body["input"][1]["content"][1],
         json!({"type":"input_text","text":task})
@@ -10873,17 +11154,148 @@ async fn chat_completions_route_rewrites_plaintext_agent_payload_before_conversi
     let (path, body) = upstream_task.await.unwrap();
     assert_eq!(path, "/v1/chat/completions");
     let sent_messages = body["messages"].as_array().unwrap();
-    // agent_message 会转换成 assistant 消息，任务正文必须作为可见文本出现在
+    // 主代理派发的 NEW_TASK 必须作为用户消息回放，任务正文以可见文本出现在
     // 该消息里；协议转换不能把 encrypted_content 直接丢弃。
-    let agent_content = sent_messages
+    let agent_message = sent_messages
         .iter()
-        .filter_map(|message| message.get("content").and_then(Value::as_str))
-        .find(|content| content.contains("Message Type: NEW_TASK"))
+        .find(|message| message.to_string().contains("Message Type: NEW_TASK"))
         .expect("上游必须收到包含任务头部的协作消息");
+    assert_eq!(agent_message["role"], "user");
     assert!(
-        agent_content.contains(task),
-        "协作消息必须包含完整任务正文，实际收到：{agent_content}"
+        agent_message.to_string().contains(task),
+        "协作消息必须包含完整任务正文，实际收到：{agent_message}"
     );
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn anthropic_route_replays_agent_task_as_user_message_before_send() {
+    let task = "只读核对任务（第 4 轮）。禁止写入任何文件，完成后给出结论。";
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await.unwrap();
+        let body = serde_json::from_slice::<Value>(&request.body).unwrap();
+        let sse = [
+            (
+                "message_start",
+                json!({
+                    "type":"message_start",
+                    "message":{
+                        "id":"msg-agent-task",
+                        "type":"message",
+                        "role":"assistant",
+                        "model":"provider-model",
+                        "content":[],
+                        "usage":{"input_tokens":4}
+                    }
+                }),
+            ),
+            (
+                "content_block_start",
+                json!({
+                    "type":"content_block_start",
+                    "index":0,
+                    "content_block":{"type":"text","text":""}
+                }),
+            ),
+            (
+                "content_block_delta",
+                json!({
+                    "type":"content_block_delta",
+                    "index":0,
+                    "delta":{"type":"text_delta","text":"received"}
+                }),
+            ),
+            (
+                "message_delta",
+                json!({
+                    "type":"message_delta",
+                    "delta":{"stop_reason":"end_turn"},
+                    "usage":{"output_tokens":2}
+                }),
+            ),
+            ("message_stop", json!({"type":"message_stop"})),
+        ]
+        .into_iter()
+        .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+        .collect::<String>();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+                    sse.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        (request.path, body)
+    });
+    let (mut config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
+    config.profiles[0].upstream_protocol =
+        crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES.into();
+    config.profiles[0].normalize();
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .json(&json!({
+            "model":model_alias(&provider_id, &model),
+            "stream":true,
+            "input":[
+                {"role":"user","content":"continue"},
+                {
+                    "type":"agent_message",
+                    "id":"amsg_4",
+                    "author":"/root",
+                    "recipient":"/root/child",
+                    "content":[
+                        {"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\n"},
+                        {"type":"encrypted_content","encrypted_content":task}
+                    ]
+                },
+                {
+                    "type":"agent_message",
+                    "id":"amsg_5",
+                    "author":"/root/child",
+                    "recipient":"/root",
+                    "content":[
+                        {"type":"input_text","text":"Message Type: FINAL_ANSWER\nTask name: /root/child\nSender: /root/child\nPayload:\n"},
+                        {"type":"encrypted_content","encrypted_content":"已完成"}
+                    ]
+                }
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let events = response.text().await.unwrap();
+    assert!(events.contains("response.completed"));
+
+    let (path, body) = upstream_task.await.unwrap();
+    assert_eq!(path, "/v1/messages");
+    let messages = body["messages"].as_array().unwrap();
+    // DeepSeek 走 Anthropic Messages，任务必须作为用户消息到达上游，否则模型
+    // 只会看到一段助手历史，从而报告任务正文缺失。
+    let task_message = messages
+        .iter()
+        .find(|message| message.to_string().contains("Message Type: NEW_TASK"))
+        .expect("上游必须收到包含任务头部的协作消息");
+    assert_eq!(task_message["role"], "user");
+    assert!(
+        task_message.to_string().contains(task),
+        "任务正文必须以可见文本出现在用户消息中，实际收到：{task_message}"
+    );
+    let completion_message = messages
+        .iter()
+        .find(|message| message.to_string().contains("Message Type: FINAL_ANSWER"))
+        .expect("上游必须收到子代理答复");
+    assert_eq!(completion_message["role"], "assistant");
     router.stop().await.unwrap();
 }
 
@@ -11895,52 +12307,6 @@ async fn request_log_excludes_non_model_paths_but_keeps_rejected_model_requests(
 }
 
 #[tokio::test]
-async fn request_log_quota_api_returns_aggregates_and_health_with_authentication() {
-    let logs = tempfile::tempdir().unwrap();
-    let (mut config, _, _) = router_config("http://127.0.0.1:9/v1".to_string());
-    config.route_request_log.backend = RouteRequestLogBackend::Sqlite;
-    let router = LocalRouter::start_with_logger(
-        &config,
-        Arc::new(RouteRequestLogController::with_root(
-            logs.path().to_path_buf(),
-        )),
-    )
-    .await
-    .unwrap();
-    let endpoint = router.endpoint();
-    let url = format!(
-        "{}/codey/api/query_route_request_log_quota_usage",
-        endpoint.base_url.trim_end_matches("/v1")
-    );
-    let client = reqwest::Client::new();
-    let unauthorized = client.post(&url).json(&json!({})).send().await.unwrap();
-    assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
-    let invalid = client
-        .post(&url)
-        .header(ROUTER_AUTH_HEADER, &endpoint.token)
-        .json(&json!({"toUnixMs": 300}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
-    let response = client
-        .post(&url)
-        .header(ROUTER_AUTH_HEADER, &endpoint.token)
-        .json(&json!({"fromUnixMs": 100, "toUnixMs": 300}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), reqwest::StatusCode::OK);
-    let value = response.json::<Value>().await.unwrap();
-    assert_eq!(value["queryable"], true);
-    assert_eq!(value["totalCalls"], 0);
-    assert_eq!(value["groups"], json!([]));
-    assert!(value["recordingHealth"]["enabled"].is_boolean());
-    assert!(value.get("items").is_none());
-    router.stop().await.unwrap();
-}
-
-#[tokio::test]
 async fn request_log_page_is_public_but_its_api_requires_the_launch_token() {
     let (config, provider_id, model) = router_config("http://127.0.0.1:9/v1".to_string());
     let router = LocalRouter::start(&config).await.unwrap();
@@ -12074,8 +12440,7 @@ async fn request_log_page_is_public_but_its_api_requires_the_launch_token() {
             .is_some_and(|message| message.starts_with("额度查询参数无效"))
     );
 
-    // 系统浏览器里的请求日志页无法走 Codey 应用桥，账号筛选、账号名显示和按
-    // 账号推算额度都要靠本地路由提供同一份账号目录。
+    // 系统浏览器里的请求日志页通过本地路由获取账号目录，用于账号筛选和账号名显示。
     let accounts = client
         .post(format!("{gateway_root}/codey/api/list_official_accounts"))
         .header(ROUTER_AUTH_HEADER, &endpoint.token)

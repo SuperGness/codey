@@ -196,7 +196,7 @@ fn full_replay_candidates(
     let hunks = match &record.edit {
         Edit::NativePatch(diff) => parse_native_hunks(diff, false)?
             .into_iter()
-            .map(|(_, _, old, new)| {
+            .map(|(_, _, old, new, _, _)| {
                 (
                     old.into_iter().map(str::to_string).collect(),
                     new.into_iter().map(str::to_string).collect(),
@@ -283,7 +283,16 @@ fn apply_native_patch_at(input: &str, diff: &str, reverse: bool, relocate: bool)
     Ok(apply_native_patch_checked(input, diff, reverse, relocate)?.0)
 }
 
-type NativeHunk<'a> = (usize, usize, Vec<&'a str>, Vec<&'a str>);
+// 第四、五个元素记录 `removed` 中 `-` 行、`added` 中 `+` 行的下标：上下文行可能
+// 已被其他对话改写，定位和替换都要能只落在这些行上。
+type NativeHunk<'a> = (
+    usize,
+    usize,
+    Vec<&'a str>,
+    Vec<&'a str>,
+    Vec<usize>,
+    Vec<usize>,
+);
 
 fn parse_native_hunks(diff: &str, reverse: bool) -> Result<Vec<NativeHunk<'_>>> {
     let header = regex::Regex::new(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$")?;
@@ -299,6 +308,10 @@ fn parse_native_hunks(diff: &str, reverse: bool) -> Result<Vec<NativeHunk<'_>>> 
         let new_count: usize = captures.get(4).map_or("1", |v| v.as_str()).parse()?;
         let mut old = Vec::new();
         let mut new = Vec::new();
+        // 分别记录 old 中 `-` 行、new 中 `+` 行的下标：按内容定位时只匹配这些行，
+        // 上下文行可能已被其他对话改写。
+        let mut minus = Vec::new();
+        let mut plus = Vec::new();
         i += 1;
         while i < lines.len() && !lines[i].starts_with("@@") {
             let (prefix, text) = lines[i].split_at_checked(1).context("原生补丁含无效空行")?;
@@ -307,8 +320,14 @@ fn parse_native_hunks(diff: &str, reverse: bool) -> Result<Vec<NativeHunk<'_>>> 
                     old.push(text);
                     new.push(text);
                 }
-                "-" => old.push(text),
-                "+" => new.push(text),
+                "-" => {
+                    minus.push(old.len());
+                    old.push(text);
+                }
+                "+" => {
+                    plus.push(new.len());
+                    new.push(text);
+                }
                 _ => bail!("原生补丁含不支持的内容或换行标记"),
             }
             i += 1;
@@ -324,12 +343,14 @@ fn parse_native_hunks(diff: &str, reverse: bool) -> Result<Vec<NativeHunk<'_>>> 
                 start.checked_sub(1).context("原生补丁行号无效")
             }
         };
-        let (from, to, removed, added) = if reverse {
+        let (from, to, removed, added, deleted, inserted_at) = if reverse {
             (
                 position(new_start, new_count)?,
                 position(old_start, old_count)?,
                 new,
                 old,
+                plus,
+                minus,
             )
         } else {
             (
@@ -337,11 +358,19 @@ fn parse_native_hunks(diff: &str, reverse: bool) -> Result<Vec<NativeHunk<'_>>> 
                 position(new_start, new_count)?,
                 old,
                 new,
+                minus,
+                plus,
             )
         };
-        hunks.push((from, to, removed, added));
+        hunks.push((from, to, removed, added, deleted, inserted_at));
     }
     Ok(hunks)
+}
+
+// `deleted` 必须是一段连续区间才能单独定位，否则只能整体匹配。
+fn contiguous_run(deleted: &[usize]) -> Option<(usize, usize)> {
+    let (first, last) = (deleted.first()?, deleted.last()?);
+    (last - first + 1 == deleted.len()).then_some((*first, deleted.len()))
 }
 
 fn apply_native_patch_checked(
@@ -358,54 +387,86 @@ fn apply_native_patch_checked(
     let mut output = Vec::new();
     let mut inverse = String::new();
     let mut cursor = 0usize;
-    for (mut from, to, removed, added) in parse_native_hunks(diff, reverse)? {
+    for (mut from, to, removed, added, deleted, inserted_at) in parse_native_hunks(diff, reverse)? {
+        // 被替换的旧行区间与要写入的新行区间。按整块匹配时覆盖整块；按删除行定位时
+        // 只覆盖删除行，其前后的上下文行保持当前基线内容，其他对话改写上下文不影响本次改动。
+        let mut span = (from, from + removed.len());
+        let mut insertion = (0, added.len());
         if relocate {
             ensure!(!removed.is_empty(), "无上下文补丁不能按内容定位");
-            // 只需要确认位置唯一，找到第二个匹配即可停止，避免大文件重复上下文反复分配。
-            let mut matches = source
-                .windows(removed.len())
-                .enumerate()
-                .filter_map(|(position, lines)| (lines == removed.as_slice()).then_some(position));
-            from = matches.next().context("原生补丁上下文不能唯一定位")?;
-            ensure!(matches.next().is_none(), "原生补丁上下文不能唯一定位");
+            match unique_match(&source, &removed, cursor)? {
+                // 先要求整块（含上下文）唯一命中，与记录生成时的内容一致。
+                Some(start) => {
+                    span = (start, start + removed.len());
+                    from = start;
+                }
+                // 上下文行可能被其他对话改写，删除行连续时只按删除行唯一定位。
+                None => {
+                    let (offset, length) =
+                        contiguous_run(&deleted).context("原生补丁上下文不能唯一定位")?;
+                    let found =
+                        unique_match(&source, &removed[offset..offset + length], cursor + offset)?
+                            .with_context(|| "原生补丁上下文不能唯一定位")?;
+                    let start = found
+                        .checked_sub(offset)
+                        .context("原生补丁位置超出基线或相互重叠")?;
+                    ensure!(start >= cursor, "原生补丁位置超出基线或相互重叠");
+                    // 纯删除补丁没有 `+` 行，替换内容为空；有新增时仍要求连续。
+                    let (add_offset, add_length) = if inserted_at.is_empty() {
+                        (0, 0)
+                    } else {
+                        contiguous_run(&inserted_at).context("原生补丁新增行不连续")?
+                    };
+                    span = (found, found + length);
+                    insertion = (add_offset, add_length);
+                    from = start;
+                }
+            }
         }
+        let replaced = &removed[span.0 - from..span.1 - from];
+        let replacement = &added[insertion.0..insertion.0 + insertion.1];
         ensure!(
-            from >= cursor && from <= source.len(),
+            from >= cursor && from <= source.len() && span.0 >= from && span.1 <= source.len(),
             "原生补丁位置超出基线或相互重叠"
         );
-        let end = from
-            .checked_add(removed.len())
-            .context("原生补丁范围过大")?;
         ensure!(
-            source.get(from..end) == Some(removed.as_slice()),
+            source.get(span.0..span.1) == Some(replaced),
             "原生补丁内容与当前基线不一致"
         );
-        output.extend_from_slice(&source[cursor..from]);
+        ensure!(
+            relocate || source.get(span.0..span.1) == Some(&removed[..]),
+            "原生补丁内容与当前基线不一致"
+        );
+        output.extend_from_slice(&source[cursor..span.0]);
         ensure!(relocate || output.len() == to, "原生补丁前后行号不一致");
         let new_position = output.len();
-        let inverse_start = if added.is_empty() {
+        let inverse_start = if replacement.is_empty() {
             new_position
         } else {
             new_position + 1
         };
-        let original_start = if removed.is_empty() { from } else { from + 1 };
+        let original_start = if replaced.is_empty() {
+            new_position
+        } else {
+            span.0 + 1
+        };
         inverse.push_str(&format!(
             "@@ -{inverse_start},{} +{original_start},{} @@\n",
-            added.len(),
-            removed.len()
+            replacement.len(),
+            replaced.len()
         ));
-        for line in &added {
+        for line in replacement {
             inverse.push('-');
             inverse.push_str(line);
             inverse.push('\n');
         }
-        for line in &removed {
+        for line in replaced {
             inverse.push('+');
             inverse.push_str(line);
             inverse.push('\n');
         }
-        output.extend(added);
-        cursor = end;
+        output.extend_from_slice(replacement);
+        cursor = span.1;
     }
     output.extend_from_slice(&source[cursor..]);
     Ok((
@@ -416,6 +477,18 @@ fn apply_native_patch_checked(
         },
         inverse,
     ))
+}
+
+// 在 `from` 之后唯一匹配；出现第二个匹配就报错，避免歧义替换。
+fn unique_match(source: &[&str], lines: &[&str], from: usize) -> Result<Option<usize>> {
+    let mut matches = source
+        .windows(lines.len())
+        .enumerate()
+        .filter_map(|(position, candidate)| (candidate == lines).then_some(position))
+        .skip_while(|position| *position < from);
+    let found = matches.next();
+    ensure!(matches.next().is_none(), "原生补丁上下文不能唯一定位");
+    Ok(found)
 }
 
 type Signature = Vec<(PathBuf, u64, SystemTime, String)>;
@@ -1369,6 +1442,7 @@ fn read_transcript_mode(home: &Path, raw: &Path, display_only: bool) -> Result<T
     let mut previous = None;
     for (index, (_, segment)) in segments.iter().enumerate() {
         for (line_index, line) in BufReader::new(File::open(segment)?).lines().enumerate() {
+            check_cancelled()?;
             let line = line?;
             ensure!(line.len() <= 8 * 1024 * 1024, "单条对话记录过大");
             let record: Value =
@@ -1513,12 +1587,13 @@ fn read_transcript_mode(home: &Path, raw: &Path, display_only: bool) -> Result<T
             && let Some((name, args, start, order)) = calls.remove(id)
         {
             let response = output(&payload["output"]);
+            // 任何门禁拒绝都可能在执行前记录之后中断，回执本身不产生文件归属；
+            // 记录被拒绝的调用身份，供后续精确解除待完成阻塞。
             if tracking::output_text(&response).is_some_and(|text| {
-                text.starts_with(
-                    "Tool call blocked by PreToolUse hook: CODEY_SUBAGENT_WORKSPACE_BUSY:",
-                ) && text
-                    .trim_end()
-                    .ends_with(&format!(". Tool: {}", name.replace('.', "__")))
+                text.starts_with("Tool call blocked by PreToolUse hook:")
+                    && text
+                        .trim_end()
+                        .ends_with(&format!(". Tool: {}", name.replace('.', "__")))
             }) && let Some(turn) = turns.remove(id).filter(|turn| turn.as_str().is_some())
             {
                 result
@@ -2155,12 +2230,11 @@ fn recover_mode(
                     }
                 });
         for (mut name, mut args, response, mut start, end, mut ordinal) in calls {
-            // 执行前基线可能早于另一个门禁的拒绝；原始拒绝回执不产生文件归属。
+            // 执行前基线可能早于执行前的门禁拒绝；原始拒绝回执不产生文件归属。
             if tracking::output_text(&response).is_some_and(|text| {
                 let tool = name.replace('.', "__");
-                text.starts_with(
-                    "Tool call blocked by PreToolUse hook: CODEY_SUBAGENT_WORKSPACE_BUSY:",
-                ) && text.trim_end().ends_with(&format!(". Tool: {tool}"))
+                text.starts_with("Tool call blocked by PreToolUse hook:")
+                    && text.trim_end().ends_with(&format!(". Tool: {tool}"))
             }) && let Some((patch, normalized)) = tracking::normalized_input(&name, &args)?
                 && let Some((start, end)) = start.zip(end).filter(|(start, end)| start <= end)
             {

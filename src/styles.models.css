@@ -1203,11 +1203,61 @@
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
-  padding: 12px 14px;
+  padding: 12px 46px 12px 14px;
   border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.08);
   border-radius: 10px;
   background: var(--codey-surface-muted, #fafafb);
   transition: all 130ms ease;
+  position: relative;
+}
+
+/* 可切换默认的卡片：整卡可点，悬停给出提示性高亮。 */
+.settings-page .official-account-item.is-switchable {
+  cursor: pointer;
+}
+
+.settings-page .official-account-item.is-switchable:hover {
+  border-color: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.18);
+  background: var(--codey-surface-hover, rgba(var(--codey-ink-rgb, 0, 0, 0), 0.045));
+}
+
+[data-theme="dark"] .settings-page .official-account-item.is-switchable:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.settings-page .official-account-item.is-switchable:focus-visible {
+  outline: 2px solid var(--codey-accent, #10a37f);
+  outline-offset: 2px;
+}
+
+/* 默认账号右上角角标；is-pending 表示改动要等 Codex 重启生效。 */
+.official-account-default-corner {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  z-index: 1;
+  padding: 2px 8px 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.4;
+  color: #fff;
+  border-radius: 0 10px 0 8px;
+  user-select: none;
+  pointer-events: none;
+}
+
+.official-account-default-corner.is-ready {
+  background: #34c759;
+}
+
+.official-account-default-corner.is-pending {
+  background: #ff9500;
+}
+
+.official-account-default-corner.is-invalid {
+  background: #ff3b30;
 }
 
 [data-theme="dark"] .settings-page .official-account-item {
@@ -1375,15 +1425,119 @@
   white-space: nowrap;
 }
 
+/* SIWC 官方直连：状态标签本身就是开关，点击在启用/停用间切换。 */
+.official-account-siwc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 0 7.5px;
+  height: 20px;
+  line-height: 18px;
+  border-radius: 9999px;
+  border: 1px dashed rgba(var(--codey-ink-rgb, 0, 0, 0), 0.22);
+  background: transparent;
+  color: var(--mac-text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.official-account-siwc-chip:hover:not(:disabled) {
+  border-color: rgba(16, 163, 127, 0.45);
+  color: var(--codey-accent, #10a37f);
+}
+
+.official-account-siwc-chip.is-active {
+  border-style: solid;
+  border-color: rgba(16, 163, 127, 0.4);
+  background: rgba(16, 163, 127, 0.12);
+  color: var(--codey-accent, #10a37f);
+}
+
+.official-account-siwc-chip.is-invalid {
+  border-style: solid;
+  border-color: rgba(255, 59, 48, 0.35);
+  background: rgba(255, 59, 48, 0.08);
+  color: var(--codey-red, #d70015);
+}
+
+.official-account-siwc-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+[data-theme="dark"] .official-account-siwc-chip {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+[data-theme="dark"] .official-account-siwc-chip.is-active {
+  border-color: rgba(16, 163, 127, 0.5);
+  background: rgba(16, 163, 127, 0.16);
+}
+
+[data-theme="dark"] .official-account-siwc-chip.is-invalid {
+  border-color: rgba(255, 69, 58, 0.45);
+  background: rgba(255, 69, 58, 0.12);
+  color: #ff6961;
+}
+
+.official-account-usage-refresh-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 0 7.5px;
+  height: 20px;
+  line-height: 18px;
+  border-radius: 9999px;
+  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.12);
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.025);
+  color: var(--mac-text-secondary);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.official-account-usage-refresh-chip:hover:not(:disabled) {
+  border-color: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.25);
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
+  color: var(--mac-text-primary);
+}
+
+.official-account-usage-refresh-chip:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+[data-theme="dark"] .official-account-usage-refresh-chip {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--mac-text-secondary);
+}
+
+[data-theme="dark"] .official-account-usage-refresh-chip:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--mac-text-primary);
+}
+
 .official-account-usage-container {
-  display: flex;
-  flex-direction: column;
   width: 100%;
   padding-left: 38px;
 }
 
 .official-account-usage {
   display: inline-flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: 8px;
   font-size: 11px;
@@ -1396,125 +1550,220 @@
   opacity: 0.75;
 }
 
-.official-account-usage-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 10px;
+/* 凭据失效：额度区直接提示失效原因和恢复入口，不再显示历史数据。 */
+.official-account-usage.is-error {
+  color: var(--codey-red, #d70015);
+}
+
+.official-account-usage-error-icon {
+  flex-shrink: 0;
+}
+
+.official-account-usage-action {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 600;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.official-account-usage-action:hover:not(:disabled) {
+  opacity: 0.8;
+}
+
+/* 每个限额窗口一张小卡：头部标签+百分比、全宽进度条、底部重置时间。卡片宽度保持一致。 */
+.official-account-usage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
   width: 100%;
 }
 
-.official-account-usage-item {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 3px 8px;
-  border-radius: 6px;
-  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.035);
-  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.05);
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--mac-text-secondary);
+.official-account-usage-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 11px;
+  border-radius: 8px;
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.025);
+  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.02);
   transition: all 130ms ease;
-  white-space: nowrap;
+  min-width: 0;
 }
 
-[data-theme="dark"] .official-account-usage-item {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.06);
+[data-theme="dark"] .official-account-usage-cell {
+  background: rgba(255, 255, 255, 0.035);
+  border-color: rgba(255, 255, 255, 0.07);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+
+.official-account-usage-cell:hover {
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.04);
+  border-color: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.1);
+}
+
+[data-theme="dark"] .official-account-usage-cell:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.official-account-usage-cell-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .official-account-usage-window {
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 600;
   color: var(--mac-text-primary);
   white-space: nowrap;
 }
 
+.official-account-usage-percent {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  padding: 1px 6.5px;
+  border-radius: 9999px;
+  white-space: nowrap;
+}
+
+.official-account-usage-percent.is-normal {
+  background: #d1fae5;
+  background: lab(94.9004% -17.0769 5.63836);
+  color: #007956;
+  color: lab(44.4871% -41.0396 11.0361);
+}
+
+[data-theme="dark"] .official-account-usage-percent.is-normal {
+  background: rgba(0, 187, 126, 0.18);
+  color: #34d399;
+}
+
+.official-account-usage-percent.is-warning {
+  background: rgba(255, 149, 0, 0.12);
+  color: #b45309;
+}
+
+[data-theme="dark"] .official-account-usage-percent.is-warning {
+  background: rgba(255, 149, 0, 0.2);
+  color: #ff9500;
+}
+
+.official-account-usage-percent.is-danger {
+  background: rgba(255, 59, 48, 0.12);
+  color: #c92a2a;
+}
+
+[data-theme="dark"] .official-account-usage-percent.is-danger {
+  background: rgba(255, 59, 48, 0.2);
+  color: #ff453a;
+}
+
 .official-account-progress-track {
-  width: 44px;
-  height: 4px;
-  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.08);
+  width: 100%;
+  height: 5px;
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.07);
   border-radius: 9999px;
   overflow: hidden;
   flex-shrink: 0;
 }
 
 [data-theme="dark"] .official-account-progress-track {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .official-account-progress-fill {
   height: 100%;
   border-radius: 9999px;
-  transition: width 0.3s ease;
+  transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .official-account-progress-fill.is-normal {
-  background: #34c759;
+  background: #00bb7e;
+  background: lab(66.9756% -58.27 19.5419);
 }
 
 .official-account-progress-fill.is-warning {
-  background: #ff9500;
+  background: linear-gradient(90deg, #ff9500 0%, #f59e0b 100%);
 }
 
 .official-account-progress-fill.is-danger {
-  background: #ff3b30;
+  background: linear-gradient(90deg, #ff3b30 0%, #dc2626 100%);
 }
 
-.official-account-usage-percent {
-  font-size: 11px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.official-account-usage-percent.is-normal {
-  color: #28a745;
-}
-
-[data-theme="dark"] .official-account-usage-percent.is-normal {
-  color: #34c759;
-}
-
-.official-account-usage-percent.is-warning {
-  color: #e68200;
-}
-
-[data-theme="dark"] .official-account-usage-percent.is-warning {
-  color: #ff9500;
-}
-
-.official-account-usage-percent.is-danger {
-  color: #d70015;
-}
-
-[data-theme="dark"] .official-account-usage-percent.is-danger {
-  color: #ff3b30;
-}
-
-.official-account-usage-reset {
-  color: var(--mac-text-secondary);
+.official-account-usage-cell-foot {
+  display: flex;
+  align-items: center;
+  gap: 4.5px;
   font-size: 10.5px;
   line-height: 1.3;
+  color: var(--mac-text-secondary);
+  min-height: 14px;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.official-account-usage-clock {
+  flex-shrink: 0;
+  opacity: 0.75;
+  color: var(--mac-text-secondary);
+}
+
+.official-account-usage-reset-none {
+  opacity: 0.6;
 }
 
 .official-account-usage-reset-time {
   opacity: 0.75;
+  color: var(--mac-text-tertiary);
 }
 
 .official-account-usage-stale {
+  grid-column: 1 / -1;
   color: var(--mac-text-tertiary);
   font-size: 10.5px;
   white-space: nowrap;
 }
 
+/* 右侧居中固定删除按钮 */
 .official-account-controls {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+
+.official-account-delete-btn {
   display: inline-flex;
   align-items: center;
-  flex-shrink: 0;
-  gap: 4px;
+  justify-content: center;
+  color: var(--mac-text-tertiary);
+  transition: all 0.15s ease;
+  border-radius: 6px;
+}
+
+.official-account-delete-btn:hover:not(:disabled) {
+  color: var(--codey-red, #d70015);
+  background: rgba(215, 0, 21, 0.08);
+}
+
+[data-theme="dark"] .official-account-delete-btn:hover:not(:disabled) {
+  color: #ff453a;
+  background: rgba(255, 69, 58, 0.15);
 }
 
 .official-login-body {

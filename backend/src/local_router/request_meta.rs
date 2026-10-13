@@ -450,6 +450,155 @@ pub(crate) fn align_routing_hint_model(headers: &mut HeaderMap, upstream_model: 
     }
 }
 
+// ---------------------------------------------------------------------------
+// SIWC（官方直连）请求整形
+// ---------------------------------------------------------------------------
+
+/// OpenAI 公开 /v1/responses 明确拒绝的顶层字段：续接状态（
+/// previous_response_id/conversation）、采样与内部参数（temperature、
+/// top_p、user、metadata、truncation 等）以及 backend-api 专属键。
+/// 官方文档列出的字段加上 pi 实测被剥离的项都在这里。
+const SIWC_REMOVED_TOP_LEVEL: &[&str] = &[
+    "previous_response_id",
+    "conversation",
+    "temperature",
+    "top_p",
+    "top_logprobs",
+    "max_output_tokens",
+    "max_tool_calls",
+    "metadata",
+    "user",
+    "truncation",
+    "background",
+    "moderation",
+    "multi_agent",
+    "prompt",
+    "prompt_cache_retention",
+    "prompt_cache_options",
+    "safety_identifier",
+    "service_tier",
+    // Codey 的路由元数据不是公开 API 字段。
+    "client_metadata",
+];
+
+/// 直连不支持的托管工具类型：镜像、托管检索/执行环境、托管 MCP 与
+/// connector、`tool_search`、`programmatic_tool_calling`。
+const SIWC_BLOCKED_TOOL_TYPES: &[&str] = &[
+    "tool_search",
+    "image_generation",
+    "file_search",
+    "code_interpreter",
+    "computer_use",
+    "computer_use_preview",
+    "mcp",
+    "programmatic_tool_calling",
+];
+
+fn siwc_tool_blocked(tool: &Value) -> bool {
+    let Some(kind) = tool.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    SIWC_BLOCKED_TOOL_TYPES.contains(&kind)
+}
+
+fn sanitize_siwc_history_item(item: &mut Value) -> bool {
+    // 公开 API 不接受 system 角色条目；等价语义是 developer 或 instructions。
+    if item.get("role").and_then(Value::as_str) == Some("system")
+        && let Some(object) = item.as_object_mut()
+    {
+        object.insert("role".to_string(), Value::String("developer".to_string()));
+        return true;
+    }
+    false
+}
+
+/// SIWC 直连线路的请求体净化。必须在最终发往上游的 JSON 树上调用；只要
+/// 返回 true，调用方就必须放弃原始编码体（encoded_body = None），否则
+/// 删除的字段会随透传字节原样外发。
+pub(crate) fn sanitize_siwc_responses_request(body: &mut Value) -> bool {
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    let mut changed = false;
+    for field in SIWC_REMOVED_TOP_LEVEL {
+        if object.remove(*field).is_some() {
+            changed = true;
+        }
+    }
+    // 直连强制无状态流式：store=false、stream=true。
+    if object.get("store").and_then(Value::as_bool) != Some(false) {
+        object.insert("store".to_string(), Value::Bool(false));
+        changed = true;
+    }
+    if object.get("stream").and_then(Value::as_bool) != Some(true) {
+        object.insert("stream".to_string(), Value::Bool(true));
+        changed = true;
+    }
+    if let Some(Value::Array(tools)) = object.get_mut("tools") {
+        let before = tools.len();
+        tools.retain(|tool| !siwc_tool_blocked(tool));
+        if tools.len() != before {
+            changed = true;
+        }
+        if tools.is_empty() {
+            object.remove("tools");
+            changed = true;
+        }
+    }
+    // tool_choice 指名了被剔除的托管工具时，上游按「引用不存在的工具」报错；
+    // 退回 auto 让它在剩余工具里自己挑。
+    if object
+        .get("tool_choice")
+        .and_then(|choice| choice.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|kind| SIWC_BLOCKED_TOOL_TYPES.contains(&kind))
+    {
+        object.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+        changed = true;
+    }
+    if let Some(Value::Array(items)) = object.get_mut("input") {
+        let before = items.len();
+        // item_reference 依赖上游服务端状态，直连的无状态请求无法解析。
+        items.retain(|item| item.get("type").and_then(Value::as_str) != Some("item_reference"));
+        if items.len() != before {
+            changed = true;
+        }
+        for item in items.iter_mut() {
+            changed |= sanitize_siwc_history_item(item);
+        }
+    }
+    changed
+}
+
+/// 直连线路的发送头清理：Codex backend-api 专属的身份与粘性会话头不能
+/// 带去公开 API。`session_id`/`x-client-request-id` 是公开 API 接受的会话
+/// 粘性头（pi 已实测），予以保留。返回 true 表示有改动（仅供日志/测试观测）。
+pub(crate) fn strip_siwc_forbidden_headers(headers: &mut HeaderMap) -> bool {
+    let mut changed = false;
+    for name in [
+        // 直连凭据的账号身份由令牌本身承载，该头只对 backend-api 有意义。
+        CHATGPT_ACCOUNT_ID_HEADER,
+        TURN_METADATA_HEADER,
+        // originator 标记 Codex 内部遥测，OpenAI-Beta 是 backend-api 特性门。
+        "originator",
+        "openai-beta",
+        "x-openai-internal-codex-responses-lite",
+    ] {
+        changed |= headers.remove(name).is_some();
+    }
+    // Codex 注入的内部头整族剥离（turn-state、beta-features、routing-hint 等）。
+    let codex_names = headers
+        .keys()
+        .filter(|name| name.as_str().starts_with("x-codex-"))
+        .cloned()
+        .collect::<Vec<_>>();
+    for name in codex_names {
+        headers.remove(&name);
+        changed = true;
+    }
+    changed
+}
+
 pub(crate) fn is_codex_client_identity_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
@@ -505,4 +654,178 @@ pub(crate) fn incoming_openai_authorization<'a>(
         return None;
     }
     Some(authorization)
+}
+
+#[cfg(test)]
+mod siwc_tests {
+    use super::*;
+
+    #[test]
+    fn siwc_sanitize_strips_unsupported_fields_and_forces_stateless_streaming() {
+        let mut body = serde_json::json!({
+            "model": "gpt-5.5",
+            "instructions": "be helpful",
+            "input": [
+                {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "s"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+                {"type": "item_reference", "id": "msg_1"}
+            ],
+            "previous_response_id": "resp_1",
+            "conversation": "conv_1",
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "top_logprobs": 3,
+            "max_output_tokens": 1024,
+            "max_tool_calls": 4,
+            "metadata": {"a": 1},
+            "user": "u",
+            "truncation": "auto",
+            "background": true,
+            "moderation": "auto",
+            "multi_agent": {},
+            "prompt": {"id": "p"},
+            "prompt_cache_retention": "24h",
+            "prompt_cache_options": {},
+            "safety_identifier": "sid",
+            "service_tier": "priority",
+            "client_metadata": {},
+            "store": true,
+            "stream": false,
+            "tools": [
+                {"type": "function", "name": "f"},
+                {"type": "tool_search"},
+                {"type": "web_search"},
+                {"type": "mcp", "server_label": "x"},
+                {"type": "image_generation"},
+                {"type": "file_search"},
+                {"type": "code_interpreter"},
+                {"type": "computer_use_preview"},
+                {"type": "programmatic_tool_calling"}
+            ],
+            "reasoning": {"effort": "high"},
+            "prompt_cache_key": "sticky",
+            "include": ["reasoning.encrypted_content"],
+            "tool_choice": "auto"
+        });
+        assert!(sanitize_siwc_responses_request(&mut body));
+        let object = body.as_object().unwrap();
+        for field in SIWC_REMOVED_TOP_LEVEL {
+            assert!(!object.contains_key(*field), "{field} must be removed");
+        }
+        // 强制无状态流式。
+        assert_eq!(object["store"], serde_json::Value::Bool(false));
+        assert_eq!(object["stream"], serde_json::Value::Bool(true));
+        // 保留的字段原样通过。
+        for kept in [
+            "model",
+            "instructions",
+            "input",
+            "reasoning",
+            "prompt_cache_key",
+            "include",
+            "tool_choice",
+            "tools",
+        ] {
+            assert!(object.contains_key(kept), "{kept} must survive");
+        }
+        // 托管工具被过滤，function/web_search 保留。
+        let tools = object["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[1]["type"], "web_search");
+        // system 角色改写成 developer；item_reference 被剔除。
+        let items = object["input"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["role"], "developer");
+        assert_eq!(items[1]["role"], "user");
+    }
+
+    #[test]
+    fn siwc_sanitize_drops_tools_key_when_everything_blocked() {
+        let mut body = serde_json::json!({
+            "model": "gpt-5.5",
+            "tools": [{"type": "tool_search"}, {"type": "mcp"}]
+        });
+        assert!(sanitize_siwc_responses_request(&mut body));
+        assert!(!body.as_object().unwrap().contains_key("tools"));
+    }
+
+    #[test]
+    fn siwc_sanitize_leaves_clean_body_unchanged() {
+        let mut body = serde_json::json!({
+            "model": "gpt-5.5",
+            "stream": true,
+            "store": false,
+            "input": [{"type": "message", "role": "user", "content": []}]
+        });
+        assert!(!sanitize_siwc_responses_request(&mut body));
+    }
+
+    #[test]
+    fn siwc_sanitize_rewrites_tool_choice_pointing_at_blocked_tool() {
+        let mut body = serde_json::json!({
+            "model": "gpt-5.5",
+            "tools": [{"type": "image_generation"}],
+            "tool_choice": {"type": "image_generation"}
+        });
+        assert!(sanitize_siwc_responses_request(&mut body));
+        let object = body.as_object().unwrap();
+        assert!(!object.contains_key("tools"));
+        assert_eq!(object["tool_choice"], serde_json::json!("auto"));
+        // 指名保留工具的 tool_choice 不动。
+        let mut body = serde_json::json!({
+            "model": "gpt-5.5",
+            "stream": true,
+            "store": false,
+            "tools": [{"type": "function", "name": "f"}],
+            "tool_choice": {"type": "function", "name": "f"}
+        });
+        assert!(!sanitize_siwc_responses_request(&mut body));
+        assert_eq!(
+            body["tool_choice"],
+            serde_json::json!({"type": "function", "name": "f"})
+        );
+    }
+
+    #[test]
+    fn siwc_header_strip_keeps_sticky_session_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static(CHATGPT_ACCOUNT_ID_HEADER),
+            HeaderValue::from_static("acct_1"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-codex-turn-state"),
+            HeaderValue::from_static("token"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-codex-beta-features"),
+            HeaderValue::from_static("x"),
+        );
+        headers.insert(
+            HeaderName::from_static("originator"),
+            HeaderValue::from_static("codex_cli_rs"),
+        );
+        headers.insert(
+            HeaderName::from_static("openai-beta"),
+            HeaderValue::from_static("responses=experimental"),
+        );
+        headers.insert(
+            HeaderName::from_static("session_id"),
+            HeaderValue::from_static("sess-1"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-client-request-id"),
+            HeaderValue::from_static("req-1"),
+        );
+        assert!(strip_siwc_forbidden_headers(&mut headers));
+        assert!(!headers.contains_key(CHATGPT_ACCOUNT_ID_HEADER));
+        assert!(!headers.contains_key("x-codex-turn-state"));
+        assert!(!headers.contains_key("x-codex-beta-features"));
+        assert!(!headers.contains_key("originator"));
+        assert!(!headers.contains_key("openai-beta"));
+        // 会话粘性头保留。
+        assert_eq!(headers["session_id"], "sess-1");
+        assert_eq!(headers["x-client-request-id"], "req-1");
+    }
 }

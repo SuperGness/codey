@@ -13,7 +13,6 @@ test("overlay API paths reject commands outside the backend whitelist", () => {
   assert.equal(api.codeyApiPath("validate_codey_plugin_config"), "/api/validate_codey_plugin_config");
   assert.equal(api.isCodeyApiCommand("query_route_request_logs"), true);
   assert.equal(api.isCodeyApiCommand("query_route_request_log_stats"), true);
-  assert.equal(api.codeyApiPath("query_route_request_log_quota_usage"), "/api/query_route_request_log_quota_usage");
   assert.equal(api.isCodeyApiCommand("clear_route_request_logs"), true);
   assert.equal(api.isCodeyApiCommand("../session/delete"), false);
   assert.throws(

@@ -983,7 +983,7 @@ fn pre_tool_use_output(
             return Ok(pre_tool_reason_denial(&reason));
         }
         if let Some(agent_id) = child_agent_id {
-            if let Some(reason) = crate::subagent_orchestrator::authorize_child_tool_with_workspace(
+            if let Some(reason) = crate::subagent_orchestrator::authorize_child_tool(
                 state_root,
                 runtime_id,
                 &input.session_id,
@@ -994,7 +994,6 @@ fn pre_tool_use_output(
                     tool_name,
                     tool_input: input.tool_input.as_ref(),
                 },
-                nonempty(input.cwd.as_deref()),
                 now_ms,
             )? {
                 return Ok(pre_tool_reason_denial(&reason));

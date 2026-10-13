@@ -387,12 +387,9 @@ pub(crate) fn native_item_requires_http(item: &Value) -> bool {
             | "custom_tool_call"
             | "custom_tool_call_output",
         ) => false,
-        Some("reasoning") => {
-            item.get("encrypted_content")
-                .and_then(Value::as_str)
-                .is_some_and(|content| !content.is_empty())
-                || (!reasoning_item_has_text(item) && summary_replay_text(item).is_none())
-        }
+        // 完整密文与可见推理都可由原生 Responses 重放，不应仅因包含
+        // encrypted_content 就把后续请求固定为 HTTP。
+        Some("reasoning") => !replayable_reasoning_item(item),
         _ => true,
     }
 }
@@ -1214,10 +1211,31 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_reasoning_does_not_force_later_continuations_to_http() {
+        let owner = [1; 32];
+        let mut history = NativeResponsesHistory::default();
+        history.prepare(owner, &mut json!({"input":"task"}));
+        history.observe(&completed(
+            "resp-encrypted",
+            vec![json!({"type":"reasoning","encrypted_content":"ciphertext"})],
+        ));
+        let mut next = json!({"previous_response_id":"resp-encrypted","input":"next"});
+        history.prepare(owner, &mut next);
+        assert!(!history.requires_http());
+        assert!(history.restore(owner, &mut next).unwrap());
+        assert_eq!(next["input"][1]["encrypted_content"], "ciphertext");
+        history.observe(&completed("resp-next", vec![]));
+        history.prepare(
+            owner,
+            &mut json!({"previous_response_id":"resp-next","input":"later"}),
+        );
+        assert!(!history.requires_http());
+    }
+
+    #[test]
     fn completed_visible_reasoning_preserves_opaque_or_rejected_history() {
         let owner = [1; 32];
         for previous in [
-            Some(json!({"id":"encrypted","type":"reasoning","encrypted_content":"ciphertext"})),
             Some(json!({"id":"search","type":"web_search_call","status":"completed"})),
             None,
         ] {
@@ -1769,7 +1787,11 @@ mod tests {
                 let mut restored = NativeResponsesHistory::with_cache(cache, &headers);
                 let mut next = json!({"previous_response_id":"resp-opaque","input":"next"});
                 restored.prepare(owner, &mut next);
-                assert!(restored.requires_http(), "{item}");
+                assert_eq!(
+                    restored.requires_http(),
+                    item["type"] != "reasoning",
+                    "{item}"
+                );
                 assert!(restored.restore_for_http(owner, &mut next, true).unwrap());
                 assert_eq!(next["input"][1], item);
                 assert!(next.get("previous_response_id").is_none());

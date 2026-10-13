@@ -70,12 +70,12 @@ impl std::fmt::Display for AccountUsageUnauthorized {
 impl std::error::Error for AccountUsageUnauthorized {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct OfficialAuthFingerprint {
+pub(crate) struct OfficialAuthFingerprint {
     len: u64,
     modified: SystemTime,
 }
 
-fn official_auth_fingerprint(path: &Path) -> Option<OfficialAuthFingerprint> {
+pub(crate) fn official_auth_fingerprint(path: &Path) -> Option<OfficialAuthFingerprint> {
     let metadata = fs::metadata(path).ok()?;
     Some(OfficialAuthFingerprint {
         len: metadata.len(),
@@ -456,6 +456,11 @@ pub(crate) async fn query_snapshot_at(
                 value["message"] = Value::String(
                     "额度刷新失败，正在使用本周上次成功获取的数据，统计截止时间保持不变。".into(),
                 );
+                // 401 是凭据被官方明确拒绝，不能随历史快照吞掉：reason 透传给
+                // 调用方标失效，界面才不会一直定格在「上次成功数据」。
+                if error.downcast_ref::<AccountUsageUnauthorized>().is_some() {
+                    value["reason"] = Value::String(USAGE_REASON_CREDENTIAL_REJECTED.to_string());
+                }
                 value
             }
             None => {

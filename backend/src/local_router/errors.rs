@@ -350,6 +350,71 @@ pub(crate) struct UpstreamHttpErrorResponse<'a> {
     pub(crate) body: &'a [u8],
 }
 
+/// SIWC 直连上游把凭据打回时标记账号的 SIWC 槽位失效：卡片出现「重新授权」，
+/// 下一次账号同步会把该线路切回 Codex backend-api 平面。限流、额度超限和
+/// 暂时性不可用不标失效——凭据本身仍然有效。
+pub(crate) fn observe_siwc_upstream_rejection(route: &RouteTarget, status: u16, body: &[u8]) {
+    let Some(auth) = route.official_auth.as_ref() else {
+        return;
+    };
+    if auth.siwc_path.is_none() {
+        return;
+    }
+    let code = serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/code")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    value
+                        .pointer("/response/error/code")
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_string)
+        });
+    let reason = match code.as_deref() {
+        Some("subscription_sharing_invalid_user") => "官方直连授权无法验证账号身份，请重新授权",
+        // 资格性拒绝（免费账号/订阅掉线/组织账号）：凭据本身没坏，但直连对
+        // 这个账号不可用，标记后对话回落 Codex 平面，卡片如实提示原因。
+        Some("subscription_sharing_user_not_eligible") => {
+            "该账号暂不具备订阅共享资格（需生效中的付费订阅），对话已恢复默认通道"
+        }
+        Some("chatpass_v2_scope_not_authorized")
+        | Some("chatpass_v2_invalid_authorization_context") => {
+            "官方直连的授权范围已失效，请重新授权"
+        }
+        Some(_) => {
+            if status == 401 {
+                "官方直连凭据被官方拒绝，请重新授权"
+            } else {
+                return;
+            }
+        }
+        // direct-admission 的 401 可能没有结构化 code；凭据被明确拒绝同样按
+        // 失效处理，400/403/429/503 一律不动。
+        None if status == 401 => "官方直连凭据被官方拒绝，请重新授权",
+        None => return,
+    };
+    let store = crate::official_accounts::OfficialAccountStore::for_config_path(
+        &crate::config::default_config_path(),
+    );
+    let account_id = auth.account_id.clone();
+    let reason = reason.to_string();
+    tokio::task::spawn_blocking(
+        move || match store.mark_siwc_invalid(&account_id, &reason) {
+            Ok(true) => crate::official_accounts::notify_siwc_invalidated(&account_id),
+            Ok(false) => {}
+            Err(error) => record_router_failure_nonblocking(
+                "siwc_mark_invalid_failed",
+                "observe_siwc_upstream_rejection",
+                error.to_string(),
+                serde_json::json!({"accountId": account_id}),
+            ),
+        },
+    );
+}
+
 pub(crate) async fn write_upstream_http_error<D>(
     downstream: &mut D,
     response: UpstreamHttpErrorResponse<'_>,

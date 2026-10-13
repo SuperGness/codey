@@ -523,49 +523,43 @@ pub(crate) fn classify_tool(tool_name: &str) -> ToolClass {
     }
 }
 
+const COLLABORATION_TOOLS: &[&str] = &[
+    "agent",
+    "spawn_agent",
+    "wait_agent",
+    "list_agents",
+    "agent_status",
+    "send_message",
+    "followup_task",
+    "interrupt_agent",
+];
+
+/// Codey 配置的 `agents` 与 Codex 固定的 `collaboration` 命名空间都归一到协作工具短名。
+fn collaboration_tool_name(normalized: &str) -> Option<&'static str> {
+    let bare = ["agents", "collaboration"]
+        .iter()
+        .find_map(|namespace| {
+            let rest = normalized.strip_prefix(namespace)?;
+            [".", "/", "::", "__", ""]
+                .iter()
+                .find_map(|separator| rest.strip_prefix(separator))
+                .filter(|rest| COLLABORATION_TOOLS.contains(rest))
+        })
+        .unwrap_or(normalized);
+    COLLABORATION_TOOLS
+        .iter()
+        .copied()
+        .find(|tool| *tool == bare)
+}
+
 pub(crate) fn normalize_tool_name(tool_name: &str) -> String {
     let normalized = tool_name.trim().to_ascii_lowercase();
+    if let Some(tool) = collaboration_tool_name(&normalized) {
+        return tool.to_string();
+    }
     let canonical = match normalized.as_str() {
-        "agent" | "agents.agent" | "agents/agent" | "agents::agent" | "agents__agent"
-        | "agentsagent" => Some("agent"),
-        "spawn_agent"
-        | "agents.spawn_agent"
-        | "agents/spawn_agent"
-        | "agents::spawn_agent"
-        | "agents__spawn_agent"
-        | "agentsspawn_agent" => Some("spawn_agent"),
-        "wait_agent" | "agents.wait_agent" | "agents/wait_agent" | "agents::wait_agent"
-        | "agents__wait_agent" | "agentswait_agent" | "functions.wait" | "functions/wait"
-        | "functions:wait" | "functions__wait" | "functions_wait" => Some("wait_agent"),
-        "list_agents"
-        | "agents.list_agents"
-        | "agents/list_agents"
-        | "agents::list_agents"
-        | "agents__list_agents"
-        | "agentslist_agents" => Some("list_agents"),
-        "agent_status"
-        | "agents.agent_status"
-        | "agents/agent_status"
-        | "agents::agent_status"
-        | "agents__agent_status" => Some("agent_status"),
-        "send_message"
-        | "agents.send_message"
-        | "agents/send_message"
-        | "agents::send_message"
-        | "agents__send_message"
-        | "agentssend_message" => Some("send_message"),
-        "followup_task"
-        | "agents.followup_task"
-        | "agents/followup_task"
-        | "agents::followup_task"
-        | "agents__followup_task"
-        | "agentsfollowup_task" => Some("followup_task"),
-        "interrupt_agent"
-        | "agents.interrupt_agent"
-        | "agents/interrupt_agent"
-        | "agents::interrupt_agent"
-        | "agents__interrupt_agent"
-        | "agentsinterrupt_agent" => Some("interrupt_agent"),
+        "functions.wait" | "functions/wait" | "functions:wait" | "functions__wait"
+        | "functions_wait" => Some("wait_agent"),
         "apply_patch" | "functions.apply_patch" => Some("apply_patch"),
         "replace" | "mcp__codey_fastctx__replace" => Some("replace"),
         "write_file" => Some("write_file"),
