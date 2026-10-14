@@ -11,11 +11,16 @@ test("Windows startup compatibility failure cleans the process before compatible
     "stop_windows_spawned_codex(&mut spawned, app_dir).await",
   );
   const compatibleRestart = windowsSpawn.indexOf(
-    "match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[], false)",
+    "match spawn_windows_codex(",
+    cleanupCall,
   );
 
   assert.ok(cleanupCall >= 0);
   assert.ok(compatibleRestart > cleanupCall);
+  assert.match(
+    windowsSpawn.slice(compatibleRestart, compatibleRestart + 500),
+    /&runtime_arguments,\s*launch_proxy_environment\.as_deref\(\)\.unwrap_or\(&\[\]\),\s*options\.launch_proxy\.is_some\(\)/,
+  );
   const singleInstanceCleanup = windowsSpawn.indexOf("if single_instance_exit {", cleanupCall);
   assert.ok(singleInstanceCleanup > cleanupCall && singleInstanceCleanup < compatibleRestart);
   assert.match(
@@ -116,10 +121,12 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
   );
   const overrideGuard = noEntryLaunch.indexOf("if !runtime_config_overrides.is_empty() {");
   const subagentGuard = noEntryLaunch.indexOf("if subagent_gate_active {");
-  const degradedLaunch = noEntryLaunch.indexOf(
-    "spawn_windows_codex(app_dir, debug_port, runtime_arguments, &[], false)",
-  );
+  const degradedLaunch = noEntryLaunch.indexOf("spawn_windows_codex(");
   assert.ok(overrideGuard >= 0 && overrideGuard < subagentGuard && subagentGuard < degradedLaunch);
+  assert.match(
+    noEntryLaunch.slice(degradedLaunch, degradedLaunch + 400),
+    /runtime_arguments,\s*launch_proxy_environment\.unwrap_or\(&\[\]\),\s*launch_proxy_environment\.is_some\(\)/,
+  );
   assert.match(noEntryLaunch, /performance_status = "degraded"/);
 });
 
@@ -349,7 +356,7 @@ test("NODE_OPTIONS require path follows platform and fuse availability", async (
     macosSpawn,
     /!inspect_fuse\.inspector_possible\(\)\s*&&\s*fuses\.node_options\.node_options_possible\(\)/,
   );
-  assert.match(macosSpawn, /add_macos_cli_wrapper\(&mut command, &require\.environment\)/);
+  assert.match(macosSpawn, /add_macos_launch_environment\(&mut command, &require\.environment\)/);
   assert.match(
     launcher,
     /"reason": "main_process_require_unavailable"/,

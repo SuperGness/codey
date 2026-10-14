@@ -908,9 +908,8 @@
       : "Codey 内嵌配置面板尚未加载，请退出 Codex 后重新启动 Codey");
   };
 
-  const visibleMountRect = (element) => {
+  const mountableRect = (element) => {
     if (!(element instanceof HTMLElement)) return null;
-    if (element.closest("[hidden], [aria-hidden=true]")) return null;
     const style = window.getComputedStyle(element);
     const rect = element.getBoundingClientRect();
     return style.display !== "none"
@@ -920,6 +919,18 @@
       ? rect
       : null;
   };
+
+  const visibleMountRect = (element) =>
+    element instanceof HTMLElement && element.closest("[hidden], [aria-hidden=true]")
+      ? null
+      : mountableRect(element);
+
+  // Codex 打开模态对话框时只给图标栏等背景内容补 aria-hidden，布局不变；
+  // 把它当成隐藏会让对话框弹出期间的扫描把入口当成失效挂载卸载。
+  const railMountRect = (element) =>
+    element instanceof HTMLElement && element.closest("[hidden]")
+      ? null
+      : mountableRect(element);
 
   const isTopChromeMountTarget = (element) => {
     const rect = visibleMountRect(element);
@@ -997,14 +1008,14 @@
     const rail = document.querySelector(navigationRailSelector);
     if (!(rail instanceof HTMLElement)) return null;
     navigationRailSeen = true;
-    if (!visibleMountRect(rail)) return null;
+    if (!railMountRect(rail)) return null;
     const cluster = [...rail.children]
-      .filter((child) => visibleMountRect(child))
+      .filter((child) => railMountRect(child))
       .at(-1);
     const stack = cluster?.firstElementChild;
     if (!(stack instanceof HTMLElement)) return null;
     const controls = [...stack.querySelectorAll("button")]
-      .filter((candidate) => candidate.id !== buttonId && visibleMountRect(candidate));
+      .filter((candidate) => candidate.id !== buttonId && railMountRect(candidate));
     const anchor = controls.find((candidate) => railHelpLabelPattern.test(candidate.getAttribute("aria-label") || ""))
       || controls.find((candidate) => railProfileLabelPattern.test(candidate.getAttribute("aria-label") || ""));
     if (!(anchor instanceof HTMLElement)) return null;
@@ -1020,15 +1031,20 @@
       return false;
     }
     const parent = button.parentElement;
-    if (!(parent instanceof HTMLElement) || button.closest("[hidden], [aria-hidden=true]")) {
+    if (!(parent instanceof HTMLElement)) {
       return false;
     }
     if (button.dataset.codeyRailSlot === "true") {
+      // 模态对话框给背景补的 aria-hidden 不算真实隐藏，与 railMountRect 一致。
+      if (button.closest("[hidden]")) return false;
       const rail = button.closest?.(navigationRailSelector);
       return !!rail
         && rail.isConnected !== false
         && parent === button.__codeyRailStack
         && button.nextElementSibling === button.__codeyRailAnchor;
+    }
+    if (button.closest("[hidden], [aria-hidden=true]")) {
+      return false;
     }
     // 页面先渲染顶部、后渲染侧栏时，已挂载的顶部入口也需要迁移。
     if (document.querySelector(navigationRailSelector)) return false;

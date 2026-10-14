@@ -940,6 +940,11 @@ pub(crate) fn normalize_responses_tool_list(tools: Option<&mut Value>) -> bool {
     };
     let mut changed = false;
     for tool in tools {
+        // 仍叫 `collaboration` 的命名空间会按保留名逐字校验 schema，归一化不能进入。
+        // 改名到别名命名空间后这里照常处理。
+        if is_reserved_collaboration_namespace(tool) {
+            continue;
+        }
         let Some(tool) = tool.as_object_mut() else {
             continue;
         };

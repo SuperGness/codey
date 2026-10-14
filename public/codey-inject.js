@@ -2328,10 +2328,17 @@
       state.retryAt = 0;
       publishCapability(feature, true);
       return controller;
-    }, () => {
+    }, (error) => {
       state.failures += 1;
       state.retryAt = Date.now() + Math.min(30_000, 1_000 * 2 ** Math.min(state.failures - 1, 5));
-      throw unavailableCapability(feature);
+      const capabilityError = unavailableCapability(feature);
+      // 探测超时、资源导入失败等真实原因要带进抛出的错误里：capability 状态
+      // 对用户保持通用文案，但错误日志需要能区分结构漂移和探测失败。
+      const reason = String(error?.message || error || "");
+      if (reason && reason !== capabilityError.message) {
+        capabilityError.message = `${capabilityError.message}（${reason}）`;
+      }
+      throw capabilityError;
     }).finally(() => { state.pending = null; });
     return state.pending;
   };

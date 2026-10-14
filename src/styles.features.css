@@ -68,6 +68,17 @@
   color: var(--codey-text, #f5f5f7);
 }
 
+.launch-proxy-section {
+  margin-bottom: 28px;
+}
+
+.launch-proxy-card .feature-card-body {
+  margin-top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .notification-section {
   margin-top: 36px;
 }

@@ -46,10 +46,10 @@ test("账号卡片优先显示额度接口的当前套餐", () => {
   assert.match(panel, /const planType = snapshotPlan \|\| account\.planType;/);
   assert.match(panel, /const plan = formatPlan\(planType\);/);
   assert.match(panel, /planTagClass\(planType\)/);
-  assert.match(panel, /planType\?\.toLowerCase\(\)\.startsWith\("pro"\) \? \([\s\S]*?<IconSparkles/);
+  assert.match(panel, /planType\?\.toLowerCase\(\) === "pro" \? \([\s\S]*?<IconSparkles/);
   const badgeClass = panel.match(/function planTagClass\([\s\S]*?\n\}/)?.[0];
   assert.ok(badgeClass, "应存在套餐徽标分类函数");
-  assert.match(badgeClass, /const p = plan\?\.toLowerCase\(\)\.trim\(\);/);
-  assert.match(badgeClass, /if \(p\?\.startsWith\("pro"\)\) return "official-account-plan-badge is-pro";/);
+  assert.match(badgeClass, /const p = plan\?\.toLowerCase\(\);/);
+  assert.match(badgeClass, /if \(p === "pro"\) return "official-account-plan-badge is-pro";/);
   assert.doesNotMatch(panel, /planTagClass\(account\.planType\)/);
 });

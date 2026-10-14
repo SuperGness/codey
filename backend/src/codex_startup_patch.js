@@ -936,7 +936,7 @@
   };
   const discoverCodexRendererAssets = (baseUrl, source) => {
     for (const match of source.matchAll(
-      /\bsrc\s*=\s*(["'])([^"']+\.(?:c|m)?js(?:[?#][^"']*)?)\1/gi,
+      /\b(?:src|href)\s*=\s*(["'])([^"']+\.(?:c|m)?js(?:[?#][^"']*)?)\1/gi,
     )) rememberCodexRendererAsset(baseUrl, match[2]);
   };
   const isCodexRendererBootstrapRequest = (request) => {
@@ -954,7 +954,7 @@
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
         (
-          /\/(?:(?:app-initial|codex-composer-adapter|general-settings|model-list-filter|windows-model-controls|use-service-tier-settings|read-service-tier-for-request|subagent-activity-chip-group)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
+          /\/(?:(?:app-initial|app-shared|codex-composer-adapter|general-settings|model-list-filter|windows-model-controls|use-service-tier-settings|read-service-tier-for-request|subagent-activity-chip-group)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
             url.pathname,
           ) ||
           (

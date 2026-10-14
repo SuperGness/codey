@@ -21,6 +21,7 @@ mod fastctx_route_gate;
 mod fs_util;
 mod hook_io;
 mod http_response;
+mod launch_proxy;
 mod launcher;
 mod local_router;
 mod maintenance_lock;

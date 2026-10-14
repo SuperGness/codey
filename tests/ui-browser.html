@@ -28,7 +28,7 @@
       ];
       const releaseNotes = state === "empty" ? undefined : state === "long"
         ? Array.from({ length: 40 }, (_, index) => `- ${notes[index % notes.length]} ${index === 0 ? "VeryLongReleaseIdentifier".repeat(12) : ""}`).join("\r\n")
-        : state === "grouped" ? "**新增功能**\n- 支持按分类生成更新日志。\n\n**体验优化**\n- 更新提示默认展示简短预览。\n\n**问题修复**\n- 修复长日志挤占弹窗的问题。\n- 修复插件导入失败后无法重试的问题。"
+        : state === "grouped" ? "**新增功能**\n- 支持按分类生成更新日志。\n\n**体验优化**\n- 更新提示直接展示完整日志。\n\n**问题修复**\n- 修复长日志挤占弹窗的问题。\n- 修复插件导入失败后无法重试的问题。"
         : notes.map(note => `- ${note}`).join("\n");
       createRoot(document.getElementById("root")).render(React.createElement(UiProvider, null,
         React.createElement(ConfirmationDialog, {

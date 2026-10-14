@@ -226,6 +226,44 @@ test("waits for a visible footer entry instead of falling back to the header", (
   assert.equal(document.getElementById("codey-settings-button").parentElement, stack);
 });
 
+test("keeps the rail entry while Codex marks the rail aria-hidden for a modal", () => {
+  const { document, header, rail, stack, window } = createProfileRailFixture();
+  const button = document.getElementById("codey-settings-button");
+  assert.equal(button.parentElement, stack);
+  // Codex 的模态对话框只给背景内容补 aria-hidden，图标栏布局不变，入口应保持挂载。
+  rail.setAttribute("aria-hidden", "true");
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button"), button);
+  assert.equal(button.parentElement, stack);
+  assert.equal(header.querySelector("#codey-settings-button"), null);
+  // 模态期间 React 重建底部堆栈时，入口也能直接挂回新容器。
+  const replacement = new FakeElement("div", { right: 44, width: 36, height: 36, top: 850 });
+  const replacementSlot = new FakeElement("span", { right: 44, width: 36, height: 36, top: 850 });
+  const replacementProfile = new FakeElement("button", { right: 44, width: 36, height: 36, top: 850 });
+  replacementProfile.setAttribute("aria-label", "打开个人资料菜单");
+  replacementSlot.appendChild(replacementProfile);
+  replacement.appendChild(replacementSlot);
+  stack.remove();
+  rail.children.at(-1).appendChild(replacement);
+  window.__codeyRendererScan();
+  const remounted = document.getElementById("codey-settings-button");
+  assert.ok(remounted);
+  assert.equal(remounted.parentElement, replacement);
+  assert.equal(remounted.nextElementSibling, replacementSlot);
+  rail.removeAttribute("aria-hidden");
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button"), remounted);
+  // 真实隐藏（hidden）的图标栏仍然不算可用挂载。
+  rail.setAttribute("hidden", "");
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button"), null);
+  rail.removeAttribute("hidden");
+  window.__codeyRendererScan();
+  const restored = document.getElementById("codey-settings-button");
+  assert.ok(restored);
+  assert.equal(restored.parentElement, replacement);
+});
+
 test("joins the native measured action row and repairs its noninteractive mirror", () => {
   const header = new FakeElement("header", { right: 1200 });
   const slot = new FakeElement("div", { right: 1200, width: 70 });

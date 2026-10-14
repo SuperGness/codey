@@ -1692,23 +1692,30 @@ impl RouterServer {
                 );
             body_mutated = true;
         }
-        if !resolved.route.official_account && normalize_responses_tool_parameter_roots(&mut body) {
-            body_mutated = true;
-            encoded_body = None;
-        }
+        let bridge = ProtocolBridge::from_upstream_protocol(resolved.protocol);
         // 原生 Responses 上游可能为模型保留 `collaboration` 命名空间并逐字校验 schema，
-        // 先改到普通命名空间，下面才能摘掉加密标记；回包由 COLLABORATION_ALIAS 还原。
-        let collaboration_alias = (ProtocolBridge::from_upstream_protocol(resolved.protocol)
-            == ProtocolBridge::NativeResponses)
+        // 先改到空闲的普通命名空间，归一化和摘标记才不会再动到保留 schema；
+        // 回包由 COLLABORATION_ALIAS 还原。
+        let collaboration_alias = (bridge == ProtocolBridge::NativeResponses)
             .then(|| alias_reserved_collaboration_namespace(&mut body))
             .flatten();
         if collaboration_alias.is_some() {
             body_mutated = true;
             encoded_body = None;
         }
+        // 没能改名的请求里 `collaboration` 仍是保留名，其内部 schema 必须逐字保留。
+        let collaboration_reserved = bridge == ProtocolBridge::NativeResponses
+            && body_has_reserved_collaboration_namespace(&body);
+        if !resolved.route.official_account && normalize_responses_tool_parameter_roots(&mut body) {
+            body_mutated = true;
+            encoded_body = None;
+        }
         // 官方上游看到协作工具的加密标记就会把任务正文换成只有它能解开的令牌，
         // 第三方子代理线路没有该密钥。摘掉标记让正文以明文返回，跨线路派发才能送达。
-        if strip_collaboration_message_encryption(&mut body, resolved.route.official_account) {
+        if strip_collaboration_message_encryption(
+            &mut body,
+            resolved.route.official_account || collaboration_reserved,
+        ) {
             body_mutated = true;
             encoded_body = None;
         }
@@ -1729,7 +1736,6 @@ impl RouterServer {
                 probe.mark_fallback(reason);
             }
         }
-        let bridge = ProtocolBridge::from_upstream_protocol(resolved.protocol);
         if let Some(probe) = downstream.request_log_probe() {
             probe.resolve_route(
                 &resolved.provider_id,
@@ -1827,6 +1833,14 @@ impl RouterServer {
             // Expansion changed the input too; do not reuse its original raw
             // JSON slice, which would contain only the latest delta.
             encoded_body = None;
+            // 展开恢复的历史里仍带着 Codex 侧的 `collaboration` 调用与工具声明，
+            // 与请求初次改名后的命名空间保持一致。
+            if collaboration_alias
+                .as_ref()
+                .is_some_and(|alias| alias.alias_history(&mut body))
+            {
+                encoded_body = None;
+            }
         }
         match restore_codey_compaction_summaries(&mut body) {
             Ok(true) => {

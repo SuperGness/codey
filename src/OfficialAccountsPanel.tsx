@@ -25,35 +25,14 @@ const USAGE_QUERY_STAGGER_MS = 200;
 
 function formatPlan(plan?: string) {
   if (!plan) return "";
-  const p = plan.toLowerCase().trim();
-  const known: Record<string, string> = {
-    free: "Free",
-    plus: "Plus",
-    pro: "Pro",
-    pro100: "Pro 100",
-    "pro_100": "Pro 100",
-    "pro-100": "Pro 100",
-    pro200: "Pro 200",
-    "pro_200": "Pro 200",
-    "pro-200": "Pro 200",
-    pro500: "Pro 500",
-    "pro_500": "Pro 500",
-    "pro-500": "Pro 500",
-    team: "Team",
-    business: "Business",
-    enterprise: "Enterprise",
-    edu: "Edu",
-  };
-  if (known[p]) return known[p];
-  const match = p.match(/^pro[_\-\s]?(\d+)$/);
-  if (match) return `Pro ${match[1]}`;
-  return plan;
+  const known: Record<string, string> = { free: "Free", plus: "Plus", pro: "Pro", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu" };
+  return known[plan.toLowerCase()] || plan;
 }
 
 function planTagClass(plan?: string) {
-  const p = plan?.toLowerCase().trim();
+  const p = plan?.toLowerCase();
   if (p === "plus") return "official-account-plan-badge is-plus";
-  if (p?.startsWith("pro")) return "official-account-plan-badge is-pro";
+  if (p === "pro") return "official-account-plan-badge is-pro";
   if (p === "team" || p === "business" || p === "enterprise") return "official-account-plan-badge is-team";
   return "official-account-plan-badge is-default";
 }
@@ -799,7 +778,7 @@ export function OfficialAccountsPanel({
                         <strong title={label}>{label}</strong>
                         {plan && (
                           <span className={planTagClass(planType)}>
-                            {planType?.toLowerCase().startsWith("pro") ? (
+                            {planType?.toLowerCase() === "pro" ? (
                               <IconSparkles size={11} stroke={2.2} className="official-account-plan-icon" aria-hidden="true" />
                             ) : null}
                             <span>{plan}</span>

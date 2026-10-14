@@ -4,10 +4,13 @@ import {
   IconCode,
   IconDeviceDesktopCode,
   IconFocus2,
+  IconHelpCircle,
   IconInfoCircle,
+  IconNetwork,
   IconPhotoSearch,
   IconUsersGroup,
   IconWorldSearch,
+  IconX,
 } from "@tabler/icons-react";
 
 import type {
@@ -18,6 +21,7 @@ import type {
 import {
   Button,
   Badge,
+  Input,
   Select,
   Switch,
   Tooltip,
@@ -29,6 +33,7 @@ import {
   type SubagentModelOption,
 } from "./subagentModels";
 import { SettingsPageHeader } from "./SettingsPageHeader";
+import { validateCodexLaunchProxy } from "./urlValidation";
 import type { DiagnosticStorageTarget } from "./diagnosticStorage";
 import { NotificationChannelsCard } from "./notifications/NotificationChannelsCard";
 import type { NotificationChannel } from "./notifications/types";
@@ -407,6 +412,28 @@ type FeaturePolicyCardProps = {
   onRequestRemoveChannel?: (channel: NotificationChannel) => void;
 };
 
+const LAUNCH_PROXY_TOOLTIP_CONTENT = (
+  <div className="space-y-1.5 text-xs text-left leading-relaxed">
+    <div className="font-semibold">Codex 启动代理格式与说明</div>
+    <div>
+      支持协议：<code className="rounded bg-[rgb(var(--codey-ink-rgb,0,0,0))]/10 px-1 py-0.5 font-mono text-[11px] dark:bg-[var(--codey-surface,#fff)]/15">http://</code>、<code className="rounded bg-[rgb(var(--codey-ink-rgb,0,0,0))]/10 px-1 py-0.5 font-mono text-[11px] dark:bg-[var(--codey-surface,#fff)]/15">https://</code>、<code className="rounded bg-[rgb(var(--codey-ink-rgb,0,0,0))]/10 px-1 py-0.5 font-mono text-[11px] dark:bg-[var(--codey-surface,#fff)]/15">socks5://</code>、<code className="rounded bg-[rgb(var(--codey-ink-rgb,0,0,0))]/10 px-1 py-0.5 font-mono text-[11px] dark:bg-[var(--codey-surface,#fff)]/15">socks5h://</code>
+    </div>
+    <div>
+      限制说明：不支持代理认证（不可携带用户名密码）；SOCKS 代理必须指定端口。
+    </div>
+    <div className="pt-0.5">
+      <div className="font-semibold text-[11px] opacity-80">常见示例：</div>
+      <div className="mt-0.5 space-y-0.5 font-mono text-[11px] opacity-90">
+        <div>http://127.0.0.1:7890</div>
+        <div>socks5://127.0.0.1:1080</div>
+      </div>
+    </div>
+    <div className="border-t border-current/15 pt-1 text-[11px] opacity-80">
+      客户端与 app-server 经此代理访问网络，重启 Codex 后生效；本地路由与额度查询不受影响。
+    </div>
+  </div>
+);
+
 function FeaturePolicyCardComponent({
   config,
   fastContextToolsStatus,
@@ -421,6 +448,8 @@ function FeaturePolicyCardComponent({
   onChannelChange,
   onRequestRemoveChannel,
 }: FeaturePolicyCardProps) {
+  const launchProxy = config.codexLaunchProxy ?? "";
+  const launchProxyError = validateCodexLaunchProxy(launchProxy);
   const configuredGpuLaunchModeIndex = GPU_LAUNCH_MODES.findIndex(
     ({ value }) => value === config.gpuLaunchMode,
   );
@@ -456,6 +485,80 @@ function FeaturePolicyCardComponent({
 
   return (
     <>
+      <section className="secondary-section launch-proxy-section" aria-labelledby="launch-proxy-title">
+        <div className="feature-policy-heading">
+          <div className="flex items-center gap-2">
+            <span className="section-title-icon" aria-hidden="true">
+              <IconNetwork size={14} />
+            </span>
+            <h3 id="launch-proxy-title" className="settings-section-heading">Codex 启动代理</h3>
+            <Tooltip content={LAUNCH_PROXY_TOOLTIP_CONTENT} position="top">
+              <span
+                className="inline-flex shrink-0 cursor-help items-center text-[var(--codey-muted,#6e6e73)] transition-colors hover:text-[var(--codey-text,#1d1d1f)]"
+                aria-label="Codex 启动代理格式与说明"
+              >
+                <IconHelpCircle size={14} aria-hidden="true" />
+              </span>
+            </Tooltip>
+          </div>
+          <p>客户端与 app-server 经此代理访问网络，重启 Codex 后生效；本地路由与额度查询不受影响。</p>
+        </div>
+        <div className={`feature-card launch-proxy-card ${launchProxy.trim() ? "active" : ""}`}>
+          <div className="feature-card-body">
+            <Input
+              id="codex-launch-proxy-input"
+              aria-label="Codex 启动代理"
+              aria-invalid={Boolean(launchProxyError)}
+              aria-describedby={
+                launchProxyError
+                  ? "codex-launch-proxy-error"
+                  : "codex-launch-proxy-description"
+              }
+              value={launchProxy}
+              disabled={isBusy}
+              placeholder="例如 http://127.0.0.1:7890"
+              rightSection={
+                launchProxy ? (
+                  <button
+                    type="button"
+                    className="flex h-5 w-5 cursor-pointer items-center justify-center rounded-full text-[var(--codey-muted,#8e8e93)] hover:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/5 hover:text-[var(--codey-text,#1d1d1f)] transition-colors"
+                    onClick={() =>
+                      onConfigChange({
+                        ...config,
+                        codexLaunchProxy: "",
+                      })
+                    }
+                    aria-label="清空代理设置"
+                    title="清空代理设置"
+                  >
+                    <IconX size={12} aria-hidden="true" />
+                  </button>
+                ) : undefined
+              }
+              onChange={(event) =>
+                onConfigChange({
+                  ...config,
+                  codexLaunchProxy: event.target.value,
+                })
+              }
+            />
+            {launchProxyError ? (
+              <small
+                id="codex-launch-proxy-error"
+                className="text-[var(--codey-red,#d70015)]"
+                role="alert"
+              >
+                {launchProxyError}
+              </small>
+            ) : (
+              <small id="codex-launch-proxy-description">
+                留空不走代理
+              </small>
+            )}
+          </div>
+        </div>
+      </section>
+
       <section className="secondary-section" aria-labelledby="runtime-title">
         <div className="feature-policy-heading">
           <div className="flex items-center gap-2">

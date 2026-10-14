@@ -57,8 +57,8 @@ pub(crate) use platform::{activate_visible_windows_codex_window, windows_process
 #[cfg(windows)]
 pub(crate) use process::windows_cli_wrapper_target;
 use process::{
-    SpawnedCodex, prepare_codex_for_launch, reap_child_after_cleanup, spawn_codex,
-    spawn_codex_exit_watcher,
+    CodexLaunchOptions, SpawnedCodex, prepare_codex_for_launch, reap_child_after_cleanup,
+    spawn_codex, spawn_codex_exit_watcher,
 };
 #[cfg(test)]
 use process::{codex_runtime_arguments, gpu_launch_arguments};
@@ -1854,13 +1854,17 @@ async fn spawn_and_inject_runtime(
     runtime_config_overrides: &[String],
 ) -> Result<SpawnedRenderer> {
     let spawn_inject_started = Instant::now();
+    let launch_proxy = crate::launch_proxy::CodexLaunchProxy::resolve(&config.codex_launch_proxy)?;
     let mut spawned = match spawn_codex(
         &mut storage.app_dir,
         patch.debug_port,
         config.slim_codex_pet,
         config.subagent_optimization,
         config.misc_model_catalog_id(),
-        config.gpu_launch_mode,
+        CodexLaunchOptions {
+            gpu_launch_mode: config.gpu_launch_mode,
+            launch_proxy: launch_proxy.as_ref(),
+        },
         runtime_config_overrides,
     )
     .await
@@ -1875,6 +1879,7 @@ async fn spawn_and_inject_runtime(
             .await);
         }
     };
+    crate::launch_proxy::set_active(launch_proxy);
     let codex_spawn_ms = spawn_inject_started.elapsed().as_millis() as u64;
     let maintenance = MaintenanceStatus {
         session_status: storage.session_maintenance.status,

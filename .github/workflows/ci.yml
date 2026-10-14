@@ -16,6 +16,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # .cargo/config.toml redirects intermediate artifacts to ~/.cargo/build,
+  # which rust-cache does not cache; keep them under target/ in CI.
+  CARGO_BUILD_BUILD_DIR: target
 
 jobs:
   quality:

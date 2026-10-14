@@ -224,6 +224,11 @@ fn windows_should_prepare_require_patch(
     !packaged_activation
 }
 
+pub(super) struct CodexLaunchOptions<'a> {
+    pub gpu_launch_mode: GpuLaunchMode,
+    pub launch_proxy: Option<&'a crate::launch_proxy::CodexLaunchProxy>,
+}
+
 #[cfg_attr(
     not(windows),
     allow(clippy::ptr_arg, reason = "Windows 启动重试需要替换调用方的应用目录")
@@ -234,7 +239,7 @@ pub(super) async fn spawn_codex(
     disable_codex_pet: bool,
     subagent_gate_active: bool,
     misc_model: Option<String>,
-    gpu_launch_mode: GpuLaunchMode,
+    options: CodexLaunchOptions<'_>,
     runtime_config_overrides: &[String],
 ) -> Result<SpawnedCodex> {
     #[cfg(any(windows, target_os = "macos"))]
@@ -250,8 +255,17 @@ pub(super) async fn spawn_codex(
         misc_model,
         runtime_config_overrides,
     );
-    let runtime_arguments =
-        codex_runtime_arguments(gpu_launch_mode, !cfg!(target_os = "macos"), cfg!(windows));
+    let mut runtime_arguments = codex_runtime_arguments(
+        options.gpu_launch_mode,
+        !cfg!(target_os = "macos"),
+        cfg!(windows),
+    );
+    if let Some(proxy) = options.launch_proxy {
+        runtime_arguments.push(proxy.chromium_argument());
+    }
+    let launch_proxy_environment = options
+        .launch_proxy
+        .map(crate::launch_proxy::CodexLaunchProxy::environment);
 
     #[cfg(windows)]
     {
@@ -339,6 +353,7 @@ pub(super) async fn spawn_codex(
                     &runtime_arguments,
                     runtime_config_overrides,
                     subagent_gate_active,
+                    launch_proxy_environment.as_deref(),
                     format!(
                         "启动尝试 {attempt}/2：NODE_OPTIONS 注入不可用（{}），主进程 Inspector 不可用（{}），且 CLI 兼容入口不可用：{error:#}",
                         fuses.node_options.as_str(),
@@ -355,6 +370,9 @@ pub(super) async fn spawn_codex(
             if let Some(wrapper) = &wrapper {
                 launch_environment.extend(wrapper.environment.iter().cloned());
             }
+            if let Some(environment) = &launch_proxy_environment {
+                launch_environment.extend(environment.iter().cloned());
+            }
             // `--require` always needs the merged launch environment. Without
             // Inspector the wrapper is otherwise the only entry, so a constrained
             // launch must not proceed unless Store accepts it.
@@ -365,7 +383,7 @@ pub(super) async fn spawn_codex(
                 debug_port,
                 &launch_arguments,
                 &launch_environment,
-                wrapper_environment_required,
+                wrapper_environment_required || options.launch_proxy.is_some(),
             )
             .await;
             let (mut spawned, wrapper_environment_applied) = match launch {
@@ -562,8 +580,14 @@ pub(super) async fn spawn_codex(
                             "Codex 启动兼容方案未能安装；Codey 集成未启用：{startup_error}"
                         )));
                     }
-                    match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[], false)
-                        .await
+                    match spawn_windows_codex(
+                        app_dir,
+                        debug_port,
+                        &runtime_arguments,
+                        launch_proxy_environment.as_deref().unwrap_or(&[]),
+                        options.launch_proxy.is_some(),
+                    )
+                    .await
                     {
                         Ok((mut fallback, _)) => {
                             fallback.performance_status = "degraded".to_string();
@@ -642,17 +666,28 @@ pub(super) async fn spawn_codex(
             )
             .await
             .map_err(recovery::recoverable)?;
-            add_macos_cli_wrapper(&mut command, &wrapper.environment)
+            add_macos_launch_environment(&mut command, &wrapper.environment)
                 .map_err(recovery::recoverable)?;
             if let Some(require) = &require_patch {
-                add_macos_cli_wrapper(&mut command, &require.environment)
+                add_macos_launch_environment(&mut command, &require.environment)
                     .map_err(recovery::recoverable)?;
             }
             Some(wrapper)
         } else {
             None
         };
-        let mut spawned = spawn_command(command)?;
+        // `.app` 经 open 启动，环境随 --env 参数进入；非 bundle 直接拉起，
+        // 由 spawn 环境继承。
+        if is_app_bundle && let Some(environment) = &launch_proxy_environment {
+            add_macos_launch_environment(&mut command, environment)
+                .map_err(recovery::recoverable)?;
+        }
+        let spawned_environment = if is_app_bundle {
+            Vec::new()
+        } else {
+            launch_proxy_environment.unwrap_or_default()
+        };
+        let mut spawned = spawn_command(command, &spawned_environment)?;
         spawned.inspector_argument = inspector_arg.clone();
         let wait_inspector_port = if use_inspector { inspector_port } else { None };
         let startup_result = install_startup_patch_with_cli_fallback(
@@ -743,7 +778,8 @@ pub(super) async fn spawn_codex(
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let command = build_codex_command(app_dir, debug_port, &runtime_arguments);
-        let mut spawned = spawn_command(command)?;
+        let mut spawned =
+            spawn_command(command, launch_proxy_environment.as_deref().unwrap_or(&[]))?;
         spawned.performance_status = "ready".to_string();
         spawned.performance_detail = "Codex 启动成功".to_string();
         Ok(spawned)
@@ -1458,16 +1494,19 @@ fn local_router_proxy_bypass_environment(
     {
         vec![(
             "NO_PROXY".to_string(),
-            merge_loopback_no_proxy(no_proxy.or(lowercase_no_proxy)),
+            crate::launch_proxy::merge_loopback_no_proxy(no_proxy.or(lowercase_no_proxy)),
         )]
     }
     #[cfg(target_os = "macos")]
     {
         vec![
-            ("NO_PROXY".to_string(), merge_loopback_no_proxy(no_proxy)),
+            (
+                "NO_PROXY".to_string(),
+                crate::launch_proxy::merge_loopback_no_proxy(no_proxy),
+            ),
             (
                 "no_proxy".to_string(),
-                merge_loopback_no_proxy(lowercase_no_proxy.or(no_proxy)),
+                crate::launch_proxy::merge_loopback_no_proxy(lowercase_no_proxy.or(no_proxy)),
             ),
         ]
     }
@@ -1476,28 +1515,6 @@ fn local_router_proxy_bypass_environment(
         let _ = (no_proxy, lowercase_no_proxy);
         Vec::new()
     }
-}
-
-#[cfg(any(windows, target_os = "macos"))]
-fn merge_loopback_no_proxy(existing: Option<&str>) -> String {
-    const LOOPBACK: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
-    let mut entries = existing
-        .into_iter()
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    for required in LOOPBACK {
-        if !entries.iter().any(|entry| {
-            entry
-                .trim_matches(['[', ']'])
-                .eq_ignore_ascii_case(required)
-        }) {
-            entries.push(required.to_string());
-        }
-    }
-    entries.join(",")
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -1550,7 +1567,7 @@ fn write_macos_cli_wrapper(
 }
 
 #[cfg(target_os = "macos")]
-fn add_macos_cli_wrapper(
+fn add_macos_launch_environment(
     command: &mut Vec<String>,
     environment: &[(String, String)],
 ) -> Result<()> {
@@ -1635,6 +1652,7 @@ async fn launch_windows_codex_without_compatibility(
     runtime_arguments: &[String],
     runtime_config_overrides: &[String],
     subagent_gate_active: bool,
+    launch_proxy_environment: Option<&[(String, String)]>,
     startup_error: String,
 ) -> Result<SpawnedCodex> {
     if !runtime_config_overrides.is_empty() {
@@ -1647,9 +1665,15 @@ async fn launch_windows_codex_without_compatibility(
             "Codex 启动兼容入口不可用；Codey 集成未启用：{startup_error}"
         )));
     }
-    let (mut spawned, _) = spawn_windows_codex(app_dir, debug_port, runtime_arguments, &[], false)
-        .await
-        .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;
+    let (mut spawned, _) = spawn_windows_codex(
+        app_dir,
+        debug_port,
+        runtime_arguments,
+        launch_proxy_environment.unwrap_or(&[]),
+        launch_proxy_environment.is_some(),
+    )
+    .await
+    .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;
     spawned.performance_status = "degraded".to_string();
     spawned.performance_detail =
         "Codex 已启动，但部分启动设置未能应用；页面功能以检测结果为准，下次启动将重试".to_string();
@@ -2385,12 +2409,13 @@ pub(super) async fn prepare_codex_for_launch(app_dir: &std::path::Path) -> Resul
 }
 
 #[cfg(not(windows))]
-fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
+fn spawn_command(command: Vec<String>, environment: &[(String, String)]) -> Result<SpawnedCodex> {
     let executable = command
         .first()
         .ok_or_else(|| anyhow::anyhow!("Codex 启动命令为空"))?;
     let mut child_command = Command::new(executable);
     child_command.args(&command[1..]);
+    child_command.envs(environment.iter().cloned());
     #[cfg(unix)]
     child_command.process_group(0);
     let child = child_command

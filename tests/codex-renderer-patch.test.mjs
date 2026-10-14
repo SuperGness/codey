@@ -692,6 +692,28 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "the AppServerRequestClient route preflight must patch without compatibility errors",
     );
 
+    // Codex 26.1007 moved AppServerRequestClient and the Electron bridge
+    // forwarder into app-shared-*.js. That chunk must stay in the patch filter
+    // or the model-request source gate never installs and startup aborts at
+    // the request-gate verification stage.
+    const sharedChunkResponse = await installedHandler({
+      url: "app://-/webview/assets/app-shared-8bd9d0399038.js",
+    });
+    const patchedSharedChunk = await sharedChunkResponse.text();
+    assert.match(
+      patchedSharedChunk,
+      /__codeyModelRequestSourceGateInstalled=true/,
+    );
+    assert.match(
+      patchedSharedChunk,
+      /__codeyAppServerRequestClients/,
+    );
+    // Assets outside the patch set must pass through untouched.
+    const unrelatedChunkResponse = await installedHandler({
+      url: "app://-/webview/assets/app-primary-6f60e9ac4103.js",
+    });
+    assert.equal(await unrelatedChunkResponse.text(), appServerRequestSource);
+
     const petSettingsSource = [
       "import{AvatarPreview as P,builtInPets as L}",
       "from\"./codex-avatar-BpKnWN_W.js\";",

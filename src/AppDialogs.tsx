@@ -1,4 +1,4 @@
-import { memo, useEffect, useId, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import {
   IconAlertTriangle as AlertTriangle,
   IconCheck as Check,
@@ -497,9 +497,6 @@ function ConfirmationDialogComponent({
   onClose,
   onConfirm,
 }: ConfirmationDialogProps) {
-  const [showFullNotes, setShowFullNotes] = useState(false);
-  const notesId = useId();
-  useEffect(() => setShowFullNotes(false), [confirmation]);
   const destructive =
     confirmation?.action === "discard-settings-changes" ||
     confirmation?.action === "delete-notification-channel" ||
@@ -524,14 +521,6 @@ function ConfirmationDialogComponent({
     }
     return groups.filter((group) => group.lines.length > 0);
   }, [isUpdate, confirmation?.releaseNotes]);
-  const noteLines = noteGroups.flatMap((group) => group.lines);
-  const hasMoreNotes = noteLines.length > 3 || noteLines.some((line) => Array.from(line).length > 60);
-  let remainingNotes = showFullNotes ? noteLines.length : 3;
-  const visibleNoteGroups = noteGroups.map((group) => {
-    const lines = group.lines.slice(0, remainingNotes);
-    remainingNotes -= lines.length;
-    return { ...group, lines };
-  }).filter((group) => group.lines.length > 0);
   return (
     <Dialog open={Boolean(confirmation)} onOpenChange={(open) => !open && onClose()}>
       <DialogContent
@@ -546,39 +535,23 @@ function ConfirmationDialogComponent({
             {confirmation?.description}
           </DialogDescription>
         </DialogHeader>
-        {noteLines.length > 0 && (
+        {noteGroups.length > 0 && (
           <section className="mt-4 flex min-h-0 flex-col gap-2">
-            <div className="flex shrink-0 items-center justify-between gap-3">
-              <h3 className="m-0 text-xs font-medium text-foreground">更新日志</h3>
-              {hasMoreNotes && (
-                <Button
-                  variant="link"
-                  size="xs"
-                  aria-expanded={showFullNotes}
-                  aria-controls={notesId}
-                  onClick={() => setShowFullNotes((show) => !show)}
-                >
-                  {showFullNotes ? "收起日志" : `查看完整日志（${noteLines.length} 条）`}
-                </Button>
-              )}
-            </div>
+            <h3 className="m-0 shrink-0 text-xs font-medium text-foreground">更新日志</h3>
             <div
-              id={notesId}
               className="update-release-notes min-h-0 max-h-[min(360px,45dvh)] overflow-y-auto overscroll-contain rounded-lg border border-default p-4 text-sm leading-7 text-muted [overflow-wrap:anywhere]"
               role="region"
               aria-label="更新日志内容"
               tabIndex={0}
             >
               <div className="space-y-3">
-                {visibleNoteGroups.map((group, groupIndex) => (
+                {noteGroups.map((group, groupIndex) => (
                   <div key={groupIndex}>
                     {group.title && <h4 className="m-0 mb-1 text-xs font-semibold text-foreground">{group.title}</h4>}
                     <ul className="m-0 list-disc space-y-2 pl-4">
                       {group.lines.map((line, index) => (
                         <li key={index} className="pl-1 whitespace-pre-wrap">
-                          <span className={showFullNotes || !hasMoreNotes ? undefined : "line-clamp-2"}>
-                            {line}
-                          </span>
+                          {line}
                         </li>
                       ))}
                     </ul>

@@ -591,6 +591,25 @@ pub(crate) fn validate_outbound_proxy_url(value: &str, label: &str) -> Result<()
     Ok(())
 }
 
+/// Codex 启动代理地址。除线路上游代理的通用要求外，Chromium 的
+/// `--proxy-server` 不支持代理认证，SOCKS 地址也必须显式端口，这里
+/// 叠加更严的约束。
+pub(crate) fn validate_codex_launch_proxy(value: &str) -> Result<(), String> {
+    validate_outbound_proxy_url(value, "Codex 启动代理")?;
+    let url = reqwest::Url::parse(value).expect("启动代理地址已通过校验");
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Codex 启动代理不能包含用户名或密码；Chromium 命令行代理不支持认证".into());
+    }
+    // 非特殊协议（socks5/socks5h）解析出的 path 是空串而非 "/"。
+    if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
+        return Err("Codex 启动代理只能包含协议、地址和端口".into());
+    }
+    if matches!(url.scheme(), "socks5" | "socks5h") && url.port().is_none() {
+        return Err("Codex 启动代理的 SOCKS 地址必须带端口".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_outbound_api_url(value: &str, label: &str) -> Result<reqwest::Url, String> {
     let url = reqwest::Url::parse(value).map_err(|_| format!("{label}不是有效的 HTTP(S) 地址"))?;
     if url.host_str().is_none() || !matches!(url.scheme(), "http" | "https") {
@@ -858,6 +877,11 @@ pub struct CodeyConfig {
     /// Codey-managed Codex launch. Disabled by default and ignored on macOS.
     #[serde(default)]
     pub gpu_launch_mode: GpuLaunchMode,
+    /// Optional launch proxy (http/https/socks5/socks5h) applied to the next
+    /// Codey-managed Codex launch: `--proxy-server` for the client and proxy
+    /// environment variables for the app-server processes it spawns.
+    #[serde(default)]
+    pub codex_launch_proxy: String,
     /// Publishes Codey's embedded FastCtx file tools to Codex for the next
     /// runtime. Disabled by default so existing tool behavior is unchanged.
     #[serde(default)]
@@ -1019,6 +1043,7 @@ impl Default for CodeyConfig {
             protect_crashpad_pending: true,
             slim_codex_pet: true,
             gpu_launch_mode: GpuLaunchMode::Off,
+            codex_launch_proxy: String::new(),
             fast_context_tools: false,
             subagent_optimization: false,
             subagent_model: default_subagent_model(),
@@ -1113,6 +1138,7 @@ impl CodeyConfig {
         self.webhook.normalize();
         self.prompt_optimization.normalize();
         self.conversation_git.model = self.conversation_git.model.trim().to_string();
+        self.codex_launch_proxy = self.codex_launch_proxy.trim().to_string();
         self
     }
 
@@ -3045,6 +3071,39 @@ mod tests {
         );
         config.profiles[0].upstream_proxy = "socks5://127.0.0.1:1080".to_string();
         assert!(config.profiles[0].validate().is_ok());
+    }
+
+    #[test]
+    fn codex_launch_proxy_rejects_credentials_paths_and_portless_socks() {
+        for accepted in [
+            "http://127.0.0.1:7890",
+            "https://proxy.example.com:8443",
+            "https://proxy.example.com",
+            "socks5://127.0.0.1:1080",
+            "socks5h://proxy.example.com:1080",
+            "http://[::1]:7890",
+        ] {
+            assert!(validate_codex_launch_proxy(accepted).is_ok(), "{accepted}");
+        }
+        for rejected in [
+            // Chromium 命令行代理不支持认证。
+            "http://user:pass@proxy.example.com:8080",
+            "socks5://user@127.0.0.1:1080",
+            // 只允许协议、地址和端口；非特殊协议的 path 解析为空串。
+            "http://127.0.0.1:7890/v1",
+            "socks5://127.0.0.1:1080/v1",
+            "http://127.0.0.1:7890?x=1",
+            "http://127.0.0.1:7890#frag",
+            // Chromium 需要 host:port，SOCKS 不能省略端口。
+            "socks5://127.0.0.1",
+            "socks5h://proxy.example.com",
+            // 通用约束沿用线路上游代理。
+            "ftp://proxy.example.com:21",
+            "127.0.0.1:7890",
+            "http://0.0.0.0:7890",
+        ] {
+            assert!(validate_codex_launch_proxy(rejected).is_err(), "{rejected}");
+        }
     }
 
     #[test]

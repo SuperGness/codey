@@ -294,17 +294,17 @@ pub(super) async fn spawn_windows_codex(
     debug_port: u16,
     extra_args: &[String],
     environment: &[(String, String)],
-    require_wrapper_environment: bool,
+    require_launch_environment: bool,
 ) -> Result<(SpawnedCodex, bool)> {
     anyhow::ensure!(
-        !require_wrapper_environment || !environment.is_empty(),
-        "Codex CLI 兼容入口缺少运行环境，已停止启动"
+        !require_launch_environment || !environment.is_empty(),
+        "Codex 启动环境未能应用，已停止启动"
     );
     let needs_packaged_environment = windows_packaged_launch_needs_environment(
         environment,
         std::env::var_os("CODEX_HOME").as_deref(),
     );
-    let environment_required = require_wrapper_environment
+    let environment_required = require_launch_environment
         || requires_codex_home_environment(std::env::var_os("CODEX_HOME").as_deref());
     let environment =
         windows_codex_launch_environment(environment, crate::codex_config::codex_home())?;
