@@ -8,18 +8,24 @@ const resolverStart = source.indexOf("  const appServerManagerResolverFromModule
 const resolverEnd = source.indexOf("  window.__codeyAppServerManagerResolverFromModule =", resolverStart);
 assert.ok(resolverStart > 0 && resolverEnd > resolverStart);
 const resolverSource = source.slice(resolverStart, resolverEnd);
+const registryStart = source.indexOf("  const declaredMethod =");
+const registryEnd = source.indexOf("  window.__codeyAppServerManagerRegistryResolverFromModule =", registryStart);
+assert.ok(registryStart > 0 && registryEnd > registryStart);
+const registrySource = source.slice(registryStart, registryEnd);
 const start = source.indexOf("  const remoteCreationInputsFactoryFromModule =");
 const end = source.indexOf("  window.__codeyRemoteControl = remoteControl;", start);
 assert.ok(start > 0 && end > start);
 const remoteSource = source.slice(start, end + "  window.__codeyRemoteControl = remoteControl;".length);
 
-function fixture({ compatible = true, ready = true, splitModules = true, managerAvailable = true, brokenAsset = false, nativeTier = false } = {}) {
+function fixture({ compatible = true, ready = true, splitModules = true, managerAvailable = true, managerApi = "rpc", brokenAsset = false, nativeTier = false } = {}) {
   const calls = [];
   const imports = [];
   const overrides = new Map();
   const scope = {
     node: { familyBindings: new Map() },
-    get: (key, params) => key === "rpc" ? { forHost: () => manager } : overrides.has(key) ? overrides.get(key).get(`local:${params.cwd ?? ""}`) : "native-client",
+    get: (key, params) => key === "rpc" ? { forHost: () => manager }
+      : key === "registry" ? new Map([["local", manager]])
+      : overrides.has(key) ? overrides.get(key).get(`local:${params.cwd ?? ""}`) : "native-client",
   };
   const addOverride = (values, family = { kind: "signal-family" }) => {
     const bindings = new Map(Object.entries(values));
@@ -55,12 +61,20 @@ function fixture({ compatible = true, ready = true, splitModules = true, manager
     if (rpc == null) throw new Error("AppServerManager RPC is not connected");
     return rpc.forHost(hostId);
   }
+  class Registry {
+    getAll() { return [this.getForHostId("local")]; }
+    getForHostId(hostId) { return this.scope.get("registry").get(hostId); }
+  }
+  const managerExports = {
+    ...(managerApi !== "registry" ? { resolver } : {}),
+    ...(managerApi !== "rpc" ? { Registry } : {}),
+  };
   const initialUrl = "app://-/assets/app-initial-test.js";
   const sharedUrl = "app://-/assets/app-shared-test.js";
   const brokenUrl = "app://-/assets/app-initial-stale.js";
   const modules = {
-    [initialUrl]: { ...(compatible ? { factory } : {}), ...(nativeTier ? { readServiceTier } : {}), ...(!splitModules && managerAvailable ? { resolver } : {}) },
-    [sharedUrl]: splitModules && managerAvailable ? { resolver } : {},
+    [initialUrl]: { ...(compatible ? { factory } : {}), ...(nativeTier ? { readServiceTier } : {}), ...(!splitModules && managerAvailable ? managerExports : {}) },
+    [sharedUrl]: splitModules && managerAvailable ? managerExports : {},
   };
   const context = vm.createContext({
     window: { __codeyImportCodexAsset: async url => {
@@ -74,8 +88,9 @@ function fixture({ compatible = true, ready = true, splitModules = true, manager
     appServerManagerFromReact: resolver => resolver(scope, "local"),
   });
   vm.runInContext(resolverSource, context);
+  vm.runInContext(registrySource, context);
   vm.runInContext(remoteSource, context);
-  return { context, calls, imports, manager, Inputs, scope, addOverride, run: args => context.window.__codeyRemoteControl(args, Date.now() + 10000) };
+  return { context, calls, imports, modules, manager, Inputs, scope, addOverride, run: args => context.window.__codeyRemoteControl(args, Date.now() + 10000) };
 }
 
 test("remote subscription hydrates the native conversation before waiting for its owner", async () => {
@@ -163,6 +178,68 @@ test("creation remains compatible with colocated exports and skips stale assets"
   }
 });
 
+test("registry-only exports create conversations with native inputs across split and colocated modules", async () => {
+  for (const splitModules of [true, false]) {
+    const { calls, imports, run } = fixture({ managerApi: "registry", splitModules, brokenAsset: true });
+    const params = { input: [{ type: "text", text: "开始任务" }], cwd: "E:/code/codey" };
+    const result = await run({ action: "create", params });
+    assert.deepEqual(JSON.parse(JSON.stringify(result)), { id: "thread", firstTurn: "accepted" });
+    assert.deepEqual(calls, [["create", params], ["inputs", "native-client", params, "canonical"]]);
+    assert.ok(imports.some(url => url.includes("app-shared-")));
+  }
+});
+
+test("registry-only defaults preserve desktop selections without creating a thread or exposing credentials", async () => {
+  const { addOverride, calls, run } = fixture({ managerApi: "registry", nativeTier: true });
+  addOverride({ "local:E:/code/codey": { model: "route/selected", reasoningEffort: "max", profile: null } });
+  const result = await run({ action: "defaults", cwd: "E:/code/codey" });
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { model: "route/selected", effort: "max", serviceTier: "default" });
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [
+    ["config/read", { includeLayers: false, cwd: "E:/code/codey" }],
+    ["tier", "local", "route/selected"],
+  ]);
+});
+
+test("mixed manager exports retain RPC priority even when the registry is discovered first", async () => {
+  for (const separateExports of [false, true]) {
+    const { calls, modules, scope, run } = fixture({ managerApi: "both" });
+    if (separateExports) {
+      modules["app://-/assets/app-initial-test.js"].Registry = modules["app://-/assets/app-shared-test.js"].Registry;
+      delete modules["app://-/assets/app-shared-test.js"].Registry;
+    }
+    const get = scope.get;
+    let registryReads = 0;
+    scope.get = (key, params) => {
+      if (key === "registry") registryReads += 1;
+      return get(key, params);
+    };
+    assert.equal((await run({ action: "create", params: {} })).id, "thread");
+    assert.equal(registryReads, 0);
+    assert.equal(calls.filter(call => call[0] === "create").length, 1);
+  }
+});
+
+test("an unusable RPC manager falls back to the local registry before submission", async () => {
+  const { calls, scope, run } = fixture({ managerApi: "both" });
+  const get = scope.get;
+  scope.get = (key, params) => key === "rpc" ? { forHost: () => ({}) } : get(key, params);
+  assert.equal((await run({ action: "create", params: {} })).id, "thread");
+  assert.equal(calls.filter(call => call[0] === "create").length, 1);
+});
+
+test("ambiguous registry exports reject remote operations without submitting requests", async () => {
+  const { calls, modules, run } = fixture({ managerApi: "registry" });
+  class OtherRegistry {
+    getAll() { return []; }
+    getForHostId(hostId) { return this.scope.get("other-registry").get(hostId); }
+  }
+  modules["app://-/assets/app-shared-test.js"].OtherRegistry = OtherRegistry;
+  for (const action of ["create", "defaults"]) {
+    await assert.rejects(run({ action, params: {} }), /暂不支持/);
+  }
+  assert.equal(calls.length, 0);
+});
+
 test("unsupported native interfaces and unloaded conversations fail without an external URL", async () => {
   const unsupported = fixture({ compatible: false });
   await assert.rejects(unsupported.run({ action: "create", params: {} }), /暂不支持/);
@@ -185,14 +262,18 @@ test("expired and disposed requests cannot submit after asynchronous discovery",
 });
 
 test("uncertain creation is never automatically retried", async () => {
-  const { calls, manager, run } = fixture();
-  manager.startConversation = async () => { calls.push(["create"]); return { status: "outcome-unknown" }; };
-  await assert.rejects(run({ action: "create", params: {} }), /勿重复发送/);
-  assert.equal(calls.length, 1);
+  for (const managerApi of ["rpc", "registry"]) {
+    const { calls, manager, run } = fixture({ managerApi });
+    manager.startConversation = async () => { calls.push(["create"]); return { status: "outcome-unknown" }; };
+    await assert.rejects(run({ action: "create", params: {} }), /勿重复发送/);
+    assert.equal(calls.length, 1);
+  }
 });
 
 test("a late native settings read cannot continue creating a conversation after disposal", async () => {
-  const { context, Inputs, run } = fixture();
-  Inputs.prototype.readCreationInputs = async () => { context.disposed = true; return "native-inputs"; };
-  await assert.rejects(run({ action: "create", params: {} }), /过期/);
+  for (const managerApi of ["rpc", "registry"]) {
+    const { context, Inputs, run } = fixture({ managerApi });
+    Inputs.prototype.readCreationInputs = async () => { context.disposed = true; return "native-inputs"; };
+    await assert.rejects(run({ action: "create", params: {} }), /过期/);
+  }
 });

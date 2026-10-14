@@ -2454,6 +2454,7 @@
   const remoteCreationContext = async () => {
     const factories = new Set();
     const resolvers = new Set();
+    const registryResolvers = new Set();
     const serviceTierReaders = new Set();
     for (const url of await discoverCodexAppAssetUrls()) {
       if (!url.includes("app-initial-") && !url.includes("app-shared-")) continue;
@@ -2462,8 +2463,10 @@
           ? await window.__codeyImportCodexAsset(url) : await import(url);
         const factory = remoteCreationInputsFactoryFromModule(module);
         const resolver = appServerManagerResolverFromModule(module);
+        const registryResolver = appServerManagerRegistryResolverFromModule(module);
         if (factory) factories.add(factory);
         if (resolver) resolvers.add(resolver);
+        if (registryResolver) registryResolvers.add(registryResolver);
         for (const value of Object.values(module || {})) {
           if (typeof value !== "function") continue;
           const source = Function.prototype.toString.call(value);
@@ -2477,7 +2480,7 @@
     }
     // Newer Codex exports the creation reader from app-initial and the manager
     // resolver from app-shared. Resolve both against the same local scope.
-    for (const resolver of resolvers) {
+    for (const resolver of [...resolvers, ...registryResolvers]) {
       for (const factory of factories) {
         let reader = null;
         const manager = appServerManagerFromReact((scope, hostId) => {

@@ -28,3 +28,4 @@
 - 插件脚本测试需 Python 3.11 及以上；Windows 上设置 `PYTHONUTF8=1` 后运行 `python -m unittest discover -s scripts -p "test_*plugin.py"`，避免子进程的 UTF-8 输出按 GBK 解码。
 - `AppState::default()` 会读取本机配置；依赖特定配置的测试应显式初始化 `config`，不能只替换 `store`。
 - 运行依赖本地 HTTP mock 的 Rust 测试时，在测试进程中设置 `NO_PROXY=127.0.0.1,localhost,::1`，避免继承的代理改写回环请求；不要改动系统代理。
+- 验证 Codex 桌面兼容性时，以运行中 `runtime_status` 返回的 `codexAppVersion` 为准；Windows 卸载登记的 `DisplayVersion` 可能滞后，不能据此判断实际运行版本。
