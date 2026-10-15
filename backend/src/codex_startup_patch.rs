@@ -253,6 +253,86 @@ fn prepare_startup_require_with_path(
     })
 }
 
+/// 主进程补丁经 asar 入口装载时使用的环境变量。
+///
+/// 副本的 asar 入口里烘进了一段装载器，它按这个变量给出的路径加载补丁。路径
+/// 每次启动都重新生成，因为补丁内容随当时的配置变化；装载器本身保持静态，
+/// 所以只能传路径，不能把补丁写进副本。
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) const ASAR_PATCH_ENV: &str = "CODEXY_ASAR_PATCH";
+
+/// 装载器加载补丁失败时写日志的位置。补丁是增强项，装载失败不拦启动，只留痕。
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) const ASAR_PATCH_LOG_ENV: &str = "CODEXY_ASAR_PATCH_LOG";
+
+/// 主进程补丁的 asar 装载形态。
+///
+/// 与 `StartupRequire` 的差别在于不经过 `NODE_OPTIONS`：路径由 asar 入口的装载器
+/// 读取，因此不受“无空白单 token”约束，也不必把脚本复制到临时目录。
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) struct StartupAsarPatch {
+    pub environment: Vec<(String, String)>,
+    pub script_path: std::path::PathBuf,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn prepare_startup_asar_patch(
+    options: PatchOptions,
+    runtime_config_overrides: &[String],
+) -> Result<StartupAsarPatch> {
+    prepare_startup_asar_patch_in(
+        &codey_runtime_core::paths::default_app_state_dir(),
+        options,
+        runtime_config_overrides,
+    )
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn prepare_startup_asar_patch_in(
+    state_dir: &std::path::Path,
+    options: PatchOptions,
+    runtime_config_overrides: &[String],
+) -> Result<StartupAsarPatch> {
+    let directory = state_dir.join(STARTUP_REQUIRE_DIR);
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("创建 Codex 启动补丁目录失败：{}", directory.display()))?;
+    prune_startup_require_files(
+        &directory,
+        std::time::SystemTime::now(),
+        STARTUP_REQUIRE_MAX_AGE,
+    );
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let script_path = directory.join(format!("{token}.js"));
+    let marker_path = directory.join(format!("{token}.json"));
+    let log_path = directory.join("asar-patch.log");
+    // 与 `--require` 形态共用同一份载荷：它是否是主进程启动期装载，只由 marker
+    // 变量判定，不依赖 `NODE_OPTIONS` 本身。
+    let expression = patch_expression_with_runtime_overrides_and_validation(
+        options,
+        runtime_config_overrides,
+        false,
+    );
+    crate::fs_util::atomic_write_private_with_parent(&script_path, expression.as_bytes())
+        .with_context(|| format!("写入 Codex 启动补丁失败：{}", script_path.display()))?;
+    Ok(StartupAsarPatch {
+        environment: vec![
+            (
+                ASAR_PATCH_ENV.to_string(),
+                script_path.to_string_lossy().into_owned(),
+            ),
+            (
+                ASAR_PATCH_LOG_ENV.to_string(),
+                log_path.to_string_lossy().into_owned(),
+            ),
+            (
+                STARTUP_PATCH_MARKER_ENV.to_string(),
+                marker_path.to_string_lossy().into_owned(),
+            ),
+        ],
+        script_path,
+    })
+}
+
 /// `NODE_OPTIONS` splits on whitespace and does not honour quotes, so the
 /// `--require` path must be a single token.
 #[cfg(any(windows, target_os = "macos", test))]
@@ -2807,6 +2887,48 @@ mod tests {
         assert_ne!(first.marker_path, second.marker_path);
         assert!(first.marker_path.with_extension("js").is_file());
         assert!(second.marker_path.with_extension("js").is_file());
+    }
+
+    #[test]
+    fn startup_asar_patch_publishes_loader_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let prepared = prepare_startup_asar_patch_in(
+            temp.path(),
+            PatchOptions {
+                disable_pet: false,
+                subagent_gate_active: false,
+                misc_model: None,
+            },
+            &[],
+        )
+        .unwrap();
+
+        let environment: std::collections::HashMap<_, _> =
+            prepared.environment.iter().cloned().collect();
+        // 装载器只认这三个变量；少一个补丁就不会被当作启动期装载。
+        assert_eq!(
+            environment.get(ASAR_PATCH_ENV),
+            Some(&prepared.script_path.to_string_lossy().into_owned())
+        );
+        assert!(environment.contains_key(ASAR_PATCH_LOG_ENV));
+        assert!(environment.contains_key(STARTUP_PATCH_MARKER_ENV));
+        // asar 形态不经 NODE_OPTIONS，那是官方关闭的通道。
+        assert!(!environment.contains_key("NODE_OPTIONS"));
+
+        let payload = std::fs::read_to_string(&prepared.script_path).unwrap();
+        // 模板里待替换的占位符必须一个不剩；补丁自身另有同风格命名的全局标记，
+        // 不能按前缀一概而论。
+        for placeholder in [
+            "__CODEY_RUNTIME_CONFIG_OVERRIDES__",
+            "__CODEY_ERROR_LOGGER_EXECUTABLE__",
+            "__DISABLE_PET__",
+            "__SUBAGENT_GATE_ACTIVE__",
+            "__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__",
+            "__CODEY_MISC_MODEL_ID__",
+        ] {
+            assert!(!payload.contains(placeholder), "未替换的占位符 {placeholder}");
+        }
+        assert!(payload.contains("codey-startup-patch-installed-v40"));
     }
 
     #[test]

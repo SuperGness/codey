@@ -28,6 +28,7 @@ pub(super) async fn invoke(state: &Arc<AppState>, args: &Value) -> Result<Value,
         data_dir,
         user_home,
         request,
+        state.can_show_native_panels().await,
     )
     .await
     .map_err(|error| error.to_string())?;
@@ -35,9 +36,8 @@ pub(super) async fn invoke(state: &Arc<AppState>, args: &Value) -> Result<Value,
         && (result["applyStatus"] == "reload-required" || result["applyStatus"] == "unchanged")
     {
         // 配置事务已完成；刷新失败也必须返回已保存的清单，避免重复导入。
-        let runtime = state.runtime.lock().await.clone();
-        if let Some(runtime) = runtime {
-            let websocket_url = runtime.renderer_websocket_url().await;
+        // 宿主注入模式下没有客户端进程句柄，注入目标改从注入上下文取。
+        if let Some(websocket_url) = state.active_renderer_websocket_url().await {
             let reloaded = tokio::time::timeout(
                 std::time::Duration::from_secs(25),
                 crate::cdp::reload_mcp_servers(&websocket_url),

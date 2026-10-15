@@ -13,7 +13,8 @@ use super::webhooks::{
     start_waiting_webhook_watcher, stop_waiting_webhook_watcher, webhook_watcher_should_run,
 };
 use super::{
-    AppState, RestartInProgressGuard, ScheduledRestart, config_requires_restart_with_route_status,
+    AppState, RestartInProgressGuard, ScheduledRestart, config_requires_restart_for_host,
+    config_requires_restart_with_route_status,
     current_update_platform, make_bridge_handler, prepare_routes_for_current_launch,
     provider_route_restart_required_for_runtime, sync_provider_models_for_launch,
 };
@@ -83,6 +84,11 @@ pub(super) async fn runtime_status_with_options(
     refresh_injection_status: bool,
 ) -> Result<Value, String> {
     let runtime = state.runtime.lock().await.clone();
+    // 宿主注入模式下没有客户端进程句柄，本次运行的信息改从注入上下文取。
+    // 不这样回退时状态会显示为「未运行」，页面上的重启提示与开关状态全部失真。
+    let host = state.host_attach().await;
+    let client_running = runtime.is_some() || host.is_some();
+    let host_applied_config = host.as_ref().map(|attach| attach.applied_config.clone());
     // 先在无锁状态取运行时模型基线，再持配置读锁做同步比较：读守卫跨
     // await 会让排队写者阻塞所有新的桥接请求。
     let (applied_models, applied_subagent, crashpad_disk_protection_active) = match runtime.as_ref()
@@ -113,7 +119,8 @@ pub(super) async fn runtime_status_with_options(
     let official_account_status = config.official_account_status_this_launch;
     let runtime_codex_app_path = runtime
         .as_ref()
-        .map(|runtime| runtime.codex_app_path.clone());
+        .map(|runtime| runtime.codex_app_path.clone())
+        .or_else(|| host.as_ref().map(|attach| attach.app_dir.clone()));
     let restart_required = match (
         runtime.as_ref(),
         applied_models.as_ref(),
@@ -128,24 +135,27 @@ pub(super) async fn runtime_status_with_options(
                 &config,
             )
         }
-        _ => false,
+        // 宿主模式没有运行时模型与子代理快照可比，这两项由页面热重载处理。
+        _ => match host_applied_config.as_ref() {
+            Some(applied) => config_requires_restart_for_host(applied, &config),
+            None => false,
+        },
     };
-    let fast_context_tools_active = runtime
+    let applied_for_status = runtime
         .as_ref()
-        .is_some_and(|runtime| runtime.applied_config.fast_context_tools);
-    let subagent_optimization_active = runtime
-        .as_ref()
-        .is_some_and(|runtime| runtime.applied_config.subagent_optimization);
+        .map(|runtime| &runtime.applied_config)
+        .or(host_applied_config.as_ref());
+    let fast_context_tools_active =
+        applied_for_status.is_some_and(|applied| applied.fast_context_tools);
+    let subagent_optimization_active =
+        applied_for_status.is_some_and(|applied| applied.subagent_optimization);
     let configured_notification_channel_count = config.webhook.enabled_channel_count();
-    let remote_compaction = remote_compaction_status_value(
-        &config,
-        runtime.as_ref().map(|runtime| &runtime.applied_config),
-    );
+    let remote_compaction = remote_compaction_status_value(&config, applied_for_status);
     let trace_log_write_protection_active = state
         .trace_log_write_protection_active
         .load(Ordering::Acquire);
     drop(config);
-    let notification_watcher_active = runtime.is_some()
+    let notification_watcher_active = client_running
         && state
             .waiting_watcher_task
             .lock()
@@ -158,7 +168,7 @@ pub(super) async fn runtime_status_with_options(
         0
     };
     let mut status = json!({
-        "running": runtime.is_some(),
+        "running": client_running,
         "appVersion": env!("CARGO_PKG_VERSION"),
         "codeyUpdatePolicy": codey_update_policy,
         "clientPlatform": current_update_platform(),
@@ -225,6 +235,23 @@ pub(super) async fn runtime_status_with_options(
             "injectionScripts".into(),
             serde_json::to_value(injection_statuses.as_ref())
                 .expect("injection statuses must be JSON-serializable"),
+        );
+    } else if let Some(host) = host.as_ref()
+        && let Some(object) = status.as_object_mut()
+    {
+        // 宿主模式的注入状态由服务端自己记录；进程维护信息属于被接管的客户端，
+        // 服务端不持有句柄，因此只给出路径与调试端口。
+        object.insert(
+            "codexAppPath".into(),
+            Value::String(host.app_dir.to_string_lossy().to_string()),
+        );
+        object.insert(
+            "hostAttached".into(),
+            Value::Bool(true),
+        );
+        object.insert(
+            "hostDebugPort".into(),
+            serde_json::json!(host.debug_port),
         );
     }
     Ok(status)
@@ -502,6 +529,24 @@ fn classify_runtime_start_error(error: &str) -> &'static str {
 }
 
 pub async fn schedule_restart_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
+    // 宿主注入模式下客户端不是本进程拉起的，服务端也没有它的进程句柄。走常规
+    // 重启路径会去拉起第二个客户端，单实例锁让它转交请求后立刻退出，用户看到
+    // 的现象是「重启后什么都没发生」。能热应用的改动就地应用，其余交给用户
+    // 重新打开应用。
+    if state.host_attach().await.is_some() {
+        let outcome = crate::commands::models::hot_reload_runtime_models(state).await;
+        let mut response = json!({
+            "status": "host_restart_required",
+            "message": "已就地应用可热更新的设置；其余改动请退出并重新打开应用",
+        });
+        if let Some(object) = response.as_object_mut()
+            && let Some(error) = outcome.error
+        {
+            object.insert("hotReloadError".into(), Value::String(error));
+        }
+        return Ok(response);
+    }
+
     let mut restart_task = state.restart_task.lock().await;
     ensure_runtime_can_start(state)?;
     if state.restart_in_progress.swap(true, Ordering::AcqRel) {

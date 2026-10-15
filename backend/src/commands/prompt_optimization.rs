@@ -46,11 +46,10 @@ pub(super) async fn resolve_request_config(
         if !config.local_router_enabled {
             return Err("本地路由已关闭；请启用本地路由并重启 Codex，或改用手动配置".to_string());
         }
-        let runtime = state.runtime.lock().await.clone().ok_or_else(|| {
+        // 宿主注入模式下没有客户端进程句柄，端点改从注入上下文取；两条路径
+        // 拿到的是同一次启动建立的同一个回环路由。
+        let endpoint = state.active_router_endpoint().await.ok_or_else(|| {
             "Codey 路由尚未运行，请先启动 Codey 后再测试或使用提示词优化".to_string()
-        })?;
-        let endpoint = runtime.local_router_endpoint().ok_or_else(|| {
-            "本地路由已关闭；请启用本地路由并重启 Codex，或改用手动配置".to_string()
         })?;
         return Ok(resolve_codey_request_config(
             &config,

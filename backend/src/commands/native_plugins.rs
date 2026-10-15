@@ -8,7 +8,11 @@ use crate::codey_plugins;
 
 mod package_upload;
 
-pub(super) async fn invoke(command: &str, args: &Value) -> Result<Value, String> {
+pub(super) async fn invoke(
+    command: &str,
+    args: &Value,
+    can_show_panels: bool,
+) -> Result<Value, String> {
     match command {
         "get_codey_plugin_host_info" => {
             serde_json::to_value(codey_plugins::host_info()).map_err(|error| error.to_string())
@@ -22,7 +26,14 @@ pub(super) async fn invoke(command: &str, args: &Value) -> Result<Value, String>
             let id = string_argument(args, "pluginId")?;
             blocking(move || codey_plugins::get_config_file(&id)).await
         }
-        "select_codey_plugin_package" => select_package().await,
+        // 副本模式的后端是无窗口的后台服务，系统选择面板无法显示；与其静默
+        // 返回「用户取消」，不如让页面提示改用手动路径或拖入文件。
+        "select_codey_plugin_package" => {
+            if !can_show_panels {
+                return Err("当前为副本模式，请在导入窗口中填写插件包路径，或将 .codey-plugin 文件拖入窗口".into());
+            }
+            select_package().await
+        }
         "inspect_codey_plugin" => {
             if let Some(id) = optional_argument::<String>(args, "discardUpload")? {
                 blocking(move || package_upload::discard(&id)).await
@@ -125,9 +136,20 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// 副本模式的后端由启动器作为后台服务拉起，没有窗口，系统选择面板显示
+    /// 不出来。这里必须给出可操作的提示，而不是让 rfd 在无窗口环境里中止。
+    #[tokio::test]
+    async fn package_selection_explains_itself_without_a_window_environment() {
+        let error = invoke("select_codey_plugin_package", &json!({}), false)
+            .await
+            .unwrap_err();
+        assert!(error.contains("副本模式"), "{error}");
+        assert!(error.contains("路径"), "{error}");
+    }
+
     #[tokio::test]
     async fn readonly_commands_do_not_require_an_installed_plugin() {
-        let value = invoke("get_codey_plugin_host_info", &json!({}))
+        let value = invoke("get_codey_plugin_host_info", &json!({}), true)
             .await
             .unwrap();
         let info: codey_plugin_sdk::host::HostInfo = serde_json::from_value(value.clone()).unwrap();
@@ -145,6 +167,7 @@ mod tests {
             &json!({
                 "content": r#"{"_comments":{"secret-key":false},"token":"secret-value"}"#
             }),
+            true,
         )
         .await
         .unwrap();
@@ -152,7 +175,7 @@ mod tests {
         assert_eq!(result["error"]["code"], "invalid_comment_value");
         assert!(!result.to_string().contains("secret-key"));
         assert!(!result.to_string().contains("secret-value"));
-        let result = invoke("validate_codey_plugin_config", &json!({"content":"{}"}))
+        let result = invoke("validate_codey_plugin_config", &json!({"content":"{}"}), true)
             .await
             .unwrap();
         assert_eq!(result["valid"], true);
@@ -199,7 +222,7 @@ mod tests {
                 json!({"pluginId":"demo","confirmed":"true"}),
             ),
         ] {
-            assert!(invoke(command, &args).await.is_err(), "{command}");
+            assert!(invoke(command, &args, true).await.is_err(), "{command}");
         }
     }
 }

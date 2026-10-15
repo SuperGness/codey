@@ -15,6 +15,7 @@ pub(crate) async fn dispatch(
     data_dir: PathBuf,
     user_home: PathBuf,
     request: Value,
+    can_show_panels: bool,
 ) -> Result<Value> {
     ensure!(data_dir.is_absolute(), "扩展数据目录必须为绝对路径");
     let permit = REQUESTS
@@ -25,6 +26,12 @@ pub(crate) async fn dispatch(
         .and_then(Value::as_str)
         .context("缺少扩展管理操作")?;
     if action == "pick_project" || action == "pick_skill" {
+        // 副本模式的后端是无窗口的后台服务，系统选择面板无法显示；与其静默
+        // 返回「用户取消」，不如让页面提示直接填入绝对路径。
+        ensure!(
+            can_show_panels,
+            "当前为副本模式，请直接填入目录的绝对路径"
+        );
         return pick_directory(action == "pick_project").await;
     }
     let service = ExtensionService::new(codex_home, data_dir, user_home);

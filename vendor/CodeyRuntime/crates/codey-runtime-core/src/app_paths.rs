@@ -475,9 +475,18 @@ pub fn validate_codex_app_dir(app_dir: &Path) -> anyhow::Result<()> {
         "Codex 应用版本缺失或无效"
     );
     if macos {
+        // Codexy 是同一客户端的派生副本，带自己的 bundle 标识，所以这里
+        // 接受官方标识与 Codexy 标识两种。副本的应用归档与可执行文件名
+        // 仍来自原客户端，上面基于 package.json 的身份校验已足以排除
+        // 无关应用，这里放宽的是 macOS 侧的标识比对。
+        const SUPPORTED_MACOS_BUNDLE_IDENTIFIERS: [&str; 2] =
+            ["com.openai.codex", "com.openai.codexy"];
         anyhow::ensure!(
-            macos_app_plist_value(&root, "CFBundleIdentifier").as_deref()
-                == Some("com.openai.codex"),
+            macos_app_plist_value(&root, "CFBundleIdentifier")
+                .as_deref()
+                .is_some_and(|identifier| SUPPORTED_MACOS_BUNDLE_IDENTIFIERS
+                    .iter()
+                    .any(|known| identifier == *known)),
             "macOS 应用标识不属于已支持的 Codex 客户端"
         );
     } else if let Some(package_name) = packaged_app_full_name(&root) {

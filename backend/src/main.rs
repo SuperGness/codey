@@ -27,6 +27,11 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
+    // host-service 必须先判定：下面的 CLI 兼容分支会把无法识别的参数转发给
+    // Codex CLI，本模式的参数会被它当成 CLI 调用吞掉。
+    if codey_lib::run_attach_service_if_requested()? {
+        return Ok(());
+    }
     if codey_lib::run_node_options_repair_if_requested()? {
         return Ok(());
     }

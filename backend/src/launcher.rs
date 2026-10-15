@@ -1922,6 +1922,206 @@ async fn spawn_and_inject_runtime(
     })
 }
 
+/// host-service 模式的准备结果：宿主客户端启动所需的一切，加上已就绪的本地路由。
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) struct HostRuntime {
+    /// 宿主客户端应使用的调试端口。宿主要把它作为自己的启动参数传入。
+    pub debug_port: u16,
+    /// 宿主客户端启动时要注入的环境。
+    pub environment: Vec<(String, String)>,
+    /// 本地路由端点，随本运行时存活；宿主退出后由调用方关闭。
+    pub router_endpoint: Option<RuntimeRouterEndpoint>,
+    /// 共享出去的本地路由句柄。宿主注入上下文也持有同一个实例，改模型或线路
+    /// 时可以直接让新配置在已建立的路由上生效，不必重启客户端。
+    local_router: Option<Arc<LocalRouter>>,
+    injection_scripts: cdp::PreparedInjectionScripts,
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+impl HostRuntime {
+    /// 等宿主客户端把调试端口开起来，然后完成渲染层注入。
+    pub(crate) async fn attach(
+        &self,
+        handler: codey_runtime_core::bridge::BridgeHandler,
+    ) -> Result<cdp::InjectedTarget> {
+        cdp::retry_inject_with_scripts(
+            self.debug_port,
+            handler,
+            &self.injection_scripts,
+            cdp::InjectionRetrySource::Startup,
+        )
+        .await
+        .map_err(|failure| failure.into_error())
+    }
+
+    /// 共享本地路由句柄。宿主注入上下文用它做配置热更新。
+    pub(crate) fn local_router_handle(&self) -> Option<Arc<LocalRouter>> {
+        self.local_router.clone()
+    }
+
+    /// 关闭本地路由。宿主退出后没有保留它的意义。
+    pub(crate) async fn stop_local_router(self) {
+        let Some(local_router) = self.local_router else {
+            return;
+        };
+        if let Err(error) = local_router.stop().await {
+            error_log::record_failure(
+                "cleanup_failed",
+                "stop_local_router_at_host_service_exit",
+                format!("{error:#}"),
+                serde_json::json!({}),
+            );
+        }
+    }
+}
+
+/// 为 host-service 模式准备运行环境。
+///
+/// 与 [`CodeyRuntime::start`] 的区别是**不拉起客户端**：宿主客户端自己启动，
+/// 因此这里不选延迟启动的补丁装载、不做会话维护，也不调用
+/// `prepare_codex_for_launch`（它会先停掉正在运行的目标客户端，而这里的
+/// 客户端正是宿主本身）。
+///
+/// 准备动作仍然照做，缺一不可：
+/// - 主进程启动补丁（`NODE_OPTIONS`）必须由宿主在启动时装载，晚起的服务赶不上；
+/// - 本地路由地址要写进 `config.toml` 的 `codey_router` 表，宿主后续新建的
+///   会话会从磁盘上查这个 provider；
+/// - 渲染层注入的脚本集在这里预编译，等宿主端口就绪后直接用。
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) async fn prepare_host_runtime(
+    config: &CodeyConfig,
+    app_dir: &std::path::Path,
+    account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
+) -> Result<HostRuntime> {
+    if !crate::codex_config::runtime_router_platform_supported() {
+        return Err(anyhow::anyhow!(
+            crate::codex_config::unsupported_runtime_platform_message()
+        ));
+    }
+    let home = codex_home();
+    repair_startup_reserved_providers(home).await;
+
+    let debug_port = codey_runtime_core::ports::try_select_packaged_codex_debug_port_with(
+        9229,
+        true,
+        codey_runtime_core::ports::can_bind_loopback_port,
+        codey_runtime_core::ports::try_find_available_loopback_port,
+    )
+    .context("无法为宿主客户端分配本地调试端口")?;
+    anyhow::ensure!(debug_port != 0, "无法为宿主客户端分配有效的本地调试端口");
+
+    let injection_scripts = cdp::prepare_injection_scripts(
+        config.local_router_enabled,
+        config.slim_codex_pet,
+        config.hide_full_access_warning,
+        &config.user_scripts,
+    );
+    let startup_profile = config
+        .local_router_enabled
+        .then(|| resolve_startup_profile(config))
+        .transpose()?;
+    if config.local_router_enabled {
+        validate_startup_router_provider(home).await?;
+    }
+
+    let local_router = if config.local_router_enabled {
+        Some(LocalRouter::start_with_usage(config, account_usage_cache).await?)
+    } else {
+        None
+    };
+    let router_endpoint = local_router.as_ref().map(LocalRouter::endpoint);
+
+    // 模型目录只是配置写入的输入之一。拿不到时退回原生运行时状态：这条
+    // 路径不写 `codey_router`，但注入与其余命令照常。
+    let prepared_provider_state = match (startup_profile.as_ref(), router_endpoint.as_ref()) {
+        (Some(profile), Some(router)) => {
+            match prepare_startup_model_catalog(config, profile, home, app_dir).await {
+                Ok(catalog) => {
+                    prepare_codex_startup_state(config, profile, home, router, catalog).await
+                }
+                Err(error) => {
+                    error_log::record_failure(
+                        "model_catalog_failed",
+                        "prepare_host_runtime_catalog",
+                        format!("{error:#}"),
+                        serde_json::json!({}),
+                    );
+                    prepare_native_runtime_state(home, config).await
+                }
+            }
+        }
+        _ => prepare_native_runtime_state(home, config).await,
+    };
+    let PreparedProviderState {
+        runtime_config_overrides,
+        ..
+    } = match prepared_provider_state {
+        Ok(state) => state,
+        Err(error) => {
+            stop_local_router_after_failed_start(local_router.as_ref()).await;
+            return Err(error);
+        }
+    };
+
+    /*
+     * 向宿主客户端装载主进程启动补丁。
+     *
+     * 客户端官方版关掉了 NODE_OPTIONS 与 Inspector 两个开关，这两条通道在客户端
+     * 上都会让启动立刻退出，因此补丁改经副本 asar 入口里烘进的装载器加载：它按
+     * 下面给出的路径 `require` 补丁。补丁自身只凭 marker 变量判定是否为启动期
+     * 装载，不关心装载途径，所以这条路与官方形态互不干扰，也不改动系统里那份
+     * 未改造的客户端。
+     *
+     * 不带 `runtime_config_overrides`。那是给命令行接管用的 app-server 配置覆盖，
+     * 补丁一旦拿到非空列表就会去改写客户端自己拉起的 app-server 参数；实测这样
+     * 客户端会在创建窗口前停住，本地路由与界面都起不来。宿主模式本来就靠
+     * `config.toml` 里的 router provider 加渲染层注入把模型接到 Codey 路由，命令行
+     * 覆盖是多余的第二条通道，去掉不影响模型与路由可用性。
+     *
+     * 路径指向按当前配置新生成的载荷，重建副本不需要重新生成补丁。未改造的官方
+     * 客户端不认识这个变量，装载器也不存在，变量会被忽略。
+     */
+    let _ = &runtime_config_overrides;
+    let startup_patch = match crate::codex_startup_patch::prepare_startup_asar_patch(
+        crate::codex_startup_patch::PatchOptions {
+            disable_pet: config.slim_codex_pet,
+            subagent_gate_active: config.subagent_optimization,
+            misc_model: config.misc_model_catalog_id(),
+        },
+        &[],
+    ) {
+        Ok(patch) => patch,
+        Err(error) => {
+            error_log::record_failure(
+                "patch_failed",
+                "prepare_host_startup_patch",
+                format!("{error:#}"),
+                serde_json::json!({}),
+            );
+            return Err(error);
+        }
+    };
+    let environment = vec![
+        ("CODEX_SPARKLE_ENABLED".to_string(), "false".to_string()),
+        (
+            "CODEY_DISABLE_MACOS_CHILD_PROCESS_SAMPLER".to_string(),
+            "true".to_string(),
+        ),
+    ]
+    .into_iter()
+    .chain(startup_patch.environment)
+    .collect();
+    eprintln!("主进程启动补丁：{}", startup_patch.script_path.display());
+
+    Ok(HostRuntime {
+        debug_port,
+        environment,
+        router_endpoint,
+        local_router: local_router.map(Arc::new),
+        injection_scripts,
+    })
+}
+
 fn spawn_runtime_watchers(inputs: RuntimeWatcherInputs) -> RuntimeWatchers {
     let RuntimeWatcherInputs {
         injected_target,

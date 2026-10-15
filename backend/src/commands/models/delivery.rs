@@ -44,10 +44,20 @@ pub(crate) async fn runtime_renderer_model_catalog(state: &Arc<AppState>) -> Res
         Some(runtime) => Some(runtime.applied_model_catalog_config().await),
         None => None,
     };
+    let host = if runtime.is_none() {
+        state.host_attach().await
+    } else {
+        None
+    };
     let current = state.config.read().await.clone();
+    // 宿主模式没有运行时模型目录快照，直接用启动时应用的配置，语义等同：都
+    // 代表「客户端当前正在使用的模型集合」。
     let config = model_catalog_config_for_runtime(
         &current,
-        runtime.as_ref().map(|runtime| &runtime.applied_config),
+        runtime
+            .as_ref()
+            .map(|runtime| &runtime.applied_config)
+            .or(host.as_ref().map(|attach| &attach.applied_config)),
         applied.as_ref(),
     );
     current_renderer_model_catalog_async(config.clone()).await
@@ -74,6 +84,12 @@ pub(crate) async fn hot_reload_runtime_models(state: &Arc<AppState>) -> ModelHot
     let _delivery = state.model_delivery_lock.lock().await;
     if state.is_shutting_down() {
         return ModelHotReloadOutcome::default();
+    }
+    if state.runtime.lock().await.is_none() {
+        // 宿主注入模式没有客户端进程句柄，改由注入上下文完成同一件事：把新
+        // 配置应用在已建立的路由上，再把模型目录下发给已经打开的页面。两个锁
+        // 仍由本函数持有，宿主分支不重复获取。
+        return hot_reload_host_models(state).await;
     }
     let Some(runtime) = state.runtime.lock().await.clone() else {
         return ModelHotReloadOutcome::default();
@@ -133,6 +149,60 @@ pub(crate) async fn hot_reload_runtime_models(state: &Arc<AppState>) -> ModelHot
                 json!({
                     "modelCount": expected_catalog.get("models").and_then(Value::as_array).map(Vec::len),
                     "websocketUrl": runtime.renderer_websocket_url().await,
+                }),
+            );
+            ModelHotReloadOutcome::failed(error)
+        }
+    }
+}
+
+async fn hot_reload_host_models(state: &Arc<AppState>) -> ModelHotReloadOutcome {
+    let Some(host) = state.host_attach().await else {
+        return ModelHotReloadOutcome::default();
+    };
+    let config = state.config.read().await.clone();
+    if host.applied_config.local_router_enabled != config.local_router_enabled {
+        return ModelHotReloadOutcome::default();
+    }
+    let delivered = if runtime_supports_current_routes_for_hot_reload(&host.applied_config, &config) {
+        config
+    } else {
+        config_with_launch_pinned_transport(&host.applied_config, &config)
+    };
+    let expected_catalog = match current_renderer_model_catalog_async(delivered.clone()).await {
+        Ok(catalog) => catalog,
+        Err(error) => return ModelHotReloadOutcome::failed(error),
+    };
+    // 本地路由由服务端持有，换掉线路快照即可让新配置在新请求上生效。
+    let router_swap = match host.local_router.as_ref() {
+        Some(local_router) if delivered.local_router_enabled => {
+            Some(local_router.update_config(&delivered))
+        }
+        _ => None,
+    };
+    match cdp::refresh_model_whitelist(&host.websocket_url, &expected_catalog).await {
+        Ok(refresh) => {
+            state.publish_host_applied_config(delivered).await;
+            ModelHotReloadOutcome {
+                reloaded: true,
+                deferred: refresh.deferred,
+                error: None,
+            }
+        }
+        Err(error) => {
+            if let (Some(local_router), Some(swap)) = (host.local_router.as_ref(), router_swap) {
+                local_router.revert_config(swap);
+            }
+            let error = format!("{error:#}");
+            // 页面下一轮会自己拉取模型目录，这里回退路由快照即可，页面侧不
+            // 需要额外回滚：它尚未收到新列表。
+            error_log::record_failure(
+                "patch_verification_failed",
+                "refresh_model_whitelist_at_host_attach",
+                error.clone(),
+                json!({
+                    "modelCount": expected_catalog.get("models").and_then(Value::as_array).map(Vec::len),
+                    "websocketUrl": host.websocket_url,
                 }),
             );
             ModelHotReloadOutcome::failed(error)

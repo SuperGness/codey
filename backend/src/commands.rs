@@ -116,6 +116,29 @@ use crate::trace_log_guard;
 const STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_VISIBLE_SESSION_TIMESTAMPS: usize = 200;
 
+/// 宿主注入模式下的运行上下文。
+///
+/// 该模式下客户端由副本启动器拉起，服务端只把自己的桥接注入进去，从不持有
+/// 客户端进程句柄，因此 `AppState::runtime` 恒为 `None`。需要「本次运行」信息
+/// 的命令改为读这里，否则会因为拿不到进程句柄而整体失效：提示词优化会报
+/// 「Codey 路由尚未运行」，模型改动也无法下发到已经打开的页面。
+#[derive(Clone)]
+pub(crate) struct HostAttach {
+    /// 宿主客户端的调试端口，同时作为「宿主是否还在」的探针。
+    pub debug_port: u16,
+    /// 已注入页面的 WebSocket 地址，用于下发刷新指令。
+    pub websocket_url: String,
+    /// 被接管客户端的位置。
+    pub app_dir: std::path::PathBuf,
+    /// 本次运行建立的本地路由端点。
+    pub router_endpoint: Option<crate::local_router::RuntimeRouterEndpoint>,
+    /// 本次运行建立的本地路由实例。改模型或线路时直接用它在已建立的路由上
+    /// 应用新配置，不必重启客户端。
+    pub local_router: Option<Arc<crate::local_router::LocalRouter>>,
+    /// 启动客户端时应用的配置，热重载据此判断是否需要重新下发。
+    pub applied_config: CodeyConfig,
+}
+
 pub struct AppState {
     pub store: ConfigStore,
     pub config: RwLock<CodeyConfig>,
@@ -145,8 +168,10 @@ pub struct AppState {
     /// 令牌刷新按账号串行执行。多个请求同时轮换同一个 refresh token 会让
     /// 先写回的凭据立刻失效。
     official_account_refresh_lock: Mutex<()>,
-    account_usage_cache: Arc<Mutex<account_usage::AccountUsageCaches>>,
+    pub(crate) account_usage_cache: Arc<Mutex<account_usage::AccountUsageCaches>>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
+    /// 宿主注入模式下的运行上下文，见 `HostAttach`。GUI 模式恒为 `None`。
+    pub(crate) host_attach: RwLock<Option<Arc<HostAttach>>>,
     runtime_operation: Mutex<()>,
     diagnostic_storage_operation: Mutex<()>,
     trace_log_write_protection_active: AtomicBool,
@@ -272,6 +297,7 @@ impl Default for AppState {
             official_account_refresh_lock: Mutex::new(()),
             account_usage_cache: Arc::new(Mutex::new(account_usage::AccountUsageCaches::default())),
             runtime: Mutex::new(None),
+            host_attach: RwLock::new(None),
             runtime_operation: Mutex::new(()),
             diagnostic_storage_operation: Mutex::new(()),
             trace_log_write_protection_active: AtomicBool::new(false),
@@ -344,6 +370,65 @@ impl AppState {
     /// Codey's own store of ChatGPT accounts, kept next to the config file.
     pub(crate) fn official_accounts(&self) -> OfficialAccountStore {
         OfficialAccountStore::for_config_path(self.store.path())
+    }
+
+    /// 宿主注入模式下的运行上下文。GUI 模式为 `None`。
+    pub(crate) async fn host_attach(&self) -> Option<Arc<HostAttach>> {
+        self.host_attach.read().await.clone()
+    }
+
+    /// 当前进程能否弹出系统原生的文件或目录选择面板。
+    ///
+    /// 副本模式的后端由启动器作为后台服务拉起，进程没有窗口，也不在图形会话
+    /// 前台，`rfd` 在这种环境下显示不出面板（macOS 上会因缺少主线程窗口而
+    /// 中止）。此时选择类命令改为提示用户手动填写路径或拖入文件。
+    pub(crate) async fn can_show_native_panels(&self) -> bool {
+        self.host_attach().await.is_none()
+    }
+
+    /// 记下本次下发给宿主页面的配置。
+    ///
+    /// 热更新成功后调用。下一次重启判定以它为基线，否则同一项改动会被反复
+    /// 提示需要重启。
+    pub(crate) async fn publish_host_applied_config(&self, config: CodeyConfig) {
+        let mut guard = self.host_attach.write().await;
+        if let Some(attach) = guard.as_mut() {
+            Arc::make_mut(attach).applied_config = config;
+        }
+    }
+
+    /// 本次运行可用的本地路由端点。
+    ///
+    /// GUI 模式从被管理的运行时取，宿主模式从注入上下文取。两处的端点含义
+    /// 相同：都是本次启动建立的回环路由，带本次运行独有的令牌。
+    pub(crate) async fn active_router_endpoint(
+        &self,
+    ) -> Option<crate::local_router::RuntimeRouterEndpoint> {
+        if let Some(runtime) = self.runtime.lock().await.clone()
+            && let Some(endpoint) = runtime.local_router_endpoint()
+        {
+            return Some(endpoint);
+        }
+        self.host_attach()
+            .await
+            .and_then(|attach| attach.router_endpoint.clone())
+    }
+
+    /// 已注入页面的 WebSocket 地址。
+    ///
+    /// 需要向页面下发刷新指令时用。GUI 模式取自运行时的注入目标，宿主模式
+    /// 取自注入结果。
+    pub(crate) async fn active_renderer_websocket_url(&self) -> Option<String> {
+        if let Some(runtime) = self.runtime.lock().await.clone() {
+            let url = runtime.renderer_websocket_url().await;
+            if !url.is_empty() {
+                return Some(url.to_string());
+            }
+        }
+        self.host_attach()
+            .await
+            .map(|attach| attach.websocket_url.clone())
+            .filter(|url| !url.is_empty())
     }
 
     /// Starts resolving the default official account in the background. The
@@ -1207,7 +1292,9 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         | "open_codey_plugin_directory"
         | "open_codey_plugin_logs"
         | "clear_codey_plugin_logs"
-        | "invoke_codey_plugin" => native_plugins::invoke(command, &args).await,
+        | "invoke_codey_plugin" => {
+            native_plugins::invoke(command, &args, state.can_show_native_panels().await).await
+        }
         _ => Err(format!("未知 Codey API 命令：{command}")),
     };
     result.unwrap_or_else(api_error_message)
@@ -1217,12 +1304,10 @@ pub async fn open_route_request_logs(
     state: &Arc<AppState>,
     theme: Option<&str>,
 ) -> Result<Value, String> {
+    // 宿主注入模式下端点由注入上下文提供，见 `active_router_endpoint`。
     let endpoint = state
-        .runtime
-        .lock()
+        .active_router_endpoint()
         .await
-        .as_ref()
-        .and_then(|runtime| runtime.local_router_endpoint())
         .ok_or_else(|| "本地路由尚未运行，无法打开请求日志".to_string())?;
     let url = endpoint.request_log_url(theme);
     tokio::task::spawn_blocking(move || open_system_browser(&url))
@@ -3052,6 +3137,31 @@ pub(super) fn config_requires_restart_with_route_status(
         || !applied_models.matches(current)
         || ((applied.subagent_optimization || current.subagent_optimization)
             && !applied_subagent.matches(current))
+}
+
+/// 宿主注入模式下的重启判定。
+///
+/// 与 GUI 模式同源，只是没有运行时模型与子代理快照可比：宿主模式这两项由
+/// 页面的热重载处理，不构成重启要求。少了这层判定时，改完设置页面不会提示
+/// 重启，用户会以为改动没生效。
+pub(super) fn config_requires_restart_for_host(
+    applied: &CodeyConfig,
+    current: &CodeyConfig,
+) -> bool {
+    provider_route_restart_required_for_runtime(applied, current)
+        || applied.codex_app_path != current.codex_app_path
+        || applied.user_scripts != current.user_scripts
+        || applied.stream_max_retries != current.stream_max_retries
+        || applied.slim_codex_pet != current.slim_codex_pet
+        || applied.gpu_launch_mode != current.gpu_launch_mode
+        || applied.codex_launch_proxy != current.codex_launch_proxy
+        || applied.fast_context_tools != current.fast_context_tools
+        || applied.conversation_git.enabled != current.conversation_git.enabled
+        || applied.subagent_optimization != current.subagent_optimization
+        || !applied
+            .misc_model
+            .trim()
+            .eq_ignore_ascii_case(current.misc_model.trim())
 }
 
 pub(super) fn provider_route_restart_required_for_runtime(

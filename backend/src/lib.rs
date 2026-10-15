@@ -1,5 +1,6 @@
 mod account_usage;
 mod appserver_call;
+mod attach_service;
 mod cdp;
 mod codex_config;
 mod codex_config_guidance;
@@ -86,6 +87,11 @@ pub fn run_codex_cli_wrapper_if_requested() -> Result<bool> {
     codex_startup_patch::run_cli_wrapper_if_requested()
 }
 
+/// attach 服务模式：为已经在运行的客户端提供 Codey 后端能力。
+pub fn run_attach_service_if_requested() -> Result<bool> {
+    attach_service::run_if_requested()
+}
+
 pub fn run_node_options_repair_if_requested() -> Result<bool> {
     electron_fuses::run_node_options_repair_if_requested()
 }
@@ -157,7 +163,7 @@ pub fn run_desktop_application() -> Result<()> {
     }
 }
 
-fn build_async_runtime() -> Result<tokio::runtime::Runtime> {
+pub(crate) fn build_async_runtime() -> Result<tokio::runtime::Runtime> {
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     // Codey is an I/O coordinator. Blocking filesystem/SQLite work already
     // runs on Tokio's blocking pool, so two async workers avoid creating a
