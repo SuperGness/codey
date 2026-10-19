@@ -3768,6 +3768,58 @@ fn explicit_parent_switch_refreshes_session_fallback_without_child_overwrite() {
 }
 
 #[test]
+fn request_binding_keys_keep_first_headers_and_session_alias_boundaries() {
+    for (headers, expected) in [
+        (
+            vec![("Session-ID", " parent "), ("session-id", "ignored")],
+            vec!["thread-id:parent", "session-id:parent"],
+        ),
+        (
+            vec![
+                ("Thread-ID", " child "),
+                ("thread-id", "ignored"),
+                ("session-id", " parent "),
+            ],
+            vec!["thread-id:child", "session-id:parent"],
+        ),
+        (
+            vec![("thread-id", " "), ("session-id", "parent")],
+            vec!["session-id:parent"],
+        ),
+        (vec![("session-id", " "), ("session-id", "ignored")], vec![]),
+        (
+            vec![("session-id", "parent"), ("X-OpenAI-Subagent", "")],
+            vec!["session-id:parent"],
+        ),
+        (
+            vec![("session-id", "parent"), ("X-Codex-Parent-Thread-ID", "")],
+            vec!["session-id:parent"],
+        ),
+        (
+            vec![("thread-id", "child\ninvalid"), ("session-id", "parent")],
+            vec!["session-id:parent"],
+        ),
+    ] {
+        let request = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/responses".into(),
+            headers: headers
+                .into_iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+            body: vec![],
+            _body_budget_permit: None,
+        };
+        assert_eq!(
+            request_binding_keys(&request),
+            expected,
+            "{:?}",
+            request.headers
+        );
+    }
+}
+
+#[test]
 fn request_log_codex_session_prefers_thread_and_falls_back_to_session() {
     let mut request = HttpRequest {
         method: "POST".into(),
@@ -3906,6 +3958,46 @@ fn raw_models_resolve_case_insensitively_and_preserve_slashes() {
             .to_string()
             .contains("缺少 model")
     );
+}
+
+#[test]
+fn raw_and_historical_models_keep_normalization_and_route_priority() {
+    let (mut config, provider_a, _) = router_config("https://relay.example/v1".into());
+    let mut route_b = config.profiles[0].clone();
+    route_b.id = "route-b".into();
+    config.profiles.push(route_b);
+    for provider in [&provider_a, "route-b"] {
+        config
+            .selected_models_by_provider
+            .insert(provider.into(), vec!["Vendor/Model".into()]);
+    }
+    config
+        .model_alias_history
+        .insert("retired/model".into(), " \tVENDOR/MODEL ".into());
+    let snapshot = RouterSnapshot::from_config(&config);
+    for requested in [" \tVENDOR/MODEL ", " \tRETIRED/MODEL "] {
+        for (hint, binding, provider) in [
+            (
+                Some(provider_a.as_str()),
+                Some("route-b"),
+                provider_a.as_str(),
+            ),
+            (Some("missing"), Some("route-b"), "route-b"),
+            (None, Some(provider_a.as_str()), provider_a.as_str()),
+        ] {
+            let selected = snapshot
+                .target_for_request(requested, hint, binding)
+                .unwrap();
+            assert_eq!(selected.provider_id, provider);
+            assert_eq!(selected.upstream_model, "Vendor/Model");
+            assert_eq!(selected.requested_model, requested.trim());
+        }
+        let error = snapshot.target_for_model(requested).unwrap_err();
+        assert!(format!("{error:#}").contains(&format!(
+            "模型 {} 同时存在于多条线路，缺少明确的 Codey 线路元数据",
+            requested.trim()
+        )));
+    }
 }
 
 #[test]
@@ -4590,6 +4682,70 @@ fn routing_hint_model_follows_the_resolved_upstream_model() {
         headers[ROUTING_HINT_HEADER],
         HeaderValue::from_static("tier=priority")
     );
+}
+
+#[test]
+fn routing_hint_model_preserves_segment_and_duplicate_header_rules() {
+    for (original, upstream, expected) in [
+        ("", "provider-model", ""),
+        (
+            " ; tier=priority ;; Model=alias ;model =alias;",
+            "provider-model",
+            " ; tier=priority ;; Model=alias ;model =alias;",
+        ),
+        (
+            "model=provider-model;; tier=priority;",
+            "provider-model",
+            "model=provider-model;; tier=priority;",
+        ),
+        (
+            " ; model=provider-model \t;;model=alias; Model=alias ;",
+            "provider-model",
+            " ;model=provider-model;;model=provider-model; Model=alias ;",
+        ),
+        ("model=alias;model=other", "a;b", "model=a;b;model=a;b"),
+        ("tier=priority", "invalid\nmodel", "tier=priority"),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            HeaderName::from_static(ROUTING_HINT_HEADER),
+            HeaderValue::from_str(original).unwrap(),
+        );
+        headers.append(
+            HeaderName::from_static(ROUTING_HINT_HEADER),
+            HeaderValue::from_static("model=second"),
+        );
+        align_routing_hint_model(&mut headers, upstream);
+        let values = headers
+            .get_all(ROUTING_HINT_HEADER)
+            .iter()
+            .collect::<Vec<_>>();
+        assert_eq!(values[0], expected, "{original:?}");
+        assert_eq!(values.len(), if original == expected { 2 } else { 1 });
+        if values.len() == 2 {
+            assert_eq!(values[1], "model=second");
+        }
+    }
+}
+
+#[test]
+fn routing_hint_model_removes_invalid_headers_only_when_rewritten() {
+    for (original, upstream) in [
+        (
+            HeaderValue::from_bytes(b"model=\xff").unwrap(),
+            "provider-model",
+        ),
+        (HeaderValue::from_static("model=alias"), "invalid\nmodel"),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.append(HeaderName::from_static(ROUTING_HINT_HEADER), original);
+        headers.append(
+            HeaderName::from_static(ROUTING_HINT_HEADER),
+            HeaderValue::from_static("model=second"),
+        );
+        align_routing_hint_model(&mut headers, upstream);
+        assert!(!headers.contains_key(ROUTING_HINT_HEADER));
+    }
 }
 
 #[test]

@@ -626,26 +626,28 @@ fn streamed_item_arguments(item: &Value) -> Option<&str> {
         .filter(|value| !value.is_empty())
 }
 
-/// Items are the same history entry when they share an item id, or, for tool
-/// calls without one, the same call id.
 /// Items are the same history entry when they describe the same tool call, or
 /// failing that share an item id. Tool calls compare by call id first because
 /// an upstream may renumber an item id while keeping the call.
 fn same_history_item(left: &Value, right: &Value) -> bool {
-    let identity = |item: &Value| {
+    fn identity(item: &Value) -> Option<(bool, &str)> {
         item.get("call_id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
-            .map(|id| format!("call_id:{id}"))
+            .map(|id| (true, id))
             .or_else(|| {
                 item.get("id")
                     .and_then(Value::as_str)
                     .filter(|id| !id.is_empty())
-                    .map(str::to_owned)
+                    .map(|id| (false, id))
             })
-    };
+    }
     match (identity(left), identity(right)) {
-        (Some(left), Some(right)) => left == right,
+        // Preserve the original prefixed-string comparison even when an item
+        // id itself starts with `call_id:`.
+        (Some((true, left)), Some((false, right))) => right.strip_prefix("call_id:") == Some(left),
+        (Some((false, left)), Some((true, right))) => left.strip_prefix("call_id:") == Some(right),
+        (Some((_, left)), Some((_, right))) => left == right,
         _ => false,
     }
 }
@@ -879,11 +881,15 @@ impl AdaptedResponsesHistory {
             Some(input @ (Value::String(_) | Value::Object(_))) => vec![input.clone()],
             Some(_) => return Ok(false),
         };
-        let mut context = previous.cloned().unwrap_or_default();
-        context.extend(input);
         self.requires_native_http = previous_history
             .is_some_and(|history| history.requires_native_http)
-            || context.iter().any(native_item_requires_http);
+            // A matched external snapshot already classified its full history.
+            // The local flag may instead describe an abandoned pending turn.
+            || (previous_history.is_none()
+                && previous.is_some_and(|context| context.iter().any(native_item_requires_http)))
+            || input.iter().any(native_item_requires_http);
+        let mut context = previous.cloned().unwrap_or_default();
+        context.extend(input);
         if !expand || previous_response_id.is_none() {
             self.pending_input = Some(context);
             return Ok(false);
@@ -926,5 +932,138 @@ impl AdaptedResponsesHistory {
         self.last_bytes = bytes;
         self.budget.resize(bytes)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn history_item_identity_preserves_call_priority_and_prefixed_ids() {
+        for (left, right, same) in [
+            (
+                json!({"call_id":"call","id":"old"}),
+                json!({"call_id":"call","id":"new"}),
+                true,
+            ),
+            (
+                json!({"call_id":"one","id":"item"}),
+                json!({"call_id":"two","id":"item"}),
+                false,
+            ),
+            (
+                json!({"call_id":"call"}),
+                json!({"id":"call_id:call"}),
+                true,
+            ),
+            (
+                json!({"call_id":"call_id:call"}),
+                json!({"id":"call_id:call_id:call"}),
+                true,
+            ),
+            (json!({"call_id":"call"}), json!({"id":"call"}), false),
+            (
+                json!({"call_id":"","id":"item"}),
+                json!({"id":"item"}),
+                true,
+            ),
+            (json!({"call_id":1,"id":"item"}), json!({"id":"item"}), true),
+            (json!({"call_id":" "}), json!({"id":"call_id: "}), true),
+            (json!({"id":""}), json!({"id":""}), false),
+            (json!({}), json!({}), false),
+        ] {
+            assert_eq!(same_history_item(&left, &right), same, "{left} / {right}");
+            assert_eq!(same_history_item(&right, &left), same, "{right} / {left}");
+        }
+    }
+
+    #[test]
+    fn native_history_classifies_snapshot_continuations_and_fresh_input() {
+        for opaque in [false, true] {
+            let mut previous = AdaptedResponsesHistory::default();
+            previous
+                .stage_native(&mut json!({"input":"task"}), None)
+                .unwrap();
+            let output = if opaque {
+                vec![json!({"type":"web_search_call","id":"search"})]
+            } else {
+                vec![json!({"role":"assistant","content":"done"})]
+            };
+            previous.remember("resp-first", &output).unwrap();
+            for new_opaque in [false, true] {
+                let input = if new_opaque {
+                    json!([{"type":"web_search_call","id":"new-search"}])
+                } else {
+                    json!([{"role":"user","content":"next"}])
+                };
+                let mut next = AdaptedResponsesHistory::default();
+                let mut continuation = json!({"previous_response_id":"resp-first","input":input});
+                let original = continuation.clone();
+                assert!(
+                    !next
+                        .stage_native(&mut continuation, Some(&previous))
+                        .unwrap()
+                );
+                assert_eq!(continuation, original);
+                assert_eq!(next.requires_native_http, opaque || new_opaque);
+                assert_eq!(next.pending_input.as_ref().unwrap().len(), 3);
+
+                next.stage_native(&mut json!({"input":"fresh"}), None)
+                    .unwrap();
+                assert!(!next.requires_native_http);
+                assert_eq!(
+                    next.pending_input.unwrap(),
+                    vec![json!({"role":"user","content":"fresh"})]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn local_history_rechecks_the_snapshot_after_an_abandoned_turn() {
+        for opaque in [false, true] {
+            let mut history = AdaptedResponsesHistory::default();
+            let opaque_item = json!({"type":"web_search_call","id":"search"});
+            history
+                .stage_native(&mut json!({"input":"task"}), None)
+                .unwrap();
+            history
+                .remember(
+                    "resp-first",
+                    &if opaque {
+                        vec![opaque_item.clone()]
+                    } else {
+                        vec![]
+                    },
+                )
+                .unwrap();
+            let abandoned_input = if opaque {
+                json!("safe")
+            } else {
+                json!([opaque_item])
+            };
+            history
+                .stage_native(&mut json!({"input":abandoned_input}), None)
+                .unwrap();
+            assert_eq!(history.requires_native_http, !opaque);
+            history.clear_pending();
+            history
+                .stage_native(
+                    &mut json!({"previous_response_id":"resp-first","input":"next"}),
+                    None,
+                )
+                .unwrap();
+            assert_eq!(history.requires_native_http, opaque);
+
+            let error = history
+                .stage_native(
+                    &mut json!({"previous_response_id":"missing","input":"next"}),
+                    None,
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("会话历史已失效"));
+            assert!(history.pending_input.is_none());
+        }
     }
 }

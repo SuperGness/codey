@@ -822,10 +822,11 @@ impl WebSocketResponsesDownstream {
                         probe.mark_first_upstream_data(FirstByteSource::UpstreamWebSocketEvent);
                     }
                     upstream.liveness.record_activity(Instant::now());
-                    let (events, raw_json_text) =
+                    let (single_event, events, raw_json_text) =
                         match serde_json::from_str::<Value>(text.as_str()) {
-                            Ok(event) => (vec![event], Some(text)),
+                            Ok(event) => (Some(event), Vec::new(), Some(text)),
                             Err(json_error) => (
+                                None,
                                 parse_responses_websocket_sse_events(text.as_str()).with_context(
                                     || {
                                         format!(
@@ -837,7 +838,7 @@ impl WebSocketResponsesDownstream {
                             ),
                         };
                     let mut raw_json_text = raw_json_text;
-                    for mut event in events {
+                    for mut event in single_event.into_iter().chain(events) {
                         if collaboration_alias
                             .as_ref()
                             .is_some_and(|alias| alias.apply(&mut event))

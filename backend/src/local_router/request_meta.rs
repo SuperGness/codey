@@ -13,24 +13,21 @@ pub(crate) fn should_force_upstream_streaming(
 }
 
 pub(crate) fn request_binding_keys(request: &HttpRequest) -> Vec<String> {
-    let session_only = incoming_header(request, "thread-id").is_none()
-        && !request_is_subagent(request)
-        && incoming_header(request, "x-codex-parent-thread-id").is_none();
+    let thread_id = incoming_header(request, "thread-id");
+    let session_id = incoming_header(request, "session-id").and_then(valid_codex_session_id);
+    let session_only = thread_id.is_none() && !request_is_subagent(request);
     let mut keys = Vec::new();
-    if session_only
-        && let Some(id) = incoming_header(request, "session-id").and_then(valid_codex_session_id)
-    {
+    if session_only && let Some(id) = session_id {
         // Only a main session may establish its exact canonical thread alias.
         keys.push(format!("thread-id:{id}"));
     }
     keys.extend(
-        ["thread-id", "session-id"]
-            .into_iter()
-            .filter_map(|header_name| {
-                let value = incoming_header(request, header_name)?.trim();
-                (!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control))
-                    .then(|| format!("{header_name}:{value}"))
-            }),
+        [
+            ("thread-id", thread_id.and_then(valid_codex_session_id)),
+            ("session-id", session_id),
+        ]
+        .into_iter()
+        .filter_map(|(header_name, value)| value.map(|value| format!("{header_name}:{value}"))),
     );
     keys
 }
@@ -438,19 +435,23 @@ pub(crate) fn align_routing_hint_model(headers: &mut HeaderMap, upstream_model: 
         headers.remove(ROUTING_HINT_HEADER);
         return;
     };
-    let rewritten = value
-        .split(';')
-        .map(|segment| {
-            if segment.trim().starts_with("model=") {
-                format!("model={upstream_model}")
-            } else {
-                segment.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(";");
-    if rewritten == value {
+    if !value.split(';').any(|segment| {
+        segment.trim().starts_with("model=")
+            && segment.strip_prefix("model=") != Some(upstream_model)
+    }) {
         return;
+    }
+    let mut rewritten = String::with_capacity(value.len());
+    for (index, segment) in value.split(';').enumerate() {
+        if index > 0 {
+            rewritten.push(';');
+        }
+        if segment.trim().starts_with("model=") {
+            rewritten.push_str("model=");
+            rewritten.push_str(upstream_model);
+        } else {
+            rewritten.push_str(segment);
+        }
     }
     match HeaderValue::from_str(&rewritten) {
         Ok(rewritten) => {

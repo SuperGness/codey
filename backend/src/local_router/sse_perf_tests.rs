@@ -37,6 +37,46 @@ fn sse_rewrite_microbenchmark() {
     }
 }
 
+#[test]
+#[ignore = "opt-in native SSE terminal microbenchmark"]
+fn native_sse_terminal_microbenchmark() {
+    for (payload_bytes, frames_per_chunk, iterations) in
+        [(64, 1, 40_000), (64, 16, 2_500), (65_536, 1, 160)]
+    {
+        let frame = format!(
+            "data: {{\"type\":\"response.output_text.delta\",\"delta\":\"{}\"}}\n\n",
+            "x".repeat(payload_bytes)
+        );
+        let input = frame.repeat(frames_per_chunk).into_bytes();
+        let mut elapsed_us = Vec::new();
+        for _ in 0..7 {
+            let mut terminal = NativeSseTerminal::default();
+            assert!(!terminal.observe(&input).unwrap());
+            let start = Instant::now();
+            for _ in 0..iterations {
+                assert!(!std::hint::black_box(
+                    terminal.observe(std::hint::black_box(&input)).unwrap()
+                ));
+            }
+            elapsed_us.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+            assert!(
+                terminal
+                    .observe(b"data: {\"type\":\"response.completed\"}\n\n")
+                    .unwrap()
+            );
+            terminal.finish().unwrap();
+        }
+        elapsed_us.sort_by(f64::total_cmp);
+        println!(
+            "NATIVE_SSE_TERMINAL_BENCH {}",
+            json!({"payload_bytes":payload_bytes,"frames_per_chunk":frames_per_chunk,
+                "iterations":iterations,"samples":elapsed_us.len(),
+                "median_us":elapsed_us[elapsed_us.len()/2],
+                "min_us":elapsed_us[0],"max_us":elapsed_us[elapsed_us.len()-1]})
+        );
+    }
+}
+
 #[tokio::test]
 async fn native_sse_forwards_first_delta_before_completion_and_keeps_log_usage() {
     const FIRST: &[u8] = b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n";

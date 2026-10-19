@@ -119,6 +119,12 @@ pub(crate) fn parse_sse_frames<A: SseFrameAccumulator>(
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+struct ResponsesEventKind<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: Cow<'a, str>,
+}
+
 /// Validate native SSE completion while forwarding the original bytes. Only
 /// one event is retained; unknown JSON fields are skipped without building a tree.
 #[derive(Default)]
@@ -131,11 +137,6 @@ pub(crate) struct NativeSseTerminal {
 
 impl NativeSseTerminal {
     fn ingest(&mut self, frame: &[u8]) -> Result<()> {
-        #[derive(serde::Deserialize)]
-        struct EventKind {
-            #[serde(rename = "type")]
-            kind: String,
-        }
         if let Some(data) = sse_frame_data(frame)? {
             if data.trim() == "[DONE]" {
                 if !self.terminal {
@@ -143,10 +144,10 @@ impl NativeSseTerminal {
                 }
                 return Ok(());
             }
-            let event: EventKind =
+            let event: ResponsesEventKind<'_> =
                 serde_json::from_str(&data).context("Responses SSE data 无效")?;
             self.terminal |= matches!(
-                event.kind.as_str(),
+                event.kind.as_ref(),
                 "response.completed" | "response.failed" | "response.incomplete" | "error"
             );
         }
@@ -254,11 +255,6 @@ impl<'a> ResponsesSseRewriter<'a> {
     }
 
     fn rewrite_frame<'b>(&self, frame: &[u8], original: &'b [u8]) -> Cow<'b, [u8]> {
-        #[derive(serde::Deserialize)]
-        struct EventKind<'a> {
-            #[serde(rename = "type", borrow)]
-            kind: Cow<'a, str>,
-        }
         let passthrough = || Cow::Borrowed(original);
         let Ok(Some(data)) = sse_frame_data(frame) else {
             return passthrough();
@@ -270,7 +266,7 @@ impl<'a> ResponsesSseRewriter<'a> {
             if !self.normalize_failures {
                 return passthrough();
             }
-            let Ok(event) = serde_json::from_str::<EventKind<'_>>(&data) else {
+            let Ok(event) = serde_json::from_str::<ResponsesEventKind<'_>>(&data) else {
                 return passthrough();
             };
             if !matches!(event.kind.as_ref(), "error" | "response.failed") {
@@ -441,6 +437,41 @@ mod perf_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_type_borrows_plain_json_and_decodes_escaped_json() {
+        let plain: ResponsesEventKind<'_> =
+            serde_json::from_str(r#"{"type":"response.completed"}"#).unwrap();
+        assert!(matches!(plain.kind, Cow::Borrowed("response.completed")));
+        let escaped: ResponsesEventKind<'_> =
+            serde_json::from_str(r#"{"type":"response.\u0063ompleted"}"#).unwrap();
+        assert!(matches!(escaped.kind, Cow::Owned(ref kind) if kind == "response.completed"));
+    }
+
+    #[test]
+    fn native_terminal_accepts_escaped_event_types_across_chunk_boundaries() {
+        let input = b"data: {\"type\":\"response.output_text.\\u0064elta\",\"delta\":\"hello\"}\n\ndata: {\"type\":\"response.\\u0063ompleted\"}\n\n";
+        for chunk_size in 1..=input.len() {
+            let mut terminal = NativeSseTerminal::default();
+            for chunk in input.chunks(chunk_size) {
+                terminal.observe(chunk).unwrap();
+            }
+            terminal.finish().unwrap();
+        }
+        for data in [
+            r#"{}"#,
+            r#"{"type":null}"#,
+            r#"{"type":1}"#,
+            r#"{"type":[]}"#,
+        ] {
+            let mut terminal = NativeSseTerminal::default();
+            assert!(
+                terminal
+                    .observe(format!("data: {data}\n\n").as_bytes())
+                    .is_err()
+            );
+        }
+    }
 
     fn rewrite_chunks(input: &[u8], chunk_size: usize, normalize: bool) -> Vec<u8> {
         let mut rewriter = ResponsesSseRewriter::new(None, normalize, None);

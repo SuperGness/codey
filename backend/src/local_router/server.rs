@@ -1061,14 +1061,16 @@ impl RouterSnapshot {
             return self.target_for_route_model(&alias.provider_id, &alias.model, requested_model);
         }
         if !self.raw_models.contains_key(&requested_key)
-            && let Some(source_model) =
-                model_id::historical_source(requested_model, &self.model_alias_history)
+            && let Some(source_model) = self
+                .model_alias_history
+                .get(&requested_key)
+                .map(String::as_str)
         {
             // Resolve a recorded upstream id as raw data, never recursively as
             // another selector (an upstream id can itself contain a slash).
             return self
                 .resolve_raw_request(
-                    source_model,
+                    &model_id::key(source_model),
                     request.route_hint,
                     request.bound_route,
                     requested_model,
@@ -1080,25 +1082,27 @@ impl RouterSnapshot {
                 });
         }
         self.resolve_raw_request(
-            requested_model,
+            &requested_key,
             request.route_hint,
             request.bound_route,
             requested_model,
         )
     }
 
+    /// `model_key` is normalized before resolving current or historical model ids.
     pub(crate) fn resolve_raw_request(
         &self,
-        model: &str,
+        model_key: &str,
         route_hint: Option<&str>,
         bound_route: Option<&str>,
         requested_model: &str,
     ) -> Result<RouteSelection> {
         let candidates = self
             .raw_models
-            .get(&model_id::key(model))
+            .get(model_key)
             .map(Vec::as_slice)
             .unwrap_or_default();
+        let auto_review = model_id::equal(model_key, CODEX_AUTO_REVIEW_MODEL);
         if let Some(route_hint) = route_hint
             && let Some(candidate) = candidates
                 .iter()
@@ -1110,7 +1114,7 @@ impl RouterSnapshot {
         // third-party selections remain route-qualified. An explicit hint
         // above can still select a third-party route with the same model.
         // 同名模型在多条官方线路并存时优先给默认账号，避免随机消耗其它账号额度。
-        if !model_id::equal(model, CODEX_AUTO_REVIEW_MODEL)
+        if !auto_review
             && let Some(official) = self
                 .default_official_provider
                 .as_deref()
@@ -1156,7 +1160,7 @@ impl RouterSnapshot {
         // binding identified a route above. A capable bound third-party route
         // still wins before this fallback.
         // 多账号并存时优先用默认账号，避免复核请求随机消耗其它账号的额度。
-        if model_id::equal(model, CODEX_AUTO_REVIEW_MODEL)
+        if auto_review
             && let Some(official_route) = self
                 .default_official_provider
                 .as_deref()
@@ -1194,7 +1198,7 @@ impl RouterSnapshot {
         }
         // 没有任何线路支持自动复核时，用杂事模型承接这一请求。这里保留
         // 请求里的原始模型名，让下游的日志与提示头仍能看出这是一次回退。
-        if model_id::equal(model, CODEX_AUTO_REVIEW_MODEL)
+        if auto_review
             && let Some(misc) = &self.misc_model
             && let Ok(mut selection) =
                 self.target_for_route_model(&misc.provider_id, &misc.model, requested_model)
