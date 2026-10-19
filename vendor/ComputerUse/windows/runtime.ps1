@@ -568,14 +568,23 @@ function Capture-WindowPngBase64($bounds) {
     }
     try {
         $bitmap = New-Object System.Drawing.Bitmap ([int][math]::Round($bounds.width)), ([int][math]::Round($bounds.height))
-        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-        $graphics.CopyFromScreen([int][math]::Round($bounds.x), [int][math]::Round($bounds.y), 0, 0, $bitmap.Size)
-        $stream = New-Object System.IO.MemoryStream
-        $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
-        $graphics.Dispose()
-        $bitmap.Dispose()
-        $bytes = $stream.ToArray()
-        $stream.Dispose()
+        try {
+            $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+            try {
+                $graphics.CopyFromScreen([int][math]::Round($bounds.x), [int][math]::Round($bounds.y), 0, 0, $bitmap.Size)
+                $stream = New-Object System.IO.MemoryStream
+                try {
+                    $bitmap.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+                    $bytes = $stream.ToArray()
+                } finally {
+                    $stream.Dispose()
+                }
+            } finally {
+                $graphics.Dispose()
+            }
+        } finally {
+            $bitmap.Dispose()
+        }
         return [Convert]::ToBase64String($bytes)
     } catch {
         return $null

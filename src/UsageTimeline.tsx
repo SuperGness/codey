@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { IconChevronLeft, IconChevronRight } from "@tabler/icons-react";
 import { Button } from "./components/ui";
 import { formatUsageNumber, usageTrend, type LogAnalytics } from "./usageAnalysis";
@@ -9,7 +9,8 @@ const shortDate = (timestamp: number, includeYear: boolean) => new Date(timestam
 const compactNumber = (value: number | null) => value == null ? "—" : Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 
 export function UsageTimeline({ stats }: { stats: LogAnalytics }) {
-  const view = usageTimelineView(stats);
+  const view = useMemo(() => usageTimelineView(stats), [stats]);
+  const whole = useMemo(() => usageTrend(stats), [stats]);
   const [selectedIndex, setSelectedIndex] = useState(view?.latestIndex ?? 0);
   const [hoveredIndex, setHoveredIndex] = useState<number>();
   const [windowStart, setWindowStart] = useState(Math.max(0, (view?.latestIndex ?? 0) - (view?.focusLength ?? 24) + 1));
@@ -22,7 +23,6 @@ export function UsageTimeline({ stats }: { stats: LogAnalytics }) {
   const selected = view.bucketAt(activeIndex);
   const start = window.buckets[0].start;
   const end = window.buckets[window.length - 1].end;
-  const whole = usageTrend(stats);
   const stateLabel = selected.total === 0 ? "无请求" : selected.tokens == null ? "用量未上报" : selected.tokens === 0 ? "已知用量为零" : "已上报用量合计";
   const jump = (index: number) => {
     setSelectedIndex(index);

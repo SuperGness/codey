@@ -60,7 +60,7 @@ test("鼠标悬停临时预览，点击固定时段，离开图表恢复固定�
   const states = [];
   let cursor = 0;
   const graph = createModuleGraph(new URL("../src/UsageTimeline.tsx", import.meta.url), { autoStub: true, stubs: {
-    react: { useState(initial) { const index = cursor++; if (!(index in states)) states[index] = initial; return [states[index], (value) => { states[index] = value; }]; }, useRef() { return { current: null }; } },
+    react: { useMemo(factory) { return factory(); }, useState(initial) { const index = cursor++; if (!(index in states)) states[index] = initial; return [states[index], (value) => { states[index] = value; }]; }, useRef() { return { current: null }; } },
     "./components/ui": autoStubModule("ui"),
   } });
   const stats = { fromUnixMs: 0, toUnixMs: 400, bucketMs: 100, trend: [bucket(100, null), bucket(200, 0), bucket(300, 99)] };

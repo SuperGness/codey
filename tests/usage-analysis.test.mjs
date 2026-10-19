@@ -154,6 +154,7 @@ test("同步异常与后端失败终止loading且可重新加载；不可查询�
 // 渲染层：未知用量的分桶必须与零用量区分，用低矮虚线柱加明确文案呈现。
 const panelHooks = { effects: [], hooks: [], cursor: 0 };
 const panelReact = {
+  useMemo(factory) { return factory(); },
   useState(initial) {
     const index = panelHooks.cursor++;
     if (!(index in panelHooks.hooks))
