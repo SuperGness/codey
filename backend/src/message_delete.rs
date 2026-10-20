@@ -761,7 +761,13 @@ fn session_absent_from_every_store(home: &Path, session_id: &str) -> bool {
 fn databases_reference_session(home: &Path, session_id: &str) -> bool {
     let needle = session_id.as_bytes();
     let mut database_paths = codex_session_db_paths_from_home(home);
-    database_paths.push(home.join(THREAD_HISTORY_DB));
+    // 线程历史库常超过字节扫描上限，会被一律当作仍有引用，墓碑因而每次启动
+    // 都重放；结构可识别时改用按 thread_id 的索引查询。
+    match thread_history_references_session(&home.join(THREAD_HISTORY_DB), session_id) {
+        Ok(Some(true)) => return true,
+        Ok(Some(false)) => {}
+        Ok(None) | Err(_) => database_paths.push(home.join(THREAD_HISTORY_DB)),
+    }
     for db_path in database_paths {
         for path in codex_sqlite_sidecar_paths(&db_path) {
             if scan_session_reference(&path, needle).unwrap_or(true) {
@@ -770,6 +776,46 @@ fn databases_reference_session(home: &Path, session_id: &str) -> bool {
         }
     }
     false
+}
+
+/// `None` 表示库不存在或结构未识别，由调用方回落到字节扫描。
+fn thread_history_references_session(path: &Path, session_id: &str) -> Result<Option<bool>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(MESSAGE_DELETE_SQLITE_BUSY_TIMEOUT)?;
+    let tables = {
+        let mut statement =
+            connection.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let mut thread_tables = Vec::new();
+    for table in tables {
+        if crate::sqlite_util::table_columns(&connection, &table)?.contains("thread_id") {
+            thread_tables.push(table);
+        }
+    }
+    if !["thread_items", "thread_turns"]
+        .iter()
+        .all(|required| thread_tables.iter().any(|table| table == required))
+    {
+        return Ok(None);
+    }
+    for table in thread_tables {
+        let escaped = table.replace('"', "\"\"");
+        let referenced: bool = connection.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM \"{escaped}\" WHERE thread_id = ?1)"),
+            [session_id],
+            |row| row.get(0),
+        )?;
+        if referenced {
+            return Ok(Some(true));
+        }
+    }
+    Ok(Some(false))
 }
 
 fn scan_session_reference(path: &Path, needle: &[u8]) -> std::io::Result<bool> {
@@ -1403,6 +1449,34 @@ mod tests {
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         assert!(!session_absent_from_every_store(directory.path(), session));
+    }
+
+    #[test]
+    fn oversized_thread_history_is_checked_by_thread_id_instead_of_bytes() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join(THREAD_HISTORY_DB);
+        let present = "019ff8aa-0b6e-7a01-a605-7a717a7795e3";
+        let absent = "019ff8aa-0b6e-7a01-a605-7a717a7795e4";
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE thread_turns (thread_id TEXT, turn_id TEXT);\
+                 CREATE TABLE thread_items (thread_id TEXT, turn_id TEXT);",
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO thread_items VALUES (?1, 't1')", [present])
+            .unwrap();
+        drop(connection);
+        // 稀疏扩容越过字节扫描上限；SQLite 按文件头的页数读取，尾部零页不影响查询。
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_SESSION_SCAN_BYTES as u64 + 1)
+            .unwrap();
+        assert!(!session_absent_from_every_store(directory.path(), present));
+        assert!(session_absent_from_every_store(directory.path(), absent));
     }
 
     #[test]
