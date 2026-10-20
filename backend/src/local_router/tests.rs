@@ -1021,6 +1021,42 @@ async fn websocket_http_fallback_gzip_html_marks_failed_despite_http_200() {
     upstream_task.await.unwrap();
 }
 
+#[tokio::test]
+async fn upstream_websocket_idle_read_is_reported_as_an_upstream_timeout() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let (received_sender, received) = oneshot::channel();
+    let upstream_task = tokio::spawn(async move {
+        let (stream, _) = upstream.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        socket.next().await.unwrap().unwrap();
+        received_sender.send(()).unwrap();
+        // 连接保持打开，但不再发送任何事件。
+        let _ = socket.next().await;
+    });
+
+    let (mut config, provider_id, model) = router_config(format!("http://{upstream_address}/v1"));
+    config.profiles[0].supports_websockets = true;
+    let snapshot = RouterSnapshot::from_config(&config);
+    let route = Arc::clone(&snapshot.routes[&provider_id]);
+    let (downstream_socket, _downstream_peer) = local_websocket_pair().await;
+    let mut downstream = WebSocketResponsesDownstream::new(downstream_socket);
+    let mut body = json!({"model":model,"input":"hello"});
+    let headers = HeaderMap::new();
+    let proxy = downstream.proxy_upstream_websocket(&route, &headers, &mut body, false, None);
+    tokio::pin!(proxy);
+    tokio::select! {
+        result = &mut proxy => panic!("upstream sent no events: {result:?}"),
+        _ = received => {}
+    }
+    tokio::time::pause();
+    let error = proxy.await.unwrap_err();
+
+    assert!(error.is::<UpstreamReadIdleTimeout>(), "{error:#}");
+    assert!(is_upstream_timeout_error(&error));
+    upstream_task.abort();
+}
+
 #[test]
 fn upstream_websocket_liveness_sends_heartbeat_and_expires_missing_pong() {
     let connected_at = Instant::now();
@@ -3006,6 +3042,23 @@ async fn unsupported_websocket_handshake_falls_back_to_http_until_config_changes
     .unwrap();
     assert_eq!(page.total, 2);
     assert!(page.items.iter().all(|item| item.fallback_count == 1));
+    for item in &page.items {
+        assert_eq!(
+            item.upstream_attempts.len(),
+            1,
+            "握手和负能力缓存不计入模型请求次数"
+        );
+        let attempt = &item.upstream_attempts[0];
+        assert_eq!(attempt.transport, UpstreamTransport::HttpSse);
+        assert_eq!(
+            attempt.trigger,
+            crate::route_request_log::AttemptTrigger::TransportFallback
+        );
+        assert_eq!(
+            attempt.outcome,
+            crate::route_request_log::AttemptOutcome::Succeeded
+        );
+    }
     let mut reasons: Vec<_> = page
         .items
         .iter()
@@ -5408,7 +5461,7 @@ fn codey_route_metadata_is_removed_without_dropping_other_turn_metadata() {
         }
     });
 
-    let (route, body_mutated) = take_codey_route_metadata(&mut request, &mut body).unwrap();
+    let (route, body_mutated) = take_codey_route_metadata(&mut request, &mut body, None).unwrap();
 
     assert_eq!(route.as_deref(), Some("route-a"));
     assert!(body_mutated);
@@ -5444,11 +5497,305 @@ fn codey_route_metadata_header_only_does_not_mark_the_body_mutated() {
         }
     });
 
-    let (route, body_mutated) = take_codey_route_metadata(&mut request, &mut body).unwrap();
+    let (route, body_mutated) = take_codey_route_metadata(&mut request, &mut body, None).unwrap();
 
     assert_eq!(route.as_deref(), Some("route-a"));
     assert!(!body_mutated);
     assert_eq!(body["client_metadata"]["keep"], "body");
+}
+
+#[test]
+fn explicit_model_alias_validates_and_strips_conflicting_route_metadata() {
+    let (mut config, provider_id, model) = router_config("https://relay.example/v1".into());
+    config
+        .model_alias_history
+        .insert("retired-route/provider-model".into(), model.clone());
+    let snapshot = RouterSnapshot::from_config(&config);
+    let alias = model_alias(&provider_id, &model);
+    let mut request = HttpRequest {
+        method: "POST".into(),
+        path: "/v1/responses".into(),
+        headers: vec![
+            (
+                TURN_METADATA_HEADER.into(),
+                json!({ROUTE_METADATA_KEY:"old-route","keep":"header"}).to_string(),
+            ),
+            (
+                TURN_METADATA_HEADER.into(),
+                json!({ROUTE_METADATA_KEY:"another-route","keep":"duplicate"}).to_string(),
+            ),
+        ],
+        body: Vec::new(),
+        _body_budget_permit: None,
+    };
+    let mut body = json!({
+        "model":alias,
+        "client_metadata": {
+            ROUTE_METADATA_KEY:provider_id,
+            TURN_METADATA_HEADER: {ROUTE_METADATA_KEY:"replayed-route","keep":"nested"},
+            "keep":"body"
+        }
+    });
+    let (hint, mutated) =
+        take_codey_route_metadata(&mut request, &mut body, snapshot.active_model_alias(&alias))
+            .unwrap();
+    assert!(hint.is_none());
+    assert!(mutated);
+    for (index, (_, value)) in request.headers.iter().enumerate() {
+        let value: Value = serde_json::from_str(value).unwrap();
+        assert!(value.get(ROUTE_METADATA_KEY).is_none());
+        assert_eq!(value["keep"], ["header", "duplicate"][index]);
+    }
+    assert!(body["client_metadata"].get(ROUTE_METADATA_KEY).is_none());
+    assert!(
+        body["client_metadata"][TURN_METADATA_HEADER]
+            .get(ROUTE_METADATA_KEY)
+            .is_none()
+    );
+    assert_eq!(
+        body["client_metadata"][TURN_METADATA_HEADER]["keep"],
+        "nested"
+    );
+    assert_eq!(body["client_metadata"]["keep"], "body");
+    let mut decision = crate::route_request_log::RouteDecision::default();
+    let selected = snapshot
+        .resolve_request_observed(
+            RouteRequest {
+                requested_model: &alias,
+                route_hint: hint.as_deref(),
+                bound_route: Some("old-route"),
+            },
+            Some(&mut decision),
+        )
+        .unwrap();
+    assert_eq!(selected.provider_id, provider_id);
+    assert_eq!(
+        decision.reason,
+        crate::route_request_log::RouteDecisionReason::ExplicitAlias
+    );
+    assert!(!decision.historical_alias);
+    assert!(snapshot.active_model_alias(&model).is_none());
+    assert!(
+        snapshot
+            .active_model_alias("retired-route/provider-model")
+            .is_none()
+    );
+}
+
+#[test]
+fn explicit_model_alias_never_bypasses_route_metadata_value_validation() {
+    let (config, provider_id, model) = router_config("https://relay.example/v1".into());
+    let snapshot = RouterSnapshot::from_config(&config);
+    let alias = model_alias(&provider_id, &model);
+    for invalid in [
+        json!(42),
+        json!(null),
+        json!(""),
+        json!("bad\nroute"),
+        json!("a".repeat(257)),
+    ] {
+        for location in ["header", "direct", "nested_object", "nested_string"] {
+            let mut header = json!({ROUTE_METADATA_KEY:"old-route"});
+            let mut metadata = json!({ROUTE_METADATA_KEY:provider_id});
+            match location {
+                "header" => header[ROUTE_METADATA_KEY] = invalid.clone(),
+                "direct" => metadata[ROUTE_METADATA_KEY] = invalid.clone(),
+                "nested_object" => {
+                    metadata[TURN_METADATA_HEADER] = json!({ROUTE_METADATA_KEY:invalid})
+                }
+                "nested_string" => {
+                    metadata[TURN_METADATA_HEADER] =
+                        json!({ROUTE_METADATA_KEY:invalid}).to_string().into()
+                }
+                _ => unreachable!(),
+            }
+            let mut request = HttpRequest {
+                method: "POST".into(),
+                path: "/v1/responses".into(),
+                headers: vec![(TURN_METADATA_HEADER.into(), header.to_string())],
+                body: Vec::new(),
+                _body_budget_permit: None,
+            };
+            let mut body = json!({"model":alias,"client_metadata":metadata});
+            assert!(
+                take_codey_route_metadata(
+                    &mut request,
+                    &mut body,
+                    snapshot.active_model_alias(&alias),
+                )
+                .is_err(),
+                "accepted invalid {location}: {invalid}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn route_metadata_conflicts_still_reject_raw_historical_and_default_models() {
+    let (mut config, provider_id, model) = router_config("http://127.0.0.1:1/v1".into());
+    config.default_model = model_alias(&provider_id, &model);
+    config
+        .model_alias_history
+        .insert("retired-route/provider-model".into(), model.clone());
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    for requested_model in [
+        Some(model.as_str()),
+        Some("retired-route/provider-model"),
+        None,
+    ] {
+        let mut body =
+            json!({"input":"continue", "client_metadata":{ROUTE_METADATA_KEY:provider_id}});
+        if let Some(requested_model) = requested_model {
+            body["model"] = requested_model.into();
+        }
+        let response = client
+            .post(format!("{}/responses", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .header(
+                TURN_METADATA_HEADER,
+                json!({ROUTE_METADATA_KEY:"old-route"}).to_string(),
+            )
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["error"]["code"],
+            "route_metadata_invalid"
+        );
+    }
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_route_switch_ignores_replayed_metadata_for_http_and_websocket() {
+    for websocket in [false, true] {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let mut captured = Vec::new();
+            for sequence in 0..3 {
+                let (mut stream, _) = upstream.accept().await.unwrap();
+                let request = read_http_request(&mut stream).await.unwrap();
+                let body: Value = serde_json::from_slice(&request.body).unwrap();
+                write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({
+                        "id":format!("resp-switch-{sequence}"), "object":"response",
+                        "status":"completed", "model":body["model"], "output":[]
+                    }),
+                )
+                .await
+                .unwrap();
+                captured.push((request.path, body));
+            }
+            captured
+        });
+        let (mut config, provider_a, model) = router_config(format!("http://{address}/a/v1"));
+        let mut route_b = config.profiles[0].clone();
+        route_b.id = "route-b".into();
+        route_b.base_url = format!("http://{address}/b/v1");
+        config.profiles.push(route_b);
+        config
+            .selected_models_by_provider
+            .insert("route-b".into(), vec![model.clone()]);
+        let router = LocalRouter::start(&config).await.unwrap();
+        let endpoint = router.endpoint();
+        let header = json!({ROUTE_METADATA_KEY:provider_a,"keep":"header"}).to_string();
+        let mut socket = if websocket {
+            Some(
+                connect_router_websocket_with_headers(
+                    &endpoint,
+                    &[
+                        (TURN_METADATA_HEADER, &header),
+                        ("thread-id", "switching-thread"),
+                    ],
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        for provider in [&provider_a, "route-b", &provider_a] {
+            let mut body = json!({
+                "model":model_alias(provider, &model), "input":"complete portable context",
+                "client_metadata":{
+                    ROUTE_METADATA_KEY:"route-b", "keep":"body",
+                    TURN_METADATA_HEADER:json!({ROUTE_METADATA_KEY:provider_a,"keep":"nested"}).to_string()
+                }
+            });
+            if let Some(socket) = socket.as_mut() {
+                body["type"] = "response.create".into();
+                socket
+                    .send(WebSocketMessage::Text(body.to_string().into()))
+                    .await
+                    .unwrap();
+                loop {
+                    let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    let WebSocketMessage::Text(text) = message else {
+                        continue;
+                    };
+                    let event: Value = serde_json::from_str(text.as_str()).unwrap();
+                    if responses_event_is_terminal(&event) {
+                        assert_eq!(event["type"], "response.completed", "{event}");
+                        break;
+                    }
+                }
+            } else {
+                let response = client
+                    .post(format!("{}/responses", endpoint.base_url))
+                    .bearer_auth(&endpoint.token)
+                    .header("thread-id", "switching-thread")
+                    .header(TURN_METADATA_HEADER, &header)
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), reqwest::StatusCode::OK);
+            }
+        }
+        if let Some(mut socket) = socket {
+            socket.close(None).await.unwrap();
+        }
+        let captured = tokio::time::timeout(Duration::from_secs(5), upstream_task)
+            .await
+            .unwrap()
+            .unwrap();
+        for ((path, body), expected) in
+            captured
+                .iter()
+                .zip(["/a/v1/responses", "/b/v1/responses", "/a/v1/responses"])
+        {
+            assert_eq!(path, expected);
+            assert_eq!(body["model"], model);
+            assert_eq!(body["client_metadata"]["keep"], "body");
+            assert!(body["client_metadata"].get(ROUTE_METADATA_KEY).is_none());
+            let nested: Value = serde_json::from_str(
+                body["client_metadata"][TURN_METADATA_HEADER]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert!(nested.get(ROUTE_METADATA_KEY).is_none());
+            assert_eq!(nested["keep"], "nested");
+        }
+        router.stop().await.unwrap();
+    }
 }
 
 #[test]
@@ -5684,6 +6031,72 @@ fn native_responses_rewrite_can_update_previous_response_id() {
     assert_eq!(
         serde_json::from_slice::<Value>(&rewritten).unwrap(),
         updated
+    );
+}
+
+#[test]
+fn native_responses_rewrite_adds_output_limit_without_reencoding_history() {
+    let original = br#"{"model":"claude-opus-5","input": [ {"role":"user","content":"raw"} ]}"#;
+    let updated = json!({
+        "model":"claude-opus-5",
+        "input":[{"role":"user","content":"raw"}],
+        "max_output_tokens":64_000,
+    });
+
+    let rewritten = rewrite_native_responses_encoded_body(original, &updated).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&rewritten).unwrap(),
+        updated
+    );
+    assert!(
+        String::from_utf8(rewritten)
+            .unwrap()
+            .contains(r#"[ {"role":"user","content":"raw"} ]"#)
+    );
+}
+
+#[tokio::test]
+async fn large_upstream_body_serializes_off_the_async_thread_with_its_budget() {
+    let budget = Arc::new(Semaphore::new(REQUEST_BODY_BUDGET_PERMITS));
+    let mut permit = acquire_request_body_budget(&budget, REQUEST_JSON_OFFLOAD_BYTES).unwrap();
+    assert!(request_budget_covers(
+        permit.as_ref(),
+        REQUEST_JSON_OFFLOAD_BYTES
+    ));
+    let held = permit.as_ref().unwrap().num_permits();
+    let small = acquire_request_body_budget(&budget, 1024).unwrap();
+    assert!(!request_budget_covers(
+        small.as_ref(),
+        REQUEST_JSON_OFFLOAD_BYTES
+    ));
+    assert!(!request_budget_covers(None, REQUEST_JSON_OFFLOAD_BYTES));
+
+    let body = json!({"input":"x".repeat(REQUEST_JSON_OFFLOAD_BYTES)});
+    let mut request = HttpRequest {
+        method: "POST".into(),
+        path: "/v1/responses".into(),
+        headers: Vec::new(),
+        body: Vec::new(),
+        _body_budget_permit: permit.take(),
+    };
+    let encoded = RequestEncoding {
+        bridge: ProtocolBridge::ResponsesToChatCompletions,
+        requested_model: "m",
+        upstream_model: "m",
+        body_mutated: true,
+    }
+    .encode(&mut request, body.clone(), None, None)
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&encoded.body).unwrap(),
+        body
+    );
+    let retained = encoded.admission.as_ref().unwrap().num_permits();
+    assert!(retained < held);
+    assert_eq!(
+        retained,
+        encoded.body.len().div_ceil(REQUEST_BODY_BUDGET_UNIT_BYTES)
     );
 }
 
@@ -8643,6 +9056,13 @@ async fn responses_compact_restores_route_identity_and_proxies_the_window_unchan
     let (mut config, provider_id, model) =
         router_config(format!("http://{upstream_address}/v1/responses"));
     config.profiles[0].supports_remote_compaction = true;
+    let mut newly_selected = config.profiles[0].clone();
+    newly_selected.id = "route-b".into();
+    newly_selected.api_key = "sk-new-route".into();
+    config.profiles.push(newly_selected);
+    config
+        .selected_models_by_provider
+        .insert("route-b".into(), vec![model.clone()]);
     let router = LocalRouter::start(&config).await.unwrap();
     let endpoint = router.endpoint();
     assert!(endpoint.supports_remote_compaction);
@@ -8651,6 +9071,11 @@ async fn responses_compact_restores_route_identity_and_proxies_the_window_unchan
         .post(format!("{}/responses/compact", endpoint.base_url))
         .bearer_auth(&endpoint.token)
         .header(CHATGPT_ACCOUNT_ID_HEADER, "acct-must-not-leak")
+        // Codex 的压缩仍指定旧模型；新一轮的线路提示不能改换压缩归属。
+        .header(
+            TURN_METADATA_HEADER,
+            json!({ROUTE_METADATA_KEY:"route-b"}).to_string(),
+        )
         .json(&json!({
             "model": model_alias(&provider_id, &model),
             "input": [{"role":"user","content":"full context"}],

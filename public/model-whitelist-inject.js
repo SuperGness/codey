@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "75";
+  const patchVersion = "76";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -362,16 +362,10 @@
       ? (threadId ? knownThreadProvider(source) : paramsProviderId(source))
       : "";
     const routedProviderId = localRouterProviderId;
-    const turnSendsUpstreamModel = method === "turn/start" && Boolean(routeProviderId);
-    const officialRoute = isOfficialRoute(route);
-    let routedModel = model;
-    if (officialRoute) {
-      routedModel = turnSendsUpstreamModel
-        ? cleanText(route?.sourceModel) || model
-        : cleanText(route?.selectorModel) || cleanText(route?.sourceModel) || model;
-    } else if (turnSendsUpstreamModel) {
-      routedModel = cleanText(route?.sourceModel) || model;
-    }
+    // The native catalog declares capabilities for each selector. Keep that
+    // identity through turn/start so the gateway can distinguish a new choice
+    // from route metadata retained by app-server from an earlier turn.
+    const routedModel = cleanText(route?.selectorModel) || model;
     const next = { ...source };
     // null 表示沿用对话模型；空字符串会让 app-server 报没有可用模型。
     if (routedModel) next.model = routedModel;
@@ -2678,6 +2672,10 @@
     const canonicalRoute = canonicalRequestedModel
       ? routeForModel(canonicalRequestedModel)
       : null;
+    const explicitRoute = canonicalRoute && (
+      method === "thread/settings/update"
+      || modelKey(canonicalRoute.selectorModel) !== modelKey(canonicalRoute.sourceModel)
+    ) ? canonicalRoute : null;
     const metadataRouteProviderId = requestProviderId(
       source[routeMetadataParam]?.[routeMetadataKey],
     );
@@ -2740,8 +2738,12 @@
       };
     })();
     const route = userIntentRoute
-      || (method !== "thread/settings/update" ? requestedThreadRoute : null)
       || refreshedDefaultRoute
+      // A current selector is an explicit route identity. Persisted bindings
+      // and response metadata may describe the previous turn, so only use
+      // them when the request still carries an unqualified upstream model.
+      || explicitRoute
+      || (method !== "thread/settings/update" ? requestedThreadRoute : null)
       || (restoredBinding ? routeForThread(threadId) : null)
       || metadataRoute
       || previouslyPatchedRoute

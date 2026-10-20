@@ -347,6 +347,16 @@ pub(crate) fn request_body_budget_permit_count(wire_bytes: usize) -> Result<usiz
     Ok(estimated_memory.div_ceil(REQUEST_BODY_BUDGET_UNIT_BYTES))
 }
 
+/// 名额按正文大小的固定倍数预留，反推即可判断请求正文是否至少有 `bytes` 大。
+pub(crate) fn request_budget_covers(permit: Option<&OwnedSemaphorePermit>, bytes: usize) -> bool {
+    permit.is_some_and(|permit| {
+        permit
+            .num_permits()
+            .saturating_mul(REQUEST_BODY_BUDGET_UNIT_BYTES)
+            >= bytes.saturating_mul(REQUEST_MEMORY_BUDGET_MULTIPLIER)
+    })
+}
+
 pub(crate) fn grow_request_body_budget(
     permit: &mut Option<OwnedSemaphorePermit>,
     body_budget: &Arc<Semaphore>,

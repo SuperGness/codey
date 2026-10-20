@@ -693,11 +693,13 @@ pub(crate) async fn write_responses_sse_event(stream: &mut TcpStream, event: &Va
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("response.event");
-    let payload = format!(
-        "event: {event_type}\ndata: {}\n\n",
-        serde_json::to_string(event).context("序列化 Responses SSE 事件失败")?
-    );
-    write_chunked_frame(stream, payload.as_bytes(), "写入 Responses SSE 事件失败").await
+    let mut payload = Vec::with_capacity(256);
+    payload.extend_from_slice(b"event: ");
+    payload.extend_from_slice(event_type.as_bytes());
+    payload.extend_from_slice(b"\ndata: ");
+    serde_json::to_writer(&mut payload, event).context("序列化 Responses SSE 事件失败")?;
+    payload.extend_from_slice(b"\n\n");
+    write_chunked_frame(stream, &payload, "写入 Responses SSE 事件失败").await
 }
 
 pub(crate) async fn finish_chunked_response(stream: &mut TcpStream) -> Result<()> {

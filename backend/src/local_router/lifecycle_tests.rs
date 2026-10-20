@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Default)]
 struct CapturedDownstream {
+    probe: Option<RouteRequestLogProbe>,
     status: Option<u16>,
     body: Vec<u8>,
     delivered: Arc<AtomicBool>,
@@ -13,19 +14,31 @@ struct CapturedDownstream {
     websocket_attempts: usize,
     fallback_attempts: usize,
     cancel_at: Option<tokio::time::Instant>,
+    cancel_signal: Option<Arc<tokio::sync::Notify>>,
+    response_started: bool,
+    error_write_budget: Option<(Arc<Semaphore>, usize)>,
+    cancel_compaction_delivery: bool,
 }
 
 #[async_trait]
 impl ResponsesDownstream for CapturedDownstream {
+    fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
+        self.probe.as_ref()
+    }
     fn is_websocket(&self) -> bool {
         self.websocket
+    }
+    fn event_stream_started(&self) -> bool {
+        self.response_started
     }
     async fn wait_for_upstream<T, F>(&mut self, future: F) -> Result<T>
     where
         T: Send,
         F: std::future::Future<Output = T> + Send,
     {
-        if let Some(deadline) = self.cancel_at {
+        if let Some(signal) = self.cancel_signal.as_ref() {
+            tokio::select! { biased; _ = signal.notified() => Err(DownstreamClosed.into()), value = future => Ok(value) }
+        } else if let Some(deadline) = self.cancel_at {
             tokio::select! { value = future => Ok(value), _ = tokio::time::sleep_until(deadline) => Err(DownstreamClosed.into()) }
         } else {
             Ok(future.await)
@@ -47,19 +60,33 @@ impl ResponsesDownstream for CapturedDownstream {
         _: String,
         _: Option<&RouteTarget>,
     ) -> Result<()> {
+        if let Some((budget, available)) = self.error_write_budget.as_ref() {
+            assert_eq!(
+                budget.available_permits(),
+                *available,
+                "request memory must be released before writing the error response"
+            );
+        }
         self.status = Some(status);
         self.body = code.as_bytes().to_vec();
         Ok(())
     }
     async fn write_json(&mut self, status: u16, value: &Value) -> Result<()> {
+        if self.cancel_compaction_delivery {
+            return Err(DownstreamClosed.into());
+        }
         self.status = Some(status);
         self.body = serde_json::to_vec(value)?;
         Ok(())
     }
     async fn start_event_stream(&mut self) -> Result<()> {
+        self.response_started = true;
         Ok(())
     }
     async fn write_event(&mut self, _: &Value) -> Result<()> {
+        if self.cancel_compaction_delivery {
+            return Err(DownstreamClosed.into());
+        }
         Ok(())
     }
     async fn finish_event_stream(&mut self) -> Result<()> {
@@ -123,6 +150,313 @@ pub(super) fn test_server(config: &CodeyConfig) -> RouterServer {
         siwc_auth_cache: Arc::default(),
         request_log: Arc::new(RouteRequestLogController::new()),
     }
+}
+
+#[tokio::test]
+async fn native_compaction_commits_binding_only_after_validated_complete_delivery() {
+    for stage in [
+        "upstream_cancel",
+        "delivery_cancel",
+        "rate_limited",
+        "invalid",
+        "completed",
+    ] {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (mut config, source, model) =
+            super::tests::router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
+        config.profiles[0].supports_remote_compaction = true;
+        let mut target = config.profiles[0].clone();
+        target.id = "compaction-target".into();
+        let target_id = target.provider_id().to_string();
+        config.profiles.push(target);
+        config
+            .selected_models_by_provider
+            .insert(target_id.clone(), vec![model.clone()]);
+        let server = test_server(&config);
+        let source_route = server
+            .snapshot
+            .read()
+            .unwrap()
+            .target_for_request(&model, Some(&source), None)
+            .unwrap();
+        let keys = ["thread-id:compact-parent".into()];
+        server.bindings.lock().unwrap().remember_resolved(
+            &keys,
+            &source_route,
+            false,
+            false,
+            Some(true),
+        );
+        let unrelated = (0..MAX_ROUTE_BINDINGS - 1)
+            .map(|index| format!("thread-id:unrelated-{index}"))
+            .collect::<Vec<_>>();
+        server.bindings.lock().unwrap().remember_resolved(
+            &unrelated,
+            &source_route,
+            false,
+            false,
+            Some(true),
+        );
+        let before = server.bindings.lock().unwrap().clone();
+        let signal = Arc::new(tokio::sync::Notify::new());
+        let upstream_signal = Arc::clone(&signal);
+        let upstream = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _request = read_http_request(&mut stream).await.unwrap();
+            if stage == "upstream_cancel" {
+                upstream_signal.notify_one();
+            } else if stage == "rate_limited" {
+                write_json_response(
+                    &mut stream,
+                    429,
+                    &json!({"error":{"message":"quota exceeded"}}),
+                )
+                .await
+                .unwrap();
+            } else if stage == "invalid" {
+                write_json_response(&mut stream, 200, &json!({"id":"invalid","output":[]}))
+                    .await
+                    .unwrap();
+            } else {
+                write_json_response(
+                    &mut stream,
+                    200,
+                    &json!({
+                        "id":"compacted", "status":"completed", "output":[
+                            {"type":"compaction","encrypted_content":"target-opaque-history"}
+                        ]
+                    }),
+                )
+                .await
+                .unwrap();
+            }
+        });
+        let mut downstream = CapturedDownstream {
+            websocket: true,
+            cancel_signal: (stage == "upstream_cancel").then_some(signal),
+            cancel_compaction_delivery: stage == "delivery_cancel",
+            ..Default::default()
+        };
+        let result = tokio::time::timeout(Duration::from_secs(5), server.proxy_parsed_responses_inner(
+            HttpRequest { method:"POST".into(), path:"/responses".into(),
+                headers:vec![("thread-id".into(),"compact-parent".into()),
+                    ("session-id".into(),"new-compact-session".into())], body:vec![],
+                _body_budget_permit:None },
+            json!({"model":model_alias(&target_id,&model),"input":[
+                {"role":"user","content":"complete original history"},{"type":"compaction_trigger"}
+            ]}), None, ResponsesRequestKind::Create, &mut downstream,
+        )).await.unwrap();
+        upstream.await.unwrap();
+        let bindings = server.bindings.lock().unwrap();
+        let actual = &bindings.routes[&keys[0]];
+        if stage == "completed" {
+            assert!(result.is_ok());
+            assert_eq!(actual.provider_id, target_id);
+            assert!(!actual.portable);
+        } else {
+            if stage.ends_with("cancel") {
+                assert!(result.unwrap_err().is::<DownstreamClosed>(), "{stage}");
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(
+                    downstream.status,
+                    Some(if stage == "rate_limited" { 429 } else { 502 })
+                );
+            }
+            assert_eq!(bindings.next_generation, before.next_generation, "{stage}");
+            assert_eq!(bindings.order, before.order, "{stage}");
+            assert_eq!(bindings.routes.len(), before.routes.len());
+            for (key, expected) in &before.routes {
+                let actual = &bindings.routes[key];
+                assert_eq!(actual.provider_id, expected.provider_id);
+                assert_eq!(actual.generation, expected.generation);
+                assert_eq!(actual.upstream_model, expected.upstream_model);
+                assert_eq!(actual.context_config, expected.context_config);
+                assert_eq!(actual.portable, expected.portable);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn pending_cross_route_native_compaction_does_not_authorize_source_response_id() {
+    let listener = Arc::new(TcpListener::bind(("127.0.0.1", 0)).await.unwrap());
+    let (mut config, source, model) =
+        super::tests::router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
+    config.profiles[0].supports_remote_compaction = true;
+    let mut target = config.profiles[0].clone();
+    target.id = "pending-compaction-target".into();
+    let target_id = target.provider_id().to_string();
+    config.profiles.push(target);
+    config
+        .selected_models_by_provider
+        .insert(target_id.clone(), vec![model.clone()]);
+    let server = Arc::new(test_server(&config));
+    let source_route = server
+        .snapshot
+        .read()
+        .unwrap()
+        .target_for_request(&model, Some(&source), None)
+        .unwrap();
+    let keys = ["thread-id:compact-parent".into()];
+    server.bindings.lock().unwrap().remember_resolved(
+        &keys,
+        &source_route,
+        false,
+        false,
+        Some(true),
+    );
+    let before = server.bindings.lock().unwrap().routes[&keys[0]].clone();
+    let (arrived_tx, arrived_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let upstream_listener = Arc::clone(&listener);
+    let upstream = tokio::spawn(async move {
+        let (mut stream, _) = upstream_listener.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await.unwrap();
+        assert_eq!(request.path, "/v1/responses/compact");
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert!(body.get("previous_response_id").is_none());
+        arrived_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        write_json_response(
+            &mut stream,
+            200,
+            &json!({
+                "id":"compacted", "status":"completed", "output":[
+                    {"type":"compaction","encrypted_content":"target-opaque-history"}
+                ]
+            }),
+        )
+        .await
+        .unwrap();
+    });
+    let compact_server = Arc::clone(&server);
+    let target_model = model_alias(&target_id, &model);
+    let compact_model = target_model.clone();
+    let compact = tokio::spawn(async move {
+        let mut downstream = CapturedDownstream::default();
+        let result = compact_server
+            .proxy_parsed_responses_inner(
+                HttpRequest {
+                    method: "POST".into(),
+                    path: "/responses/compact".into(),
+                    headers: vec![("thread-id".into(), "compact-parent".into())],
+                    body: vec![],
+                    _body_budget_permit: None,
+                },
+                json!({"model":compact_model,"input":[
+                    {"role":"user","content":"complete original history"}
+                ]}),
+                None,
+                ResponsesRequestKind::Compact,
+                &mut downstream,
+            )
+            .await;
+        (result, downstream)
+    });
+    tokio::time::timeout(Duration::from_secs(5), arrived_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    {
+        let bindings = server.bindings.lock().unwrap();
+        assert_eq!(bindings.routes[&keys[0]].provider_id, source);
+        assert_eq!(bindings.routes[&keys[0]].generation, before.generation);
+    }
+    for websocket in [false, true] {
+        let mut downstream = CapturedDownstream {
+            websocket,
+            ..Default::default()
+        };
+        tokio::time::timeout(Duration::from_secs(5), server.proxy_parsed_responses_inner(
+            HttpRequest { method:"POST".into(), path:"/responses".into(),
+                headers:vec![("thread-id".into(),"compact-parent".into())], body:vec![],
+                _body_budget_permit:None },
+            json!({"model":target_model,"input":"delta","previous_response_id":"source-private-id"}),
+            None, ResponsesRequestKind::Create, &mut downstream,
+        )).await.unwrap().unwrap();
+        assert_eq!(downstream.status, Some(400));
+        assert_eq!(downstream.body, b"context_not_portable");
+        assert_eq!(downstream.websocket_attempts, 0);
+        assert_eq!(downstream.fallback_attempts, 0);
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(75), listener.accept())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        server.bindings.lock().unwrap().routes[&keys[0]].generation,
+        before.generation
+    );
+    release_tx.send(()).unwrap();
+    let (result, downstream) = tokio::time::timeout(Duration::from_secs(5), compact)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(result.is_ok());
+    assert_eq!(downstream.status, Some(200));
+    upstream.await.unwrap();
+    let bindings = server.bindings.lock().unwrap();
+    assert_eq!(bindings.routes[&keys[0]].provider_id, target_id);
+    assert!(!bindings.routes[&keys[0]].portable);
+}
+
+#[tokio::test]
+async fn cross_route_websocket_delta_is_rejected_before_transport_attempt() {
+    let (mut config, source, model) = super::tests::router_config("http://127.0.0.1:9/v1".into());
+    let mut target = config.profiles[0].clone();
+    target.id = "native-target".into();
+    let target_id = target.provider_id().to_string();
+    config.profiles.push(target);
+    config
+        .selected_models_by_provider
+        .insert(target_id.clone(), vec![model.clone()]);
+    let server = test_server(&config);
+    let source_route = server
+        .snapshot
+        .read()
+        .unwrap()
+        .target_for_request(&model, Some(&source), None)
+        .unwrap();
+    let keys = ["thread-id:delta-parent".into()];
+    server.bindings.lock().unwrap().remember_resolved(
+        &keys,
+        &source_route,
+        false,
+        false,
+        Some(true),
+    );
+    let before = server.bindings.lock().unwrap().routes[&keys[0]].generation;
+    let mut downstream = CapturedDownstream {
+        websocket: true,
+        ..Default::default()
+    };
+    server
+        .proxy_parsed_responses_inner(
+            HttpRequest {
+                method: "POST".into(),
+                path: "/responses".into(),
+                headers: vec![("thread-id".into(), "delta-parent".into())],
+                body: vec![],
+                _body_budget_permit: None,
+            },
+            json!({"model":model_alias(&target_id,&model),"input":"delta",
+            "previous_response_id":"source-private-id"}),
+            None,
+            ResponsesRequestKind::Create,
+            &mut downstream,
+        )
+        .await
+        .unwrap();
+    assert_eq!(downstream.status, Some(400));
+    assert_eq!(downstream.body, b"context_not_portable");
+    assert_eq!(downstream.websocket_attempts, 0);
+    assert_eq!(downstream.fallback_attempts, 0);
+    assert_eq!(
+        server.bindings.lock().unwrap().routes[&keys[0]].generation,
+        before
+    );
 }
 
 fn official_history_server(url: String) -> (RouterServer, String) {
@@ -711,7 +1045,7 @@ async fn plugin_retry_keeps_the_body_when_plugins_are_disabled_during_upload() {
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let mut headers = HeaderMap::new();
         let mut downstream = CapturedDownstream::default();
-        let mut attempt = 0;
+        let mut attempts = AttemptBudget::default();
         send_lifecycle_http(
             &mut downstream,
             &mut lifecycle,
@@ -720,7 +1054,7 @@ async fn plugin_retry_keeps_the_body_when_plugins_are_disabled_during_upload() {
             &mut headers,
             body,
             &mut || {},
-            &mut attempt,
+            &mut attempts,
             Duration::from_secs(5),
             None,
         )
@@ -765,6 +1099,422 @@ async fn lifecycle_retry_limit_and_reasoning_fallback_share_one_replay() {
         assert_eq!(downstream.status, Some(if retry_again { 409 } else { 400 }));
         assert!(!downstream.delivered.load(Ordering::SeqCst));
         assert_eq!(terminal(&mut events).await.0, "request.failed");
+    }
+}
+
+#[tokio::test]
+async fn diagnostic_attempts_match_actual_plugin_and_reasoning_sends() {
+    use crate::route_request_log::{AttemptOutcome, AttemptTrigger};
+    for plugin_retry in [false, true] {
+        let (url, upstream) = fake_upstream(vec![400, 200]).await;
+        let (config, provider, model) = super::tests::router_config(url);
+        let server = test_server(&config);
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        let mut downstream = CapturedDownstream {
+            probe: Some(probe.clone()),
+            ..Default::default()
+        };
+        let (plugin, _events) = recording_plugin(move |method, params| {
+            if plugin_retry && method == "request.afterHeaders" && params["attempt"] == 0 {
+                json!({"action":"retry"})
+            } else {
+                json!({"action":"continue"})
+            }
+        });
+        with_test_plugins(
+            vec![plugin],
+            invoke(
+                &server,
+                &model_alias(&provider, &model),
+                false,
+                &mut downstream,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), upstream)
+                .await
+                .expect("two upstream sends")
+                .unwrap()
+                .len(),
+            2
+        );
+        let attempts = probe.attempts_for_test();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].sequence, 1);
+        assert_eq!(attempts[0].status_code, Some(400));
+        assert_eq!(attempts[0].outcome, AttemptOutcome::Rejected);
+        assert_eq!(attempts[1].sequence, 2);
+        assert_eq!(attempts[1].status_code, Some(200));
+        assert_eq!(
+            attempts[1].trigger,
+            if plugin_retry {
+                AttemptTrigger::PluginRetry
+            } else {
+                AttemptTrigger::ReasoningRepair
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn rejected_before_send_hook_does_not_create_an_upstream_attempt() {
+    let (config, provider, model) = super::tests::router_config("http://127.0.0.1:9/v1".into());
+    let server = test_server(&config);
+    let probe = RouteRequestLogProbe::detached_test_probe();
+    let mut downstream = CapturedDownstream {
+        probe: Some(probe.clone()),
+        ..Default::default()
+    };
+    let (plugin, mut events) = recording_plugin(|method, _| {
+        if method == "request.beforeSend" {
+            json!({"action":"retry"})
+        } else {
+            json!({"action":"continue"})
+        }
+    });
+    with_test_plugins(
+        vec![plugin],
+        invoke(
+            &server,
+            &model_alias(&provider, &model),
+            false,
+            &mut downstream,
+        ),
+    )
+    .await
+    .unwrap();
+    // 插件层在发送前校验非法 retry 动作，网关没有机会调用上游。
+    assert_eq!(downstream.status, Some(502));
+    let mut saw_before_send = false;
+    while let Ok((method, _)) = events.try_recv() {
+        saw_before_send |= method == "request.beforeSend";
+    }
+    assert!(saw_before_send);
+    assert!(probe.attempts_for_test().is_empty());
+}
+
+#[tokio::test]
+async fn cancellation_before_retry_send_preserves_the_rejected_first_attempt() {
+    use crate::route_request_log::{AttemptOutcome, AttemptPhase};
+    let (url, upstream) = fake_upstream(vec![400]).await;
+    let (config, provider, model) = super::tests::router_config(url);
+    let server = test_server(&config);
+    let probe = RouteRequestLogProbe::detached_test_probe();
+    let cancelled = Arc::new(tokio::sync::Notify::new());
+    let signal = Arc::clone(&cancelled);
+    let mut downstream = CapturedDownstream {
+        websocket: true,
+        probe: Some(probe.clone()),
+        cancel_signal: Some(cancelled),
+        ..Default::default()
+    };
+    let (plugin, _events) = recording_plugin(move |method, params| {
+        if method == "request.afterHeaders" {
+            return json!({"action":"retry"});
+        }
+        if method == "request.beforeSend" && params["attempt"] == 1 {
+            signal.notify_one();
+        }
+        json!({"action":"continue"})
+    });
+    let error = tokio::time::timeout(
+        Duration::from_secs(3),
+        with_test_plugins(
+            vec![plugin],
+            invoke(
+                &server,
+                &model_alias(&provider, &model),
+                false,
+                &mut downstream,
+            ),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert!(error.is::<DownstreamClosed>());
+    assert_eq!(upstream.await.unwrap().len(), 1);
+    let attempts = probe.attempts_for_test();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].status_code, Some(400));
+    assert_eq!(attempts[0].outcome, AttemptOutcome::Rejected);
+    assert_eq!(attempts[0].phase, AttemptPhase::ResponseHeaders);
+}
+
+#[tokio::test]
+async fn reasoning_repair_consumes_the_replay_before_a_plugin_can_retry() {
+    let (url, upstream) = fake_upstream(vec![400, 200]).await;
+    let (config, provider, model) = super::tests::router_config(url);
+    let server = test_server(&config);
+    let mut downstream = CapturedDownstream::default();
+    let (plugin, mut events) = recording_plugin(|method, params| {
+        if method == "request.afterHeaders" && params["attempt"] == 1 {
+            json!({"action":"retry"})
+        } else {
+            json!({"action":"continue"})
+        }
+    });
+    with_test_plugins(
+        vec![plugin],
+        invoke(
+            &server,
+            &model_alias(&provider, &model),
+            false,
+            &mut downstream,
+        ),
+    )
+    .await
+    .unwrap();
+    let requests = upstream.await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_ne!(
+        requests[0].body, requests[1].body,
+        "second request must contain the reasoning repair"
+    );
+    let repaired: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert!(repaired.to_string().contains("reasoning_text"));
+    assert_eq!(downstream.status, Some(409));
+    assert_eq!(downstream.body, b"plugin_retry_limit");
+    assert!(!downstream.delivered.load(Ordering::SeqCst));
+    assert_eq!(terminal(&mut events).await.0, "request.failed");
+}
+
+#[tokio::test]
+async fn started_downstream_forbids_both_plugin_retry_and_reasoning_repair() {
+    for plugin_retry in [false, true] {
+        let (url, upstream) = fake_upstream(vec![400]).await;
+        let (config, provider, model) = super::tests::router_config(url);
+        let server = test_server(&config);
+        let mut downstream = CapturedDownstream {
+            response_started: true,
+            ..Default::default()
+        };
+        let (plugin, mut events) = recording_plugin(move |method, _| {
+            if method == "request.afterHeaders" && plugin_retry {
+                json!({"action":"retry"})
+            } else {
+                json!({"action":"continue"})
+            }
+        });
+        with_test_plugins(
+            vec![plugin],
+            invoke(
+                &server,
+                &model_alias(&provider, &model),
+                false,
+                &mut downstream,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(upstream.await.unwrap().len(), 1);
+        assert_eq!(
+            downstream.status,
+            Some(if plugin_retry { 409 } else { 400 })
+        );
+        assert!(!downstream.delivered.load(Ordering::SeqCst));
+        assert_eq!(terminal(&mut events).await.0, "request.failed");
+    }
+}
+
+#[tokio::test]
+async fn cancellation_after_headers_releases_the_replay_body_and_reports_cancelled() {
+    let (url, upstream) = fake_upstream(vec![200]).await;
+    let (config, provider, model) = super::tests::router_config(url);
+    let server = test_server(&config);
+    let cancel = Arc::new(tokio::sync::Notify::new());
+    let notify = cancel.clone();
+    let mut downstream = CapturedDownstream {
+        websocket: true,
+        cancel_signal: Some(cancel),
+        ..Default::default()
+    };
+    let (plugin, mut events) = recording_plugin(move |method, _| {
+        if method == "request.afterHeaders" {
+            notify.notify_one();
+            json!({"action":"wait","token":"after-headers","pollAfterMs":50})
+        } else if method == "request.resume" {
+            json!({"action":"wait","token":"after-headers","pollAfterMs":50})
+        } else {
+            json!({"action":"continue"})
+        }
+    });
+    let available = server.request_body_budget.available_permits();
+    let permit = server
+        .request_body_budget
+        .clone()
+        .try_acquire_many_owned(4)
+        .unwrap();
+    let body = json!({"model":model_alias(&provider, &model),"stream":true,"input":"cancel after headers"});
+    let encoded = serde_json::to_vec(&body).unwrap();
+    let request = HttpRequest {
+        method: "POST".into(),
+        path: "/v1/responses".into(),
+        headers: vec![],
+        body: Vec::new(),
+        _body_budget_permit: Some(permit),
+    };
+    let result = with_test_plugins(
+        vec![plugin],
+        server.proxy_parsed_responses_inner(
+            request,
+            body,
+            Some(encoded),
+            ResponsesRequestKind::Create,
+            &mut downstream,
+        ),
+    )
+    .await;
+    assert!(result.unwrap_err().is::<DownstreamClosed>());
+    assert_eq!(upstream.await.unwrap().len(), 1);
+    assert_eq!(server.request_body_budget.available_permits(), available);
+    assert_eq!(downstream.status, None);
+    assert!(!downstream.delivered.load(Ordering::SeqCst));
+    assert_eq!(terminal(&mut events).await.0, "request.cancelled");
+}
+
+#[tokio::test]
+async fn rejected_response_releases_request_memory_before_reading_its_body() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (headers_sent, headers_received) = tokio::sync::oneshot::channel();
+    let (release_body, body_released) = tokio::sync::oneshot::channel();
+    let error_body = br#"{"error":{"message":"quota exhausted","code":"rate_limit_exceeded"}}"#;
+    let upstream = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        read_http_request(&mut socket).await.unwrap();
+        socket.write_all(format!(
+            "HTTP/1.1 429 Too Many Requests\r\ncontent-length: {}\r\nx-request-id: rejected-request\r\nretry-after: 3\r\nconnection: close\r\n\r\n", error_body.len(),
+        ).as_bytes()).await.unwrap();
+        headers_sent.send(()).unwrap();
+        body_released.await.unwrap();
+        socket.write_all(error_body).await.unwrap();
+    });
+    let (config, provider, model) = super::tests::router_config(url.clone());
+    let server = test_server(&config);
+    let resolved = RouterSnapshot::from_config(&config)
+        .target_for_model(&model_alias(&provider, &model))
+        .unwrap();
+    let endpoint = format!("{url}/responses");
+    let execution = HttpExecution {
+        server: &server,
+        resolved: &resolved,
+        bridge: ProtocolBridge::NativeResponses,
+        request_kind: ResponsesRequestKind::Create,
+        compacting: false,
+        native_compaction: false,
+        compaction_phase: GatewayCompactionPhase::GatewaySummary,
+        upstream_url: &endpoint,
+        upstream_stream_requested: false,
+    };
+    let available = server.request_body_budget.available_permits();
+    let permit = server
+        .request_body_budget
+        .clone()
+        .try_acquire_many_owned(4)
+        .unwrap();
+    let request = EncodedHttpRequest {
+        body: Bytes::from_static(b"{\"input\":\"test\"}"),
+        admission: Some(permit),
+    };
+    let mut downstream = CapturedDownstream::default();
+    let mut lifecycle = LifecycleRequest::inert();
+    let mut headers = HeaderMap::new();
+    let send = execution.send(
+        &mut downstream,
+        &mut lifecycle,
+        &server.client,
+        &mut headers,
+        request,
+        &[],
+    );
+    tokio::pin!(send);
+    let released = tokio::time::timeout(Duration::from_secs(2), async {
+        headers_received.await.unwrap();
+        let all = server
+            .request_body_budget
+            .clone()
+            .acquire_many_owned(available as u32)
+            .await
+            .unwrap();
+        drop(all);
+    });
+    tokio::select! {
+        result = &mut send => panic!("error body has not arrived: {}", result.is_ok()),
+        result = released => result.expect("request memory must be free before reading the error body"),
+    }
+    release_body.send(()).unwrap();
+    let received = send.await.unwrap().unwrap();
+    let ReceivedHttpResponse::Rejected { head, body } = received else {
+        panic!("expected the original upstream rejection");
+    };
+    assert_eq!(head.status, 429);
+    assert_eq!(head.request_id.as_deref(), Some("rejected-request"));
+    assert_eq!(head.retry_advice.unwrap().header, "3");
+    assert_eq!(body, error_body);
+    assert_eq!(server.request_body_budget.available_permits(), available);
+    upstream.await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_error_bodies_keep_the_websocket_failure_contract_without_replay() {
+    for status in [400, 502] {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_http_request(&mut socket).await.unwrap();
+            socket.write_all(format!(
+                "HTTP/1.1 {status} Error\r\ncontent-length: 100\r\nconnection: close\r\n\r\n{{\"error\":",
+            ).as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let (config, provider, model) = super::tests::router_config(url);
+        let server = test_server(&config);
+        let available = server.request_body_budget.available_permits();
+        let permit = server
+            .request_body_budget
+            .clone()
+            .try_acquire_many_owned(4)
+            .unwrap();
+        let body = json!({"model":model_alias(&provider, &model),"stream":true,"input":[{"type":"reasoning","encrypted_content":"test","summary":[]},{"role":"user","content":"test"}]});
+        let encoded = serde_json::to_vec(&body).unwrap();
+        let request = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/responses".into(),
+            headers: vec![],
+            body: Vec::new(),
+            _body_budget_permit: Some(permit),
+        };
+        let mut downstream = CapturedDownstream {
+            websocket: true,
+            error_write_budget: Some((server.request_body_budget.clone(), available)),
+            ..Default::default()
+        };
+        let plugin = TestPlugin::new("http-error", |_, _| Ok(json!({"action":"continue"})));
+        with_test_plugins(
+            vec![plugin],
+            server.proxy_parsed_responses_inner(
+                request,
+                body,
+                Some(encoded),
+                ResponsesRequestKind::Create,
+                &mut downstream,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(downstream.status, Some(502));
+        assert_eq!(downstream.body, b"upstream_response_failed");
+        assert!(!downstream.delivered.load(Ordering::SeqCst));
+        upstream.await.unwrap();
     }
 }
 
@@ -1093,7 +1843,7 @@ async fn selected_api_key_does_not_follow_a_redirect_to_another_path() {
             &mut headers,
             Bytes::from_static(b"{\"input\":\"original\"}"),
             &mut || {},
-            &mut 0,
+            &mut AttemptBudget::default(),
             Duration::from_secs(2),
             None,
         )

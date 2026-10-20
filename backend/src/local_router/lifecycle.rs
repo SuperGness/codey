@@ -312,7 +312,7 @@ pub(super) async fn send_lifecycle_http<D, F>(
     headers: &mut HeaderMap,
     body: Bytes,
     on_uploaded: &mut F,
-    attempt: &mut u32,
+    attempts: &mut AttemptBudget,
     timeout: Duration,
     plugin: Option<&plugin_transport::Target>,
 ) -> Result<
@@ -333,7 +333,7 @@ where
             downstream,
             lifecycle.dispatch(
                 LifecycleStage::BeforeSend,
-                *attempt,
+                attempts.attempt_index(),
                 lifecycle_headers(headers),
                 None,
             ),
@@ -365,8 +365,22 @@ where
         // 以这条请求启动时的插件快照为准。上传过程中全局插件被关掉时，
         // 快照仍可能在响应头之后要求重发，正文必须还在。
         let keep_uploaded_body = lifecycle.is_active();
-        let result = await_upstream(
-            downstream,
+        attempts.begin_send()?;
+        let send_probe = downstream.request_log_probe().cloned();
+        let transport = attempts.transport;
+        let trigger = match attempts.retry_reason() {
+            Some(RetryReason::Plugin) => crate::route_request_log::AttemptTrigger::PluginRetry,
+            Some(RetryReason::ReasoningText) => {
+                crate::route_request_log::AttemptTrigger::ReasoningRepair
+            }
+            None => crate::route_request_log::AttemptTrigger::Initial,
+        };
+        let result = await_upstream(downstream, async {
+            // 下游取消可能让 wait_for_upstream 在首次 poll 之前结束，
+            // 此时不能把未启动的发送记作一次上游尝试。
+            if let Some(probe) = &send_probe {
+                probe.begin_upstream_attempt(transport, trigger);
+            }
             send_route_response_headers(
                 plugin,
                 codey_plugin_sdk::transport::Operation::Responses,
@@ -381,9 +395,38 @@ where
                     }
                     on_uploaded();
                 },
-            ),
-        )
-        .await?;
+            )
+            .await
+        })
+        .await;
+        if let Some(probe) = downstream.request_log_probe() {
+            use crate::route_request_log::{AttemptOutcome, AttemptPhase};
+            match &result {
+                Ok(Ok(Ok(response))) => probe.record_attempt_headers(response.status().as_u16()),
+                Ok(Ok(Err(error))) => probe.finish_upstream_attempt(
+                    if error.is_timeout() {
+                        AttemptOutcome::TimedOut
+                    } else {
+                        AttemptOutcome::Failed
+                    },
+                    AttemptPhase::ResponseHeaders,
+                ),
+                Ok(Err(_)) => probe.finish_upstream_attempt(
+                    AttemptOutcome::TimedOut,
+                    AttemptPhase::ResponseHeaders,
+                ),
+                Err(error) => probe.finish_upstream_attempt(
+                    if error.is::<DownstreamClosed>() || error.is::<DownstreamResponseInterrupt>() {
+                        AttemptOutcome::Cancelled
+                    } else {
+                        AttemptOutcome::Failed
+                    },
+                    AttemptPhase::Send,
+                ),
+            }
+        }
+        let result = result?;
+        attempts.finish_send(matches!(&result, Ok(Ok(_))));
         let Ok(Ok(response)) = &result else {
             return Ok(result);
         };
@@ -391,7 +434,7 @@ where
             downstream,
             lifecycle.dispatch(
                 LifecycleStage::AfterHeaders,
-                *attempt,
+                attempts.attempt_index(),
                 lifecycle_headers(headers),
                 Some(LifecycleResponse {
                     status: response.status().as_u16(),
@@ -403,7 +446,7 @@ where
         match decision {
             LifecycleDecision::Continue(_) => return Ok(result),
             LifecycleDecision::Retry(patches) => {
-                if *attempt >= 1 || downstream.event_stream_started() {
+                if !attempts.reserve_retry(RetryReason::Plugin, downstream.event_stream_started()) {
                     return Err(LifecycleError {
                         status: 409,
                         code: "plugin_retry_limit".into(),
@@ -411,11 +454,16 @@ where
                     }
                     .into());
                 }
+                if let Some(probe) = downstream.request_log_probe() {
+                    probe.finish_upstream_attempt(
+                        crate::route_request_log::AttemptOutcome::Superseded,
+                        crate::route_request_log::AttemptPhase::ResponseHeaders,
+                    );
+                }
                 drop(result);
                 apply_codey_plugin_header_patches(headers, patches)?;
-                *attempt += 1;
                 if let Some(probe) = downstream.request_log_probe() {
-                    probe.mark_fallback("plugin_request_retry");
+                    probe.mark_fallback(attempts.retry_reason().expect("reserved retry").label());
                 }
             }
         }

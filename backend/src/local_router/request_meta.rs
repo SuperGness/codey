@@ -57,6 +57,7 @@ pub(crate) fn valid_codex_session_id(value: &str) -> Option<&str> {
 pub(crate) fn take_codey_route_metadata(
     request: &mut HttpRequest,
     body: &mut Value,
+    explicit_model_alias: Option<&AliasTarget>,
 ) -> Result<(Option<String>, bool)> {
     let mut route_hint = None;
     let mut body_mutated = false;
@@ -74,7 +75,7 @@ pub(crate) fn take_codey_route_metadata(
             *value = serde_json::to_string(&metadata)
                 .context("序列化清理后的 Codex turn metadata 失败")?;
         }
-        merge_route_hint(&mut route_hint, extracted)?;
+        merge_route_hint(&mut route_hint, extracted, explicit_model_alias)?;
     }
 
     let Some(client_metadata) = body
@@ -94,6 +95,7 @@ pub(crate) fn take_codey_route_metadata(
             .as_ref()
             .map(validated_route_hint_value)
             .transpose()?,
+        explicit_model_alias,
     )?;
     if let Some(metadata) = client_metadata.get_mut(TURN_METADATA_HEADER) {
         let extracted = match metadata {
@@ -118,7 +120,7 @@ pub(crate) fn take_codey_route_metadata(
             }
             _ => None,
         };
-        merge_route_hint(&mut route_hint, extracted)?;
+        merge_route_hint(&mut route_hint, extracted, explicit_model_alias)?;
     }
     Ok((route_hint, body_mutated))
 }
@@ -190,6 +192,14 @@ pub(crate) fn begin_encoded_json_field(
     Ok(())
 }
 
+/// 原生透传时允许改写的顶层字段；其余字段原样复制原始字节。
+const NATIVE_REWRITTEN_FIELDS: [&str; 4] = [
+    "model",
+    "client_metadata",
+    "previous_response_id",
+    "max_output_tokens",
+];
+
 pub(crate) fn rewrite_native_responses_encoded_body(
     original: &[u8],
     updated: &Value,
@@ -202,27 +212,14 @@ pub(crate) fn rewrite_native_responses_encoded_body(
     let mut output = Vec::with_capacity(original.len());
     output.push(b'{');
     let mut first = true;
-    let mut saw_model = false;
-    let mut saw_client_metadata = false;
-    let mut saw_previous_response_id = false;
+    let mut seen = [false; NATIVE_REWRITTEN_FIELDS.len()];
     for (name, raw) in fields {
-        let replacement = match name.as_str() {
-            "model" => {
-                saw_model = true;
-                Some(updated.get("model"))
-            }
-            "client_metadata" => {
-                saw_client_metadata = true;
-                Some(updated.get("client_metadata"))
-            }
-            "previous_response_id" => {
-                saw_previous_response_id = true;
-                Some(updated.get("previous_response_id"))
-            }
-            _ => None,
-        };
-        if let Some(replacement) = replacement {
-            let Some(replacement) = replacement else {
+        if let Some(index) = NATIVE_REWRITTEN_FIELDS
+            .iter()
+            .position(|field| *field == name)
+        {
+            seen[index] = true;
+            let Some(replacement) = updated.get(&name) else {
                 continue;
             };
             begin_encoded_json_field(&mut output, &mut first, &name)?;
@@ -233,15 +230,12 @@ pub(crate) fn rewrite_native_responses_encoded_body(
             output.extend_from_slice(raw.get().as_bytes());
         }
     }
-    for (name, saw_field) in [
-        ("model", saw_model),
-        ("client_metadata", saw_client_metadata),
-        ("previous_response_id", saw_previous_response_id),
-    ] {
-        if saw_field {
-            continue;
-        }
-        let Some(value) = updated.get(name) else {
+    for (name, _) in NATIVE_REWRITTEN_FIELDS
+        .iter()
+        .zip(seen)
+        .filter(|(_, seen)| !seen)
+    {
+        let Some(value) = updated.get(*name) else {
             continue;
         };
         begin_encoded_json_field(&mut output, &mut first, name)?;
@@ -266,12 +260,7 @@ pub(crate) async fn rewrite_native_responses_encoded_body_offloaded(
         .as_object()
         .context("Responses 上游请求必须是 JSON 对象")?
         .iter()
-        .filter(|(name, _)| {
-            matches!(
-                name.as_str(),
-                "model" | "client_metadata" | "previous_response_id"
-            )
-        })
+        .filter(|(name, _)| NATIVE_REWRITTEN_FIELDS.contains(&name.as_str()))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<serde_json::Map<_, _>>();
     tokio::task::spawn_blocking(move || {
@@ -305,7 +294,16 @@ pub(crate) fn validated_route_hint_value(value: &Value) -> Result<String> {
     Ok(route_hint.to_string())
 }
 
-pub(crate) fn merge_route_hint(current: &mut Option<String>, next: Option<String>) -> Result<()> {
+pub(crate) fn merge_route_hint(
+    current: &mut Option<String>,
+    next: Option<String>,
+    explicit_model_alias: Option<&AliasTarget>,
+) -> Result<()> {
+    // 当前模型别名已经明确指定线路。Codex 可能重放旧 turn 的元数据，
+    // 这些提示不能阻止显式切换；字段仍须先校验并从上游请求中剥离。
+    if explicit_model_alias.is_some() {
+        return Ok(());
+    }
     let Some(next) = next else {
         return Ok(());
     };

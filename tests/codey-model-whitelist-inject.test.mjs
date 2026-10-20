@@ -943,7 +943,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "75");
+  assert.equal(patch.version, "76");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -1192,7 +1192,7 @@ test("route aliases display clearly and dispatch to the selected provider", asyn
   };
   runtime.dispatchWindowEvent("codex-message-from-view", direct);
   assert.deepEqual(direct.detail.request.params, {
-    model: "shared-model",
+    model: "route-b/shared-model",
     responsesapiClientMetadata: { trace: "preserved", codey_route: "route-b" },
   });
 
@@ -1265,7 +1265,7 @@ test("route aliases display clearly and dispatch to the selected provider", asyn
   };
   runtime.dispatchWindowEvent("codex-message-from-view", deletedRouteRequest);
   assert.deepEqual(deletedRouteRequest.detail.request.params, {
-    model: "shared-model",
+    model: "route-a/shared-model",
     responsesapiClientMetadata: { codey_route: "route-a" },
   });
   assert.equal(
@@ -1344,7 +1344,7 @@ test("a raw model keeps its persisted thread route when multiple routes share th
   });
   assert.deepEqual(resumedTurn.request.params, {
     threadId: "persisted-thread",
-    model: "shared-model",
+    model: "route-b/shared-model",
     responsesapiClientMetadata: { codey_route: "route-b" },
   });
   restoredRuntime.patch.dispose();
@@ -1650,7 +1650,7 @@ test("a persisted thread route migrates when only another route exposes the same
   });
   assert.deepEqual(nextTurn.request.params, {
     threadId: "stale-route-thread",
-    model: "gpt-5.6-sol",
+    model: "openai/gpt-5.6-sol",
     responsesapiClientMetadata: { codey_route: "openai" },
   });
   assert.deepEqual(
@@ -1829,7 +1829,7 @@ test("qualified official selectors survive composer state requests", async () =>
   });
   assert.deepEqual(nextTurn.request.params, {
     threadId: "qualified-official-thread",
-    model: "gpt-5.6-sol",
+    model: alias,
     responsesapiClientMetadata: { codey_route: "route-b" },
   });
   runtime.patch.dispose();
@@ -1930,7 +1930,7 @@ test("an explicit official settings choice beats an old same-id relay route", as
   runtime.patch.dispose();
 });
 
-test("raw turns retain their route across repeated transport rewrites and thread replies", async () => {
+test("turn selectors retain their route across repeated transport rewrites and thread replies", async () => {
   const model = "gpt-5.6-sol";
   const routes = ["openai", "route-a", "route-b"];
   const selectors = [model, `route-a/${model}`, `route-b/${model}`];
@@ -1963,7 +1963,7 @@ test("raw turns retain their route across repeated transport rewrites and thread
     });
     const expected = {
       threadId: "raw-turn-thread",
-      model,
+      model: selectors[index],
       responsesapiClientMetadata: { codey_route: routes[index] },
     };
     assert.deepEqual(turn.request.params, expected);
@@ -1973,7 +1973,7 @@ test("raw turns retain their route across repeated transport rewrites and thread
       request: { method: "send-cli-request-for-host", params: JSON.parse(JSON.stringify(turn.request)) },
     });
     assert.deepEqual(wrapped.request.params.params, expected,
-      "serialized raw models must keep the route through another transport pass");
+      "serialized selectors must keep the route through another transport pass");
     assert.equal(runtime.patch.isBlockedOutgoingMessage(wrapped), false);
 
     const response = { data: { type: "mcp-response", message: { result: { data: [
@@ -1984,6 +1984,93 @@ test("raw turns retain their route across repeated transport rewrites and thread
     assert.equal(response.data.message.result.data[0].model, selectors[index]);
     assert.equal(response.data.message.result.data[1].model, model);
   }
+  runtime.patch.dispose();
+});
+
+test("explicit turn selectors override stale metadata across repeated same-model route switches", async () => {
+  for (const sourceModel of ["shared-model", "codex-auto-review"]) {
+    const routes = ["route-a", "route-b", "codey-official-account-test"];
+    const models = routes.map((route) => `${route}/${sourceModel}`);
+    const storage = memoryStorage();
+    const runtime = await loadPatch({
+      status: "ok", models, default_model: models[0],
+      model_metadata: routes.map((route, index) => ({
+        model: models[index], source_model: sourceModel,
+        provider_id: "codey_router", route_provider_id: route,
+        official_account: index === 2,
+      })),
+    }, [statsigClient()], { storage });
+    compactionReply(runtime, "carrier", { thread: { id: "switching", modelProvider: "codey_router" } });
+    let previousRoute = routes[1];
+    for (const index of [0, 1, 0, 2, 1]) {
+      const metadata = Object.freeze({ codey_route: previousRoute, trace: "preserved" });
+      const params = Object.freeze({ threadId: "switching", model: models[index], responsesapiClientMetadata: metadata });
+      const outgoing = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", params));
+      const expected = {
+        threadId: "switching", model: models[index],
+        responsesapiClientMetadata: { codey_route: routes[index], trace: "preserved" },
+      };
+      assert.deepEqual(outgoing.request.params, expected);
+      assert.equal(runtime.patch.isBlockedOutgoingMessage(outgoing), false);
+      assert.equal(params.responsesapiClientMetadata, metadata);
+      assert.equal(metadata.codey_route, previousRoute);
+      const serialized = JSON.parse(JSON.stringify(outgoing.request));
+      serialized.params.responsesapiClientMetadata.codey_route = previousRoute;
+      const wrapped = runtime.patch.rewriteOutgoingMessage({
+        type: "mcp-request", request: { method: "send-cli-request-for-host", params: serialized },
+      });
+      assert.deepEqual(wrapped.request.params.params, expected,
+        "another bridge pass must not let retained metadata replace the explicit selector");
+      assert.deepEqual(JSON.parse(storage.getItem("codey.thread-route-bindings.v1")), [
+        ["switching", { routeProviderId: routes[index], sourceModel }],
+      ]);
+      previousRoute = routes[index];
+    }
+    runtime.patch.dispose();
+  }
+});
+
+test("all model-bound entry points preserve a current selector ahead of stale route metadata", async () => {
+  for (const method of ["thread/start", "thread/resume", "thread/fork", "thread/settings/update", "turn/start"]) {
+    for (const wrapped of [false, true]) {
+      const storage = memoryStorage();
+      storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+        ["selected", { routeProviderId: "route-a", sourceModel: "shared" }],
+      ]));
+      storage.setItem("codey.thread-requested-routes.v1", JSON.stringify([
+        ["selected", { routeProviderId: "route-a", sourceModel: "shared" }],
+      ]));
+      const runtime = await loadPatch({
+        status: "ok", models: ["route-a/shared", "route-b/shared"], default_model: "route-a/shared",
+      }, [statsigClient()], { storage });
+      compactionReply(runtime, "carrier", { thread: { id: "selected", modelProvider: "codey_router" } });
+      const params = {
+        threadId: "selected", model: "route-b/shared", effort: "high",
+        responsesapiClientMetadata: { codey_route: "route-a", trace: "kept" },
+      };
+      const request = { method, params };
+      const outgoing = runtime.patch.rewriteOutgoingMessage({
+        type: method === "thread/start" ? "thread-prewarm-start" : "mcp-request",
+        request: wrapped ? { method: "send-cli-request-for-host", params: request } : request,
+      });
+      const actual = wrapped ? outgoing.request.params.params : outgoing.request.params;
+      assert.equal(actual.model, "route-b/shared", `${method}, wrapped=${wrapped}`);
+      assert.equal(actual.effort, "high");
+      assert.equal(actual.responsesapiClientMetadata.trace, "kept");
+      assert.equal(runtime.patch.isBlockedOutgoingMessage(outgoing), false);
+      if (method === "turn/start") assert.equal(actual.responsesapiClientMetadata.codey_route, "route-b");
+      runtime.patch.dispose();
+    }
+  }
+});
+
+test("unrouted catalog models retain their model and unrelated request metadata", async () => {
+  const runtime = await loadPatch({
+    status: "ok", models: ["plain-model"], default_model: "plain-model",
+  }, [statsigClient()]);
+  const params = { model: "plain-model", responsesapiClientMetadata: { trace: "kept" } };
+  const outgoing = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", params));
+  assert.deepEqual(outgoing.request.params, params);
   runtime.patch.dispose();
 });
 
@@ -2187,7 +2274,7 @@ test("an explicit runtime provider response takes precedence over the requested 
     migrate("codey_router");
     const routedTurn = turn();
     assert.equal(runtime.patch.isBlockedOutgoingMessage(routedTurn), false);
-    assert.equal(routedTurn.request.params.model, "gpt-5.6-luna");
+    assert.equal(routedTurn.request.params.model, alias);
     assert.equal(routedTurn.request.params.responsesapiClientMetadata.codey_route, "route-aizz");
   }
   runtime.patch.dispose();
@@ -2284,7 +2371,7 @@ test("a legacy official task resumes through the local router carrier", async ()
   runtime.dispatchWindowEvent("codex-message-from-view", selected);
   assert.deepEqual(selected.detail.request.params, {
     threadId: "official-thread",
-    model: "shared-model",
+    model: "relay/shared-model",
     responsesapiClientMetadata: { codey_route: "relay" },
   });
   assert.equal(runtime.patch.isBlockedOutgoingMessage(selected.detail), false);
@@ -2370,7 +2457,7 @@ test("an id-less app-server resume records its router migration after request cr
   assert.equal(runtime.patch.isBlockedOutgoingMessage(switched), false);
   assert.deepEqual(switched.request.params, {
     threadId: "id-less-resume-thread",
-    model: "shared-model",
+    model: alias,
     responsesapiClientMetadata: { codey_route: "relay" },
   });
   runtime.patch.dispose();
@@ -2461,7 +2548,7 @@ test("a legacy custom-carrier thread resumes onto the router and continues on a 
   assert.equal(runtime.patch.isBlockedOutgoingMessage(continued), false);
   assert.deepEqual(continued.request.params, {
     threadId: "legacy-custom-thread",
-    model: "gpt-5.6-sol",
+    model: alias,
     responsesapiClientMetadata: { codey_route: "aihub" },
   });
   runtime.patch.dispose();
@@ -2552,7 +2639,7 @@ test("an external-provider thread resumes onto the router and switches to an off
   assert.equal(runtime.patch.isBlockedOutgoingMessage(switched), false);
   assert.deepEqual(switched.request.params, {
     threadId: "external-official-thread",
-    model: "gpt-5.6-sol",
+    model: alias,
     responsesapiClientMetadata: { codey_route: "openai" },
   });
   runtime.patch.dispose();
@@ -2598,7 +2685,7 @@ test("every official route requires the local router even on a legacy OpenAI tas
       type: "mcp-request", request: { method: "turn/start", params: { threadId: "official-task", model } },
     });
     assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), false);
-    assert.equal(turn.request.params.model, "gpt-5.6-sol");
+    assert.equal(turn.request.params.model, model);
     assert.equal(turn.request.params.responsesapiClientMetadata.codey_route, routeId);
     runtime.patch.dispose();
   }
@@ -2648,7 +2735,7 @@ test("an official thread must resume onto the router before selecting a third-pa
   assert.equal(runtime.patch.isBlockedOutgoingMessage(rewritten), true);
   assert.deepEqual(rewritten.request.params, {
     threadId: "official-thread",
-    model: "gpt-5.5",
+    model: alias,
     responsesapiClientMetadata: { codey_route: "relay" },
   });
   runtime.patch.dispose();
@@ -2692,7 +2779,7 @@ test("an unresumed external-provider task cannot bypass runtime migration", asyn
 
   assert.deepEqual(rewritten.request.params, {
     threadId: "external-thread",
-    model: "gpt-5.5",
+    model: alias,
     responsesapiClientMetadata: { codey_route: "relay" },
   });
   assert.equal(runtime.patch.isBlockedOutgoingMessage(rewritten), true);
@@ -2750,7 +2837,7 @@ test("a local-router thread can switch among third-party and official gateway ro
   assert.equal(runtime.patch.isBlockedOutgoingMessage(thirdPartySwitch), false);
   assert.deepEqual(thirdPartySwitch.request.params, {
     threadId: "router-thread",
-    model: "shared-model",
+    model: routeB,
     responsesapiClientMetadata: { codey_route: "route-b" },
   });
 
@@ -2858,7 +2945,7 @@ test("a prewarmed gateway thread switches models without an invalid turn provide
   assert.equal(runtime.patch.isBlockedOutgoingMessage(laterThirdPartyTurn), false);
   assert.deepEqual(laterThirdPartyTurn.request.params, {
     threadId: "draft-thread",
-    model: "gpt-5.5",
+    model: alias,
     responsesapiClientMetadata: { codey_route: "route-a" },
   });
   runtime.patch.dispose();
@@ -3323,7 +3410,7 @@ test("model picker menu groups models under route headings without changing mode
   };
   runtime.dispatchWindowEvent("codex-message-from-view", request);
   assert.deepEqual(request.detail.request.params, {
-    model: "gpt-5.6-sol",
+    model: "relay/gpt-5.6-sol",
     responsesapiClientMetadata: { codey_route: "relay" },
   });
   runtime.patch.dispose();
@@ -3629,7 +3716,7 @@ test("model picker ignores streaming mutations outside the picker", async () => 
   runtime.patch.dispose();
 });
 
-test("the clicked official route emits a raw ChatGPT model despite stale route metadata", async () => {
+test("the clicked official route retains its selector despite stale route metadata", async () => {
   const storage = memoryStorage();
   storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
     ["menu-route-thread", {
@@ -3695,7 +3782,7 @@ test("the clicked official route emits a raw ChatGPT model despite stale route m
   });
   assert.deepEqual(selectedTurn.request.params, {
     threadId: "menu-route-thread",
-    model: "gpt-5.6-sol",
+    model: "openai/gpt-5.6-sol",
     responsesapiClientMetadata: { codey_route: "openai" },
   });
 
@@ -3709,7 +3796,7 @@ test("the clicked official route emits a raw ChatGPT model despite stale route m
   });
   assert.deepEqual(laterTurn.request.params, {
     threadId: "menu-route-thread",
-    model: "gpt-5.6-sol",
+    model: "openai/gpt-5.6-sol",
     responsesapiClientMetadata: { codey_route: "openai" },
   });
   runtime.patch.dispose();
@@ -3883,7 +3970,7 @@ test("official OpenAI route aliases dispatch raw model ids through the OpenAI pr
   };
   runtime.dispatchWindowEvent("codex-message-from-view", relay);
   assert.deepEqual(relay.detail.request.params, {
-    model: "gpt-5.6-sol",
+    model: "relay/gpt-5.6-sol",
     responsesapiClientMetadata: { codey_route: "relay" },
   });
   runtime.patch.dispose();
@@ -4724,7 +4811,7 @@ test("legacy codey selectors recover without a history field and leave current s
   const raw = runtime.patch.rewriteOutgoingMessage({
     type: "mcp-request", request: { method: "turn/start", params: { model: "codey/vendor/model" } },
   });
-  assert.equal(raw.request.params.model, "codey/vendor/model");
+  assert.equal(raw.request.params.model, "current/codey/vendor/model");
   assert.equal(raw.request.params.responsesapiClientMetadata.codey_route, "current");
   runtime.patch.dispose();
 });
@@ -4863,7 +4950,7 @@ test("ambiguous historical models retain their identity unless a valid hint choo
   const hinted = runtime.patch.rewriteOutgoingMessage({ ...original, request: { ...original.request, params: {
     model: "codey/vendor/model", responsesapiClientMetadata: { codey_route: "b" },
   } } });
-  assert.equal(hinted.request.params.model, "vendor/model");
+  assert.equal(hinted.request.params.model, "b/vendor/model");
   assert.equal(hinted.request.params.responsesapiClientMetadata.codey_route, "b");
   const resumed = runtime.patch.rewriteOutgoingMessage({ type: "mcp-request", request: {
     method: "thread/resume", params: { threadId: "ambiguous", modelProvider: "codey_router" },
@@ -5502,7 +5589,7 @@ for (const entry of ["client", "direct"]) {
       assert.equal(runtime.patch.rewriteIncomingResult("thread/read", stale, "remote-host"), stale);
       assert.equal(runtime.patch.rewriteIncomingResult("thread/read", { thread: { id: "other", model: "local/shared" } }, "local").thread.model, "local/shared");
       const turn = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId: "cold" })).request.params;
-      assert.equal(turn.model, "shared");
+      assert.equal(turn.model, "remote/shared");
       assert.equal(turn.responsesapiClientMetadata.codey_route, "remote");
       runtime.patch.dispose();
     });
@@ -5687,7 +5774,7 @@ test("failed and out-of-order settings replies retain the latest accepted select
   compactionReply(runtime, "older", { modelProvider: "codey_router", model: "gpt-6-astra" });
   assert.equal(storage.getItem("codey.thread-model-selections.v1"), null);
   const turn = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId: "settings" })).request.params;
-  assert.equal(turn.model, "shared");
+  assert.equal(turn.model, "local/shared");
   assert.equal(turn.responsesapiClientMetadata.codey_route, "local");
   for (const failureFirst of [true, false]) {
     choose("middle", "remote/shared");

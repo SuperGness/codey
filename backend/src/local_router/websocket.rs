@@ -711,25 +711,48 @@ impl WebSocketResponsesDownstream {
         // Any later failure is surfaced to the caller and is never replayed
         // over HTTP, avoiding duplicate tool calls and other side effects.
         if let Some(probe) = probe {
-            probe.mark_upstream_send(UpstreamTransport::WebSocket);
             probe.record_upstream_body(RequestBodySummary::from_responses_body(
                 body,
                 Some(message.len() as u64),
             ));
         }
         match self
-            .wait_for_upstream(tokio::time::timeout(
-                DOWNSTREAM_WRITE_TIMEOUT,
-                upstream.socket.send(WebSocketMessage::Text(message.into())),
-            ))
+            .wait_for_upstream(tokio::time::timeout(DOWNSTREAM_WRITE_TIMEOUT, async {
+                if let Some(probe) = probe {
+                    probe.begin_upstream_attempt(
+                        UpstreamTransport::WebSocket,
+                        crate::route_request_log::AttemptTrigger::Initial,
+                    );
+                }
+                upstream
+                    .socket
+                    .send(WebSocketMessage::Text(message.into()))
+                    .await
+            }))
             .await?
         {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                if let Some(probe) = probe {
+                    probe.mark_attempt_phase(crate::route_request_log::AttemptPhase::ResponseBody);
+                }
+            }
             Ok(Err(error)) => {
+                if let Some(probe) = probe {
+                    probe.finish_upstream_attempt(
+                        crate::route_request_log::AttemptOutcome::Failed,
+                        crate::route_request_log::AttemptPhase::Send,
+                    );
+                }
                 record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
                 return Err(error).context("发送 Responses WebSocket 上游请求失败");
             }
             Err(_) => {
+                if let Some(probe) = probe {
+                    probe.finish_upstream_attempt(
+                        crate::route_request_log::AttemptOutcome::TimedOut,
+                        crate::route_request_log::AttemptPhase::Send,
+                    );
+                }
                 record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
                 anyhow::bail!("发送 Responses WebSocket 上游请求超时");
             }
@@ -740,6 +763,12 @@ impl WebSocketResponsesDownstream {
         let mut response_bytes = 0_usize;
         loop {
             if tokio::time::Instant::now() >= response_deadline {
+                if let Some(probe) = probe {
+                    probe.finish_upstream_attempt(
+                        crate::route_request_log::AttemptOutcome::TimedOut,
+                        crate::route_request_log::AttemptPhase::ResponseBody,
+                    );
+                }
                 return Err(anyhow::Error::new(UpstreamResponseDeadline));
             }
             let next = loop {
@@ -755,8 +784,21 @@ impl WebSocketResponsesDownstream {
                 let next = match waited {
                     Ok(Ok(next)) => next,
                     Ok(Err(_)) => {
+                        if let Some(probe) = probe {
+                            probe.finish_upstream_attempt(
+                                crate::route_request_log::AttemptOutcome::TimedOut,
+                                crate::route_request_log::AttemptPhase::ResponseBody,
+                            );
+                        }
+                        // 等待上限取总期限与空闲期限的较小值；总期限耗尽不代表线路
+                        // 不支持 WebSocket，和帧间检查一样不记退避。
+                        if tokio::time::Instant::now() >= response_deadline {
+                            return Err(anyhow::Error::new(UpstreamResponseDeadline));
+                        }
                         record_upstream_websocket_failure(&self.websocket_backoffs, &backoff_key);
-                        anyhow::bail!("读取 Responses WebSocket 上游事件超时");
+                        return Err(anyhow::Error::new(UpstreamReadIdleTimeout {
+                            operation: "读取 Responses WebSocket 上游事件",
+                        }));
                     }
                     Err(error)
                         if error
@@ -1423,6 +1465,30 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
     }
 }
 
+/// HTTP 回退的每个事件都经过同一套归一化、修正、观测和写回；返回是否为终态事件。
+async fn forward_fallback_event(
+    downstream: &mut WebSocketResponsesDownstream,
+    mut event: Value,
+    retry_advice: Option<&ResponseRetryAdvice>,
+    response_fix: Option<&NativeResponseFix>,
+    probe: Option<&RouteRequestLogProbe>,
+) -> Result<bool> {
+    normalize_response_failure(&mut event, retry_advice);
+    if let Some(fix) = response_fix {
+        fix.apply(&mut event);
+    }
+    if let Some(probe) = probe {
+        probe.observe_event(&event);
+    }
+    downstream.write_event(&event).await?;
+    if responses_event_has_user_content(&event)
+        && let Some(probe) = probe
+    {
+        probe.mark_first_downstream_content();
+    }
+    Ok(responses_event_is_terminal(&event))
+}
+
 pub(crate) async fn proxy_native_response_to_websocket(
     downstream: &mut WebSocketResponsesDownstream,
     response: reqwest::Response,
@@ -1469,22 +1535,16 @@ pub(crate) async fn proxy_native_response_to_websocket(
                     done = true;
                     break;
                 }
-                let mut event = serde_json::from_str::<Value>(&data)
+                let event = serde_json::from_str::<Value>(&data)
                     .context("Responses HTTP 上游 SSE data 不是有效 JSON")?;
-                normalize_response_failure(&mut event, retry_advice.as_ref());
-                if let Some(fix) = response_fix.as_ref() {
-                    fix.apply(&mut event);
-                }
-                terminal |= responses_event_is_terminal(&event);
-                if let Some(probe) = probe {
-                    probe.observe_event(&event);
-                }
-                downstream.write_event(&event).await?;
-                if responses_event_has_user_content(&event)
-                    && let Some(probe) = probe
-                {
-                    probe.mark_first_downstream_content();
-                }
+                terminal |= forward_fallback_event(
+                    downstream,
+                    event,
+                    retry_advice.as_ref(),
+                    response_fix.as_ref(),
+                    probe,
+                )
+                .await?;
                 if terminal {
                     break;
                 }
@@ -1501,22 +1561,16 @@ pub(crate) async fn proxy_native_response_to_websocket(
             && let Some(data) = sse_frame_data(&buffer[cursor.consumed..])?
             && data.trim() != "[DONE]"
         {
-            let mut event = serde_json::from_str::<Value>(&data)
+            let event = serde_json::from_str::<Value>(&data)
                 .context("Responses HTTP 上游 SSE 末尾 data 不是有效 JSON")?;
-            normalize_response_failure(&mut event, retry_advice.as_ref());
-            if let Some(fix) = response_fix.as_ref() {
-                fix.apply(&mut event);
-            }
-            terminal |= responses_event_is_terminal(&event);
-            if let Some(probe) = probe {
-                probe.observe_event(&event);
-            }
-            downstream.write_event(&event).await?;
-            if responses_event_has_user_content(&event)
-                && let Some(probe) = probe
-            {
-                probe.mark_first_downstream_content();
-            }
+            terminal |= forward_fallback_event(
+                downstream,
+                event,
+                retry_advice.as_ref(),
+                response_fix.as_ref(),
+                probe,
+            )
+            .await?;
         }
         if !terminal {
             anyhow::bail!("Responses HTTP/SSE 降级流在终态事件前断开");
@@ -1549,20 +1603,15 @@ pub(crate) async fn proxy_native_response_to_websocket(
             anyhow::bail!("Responses HTTP/SSE 降级响应缺少终态事件");
         }
         downstream.start_event_stream().await?;
-        for mut event in events {
-            normalize_response_failure(&mut event, retry_advice.as_ref());
-            if let Some(fix) = response_fix.as_ref() {
-                fix.apply(&mut event);
-            }
-            if let Some(probe) = probe {
-                probe.observe_event(&event);
-            }
-            downstream.write_event(&event).await?;
-            if responses_event_has_user_content(&event)
-                && let Some(probe) = probe
-            {
-                probe.mark_first_downstream_content();
-            }
+        for event in events {
+            forward_fallback_event(
+                downstream,
+                event,
+                retry_advice.as_ref(),
+                response_fix.as_ref(),
+                probe,
+            )
+            .await?;
         }
         return downstream.finish_event_stream().await;
     }
@@ -1751,6 +1800,53 @@ pub(crate) async fn write_static_response(
 mod http_fallback_history_tests {
     use super::super::tests::{local_websocket_pair, router_config};
     use super::*;
+
+    #[tokio::test]
+    async fn websocket_diagnostics_count_response_create_but_not_the_handshake() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let upstream = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let WebSocketMessage::Text(request) = socket.next().await.unwrap().unwrap() else {
+                panic!("response.create expected");
+            };
+            let request: Value = serde_json::from_str(&request).unwrap();
+            assert_eq!(request["type"], "response.create");
+            socket.send(WebSocketMessage::Text(json!({"type":"response.completed","response":{"id":"response-test","status":"completed","output":[]}}).to_string().into())).await.unwrap();
+        });
+        let (mut config, provider, model) = router_config(format!("http://{address}/v1"));
+        config.profiles[0].supports_websockets = true;
+        let snapshot = RouterSnapshot::from_config(&config);
+        let (socket, _peer) = local_websocket_pair().await;
+        let mut downstream = WebSocketResponsesDownstream::new(socket);
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        assert_eq!(
+            downstream
+                .proxy_upstream_websocket(
+                    &snapshot.routes[&provider],
+                    &HeaderMap::new(),
+                    &mut json!({"model":model,"input":"test"}),
+                    false,
+                    Some(&probe)
+                )
+                .await
+                .unwrap(),
+            UpstreamWebSocketAttempt::Completed
+        );
+        upstream.await.unwrap();
+        let attempts = probe.attempts_for_test();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].transport, UpstreamTransport::WebSocket);
+        assert_eq!(
+            attempts[0].status_code, None,
+            "101 握手状态不能作为模型响应状态"
+        );
+        assert_eq!(
+            attempts[0].outcome,
+            crate::route_request_log::AttemptOutcome::Succeeded
+        );
+    }
 
     #[tokio::test]
     async fn declared_search_tools_preserve_websocket_selection() {
