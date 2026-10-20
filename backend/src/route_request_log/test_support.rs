@@ -7,6 +7,9 @@ use super::{
 
 pub(super) fn sample_entry(request_id: &str) -> RouteRequestLogEntry {
     RouteRequestLogEntry {
+        route_decision: None,
+        upstream_attempts: Vec::new(),
+        attempts_omitted: 0,
         requested_service_tier: None,
         service_tier: None,
         schema_version: SCHEMA_VERSION,

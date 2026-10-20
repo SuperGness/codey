@@ -423,6 +423,9 @@ impl SqliteSink {
             ("upstream_bytes", "INTEGER"),
             ("upstream_response_model", "TEXT"),
             ("concurrency_wait_ms", "INTEGER"),
+            ("route_decision", "TEXT"),
+            ("upstream_attempts", "TEXT"),
+            ("attempts_omitted", "INTEGER"),
         ] {
             if !existing_columns.contains(column) {
                 connection.execute_batch(&format!(
@@ -470,14 +473,15 @@ impl SqliteSink {
                     request_has_previous_response_id, request_bytes,
                     upstream_input_state, upstream_input_items,
                     upstream_has_previous_response_id, upstream_bytes,
-                    upstream_response_model, concurrency_wait_ms
+                    upstream_response_model, concurrency_wait_ms,
+                    route_decision, upstream_attempts, attempts_omitted
                 ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
                     ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
                     ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30,
                     ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40,
                     ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50,
-                    ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58, ?59, ?60
+                    ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58, ?59, ?60, ?61, ?62, ?63
                 ) ON CONFLICT(request_id) DO NOTHING",
             )?;
             for queued in batch {
@@ -543,6 +547,13 @@ impl SqliteSink {
                     entry.upstream_bytes.map(to_i64),
                     entry.upstream_response_model,
                     entry.concurrency_wait_ms.map(to_i64),
+                    entry
+                        .route_decision
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?,
+                    serde_json::to_string(&entry.upstream_attempts)?,
+                    entry.attempts_omitted,
                 ])?;
             }
         }

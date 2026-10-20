@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod collector;
+mod diagnostics;
+pub(crate) use diagnostics::*;
 mod query;
 #[cfg(test)]
 mod test_support;
@@ -31,7 +33,7 @@ pub(crate) use query::{
 #[cfg(test)]
 pub(crate) use query::{session_recorded_average, session_recorded_timing};
 
-const SCHEMA_VERSION: u8 = 13;
+const SCHEMA_VERSION: u8 = 14;
 const MAX_LOG_STRING_BYTES: usize = 512;
 const MAX_LOG_HEADERS_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_LOG_ERROR_BYTES: usize = 64 * 1024;
@@ -71,7 +73,7 @@ impl RequestProtocol {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum UpstreamTransport {
     Http,
@@ -217,6 +219,9 @@ impl RequestTokenUsage {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RouteRequestLogEntry {
+    pub route_decision: Option<RouteDecision>,
+    pub upstream_attempts: Vec<UpstreamAttemptLog>,
+    pub attempts_omitted: u32,
     pub requested_service_tier: Option<String>,
     pub service_tier: Option<String>,
     pub schema_version: u8,
@@ -450,6 +455,9 @@ pub(crate) struct RouteRequestLogAnalytics {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RouteRequestLogQueryItem {
+    pub route_decision: Option<RouteDecision>,
+    pub upstream_attempts: Vec<UpstreamAttemptLog>,
+    pub attempts_omitted: u32,
     pub requested_service_tier: Option<String>,
     pub service_tier: Option<String>,
     pub request_id: String,

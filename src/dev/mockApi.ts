@@ -517,6 +517,33 @@ if (import.meta.env.DEV) {
           ? "供应商额度不足，请稍后重试或切换备用线路（代码：rate_limit_exceeded）"
           : undefined,
         completionReason: failed ? undefined : "completed",
+        routeDecision: index % 10 === 9 ? null : {
+          settingsRevision: 42,
+          reason: account ? "default_official" : primary ? "explicit_alias" : "session_binding",
+          candidateCount: primary || account ? 1 : 2,
+          historicalAlias: index === 0,
+          defaultedModel: false,
+          rejectedHint: index === 1 ? "model_not_enabled" : null,
+          rejectedBinding: null,
+        },
+        upstreamAttempts: index % 10 === 9 ? [] : [
+          ...(index === 0 ? [{
+            sequence: 1, transport: "http_sse", trigger: "initial", startedMs: 23,
+            durationMs: 50, headerMs: 45, statusCode: 400, outcome: "rejected", phase: "response_body",
+          }] : []),
+          {
+            sequence: index === 0 ? 2 : 1,
+            transport: protocol === "sse" ? "http_sse" : protocol,
+            trigger: index === 0 ? "reasoning_repair" : "initial",
+            startedMs: index === 0 ? 80 : 12 + index,
+            durationMs: totalDurationMs - (index === 0 ? 80 : 12 + index),
+            headerMs: 120 + index * 8,
+            statusCode: failed ? 429 : 200,
+            outcome: failed ? "rejected" : "succeeded",
+            phase: failed ? "response_body" : "complete",
+          },
+        ],
+        attemptsOmitted: 0,
         fallbackCount: failed ? 1 : 0,
         fallbackReason: failed ? "rate_limited" : undefined,
         upstreamAuthority: primary ? "primary.example.invalid" : "backup.example.invalid",

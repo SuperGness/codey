@@ -22,6 +22,103 @@ use super::{
 use crate::config::{RouteRequestLogBackend, RouteRequestLogConfig};
 
 #[test]
+fn attempt_diagnostics_are_bounded_and_never_copy_payloads() {
+    use super::super::{AttemptOutcome, AttemptPhase, AttemptTrigger, MAX_RECORDED_ATTEMPTS};
+    let probe = RouteRequestLogProbe::detached_test_probe();
+    probe.mark_fallback("websocket_connect_failed");
+    for _ in 0..MAX_RECORDED_ATTEMPTS + 5 {
+        probe.begin_upstream_attempt(UpstreamTransport::HttpSse, AttemptTrigger::Initial);
+        probe.record_attempt_headers(503);
+    }
+    probe.finish_upstream_attempt(AttemptOutcome::Failed, AttemptPhase::ResponseBody);
+    let pending = lock_unpoisoned(&probe.shared.entry);
+    assert_eq!(pending.upstream_attempts.len(), MAX_RECORDED_ATTEMPTS);
+    assert_eq!(pending.attempts_omitted, 5);
+    assert_eq!(
+        pending.upstream_attempts[0].trigger,
+        AttemptTrigger::TransportFallback
+    );
+    assert_eq!(
+        pending.upstream_attempts.last().unwrap().outcome,
+        AttemptOutcome::Rejected
+    );
+    let encoded = serde_json::to_string(&pending.upstream_attempts).unwrap();
+    assert!(encoded.len() < 4_096);
+    for forbidden in ["authorization", "headers", "input", "apiKey", "requestBody"] {
+        assert!(!encoded.contains(forbidden));
+    }
+}
+
+#[test]
+fn attempts_distinguish_cancellation_timeout_and_failed_downstream_delivery() {
+    use super::super::{AttemptOutcome, AttemptPhase, AttemptTrigger};
+    for outcome in [AttemptOutcome::Cancelled, AttemptOutcome::TimedOut] {
+        let probe = RouteRequestLogProbe::detached_test_probe();
+        probe.begin_upstream_attempt(UpstreamTransport::WebSocket, AttemptTrigger::Initial);
+        probe.finish_upstream_attempt(outcome, AttemptPhase::ResponseBody);
+        let attempts = probe.attempts_for_test();
+        assert_eq!(attempts[0].outcome, outcome);
+        assert_eq!(attempts[0].status_code, None);
+    }
+    let probe = RouteRequestLogProbe::detached_test_probe();
+    probe.begin_upstream_attempt(UpstreamTransport::HttpSse, AttemptTrigger::Initial);
+    probe.observe_event(&serde_json::json!({"type":"response.completed","response":{"output":[{"text":"secret content"}]}}));
+    probe.finish_upstream_attempt(AttemptOutcome::Failed, AttemptPhase::DownstreamDelivery);
+    let attempts = probe.attempts_for_test();
+    assert_eq!(attempts[0].outcome, AttemptOutcome::DeliveryFailed);
+    assert_eq!(attempts[0].phase, AttemptPhase::DownstreamDelivery);
+    assert!(
+        !serde_json::to_string(&attempts)
+            .unwrap()
+            .contains("secret content")
+    );
+}
+
+#[test]
+fn cancellation_preserves_an_observed_upstream_failure() {
+    use super::super::{AttemptOutcome, AttemptPhase, AttemptTrigger};
+    let probe = RouteRequestLogProbe::detached_test_probe();
+    probe.begin_upstream_attempt(UpstreamTransport::HttpSse, AttemptTrigger::Initial);
+    probe.record_attempt_headers(200);
+    probe.observe_event(
+        &serde_json::json!({"type":"response.failed","response":{"status":"failed"}}),
+    );
+    probe.finish_upstream_attempt(AttemptOutcome::Cancelled, AttemptPhase::ResponseBody);
+    let attempts = probe.attempts_for_test();
+    assert_eq!(attempts.len(), 1);
+    assert_eq!(attempts[0].outcome, AttemptOutcome::Failed);
+    assert_eq!(attempts[0].phase, AttemptPhase::ResponseBody);
+    assert!(attempts[0].duration_ms.is_some());
+}
+
+#[test]
+fn statistics_only_probe_does_not_allocate_diagnostics() {
+    use super::super::{AttemptTrigger, RouteDecision};
+    let controller = RouteRequestLogController::with_root(PathBuf::new());
+    let probe = controller
+        .begin(|producer| {
+            producer.begin(RouteRequestLogStart {
+                request_id: "stats-only",
+                started_at: Instant::now(),
+                request_protocol: RequestProtocol::Http,
+                request_kind: "responses",
+                requested_model: "model",
+                reasoning_effort: None,
+                thinking_budget_tokens: None,
+                codex_session_id: Some("session"),
+                codex_session_is_parent: false,
+            })
+        })
+        .unwrap();
+    assert!(!probe.records_diagnostics());
+    probe.record_route_decision(RouteDecision::default());
+    probe.begin_upstream_attempt(UpstreamTransport::Http, AttemptTrigger::Initial);
+    let pending = lock_unpoisoned(&probe.shared.entry);
+    assert!(pending.route_decision.is_none());
+    assert_eq!(pending.upstream_attempts.capacity(), 0);
+}
+
+#[test]
 fn live_speed_updates_before_finish_and_reconciles_reported_usage() {
     let controller = RouteRequestLogController::with_root(PathBuf::new());
     let registry = controller.session_stats();
@@ -738,7 +835,17 @@ fn probe_submits_exactly_once_with_timing_and_usage() {
         "Responses passthrough",
         false,
     );
-    probe.mark_upstream_send(UpstreamTransport::HttpSse);
+    use super::super::{AttemptOutcome, AttemptTrigger, RouteDecision, RouteDecisionReason};
+    probe.record_route_decision(RouteDecision {
+        settings_revision: 42,
+        reason: RouteDecisionReason::ExplicitAlias,
+        candidate_count: 1,
+        ..Default::default()
+    });
+    probe.begin_upstream_attempt(UpstreamTransport::HttpSse, AttemptTrigger::Initial);
+    probe.record_attempt_headers(400);
+    probe.begin_upstream_attempt(UpstreamTransport::HttpSse, AttemptTrigger::ReasoningRepair);
+    probe.record_attempt_headers(200);
     probe.mark_first_upstream_data(FirstByteSource::UpstreamHttpBody);
     probe.mark_first_downstream_content();
     let original_error = format!("{}末尾", "错".repeat(MAX_LOG_ERROR_BYTES / 3));
@@ -754,6 +861,21 @@ fn probe_submits_exactly_once_with_timing_and_usage() {
     let queued = receiver.try_recv().unwrap();
     assert_eq!(queued.entry.request_id, "request-one");
     assert_eq!(queued.entry.status, RequestStatus::Succeeded);
+    assert_eq!(queued.entry.route_decision.unwrap().settings_revision, 42);
+    assert_eq!(queued.entry.upstream_attempts.len(), 2);
+    assert_eq!(
+        queued.entry.upstream_attempts[0].outcome,
+        AttemptOutcome::Rejected
+    );
+    assert_eq!(queued.entry.upstream_attempts[0].status_code, Some(400));
+    assert_eq!(
+        queued.entry.upstream_attempts[1].outcome,
+        AttemptOutcome::Succeeded
+    );
+    assert_eq!(
+        queued.entry.upstream_attempts[1].trigger,
+        AttemptTrigger::ReasoningRepair
+    );
     assert!(queued.entry.ttft_ms.is_some());
     assert!(queued.entry.router_pre_upstream_ms.is_some());
     assert_eq!(queued.entry.upstream_first_byte_ms, queued.entry.ttft_ms);

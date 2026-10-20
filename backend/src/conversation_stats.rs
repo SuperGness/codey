@@ -518,6 +518,9 @@ mod tests {
 
     pub(super) fn sample_entry(session: Option<&str>, kind: &str) -> RouteRequestLogEntry {
         RouteRequestLogEntry {
+            route_decision: None,
+            upstream_attempts: Vec::new(),
+            attempts_omitted: 0,
             requested_service_tier: None,
             service_tier: None,
             schema_version: 1,

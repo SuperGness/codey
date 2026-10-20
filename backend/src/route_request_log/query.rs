@@ -527,10 +527,16 @@ fn query_sqlite_route_request_logs(
             codex_session_id, codex_session_is_parent, {tier_columns},
             upstream_request_headers, {account_column}, {request_shape_columns},
             {response_header_column}, {response_model_column},
-            {OUTPUT_SPEED_SQL} AS output_tokens_per_second, {concurrency_wait_column}
+            {OUTPUT_SPEED_SQL} AS output_tokens_per_second, {concurrency_wait_column},
+            {diagnostic_columns}
          FROM route_request_logs{where_clause}
          ORDER BY timestamp_unix_ms DESC, request_id DESC
-         {pagination}"
+         {pagination}",
+        diagnostic_columns = if optional_columns.diagnostics {
+            "route_decision, upstream_attempts, attempts_omitted"
+        } else {
+            "NULL, NULL, NULL"
+        }
     );
     let mut page_params = filter_params;
     page_params.push(SqlValue::Integer(to_i64(
@@ -945,6 +951,7 @@ pub(crate) fn query_route_request_log_stats(
 
 #[derive(Clone, Copy)]
 struct RouteRequestLogOptionalColumns {
+    diagnostics: bool,
     /// Billing tier columns used by the pricing estimate.
     tiers: bool,
     /// The per-route official account id.
@@ -971,14 +978,24 @@ fn sqlite_optional_columns(
     static RESPONSE_HEADER_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     static RESPONSE_MODEL_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     static CONCURRENCY_WAIT_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    static DIAGNOSTIC_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     let tiers_known = sqlite_path_known(&TIERED_PATHS, path);
     let official_known = sqlite_path_known(&ACCOUNTED_PATHS, path);
     let shape_known = sqlite_path_known(&SHAPED_PATHS, path);
     let headers_known = sqlite_path_known(&RESPONSE_HEADER_PATHS, path);
     let model_known = sqlite_path_known(&RESPONSE_MODEL_PATHS, path);
     let wait_known = sqlite_path_known(&CONCURRENCY_WAIT_PATHS, path);
-    if tiers_known && official_known && shape_known && headers_known && model_known && wait_known {
+    let diagnostics_known = sqlite_path_known(&DIAGNOSTIC_PATHS, path);
+    if tiers_known
+        && official_known
+        && shape_known
+        && headers_known
+        && model_known
+        && wait_known
+        && diagnostics_known
+    {
         return Ok(RouteRequestLogOptionalColumns {
+            diagnostics: true,
             tiers: true,
             official_account: true,
             request_shape: true,
@@ -989,6 +1006,13 @@ fn sqlite_optional_columns(
     }
     let columns = table_columns(connection, "route_request_logs")?;
     Ok(RouteRequestLogOptionalColumns {
+        diagnostics: sqlite_remember_column(
+            &DIAGNOSTIC_PATHS,
+            path,
+            ["route_decision", "upstream_attempts", "attempts_omitted"]
+                .iter()
+                .all(|column| columns.contains(*column)),
+        ),
         concurrency_wait: sqlite_remember_column(
             &CONCURRENCY_WAIT_PATHS,
             path,
@@ -1049,6 +1073,9 @@ fn open_query_connection(path: &Path) -> rusqlite::Result<Connection> {
 
 fn query_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequestLogQueryItem> {
     Ok(RouteRequestLogQueryItem {
+        route_decision: row_json(row, 59)?,
+        upstream_attempts: row_json(row, 60)?.unwrap_or_default(),
+        attempts_omitted: row.get::<_, Option<u32>>(61)?.unwrap_or_default(),
         requested_service_tier: row.get(43)?,
         service_tier: row.get(44)?,
         request_id: row.get(0)?,
@@ -1108,6 +1135,25 @@ fn query_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteRequest
         upstream_response_headers: row.get(55)?,
         upstream_response_model: row.get(56)?,
         output_tokens_per_second: row.get(57)?,
+    })
+}
+
+fn row_json<T: serde::de::DeserializeOwned>(
+    row: &rusqlite::Row<'_>,
+    index: usize,
+) -> rusqlite::Result<Option<T>> {
+    let Some(value) = row.get::<_, Option<String>>(index)? else {
+        return Ok(None);
+    };
+    if value.len() > 16 * 1024 {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "路由诊断超过大小上限").into(),
+        ));
+    }
+    serde_json::from_str(&value).map(Some).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, error.into())
     })
 }
 

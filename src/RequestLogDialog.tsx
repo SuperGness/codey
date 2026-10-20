@@ -34,6 +34,7 @@ import { modelIdsEqual } from "./modelIds";
 import { formatRouteName } from "./routeShortNames";
 import type { LogAnalytics } from "./usageAnalysis";
 import { maskEmail } from "./sensitiveText";
+import { RequestLogRouteDiagnostics, type RouteDiagnostics } from "./RequestLogRouteDiagnostics";
 import {
   Button,
   Dialog,
@@ -57,7 +58,7 @@ const fallbackReasonLabels: Record<string, string> = {
   websocket_to_http_sse: "上游由 WebSocket 转为 HTTP/SSE，旧记录未区分具体原因",
 };
 
-type RouteRequestLogItem = {
+type RouteRequestLogItem = RouteDiagnostics & {
   requestId: string;
   traceId: string;
   timestampUnixMs: number;
@@ -2768,6 +2769,8 @@ export function RequestLogDialog({
                   ) : null}
                 </dl>
               </div>
+
+              <RequestLogRouteDiagnostics item={selectedItem} />
 
               {/* 请求头与响应头 */}
               <div className="rounded-xl border border-[rgb(var(--codey-ink-rgb,0,0,0))]/8 bg-[var(--codey-surface-muted,#fafafa)] p-3.5 text-xs">

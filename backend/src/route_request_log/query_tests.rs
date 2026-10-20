@@ -1382,6 +1382,9 @@ fn query_rejects_unbounded_or_invalid_parameters() {
 #[test]
 fn query_items_serialize_with_camel_case_fields() {
     let value = serde_json::to_value(RouteRequestLogQueryItem {
+        route_decision: None,
+        upstream_attempts: Vec::new(),
+        attempts_omitted: 0,
         requested_service_tier: None,
         service_tier: None,
         request_id: "request".into(),

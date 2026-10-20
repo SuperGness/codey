@@ -18,6 +18,89 @@ use super::{BatchSink, NdjsonSink, SqliteSink, flush_batch, prune_sqlite_logs, r
 use crate::config::RouteRequestLogBackend;
 
 #[test]
+fn route_diagnostics_migrate_old_logs_and_roundtrip_without_losing_failed_attempts() {
+    use super::super::{
+        AttemptOutcome, AttemptPhase, AttemptTrigger, RouteDecision, RouteDecisionReason,
+        UpstreamAttemptLog, UpstreamTransport,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join(SQLITE_FILE_NAME);
+    let mut sink = SqliteSink::open(&path, 30).unwrap();
+    let mut legacy = sample_entry("legacy");
+    legacy.timestamp_unix_ms = unix_timestamp_ms();
+    sink.write_batch(&[queued(legacy)]).unwrap();
+    sink.connection.execute_batch("ALTER TABLE route_request_logs DROP COLUMN route_decision; ALTER TABLE route_request_logs DROP COLUMN upstream_attempts; ALTER TABLE route_request_logs DROP COLUMN attempts_omitted;").unwrap();
+    drop(sink);
+    let page = query_route_request_logs(
+        directory.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery::default(),
+    )
+    .unwrap();
+    assert!(page.items[0].route_decision.is_none());
+    assert!(page.items[0].upstream_attempts.is_empty());
+    assert_eq!(page.items[0].attempts_omitted, 0);
+    let mut sink = SqliteSink::open(&path, 30).unwrap();
+    let mut entry = sample_entry("diagnostics");
+    entry.timestamp_unix_ms = unix_timestamp_ms();
+    entry.route_decision = Some(RouteDecision {
+        settings_revision: 91,
+        reason: RouteDecisionReason::ExplicitAlias,
+        candidate_count: 1,
+        ..Default::default()
+    });
+    entry.upstream_attempts = vec![
+        UpstreamAttemptLog {
+            sequence: 1,
+            transport: UpstreamTransport::HttpSse,
+            trigger: AttemptTrigger::Initial,
+            started_ms: 5,
+            duration_ms: Some(8),
+            header_ms: Some(4),
+            status_code: Some(429),
+            outcome: AttemptOutcome::Rejected,
+            phase: AttemptPhase::ResponseHeaders,
+        },
+        UpstreamAttemptLog {
+            sequence: 2,
+            transport: UpstreamTransport::HttpSse,
+            trigger: AttemptTrigger::PluginRetry,
+            started_ms: 14,
+            duration_ms: Some(30),
+            header_ms: Some(4),
+            status_code: Some(200),
+            outcome: AttemptOutcome::Succeeded,
+            phase: AttemptPhase::Complete,
+        },
+    ];
+    let expected = entry.clone();
+    let json = serde_json::to_value(&entry).unwrap();
+    assert_eq!(json["routeDecision"]["settingsRevision"], 91);
+    assert_eq!(json["upstreamAttempts"][0]["statusCode"], 429);
+    sink.write_batch(&[queued(entry)]).unwrap();
+    let page = query_route_request_logs(
+        directory.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery::default(),
+    )
+    .unwrap();
+    let item = page
+        .items
+        .iter()
+        .find(|item| item.request_id == "diagnostics")
+        .unwrap();
+    assert_eq!(item.route_decision, expected.route_decision);
+    assert_eq!(item.upstream_attempts, expected.upstream_attempts);
+    let legacy = page
+        .items
+        .iter()
+        .find(|item| item.request_id == "legacy")
+        .unwrap();
+    assert!(legacy.route_decision.is_none());
+    assert!(legacy.upstream_attempts.is_empty());
+}
+
+#[test]
 fn billing_tiers_migrate_history_and_roundtrip() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join(SQLITE_FILE_NAME);

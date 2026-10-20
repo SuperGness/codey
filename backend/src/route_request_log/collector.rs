@@ -12,6 +12,7 @@ use arc_swap::ArcSwapOption;
 use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 
+use super::diagnostics::*;
 use super::query::clear_route_request_log_files;
 use super::writer::{BatchSink, WorkerConfig, WriterControl, writer_loop};
 use super::{
@@ -78,6 +79,10 @@ impl RouteRequestLogProducer {
             registry.begin_request(session_id, request_id, timestamp_unix_ms);
         }
         let entry = PendingEntry {
+            route_decision: None,
+            upstream_attempts: Vec::new(),
+            attempts_omitted: 0,
+            active_attempt_started: None,
             requested_service_tier: None,
             service_tier: None,
             request_body: None,
@@ -326,6 +331,10 @@ impl Drop for RouteRequestLogFinishGuard {
 }
 
 struct PendingEntry {
+    route_decision: Option<RouteDecision>,
+    upstream_attempts: Vec<UpstreamAttemptLog>,
+    attempts_omitted: u32,
+    active_attempt_started: Option<Instant>,
     requested_service_tier: Option<String>,
     service_tier: Option<String>,
     request_body: Option<RequestBodySummary>,
@@ -372,6 +381,112 @@ struct PendingEntry {
 }
 
 impl RouteRequestLogProbe {
+    pub(crate) fn records_diagnostics(&self) -> bool {
+        self.shared.producer.sender.is_some()
+    }
+
+    pub(crate) fn record_route_decision(&self, decision: RouteDecision) {
+        if self.records_diagnostics() {
+            self.shield(|| lock_unpoisoned(&self.shared.entry).route_decision = Some(decision));
+        }
+    }
+
+    /// 只在真正启动上游请求时调用；WebSocket 握手不算请求尝试。
+    pub(crate) fn begin_upstream_attempt(
+        &self,
+        transport: UpstreamTransport,
+        trigger: AttemptTrigger,
+    ) {
+        self.mark_upstream_send(transport);
+        if !self.records_diagnostics() {
+            return;
+        }
+        self.shield(|| {
+            let mut entry = lock_unpoisoned(&self.shared.entry);
+            finish_attempt(&mut entry, AttemptOutcome::Superseded, None);
+            if entry.upstream_attempts.len() >= MAX_RECORDED_ATTEMPTS {
+                entry.attempts_omitted = entry.attempts_omitted.saturating_add(1);
+                return;
+            }
+            let trigger = if trigger == AttemptTrigger::Initial
+                && entry
+                    .fallback_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.starts_with("websocket_"))
+            {
+                AttemptTrigger::TransportFallback
+            } else {
+                trigger
+            };
+            let sequence = entry.upstream_attempts.len() as u32 + 1;
+            entry.upstream_attempts.push(UpstreamAttemptLog {
+                sequence,
+                transport,
+                trigger,
+                started_ms: elapsed_millis(self.shared.started_at),
+                duration_ms: None,
+                header_ms: None,
+                status_code: None,
+                outcome: AttemptOutcome::Pending,
+                phase: AttemptPhase::Send,
+            });
+            entry.active_attempt_started = Some(Instant::now());
+        });
+    }
+
+    /// 与最终响应头字段分开，失败后成功的重试也保留前一次状态。
+    pub(crate) fn record_attempt_headers(&self, status: u16) {
+        if !self.records_diagnostics() {
+            return;
+        }
+        self.shield(|| {
+            let mut entry = lock_unpoisoned(&self.shared.entry);
+            let Some(started) = entry.active_attempt_started else {
+                return;
+            };
+            if let Some(attempt) = entry.upstream_attempts.last_mut() {
+                attempt.status_code = Some(status);
+                attempt
+                    .header_ms
+                    .get_or_insert_with(|| elapsed_millis(started));
+                attempt.phase = AttemptPhase::ResponseBody;
+            }
+        });
+    }
+
+    pub(crate) fn finish_upstream_attempt(&self, outcome: AttemptOutcome, phase: AttemptPhase) {
+        if self.records_diagnostics() {
+            self.shield(|| {
+                finish_attempt(
+                    &mut lock_unpoisoned(&self.shared.entry),
+                    outcome,
+                    Some(phase),
+                )
+            });
+        }
+    }
+
+    pub(crate) fn mark_attempt_phase(&self, phase: AttemptPhase) {
+        if !self.records_diagnostics() {
+            return;
+        }
+        self.shield(|| {
+            let mut entry = lock_unpoisoned(&self.shared.entry);
+            if entry.active_attempt_started.is_some()
+                && let Some(attempt) = entry.upstream_attempts.last_mut()
+            {
+                attempt.phase = phase;
+            }
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attempts_for_test(&self) -> Vec<UpstreamAttemptLog> {
+        lock_unpoisoned(&self.shared.entry)
+            .upstream_attempts
+            .clone()
+    }
+
     pub(crate) fn set_requested_service_tier(&self, tier: Option<&str>) {
         self.shield(|| {
             lock_unpoisoned(&self.shared.entry).requested_service_tier = tier.map(bounded_string);
@@ -599,6 +714,7 @@ impl RouteRequestLogProbe {
         status_code: u16,
         upstream_request_id: Option<&str>,
     ) {
+        self.record_attempt_headers(status_code);
         self.shield(|| {
             if let Some(started_at) = self.shared.upstream_started_at.get() {
                 store_elapsed_once(&self.shared.upstream_header_micros, *started_at);
@@ -892,6 +1008,20 @@ impl RouteRequestLogProbe {
         };
         let mut pending = lock_unpoisoned(&self.shared.entry);
         let status = pending.status.unwrap_or(default_status);
+        let attempt_status = if default_status == RequestStatus::Failed
+            || (default_status == RequestStatus::Cancelled && status != RequestStatus::Failed)
+        {
+            default_status
+        } else {
+            status
+        };
+        let outcome = match attempt_status {
+            RequestStatus::Succeeded => AttemptOutcome::Succeeded,
+            RequestStatus::Incomplete => AttemptOutcome::Incomplete,
+            RequestStatus::Cancelled => AttemptOutcome::Cancelled,
+            RequestStatus::Failed => AttemptOutcome::Failed,
+        };
+        finish_attempt(&mut pending, outcome, None);
         if pending.completion_reason.is_none() {
             pending.completion_reason = Some(default_reason.to_string());
         }
@@ -924,6 +1054,9 @@ impl RouteRequestLogProbe {
             matches!(status, RequestStatus::Succeeded | RequestStatus::Incomplete).then_some(200)
         });
         let entry = RouteRequestLogEntry {
+            route_decision: pending.route_decision.take(),
+            upstream_attempts: std::mem::take(&mut pending.upstream_attempts),
+            attempts_omitted: pending.attempts_omitted,
             requested_service_tier: pending.requested_service_tier.take(),
             service_tier: pending.service_tier.take(),
             schema_version: SCHEMA_VERSION,
@@ -1454,6 +1587,42 @@ fn observe_terminal_value(entry: &mut PendingEntry, value: &Value) {
     }
 }
 
+fn finish_attempt(entry: &mut PendingEntry, outcome: AttemptOutcome, phase: Option<AttemptPhase>) {
+    let Some(started) = entry.active_attempt_started.take() else {
+        return;
+    };
+    if let Some(attempt) = entry.upstream_attempts.last_mut() {
+        attempt.duration_ms = Some(elapsed_millis(started));
+        let terminal = attempt.outcome;
+        attempt.outcome =
+            if terminal == AttemptOutcome::Succeeded && outcome == AttemptOutcome::Failed {
+                attempt.phase = AttemptPhase::DownstreamDelivery;
+                AttemptOutcome::DeliveryFailed
+            } else if terminal == AttemptOutcome::Failed {
+                // 上游已明确失败，随后下游断开不能改写该次上游结果。
+                terminal
+            } else if outcome == AttemptOutcome::Cancelled {
+                AttemptOutcome::Cancelled
+            } else if terminal != AttemptOutcome::Pending {
+                terminal
+            } else if matches!(outcome, AttemptOutcome::Superseded | AttemptOutcome::Failed)
+                && attempt.status_code.is_some_and(|status| status >= 400)
+            {
+                AttemptOutcome::Rejected
+            } else {
+                outcome
+            };
+        if let Some(phase) = phase {
+            attempt.phase = phase;
+        } else if matches!(
+            outcome,
+            AttemptOutcome::Succeeded | AttemptOutcome::Incomplete
+        ) {
+            attempt.phase = AttemptPhase::Complete;
+        }
+    }
+}
+
 fn apply_terminal_status(entry: &mut PendingEntry, terminal: Option<&str>) {
     let status = match terminal {
         Some("response.completed" | "completed") => Some(RequestStatus::Succeeded),
@@ -1462,6 +1631,16 @@ fn apply_terminal_status(entry: &mut PendingEntry, terminal: Option<&str>) {
         _ => None,
     };
     if let Some(status) = status {
+        if entry.active_attempt_started.is_some()
+            && let Some(attempt) = entry.upstream_attempts.last_mut()
+        {
+            attempt.outcome = match status {
+                RequestStatus::Succeeded => AttemptOutcome::Succeeded,
+                RequestStatus::Failed => AttemptOutcome::Failed,
+                RequestStatus::Incomplete => AttemptOutcome::Incomplete,
+                RequestStatus::Cancelled => AttemptOutcome::Cancelled,
+            };
+        }
         entry.status = Some(status);
         entry.completion_reason = Some(
             match status {
