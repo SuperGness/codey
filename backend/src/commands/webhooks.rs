@@ -197,17 +197,20 @@ type RecentSessionScanResult = (
     Arc<RecentSessionEvents>,
 );
 pub(super) struct RecentSessionScanTask {
-    task: tokio::task::JoinHandle<RecentSessionScanResult>,
+    task: tokio::task::JoinHandle<(RecentSessionScanResult, Duration)>,
     started_at: i64,
-    started: Instant,
 }
 
 impl RecentSessionScanTask {
-    fn new(task: tokio::task::JoinHandle<RecentSessionScanResult>) -> Self {
+    // 计时放在阻塞任务内：启动期的初始扫描要等 Codex 就绪后才被 await。
+    fn spawn(scan: impl FnOnce() -> RecentSessionScanResult + Send + 'static) -> Self {
         Self {
-            task,
             started_at: unix_timestamp_seconds(),
-            started: Instant::now(),
+            task: tokio::task::spawn_blocking(move || {
+                let started = Instant::now();
+                let result = scan();
+                (result, started.elapsed())
+            }),
         }
     }
 }
@@ -618,12 +621,10 @@ pub(super) async fn start_waiting_webhook_watcher(
                     scan_recent_session_events(event_cache, home.clone()).await
                 } else {
                     let home = home.clone();
-                    await_recent_session_scan(RecentSessionScanTask::new(
-                        tokio::task::spawn_blocking(move || {
-                            let events = event_cache.refresh_changes(&home, changes);
-                            (event_cache, events)
-                        }),
-                    ))
+                    await_recent_session_scan(RecentSessionScanTask::spawn(move || {
+                        let events = event_cache.refresh_changes(&home, changes);
+                        (event_cache, events)
+                    }))
                     .await
                 }
             } else {
@@ -740,14 +741,10 @@ fn start_recent_session_scan_at(
     mut cache: pending_approval::RecentSessionEventCache,
     home: PathBuf,
 ) -> RecentSessionScanTask {
-    RecentSessionScanTask {
-        started_at: unix_timestamp_seconds(),
-        started: Instant::now(),
-        task: tokio::task::spawn_blocking(move || {
-            let events = cache.refresh(&home);
-            (cache, events)
-        }),
-    }
+    RecentSessionScanTask::spawn(move || {
+        let events = cache.refresh(&home);
+        (cache, events)
+    })
 }
 
 fn notification_codex_home(_state: &AppState) -> PathBuf {
@@ -761,14 +758,13 @@ fn notification_codex_home(_state: &AppState) -> PathBuf {
 pub(super) async fn await_recent_session_scan(
     scan_task: RecentSessionScanTask,
 ) -> RecentSessionScanResult {
-    let started = scan_task.started;
     match scan_task.task.await {
-        Ok(result) => {
-            if started.elapsed() >= SLOW_SESSION_SCAN {
+        Ok((result, scan_time)) => {
+            if scan_time >= SLOW_SESSION_SCAN {
                 notification_observation(
                     "notification.scan_slow",
                     json!({
-                        "scanMs":elapsed_ms(started),
+                        "scanMs":scan_time.as_millis() as u64,
                         "sessions":result.1.session_statuses.len(),
                         "waiting":result.1.pending_approvals.len(),
                         "completed":result.1.completed_turns.len(),
@@ -778,10 +774,7 @@ pub(super) async fn await_recent_session_scan(
             result
         }
         Err(_) => {
-            notification_observation(
-                "notification.scan_failed",
-                json!({"reason":"task_failed", "scanMs":elapsed_ms(started)}),
-            );
+            notification_observation("notification.scan_failed", json!({"reason":"task_failed"}));
             (
                 pending_approval::RecentSessionEventCache::default(),
                 Arc::new(RecentSessionEvents::default()),
@@ -2299,13 +2292,13 @@ mod tests {
         let state = Arc::new(isolated_test_state(directory.path()));
         *state.recent_session_event_cache.lock().await = None;
         let (release_scan_tx, release_scan_rx) = oneshot::channel();
-        let initial_scan_task = RecentSessionScanTask::new(tokio::spawn(async move {
-            let _ = release_scan_rx.await;
+        let initial_scan_task = RecentSessionScanTask::spawn(move || {
+            let _ = release_scan_rx.blocking_recv();
             (
                 pending_approval::RecentSessionEventCache::default(),
                 Arc::new(RecentSessionEvents::default()),
             )
-        }));
+        });
 
         tokio::time::timeout(
             Duration::from_secs(1),
