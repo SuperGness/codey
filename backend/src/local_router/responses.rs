@@ -2139,27 +2139,37 @@ impl RouterServer {
             }
             ensure_anthropic_context_1m_beta(&mut headers);
         }
-        // Commit the new binding only after the request's route compatibility,
-        // payload conversion, and credentials have passed local checks. A
-        // rejected switch must leave the prior route available for a retry.
+        // Ordinary requests commit after compatibility, conversion and credentials
+        // pass local checks. Native compaction waits for validated complete delivery;
+        // pending or rejected compaction must keep the original route identity.
         // 自动复核是独立请求，复用主会话标识时也不能更改主会话的线路。
         let auto_review_request =
             model_id::equal(&resolved.upstream_model, CODEX_AUTO_REVIEW_MODEL)
                 || resolved.fallback_reason.as_deref() == Some("auto_review_misc_model");
+        let mut native_compaction_binding = None;
         if !auto_review_request && portable_attempt.is_none() {
             let refresh_session_binding = !subagent_request
                 && incoming_header(&request, "x-codex-parent-thread-id").is_none()
                 && (route_hint.is_some() || incoming_header(&request, "thread-id").is_none());
-            self.bindings
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remember_resolved(
+            if native_compaction {
+                native_compaction_binding = Some(PendingNativeCompactionBinding::prepare(
+                    &self.bindings,
                     &binding_keys,
                     &resolved,
                     refresh_session_binding,
-                    native_compaction,
-                    history_portable,
-                );
+                ));
+            } else {
+                self.bindings
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remember_resolved(
+                        &binding_keys,
+                        &resolved,
+                        refresh_session_binding,
+                        false,
+                        history_portable,
+                    );
+            }
         }
         let cache_key_deleted = resolved
             .route
@@ -2850,6 +2860,15 @@ impl RouterServer {
             result => result,
         };
         observed.finish(&mut lifecycle, &result);
+        if result.is_ok()
+            && observed.error.is_none()
+            && observed
+                .status
+                .is_some_and(|status| (200..300).contains(&status))
+            && let Some(binding) = native_compaction_binding
+        {
+            binding.complete();
+        }
         result
     }
 

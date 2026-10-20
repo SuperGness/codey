@@ -464,9 +464,7 @@ impl PortableAttempt {
         let Some(restored) = restoration.materialize() else {
             return false;
         };
-        if validate_cross_route_context(&restored).is_err()
-            || responses_previous_response_id(&restored).is_some()
-        {
+        if validate_cross_route_context(&restored).is_err() {
             return false;
         }
         if let Some(additional_permit) = additional_permit {
@@ -609,12 +607,74 @@ impl Drop for PortableAttempt {
 
 // None denotes an unresolved delta; it cannot replace the stored history state.
 pub(crate) fn resolved_history_portability(body: &Value) -> Option<bool> {
-    if validate_cross_route_context(body).is_err() {
+    if validate_cross_route_history_items(body).is_err() {
         Some(false)
     } else if responses_previous_response_id(body).is_none() {
         Some(true)
     } else {
         None
+    }
+}
+
+/// 原生压缩完整交付前不修改共享绑定，失败或取消仍沿用原历史的线路身份。
+/// 提交时只更新准备后未变化的 key，保留并发请求写入的新绑定。
+pub(crate) struct PendingNativeCompactionBinding {
+    bindings: Arc<Mutex<RouteBindings>>,
+    expected: Vec<(String, Option<u64>)>,
+    prepared_generation: u64,
+    resolved: RouteSelection,
+    refresh_session: bool,
+}
+
+impl PendingNativeCompactionBinding {
+    pub(crate) fn prepare(
+        bindings: &Arc<Mutex<RouteBindings>>,
+        keys: &[String],
+        resolved: &RouteSelection,
+        refresh_session: bool,
+    ) -> Self {
+        let stored = bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let expected = keys
+            .iter()
+            .map(|key| {
+                (
+                    key.clone(),
+                    stored.routes.get(key).map(|binding| binding.generation),
+                )
+            })
+            .collect();
+        Self {
+            bindings: Arc::clone(bindings),
+            expected,
+            prepared_generation: stored.next_generation,
+            resolved: resolved.clone(),
+            refresh_session,
+        }
+    }
+
+    pub(crate) fn complete(self) {
+        let mut bindings = self
+            .bindings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let keys = self
+            .expected
+            .into_iter()
+            .filter_map(|(key, generation)| {
+                let current = bindings.routes.get(&key).map(|binding| binding.generation);
+                let unchanged = match generation {
+                    Some(generation) => current == Some(generation),
+                    // 淘汰后不保留每个 key 的版本；全局版本变化时，无法排除新建后又被淘汰。
+                    None => {
+                        current.is_none() && bindings.next_generation == self.prepared_generation
+                    }
+                };
+                unchanged.then_some(key)
+            })
+            .collect::<Vec<_>>();
+        bindings.remember_resolved(&keys, &self.resolved, self.refresh_session, true, None);
     }
 }
 
@@ -937,6 +997,380 @@ mod tests {
             .as_u16(),
             200
         );
+        upstream_task.await.unwrap();
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_native_compaction_preserves_portable_history_and_source_binding() {
+        for (status, output) in [
+            (429, json!({"error":{"message":"quota exhausted"}})),
+            (
+                200,
+                json!({"id":"invalid","status":"completed","output":[]}),
+            ),
+        ] {
+            let (router, upstream, source, target, model) = fixture().await;
+            let source_route = router
+                .snapshot
+                .read()
+                .unwrap()
+                .target_for_request(&model, Some(&source), None)
+                .unwrap();
+            router.bindings.lock().unwrap().remember_resolved(
+                &["thread-id:parent".into()],
+                &source_route,
+                false,
+                false,
+                Some(true),
+            );
+            let before = router.bindings.lock().unwrap().routes["thread-id:parent"].clone();
+            let upstream_task = tokio::spawn(async move {
+                let (mut socket, _) = upstream.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await.unwrap();
+                assert_eq!(
+                    incoming_header(&request, "authorization"),
+                    Some("Bearer sk-target")
+                );
+                write_json_response(&mut socket, status, &output)
+                    .await
+                    .unwrap();
+            });
+            let response = post(
+                &client(), &router, "parent", &model_alias(&target, "target-model"),
+                json!([{"role":"user","content":"complete visible history"},{"type":"compaction_trigger"}]),
+            ).send().await.unwrap();
+            assert_eq!(
+                response.status().as_u16(),
+                if status == 200 { 502 } else { status }
+            );
+            let _ = response.bytes().await.unwrap();
+            upstream_task.await.unwrap();
+            assert_binding_unchanged(&router, &before);
+            assert_eq!(router.portable_compaction("prepare", &json!({
+                "threadId":"parent","targetProviderId":target,"targetModel":"target-model"
+            })).unwrap()["required"], false);
+            assert!(router.bindings.lock().unwrap().portable_tickets.is_empty());
+            router.stop().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn native_compaction_binding_commit_preserves_later_requests_and_session_rules() {
+        let (router, _upstream, source, target, model) = fixture().await;
+        let source_route = router
+            .snapshot
+            .read()
+            .unwrap()
+            .target_for_request(&model, Some(&source), None)
+            .unwrap();
+        let target_route = router
+            .snapshot
+            .read()
+            .unwrap()
+            .target_for_request("target-model", Some(&target), None)
+            .unwrap();
+        let keys = [
+            "thread-id:parent".into(),
+            "session-id:parent".into(),
+            "thread-id:created-later".into(),
+            "thread-id:removed-later".into(),
+            "thread-id:new".into(),
+        ];
+        router.bindings.lock().unwrap().remember_resolved(
+            &keys[..2],
+            &source_route,
+            true,
+            false,
+            Some(true),
+        );
+        router.bindings.lock().unwrap().remember_resolved(
+            &keys[3..4],
+            &source_route,
+            false,
+            false,
+            Some(true),
+        );
+        let session_before = router.bindings.lock().unwrap().routes[&keys[1]].clone();
+        let pending =
+            PendingNativeCompactionBinding::prepare(&router.bindings, &keys, &target_route, false);
+        assert!(router.bindings.lock().unwrap().routes[&keys[0]].portable);
+        router.bindings.lock().unwrap().remember_resolved(
+            &[keys[0].clone(), keys[2].clone()],
+            &source_route,
+            false,
+            false,
+            Some(true),
+        );
+        let later = router.bindings.lock().unwrap().routes[&keys[0]].clone();
+        let created_later = router.bindings.lock().unwrap().routes[&keys[2]].clone();
+        router.bindings.lock().unwrap().routes.remove(&keys[3]);
+        pending.complete();
+        assert_binding_unchanged(&router, &later);
+        let bindings = router.bindings.lock().unwrap();
+        assert_eq!(
+            bindings.routes[&keys[1]].generation,
+            session_before.generation
+        );
+        assert!(bindings.routes[&keys[1]].portable);
+        assert_eq!(
+            bindings.routes[&keys[2]].generation,
+            created_later.generation
+        );
+        assert_eq!(bindings.routes[&keys[2]].provider_id, source);
+        assert!(!bindings.routes.contains_key(&keys[3]));
+        assert!(!bindings.routes.contains_key(&keys[4]));
+        assert!(
+            bindings
+                .order
+                .contains(&(keys[1].clone(), session_before.generation))
+        );
+        drop(bindings);
+        PendingNativeCompactionBinding::prepare(&router.bindings, &keys[4..], &target_route, false)
+            .complete();
+        {
+            let bindings = router.bindings.lock().unwrap();
+            assert_eq!(bindings.routes[&keys[4]].provider_id, target);
+            assert!(!bindings.routes[&keys[4]].portable);
+        }
+        PendingNativeCompactionBinding::prepare(&router.bindings, &keys[..2], &target_route, true)
+            .complete();
+        for key in &keys[..2] {
+            let bindings = router.bindings.lock().unwrap();
+            assert_eq!(bindings.routes[key].provider_id, target);
+            assert!(!bindings.routes[key].portable);
+        }
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_compaction_binding_commit_rejects_created_then_evicted_key() {
+        let (router, _upstream, source, target, model) = fixture().await;
+        let snapshot = router.snapshot.read().unwrap().clone();
+        let source_route = snapshot
+            .target_for_request(&model, Some(&source), None)
+            .unwrap();
+        let target_route = snapshot
+            .target_for_request("target-model", Some(&target), None)
+            .unwrap();
+        let keys = ["thread-id:created-then-evicted".into()];
+        let pending =
+            PendingNativeCompactionBinding::prepare(&router.bindings, &keys, &target_route, false);
+        {
+            let mut bindings = router.bindings.lock().unwrap();
+            bindings.remember_resolved(&keys, &source_route, false, false, Some(true));
+            let other_keys = (0..MAX_ROUTE_BINDINGS)
+                .map(|index| format!("thread-id:other-{index}"))
+                .collect::<Vec<_>>();
+            bindings.remember_resolved(&other_keys, &source_route, false, false, Some(true));
+            assert!(!bindings.routes.contains_key(&keys[0]));
+        }
+        let before = router.bindings.lock().unwrap().clone();
+        pending.complete();
+        {
+            let bindings = router.bindings.lock().unwrap();
+            assert!(!bindings.routes.contains_key(&keys[0]));
+            assert_eq!(bindings.routes.len(), MAX_ROUTE_BINDINGS);
+            assert_eq!(bindings.next_generation, before.next_generation);
+            assert_eq!(bindings.order, before.order);
+            for (key, expected) in &before.routes {
+                assert_eq!(bindings.routes[key].generation, expected.generation);
+            }
+        }
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_compaction_existing_binding_commits_after_unrelated_write() {
+        let (router, _upstream, source, target, model) = fixture().await;
+        let snapshot = router.snapshot.read().unwrap().clone();
+        let source_route = snapshot
+            .target_for_request(&model, Some(&source), None)
+            .unwrap();
+        let target_route = snapshot
+            .target_for_request("target-model", Some(&target), None)
+            .unwrap();
+        let keys = ["thread-id:existing".into()];
+        router.bindings.lock().unwrap().remember_resolved(
+            &keys,
+            &source_route,
+            false,
+            false,
+            Some(true),
+        );
+        let pending =
+            PendingNativeCompactionBinding::prepare(&router.bindings, &keys, &target_route, false);
+        router.bindings.lock().unwrap().remember_resolved(
+            &["thread-id:unrelated".into()],
+            &source_route,
+            false,
+            false,
+            Some(true),
+        );
+        pending.complete();
+        {
+            let bindings = router.bindings.lock().unwrap();
+            assert_eq!(bindings.routes[&keys[0]].provider_id, target);
+            assert!(!bindings.routes[&keys[0]].portable);
+            assert_eq!(bindings.routes["thread-id:unrelated"].provider_id, source);
+            assert!(bindings.routes["thread-id:unrelated"].portable);
+        }
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_native_compaction_does_not_mutate_full_binding_cache() {
+        let (router, _upstream, source, target, model) = fixture().await;
+        let snapshot = router.snapshot.read().unwrap().clone();
+        let source_route = snapshot
+            .target_for_request(&model, Some(&source), None)
+            .unwrap();
+        let target_route = snapshot
+            .target_for_request("target-model", Some(&target), None)
+            .unwrap();
+        let mut keys = (0..MAX_ROUTE_BINDINGS)
+            .map(|index| format!("thread-id:existing-{index}"))
+            .collect::<Vec<_>>();
+        router.bindings.lock().unwrap().remember_resolved(
+            &keys,
+            &source_route,
+            false,
+            false,
+            Some(true),
+        );
+        let before = router.bindings.lock().unwrap().clone();
+        keys = vec![
+            keys[0].clone(),
+            "session-id:missing".into(),
+            "thread-id:missing".into(),
+        ];
+        let mut pending = Some(PendingNativeCompactionBinding::prepare(
+            &router.bindings,
+            &keys,
+            &target_route,
+            true,
+        ));
+        for prepared in [true, false] {
+            let bindings = router.bindings.lock().unwrap();
+            assert_eq!(
+                bindings.next_generation, before.next_generation,
+                "prepared={prepared}"
+            );
+            assert_eq!(bindings.order, before.order, "prepared={prepared}");
+            assert_eq!(bindings.routes.len(), MAX_ROUTE_BINDINGS);
+            for (key, expected) in &before.routes {
+                let actual = &bindings.routes[key];
+                assert_eq!(actual.generation, expected.generation);
+                assert_eq!(actual.provider_id, expected.provider_id);
+                assert_eq!(actual.upstream_model, expected.upstream_model);
+                assert_eq!(actual.context_config, expected.context_config);
+                assert_eq!(actual.portable, expected.portable);
+            }
+            drop(bindings);
+            if prepared {
+                // 失败、取消和预热退出不调用 complete，也不需要回滚。
+                drop(pending.take());
+            }
+        }
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cross_route_unresolved_delta_is_rejected_before_native_http_send() {
+        let (router, upstream, source, target, model) = fixture().await;
+        bind_source(&router, &source, &model);
+        router
+            .bindings
+            .lock()
+            .unwrap()
+            .routes
+            .get_mut("thread-id:parent")
+            .unwrap()
+            .portable = true;
+        let before = router.bindings.lock().unwrap().routes["thread-id:parent"].clone();
+        let client = client();
+        let response = client
+            .post(format!("{}/responses", router.endpoint.base_url))
+            .bearer_auth(&router.endpoint.token)
+            .header("thread-id", "parent")
+            .json(&json!({"model":model_alias(&target,"target-model"),
+                "previous_response_id":"source-private-id","input":"new delta"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 400);
+        assert_eq!(
+            response.json::<Value>().await.unwrap()["error"]["code"],
+            "context_not_portable"
+        );
+        assert_binding_unchanged(&router, &before);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), upstream.accept())
+                .await
+                .is_err()
+        );
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn portable_native_history_can_switch_without_deleted_source_and_strip_reasoning_ciphertext()
+     {
+        let (router, upstream, source, target, model) = fixture().await;
+        let source_route = router
+            .snapshot
+            .read()
+            .unwrap()
+            .target_for_request(&model, Some(&source), None)
+            .unwrap();
+        router.bindings.lock().unwrap().remember_resolved(
+            &["thread-id:parent".into()],
+            &source_route,
+            false,
+            false,
+            Some(true),
+        );
+        let mut snapshot = router.snapshot.read().unwrap().as_ref().clone();
+        snapshot.routes.remove(&source);
+        *router.snapshot.write().unwrap() = Arc::new(snapshot);
+        assert_eq!(
+            router
+                .portable_compaction(
+                    "prepare",
+                    &json!({
+                        "threadId":"parent","targetProviderId":target,"targetModel":"target-model"
+                    })
+                )
+                .unwrap()["required"],
+            false
+        );
+        let upstream_task = tokio::spawn(async move {
+            let (mut socket, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await.unwrap();
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert!(!body.to_string().contains("source-reasoning-secret"));
+            assert!(body.to_string().contains("visible reasoning summary"));
+            assert!(body.to_string().contains("complete user history"));
+            assert!(!body.to_string().contains("compaction_trigger"));
+            write_json_response(&mut socket, 200, &json!({"id":"reply","output":[]}))
+                .await
+                .unwrap();
+        });
+        let response = post(
+            &client(),
+            &router,
+            "parent",
+            &model_alias(&target, "target-model"),
+            json!([
+                {"role":"user","content":"complete user history"},
+                {"type":"reasoning","encrypted_content":"source-reasoning-secret",
+                    "summary":[{"type":"summary_text","text":"visible reasoning summary"}]}
+            ]),
+        )
+        .send()
+        .await
+        .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let _ = response.bytes().await.unwrap();
         upstream_task.await.unwrap();
         router.stop().await.unwrap();
     }

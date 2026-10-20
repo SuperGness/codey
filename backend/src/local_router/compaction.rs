@@ -279,6 +279,16 @@ fn validate_portable_context_items(items: &[Value], allow_trigger: bool) -> Resu
 }
 
 pub(crate) fn validate_cross_route_context(body: &Value) -> Result<()> {
+    validate_cross_route_history_items(body)?;
+    if responses_previous_response_id(body).is_some() {
+        anyhow::bail!(
+            "context_not_portable: previous_response_id 属于上一条线路，无法完整恢复续接历史；请重新发送完整上下文"
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_cross_route_history_items(body: &Value) -> Result<()> {
     validate_portable_context_items(input_items(body), true)?;
     fn contains_item_reference(value: &Value) -> bool {
         if value.get("type").and_then(Value::as_str) == Some("item_reference") {
