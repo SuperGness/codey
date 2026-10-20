@@ -274,6 +274,21 @@ export function createCodexExtensionsPreview(platform: string) {
           `---\nname: ${entry.name}\ndescription: ${entry.description}\n---\n# ${entry.name}\n`,
       };
     }
+    if (action === "preview_skill_install") {
+      const sourcePath = String(request.sourcePath ?? "");
+      if (!/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(sourcePath))
+        throw new Error("请使用绝对路径");
+      return {
+        name: "demo-skill",
+        description: "本地导入的演示 Skill。",
+        sourcePath,
+        sourceKind: sourcePath.toLowerCase().endsWith(".zip") ? "zip" : "directory",
+        files: [{ path: "SKILL.md", size: 128, executable: false }],
+        fileCount: 1,
+        totalBytes: 128,
+        sourceRevision: `source-preview:${sourcePath}`,
+      };
+    }
     if (action === "validate_skill" || action === "test_mcp") {
       const entry = action === "test_mcp" ? mcp() : skill();
       if (entry.canCheck === false) throw new Error("当前资源不允许检查");
@@ -507,6 +522,8 @@ export function createCodexExtensionsPreview(platform: string) {
       case "install_skill": {
         if (!/^(\/|[A-Za-z]:[\\/]|\\\\)/.test(String(request.sourcePath)))
           throw new Error("请使用绝对路径");
+        if (request.sourceRevision !== undefined && request.sourceRevision !== `source-preview:${request.sourcePath}`)
+          throw new Error("Skill 来源已变化，请重新预览后安装");
         if (state.inventory.skills.some((item) => item.id === "demo-skill"))
           throw new Error("安装目标已存在，请先解决同名目录冲突");
         state.inventory.skills.push({

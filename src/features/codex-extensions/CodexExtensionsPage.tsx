@@ -1,4 +1,4 @@
-import { memo, useState, useMemo, useDeferredValue, useEffect } from "react";
+import { memo, useState, useMemo, useDeferredValue, useEffect, useRef } from "react";
 import { toast } from "@heroui/react";
 import {
   Button,
@@ -36,6 +36,7 @@ import type {
   ExtensionTransport,
   McpEntry,
   SkillEntry,
+  SkillInstallPreview,
 } from "./types";
 import {
   useExtensionsController,
@@ -73,6 +74,7 @@ function CodexExtensionsPageComponent({
   const deferredQuery = useDeferredValue(query);
   const [projectPath, setProjectPath] = useState("");
   const [draft, setDraft] = useState<EditorDraft | null>(null);
+  const previewEpoch = useRef(0);
   const [comparison, setComparison] = useState<{
     content: string;
     revision: string;
@@ -113,7 +115,7 @@ function CodexExtensionsPageComponent({
       (result) => {
         if (result)
           setDraft((current) =>
-            current ? { ...current, content: result.path } : current,
+            current ? { ...current, content: result.path, installPreview: undefined } : current,
           );
       },
     );
@@ -252,6 +254,19 @@ function CodexExtensionsPageComponent({
       },
     });
   };
+  const previewInstall = async (currentDraft: EditorDraft) => {
+    if (busy || loading || editorError(currentDraft)) return;
+    const generation = ++previewEpoch.current;
+    const pendingDraft = { ...currentDraft, installPreview: undefined };
+    setDraft(pendingDraft);
+    await controller.run<SkillInstallPreview>(
+      { action: "preview_skill_install", sourcePath: currentDraft.content.trim() },
+      (result) => setDraft((current) =>
+        current === pendingDraft ? { ...current, installPreview: result } : current,
+      ),
+      () => generation === previewEpoch.current,
+    );
+  };
   const save = async () => {
     if (!draft || busy || loading || mcpJsonError(draft) || editorError(draft))
       return;
@@ -261,9 +276,17 @@ function CodexExtensionsPageComponent({
       inventory?.mcps.some((entry) => entry.id === draft.id)
     )
       return;
+    if (draft.kind === "install" && !draft.installPreview) {
+      await previewInstall(draft);
+      return;
+    }
     const action =
       draft.kind === "install"
-        ? { action: "install_skill", sourcePath: draft.content.trim() }
+        ? {
+            action: "install_skill",
+            sourcePath: draft.content.trim(),
+            sourceRevision: draft.installPreview!.sourceRevision,
+          }
         : draft.kind === "mcp"
           ? {
               action: "save_mcp",
@@ -395,30 +418,25 @@ function CodexExtensionsPageComponent({
         icon={
           kind === "mcp" ? <IconServer size={15} /> : <IconBook2 size={15} />
         }
-        badge={
-          <span className="codey-badge codey-badge-info">
-            {kind === "mcp" ? "Model Context Protocol" : "Codex 增强技能"}
-          </span>
-        }
         description={
           kind === "mcp"
             ? "管理 MCP 服务配置，检查连接与可用性。"
             : "管理本地 Skill，检查配置与可用性。"
         }
         actions={
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 [&_button]:whitespace-nowrap">
             {kind === "skill" && (
-              <Button size="sm" variant="outline" onClick={() => setCacheOpen(true)}>
+              <Button size="sm" variant="ghost" onClick={() => setCacheOpen(true)}>
                 缓存 Skill 管理
               </Button>
             )}
             <Button
               size="sm"
-              variant="outline"
+              variant="ghost"
               disabled={busy || loading}
               onClick={() => void controller.refresh()}
             >
-              <IconRefresh size={14} className="mr-1 inline-block" />
+              <IconRefresh size={14} className={loading ? "motion-safe:animate-spin" : ""} aria-hidden="true" />
               刷新
             </Button>
             <Button
@@ -442,7 +460,7 @@ function CodexExtensionsPageComponent({
           </div>
         }
       />
-      <div className="space-y-4">
+        <div className="space-y-3">
         <ExtensionScope
           kind={kind}
           scope={scope}
@@ -495,13 +513,13 @@ function CodexExtensionsPageComponent({
           onClear={clearFilters}
         />
         {inventory && (
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-            <span>
-              匹配 {filtered.length} / {entries.length} 项
+          <div className="flex min-h-9 flex-wrap items-center gap-2 text-xs text-muted">
+            <span className="mr-auto tabular-nums">
+              {filtered.length === entries.length ? `全部 ${entries.length} 项` : `匹配 ${filtered.length} / ${entries.length} 项`}
             </span>
             <Button
               size="xs"
-              variant="outline"
+              variant="ghost"
               disabled={unavailable || !currentPage.entries.some(canToggle)}
               onClick={() =>
                 setSelected(
@@ -511,7 +529,7 @@ function CodexExtensionsPageComponent({
                 )
               }
             >
-              选择本页可操作项
+              选择本页
             </Button>
             {selected.length > 0 && (
               <>
@@ -549,9 +567,10 @@ function CodexExtensionsPageComponent({
           </div>
         )}
         {loading && (
-          <p role="status" className="p-6 text-center text-muted">
-            {inventory ? "正在刷新，暂时显示上次读取结果…" : "正在读取配置…"}
-          </p>
+          <div role="status" className="rounded-xl border border-default px-4 py-3 text-xs text-muted">
+            <div className="flex items-center gap-2"><IconRefresh size={14} className="motion-safe:animate-spin" aria-hidden="true" />{inventory ? "正在刷新，暂时显示上次读取结果…" : "正在读取配置…"}</div>
+            {!inventory && <div aria-hidden="true" className="mt-4 space-y-4">{[0, 1, 2].map((row) => <div key={row} className="flex items-center gap-3"><div className="size-9 rounded-lg bg-default/50" /><div className="flex-1 space-y-2"><div className="h-3 w-1/3 rounded bg-default/50" /><div className="h-2 w-2/3 rounded bg-default/30" /></div></div>)}</div>}
+          </div>
         )}
         {inventory && (
           <ExtensionList
@@ -559,6 +578,7 @@ function CodexExtensionsPageComponent({
             entries={currentPage.entries}
             busy={busy || loading}
             busyAction={controller.busyAction}
+            busyResourceId={controller.busyResourceId}
             onAction={onAction}
             selected={selected}
             onSelect={(id) =>
@@ -576,7 +596,7 @@ function CodexExtensionsPageComponent({
         {inventory && filtered.length > 0 && (
           <nav
             aria-label="资源分页"
-            className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted"
+            className="flex flex-wrap items-center justify-end gap-3 pt-1 text-xs text-muted"
           >
             <span>
               第 {currentPage.page} / {currentPage.pages} 页 · 每页 20 项
@@ -610,14 +630,14 @@ function CodexExtensionsPageComponent({
         >
           <DialogContent
             container={container}
-            className={draft.kind === "install" ? "sm:w-[560px]" : "sm:w-[760px]"}
+            className={`flex max-h-[calc(100dvh-32px)] flex-col ${draft.kind === "install" ? "sm:w-[680px]" : "sm:w-[760px]"}`}
             onEscapeKeyDown={(event) => {
               if (busy || discard) event.preventDefault();
             }}
           >
-            <DialogHeader>
+            <DialogHeader className="shrink-0 pb-3">
               <div className="flex items-start gap-3.5">
-                <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-blue-500/10 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-accent/10 text-accent">
                   {draft.kind === "mcp" ? (
                     <IconServer size={20} stroke={1.75} aria-hidden="true" />
                   ) : draft.kind === "install" ? (
@@ -630,26 +650,19 @@ function CodexExtensionsPageComponent({
                   <div className="flex items-center gap-2">
                     <DialogTitle>
                       {draft.kind === "install"
-                        ? "新增 Skill"
+                        ? "导入 Skill"
                         : `${draft.readOnly ? "查看" : draft.isNew ? "新增" : "编辑"} ${draft.kind === "mcp" ? "MCP" : "Skill"}`}
                     </DialogTitle>
-                    <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-[11px] font-medium text-blue-600 dark:bg-blue-500/15 dark:text-blue-400">
-                      {draft.kind === "install"
-                        ? "本地导入"
-                        : draft.kind === "mcp"
-                          ? "MCP 服务"
-                          : "SKILL.md"}
-                    </span>
                   </div>
                   <DialogDescription>
                     {draft.kind === "install"
-                      ? "选择本地 Skill 目录或 ZIP 文件进行安装。"
+                      ? "先预览本地目录或 ZIP 的来源与文件，再确认安装。"
                       : draft.kind === "mcp"
                         ? draft.isNew
                           ? "配置并添加新的 MCP 服务，保存后自动启用并刷新 Codex。"
                           : "查看或修改当前 MCP 服务配置。"
                         : draft.isNew
-                          ? "编写 SKILL.md 定义技能元数据与提示词说明，保存后生效。"
+                          ? "编写 SKILL.md 定义技能元数据与提示词说明，保存后默认禁用。"
                           : draft.readOnly
                             ? "查看当前 Skill 的 SKILL.md 配置与说明内容。"
                             : "编辑当前 Skill 的 SKILL.md 文件，保存后将更新本地文件。"}
@@ -657,15 +670,23 @@ function CodexExtensionsPageComponent({
                 </div>
               </div>
             </DialogHeader>
-            <div className="max-h-[72vh] overflow-y-auto pt-2">
+            <div className="min-h-0 overflow-y-auto overscroll-contain pt-1">
               <ExtensionEditor
                 draft={draft}
                 busy={busy || loading}
+                previewing={controller.busyAction === "preview_skill_install"}
                 submissionError={controller.error}
-                onChange={setDraft}
+                onChange={(next) => {
+                  controller.clearError();
+                  if (next.kind === "install" && next.content !== draft.content) {
+                    previewEpoch.current++;
+                    setDraft({ ...next, installPreview: undefined });
+                  } else setDraft(next);
+                }}
                 onSave={() => void save()}
                 onCancel={() => guard(() => setDraft(null))}
                 onPick={pickSkill}
+                onPreview={() => void previewInstall(draft)}
                 inventory={inventory}
                 onReload={loadLatest}
                 saving={[
@@ -673,6 +694,7 @@ function CodexExtensionsPageComponent({
                   "save_skill",
                   "create_skill",
                   "install_skill",
+                  "preview_skill_install",
                 ].includes(controller.busyAction)}
               />
               {loading && (

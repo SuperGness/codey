@@ -132,6 +132,15 @@ test("editor rejects oversize identifiers and malformed Skill metadata", () => {
     "",
   );
 });
+
+test("Skill 编辑允许 4 MiB，MCP 保留 1 MiB 并按 UTF-8 字节检查", () => {
+  const header = "---\nname: demo\ndescription: test\n---\n";
+  const content = header + "a".repeat(2 * 1024 * 1024);
+  assert.equal(editorError({ kind: "skill", content }), "");
+  assert.match(editorError({ kind: "mcp", id: "demo", content }), /1 MiB/);
+  assert.equal(editorError({ kind: "skill", content: header + "a".repeat(4 * 1024 * 1024 - header.length) }), "");
+  assert.match(editorError({ kind: "skill", content: header + "中".repeat(1_400_000) }), /4 MiB/);
+});
 test("batch changes skip unchanged resources and preserve the ability to disable invalid ones", () => {
   const entries = [
     { id: "enabled-invalid", enabled: true, configurationStatus: "invalid" },

@@ -1,15 +1,15 @@
 import type { EditorDraft, Inventory, McpEntry, SkillEntry } from "./types";
 
-const CONTENT_BYTE_LIMIT = 1024 * 1024;
 const encoder = new TextEncoder();
 
 // 每次按键都会走到这里：纯 ASCII 内容的字节数等于长度，不必整串编码；
 // 只有出现非 ASCII 时才需要精确计算，接近上限的输入也不会每键都做全量编码。
-function exceedsByteLimit(content: string) {
-  if (content.length > CONTENT_BYTE_LIMIT) return true;
+function exceedsByteLimit(content: string, limit: number) {
+  if (content.length > limit) return true;
+  if (content.length * 3 <= limit) return false;
   return (
     /[^\x00-\x7F]/.test(content) &&
-    encoder.encode(content).length > CONTENT_BYTE_LIMIT
+    encoder.encode(content).length > limit
   );
 }
 
@@ -107,8 +107,9 @@ export function matchesResource(
 export function editorError(draft: EditorDraft): string {
   if (draft.kind === "mcp" && !/^[A-Za-z0-9_-]{1,128}$/.test(draft.id))
     return "服务标识需为 1 至 128 个英文字母、数字、连字符或下划线。";
-  if (exceedsByteLimit(draft.content))
-    return "内容超过 1 MB，请精简后重试。";
+  const limitMiB = draft.kind === "skill" ? 4 : 1;
+  if (exceedsByteLimit(draft.content, limitMiB * 1024 * 1024))
+    return `内容超过 ${limitMiB} MiB，请精简后重试。`;
   if (!draft.content.trim())
     return draft.kind === "install"
       ? "请输入 Skill 目录或 ZIP 的绝对路径。"

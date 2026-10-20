@@ -7,6 +7,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "../../components/ui";
+import { IconAlertTriangle, IconInfoCircle } from "@tabler/icons-react";
 export function ConfirmationDialog({
   title,
   description,
@@ -33,15 +34,19 @@ export function ConfirmationDialog({
     >
       <DialogContent
         container={container}
+        className="max-w-md"
         onEscapeKeyDown={(event) => {
           if (busy) event.preventDefault();
         }}
       >
-        <DialogHeader>
+        <DialogHeader className="space-y-3">
+          <div className={`flex h-10 w-10 items-center justify-center rounded-xl ${destructive ? "bg-danger/10 text-danger" : "bg-accent/10 text-accent"}`} aria-hidden="true">
+            {destructive ? <IconAlertTriangle size={21} /> : <IconInfoCircle size={21} />}
+          </div>
           <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
+          <DialogDescription className="break-words leading-relaxed">{description}</DialogDescription>
         </DialogHeader>
-        <DialogFooter>
+        <DialogFooter className="mt-2 border-t border-black/[0.08] pt-4 dark:border-white/[0.1]">
           <Button variant="outline" disabled={busy} onClick={onCancel}>
             取消
           </Button>

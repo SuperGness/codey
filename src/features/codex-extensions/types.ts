@@ -75,6 +75,16 @@ export interface CheckResult {
   summary: string;
   checks: { name: string; ok: boolean; message: string }[];
 }
+export interface SkillInstallPreview {
+  name: string;
+  description: string;
+  sourcePath: string;
+  sourceKind: "directory" | "zip";
+  files: { path: string; size: number; executable: boolean }[];
+  fileCount: number;
+  totalBytes: number;
+  sourceRevision: string;
+}
 export interface EditorDraft {
   kind: "mcp" | "skill" | "install";
   id: string;
@@ -86,6 +96,7 @@ export interface EditorDraft {
   isNew?: boolean;
   jsonService?: string;
   entry?: McpEntry | SkillEntry;
+  installPreview?: SkillInstallPreview;
 }
 export interface Confirmation {
   title: string;

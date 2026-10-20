@@ -193,3 +193,86 @@ test("保存提示按 applyStatus 区分，重启提示不重复后端消息", a
   );
   assert.equal(controller.noticeSeq, 2);
 });
+
+test("只标记正在操作的资源，异常后释放锁和标记", async () => {
+  const h = createHarness();
+  h.render();
+  h.reads[0].resolve({ revision: "r1" });
+  await settle();
+  const checking = h.render().inspect({ action: "test_mcp", id: "docs" });
+  assert.equal(h.render().busyResourceId, "docs");
+  assert.equal(h.render().busyAction, "test_mcp");
+  assert.equal(await h.render().run({ action: "read_skill", id: "other" }), "failed");
+  h.writes[0].reject(new Error("连接失败"));
+  assert.equal(await checking, "failed");
+  assert.equal(h.render().busyResourceId, "");
+  assert.equal(h.render().busy, false);
+});
+
+test("保存成功后晚到的旧清单不能覆盖最新状态", async () => {
+  const h = createHarness();
+  const controller = h.render();
+  const saving = controller.mutate({ action: "save_mcp", id: "docs" });
+  h.writes[0].resolve({ inventory: { revision: "r2" }, message: "已保存" });
+  assert.equal(await saving, "ok");
+  h.reads[0].resolve({ revision: "r1" });
+  await settle();
+  assert.equal(h.render().inventory.revision, "r2");
+  assert.equal(h.render().loading, false);
+});
+
+test("预览是只读操作，修改状态不确定时仍可预览且切换范围丢弃旧结果", async () => {
+  const h = createHarness();
+  h.render();
+  h.reads[0].resolve({ revision: "r1" });
+  await settle();
+  const mutation = h.render().mutate({ action: "install_skill" });
+  h.writes[0].reject(new Error("结果尚不确定"));
+  await mutation;
+  let received = false;
+  const controller = h.render();
+  const previewing = controller.run({ action: "preview_skill_install", sourcePath: "/tmp/skill" }, () => { received = true; });
+  assert.equal(h.writes.length, 2);
+  controller.setScope({ kind: "project", projectPath: "/project" });
+  h.render();
+  h.writes[1].resolve({ sourceRevision: "source-1" });
+  assert.equal(await previewing, "superseded");
+  assert.equal(received, false);
+  assert.equal(h.render().busyResourceId, "");
+});
+
+test("提交前开始的旧读取不能解除提交超时后的保护", async () => {
+  const h = createHarness();
+  const controller = h.render();
+  const saving = controller.mutate({ action: "save_skill" });
+  h.writes[0].reject(new Error("操作超时，结果尚不确定"));
+  await saving;
+  h.reads[0].resolve({ revision: "r1" });
+  await settle();
+  assert.equal(h.render().uncertain, true);
+  const refreshed = h.render().refresh();
+  h.reads[1].resolve({ revision: "r2" });
+  await refreshed;
+  assert.equal(h.render().uncertain, false);
+});
+test("预览输入已改变时忽略迟到错误并释放操作锁", async () => {
+  const h = createHarness();
+  h.render();
+  h.reads[0].resolve({ revision: "r1" });
+  await settle();
+  let current = true;
+  const preview = h.render().run(
+    { action: "preview_skill_install", sourcePath: "/tmp/old" },
+    undefined,
+    () => current,
+  );
+  current = false;
+  h.writes[0].reject(new Error("旧来源不存在"));
+  assert.equal(await preview, "superseded");
+  assert.equal(h.render().error, "");
+  assert.equal(h.render().busy, false);
+  const retry = h.render().run({ action: "preview_skill_install", sourcePath: "/tmp/new" });
+  h.writes[1].reject(new Error("新来源无法读取"));
+  assert.equal(await retry, "failed");
+  assert.equal(h.render().error, "新来源无法读取");
+});

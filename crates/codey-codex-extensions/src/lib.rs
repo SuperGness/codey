@@ -86,7 +86,7 @@ impl ExtensionService {
     /// 因此安装、创建和改名都要确认名称在整个作用域内唯一。
     fn ensure_name_available(&self, scope: &Scope, name: &str, target: &Path) -> Result<()> {
         for root in self.skill_roots(scope) {
-            for (existing, manifest) in skills::named_manifests(&root) {
+            for (existing, manifest) in skills::named_manifests(&root)? {
                 // 系统内置资源由 Codex 提供，用户无法改名或卸载，不能因此挡住自己的 Skill。
                 if manifest.components().any(|c| c.as_os_str() == ".system") {
                     continue;
@@ -235,6 +235,7 @@ impl ExtensionService {
                 }
             }
         }
+        cache.ensure_complete()?;
         let revision = fsutil::digest(&serde_json::to_vec(&fingerprints)?);
         let mut mcps = mcp::list(&doc, &config_path.to_string_lossy())?;
         for entry in &mut mcps {
@@ -314,6 +315,21 @@ impl ExtensionService {
         let config_path = self.config_path(&scope)?;
         if action == "list" {
             return self.inventory(&scope);
+        }
+        if action == "preview_skill_install" {
+            let source = PathBuf::from(Self::required(&request, "sourcePath")?);
+            let files = skills::load_source(&source)?;
+            let (name, description) = skills::metadata(&files[Path::new("SKILL.md")].bytes)?;
+            let total_bytes: usize = files.values().map(|file| file.bytes.len()).sum();
+            let preview_files: Vec<_> = files.iter().take(100).map(|(path, file)| {
+                json!({"path":path,"size":file.bytes.len(),"executable":file.executable})
+            }).collect();
+            return Ok(json!({
+                "name":name,"description":description,"sourcePath":source,
+                "sourceKind":if source.is_dir() {"directory"} else {"zip"},
+                "files":preview_files,"fileCount":files.len(),"totalBytes":total_bytes,
+                "sourceRevision":skills::source_digest(&files)
+            }));
         }
         if action == "export_skill" {
             let inventory = self.inventory(&scope)?;
@@ -600,6 +616,12 @@ impl ExtensionService {
                     );
                     let target = path.join("SKILL.md");
                     self.ensure_name_available(&scope, &name, &target)?;
+                    // 身份和启停规则按路径保留；改名不能引入已有名称规则，
+                    // 否则保存后将无法确认启用状态，且失去继续编辑的入口。
+                    ensure!(
+                        !self.disabled_skills()?.1.contains(&name),
+                        "存在同名 Skill 规则，无法保证保存后的启用状态；请先处理冲突规则"
+                    );
                     managed
                         .files
                         .insert(target.clone(), fsutil::digest(&content));
@@ -636,12 +658,16 @@ impl ExtensionService {
                         skills::load_source(&source)?,
                     )
                 };
-                if let Some(expected) = request.get("expectedSourceDigest").and_then(Value::as_str)
-                {
-                    ensure!(
-                        expected == skills::source_digest(&files),
-                        "安装来源内容已变化"
-                    );
+                // 新界面传预览版本；兼容旧调用方的 expectedSourceDigest 和无预览安装。
+                let source_revision = skills::source_digest(&files);
+                for key in ["sourceRevision", "expectedSourceDigest"] {
+                    if let Some(expected) = request.get(key) {
+                        let expected = expected.as_str().context("安装来源版本必须为字符串")?;
+                        ensure!(
+                            expected == source_revision,
+                            "安装来源内容已变化，请重新预览后安装"
+                        );
+                    }
                 }
                 let (name, _) = skills::metadata(&files.get(Path::new("SKILL.md")).unwrap().bytes)?;
                 ensure!(

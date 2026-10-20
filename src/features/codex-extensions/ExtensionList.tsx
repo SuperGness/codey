@@ -17,6 +17,7 @@ export function ExtensionList({
   entries,
   busy,
   busyAction,
+  busyResourceId,
   onAction,
   selected = [],
   onSelect,
@@ -28,6 +29,7 @@ export function ExtensionList({
   entries: (McpEntry | SkillEntry)[];
   busy: boolean;
   busyAction?: string;
+  busyResourceId?: string;
   onAction: (action: string, entry: McpEntry | SkillEntry) => void;
   selected?: string[];
   onSelect?: (id: string) => void;
@@ -51,7 +53,7 @@ export function ExtensionList({
 
   if (!entries.length) {
     return (
-      <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-default py-12 text-center">
+      <div className="flex min-h-64 flex-col items-center justify-center rounded-xl border border-dashed border-default px-5 py-12 text-center">
         <div className="mb-3 flex size-12 items-center justify-center rounded-2xl bg-default/40 text-muted">
           <KindIcon size={24} stroke={1.5} />
         </div>
@@ -70,7 +72,7 @@ export function ExtensionList({
   }
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+    <div className="overflow-hidden rounded-xl border border-default bg-background divide-y divide-default">
       {entries.map((entry) => {
         const isBuiltin = "ownership" in entry && entry.ownership === "builtin";
         const isEnabled = entry.enabled;
@@ -78,13 +80,15 @@ export function ExtensionList({
           isBuiltin || !("enabledKnown" in entry) || entry.enabledKnown !== false;
         const isManaged = "ownership" in entry && entry.ownership === "managed";
         const checkResult = checks[entry.id];
+        const working = busy && busyResourceId === entry.id;
 
         return (
           <article
             key={entry.id}
-            className="codey-card flex flex-col justify-between"
+            aria-busy={working}
+            className={`flex min-w-0 flex-col transition-colors hover:bg-default/15 lg:flex-row lg:items-start ${selected.includes(entry.id) ? "bg-accent/5" : ""}`}
           >
-            <div className="p-5">
+            <div className="min-w-0 flex-1 px-4 py-3.5">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   {onSelect && canToggle(entry) && (
@@ -101,13 +105,7 @@ export function ExtensionList({
                     </div>
                   )}
                   <div
-                    className={`flex size-10 shrink-0 items-center justify-center rounded-xl transition-colors ${
-                      isBuiltin
-                        ? "bg-violet-500/10 text-violet-600 dark:bg-violet-500/20 dark:text-violet-400 ring-1 ring-violet-500/20"
-                        : isEnabled && isKnown
-                          ? "bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400 ring-1 ring-blue-500/20"
-                          : "bg-default/40 text-muted"
-                    }`}
+                    className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${isEnabled && isKnown ? "bg-accent/10 text-accent" : "bg-default/40 text-muted"}`}
                   >
                     <KindIcon size={20} stroke={1.8} aria-hidden="true" />
                   </div>
@@ -115,7 +113,7 @@ export function ExtensionList({
                     <div className="flex flex-wrap items-center gap-1.5">
                       <h4
                         title={entry.name}
-                        className="m-0 truncate text-sm font-semibold text-foreground"
+                        className="m-0 max-w-full truncate text-sm font-semibold text-foreground"
                       >
                         {entry.name}
                       </h4>
@@ -143,18 +141,23 @@ export function ExtensionList({
                       )}
                     </div>
                     {"transport" in entry && (
-                      <p className="mb-0 mt-0.5 truncate font-mono text-xs text-muted/80">
+                      <p title={`${entry.transport} · ${entry.summary}`} className="mb-0 mt-1 truncate text-xs text-muted">
                         {entry.transport} · {entry.summary}
+                      </p>
+                    )}
+                    {"description" in entry && entry.description && (
+                      <p title={entry.description} className="mb-0 mt-1 truncate text-xs text-muted">
+                        {entry.description}
                       </p>
                     )}
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2.5 shrink-0">
+                <div className="flex flex-wrap items-center justify-end gap-2 shrink-0">
                   {isBuiltin ? (
                     <Badge
                       variant="outline"
-                      className="border-violet-500/30 bg-violet-500/10 text-violet-700 dark:text-violet-300 font-medium"
+                      className="border-default text-muted font-medium"
                     >
                       系统内置
                     </Badge>
@@ -165,7 +168,9 @@ export function ExtensionList({
                           !isKnown ? "secondary" : isEnabled ? "success" : "secondary"
                         }
                       >
-                        {!isKnown ? "状态待确认" : isEnabled ? "已启用" : "已禁用"}
+                        {working && (busyAction === "set_mcp_enabled" || busyAction === "set_skill_enabled")
+                          ? "正在保存…"
+                          : !isKnown ? "状态待确认" : isEnabled ? "已启用" : "已禁用"}
                       </Badge>
                       <Switch
                         size="sm"
@@ -179,17 +184,11 @@ export function ExtensionList({
                 </div>
               </div>
 
-              {"description" in entry && entry.description && (
-                <p className="mb-0 mt-3 line-clamp-2 text-xs text-foreground/80 leading-relaxed">
-                  {entry.description}
-                </p>
-              )}
-
-              <div className="mt-2.5 rounded-lg border border-black/[0.04] bg-black/[0.02] px-2.5 py-1.5 font-mono text-[11px] text-muted/80 break-all select-text dark:border-white/[0.04] dark:bg-white/[0.03]">
+              <div title={entry.sourcePath} className={`mt-2 truncate font-mono text-[11px] text-muted select-text ${onSelect && canToggle(entry) ? "sm:ml-[76px]" : "sm:ml-12"}`}>
                 {entry.sourcePath}
               </div>
 
-              <div className="mt-2.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted">
+              <div className={`mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted ${onSelect && canToggle(entry) ? "sm:ml-[76px]" : "sm:ml-12"}`}>
                 <span>
                   配置：
                   <span
@@ -327,8 +326,8 @@ export function ExtensionList({
               )}
             </div>
 
-            <div className="flex items-center justify-between gap-2 border-t border-black/[0.06] bg-black/[0.015] px-5 py-2.5 dark:border-white/[0.06] dark:bg-white/[0.02]">
-              <div className="flex items-center gap-2 min-w-0 flex-1">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-4 pb-3 lg:w-56 lg:shrink-0 lg:flex-col lg:items-end lg:gap-3 lg:py-3.5">
+              <div className="flex flex-wrap items-center gap-2 min-w-0 lg:justify-end">
                 <Button
                   size="xs"
                   variant="outline"
@@ -342,7 +341,7 @@ export function ExtensionList({
                 >
                   <IconPlugConnected size={13} aria-hidden="true" />
                   <span>
-                    {busy &&
+                    {working &&
                     (busyAction === "test_mcp" || busyAction === "validate_skill")
                       ? "检查中…"
                       : kind === "mcp"
@@ -354,7 +353,7 @@ export function ExtensionList({
                 {checkResult && (
                   <button
                     type="button"
-                    role="status"
+                    aria-expanded={isCheckExpanded(entry.id, checkResult.ok)}
                     onClick={() => toggleCheckExpanded(entry.id, checkResult.ok)}
                     className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium truncate shrink-0 cursor-pointer transition-opacity hover:opacity-80 ${
                       checkResult.revision !== revision
@@ -395,7 +394,7 @@ export function ExtensionList({
 
               <div className="flex items-center gap-1.5 shrink-0 ml-auto">
                 <Button
-                  size="icon-sm"
+                  size="xs"
                   variant="outline"
                   disabled={busy}
                   title={
@@ -421,6 +420,7 @@ export function ExtensionList({
                   ) : (
                     <IconSettings size={14} aria-hidden="true" />
                   )}
+                  {entry.readOnly || entry.canEdit === false || ("ownership" in entry && !isManaged) ? "查看" : "编辑"}
                 </Button>
 
                 <Button

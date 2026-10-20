@@ -103,6 +103,7 @@ impl ExtensionService {
                 .unwrap_or_default()
                 .to_owned()
         });
+        cache.ensure_complete()?;
         let revision = fsutil::digest(&serde_json::to_vec(&json!([root, entries, fingerprints]))?);
         Ok(json!({"revision":revision,"skills":entries,"warnings":warnings}))
     }

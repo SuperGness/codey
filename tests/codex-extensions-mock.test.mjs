@@ -215,3 +215,17 @@ test("external skills can be removed while builtin and cached ones stay read-onl
     false,
   );
 });
+
+test("Skill 预览不写入清单，安装要求来源版本匹配且默认禁用", async () => {
+  const request = preview();
+  const initial = await request({ action: "list" });
+  const sourcePath = "/Users/preview/Downloads/demo.zip";
+  const source = await request({ action: "preview_skill_install", sourcePath });
+  assert.equal(source.sourceKind, "zip");
+  assert.equal(source.fileCount, source.files.length);
+  assert.deepEqual(await request({ action: "list" }), initial);
+  await assert.rejects(request({ action: "install_skill", sourcePath, sourceRevision: "outdated", revision: initial.revision }), /重新预览/);
+  assert.deepEqual(await request({ action: "list" }), initial);
+  const result = await request({ action: "install_skill", sourcePath, sourceRevision: source.sourceRevision, revision: initial.revision });
+  assert.equal(result.inventory.skills.find((entry) => entry.name === source.name).enabled, false);
+});

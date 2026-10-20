@@ -34,10 +34,10 @@ export function ExtensionScope({
 }) {
   const validPath = /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(projectPath.trim());
   return (
-    <div className="codey-card p-4 space-y-3">
+    <div className="space-y-3 rounded-xl border border-default bg-default/10 px-4 py-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
-          <span className="text-xs font-semibold text-muted">生效范围</span>
+          <span className="text-xs font-medium text-muted">配置范围</span>
           <div
             className="codey-segmented-control"
             role="group"
@@ -66,21 +66,16 @@ export function ExtensionScope({
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <span
-            className={`codey-badge ${scope.kind === "project" ? "codey-badge-info" : "codey-badge-neutral"}`}
-          >
-            {scope.kind === "project" ? "项目专属" : "全局用户"}
-          </span>
           {inventory && (
-            <span className="codey-badge codey-badge-neutral">
-              共 {count} 项
+            <span className="text-xs tabular-nums text-muted">
+              {count} 个{kind === "mcp" ? "服务" : "技能"}
             </span>
           )}
         </div>
       </div>
       {projectMode && (
         <>
-          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-[var(--color-border-subtle)]">
+          <div className="flex flex-wrap items-center gap-2 pt-3 border-t border-default">
             <div className="min-w-0 basis-full sm:flex-1 sm:basis-auto">
               <Input
                 aria-label="项目绝对路径"
@@ -110,29 +105,28 @@ export function ExtensionScope({
             </Button>
           </div>
           {!validPath && (
-            <p className="text-xs text-muted">
+            <p className="m-0 text-xs text-muted">
               请输入或选择项目绝对路径，再读取该项目的配置。
             </p>
           )}
         </>
       )}
       {inventory && (
-        <div className="rounded-lg bg-[var(--color-bg-tertiary)] p-3 text-xs text-muted border border-[var(--color-border-subtle)] space-y-1">
-          <p className="m-0 break-all font-medium text-[var(--color-text-primary)]">
-            当前范围：{scope.kind === "user" ? "当前用户" : scope.projectPath} ·
-            共 {count} 项
-          </p>
-          <p className="mb-0 mt-1 break-all">
-            配置位置：
-            {kind === "skill"
-              ? inventory.skillConfigPath || inventory.configPath
-              : inventory.configPath}
-          </p>
-          <p className="mb-0 mt-1">
-            {inventory.applyNotice ||
-              "MCP 保存后自动刷新 Codex 配置；Skill 变更请在新会话中确认。"}
-          </p>
-        </div>
+        <details className="group text-xs text-muted">
+          <summary className="flex cursor-pointer list-none items-center gap-2 rounded-md focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent">
+            <IconFolder size={13} className="shrink-0" aria-hidden="true" />
+            <span className="min-w-0 flex-1 truncate" title={kind === "skill" ? inventory.skillConfigPath || inventory.configPath : inventory.configPath}>
+              {kind === "skill" ? inventory.skillConfigPath || inventory.configPath : inventory.configPath}
+            </span>
+            <span className="shrink-0 text-accent group-open:hidden">范围说明</span>
+            <span className="hidden shrink-0 text-accent group-open:inline">收起说明</span>
+          </summary>
+          <div className="mt-3 space-y-1.5 border-t border-default pt-3 leading-relaxed">
+            <p className="m-0 break-all">当前范围：{scope.kind === "user" ? "当前用户" : scope.projectPath}</p>
+            <p className="m-0 break-all">配置位置：{kind === "skill" ? inventory.skillConfigPath || inventory.configPath : inventory.configPath}</p>
+            <p className="m-0">{inventory.applyNotice || "MCP 保存后自动刷新 Codex 配置；Skill 变更请在新会话中确认。"}</p>
+          </div>
+        </details>
       )}
     </div>
   );
@@ -162,11 +156,11 @@ export function ExtensionFilters({
   onClear: () => void;
 }) {
   return (
-    <div className="flex flex-wrap gap-2">
+    <div className="flex flex-wrap items-center gap-2">
       <Input
         type="search"
         aria-label={`搜索 ${kind === "mcp" ? "MCP" : "Skill"}`}
-        className="min-w-40 flex-1 text-xs"
+        className="min-w-48 flex-1 basis-full text-xs md:basis-48"
         placeholder="搜索名称、描述或路径"
         value={query}
         onChange={(event) => onQuery(event.target.value)}
@@ -174,7 +168,7 @@ export function ExtensionFilters({
       />
       <Select
         aria-label="状态筛选"
-        className="w-32 text-xs"
+        className="min-w-28 flex-1 text-xs md:w-32 md:flex-none"
         value={filter}
         onChange={(value) => onFilter(String(value))}
         optionList={[
@@ -188,7 +182,7 @@ export function ExtensionFilters({
       />
       <Select
         aria-label="来源筛选"
-        className="w-32 text-xs"
+        className="min-w-32 flex-1 text-xs md:w-36 md:flex-none"
         value={source}
         onChange={(value) => onSource(String(value))}
         optionList={
@@ -209,7 +203,7 @@ export function ExtensionFilters({
       />
       <Select
         aria-label="排序"
-        className="w-32 text-xs"
+        className="min-w-28 flex-1 text-xs md:w-32 md:flex-none"
         value={sort}
         onChange={(value) => onSort(String(value))}
         optionList={[

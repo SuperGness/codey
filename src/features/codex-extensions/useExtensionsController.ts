@@ -10,8 +10,8 @@ import { causeText } from "./state";
 import { readInventory, invalidateInventory, withTimeout } from "./requests";
 
 /**
- * run 的结果：ok 提交成功且本地状态同步；superseded 后端已落库但结果被抢占；
- * failed 未提交或提交失败，调用方应保留草稿。
+ * run 的结果：ok 请求完成且本地状态同步；superseded 结果已过期，未更新当前状态；
+ * failed 请求未发起或失败，调用方应保留草稿。
  */
 export type RunOutcome = "ok" | "superseded" | "failed";
 
@@ -24,6 +24,7 @@ export function useExtensionsController(
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [busyAction, setBusyAction] = useState("");
+  const [busyResourceId, setBusyResourceId] = useState("");
   const [uncertain, setUncertain] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -50,13 +51,15 @@ export function useExtensionsController(
   const refresh = useCallback(
     async (force = true) => {
       const generation = ++readEpoch.current;
+      const operationAtStart = writeEpoch.current;
       setLoading(true);
       setError("");
       try {
         const result = await readInventory(request, scope, force);
         if (mounted.current && generation === readEpoch.current) {
           setInventory(result);
-          setUncertain(false);
+          if (operationAtStart === writeEpoch.current && !locked.current)
+            setUncertain(false);
           return result;
         }
         return null;
@@ -78,6 +81,7 @@ export function useExtensionsController(
     setChecks({});
     setBusy(false);
     setBusyAction("");
+    setBusyResourceId("");
     setUncertain(false);
     // 序号失效后旧请求不会再清 loading，这里显式收尾，避免切走范围时卡在加载态。
     setLoading(false);
@@ -92,12 +96,14 @@ export function useExtensionsController(
     async <T>(
       action: Record<string, unknown>,
       onSuccess?: (result: T) => void,
+      isCurrent?: () => boolean,
     ): Promise<RunOutcome> => {
       if (locked.current) return "failed";
       const token = {};
       locked.current = token;
       setBusy(true);
       setBusyAction(String(action.action));
+      setBusyResourceId(typeof action.id === "string" ? action.id : "");
       setError("");
       const generation = ++writeEpoch.current;
       const mutation = ![
@@ -108,12 +114,14 @@ export function useExtensionsController(
         "pick_skill",
         "test_mcp",
         "validate_skill",
+        "preview_skill_install",
       ].includes(String(action.action));
       if (mutation && uncertain) {
         setError("上次操作结果尚不确定，请先刷新确认后再提交修改。");
         locked.current = null;
         setBusy(false);
         setBusyAction("");
+        setBusyResourceId("");
         return "failed";
       }
       if (mutation) {
@@ -127,7 +135,7 @@ export function useExtensionsController(
           ? 45000
           : actionName.startsWith("pick_")
             ? 120000
-            : mutation
+            : mutation || actionName === "preview_skill_install"
               ? 30000
               : 15000;
       try {
@@ -141,11 +149,14 @@ export function useExtensionsController(
           timeoutMs,
         );
         if (!mounted.current) return "failed";
-        // 被新的操作或范围切换抢占：后端已落库，但本地状态不能再用这次结果覆盖。
-        if (generation !== writeEpoch.current) return "superseded";
+        // 操作、范围或输入发生变化后，旧结果不能再更新当前页面。
+        if (generation !== writeEpoch.current || isCurrent?.() === false)
+          return "superseded";
         onSuccess?.(result);
         return "ok";
       } catch (cause) {
+        // 输入已变化时，旧读取的错误也不能显示在新草稿中。
+        if (isCurrent?.() === false) return "superseded";
         const message = causeText(cause);
         if (mounted.current && generation === writeEpoch.current) {
           setError(message);
@@ -159,6 +170,7 @@ export function useExtensionsController(
           if (mounted.current) {
             setBusy(false);
             setBusyAction("");
+            setBusyResourceId("");
           }
         }
       }
@@ -172,6 +184,9 @@ export function useExtensionsController(
   const mutate = useCallback(
     async (action: Record<string, unknown>) => {
       const outcome = await run<MutationResult>(action, (result) => {
+        // 已提交的清单比提交前启动的读取更新，旧读取不得再覆盖它。
+        readEpoch.current++;
+        setLoading(false);
         setInventory(result.inventory);
         // 后端 message 已说明保存结果，这里只在仍需重启时补充生效方式，避免同一句提示重复两遍。
         postNotice(
@@ -208,6 +223,7 @@ export function useExtensionsController(
     loading,
     busy,
     busyAction,
+    busyResourceId,
     uncertain,
     clearError: () => setError(""),
     error,

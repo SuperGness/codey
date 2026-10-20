@@ -1542,3 +1542,254 @@ fn external_skills_report_their_directory_instead_of_a_scope_token() {
     assert_eq!(entry["origin"].as_str(), Some(""));
     assert_eq!(entry["sourcePath"].as_str(), Some(expected.as_str()));
 }
+
+#[test]
+fn skill_install_preview_is_read_only_bounded_and_matches_installed_content() {
+    let f = Fixture::new("# preserve\n");
+    for index in 0..105 {
+        fs::write(f.source.join(format!("asset-{index:03}.txt")), "resource").unwrap();
+    }
+    let before = fs::read(f.home.join("config.toml")).unwrap();
+    let preview = f
+        .service
+        .dispatch(json!({
+            "action":"preview_skill_install","sourcePath":f.source
+        }))
+        .unwrap();
+    assert_eq!(preview["name"], "demo");
+    assert_eq!(preview["description"], "A test skill");
+    assert_eq!(preview["sourcePath"], json!(f.source));
+    assert_eq!(preview["sourceKind"], "directory");
+    assert_eq!(preview["fileCount"], 106);
+    assert_eq!(preview["files"].as_array().unwrap().len(), 100);
+    assert_eq!(preview["files"][0]["path"], "SKILL.md");
+    let source = skills::load_source(&f.source).unwrap();
+    assert_eq!(preview["sourceRevision"], skills::source_digest(&source));
+    assert_eq!(
+        preview["totalBytes"],
+        source.values().map(|file| file.bytes.len()).sum::<usize>()
+    );
+    assert!(!f.data.exists());
+    assert!(!f.home.join("config.toml.lock").exists());
+    assert!(!f.home.join("skills").exists());
+    assert_eq!(fs::read(f.home.join("config.toml")).unwrap(), before);
+
+    let installed = f.mutate(json!({
+        "action":"install_skill","sourcePath":f.source,"sourceRevision":preview["sourceRevision"]
+    })).unwrap();
+    assert_eq!(installed["inventory"]["skills"][0]["enabled"], false);
+    assert_eq!(
+        fs::read(f.home.join("skills/demo/asset-104.txt")).unwrap(),
+        b"resource"
+    );
+}
+
+#[test]
+fn previewed_skill_rejects_changed_sources_and_invalid_revisions_without_writes() {
+    for key in ["sourceRevision", "expectedSourceDigest"] {
+        let f = Fixture::new("# unchanged\n");
+        let preview = f
+            .service
+            .dispatch(json!({
+                "action":"preview_skill_install","sourcePath":f.source
+            }))
+            .unwrap();
+        fs::write(f.source.join("new-resource.txt"), "new content").unwrap();
+        let before = fs::read(f.home.join("config.toml")).unwrap();
+        let mut request = json!({"action":"install_skill","sourcePath":f.source});
+        request[key] = preview["sourceRevision"].clone();
+        assert!(
+            f.mutate(request.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("重新预览")
+        );
+        request[key] = json!(123);
+        assert!(
+            f.mutate(request.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("必须为字符串")
+        );
+        assert_eq!(fs::read(f.home.join("config.toml")).unwrap(), before);
+        assert!(!f.home.join("skills/demo").exists());
+        assert!(!f.service.registry_path().exists());
+        assert!(!f.data.join("audit.jsonl").exists());
+        let latest = f
+            .service
+            .dispatch(json!({
+                "action":"preview_skill_install","sourcePath":f.source
+            }))
+            .unwrap();
+        request[key] = latest["sourceRevision"].clone();
+        f.mutate(request).unwrap();
+        assert!(f.home.join("skills/demo/new-resource.txt").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn skill_preview_revision_covers_executable_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("");
+    let script = f.source.join("run.sh");
+    fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o600)).unwrap();
+    let first = f
+        .service
+        .dispatch(json!({
+            "action":"preview_skill_install","sourcePath":f.source
+        }))
+        .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    let latest = f
+        .service
+        .dispatch(json!({
+            "action":"preview_skill_install","sourcePath":f.source
+        }))
+        .unwrap();
+    assert_ne!(first["sourceRevision"], latest["sourceRevision"]);
+    assert_eq!(latest["files"][1]["executable"], true);
+    assert!(
+        f.mutate(json!({
+            "action":"install_skill","sourcePath":f.source,"sourceRevision":first["sourceRevision"]
+        }))
+        .is_err()
+    );
+    assert!(!f.home.join("skills/demo").exists());
+}
+
+#[test]
+fn skill_preview_uses_zip_import_safety_checks() {
+    let f = Fixture::new("");
+    let path = f.source.parent().unwrap().join("skill.zip");
+    let manifest = fs::read(f.source.join("SKILL.md")).unwrap();
+    archive(
+        &path,
+        &[("wrapper/SKILL.md", &manifest), ("wrapper/asset", b"asset")],
+    );
+    let preview = f
+        .service
+        .dispatch(json!({
+            "action":"preview_skill_install","sourcePath":path
+        }))
+        .unwrap();
+    assert_eq!(preview["sourceKind"], "zip");
+    assert_eq!(preview["files"][0]["path"], "SKILL.md");
+    assert_eq!(preview["fileCount"], 2);
+    archive(&path, &[("../escape", b"secret"), ("SKILL.md", &manifest)]);
+    let error = f
+        .service
+        .dispatch(json!({
+            "action":"preview_skill_install","sourcePath":path
+        }))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, skills::load_source(&path).err().unwrap().to_string());
+    assert!(!error.contains("secret"));
+    assert!(!f.data.exists());
+    assert!(!f.home.join("skills").exists());
+}
+
+#[test]
+fn skill_rename_preserves_path_identity_and_rejects_name_rule_conflicts() {
+    let f = Fixture::new("[[skills.config]]\nname='blocked'\nenabled=false\n");
+    let installed = f
+        .mutate(json!({"action":"install_skill","sourcePath":f.source}))
+        .unwrap();
+    let id = installed["inventory"]["skills"][0]["id"].clone();
+    let config = fs::read(f.home.join("config.toml")).unwrap();
+    let registry = fs::read(f.service.registry_path()).unwrap();
+    let manifest = f.home.join("skills/demo/SKILL.md");
+    let original = fs::read(&manifest).unwrap();
+    assert!(
+        f.mutate(json!({
+            "action":"save_skill","id":id,
+            "content":"---\nname: blocked\ndescription: test\n---\n"
+        }))
+        .unwrap_err()
+        .to_string()
+        .contains("同名 Skill 规则")
+    );
+    assert_eq!(fs::read(&manifest).unwrap(), original);
+    assert_eq!(fs::read(f.service.registry_path()).unwrap(), registry);
+    assert_eq!(fs::read(f.home.join("config.toml")).unwrap(), config);
+
+    let renamed = f
+        .mutate(json!({
+            "action":"save_skill","id":id,
+            "content":"---\nname: renamed\ndescription: updated\n---\n"
+        }))
+        .unwrap();
+    let entry = &renamed["inventory"]["skills"][0];
+    assert_eq!(entry["name"], "renamed");
+    assert_eq!(entry["id"], id);
+    assert_eq!(entry["manifestPath"], json!(manifest));
+    assert_eq!(entry["enabled"], false);
+    assert_eq!(entry["enabledKnown"], true);
+    assert_eq!(entry["canEdit"], true);
+    assert_eq!(fs::read(f.home.join("config.toml")).unwrap(), config);
+    f.mutate(json!({"action":"set_skill_enabled","id":id,"enabled":true}))
+        .unwrap();
+    assert_eq!(f.list()["skills"][0]["enabled"], true);
+}
+
+#[test]
+fn inventory_budget_rejects_partial_revisions_and_preserves_mutation_targets() {
+    for plugin_cache in [false, true] {
+        let f = Fixture::new("[mcp_servers.test]\ncommand='node'\nenabled=false\n");
+        let root = if plugin_cache {
+            f.home.join("plugins/cache/vendor/plugin/1/skills")
+        } else {
+            f.home.join("skills")
+        };
+        let action = if plugin_cache {
+            "list_skill_cache"
+        } else {
+            "list"
+        };
+        let before = f.service.dispatch(json!({"action":action})).unwrap();
+        let resource = vec![b'x'; fsutil::MAX_FILE as usize];
+        for skill in 0..3 {
+            let directory = root.join(format!("skill-{skill}"));
+            fs::create_dir_all(&directory).unwrap();
+            fs::copy(f.source.join("SKILL.md"), directory.join("SKILL.md")).unwrap();
+            for file in 0..6 {
+                fs::write(directory.join(format!("asset-{file}")), &resource).unwrap();
+            }
+        }
+        let error = f.service.dispatch(json!({"action":action})).unwrap_err();
+        assert!(error.to_string().contains("64 MiB"));
+        let mutation = if plugin_cache {
+            json!({"action":"remove_skill_cache","id":skills::id(&root.join("skill-0/SKILL.md")),"confirmed":true,"revision":before["revision"]})
+        } else {
+            json!({"action":"set_mcp_enabled","id":"test","enabled":true,"confirmed":true,"revision":before["revision"]})
+        };
+        let original = fs::read(f.home.join("config.toml")).unwrap();
+        assert!(
+            f.service
+                .dispatch(mutation)
+                .unwrap_err()
+                .to_string()
+                .contains("64 MiB")
+        );
+        assert_eq!(fs::read(f.home.join("config.toml")).unwrap(), original);
+        assert!(root.join("skill-0/SKILL.md").exists());
+        assert!(!f.data.join("audit.jsonl").exists());
+    }
+}
+
+#[test]
+fn inventory_read_cache_does_not_charge_repeated_reads() {
+    let f = Fixture::new("");
+    let file = f.source.join("resource");
+    fs::write(&file, vec![b'x'; fsutil::MAX_FILE as usize]).unwrap();
+    let mut cache = fsutil::ReadCache::default();
+    for _ in 0..(fsutil::MAX_INVENTORY_BYTES / fsutil::MAX_FILE + 1) {
+        assert_eq!(
+            cache.read(&file).unwrap().unwrap().len(),
+            fsutil::MAX_FILE as usize
+        );
+    }
+    cache.ensure_complete().unwrap();
+}

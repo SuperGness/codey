@@ -126,10 +126,10 @@ fn manifest_version(bytes: &[u8]) -> Option<String> {
 
 /// 列出一个根目录下所有可解析 Skill 的名称与清单路径，用于同范围重名检查。
 /// 无法解析的元数据直接跳过：它们已在清单里单独报告，不参与重名判断。
-pub fn named_manifests(root: &Path) -> Vec<(String, PathBuf)> {
+pub fn named_manifests(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut warnings = Vec::new();
     let mut cache = fsutil::ReadCache::default();
-    discover(root, &mut warnings)
+    let manifests = discover(root, &mut warnings)
         .into_iter()
         .filter(|path| path.file_name().is_some_and(|name| name == "SKILL.md"))
         .filter_map(|manifest| {
@@ -137,7 +137,9 @@ pub fn named_manifests(root: &Path) -> Vec<(String, PathBuf)> {
             let (name, _) = metadata(bytes).ok()?;
             Some((name, manifest))
         })
-        .collect()
+        .collect();
+    cache.ensure_complete()?;
+    Ok(manifests)
 }
 
 pub fn external_removal_files(path: &Path) -> Result<Vec<PathBuf>> {
@@ -281,11 +283,15 @@ pub fn load_source(source: &Path) -> Result<BTreeMap<PathBuf, SourceFile>> {
     fsutil::safe_path(source)?;
     let mut files = BTreeMap::new();
     if source.is_dir() {
+        let mut total = 0u64;
         for path in fsutil::walk(source)? {
+            let bytes = fsutil::read(&path)?.context("源文件已消失")?;
+            total += bytes.len() as u64;
+            ensure!(total <= fsutil::MAX_TOTAL, "目录内容超过总大小限制");
             files.insert(
                 path.strip_prefix(source)?.to_path_buf(),
                 SourceFile {
-                    bytes: fsutil::read(&path)?.context("源文件已消失")?,
+                    bytes,
                     executable: fsutil::file_mode(&path)?.is_some_and(|m| m & 0o111 != 0),
                 },
             );
