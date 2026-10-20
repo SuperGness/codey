@@ -8811,6 +8811,214 @@ fn upstream_error_summary_extracts_context_and_redacts_route_credentials() {
     );
 }
 
+fn unsupported_image_validation_error() -> Value {
+    json!({
+        "error": {
+            "message": [{
+                "type": "value_error",
+                "loc": ["body"],
+                "msg": "Value error, Image inputs are not supported for this model",
+                "ctx": {"error": "Image inputs are not supported for this model"}
+            }],
+            "type": "invalid_request_error",
+            "param": null,
+            "code": "invalid_request_error"
+        }
+    })
+}
+
+#[test]
+fn upstream_error_summary_explains_unsupported_image_validation_errors() {
+    let (config, provider_id, _) = router_config("https://relay.example/v1".into());
+    let snapshot = RouterSnapshot::from_config(&config);
+    let route = snapshot.routes.get(&provider_id).unwrap();
+    let summary = upstream_error_summary(&unsupported_image_validation_error(), route);
+
+    let message = summary.message.as_deref().unwrap();
+    assert!(message.contains("当前模型不支持图片输入"));
+    assert!(message.contains("请切换到支持图片的模型"));
+    assert!(message.contains("会话历史中的图片或截图也可能导致此错误"));
+    assert!(message.contains("Value error, Image inputs are not supported for this model"));
+    assert!(message.chars().count() <= 513);
+    assert_eq!(summary.error_type.as_deref(), Some("invalid_request_error"));
+    assert_eq!(summary.code.as_deref(), Some("invalid_request_error"));
+}
+
+#[test]
+fn upstream_error_summary_bounds_and_redacts_validation_messages_only() {
+    let (config, provider_id, _) = router_config("https://relay.example/v1".into());
+    let snapshot = RouterSnapshot::from_config(&config);
+    let route = snapshot.routes.get(&provider_id).unwrap();
+    let details = json!([
+        {"msg": null, "input": "private-input"},
+        {"msg": " \n ", "ctx": {"error": "private-context"}},
+        {"msg": {"nested": "private-nested-message"}},
+        {
+            "msg": "missing field for Bearer sk-upstream\nplease correct it",
+            "loc": ["private-location"],
+            "input": "private-input",
+            "ctx": {"error": "private-context"}
+        },
+        {"msg": "invalid field for sk-upstream"}
+    ]);
+    for pointer in [
+        "/response/error/message",
+        "/error/error/message",
+        "/error/message",
+        "/message",
+        "/detail",
+    ] {
+        let mut value = json!({
+            "response": {"error": {"message": null}},
+            "error": {"error": {"message": null}, "message": null},
+            "message": null,
+            "detail": null
+        });
+        *value.pointer_mut(pointer).unwrap() = details.clone();
+        let summary = upstream_error_summary(&value, route);
+        assert_eq!(
+            summary.message.as_deref(),
+            Some("missing field for *** please correct it；invalid field for ***"),
+            "{pointer}"
+        );
+    }
+    let summary = upstream_error_summary(
+        &json!({"error": {"message": [
+            {"msg": format!("Bearer sk-upstream {}", "错误".repeat(600))},
+            {"msg": "private-trailing-message"}
+        ]}}),
+        route,
+    );
+    let message = summary.message.unwrap();
+    assert!(message.starts_with("*** "));
+    assert_eq!(message.chars().count(), 513);
+    assert!(message.ends_with('…'));
+    assert!(!message.contains("sk-upstream"));
+    assert!(!message.contains("private-trailing-message"));
+}
+
+#[test]
+fn upstream_error_summary_does_not_misclassify_image_constraints() {
+    let (config, provider_id, _) = router_config("https://relay.example/v1".into());
+    let snapshot = RouterSnapshot::from_config(&config);
+    let route = snapshot.routes.get(&provider_id).unwrap();
+    for message in [
+        "Image is too large",
+        "Image format is not supported for this model",
+        "Image inputs larger than 20 MB are not supported for this model",
+        "This model does not support images larger than 20 MB",
+        "This model does not support image inputs in this format",
+        "Image inputs are not supported for this model at this resolution",
+        "Too many image inputs",
+        "Unknown model",
+    ] {
+        for body in [
+            json!({"error": {"message": message}}),
+            json!({"error": {"message": [{"msg": message}]}}),
+        ] {
+            let summary = upstream_error_summary(&body, route);
+            assert_eq!(summary.message.as_deref(), Some(message));
+        }
+    }
+    assert_eq!(
+        upstream_error_summary(&json!({"detail": "ordinary upstream failure"}), route)
+            .message
+            .as_deref(),
+        Some("ordinary upstream failure")
+    );
+    assert!(
+        upstream_error_summary(
+            &json!({"error": {"message": [{"input": "private-input"}]}}),
+            route,
+        )
+        .message
+        .is_none()
+    );
+}
+
+#[tokio::test]
+async fn upstream_image_input_failure_messages_cover_http_stream_and_websocket() {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let upstream_task = tokio::spawn(async move {
+        let (mut stream, _) = upstream.accept().await.unwrap();
+        let request = read_http_request(&mut stream).await.unwrap();
+        let body = unsupported_image_validation_error().to_string();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        serde_json::from_slice::<Value>(&request.body).unwrap()
+    });
+    let (config, provider_id, model) = router_config(format!("http://{address}/v1"));
+    let router = LocalRouter::start(&config).await.unwrap();
+    let endpoint = router.endpoint();
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap()
+        .post(format!("{}/responses", endpoint.base_url))
+        .bearer_auth(&endpoint.token)
+        .json(&json!({
+            "model": model_alias(&provider_id, &model),
+            "stream": false,
+            "input": [{"role": "user", "content": [
+                {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}
+            ]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    let http_body = response.text().await.unwrap();
+    let sent = upstream_task.await.unwrap();
+    router.stop().await.unwrap();
+    assert_eq!(sent["model"], model);
+    assert_eq!(sent["input"][0]["content"][0]["type"], "input_image");
+
+    let snapshot = RouterSnapshot::from_config(&config);
+    let route = snapshot.routes.get(&provider_id).unwrap();
+    let failure = streaming_response_failure(
+        &UpstreamStreamFailure(unsupported_image_validation_error()).into(),
+        route,
+        None,
+    );
+    assert_eq!(failure.code, "upstream_stream_error");
+    assert_eq!(
+        failure.event["response"]["error"]["codey"]["upstreamCode"],
+        "invalid_request_error"
+    );
+    assert!(failure.retry_advice.is_none());
+    let mut websocket_event = unsupported_image_validation_error();
+    annotate_upstream_websocket_failure(
+        &mut websocket_event,
+        route,
+        &model,
+        "wss://relay.example/v1/responses",
+    );
+    for message in [
+        http_body.as_str(),
+        failure.event["response"]["error"]["message"]
+            .as_str()
+            .unwrap(),
+        websocket_event["error"]["message"].as_str().unwrap(),
+    ] {
+        assert!(message.contains("当前模型不支持图片输入"), "{message}");
+        assert!(message.contains("请切换到支持图片的模型"), "{message}");
+        assert!(message.contains("会话历史中的图片或截图"), "{message}");
+        assert!(
+            message.contains("Image inputs are not supported for this model"),
+            "{message}"
+        );
+    }
+}
+
 #[test]
 fn websocket_failure_event_keeps_provider_codes_and_adds_route_context() {
     let (config, provider_id, _) = router_config("https://relay.example/v1".into());

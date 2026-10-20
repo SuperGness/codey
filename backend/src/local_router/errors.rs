@@ -187,19 +187,77 @@ pub(crate) fn observe_upstream_stream_error(
     }
 }
 
+fn upstream_error_message_text(value: &Value, route: &RouteTarget) -> Option<String> {
+    if let Some(message) = value.as_str() {
+        return sanitize_upstream_error_text(message, route, 512);
+    }
+
+    let mut message = String::new();
+    // 验证错误可能附带原始输入和上下文，仅提取 msg，并沿用脱敏和总长度限制。
+    for detail in value.as_array()? {
+        let Some(part) = detail
+            .get("msg")
+            .and_then(Value::as_str)
+            .and_then(|part| sanitize_upstream_error_text(part, route, 512))
+        else {
+            continue;
+        };
+        if !message.is_empty() {
+            message.push('；');
+        }
+        message.push_str(&part);
+        if message.chars().count() > 512 {
+            break;
+        }
+    }
+    sanitize_upstream_error_text(&message, route, 512)
+}
+
+fn upstream_message_rejects_image_input(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.split([';', '；']).any(|part| {
+        let part = part.trim().trim_end_matches(['.', '!', '。']);
+        let part = part.strip_prefix("value error, ").unwrap_or(part);
+        // 只匹配完整的能力错误，避免把格式、尺寸和数量限制误判为模型不支持图片。
+        matches!(
+            part,
+            "image inputs are not supported for this model"
+                | "image inputs are not supported by this model"
+                | "image input is not supported for this model"
+                | "image input is not supported by this model"
+                | "this model does not support image inputs"
+                | "this model does not support image input"
+                | "this model does not support images"
+        )
+    })
+}
+
 pub(crate) fn upstream_error_summary(value: &Value, route: &RouteTarget) -> UpstreamErrorSummary {
-    let message = first_string_at(
-        value,
-        &[
-            "/response/error/message",
-            "/error/error/message",
-            "/error/message",
-            "/message",
-            "/detail",
-            "/error",
-        ],
-    )
-    .and_then(|message| sanitize_upstream_error_text(message, route, 512));
+    let message = [
+        "/response/error/message",
+        "/error/error/message",
+        "/error/message",
+        "/message",
+        "/detail",
+        "/error",
+    ]
+    .iter()
+    .find_map(|pointer| {
+        value
+            .pointer(pointer)
+            .and_then(|value| upstream_error_message_text(value, route))
+    })
+    .and_then(|message| {
+        if upstream_message_rejects_image_input(&message) {
+            sanitize_upstream_error_text(
+                &format!("当前模型不支持图片输入，请切换到支持图片的模型后重试；会话历史中的图片或截图也可能导致此错误。上游原因：{message}"),
+                route,
+                512,
+            )
+        } else {
+            Some(message)
+        }
+    });
     let error_type = first_string_at(
         value,
         &["/response/error/type", "/error/error/type", "/error/type"],
