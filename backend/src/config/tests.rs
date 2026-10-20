@@ -625,6 +625,22 @@ fn legacy_empty_short_names_receive_unique_defaults() {
 }
 
 #[test]
+fn loading_legacy_protocol_keeps_read_compatibility_without_rewriting_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.json");
+    let mut config = CodeyConfig::default();
+    config.profiles[0].upstream_protocol = "old-unrecognized-protocol".into();
+    let original = serde_json::to_vec(&config).unwrap();
+    std::fs::write(&path, &original).unwrap();
+    let loaded = ConfigStore::new(&path).load().unwrap();
+    assert_eq!(
+        loaded.profiles[0].upstream_protocol,
+        UPSTREAM_PROTOCOL_OPENAI_RESPONSES
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[test]
 fn route_validation_rejects_duplicate_short_names() {
     let mut first = ProviderProfile::new("First");
     first.id = "first".into();

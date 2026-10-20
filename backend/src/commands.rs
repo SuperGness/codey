@@ -2091,6 +2091,8 @@ fn merge_profile_secrets(
         .map(|profile| (profile.id.as_str(), profile))
         .collect::<std::collections::HashMap<_, _>>();
     for profile in &mut profiles {
+        // 先验证请求原值，避免历史配置归一化把拼写错误当作默认协议保存。
+        profile.validate_upstream_protocol_input()?;
         let previous_profile = previous_by_id.get(profile.id.as_str()).copied();
         profile.merge_redacted_secret(previous_profile);
         if let Some(previous_profile) = previous_profile {

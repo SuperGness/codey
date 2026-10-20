@@ -273,6 +273,17 @@ impl ProviderProfile {
         self.clear_api_key = false;
     }
 
+    pub(crate) fn validate_upstream_protocol_input(&self) -> Result<(), String> {
+        if recognized_upstream_protocol(&self.upstream_protocol).is_none() {
+            return Err(format!(
+                "线路「{}」使用了不支持的上游协议：{}",
+                self.name.trim(),
+                self.upstream_protocol.trim()
+            ));
+        }
+        Ok(())
+    }
+
     pub fn merge_redacted_secret(&mut self, previous: Option<&Self>) {
         if self.clear_api_key {
             self.api_key.clear();
@@ -288,6 +299,7 @@ impl ProviderProfile {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
+        self.validate_upstream_protocol_input()?;
         if self.id.trim().is_empty() {
             return Err("线路 ID 不能为空".to_string());
         }

@@ -638,6 +638,82 @@ fn renderer_settings_keep_editable_credentials_but_clear_clawbot_tokens() {
 }
 
 #[test]
+fn provider_secret_merge_rejects_unknown_protocol_before_normalization() {
+    let mut saved = ProviderProfile::new("Relay");
+    saved.id = "relay-route".into();
+    saved.short_name = "中转".into();
+    saved.base_url = "https://relay.example/v1".into();
+    saved.api_key = "saved-key".into();
+    saved.normalize();
+    let previous = CodeyConfig {
+        profiles: vec![saved.clone()],
+        ..CodeyConfig::default()
+    };
+
+    for new_route in [false, true] {
+        for official in [false, true] {
+            let mut input = saved.clone();
+            if new_route {
+                input.id = "new-route".into();
+            }
+            if official {
+                input.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+            }
+            input.upstream_protocol = "openaiRespones".into();
+            let error = merge_profile_secrets(vec![input], &previous).unwrap_err();
+            assert!(
+                error.contains("不支持的上游协议：openaiRespones"),
+                "{error}"
+            );
+        }
+    }
+    let mut empty_default = CodeyConfig::default().profiles.remove(0);
+    empty_default.upstream_protocol = "unknown".into();
+    assert!(merge_profile_secrets(vec![empty_default], &previous).is_err());
+    assert_eq!(previous.profiles[0].api_key, "saved-key");
+}
+
+#[test]
+fn provider_secret_merge_keeps_explicit_protocol_defaults_and_legacy_aliases() {
+    let mut saved = ProviderProfile::new("Relay");
+    saved.id = "relay-route".into();
+    saved.short_name = "中转".into();
+    saved.base_url = "https://relay.example/v1".into();
+    saved.api_key = "saved-key".into();
+    saved.normalize();
+    let previous = CodeyConfig {
+        profiles: vec![saved.clone()],
+        ..CodeyConfig::default()
+    };
+    for (input, expected) in [
+        ("   ", crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES),
+        (
+            " chatCompletions ",
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+        ),
+        (
+            "openaiChatCompletion",
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+        ),
+        (
+            "anthropic",
+            crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+        ),
+        (
+            "anthropicMessagesApi",
+            crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+        ),
+    ] {
+        let mut request = saved.clone();
+        request.api_key.clear();
+        request.upstream_protocol = input.into();
+        let merged = merge_profile_secrets(vec![request], &previous).unwrap();
+        assert_eq!(merged[0].upstream_protocol, expected, "{input}");
+        assert_eq!(merged[0].api_key, "saved-key");
+    }
+}
+
+#[test]
 fn provider_secret_merge_allows_changing_official_routes_to_api_key() {
     let mut official = crate::config::ProviderProfile::new("OpenAI 官方直登");
     official.id = "official-route".to_string();

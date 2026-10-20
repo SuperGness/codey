@@ -1829,19 +1829,26 @@ pub(super) fn normalize_subagent_selection(model: &mut String, reasoning_effort:
     }
 }
 
-pub(super) fn normalize_upstream_protocol(value: &str) -> String {
-    match value.trim() {
+/// 空值对应旧版默认协议；这里只接受明确支持的旧名称，不猜测未知值。
+pub(super) fn recognized_upstream_protocol(value: &str) -> Option<&'static str> {
+    Some(match value.trim() {
         UPSTREAM_PROTOCOL_OFFICIAL => UPSTREAM_PROTOCOL_OFFICIAL,
-        UPSTREAM_PROTOCOL_OPENAI_RESPONSES => UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+        "" | UPSTREAM_PROTOCOL_OPENAI_RESPONSES => UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
         UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS | "chatCompletions" | "openaiChatCompletion" => {
             UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS
         }
         UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES | "anthropic" | "anthropicMessagesApi" => {
             UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES
         }
-        _ => UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
-    }
-    .to_string()
+        _ => return None,
+    })
+}
+
+pub(super) fn normalize_upstream_protocol(value: &str) -> String {
+    // 读取历史配置保留旧版默认行为；用户提交必须在归一化前校验原始值。
+    recognized_upstream_protocol(value)
+        .unwrap_or(UPSTREAM_PROTOCOL_OPENAI_RESPONSES)
+        .to_string()
 }
 
 pub(super) fn normalize_auth_mode(value: &str, official: bool) -> String {
