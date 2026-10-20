@@ -2355,7 +2355,7 @@
           }
           window.__codeyCodexSessionController ||= controller;
         }
-        if (feature === "deleteMessages") {
+        if (feature === "deleteMessages" || feature === "modelRouting") {
           const resolver = await loadManagerSourceResolver(url, module);
           if (disposed) throw unavailableCapability(feature);
           const registered = registeredMessageDeletionController(feature);

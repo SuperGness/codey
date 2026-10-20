@@ -333,6 +333,7 @@ function loadInjection({
       },
     },
     MutationObserver,
+    performance: { now: () => now },
     TextEncoder,
     URL,
     URLSearchParams,
@@ -471,8 +472,85 @@ test("native model routing discovers the local request client without sending a 
   const client = { hostId: "local", enqueueRequest() { throw Error("must not send"); }, createRequest() {}, onResult() {} };
   const manager = { requestClient: client, sendRequest() { throw Error("must not send"); } };
   const runtime = loadInjection({ localAppServerManager: manager, initialSessionId: "" });
+  let fetches = 0;
+  runtime.window.fetch = async () => { fetches += 1; return { ok: false }; };
   assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client);
   assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available");
+  assert.equal(fetches, 0, "exported registry discovery must not read asset source");
+});
+
+test("native model routing retains module discovery before React mounts", async () => {
+  const client = { hostId: "local", enqueueRequest() { assert.fail("must not send"); }, createRequest() {}, onResult() {} };
+  const manager = { requestClient: client };
+  const runtime = loadInjection({ initialSessionId: "" });
+  const scope = {
+    query() {}, set() {}, watch() {}, when() {},
+    get(_key, hostId) { return hostId === "local" ? manager : null; },
+  };
+  const module = {
+    container: { scope },
+    Registry: class {
+      getAll() { return this.scope.get("managers"); }
+      getForHostId(hostId) { return this.scope.get("manager", hostId); }
+    },
+  };
+  runtime.document.scripts.push({ src: "app://-/assets/app-initial-module.js" });
+  runtime.window.__codeyImportCodexAsset = async () => module;
+  let fetches = 0;
+  runtime.window.fetch = async () => { fetches += 1; return { ok: false }; };
+
+  assert.equal(runtime.document.body.__reactFiber$test, undefined);
+  assert.equal(await runtime.window.__codeyLoadCodexRequestClientFromModule(), client);
+  assert.equal(fetches, 0, "module discovery must not read asset source");
+});
+
+test("native model routing retries unexported registry discovery and caches source bindings across capabilities", async () => {
+  for (const unavailable of ["react", "import", "fetch"]) {
+    const hosts = {}, managers = {};
+    const client = { hostId: "local", enqueueRequest() { assert.fail("must not send"); }, createRequest() {}, onResult() {} };
+    const manager = createLocalDeletionManager({ requestClient: client, sendRequest() { assert.fail("must not send"); } });
+    const scope = Object.assign(function scope() {}, {
+      query() {}, set() {}, watch() {}, when() {},
+      get(key, hostId) {
+        if (key === hosts) return ["local"];
+        assert.equal(key, managers);
+        assert.equal(hostId, "local");
+        return manager;
+      },
+    });
+    const module = { h: hosts, m: managers, mQt: { scope } };
+    const url = "app://-/assets/app-initial-unexported-routing.js";
+    const asset = "throw Error('must not evaluate');class R {getForHostId(e){return this.scope.get(hosts).includes(e)?this.scope.get(managers,e):null}};export {hosts as h,managers as m};";
+    const runtime = loadInjection({ initialSessionId: "" });
+    const mount = () => { runtime.document.body.__reactFiber$test = { memoizedState: { scope } }; };
+    if (unavailable !== "react") mount();
+    runtime.document.scripts.push({ src: url });
+    let ready = false;
+    let fetches = 0;
+    runtime.window.__codeyImportCodexAsset = async () => {
+      if (!ready && unavailable === "import") throw Error("asset import is not ready");
+      return module;
+    };
+    runtime.window.fetch = async (assetUrl) => {
+      assert.equal(assetUrl, url);
+      fetches += 1;
+      return { ok: ready || unavailable !== "fetch", text: async () => asset };
+    };
+
+    await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/, unavailable);
+    assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "unavailable", unavailable);
+    if (unavailable === "react") {
+      await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
+      assert.equal(fetches, 1, "React retries reuse bindings even before a manager is found");
+      mount();
+    }
+    ready = true;
+    assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client, unavailable);
+    assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available", unavailable);
+    runtime.window.__codeyCodexSessionController = null;
+    assert.equal((await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" })).manager, manager);
+    assert.equal(fetches, unavailable === "fetch" ? 2 : 1, "deletion reuses the successful source resolver");
+  }
 });
 
 test("native model routing cannot use a remote or incomplete client", async () => {
