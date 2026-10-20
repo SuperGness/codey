@@ -625,6 +625,100 @@ fn legacy_empty_short_names_receive_unique_defaults() {
 }
 
 #[test]
+fn runtime_catalog_and_router_share_route_membership_and_capabilities() {
+    let mut responses = ProviderProfile::new("Responses");
+    responses.id = "responses".into();
+    responses.source_provider_id = Some("imported route".into());
+    responses.base_url = "https://responses.example/v1".into();
+    responses.supports_websockets = true;
+    responses.supports_remote_compaction = true;
+    responses.supports_native_web_search = true;
+    responses.supports_auto_review = true;
+    responses.normalize();
+    let mut chat = responses.clone();
+    chat.id = "chat".into();
+    chat.source_provider_id = None;
+    chat.upstream_protocol = UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+    chat.normalize();
+    let mut disabled = responses.clone();
+    disabled.id = "disabled".into();
+    disabled.source_provider_id = None;
+    disabled.enabled = false;
+    let mut incomplete = responses.clone();
+    incomplete.id = "incomplete".into();
+    incomplete.source_provider_id = None;
+    incomplete.base_url.clear();
+    let mut official = ProviderProfile::new("Official");
+    official.id = "official".into();
+    official.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+    official.normalize();
+    let mut config = CodeyConfig {
+        profiles: vec![responses, chat, disabled, incomplete, official],
+        official_account_available_this_launch: true,
+        ..CodeyConfig::default()
+    };
+    for profile in &config.profiles {
+        config.selected_models_by_provider.insert(
+            profile.provider_id().into(),
+            vec!["Shared".into(), "org/model".into()],
+        );
+    }
+    let snapshot = local_router::RouterSnapshot::from_config(&config);
+    assert_eq!(snapshot.routes.len(), 3);
+    let (_, selected) = config.runtime_catalog_models();
+    assert_eq!(selected.len(), 6);
+    assert!(!selected.iter().any(|id| id.contains("codex-auto-review")));
+    let websocket_ids = config.runtime_websocket_model_aliases();
+    let compaction_ids = config.runtime_remote_compaction_model_aliases();
+    let targets = config.runtime_model_targets();
+    assert_eq!(targets.len(), selected.len());
+    for target in targets {
+        let id = config.runtime_catalog_id_for_target(&target);
+        assert!(selected.contains(&id), "{id}");
+        let selection = snapshot.target_for_model(&id).unwrap();
+        assert_eq!(selection.provider_id, target.provider_id);
+        assert_eq!(selection.upstream_model, target.upstream_model);
+        assert_eq!(
+            selection.route.supports_websockets,
+            websocket_ids.contains(&id)
+        );
+        assert_eq!(
+            selection.route.supports_remote_compaction,
+            compaction_ids.contains(&id)
+        );
+    }
+    assert!(
+        snapshot
+            .target_for_model(&local_router::model_alias(
+                "imported route",
+                local_router::CODEX_AUTO_REVIEW_MODEL
+            ))
+            .is_ok()
+    );
+    for id in ["disabled", "incomplete"] {
+        assert!(!snapshot.routes.contains_key(id));
+        assert!(
+            !selected
+                .iter()
+                .any(|model| model.starts_with(&format!("{id}/")))
+        );
+    }
+    config.official_account_available_this_launch = false;
+    assert!(
+        !local_router::RouterSnapshot::from_config(&config)
+            .routes
+            .contains_key("official")
+    );
+    assert!(
+        !config
+            .runtime_catalog_models()
+            .1
+            .iter()
+            .any(|model| model == "Shared")
+    );
+}
+
+#[test]
 fn loading_legacy_protocol_keeps_read_compatibility_without_rewriting_file() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("config.json");

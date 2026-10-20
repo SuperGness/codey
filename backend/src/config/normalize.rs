@@ -753,6 +753,27 @@ impl CodeyConfig {
             .unwrap_or_else(model_catalog::default_official_model_slugs)
     }
 
+    /// 目录与路由表共用启用模型来源；自动复核模型不作为普通可选模型显示。
+    pub(crate) fn enabled_profile_models(&self, profile: &ProviderProfile) -> Vec<String> {
+        if profile.official_account {
+            self.enabled_official_route_models(profile.provider_id())
+        } else {
+            self.enabled_route_models(profile.provider_id())
+        }
+    }
+
+    pub(crate) fn routable_profile_models(&self, profile: &ProviderProfile) -> Vec<String> {
+        let mut models = self.enabled_profile_models(profile);
+        if (profile.official_account || profile.supports_auto_review)
+            && !models
+                .iter()
+                .any(|model| model_id::equal(model, local_router::CODEX_AUTO_REVIEW_MODEL))
+        {
+            models.push(local_router::CODEX_AUTO_REVIEW_MODEL.to_string());
+        }
+        models
+    }
+
     /// 官方线路只能选择内置官方模型清单里的模型。上游下线某个模型后，旧配置里
     /// 遗留的选择会在这里清掉，避免模型界面和生成的目录继续出现它。
     fn prune_retired_official_selections(&mut self) {
@@ -824,6 +845,34 @@ impl CodeyConfig {
                 || (self.local_router_enabled && profile.official_account_id.is_some()))
     }
 
+    /// 运行时目录和请求路由共用线路可用性判定。凭据有效性仍由发送阶段检查。
+    pub(crate) fn runtime_profiles(&self) -> impl Iterator<Item = &ProviderProfile> {
+        self.profiles.iter().filter(|profile| {
+            profile.enabled
+                && !profile.provider_id().trim().is_empty()
+                && if profile.official_account {
+                    self.official_route_usable(profile)
+                } else {
+                    !profile.normalized_base_url().is_empty()
+                }
+        })
+    }
+
+    fn runtime_model_aliases_for(
+        &self,
+        supports: impl Fn(&ProviderProfile) -> bool,
+    ) -> Vec<String> {
+        let qualify_official = self.qualifies_official_model_ids();
+        self.runtime_profiles()
+            .filter(|profile| supports(profile))
+            .flat_map(|profile| {
+                self.enabled_profile_models(profile)
+                    .into_iter()
+                    .map(move |model| runtime_catalog_model_id(profile, &model, qualify_official))
+            })
+            .collect()
+    }
+
     /// Derived official routes of the accounts that are live this launch.
     pub(crate) fn usable_official_routes(&self) -> impl Iterator<Item = &ProviderProfile> {
         self.profiles
@@ -877,35 +926,16 @@ impl CodeyConfig {
 
     /// Runtime catalog model IDs that use Responses WebSocket.
     pub(crate) fn runtime_websocket_model_aliases(&self) -> Vec<String> {
-        if !self.runtime_supports_websockets() {
-            return Vec::new();
-        }
-        let qualify_official = self.qualifies_official_model_ids();
-        self.profiles
-            .iter()
-            .filter(|profile| self.route_supports_websockets_this_launch(profile))
-            .flat_map(|profile| {
-                let provider_id = profile.provider_id();
-                let models = if profile.official_account {
-                    self.enabled_official_route_models(provider_id)
-                } else {
-                    self.enabled_route_models(provider_id)
-                };
-                models
-                    .into_iter()
-                    .map(move |model| runtime_catalog_model_id(profile, &model, qualify_official))
-            })
-            .collect()
+        self.runtime_model_aliases_for(|profile| {
+            self.route_supports_websockets_this_launch(profile)
+        })
     }
 
     /// Codex gates WebSocket transport at the provider level, then applies each
     /// model's `prefer_websockets` setting from the runtime catalog.
     pub(crate) fn runtime_supports_websockets(&self) -> bool {
-        self.profiles.iter().any(|profile| {
-            !profile.provider_id().trim().is_empty()
-                && (profile.official_account || !profile.normalized_base_url().is_empty())
-                && self.route_supports_websockets_this_launch(profile)
-        })
+        self.runtime_profiles()
+            .any(|profile| self.route_supports_websockets_this_launch(profile))
     }
 
     /// Whether one route can expose Codex's native Responses Web Search tool
@@ -935,22 +965,9 @@ impl CodeyConfig {
     /// only preserves the capability when the source model metadata declares
     /// support as well.
     pub(crate) fn runtime_native_web_search_model_aliases(&self) -> Vec<String> {
-        let qualify_official = self.qualifies_official_model_ids();
-        self.profiles
-            .iter()
-            .filter(|profile| self.route_supports_native_web_search_this_launch(profile))
-            .flat_map(|profile| {
-                let provider_id = profile.provider_id();
-                let models = if profile.official_account {
-                    self.enabled_official_route_models(provider_id)
-                } else {
-                    self.enabled_route_models(provider_id)
-                };
-                models
-                    .into_iter()
-                    .map(move |model| runtime_catalog_model_id(profile, &model, qualify_official))
-            })
-            .collect()
+        self.runtime_model_aliases_for(|profile| {
+            self.route_supports_native_web_search_this_launch(profile)
+        })
     }
 
     /// Whether one route can carry the Responses `input_image.detail=original`
@@ -972,22 +989,9 @@ impl CodeyConfig {
 
     /// Runtime catalog model IDs that may keep `supports_image_detail_original`.
     pub(crate) fn runtime_image_detail_original_model_aliases(&self) -> Vec<String> {
-        let qualify_official = self.qualifies_official_model_ids();
-        self.profiles
-            .iter()
-            .filter(|profile| self.route_supports_image_detail_original_this_launch(profile))
-            .flat_map(|profile| {
-                let provider_id = profile.provider_id();
-                let models = if profile.official_account {
-                    self.enabled_official_route_models(provider_id)
-                } else {
-                    self.enabled_route_models(provider_id)
-                };
-                models
-                    .into_iter()
-                    .map(move |model| runtime_catalog_model_id(profile, &model, qualify_official))
-            })
-            .collect()
+        self.runtime_model_aliases_for(|profile| {
+            self.route_supports_image_detail_original_this_launch(profile)
+        })
     }
 
     /// Whether one route natively supports the Responses compaction contract
@@ -1016,12 +1020,12 @@ impl CodeyConfig {
 
     /// 这里只汇总可用能力；压缩方式由网关按所选线路热切换。
     pub(crate) fn runtime_supports_remote_compaction(&self) -> bool {
-        self.remote_compaction_runtime_profiles()
+        self.runtime_profiles()
             .any(|profile| self.route_supports_remote_compaction_this_launch(profile))
     }
 
     pub(crate) fn remote_compaction_route_capabilities(&self) -> BTreeMap<String, bool> {
-        self.remote_compaction_runtime_profiles()
+        self.runtime_profiles()
             .map(|profile| {
                 (
                     profile.provider_id().to_string(),
@@ -1043,36 +1047,13 @@ impl CodeyConfig {
     }
 
     pub(crate) fn runtime_remote_compaction_model_aliases(&self) -> Vec<String> {
-        let qualify_official = self.qualifies_official_model_ids();
-        self.remote_compaction_runtime_profiles()
-            .filter(|profile| self.route_supports_remote_compaction_this_launch(profile))
-            .flat_map(|profile| {
-                let models = if profile.official_account {
-                    self.enabled_official_route_models(profile.provider_id())
-                } else {
-                    self.enabled_route_models(profile.provider_id())
-                };
-                models
-                    .into_iter()
-                    .map(move |model| runtime_catalog_model_id(profile, &model, qualify_official))
-            })
-            .collect()
-    }
-
-    fn remote_compaction_runtime_profiles(&self) -> impl Iterator<Item = &ProviderProfile> {
-        self.profiles.iter().filter(|profile| {
-            profile.enabled
-                && !profile.provider_id().trim().is_empty()
-                && if profile.official_account {
-                    self.official_route_usable(profile)
-                } else {
-                    !profile.normalized_base_url().is_empty()
-                }
+        self.runtime_model_aliases_for(|profile| {
+            self.route_supports_remote_compaction_this_launch(profile)
         })
     }
 
     pub(crate) fn remote_compaction_blockers(&self) -> Vec<RemoteCompactionBlocker> {
-        self.remote_compaction_runtime_profiles()
+        self.runtime_profiles()
             .filter(|profile| !self.route_supports_remote_compaction_this_launch(profile))
             .map(|profile| RemoteCompactionBlocker {
                 route_id: profile.id.clone(),
@@ -1162,13 +1143,13 @@ impl CodeyConfig {
     }
 
     pub(crate) fn runtime_model_targets(&self) -> Vec<RuntimeModelTarget> {
-        let usable_official_routes = self
-            .usable_official_routes()
+        let available_routes = self
+            .runtime_profiles()
             .map(|profile| profile.id.clone())
             .collect::<BTreeSet<_>>();
         self.configured_model_targets()
             .into_iter()
-            .filter(|target| !target.official || usable_official_routes.contains(&target.route_id))
+            .filter(|target| available_routes.contains(&target.route_id))
             .collect()
     }
 
@@ -1241,12 +1222,7 @@ impl CodeyConfig {
             if provider_id.is_empty() {
                 continue;
             }
-            let models = if profile.official_account {
-                self.enabled_official_route_models(provider_id)
-            } else {
-                self.enabled_route_models(provider_id)
-            };
-            for upstream_model in models {
+            for upstream_model in self.enabled_profile_models(profile) {
                 let alias = local_router::model_alias(provider_id, &upstream_model);
                 let request_provider_id = self
                     .runtime_gateway_provider_id_for_profile(profile)
@@ -1317,40 +1293,24 @@ impl CodeyConfig {
         let qualify_official = self.qualifies_official_model_ids();
         let mut upstream = Vec::new();
         let mut selected = Vec::new();
-        for profile in &self.profiles {
-            if !profile.enabled {
-                continue;
-            }
-            if profile.official_account {
-                if self.official_route_usable(profile) {
-                    let provider_id = profile.provider_id();
-                    let enabled = self.enabled_official_route_models(provider_id);
-                    let aliases = enabled
-                        .iter()
-                        .map(|model| runtime_catalog_model_id(profile, model, qualify_official))
-                        .collect::<Vec<_>>();
-                    upstream.extend(aliases.iter().cloned());
-                    selected.extend(aliases);
-                }
-                continue;
-            }
+        for profile in self.runtime_profiles() {
             let provider_id = profile.provider_id();
-            if let Some(models) = self.upstream_models_by_provider.get(profile.provider_id()) {
+            if !profile.official_account
+                && let Some(models) = self.upstream_models_by_provider.get(provider_id)
+            {
                 upstream.extend(
                     models
                         .iter()
                         .map(|model| local_router::model_alias(provider_id, model)),
                 );
             }
-            let enabled_models = self.enabled_route_models(provider_id);
-            if !enabled_models.is_empty() {
-                let aliases = enabled_models
-                    .iter()
-                    .map(|model| local_router::model_alias(provider_id, model))
-                    .collect::<Vec<_>>();
-                upstream.extend(aliases.iter().cloned());
-                selected.extend(aliases);
-            }
+            let aliases = self
+                .enabled_profile_models(profile)
+                .iter()
+                .map(|model| runtime_catalog_model_id(profile, model, qualify_official))
+                .collect::<Vec<_>>();
+            upstream.extend(aliases.iter().cloned());
+            selected.extend(aliases);
         }
         (
             model_id::dedupe_preserving_first(upstream.iter().map(String::as_str)),
@@ -1367,28 +1327,12 @@ impl CodeyConfig {
     pub(crate) fn runtime_catalog_display_names(&self) -> BTreeMap<String, String> {
         let qualify_official = self.qualifies_official_model_ids();
         let mut names = BTreeMap::new();
-        for profile in &self.profiles {
-            if !profile.enabled {
-                continue;
-            }
-            let provider_id = profile.provider_id();
-            if profile.official_account {
-                if !self.official_route_usable(profile) {
-                    continue;
+        for profile in self.runtime_profiles() {
+            for model in self.enabled_profile_models(profile) {
+                let id = runtime_catalog_model_id(profile, &model, qualify_official);
+                if !profile.official_account || id.contains('/') {
+                    names.insert(id, route_model_display_name(profile, &model));
                 }
-                for model in self.enabled_official_route_models(provider_id) {
-                    let id = runtime_catalog_model_id(profile, &model, qualify_official);
-                    if id.contains('/') {
-                        names.insert(id, route_model_display_name(profile, &model));
-                    }
-                }
-                continue;
-            }
-            for model in self.enabled_route_models(provider_id) {
-                names.insert(
-                    local_router::model_alias(provider_id, &model),
-                    route_model_display_name(profile, &model),
-                );
             }
         }
         names

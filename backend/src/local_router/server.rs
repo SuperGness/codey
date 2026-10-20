@@ -857,19 +857,8 @@ impl RouterSnapshot {
         let mut raw_models = HashMap::<String, Vec<AliasTarget>>::new();
         let mut default_official_provider = None;
         let mut default_official_rank = None;
-        for profile in &config.profiles {
-            if !profile.enabled {
-                continue;
-            }
-            // 存储账号的官方线路自带凭据，本地路由可以独立转发，不再依赖
-            // 本次启动的默认登录。
-            if profile.official_account && !config.official_route_usable(profile) {
-                continue;
-            }
+        for profile in config.runtime_profiles() {
             let provider_id = profile.provider_id().trim();
-            if provider_id.is_empty() {
-                continue;
-            }
             // 凭据平面先于上游地址决定：SIWC 直连时对话走官方公开 API，
             // 账号保存的自定义网关只对 Codex backend-api 平面生效。
             let official_auth = official_route_auth(profile);
@@ -937,7 +926,7 @@ impl RouterSnapshot {
             };
             target.context_config = target.context_config_fingerprint();
             target.websocket_config = target.websocket_config_fingerprint();
-            for model in route_models(config, profile, provider_id) {
+            for model in config.routable_profile_models(profile) {
                 let alias_target = AliasTarget {
                     provider_id: provider_id.to_string(),
                     model: model.clone(),
@@ -1407,27 +1396,6 @@ pub(crate) struct RouteRequest<'a> {
     pub(crate) requested_model: &'a str,
     pub(crate) route_hint: Option<&'a str>,
     pub(crate) bound_route: Option<&'a str>,
-}
-
-pub(crate) fn route_models(
-    config: &CodeyConfig,
-    profile: &crate::config::ProviderProfile,
-    provider_id: &str,
-) -> Vec<String> {
-    let mut models = if profile.official_account {
-        config.enabled_official_route_models(provider_id)
-    } else {
-        config.enabled_route_models(provider_id)
-    };
-    let supports_auto_review = profile.official_account || profile.supports_auto_review;
-    if supports_auto_review
-        && !models
-            .iter()
-            .any(|model| model.eq_ignore_ascii_case(CODEX_AUTO_REVIEW_MODEL))
-    {
-        models.push(CODEX_AUTO_REVIEW_MODEL.to_string());
-    }
-    models
 }
 
 pub(crate) use crate::model_id::model_alias;
