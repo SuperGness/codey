@@ -62,6 +62,7 @@ pub(crate) fn prepare_cached_catalog_in_context(
         gate_cached_native_web_search(model, &allowed_model_keys);
         gate_cached_image_detail_original(model, &image_detail_original_model_keys);
         prepare_cached_context_window(model);
+        normalize_third_party_compaction_identity(model);
         changed |= *model != previous;
     }
     if changed {
@@ -75,6 +76,7 @@ pub(crate) fn prepare_cached_catalog_in_context(
         gate_cached_native_web_search(model, &allowed_model_keys);
         gate_cached_image_detail_original(model, &image_detail_original_model_keys);
         prepare_cached_context_window(model);
+        normalize_third_party_compaction_identity(model);
     }
     if safely_gated_models != written_models {
         bail!("复用的 Codey 模型目录仍包含与当前线路不匹配的模型能力");

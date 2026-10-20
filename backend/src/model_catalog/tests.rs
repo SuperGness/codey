@@ -1814,11 +1814,13 @@ fn route_aliases_use_matching_official_runtime_metadata_and_sanitize_unknown_mod
         "openai/gpt-5.6-sol".into(),
         "openai/gpt-5.5".into(),
         "provider/custom-model".into(),
+        "gpt-5.6-sol".into(),
+        "codey-official-account-test/gpt-5.5".into(),
     ];
 
     assert_eq!(
         refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap(),
-        4
+        6
     );
     let catalog: Value =
         serde_json::from_slice(&fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap())
@@ -1853,7 +1855,7 @@ fn route_aliases_use_matching_official_runtime_metadata_and_sanitize_unknown_mod
         .unwrap();
     assert_eq!(gpt_56["use_responses_lite"], true);
     assert_eq!(gpt_56["tool_mode"], "code_mode_only");
-    assert_eq!(gpt_56["comp_hash"], "3000");
+    assert!(gpt_56.get("comp_hash").is_none());
     assert_eq!(gpt_56["default_service_tier"], "priority");
     assert_eq!(gpt_56["prefer_websockets"], true);
     assert_eq!(gpt_56["include_skills_usage_instructions"], false);
@@ -1877,7 +1879,7 @@ fn route_aliases_use_matching_official_runtime_metadata_and_sanitize_unknown_mod
         .unwrap();
     assert_eq!(gpt_55["use_responses_lite"], false);
     assert!(gpt_55.get("tool_mode").is_none());
-    assert_eq!(gpt_55["comp_hash"], "2911");
+    assert!(gpt_55.get("comp_hash").is_none());
     assert_eq!(gpt_55["include_skills_usage_instructions"], true);
     assert_eq!(gpt_55["experimental_supported_tools"], json!([]));
     assert_eq!(
@@ -1923,6 +1925,128 @@ fn route_aliases_use_matching_official_runtime_metadata_and_sanitize_unknown_mod
         ["low", "medium", "high", "xhigh"]
     );
     assert!(custom["auto_compact_token_limit"].is_null());
+
+    for (slug, comp_hash) in [
+        ("gpt-5.6-sol", "3000"),
+        ("codey-official-account-test/gpt-5.5", "2911"),
+    ] {
+        let official = models.iter().find(|model| model["slug"] == slug).unwrap();
+        assert_eq!(official["comp_hash"], comp_hash);
+    }
+}
+
+#[test]
+fn cached_catalog_removes_third_party_compaction_identity_and_is_idempotent() {
+    let home = tempfile::tempdir().unwrap();
+    write_cache(home.path());
+    let selected = vec![
+        "route-a/gpt-5.6-sol".to_string(),
+        "route-b/gpt-5.5".to_string(),
+        "route-c/vendor/custom-model".to_string(),
+        "gpt-5.6-sol".to_string(),
+        "codey-official-account-test/gpt-5.5".to_string(),
+    ];
+    refresh_for_provider_with_capabilities(
+        home.path(),
+        false,
+        Some(&selected),
+        &selected,
+        CapabilityLists {
+            image_detail_original_models: Some(&[]),
+            remote_compaction_models: Some(&selected[..1]),
+            ..CapabilityLists::default()
+        },
+        "",
+    )
+    .unwrap();
+    let mut stale = read_runtime_catalog_models(home.path()).unwrap();
+    for (index, model) in stale.iter_mut().enumerate() {
+        model["comp_hash"] = json!(format!("legacy-{index}"));
+        // Older catalogs can mislabel both raw and derived official entries.
+        model["codey_source"] = json!("third_party");
+    }
+    write_catalog(home.path(), &stale).unwrap();
+    let mut expected = stale;
+    for model in &mut expected[..3] {
+        model.as_object_mut().unwrap().remove("comp_hash");
+    }
+    assert!(
+        prepare_cached_catalog_for_current_capabilities(home.path(), &[], &[], &selected[..1], "")
+            .unwrap()
+    );
+    let actual = read_runtime_catalog_models(home.path()).unwrap();
+    assert_eq!(actual.len(), expected.len());
+    for (actual, expected) in actual.iter().zip(&expected) {
+        for (field, value) in expected.as_object().unwrap() {
+            assert_eq!(
+                actual.get(field),
+                Some(value),
+                "{}.{field}",
+                expected["slug"]
+            );
+        }
+        assert_eq!(
+            actual.as_object().unwrap().len(),
+            expected.as_object().unwrap().len()
+        );
+    }
+    let path = home.path().join(relative_path());
+    let first = fs::read(&path).unwrap();
+    assert!(
+        prepare_cached_catalog_for_current_capabilities(home.path(), &[], &[], &selected[..1], "")
+            .unwrap()
+    );
+    assert_eq!(fs::read(path).unwrap(), first);
+}
+
+#[test]
+fn catalog_overrides_do_not_restore_third_party_compaction_identity() {
+    let mut models = vec![json!({
+        "slug": "route/gpt-5.6-sol",
+        "codey_source": "third_party",
+        "comp_hash": "3000",
+        "context_window": 272_000,
+        "auto_compact_token_limit": 240_000,
+        "codey_context_source": "official_catalog",
+        "codey_remote_compaction": true,
+        "supported_reasoning_levels": [{"effort": "high"}],
+        "default_reasoning_level": "high"
+    })];
+    let contexts = BTreeMap::from([(
+        "route/gpt-5.6-sol".into(),
+        crate::config::ModelContextConfig {
+            context_window_tokens: 128_000,
+            auto_compact_token_limit: Some(100_000),
+            reserve_output_tokens: Some(16_000),
+        },
+    )]);
+    let empty_contexts = BTreeMap::new();
+    let empty_efforts = BTreeMap::new();
+    let display_names = BTreeMap::from([("route/gpt-5.6-sol".into(), "Route Sol".into())]);
+    let overrides = CatalogOverrides {
+        plugin_contexts: &empty_contexts,
+        contexts: &contexts,
+        reasoning_efforts: &empty_efforts,
+        display_names: &display_names,
+    };
+    apply_overrides_to_models(&mut models, overrides).unwrap();
+    assert!(models[0].get("comp_hash").is_none());
+    assert_eq!(models[0]["context_window"], 128_000);
+    assert_eq!(models[0]["auto_compact_token_limit"], 100_000);
+    assert_eq!(models[0]["codey_remote_compaction"], true);
+    assert_eq!(models[0]["display_name"], "Route Sol");
+    apply_overrides_to_models(
+        &mut models,
+        CatalogOverrides {
+            contexts: &empty_contexts,
+            ..overrides
+        },
+    )
+    .unwrap();
+    assert!(models[0].get("comp_hash").is_none());
+    assert_eq!(models[0]["context_window"], 272_000);
+    assert_eq!(models[0]["auto_compact_token_limit"], 240_000);
+    assert_eq!(models[0]["codey_remote_compaction"], true);
 }
 
 #[test]
@@ -3498,7 +3622,8 @@ fn custom_context_overlay_supplements_exact_route_models_with_full_metadata() {
     let source = home.path().join("custom.json");
     let original = json!({
         "revision": "user-owned",
-        "models": [{"slug": "other-route/deepseek-v4.1-flash", "custom": [1, 2]}]
+        "models": [{"slug": "other-route/deepseek-v4.1-flash", "custom": [1, 2],
+            "comp_hash": "user-declared", "codey_source": "third_party"}]
     });
     let source_bytes = serde_json::to_vec(&original).unwrap();
     fs::write(&source, &source_bytes).unwrap();
@@ -3506,6 +3631,8 @@ fn custom_context_overlay_supplements_exact_route_models_with_full_metadata() {
     fs::create_dir_all(runtime_path.parent().unwrap()).unwrap();
     let mut runtime_model = json!({
         "slug": "route-mv69jfev-blgrbg/deepseek-v4.1-flash",
+        "codey_source": "third_party",
+        "comp_hash": "legacy-template",
         "description": "Codey route model",
         "base_instructions": "Keep Codey instructions",
         "supported_reasoning_levels": [{"effort": "high"}],
@@ -3528,6 +3655,7 @@ fn custom_context_overlay_supplements_exact_route_models_with_full_metadata() {
     let projected: Value = serde_json::from_slice(&first_bytes).unwrap();
     let mut expected = original.clone();
     let mut expected_model = runtime_model.clone();
+    expected_model.as_object_mut().unwrap().remove("comp_hash");
     apply_model_context(&mut expected_model, policies.values().next()).unwrap();
     expected["models"]
         .as_array_mut()

@@ -365,6 +365,7 @@ pub(crate) fn render_context_catalog_overlay(
                     )));
                 }
                 let mut candidate = candidate.clone();
+                normalize_third_party_compaction_identity(&mut candidate);
                 if policy.is_none()
                     && candidate
                         .get("codey_context_source")
@@ -470,6 +471,7 @@ pub(super) fn apply_overrides_to_models(
         }) {
             model["display_name"] = json!(display_name);
         }
+        normalize_third_party_compaction_identity(model);
     }
     Ok(())
 }
@@ -822,6 +824,7 @@ fn render_catalog_for_provider(
         }
     }
     for model in &mut catalog_models {
+        normalize_third_party_compaction_identity(model);
         prepare_cached_context_window(model);
         // Codex 只发送模型目录里声明过的思考强度。目录没有 ultra 时，界面仍能
         // 选中它，请求会被静默改成该模型的默认档（luna 是 medium）。
@@ -1728,6 +1731,23 @@ fn official_template_for_route_alias<'a>(
 fn is_official_route_alias(model_id: &str) -> bool {
     crate::model_id::parse_alias(model_id)
         .is_some_and(|alias| crate::config::is_official_profile_id(alias.provider_key))
+}
+
+/// 匹配官方模板的第三方模型不能继承其压缩身份，否则切换模型时 Codex
+/// 会先用旧线路压缩。字段缺失还能兼容会话中已经记录的旧值；改成新常量仍会触发。
+pub(super) fn normalize_third_party_compaction_identity(model: &mut Value) {
+    let is_third_party_alias = model.get("codey_source").and_then(Value::as_str)
+        == Some("third_party")
+        && model
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(|slug| {
+                // 官方裸模型及派生账号优先按身份保留，兼容旧目录中的错误来源标记。
+                model_id::parse_alias(slug).is_some() && !is_official_route_alias(slug)
+            });
+    if is_third_party_alias && let Some(object) = model.as_object_mut() {
+        object.remove("comp_hash");
+    }
 }
 
 fn third_party_reasoning_levels(template: &Value, use_template_metadata: bool) -> Value {
