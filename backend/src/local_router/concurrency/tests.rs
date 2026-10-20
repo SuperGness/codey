@@ -353,6 +353,31 @@ async fn wait_for_queue(router: &LocalRouter, count: usize) {
     .unwrap();
 }
 
+async fn wait_for_idle(router: &LocalRouter) {
+    // 客户端收到响应结束标记后，服务端仍可能在收尾并释放并发许可。
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if router
+                .official_concurrency
+                .status()
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|state| state["running"] == 0 && state["waiting"] == 0)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    })
+    .await;
+    assert!(
+        result.is_ok(),
+        "official permits were not released: {}",
+        router.official_concurrency.status()
+    );
+}
+
 #[tokio::test]
 async fn streaming_holds_permit_until_body_finishes_and_other_route_progresses() {
     let mut upstream = mock_upstream().await;
@@ -385,7 +410,7 @@ async fn streaming_holds_permit_until_body_finishes_and_other_route_progresses()
         .unwrap();
     upstream.release.add_permits(1);
     second.await.unwrap().unwrap();
-    assert_eq!(router.official_concurrency.status()[0]["running"], 0);
+    wait_for_idle(&router).await;
     router.stop().await.unwrap();
 }
 
@@ -410,7 +435,7 @@ async fn sixty_fifth_request_queues_when_all_execution_slots_are_busy() {
         request.await.unwrap().unwrap();
     }
     last.await.unwrap().unwrap();
-    assert_eq!(router.official_concurrency.status()[0]["running"], 0);
+    wait_for_idle(&router).await;
     router.stop().await.unwrap();
 }
 
@@ -590,7 +615,7 @@ async fn compact_and_image_requests_share_the_generation_queue() {
         assert!(received.ends_with(path), "{received} vs {path}");
         upstream.release.add_permits(1);
         second.await.unwrap();
-        assert_eq!(router.official_concurrency.status()[0]["running"], 0);
+        wait_for_idle(&router).await;
         router.stop().await.unwrap();
     }
 }

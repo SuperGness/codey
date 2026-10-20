@@ -1143,6 +1143,24 @@ impl RequestGateBudget {
             wait_ms: wait.as_millis() as u64,
         })
     }
+
+    fn cdp_failure(&self, error: anyhow::Error) -> VerifyFailure {
+        // 两层超时可能在同一次轮询中到期，诊断不能依赖定时器的返回顺序。
+        let error = if error.is::<tokio::time::error::Elapsed>() {
+            error.context(format!(
+                "模型请求校验未通过：CDP 调用未在响应预算内完成（callBudgetMs={}；pageBudgetMs={}）",
+                self.call_timeout.as_millis(),
+                self.wait_ms,
+            ))
+        } else {
+            error.context("校验模型请求入口失败")
+        };
+        VerifyFailure {
+            reinstall: true,
+            request_gate_unready: false,
+            error,
+        }
+    }
 }
 
 async fn verify_request_gate(
@@ -1168,20 +1186,9 @@ async fn verify_request_gate(
         ),
     )
     .await
-    .map_err(|_| VerifyFailure {
-        reinstall: true,
-        request_gate_unready: false,
-        error: anyhow::anyhow!(
-            "模型请求校验未通过：CDP 调用未在响应预算内完成（callBudgetMs={}；pageBudgetMs={}）",
-            budget.call_timeout.as_millis(),
-            budget.wait_ms,
-        ),
-    })?
-    .map_err(|error| VerifyFailure {
-        reinstall: true,
-        request_gate_unready: false,
-        error: error.context("校验模型请求入口失败"),
-    })?;
+    .map_err(anyhow::Error::from)
+    .and_then(|response| response)
+    .map_err(|error| budget.cdp_failure(error))?;
     let payload = runtime_value(&response)
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| VerifyFailure {
@@ -2478,6 +2485,38 @@ assert.equal(nextPage.window.attempts, 1);
                 REQUEST_GATE_MIN_WAIT.as_millis() as u64
             );
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn request_gate_classifies_both_timeout_layers_without_losing_the_cause() {
+        let budget =
+            RequestGateBudget::until(tokio::time::Instant::now() + CDP_INJECTION_TIMEOUT, true)
+                .unwrap();
+        for inner_timeout in [false, true] {
+            let elapsed = tokio::time::timeout(Duration::ZERO, std::future::pending::<()>())
+                .await
+                .unwrap_err();
+            let mut error = anyhow::Error::from(elapsed);
+            if inner_timeout {
+                error = error.context("timed out waiting for CDP command Runtime.evaluate");
+            }
+            let failure = budget.cdp_failure(error);
+            assert!(failure.reinstall);
+            assert!(!failure.request_gate_unready);
+            assert!(failure.error.is::<tokio::time::error::Elapsed>());
+            let detail = failure.error.to_string();
+            assert!(detail.contains("CDP 调用未在响应预算内完成"), "{detail}");
+            assert!(
+                detail.contains("callBudgetMs=1200；pageBudgetMs=200"),
+                "{detail}"
+            );
+        }
+
+        let failure = budget.cdp_failure(anyhow::anyhow!("connection refused"));
+        assert!(failure.reinstall);
+        assert!(!failure.request_gate_unready);
+        assert_eq!(failure.error.to_string(), "校验模型请求入口失败");
+        assert_eq!(failure.error.root_cause().to_string(), "connection refused");
     }
 
     #[tokio::test]
