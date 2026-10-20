@@ -1107,25 +1107,26 @@ mod tests {
         router.bindings.lock().unwrap().routes.remove(&keys[3]);
         pending.complete();
         assert_binding_unchanged(&router, &later);
-        let bindings = router.bindings.lock().unwrap();
-        assert_eq!(
-            bindings.routes[&keys[1]].generation,
-            session_before.generation
-        );
-        assert!(bindings.routes[&keys[1]].portable);
-        assert_eq!(
-            bindings.routes[&keys[2]].generation,
-            created_later.generation
-        );
-        assert_eq!(bindings.routes[&keys[2]].provider_id, source);
-        assert!(!bindings.routes.contains_key(&keys[3]));
-        assert!(!bindings.routes.contains_key(&keys[4]));
-        assert!(
-            bindings
-                .order
-                .contains(&(keys[1].clone(), session_before.generation))
-        );
-        drop(bindings);
+        {
+            let bindings = router.bindings.lock().unwrap();
+            assert_eq!(
+                bindings.routes[&keys[1]].generation,
+                session_before.generation
+            );
+            assert!(bindings.routes[&keys[1]].portable);
+            assert_eq!(
+                bindings.routes[&keys[2]].generation,
+                created_later.generation
+            );
+            assert_eq!(bindings.routes[&keys[2]].provider_id, source);
+            assert!(!bindings.routes.contains_key(&keys[3]));
+            assert!(!bindings.routes.contains_key(&keys[4]));
+            assert!(
+                bindings
+                    .order
+                    .contains(&(keys[1].clone(), session_before.generation))
+            );
+        }
         PendingNativeCompactionBinding::prepare(&router.bindings, &keys[4..], &target_route, false)
             .complete();
         {

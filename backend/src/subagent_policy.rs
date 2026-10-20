@@ -287,6 +287,7 @@ mod tests {
     fn route_config(provider_id: &str) -> CodeyConfig {
         let mut profile = ProviderProfile::new("Route");
         profile.id = provider_id.to_string();
+        profile.base_url = "https://provider.example/v1".into();
         profile.official_account = false;
         CodeyConfig {
             active_profile_id: provider_id.to_string(),
@@ -475,8 +476,10 @@ mod tests {
     fn route_qualified_model_is_preserved_outside_the_current_route_state() {
         let mut provider_a = ProviderProfile::new("A");
         provider_a.id = "route-a".into();
+        provider_a.base_url = "https://provider-a.example/v1".into();
         let mut provider_b = ProviderProfile::new("B");
         provider_b.id = "route-b".into();
+        provider_b.base_url = "https://provider-b.example/v1".into();
         let mut config = CodeyConfig {
             active_profile_id: provider_a.id.clone(),
             profiles: vec![provider_a, provider_b],
