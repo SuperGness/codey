@@ -1,0 +1,120 @@
+name: Native Codex compatibility
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/native-codex-compat.yml"
+      - "scripts/native-codex-compat.py"
+      - "tests/test_native_codex_compat.py"
+      - "backend/src/local_router/**"
+      - "backend/src/model_catalog/**"
+      - "backend/src/codex/**"
+      - "backend/src/config/**"
+      - "backend/src/cdp.rs"
+      - "backend/src/commands.rs"
+      - "backend/src/commands/**"
+      - "crates/codey-codex-extensions/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-codex-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-compat:
+    name: Codex ${{ matrix.version }} local Responses contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Immutable npm platform tarballs; update version and SHA-512 together.
+          - version: "0.162.0"
+            integrity: "qHWp6oKpf456PqjberGN8avs8zChv2oS+UuDiqVFYAuDOhq6vBc1drh8jEsnR7dBX+zcw03PN5VLtePGlMcC3w=="
+          - version: "0.163.0-alpha.10.2"
+            integrity: "S3Om6e/GIhhheqWmc/aRCGM55ibvhnpYKq1gJ4bwCYeCNEtXEd7+L8xa5aX+JVmV0wL1oOFZi/R/R8iSLriHTA=="
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+      CODEX_TEST_VERSION: ${{ matrix.version }}
+      CODEX_TEST_INTEGRITY: ${{ matrix.integrity }}
+
+    steps:
+      - name: Checkout Codey
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test runner failures and cleanup offline
+        run: python3 -m unittest discover -s tests -p 'test_native_codex_compat.py' -v
+
+      - name: Install the pinned native client without npm scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import os
+          from pathlib import Path
+          import shutil
+          import tarfile
+          import urllib.request
+
+          version = os.environ["CODEX_TEST_VERSION"]
+          root = Path(os.environ["RUNNER_TEMP"]) / "native-codex"
+          root.mkdir()
+          archive = root / "codex.tgz"
+          url = f"https://registry.npmjs.org/@openai/codex/-/codex-{version}-linux-x64.tgz"
+          with urllib.request.urlopen(url, timeout=30) as response, archive.open("wb") as output:
+              shutil.copyfileobj(response, output)
+          with archive.open("rb") as source:
+              actual = base64.b64encode(hashlib.file_digest(source, "sha512").digest()).decode()
+          if actual != os.environ["CODEX_TEST_INTEGRITY"]:
+              raise SystemExit("Native Codex archive SHA-512 mismatch")
+          binary = root / "codex"
+          with tarfile.open(archive) as package:
+              members = [entry for entry in package.getmembers()
+                         if entry.isfile() and entry.name.endswith("/bin/codex")]
+              if len(members) != 1:
+                  raise SystemExit("Expected exactly one native Codex executable")
+              # Copy only the verified regular file; never unpack archive paths.
+              with package.extractfile(members[0]) as source, binary.open("wb") as output:
+                  shutil.copyfileobj(source, output)
+          binary.chmod(0o700)
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write(f"CODEY_NATIVE_CODEX_BIN={binary}\n")
+          PY
+
+      - name: Exercise native model switching and local compaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/native-codex-compat.py \
+            --codex-bin "$CODEY_NATIVE_CODEX_BIN" \
+            --report native-codex-compat.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          report = json.loads(Path("native-codex-compat.json").read_text())
+          expected = "codex-cli " + os.environ["CODEX_TEST_VERSION"]
+          if report["runs"][0]["version"] != expected:
+              raise SystemExit("Installed client did not report the pinned version")
+          PY
+
+      - name: Upload synthetic compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-codex-${{ matrix.version }}
+          path: native-codex-compat.json
+          if-no-files-found: warn
