@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 #[cfg(any(windows, target_os = "macos", test))]
 use std::io::Write;
@@ -281,59 +282,57 @@ pub(crate) fn read(home: &Path, thread_id: &str) -> Result<Value> {
     let path = checked_path(&home, &rollout)?;
     let mut model = None;
     let mut session_provider = None;
-    let mut identity = false;
+    let mut identity = RolloutIdentity::default();
     for line in BufReader::new(File::open(path)?).lines() {
         let line = line?;
-        let Ok(record) = serde_json::from_str::<MetadataRecord>(&line) else {
+        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            identity.require_owner()?;
             continue;
         };
-        match record.kind.as_str() {
-            "session_meta" => {
-                if record.payload.id.as_deref() != Some(thread_id) {
-                    bail!("会话记录标识不匹配");
-                }
-                identity = true;
-                session_provider = record.payload.model_provider;
+        if identity.observe(&record, thread_id)? {
+            session_provider = record["payload"]["model_provider"]
+                .as_str()
+                .map(str::to_owned);
+        }
+        let applied_settings = own_settings(&record, thread_id);
+        let payload = match record["type"].as_str() {
+            Some("turn_context") if identity.owns_turn(&record, thread_id) => &record["payload"],
+            Some("event_msg") if applied_settings => &record["payload"]["thread_settings"],
+            _ => continue,
+        };
+        let Ok(payload) = serde_json::from_value::<MetadataPayload>(payload.clone()) else {
+            continue;
+        };
+        if let Some(selected) = payload.model.filter(|m| !m.trim().is_empty()) {
+            if applied_settings && payload.model_provider.is_some() {
+                session_provider = payload.model_provider.clone();
             }
-            "turn_context" => {
-                if let Some(selected) = record.payload.model.filter(|m| !m.trim().is_empty()) {
-                    model = Some((
-                        selected,
-                        record
-                            .payload
-                            .model_provider
-                            .or_else(|| session_provider.clone()),
-                        record
-                            .timestamp
-                            .as_ref()
-                            .and_then(Value::as_str)
-                            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                            .map(|value| value.timestamp_millis())
-                            .filter(|value| {
-                                *value > 0
-                                    && *value
-                                        <= chrono::Utc::now()
-                                            .timestamp_millis()
-                                            .saturating_add(300_000)
-                            }),
-                        record
-                            .payload
-                            .effort
-                            .or_else(|| {
-                                record.payload.collaboration_mode.and_then(|mode| {
-                                    mode.pointer("/settings/reasoning_effort").cloned()
-                                })
-                            })
-                            .filter(valid_reasoning_effort),
-                    ));
-                }
-            }
-            _ => {}
+            model = Some((
+                selected,
+                payload.model_provider.or_else(|| session_provider.clone()),
+                record["timestamp"]
+                    .as_str()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.timestamp_millis())
+                    .filter(|value| {
+                        *value > 0
+                            && *value
+                                <= chrono::Utc::now()
+                                    .timestamp_millis()
+                                    .saturating_add(300_000)
+                    }),
+                payload
+                    .effort
+                    .or_else(|| {
+                        payload
+                            .collaboration_mode
+                            .and_then(|mode| mode.pointer("/settings/reasoning_effort").cloned())
+                    })
+                    .filter(valid_reasoning_effort),
+            ));
         }
     }
-    if !identity {
-        bail!("无法确认会话记录标识");
-    }
+    identity.require_owner()?;
     let Some((model, provider, timestamp, effort)) = model else {
         return Ok(fallback());
     };
@@ -370,6 +369,71 @@ fn checked_path(home: &Path, path: &Path) -> Result<PathBuf> {
         bail!("会话元数据不在 Codex 数据目录内");
     }
     Ok(path)
+}
+
+#[derive(Default)]
+struct RolloutIdentity {
+    seen: bool,
+    ancestors: HashSet<String>,
+    current_session: bool,
+}
+
+fn own_settings(record: &Value, thread_id: &str) -> bool {
+    record["type"] == "event_msg"
+        && record["payload"]["type"] == "thread_settings_applied"
+        && record["payload"]["thread_id"].as_str() == Some(thread_id)
+}
+
+impl RolloutIdentity {
+    // 首条元数据确定文件归属；分叉历史随后可以包含已声明的父会话和祖先。
+    fn observe(&mut self, record: &Value, thread_id: &str) -> Result<bool> {
+        if record["type"] != "session_meta" {
+            self.require_owner()?;
+            if own_settings(record, thread_id) {
+                self.current_session = true;
+            }
+            return Ok(false);
+        }
+        let payload = &record["payload"];
+        let id = payload["id"].as_str().context("无法确认会话记录标识")?;
+        if id != thread_id && (!self.seen || !self.ancestors.contains(id)) {
+            bail!("会话记录标识不匹配");
+        }
+        let first = !self.seen;
+        self.seen = true;
+        for parent in [
+            payload.get("forked_from_id"),
+            payload.pointer("/source/subagent/thread_spawn/parent_thread_id"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|value| !value.is_null())
+        {
+            let parent = parent.as_str().context("无效的父会话标识")?;
+            validate_thread_id(parent)?;
+            if parent != thread_id {
+                self.ancestors.insert(parent.to_owned());
+            }
+        }
+        // 继承回合的时间会被重写，只有明确属于本会话的元数据或设置事件能结束继承段。
+        self.current_session =
+            id == thread_id && (!first || payload.get("forked_from_id").is_none_or(Value::is_null));
+        Ok(first)
+    }
+
+    fn owns_turn(&self, record: &Value, thread_id: &str) -> bool {
+        match record["payload"].get("thread_id") {
+            Some(id) => id.as_str() == Some(thread_id),
+            None => self.current_session,
+        }
+    }
+
+    fn require_owner(&self) -> Result<()> {
+        if !self.seen {
+            bail!("无法确认会话记录标识");
+        }
+        Ok(())
+    }
 }
 
 // 压缩后的 turn_context 可能已记录失败的目标模型，源身份只取压缩记录自身。
@@ -411,52 +475,43 @@ pub(crate) fn native_compaction_source(home: &Path, thread_id: &str) -> Result<O
     else {
         return Ok(None);
     };
-    let mut identity = false;
+    let mut identity = RolloutIdentity::default();
     let mut source = None;
     let mut native_history = false;
     for line in BufReader::new(File::open(checked_path(&home, &rollout)?)?).lines() {
         let line = line?;
         let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            identity.require_owner()?;
             continue;
         };
+        identity.observe(&record, thread_id)?;
         let payload = &record["payload"];
-        match record["type"].as_str() {
-            Some("session_meta") => {
-                if payload["id"].as_str() != Some(thread_id) {
-                    bail!("会话记录标识不匹配");
-                }
-                identity = true;
-            }
-            Some("compacted") => {
-                source = None;
-                let has_native = payload["replacement_history"]
-                    .as_array()
-                    .is_some_and(|items| {
-                        items.iter().any(|item| {
-                            item["type"] == "compaction"
-                                && item["encrypted_content"].as_str().is_some_and(|value| {
-                                    !value.is_empty() && !value.starts_with("codey-summary-v1:")
-                                })
-                        })
-                    });
-                native_history = has_native;
-                if has_native {
-                    source = payload["resume_metadata"]["previous_turn_settings"]["model"]
-                        .as_str()
-                        .filter(|model| {
-                            model.split_once('/').is_some_and(|(provider, model)| {
-                                !provider.is_empty() && !model.is_empty()
+        if let Some("compacted") = record["type"].as_str() {
+            source = None;
+            let has_native = payload["replacement_history"]
+                .as_array()
+                .is_some_and(|items| {
+                    items.iter().any(|item| {
+                        item["type"] == "compaction"
+                            && item["encrypted_content"].as_str().is_some_and(|value| {
+                                !value.is_empty() && !value.starts_with("codey-summary-v1:")
                             })
+                    })
+                });
+            native_history = has_native;
+            if has_native {
+                source = payload["resume_metadata"]["previous_turn_settings"]["model"]
+                    .as_str()
+                    .filter(|model| {
+                        model.split_once('/').is_some_and(|(provider, model)| {
+                            !provider.is_empty() && !model.is_empty()
                         })
-                        .map(str::to_owned);
-                }
+                    })
+                    .map(str::to_owned);
             }
-            _ => {}
         }
     }
-    if !identity {
-        bail!("无法确认会话记录标识");
-    }
+    identity.require_owner()?;
     if native_history && source.is_none() {
         bail!("压缩历史缺少明确的源线路模型，请恢复原线路后重试");
     }
@@ -464,19 +519,15 @@ pub(crate) fn native_compaction_source(home: &Path, thread_id: &str) -> Result<O
 }
 
 #[derive(Deserialize)]
-struct MetadataRecord {
-    #[serde(rename = "type")]
-    kind: String,
-    timestamp: Option<Value>,
-    payload: MetadataPayload,
-}
-
-#[derive(Deserialize)]
 struct MetadataPayload {
-    id: Option<String>,
     model: Option<String>,
+    #[serde(alias = "model_provider_id")]
     model_provider: Option<String>,
-    #[serde(default, deserialize_with = "present_value")]
+    #[serde(
+        default,
+        alias = "reasoning_effort",
+        deserialize_with = "present_value"
+    )]
     effort: Option<Value>,
     collaboration_mode: Option<Value>,
 }
@@ -493,6 +544,294 @@ mod tests {
         timestamp: Option<i64>,
     ) -> Result<()> {
         super::remember_settings(home, thread_id, model, provider, timestamp, None)
+    }
+
+    fn rollout_home() -> tempfile::TempDir {
+        let home = tempfile::tempdir().unwrap();
+        let db = Connection::open(home.path().join("state_5.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE threads (id TEXT, model TEXT, model_provider TEXT, rollout_path TEXT);
+            INSERT INTO threads VALUES ('saved',NULL,NULL,'session.jsonl');",
+        )
+        .unwrap();
+        home
+    }
+
+    fn write_rollout(home: &Path, records: &[Value]) {
+        std::fs::write(
+            home.join("session.jsonl"),
+            records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+    }
+
+    fn inherited_metadata() -> Vec<Value> {
+        vec![
+            json!({"type":"session_meta","payload":{
+                "id":"saved","model_provider":"child-provider","forked_from_id":"parent"
+            }}),
+            json!({"type":"session_meta","payload":{
+                "id":"parent","model_provider":"parent-provider",
+                "source":{"subagent":{"thread_spawn":{"parent_thread_id":"ancestor"}}}
+            }}),
+            json!({"type":"session_meta","payload":{
+                "id":"ancestor","model_provider":"ancestor-provider"
+            }}),
+        ]
+    }
+
+    #[test]
+    fn inherited_models_wait_for_settings_explicitly_applied_to_current_thread() {
+        let home = rollout_home();
+        let mut records = inherited_metadata();
+        records.extend([
+            json!({"type":"event_msg","payload":{"type":"thread_settings_applied",
+                "thread_id":"parent","thread_settings":{
+                    "model":"parent/model","model_provider_id":"parent-applied","reasoning_effort":"low"
+                }
+            }}),
+            json!({"type":"turn_context","payload":{"model":"parent/latest","effort":"medium"}}),
+        ]);
+        write_rollout(home.path(), &records);
+        assert_eq!(read(home.path(), "saved").unwrap()["status"], "missing");
+
+        records.push(json!({"type":"event_msg","payload":{"type":"thread_settings_applied",
+            "thread_id":"saved","thread_settings":{
+                "model":"child/selected","model_provider_id":"child-applied","reasoning_effort":"high"
+            }
+        }}));
+        write_rollout(home.path(), &records);
+        assert_eq!(
+            read(home.path(), "saved").unwrap(),
+            json!({
+                "status":"ok","threadId":"saved","model":"child/selected",
+                "modelProvider":"child-applied","reasoningEffort":"high"
+            })
+        );
+
+        // 原生子代理在设置事件后直接写入自己的回合，不会再写一条 session_meta。
+        records.push(
+            json!({"type":"turn_context","payload":{"model":"child/first-turn","effort":"max"}}),
+        );
+        write_rollout(home.path(), &records);
+        assert_eq!(
+            read(home.path(), "saved").unwrap(),
+            json!({
+                "status":"ok","threadId":"saved","model":"child/first-turn",
+                "modelProvider":"child-applied","reasoningEffort":"max"
+            })
+        );
+
+        records.extend([
+            json!({"type":"session_meta","payload":{"id":"saved","model_provider":"stale-provider"}}),
+            json!({"type":"turn_context","payload":{"model":"child/latest","effort":null}}),
+        ]);
+        write_rollout(home.path(), &records);
+        assert_eq!(
+            read(home.path(), "saved").unwrap(),
+            json!({
+                "status":"ok","threadId":"saved","model":"child/latest",
+                "modelProvider":"child-applied","reasoningEffort":null
+            })
+        );
+    }
+
+    #[test]
+    fn repeated_owner_metadata_and_explicit_turn_identity_preserve_child_provider() {
+        let home = rollout_home();
+        for own_record in [
+            json!({"type":"session_meta","payload":{"id":"saved","model_provider":"ignored-provider"}}),
+            json!({"type":"turn_context","payload":{"thread_id":"saved","model":"child/model"}}),
+        ] {
+            let mut records = inherited_metadata();
+            records.push(json!({"type":"turn_context","payload":{"model":"ancestor/model"}}));
+            records.push(own_record.clone());
+            if own_record["type"] == "session_meta" {
+                records.push(json!({"type":"turn_context","payload":{"model":"child/model"}}));
+            }
+            records.push(json!({"type":"turn_context","payload":{"thread_id":"parent","model":"parent/model"}}));
+            write_rollout(home.path(), &records);
+            assert_eq!(
+                read(home.path(), "saved").unwrap(),
+                json!({
+                    "status":"ok","threadId":"saved","model":"child/model","modelProvider":"child-provider"
+                })
+            );
+        }
+        // 只有来源关系、没有分叉历史的子会话可以直接读取自己的回合。
+        write_rollout(
+            home.path(),
+            &[
+                json!({"type":"session_meta","payload":{
+                    "id":"saved","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}
+                }}),
+                json!({"type":"turn_context","payload":{"model":"child/model"}}),
+            ],
+        );
+        assert_eq!(read(home.path(), "saved").unwrap()["model"], "child/model");
+    }
+
+    #[test]
+    fn inherited_only_history_uses_current_thread_fallbacks_without_parent_effort() {
+        let home = rollout_home();
+        let mut records = inherited_metadata();
+        records.push(json!({"type":"turn_context","timestamp":"2026-01-03T00:00:00Z",
+            "payload":{"model":"parent/model","model_provider":"parent-provider","effort":"high"}
+        }));
+        write_rollout(home.path(), &records);
+        assert_eq!(read(home.path(), "saved").unwrap()["status"], "missing");
+        let db = Connection::open(home.path().join("state_5.sqlite")).unwrap();
+        db.execute(
+            "UPDATE threads SET model='child/database',model_provider='child-database'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            read(home.path(), "saved").unwrap(),
+            json!({
+                "status":"ok","threadId":"saved","model":"child/database","modelProvider":"child-database"
+            })
+        );
+        remember_settings(
+            home.path(),
+            "saved",
+            "child/confirmed",
+            Some("child-confirmed"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            read(home.path(), "saved").unwrap(),
+            json!({
+                "status":"ok","threadId":"saved","model":"child/confirmed","modelProvider":"child-confirmed"
+            })
+        );
+    }
+
+    #[test]
+    fn applied_settings_respect_confirmed_time_and_effort_presence() {
+        let home = rollout_home();
+        let confirmed_at = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        remember_settings(
+            home.path(),
+            "saved",
+            "child/confirmed",
+            None,
+            Some(confirmed_at),
+        )
+        .unwrap();
+        for (timestamp, effort, expected_model) in [
+            (
+                Some("2026-01-03T00:00:00Z"),
+                Some(Value::Null),
+                "child/applied",
+            ),
+            (Some("2026-01-03T00:00:00Z"), None, "child/applied"),
+            (
+                Some("2026-01-01T00:00:00Z"),
+                Some(json!("high")),
+                "child/confirmed",
+            ),
+            (None, Some(json!("high")), "child/confirmed"),
+        ] {
+            let mut records = inherited_metadata();
+            let mut settings = json!({"type":"event_msg","timestamp":timestamp,"payload":{
+                "type":"thread_settings_applied","thread_id":"saved","thread_settings":{"model":"child/applied"}
+            }});
+            if let Some(effort) = effort.clone() {
+                settings["payload"]["thread_settings"]["reasoning_effort"] = effort;
+            }
+            records.push(settings);
+            write_rollout(home.path(), &records);
+            let result = read(home.path(), "saved").unwrap();
+            assert_eq!(result["model"], expected_model);
+            assert_eq!(
+                result.get("reasoningEffort").cloned(),
+                if expected_model == "child/applied" {
+                    effort
+                } else {
+                    None
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn both_readers_reject_wrong_or_missing_initial_identity_and_undeclared_ancestors() {
+        let home = rollout_home();
+        remember_settings(home.path(), "saved", "child/confirmed", None, None).unwrap();
+        let owner = json!({"type":"session_meta","payload":{"id":"saved"}});
+        let turn = json!({"type":"turn_context","payload":{"model":"child/model"}});
+        for first in [
+            json!({"type":"session_meta","payload":{"id":"other"}}),
+            json!({"type":"session_meta","payload":{}}),
+            json!({"type":"session_meta","payload":{"id":7}}),
+            turn.clone(),
+        ] {
+            write_rollout(home.path(), &[first, owner.clone(), turn.clone()]);
+            assert!(read(home.path(), "saved").is_err());
+            assert!(native_compaction_source(home.path(), "saved").is_err());
+        }
+        for prefix in ["not-json", ""] {
+            std::fs::write(
+                home.path().join("session.jsonl"),
+                format!("{prefix}\n{owner}\n{turn}"),
+            )
+            .unwrap();
+            assert!(read(home.path(), "saved").is_err());
+            assert!(native_compaction_source(home.path(), "saved").is_err());
+        }
+        for records in [
+            vec![turn],
+            vec![
+                owner.clone(),
+                json!({"type":"session_meta","payload":{"id":"other"}}),
+            ],
+            vec![
+                inherited_metadata()[0].clone(),
+                json!({"type":"session_meta","payload":{"id":"ancestor"}}),
+            ],
+            vec![owner, json!({"type":"session_meta","payload":{"id":null}})],
+        ] {
+            write_rollout(home.path(), &records);
+            assert!(read(home.path(), "saved").is_err());
+            assert!(native_compaction_source(home.path(), "saved").is_err());
+        }
+    }
+
+    #[test]
+    fn inherited_native_compaction_keeps_its_explicit_source_until_replaced() {
+        let home = rollout_home();
+        let mut records = inherited_metadata();
+        records.extend([
+            json!({"type":"compacted","payload":{
+                "replacement_history":[{"type":"compaction","encrypted_content":"opaque"}],
+                "resume_metadata":{"previous_turn_settings":{"model":"ancestor/source"}}
+            }}),
+            json!({"type":"turn_context","payload":{"model":"parent/model"}}),
+        ]);
+        write_rollout(home.path(), &records);
+        assert_eq!(
+            native_compaction_source(home.path(), "saved")
+                .unwrap()
+                .as_deref(),
+            Some("ancestor/source")
+        );
+        assert_eq!(read(home.path(), "saved").unwrap()["status"], "missing");
+        records.push(json!({"type":"compacted","payload":{"replacement_history":[
+            {"type":"compaction","encrypted_content":"codey-summary-v1:portable"}
+        ]}}));
+        write_rollout(home.path(), &records);
+        assert_eq!(
+            native_compaction_source(home.path(), "saved").unwrap(),
+            None
+        );
     }
 
     #[test]
