@@ -763,8 +763,10 @@ where
         params: Value,
         timeout: Duration,
     ) -> anyhow::Result<Value> {
-        self.socket
-            .send(Message::Text(
+        let deadline = tokio::time::Instant::now() + timeout;
+        tokio::time::timeout_at(
+            deadline,
+            self.socket.send(Message::Text(
                 json!({
                     "id": message_id,
                     "method": method,
@@ -772,16 +774,23 @@ where
                 })
                 .to_string()
                 .into(),
-            ))
-            .await
-            .with_context(|| format!("failed to send CDP command {method} id {message_id}"))?;
+            )),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "timed out waiting for CDP command {method} id {message_id} send after {}ms",
+                timeout.as_millis()
+            )
+        })?
+        .with_context(|| format!("failed to send CDP command {method} id {message_id}"))?;
 
-        tokio::time::timeout(timeout, self.wait_for_id(message_id, method.to_string()))
+        tokio::time::timeout_at(deadline, self.wait_for_id(message_id, method.to_string()))
             .await
             .with_context(|| {
                 format!(
-                    "timed out waiting for CDP command {method} id {message_id} response after {}s",
-                    timeout.as_secs()
+                    "timed out waiting for CDP command {method} id {message_id} response after {}ms",
+                    timeout.as_millis()
                 )
             })?
     }
@@ -886,6 +895,259 @@ fn next_message_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::{Context as TaskContext, Poll};
+
+    use futures_util::Stream;
+    use tokio_tungstenite::tungstenite::Error as WebSocketError;
+
+    type SocketStep<T> = Pin<Box<dyn Future<Output = Result<T, WebSocketError>> + Send>>;
+
+    struct ControlledSocket {
+        send_ready: SocketStep<()>,
+        send_flush: SocketStep<()>,
+        response: Option<SocketStep<Message>>,
+        sent: Vec<Message>,
+    }
+
+    impl ControlledSocket {
+        fn new(response: Value) -> Self {
+            Self {
+                send_ready: Box::pin(async { Ok(()) }),
+                send_flush: Box::pin(async { Ok(()) }),
+                response: Some(Box::pin(async move {
+                    Ok(Message::Text(response.to_string().into()))
+                })),
+                sent: Vec::new(),
+            }
+        }
+    }
+
+    impl Sink<Message> for ControlledSocket {
+        type Error = WebSocketError;
+
+        fn poll_ready(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.send_ready.as_mut().poll(cx)
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+            self.sent.push(message);
+            Ok(())
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.send_flush.as_mut().poll(cx)
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Stream for ControlledSocket {
+        type Item = Result<Message, WebSocketError>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            let Some(response) = self.response.as_mut() else {
+                return Poll::Ready(None);
+            };
+            match response.as_mut().poll(cx) {
+                Poll::Ready(result) => {
+                    self.response = None;
+                    Poll::Ready(Some(result))
+                }
+                Poll::Pending => Poll::Pending,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn command_send_times_out_when_readiness_or_flush_never_completes() {
+        for pending_flush in [false, true] {
+            let mut socket = ControlledSocket::new(json!({ "id": 7, "result": {} }));
+            if pending_flush {
+                socket.send_flush = Box::pin(std::future::pending());
+            } else {
+                socket.send_ready = Box::pin(std::future::pending());
+            }
+            let mut session = CdpSession::new(socket);
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                session.send_command_with_timeout(
+                    7,
+                    "Runtime.evaluate",
+                    json!({}),
+                    Duration::from_millis(50),
+                ),
+            )
+            .await
+            .expect("command budget must also bound a pending send")
+            .expect_err("pending send must time out before reading the response");
+
+            assert_eq!(
+                error.to_string(),
+                "timed out waiting for CDP command Runtime.evaluate id 7 send after 50ms"
+            );
+            assert!(
+                error
+                    .downcast_ref::<tokio::time::error::Elapsed>()
+                    .is_some()
+            );
+            assert_eq!(session.socket.sent.len(), usize::from(pending_flush));
+            assert!(session.socket.response.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn command_send_and_response_share_one_deadline() {
+        let mut socket = ControlledSocket::new(json!({ "id": 7, "result": {} }));
+        socket.send_flush = Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(())
+        });
+        socket.response = Some(Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(Message::Text(
+                json!({ "id": 7, "result": {} }).to_string().into(),
+            ))
+        }));
+        let mut session = CdpSession::new(socket);
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            session.send_command_with_timeout(
+                7,
+                "Runtime.evaluate",
+                json!({}),
+                Duration::from_millis(250),
+            ),
+        )
+        .await
+        .expect("command must finish within its shared budget")
+        .expect_err("send and response delays must not each receive the full budget");
+
+        assert_eq!(
+            error.to_string(),
+            "timed out waiting for CDP command Runtime.evaluate id 7 response after 250ms"
+        );
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+        assert_eq!(session.socket.sent.len(), 1);
+        assert!(session.socket.response.is_some());
+    }
+
+    #[tokio::test]
+    async fn command_with_shared_deadline_returns_normal_response() {
+        let response = json!({ "id": 7, "result": { "value": true } });
+        let mut session = CdpSession::new(ControlledSocket::new(response.clone()));
+        let params = json!({ "expression": "true" });
+
+        let result = session
+            .send_command_with_timeout(
+                7,
+                "Runtime.evaluate",
+                params.clone(),
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("normal response should succeed");
+
+        assert_eq!(result, response);
+        assert_eq!(session.socket.sent.len(), 1);
+        let Message::Text(command) = &session.socket.sent[0] else {
+            panic!("CDP command should be sent as text");
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(command).unwrap(),
+            json!({ "id": 7, "method": "Runtime.evaluate", "params": params })
+        );
+    }
+
+    #[tokio::test]
+    async fn command_with_shared_deadline_preserves_send_error_source() {
+        let mut socket = ControlledSocket::new(json!({ "id": 7, "result": {} }));
+        socket.send_flush = Box::pin(async {
+            Err(WebSocketError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "controlled send failure",
+            )))
+        });
+        let mut session = CdpSession::new(socket);
+
+        let error = session
+            .send_command_with_timeout(7, "Runtime.evaluate", json!({}), Duration::from_secs(1))
+            .await
+            .expect_err("send error should be propagated");
+
+        assert_eq!(
+            error.to_string(),
+            "failed to send CDP command Runtime.evaluate id 7"
+        );
+        assert!(matches!(
+            error.downcast_ref::<WebSocketError>(),
+            Some(WebSocketError::Io(_))
+        ));
+        assert_eq!(error.root_cause().to_string(), "controlled send failure");
+    }
+
+    #[tokio::test]
+    async fn command_with_shared_deadline_preserves_read_error_source() {
+        let mut socket = ControlledSocket::new(json!({ "id": 7, "result": {} }));
+        socket.response = Some(Box::pin(async {
+            Err(WebSocketError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "controlled read failure",
+            )))
+        }));
+        let mut session = CdpSession::new(socket);
+
+        let error = session
+            .send_command_with_timeout(7, "Runtime.evaluate", json!({}), Duration::from_secs(1))
+            .await
+            .expect_err("read error should be propagated");
+
+        assert_eq!(error.to_string(), "failed to read CDP websocket message");
+        assert!(matches!(
+            error.downcast_ref::<WebSocketError>(),
+            Some(WebSocketError::Io(_))
+        ));
+        assert_eq!(error.root_cause().to_string(), "controlled read failure");
+    }
+
+    #[tokio::test]
+    async fn command_with_shared_deadline_preserves_cdp_error() {
+        let mut session = CdpSession::new(ControlledSocket::new(json!({
+            "id": 7,
+            "error": { "code": -32000, "message": "Runtime disabled" },
+        })));
+
+        let error = session
+            .send_command_with_timeout(7, "Runtime.evaluate", json!({}), Duration::from_secs(1))
+            .await
+            .expect_err("CDP error should be propagated");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("CDP command Runtime.evaluate id 7 failed:"),
+            "{message}"
+        );
+        assert!(message.contains("Runtime disabled"), "{message}");
+        assert!(message.contains("-32000"), "{message}");
+    }
 
     #[test]
     fn cdp_connect_future_keeps_handshake_off_the_startup_stack() {

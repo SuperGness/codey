@@ -318,6 +318,8 @@ enum SessionCommand {
     /// 只要求把命令发出去：放行暂停资产时不需要结果，走这条路径就可以不 spawn
     /// 任务、也不在 pending 表里留条目。
     CdpFireAndForget { method: &'static str, params: Value },
+    /// Runtime 初始上下文可能先于主 frame 查询到达，查询完成后重新选择。
+    RefreshMainContext,
 }
 
 /// 会话内资产拦截计数。每个暂停任务在独立任务里跑，用原子计数而不是
@@ -332,8 +334,8 @@ struct PatchSessionCounters {
     patched: AtomicU64,
     /// 候选资产被原样放行的次数：求值失败、补丁返回 null 或 fulfill 失败。
     skipped: AtomicU64,
-    /// Debugger.scriptParsed 观察到的候选脚本数：app:// 资产不过 Fetch，但
-    /// 每个模块求值前都会在 V8 层解析——这条通道不受自定义协议影响。
+    /// Debugger.scriptParsed 观察到的候选脚本数：解析事件不受自定义协议影响，
+    /// 但异步处理事件时脚本可能已经开始求值。
     script_parsed: AtomicU64,
     /// 经 setScriptSource 写回补丁源码的脚本数。
     script_patched: AtomicU64,
@@ -356,6 +358,7 @@ pub(crate) struct PatchSessionStats {
     pub(crate) script_parsed: u64,
     pub(crate) script_patched: u64,
     pub(crate) script_patch_failed: u64,
+    pub(crate) script_edit_disabled: bool,
 }
 
 /// 注入侧持有的补丁会话句柄；泵退出后由下一次安装重建。
@@ -524,6 +527,7 @@ impl RendererAssetPatchSession {
             script_parsed: self.counters.script_parsed.load(Ordering::Relaxed),
             script_patched: self.counters.script_patched.load(Ordering::Relaxed),
             script_patch_failed: self.counters.script_patch_failed.load(Ordering::Relaxed),
+            script_edit_disabled: self.counters.script_edit_disabled.load(Ordering::Relaxed) != 0,
         }
     }
 }
@@ -652,6 +656,7 @@ impl RendererAssetPatchSession {
                 .and_then(Value::as_str)
         {
             *main_frame_id.lock().expect("main frame id lock poisoned") = Some(id.to_string());
+            let _ = self.command_tx.send(SessionCommand::RefreshMainContext);
         }
         // 补丁脚本走文档级注册：必须在 Fetch.enable 之前落位，这样 reload 后的
         // 新文档在任何资产暂停发生前就有 __codeyRendererPatchEntry 可用。同一
@@ -700,10 +705,10 @@ impl RendererAssetPatchSession {
         )
         .await
         .context("启用渲染资产 Fetch 拦截失败")?;
-        // app:// 自定义协议的资产请求不过网络栈，Fetch 拦不到；但每个模块求值
-        // 前都会经过 V8 解析，Debugger.scriptParsed 事件不受协议影响。启用后
-        // 泵按 scriptParsed → getScriptSource → 补丁入口 → setScriptSource 的
-        // 顺序在求值前完成改写。失败不致命：文档脚本与 Fetch 会话照常工作。
+        // 部分构建的 app:// 资产请求不过 Fetch，scriptParsed 提供备用改写机会。
+        // 事件处理与 getScriptSource / setScriptSource 都是异步的，也没有暂停
+        // 脚本执行，因此不保证赶在求值前完成，更不能保证避免静态 import 的
+        // 副作用。失败不致命：文档脚本与 Fetch 会话照常工作。
         if let Err(error) = self.send_command("Debugger.enable", json!({})).await {
             let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
                 "renderer_asset_patch.debugger_enable_failed",
@@ -785,6 +790,10 @@ async fn run_patch_pump(args: PatchPumpArgs) {
                     let (method, params, respond) = match command {
                         SessionCommand::Cdp { method, params, respond } => (method, params, Some(respond)),
                         SessionCommand::CdpFireAndForget { method, params } => (method, params, None),
+                        SessionCommand::RefreshMainContext => {
+                            publish_main_context(&contexts, &main_frame_id, &main_context_tx, &counters, &command_tx, false);
+                            continue;
+                        }
                     };
                     let id = next_message_id();
                     if let Some(respond) = respond {
@@ -1002,17 +1011,38 @@ fn handle_patch_event(value: &Value, state: &mut PatchEventState<'_>) {
                     is_default,
                 },
             );
-            publish_main_context(contexts, main_frame_id, main_context_tx);
+            publish_main_context(
+                contexts,
+                main_frame_id,
+                main_context_tx,
+                counters,
+                command_tx,
+                false,
+            );
         }
         "Runtime.executionContextDestroyed" => {
             if let Some(id) = params.get("executionContextId").and_then(Value::as_u64) {
                 contexts.remove(&id);
-                publish_main_context(contexts, main_frame_id, main_context_tx);
+                publish_main_context(
+                    contexts,
+                    main_frame_id,
+                    main_context_tx,
+                    counters,
+                    command_tx,
+                    false,
+                );
             }
         }
         "Runtime.executionContextsCleared" => {
             contexts.clear();
-            publish_main_context(contexts, main_frame_id, main_context_tx);
+            publish_main_context(
+                contexts,
+                main_frame_id,
+                main_context_tx,
+                counters,
+                command_tx,
+                false,
+            );
         }
         "Page.frameNavigated" => {
             let frame = params.get("frame").cloned().unwrap_or_else(|| json!({}));
@@ -1020,7 +1050,14 @@ fn handle_patch_event(value: &Value, state: &mut PatchEventState<'_>) {
                 && let Some(id) = frame.get("id").and_then(Value::as_str)
             {
                 *main_frame_id.lock().expect("main frame id lock poisoned") = Some(id.to_string());
-                publish_main_context(contexts, main_frame_id, main_context_tx);
+                publish_main_context(
+                    contexts,
+                    main_frame_id,
+                    main_context_tx,
+                    counters,
+                    command_tx,
+                    true,
+                );
             }
         }
         "Runtime.bindingCalled"
@@ -1076,27 +1113,29 @@ fn bump_bootstrap_epoch(bootstrap_epoch_tx: &watch::Sender<u64>) {
     bootstrap_epoch_tx.send_modify(|epoch| *epoch += 1);
 }
 
-/// 当前主 frame 的 default 执行上下文。没有 frame 信息时回退到任意 default
-/// 上下文——Codex 渲染页没有同协议 iframe，取最近一个即可。
+/// 当前主 frame 的 default 执行上下文。已知主 frame 时不回退到子 frame；
+/// 尚无 frame 信息时暂取最新的 default 上下文，查询主 frame 后重新选择。
 fn publish_main_context(
     contexts: &HashMap<u64, ContextInfo>,
     main_frame_id: &Arc<Mutex<Option<String>>>,
     main_context_tx: &watch::Sender<Option<u64>>,
+    counters: &PatchSessionCounters,
+    command_tx: &mpsc::UnboundedSender<SessionCommand>,
+    republish_capabilities: bool,
 ) {
     let main_frame_id = main_frame_id.lock().expect("main frame id lock poisoned");
-    let main = main_frame_id
-        .as_deref()
-        .and_then(|frame| {
-            contexts.iter().find_map(|(id, info)| {
-                (info.is_default && info.frame_id.as_deref() == Some(frame)).then_some(*id)
-            })
+    let main = contexts
+        .iter()
+        .filter(|(_, info)| {
+            info.is_default
+                && main_frame_id
+                    .as_deref()
+                    .is_none_or(|frame| info.frame_id.as_deref() == Some(frame))
         })
-        .or_else(|| {
-            contexts
-                .iter()
-                .find_map(|(id, info)| info.is_default.then_some(*id))
-        });
-    if *main_context_tx.borrow() != main {
+        .map(|(id, _)| *id)
+        .max();
+    let changed = *main_context_tx.borrow() != main;
+    if changed {
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
             "renderer_asset_patch.context_published",
             json!({
@@ -1112,7 +1151,47 @@ fn publish_main_context(
                     .collect::<Vec<_>>(),
             }),
         );
-        let _ = main_context_tx.send(main);
+        // 安装阶段可能还没有 receiver；send_replace 仍保留当前上下文。
+        main_context_tx.send_replace(main);
+    }
+    if (changed || republish_capabilities)
+        && counters.script_edit_disabled.load(Ordering::Relaxed) != 0
+    {
+        enqueue_script_edit_unavailable(command_tx, main);
+    }
+}
+
+fn enqueue_script_edit_unavailable(
+    command_tx: &mpsc::UnboundedSender<SessionCommand>,
+    context_id: Option<u64>,
+) {
+    let Some(context_id) = context_id else {
+        return;
+    };
+    let _ = command_tx.send(SessionCommand::CdpFireAndForget {
+        method: "Runtime.evaluate",
+        params: json!({
+            "expression": "(()=>{window.__codeyRendererAssetPatchCapabilities={...window.__codeyRendererAssetPatchCapabilities,liveEdit:'unavailable'};})()",
+            "contextId": context_id,
+            "returnByValue": true,
+        }),
+    });
+}
+
+fn record_script_edit_unavailable(
+    error: &anyhow::Error,
+    counters: &PatchSessionCounters,
+    command_tx: &mpsc::UnboundedSender<SessionCommand>,
+    context_id: Option<u64>,
+) {
+    if format!("{error:#}").contains("setScriptSource functionality no longer available")
+        && counters
+            .script_edit_disabled
+            .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        // 仅公布 Live Edit 的能力；Fetch 与运行时请求入口仍可继续工作。
+        enqueue_script_edit_unavailable(command_tx, context_id);
     }
 }
 
@@ -1196,9 +1275,8 @@ fn log_script_patch_stage(url: &str, stage: &str, detail: &str) {
     );
 }
 
-/// scriptParsed → getScriptSource → 补丁入口 → setScriptSource：ES 模块图按
-/// 「整图解析→链接→求值」的顺序执行，解析事件到该脚本求值之间有天然窗口；
-/// 改写错过窗口也不致命——补丁幂等，运行时门禁仍是路由正确性的兜底。
+/// scriptParsed 的异步备用改写，不暂停脚本求值，不能保证阻止静态 import
+/// 及初始化副作用；运行时请求入口仍负责路由校验。
 async fn handle_parsed_script(
     command_tx: mpsc::UnboundedSender<SessionCommand>,
     mut context_rx: watch::Receiver<Option<u64>>,
@@ -1210,13 +1288,20 @@ async fn handle_parsed_script(
 ) {
     use std::sync::atomic::Ordering::Relaxed;
     let failed = || counters.script_patch_failed.fetch_add(1, Relaxed);
-    let source = match send_command_via(
+    if counters.script_edit_disabled.load(Relaxed) != 0 {
+        return;
+    }
+    let source_response = send_command_via(
         &command_tx,
         "Debugger.getScriptSource",
         json!({ "scriptId": script_id }),
     )
-    .await
-    {
+    .await;
+    // 其他并发任务可能在读源期间确认禁用；避免复制大模块或继续跨页面求值。
+    if counters.script_edit_disabled.load(Relaxed) != 0 {
+        return;
+    }
+    let source = match source_response {
         Ok(value) => match value
             .get("result")
             .and_then(|result| result.get("scriptSource"))
@@ -1234,10 +1319,10 @@ async fn handle_parsed_script(
             return;
         }
     };
-    // 与 Fetch 路径同一策略：优先辅助页（启动早期通常还不存在），失败退回
-    // 被拦页自己的上下文——主上下文在模块图求值前就已建好，窗口够用。
+    // 与 Fetch 路径同一策略：优先辅助页，失败退回被拦页自己的上下文。
     let patched = match evaluator.evaluate(&url, &source).await {
         Ok(patched) => patched,
+        Err(_) if counters.script_edit_disabled.load(Relaxed) != 0 => return,
         Err(evaluator_error) => match evaluate_in_page_context(
             &command_tx,
             &mut context_rx,
@@ -1259,6 +1344,9 @@ async fn handle_parsed_script(
             }
         },
     };
+    if counters.script_edit_disabled.load(Relaxed) != 0 {
+        return;
+    }
     let Some(patched) = patched.filter(|patched| *patched != source) else {
         log_script_patch_stage(&url, "no_patch", "entry returned null/identical");
         return;
@@ -1276,9 +1364,7 @@ async fn handle_parsed_script(
         }
         Err(error) => {
             log_script_patch_stage(&url, "setScriptSource", &format!("{error:#}"));
-            if format!("{error:#}").contains("no longer available") {
-                counters.script_edit_disabled.store(1, Relaxed);
-            }
+            record_script_edit_unavailable(&error, &counters, &command_tx, *context_rx.borrow());
             failed();
         }
     }
@@ -1586,6 +1672,299 @@ fn fresh_response_headers(headers: &[Value]) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mock_evaluator(command_tx: &mpsc::UnboundedSender<SessionCommand>) -> Arc<PatchEvaluator> {
+        Arc::new(PatchEvaluator {
+            own_ws_url: String::new(),
+            install_script: Arc::from(""),
+            connection: tokio::sync::Mutex::new(Some(EvaluatorConn {
+                command_tx: command_tx.clone(),
+                pump: tokio::spawn(std::future::pending()),
+            })),
+        })
+    }
+
+    async fn next_cdp_command(
+        commands: &mut mpsc::UnboundedReceiver<SessionCommand>,
+        expected: &str,
+    ) -> (Value, oneshot::Sender<CommandResult>) {
+        let command = tokio::time::timeout(Duration::from_secs(1), commands.recv())
+            .await
+            .expect("CDP command should be queued")
+            .expect("CDP command channel should remain open");
+        let SessionCommand::Cdp {
+            method,
+            params,
+            respond,
+        } = command
+        else {
+            panic!("expected a CDP command with a response");
+        };
+        assert_eq!(method, expected);
+        (params, respond)
+    }
+
+    fn assert_capability_notification(
+        commands: &mut mpsc::UnboundedReceiver<SessionCommand>,
+        context_id: u64,
+    ) {
+        let SessionCommand::CdpFireAndForget { method, params } = commands
+            .try_recv()
+            .expect("capability notification should be queued")
+        else {
+            panic!("capability notification must not wait for a response");
+        };
+        assert_eq!(method, "Runtime.evaluate");
+        assert_eq!(params["contextId"], context_id);
+        let expression = params["expression"].as_str().unwrap();
+        assert!(expression.contains("window.__codeyRendererAssetPatchCapabilities"));
+        assert!(expression.contains("...window.__codeyRendererAssetPatchCapabilities"));
+        assert!(expression.contains("liveEdit:'unavailable'"));
+    }
+
+    async fn prepare_script_write(
+        command_tx: &mpsc::UnboundedSender<SessionCommand>,
+        commands: &mut mpsc::UnboundedReceiver<SessionCommand>,
+        context_rx: watch::Receiver<Option<u64>>,
+        counters: Arc<PatchSessionCounters>,
+    ) -> (tokio::task::JoinHandle<()>, oneshot::Sender<CommandResult>) {
+        let task = tokio::spawn(handle_parsed_script(
+            command_tx.clone(),
+            context_rx,
+            Arc::from(""),
+            mock_evaluator(command_tx),
+            counters,
+            "script".to_string(),
+            "app://-/assets/app-primary-test.js".to_string(),
+        ));
+        let (_, respond) = next_cdp_command(commands, "Debugger.getScriptSource").await;
+        respond
+            .send(Ok(json!({"result": {"scriptSource": "original()"}})))
+            .unwrap();
+        let (_, respond) = next_cdp_command(commands, "Runtime.evaluate").await;
+        respond
+            .send(Ok(json!({"result": {"result": {"value": "patched()"}}})))
+            .unwrap();
+        let (_, respond) = next_cdp_command(commands, "Debugger.setScriptSource").await;
+        (task, respond)
+    }
+
+    #[tokio::test]
+    async fn script_edit_requires_explicit_unavailability_and_notifies_only_once() {
+        let (command_tx, mut commands) = mpsc::unbounded_channel();
+        let (main_context, context_rx) = watch::channel(Some(42));
+        let counters = Arc::new(PatchSessionCounters::default());
+        let session = RendererAssetPatchSession {
+            websocket_url: Arc::from("ws://test"),
+            command_tx: command_tx.clone(),
+            bootstrap_epoch: watch::channel(0).0,
+            main_context,
+            counters: counters.clone(),
+            pump: Mutex::new(None),
+        };
+        let initial_stats = serde_json::to_value(session.stats()).unwrap();
+        assert_eq!(initial_stats["scriptEditDisabled"], false);
+        assert_eq!(initial_stats["pausedRequests"], 0);
+        assert_eq!(initial_stats["scriptParsed"], 0);
+        for error in [
+            "Cannot find script",
+            "CDP command Debugger.setScriptSource timed out",
+            "another functionality no longer available",
+        ] {
+            let (task, respond) = prepare_script_write(
+                &command_tx,
+                &mut commands,
+                context_rx.clone(),
+                counters.clone(),
+            )
+            .await;
+            respond.send(Err(error.to_string())).unwrap();
+            task.await.unwrap();
+            assert_eq!(counters.script_edit_disabled.load(Ordering::Relaxed), 0);
+            assert!(commands.try_recv().is_err());
+        }
+
+        // 两个并发脚本都已发出写入，再先后收到同一个明确禁用错误。
+        let (first, first_response) = prepare_script_write(
+            &command_tx,
+            &mut commands,
+            context_rx.clone(),
+            counters.clone(),
+        )
+        .await;
+        let (second, second_response) =
+            prepare_script_write(&command_tx, &mut commands, context_rx, counters.clone()).await;
+        let unavailable = json!({"error": {"code": -32000, "message":
+            "setScriptSource functionality no longer available"}})
+        .to_string();
+        first_response.send(Err(unavailable.clone())).unwrap();
+        first.await.unwrap();
+        assert_capability_notification(&mut commands, 42);
+        second_response.send(Err(unavailable)).unwrap();
+        second.await.unwrap();
+        assert!(commands.try_recv().is_err());
+        assert_eq!(counters.script_patch_failed.load(Ordering::Relaxed), 5);
+
+        let stats = serde_json::to_value(session.stats()).unwrap();
+        assert_eq!(stats["scriptEditDisabled"], true);
+        assert_eq!(stats["pausedRequests"], 0);
+    }
+
+    #[tokio::test]
+    async fn script_edit_capability_follows_main_default_context_across_navigation() {
+        let (command_tx, mut commands) = mpsc::unbounded_channel();
+        let (main_context_tx, context_rx) = watch::channel(None);
+        drop(context_rx); // 初始化阶段没有订阅者，也必须保留选中的主上下文。
+        let main_frame_id = Arc::new(Mutex::new(Some("main".to_string())));
+        let counters = Arc::new(PatchSessionCounters::default());
+        let bootstrap_epoch_tx = watch::channel(0).0;
+        let install_script = Arc::from("");
+        let evaluator = mock_evaluator(&command_tx);
+        let mut contexts = HashMap::new();
+        let mut inflight = tokio::task::JoinSet::new();
+        let mut state = PatchEventState {
+            contexts: &mut contexts,
+            main_frame_id: &main_frame_id,
+            main_context_tx: &main_context_tx,
+            bootstrap_epoch_tx: &bootstrap_epoch_tx,
+            command_tx: &command_tx,
+            install_script: &install_script,
+            evaluator: &evaluator,
+            counters: &counters,
+            inflight: &mut inflight,
+        };
+        record_script_edit_unavailable(
+            &anyhow::anyhow!("setScriptSource functionality no longer available"),
+            &counters,
+            &command_tx,
+            None,
+        );
+        let context = |id, frame, is_default| {
+            json!({
+                "method": "Runtime.executionContextCreated",
+                "params": {"context": {"id": id, "auxData": {
+                    "frameId": frame, "isDefault": is_default,
+                }}},
+            })
+        };
+        handle_patch_event(&context(90, "child", true), &mut state);
+        handle_patch_event(&context(91, "main", false), &mut state);
+        assert_eq!(*main_context_tx.borrow(), None);
+        assert!(commands.try_recv().is_err());
+        handle_patch_event(&context(2, "main", true), &mut state);
+        assert_eq!(*main_context_tx.borrow(), Some(2));
+        assert_capability_notification(&mut commands, 2);
+        handle_patch_event(&context(92, "main", false), &mut state);
+        assert!(commands.try_recv().is_err());
+
+        handle_patch_event(
+            &json!({"method": "Page.frameNavigated",
+            "params": {"frame": {"id": "next-main"}}}),
+            &mut state,
+        );
+        assert_eq!(*main_context_tx.borrow(), None);
+        assert!(commands.try_recv().is_err());
+        handle_patch_event(&context(3, "next-main", true), &mut state);
+        assert_capability_notification(&mut commands, 3);
+        handle_patch_event(
+            &json!({"method": "Page.frameNavigated",
+            "params": {"frame": {"id": "next-main"}}}),
+            &mut state,
+        );
+        assert_capability_notification(&mut commands, 3);
+        handle_patch_event(
+            &json!({"method": "Runtime.executionContextDestroyed",
+            "params": {"executionContextId": 3}}),
+            &mut state,
+        );
+        assert_eq!(*main_context_tx.borrow(), None);
+        assert!(commands.try_recv().is_err());
+        handle_patch_event(
+            &json!({"method": "Runtime.executionContextsCleared"}),
+            &mut state,
+        );
+        handle_patch_event(&context(4, "next-main", true), &mut state);
+        assert_capability_notification(&mut commands, 4);
+    }
+
+    #[tokio::test]
+    async fn unavailable_script_edit_stops_pending_source_work_but_keeps_fetch_patching() {
+        let (command_tx, mut commands) = mpsc::unbounded_channel();
+        let (_main_context, context_rx) = watch::channel(Some(42));
+        let counters = Arc::new(PatchSessionCounters::default());
+        let (first, respond) = prepare_script_write(
+            &command_tx,
+            &mut commands,
+            context_rx.clone(),
+            counters.clone(),
+        )
+        .await;
+        let pending = tokio::spawn(handle_parsed_script(
+            command_tx.clone(),
+            context_rx.clone(),
+            Arc::from(""),
+            mock_evaluator(&command_tx),
+            counters.clone(),
+            "pending".to_string(),
+            "app://-/assets/app-shared-test.js".to_string(),
+        ));
+        let (_, source_response) =
+            next_cdp_command(&mut commands, "Debugger.getScriptSource").await;
+        respond
+            .send(Err(
+                "setScriptSource functionality no longer available".to_string()
+            ))
+            .unwrap();
+        first.await.unwrap();
+        assert_capability_notification(&mut commands, 42);
+        source_response
+            .send(Ok(json!({"result": {"scriptSource": "original()"}})))
+            .unwrap();
+        pending.await.unwrap();
+        assert!(commands.try_recv().is_err());
+        assert_eq!(counters.script_patch_failed.load(Ordering::Relaxed), 1);
+
+        handle_parsed_script(
+            command_tx.clone(),
+            context_rx.clone(),
+            Arc::from(""),
+            mock_evaluator(&command_tx),
+            counters.clone(),
+            "later".to_string(),
+            "app://-/assets/app-shared-test.js".to_string(),
+        )
+        .await;
+        assert!(commands.try_recv().is_err());
+
+        let fetch = tokio::spawn(process_paused_asset(
+            command_tx.clone(),
+            context_rx,
+            Arc::from(""),
+            mock_evaluator(&command_tx),
+            counters.clone(),
+            json!({"requestId": "fetch", "request": {
+                "url": "app://-/assets/app-primary-test.js",
+            }}),
+        ));
+        let (_, respond) = next_cdp_command(&mut commands, "Fetch.getResponseBody").await;
+        respond
+            .send(Ok(json!({"result": {"body": "original()"}})))
+            .unwrap();
+        let (_, respond) = next_cdp_command(&mut commands, "Runtime.evaluate").await;
+        respond
+            .send(Ok(json!({"result": {"result": {"value": "patched()"}}})))
+            .unwrap();
+        let (params, respond) = next_cdp_command(&mut commands, "Fetch.fulfillRequest").await;
+        assert_eq!(params["requestId"], "fetch");
+        assert_eq!(
+            params["body"],
+            base64::engine::general_purpose::STANDARD.encode("patched()")
+        );
+        respond.send(Ok(json!({}))).unwrap();
+        fetch.await.unwrap();
+        assert_eq!(counters.patched.load(Ordering::Relaxed), 1);
+        assert!(commands.try_recv().is_err());
+    }
 
     #[test]
     fn patch_candidates_cover_entry_documents_and_bundled_assets() {
