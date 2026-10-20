@@ -616,8 +616,10 @@ pub async fn retry_inject_with_scripts(
                 handler.clone(),
                 scripts,
                 &phase,
-                degrade_request_gate,
-                deadline,
+                InjectionAttemptPolicy {
+                    degrade_request_gate,
+                    deadline,
+                },
             ),
         )
         .await
@@ -1228,6 +1230,11 @@ enum AttemptOutcome {
     },
 }
 
+struct InjectionAttemptPolicy {
+    degrade_request_gate: bool,
+    deadline: tokio::time::Instant,
+}
+
 async fn run_injection_attempt(
     retained: Option<EstablishedInjection>,
     prefetched_page: Option<crate::early_attach::PrefetchedPage>,
@@ -1235,9 +1242,12 @@ async fn run_injection_attempt(
     handler: BridgeHandler,
     scripts: &PreparedInjectionScripts,
     phase: &AtomicU8,
-    degrade_request_gate: bool,
-    deadline: tokio::time::Instant,
+    policy: InjectionAttemptPolicy,
 ) -> AttemptOutcome {
+    let InjectionAttemptPolicy {
+        degrade_request_gate,
+        deadline,
+    } = policy;
     let bridge = match retained.filter(|bridge| !bridge.pump.is_finished()) {
         Some(bridge) => bridge,
         // 没有可复用的桥接（首轮，或上一轮留下的桥接泵已随页面导航/目标关闭
