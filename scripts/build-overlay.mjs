@@ -21,10 +21,13 @@ const outputs = new Map(
 // Codex 渲染进程内求值。这里统一压缩到 dist-overlay/inject/，cdp.rs 只嵌入
 // 压缩产物。
 const publicDir = join(root, "public");
+// 与控制台共用应用图标，内嵌后无需从宿主页面请求额外资源。
+const appIconDataUrl = `data:image/png;base64,${readFileSync(join(root, "backend/icons/favicon.png")).toString("base64")}`;
 let rawTotal = 0;
 let minifiedTotal = 0;
 for (const name of readdirSync(publicDir).filter((entry) => entry.endsWith(".js"))) {
-  const source = readFileSync(join(publicDir, name), "utf8");
+  const source = readFileSync(join(publicDir, name), "utf8")
+    .replaceAll("__CODEY_APP_ICON_DATA_URL__", appIconDataUrl);
   // esbuild 在解析层就会常量折叠 `"__CODEY_X__" === "true"` 这类比较，任何
   // minify 开关都关不掉；这些占位符是 cdp.rs 按启动设置做运行时替换的锚点。
   // 因此压缩后逐一校验占位符仍在，丢失即整文件回退为源码拷贝。

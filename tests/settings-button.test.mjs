@@ -683,13 +683,14 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.ok(injectedStyle);
   assert.match(injectedStyle.textContent, /#codey-account-usage \{[^}]*background: transparent;/);
   assert.doesNotMatch(injectedStyle.textContent, /#codey-account-usage \{[^}]*background:[^;}]*Canvas/);
-  assert.match(injectedStyle.textContent, /\.codey-usage-meter \{ display: block;[^}]*height: 2px;[^}]*max-height: 2px;/);
-  assert.match(injectedStyle.textContent, /data-tone="healthy"[^}]*background: #34c759;/);
-  assert.match(injectedStyle.textContent, /data-tone="normal"[^}]*background: #0a84ff;/);
-  assert.match(injectedStyle.textContent, /data-tone="warning"[^}]*background: #ffcc00;/);
-  assert.match(injectedStyle.textContent, /data-tone="critical"[^}]*background: #ff453a;/);
+  assert.match(injectedStyle.textContent, /\.codey-usage-meter \{ display: block;[^}]*height: 3px;[^}]*max-height: 3px;/);
+  assert.match(injectedStyle.textContent, /data-tone="normal"[^}]*--codey-usage-accent: light-dark\(/);
+  assert.match(injectedStyle.textContent, /data-tone="warning"[^}]*--codey-usage-accent: light-dark\(/);
+  assert.match(injectedStyle.textContent, /data-tone="critical"[^}]*--codey-usage-accent: light-dark\(/);
   assert.match(injectedStyle.textContent, /#codey-account-usage:hover \.codey-usage-details/);
-  assert.match(injectedStyle.textContent, /\.codey-usage-details \{[^}]*background: rgb\(34 34 34 \/ \.97\);/);
+  assert.match(injectedStyle.textContent, /--codey-usage-surface: light-dark\(#ffffff, #252525\);/);
+  assert.match(injectedStyle.textContent, /\.codey-usage-details \{[^}]*background: var\(--codey-usage-surface\);/);
+  assert.doesNotMatch(injectedStyle.textContent, /#codey-account-usage\[data-state="stale"\] \{[^}]*opacity:/);
   assert.match(injectedStyle.textContent, /\.codey-usage-plan-tag \{[^}]*border:[^}]*background: color-mix\(in srgb, #0a84ff 13%, transparent\);/);
   assert.equal(usage.parentElement, sidebarFooterHost);
   assert.equal(usage.nextElementSibling, nativeProfileFooter);
@@ -748,7 +749,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.doesNotMatch(usage.getAttribute("aria-label"), /5 小时额度/);
   assert.match(usage.getAttribute("aria-label"), /1 天 5 小时后重置/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?77/);
-  assert.match(usage.innerHTML, /class="codey-usage-plan-tag">Plus<\/span>/);
+  assert.match(usage.innerHTML, /class="codey-usage-plan-tag" data-plan="plus">Plus<\/span>/);
 
   accountUsageResult = { status: "unavailable", reason: "third_party" };
   const refreshSchedulesBeforeUnavailable = scheduledDelays.filter(
@@ -782,7 +783,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.match(remountedUsage.innerHTML, /周额度/);
   const remountedSummaryHtml = remountedUsage.innerHTML.split('class="codey-usage-details"')[0];
   assert.doesNotMatch(remountedSummaryHtml, /data-window="five-hour"/);
-  assert.match(remountedSummaryHtml, /class="codey-usage-plan-tag">Plus<\/span>/);
+  assert.match(remountedSummaryHtml, /class="codey-usage-plan-tag" data-plan="plus">Plus<\/span>/);
 
   for (const [planType, expectedLabel, expectedTier] of [
     ["prolite", "Pro 100", "100"],
@@ -813,7 +814,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
     accountUsageResult = { ...accountUsageResult, planType };
     await window.__codeyRefreshAccountUsage();
     assert.equal(
-      remountedUsage.innerHTML.match(/class="codey-usage-plan-tag"(?: data-pro-tier="(?:100|200|500)")?>([^<]*)<\/span>/)?.[1],
+      remountedUsage.innerHTML.match(/class="codey-usage-plan-tag"(?: data-plan="plus")?(?: data-pro-tier="(?:100|200|500)")?>([^<]*)<\/span>/)?.[1],
       expectedLabel.replaceAll('"', "&quot;"),
       `rendered plan label for ${planType}`,
     );
@@ -821,6 +822,11 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
       remountedUsage.innerHTML.match(/class="codey-usage-plan-tag" data-pro-tier="([^"]*)"/)?.[1],
       expectedTier,
       `rendered Pro tier for ${planType}`,
+    );
+    assert.equal(
+      remountedUsage.innerHTML.includes('data-plan="plus"'),
+      expectedLabel === "Plus",
+      `applies Plus styling only to Plus for ${planType}`,
     );
     assert.equal(findById("codey-account-usage"), remountedUsage);
   }
