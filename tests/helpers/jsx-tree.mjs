@@ -53,6 +53,7 @@ function makeElement(type, props, key) {
 function createReactStub() {
   let cursor = 0;
   let states = [];
+  const contextDefaults = new WeakMap();
   const react = {
     createElement: (type, props, ...children) =>
       makeElement(type, {
@@ -84,7 +85,14 @@ function createReactStub() {
     useInsertionEffect: () => {},
     useId: () => ":r0:",
     useDeferredValue: (value) => value,
-    useContext: () => null,
+    // 元素树不执行 Provider；useContext 只读取各个 Context 的默认值。
+    createContext(defaultValue) {
+      const context = {};
+      context.Provider = context;
+      contextDefaults.set(context, defaultValue);
+      return context;
+    },
+    useContext: (context) => contextDefaults.get(context),
     useReducer: (_reducer, initial) =>
       [typeof initial === "function" ? initial() : initial, () => {}],
     useTransition: () => [false, (callback) => callback()],
