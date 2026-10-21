@@ -165,30 +165,151 @@
   white-space: nowrap;
 }
 
-.status-card-active {
-  border-color: var(--codey-blue, #007aff) !important;
-  box-shadow: 0 0 0 2px rgba(0, 122, 255, 0.22), 0 2px 8px rgba(0, 0, 0, 0.04) !important;
-  background: color-mix(in srgb, var(--codey-blue-soft, #eaf3ff) 35%, var(--codey-surface)) !important;
+.operations-status-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 10px;
+  border-radius: 12px;
+  background: var(--codey-card);
+  box-shadow: var(--codey-card-shadow);
+  overflow: hidden;
 }
 
-[data-theme="dark"] .status-card-active {
-  background: color-mix(in srgb, var(--codey-blue, #007aff) 12%, var(--codey-surface)) !important;
+.status-strip-item {
+  --tone: var(--codey-blue);
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px 12px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 130ms ease;
+}
+
+.status-strip-item + .status-strip-item {
+  border-left: 1px solid var(--codey-border-subtle);
+}
+
+.status-strip-item.tone-success { --tone: var(--codey-green); }
+.status-strip-item.tone-warning { --tone: var(--codey-amber); }
+.status-strip-item.tone-destructive { --tone: var(--codey-red); }
+
+.status-strip-item:hover {
+  background: color-mix(in srgb, var(--codey-canvas) 60%, var(--codey-card));
+}
+
+.status-strip-item.is-expanded {
+  background: color-mix(in srgb, var(--codey-blue) 6%, var(--codey-card));
+}
+
+.status-strip-item.is-expanded::after {
+  content: "";
+  position: absolute;
+  right: 16px;
+  bottom: 0;
+  left: 16px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--codey-blue);
+}
+
+.status-strip-item:focus-visible {
+  outline: 2px solid var(--codey-blue);
+  outline-offset: -2px;
+}
+
+.status-strip-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.status-strip-icon {
+  flex: none;
+  color: var(--codey-muted);
+}
+
+.status-strip-head strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--codey-text);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-strip-state {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  color: var(--tone);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.status-strip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 20%, transparent);
+}
+
+.status-strip-description {
+  display: -webkit-box;
+  min-height: 34px;
+  overflow: hidden;
+  color: var(--codey-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.status-strip-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--codey-subtle);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.status-strip-item:hover .status-strip-toggle,
+.status-strip-item.is-expanded .status-strip-toggle {
+  color: var(--codey-blue);
+}
+
+@container settings-content (max-width: 620px) {
+  .operations-status-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .status-strip-item + .status-strip-item {
+    border-top: 1px solid var(--codey-border-subtle);
+    border-left: 0;
+  }
+  .status-strip-description {
+    min-height: 0;
+  }
 }
 
 .operations-expanded-tray {
-  margin-top: -2px;
   margin-bottom: 12px;
   padding: 12px 16px 14px;
   border-radius: 12px;
-  background: color-mix(in srgb, var(--codey-surface-sunken, #f2f2f5) 45%, var(--codey-surface) 55%);
-  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.07);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+  background: var(--codey-card);
+  box-shadow: var(--codey-card-shadow);
   transition: all 180ms ease;
-}
-
-[data-theme="dark"] .operations-expanded-tray {
-  background: color-mix(in srgb, var(--codey-surface-sunken, #1c1c1e) 55%, var(--codey-surface) 45%);
-  border-color: rgba(255, 255, 255, 0.08);
 }
 
 .operations-expanded-card {

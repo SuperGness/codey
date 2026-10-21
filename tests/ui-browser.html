@@ -126,13 +126,67 @@
         document.body.style.background = "#181818";
         document.body.style.color = "#ffffff";
       }
-      window.__codexSessionDeleteBridge = (path, args) => mock(path.split("/").pop(), args);
+      const restartCheck = new URLSearchParams(location.search).get("check") === "restart-state";
+      const restartPreview = new URLSearchParams(location.search).get("state");
+      let restartState = restartPreview || "waiting";
+      let restartRevision = 1;
+      let restartRequests = 0;
+      const invokeFixture = async (command, args) => {
+        if (restartCheck && command === "restart_codey") {
+          restartRequests++;
+          restartState = "restarting";
+          setTimeout(() => { restartState = "complete"; restartRevision++; }, 1200);
+          return { status: "restarting" };
+        }
+        const result = await mock(command, args);
+        if (!restartCheck || command !== "runtime_status") return result;
+        return {
+          ...result,
+          restartRequired: restartState === "waiting" || restartState === "restarting",
+          restartInProgress: restartState === "restarting",
+          configApply: {
+            revision: restartRevision,
+            state: restartState === "failed" ? "failed" : restartState === "complete" ? "applied" : "restart_required",
+            error: restartState === "failed" ? "测试：配置应用失败" : undefined,
+          },
+        };
+      };
+      window.__codeyInvokeApi = invokeFixture;
+      window.__codexSessionDeleteBridge = (path, args) => invokeFixture(path.split("/").pop(), args);
       await import("../src/overlay.tsx");
       const button = document.createElement("button");
       button.textContent = "打开内嵌设置";
       button.onclick = () => window.__codeySettingsOverlay.open();
       document.body.append(button);
       window.__codeySettingsOverlay.open();
+      if (restartCheck && !restartPreview) {
+        const shadow = document.querySelector("#codey-settings-overlay-host").shadowRoot;
+        const waitFor = async (read) => {
+          const deadline = performance.now() + 5000;
+          while (!read()) {
+            if (performance.now() > deadline) throw new Error("重启按钮验证等待超时");
+            await new Promise(requestAnimationFrame);
+          }
+        };
+        const action = () => shadow.querySelector(".codex-status-action");
+        await waitFor(() => action()?.textContent.trim() === "等待重启");
+        if (!action().classList.contains("is-warning") || action().disabled) throw new Error("等待重启按钮未显示警告状态或不可操作");
+        if (shadow.textContent.includes("部分设置需重启 Codex 后生效")) throw new Error("仍显示重复的重启横幅");
+        action().click();
+        await waitFor(() => shadow.querySelector(".confirmation-dialog"));
+        if (restartRequests !== 0) throw new Error("确认前已发送重启请求");
+        const confirmation = shadow.querySelector(".confirmation-dialog");
+        [...confirmation.querySelectorAll("button")].find(button => button.textContent.trim() === "重启 Codex").click();
+        await waitFor(() => action()?.textContent.trim() === "正在重启");
+        if (!action().disabled || action().classList.contains("is-warning")) throw new Error("重启中的按钮状态错误");
+        await waitFor(() => action()?.textContent.trim() === "重启" && !action().disabled);
+        if (restartRequests !== 1 || action().classList.contains("is-warning")) throw new Error("重启完成后未恢复普通按钮");
+        restartState = "failed";
+        restartRevision++;
+        window.dispatchEvent(new Event("codey-settings-opened"));
+        await waitFor(() => [...shadow.querySelectorAll('[role="alert"]')].some(alert => alert.textContent.includes("测试：配置应用失败")));
+        document.body.dataset.restartStateResult = "PASS：等待重启、确认、重启中、完成恢复及配置失败提示均正常";
+      }
       if (new URLSearchParams(location.search).get("check") === "theme-sync") {
         const host = document.querySelector("#codey-settings-overlay-host");
         const containers = ["codey-overlay-root", "codey-overlay-modal-container"].map(id => host.shadowRoot.getElementById(id));
@@ -169,6 +223,50 @@
         result.id = "theme-sync-result";
         result.textContent = "PASS：首次打开、主题属性、主题类、颜色方案及关闭后重开均同步两个挂载容器";
         document.body.append(result);
+      }
+      if (new URLSearchParams(location.search).get("check") === "toast-layout") {
+        const { toast } = await import("@heroui/react");
+        const shadow = document.querySelector("#codey-settings-overlay-host").shadowRoot;
+        const waitFor = async (read) => {
+          const deadline = performance.now() + 5000;
+          while (!read()) {
+            if (performance.now() > deadline) throw new Error("Toast 布局验证等待超时");
+            await new Promise(requestAnimationFrame);
+          }
+        };
+        await waitFor(() => shadow.querySelector('button[aria-label="删除Telegram通知渠道"]'));
+        for (const nested of [true, false]) {
+          if (nested) shadow.querySelector('button[aria-label="删除Telegram通知渠道"]').click();
+          const selector = nested ? ".confirmation-dialog" : ".settings-modal-shell";
+          await waitFor(() => shadow.querySelector(`${selector} .toast-portal-host`));
+          const dialog = shadow.querySelector(selector);
+          await waitFor(() => !dialog.closest(".modal__backdrop").getAnimations({ subtree: true }).length);
+          toast.info("消息提示已完整显示", {
+            timeout: 0,
+            description: "这是一条需要换行的较长提示，用于确认消息内容和关闭按钮完整显示在弹窗范围内。",
+          });
+          await waitFor(() => dialog.querySelector('[data-slot="toast"]'));
+          await waitFor(() => !dialog.querySelector('[data-slot="toast"][data-entering="true"]'));
+          await waitFor(() => !dialog.getAnimations({ subtree: true }).length);
+          const notice = dialog.querySelector('[data-slot="toast"][data-frontmost="true"]');
+          const bounds = (dialog.querySelector(".settings-modal-body") ?? dialog).getBoundingClientRect();
+          if (!notice) throw new Error("Toast 未显示");
+          for (const element of [notice, notice.querySelector('[data-slot="toast-close"]')]) {
+            if (!element) throw new Error("Toast 关闭按钮未显示");
+            const rect = element.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0 || rect.top < bounds.top || rect.bottom > bounds.bottom || rect.left < bounds.left || rect.right > bounds.right) {
+              throw new Error(`${nested ? "嵌套" : "设置"}弹窗中的 Toast 被裁切`);
+            }
+          }
+          if (notice.getBoundingClientRect().top > bounds.top + 32) throw new Error("Toast 未显示在弹窗顶部");
+          if (nested) {
+            toast.clear();
+            await waitFor(() => !dialog.querySelector('[data-slot="toast"]'));
+            dialog.querySelector('button[aria-label="关闭"]').click();
+            await waitFor(() => !shadow.querySelector(selector));
+          }
+        }
+        document.body.dataset.toastLayoutResult = "PASS：设置及嵌套弹窗的长提示和关闭按钮完整显示在顶部";
       }
       if (new URLSearchParams(location.search).get("check") === "toast-close") {
         const { toast } = await import("@heroui/react");

@@ -189,26 +189,92 @@ export function SubagentPolicyCardComponent({
           roleDisabled ? "subagent-role-disabled" : ""
         }`}
       >
-        <div className="subagent-role-item-header">
-          <div className="subagent-role-identity">
-            <div
-              className={`subagent-role-icon-box subagent-role-icon-box--${task.id}`}
-            >
-              <TaskIcon size={18} stroke={1.9} aria-hidden="true" />
-            </div>
-            <div className="subagent-role-meta">
-              <div className="subagent-role-title-row">
-                <h4 className="subagent-role-name">{task.name}</h4>
-                {roleDisabled && (
-                  <span className="subagent-role-status-chip">已停用</span>
-                )}
-              </div>
-              <p className="subagent-role-description">{task.description}</p>
-            </div>
+        <div className="subagent-role-identity">
+          <div
+            className={`subagent-role-icon-box subagent-role-icon-box--${task.id}`}
+          >
+            <TaskIcon size={18} stroke={1.9} aria-hidden="true" />
           </div>
+          <div className="subagent-role-meta">
+            <div className="subagent-role-title-row">
+              <h4 className="subagent-role-name">{task.name}</h4>
+              {roleDisabled && (
+                <span className="subagent-role-status-chip">已停用</span>
+              )}
+            </div>
+            <p className="subagent-role-description" title={task.description}>{task.description}</p>
+          </div>
+        </div>
+
+        <div className="subagent-control-group subagent-control-group--model">
+          <label className="subagent-control-label">指定模型</label>
+          <div className="subagent-control-field">
+            <ModelCombobox
+              aria-label={`${task.name}模型`}
+              value={selection.model}
+              placeholder={
+                subagentModelOptions.length === 0
+                  ? "所有线路均暂无模型"
+                  : "请选择模型"
+              }
+              disabled={
+                subagentPolicyControlsDisabled ||
+                roleDisabled ||
+                subagentModelOptions.length === 0
+              }
+              options={subagentModelOptions}
+              preferredProviderId={preferredProviderId}
+              onChange={(value) => {
+                const option = subagentModelOptions.find(
+                  (candidate) => candidate.value === value,
+                );
+                if (!option) return;
+                const reasoningEffort =
+                  option.supportedReasoningEfforts.includes(
+                    selection.reasoningEffort,
+                  )
+                    ? selection.reasoningEffort
+                    : option.defaultReasoningEffort;
+                updateRole({
+                  model: option.value,
+                  reasoningEffort,
+                });
+              }}
+            />
+          </div>
+        </div>
+
+        <div className="subagent-control-group subagent-control-group--effort">
+          <label className="subagent-control-label">思考深度</label>
+          <div className="subagent-control-field">
+            <Select
+              className="w-full min-w-0"
+              aria-label={`${task.name}思考深度`}
+              value={
+                reasoningEfforts.includes(selection.reasoningEffort)
+                  ? selection.reasoningEffort
+                  : undefined
+              }
+              placeholder="暂无可选深度"
+              disabled={
+                subagentPolicyControlsDisabled ||
+                roleDisabled ||
+                reasoningEfforts.length === 0
+              }
+              optionList={reasoningOptions}
+              filter={false}
+              onChange={(value) =>
+                updateRole({
+                  model: selectedModel?.value ?? selection.model,
+                  reasoningEffort: String(value ?? ""),
+                })
+              }
+            />
+          </div>
+        </div>
+        <div className="subagent-role-switch-wrap">
           {!isDefaultRole && (
-            <div
-              className="subagent-role-switch-wrap"
+            <span
               title={
                 isSingleEnabledRole ? "至少需要保留一个启用的调度角色" : undefined
               }
@@ -221,77 +287,8 @@ export function SubagentPolicyCardComponent({
                 onCheckedChange={(enabled) => updateRole({ enabled })}
                 aria-label={`${selection.enabled ? "关闭" : "启用"}${task.name}角色`}
               />
-            </div>
+            </span>
           )}
-        </div>
-
-        <div className="subagent-role-controls-row">
-          <div className="subagent-control-group subagent-control-group--model">
-            <label className="subagent-control-label">指定模型</label>
-            <div className="subagent-control-field">
-              <ModelCombobox
-                aria-label={`${task.name}模型`}
-                value={selection.model}
-                placeholder={
-                  subagentModelOptions.length === 0
-                    ? "所有线路均暂无模型"
-                    : "请选择模型"
-                }
-                disabled={
-                  subagentPolicyControlsDisabled ||
-                  roleDisabled ||
-                  subagentModelOptions.length === 0
-                }
-                options={subagentModelOptions}
-                preferredProviderId={preferredProviderId}
-                onChange={(value) => {
-                  const option = subagentModelOptions.find(
-                    (candidate) => candidate.value === value,
-                  );
-                  if (!option) return;
-                  const reasoningEffort =
-                    option.supportedReasoningEfforts.includes(
-                      selection.reasoningEffort,
-                    )
-                      ? selection.reasoningEffort
-                      : option.defaultReasoningEffort;
-                  updateRole({
-                    model: option.value,
-                    reasoningEffort,
-                  });
-                }}
-              />
-            </div>
-          </div>
-
-          <div className="subagent-control-group subagent-control-group--effort">
-            <label className="subagent-control-label">思考深度</label>
-            <div className="subagent-control-field">
-              <Select
-                className="w-full min-w-0"
-                aria-label={`${task.name}思考深度`}
-                value={
-                  reasoningEfforts.includes(selection.reasoningEffort)
-                    ? selection.reasoningEffort
-                    : undefined
-                }
-                placeholder="暂无可选深度"
-                disabled={
-                  subagentPolicyControlsDisabled ||
-                  roleDisabled ||
-                  reasoningEfforts.length === 0
-                }
-                optionList={reasoningOptions}
-                filter={false}
-                onChange={(value) =>
-                  updateRole({
-                    model: selectedModel?.value ?? selection.model,
-                    reasoningEffort: String(value ?? ""),
-                  })
-                }
-              />
-            </div>
-          </div>
         </div>
       </div>
     );
@@ -317,7 +314,7 @@ export function SubagentPolicyCardComponent({
         <div className="module-card-body subagent-policy-body">
           {config.subagentOptimization ? (
             <>
-              <div className="subagent-group-card codey-card">
+              <div className="subagent-group-card subagent-group-card--default codey-card">
                 {renderRoleCard(DEFAULT_SUBAGENT_TASK)}
               </div>
               <div className="subagent-group-card codey-card">
@@ -335,6 +332,12 @@ export function SubagentPolicyCardComponent({
                   <span className="subagent-group-desc">
                     负责定位、跨文件检索及界面核验，可按任务授权调用工具
                   </span>
+                </div>
+                <div className="subagent-table-head" aria-hidden="true">
+                  <span>角色</span>
+                  <span>模型</span>
+                  <span>思考深度</span>
+                  <span>启用</span>
                 </div>
                 <div className="subagent-group-items">
                   {analysisTasks.map(renderRoleCard)}
@@ -356,6 +359,12 @@ export function SubagentPolicyCardComponent({
                   <span className="subagent-group-desc">
                     负责前端界面与逻辑实现，受父任务权限约束
                   </span>
+                </div>
+                <div className="subagent-table-head" aria-hidden="true">
+                  <span>角色</span>
+                  <span>模型</span>
+                  <span>思考深度</span>
+                  <span>启用</span>
                 </div>
                 <div className="subagent-group-items">
                   {implementationTasks.map(renderRoleCard)}
@@ -505,7 +514,18 @@ function FeaturePolicyCardComponent({
           <p>客户端与 app-server 经此代理访问网络，重启 Codex 后生效；本地路由与额度查询不受影响。</p>
         </div>
         <div className={`feature-card launch-proxy-card ${launchProxy.trim() ? "active" : ""}`}>
-          <div className="feature-card-body">
+          <div className="feature-card-body launch-proxy-row">
+            <div className="launch-proxy-label">
+              <label htmlFor="codex-launch-proxy-input">代理地址</label>
+              <span
+                className={`launch-proxy-state ${
+                  launchProxyError ? "is-error" : launchProxy.trim() ? "is-active" : ""
+                }`}
+              >
+                {launchProxyError ? "格式错误" : launchProxy.trim() ? "已设置代理" : "直连"}
+              </span>
+            </div>
+            <div className="launch-proxy-field">
             <Input
               id="codex-launch-proxy-input"
               aria-label="Codex 启动代理"
@@ -556,6 +576,7 @@ function FeaturePolicyCardComponent({
                 留空不走代理
               </small>
             )}
+            </div>
           </div>
         </div>
       </section>
@@ -652,7 +673,7 @@ function FeaturePolicyCardComponent({
               <div className="feature-card-header">
                 <div className="feature-card-title">
                   <strong>FastCtx 上下文工具</strong>
-                  <Badge variant="brand">v0.2.6</Badge>
+                  <Badge variant="secondary" className="font-mono">v0.2.6</Badge>
                 </div>
                 {fastctxStatusBlocksEmbedded ? (
                   <Tooltip

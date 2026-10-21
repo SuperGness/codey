@@ -125,6 +125,7 @@
     --success: #34c759;
     --warning: #ff9500;
     --background: #ffffff;
+    --field-radius: 8px;
     --field-shadow: 0 0 0 0 transparent;
     --field-border: rgba(0, 0, 0, 0.12);
     --field-border-hover: rgba(0, 0, 0, 0.24);
@@ -139,6 +140,7 @@
     --success: #4bd26d;
     --warning: #ffb340;
     --background: #202024;
+    --field-radius: 8px;
     --field-shadow: 0 0 0 0 transparent;
     --field-border: rgba(255, 255, 255, 0.18);
     --field-border-hover: rgba(255, 255, 255, 0.32);

@@ -19,7 +19,7 @@ if (import.meta.env.DEV) {
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <UiProvider>
-      <App />
+      <App embedded={import.meta.env.DEV && new URLSearchParams(window.location.search).has("embedded")} />
     </UiProvider>
   </React.StrictMode>,
 );

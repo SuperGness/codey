@@ -81,25 +81,6 @@
     gap: 10px;
   }
 
-  .route-auxiliary-misc {
-    width: 100%;
-    flex-wrap: wrap;
-  }
-
-  .route-auxiliary-combobox {
-    width: 100%;
-    flex: 1 1 100%;
-  }
-
-  .route-auxiliary-retry {
-    width: 100%;
-  }
-
-  .route-auxiliary-retry .local-router-toggle {
-    width: 100%;
-    justify-content: space-between;
-  }
-
   .provider-model-tags,
   .route-manager-current .provider-model-tags,
   .provider-model-group .provider-model-empty,

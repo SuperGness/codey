@@ -64,7 +64,7 @@ import type {
   Notice,
   Profile,
 } from "./App.types";
-import { Badge, Button, Tooltip } from "./components/ui";
+import { Button, Tooltip } from "./components/ui";
 
 const Check = IconCheck;
 const extensionRequest: ExtensionTransport = request => invoke("codex_extensions", { request });
@@ -1364,111 +1364,203 @@ export function App({
           ? `${updateResult.text}（点击再次检查）`
           : "检查 Codey 在线更新";
 
-  const configHeaderContent = (
-    <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-5 max-[760px]:grid-cols-[minmax(0,1fr)_auto_auto] max-[760px]:gap-2.5">
-      <div className="flex min-w-0 items-center gap-3 justify-self-start max-[760px]:gap-2">
-        <CodeyBrandMark />
-        <div className="flex min-w-0 flex-col">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <h1 className="m-0 whitespace-nowrap text-base font-bold tracking-[-0.02em] text-[var(--codey-text,#1d1d1f)]">Codey 控制台</h1>
-            {dirty && (
-              <Badge variant="warning">
-                未保存更改
-              </Badge>
-            )}
-          </div>
-          <p className="m-0 mt-0.5 text-[11px] text-[var(--codey-muted,#6e6e73)] max-[760px]:hidden">管理 Codex 线路、模型服务、运行策略与诊断日志</p>
-        </div>
-      </div>
+  const codexStatusText = restartStatusError
+    ? "状态未知"
+    : status.restartInProgress
+      ? "正在重启"
+      : status.running
+        ? "运行中"
+        : "未运行";
+  const codexStatusTone = restartStatusError
+    ? "warning"
+    : status.restartInProgress
+      ? "pending"
+      : status.running
+        ? "running"
+        : "stopped";
 
-      {embedded && (
-        <div className="flex items-center gap-3 justify-self-center max-[760px]:gap-2">
-          <div className="config-header-feedback">
-            <Button
-              aria-describedby="codey-feedback-qr-description"
-              aria-label="问题反馈群，鼠标悬停或键盘聚焦查看二维码"
-              className="h-8! whitespace-nowrap px-3.5 text-xs max-[760px]:w-8! max-[760px]:px-0!"
-              variant="brand-outline"
-            >
-              <IconMessageCircleQuestion aria-hidden="true" />
-              <span className="max-[760px]:hidden">问题反馈群</span>
-            </Button>
-            <div className="feedback-qr-popover" role="tooltip">
-              <img src={feedbackGroupQrUrl} alt="问题反馈群二维码" />
-              <span id="codey-feedback-qr-description">扫码加入问题反馈群</span>
-            </div>
-          </div>
-          <Button
-            aria-label="打开 Codey GitHub 仓库"
-            className="h-8! w-8! min-w-8! px-0!"
-            onClick={() => window.open("https://github.com/SuperGness/codey", "_blank", "noopener,noreferrer")}
-            size="icon-sm"
-            title="GitHub 仓库"
-            variant="brand-outline"
-          >
-            <IconBrandGithub aria-hidden="true" />
-          </Button>
-        </div>
-      )}
-
-      <div className="flex min-w-0 items-center gap-4 justify-self-end">
-        <div className="flex items-center gap-2">
-          {embedded && (
-            <Button
-              aria-label={restartStatusError ? "重新查询状态" : status.running ? "重启 Codex" : "Codex 未运行"}
-              className="h-8! whitespace-nowrap px-3 text-xs max-[520px]:w-8! max-[520px]:px-0!"
-              disabled={isBusy || (!restartStatusError && (status.restartInProgress || !status.running))}
-              onClick={handleRestartCodex}
-              variant="warning"
-            >
-              {busy === "restart" || (status.restartInProgress && !restartStatusError) ? (
-                <LoaderCircle className="animate-spin" size={14} aria-hidden="true" />
-              ) : (
-                <RefreshCw size={14} aria-hidden="true" />
-              )}
-              <span className="max-[520px]:hidden">
-                {restartStatusError ? "重新查询状态" : status.running ? "重启 Codex" : "未运行"}
-              </span>
-            </Button>
-          )}
-          <Button
-            aria-label={dirty ? "保存更改" : "已保存"}
-            className="h-8! min-w-[84px] px-3 text-xs max-[520px]:min-w-8! max-[520px]:w-8! max-[520px]:px-0!"
-            disabled={!dirty || isBusy}
-            onClick={handleSaveCurrent}
-            variant={dirty ? "default" : "secondary"}
-          >
-            {busy === "save" ? (
-              <LoaderCircle className="animate-spin" size={14} aria-hidden="true" />
-            ) : dirty ? (
-              <Save size={14} aria-hidden="true" />
-            ) : (
-              <Check size={14} aria-hidden="true" />
-            )}
-            <span className="max-[520px]:hidden">
-              {dirty ? "保存更改" : "已保存"}
-            </span>
-          </Button>
-          {embedded && (
-            <Button
-              aria-label="关闭配置"
-              className="size-8! flex-none p-0! rounded-full! max-[520px]:size-8! max-[520px]:p-0!"
-              disabled={isBusy}
-              onClick={handleCloseSettings}
-              size="icon"
-              variant="ghost"
-            >
-              <X size={15} aria-hidden="true" />
-            </Button>
-          )}
-        </div>
+  const brand = (
+    <div className="sidebar-brand">
+      <CodeyBrandMark />
+      <div className="sidebar-brand-text">
+        <h1>Codey</h1>
+        <span>控制台</span>
       </div>
     </div>
   );
 
+  const saveButton = (
+    <Button
+      aria-label={dirty ? "保存更改" : "已保存"}
+      className="sidebar-save-button"
+      disabled={!dirty || isBusy}
+      onClick={handleSaveCurrent}
+      variant={dirty ? "default" : "secondary"}
+    >
+      {busy === "save" ? (
+        <LoaderCircle className="animate-spin" size={14} aria-hidden="true" />
+      ) : dirty ? (
+        <Save size={14} aria-hidden="true" />
+      ) : (
+        <Check size={14} aria-hidden="true" />
+      )}
+      <span>{dirty ? "保存更改" : "已保存"}</span>
+    </Button>
+  );
+
+  const restarting = busy === "restart" || (status.restartInProgress && !restartStatusError);
+  const waitingForRestart = !restartStatusError && !restarting && status.restartRequired === true;
+  const restartButtonText = restartStatusError
+    ? "重新查询"
+    : restarting ? "正在重启" : waitingForRestart ? "等待重启" : "重启";
+  const restartButtonLabel = restartStatusError
+    ? "重新查询状态"
+    : restarting ? "正在重启 Codex"
+      : waitingForRestart ? "等待重启 Codex，点击重启以应用配置"
+        : status.running ? "重启 Codex" : "Codex 未运行";
+
+  const restartButton = (
+    <Button
+      aria-label={restartButtonLabel}
+      title={restartButtonLabel}
+      className={`codex-status-action${waitingForRestart ? " is-warning" : ""}`}
+      disabled={isBusy || (!restartStatusError && (status.restartInProgress || !status.running))}
+      onClick={handleRestartCodex}
+      size="sm"
+      variant="ghost"
+    >
+      {restarting ? (
+        <LoaderCircle className="animate-spin" size={13} aria-hidden="true" />
+      ) : (
+        <RefreshCw size={13} aria-hidden="true" />
+      )}
+      <span>{restartButtonText}</span>
+    </Button>
+  );
+
+  const sidebarFooter = (
+    <>
+      {embedded && (
+        <div className={`codex-status-card is-${codexStatusTone}`}>
+          <span className="codex-status-dot" aria-hidden="true" />
+          <div className="codex-status-text">
+            <strong>Codex</strong>
+            <span>{codexStatusText}</span>
+          </div>
+          {restartButton}
+        </div>
+      )}
+      <div className="sidebar-save">
+        {dirty && (
+          <span className="sidebar-dirty-hint" role="status">
+            <span aria-hidden="true" />
+            有未保存的更改
+          </span>
+        )}
+        {saveButton}
+      </div>
+      <div className="sidebar-footer-bar">
+        <div className="sidebar-footer-left">
+          <span className="sidebar-footer-version font-mono">
+            v{status.appVersion || "0.0.1"}
+            {(updateCheck?.updateAvailable === true || Boolean(downloadedUpdate)) && (
+              <span
+                className="ml-1.5 inline-flex shrink-0"
+                role="img"
+                aria-label={downloadedUpdate ? "新版本已下载，待安装" : "有新版本可用"}
+                title={downloadedUpdate ? "新版本已下载，待安装" : "有新版本可用"}
+              >
+                <span className="size-1.5 rounded-full bg-[var(--codey-red)]" aria-hidden="true" />
+              </span>
+            )}
+          </span>
+          <Tooltip content={updateTooltipText} position="top">
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              className="sidebar-footer-icon-btn"
+              disabled={isBusy && !isCheckingUpdate}
+              aria-label={updateTooltipText}
+              onClick={handleFooterUpdateClick}
+            >
+              {isCheckingUpdate || isDownloadingUpdate || isInstallingUpdate ? (
+                <LoaderCircle className="animate-spin" size={14} aria-hidden="true" />
+              ) : downloadedUpdate ? (
+                <IconCheck size={14} className="text-success" aria-hidden="true" />
+              ) : hasUpdate ? (
+                <span className="relative inline-flex items-center justify-center">
+                  <IconCircleArrowUp size={15} className="text-primary" aria-hidden="true" />
+                  <span className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-primary animate-pulse" />
+                </span>
+              ) : (
+                <IconCircleArrowUp size={15} aria-hidden="true" />
+              )}
+            </Button>
+          </Tooltip>
+        </div>
+
+        <div className="sidebar-footer-right">
+          {embedded && (
+            <>
+              <div className="config-header-feedback">
+                <Button
+                  aria-describedby="codey-feedback-qr-description"
+                  aria-label="问题反馈群，鼠标悬停或键盘聚焦查看二维码"
+                  className="sidebar-footer-icon-btn"
+                  size="icon-sm"
+                  variant="ghost"
+                >
+                  <IconMessageCircleQuestion size={15} aria-hidden="true" />
+                </Button>
+                <div className="feedback-qr-popover" role="tooltip">
+                  <img src={feedbackGroupQrUrl} alt="问题反馈群二维码" />
+                  <span id="codey-feedback-qr-description">扫码加入问题反馈群</span>
+                </div>
+              </div>
+              <Tooltip content="GitHub 仓库" position="top">
+                <Button
+                  aria-label="打开 Codey GitHub 仓库"
+                  className="sidebar-footer-icon-btn"
+                  onClick={() => window.open("https://github.com/SuperGness/codey", "_blank", "noopener,noreferrer")}
+                  size="icon-sm"
+                  variant="ghost"
+                >
+                  <IconBrandGithub size={15} aria-hidden="true" />
+                </Button>
+              </Tooltip>
+            </>
+          )}
+          <Tooltip content="系统设置与偏好" position="top">
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              className="sidebar-footer-icon-btn"
+              aria-label="系统设置与偏好"
+              onClick={() => setSystemSettingsOpen(true)}
+            >
+              <IconSettings size={15} aria-hidden="true" />
+            </Button>
+          </Tooltip>
+        </div>
+      </div>
+    </>
+  );
+
   const appContent = (
     <main className={`app-shell${embedded ? " embedded" : ""}`}>
-      <a className="skip-link" href={usageAnalysisOpen ? "#usage-analysis-title" : "#codey-settings-content"}>
+      <a
+        className="skip-link"
+        href={usageAnalysisOpen ? "#usage-analysis-title" : "#codey-settings-content"}
+        onClick={(event) => {
+          // 页内锚点无法跨越 ShadowRoot，直接在当前控制台内移动焦点。
+          const target = event.currentTarget.closest(".app-shell")?.querySelector<HTMLElement>(
+            usageAnalysisOpen ? "#usage-analysis-title" : "#codey-settings-content",
+          );
+          if (!target) return;
+          event.preventDefault();
+          target.focus();
+        }}
+      >
         {usageAnalysisOpen ? "跳至用量分析" : "跳至设置内容"}
       </a>
 
@@ -1504,13 +1596,20 @@ export function App({
         </div>
       )}
 
-      {!embedded && (
-        <header className="z-30 flex flex-col border-b border-[rgb(var(--codey-ink-rgb,0,0,0))]/8 bg-[var(--codey-surface,#fff)]/75 px-5 py-2.5 backdrop-blur-xl shadow-[0_3px_8px_rgba(0,0,0,0.04),0_1px_2px_rgba(0,0,0,0.02)]">
-          {configHeaderContent}
-        </header>
+      {embedded && (
+        <Button
+          aria-label="关闭配置"
+          className="settings-close-button"
+          disabled={isBusy}
+          onClick={handleCloseSettings}
+          size="icon"
+          variant="ghost"
+        >
+          <X size={16} aria-hidden="true" />
+        </Button>
       )}
 
-      {status.configApply && (
+      {status.configApply && (status.configApply.state !== "restart_required" || configApplyError) && (
         <div role={status.configApply.state === "failed" || configApplyError ? "alert" : "status"}
           className="flex flex-wrap items-center gap-2 border-b border-[rgb(var(--codey-ink-rgb,0,0,0))]/8 px-5 py-2 text-xs">
           {status.configApply.state === "pending" && !configApplyError && <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />}
@@ -1520,68 +1619,20 @@ export function App({
       )}
 
       {usageAnalysisOpen ? (
-        <div className="page-scroll">
-          <UsageAnalysisPanel onBack={() => setUsageAnalysisOpen(false)} />
-        </div>
+        <>
+          <div className="usage-analysis-topbar">
+            {brand}
+            <div className="usage-analysis-topbar-actions">{saveButton}</div>
+          </div>
+          <div className="page-scroll">
+            <UsageAnalysisPanel onBack={() => setUsageAnalysisOpen(false)} />
+          </div>
+        </>
       ) : (
       <SettingsLayout
+        brand={brand}
         contentRef={settingsScroll}
-        sidebarFooter={
-          <div className="sidebar-footer-bar">
-            <div className="sidebar-footer-left">
-              <span className="sidebar-footer-version font-mono">
-                v{status.appVersion || "0.0.1"}
-                {(updateCheck?.updateAvailable === true || Boolean(downloadedUpdate)) && (
-                  <span
-                    className="ml-1.5 inline-flex shrink-0"
-                    role="img"
-                    aria-label={downloadedUpdate ? "新版本已下载，待安装" : "有新版本可用"}
-                    title={downloadedUpdate ? "新版本已下载，待安装" : "有新版本可用"}
-                  >
-                    <span className="size-1.5 rounded-full bg-[var(--codey-red)]" aria-hidden="true" />
-                  </span>
-                )}
-              </span>
-              <Tooltip content={updateTooltipText} position="top">
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  className="sidebar-footer-icon-btn"
-                  disabled={isBusy && !isCheckingUpdate}
-                  aria-label={updateTooltipText}
-                  onClick={handleFooterUpdateClick}
-                >
-                  {isCheckingUpdate || isDownloadingUpdate || isInstallingUpdate ? (
-                    <LoaderCircle className="animate-spin" size={14} aria-hidden="true" />
-                  ) : downloadedUpdate ? (
-                    <IconCheck size={14} className="text-success" aria-hidden="true" />
-                  ) : hasUpdate ? (
-                    <span className="relative inline-flex items-center justify-center">
-                      <IconCircleArrowUp size={15} className="text-primary" aria-hidden="true" />
-                      <span className="absolute -top-0.5 -right-0.5 size-1.5 rounded-full bg-primary animate-pulse" />
-                    </span>
-                  ) : (
-                    <IconCircleArrowUp size={15} aria-hidden="true" />
-                  )}
-                </Button>
-              </Tooltip>
-            </div>
-
-            <div className="sidebar-footer-right">
-              <Tooltip content="系统设置与偏好" position="top">
-                <Button
-                  size="icon-sm"
-                  variant="ghost"
-                  className="sidebar-footer-icon-btn"
-                  aria-label="系统设置与偏好"
-                  onClick={() => setSystemSettingsOpen(true)}
-                >
-                  <IconSettings size={15} aria-hidden="true" />
-                </Button>
-              </Tooltip>
-            </div>
-          </div>
-        }
+        sidebarFooter={sidebarFooter}
         sections={{
           overview: (
             <>
@@ -1739,11 +1790,7 @@ export function App({
     <SettingsModalShell
       afterClose={onAfterClose}
       container={modalContainer}
-      header={
-        <div className="flex w-full items-center overflow-visible">
-          {configHeaderContent}
-        </div>
-      }
+      header={null}
       onCancel={handleCloseSettings}
       visible={modalVisible}
     >

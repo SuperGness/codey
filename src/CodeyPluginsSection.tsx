@@ -16,7 +16,6 @@ import { invoke } from "./api";
 import { errorText } from "./appUtils";
 import { cn, toast } from "@heroui/react";
 import {
-  Badge,
   Button,
   Checkbox,
   Dialog,
@@ -53,6 +52,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
     if (text) toast.warning(text);
   }, []);
   const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<"all" | "enabled" | "disabled">("all");
   const [importOpen, setImportOpen] = useState(false);
   const [importError, setImportError] = useState("");
   const [preview, setPreview] = useState<CodeyPluginPreview | null>(null);
@@ -326,14 +326,17 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
   const filteredPlugins = useMemo(() => {
     if (!result?.plugins) return [];
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return result.plugins;
-    return result.plugins.filter((p) =>
+    const byStatus = statusFilter === "all"
+      ? result.plugins
+      : result.plugins.filter((p) => p.enabled === (statusFilter === "enabled"));
+    if (!q) return byStatus;
+    return byStatus.filter((p) =>
       p.name.toLowerCase().includes(q) ||
       p.id.toLowerCase().includes(q) ||
       (p.description && p.description.toLowerCase().includes(q)) ||
       (p.capabilities && p.capabilities.some((c) => c.toLowerCase().includes(q)))
     );
-  }, [result?.plugins, searchQuery]);
+  }, [result?.plugins, searchQuery, statusFilter]);
 
   const upgrading = preview
     ? result?.plugins.find((plugin) => plugin.id === preview.manifest.id)
@@ -378,13 +381,15 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
         aria-label="插件文件拖放区域"
         aria-busy={Boolean(importStep)}
         className={cn(
-          "mb-4 flex items-center gap-3 rounded-xl border border-dashed p-4 text-xs transition-colors",
+          "mb-5 flex items-center gap-3.5 rounded-[14px] border border-dashed px-4 py-3.5 text-xs transition-colors",
           dragActive
             ? "border-blue-500 bg-blue-500/10 text-blue-600 ring-2 ring-blue-500/20 dark:text-blue-400"
-            : "border-default bg-default/20 text-muted",
+            : "border-[var(--codey-border-strong)] text-muted",
         )}
       >
-        {importStep ? <IconRefresh size={22} className="shrink-0 animate-spin" aria-hidden="true" /> : <IconFilePlus size={22} className="shrink-0" aria-hidden="true" />}
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-[10px] bg-accent/10 text-accent">
+          {importStep ? <IconRefresh size={18} className="animate-spin" aria-hidden="true" /> : <IconFilePlus size={18} aria-hidden="true" />}
+        </span>
         <div className="min-w-0" role="status" aria-live="polite">
           <div className="font-medium text-foreground">
             {importStep === "installing" ? "正在导入插件…" : importStep === "checking" ? "正在读取并检查插件包…" : dragActive ? "松开文件，检查并导入插件包" : "将插件包拖到此页面，或点击「导入插件包」"}
@@ -394,21 +399,32 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
       </div>
       {importResult && <div role="status" className="mb-4 rounded-xl border border-green-500/25 bg-green-500/10 p-3 text-xs text-green-700 dark:text-green-300">{importResult}</div>}
 
-      {/* 顶部统计与工具栏 */}
-      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
-          {loading ? (
+      {/* 顶部筛选与搜索 */}
+      <div className="mb-4 flex flex-col-reverse gap-3 sm:flex-row sm:items-center">
+        <div className="flex min-h-8 flex-1 flex-wrap items-center gap-2 text-xs text-muted">
+          {loading && !result ? (
             <span>正在读取插件…</span>
           ) : result ? (
             <>
-              <Badge variant="secondary" className="font-normal">
-                共 {result.plugins.length} 个插件
-              </Badge>
-              <Badge variant="success" className="font-normal">
-                已启用 {result.plugins.filter((p) => p.enabled).length} 个
-              </Badge>
-              <span className="hidden text-muted/40 sm:inline">·</span>
-              <span className="font-mono text-muted/75">
+              <div className="extension-status-chips" role="group" aria-label="插件状态筛选">
+                {([
+                  ["all", "全部", result.plugins.length],
+                  ["enabled", "已启用", result.plugins.filter((p) => p.enabled).length],
+                  ["disabled", "未启用", result.plugins.filter((p) => !p.enabled).length],
+                ] as const).map(([value, label, count]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    aria-pressed={statusFilter === value}
+                    className={`extension-status-chip is-${value}`}
+                    onClick={() => setStatusFilter(value)}
+                  >
+                    <span>{label}</span>
+                    <span className="extension-status-chip-count">{count}</span>
+                  </button>
+                ))}
+              </div>
+              <span className="ml-auto font-mono text-[11px] text-muted/75" title="当前客户端平台">
                 {result.platform} / {result.arch}
               </span>
             </>
@@ -417,7 +433,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
           )}
         </div>
 
-        <div className="relative min-w-[200px] flex-1 sm:w-60">
+        <div className="relative min-w-[200px] sm:w-64">
           <Input
             aria-label="搜索插件"
             placeholder="搜索插件名称、ID 或能力…"
@@ -439,16 +455,27 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
 
       {/* 插件卡片网格 */}
       {filteredPlugins.length === 0 ? (
-        known && !loading && <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-default py-14 text-center">
-          <div className="mb-3 flex size-12 items-center justify-center rounded-2xl bg-default/40 text-muted">
+        known && !loading && <div className="codey-card flex flex-col items-center justify-center px-6 py-16 text-center">
+          <div className="mb-3.5 flex size-12 items-center justify-center rounded-[14px] bg-accent/10 text-accent">
             <IconPuzzle size={24} stroke={1.5} />
           </div>
-          {searchQuery ? (
+          {searchQuery || statusFilter !== "all" ? (
             <>
               <h4 className="m-0 text-sm font-semibold text-foreground">未找到匹配的插件</h4>
-              <p className="mb-3 mt-1 text-xs text-muted">没有符合「{searchQuery}」的插件，请尝试其他关键词。</p>
-              <Button size="xs" variant="outline" onClick={() => setSearchQuery("")}>
-                清除搜索
+              <p className="mb-3 mt-1 text-xs text-muted">
+                {searchQuery
+                  ? `没有符合「${searchQuery}」的插件，请尝试其他关键词。`
+                  : `当前没有${statusFilter === "enabled" ? "已启用" : "未启用"}的插件。`}
+              </p>
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={() => {
+                  setSearchQuery("");
+                  setStatusFilter("all");
+                }}
+              >
+                清除筛选
               </Button>
             </>
           ) : (
@@ -472,16 +499,16 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
             return (
               <article
                 key={plugin.id}
-                className="codey-card flex flex-col justify-between"
+                className={`codey-card codey-plugin-card flex flex-col justify-between${plugin.enabled ? " is-enabled" : ""}`}
               >
                 <div className="p-5">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex items-start gap-3 min-w-0 flex-1">
                       <div
-                        className={`flex size-10 shrink-0 items-center justify-center rounded-xl transition-colors ${
+                        className={`flex size-11 shrink-0 items-center justify-center rounded-[13px] transition-colors ${
                           plugin.enabled
-                            ? "bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400 ring-1 ring-blue-500/20"
-                            : "bg-default/40 text-muted"
+                            ? "bg-accent text-white shadow-[0_4px_12px_-4px_var(--accent)]"
+                            : "bg-default/50 text-muted"
                         }`}
                       >
                         <IconPuzzle size={20} stroke={1.8} aria-hidden="true" />
@@ -544,6 +571,9 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
                       </div>
                     </div>
                     <div className="flex items-center gap-2.5 shrink-0">
+                      <span className={`codey-plugin-state${plugin.enabled ? " is-on" : ""}`}>
+                        {plugin.enabled ? "已启用" : "未启用"}
+                      </span>
                       <Switch
                         size="sm"
                         checked={plugin.enabled}
@@ -571,7 +601,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
                       {plugin.capabilities.map((cap) => (
                         <span
                           key={cap}
-                          className="inline-flex items-center rounded-md bg-default/40 px-2 py-0.5 text-[11px] text-muted"
+                          className="inline-flex items-center rounded-full border border-default bg-default/20 px-2 py-0.5 font-mono text-[10.5px] text-muted"
                         >
                           {cap}
                         </span>
@@ -592,7 +622,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-black/[0.06] bg-black/[0.015] px-5 py-2.5 dark:border-white/[0.06] dark:bg-white/[0.02]">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-default/70 px-4 py-2">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="whitespace-nowrap text-[11px] text-muted" title="当前日志及轮转备份的大小，刷新列表时更新">
                       日志 {plugin.logSizeBytes == null ? "大小未知" : formatBytes(plugin.logSizeBytes)}
@@ -634,10 +664,10 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
                     ) : null}
                   </div>
 
-                  <div className="flex items-center gap-1.5 ml-auto">
+                  <div className="flex items-center gap-0.5 ml-auto">
                     <Button
                       size="icon-sm"
-                      variant="outline"
+                      variant="ghost"
                       disabled={blocked}
                       title="在本机终端查看日志"
                       aria-label={`在本机终端查看 ${plugin.name} 的日志`}
@@ -657,7 +687,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
 
                     <Button
                       size="icon-sm"
-                      variant="outline"
+                      variant="ghost"
                       disabled={blocked}
                       title="在文件管理器中打开插件目录"
                       aria-label={`打开 ${plugin.name} 的插件目录`}
@@ -672,7 +702,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
 
                     <Button
                       size="icon-sm"
-                      variant="outline"
+                      variant="ghost"
                       disabled={blocked}
                       title="插件配置"
                       aria-label={`配置 ${plugin.name}`}
@@ -683,7 +713,8 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
 
                     <Button
                       size="icon-sm"
-                      variant="destructive-light"
+                      variant="ghost"
+                      className="text-muted hover:text-danger"
                       disabled={blocked || plugin.enabled}
                       title={plugin.enabled ? "请先停用插件再卸载" : "卸载插件"}
                       aria-label={`卸载 ${plugin.name}`}

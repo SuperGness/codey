@@ -1,4 +1,8 @@
-import type { ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+
+// 各页继续拥有标题内容和操作状态，由公共布局把标题放到正文滚动区外。
+export const SettingsPageHeaderTarget = createContext<HTMLElement | null | undefined>(undefined);
 
 type SettingsPageHeaderProps = {
   id: string;
@@ -17,7 +21,8 @@ export function SettingsPageHeader({
   badge,
   icon,
 }: SettingsPageHeaderProps) {
-  return (
+  const target = useContext(SettingsPageHeaderTarget);
+  const header = (
     <header className="settings-page-header">
       <div className="settings-page-header-main">
         {icon && (
@@ -36,4 +41,5 @@ export function SettingsPageHeader({
       {actions && <div className="settings-page-actions">{actions}</div>}
     </header>
   );
+  return target === undefined ? header : target ? createPortal(header, target) : null;
 }

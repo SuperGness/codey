@@ -2,12 +2,14 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Modal } from "@heroui/react";
 import { UNSAFE_PortalProvider } from "react-aria";
 import { useToastContainer } from "./components/ui";
+import codeyAppIcon from "../backend/icons/favicon.png?inline";
 
 type SettingsModalShellProps = {
   afterClose?: () => void;
   children: ReactNode;
   container?: HTMLElement | null;
-  header?: ReactNode;
+  /** 传 null 时不渲染标题栏，由内容自行提供标题与关闭入口。 */
+  header?: ReactNode | null;
   onCancel: () => void;
   title?: ReactNode;
   visible: boolean;
@@ -15,41 +17,15 @@ type SettingsModalShellProps = {
 
 export function CodeyBrandMark() {
   return (
-    <svg
-      className="block size-[38px] rounded-[10px] text-[var(--codey-blue,#007aff)] shadow-[0_1px_2px_rgba(0,122,255,0.12),0_4px_12px_rgba(0,122,255,0.14)] max-[760px]:size-8"
-      viewBox="0 0 350 350"
+    <img
+      className="codey-brand-mark block size-9"
+      src={codeyAppIcon}
+      alt=""
+      width={36}
+      height={36}
       aria-hidden="true"
-      focusable="false"
-    >
-      <defs>
-        <linearGradient
-          id="codey-brand-mark-gradient"
-          x1="0"
-          x2="1"
-          y1="0"
-          y2="1"
-        >
-          <stop offset="0%" stopColor="#ffffff" />
-          <stop offset="100%" stopColor="#e3efff" />
-        </linearGradient>
-      </defs>
-      <rect
-        x="0"
-        y="0"
-        width="350"
-        height="350"
-        rx="34"
-        fill="url(#codey-brand-mark-gradient)"
-      />
-      <path
-        d="M70 301c-16 0-24-18-13-30l73-77c8-8 8-20 0-28L65 101C50 86 57 61 78 57c9-2 18 1 25 8l91 91c18 18 18 46 0 64l-66 66c-6 6-2 15 7 15h183"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="22"
-      />
-    </svg>
+      draggable={false}
+    />
   );
 }
 
@@ -93,8 +69,8 @@ export function SettingsModalShell({
           aria-label="Codey 配置"
         >
           <AfterClose onUnmount={afterClose} />
-          {header !== undefined ? (
-            <div className="settings-modal-header relative z-10 flex flex-none items-center px-5 py-3">
+          {header === null ? null : header !== undefined ? (
+            <div className="settings-modal-header relative z-10 flex flex-none items-center py-2.5 pl-4 pr-3">
               {header}
             </div>
           ) : (

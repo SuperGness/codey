@@ -140,8 +140,8 @@ type ChipProps = React.ComponentProps<typeof Chip>;
 type BadgeVariant = "default" | "secondary" | "destructive" | "outline" | "success" | "warning" | "info" | "brand";
 export type BadgeProps = Omit<React.HTMLAttributes<HTMLSpanElement>, "color"> & { variant?: BadgeVariant };
 const badgeAppearance: Record<BadgeVariant, { color: ChipProps["color"]; variant: ChipProps["variant"] }> = {
-  default: { color: "accent", variant: "primary" },
-  brand: { color: "accent", variant: "primary" },
+  default: { color: "accent", variant: "soft" },
+  brand: { color: "accent", variant: "soft" },
   info: { color: "accent", variant: "soft" },
   secondary: { color: "default", variant: "secondary" },
   outline: { color: "default", variant: "tertiary" },
@@ -152,7 +152,7 @@ const badgeAppearance: Record<BadgeVariant, { color: ChipProps["color"]; variant
 export function Badge({ variant = "default", className, children, ...props }: BadgeProps) {
   const appearance = badgeAppearance[variant];
   return (
-    <Chip {...props} size="sm" color={appearance.color} variant={appearance.variant} className={cn("whitespace-nowrap px-2.5", className)}>
+    <Chip {...props} size="sm" color={appearance.color} variant={appearance.variant} className={cn("whitespace-nowrap px-1.5", className)}>
       {children}
     </Chip>
   );

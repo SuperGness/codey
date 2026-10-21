@@ -402,68 +402,41 @@ function OperationsPanelComponent({
       <div className="operations-panel">
         {/* 3列核心服务卡片 */}
         <div
-          className="operations-status-cards grid grid-cols-1 gap-2.5 sm:grid-cols-3 mb-3"
+          className="operations-status-cards"
           role="list"
           aria-label="核心服务状态"
         >
           {statusCards.map((item) => {
             const StatusIcon = item.icon;
             const isExpanded = activeCardTitle === item.title;
-            const badgeVariant =
-              item.tone === "destructive"
-                ? "destructive"
-                : item.tone === "warning"
-                  ? "warning"
-                  : item.tone === "success"
-                    ? "success"
-                    : "secondary";
 
             return (
               <button
                 key={item.title}
                 type="button"
-                className={`codey-card flex flex-col justify-between p-3.5 text-left transition-all cursor-pointer ${
-                  isExpanded
-                    ? "status-card-active border-blue-500 ring-2 ring-blue-500/20 shadow-xs"
-                    : "hover:border-default-foreground/20 hover:shadow-xs"
-                }`}
+                role="listitem"
+                className={`status-strip-item tone-${item.tone}${isExpanded ? " is-expanded" : ""}`}
                 onClick={() => toggleCard(item.title)}
                 aria-expanded={isExpanded}
                 aria-label={`${item.title}（${item.label}），点击${isExpanded ? "收起" : "展开"}`}
               >
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <div className="flex items-center gap-2">
-                    <div
-                      className={`flex size-7 shrink-0 items-center justify-center rounded-lg ${
-                        item.tone === "success"
-                          ? "bg-green-500/10 text-green-600 dark:bg-green-500/20 dark:text-green-400"
-                          : item.tone === "warning"
-                            ? "bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400"
-                            : item.tone === "destructive"
-                              ? "bg-red-500/10 text-red-600 dark:bg-red-500/20 dark:text-red-400"
-                              : "bg-blue-500/10 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400"
-                      }`}
-                      aria-hidden="true"
-                    >
-                      <StatusIcon size={15} />
-                    </div>
-                    <strong className="text-xs font-semibold text-foreground">{item.title}</strong>
-                  </div>
-                  <Badge variant={badgeVariant} className="text-[10.5px] px-1.5 py-0">
+                <span className="status-strip-head">
+                  <StatusIcon size={15} className="status-strip-icon" aria-hidden="true" />
+                  <strong>{item.title}</strong>
+                  <span className="status-strip-state">
+                    <span className="status-strip-dot" aria-hidden="true" />
                     {item.label}
-                  </Badge>
-                </div>
-                <p className="m-0 text-[11.5px] text-muted line-clamp-2 leading-relaxed">
-                  {item.description}
-                </p>
-                <div className="mt-2.5 flex items-center justify-between text-[11px] font-medium text-muted/70">
-                  <span>{isExpanded ? "收起诊断" : "查看诊断详情"}</span>
+                  </span>
+                </span>
+                <span className="status-strip-description">{item.description}</span>
+                <span className="status-strip-toggle">
+                  {isExpanded ? "收起诊断" : "查看诊断"}
                   {isExpanded ? (
-                    <IconChevronUp size={13} aria-hidden="true" />
+                    <IconChevronUp size={12} aria-hidden="true" />
                   ) : (
-                    <IconChevronDown size={13} aria-hidden="true" />
+                    <IconChevronDown size={12} aria-hidden="true" />
                   )}
-                </div>
+                </span>
               </button>
             );
           })}

@@ -38,6 +38,7 @@ function layoutHarness() {
     if (name === "react") return react;
     if (name === "react/jsx-runtime") return { jsx, jsxs: jsx };
     if (name === "@tabler/icons-react") return new Proxy({}, { get: () => "icon" });
+    if (name === "./SettingsPageHeader") return { SettingsPageHeaderTarget: { Provider: "header-provider" } };
     throw new Error(`unexpected import: ${name}`);
   }, exports);
 

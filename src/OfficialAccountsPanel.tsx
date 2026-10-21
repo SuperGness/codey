@@ -695,20 +695,6 @@ export function OfficialAccountsPanel({
                     }
                   : {})}
               >
-                {account.isDefault && (
-                  <span
-                    className={`official-account-default-corner${account.invalid ? " is-invalid" : officialAccountAvailable ? " is-ready" : " is-pending"}`}
-                    title={
-                      account.invalid
-                        ? "默认官方账号（凭据已失效）"
-                        : officialAccountAvailable
-                          ? "默认官方账号，Codex 以此账号登录"
-                          : "默认官方账号，Codex 重启后生效"
-                    }
-                  >
-                    默认
-                  </span>
-                )}
                 <div className="official-account-item-top">
                   <div className="official-account-item-left">
                     <div className="official-account-item-icon-pill" aria-hidden="true">
@@ -717,6 +703,20 @@ export function OfficialAccountsPanel({
                     <div className="official-account-main">
                       <div className="official-account-line">
                         <strong title={label}>{label}</strong>
+                        {account.isDefault && (
+                          <span
+                            className={`official-account-default-corner${account.invalid ? " is-invalid" : officialAccountAvailable ? " is-ready" : " is-pending"}`}
+                            title={
+                              account.invalid
+                                ? "默认官方账号（凭据已失效）"
+                                : officialAccountAvailable
+                                  ? "默认官方账号，Codex 以此账号登录"
+                                  : "默认官方账号，Codex 重启后生效"
+                            }
+                          >
+                            默认
+                          </span>
+                        )}
                         {plan && (
                           <span className={planTagClass(planType)}>
                             {isProPlan(planType) ? (
@@ -752,20 +752,6 @@ export function OfficialAccountsPanel({
                             </button>
                           </Tooltip>
                         )}
-                        {!account.invalid && !usageInvalid && (
-                          <Tooltip content={usageLoading ? "正在刷新额度…" : "刷新额度"}>
-                            <button
-                              type="button"
-                              className="official-account-usage-refresh-chip"
-                              disabled={disabled || usageLoading}
-                              aria-label={usageLoading ? "正在刷新额度" : "刷新额度"}
-                              onClick={() => void refreshUsage(account.id, true)}
-                            >
-                              <IconRefresh size={11} className={usageLoading ? "animate-spin" : undefined} aria-hidden="true" />
-                              <span>{usageLoading ? "正在刷新" : "刷新额度"}</span>
-                            </button>
-                          </Tooltip>
-                        )}
                       </div>
                     </div>
                   </div>
@@ -795,6 +781,22 @@ export function OfficialAccountsPanel({
                   )}
                 </div>
                 <div className="official-account-controls">
+                  {switchable && <span className="official-account-set-default-hint" aria-hidden="true">设为默认</span>}
+                  {!account.invalid && !usageInvalid && (
+                    <Tooltip content={usageLoading ? "正在刷新额度…" : "刷新额度"}>
+                      <Button
+                        variant="link"
+                        size="icon-sm"
+                        className="official-account-usage-refresh-btn"
+                        disabled={disabled || usageLoading}
+                        aria-label={usageLoading ? "正在刷新额度" : "刷新额度"}
+                        aria-busy={usageLoading}
+                        onClick={() => void refreshUsage(account.id, true)}
+                      >
+                        <IconRefresh size={14} className={usageLoading ? "animate-spin" : undefined} aria-hidden="true" />
+                      </Button>
+                    </Tooltip>
+                  )}
                   <Button
                     variant="link"
                     color="danger"

@@ -8,6 +8,7 @@ import {
   IconSparkles,
   IconUsersGroup,
 } from "@tabler/icons-react";
+import { SettingsPageHeaderTarget } from "./SettingsPageHeader";
 
 const SETTINGS_PAGES = [
   { id: "overview", title: "基础功能", icon: IconLayoutDashboard, group: "核心配置" },
@@ -19,16 +20,41 @@ const SETTINGS_PAGES = [
   { id: "skills", title: "Skill 管理", icon: IconBook2, group: "扩展生态" },
 ] as const;
 
+const SETTINGS_GROUPS = ["核心配置", "扩展生态"] as const;
+
 type SettingsPageId = (typeof SETTINGS_PAGES)[number]["id"];
 type SettingsSection = ReactNode | ((active: boolean) => ReactNode);
 
 type SettingsLayoutProps = {
+  brand?: ReactNode;
   sections: Record<SettingsPageId, SettingsSection>;
   sidebarFooter?: ReactNode;
   contentRef?: RefObject<HTMLDivElement | null>;
 };
 
-export function SettingsLayout({ sections, sidebarFooter, contentRef }: SettingsLayoutProps) {
+function SettingsPageContent({ children, contentRef, labelledBy }: {
+  children: ReactNode;
+  contentRef?: RefObject<HTMLDivElement | null>;
+  labelledBy: string;
+}) {
+  const [headerTarget, setHeaderTarget] = useState<HTMLDivElement | null>(null);
+
+  return (
+    <SettingsPageHeaderTarget.Provider value={headerTarget}>
+      <div className="settings-page-header-host" ref={setHeaderTarget} />
+      <div
+        ref={contentRef}
+        className="settings-page-scroll page-scroll"
+        aria-labelledby={labelledBy}
+        tabIndex={0}
+      >
+        <div className="page">{children}</div>
+      </div>
+    </SettingsPageHeaderTarget.Provider>
+  );
+}
+
+export function SettingsLayout({ brand, sections, sidebarFooter, contentRef }: SettingsLayoutProps) {
   const [activePage, setActivePage] = useState<SettingsPageId>("overview");
   const [visitedPages, setVisitedPages] = useState<ReadonlySet<SettingsPageId>>(
     () => new Set(["overview"]),
@@ -40,54 +66,33 @@ export function SettingsLayout({ sections, sidebarFooter, contentRef }: Settings
     setActivePage(page);
   }
 
-  const corePages = SETTINGS_PAGES.filter((p) => p.group === "核心配置");
-  const extensionPages = SETTINGS_PAGES.filter((p) => p.group === "扩展生态");
-
   return (
     <div className="settings-layout">
       <nav className="settings-sidebar" aria-label="配置功能菜单">
+        {brand && <div className="settings-sidebar-header">{brand}</div>}
         <div className="settings-sidebar-menu">
-        <div className="settings-nav-group">
-          <div className="settings-nav-group-title">核心配置</div>
-          {corePages.map((page) => {
-            const Icon = page.icon;
-            return (
-              <button
-                key={page.id}
-                id={`${id}-menu-${page.id}`}
-                type="button"
-                className="settings-nav-item"
-                aria-current={activePage === page.id ? "page" : undefined}
-                aria-controls={`${id}-page-${page.id}`}
-                onClick={() => selectPage(page.id)}
-              >
-                <Icon size={16} stroke={1.8} aria-hidden="true" />
-                <span>{page.title}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="settings-nav-group">
-          <div className="settings-nav-group-title">扩展生态</div>
-          {extensionPages.map((page) => {
-            const Icon = page.icon;
-            return (
-              <button
-                key={page.id}
-                id={`${id}-menu-${page.id}`}
-                type="button"
-                className="settings-nav-item"
-                aria-current={activePage === page.id ? "page" : undefined}
-                aria-controls={`${id}-page-${page.id}`}
-                onClick={() => selectPage(page.id)}
-              >
-                <Icon size={16} stroke={1.8} aria-hidden="true" />
-                <span>{page.title}</span>
-              </button>
-            );
-          })}
-        </div>
+          {SETTINGS_GROUPS.map((group) => (
+            <div key={group} className="settings-nav-group">
+              <div className="settings-nav-group-title">{group}</div>
+              {SETTINGS_PAGES.filter((page) => page.group === group).map((page) => {
+                const Icon = page.icon;
+                return (
+                  <button
+                    key={page.id}
+                    id={`${id}-menu-${page.id}`}
+                    type="button"
+                    className="settings-nav-item"
+                    aria-current={activePage === page.id ? "page" : undefined}
+                    aria-controls={`${id}-page-${page.id}`}
+                    onClick={() => selectPage(page.id)}
+                  >
+                    <Icon size={16} stroke={1.75} aria-hidden="true" />
+                    <span>{page.title}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
         {sidebarFooter && <div className="settings-sidebar-footer">{sidebarFooter}</div>}
       </nav>
@@ -101,16 +106,17 @@ export function SettingsLayout({ sections, sidebarFooter, contentRef }: Settings
             <section
               key={page.id}
               id={`${id}-page-${page.id}`}
-              ref={active ? contentRef : undefined}
-              className="settings-page page-scroll"
+              className="settings-page"
               aria-labelledby={`${id}-menu-${page.id}`}
               hidden={!active}
-              tabIndex={0}
             >
               {visitedPages.has(page.id) && (
-                <div className="page">
+                <SettingsPageContent
+                  contentRef={active ? contentRef : undefined}
+                  labelledBy={`${id}-menu-${page.id}`}
+                >
                   {typeof content === "function" ? content(active) : content}
-                </div>
+                </SettingsPageContent>
               )}
             </section>
           );
