@@ -1618,15 +1618,16 @@ export function App({
         </div>
       )}
 
-      {usageAnalysisOpen ? (
+      {usageAnalysisOpen && (
         <>
           <UsageAnalysisHeader onBack={() => setUsageAnalysisOpen(false)} />
           <div className="page-scroll">
             <UsageAnalysisPanel />
           </div>
         </>
-      ) : (
+      )}
       <SettingsLayout
+        hidden={usageAnalysisOpen}
         brand={brand}
         contentRef={settingsScroll}
         sidebarFooter={sidebarFooter}
@@ -1726,7 +1727,6 @@ export function App({
           ),
         }}
       />
-      )}
 
       <NoticeToast controller={noticeController} />
 

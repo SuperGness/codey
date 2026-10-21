@@ -27,6 +27,7 @@ type SettingsSection = ReactNode | ((active: boolean) => ReactNode);
 
 type SettingsLayoutProps = {
   brand?: ReactNode;
+  hidden?: boolean;
   sections: Record<SettingsPageId, SettingsSection>;
   sidebarFooter?: ReactNode;
   contentRef?: RefObject<HTMLDivElement | null>;
@@ -54,7 +55,7 @@ function SettingsPageContent({ children, contentRef, labelledBy }: {
   );
 }
 
-export function SettingsLayout({ brand, sections, sidebarFooter, contentRef }: SettingsLayoutProps) {
+export function SettingsLayout({ brand, sections, sidebarFooter, contentRef, hidden = false }: SettingsLayoutProps) {
   const [activePage, setActivePage] = useState<SettingsPageId>("overview");
   const [visitedPages, setVisitedPages] = useState<ReadonlySet<SettingsPageId>>(
     () => new Set(["overview"]),
@@ -67,7 +68,7 @@ export function SettingsLayout({ brand, sections, sidebarFooter, contentRef }: S
   }
 
   return (
-    <div className="settings-layout">
+    <div className="settings-layout" hidden={hidden}>
       <nav className="settings-sidebar" aria-label="配置功能菜单">
         {brand && <div className="settings-sidebar-header">{brand}</div>}
         <div className="settings-sidebar-menu">
@@ -100,7 +101,7 @@ export function SettingsLayout({ brand, sections, sidebarFooter, contentRef }: S
       <div className="settings-content" id="codey-settings-content" tabIndex={-1}>
         {/* 首次访问时挂载模块，之后保留草稿、展开状态和异步加载结果。 */}
         {SETTINGS_PAGES.map((page) => {
-          const active = activePage === page.id;
+          const active = !hidden && activePage === page.id;
           const content = sections[page.id];
           return (
             <section

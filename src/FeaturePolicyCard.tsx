@@ -198,11 +198,19 @@ export function SubagentPolicyCardComponent({
           <div className="subagent-role-meta">
             <div className="subagent-role-title-row">
               <h4 className="subagent-role-name">{task.name}</h4>
+              <Tooltip content={task.description} position="top" asChild>
+                <button
+                  type="button"
+                  className="subagent-role-help"
+                  aria-label={`${task.name}说明`}
+                >
+                  <IconHelpCircle size={14} aria-hidden="true" />
+                </button>
+              </Tooltip>
               {roleDisabled && (
                 <span className="subagent-role-status-chip">已停用</span>
               )}
             </div>
-            <p className="subagent-role-description" title={task.description}>{task.description}</p>
           </div>
         </div>
 

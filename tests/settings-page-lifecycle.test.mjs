@@ -53,7 +53,7 @@ function layoutHarness() {
     }, []);
     return jsx("page-probe", { id, active, instance, draft, edit, expanded, expand, result, complete });
   }
-  function render() {
+  function render(hidden = false) {
     const seen = new Set();
     const cleanup = fiber => { fiber.mounted = false; fiber.hooks.forEach(hook => hook?.cleanup?.()); };
     function visit(node, path) {
@@ -71,10 +71,10 @@ function layoutHarness() {
       return { ...node, props: { ...node.props, children: visit(node.props.children, `${address}.children`) } };
     }
     // 每次父级更新都生成新的内容元素和 render callback，模拟 App 的实际调用。
-    const sections = Object.fromEntries(pages.map(id => [id, ["mcp", "skills"].includes(id)
+    const sections = Object.fromEntries(pages.map(id => [id, ["models", "mcp", "skills"].includes(id)
       ? active => { callbacks.push({ id, active }); return jsx(Page, { id, active }); }
       : jsx(Page, { id })]));
-    tree = visit(jsx(exports.SettingsLayout, { sections }), "root");
+    tree = visit(jsx(exports.SettingsLayout, { sections, hidden }), "root");
     for (const [address, fiber] of fibers) if (!seen.has(address)) { cleanup(fiber); fibers.delete(address); }
     for (const fiber of fibers.values()) for (const effect of fiber.effects.splice(0)) effect();
   }
@@ -140,4 +140,24 @@ test("visited render callbacks receive active=false while hidden and latest acti
   harness.select("mcp");
   assert.equal(harness.page("mcp").active, true);
   assert.equal(harness.page("skills").active, false);
+});
+
+test("returning from usage analysis restores the models page and its existing state", () => {
+  const harness = layoutHarness();
+  harness.select("models");
+  const models = harness.page("models");
+  models.edit("route-draft");
+  models.expand(true);
+
+  harness.render(true);
+  assert.equal(harness.find("div").find(node => node.props.className === "settings-layout").props.hidden, true);
+  assert.equal(harness.page("models").active, false);
+
+  harness.render(false);
+  assert.equal(harness.find("button").find(node => node.props["aria-current"] === "page").props.id, "settings-menu-models");
+  assert.equal(harness.page("models").instance, models.instance);
+  assert.equal(harness.page("models").draft, "route-draft");
+  assert.equal(harness.page("models").expanded, true);
+  assert.equal(harness.page("models").active, true);
+  assert.deepEqual(harness.unmounts, []);
 });

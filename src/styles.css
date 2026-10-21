@@ -735,6 +735,7 @@ button,
   overflow: hidden;
 }
 
+.settings-layout[hidden],
 .settings-page[hidden] {
   display: none;
 }
