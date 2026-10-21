@@ -1609,7 +1609,7 @@ export function App({
         </Button>
       )}
 
-      {status.configApply && (status.configApply.state !== "restart_required" || configApplyError) && (
+      {status.configApply && (status.configApply.state === "pending" || status.configApply.state === "failed" || configApplyError) && (
         <div role={status.configApply.state === "failed" || configApplyError ? "alert" : "status"}
           className="flex flex-wrap items-center gap-2 border-b border-[rgb(var(--codey-ink-rgb,0,0,0))]/8 px-5 py-2 text-xs">
           {status.configApply.state === "pending" && !configApplyError && <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />}

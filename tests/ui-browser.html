@@ -146,7 +146,7 @@
           restartInProgress: restartState === "restarting",
           configApply: {
             revision: restartRevision,
-            state: restartState === "failed" ? "failed" : restartState === "complete" ? "applied" : "restart_required",
+            state: ["pending", "saved", "failed"].includes(restartState) ? restartState : restartState === "complete" ? "applied" : "restart_required",
             error: restartState === "failed" ? "测试：配置应用失败" : undefined,
           },
         };
@@ -181,11 +181,21 @@
         if (!action().disabled || action().classList.contains("is-warning")) throw new Error("重启中的按钮状态错误");
         await waitFor(() => action()?.textContent.trim() === "重启" && !action().disabled);
         if (restartRequests !== 1 || action().classList.contains("is-warning")) throw new Error("重启完成后未恢复普通按钮");
+        if (shadow.textContent.includes("配置已保存并应用")) throw new Error("应用成功后仍显示保存横幅");
+        restartState = "pending";
+        restartRevision++;
+        window.dispatchEvent(new Event("codey-settings-opened"));
+        await waitFor(() => [...shadow.querySelectorAll('[role="status"]')].some(notice => notice.textContent.includes("配置已保存，正在应用")));
+        restartState = "saved";
+        restartRevision++;
+        window.dispatchEvent(new Event("codey-settings-opened"));
+        await waitFor(() => !shadow.textContent.includes("配置已保存，正在应用"));
+        if ([...shadow.querySelectorAll('[role="status"]')].some(notice => notice.textContent.includes("配置已保存"))) throw new Error("保存成功后仍显示保存横幅");
         restartState = "failed";
         restartRevision++;
         window.dispatchEvent(new Event("codey-settings-opened"));
         await waitFor(() => [...shadow.querySelectorAll('[role="alert"]')].some(alert => alert.textContent.includes("测试：配置应用失败")));
-        document.body.dataset.restartStateResult = "PASS：等待重启、确认、重启中、完成恢复及配置失败提示均正常";
+        document.body.dataset.restartStateResult = "PASS：等待重启及保存成功均无横幅，重启流程、应用中和失败提示正常";
       }
       if (new URLSearchParams(location.search).get("check") === "theme-sync") {
         const host = document.querySelector("#codey-settings-overlay-host");
