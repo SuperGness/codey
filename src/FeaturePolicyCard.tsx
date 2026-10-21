@@ -533,11 +533,11 @@ function FeaturePolicyCardComponent({
               aria-describedby={
                 launchProxyError
                   ? "codex-launch-proxy-error"
-                  : "codex-launch-proxy-description"
+                  : undefined
               }
               value={launchProxy}
               disabled={isBusy}
-              placeholder="例如 http://127.0.0.1:7890"
+              placeholder="留空不走代理，例如 http://127.0.0.1:7890"
               rightSection={
                 launchProxy ? (
                   <button
@@ -571,11 +571,7 @@ function FeaturePolicyCardComponent({
               >
                 {launchProxyError}
               </small>
-            ) : (
-              <small id="codex-launch-proxy-description">
-                留空不走代理
-              </small>
-            )}
+            ) : null}
             </div>
           </div>
         </div>
