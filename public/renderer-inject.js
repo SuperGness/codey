@@ -682,7 +682,7 @@
     const balance = credits.unlimited
       ? "不限"
       : credits.balance !== undefined && credits.balance !== null
-        ? String(credits.balance)
+        ? String(credits.balance).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "")
         : credits.hasCredits
           ? "可用"
           : "0";
