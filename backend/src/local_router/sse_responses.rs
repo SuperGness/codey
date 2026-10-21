@@ -440,10 +440,12 @@ impl<'a> ResponsesSseState<'a> {
             if tool.name.is_empty() {
                 anyhow::bail!("流式 function_call 缺少 name");
             }
+            // 名称可能在已发出后继续收到后缀，收尾时仍须校验完整名称。
+            let response_name = self
+                .tool_bridge
+                .restore_stream_upstream_name(&tool.name, true)?;
             if tool.response_name.is_none() {
-                tool.response_name = self
-                    .tool_bridge
-                    .restore_stream_upstream_name(&tool.name, true)?;
+                tool.response_name = response_name;
             }
             if tool.call_id.is_empty() {
                 tool.call_id = format!("call_codey_{}", Uuid::new_v4());

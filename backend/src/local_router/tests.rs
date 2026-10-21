@@ -8212,6 +8212,228 @@ fn namespace_response_names_restore_for_chat_and_anthropic_outputs() {
     assert_eq!(anthropic["output"][0]["namespace"], "fs");
 }
 
+fn dsml_namespace_tool_bridge() -> (ResponsesToolBridge, String) {
+    let converted = responses_to_chat_completions_request(&json!({
+        "model":"provider-model",
+        "input":"hello",
+        "tools":[{"type":"namespace","name":"agents","tools":[
+            {"type":"function","name":"wait_agent","parameters":{"type":"object"}}
+        ]}]
+    }))
+    .unwrap();
+    let upstream_name = converted.body["tools"][0]["function"]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        upstream_name,
+        "codey_ns__agents_wait_agent__05c0bf41c2c6afa4"
+    );
+    (converted.tool_bridge, upstream_name)
+}
+
+#[test]
+fn namespace_dsml_restores_logged_name_without_changing_arguments() {
+    let (bridge, upstream_name) = dsml_namespace_tool_bridge();
+    let malformed = format!("{upstream_name}</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name=");
+    for arguments in ["{\"timeout_ms\":30000}", "", "{invalid-json"] {
+        let response = chat_completion_to_responses_body_with_tool_bridge(
+            json!({"choices":[{"message":{"role":"assistant","tool_calls":[{
+                "id":"call-dsml","type":"function",
+                "function":{"name":malformed,"arguments":arguments}
+            }]},"finish_reason":"tool_calls"}]}),
+            "provider-model",
+            &bridge,
+        )
+        .unwrap();
+        assert_eq!(response["output"][0]["name"], "wait_agent");
+        assert_eq!(response["output"][0]["namespace"], "agents");
+        assert_eq!(response["output"][0]["arguments"], arguments);
+    }
+}
+
+#[test]
+fn namespace_dsml_streaming_handles_every_name_character_split() {
+    let (bridge, upstream_name) = dsml_namespace_tool_bridge();
+    let malformed = format!("{upstream_name}</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name=");
+    for split in malformed.char_indices().map(|(index, _)| index) {
+        let mut accumulator = ChatSseAccumulator::for_streaming("provider-model");
+        let mut stream = ResponsesSseState::new("provider-model", &bridge);
+        let mut events = Vec::new();
+        for (name, arguments) in [
+            (&malformed[..split], "{\"timeout_ms\":"),
+            (&malformed[split..], "30000}"),
+        ] {
+            accumulator
+                .ingest(&json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+                    "index":0,"id":"call-dsml","type":"function",
+                    "function":{"name":name,"arguments":arguments}
+                }]}}]}))
+                .unwrap();
+            events.extend(
+                stream
+                    .tool_delta(0, Some("call-dsml"), Some(name), Some(arguments), None)
+                    .unwrap(),
+            );
+        }
+        accumulator
+            .ingest(&json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}))
+            .unwrap();
+        let completed = chat_completion_to_responses_body_with_tool_bridge(
+            accumulator.into_chat_completion(true).unwrap(),
+            "provider-model",
+            &bridge,
+        )
+        .unwrap();
+        let added = events
+            .iter()
+            .filter(|event| event["type"] == "response.output_item.added")
+            .collect::<Vec<_>>();
+        assert_eq!(added.len(), 1, "split={split}");
+        assert_eq!(added[0]["item"]["name"], "wait_agent");
+        assert_eq!(added[0]["item"]["namespace"], "agents");
+        let streamed = stream_tool_item(stream.tools.get(&0).unwrap()).unwrap();
+        assert_eq!(streamed["name"], completed["output"][0]["name"]);
+        assert_eq!(streamed["namespace"], completed["output"][0]["namespace"]);
+        assert_eq!(streamed["arguments"], "{\"timeout_ms\":30000}");
+    }
+}
+
+#[test]
+fn namespace_dsml_rejects_unknown_names_and_incomplete_or_unknown_boundaries() {
+    let (bridge, upstream_name) = dsml_namespace_tool_bridge();
+    let unknown = namespaced_upstream_tool_name(&["other_agents".to_string()], "wait_agent");
+    for name in [
+        format!("{unknown}</｜｜DSML｜｜ parameter>"),
+        format!("{upstream_name}wrong</｜｜DSML｜｜ parameter>"),
+        format!(
+            "{}</｜｜DSML｜｜ parameter>",
+            upstream_name.replace("05c0bf41c2c6afa4", "05c0bf41c2c6afa5")
+        ),
+        format!("{upstream_name}<"),
+        format!("{upstream_name}</｜｜DSML｜｜ parameter"),
+        format!("{upstream_name}</｜｜DSML｜｜ invoke>"),
+        format!("{upstream_name}</｜｜DSML｜｜ parameterized>"),
+        format!("{upstream_name} </｜｜DSML｜｜ parameter>"),
+    ] {
+        assert!(bridge.restore_upstream_name(&name).is_err(), "{name}");
+        assert!(
+            bridge.restore_stream_upstream_name(&name, true).is_err(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn namespace_dsml_boundary_disambiguates_declared_name_prefixes() {
+    let (mut bridge, upstream_name) = dsml_namespace_tool_bridge();
+    let longer_name = format!("{upstream_name}_longer");
+    let mut longer_tool = bridge.restore_upstream_name(&upstream_name).unwrap();
+    longer_tool.name = "wait_agent_longer".to_string();
+    bridge
+        .upstream_to_response
+        .insert(longer_name.clone(), longer_tool.clone());
+    assert!(
+        bridge
+            .restore_stream_upstream_name(&upstream_name, false)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        bridge
+            .restore_stream_upstream_name(&format!("{upstream_name}</｜｜DSML"), false)
+            .unwrap()
+            .is_none()
+    );
+    for (name, expected) in [
+        (
+            upstream_name.clone(),
+            bridge.restore_upstream_name(&upstream_name).unwrap(),
+        ),
+        (longer_name, longer_tool),
+    ] {
+        assert_eq!(
+            bridge
+                .restore_stream_upstream_name(&format!("{name}</｜｜DSML｜｜ parameter>"), false)
+                .unwrap(),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn namespace_dsml_does_not_repair_other_tool_kinds() {
+    let (mut bridge, _) = dsml_namespace_tool_bridge();
+    for tool in [
+        ResponsesToolName::plain("lookup"),
+        ResponsesToolName::custom_in_namespace(&["functions".to_string()], "apply_patch"),
+        ResponsesToolName::tool_search(),
+    ] {
+        let name = bridge.upstream_name_for_call(&tool).unwrap();
+        assert_eq!(bridge.restore_upstream_name(&name).unwrap(), tool);
+        let malformed = format!("{name}</｜｜DSML｜｜ parameter>");
+        for result in [
+            bridge.restore_upstream_name(&malformed),
+            bridge.restore_stream_upstream_name(&malformed, true).map(Option::unwrap),
+        ] {
+            if tool.is_custom() {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), ResponsesToolName::plain(&malformed));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn namespace_dsml_stream_finish_revalidates_previously_emitted_names() {
+    let (bridge, upstream_name) = dsml_namespace_tool_bridge();
+    for (suffix, valid) in [
+        ("</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name=", true),
+        ("</｜｜DSML｜｜ parameter", false),
+        ("</｜｜DSML｜｜ invoke>", false),
+        ("wrong</｜｜DSML｜｜ parameter>", false),
+    ] {
+        let (socket, mut peer) = local_websocket_pair().await;
+        let mut downstream = WebSocketResponsesDownstream::new(socket);
+        let mut stream = ResponsesSseState::new("provider-model", &bridge);
+        stream.start(&mut downstream).await.unwrap();
+        let events = stream
+            .tool_delta(0, Some("call-dsml"), Some(&upstream_name), Some("{}"), None)
+            .unwrap();
+        assert_eq!(events[0]["item"]["name"], "wait_agent");
+        stream.write_events(&mut downstream, events).await.unwrap();
+        assert!(
+            stream
+                .tool_delta(0, None, Some(suffix), None, None)
+                .unwrap()
+                .is_empty()
+        );
+        let result = stream.finish(&mut downstream, None, None).await;
+        assert_eq!(result.is_ok(), valid, "suffix={suffix}, result={result:?}");
+        if valid {
+            let terminal = loop {
+                let message = tokio::time::timeout(Duration::from_secs(2), peer.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let WebSocketMessage::Text(text) = message else {
+                    panic!("expected downstream JSON text frame");
+                };
+                let event: Value = serde_json::from_str(text.as_str()).unwrap();
+                if responses_event_is_terminal(&event) {
+                    break event;
+                }
+            };
+            assert_eq!(terminal["type"], "response.completed");
+            assert_eq!(terminal["response"]["output"][0]["name"], "wait_agent");
+            assert_eq!(terminal["response"]["output"][0]["namespace"], "agents");
+            assert_eq!(terminal["response"]["output"][0]["arguments"], "{}");
+        }
+    }
+}
+
 #[test]
 fn namespace_streaming_restores_added_and_done_items_after_complete_name() {
     let converted = responses_to_chat_completions_request(&json!({

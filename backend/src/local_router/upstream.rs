@@ -594,7 +594,41 @@ impl ResponsesToolBridge {
         Ok(upstream_name)
     }
 
+    fn upstream_name_without_dsml_suffix<'a>(
+        &self,
+        upstream_name: &'a str,
+        final_name: bool,
+    ) -> Result<Option<&'a str>> {
+        // 部分上游会把 DSML 参数结束标签及后续内容拼进 function.name。
+        // 只还原已登记的 namespace function 和已确认的标签，不猜测名称或参数。
+        const DSML_PARAMETER_END: &str = "</｜｜DSML｜｜ parameter>";
+        if self.upstream_to_response.contains_key(upstream_name) {
+            return Ok(Some(upstream_name));
+        }
+        let Some((name, _)) = upstream_name.split_once('<') else {
+            return Ok(Some(upstream_name));
+        };
+        if !self
+            .upstream_to_response
+            .get(name)
+            .is_some_and(|tool_name| tool_name.is_function() && !tool_name.namespace.is_empty())
+        {
+            return Ok(Some(upstream_name));
+        }
+        let suffix = &upstream_name[name.len()..];
+        if suffix.starts_with(DSML_PARAMETER_END) {
+            return Ok(Some(name));
+        }
+        if !final_name && DSML_PARAMETER_END.starts_with(suffix) {
+            return Ok(None);
+        }
+        anyhow::bail!("上游工具名称后包含未知或不完整的 DSML 标记 {upstream_name}");
+    }
+
     pub(crate) fn restore_upstream_name(&self, upstream_name: &str) -> Result<ResponsesToolName> {
+        let upstream_name = self
+            .upstream_name_without_dsml_suffix(upstream_name, true)?
+            .expect("final tool name cannot be pending");
         if let Some(tool_name) = self.upstream_to_response.get(upstream_name) {
             return Ok(tool_name.clone());
         }
@@ -612,6 +646,13 @@ impl ResponsesToolBridge {
         upstream_name: &str,
         final_name: bool,
     ) -> Result<Option<ResponsesToolName>> {
+        let Some(restored_name) = self.upstream_name_without_dsml_suffix(upstream_name, final_name)?
+        else {
+            return Ok(None);
+        };
+        // 完整标签已经确定名称边界，不再等待名称相同开头的其他工具。
+        let final_name = final_name || restored_name.len() != upstream_name.len();
+        let upstream_name = restored_name;
         if let Some(tool_name) = self.upstream_to_response.get(upstream_name) {
             if !final_name
                 && self.upstream_to_response.keys().any(|known| {
