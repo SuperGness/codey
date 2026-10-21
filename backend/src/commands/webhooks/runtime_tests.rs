@@ -115,17 +115,68 @@ async fn stored_delivery_states(state: &AppState) -> Vec<String> {
 }
 
 async fn wait_for_delivered(state: &AppState, expected: usize) {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let states = stored_delivery_states(state).await;
-            if states.len() == expected && states.iter().all(|state| state == "delivered") {
-                break;
+    wait_for_delivery_states(expected, || stored_delivery_states(state)).await;
+}
+
+async fn wait_for_delivery_states<F, Fut>(expected: usize, mut read_states: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Vec<String>>,
+{
+    let mut delivered = 0;
+    let mut states = Vec::new();
+    loop {
+        // 每次确认都需要完整磁盘同步；限制停滞时间，不限制整批投递的吞吐量。
+        // 只有成功数量严格增加才重新计时，最多等待 expected 次进展。
+        let progress = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                states = read_states().await;
+                assert_eq!(
+                    states.len(),
+                    expected,
+                    "unexpected delivery rows: {states:?}"
+                );
+                let completed = states.iter().filter(|state| *state == "delivered").count();
+                if completed == expected || completed > delivered {
+                    break completed;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            tokio::time::sleep(Duration::from_millis(5)).await;
+        })
+        .await;
+        delivered = progress.unwrap_or_else(|_| {
+            panic!("delivery results stalled: delivered {delivered}/{expected}, states={states:?}")
+        });
+        if delivered == expected {
+            break;
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn delivery_wait_accepts_progress_across_slow_durable_commits() {
+    let started = tokio::time::Instant::now();
+    let mut completed = 0;
+    wait_for_delivery_states(2, || {
+        completed += 1;
+        let states = if completed == 1 {
+            vec!["delivered".into(), "inflight".into()]
+        } else {
+            vec!["delivered".into(), "delivered".into()]
+        };
+        async move {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            states
         }
     })
-    .await
-    .expect("delivery results should be durable");
+    .await;
+    assert_eq!(started.elapsed(), Duration::from_secs(4));
+}
+
+#[tokio::test(start_paused = true)]
+#[should_panic(expected = "delivery results stalled: delivered 1/2")]
+async fn delivery_wait_repeated_states_do_not_extend_the_stall_deadline() {
+    wait_for_delivery_states(2, || async { vec!["delivered".into(), "inflight".into()] }).await;
 }
 
 #[tokio::test]
