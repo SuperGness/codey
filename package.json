@@ -18,6 +18,7 @@
   "dependencies": {
     "@heroui/react": "3.2.6",
     "@heroui/styles": "3.2.6",
+    "@internationalized/date": "3.12.4",
     "@tabler/icons-react": "^3.45.0",
     "react": "^19.0.0",
     "react-aria": "^3.53.0",

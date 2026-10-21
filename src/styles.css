@@ -771,12 +771,17 @@ button,
   display: flex;
   flex: none;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
-  padding: 12px 20px;
+  padding: 13px 24px;
   border-bottom: 1px solid var(--codey-border-subtle);
   background: var(--codey-sidebar);
 }
+
+.usage-analysis-topbar .usage-back { flex: none; width: 34px; height: 34px; color: var(--codey-muted); }
+.usage-analysis-heading { min-width: 0; }
+.usage-analysis-heading h1 { margin: 0; font-size: 19px; line-height: 1.4; font-weight: 650; letter-spacing: -.025em; outline: none; }
+.usage-analysis-heading p { margin: 2px 0 0; font-size: 12px; color: var(--codey-muted); }
 
 .app-shell.embedded .usage-analysis-topbar {
   padding-right: 64px;

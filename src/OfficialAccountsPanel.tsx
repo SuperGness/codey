@@ -751,6 +751,8 @@ export function OfficialAccountsPanel({
                     <div className="official-account-main">
                       <div className="official-account-line">
                         <strong title={label}>{label}</strong>
+                      </div>
+                      <div className="official-account-tags">
                         {account.isDefault && (
                           <span
                             className={`official-account-default-corner${account.invalid ? " is-invalid" : officialAccountAvailable ? " is-ready" : " is-pending"}`}

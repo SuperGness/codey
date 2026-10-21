@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as internationalizedDate from "@internationalized/date";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 import {
   autoStubModule,
@@ -56,6 +57,7 @@ test("各时间范围固定按模型与Token排序；全部历史不传时间或
   assert.deepEqual(usageQuery("7d", now), { groupBy: "model", groupSort: "tokens", includeDailyTrend: true, fromUnixMs: now - 7 * 86400000, toUnixMs: now });
   assert.deepEqual(usageQuery("30d", now), { groupBy: "model", groupSort: "tokens", includeDailyTrend: true, fromUnixMs: now - 30 * 86400000, toUnixMs: now });
   assert.deepEqual(usageQuery("all", now), { groupBy: "model", groupSort: "tokens", includeDailyTrend: true, allTime: true });
+  assert.deepEqual(usageQuery({ fromUnixMs: 123, toUnixMs: 456 }, now), { groupBy: "model", groupSort: "tokens", includeDailyTrend: true, fromUnixMs: 123, toUnixMs: 456 });
 });
 
 test("前12组按Token排序，其他包含后端截断残量且不改变输入", () => {
@@ -201,12 +203,49 @@ const panelGraph = createModuleGraph(new URL("../src/UsageAnalysisPanel.tsx", im
   autoStub: true,
   stubs: {
     react: panelReact,
+    "@internationalized/date": internationalizedDate,
     "./api": { invoke: async () => panelStats },
     "./appUtils": { withTimeout: (promise) => promise },
     "./components/ui": uiStubs,
     "./UsageHeatmap": autoStubModule("heatmap"),
     "./UsageTimeline": timelineGraph.exports,
   },
+});
+
+const dateFilterGraph = createModuleGraph(new URL("../src/UsageDateFilter.tsx", import.meta.url), {
+  autoStub: true,
+  stubs: { "@internationalized/date": internationalizedDate, "./components/ui": uiStubs },
+});
+
+test("快捷日期包含当天、支持跨月，全部历史不附带日期限制", () => {
+  const { usagePresetDates, usageDatesQuery } = dateFilterGraph.exports;
+  const current = new internationalizedDate.CalendarDate(2024, 3, 2);
+  for (const [preset, start] of [["today", "2024-03-02"], ["7d", "2024-02-25"], ["30d", "2024-02-02"], ["month", "2024-03-01"]]) {
+    const range = usagePresetDates(preset, current);
+    assert.equal(range.start.toString(), start);
+    assert.equal(range.end.toString(), "2024-03-02");
+  }
+  assert.equal(usageDatesQuery(usagePresetDates("all", current)), "all");
+});
+
+test("日历查询包含结束日，按本地时区处理跨年和夏令时", () => {
+  const { usageDatesQuery } = dateFilterGraph.exports;
+  const date = (year, month, day) => new internationalizedDate.CalendarDate(year, month, day);
+  assert.deepEqual(usageDatesQuery({ start: date(2024, 12, 31), end: date(2025, 1, 1) }, "Asia/Shanghai"), {
+    fromUnixMs: Date.parse("2024-12-30T16:00:00Z"), toUnixMs: Date.parse("2025-01-01T16:00:00Z"),
+  });
+  for (const [day, hours] of [[date(2024, 3, 10), 23], [date(2024, 11, 3), 25]]) {
+    const query = usageDatesQuery({ start: day, end: day }, "America/New_York");
+    assert.equal(query.toUnixMs - query.fromUnixMs, hours * 60 * 60 * 1000);
+  }
+});
+
+test("日历范围拒绝超过后端 366 天上限，全部历史仍可查询", () => {
+  const { usageDatesWithinLimit } = dateFilterGraph.exports;
+  const start = new internationalizedDate.CalendarDate(2024, 1, 1);
+  assert.equal(usageDatesWithinLimit({ start, end: start.add({ days: 364 }) }), true);
+  assert.equal(usageDatesWithinLimit({ start, end: start.add({ days: 366 }) }), false);
+  assert.equal(usageDatesWithinLimit(null), true);
 });
 
 test("用量趋势渲染把未上报的分桶画成虚线标记并标注用量未上报", async () => {

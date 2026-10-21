@@ -104,11 +104,18 @@
         }
         return result;
       };
-      const { UsageAnalysisPanel } = await import("../src/UsageAnalysisPanel.tsx");
+      const { UsageAnalysisHeader, UsageAnalysisPanel } = await import("../src/UsageAnalysisPanel.tsx");
+      const { SettingsModalShell } = await import("../src/SettingsModalShell.tsx");
+      const { Button } = await import("../src/components/ui/index.tsx");
+      const { IconX } = await import("@tabler/icons-react");
+      const inModal = new URLSearchParams(location.search).get("modal") === "1";
+      const goBack = () => { location.href = new URL("ui-browser.html", location.href).href; };
+      const usageContent = React.createElement("main", { className: `app-shell${inModal ? " embedded" : ""}` },
+        inModal && React.createElement(Button, { className: "settings-close-button", "aria-label": "关闭配置", size: "icon", variant: "ghost", onPress: goBack }, React.createElement(IconX, { size: 16 })),
+        React.createElement(UsageAnalysisHeader, { onBack: goBack }),
+        React.createElement("div", { className: "page-scroll" }, React.createElement(UsageAnalysisPanel)));
       createRoot(document.getElementById("root")).render(React.createElement(UiProvider, null,
-        React.createElement("main", { className: "app-shell" },
-          React.createElement("div", { className: "page-scroll" },
-            React.createElement(UsageAnalysisPanel, { onBack() { location.href = new URL("ui-browser.html", location.href).href; } })))));
+        inModal ? React.createElement(SettingsModalShell, { header: null, visible: true, onCancel: goBack }, usageContent) : usageContent));
     } else if (view === "logs") {
       const { installRequestLogTheme } = await import("../src/requestLogTheme.ts");
       installRequestLogTheme();

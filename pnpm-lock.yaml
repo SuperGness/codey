@@ -18,6 +18,9 @@ importers:
       '@heroui/styles':
         specifier: 3.2.6
         version: 3.2.6(patch_hash=0d2cc7b42305c008a70a497c5c72894e7ce60404f3aeb01c3bd36440e16bddb6)(tailwind-merge@3.4.0)(tailwindcss@4.3.0)
+      '@internationalized/date':
+        specifier: 3.12.4
+        version: 3.12.4
       '@tabler/icons-react':
         specifier: ^3.45.0
         version: 3.45.0(react@19.2.7)

@@ -4,27 +4,30 @@ import { Spinner } from "@heroui/react";
 import { Button } from "./components/ui";
 import { invoke } from "./api";
 import { withTimeout } from "./appUtils";
-import { formatUsageNumber, observeUsageRequest, usageCoverage, usageQuery, usageSlices, type LogAnalytics, type UsageLoadState, type UsageRange } from "./usageAnalysis";
+import { formatUsageNumber, observeUsageRequest, usageCoverage, usageQuery, usageSlices, type LogAnalytics, type UsageLoadState } from "./usageAnalysis";
 import styles from "./styles.usage-analysis.css?inline";
 import { UsageHeatmap } from "./UsageHeatmap";
 import { UsageTimeline } from "./UsageTimeline";
+import { UsageDateFilter, usageDatesLabel, usageDatesQuery, usagePresetDates, type UsageDates } from "./UsageDateFilter";
 
-const ranges: { label: string; value: UsageRange }[] = [
-  { label: "近 7 天", value: "7d" },
-  { label: "近 30 天", value: "30d" },
-  { label: "全部历史", value: "all" },
-];
 const utc = (timestamp: number) => new Date(timestamp).toLocaleString("zh-CN", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 
-export function UsageAnalysisPanel({ onBack }: { onBack: () => void }) {
-  const [range, setRange] = useState<UsageRange>("7d");
+export function UsageAnalysisHeader({ onBack }: { onBack: () => void }) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => { heading.current?.focus(); }, []);
+  return <header className="usage-analysis-topbar">
+    <Button variant="ghost" size="icon" className="usage-back" aria-label="返回线路与模型" onPress={onBack}><IconArrowLeft size={20} aria-hidden="true" /></Button>
+    <div className="usage-analysis-heading"><h1 ref={heading} tabIndex={-1} id="usage-analysis-title">用量分析</h1><p>模型消耗与使用趋势</p></div>
+  </header>;
+}
+
+export function UsageAnalysisPanel() {
+  const [range, setRange] = useState<UsageDates>(() => usagePresetDates("7d"));
   const [revision, setRevision] = useState(0);
   const [chart, setChart] = useState<"heatmap" | "bars">("bars");
   const [state, setState] = useState<UsageLoadState>({ loading: true, data: null, error: "" });
-  const heading = useRef<HTMLHeadingElement>(null);
-  useEffect(() => { heading.current?.focus(); }, []);
   useEffect(() => observeUsageRequest(
-    () => withTimeout(invoke<LogAnalytics>("query_route_request_log_stats", usageQuery(range)), 30_000, "统计请求超时，请稍后重试。"),
+    () => withTimeout(invoke<LogAnalytics>("query_route_request_log_stats", usageQuery(usageDatesQuery(range))), 30_000, "统计请求超时，请稍后重试。"),
     setState,
   ), [range, revision]);
   const reload = () => { setState({ loading: true, data: null, error: "" }); setRevision((value) => value + 1); };
@@ -40,23 +43,12 @@ export function UsageAnalysisPanel({ onBack }: { onBack: () => void }) {
 
   return <section className="usage-analysis" aria-labelledby="usage-analysis-title">
     <style>{styles}</style>
-    <header className="usage-header">
-    <div className="usage-navigation"><Button variant="ghost" size="xs" className="usage-back" onClick={onBack}><IconArrowLeft size={15} aria-hidden="true" />线路与模型</Button></div>
-    <div className="usage-heading">
-      <div className="usage-title">
-        <h1 ref={heading} tabIndex={-1} id="usage-analysis-title">用量分析</h1>
-        <p>模型消耗与使用趋势</p>
-      </div>
     <div className="usage-toolbar">
-      <div className="usage-range-control usage-segmented" role="group" aria-label="用量时间范围">
-        {ranges.map(({ label, value }) => <Button key={value} size="xs" variant="ghost" aria-pressed={range === value} onPress={() => {
-          if (value !== range) { setState({ loading: true, data: null, error: "" }); setRange(value); }
-        }}>{label}</Button>)}
-      </div>
+      <UsageDateFilter value={range} onChange={(value) => {
+        if (usageDatesLabel(value) !== usageDatesLabel(range)) { setState({ loading: true, data: null, error: "" }); setRange(value); }
+      }} />
       <Button variant="outline" size="sm" className="usage-refresh" loading={state.loading} onClick={reload}><IconRefresh size={14} aria-hidden="true" />刷新</Button>
     </div>
-    </div>
-    </header>
     <div aria-live="polite" aria-busy={state.loading}>
       {state.loading ? <div className="usage-state" role="status"><Spinner size="sm" /><strong>正在统计用量…</strong><span>正在读取所选范围的请求日志</span></div>
         : state.error ? <div className="usage-state usage-error" role="alert"><strong>用量分析加载失败</strong><p>{state.error}</p><Button variant="outline" size="sm" onClick={reload}>重试</Button></div>
@@ -67,7 +59,7 @@ export function UsageAnalysisPanel({ onBack }: { onBack: () => void }) {
           {health && health.pendingEntries > 0 && <p className="usage-scope">有 {formatUsageNumber(health.pendingEntries)} 条日志等待写入，可稍后刷新。</p>}
           {stats.total === 0 ? <div className="usage-state"><IconChartDonut size={32} aria-hidden="true" /><strong>所选范围暂无请求日志</strong><span>可切换到全部历史，或开启日志记录后发起请求。</span></div> : <>
             <div className="usage-overview" role="group" aria-label="用量概览">
-              <div className="usage-metric usage-metric-total"><span>总 Token <small>{ranges.find((item) => item.value === range)?.label}</small></span><strong>{formatUsageNumber(totalTokens)}</strong><small>已知总量合计</small></div>
+              <div className="usage-metric usage-metric-total"><span>总 Token</span><strong>{formatUsageNumber(totalTokens)}</strong><small>已知总量合计</small></div>
               <div className="usage-token-comparison">
                 {([
                   { key: "input", label: "输入 Token", value: stats.inputTokensSum, detail: "包含缓存输入" },
@@ -90,9 +82,9 @@ export function UsageAnalysisPanel({ onBack }: { onBack: () => void }) {
             <div className="usage-workspace">
             <section className="usage-card usage-trend-card" aria-labelledby="usage-trend-title">
               <div className="usage-card-heading"><div><h2 id="usage-trend-title">Token 时间趋势</h2><p>{utc(stats.fromUnixMs)} 至 {utc(stats.toUnixMs)} UTC（不含结束时间）</p></div><div className="usage-chart-switch usage-segmented" role="group" aria-label="趋势图类型"><Button size="xs" variant="ghost" aria-pressed={chart === "bars"} onPress={() => setChart("bars")}>直方图</Button><Button size="xs" variant="ghost" aria-pressed={chart === "heatmap"} onPress={() => setChart("heatmap")}>热力图</Button></div></div>
-              {chart === "heatmap" && <UsageHeatmap key={range} stats={stats} />}
+              {chart === "heatmap" && <UsageHeatmap key={usageDatesLabel(range)} stats={stats} />}
               {stats.trend.length ? <>
-                {chart === "bars" && <UsageTimeline key={`${range}:${revision}:${stats.fromUnixMs}:${stats.toUnixMs}`} stats={stats} />}
+                {chart === "bars" && <UsageTimeline key={`${usageDatesLabel(range)}:${revision}:${stats.fromUnixMs}:${stats.toUnixMs}`} stats={stats} />}
                 <details className="usage-trend-details"><summary>查看趋势明细</summary><div className="usage-table-scroll"><table><thead><tr><th>分桶起点（UTC）</th><th>请求数</th><th>Token</th></tr></thead><tbody>{stats.trend.map((bucket) => <tr key={bucket.timestampUnixMs}><td>{utc(bucket.timestampUnixMs)}</td><td>{formatUsageNumber(bucket.total)}</td><td>{formatUsageNumber(bucket.totalTokensSum)}</td></tr>)}</tbody></table></div></details>
               </> : <p className="usage-scope">暂无趋势数据</p>}
             </section>

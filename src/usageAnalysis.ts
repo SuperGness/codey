@@ -41,12 +41,12 @@ export type LogAnalytics = LogSummary & {
   } | null;
 };
 
-export type UsageRange = "7d" | "30d" | "all";
+export type UsageRange = "7d" | "30d" | "all" | { fromUnixMs: number; toUnixMs: number };
 
 export function usageQuery(range: UsageRange, now = Date.now()) {
   return {
     groupBy: "model", groupSort: "tokens", includeDailyTrend: true,
-    ...(range === "all" ? { allTime: true } : {
+    ...(typeof range === "object" ? range : range === "all" ? { allTime: true } : {
       fromUnixMs: now - (range === "7d" ? 7 : 30) * 86_400_000,
       toUnixMs: now,
     }),

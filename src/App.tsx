@@ -20,7 +20,7 @@ import { ModelPickerDialog } from "./AppDialogs";
 import { SystemSettingsDialog } from "./SystemSettingsDialog";
 import { FeaturePolicyCard, SubagentPolicyCard } from "./FeaturePolicyCard";
 import { ModelSection } from "./ModelSection";
-import { UsageAnalysisPanel } from "./UsageAnalysisPanel";
+import { UsageAnalysisHeader, UsageAnalysisPanel } from "./UsageAnalysisPanel";
 import { OperationsPanel } from "./OperationsPanel";
 import { CodeyPluginsSection } from "./CodeyPluginsSection";
 import { CodexExtensionsPage, type ExtensionTransport } from "./features/codex-extensions";
@@ -1620,12 +1620,9 @@ export function App({
 
       {usageAnalysisOpen ? (
         <>
-          <div className="usage-analysis-topbar">
-            {brand}
-            <div className="usage-analysis-topbar-actions">{saveButton}</div>
-          </div>
+          <UsageAnalysisHeader onBack={() => setUsageAnalysisOpen(false)} />
           <div className="page-scroll">
-            <UsageAnalysisPanel onBack={() => setUsageAnalysisOpen(false)} />
+            <UsageAnalysisPanel />
           </div>
         </>
       ) : (

@@ -8235,7 +8235,8 @@ fn dsml_namespace_tool_bridge() -> (ResponsesToolBridge, String) {
 #[test]
 fn namespace_dsml_restores_logged_name_without_changing_arguments() {
     let (bridge, upstream_name) = dsml_namespace_tool_bridge();
-    let malformed = format!("{upstream_name}</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name=");
+    let malformed =
+        format!("{upstream_name}</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name=");
     for arguments in ["{\"timeout_ms\":30000}", "", "{invalid-json"] {
         let response = chat_completion_to_responses_body_with_tool_bridge(
             json!({"choices":[{"message":{"role":"assistant","tool_calls":[{
@@ -8255,7 +8256,8 @@ fn namespace_dsml_restores_logged_name_without_changing_arguments() {
 #[test]
 fn namespace_dsml_streaming_handles_every_name_character_split() {
     let (bridge, upstream_name) = dsml_namespace_tool_bridge();
-    let malformed = format!("{upstream_name}</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name=");
+    let malformed =
+        format!("{upstream_name}</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name=");
     for split in malformed.char_indices().map(|(index, _)| index) {
         let mut accumulator = ChatSseAccumulator::for_streaming("provider-model");
         let mut stream = ResponsesSseState::new("provider-model", &bridge);
@@ -8374,7 +8376,9 @@ fn namespace_dsml_does_not_repair_other_tool_kinds() {
         let malformed = format!("{name}</｜｜DSML｜｜ parameter>");
         for result in [
             bridge.restore_upstream_name(&malformed),
-            bridge.restore_stream_upstream_name(&malformed, true).map(Option::unwrap),
+            bridge
+                .restore_stream_upstream_name(&malformed, true)
+                .map(Option::unwrap),
         ] {
             if tool.is_custom() {
                 assert!(result.is_err());
@@ -8389,7 +8393,10 @@ fn namespace_dsml_does_not_repair_other_tool_kinds() {
 async fn namespace_dsml_stream_finish_revalidates_previously_emitted_names() {
     let (bridge, upstream_name) = dsml_namespace_tool_bridge();
     for (suffix, valid) in [
-        ("</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name=", true),
+        (
+            "</｜｜DSML｜｜ parameter> <｜｜DSML｜｜ parameter name=",
+            true,
+        ),
         ("</｜｜DSML｜｜ parameter", false),
         ("</｜｜DSML｜｜ invoke>", false),
         ("wrong</｜｜DSML｜｜ parameter>", false),

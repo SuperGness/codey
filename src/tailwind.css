@@ -1,6 +1,5 @@
 /*
- * HeroUI 样式按组件导入。@heroui/styles 的总入口会拉进全部组件表（含日历、取色器、
- * 数字输入等从未渲染的组件，约 150 KB），而 overlay 把整份 CSS 内联进 JS。
+ * HeroUI 样式按组件导入，避免 overlay 将未使用的组件样式内联进 JS。
  * 这里按 dist/index.css 与 dist/components/index.css 的分层和顺序复刻，只保留实际
  * 渲染的组件：共享基元先导入，再导入依赖它们的组件，最后是弹层与组合框。
  * 新增 HeroUI 组件时在对应位置补一行 @import。
@@ -54,6 +53,8 @@
 @import "@heroui/styles/components/input.css" layer(components);
 @import "@heroui/styles/components/input-group.css" layer(components);
 @import "@heroui/styles/components/number-field.css" layer(components);
+@import "@heroui/styles/components/date-input-group.css" layer(components);
+@import "@heroui/styles/components/range-calendar.css" layer(components);
 @import "@heroui/styles/components/textarea.css" layer(components);
 
 /* 布局 */
@@ -68,6 +69,7 @@
 /* 选择器 */
 @import "@heroui/styles/components/combo-box.css" layer(components);
 @import "@heroui/styles/components/select.css" layer(components);
+@import "@heroui/styles/components/date-range-picker.css" layer(components);
 
 @import "@heroui/styles/themes/default" layer(theme);
 @import "@heroui/styles/utilities";
@@ -87,6 +89,9 @@
 @source "../node_modules/@heroui/react/dist/components/close-button";
 @source "../node_modules/@heroui/react/dist/components/combo-box";
 @source "../node_modules/@heroui/react/dist/components/description";
+@source "../node_modules/@heroui/react/dist/components/date-input-group";
+@source "../node_modules/@heroui/react/dist/components/date-range-picker";
+@source "../node_modules/@heroui/react/dist/components/range-calendar";
 @source "../node_modules/@heroui/react/dist/components/disclosure";
 @source "../node_modules/@heroui/react/dist/components/drawer";
 @source "../node_modules/@heroui/react/dist/components/error-message";

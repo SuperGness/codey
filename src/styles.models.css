@@ -1505,7 +1505,8 @@
   flex: 1;
 }
 
-.official-account-line {
+.official-account-line,
+.official-account-tags {
   display: flex;
   align-items: center;
   flex-wrap: wrap;

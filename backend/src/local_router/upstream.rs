@@ -646,7 +646,8 @@ impl ResponsesToolBridge {
         upstream_name: &str,
         final_name: bool,
     ) -> Result<Option<ResponsesToolName>> {
-        let Some(restored_name) = self.upstream_name_without_dsml_suffix(upstream_name, final_name)?
+        let Some(restored_name) =
+            self.upstream_name_without_dsml_suffix(upstream_name, final_name)?
         else {
             return Ok(None);
         };
