@@ -425,28 +425,20 @@ function CodexExtensionsPageComponent({
         }
         actions={
           <div className="flex flex-wrap items-center gap-2 [&_button]:whitespace-nowrap">
-            {kind === "skill" && (
-              <Button size="sm" variant="ghost" onClick={() => setCacheOpen(true)}>
-                缓存 Skill 管理
-              </Button>
-            )}
             <Button
               size="sm"
-              variant="ghost"
+              variant="outline"
               disabled={busy || loading}
               onClick={() => void controller.refresh()}
             >
               <IconRefresh size={14} className={loading ? "motion-safe:animate-spin" : ""} aria-hidden="true" />
               刷新
             </Button>
-            <Button
-              size="sm"
-              disabled={unavailable}
-              onClick={() => startDraft(kind)}
-            >
-              <IconPlus size={14} className="mr-1 inline-block" />
-              {kind === "mcp" ? "新增 MCP" : "新增 Skill"}
-            </Button>
+            {kind === "skill" && (
+              <Button size="sm" variant="outline" onClick={() => setCacheOpen(true)}>
+                缓存 Skill 管理
+              </Button>
+            )}
             {kind === "skill" && (
               <Button
                 size="sm"
@@ -457,6 +449,14 @@ function CodexExtensionsPageComponent({
                 导入目录 / ZIP
               </Button>
             )}
+            <Button
+              size="sm"
+              disabled={unavailable}
+              onClick={() => startDraft(kind)}
+            >
+              <IconPlus size={14} className="mr-1 inline-block" />
+              {kind === "mcp" ? "新增 MCP" : "新增 Skill"}
+            </Button>
           </div>
         }
       />
@@ -502,70 +502,73 @@ function CodexExtensionsPageComponent({
         ))}
         <ExtensionFilters
           kind={kind}
+          entries={entries}
           query={query}
           filter={filter}
           source={source}
           sort={sort}
+          trailing={inventory && (
+            <div className="ml-auto flex flex-wrap items-center gap-2 text-xs text-muted">
+              {filtered.length !== entries.length && (
+                <span className="tabular-nums">
+                  匹配 {filtered.length} / {entries.length} 项
+                </span>
+              )}
+              <Button
+                size="xs"
+                variant="ghost"
+                disabled={unavailable || !currentPage.entries.some(canToggle)}
+                onClick={() =>
+                  setSelected(
+                    currentPage.entries
+                      .filter(canToggle)
+                      .map((entry) => entry.id),
+                  )
+                }
+              >
+                选择本页
+              </Button>
+              {selected.length > 0 && (
+                <>
+                  <span>已选 {selected.length} 项，最多 100 项</span>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={
+                      unavailable || !batchTargets(entries, selected, true).length
+                    }
+                    onClick={() => batch(true)}
+                  >
+                    启用
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={
+                      unavailable ||
+                      !batchTargets(entries, selected, false).length
+                    }
+                    onClick={() => batch(false)}
+                  >
+                    禁用
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() => setSelected([])}
+                  >
+                    清空选择
+                  </Button>
+                </>
+              )}
+            </div>
+          )}
           onQuery={setQuery}
           onFilter={setFilter}
           onSource={setSource}
           onSort={setSort}
           onClear={clearFilters}
         />
-        {inventory && (
-          <div className="flex min-h-9 flex-wrap items-center gap-2 text-xs text-muted">
-            <span className="mr-auto tabular-nums">
-              {filtered.length === entries.length ? `全部 ${entries.length} 项` : `匹配 ${filtered.length} / ${entries.length} 项`}
-            </span>
-            <Button
-              size="xs"
-              variant="ghost"
-              disabled={unavailable || !currentPage.entries.some(canToggle)}
-              onClick={() =>
-                setSelected(
-                  currentPage.entries
-                    .filter(canToggle)
-                    .map((entry) => entry.id),
-                )
-              }
-            >
-              选择本页
-            </Button>
-            {selected.length > 0 && (
-              <>
-                <span>已选 {selected.length} 项，最多 100 项</span>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={
-                    unavailable || !batchTargets(entries, selected, true).length
-                  }
-                  onClick={() => batch(true)}
-                >
-                  启用
-                </Button>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={
-                    unavailable ||
-                    !batchTargets(entries, selected, false).length
-                  }
-                  onClick={() => batch(false)}
-                >
-                  禁用
-                </Button>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  onClick={() => setSelected([])}
-                >
-                  清空选择
-                </Button>
-              </>
-            )}
-          </div>
-        )}
         {loading && (
           <div role="status" className="rounded-xl border border-default px-4 py-3 text-xs text-muted">
             <div className="flex items-center gap-2"><IconRefresh size={14} className="motion-safe:animate-spin" aria-hidden="true" />{inventory ? "正在刷新，暂时显示上次读取结果…" : "正在读取配置…"}</div>
@@ -593,7 +596,7 @@ function CodexExtensionsPageComponent({
             filtered={!!query.trim() || filter !== "all" || source !== "all"}
           />
         )}
-        {inventory && filtered.length > 0 && (
+        {inventory && currentPage.pages > 1 && (
           <nav
             aria-label="资源分页"
             className="flex flex-wrap items-center justify-end gap-3 pt-1 text-xs text-muted"
@@ -670,7 +673,6 @@ function CodexExtensionsPageComponent({
                 </div>
               </div>
             </DialogHeader>
-            <div className="min-h-0 overflow-y-auto overscroll-contain pt-1">
               <ExtensionEditor
                 draft={draft}
                 busy={busy || loading}
@@ -696,7 +698,7 @@ function CodexExtensionsPageComponent({
                   "install_skill",
                   "preview_skill_install",
                 ].includes(controller.busyAction)}
-              />
+              >
               {loading && (
                 <p role="status" className="mt-2 text-xs text-muted">
                   正在重新读取当前范围，草稿已保留…
@@ -745,7 +747,7 @@ function CodexExtensionsPageComponent({
                   </Button>
                 </section>
               )}
-            </div>
+              </ExtensionEditor>
           </DialogContent>
         </Dialog>
       )}

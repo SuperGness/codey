@@ -1,5 +1,5 @@
 import { Button, Input } from "../../components/ui";
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 import {
   IconAlertCircle,
   IconCheck,
@@ -30,6 +30,7 @@ export function ExtensionEditor({
   saving,
   previewing = false,
   onPreview,
+  children,
 }: {
   draft: EditorDraft;
   busy: boolean;
@@ -43,6 +44,7 @@ export function ExtensionEditor({
   saving?: boolean;
   previewing?: boolean;
   onPreview?: () => void;
+  children?: ReactNode;
 }) {
   const idError = draft.kind === "mcp" && (
     !/^[A-Za-z0-9_-]{1,128}$/.test(draft.id) ||
@@ -62,7 +64,8 @@ export function ExtensionEditor({
   const lineCount = (draft.content.match(/\n/g)?.length ?? 0) + 1;
 
   return (
-    <div className="space-y-4 text-foreground">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden text-foreground">
+      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain pt-1">
       {entry && <ResourceInfo entry={entry} inventory={inventory} />}
 
       {draft.kind === "install" && (
@@ -262,7 +265,9 @@ export function ExtensionEditor({
           </Button>
         )}
 
-      <div className="mt-5 flex flex-wrap items-center justify-end gap-2.5 border-t border-black/[0.08] pt-4 dark:border-white/[0.1]">
+        {children}
+      </div>
+      <div className="mt-4 flex shrink-0 flex-wrap items-center justify-end gap-2.5 border-t border-black/[0.08] pt-4 dark:border-white/[0.1]">
         <Button variant="outline" disabled={busy} onClick={onCancel}>
           {draft.readOnly ? "返回列表" : "取消"}
         </Button>

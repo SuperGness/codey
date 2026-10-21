@@ -72,7 +72,7 @@ export function ExtensionList({
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-default bg-background divide-y divide-default">
+    <div className="codey-card divide-y divide-default">
       {entries.map((entry) => {
         const isBuiltin = "ownership" in entry && entry.ownership === "builtin";
         const isEnabled = entry.enabled;
@@ -81,14 +81,15 @@ export function ExtensionList({
         const isManaged = "ownership" in entry && entry.ownership === "managed";
         const checkResult = checks[entry.id];
         const working = busy && busyResourceId === entry.id;
+        const detailIndent = onSelect && canToggle(entry) ? "sm:ml-[76px]" : "sm:ml-12";
 
         return (
           <article
             key={entry.id}
             aria-busy={working}
-            className={`flex min-w-0 flex-col transition-colors hover:bg-default/15 lg:flex-row lg:items-start ${selected.includes(entry.id) ? "bg-accent/5" : ""}`}
+            className={`flex min-w-0 flex-col transition-colors hover:bg-default/15 ${selected.includes(entry.id) ? "bg-accent/5" : ""}`}
           >
-            <div className="min-w-0 flex-1 px-4 py-3.5">
+            <div className="min-w-0 flex-1 px-4 pt-3.5 pb-2.5">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
                   {onSelect && canToggle(entry) && (
@@ -184,11 +185,11 @@ export function ExtensionList({
                 </div>
               </div>
 
-              <div title={entry.sourcePath} className={`mt-2 truncate font-mono text-[11px] text-muted select-text ${onSelect && canToggle(entry) ? "sm:ml-[76px]" : "sm:ml-12"}`}>
+              <div title={entry.sourcePath} className={`mt-2 truncate font-mono text-[11px] text-muted select-text ${detailIndent}`}>
                 {entry.sourcePath}
               </div>
 
-              <div className={`mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted ${onSelect && canToggle(entry) ? "sm:ml-[76px]" : "sm:ml-12"}`}>
+              <div className={`mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted ${detailIndent}`}>
                 <span>
                   配置：
                   <span
@@ -326,8 +327,8 @@ export function ExtensionList({
               )}
             </div>
 
-            <div className="flex flex-wrap items-center justify-between gap-2 px-4 pb-3 lg:w-56 lg:shrink-0 lg:flex-col lg:items-end lg:gap-3 lg:py-3.5">
-              <div className="flex flex-wrap items-center gap-2 min-w-0 lg:justify-end">
+            <div className={`flex flex-wrap items-center justify-between gap-2 px-4 pb-3.5 ${detailIndent}`}>
+              <div className="flex flex-wrap items-center gap-2 min-w-0">
                 <Button
                   size="xs"
                   variant="outline"
@@ -392,10 +393,10 @@ export function ExtensionList({
                 )}
               </div>
 
-              <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+              <div className="flex items-center gap-0.5 shrink-0 ml-auto">
                 <Button
                   size="xs"
-                  variant="outline"
+                  variant="ghost"
                   disabled={busy}
                   title={
                     entry.readOnly ||
@@ -425,7 +426,7 @@ export function ExtensionList({
 
                 <Button
                   size="icon-sm"
-                  variant="outline"
+                  variant="ghost"
                   disabled={busy}
                   title={kind === "mcp" ? "导出 MCP 配置 (JSON)" : "导出 Skill"}
                   aria-label={`导出 ${entry.name}`}
@@ -437,7 +438,8 @@ export function ExtensionList({
                 {!entry.readOnly && entry.canRemove !== false && (
                   <Button
                     size="icon-sm"
-                    variant="destructive-light"
+                    variant="ghost"
+                    className="text-muted hover:text-danger"
                     disabled={busy}
                     title={kind === "mcp" ? "移除 MCP 服务" : "卸载 Skill"}
                     aria-label={kind === "mcp" ? `移除 ${entry.name}` : `卸载 ${entry.name}`}

@@ -105,7 +105,7 @@ export function McpJsonImport({
           spellCheck={false}
           readOnly={draft.readOnly}
           disabled={busy}
-          className="block min-h-[240px] w-full resize-y bg-transparent px-4 py-3.5 font-mono text-[13px] leading-6 text-foreground outline-none disabled:opacity-60"
+          className="block min-h-[200px] w-full resize-y bg-transparent px-4 py-3.5 font-mono text-[13px] leading-6 text-foreground outline-none disabled:opacity-60"
           value={draft.content}
           onChange={(event) => {
             sequence.current++;

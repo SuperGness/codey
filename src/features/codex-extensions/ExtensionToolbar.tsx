@@ -1,11 +1,14 @@
+import type { ReactNode } from "react";
 import {
   IconFolder,
   IconFolderCode,
   IconSearch,
   IconUser,
+  IconX,
 } from "@tabler/icons-react";
 import { Button, Input, Select } from "../../components/ui";
-import type { Inventory, Scope } from "./types";
+import { matchesResource } from "./state";
+import type { Inventory, McpEntry, Scope, SkillEntry } from "./types";
 
 export function ExtensionScope({
   kind,
@@ -34,7 +37,7 @@ export function ExtensionScope({
 }) {
   const validPath = /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(projectPath.trim());
   return (
-    <div className="space-y-3 rounded-xl border border-default bg-default/10 px-4 py-3">
+    <div className="codey-card space-y-3 px-4 py-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-3">
           <span className="text-xs font-medium text-muted">配置范围</span>
@@ -132,12 +135,23 @@ export function ExtensionScope({
   );
 }
 
+const STATUS_FILTERS = [
+  { value: "all", label: "全部" },
+  { value: "enabled", label: "已启用" },
+  { value: "disabled", label: "已禁用" },
+  { value: "readonly", label: "只读" },
+  { value: "unknown", label: "状态待确认" },
+  { value: "invalid", label: "配置无效" },
+] as const;
+
 export function ExtensionFilters({
   kind,
+  entries,
   query,
   filter,
   source,
   sort,
+  trailing,
   onQuery,
   onFilter,
   onSource,
@@ -145,78 +159,97 @@ export function ExtensionFilters({
   onClear,
 }: {
   kind: "mcp" | "skill";
+  entries: (McpEntry | SkillEntry)[];
   query: string;
   filter: string;
   source: string;
   sort: string;
+  trailing?: ReactNode;
   onQuery: (value: string) => void;
   onFilter: (value: string) => void;
   onSource: (value: string) => void;
   onSort: (value: string) => void;
   onClear: () => void;
 }) {
+  const statusOptions = STATUS_FILTERS.map((option) => ({
+    ...option,
+    count: entries.filter((entry) => matchesResource(entry, "", option.value)).length,
+  })).filter(
+    (option) =>
+      option.value === "all" ||
+      option.value === "enabled" ||
+      option.value === "disabled" ||
+      option.count > 0 ||
+      option.value === filter,
+  );
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <Input
-        type="search"
-        aria-label={`搜索 ${kind === "mcp" ? "MCP" : "Skill"}`}
-        className="min-w-48 flex-1 basis-full text-xs md:basis-48"
-        placeholder="搜索名称、描述或路径"
-        value={query}
-        onChange={(event) => onQuery(event.target.value)}
-        leftSection={<IconSearch size={14} className="text-muted" />}
-      />
-      <Select
-        aria-label="状态筛选"
-        className="min-w-28 flex-1 text-xs md:w-32 md:flex-none"
-        value={filter}
-        onChange={(value) => onFilter(String(value))}
-        optionList={[
-          { value: "all", label: "全部状态" },
-          { value: "enabled", label: "已启用" },
-          { value: "disabled", label: "已禁用" },
-          { value: "readonly", label: "只读" },
-          { value: "unknown", label: "状态待确认" },
-          { value: "invalid", label: "配置无效" },
-        ]}
-      />
-      <Select
-        aria-label="来源筛选"
-        className="min-w-32 flex-1 text-xs md:w-36 md:flex-none"
-        value={source}
-        onChange={(value) => onSource(String(value))}
-        optionList={
-          kind === "mcp"
-            ? [
-                { value: "all", label: "全部连接类型" },
-                { value: "stdio", label: "本地进程" },
-                { value: "http", label: "HTTP" },
-                { value: "unknown", label: "未知类型" },
-              ]
-            : [
-                { value: "all", label: "全部来源" },
-                { value: "managed", label: "Codey 托管" },
-                { value: "external", label: "外部安装" },
-                { value: "builtin", label: "系统内置" },
-              ]
-        }
-      />
-      <Select
-        aria-label="排序"
-        className="min-w-28 flex-1 text-xs md:w-32 md:flex-none"
-        value={sort}
-        onChange={(value) => onSort(String(value))}
-        optionList={[
-          { value: "name", label: "名称排序" },
-          { value: "updated", label: "最近更新" },
-          { value: "enabled", label: "启用优先" },
-        ]}
-      />
-      {(query.trim() || filter !== "all" || source !== "all") && (
-        <Button size="sm" variant="outline" onClick={onClear}>
-          清除筛选
-        </Button>
-      )}
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          type="search"
+          aria-label={`搜索 ${kind === "mcp" ? "MCP" : "Skill"}`}
+          className="min-w-48 flex-1 basis-full text-xs md:basis-48"
+          placeholder="搜索名称、描述或路径"
+          value={query}
+          onChange={(event) => onQuery(event.target.value)}
+          leftSection={<IconSearch size={14} className="text-muted" />}
+        />
+        <Select
+          aria-label="来源筛选"
+          className="min-w-32 flex-1 text-xs md:w-36 md:flex-none"
+          value={source}
+          onChange={(value) => onSource(String(value))}
+          optionList={
+            kind === "mcp"
+              ? [
+                  { value: "all", label: "全部连接类型" },
+                  { value: "stdio", label: "本地进程" },
+                  { value: "http", label: "HTTP" },
+                  { value: "unknown", label: "未知类型" },
+                ]
+              : [
+                  { value: "all", label: "全部来源" },
+                  { value: "managed", label: "Codey 托管" },
+                  { value: "external", label: "外部安装" },
+                  { value: "builtin", label: "系统内置" },
+                ]
+          }
+        />
+        <Select
+          aria-label="排序"
+          className="min-w-28 flex-1 text-xs md:w-32 md:flex-none"
+          value={sort}
+          onChange={(value) => onSort(String(value))}
+          optionList={[
+            { value: "name", label: "名称排序" },
+            { value: "updated", label: "最近更新" },
+            { value: "enabled", label: "启用优先" },
+          ]}
+        />
+      </div>
+      <div className="flex min-h-8 flex-wrap items-center gap-2">
+        <div className="extension-status-chips" role="group" aria-label="状态筛选">
+          {statusOptions.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              aria-pressed={filter === option.value}
+              className={`extension-status-chip is-${option.value}`}
+              onClick={() => onFilter(option.value)}
+            >
+              <span>{option.label}</span>
+              <span className="extension-status-chip-count">{option.count}</span>
+            </button>
+          ))}
+        </div>
+        {(query.trim() || filter !== "all" || source !== "all") && (
+          <Button size="xs" variant="ghost" onClick={onClear}>
+            <IconX size={13} aria-hidden="true" />
+            清除筛选
+          </Button>
+        )}
+        {trailing}
+      </div>
     </div>
   );
 }
