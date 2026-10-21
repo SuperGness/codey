@@ -22,7 +22,7 @@ import {
 } from "@heroui/react";
 export { Label } from "@heroui/react";
 import type { Key } from "@heroui/react";
-import { UNSAFE_PortalProvider } from "react-aria";
+import { mergeProps, mergeRefs, UNSAFE_PortalProvider } from "react-aria";
 
 // 本文件是控制台各模块共用的业务控件层：把项目内统一的语义（按钮语义变体、徽章语义、
 // optionList 形式的下拉、受控对话框）映射到 HeroUI 组件，避免各处重复拼装复合组件。
@@ -43,19 +43,30 @@ export function useToastContainer(element: HTMLElement | null, active = true) {
 type TooltipContentProps = React.ComponentProps<typeof HeroTooltip.Content>;
 export interface TooltipProps {
   children: React.ReactElement;
+  asChild?: boolean;
   className?: string;
   content?: React.ReactNode;
   delay?: number;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   position?: TooltipContentProps["placement"];
 }
-export function Tooltip({ children, className, content, delay = 400, position = "top" }: TooltipProps) {
+export function Tooltip({ children, asChild = false, className, content, delay = 400, open, onOpenChange, position = "top" }: TooltipProps) {
   if (content == null || content === "") return children;
   // 自带焦点行为的按钮可以直接作为触发器；普通元素需要 HeroUI 的触发器包裹以获得悬浮与焦点事件。
   const trigger = children.type === Button
     ? children
-    : <HeroTooltip.Trigger className={cn("inline-flex max-w-full", className)}>{children}</HeroTooltip.Trigger>;
+    : asChild
+      ? <HeroTooltip.Trigger render={(props) => {
+          const child = children as React.ReactElement<React.HTMLAttributes<HTMLElement> & { ref?: React.Ref<HTMLElement> }>;
+          return React.cloneElement(child, mergeProps(props, child.props, {
+            className: cn(props.className, child.props.className, className),
+            ref: mergeRefs(props.ref, child.props.ref),
+          }));
+        }} />
+      : <HeroTooltip.Trigger className={cn("inline-flex max-w-full", className)}>{children}</HeroTooltip.Trigger>;
   return (
-    <HeroTooltip delay={delay} closeDelay={80}>
+    <HeroTooltip delay={delay} closeDelay={80} isOpen={open} onOpenChange={onOpenChange}>
       {trigger}
       <HeroTooltip.Content placement={position} showArrow className="max-w-[420px] text-xs">
         {content}

@@ -1335,23 +1335,6 @@
   gap: 4px;
 }
 
-.official-account-set-default-hint {
-  padding: 3px 9px;
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--mac-blue) 10%, transparent);
-  color: var(--mac-blue);
-  font-size: 11.5px;
-  font-weight: 600;
-  white-space: nowrap;
-  opacity: 0;
-  transition: opacity 130ms ease;
-}
-
-.official-account-item.is-switchable:hover .official-account-set-default-hint,
-.official-account-item.is-switchable:focus-visible .official-account-set-default-hint {
-  opacity: 1;
-}
-
 @container settings-content (max-width: 640px) {
   .settings-page .official-account-item {
     grid-template-columns: minmax(0, 1fr) auto;

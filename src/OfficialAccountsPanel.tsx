@@ -254,6 +254,8 @@ export function OfficialAccountsPanel({
   const [siwcCopied, setSiwcCopied] = useState(false);
   const [confirmSiwcAccount, setConfirmSiwcAccount] = useState<OfficialAccount | null>(null);
   const [confirmDefaultAccount, setConfirmDefaultAccount] = useState<OfficialAccount | null>(null);
+  const [switchTipTarget, setSwitchTipTarget] = useState<string | null>(null);
+  const [switchTipOpen, setSwitchTipOpen] = useState<string | null>(null);
   const loginRef = useRef<LoginStart | null>(null);
   loginRef.current = login;
   const siwcLoginRef = useRef<(LoginStart & { accountId: string }) | null>(null);
@@ -595,6 +597,14 @@ export function OfficialAccountsPanel({
   }
 
   const disabled = isBusy || pending !== null;
+  useEffect(() => {
+    if (!active || disabled || !switchTipTarget) {
+      setSwitchTipOpen(null);
+      return;
+    }
+    const timer = window.setTimeout(() => setSwitchTipOpen(switchTipTarget), 400);
+    return () => window.clearTimeout(timer);
+  }, [active, disabled, switchTipTarget]);
 
   return (
     <div className="official-accounts-panel" aria-label="官方账号">
@@ -670,25 +680,63 @@ export function OfficialAccountsPanel({
                   ? `${account.siwcInvalidReason || "官方直连授权已失效"}，点击重新授权`
                   : "通过 Sign in with ChatGPT 二次授权，对话走 OpenAI 官方通道；额度查询等继续使用现有登录";
             return (
-              <li
+              <Tooltip
                 key={account.id}
+                asChild
+                content={switchable ? "点击切换为默认账号" : undefined}
+                open={active && !disabled && switchTipOpen === account.id}
+                onOpenChange={(open) => {
+                  if (!open) {
+                    setSwitchTipTarget((current) => current === account.id ? null : current);
+                    setSwitchTipOpen((current) => current === account.id ? null : current);
+                  }
+                }}
+              >
+              <li
                 className={`official-account-item${account.isDefault ? " is-default" : ""}${account.invalid ? " is-invalid" : ""}${switchable ? " is-switchable" : ""}`}
                 {...(switchable
                   ? {
                       role: "button",
                       tabIndex: 0,
-                      title: "点击切换为默认官方账号",
+                      onPointerOverCapture: (event: React.PointerEvent) => {
+                        if (event.pointerType === "touch") return;
+                        const target = event.target as HTMLElement;
+                        const nestedTrigger = target.closest("[data-slot='tooltip-trigger']");
+                        const overControl = target.closest("button, a, input, textarea") ||
+                          (nestedTrigger && nestedTrigger !== event.currentTarget);
+                        setSwitchTipTarget(overControl ? null : account.id);
+                        if (overControl) setSwitchTipOpen(null);
+                      },
+                      onPointerLeave: () => {
+                        setSwitchTipTarget(null);
+                        setSwitchTipOpen(null);
+                      },
+                      onFocusCapture: (event: React.FocusEvent) => {
+                        const target = event.target === event.currentTarget ? account.id : null;
+                        setSwitchTipTarget(target);
+                        setSwitchTipOpen(target);
+                      },
+                      onBlurCapture: (event: React.FocusEvent) => {
+                        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                          setSwitchTipTarget(null);
+                          setSwitchTipOpen(null);
+                        }
+                      },
                       onClick: (event: React.MouseEvent) => {
                         // li 自身也是 role=button，不能把卡片算进交互元素。
                         if ((event.target as HTMLElement).closest("button, a, input, textarea")) return;
                         // 拖选文本时的点击不弹确认窗。
                         if (window.getSelection()?.toString()) return;
+                        setSwitchTipTarget(null);
+                        setSwitchTipOpen(null);
                         askSetDefault(account);
                       },
                       onKeyDown: (event: React.KeyboardEvent) => {
                         if (event.target !== event.currentTarget) return;
                         if (event.key === "Enter" || event.key === " ") {
                           event.preventDefault();
+                          setSwitchTipTarget(null);
+                          setSwitchTipOpen(null);
                           askSetDefault(account);
                         }
                       },
@@ -781,7 +829,6 @@ export function OfficialAccountsPanel({
                   )}
                 </div>
                 <div className="official-account-controls">
-                  {switchable && <span className="official-account-set-default-hint" aria-hidden="true">设为默认</span>}
                   {!account.invalid && !usageInvalid && (
                     <Tooltip content={usageLoading ? "正在刷新额度…" : "刷新额度"}>
                       <Button
@@ -815,6 +862,7 @@ export function OfficialAccountsPanel({
                   </Button>
                 </div>
               </li>
+              </Tooltip>
             );
           })}
         </ul>
