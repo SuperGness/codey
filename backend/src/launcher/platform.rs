@@ -928,6 +928,7 @@ pub(super) async fn stop_running_windows_codex_instances(
             .map(|process| (process.process_id, process.executable_path.as_deref())),
     );
     if instances.is_empty() {
+        cleanup_stale_windows_codex_tray_icons(app_dir);
         return Ok(instances);
     }
     ensure_selected_windows_instances(app_dir, &instances)?;
@@ -1028,6 +1029,74 @@ fn windows_executable_is_codex_service(path: &Path) -> bool {
         .is_some_and(|(_, name)| windows_executable_name_is_codex_service(name))
 }
 
+/// 托盘 GUID 在各安装目录间共享；只有当前会话没有潜在持有者时才能删除。
+#[cfg(any(windows, test))]
+fn windows_codex_tray_cleanup_is_safe<'a>(
+    app_dir: &Path,
+    current_session: Option<u32>,
+    processes: impl IntoIterator<Item = (Option<u32>, &'a str, Option<&'a Path>)>,
+) -> bool {
+    let Some(current_session) = current_session else {
+        return false;
+    };
+    let is_codex_name = |name: &str| {
+        WINDOWS_CODEX_EXECUTABLE_NAMES
+            .iter()
+            .any(|expected| name.eq_ignore_ascii_case(expected))
+    };
+    !processes.into_iter().any(|(session, name, path)| {
+        if !windows_process_in_session(session, Some(current_session)) {
+            return false;
+        }
+        let normalized_path = path.map(normalized_windows_path);
+        let path_name = normalized_path
+            .as_deref()
+            .and_then(|path| path.rsplit('\\').next());
+        // Toolhelp 名称和路径来自不同查询；任一指向 Codex 都应阻止清理。
+        if is_codex_name(name) || path_name.is_some_and(is_codex_name) {
+            return true;
+        }
+        if windows_executable_name_is_codex_service(name)
+            && path_name.is_none_or(|path_name| path_name.eq_ignore_ascii_case(name))
+        {
+            return false;
+        }
+        path.is_some_and(|path| windows_path_is_within(path, app_dir))
+    })
+}
+
+#[cfg(windows)]
+fn cleanup_stale_windows_codex_tray_icons(app_dir: &Path) {
+    let current_session = codey_runtime_core::windows_process_session_id(std::process::id());
+    if current_session.is_none() {
+        return;
+    }
+    // 必须重新枚举；停止阶段的旧 PID 或快照不能排除其他安装刚启动的新实例。
+    let Ok(processes) = codey_runtime_core::windows_enumerate_processes() else {
+        return;
+    };
+    if !windows_codex_tray_cleanup_is_safe(
+        app_dir,
+        current_session,
+        processes.iter().map(|process| {
+            (
+                process.session_id,
+                process.exe_file.as_str(),
+                process.executable_path.as_deref(),
+            )
+        }),
+    ) {
+        return;
+    }
+    let removed = codey_runtime_core::windows_remove_codex_tray_icons();
+    if removed > 0 {
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.windows_codex_tray_icons_removed",
+            serde_json::json!({ "removed": removed }),
+        );
+    }
+}
+
 #[cfg(any(windows, test))]
 pub(super) fn windows_owned_process_ids_from_snapshot<'a>(
     app_dir: &Path,
@@ -1092,7 +1161,9 @@ async fn terminate_windows_codex_processes_with_timeout(
         stop_timeout,
         codey_runtime_core::windows_enumerate_processes,
     )
-    .await
+    .await?;
+    cleanup_stale_windows_codex_tray_icons(app_dir);
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1302,6 +1373,148 @@ pub(super) fn windows_stop_failure_summary(remaining: &[(u32, String, Option<u64
 #[cfg(test)]
 mod compatibility_tests {
     use super::*;
+
+    #[test]
+    fn tray_cleanup_requires_a_known_idle_session() {
+        let app_dir = Path::new(r"C:\Apps\Codex");
+        assert!(windows_codex_tray_cleanup_is_safe(app_dir, Some(1), []));
+        assert!(!windows_codex_tray_cleanup_is_safe(app_dir, None, []));
+        assert!(windows_codex_tray_cleanup_is_safe(
+            app_dir,
+            Some(1),
+            [
+                (
+                    Some(1),
+                    "notepad.exe",
+                    Some(Path::new(r"C:\Windows\notepad.exe"))
+                ),
+                (None, "unrelated.exe", None),
+            ],
+        ));
+    }
+
+    #[test]
+    fn tray_cleanup_blocks_codex_names_from_either_process_query() {
+        let app_dir = Path::new(r"C:\Apps\Codex");
+        for session in [Some(1), None] {
+            for (name, path) in [
+                ("Codex.exe", None),
+                ("CHATGPT.EXE", None),
+                ("Codex.exe", Some(Path::new(r"D:\OtherInstall\Codex.exe"))),
+                (
+                    "ChatGPT.exe",
+                    Some(Path::new(r"D:\OtherInstall\ChatGPT.exe")),
+                ),
+                (
+                    "unrelated.exe",
+                    Some(Path::new(r"D:\OtherInstall\CODEX.EXE")),
+                ),
+                (
+                    "codex-windows-sandbox-service.exe",
+                    Some(Path::new(r"D:\OtherInstall\ChatGPT.exe")),
+                ),
+                (
+                    "Codex.exe",
+                    Some(Path::new(
+                        r"D:\OtherInstall\codex-windows-sandbox-service.exe",
+                    )),
+                ),
+                (
+                    "ChatGPT.exe",
+                    Some(Path::new(r"D:\OtherInstall\unrelated.exe")),
+                ),
+            ] {
+                assert!(
+                    !windows_codex_tray_cleanup_is_safe(app_dir, Some(1), [(session, name, path)]),
+                    "unexpected cleanup permission: {session:?}, {name}, {path:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tray_cleanup_blocks_selected_install_helpers() {
+        let app_dir = Path::new(r"C:\Apps\Codex");
+        for session in [Some(1), None] {
+            for name in [
+                "node.exe",
+                "ordinary-service.exe",
+                "codex-windows-sandbox-service.exe",
+            ] {
+                assert!(!windows_codex_tray_cleanup_is_safe(
+                    app_dir,
+                    Some(1),
+                    [(
+                        session,
+                        name,
+                        Some(Path::new(r"c:/apps/codex/resources/node.exe"))
+                    )],
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn tray_cleanup_does_not_affect_other_login_sessions() {
+        let app_dir = Path::new(r"C:\Apps\Codex");
+        assert!(windows_codex_tray_cleanup_is_safe(
+            app_dir,
+            Some(1),
+            [
+                (Some(2), "Codex.exe", None),
+                (
+                    Some(2),
+                    "ChatGPT.exe",
+                    Some(Path::new(r"D:\OtherInstall\ChatGPT.exe"))
+                ),
+                (
+                    Some(0),
+                    "node.exe",
+                    Some(Path::new(r"C:\Apps\Codex\resources\node.exe"))
+                ),
+            ],
+        ));
+    }
+
+    #[test]
+    fn tray_cleanup_exempts_known_system_services() {
+        let app_dir = Path::new(r"C:\Apps\Codex");
+        for name in WINDOWS_CODEX_SERVICE_EXECUTABLE_NAMES {
+            let path = app_dir.join("resources").join(name.to_ascii_uppercase());
+            for session in [Some(1), None] {
+                for path in [Some(path.as_path()), None] {
+                    assert!(windows_codex_tray_cleanup_is_safe(
+                        app_dir,
+                        Some(1),
+                        [(session, *name, path)],
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tray_cleanup_blocks_new_codex_after_a_stopped_pid_is_reused() {
+        let process_id = 42;
+        let current = [(process_id, "Codex.exe".to_string(), Some(200))];
+        assert!(
+            windows_stop_survivors(
+                &HashMap::from([(process_id, Some(100))]),
+                &current,
+                &HashSet::from([process_id]),
+            )
+            .is_empty()
+        );
+        assert!(!windows_codex_tray_cleanup_is_safe(
+            Path::new(r"C:\Apps\Codex"),
+            Some(1),
+            [(
+                Some(1),
+                current[0].1.as_str(),
+                Some(Path::new(r"D:\OtherInstall\Codex.exe"))
+            )],
+        ));
+    }
 
     #[test]
     fn process_cleanup_refuses_other_installations_before_stopping_anything() {

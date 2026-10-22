@@ -28,7 +28,9 @@ use windows::Win32::System::Threading::{
 #[cfg(windows)]
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 #[cfg(windows)]
-use windows::Win32::UI::Shell::{ExtractIconExW, ShellExecuteW};
+use windows::Win32::UI::Shell::{
+    ExtractIconExW, NIF_GUID, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
+};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWMINNOACTIVE;
 #[cfg(windows)]
@@ -42,10 +44,20 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HICON, ICON_BIG, ICON_SMALL, SendMessageW, WM_SETICON,
 };
 #[cfg(windows)]
-use windows::core::{PCWSTR, PROPVARIANT, PWSTR};
+use windows::core::{GUID, PCWSTR, PROPVARIANT, PWSTR};
 
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+// 来源：Codex 26.1013.40934 的 main-CLu1A25j.js 中 F3e 与 Tray 构造参数。
+// 仅清理客户端已知 GUID，不枚举其他应用的托盘图标。
+#[cfg(windows)]
+const CODEX_TRAY_GUIDS: [GUID; 4] = [
+    GUID::from_u128(0xc4c933ff_16f4_47c7_a231_29e6bb84dccc), // Nightly
+    GUID::from_u128(0xc4607cac_3138_48bd_8b2a_5bc99d08e393), // InternalAlpha
+    GUID::from_u128(0x758400cf_36c7_43be_9335_6354d603be3a), // PublicBeta
+    GUID::from_u128(0xe5768d8b_6936_4f45_b1ad_4c5fb414cb35), // Prod
+];
 
 #[cfg(windows)]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +98,27 @@ pub fn open_url(url: &str) -> anyhow::Result<()> {
         anyhow::bail!("ShellExecuteW returned {code}");
     }
     Ok(())
+}
+
+#[cfg(windows)]
+pub fn remove_codex_tray_icons() -> usize {
+    CODEX_TRAY_GUIDS
+        .into_iter()
+        .filter(|guid| {
+            let data = codex_tray_icon_data(*guid);
+            unsafe { Shell_NotifyIconW(NIM_DELETE, &data) }.as_bool()
+        })
+        .count()
+}
+
+#[cfg(windows)]
+fn codex_tray_icon_data(guid: GUID) -> NOTIFYICONDATAW {
+    NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        uFlags: NIF_GUID,
+        guidItem: guid,
+        ..Default::default()
+    }
 }
 
 #[cfg(windows)]
@@ -559,6 +592,20 @@ impl Drop for HandleGuard {
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_tray_icon_delete_data_uses_only_guid_identity() {
+        for guid in CODEX_TRAY_GUIDS {
+            let data = codex_tray_icon_data(guid);
+            assert_eq!(data.cbSize as usize, std::mem::size_of::<NOTIFYICONDATAW>());
+            assert_eq!(data.uFlags, NIF_GUID);
+            assert_eq!(data.guidItem, guid);
+            assert_eq!(data.hWnd, HWND::default());
+            assert_eq!(data.uID, 0);
+            assert_eq!(data.uCallbackMessage, 0);
+            assert_eq!(data.hIcon, HICON::default());
+        }
+    }
 
     // 【自动化测试】Windows 进程 - 原生检测区分存活与退出
     #[test]

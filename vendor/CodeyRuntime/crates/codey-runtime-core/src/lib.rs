@@ -28,6 +28,13 @@ pub fn windows_open_url(url: &str) -> anyhow::Result<()> {
     windows_integration::open_url(url)
 }
 
+/// 删除已知 Codex 托盘图标并返回成功次数；图标不存在时不报错。
+/// 调用方须先确认目标进程已退出，且当前会话没有其他 Codex 实例。
+#[cfg(windows)]
+pub fn windows_remove_codex_tray_icons() -> usize {
+    windows_integration::remove_codex_tray_icons()
+}
+
 #[cfg(windows)]
 pub fn windows_activate_process_window(process_id: u32) -> bool {
     windows_integration::activate_process_window(process_id)
