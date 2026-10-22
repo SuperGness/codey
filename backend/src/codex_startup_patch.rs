@@ -44,6 +44,8 @@ const CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET: std::time::Duration = std::time::Dur
 #[cfg(any(windows, target_os = "macos", test))]
 const CLI_WRAPPER_HANDSHAKE_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_millis(100);
+#[cfg(any(windows, target_os = "macos", test))]
+const CLI_WRAPPER_OUTPUT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 #[cfg(any(windows, test))]
 pub(crate) const WINDOWS_PACKAGE_RESUME_ARGUMENT: &str = "--codey-resume-packaged-app";
 
@@ -350,14 +352,14 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
                 use std::os::windows::process::CommandExt;
                 relay.creation_flags(codey_runtime_core::windows_create_no_window());
             }
-            let mut relay = relay.spawn().context("启动 Codex 本地路由请求转发失败")?;
+            let relay =
+                input_router.insert(relay.spawn().context("启动 Codex 本地路由请求转发失败")?);
             command.stdin(
                 relay
                     .stdout
                     .take()
                     .context("Codex 本地路由请求管道不可用")?,
             );
-            input_router = Some(relay);
             let mut observer = std::process::Command::new(std::env::current_exe()?);
             observer
                 .arg("--codey-observe-app-server-output")
@@ -367,9 +369,9 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
                 use std::os::windows::process::CommandExt;
                 observer.creation_flags(codey_runtime_core::windows_create_no_window());
             }
-            let mut observer = observer.spawn().context("启动 Codex 会话响应转发失败")?;
+            let observer =
+                output_observer.insert(observer.spawn().context("启动 Codex 会话响应转发失败")?);
             command.stdout(observer.stdin.take().context("Codex 会话响应管道不可用")?);
-            output_observer = Some(observer);
         }
         #[cfg(target_os = "macos")]
         {
@@ -394,14 +396,11 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     let mut child = match launch {
         Ok(child) => child,
         Err(error) => {
-            if let Some(mut observer) = output_observer {
-                let _ = observer.kill();
-                let _ = observer.wait();
-            }
-            if let Some(mut relay) = input_router {
-                let _ = relay.kill();
-                let _ = relay.wait();
-            }
+            finish_cli_wrapper_helpers(
+                &mut input_router,
+                &mut output_observer,
+                std::time::Duration::ZERO,
+            );
             if let Some(readiness) = readiness {
                 // 校验或创建进程失败必须显式回传，避免被误报成握手超时。
                 readiness.fail(&CliWrapperFailure {
@@ -419,18 +418,77 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         readiness.executed();
     }
     let status = child.wait();
-    // 等待原生进程关闭 stdout 后读完最后一条通知，不能提前终止输出转发器。
-    if let Some(mut observer) = output_observer {
-        let _ = observer.wait();
+    if status.is_err() {
+        terminate_cli_child(&mut child, "Codex CLI");
     }
-    if let Some(mut relay) = input_router {
-        let _ = relay.kill();
-        let _ = relay.wait();
-    }
+    finish_cli_wrapper_helpers(
+        &mut input_router,
+        &mut output_observer,
+        if status.is_ok() {
+            CLI_WRAPPER_OUTPUT_DRAIN_TIMEOUT
+        } else {
+            std::time::Duration::ZERO
+        },
+    );
     let status =
         status.with_context(|| format!("等待 Codex CLI 退出失败：{}", target.display()))?;
     let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
     std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn wait_for_cli_child_exit(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> std::io::Result<bool> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(true),
+            Ok(None) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(20)));
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn terminate_cli_child(child: &mut std::process::Child, role: &str) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let termination = child.kill();
+    // Windows 的终止请求是异步的；回收同样有时限，避免清理失败阻塞包装器退出。
+    match wait_for_cli_child_exit(child, std::time::Duration::from_secs(1)) {
+        Ok(true) => {}
+        result => eprintln!(
+            "Codey 回收 {role} 失败（PID {}）：终止结果 {termination:?}，等待结果 {result:?}",
+            child.id()
+        ),
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn finish_cli_wrapper_helpers(
+    input_router: &mut Option<std::process::Child>,
+    output_observer: &mut Option<std::process::Child>,
+    drain_timeout: std::time::Duration,
+) {
+    // CLI 已结束，不再需要输入；先清理，避免输出管道未关闭时连带保留输入进程。
+    if let Some(relay) = input_router {
+        terminate_cli_child(relay, "输入转发器");
+    }
+    if let Some(observer) = output_observer {
+        // 保留末尾通知的排空时间，但后代继承 stdout 时不能无限等待 EOF。
+        if !matches!(wait_for_cli_child_exit(observer, drain_timeout), Ok(true)) {
+            terminate_cli_child(observer, "输出观察器");
+        }
+    }
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -1179,6 +1237,122 @@ fn rewrite_app_server_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_helper_process_fixture() {
+        let Ok(role) = std::env::var("CODEY_TEST_CLI_HELPER_ROLE") else {
+            return;
+        };
+        std::fs::write(
+            std::env::var_os("CODEY_TEST_CLI_HELPER_READY").unwrap(),
+            b"ready",
+        )
+        .unwrap();
+        if role == "observer" {
+            observe_local_app_server_output(
+                std::io::stdin().lock(),
+                std::io::stdout().lock(),
+                &std::path::PathBuf::from(std::env::var_os("CODEY_TEST_CLI_HELPER_HOME").unwrap()),
+            )
+            .unwrap();
+        } else {
+            // 保留继承的 stdout 写句柄，直到父进程关闭 stdin。
+            std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink()).unwrap();
+        }
+        std::process::exit(0);
+    }
+
+    struct CliHelperFixture(Option<std::process::Child>);
+
+    impl Drop for CliHelperFixture {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn spawn_cli_helper_fixture(
+        home: &std::path::Path,
+        role: &str,
+        stdout: std::process::Stdio,
+    ) -> CliHelperFixture {
+        let ready = home.join(uuid::Uuid::new_v4().to_string());
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "codex_startup_patch::tests::cli_helper_process_fixture",
+                "--nocapture",
+            ])
+            .env("CODEY_TEST_CLI_HELPER_ROLE", role)
+            .env("CODEY_TEST_CLI_HELPER_READY", &ready)
+            .env("CODEY_TEST_CLI_HELPER_HOME", home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(stdout)
+            .spawn()
+            .unwrap();
+        let mut fixture = CliHelperFixture(Some(child));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(fixture.0.as_mut().unwrap().try_wait().unwrap().is_none());
+            assert!(std::time::Instant::now() < deadline, "helper did not start");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        fixture
+    }
+
+    #[test]
+    fn cli_helper_cleanup_drains_and_persists_the_final_notification() {
+        use std::io::Read;
+        let home = tempfile::tempdir().unwrap();
+        let mut observer =
+            spawn_cli_helper_fixture(home.path(), "observer", std::process::Stdio::piped());
+        let notification = br#"{"method":"thread/settings/updated","params":{"threadId":"last","threadSettings":{"model":"route/final"}}}"#;
+        let mut input = observer.0.as_mut().unwrap().stdin.take().unwrap();
+        input.write_all(notification).unwrap();
+        drop(input);
+
+        finish_cli_wrapper_helpers(&mut None, &mut observer.0, CLI_WRAPPER_OUTPUT_DRAIN_TIMEOUT);
+
+        let child = observer.0.as_mut().unwrap();
+        assert!(child.try_wait().unwrap().unwrap().success());
+        let mut output = Vec::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_end(&mut output)
+            .unwrap();
+        assert!(output.ends_with(notification));
+        assert_eq!(
+            crate::session_model::read(home.path(), "last").unwrap()["model"],
+            "route/final"
+        );
+    }
+
+    #[test]
+    fn cli_helper_cleanup_reaps_helpers_while_another_process_holds_the_output_pipe() {
+        let home = tempfile::tempdir().unwrap();
+        let mut observer =
+            spawn_cli_helper_fixture(home.path(), "observer", std::process::Stdio::null());
+        let writer = observer.0.as_mut().unwrap().stdin.take().unwrap();
+        let mut holder = spawn_cli_helper_fixture(home.path(), "holder", writer.into());
+        let mut relay = spawn_cli_helper_fixture(home.path(), "relay", std::process::Stdio::null());
+        assert!(observer.0.as_mut().unwrap().try_wait().unwrap().is_none());
+
+        let started = std::time::Instant::now();
+        finish_cli_wrapper_helpers(
+            &mut relay.0,
+            &mut observer.0,
+            std::time::Duration::from_millis(100),
+        );
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(relay.0.as_mut().unwrap().try_wait().unwrap().is_some());
+        assert!(observer.0.as_mut().unwrap().try_wait().unwrap().is_some());
+        assert!(holder.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    }
 
     #[test]
     fn output_observer_preserves_bytes_and_persists_only_confirmed_settings() {
