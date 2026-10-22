@@ -353,6 +353,14 @@ async fn forward_codex_exit_to_codey_shutdown(
     runtime_generation: u64,
 ) {
     if codex_exit.await.is_err() {
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.codex_exit_watch_closed",
+            json!({
+                "codeyProcessId": std::process::id(),
+                "runtimeGeneration": runtime_generation,
+                "shutdownRequested": false,
+            }),
+        );
         return;
     }
     while exit_state.restart_in_progress.load(Ordering::Acquire) {
@@ -366,7 +374,18 @@ async fn forward_codex_exit_to_codey_shutdown(
     }
     // 重启期间旧 Codex 的退出不能关闭新一代运行时；只有当前受控
     // Codex 的自然退出才联动关闭 Codey 主进程。
-    if exit_state.runtime_generation.load(Ordering::Acquire) == runtime_generation {
+    let current_generation = exit_state.runtime_generation.load(Ordering::Acquire);
+    let current_runtime = current_generation == runtime_generation;
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.codex_exit_observed",
+        json!({
+            "codeyProcessId": std::process::id(),
+            "runtimeGeneration": runtime_generation,
+            "currentRuntimeGeneration": current_generation,
+            "shutdownRequested": current_runtime,
+        }),
+    );
+    if current_runtime {
         exit_state.request_shutdown();
     }
 }
@@ -652,7 +671,7 @@ async fn run_scheduled_restart(restart_state: Arc<AppState>, mut cancel: oneshot
         runtime_start_failure_context(&restart_state, true, &error).await,
     );
     eprintln!("Codey 自动重启 Codex 失败：{error}");
-    restart_state.request_shutdown();
+    restart_state.request_shutdown_with_reason(super::AppShutdownReason::RuntimeRestartFailed);
 }
 
 async fn stop_codey_runtime_locked(state: &Arc<AppState>) -> Result<Value, String> {
@@ -885,5 +904,35 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_codex_exit_watch_does_not_request_shutdown() {
+        let state = Arc::new(AppState::default());
+        state.runtime_generation.store(7, Ordering::Release);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        drop(exit_tx);
+
+        forward_codex_exit_to_codey_shutdown(Arc::clone(&state), exit_rx, 7).await;
+
+        assert!(!state.is_shutting_down());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), state.wait_for_shutdown())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_restart_failure_keeps_its_shutdown_reason() {
+        let state = Arc::new(AppState::default());
+        state.request_shutdown_with_reason(AppShutdownReason::RuntimeRestartFailed);
+        // A late natural-exit notification must not replace the failure cause.
+        state.request_shutdown();
+        assert_eq!(
+            state.wait_for_shutdown().await,
+            AppShutdownReason::RuntimeRestartFailed
+        );
+        assert!(state.is_shutting_down());
     }
 }

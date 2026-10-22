@@ -4,7 +4,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChildProcessState {
     Running,
-    Exited,
+    Exited(Option<i32>),
     Untracked,
 }
 
@@ -13,16 +13,51 @@ async fn child_process_state(child: &Arc<Mutex<Option<Child>>>) -> ChildProcessS
     let mut slot = child.lock().await;
     let state = match slot.as_mut() {
         Some(process) => match process.try_wait() {
-            Ok(Some(_)) => ChildProcessState::Exited,
+            Ok(Some(status)) => ChildProcessState::Exited(status.code()),
             Ok(None) => ChildProcessState::Running,
             Err(_) => ChildProcessState::Running,
         },
         None => ChildProcessState::Untracked,
     };
-    if state == ChildProcessState::Exited {
+    if matches!(state, ChildProcessState::Exited(_)) {
         slot.take();
     }
     state
+}
+
+fn record_codex_exit_watch_started(process_id: Option<u32>, source: &str) -> Instant {
+    let watched_at = Instant::now();
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.codex_exit_watch_started",
+        serde_json::json!({
+            "codeyProcessId": std::process::id(),
+            "processId": process_id,
+            "source": source,
+        }),
+    );
+    watched_at
+}
+
+fn record_codex_exit(
+    process_id: Option<u32>,
+    source: &str,
+    watched_at: Instant,
+    exit_code: Option<i64>,
+    success: Option<bool>,
+) {
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.codex_exited",
+        serde_json::json!({
+            "codeyProcessId": std::process::id(),
+            "processId": process_id,
+            "source": source,
+            "watchedForMs": watched_at.elapsed().as_millis(),
+            "exitCode": exit_code,
+            "exitCodeHex": exit_code.map(|code| format!("0x{:08X}", code as u32)),
+            "success": success,
+        }),
+    );
+    let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
 }
 
 #[cfg(not(windows))]
@@ -40,19 +75,32 @@ pub(super) fn spawn_codex_exit_watcher(
         let Some(mut process) = child.lock().await.take() else {
             return;
         };
+        // macOS app bundles are held by `open -W`; this is the exact launched
+        // child, which can differ from the Electron main process PID.
+        let process_id = process.id();
+        let watched_at = record_codex_exit_watch_started(process_id, "direct_child");
         let wait_result = tokio::select! {
             _ = &mut shutdown_rx => None,
             result = process.wait() => Some(result),
         };
         let natural_exit = match wait_result {
-            Some(Ok(_)) => true,
+            Some(Ok(status)) => {
+                record_codex_exit(
+                    process_id,
+                    "direct_child",
+                    watched_at,
+                    status.code().map(i64::from),
+                    Some(status.success()),
+                );
+                true
+            }
             Some(Err(error)) => {
                 error_log::record_failure(
                     "process_watch_failed",
                     "wait_for_codex_exit",
                     error.to_string(),
                     serde_json::json!({
-                        "processId": process.id(),
+                        "processId": process_id,
                     }),
                 );
                 *child.lock().await = Some(process);
@@ -84,12 +132,26 @@ pub(super) fn spawn_codex_exit_watcher(
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let (exit_tx, exit_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
+        let watched_process_id = match process_id {
+            Some(process_id) => Some(process_id),
+            None => child.lock().await.as_ref().and_then(Child::id),
+        };
+        let mut source = if process_id.is_some() {
+            "windows_process_wait"
+        } else {
+            "direct_child"
+        };
+        let watched_at = record_codex_exit_watch_started(watched_process_id, source);
+        let mut exit_code = None;
         let natural_exit = if let Some(process_id) = process_id {
             tokio::select! {
                 _ = &mut shutdown_rx => false,
-                result = codey_runtime_core::launcher::wait_for_windows_process_id(process_id) => {
+                result = codey_runtime_core::launcher::wait_for_windows_process_exit(process_id) => {
                     match result {
-                        Ok(()) => true,
+                        Ok(code) => {
+                            exit_code = code;
+                            true
+                        }
                         Err(error) => {
                             error_log::record_failure(
                                 "process_watch_failed",
@@ -100,6 +162,7 @@ pub(super) fn spawn_codex_exit_watcher(
                                 }),
                             );
                             eprintln!("等待 Windows Codex 进程退出失败：{error:#}");
+                            source = "windows_process_probe";
                             let mut interval = tokio::time::interval(Duration::from_secs(1));
                             loop {
                                 tokio::select! {
@@ -125,13 +188,23 @@ pub(super) fn spawn_codex_exit_watcher(
                     _ = &mut shutdown_rx => break false,
                     _ = interval.tick() => match child_process_state(&child).await {
                         ChildProcessState::Running => {}
-                        ChildProcessState::Exited => break true,
+                        ChildProcessState::Exited(code) => {
+                            exit_code = code.map(|code| code as u32);
+                            break true;
+                        }
                         ChildProcessState::Untracked => break false,
                     }
                 }
             }
         };
         if natural_exit {
+            record_codex_exit(
+                watched_process_id,
+                source,
+                watched_at,
+                exit_code.map(i64::from),
+                exit_code.map(|code| code == 0),
+            );
             codex_exited.store(true, Ordering::Release);
             let _ = exit_tx.send(());
         }

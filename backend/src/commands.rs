@@ -220,6 +220,7 @@ impl Drop for RestartInProgressGuard {
 pub enum AppShutdownReason {
     CodexExited,
     InstallUpdate,
+    RuntimeRestartFailed,
 }
 
 /// An unreadable config falls back to defaults for this launch. The broken

@@ -71,6 +71,82 @@ enum ShutdownReason {
     CodexExited,
     InstallUpdate,
     Signal,
+    RuntimeRestartFailed,
+}
+
+impl ShutdownReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CodexExited => "codex_exited",
+            Self::InstallUpdate => "install_update",
+            Self::Signal => "signal",
+            Self::RuntimeRestartFailed => "runtime_restart_failed",
+        }
+    }
+}
+
+struct DesktopLifecycle {
+    started_at: std::time::Instant,
+    reason: std::sync::Mutex<&'static str>,
+}
+
+impl DesktopLifecycle {
+    fn new() -> Self {
+        Self {
+            started_at: std::time::Instant::now(),
+            reason: std::sync::Mutex::new("startup_failed"),
+        }
+    }
+
+    fn set_reason(&self, reason: &'static str) {
+        *self
+            .reason
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = reason;
+    }
+
+    fn shutdown_requested(&self, reason: ShutdownReason) {
+        self.set_reason(reason.as_str());
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "desktop.shutdown_requested",
+            serde_json::json!({
+                "processId": std::process::id(),
+                "uptimeMs": self.started_at.elapsed().as_millis(),
+                "reason": reason.as_str(),
+            }),
+        );
+        let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
+    }
+
+    fn exit_details(&self, success: bool, panicking: bool) -> serde_json::Value {
+        let reason = *self
+            .reason
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        serde_json::json!({
+            "processId": std::process::id(),
+            "uptimeMs": self.started_at.elapsed().as_millis(),
+            "reason": if panicking { "panic" } else { reason },
+            "success": success && !panicking,
+            "exitCode": if panicking { None } else { Some(if success { 0 } else { 1 }) },
+        })
+    }
+}
+
+struct DesktopExitGuard {
+    lifecycle: Arc<DesktopLifecycle>,
+    success: bool,
+}
+
+impl Drop for DesktopExitGuard {
+    fn drop(&mut self) {
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "desktop.finished",
+            self.lifecycle
+                .exit_details(self.success, std::thread::panicking()),
+        );
+        let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
+    }
 }
 
 pub fn run_update_helper_if_requested() -> Result<bool> {
@@ -127,19 +203,41 @@ pub fn run_fastctx_route_hook_if_requested() -> Result<bool> {
 }
 
 pub fn run_desktop_application() -> Result<()> {
+    let lifecycle = Arc::new(DesktopLifecycle::new());
+    let mut exit_guard = DesktopExitGuard {
+        lifecycle: Arc::clone(&lifecycle),
+        success: false,
+    };
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "desktop.started",
+        serde_json::json!({ "processId": std::process::id() }),
+    );
+    let result = run_desktop_application_inner(lifecycle);
+    exit_guard.success = result.is_ok();
+    result
+}
+
+fn run_desktop_application_inner(lifecycle: Arc<DesktopLifecycle>) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        native_update_ui::run_macos_application(|ui| build_async_runtime()?.block_on(run(ui)))
+        native_update_ui::run_macos_application(move |ui| {
+            build_async_runtime()?.block_on(run(ui, lifecycle))
+        })
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         #[cfg(windows)]
         let Some(_desktop_instance) = desktop_instance::claim() else {
+            lifecycle.set_reason("instance_not_acquired");
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "desktop.instance_not_acquired",
+                serde_json::json!({}),
+            );
             return Ok(());
         };
         let ui = NativeUpdateUi::start();
-        let result = build_async_runtime()?.block_on(run(ui.clone()));
+        let result = build_async_runtime()?.block_on(run(ui.clone(), lifecycle));
         ui.shutdown();
         result
     }
@@ -162,7 +260,7 @@ impl Drop for PluginShutdownGuard {
     }
 }
 
-async fn run(ui: NativeUpdateUi) -> Result<()> {
+async fn run(ui: NativeUpdateUi, lifecycle: Arc<DesktopLifecycle>) -> Result<()> {
     // Config load, ledger read and HTTP client construction (which loads the
     // system root store) are synchronous; keep them off the async workers.
     let state = tokio::task::spawn_blocking(|| {
@@ -193,9 +291,7 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
     // Register signal listeners during launch even though the update workflow
     // no longer polls them before launching Codex.
     let shutdown_task = tokio::spawn(shutdown_signal());
-    let shutdown = async {
-        let _ = shutdown_task.await;
-    };
+    let shutdown = wait_for_shutdown_signal_task(shutdown_task);
     tokio::pin!(shutdown);
     let show_initial_startup_failure = |error: &str| {
         let ui = ui.clone();
@@ -205,6 +301,7 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
     let shutdown_reason = loop {
         match commands::launch_codey_runtime(&state).await {
             Ok(_) => {
+                lifecycle.set_reason("runtime_failed");
                 break wait_for_runtime_shutdown(
                     startup_update::run(&state, &ui),
                     state.wait_for_shutdown(),
@@ -251,12 +348,15 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
                 if let Err(error) = &result {
                     show_initial_startup_failure(error).await;
                 }
-                return result.map_err(anyhow::Error::msg);
+                return result
+                    .map(|reason| lifecycle.shutdown_requested(reason))
+                    .map_err(anyhow::Error::msg);
             }
         }
     };
 
     let shutdown_started_at = std::time::SystemTime::now();
+    lifecycle.shutdown_requested(shutdown_reason);
     let cleanup = stop_runtime_with_retry(&state).await;
     if let Err(error) = &cleanup {
         error_log::record_failure(
@@ -270,6 +370,7 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
         ShutdownReason::CodexExited => "Codex 已退出",
         ShutdownReason::InstallUpdate => "Codey 正在安装更新",
         ShutdownReason::Signal => "Codey 收到退出信号",
+        ShutdownReason::RuntimeRestartFailed => "Codey 自动重启 Codex 失败",
     };
     // The public no-argument helper remains available for callers without a shutdown boundary:
     // terminate_other_codey_processes().await
@@ -288,7 +389,20 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
             eprintln!("{shutdown_context}，但清理遗留 Codey 进程失败：{error:#}");
         }
     }
-    cleanup.map_err(anyhow::Error::msg)
+    runtime_shutdown_result(shutdown_reason, cleanup).map_err(anyhow::Error::msg)
+}
+
+fn runtime_shutdown_result(
+    reason: ShutdownReason,
+    cleanup: Result<(), String>,
+) -> Result<(), String> {
+    match (reason, cleanup) {
+        (ShutdownReason::RuntimeRestartFailed, Ok(())) => Err("自动重启 Codex 失败".to_string()),
+        (ShutdownReason::RuntimeRestartFailed, Err(error)) => {
+            Err(format!("自动重启 Codex 失败；退出清理失败：{error}"))
+        }
+        (_, result) => result,
+    }
 }
 
 async fn finish_failed_startup(
@@ -296,16 +410,16 @@ async fn finish_failed_startup(
     cleanup: Result<(), String>,
     update: impl std::future::Future<Output = startup_update::StartupUpdateOutcome>,
     signal: impl std::future::Future<Output = ()>,
-) -> Result<(), String> {
+) -> Result<ShutdownReason, String> {
     // Only offer replacement after Codex has stopped and its temporary state
     // has been restored. A failed cleanup must preserve its original error.
     if cleanup.is_ok() {
         tokio::select! {
             biased;
-            _ = signal => return Ok(()),
+            _ = signal => return Ok(ShutdownReason::Signal),
             outcome = update => {
                 if outcome == startup_update::StartupUpdateOutcome::InstallScheduled {
-                    return Ok(());
+                    return Ok(ShutdownReason::InstallUpdate);
                 }
             }
         }
@@ -329,6 +443,7 @@ async fn wait_for_runtime_shutdown(
             reason = &mut app_shutdown => return match reason {
                 AppShutdownReason::CodexExited => ShutdownReason::CodexExited,
                 AppShutdownReason::InstallUpdate => ShutdownReason::InstallUpdate,
+                AppShutdownReason::RuntimeRestartFailed => ShutdownReason::RuntimeRestartFailed,
             },
             _ = &mut signal => return ShutdownReason::Signal,
             outcome = &mut update, if update_pending => {
@@ -387,6 +502,22 @@ async fn show_initial_startup_failure_with_ui(ui: &NativeUpdateUi, error: &str) 
     }
 }
 
+async fn wait_for_shutdown_signal_task(task: tokio::task::JoinHandle<()>) {
+    if let Err(error) = task.await {
+        error_log::record_failure(
+            "shutdown_signal_listener_failed",
+            "wait_for_shutdown_signal_task",
+            error.to_string(),
+            serde_json::json!({
+                "cancelled": error.is_cancelled(),
+                "panicked": error.is_panic(),
+            }),
+        );
+        // 监听任务异常不代表收到退出信号，继续等待 Codex 退出或安装更新。
+        std::future::pending::<()>().await;
+    }
+}
+
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -396,10 +527,16 @@ async fn shutdown_signal() {
             Ok(mut terminate) => {
                 tokio::select! {
                     _ = ctrl_c_signal() => {}
-                    _ = terminate.recv() => {}
+                    _ = wait_for_termination_signal(terminate.recv()) => {}
                 }
             }
             Err(error) => {
+                error_log::record_failure(
+                    "shutdown_signal_listener_failed",
+                    "register_sigterm_listener",
+                    format!("{error:#}"),
+                    serde_json::json!({}),
+                );
                 eprintln!("{error:#}");
                 ctrl_c_signal().await;
             }
@@ -412,10 +549,29 @@ async fn shutdown_signal() {
     }
 }
 
+#[cfg(any(unix, test))]
+async fn wait_for_termination_signal(signal: impl std::future::Future<Output = Option<()>>) {
+    if signal.await.is_none() {
+        error_log::record_failure(
+            "shutdown_signal_listener_failed",
+            "wait_for_sigterm",
+            "SIGTERM 监听流已关闭，未收到退出信号",
+            serde_json::json!({}),
+        );
+        std::future::pending::<()>().await;
+    }
+}
+
 /// A listener that cannot be registered never fires, so Codex exit remains
 /// the shutdown trigger instead of Codey quitting right after launch.
 async fn ctrl_c_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
+        error_log::record_failure(
+            "shutdown_signal_listener_failed",
+            "wait_for_ctrl_c",
+            error.to_string(),
+            serde_json::json!({}),
+        );
         eprintln!("监听 Ctrl+C 失败：{error}");
         std::future::pending::<()>().await;
     }
@@ -451,7 +607,7 @@ mod tests {
                 pending(),
             )
             .await,
-            Ok(())
+            Ok(ShutdownReason::InstallUpdate)
         );
     }
 
@@ -473,7 +629,7 @@ mod tests {
     async fn failed_startup_update_can_be_cancelled_by_shutdown() {
         assert_eq!(
             finish_failed_startup("Codex 启动失败", Ok(()), pending(), async {}).await,
-            Ok(())
+            Ok(ShutdownReason::Signal)
         );
     }
 
@@ -502,6 +658,129 @@ mod tests {
             wait_for_runtime_shutdown(pending(), pending(), async {}).await,
             ShutdownReason::Signal
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_signal_listener_does_not_trigger_shutdown() {
+        let listener = tokio::spawn(async { panic!("signal listener failed") });
+        let reason = wait_for_runtime_shutdown(
+            pending(),
+            async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                AppShutdownReason::CodexExited
+            },
+            wait_for_shutdown_signal_task(listener),
+        )
+        .await;
+        assert_eq!(reason, ShutdownReason::CodexExited);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_signal_listener_does_not_trigger_shutdown() {
+        let listener = tokio::spawn(pending::<()>());
+        listener.abort();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                wait_for_shutdown_signal_task(listener),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_signal_listener_triggers_shutdown() {
+        let reason = wait_for_runtime_shutdown(
+            pending(),
+            pending(),
+            wait_for_shutdown_signal_task(tokio::spawn(async {})),
+        )
+        .await;
+        assert_eq!(reason, ShutdownReason::Signal);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_sigterm_stream_does_not_trigger_shutdown() {
+        let reason = wait_for_runtime_shutdown(
+            pending(),
+            async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                AppShutdownReason::InstallUpdate
+            },
+            wait_for_termination_signal(async { None }),
+        )
+        .await;
+        assert_eq!(reason, ShutdownReason::InstallUpdate);
+    }
+
+    #[tokio::test]
+    async fn received_sigterm_triggers_shutdown() {
+        let reason = wait_for_runtime_shutdown(
+            pending(),
+            pending(),
+            wait_for_termination_signal(async { Some(()) }),
+        )
+        .await;
+        assert_eq!(reason, ShutdownReason::Signal);
+    }
+
+    #[test]
+    fn desktop_exit_diagnostics_preserve_reason_and_cleanup_failure() {
+        let lifecycle = DesktopLifecycle::new();
+        for reason in [
+            ShutdownReason::CodexExited,
+            ShutdownReason::InstallUpdate,
+            ShutdownReason::Signal,
+        ] {
+            lifecycle.set_reason(reason.as_str());
+            for success in [true, false] {
+                let details = lifecycle.exit_details(success, false);
+                assert_eq!(details["processId"], std::process::id());
+                assert_eq!(details["reason"], reason.as_str());
+                assert_eq!(details["success"], success);
+                assert_eq!(details["exitCode"], if success { 0 } else { 1 });
+                assert!(details["uptimeMs"].is_u64());
+            }
+        }
+        lifecycle.set_reason("instance_not_acquired");
+        assert_eq!(
+            lifecycle.exit_details(true, false)["reason"],
+            "instance_not_acquired"
+        );
+        let panic = lifecycle.exit_details(false, true);
+        assert_eq!(panic["reason"], "panic");
+        assert_eq!(panic["success"], false);
+        assert!(panic["exitCode"].is_null());
+        assert_eq!(
+            DesktopLifecycle::new().exit_details(false, false)["reason"],
+            "startup_failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_restart_failure_remains_failure_after_shutdown_cleanup() {
+        let reason = wait_for_runtime_shutdown(
+            pending(),
+            async { AppShutdownReason::RuntimeRestartFailed },
+            pending(),
+        )
+        .await;
+        assert_eq!(reason, ShutdownReason::RuntimeRestartFailed);
+        let lifecycle = DesktopLifecycle::new();
+        lifecycle.set_reason(reason.as_str());
+        for cleanup in [Ok(()), Err("配置恢复失败".to_string())] {
+            let result = runtime_shutdown_result(reason, cleanup.clone());
+            let details = lifecycle.exit_details(result.is_ok(), false);
+            assert_eq!(details["reason"], "runtime_restart_failed");
+            assert_eq!(details["success"], false);
+            assert_eq!(details["exitCode"], 1);
+            let error = result.unwrap_err();
+            assert!(error.contains("自动重启 Codex 失败"));
+            if let Err(cleanup_error) = cleanup {
+                assert!(error.contains(&cleanup_error));
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]

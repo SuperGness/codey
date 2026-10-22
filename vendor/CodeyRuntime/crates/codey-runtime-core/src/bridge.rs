@@ -318,11 +318,15 @@ pub async fn install_bridge(
     let shutdown = Arc::new(Notify::new());
     let task_closing = Arc::clone(&closing);
     let task_shutdown = Arc::clone(&shutdown);
+    let task_websocket_url = websocket_url.to_owned();
     let task = tokio::spawn(async move {
         if let Err(error) = run_bridge_pump(session, task_closing, task_shutdown).await {
             let _ = crate::diagnostic_log::append_diagnostic_log(
                 "bridge.pump_failed",
-                json!({ "message": error.to_string() }),
+                json!({
+                    "message": format!("{error:#}"),
+                    "websocketUrl": task_websocket_url,
+                }),
             );
         }
     });
