@@ -616,12 +616,16 @@ async fn http_response(mut response: Response, id: u64) -> Result<Value> {
         if total > MAX_BODY {
             bail!("HTTP 响应超过 1 MiB 检查上限");
         }
+        // Retained SSE bytes have already been searched for a newline.
+        let mut search_from = bytes.len();
         bytes.extend_from_slice(&chunk);
         if sse {
             let mut consumed = 0;
-            while let Some(end) = bytes[consumed..].iter().position(|b| *b == b'\n') {
-                let line = &bytes[consumed..consumed + end];
-                consumed += end + 1;
+            while let Some(end) = bytes[search_from..].iter().position(|b| *b == b'\n') {
+                let end = search_from + end;
+                let line = &bytes[consumed..end];
+                consumed = end + 1;
+                search_from = consumed;
                 let line = line.strip_suffix(b"\r").unwrap_or(line);
                 if line.is_empty() && !data.is_empty() {
                     messages += 1;
