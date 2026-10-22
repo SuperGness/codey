@@ -19,6 +19,9 @@ use crate::error_log;
 #[cfg(windows)]
 const WINDOWS_CODEX_STOP_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(windows)]
+// Codex can spend five seconds draining its native will-quit handlers.
+const WINDOWS_CODEX_GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(windows)]
 const WINDOWS_STARTUP_PATCH_FAILURE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[cfg(windows)]
@@ -1103,8 +1106,55 @@ async fn terminate_windows_codex_processes_with_timeout(
         process_id,
         stop_timeout,
         codey_runtime_core::windows_enumerate_processes,
+        async { false },
+        terminate_windows_codex_process_if_matches,
     )
     .await
+}
+
+#[cfg(windows)]
+pub(super) async fn stop_windows_codex_processes(
+    app_dir: &Path,
+    process_id: Option<u32>,
+    renderer_websocket_url: &str,
+) -> Result<()> {
+    terminate_windows_codex_processes_with_snapshot(
+        app_dir,
+        process_id,
+        WINDOWS_CODEX_STOP_TIMEOUT,
+        codey_runtime_core::windows_enumerate_processes,
+        async {
+            crate::cdp::request_app_quit(renderer_websocket_url)
+                .await
+                .is_ok()
+        },
+        terminate_windows_codex_process_if_matches,
+    )
+    .await
+}
+
+#[cfg(windows)]
+fn terminate_windows_codex_process_if_matches(
+    process_id: u32,
+    executable_path: Option<&Path>,
+    creation_time: Option<u64>,
+) -> bool {
+    match (executable_path, creation_time) {
+        (Some(path), Some(creation_time)) => {
+            codey_runtime_core::windows_terminate_process_if_matches(
+                process_id,
+                path,
+                creation_time,
+            )
+        }
+        (_, Some(creation_time)) => {
+            codey_runtime_core::windows_terminate_process_if_creation_matches(
+                process_id,
+                creation_time,
+            )
+        }
+        _ => false,
+    }
 }
 
 #[cfg(windows)]
@@ -1113,6 +1163,8 @@ async fn terminate_windows_codex_processes_with_snapshot(
     process_id: Option<u32>,
     stop_timeout: Duration,
     mut snapshot: impl FnMut() -> Result<Vec<codey_runtime_core::WindowsProcessInfo>>,
+    request_exit: impl std::future::Future<Output = bool>,
+    mut terminate: impl FnMut(u32, Option<&Path>, Option<u64>) -> bool,
 ) -> Result<()> {
     let current_session = codey_runtime_core::windows_process_session_id(std::process::id());
     // Toolhelp names remain available when a service's image path is unreadable.
@@ -1158,30 +1210,30 @@ async fn terminate_windows_codex_processes_with_snapshot(
                 .map(|process| (*process_id, process.creation_time))
         })
         .collect::<HashMap<_, _>>();
-    for process_id in ordered_process_ids {
-        let _terminated_natively = processes
-            .iter()
-            .find(|process| process.process_id == process_id)
-            .is_some_and(
-                |process| match (&process.executable_path, process.creation_time) {
-                    (Some(path), Some(creation_time)) => {
-                        codey_runtime_core::windows_terminate_process_if_matches(
-                            process.process_id,
-                            path,
-                            creation_time,
-                        )
-                    }
-                    (_, Some(creation_time)) => {
-                        codey_runtime_core::windows_terminate_process_if_creation_matches(
-                            process.process_id,
-                            creation_time,
-                        )
-                    }
-                    _ => false,
-                },
-            );
+    // Capture descendants before app.quit() can orphan them; normal exit also
+    // lets Electron unregister its Windows notification-area icon.
+    let graceful_exit_requested = !process_ids.is_empty() && request_exit.await;
+    let graceful_deadline = tokio::time::Instant::now()
+        + if graceful_exit_requested {
+            WINDOWS_CODEX_GRACEFUL_STOP_TIMEOUT
+        } else {
+            Duration::ZERO
+        };
+    if !graceful_exit_requested {
+        for process_id in &ordered_process_ids {
+            if let Some(process) = processes
+                .iter()
+                .find(|process| process.process_id == *process_id)
+            {
+                let _terminated_natively = terminate(
+                    process.process_id,
+                    process.executable_path.as_deref(),
+                    process.creation_time,
+                );
+            }
+        }
     }
-    let deadline = tokio::time::Instant::now() + stop_timeout;
+    let deadline = graceful_deadline + stop_timeout;
     loop {
         let current_processes = snapshot()
             .context("确认 Windows Codex 进程清理结果失败")?
@@ -1207,23 +1259,12 @@ async fn terminate_windows_codex_processes_with_snapshot(
                 continue;
             };
             expected_creation_times.insert(*discovered_process_id, process.creation_time);
-            match (&process.executable_path, process.creation_time) {
-                (Some(path), Some(creation_time)) => {
-                    let _terminated_natively =
-                        codey_runtime_core::windows_terminate_process_if_matches(
-                            process.process_id,
-                            path,
-                            creation_time,
-                        );
-                }
-                (_, Some(creation_time)) => {
-                    let _terminated_natively =
-                        codey_runtime_core::windows_terminate_process_if_creation_matches(
-                            process.process_id,
-                            creation_time,
-                        );
-                }
-                _ => {}
+            if tokio::time::Instant::now() >= graceful_deadline {
+                let _terminated_natively = terminate(
+                    process.process_id,
+                    process.executable_path.as_deref(),
+                    process.creation_time,
+                );
             }
         }
         let current = current_processes
@@ -1237,10 +1278,21 @@ async fn terminate_windows_codex_processes_with_snapshot(
                 )
             })
             .collect::<Vec<_>>();
-        let remaining = windows_stop_survivors(&expected_creation_times, &current, &process_ids);
+        let mut remaining =
+            windows_stop_survivors(&expected_creation_times, &current, &process_ids);
         if remaining.is_empty() {
             return Ok(());
         }
+        if tokio::time::Instant::now() < graceful_deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            continue;
+        }
+        remaining.sort_by_key(|(process_id, _, _)| {
+            ordered_process_ids
+                .iter()
+                .position(|candidate| candidate == process_id)
+                .map_or(0, |index| index + 1)
+        });
         if tokio::time::Instant::now() < deadline {
             // Windows exits lag behind TerminateProcess (pending I/O,
             // throttled children, antivirus scans) and a first attempt can
@@ -1249,10 +1301,7 @@ async fn terminate_windows_codex_processes_with_snapshot(
             for (process_id, _, expected_creation_time) in &remaining {
                 if let Some(expected_creation_time) = expected_creation_time {
                     let _terminated_again =
-                        codey_runtime_core::windows_terminate_process_if_creation_matches(
-                            *process_id,
-                            *expected_creation_time,
-                        );
+                        terminate(*process_id, None, Some(*expected_creation_time));
                 }
             }
         } else {
@@ -1546,6 +1595,183 @@ mod compatibility_tests {
     }
 
     #[cfg(windows)]
+    #[tokio::test(start_paused = true)]
+    async fn graceful_cleanup_captures_descendants_and_waits_for_native_shutdown() {
+        let app_dir = Path::new(r"C:\CodeyTestApp");
+        let root = codey_runtime_core::WindowsProcessInfo {
+            process_id: 10,
+            parent_process_id: 4,
+            exe_file: "Codex.exe".to_string(),
+            executable_path: Some(app_dir.join("Codex.exe")),
+            creation_time: Some(1),
+            session_id: None,
+        };
+        let child = codey_runtime_core::WindowsProcessInfo {
+            process_id: 11,
+            parent_process_id: root.process_id,
+            executable_path: Some(r"C:\Other\worker.exe".into()),
+            creation_time: Some(2),
+            ..root.clone()
+        };
+        let started = tokio::time::Instant::now();
+        let snapshots = std::cell::Cell::new(0);
+        terminate_windows_codex_processes_with_snapshot(
+            app_dir,
+            Some(root.process_id),
+            Duration::from_secs(1),
+            || {
+                snapshots.set(snapshots.get() + 1);
+                Ok(match snapshots.get() {
+                    1 => vec![root.clone(), child.clone()],
+                    _ if started.elapsed() < Duration::from_secs(5) => {
+                        vec![codey_runtime_core::WindowsProcessInfo {
+                            parent_process_id: 0,
+                            ..child.clone()
+                        }]
+                    }
+                    _ => Vec::new(),
+                })
+            },
+            async {
+                assert_eq!(snapshots.get(), 1);
+                true
+            },
+            |_, _, _| panic!("normal exit must not terminate processes"),
+        )
+        .await
+        .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(5));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(start_paused = true)]
+    async fn graceful_cleanup_tracks_orphans_and_new_descendants_through_fallback() {
+        let app_dir = Path::new(r"C:\CodeyTestApp");
+        let root = codey_runtime_core::WindowsProcessInfo {
+            process_id: 10,
+            parent_process_id: 4,
+            exe_file: "Codex.exe".to_string(),
+            executable_path: Some(app_dir.join("Codex.exe")),
+            creation_time: Some(1),
+            session_id: None,
+        };
+        let child = codey_runtime_core::WindowsProcessInfo {
+            process_id: 11,
+            parent_process_id: root.process_id,
+            executable_path: Some(r"C:\Other\worker.exe".into()),
+            creation_time: Some(2),
+            ..root.clone()
+        };
+        let grandchild = codey_runtime_core::WindowsProcessInfo {
+            process_id: 12,
+            parent_process_id: child.process_id,
+            creation_time: Some(3),
+            ..child.clone()
+        };
+        for force_succeeds in [true, false] {
+            let started = tokio::time::Instant::now();
+            let snapshots = std::cell::Cell::new(0);
+            let terminated = std::cell::RefCell::new(HashSet::new());
+            let result = terminate_windows_codex_processes_with_snapshot(
+                app_dir,
+                Some(root.process_id),
+                Duration::from_millis(100),
+                || {
+                    snapshots.set(snapshots.get() + 1);
+                    if snapshots.get() == 1 {
+                        return Ok(vec![root.clone(), child.clone()]);
+                    }
+                    let mut remaining = vec![codey_runtime_core::WindowsProcessInfo {
+                        creation_time: Some(99),
+                        ..root.clone()
+                    }];
+                    for process in [&child, &grandchild] {
+                        if !force_succeeds || !terminated.borrow().contains(&process.process_id) {
+                            remaining.push(codey_runtime_core::WindowsProcessInfo {
+                                parent_process_id: if snapshots.get() == 2 {
+                                    process.parent_process_id
+                                } else {
+                                    0
+                                },
+                                ..process.clone()
+                            });
+                        }
+                    }
+                    Ok(remaining)
+                },
+                async { true },
+                |process_id, _, creation_time| {
+                    assert!(started.elapsed() >= WINDOWS_CODEX_GRACEFUL_STOP_TIMEOUT);
+                    assert_ne!(process_id, root.process_id, "reused PID must be left alone");
+                    assert_eq!(creation_time, Some(u64::from(process_id - 9)));
+                    terminated.borrow_mut().insert(process_id);
+                    force_succeeds
+                },
+            )
+            .await;
+            assert_eq!(result.is_ok(), force_succeeds, "{result:?}");
+            assert_eq!(*terminated.borrow(), HashSet::from([11, 12]));
+            if let Err(error) = result {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("无法安全停止 Windows Codex 进程")
+                );
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(start_paused = true)]
+    async fn failed_graceful_request_keeps_immediate_children_first_cleanup() {
+        let app_dir = Path::new(r"C:\CodeyTestApp");
+        let root = codey_runtime_core::WindowsProcessInfo {
+            process_id: 10,
+            parent_process_id: 4,
+            exe_file: "Codex.exe".to_string(),
+            executable_path: Some(app_dir.join("Codex.exe")),
+            creation_time: Some(1),
+            session_id: None,
+        };
+        let child = codey_runtime_core::WindowsProcessInfo {
+            process_id: 11,
+            parent_process_id: root.process_id,
+            creation_time: Some(2),
+            ..root.clone()
+        };
+        let started = tokio::time::Instant::now();
+        let snapshots = std::cell::Cell::new(0);
+        let terminated = std::cell::RefCell::new(Vec::new());
+        terminate_windows_codex_processes_with_snapshot(
+            app_dir,
+            Some(root.process_id),
+            Duration::from_secs(1),
+            || {
+                snapshots.set(snapshots.get() + 1);
+                Ok(if snapshots.get() == 1 {
+                    vec![root.clone(), child.clone()]
+                } else {
+                    Vec::new()
+                })
+            },
+            async {
+                assert_eq!(snapshots.get(), 1);
+                false
+            },
+            |process_id, path, creation_time| {
+                assert_eq!(started.elapsed(), Duration::ZERO);
+                assert_eq!(path, root.executable_path.as_deref());
+                assert_eq!(creation_time, Some(u64::from(process_id - 9)));
+                terminated.borrow_mut().push(process_id);
+                true
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*terminated.borrow(), vec![11, 10]);
+    }
+
+    #[cfg(windows)]
     #[test]
     fn store_process_handle_retains_exit_code_after_child_is_reaped() {
         use std::io::Write;
@@ -1597,6 +1823,8 @@ mod compatibility_tests {
                     calls += 1;
                     Ok(vec![service.clone()])
                 },
+                async { false },
+                terminate_windows_codex_process_if_matches,
             )
             .await;
             assert!(result.is_ok(), "{result:?}");
@@ -1652,6 +1880,8 @@ mod compatibility_tests {
                         }
                         Ok(processes)
                     },
+                    async { false },
+                    terminate_windows_codex_process_if_matches,
                 )
                 .await;
                 assert_eq!(
@@ -1681,6 +1911,8 @@ mod compatibility_tests {
                     }
                     Ok(Vec::new())
                 },
+                async { false },
+                terminate_windows_codex_process_if_matches,
             )
             .await;
             assert!(format!("{:#}", result.unwrap_err()).contains("snapshot unavailable"));

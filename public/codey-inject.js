@@ -2120,6 +2120,32 @@
   };
   window.__codeyAppServerManagerRegistryResolverFromModule = appServerManagerRegistryResolverFromModule;
 
+  const cachedAppServerManagerFromScope = (scope, hostId) => {
+    if (hostId !== "local") return null;
+    const managers = new Set();
+    const seenFamilies = new Set();
+    const nodes = new Set([scope.node, ...scope.chain?.values?.() || []]);
+    for (const node of nodes) {
+      for (const [family, bindings] of node?.familyBindings?.entries?.() || []) {
+        // New builds keep the concrete manager in a signal without exporting
+        // its registry. Read existing local bindings only; probing unused
+        // families can initialize managers or create deferred RPC connections.
+        if (family?.kind !== "signal-family" || !bindings?.has?.(hostId) || seenFamilies.has(family)) continue;
+        seenFamilies.add(family);
+        try {
+          const manager = scope.get(family, hostId);
+          const client = manager && Object.getOwnPropertyDescriptor(manager, "requestClient")?.value;
+          if (client?.hostId !== hostId || !declaredMethod(manager, "sendRequest")
+            || !["enqueueRequest", "createRequest", "onResult"].every((method) => declaredMethod(client, method))) continue;
+          managers.add(manager);
+        } catch {
+          continue;
+        }
+      }
+    }
+    return managers.size === 1 ? managers.values().next().value : null;
+  };
+
   const messageDeletionMethods = {
     async prepare(conversationId) {
       const conversation = this.getConversation(conversationId);
@@ -2248,6 +2274,12 @@
     }
     if (sessionControllerLooksUsable(window.__codeyCodexSessionController, feature)) {
       return window.__codeyCodexSessionController;
+    }
+    const cachedManager = appServerManagerFromReact(cachedAppServerManagerFromScope);
+    const cachedController = cachedManager && managerSessionController(cachedManager);
+    if (sessionControllerLooksUsable(cachedController, feature)) {
+      window.__codeyCodexSessionController = cachedController;
+      return cachedController;
     }
     let fallbackDispatcher = typeof window.__codeyCodexSignalDispatcher === "function"
       ? window.__codeyCodexSignalDispatcher

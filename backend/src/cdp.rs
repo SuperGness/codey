@@ -13,6 +13,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error_log;
 
+#[cfg(any(windows, test))]
+mod app_quit;
+#[cfg(windows)]
+pub(crate) use app_quit::request_app_quit;
+
 const SETTINGS_OVERLAY_LOAD_PATH: &str = "/internal/codey/settings-overlay/load";
 const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";
 const CDP_INJECTION_TIMEOUT: Duration = Duration::from_secs(30);

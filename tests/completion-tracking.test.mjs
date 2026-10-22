@@ -470,6 +470,65 @@ test("native model routing discovers the local request client without sending a 
   assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available");
 });
 
+function loadCachedManagerInjection(managers, { inherited = false, mounted = true } = {}) {
+  const runtime = loadInjection({ initialSessionId: "" });
+  const families = managers.map(() => ({ kind: "signal-family" }));
+  const bindings = new Map(families.map((family) => [family, new Map(mounted ? [["local", {}]] : [])]));
+  const reads = [];
+  const node = { familyBindings: bindings };
+  const scope = {
+    query: null,
+    node: inherited ? { familyBindings: new Map() } : node,
+    chain: new Map(inherited ? [["parent", node]] : []),
+    get(family, hostId) {
+      assert.equal(hostId, "local");
+      assert.ok(bindings.get(family)?.has(hostId), "discovery must not initialize an unused signal");
+      reads.push(family);
+      return managers[families.indexOf(family)];
+    },
+    set() { throw Error("discovery must not change signals"); },
+    watch() { throw Error("discovery must not create RPC watchers"); },
+    when() {},
+  };
+  runtime.document.body.__reactFiber$cachedManager = {
+    memoizedState: { scope },
+    return: null,
+  };
+  runtime.document.scripts.push({ src: "app://-/assets/app-initial-private-registry.js" });
+  runtime.window.__codeyImportCodexAsset = async () => ({});
+  return { ...runtime, reads };
+}
+
+test("native model routing discovers a cached manager when its registry is no longer exported", async () => {
+  for (const inherited of [false, true]) {
+    const client = { hostId: "local", enqueueRequest() { throw Error("must not send"); }, createRequest() {}, onResult() {} };
+    const manager = { requestClient: client, sendRequest() { throw Error("must not send"); } };
+    const runtime = loadCachedManagerInjection([manager], { inherited });
+    assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client);
+    assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client);
+    assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available");
+    assert.equal(runtime.reads.length, 1, "reuse the verified manager on subsequent calls");
+  }
+});
+
+test("cached manager discovery rejects remote, incomplete, ambiguous, and unmounted clients", async () => {
+  const manager = (hostId = "local") => ({
+    requestClient: { hostId, enqueueRequest() {}, createRequest() {}, onResult() {} },
+    sendRequest() { throw Error("must not send"); },
+  });
+  for (const [managers, options] of [
+    [[manager("remote")], {}],
+    [[{ requestClient: { hostId: "local" }, sendRequest() {} }], {}],
+    [[manager(), manager()], {}],
+    [[manager()], { mounted: false }],
+  ]) {
+    const runtime = loadCachedManagerInjection(managers, options);
+    await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
+    assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "unavailable");
+    if (options.mounted === false) assert.equal(runtime.reads.length, 0);
+  }
+});
+
 test("native model routing cannot use a remote or incomplete client", async () => {
   const manager = { requestClient: { hostId: "remote" }, getConversation() { return null; } };
   const runtime = loadInjection({ localAppServerManager: manager, initialSessionId: "" });
