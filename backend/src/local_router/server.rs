@@ -105,6 +105,11 @@ pub(crate) const ROUTER_PORT_START: u16 = 26_958;
 /// 从起始端口最多连续探测多少个候选端口，全都不可用时回退由内核分配。
 pub(crate) const ROUTER_PORT_PROBES: u16 = 64;
 
+const ROUTER_READY_TIMEOUT: Duration = Duration::from_secs(5);
+const ROUTER_RESTART_INITIAL_DELAY: Duration = Duration::from_millis(100);
+const ROUTER_RESTART_MAX_DELAY: Duration = Duration::from_secs(5);
+const ROUTER_RESTART_STABLE_PERIOD: Duration = Duration::from_secs(60);
+
 /// 从 `ROUTER_PORT_START` 开始顺序探测可用端口，候选被占用就换下一个。
 /// `bind` 成功即独占该端口，所以并发启动的多个实例不会拿到同一个端口。
 pub(super) async fn bind_router_listener_with<T, F, Fut>(mut bind: F) -> Result<T>
@@ -189,6 +194,8 @@ pub(super) fn load_or_create_router_token_at(path: &Path) -> String {
 pub(crate) struct LocalRouter {
     #[cfg(test)]
     pub(crate) portable_history_cache: std::sync::Weak<Mutex<PortableHistoryCache>>,
+    #[cfg(test)]
+    pub(super) listener_worker: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
     pub(crate) endpoint: RuntimeRouterEndpoint,
     pub(crate) bindings: Arc<Mutex<RouteBindings>>,
     pub(crate) snapshot: Arc<RwLock<Arc<RouterSnapshot>>>,
@@ -231,13 +238,21 @@ impl LocalRouter {
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
     ) -> Result<Self> {
         let listener = bind_router_listener().await?;
-        let port = listener
+        Self::start_with_bound_listener(config, request_log, account_usage_cache, listener).await
+    }
+
+    pub(super) async fn start_with_bound_listener(
+        config: &CodeyConfig,
+        request_log: Arc<RouteRequestLogController>,
+        account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
+        listener: TcpListener,
+    ) -> Result<Self> {
+        let address = listener
             .local_addr()
-            .context("读取 Codey 本地路由监听地址失败")?
-            .port();
+            .context("读取 Codey 本地路由监听地址失败")?;
         let token = load_or_create_router_token();
         let endpoint = RuntimeRouterEndpoint {
-            base_url: format!("http://127.0.0.1:{port}/v1"),
+            base_url: format!("http://{address}/v1"),
             token,
             supports_websockets: config.runtime_supports_websockets(),
             supports_remote_compaction: config.runtime_supports_remote_compaction(),
@@ -246,7 +261,7 @@ impl LocalRouter {
         let snapshot = Arc::new(RwLock::new(Arc::new(RouterSnapshot::from_config(config))));
         let official_concurrency = Arc::new(OfficialConcurrency::default());
         official_concurrency.update(&snapshot.read().unwrap());
-        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let official_auth_path = crate::codex_config::codex_home().join("auth.json");
         let websocket_backoffs = Arc::new(Mutex::new(UpstreamWebSocketBackoffs::default()));
         websocket_backoffs
@@ -294,143 +309,21 @@ impl LocalRouter {
         let server = Arc::new(server);
         #[cfg(test)]
         let portable_history_cache = Arc::downgrade(&server.portable_history_cache);
-        let task = tokio::spawn(async move {
-            let mut connections = JoinSet::new();
-            let mut consecutive_accept_failures = 0_u32;
-            let mut history_sweep = tokio::time::interval(PORTABLE_HISTORY_SWEEP_INTERVAL);
-            history_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_rx => break,
-                    _ = history_sweep.tick() => {
-                        server.portable_history_cache.lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner).prune();
-                    }
-                    joined = connections.join_next(), if !connections.is_empty() => {
-                        if let Some(Err(error)) = joined
-                            && error.is_panic()
-                        {
-                            record_router_failure_nonblocking(
-                                "local_router_connection_task_failed",
-                                "join_local_router_connection",
-                                error.to_string(),
-                                serde_json::json!({}),
-                            );
-                        }
-                    }
-                    result = listener.accept() => {
-                        match result {
-                            Ok((stream, _)) => {
-                                consecutive_accept_failures = 0;
-                                // Chunked SSE writes each event as three small
-                                // writes (size line, payload, CRLF). Nagle would
-                                // hold those back waiting on delayed ACKs and add
-                                // latency to every streamed token.
-                                let _ = stream.set_nodelay(true);
-                                // 休眠或断网后对端经常不发 FIN。keepalive 失败时，正在读的
-                                // 连接会退出，不再一直占着任务。
-                                enable_downstream_keepalive(&stream);
-                                let server = Arc::clone(&server);
-                                let admitted = match Arc::clone(&server.admitted_connections)
-                                    .try_acquire_owned()
-                                {
-                                    Ok(permit) => permit,
-                                    Err(_) => {
-                                        if let Ok(rejection_permit) = Arc::clone(
-                                            &server.rejection_limit,
-                                        )
-                                        .try_acquire_owned()
-                                        {
-                                            let request_id = Uuid::new_v4().simple().to_string();
-                                            connections.spawn(async move {
-                                                ROUTER_REQUEST_ID.scope(request_id, async move {
-                                                    let _rejection_permit = rejection_permit;
-                                                    let mut stream = stream;
-                                                    let _ = tokio::time::timeout(
-                                                        DOWNSTREAM_WRITE_TIMEOUT,
-                                                        write_error_response(
-                                                            &mut stream,
-                                                            503,
-                                                            "router_busy",
-                                                            "Codey 本地路由当前请求过多，请稍后重试",
-                                                            None,
-                                                        ),
-                                                    )
-                                                    .await;
-                                                }).await;
-                                            });
-                                        }
-                                        continue;
-                                    }
-                                };
-                                let request_id = Uuid::new_v4().simple().to_string();
-                                connections.spawn(ROUTER_REQUEST_ID.scope(
-                                    request_id.clone(),
-                                    ROUTER_REQUEST_STARTED_AT.scope(Instant::now(), async move {
-                                        let _admitted = admitted;
-                                        if let Err(error) = server.handle_connection(stream).await {
-                                            record_router_failure_nonblocking(
-                                                "local_router_request_failed",
-                                                "handle_local_router_connection",
-                                                format!("{error:#}"),
-                                                serde_json::json!({ "requestId": request_id }),
-                                            );
-                                        }
-                                    }),
-                                ));
-                            }
-                            Err(error) => {
-                                consecutive_accept_failures =
-                                    consecutive_accept_failures.saturating_add(1);
-                                // 同一轮连续失败只记一次，句柄耗尽时不会刷满错误日志。
-                                if consecutive_accept_failures == 1 {
-                                    record_router_failure_nonblocking(
-                                        "local_router_accept_failed",
-                                        "accept_local_router_connection",
-                                        error.to_string(),
-                                        serde_json::json!({}),
-                                    );
-                                }
-                                tokio::select! {
-                                    _ = &mut shutdown_rx => break,
-                                    _ = tokio::time::sleep(accept_retry_delay(
-                                        consecutive_accept_failures,
-                                    )) => {}
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            drop(listener);
-            let drained = tokio::time::timeout(ROUTER_SHUTDOWN_DRAIN_TIMEOUT, async {
-                while let Some(joined) = connections.join_next().await {
-                    if let Err(error) = joined
-                        && error.is_panic()
-                    {
-                        record_router_failure_nonblocking(
-                            "local_router_connection_task_failed",
-                            "drain_local_router_connection",
-                            error.to_string(),
-                            serde_json::json!({}),
-                        );
-                    }
-                }
-            })
-            .await;
-            if drained.is_err() {
-                connections.abort_all();
-                while connections.join_next().await.is_some() {}
-            }
-            server
-                .portable_history_cache
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clear();
-        });
-        Ok(Self {
+        #[cfg(test)]
+        let listener_worker = Arc::new(Mutex::new(None));
+        let task = tokio::spawn(supervise_router_listener(
+            listener,
+            address,
+            server,
+            shutdown_rx,
+            #[cfg(test)]
+            Arc::clone(&listener_worker),
+        ));
+        let router = Self {
             #[cfg(test)]
             portable_history_cache,
+            #[cfg(test)]
+            listener_worker,
             endpoint,
             bindings,
             snapshot,
@@ -439,13 +332,335 @@ impl LocalRouter {
             shutdown: Mutex::new(Some(shutdown_tx)),
             task: Mutex::new(Some(task)),
             request_log,
-        })
+        };
+        router.confirm_ready(ROUTER_READY_TIMEOUT).await
+    }
+
+    pub(super) async fn confirm_ready(self, wait: Duration) -> Result<Self> {
+        if let Err(error) = verify_router_endpoint(&self.endpoint, wait).await {
+            record_router_failure_nonblocking(
+                "local_router_start_failed",
+                "confirm_local_router_ready",
+                format!("{error:#}"),
+                serde_json::json!({ "baseUrl": self.endpoint.base_url }),
+            );
+            // 就绪失败时等待监听释放，再把错误交给启动流程，避免注入失效地址。
+            if let Err(cleanup_error) = self.stop().await {
+                record_router_failure_nonblocking(
+                    "local_router_start_cleanup_failed",
+                    "stop_unready_local_router",
+                    format!("{cleanup_error:#}"),
+                    serde_json::json!({ "baseUrl": self.endpoint.base_url }),
+                );
+            }
+            return Err(error);
+        }
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "local_router.listener_ready",
+            serde_json::json!({ "baseUrl": self.endpoint.base_url }),
+        );
+        Ok(self)
     }
 
     pub(crate) fn endpoint(&self) -> RuntimeRouterEndpoint {
         self.endpoint.clone()
     }
+}
 
+pub(super) async fn verify_router_endpoint(
+    endpoint: &RuntimeRouterEndpoint,
+    wait: Duration,
+) -> Result<()> {
+    tokio::time::timeout(wait, async {
+        // 本地探测不使用系统代理，不跟随重定向，也不访问任何上游线路。
+        let client = tokio::task::spawn_blocking(|| {
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+        })
+        .await
+        .context("创建本地路由就绪检查任务失败")?
+        .context("创建本地路由就绪检查客户端失败")?;
+        let response = client
+            .get(format!(
+                "{}/codey/concurrency",
+                endpoint.base_url.trim_end_matches("/v1"),
+            ))
+            .header(ROUTER_AUTH_HEADER, &endpoint.token)
+            .send()
+            .await
+            .context("本地路由尚未响应就绪检查")?;
+        anyhow::ensure!(
+            response.status() == reqwest::StatusCode::OK,
+            "本地路由就绪检查返回状态 {}",
+            response.status(),
+        );
+        let body = response
+            .json::<Value>()
+            .await
+            .context("本地路由就绪检查响应无效")?;
+        anyhow::ensure!(body.is_array(), "本地路由就绪检查未返回并发状态",);
+        Ok(())
+    })
+    .await
+    .context("等待 Codey 本地路由就绪超时")?
+}
+
+fn router_restart_delay(failures: u32) -> Duration {
+    ROUTER_RESTART_INITIAL_DELAY
+        .saturating_mul(1_u32 << failures.saturating_sub(1).min(16))
+        .min(ROUTER_RESTART_MAX_DELAY)
+}
+
+async fn supervise_router_listener(
+    mut listener: TcpListener,
+    address: std::net::SocketAddr,
+    server: Arc<RouterServer>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+    #[cfg(test)] listener_worker: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
+) {
+    // JoinSet 随监督任务一起销毁，Drop 或显式取消不会留下仍在监听的子任务。
+    let mut workers = JoinSet::new();
+    let mut failures = 0_u32;
+    let mut last_recovery_log: Option<Instant> = None;
+    'supervision: loop {
+        let (worker_shutdown, worker_shutdown_rx) = oneshot::channel();
+        let started = Instant::now();
+        let _worker_abort = workers.spawn(run_router_listener(
+            listener,
+            Arc::clone(&server),
+            worker_shutdown_rx,
+        ));
+        #[cfg(test)]
+        {
+            *listener_worker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(_worker_abort);
+        }
+        let ended = tokio::select! {
+            biased;
+            _ = &mut shutdown_rx => {
+                let _ = worker_shutdown.send(());
+                // worker 保留原有连接 drain 时限；等待其完成后才报告关闭。
+                while let Some(joined) = workers.join_next().await {
+                    if let Err(error) = joined {
+                        record_router_failure_nonblocking(
+                            "local_router_listener_shutdown_failed",
+                            "stop_local_router_listener",
+                            error.to_string(),
+                            serde_json::json!({ "address": address.to_string() }),
+                        );
+                    }
+                }
+                break;
+            }
+            joined = workers.join_next() => joined,
+        };
+        if started.elapsed() >= ROUTER_RESTART_STABLE_PERIOD {
+            failures = 0;
+        }
+        failures = failures.saturating_add(1);
+        // 持续失败按次数限流，避免相同故障占满诊断日志。
+        if failures.is_power_of_two() {
+            let error = match ended {
+                Some(Err(error)) => error.to_string(),
+                _ => "本地路由监听任务在未关闭时结束".to_string(),
+            };
+            record_router_failure_nonblocking(
+                "local_router_listener_exited",
+                "supervise_local_router_listener",
+                error,
+                serde_json::json!({ "address": address.to_string(), "failures": failures }),
+            );
+        }
+        listener = loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => break 'supervision,
+                _ = tokio::time::sleep(router_restart_delay(failures)) => {}
+            }
+            // 已注入的地址不能改变；原端口被占用时继续等待，并允许关闭打断。
+            let rebound = tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => break 'supervision,
+                result = TcpListener::bind(address) => result,
+            };
+            match rebound {
+                Ok(listener) => {
+                    if last_recovery_log
+                        .is_none_or(|last| last.elapsed() >= ROUTER_RESTART_STABLE_PERIOD)
+                    {
+                        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                            "local_router.listener_rebound",
+                            serde_json::json!({
+                                "address": address.to_string(),
+                                "failures": failures,
+                            }),
+                        );
+                        last_recovery_log = Some(Instant::now());
+                    }
+                    break listener;
+                }
+                Err(error) => {
+                    failures = failures.saturating_add(1);
+                    if failures.is_power_of_two() {
+                        record_router_failure_nonblocking(
+                            "local_router_listener_rebind_failed",
+                            "rebind_local_router_listener",
+                            error.to_string(),
+                            serde_json::json!({
+                                "address": address.to_string(),
+                                "failures": failures,
+                            }),
+                        );
+                    }
+                }
+            }
+        };
+    }
+    server
+        .portable_history_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+async fn run_router_listener(
+    listener: TcpListener,
+    server: Arc<RouterServer>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) {
+    let mut connections = JoinSet::new();
+    let mut consecutive_accept_failures = 0_u32;
+    let mut history_sweep = tokio::time::interval(PORTABLE_HISTORY_SWEEP_INTERVAL);
+    history_sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_rx => break,
+            _ = history_sweep.tick() => {
+                server.portable_history_cache.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner).prune();
+            }
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = joined
+                    && error.is_panic()
+                {
+                    record_router_failure_nonblocking(
+                        "local_router_connection_task_failed",
+                        "join_local_router_connection",
+                        error.to_string(),
+                        serde_json::json!({}),
+                    );
+                }
+            }
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, _)) => {
+                        consecutive_accept_failures = 0;
+                        // Chunked SSE writes each event as three small
+                        // writes (size line, payload, CRLF). Nagle would
+                        // hold those back waiting on delayed ACKs and add
+                        // latency to every streamed token.
+                        let _ = stream.set_nodelay(true);
+                        // 休眠或断网后对端经常不发 FIN。keepalive 失败时，正在读的
+                        // 连接会退出，不再一直占着任务。
+                        enable_downstream_keepalive(&stream);
+                        let server = Arc::clone(&server);
+                        let admitted = match Arc::clone(&server.admitted_connections)
+                            .try_acquire_owned()
+                        {
+                            Ok(permit) => permit,
+                            Err(_) => {
+                                if let Ok(rejection_permit) = Arc::clone(
+                                    &server.rejection_limit,
+                                )
+                                .try_acquire_owned()
+                                {
+                                    let request_id = Uuid::new_v4().simple().to_string();
+                                    connections.spawn(async move {
+                                        ROUTER_REQUEST_ID.scope(request_id, async move {
+                                            let _rejection_permit = rejection_permit;
+                                            let mut stream = stream;
+                                            let _ = tokio::time::timeout(
+                                                DOWNSTREAM_WRITE_TIMEOUT,
+                                                write_error_response(
+                                                    &mut stream,
+                                                    503,
+                                                    "router_busy",
+                                                    "Codey 本地路由当前请求过多，请稍后重试",
+                                                    None,
+                                                ),
+                                            )
+                                            .await;
+                                        }).await;
+                                    });
+                                }
+                                continue;
+                            }
+                        };
+                        let request_id = Uuid::new_v4().simple().to_string();
+                        connections.spawn(ROUTER_REQUEST_ID.scope(
+                            request_id.clone(),
+                            ROUTER_REQUEST_STARTED_AT.scope(Instant::now(), async move {
+                                let _admitted = admitted;
+                                if let Err(error) = server.handle_connection(stream).await {
+                                    record_router_failure_nonblocking(
+                                        "local_router_request_failed",
+                                        "handle_local_router_connection",
+                                        format!("{error:#}"),
+                                        serde_json::json!({ "requestId": request_id }),
+                                    );
+                                }
+                            }),
+                        ));
+                    }
+                    Err(error) => {
+                        consecutive_accept_failures =
+                            consecutive_accept_failures.saturating_add(1);
+                        // 同一轮连续失败只记一次，句柄耗尽时不会刷满错误日志。
+                        if consecutive_accept_failures == 1 {
+                            record_router_failure_nonblocking(
+                                "local_router_accept_failed",
+                                "accept_local_router_connection",
+                                error.to_string(),
+                                serde_json::json!({}),
+                            );
+                        }
+                        tokio::select! {
+                            _ = &mut shutdown_rx => break,
+                            _ = tokio::time::sleep(accept_retry_delay(
+                                consecutive_accept_failures,
+                            )) => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+    drop(listener);
+    let drained = tokio::time::timeout(ROUTER_SHUTDOWN_DRAIN_TIMEOUT, async {
+        while let Some(joined) = connections.join_next().await {
+            if let Err(error) = joined
+                && error.is_panic()
+            {
+                record_router_failure_nonblocking(
+                    "local_router_connection_task_failed",
+                    "drain_local_router_connection",
+                    error.to_string(),
+                    serde_json::json!({}),
+                );
+            }
+        }
+    })
+    .await;
+    if drained.is_err() {
+        connections.abort_all();
+        while connections.join_next().await.is_some() {}
+    }
+}
+
+impl LocalRouter {
     pub(crate) fn update_config(&self, config: &CodeyConfig) -> RouterSnapshotSwap {
         let installed = Arc::new(RouterSnapshot::from_config(config));
         let mut current = self

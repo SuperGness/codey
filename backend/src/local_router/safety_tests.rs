@@ -40,6 +40,186 @@ fn accept_failures_back_off_up_to_one_second() {
     assert_eq!(accept_retry_delay(u32::MAX), ACCEPT_RETRY_MAX_DELAY);
 }
 
+async fn start_ephemeral_router(config: &CodeyConfig) -> LocalRouter {
+    LocalRouter::start_with_bound_listener(
+        config,
+        Arc::new(RouteRequestLogController::new()),
+        Arc::default(),
+        TcpListener::bind(("127.0.0.1", 0)).await.unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+fn listener_worker(router: &LocalRouter) -> tokio::task::AbortHandle {
+    router.listener_worker.lock().unwrap().clone().unwrap()
+}
+
+fn router_address(endpoint: &RuntimeRouterEndpoint) -> std::net::SocketAddr {
+    let url = reqwest::Url::parse(&endpoint.base_url).unwrap();
+    std::net::SocketAddr::from(([127, 0, 0, 1], url.port().unwrap()))
+}
+
+#[tokio::test]
+async fn listener_worker_exit_restores_original_endpoint_without_logging_probes() {
+    let logs = tempfile::tempdir().unwrap();
+    let (mut config, provider, model) = router_config("http://127.0.0.1:9/v1".into());
+    config.route_request_log.enabled = true;
+    config.route_request_log.backend = crate::config::RouteRequestLogBackend::Sqlite;
+    let logger = Arc::new(RouteRequestLogController::with_root(logs.path().into()));
+    let router = LocalRouter::start_with_bound_listener(
+        &config,
+        Arc::clone(&logger),
+        Arc::default(),
+        TcpListener::bind(("127.0.0.1", 0)).await.unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(logger.health().await.stats.accepted, 0);
+    let endpoint = router.endpoint();
+    let cache = router.portable_history_cache.upgrade().unwrap();
+    config.settings_revision = 42;
+    router.update_config(&config);
+    let keys = vec!["session-id:listener-recovery".to_string()];
+    router
+        .bindings
+        .lock()
+        .unwrap()
+        .remember(&keys, &provider, true);
+    let failed_worker = listener_worker(&router);
+    failed_worker.abort();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while listener_worker(&router).id() == failed_worker.id() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("listener worker should be replaced");
+    verify_router_endpoint(&endpoint, Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(logger.health().await.stats.accepted, 0);
+    assert!(Arc::ptr_eq(
+        &cache,
+        &router.portable_history_cache.upgrade().unwrap()
+    ));
+    assert_eq!(router.snapshot.read().unwrap().settings_revision, 42);
+    assert_eq!(
+        router.bindings.lock().unwrap().route_for_keys(&keys),
+        Some(provider)
+    );
+
+    let mut invalid = endpoint.clone();
+    invalid.token = "invalid-router-token".into();
+    assert!(
+        verify_router_endpoint(&invalid, Duration::from_secs(2))
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("401")
+    );
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("{}/models", endpoint.base_url))
+        .header(ROUTER_AUTH_HEADER, &endpoint.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert!(
+        response.json::<Value>().await.unwrap()["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["id"] == model)
+    );
+    router.stop().await.unwrap();
+    let page = crate::route_request_log::query_route_request_logs(
+        logs.path(),
+        crate::config::RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        page.total, 1,
+        "only the explicit models request should be logged"
+    );
+}
+
+#[tokio::test]
+async fn stopping_router_interrupts_fixed_port_rebind_without_restarting() {
+    let router = start_ephemeral_router(&CodeyConfig::default()).await;
+    let address = router_address(&router.endpoint());
+    let worker = listener_worker(&router);
+    worker.abort();
+    let occupied = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(listener) = TcpListener::bind(address).await {
+                break listener;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("failed worker should release its original listener");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(listener_worker(&router).id(), worker.id());
+    tokio::time::timeout(Duration::from_secs(1), router.stop())
+        .await
+        .expect("shutdown should interrupt rebind backoff")
+        .unwrap();
+    drop(occupied);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(listener_worker(&router).id(), worker.id());
+    let _released = TcpListener::bind(address).await.unwrap();
+}
+
+#[tokio::test]
+async fn dropping_router_cancels_its_supervised_listener() {
+    let router = start_ephemeral_router(&CodeyConfig::default()).await;
+    let address = router_address(&router.endpoint());
+    let worker = listener_worker(&router);
+    let cache = router.portable_history_cache.clone();
+    drop(router);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !worker.is_finished() || cache.upgrade().is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping the supervisor should also drop its listener worker");
+    let released = TcpListener::bind(address).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(worker.is_finished());
+    drop(released);
+}
+
+#[tokio::test]
+async fn readiness_timeout_cleans_up_the_listener_before_returning() {
+    let mut router = start_ephemeral_router(&CodeyConfig::default()).await;
+    let address = router_address(&router.endpoint());
+    let worker = listener_worker(&router);
+    let cache = router.portable_history_cache.clone();
+    let silent = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    router.endpoint.base_url = format!("http://{}/v1", silent.local_addr().unwrap());
+    let silent_server = tokio::spawn(async move {
+        let (_socket, _) = silent.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let result = router.confirm_ready(Duration::from_millis(100)).await;
+    let Err(error) = result else {
+        panic!("a TCP listener without an HTTP response must not be ready");
+    };
+    assert!(error.to_string().contains("超时"));
+    assert!(worker.is_finished());
+    assert!(cache.upgrade().is_none());
+    let _released = TcpListener::bind(address).await.unwrap();
+    silent_server.abort();
+    let _ = silent_server.await;
+}
+
 #[tokio::test]
 async fn request_size_errors_are_413_and_damaged_compression_is_400() {
     let router = LocalRouter::start(&CodeyConfig::default()).await.unwrap();
