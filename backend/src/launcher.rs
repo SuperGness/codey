@@ -1242,7 +1242,7 @@ async fn inject_initial_renderer(
     spawned: &SpawnedCodex,
     child: &Arc<Mutex<Option<Child>>>,
     restore_context: RuntimeConfigRestoreContext<'_>,
-    prefetched_target: Option<tokio::task::JoinHandle<Option<crate::early_attach::PrefetchedPage>>>,
+    prefetched_target: Option<crate::early_attach::PrefetchTask>,
 ) -> Result<cdp::InjectedTarget> {
     let failure = match cdp::retry_inject_with_scripts(
         debug_port,

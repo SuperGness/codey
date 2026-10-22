@@ -547,6 +547,8 @@ fn append_guarded_script(
 
 /// 预取（含浏览器端点早期挂载）的内部预算与注入总期限同级。
 pub const PREFETCH_BUDGET: Duration = CDP_INJECTION_TIMEOUT;
+// 预取仅占启动预算的一部分，后续枚举、桥接安装和校验仍有机会完成。
+const PREFETCH_HANDOFF_BUDGET: Duration = Duration::from_secs(8);
 
 /// 在 Codex 进程拉起与 CLI 包装器握手窗口内预取页面目标：调试端口在
 /// Chromium 主进程就绪后先于握手完成可用。除 /json 枚举外还会尝试浏览器
@@ -555,7 +557,7 @@ pub const PREFETCH_BUDGET: Duration = CDP_INJECTION_TIMEOUT;
 /// 流程照常走发现重试。
 pub fn spawn_injectable_target_prefetch(
     debug_port: u16,
-) -> tokio::task::JoinHandle<Option<crate::early_attach::PrefetchedPage>> {
+) -> crate::early_attach::PrefetchTask {
     crate::early_attach::spawn_early_attach_prefetch(debug_port, PREFETCH_BUDGET)
 }
 
@@ -564,7 +566,7 @@ pub async fn retry_inject_with_scripts(
     handler: BridgeHandler,
     scripts: &PreparedInjectionScripts,
     source: InjectionRetrySource,
-    prefetched_target: Option<tokio::task::JoinHandle<Option<crate::early_attach::PrefetchedPage>>>,
+    prefetched_target: Option<crate::early_attach::PrefetchTask>,
 ) -> std::result::Result<InjectedTarget, InjectionRetryFailure> {
     // Renderer asset preparation on newer Windows Codex builds can consume
     // more than ten seconds before the first injectable page appears. Keep
@@ -572,19 +574,23 @@ pub async fn retry_inject_with_scripts(
     // hard startup deadline.
     let started = tokio::time::Instant::now();
     let deadline = started + CDP_INJECTION_TIMEOUT;
-    // 预取任务本身就在做同样的只读枚举：等它出结果而不是并行跑第二份轮询。
-    // 它只在首轮建立注入时消费一次，后续重试照旧枚举（目标可能已换）。
+    let mut stats = InjectionRetryStats::default();
+    // 先限时交接预取，再运行常规枚举，避免重复轮询与预取独占总预算。
     let mut prefetched_target = match prefetched_target {
-        Some(handle) => match tokio::time::timeout_at(deadline, handle).await {
-            Ok(Ok(target)) => target,
-            _ => None,
-        },
+        Some(prefetch) => {
+            let (handoff_deadline, cleanup_deadline) = prefetch_deadlines(started, deadline);
+            let (target, diagnostics) = prefetch.wait(handoff_deadline, cleanup_deadline).await;
+            stats.prefetch = Some(diagnostics);
+            target
+        }
         None => None,
     };
     let mut delay = INITIAL_RETRY_INTERVAL;
     let phase = Arc::new(AtomicU8::new(InjectionPhase::DiscoverTargets as u8));
-    let mut previous_error = None;
-    let mut stats = InjectionRetryStats::default();
+    let mut previous_error = stats
+        .prefetch
+        .as_ref()
+        .and_then(|prefetch| prefetch.last_discovery_error.clone());
     // 校验失败时桥接本身仍然可用：把它跨轮保留，下一轮只在原 WebSocket 上
     // 重跑校验，不再重连并重放全部注入脚本。
     let mut retained_bridge: Option<EstablishedInjection> = None;
@@ -672,6 +678,20 @@ pub async fn retry_inject_with_scripts(
     })
 }
 
+fn prefetch_deadlines(
+    started: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+) -> (tokio::time::Instant, tokio::time::Instant) {
+    let remaining = deadline.saturating_duration_since(started);
+    let wait_budget = PREFETCH_HANDOFF_BUDGET.min(remaining.saturating_sub(
+        crate::early_attach::PREFETCH_CLEANUP_BUDGET + MINIMUM_VERIFICATION_BUDGET,
+    ));
+    let handoff_deadline = started + wait_budget;
+    let cleanup_deadline = (handoff_deadline + crate::early_attach::PREFETCH_CLEANUP_BUDGET)
+        .min(deadline);
+    (handoff_deadline, cleanup_deadline)
+}
+
 /// 下一次重试前的等待时长。发现与选择阶段的失败通常只付一次 loopback 请求的
 /// 代价，既不触碰 renderer 也不留 CDP 副作用，用小步长逼近 renderer 就绪即可。
 /// 但同一阶段的失败也可能突然变贵（例如调试端口被别的服务占用而让请求挂到
@@ -694,6 +714,7 @@ fn next_injection_retry_delay(
 /// 汇总，不随重试次数增长。
 #[derive(Default)]
 struct InjectionRetryStats {
+    prefetch: Option<crate::early_attach::PrefetchDiagnostics>,
     attempts: u32,
     phase_failures: [u32; INJECTION_PHASE_COUNT],
     failure_expense_ms: u64,
@@ -751,6 +772,9 @@ impl InjectionRetryStats {
         // 汇总文案只保留归类结果，完整错误链随最后一次尝试一起进诊断记录。
         if let Some(last_error) = last_error {
             detail["lastError"] = serde_json::json!(last_error);
+        }
+        if let Some(prefetch) = &self.prefetch {
+            detail["prefetch"] = serde_json::json!(prefetch);
         }
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
             "cdp.injection_retry_summary",
@@ -2155,6 +2179,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefetch_handoff_and_cleanup_leave_time_for_injection() {
+        let started = tokio::time::Instant::now();
+        let deadline = started + CDP_INJECTION_TIMEOUT;
+        let (handoff, cleanup) = prefetch_deadlines(started, deadline);
+        assert_eq!(handoff - started, Duration::from_secs(8));
+        assert_eq!(cleanup - started, Duration::from_secs(14));
+        assert!(deadline - cleanup >= MINIMUM_VERIFICATION_BUDGET);
+    }
 
     #[tokio::test]
     async fn mcp_reload_requires_a_confirmed_renderer_response() {
