@@ -536,8 +536,6 @@ impl WebSocketResponsesDownstream {
             .as_ref()
             .map_err(|error| anyhow::anyhow!(error.clone()))?;
         let now = Instant::now();
-        let backoff_key =
-            UpstreamWebSocketBackoffKey::for_route(route, upstream_url, auth_identity);
         let previous_response_id = responses_previous_response_id(body);
         let previous_response_key: Option<[u8; 32]> =
             previous_response_id.map(|id| Sha256::digest(id.as_bytes()).into());
@@ -568,6 +566,18 @@ impl WebSocketResponsesDownstream {
         let history_key = self
             .native_history
             .prepare_for_route(route, effective_auth, body);
+        let backoff_key =
+            UpstreamWebSocketBackoffKey::for_route(route, upstream_url, effective_auth);
+        // 同线路的其他会话可能已经报告故障；缓存连接也必须遵守共享退避。
+        if self
+            .websocket_backoffs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_backing_off(&backoff_key, Instant::now())
+        {
+            self.upstream.take();
+            return Ok(UpstreamWebSocketAttempt::UseHttp("websocket_backoff"));
+        }
         if route.official_account
             && self.native_history.requires_http_for_websocket(
                 body,
@@ -625,21 +635,16 @@ impl WebSocketResponsesDownstream {
                 ))
                 .await?
             {
-                Ok(socket) => {
-                    self.websocket_backoffs
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .record_success(&backoff_key);
-                    CachedUpstreamWebSocket {
-                        route_id: route.provider_id.clone(),
-                        url: upstream_url.clone(),
-                        auth_identity,
-                        response_ids: VecDeque::new(),
-                        config_identity: route.websocket_config,
-                        liveness: UpstreamWebSocketLiveness::new(Instant::now()),
-                        socket,
-                    }
-                }
+                // 握手成功不代表请求已恢复；保留故障次数直到收到成功终态。
+                Ok(socket) => CachedUpstreamWebSocket {
+                    route_id: route.provider_id.clone(),
+                    url: upstream_url.clone(),
+                    auth_identity,
+                    response_ids: VecDeque::new(),
+                    config_identity: route.websocket_config,
+                    liveness: UpstreamWebSocketLiveness::new(Instant::now()),
+                    socket,
+                },
                 Err(error) => {
                     if upstream_websocket_endpoint_is_unsupported(&error) {
                         self.websocket_backoffs
@@ -887,6 +892,14 @@ impl WebSocketResponsesDownstream {
                         {
                             raw_json_text = None;
                         }
+                        let infrastructure_failure =
+                            responses_event_is_websocket_infrastructure_failure(&event);
+                        if infrastructure_failure {
+                            record_upstream_websocket_failure(
+                                &self.websocket_backoffs,
+                                &backoff_key,
+                            );
+                        }
                         if responses_event_is_failure(&event) {
                             if let Some(probe) = probe {
                                 let original = raw_json_text
@@ -944,24 +957,23 @@ impl WebSocketResponsesDownstream {
                             probe.mark_first_downstream_content();
                         }
                         if terminal {
-                            let successful_backoff_key = UpstreamWebSocketBackoffKey::for_route(
-                                route,
-                                upstream_url,
-                                upstream.auth_identity,
-                            );
                             if let Some(response_id) = produced_response_id {
                                 if upstream.response_ids.len() >= MAX_CACHED_RESPONSE_IDS {
                                     upstream.response_ids.pop_front();
                                 }
                                 upstream.response_ids.push_back(response_id);
                             }
-                            if responses_websocket_connection_is_reusable(&event) {
+                            if !infrastructure_failure
+                                && responses_websocket_connection_is_reusable(&event)
+                            {
                                 self.upstream = Some(upstream);
                             }
-                            self.websocket_backoffs
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .record_success(&successful_backoff_key);
+                            if !responses_event_is_failure(&event) {
+                                self.websocket_backoffs
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .record_success(&backoff_key);
+                            }
                             return Ok(UpstreamWebSocketAttempt::Completed);
                         }
                     }
@@ -1096,6 +1108,15 @@ pub(crate) fn responses_event_is_failure(event: &Value) -> bool {
         event.get("type").and_then(Value::as_str),
         Some("response.failed" | "error")
     )
+}
+
+pub(crate) fn responses_event_is_websocket_infrastructure_failure(event: &Value) -> bool {
+    responses_event_is_failure(event)
+        && ["/error/code", "/response/error/code"]
+            .into_iter()
+            .any(|path| {
+                event.pointer(path).and_then(Value::as_str) == Some("rebuild_target_not_ready")
+            })
 }
 
 pub(crate) fn parse_responses_websocket_sse_events(text: &str) -> Result<Vec<Value>> {

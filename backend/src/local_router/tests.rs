@@ -1465,6 +1465,9 @@ async fn websocket_rejected_message_reports_type_without_echoing_payload() {
 #[path = "steering_tests.rs"]
 mod steering_tests;
 
+#[path = "websocket_backoff_tests.rs"]
+mod websocket_backoff_tests;
+
 #[allow(clippy::result_large_err)]
 #[tokio::test]
 async fn declared_responses_route_reuses_upstream_websocket() {
