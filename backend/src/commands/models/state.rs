@@ -1,6 +1,10 @@
 use super::*;
 
 #[cfg(test)]
+#[path = "context_budget_tests.rs"]
+mod context_budget_tests;
+
+#[cfg(test)]
 pub(crate) fn provider_route_requires_restart(
     applied: &CodeyConfig,
     current: &CodeyConfig,
@@ -213,6 +217,14 @@ pub(crate) fn renderer_model_catalog_value(
     config: &CodeyConfig,
     model_state: &model_catalog::ModelSelectionState,
 ) -> Value {
+    renderer_model_catalog_value_at(config, model_state, codex_home())
+}
+
+fn renderer_model_catalog_value_at(
+    config: &CodeyConfig,
+    model_state: &model_catalog::ModelSelectionState,
+    home: &std::path::Path,
+) -> Value {
     if !config.local_router_enabled {
         let mut catalog = renderer_native_model_catalog_value(model_state);
         catalog["legacy_model_aliases"] = json!(config.model_alias_history);
@@ -230,7 +242,7 @@ pub(crate) fn renderer_model_catalog_value(
     let context_metadata = if !config.uses_builtin_official_model_catalog()
         || !config.runtime_model_contexts().is_empty()
     {
-        model_catalog::runtime_context_metadata(codex_home())
+        model_catalog::context_metadata_for_config(home, config)
     } else {
         BTreeMap::new()
     };
