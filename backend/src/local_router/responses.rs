@@ -318,11 +318,25 @@ impl RouterServer {
                         return Ok(());
                     }
                 };
-                let backend = self
-                    .snapshot
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .request_log_backend;
+                let (backend, model_aliases) = {
+                    let snapshot = self
+                        .snapshot
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let aliases = if statistics {
+                        crate::route_request_log::RouteRequestLogModelAliases::new(
+                            snapshot
+                                .aliases
+                                .iter()
+                                .map(|(alias, target)| (alias.clone(), target.model.clone())),
+                            snapshot.raw_models.keys().cloned(),
+                            snapshot.model_alias_history.clone(),
+                        )
+                    } else {
+                        Default::default()
+                    };
+                    (snapshot.request_log_backend, aliases)
+                };
                 let root = self.request_log.root().to_path_buf();
                 let result = tokio::task::spawn_blocking(move || {
                     crate::route_request_log::query_route_request_log_models(&root, backend, query)
@@ -367,8 +381,8 @@ impl RouterServer {
                 match tokio::task::spawn_blocking(move || {
                     let value = if statistics {
                         serde_json::to_value(
-                            crate::route_request_log::query_route_request_log_stats(
-                                &root, backend, query,
+                            crate::route_request_log::query_route_request_log_stats_with_model_aliases(
+                                &root, backend, query, model_aliases,
                             )?,
                         )
                     } else {
@@ -556,6 +570,20 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        let snapshot = Arc::clone(
+            &self
+                .snapshot
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let image_model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(probe) = &probe {
+            probe.record_request_model(&image_model, snapshot.request_model_name(&image_model));
+        }
         let (route_hint, body_mutated) =
             match take_codey_route_metadata(&mut request, &mut body, None) {
                 Ok(extracted) => extracted,
@@ -572,19 +600,9 @@ impl RouterServer {
                     return Ok(());
                 }
             };
-        let snapshot = Arc::clone(
-            &self
-                .snapshot
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        let image_model = body
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
         let mut route_decision = crate::route_request_log::RouteDecision::default();
         let resolved = snapshot.route_for_image_request_observed(
-            image_model,
+            &image_model,
             route_hint.as_deref(),
             probe
                 .as_ref()
@@ -1571,6 +1589,58 @@ impl RouterServer {
                 .await;
         }
         if let Some(probe) = &probe {
+            let requested_model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let reasoning_effort = body
+                .pointer("/reasoning/effort")
+                .or_else(|| body.get("reasoning_effort"))
+                .and_then(Value::as_str);
+            let thinking_budget_tokens = [
+                "/thinking/budget_tokens",
+                "/thinking/budgetTokens",
+                "/thinking_budget_tokens",
+                "/thinkingBudgetTokens",
+            ]
+            .into_iter()
+            .find_map(|pointer| body.pointer(pointer).and_then(Value::as_u64));
+            producer.begin(RouteRequestLogStart {
+                request_id: &request_id,
+                started_at: current_router_request_started_at().unwrap_or_else(Instant::now),
+                request_protocol,
+                request_kind: if request_kind == ResponsesRequestKind::Create
+                    && is_compaction_request(&body, request_kind)
+                {
+                    "responses_compact_v2"
+                } else {
+                    request_kind.label()
+                },
+                requested_model,
+                reasoning_effort,
+                thinking_budget_tokens,
+                codex_session_id,
+                codex_session_is_parent,
+            })
+        });
+        if probe.is_none() {
+            return self
+                .proxy_with_compaction_budget(request, body, encoded_body, request_kind, downstream)
+                .await;
+        }
+        if let Some(probe) = &probe {
+            let requested_model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let snapshot = self
+                .snapshot
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            probe.record_request_model(
+                requested_model,
+                snapshot.request_model_name(requested_model),
+            );
             probe.set_subagent(request_is_subagent(&request));
             probe.set_requested_service_tier(body.get("service_tier").and_then(Value::as_str));
             probe.record_request_body(RequestBodySummary::from_responses_body(

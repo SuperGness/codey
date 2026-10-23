@@ -13257,6 +13257,156 @@ async fn non_stream_transport_error_response_preserves_http_status_and_text() {
 }
 
 #[tokio::test]
+async fn request_log_resolves_model_identity_before_http_websocket_and_image_rejections() {
+    let logs = tempfile::tempdir().unwrap();
+    let (mut config, provider_id, model) = router_config("http://127.0.0.1:9/v1".into());
+    let alias = model_alias(&provider_id, &model);
+    let raw_model = "vendor/raw-model";
+    config
+        .selected_models_by_provider
+        .get_mut(&provider_id)
+        .unwrap()
+        .push(raw_model.into());
+    config
+        .model_alias_history
+        .insert(alias.clone(), "outdated-model".into());
+    config
+        .model_alias_history
+        .insert("retired/model".into(), model.clone());
+    config
+        .model_alias_history
+        .insert(raw_model.into(), "wrongly-stripped-model".into());
+    config.route_request_log.enabled = true;
+    config.route_request_log.backend = RouteRequestLogBackend::Sqlite;
+    let router = LocalRouter::start_with_logger(
+        &config,
+        Arc::new(RouteRequestLogController::with_root(
+            logs.path().to_path_buf(),
+        )),
+    )
+    .await
+    .unwrap();
+    let endpoint = router.endpoint();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let mut socket = connect_router_websocket(&endpoint).await;
+    let cases = [
+        (alias.as_str(), model.as_str()),
+        ("retired/model", model.as_str()),
+        (raw_model, raw_model),
+        ("unknown/namespace/model", "unknown/namespace/model"),
+    ];
+    for (requested, _) in cases {
+        let mut body = json!({
+            "model": requested, "input": "test", "prompt": "test",
+            "client_metadata": {ROUTE_METADATA_KEY: 123}
+        });
+        for path in ["responses", "images/generations"] {
+            let response = client
+                .post(format!("{}/{path}", endpoint.base_url))
+                .bearer_auth(&endpoint.token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["error"]["code"],
+                "route_metadata_invalid"
+            );
+        }
+        body["type"] = "response.create".into();
+        socket
+            .send(WebSocketMessage::Text(body.to_string().into()))
+            .await
+            .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let WebSocketMessage::Text(text) = message else {
+            panic!("expected failure event")
+        };
+        let event: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(event["type"], "response.failed");
+        assert_eq!(
+            event["response"]["error"]["codey"]["errorCode"],
+            "route_metadata_invalid"
+        );
+    }
+    socket.close(None).await.unwrap();
+    router.stop().await.unwrap();
+    let page = crate::route_request_log::query_route_request_logs(
+        logs.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(page.total, 12);
+    for (requested, expected) in cases {
+        let items = page
+            .items
+            .iter()
+            .filter(|item| item.requested_model == requested)
+            .collect::<Vec<_>>();
+        assert_eq!(items.len(), 3);
+        for item in items {
+            assert_eq!(item.model.as_deref(), Some(expected));
+            assert_eq!(item.error_code.as_deref(), Some("route_metadata_invalid"));
+            assert!(item.provider.is_none());
+            assert!(item.upstream_authority.is_none());
+            assert!(item.upstream_transport.is_none());
+            assert!(item.upstream_attempts.is_empty());
+        }
+    }
+
+    // 在临时库中还原旧日志格式，验证页面 API 也使用当前与历史别名。
+    let connection =
+        rusqlite::Connection::open(logs.path().join("route-requests.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE route_request_logs SET model = CASE
+                WHEN request_kind = 'images_generations' THEN requested_model
+                ELSE NULL END",
+            [],
+        )
+        .unwrap();
+    drop(connection);
+    let router = LocalRouter::start_with_logger(
+        &config,
+        Arc::new(RouteRequestLogController::with_root(
+            logs.path().to_path_buf(),
+        )),
+    )
+    .await
+    .unwrap();
+    let endpoint = router.endpoint();
+    let response = client
+        .post(format!(
+            "{}/codey/api/query_route_request_log_stats",
+            endpoint.base_url.trim_end_matches("/v1")
+        ))
+        .header(ROUTER_AUTH_HEADER, &endpoint.token)
+        .json(&json!({"allTime": true, "groupBy": "model"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let stats = response.json::<Value>().await.unwrap();
+    assert_eq!(stats["total"], 12);
+    let groups = stats["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 3);
+    let model_group = groups.iter().find(|group| group["key"] == model).unwrap();
+    assert_eq!(model_group["total"], 6);
+    assert!(model_group["totalTokensSum"].is_null());
+    assert_eq!(model_group["totalTokensKnownCount"], 0);
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn router_proxies_image_generation_to_the_default_openai_route() {
     let logs = tempfile::tempdir().unwrap();
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

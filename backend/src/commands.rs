@@ -1397,10 +1397,37 @@ async fn query_route_request_log_stats(
     state: &Arc<AppState>,
     query: RouteRequestLogQuery,
 ) -> Result<Value, String> {
-    let backend = state.config.read().await.route_request_log.backend;
+    let (backend, model_aliases) = {
+        let config = state.config.read().await;
+        let models = config
+            .runtime_profiles()
+            .flat_map(|profile| {
+                config
+                    .routable_profile_models(profile)
+                    .into_iter()
+                    .map(|model| {
+                        (
+                            crate::model_id::model_alias(profile.provider_id(), &model),
+                            model,
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        let aliases = crate::route_request_log::RouteRequestLogModelAliases::new(
+            models.iter().cloned(),
+            models.iter().map(|(_, model)| model.clone()),
+            config.model_alias_history.clone(),
+        );
+        (config.route_request_log.backend, aliases)
+    };
     let root = codey_runtime_core::paths::default_app_state_dir();
     let stats = tokio::task::spawn_blocking(move || {
-        crate::route_request_log::query_route_request_log_stats(&root, backend, query)
+        crate::route_request_log::query_route_request_log_stats_with_model_aliases(
+            &root,
+            backend,
+            query,
+            model_aliases,
+        )
     })
     .await
     .map_err(|error| format!("请求日志统计任务异常退出：{error}"))?

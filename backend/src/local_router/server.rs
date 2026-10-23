@@ -1274,6 +1274,20 @@ impl RouterSnapshot {
         .map(|selection| selection.route)
     }
 
+    /// 只根据可信目录恢复一层别名；原始模型本身可以含有斜杠。
+    pub(crate) fn request_model_name<'a>(&'a self, requested_model: &'a str) -> &'a str {
+        let key = model_id::key(requested_model.trim());
+        if let Some(alias) = self.aliases.get(&key) {
+            return &alias.model;
+        }
+        if !self.raw_models.contains_key(&key)
+            && let Some(model) = self.model_alias_history.get(&key)
+        {
+            return model;
+        }
+        requested_model
+    }
+
     pub(crate) fn active_model_alias(&self, requested_model: &str) -> Option<&AliasTarget> {
         // 历史别名只提供模型恢复信息，不能作为本次请求的明确线路选择。
         self.aliases.get(&model_id::key(requested_model.trim()))

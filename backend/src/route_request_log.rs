@@ -20,18 +20,15 @@ pub(crate) use collector::{
     RouteRequestLogController, RouteRequestLogGuard, RouteRequestLogProbe,
     RouteRequestLogReconfigure, is_output_delta_event, observe_upstream_response_model,
 };
-// 保留现有 crate 内入口，避免内部拆分改变调用路径。
-#[allow(unused_imports)]
-pub(crate) use collector::{
-    RouteRequestLogFinishGuard, RouteRequestLogProducer, RouteRequestLogRuntime,
-    upstream_response_model,
-};
 pub(crate) use query::{
-    clear_route_request_log_files, last_turn_recorded_stats, query_route_request_log_models,
-    query_route_request_log_stats, query_route_request_logs,
+    RouteRequestLogModelAliases, clear_route_request_log_files, last_turn_recorded_stats,
+    query_route_request_log_models, query_route_request_log_stats_with_model_aliases,
+    query_route_request_logs,
 };
 #[cfg(test)]
-pub(crate) use query::{session_recorded_average, session_recorded_timing};
+pub(crate) use query::{
+    query_route_request_log_stats, session_recorded_average, session_recorded_timing,
+};
 
 const SCHEMA_VERSION: u8 = 14;
 const MAX_LOG_STRING_BYTES: usize = 512;

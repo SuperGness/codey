@@ -642,6 +642,15 @@ impl RouteRequestLogProbe {
         });
     }
 
+    /// 模型标识可在选路前确定；不表示线路已解析或请求已发送。
+    pub(crate) fn record_request_model(&self, requested_model: &str, model: &str) {
+        self.shield(|| {
+            let mut entry = lock_unpoisoned(&self.shared.entry);
+            entry.requested_model = bounded_string(requested_model);
+            entry.model = (!model.trim().is_empty()).then(|| bounded_string(model));
+        });
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn resolve_route(
         &self,
