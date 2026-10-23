@@ -1257,20 +1257,20 @@ impl RouterSnapshot {
                 Some(crate::route_request_log::RouteCheckRejection::RouteMissing);
         }
         let model = model.trim();
-        if !model.is_empty() {
-            if let Some(candidates) = self.raw_models.get(&model_id::key(upstream_model)) {
-                if candidates.len() > 1 {
-                    record_decision(&mut decision, Reason::AmbiguousModel, candidates.len());
-                    anyhow::bail!("模型 {model} 同时存在于多条线路，缺少明确的 Codey 线路元数据");
-                }
-                if let Some(candidate) = candidates.first() {
-                    record_decision(&mut decision, Reason::UniqueCandidate, 1);
-                    return self.target_for_route_model(
-                        &candidate.provider_id,
-                        &candidate.model,
-                        requested_model,
-                    );
-                }
+        if !model.is_empty()
+            && let Some(candidates) = self.raw_models.get(&model_id::key(upstream_model))
+        {
+            if candidates.len() > 1 {
+                record_decision(&mut decision, Reason::AmbiguousModel, candidates.len());
+                anyhow::bail!("模型 {model} 同时存在于多条线路，缺少明确的 Codey 线路元数据");
+            }
+            if let Some(candidate) = candidates.first() {
+                record_decision(&mut decision, Reason::UniqueCandidate, 1);
+                return self.target_for_route_model(
+                    &candidate.provider_id,
+                    &candidate.model,
+                    requested_model,
+                );
             }
         }
         if let Some(decision) = decision.as_deref_mut() {
