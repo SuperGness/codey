@@ -1205,8 +1205,8 @@ impl RouterSnapshot {
         })
     }
 
-    /// 图片请求不沿用对话线程绑定。显式线路提示优先；模型能唯一确定线路时用该线路；
-    /// 模型未登记时才退到默认模型所在线路。同名模型归属不明时仍然拒绝。
+    /// 图片请求不沿用对话线程绑定。当前模型别名明确指定线路，其余请求优先用线路提示；
+    /// 无提示时用模型唯一对应的线路，模型未登记才使用默认线路，同名模型归属不明仍拒绝。
     #[cfg(test)]
     pub(crate) fn route_for_image_request(
         &self,
@@ -1214,6 +1214,7 @@ impl RouterSnapshot {
         route_hint: Option<&str>,
     ) -> Result<Arc<RouteTarget>> {
         self.route_for_image_request_observed(model, route_hint, None)
+            .map(|selection| selection.route)
     }
 
     pub(crate) fn route_for_image_request_observed(
@@ -1221,16 +1222,33 @@ impl RouterSnapshot {
         model: &str,
         route_hint: Option<&str>,
         mut decision: Option<&mut crate::route_request_log::RouteDecision>,
-    ) -> Result<Arc<RouteTarget>> {
+    ) -> Result<RouteSelection> {
         use crate::route_request_log::RouteDecisionReason as Reason;
+        let requested_model = model;
+        let upstream_model = self.request_model_name(model);
         if let Some(decision) = decision.as_deref_mut() {
             decision.settings_revision = self.settings_revision;
+            let key = model_id::key(model.trim());
+            decision.historical_alias = !self.aliases.contains_key(&key)
+                && !self.raw_models.contains_key(&key)
+                && self.model_alias_history.contains_key(&key);
+        }
+        if let Some(alias) = self.active_model_alias(model) {
+            record_decision(&mut decision, Reason::ExplicitAlias, 1);
+            return self.target_for_route_model(&alias.provider_id, &alias.model, requested_model);
         }
         if let Some(route_hint) = route_hint.map(str::trim).filter(|hint| !hint.is_empty())
             && let Some(route) = self.routes.get(route_hint)
         {
             record_decision(&mut decision, Reason::RouteHint, 1);
-            return Ok(Arc::clone(route));
+            return Ok(RouteSelection {
+                provider_id: route.provider_id.clone(),
+                protocol: route.protocol,
+                requested_model: requested_model.to_string(),
+                route: Arc::clone(route),
+                upstream_model: upstream_model.to_string(),
+                fallback_reason: None,
+            });
         }
         if route_hint.is_some()
             && let Some(decision) = decision.as_deref_mut()
@@ -1240,23 +1258,18 @@ impl RouterSnapshot {
         }
         let model = model.trim();
         if !model.is_empty() {
-            let model_key = model_id::key(model);
-            if let Some(alias) = self.aliases.get(&model_key) {
-                record_decision(&mut decision, Reason::ExplicitAlias, 1);
-                return self
-                    .target_for_route_model(&alias.provider_id, &alias.model, model)
-                    .map(|selection| selection.route);
-            }
-            if let Some(candidates) = self.raw_models.get(&model_key) {
+            if let Some(candidates) = self.raw_models.get(&model_id::key(upstream_model)) {
                 if candidates.len() > 1 {
                     record_decision(&mut decision, Reason::AmbiguousModel, candidates.len());
                     anyhow::bail!("模型 {model} 同时存在于多条线路，缺少明确的 Codey 线路元数据");
                 }
                 if let Some(candidate) = candidates.first() {
                     record_decision(&mut decision, Reason::UniqueCandidate, 1);
-                    return self
-                        .target_for_route_model(&candidate.provider_id, &candidate.model, model)
-                        .map(|selection| selection.route);
+                    return self.target_for_route_model(
+                        &candidate.provider_id,
+                        &candidate.model,
+                        requested_model,
+                    );
                 }
             }
         }
@@ -1271,7 +1284,12 @@ impl RouterSnapshot {
             },
             decision,
         )
-        .map(|selection| selection.route)
+        .map(|mut selection| {
+            // 默认文本模型只确定图片请求所用线路，不能替换图片模型。
+            selection.requested_model = requested_model.to_string();
+            selection.upstream_model = upstream_model.to_string();
+            selection
+        })
     }
 
     /// 只根据可信目录恢复一层别名；原始模型本身可以含有斜杠。

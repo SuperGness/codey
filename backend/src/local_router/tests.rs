@@ -94,6 +94,15 @@ fn image_request_uses_the_model_route_instead_of_a_conversation_binding() {
             .provider_id,
         chat_id
     );
+    let hinted_alias = snapshot
+        .route_for_image_request_observed(
+            &model_alias(&images_id, "gpt-image-2"),
+            Some(&chat_id),
+            None,
+        )
+        .unwrap();
+    assert_eq!(hinted_alias.provider_id, images_id);
+    assert_eq!(hinted_alias.upstream_model, "gpt-image-2");
     config
         .selected_models_by_provider
         .get_mut(&chat_id)
@@ -5656,22 +5665,24 @@ async fn route_metadata_conflicts_still_reject_raw_historical_and_default_models
         if let Some(requested_model) = requested_model {
             body["model"] = requested_model.into();
         }
-        let response = client
-            .post(format!("{}/responses", endpoint.base_url))
-            .bearer_auth(&endpoint.token)
-            .header(
-                TURN_METADATA_HEADER,
-                json!({ROUTE_METADATA_KEY:"old-route"}).to_string(),
-            )
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-        assert_eq!(
-            response.json::<Value>().await.unwrap()["error"]["code"],
-            "route_metadata_invalid"
-        );
+        for path in ["responses", "images/generations", "images/edits"] {
+            let response = client
+                .post(format!("{}/{path}", endpoint.base_url))
+                .bearer_auth(&endpoint.token)
+                .header(
+                    TURN_METADATA_HEADER,
+                    json!({ROUTE_METADATA_KEY:"old-route"}).to_string(),
+                )
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response.json::<Value>().await.unwrap()["error"]["code"],
+                "route_metadata_invalid"
+            );
+        }
     }
     router.stop().await.unwrap();
 }
@@ -13404,6 +13415,299 @@ async fn request_log_resolves_model_identity_before_http_websocket_and_image_rej
     assert!(model_group["totalTokensSum"].is_null());
     assert_eq!(model_group["totalTokensKnownCount"], 0);
     router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn router_image_aliases_rewrite_the_upstream_body_and_preserve_raw_models() {
+    let logs = tempfile::tempdir().unwrap();
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let (mut config, provider_id, text_model) = router_config(format!("http://{address}/v1"));
+    let image_model = "vendor/gpt-image-2";
+    let nested_model = model_alias(&provider_id, &text_model);
+    config
+        .selected_models_by_provider
+        .get_mut(&provider_id)
+        .unwrap()
+        .extend([image_model.to_string(), nested_model.clone()]);
+    config.default_model = model_alias(&provider_id, &text_model);
+    config
+        .model_alias_history
+        .insert("retired/image-model".into(), image_model.into());
+    config
+        .model_alias_history
+        .insert(image_model.into(), "wrongly-stripped-image-model".into());
+    config.route_request_log.enabled = true;
+    config.route_request_log.backend = RouteRequestLogBackend::Sqlite;
+    let alias = model_alias(&provider_id, image_model);
+    let nested_alias = model_alias(&provider_id, &nested_model);
+    let cases = [
+        ("generations", alias.as_str(), image_model),
+        ("edits", alias.as_str(), image_model),
+        ("generations", "retired/image-model", image_model),
+        ("generations", image_model, image_model),
+        ("edits", "unknown/image-model", "unknown/image-model"),
+        ("generations", nested_alias.as_str(), nested_model.as_str()),
+    ];
+    let count = cases.len();
+    let upstream_task = tokio::spawn(async move {
+        let mut captured = Vec::new();
+        for _ in 0..count {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            captured.push((request.path, request.body));
+            write_json_response(&mut stream, 200, &json!({"created":1,"data":[]}))
+                .await
+                .unwrap();
+        }
+        captured
+    });
+    let router = LocalRouter::start_with_logger(
+        &config,
+        Arc::new(RouteRequestLogController::with_root(
+            logs.path().to_path_buf(),
+        )),
+    )
+    .await
+    .unwrap();
+    let endpoint = router.endpoint();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let mut originals = Vec::new();
+    for (path, requested, _) in cases {
+        let original =
+            format!("{{ \n \"model\": {requested:?}, \"prompt\": \"draw an otter\" }}\n");
+        let response = client
+            .post(format!("{}/images/{path}", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .header(CONTENT_TYPE, "application/json")
+            .body(original.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        response.bytes().await.unwrap();
+        originals.push(original);
+    }
+    let captured = tokio::time::timeout(Duration::from_secs(5), upstream_task)
+        .await
+        .unwrap()
+        .unwrap();
+    router.stop().await.unwrap();
+    let page = crate::route_request_log::query_route_request_logs(
+        logs.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(page.total, count as u64);
+    for (((path, requested, expected), (upstream_path, bytes)), original) in
+        cases.into_iter().zip(captured).zip(originals)
+    {
+        assert_eq!(upstream_path, format!("/v1/images/{path}"));
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["model"], expected);
+        assert_eq!(body["prompt"], "draw an otter");
+        if requested == expected {
+            assert_eq!(bytes, original.as_bytes());
+        }
+        let item = page
+            .items
+            .iter()
+            .find(|item| item.requested_model == requested)
+            .unwrap();
+        assert_eq!(item.model.as_deref(), Some(expected));
+        assert_eq!(item.provider.as_deref(), Some(provider_id.as_str()));
+    }
+}
+
+#[tokio::test]
+async fn router_image_aliases_keep_the_selected_route_despite_replayed_metadata() {
+    let logs = tempfile::tempdir().unwrap();
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let (mut config, provider_a, text_model) = router_config(format!("http://{address}/a/v1"));
+    let mut route_b = config.profiles[0].clone();
+    route_b.id = "route-b".into();
+    route_b.base_url = format!("http://{address}/b/v1");
+    config.profiles.push(route_b);
+    let image_model = "vendor/gpt-image-2";
+    let nested_model = model_alias(&provider_a, &text_model);
+    config
+        .selected_models_by_provider
+        .get_mut(&provider_a)
+        .unwrap()
+        .extend([image_model.to_string(), nested_model.clone()]);
+    config
+        .selected_models_by_provider
+        .insert("route-b".into(), vec![text_model.clone()]);
+    config.default_model = model_alias("route-b", &text_model);
+    config
+        .model_alias_history
+        .insert("retired/image-model".into(), image_model.into());
+    config.route_request_log.enabled = true;
+    config.route_request_log.backend = RouteRequestLogBackend::Sqlite;
+    let alias = model_alias(&provider_a, image_model);
+    let nested_alias = model_alias(&provider_a, &nested_model);
+    let cases = [
+        // 当前别名优先于有效、缺失、相同和相互冲突的旧线路提示。
+        (
+            "generations",
+            alias.as_str(),
+            "route-b",
+            "route-b",
+            "a",
+            image_model,
+        ),
+        (
+            "edits",
+            alias.as_str(),
+            "deleted-route",
+            "deleted-route",
+            "a",
+            image_model,
+        ),
+        (
+            "generations",
+            alias.as_str(),
+            provider_a.as_str(),
+            provider_a.as_str(),
+            "a",
+            image_model,
+        ),
+        (
+            "edits",
+            alias.as_str(),
+            "route-b",
+            provider_a.as_str(),
+            "a",
+            image_model,
+        ),
+        // 原始与历史模型仍服从明确线路提示，图片模型不必登记于该线路。
+        (
+            "generations",
+            "gpt-image-2",
+            "route-b",
+            "route-b",
+            "b",
+            "gpt-image-2",
+        ),
+        (
+            "edits",
+            "retired/image-model",
+            "route-b",
+            "route-b",
+            "b",
+            image_model,
+        ),
+        (
+            "generations",
+            image_model,
+            "route-b",
+            "route-b",
+            "b",
+            image_model,
+        ),
+        (
+            "edits",
+            nested_alias.as_str(),
+            "route-b",
+            "route-b",
+            "a",
+            nested_model.as_str(),
+        ),
+    ];
+    let count = cases.len();
+    let upstream_task = tokio::spawn(async move {
+        let mut captured = Vec::new();
+        for _ in 0..count {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let request = read_http_request(&mut stream).await.unwrap();
+            write_json_response(&mut stream, 200, &json!({"created":1,"data":[]}))
+                .await
+                .unwrap();
+            captured.push(request);
+        }
+        captured
+    });
+    let router = LocalRouter::start_with_logger(
+        &config,
+        Arc::new(RouteRequestLogController::with_root(
+            logs.path().to_path_buf(),
+        )),
+    )
+    .await
+    .unwrap();
+    let endpoint = router.endpoint();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    for (index, (path, requested, header_hint, body_hint, _, _)) in cases.iter().enumerate() {
+        let response = client
+            .post(format!("{}/images/{path}", endpoint.base_url))
+            .bearer_auth(&endpoint.token)
+            .header("thread-id", format!("image-alias-{index}"))
+            .header(
+                TURN_METADATA_HEADER,
+                json!({ROUTE_METADATA_KEY:header_hint,"keep":"header"}).to_string(),
+            )
+            .json(&json!({
+                "model":requested, "prompt":"draw an otter",
+                "client_metadata":{ROUTE_METADATA_KEY:body_hint,"keep":"body"}
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK, "case {index}");
+        response.bytes().await.unwrap();
+    }
+    let captured = tokio::time::timeout(Duration::from_secs(5), upstream_task)
+        .await
+        .unwrap()
+        .unwrap();
+    router.stop().await.unwrap();
+    let page = crate::route_request_log::query_route_request_logs(
+        logs.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery::default(),
+    )
+    .unwrap();
+    assert_eq!(page.total, count as u64);
+    for (index, ((path, requested, _, _, route, expected_model), request)) in
+        cases.into_iter().zip(captured).enumerate()
+    {
+        assert_eq!(
+            request.path,
+            format!("/{route}/v1/images/{path}"),
+            "case {index}"
+        );
+        let body: Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["model"], expected_model, "case {index}");
+        assert_eq!(body["prompt"], "draw an otter");
+        assert!(body["client_metadata"].get(ROUTE_METADATA_KEY).is_none());
+        assert_eq!(body["client_metadata"]["keep"], "body");
+        assert!(incoming_header(&request, TURN_METADATA_HEADER).is_none());
+        let session = format!("image-alias-{index}");
+        let item = page
+            .items
+            .iter()
+            .find(|item| item.codex_session_id.as_deref() == Some(session.as_str()))
+            .unwrap();
+        assert_eq!(item.requested_model, requested);
+        assert_eq!(item.model.as_deref(), Some(expected_model));
+        assert_eq!(
+            item.provider.as_deref(),
+            Some(if route == "a" {
+                provider_a.as_str()
+            } else {
+                "route-b"
+            })
+        );
+        assert_eq!(item.status, "succeeded");
+    }
 }
 
 #[tokio::test]
