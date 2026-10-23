@@ -59,6 +59,29 @@ mod trace_log_guard;
 mod trace_log_stats;
 mod update_helper;
 
+// 单元测试不能写入用户真实的 Codey 状态目录：诊断日志和错误日志都按该目录
+// 定位，否则测试记录会淹没真实故障并提前触发日志轮转。在 main 之前设置，
+// 保证任何测试线程读取路径时都已生效。`cargo run` 和 `cargo test` 重建的
+// 正式二进制都不包含这段代码。
+#[cfg(test)]
+mod test_state_isolation {
+    extern "C" fn isolate_app_state_dir() {
+        const KEY: &str = "CODEY_APP_STATE_DIR";
+        if std::env::var_os(KEY).is_some_and(|value| !value.is_empty()) {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("codey-test-state-{}", std::process::id()));
+        // SAFETY: runs as a pre-main initializer before any other thread exists.
+        unsafe { std::env::set_var(KEY, dir) };
+    }
+
+    #[used]
+    #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
+    #[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
+    #[cfg_attr(windows, unsafe(link_section = ".CRT$XCU"))]
+    static ISOLATE_APP_STATE_DIR: extern "C" fn() = isolate_app_state_dir;
+}
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};

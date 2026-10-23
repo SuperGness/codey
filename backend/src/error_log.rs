@@ -1080,10 +1080,18 @@ mod tests {
 
     #[test]
     fn path_uses_codey_state_directory() {
+        assert_eq!(
+            error_log_path(),
+            codey_runtime_core::paths::default_app_state_dir().join("codey-errors.log")
+        );
+        // 单元测试进程已被隔离到临时状态目录，不会写入用户的真实日志。
         assert!(
-            error_log_path().ends_with(".codex-session-delete/codey-errors.log"),
-            "{}",
-            error_log_path().display()
+            !error_log_path().starts_with(
+                directories::BaseDirs::new()
+                    .unwrap()
+                    .home_dir()
+                    .join(".codex-session-delete")
+            )
         );
     }
 
