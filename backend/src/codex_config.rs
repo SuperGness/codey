@@ -326,6 +326,7 @@ pub(crate) fn apply_runtime_router_config(
     if let Some(local_router) = options.local_router {
         persist_runtime_router_disk_provider_or_rollback(home, &marker, local_router)?;
     }
+    crate::subagent_gate::spawn_stale_session_state_sweep(home);
     Ok(applied)
 }
 

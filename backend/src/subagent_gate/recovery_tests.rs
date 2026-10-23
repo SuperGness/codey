@@ -584,3 +584,77 @@ fn stopping_a_child_clears_its_in_flight_tool_before_status_failure_recovery() {
         0
     );
 }
+
+#[test]
+fn unverifiable_single_status_does_not_open_the_protocol_circuit() {
+    for response in [
+        json!({"agent_id": "/root/sibling", "status": "completed"}),
+        json!({"status": "running"}),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let session = "unverifiable-status";
+        start_recovery_child(root, session);
+        start_recovery_child_named(root, session, "sibling");
+        let mut status = input("PostToolUse", session);
+        status.tool_name = Some("agents.agent_status".into());
+        status.tool_input = Some(json!({"target": "/root/reader"}));
+        status.tool_response = Some(response.clone());
+        handle_hook_for_runtime_at(&status, root, "runtime-a", 1_000).unwrap();
+        assert_eq!(
+            protocol_issue_reason(root, "runtime-a", session).unwrap(),
+            None,
+            "{response}"
+        );
+    }
+}
+
+#[test]
+fn timed_out_wait_returns_a_compact_continuation_naming_active_tasks() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let session = "compact-timeout";
+    start_recovery_child(root, session);
+    start_recovery_child_named(root, session, "sibling");
+    let mut wait = input("PostToolUse", session);
+    wait.tool_name = Some("agents.wait_agent".into());
+    for response in [
+        json!({"message": "Wait timed out.", "timed_out": true}),
+        json!("{\"message\":\"Wait timed out.\",\"timed_out\":true}"),
+    ] {
+        wait.tool_response = Some(response);
+        let output = handle_hook_for_runtime_at(&wait, root, "runtime-a", 1_000).unwrap();
+        assert_eq!(output["decision"], "block");
+        let reason = output["reason"].as_str().unwrap();
+        assert!(reason.contains("仍有 2 个子代理"), "{reason}");
+        assert!(
+            reason.contains("`reader`") && reason.contains("`sibling`"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("直接再次调用 agents.wait_agent"),
+            "{reason}"
+        );
+        assert!(reason.chars().count() < 300, "{}", reason.chars().count());
+    }
+
+    let mut stopped = input("SubagentStop", session);
+    stopped.agent_id = Some("/root/sibling".into());
+    stopped.agent_type = Some("codey_quick_scan".into());
+    handle_hook_for_runtime_at(&stopped, root, "runtime-a", 1_100).unwrap();
+    wait.tool_response = Some(json!({"message": "Wait timed out.", "timed_out": true}));
+    let reason = handle_hook_for_runtime_at(&wait, root, "runtime-a", 1_200).unwrap()["reason"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(reason.contains("仍有 1 个子代理") && reason.contains("`reader`"));
+    assert!(!reason.contains("`sibling`"));
+
+    // A completed wait without per-agent detail still gets the full guidance.
+    wait.tool_response = Some(json!({"message": "Wait completed.", "timed_out": false}));
+    let reason = handle_hook_for_runtime_at(&wait, root, "runtime-a", 1_300).unwrap()["reason"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(reason.contains("agents.list_agents") && reason.contains("门禁指令到此结束"));
+}

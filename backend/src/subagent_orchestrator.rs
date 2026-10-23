@@ -1761,6 +1761,28 @@ pub(crate) fn single_agent_status_matches_target(
             .all(|identifier| identity_task_candidates(&ledger, identifier) == expected))
 }
 
+/// Task names of the attempts the ledger still considers active, used to keep
+/// gate continuations short. `None` means a marker-only session has no ledger.
+pub(crate) fn active_task_names(
+    state_root: &Path,
+    runtime_id: &str,
+    session_id: &str,
+    now_ms: u64,
+) -> Result<Option<Vec<String>>> {
+    let store = LedgerStore::open(state_root, session_id)?;
+    let Some(ledger) = store.load(runtime_id, session_id, now_ms)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        ledger
+            .reservations
+            .iter()
+            .filter(|(_, reservation)| reservation.state.is_active())
+            .map(|(task_id, _)| task_id.clone())
+            .collect(),
+    ))
+}
+
 pub(crate) fn active_reservation_projection(
     state_root: &Path,
     runtime_id: &str,

@@ -17,6 +17,7 @@ use crate::subagent::{
 
 mod runtime_policy;
 mod state;
+mod sweep;
 #[cfg(test)]
 mod tests;
 
@@ -26,6 +27,7 @@ pub(crate) use runtime_policy::{
     commit_runtime_subagent_policy, runtime_subagent_policy_matches, runtime_subagent_policy_paths,
 };
 use state::*;
+pub(crate) use sweep::spawn_stale_session_state_sweep;
 
 pub(crate) const HOOK_ARGUMENT: &str = "--codey-subagent-gate-hook";
 pub(crate) const COMBINED_HOOK_ARGUMENT: &str = "--codey-subagent-gate-hook-with-fastctx";
@@ -977,20 +979,18 @@ fn pre_tool_use_output(
         return Ok(subagent_identity_missing_denial());
     }
     let active = recover_root_active_state(input, state_root, runtime_id, now_ms)?;
-    let trusted_root_turn =
-        active > 0 && trusted_root_turn_matches(input, state_root, runtime_id, now_ms)?;
-    if active > 0 && !trusted_root_turn {
-        let Some(tool_name) = input.tool_name.as_deref() else {
-            return Ok(pre_tool_denial(active, None));
-        };
-        if is_anonymous_reconciliation_tool(tool_name, input.tool_input.as_ref()) {
-            return Ok(json!({}));
-        }
-        if is_collaboration_tool(tool_name) {
-            return Ok(pre_tool_reason_denial(&format!(
-                "Codey 主体身份门禁：仍有 {active} 个活动子代理，但当前 PreToolUse 载荷既没有可信的 child 身份，也没有匹配本轮首个根派生调用的 turn_id，无法证明调用者是根代理。为防止匿名 child 派生、追派或中断，当前仅允许已提供的 agents.wait_agent、agents.agent_status 与不带筛选的 agents.list_agents 对账；其余编排调用已按 fail-closed 拒绝。"
-            )));
-        }
+    // Only orchestration beyond reconciliation needs proof of root identity;
+    // every other root tool gets the same answer either way, so skip the
+    // rollout scan for them.
+    if active > 0
+        && let Some(tool_name) = input.tool_name.as_deref()
+        && is_collaboration_tool(tool_name)
+        && !is_anonymous_reconciliation_tool(tool_name, input.tool_input.as_ref())
+        && !trusted_root_turn_matches(input, state_root, runtime_id, now_ms)?
+    {
+        return Ok(pre_tool_reason_denial(&format!(
+            "Codey 主体身份门禁：仍有 {active} 个活动子代理，但当前 PreToolUse 载荷既没有可信的 child 身份，也没有匹配本轮首个根派生调用的 turn_id，无法证明调用者是根代理。为防止匿名 child 派生、追派或中断，当前仅允许已提供的 agents.wait_agent、agents.agent_status 与不带筛选的 agents.list_agents 对账；其余编排调用已按 fail-closed 拒绝。"
+        )));
     }
     if input
         .tool_name
@@ -1213,6 +1213,12 @@ fn post_tool_use_output(
     } else {
         input.tool_response.as_ref()
     };
+    // A single-target reply that cannot be tied to its target is ignored for
+    // settlement, but it is not evidence of an unknown response shape and must
+    // not open the protocol circuit that blocks later spawns.
+    let unverified_single_status = is_single_agent_status_tool(tool_name)
+        && status_response.is_none()
+        && input.tool_response.is_some();
     let response_is_usable = if is_single_agent_status_tool(tool_name) {
         let mut observations = Vec::new();
         if let Some(response) = status_response {
@@ -1234,7 +1240,7 @@ fn post_tool_use_output(
             UNAVAILABLE_STATUS_SINCE_FILE,
         )?;
         clear_unknown_status_protocol_issue(state_root, runtime_id, &input.session_id, now_ms)?;
-    } else {
+    } else if !unverified_single_status {
         record_protocol_issue(
             state_root,
             runtime_id,
@@ -1327,6 +1333,19 @@ fn post_tool_use_output(
             "reason": format!("Codey 子代理门禁：agents.agent_status 返回后仍有 {active} 个子代理未确认终态。只接受与请求目标一致的状态回复，单个目标的终态不能代表所有子代理已结束。请使用本轮实际提供的状态工具继续核对；工具未注册时不要重复调用，门禁会在恢复等待期结束后的下一次根调用中处理遗留状态。\n\n{returned_update}")
         }))
     } else if is_wait_agent_tool(tool_name) {
+        if wait_response_is_bare_timeout(input.tool_response.as_ref()) {
+            let task_names = crate::subagent_orchestrator::active_task_names(
+                state_root,
+                runtime_id,
+                &input.session_id,
+                now_ms,
+            )?;
+            return Ok(post_wait_timeout_continuation(
+                active,
+                task_names.as_deref(),
+                protocol_issue.as_deref(),
+            ));
+        }
         Ok(post_wait_continuation(
             active,
             input.tool_response.as_ref(),
@@ -1694,6 +1713,35 @@ fn post_wait_continuation(
     })
 }
 
+// A bare timeout carries no per-agent update, so it gets a short summary
+// instead of the full guidance; the root hint already holds the full rules.
+fn post_wait_timeout_continuation(
+    active: usize,
+    task_names: Option<&[String]>,
+    protocol_issue: Option<&str>,
+) -> Value {
+    let names = task_names
+        .filter(|names| !names.is_empty() && names.len() == active)
+        .map(|names| {
+            let quoted = names
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join("、");
+            format!("（{quoted}）")
+        })
+        .unwrap_or_default();
+    let compatibility = protocol_issue
+        .map(|issue| format!(" Hook 协议兼容性诊断：{issue}。"))
+        .unwrap_or_default();
+    json!({
+        "decision": "block",
+        "reason": format!(
+            "Codey 子代理汇合门禁：wait_agent 等待超时，仍有 {active} 个子代理在运行{names}。超时只表示这段时间没有新消息，不代表异常；直接再次调用 agents.wait_agent，不需要先调用 list_agents。名单中消失的任务已经结束，需要它的结果或补位时再调用一次不带筛选的 agents.list_agents。活动期间只能使用 agents.* 协作工具。{compatibility}"
+        ),
+    })
+}
+
 fn post_list_continuation(
     active: usize,
     tool_response: Option<&Value>,
@@ -1850,6 +1898,28 @@ fn wait_agent_response_is_usable(tool_response: Option<&Value>) -> bool {
             .ok()
             .as_ref()
             .is_some_and(|value| wait_agent_response_is_usable(Some(value))),
+        _ => false,
+    }
+}
+
+/// Matches the provider's plain `{message, timed_out: true}` wait result and
+/// nothing richer, so any per-agent update still reaches the full renderer.
+fn wait_response_is_bare_timeout(tool_response: Option<&Value>) -> bool {
+    match tool_response {
+        Some(Value::Object(values)) => {
+            object_value(values, "timedout") == Some(&Value::Bool(true))
+                && values.iter().all(|(key, value)| {
+                    match normalized_ascii_identifier(key).as_str() {
+                        "timedout" => true,
+                        "message" => value.is_string(),
+                        _ => false,
+                    }
+                })
+        }
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text)
+            .ok()
+            .as_ref()
+            .is_some_and(|value| wait_response_is_bare_timeout(Some(value))),
         _ => false,
     }
 }
