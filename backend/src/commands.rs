@@ -32,7 +32,6 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
 
-pub(crate) use models::native_subagent_model_state;
 #[cfg(test)]
 use models::{
     config_with_current_provider_models, config_with_launch_pinned_transport,
@@ -49,6 +48,7 @@ use models::{
     runtime_supports_current_routes_for_hot_reload, sync_current_third_party_provider_state,
     sync_provider_models_for_launch, websocket_transport_requires_restart,
 };
+pub(crate) use models::{native_subagent_model_state, native_upstream_model};
 use plugins::{plugin_marketplace_status, prepare_computer_use, repair_plugin_marketplace};
 use prompt_optimization::{
     fetch_prompt_optimization_models_command, optimize_prompt_command,

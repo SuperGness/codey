@@ -50,7 +50,13 @@ pub(crate) fn reconcile_with_model_state(
     state: Option<&model_catalog::ModelSelectionState>,
 ) {
     prepare_subagent_roles(config);
-    let route_targets = config.runtime_model_targets();
+    // Native callers have already resolved selectors to upstream ids. Applying
+    // local aliases again can change a raw id that happens to contain a slash.
+    let route_targets = if config.local_router_enabled {
+        config.runtime_model_targets()
+    } else {
+        Vec::new()
+    };
     let current_provider_id = config.current_provider_id().map(str::to_string);
     let Some(state) = state else {
         let route_aliases = route_targets
@@ -435,6 +441,42 @@ mod tests {
         assert!(config.subagent_optimization);
         assert_eq!(config.subagent_model, "gpt-5.6-sol");
         assert_eq!(config.subagent_reasoning_effort, "high");
+    }
+
+    #[test]
+    fn native_reconciliation_uses_raw_model_metadata_without_route_aliases() {
+        let mut config = route_config("route-a");
+        config.local_router_enabled = false;
+        config
+            .selected_models_by_provider
+            .insert("route-a".into(), vec!["Model".into()]);
+        config.subagent_model = "ROUTE-A/model".into();
+        config.subagent_roles = uniform_subagent_roles(&config.subagent_model, "high");
+
+        reconcile_with_model_state(&mut config, None);
+        assert_eq!(config.subagent_model, "ROUTE-A/model");
+
+        let state = model_catalog::ModelSelectionState {
+            third_party_models: vec!["Route-A/Model".into()],
+            third_party_model_metadata: vec![model_catalog::ThirdPartyModelAvailability {
+                slug: "Route-A/Model".into(),
+                supported_reasoning_efforts: vec!["low".into()],
+                auto_supported_reasoning_efforts: vec!["low".into()],
+                reasoning_efforts: Vec::new(),
+                default_reasoning_effort: "low".into(),
+            }],
+            default_model: "Route-A/Model".into(),
+            ..Default::default()
+        };
+        reconcile_with_model_state(&mut config, Some(&state));
+
+        assert_eq!(config.subagent_model, "Route-A/Model");
+        assert!(
+            config
+                .subagent_roles
+                .values()
+                .all(|role| { role.model == "Route-A/Model" && role.reasoning_effort == "low" })
+        );
     }
 
     #[test]

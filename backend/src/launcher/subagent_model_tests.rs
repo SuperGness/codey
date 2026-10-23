@@ -461,6 +461,31 @@ fn subagent_catalog_fallback_rejects_ambiguous_routes_but_custom_catalog_preserv
 }
 
 #[test]
+fn subagent_catalog_fallback_rejects_raw_ids_that_resolve_to_another_route_alias() {
+    let mut config = subagent_catalog_fallback_config();
+    let mut other = config.profiles[0].clone();
+    other.id = "route-b".into();
+    config.profiles.push(other);
+    config
+        .selected_models_by_provider
+        .insert("route-b".into(), vec!["route-a/gpt-6-astra".into()]);
+    let runtime = router_subagent_runtime_config(&config, false).unwrap();
+    assert_eq!(runtime.subagent_model, "gpt-6-astra");
+
+    let requested = "route-b/route-a/gpt-6-astra";
+    config.subagent_model = requested.into();
+    config.subagent_roles = crate::config::uniform_subagent_roles(requested, "high");
+    let error = router_subagent_runtime_config(&config, false).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("无法在内置模型目录模式下安全派发")
+    );
+    let runtime = router_subagent_runtime_config(&config, true).unwrap();
+    assert_eq!(runtime.subagent_model, requested);
+}
+
+#[test]
 fn subagent_catalog_fallback_checks_enabled_roles_only_and_rejects_missing_routes() {
     let mut config = subagent_catalog_fallback_config();
     let worker = config.subagent_roles.get_mut("codey_worker").unwrap();

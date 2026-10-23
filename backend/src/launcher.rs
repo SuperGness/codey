@@ -625,16 +625,33 @@ fn router_subagent_runtime_config(
         selection.model = if route_catalog_installed {
             routed
         } else {
-            let model = native_subagent_model(config, &targets, &routed);
+            let model = targets
+                .iter()
+                .find(|target| model_id::equal(&target.alias, &routed))
+                .map(|target| target.upstream_model.clone())
+                .unwrap_or_else(|| crate::commands::native_upstream_model(config, &routed));
             // Without a custom catalog Codex validates native slugs before the
             // router sees the request. Only strip a route when raw-id routing
             // is unambiguous, including inherited thread route metadata.
             let mut matching = targets
                 .iter()
                 .filter(|target| model_id::equal(&target.upstream_model, &model));
+            let unique_target = match (matching.next(), matching.next()) {
+                (Some(target), None) => Some(target),
+                _ => None,
+            };
+            let preserves_route = unique_target.is_some_and(|target| {
+                targets
+                    .iter()
+                    .find(|candidate| model_id::equal(&candidate.alias, &model))
+                    .is_none_or(|alias_target| {
+                        alias_target.route_id == target.route_id
+                            && model_id::equal(&alias_target.upstream_model, &target.upstream_model)
+                    })
+            });
             anyhow::ensure!(
-                matching.next().is_some() && matching.next().is_none(),
-                "子代理角色 {role} 的模型 {routed} 无法在内置模型目录模式下安全派发：模型线路不存在或存在同名线路；请补齐 Codex 模型缓存并重启，或只启用一条提供该模型的线路"
+                preserves_route,
+                "子代理角色 {role} 的模型 {routed} 无法在内置模型目录模式下安全派发：模型线路不存在、存在同名线路或标识与其他线路冲突；请补齐 Codex 模型缓存并重启，或只启用一条提供该模型的线路"
             );
             // 路由是否唯一与模型品牌无关。Codey 的官方展示名单不能
             // 代表当前 Codex 或自定义 Provider 实际支持的模型范围。
@@ -1747,76 +1764,12 @@ async fn prepare_startup_storage(
     Ok(prepared)
 }
 
-fn native_subagent_model(
-    config: &CodeyConfig,
-    targets: &[RuntimeModelTarget],
-    model: &str,
-) -> String {
-    let model = model.trim();
-    targets
-        .iter()
-        .find(|target| model_id::equal(&target.alias, model))
-        .map(|target| target.upstream_model.clone())
-        .or_else(|| native_provider_prefixed_subagent_model(config, model))
-        .unwrap_or_else(|| model.to_string())
-}
-
-fn native_provider_prefixed_subagent_model(config: &CodeyConfig, model: &str) -> Option<String> {
-    for profile in &config.profiles {
-        let provider_id = profile.provider_id();
-        let prefix = local_router::model_alias(provider_id, "");
-        let Some(upstream_model) = strip_model_provider_prefix(model, &prefix) else {
-            continue;
-        };
-        let known_model = config
-            .upstream_models_by_provider
-            .get(provider_id)
-            .into_iter()
-            .flatten()
-            .chain(
-                config
-                    .selected_models_by_provider
-                    .get(provider_id)
-                    .into_iter()
-                    .flatten(),
-            )
-            .chain(
-                config
-                    .declared_official_models_by_provider
-                    .get(provider_id)
-                    .into_iter()
-                    .flatten(),
-            )
-            .find(|known| model_id::equal(known, upstream_model))
-            .cloned()
-            .or_else(|| {
-                model_catalog::default_official_model_slugs()
-                    .into_iter()
-                    .find(|known| model_id::equal(known, upstream_model))
-            });
-        if known_model.is_some() {
-            return known_model;
-        }
-    }
-    None
-}
-
-fn strip_model_provider_prefix<'a>(model: &'a str, prefix: &str) -> Option<&'a str> {
-    let prefix = prefix.trim();
-    model
-        .get(..prefix.len())
-        .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
-        .and_then(|_| model.get(prefix.len()..))
-        .map(str::trim)
-        .filter(|suffix| !suffix.is_empty())
-}
-
 fn native_subagent_runtime_config(config: &CodeyConfig) -> CodeyConfig {
     let mut runtime_config = config.clone();
-    let targets = config.runtime_model_targets();
-    runtime_config.subagent_model = native_subagent_model(config, &targets, &config.subagent_model);
+    runtime_config.subagent_model =
+        crate::commands::native_upstream_model(config, &config.subagent_model);
     for selection in runtime_config.subagent_roles.values_mut() {
-        selection.model = native_subagent_model(config, &targets, &selection.model);
+        selection.model = crate::commands::native_upstream_model(config, &selection.model);
     }
     runtime_config
 }
@@ -1826,7 +1779,9 @@ fn reconciled_native_subagent_runtime_config(
     home: &std::path::Path,
 ) -> CodeyConfig {
     let mut runtime_config = native_subagent_runtime_config(config);
-    if let Ok(model_state) = crate::commands::native_subagent_model_state(&runtime_config, home) {
+    // Read selection state from the original selectors. The runtime copy has
+    // already expanded them once, and its raw ids can also look like aliases.
+    if let Ok(model_state) = crate::commands::native_subagent_model_state(config, home) {
         subagent_policy::reconcile_with_model_state(&mut runtime_config, Some(&model_state));
     }
     runtime_config
