@@ -66,6 +66,35 @@ pub(crate) enum IdleWebSocketEvent {
 }
 
 /// 空闲下游 WebSocket 的登记表。名额按注册顺序保留，超出上限时关闭最久的一条。
+/// 空闲等待下一条请求时，对端不发 Close 帧直接断开 TCP 是连接的正常结束，
+/// 不能当作路由失败记录。
+fn idle_downstream_message(
+    message: Option<std::result::Result<WebSocketMessage, tokio_tungstenite::tungstenite::Error>>,
+) -> Result<Option<WebSocketMessage>> {
+    use tokio_tungstenite::tungstenite::{Error, error::ProtocolError};
+    match message {
+        Some(Err(
+            Error::ConnectionClosed
+            | Error::AlreadyClosed
+            | Error::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+        )) => Ok(None),
+        Some(Err(Error::Io(error)))
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+            ) =>
+        {
+            Ok(None)
+        }
+        message => message
+            .transpose()
+            .context("读取 Codey Responses WebSocket 消息失败"),
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct IdleDownstreamRegistry {
     next_id: u64,
@@ -350,9 +379,7 @@ impl WebSocketResponsesDownstream {
                 }
                 IdleWebSocketEvent::ConfigurationChanged => continue,
                 IdleWebSocketEvent::Downstream(message) => {
-                    let message = message
-                        .transpose()
-                        .context("读取 Codey Responses WebSocket 消息失败")?;
+                    let message = idle_downstream_message(message)?;
                     if matches!(&message, Some(WebSocketMessage::Text(_)))
                         && self
                             .upstream
@@ -467,9 +494,7 @@ impl WebSocketResponsesDownstream {
         };
         match outcome {
             IdleDownstreamWait::Evicted => Ok(None),
-            IdleDownstreamWait::Message(message) => message
-                .transpose()
-                .context("读取 Codey Responses WebSocket 消息失败"),
+            IdleDownstreamWait::Message(message) => idle_downstream_message(message),
             IdleDownstreamWait::TimedOut => {
                 let _ = self.close(None).await;
                 Ok(None)
@@ -2472,5 +2497,39 @@ mod admission_tests {
                 REQUEST_BODY_BUDGET_PERMITS - held
             );
         });
+    }
+}
+
+#[cfg(test)]
+mod idle_disconnect_tests {
+    use super::super::tests::local_websocket_pair;
+    use super::*;
+    use tokio_tungstenite::tungstenite::{Error, error::ProtocolError};
+
+    #[test]
+    fn peer_disconnects_end_the_idle_wait_without_an_error() {
+        for error in [
+            Error::ConnectionClosed,
+            Error::AlreadyClosed,
+            Error::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+            Error::Io(std::io::ErrorKind::UnexpectedEof.into()),
+            Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+        ] {
+            assert!(idle_downstream_message(Some(Err(error))).unwrap().is_none());
+        }
+        assert!(
+            idle_downstream_message(Some(Err(Error::Io(
+                std::io::ErrorKind::PermissionDenied.into()
+            ))))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_client_socket_ends_the_connection_cleanly() {
+        let (socket, peer) = local_websocket_pair().await;
+        let mut downstream = WebSocketResponsesDownstream::new(socket);
+        drop(peer);
+        assert!(downstream.next_message().await.unwrap().is_none());
     }
 }

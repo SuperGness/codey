@@ -1338,8 +1338,13 @@ impl RouterServer {
                 }
                 WebSocketMessage::Ping(payload) => downstream.write_pong(payload).await?,
                 WebSocketMessage::Pong(_) => {}
-                WebSocketMessage::Close(frame) => {
-                    downstream.close(frame).await?;
+                WebSocketMessage::Close(_) => {
+                    // Reading a Close already queued tungstenite's reply; sending
+                    // another Close fails with SendAfterClosing. Flush the reply.
+                    downstream.upstream.take();
+                    let _ =
+                        tokio::time::timeout(DOWNSTREAM_WRITE_TIMEOUT, downstream.socket.flush())
+                            .await;
                     break;
                 }
                 WebSocketMessage::Binary(_) | WebSocketMessage::Frame(_) => {

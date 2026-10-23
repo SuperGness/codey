@@ -604,7 +604,10 @@ async fn run_router_listener(
                             request_id.clone(),
                             ROUTER_REQUEST_STARTED_AT.scope(Instant::now(), async move {
                                 let _admitted = admitted;
-                                if let Err(error) = server.handle_connection(stream).await {
+                                // 客户端提前断开（取消请求、关闭会话）是正常结束，不记为失败。
+                                if let Err(error) = server.handle_connection(stream).await
+                                    && !error.is::<DownstreamClosed>()
+                                {
                                     record_router_failure_nonblocking(
                                         "local_router_request_failed",
                                         "handle_local_router_connection",
