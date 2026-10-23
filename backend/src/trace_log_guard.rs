@@ -14,6 +14,7 @@ use serde::Serialize;
 /// lets Codey adopt an existing manual workaround and makes the off switch
 /// restore writes predictably.
 const BLOCK_INSERTS_TRIGGER: &str = "block_log_inserts";
+const DEFAULT_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Shared by startup, cleanup and queued configuration application. The target
 /// is distinct from protection_active: a successful enable may find no database.
@@ -21,9 +22,19 @@ const BLOCK_INSERTS_TRIGGER: &str = "block_log_inserts";
 pub struct TraceLogGuardState {
     operation: Mutex<()>,
     applied: AtomicU8,
+    #[cfg(test)]
+    busy_timeout_for_test: Option<Duration>,
 }
 
 impl TraceLogGuardState {
+    #[cfg(test)]
+    pub(crate) fn with_busy_timeout_for_test(busy_timeout: Duration) -> Self {
+        Self {
+            busy_timeout_for_test: Some(busy_timeout),
+            ..Default::default()
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn configuring_for_test(&self) -> bool {
         self.operation.try_lock().is_err()
@@ -40,7 +51,10 @@ impl TraceLogGuardState {
     pub fn configure(&self, home: &Path, disabled: bool) -> Result<TraceLogGuardReport> {
         let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
         let previous = self.applied_target();
-        match configure(home, disabled) {
+        let busy_timeout = DEFAULT_BUSY_TIMEOUT;
+        #[cfg(test)]
+        let busy_timeout = self.busy_timeout_for_test.unwrap_or(busy_timeout);
+        match configure_with_busy_timeout(home, disabled, busy_timeout) {
             Ok(report) => {
                 self.applied
                     .store(if disabled { 2 } else { 1 }, Ordering::Release);
@@ -51,7 +65,7 @@ impl TraceLogGuardState {
                 // a prior target is known, also verify restoration across all DBs.
                 self.applied.store(0, Ordering::Release);
                 if let Some(previous) = previous {
-                    match configure(home, previous) {
+                    match configure_with_busy_timeout(home, previous, busy_timeout) {
                         Ok(_) => self
                             .applied
                             .store(if previous { 2 } else { 1 }, Ordering::Release),
@@ -93,12 +107,21 @@ pub struct TraceLogCleanupReport {
 /// Enables or disables the persistent-log write guard in every Codex log
 /// database that already exists. The function never creates a database: Codex
 /// remains responsible for its schema and migrations.
+#[cfg(test)]
 pub fn configure(home: &Path, disable_writes: bool) -> Result<TraceLogGuardReport> {
+    configure_with_busy_timeout(home, disable_writes, DEFAULT_BUSY_TIMEOUT)
+}
+
+fn configure_with_busy_timeout(
+    home: &Path,
+    disable_writes: bool,
+    busy_timeout: Duration,
+) -> Result<TraceLogGuardReport> {
     let mut report = TraceLogGuardReport::default();
     let mut changed_paths: Vec<PathBuf> = Vec::new();
     for path in log_database_paths(home)? {
         report.databases_found += 1;
-        let outcome = match configure_database(&path, disable_writes) {
+        let outcome = match configure_database(&path, disable_writes, busy_timeout) {
             Ok(outcome) => outcome,
             Err(error) => {
                 let primary = format!(
@@ -109,11 +132,11 @@ pub fn configure(home: &Path, disable_writes: bool) -> Result<TraceLogGuardRepor
                     .iter()
                     .rev()
                     .filter_map(|changed_path| {
-                        configure_database(changed_path, !disable_writes).err().map(
-                            |rollback_error| {
+                        configure_database(changed_path, !disable_writes, busy_timeout)
+                            .err()
+                            .map(|rollback_error| {
                                 format!("{}：{rollback_error:#}", changed_path.display())
-                            },
-                        )
+                            })
                     })
                     .collect::<Vec<_>>();
                 if rollback_errors.is_empty() {
@@ -162,12 +185,16 @@ struct DatabaseOutcome {
     changed: bool,
 }
 
-fn configure_database(path: &Path, disable_writes: bool) -> Result<DatabaseOutcome> {
+fn configure_database(
+    path: &Path,
+    disable_writes: bool,
+    busy_timeout: Duration,
+) -> Result<DatabaseOutcome> {
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.busy_timeout(busy_timeout)?;
 
     let table_found = connection
         .query_row(

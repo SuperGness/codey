@@ -1,5 +1,7 @@
 use super::*;
 
+const TEST_WATCHDOG: Duration = Duration::from_secs(15);
+
 type Reconcile = dyn Fn(&CodeyConfig) -> anyhow::Result<crate::codex_config::RuntimeSubagentReconcileReport>
     + Send
     + Sync;
@@ -25,7 +27,7 @@ impl Gate {
 }
 
 async fn settled(state: &AppState) -> Value {
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(TEST_WATCHDOG, async {
         loop {
             let result = config_apply::status(state);
             if result["state"] != "pending" {
@@ -39,7 +41,7 @@ async fn settled(state: &AppState) -> Value {
 }
 
 async fn save_without_waiting(state: &Arc<AppState>, config: CodeyConfig) -> Value {
-    let result = tokio::time::timeout(Duration::from_secs(2), save_codey_config(state, config))
+    let result = tokio::time::timeout(TEST_WATCHDOG, save_codey_config(state, config))
         .await
         .expect("slow application must not block a subsequent save")
         .unwrap();
@@ -238,8 +240,11 @@ async fn trace_failure_keeps_saved_target_and_retries_without_rescanning_success
 #[tokio::test]
 async fn sqlite_lock_wait_does_not_block_another_config_save() {
     let directory = tempfile::tempdir().unwrap();
-    let db = rusqlite::Connection::open(directory.path().join("logs_2.sqlite")).unwrap();
-    db.execute_batch("CREATE TABLE logs(level TEXT); BEGIN EXCLUSIVE;")
+    let mut db = rusqlite::Connection::open(directory.path().join("logs_2.sqlite")).unwrap();
+    db.execute_batch("CREATE TABLE logs(level TEXT);").unwrap();
+    // 断言失败时也会自动回滚，避免阻塞任务等到较长的锁等待超时。
+    let transaction = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Exclusive)
         .unwrap();
     let state = Arc::new(AppState {
         store: ConfigStore::new(directory.path().join("config.json")),
@@ -251,12 +256,18 @@ async fn sqlite_lock_wait_does_not_block_another_config_save() {
             trace_home: Some(directory.path().into()),
             ..Default::default()
         },
+        // SQLite 的等待时间要明显长于保存超时，才能确认保存结束时应用仍被锁阻塞。
+        trace_log_guard_state: Arc::new(
+            crate::trace_log_guard::TraceLogGuardState::with_busy_timeout_for_test(
+                Duration::from_secs(60),
+            ),
+        ),
         ..Default::default()
     });
     let mut enabled = state.config.read().await.clone();
     enabled.disable_trace_log_writes = true;
     save_without_waiting(&state, enabled).await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(TEST_WATCHDOG, async {
         while !state.trace_log_guard_state.configuring_for_test() {
             tokio::task::yield_now().await;
         }
@@ -267,7 +278,9 @@ async fn sqlite_lock_wait_does_not_block_another_config_save() {
     latest.user_scripts.push("// unrelated change".into());
     let saved = save_without_waiting(&state, latest).await;
     assert_eq!(saved["configApply"]["state"], "pending");
-    db.execute_batch("ROLLBACK").unwrap();
+    assert!(state.trace_log_guard_state.configuring_for_test());
+    assert_eq!(state.trace_log_guard_state.applied_target(), None);
+    transaction.rollback().unwrap();
     assert_eq!(
         settled(&state).await["revision"],
         saved["configApply"]["revision"]
