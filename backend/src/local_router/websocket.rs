@@ -700,21 +700,22 @@ impl WebSocketResponsesDownstream {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_string();
+        // 必须按实际发送的正文判断；重连时可能已经移除了 previous_response_id。
+        let mut can_recover_persisted_context = responses_previous_response_id(body).is_some();
         let message_body = body
             .as_object_mut()
             .context("Responses WebSocket 上游请求必须是 JSON 对象")?;
-        message_body.remove("stream");
-        message_body.remove("background");
-        message_body.insert(
+        let http_stream = message_body.remove("stream");
+        let http_background = message_body.remove("background");
+        let http_type = message_body.insert(
             "type".to_string(),
             Value::String("response.create".to_string()),
         );
         let message =
             serde_json::to_string(body).context("序列化 Responses WebSocket 上游请求失败")?;
 
-        // Once send is attempted the request may have reached the upstream.
-        // Any later failure is surfaced to the caller and is never replayed
-        // over HTTP, avoiding duplicate tool calls and other side effects.
+        // 发送后通常不能重放。唯一例外是首事件明确拒绝持久化续接且没有执行迹象，
+        // 此时仍须验证完整历史，才能通过 HTTP 继续当前请求。
         if let Some(probe) = probe {
             probe.record_upstream_body(RequestBodySummary::from_responses_body(
                 body,
@@ -819,6 +820,7 @@ impl WebSocketResponsesDownstream {
                                 .expect("admitted interrupt must contain JSON"),
                         )
                         .context("序列化 Responses WebSocket 中断事件失败")?;
+                        can_recover_persisted_context = false;
                         match tokio::time::timeout(
                             DOWNSTREAM_WRITE_TIMEOUT,
                             upstream.socket.send(WebSocketMessage::Text(message.into())),
@@ -884,8 +886,56 @@ impl WebSocketResponsesDownstream {
                                 None,
                             ),
                         };
+                    // SSE 包装可能在同一帧里携带多个事件，不能忽略后续执行迹象。
+                    let only_event_in_frame = single_event.is_some() || events.len() == 1;
                     let mut raw_json_text = raw_json_text;
                     for mut event in single_event.into_iter().chain(events) {
+                        let persisted_context_rejected =
+                            responses_event_rejects_persisted_context(&event);
+                        if can_recover_persisted_context
+                            && only_event_in_frame
+                            && persisted_context_rejected
+                            && persisted_rejection_has_no_execution(&event)
+                        {
+                            // HTTP 使用当前请求头身份；刷新令牌及工具历史校验沿用既有规则。
+                            // 只在明确拒绝后重新暂存，健康 WS 不增加历史复制。
+                            let http_owner = self
+                                .native_history
+                                .prepare_for_route(route, auth_identity, body);
+                            if self.native_history.can_recover_rejected_continuation(
+                                http_owner,
+                                route.official_account || route.supports_remote_compaction,
+                            ) {
+                                self.native_history.mark_continuation_rejected();
+                                let object = body.as_object_mut().expect("validated request object");
+                                for (name, value) in [
+                                    ("stream", http_stream),
+                                    ("background", http_background),
+                                    ("type", http_type),
+                                ] {
+                                    object.remove(name);
+                                    if let Some(value) = value {
+                                        object.insert(name.into(), value);
+                                    }
+                                }
+                                if let Some(probe) = probe {
+                                    probe.mark_upstream_error_summary(&redact_upstream_error_text(
+                                        &event.to_string(),
+                                        route,
+                                    ));
+                                    // 不 observe 拒绝终态，避免污染随后 HTTP 成功的最终状态。
+                                    probe.finish_upstream_attempt(
+                                        crate::route_request_log::AttemptOutcome::Failed,
+                                        crate::route_request_log::AttemptPhase::ResponseBody,
+                                    );
+                                }
+                                // upstream 随返回丢弃；上下文拒绝不影响其他会话的线路退避。
+                                return Ok(UpstreamWebSocketAttempt::UseHttp(
+                                    "websocket_persisted_context_rejected",
+                                ));
+                            }
+                        }
+                        can_recover_persisted_context = false;
                         if collaboration_alias
                             .as_ref()
                             .is_some_and(|alias| alias.apply(&mut event))
@@ -964,6 +1014,7 @@ impl WebSocketResponsesDownstream {
                                 upstream.response_ids.push_back(response_id);
                             }
                             if !infrastructure_failure
+                                && !persisted_context_rejected
                                 && responses_websocket_connection_is_reusable(&event)
                             {
                                 self.upstream = Some(upstream);
@@ -1117,6 +1168,37 @@ pub(crate) fn responses_event_is_websocket_infrastructure_failure(event: &Value)
             .any(|path| {
                 event.pointer(path).and_then(Value::as_str) == Some("rebuild_target_not_ready")
             })
+}
+
+fn responses_event_rejects_persisted_context(event: &Value) -> bool {
+    let error = match event["type"].as_str() {
+        Some("error") => event.get("error"),
+        Some("response.failed") => event.pointer("/response/error"),
+        _ => None,
+    };
+    error.is_some_and(|error| {
+        error["type"] == "invalid_request_error"
+            && error["code"] == "unsupported_persisted_item_context"
+    })
+}
+
+fn persisted_rejection_has_no_execution(event: &Value) -> bool {
+    // id、输出、用量或工具字段都可能表明响应已开始，即使拒绝是首个收到的事件。
+    [
+        "/response_id",
+        "/response/id",
+        "/item",
+        "/delta",
+        "/usage",
+        "/response/usage",
+    ]
+    .into_iter()
+    .all(|path| event.pointer(path).is_none_or(Value::is_null))
+        && ["/output", "/response/output"].into_iter().all(|path| {
+            event.pointer(path).is_none_or(|output| {
+                output.is_null() || output.as_array().is_some_and(Vec::is_empty)
+            })
+        })
 }
 
 pub(crate) fn parse_responses_websocket_sse_events(text: &str) -> Result<Vec<Value>> {
@@ -1867,6 +1949,115 @@ mod http_fallback_history_tests {
             attempts[0].outcome,
             crate::route_request_log::AttemptOutcome::Succeeded
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_context_rejection_after_forwarded_interrupt_is_not_replayed() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (second_sent, second_received) = oneshot::channel();
+        let upstream = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            socket.next().await.unwrap().unwrap();
+            socket
+                .send(WebSocketMessage::Text(
+                    json!({"type":"response.completed",
+                        "response":{"id":"resp-original","status":"completed","output":[]}})
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            socket.next().await.unwrap().unwrap();
+            second_sent.send(()).unwrap();
+            let WebSocketMessage::Text(interrupt) = socket.next().await.unwrap().unwrap() else {
+                panic!("expected forwarded interrupt");
+            };
+            assert_eq!(
+                serde_json::from_str::<Value>(&interrupt).unwrap()["type"],
+                "response.interrupt"
+            );
+            socket
+                .send(WebSocketMessage::Text(
+                    json!({"type":"error","error":{"type":"invalid_request_error",
+                        "code":"unsupported_persisted_item_context","message":"Cannot replay"}})
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let (mut config, provider, model) = router_config(format!("http://{address}/v1"));
+        config.profiles[0].supports_websockets = true;
+        let snapshot = RouterSnapshot::from_config(&config);
+        let route = &snapshot.routes[&provider];
+        let (socket, mut peer) = local_websocket_pair().await;
+        let mut downstream = WebSocketResponsesDownstream::new(socket);
+        downstream
+            .proxy_upstream_websocket(
+                route,
+                &HeaderMap::new(),
+                &mut json!({"model":model,"input":"task"}),
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        peer.next().await.unwrap().unwrap();
+        downstream.clear_stream_id();
+        let client = tokio::spawn(async move {
+            second_received.await.unwrap();
+            peer.send(WebSocketMessage::Text(
+                json!({"type":"response.interrupt","response_id":"resp-original"})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            let WebSocketMessage::Text(event) = peer.next().await.unwrap().unwrap() else {
+                panic!("expected rejection");
+            };
+            let event: Value = serde_json::from_str(&event).unwrap();
+            assert_eq!(
+                event["response"]["error"]["codey"]["originalCode"],
+                "unsupported_persisted_item_context"
+            );
+        });
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            downstream.proxy_upstream_websocket(
+                route,
+                &HeaderMap::new(),
+                &mut json!({"model":model,"previous_response_id":"resp-original","input":"next"}),
+                false,
+                None,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, UpstreamWebSocketAttempt::Completed);
+        assert!(downstream.upstream.is_none());
+        upstream.await.unwrap();
+        client.await.unwrap();
+    }
+
+    #[test]
+    fn persisted_context_recovery_rejects_execution_in_the_error_event() {
+        for evidence in [
+            json!({"response_id":"resp-new"}),
+            json!({"response":{"id":"resp-new"}}),
+            json!({"response":{"output":[{"type":"function_call"}]}}),
+            json!({"usage":{"output_tokens":1}}),
+            json!({"item":{"type":"function_call"}}),
+            json!({"delta":"started"}),
+        ] {
+            assert!(!persisted_rejection_has_no_execution(&evidence));
+        }
+        assert!(persisted_rejection_has_no_execution(
+            &json!({"response":{"output":[]}})
+        ));
     }
 
     #[tokio::test]

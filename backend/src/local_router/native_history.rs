@@ -297,6 +297,21 @@ impl NativeResponsesHistory {
             }
             return Ok(false);
         }
+        let input = self.validated_http_restore_input(owner, allow_native_compaction)?;
+        let input = replayable_native_history(input);
+        let object = body
+            .as_object_mut()
+            .context("Responses 请求必须是 JSON 对象")?;
+        object.insert("input".into(), Value::Array(input));
+        object.remove("previous_response_id");
+        Ok(true)
+    }
+
+    fn validated_http_restore_input(
+        &self,
+        owner: [u8; 32],
+        allow_native_compaction: bool,
+    ) -> Result<&[Value]> {
         if self.owner != Some(owner) {
             anyhow::bail!("上游身份已变化，无法安全恢复续接历史；请重新发送完整上下文");
         }
@@ -309,13 +324,43 @@ impl NativeResponsesHistory {
             .as_ref()
             .context("缺少完整续接历史，请重新发送完整上下文")?;
         validate_native_tool_history_for_restore(input, allow_native_compaction)?;
-        let input = replayable_native_history(input);
-        let object = body
-            .as_object_mut()
-            .context("Responses 请求必须是 JSON 对象")?;
-        object.insert("input".into(), Value::Array(input));
-        object.remove("previous_response_id");
-        Ok(true)
+        Ok(input)
+    }
+
+    pub(crate) fn can_recover_rejected_continuation(
+        &self,
+        owner: [u8; 32],
+        allow_native_compaction: bool,
+    ) -> bool {
+        self.pending_previous_response.is_some()
+            && self
+                .validated_http_restore_input(owner, allow_native_compaction)
+                .is_ok_and(|input| {
+                    // 同轮恢复必须保留全部上下文，不能靠丢弃空推理绕过拒绝。
+                    input.iter().all(|item| {
+                        item["type"] != "reasoning" || replayable_reasoning_item(item)
+                    })
+                })
+    }
+
+    pub(crate) fn mark_continuation_rejected(&mut self) {
+        let Some(id) = self.pending_previous_response else {
+            return;
+        };
+        self.continuation_rejected = true;
+        if self.latest.as_ref().is_some_and(|history| {
+            history.last.as_ref().is_some_and(|(response_id, _)| {
+                <[u8; 32]>::from(Sha256::digest(response_id.as_bytes())) == id
+            })
+        }) {
+            self.latest_continuation_rejected = true;
+        }
+        if let (Some(scope), Some(owner)) = (self.scope, self.owner) {
+            self.cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .mark_requires_http(scope, owner, id);
+        }
     }
 
     pub(crate) fn observe(&mut self, event: &Value) {
@@ -328,22 +373,8 @@ impl NativeResponsesHistory {
         .into_iter()
         .flatten()
         .any(|code| code.as_str() == Some("unsupported_persisted_item_context"))
-            && let Some(id) = self.pending_previous_response
         {
-            self.continuation_rejected = true;
-            if self.latest.as_ref().is_some_and(|history| {
-                history.last.as_ref().is_some_and(|(response_id, _)| {
-                    <[u8; 32]>::from(Sha256::digest(response_id.as_bytes())) == id
-                })
-            }) {
-                self.latest_continuation_rejected = true;
-            }
-            if let (Some(scope), Some(owner)) = (self.scope, self.owner) {
-                self.cache
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .mark_requires_http(scope, owner, id);
-            }
+            self.mark_continuation_rejected();
         }
         if self.history.pending_input.is_none() {
             return;
@@ -626,6 +657,34 @@ mod tests {
 
     fn completed(id: &str, output: Vec<Value>) -> Value {
         json!({"type":"response.completed","response":{"id":id,"object":"response","status":"completed","output":output}})
+    }
+
+    #[test]
+    fn persisted_context_recovery_rejects_identity_changes_and_empty_reasoning() {
+        for allow_native_compaction in [false, true] {
+            for output in [
+                vec![],
+                vec![json!({"type":"reasoning","id":"hidden","summary":[]})],
+            ] {
+                let recoverable = output.is_empty();
+                let mut history = NativeResponsesHistory::default();
+                history.prepare([1; 32], &mut json!({"input":"task"}));
+                history.observe(&completed("resp-original", output));
+                let mut body = json!({"previous_response_id":"resp-original","input":"next"});
+                history.prepare([1; 32], &mut body);
+                assert_eq!(
+                    history.can_recover_rejected_continuation([1; 32], allow_native_compaction),
+                    recoverable,
+                );
+                assert!(
+                    !history.can_recover_rejected_continuation([2; 32], allow_native_compaction)
+                );
+                history.prepare([2; 32], &mut body);
+                assert!(
+                    !history.can_recover_rejected_continuation([2; 32], allow_native_compaction)
+                );
+            }
+        }
     }
 
     fn native_client_items() -> Vec<Value> {
@@ -972,15 +1031,6 @@ mod tests {
             "type":"response.create","model":model,"previous_response_id":"resp-reconnected",
             "input":"after rejection"
         });
-        client
-            .send(WebSocketMessage::Text(rejected.to_string().into()))
-            .await
-            .unwrap();
-        let error = terminal(&mut client).await;
-        assert_eq!(
-            error["response"]["error"]["codey"]["originalCode"],
-            "unsupported_persisted_item_context"
-        );
         client
             .send(WebSocketMessage::Text(rejected.to_string().into()))
             .await

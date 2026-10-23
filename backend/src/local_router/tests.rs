@@ -598,6 +598,12 @@ async fn send_router_websocket_request_on_stream(
         ))
         .await
         .unwrap();
+    read_router_websocket_turn(socket).await
+}
+
+async fn read_router_websocket_turn(
+    socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+) -> Vec<Value> {
     let mut events = Vec::new();
     loop {
         let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
@@ -2155,7 +2161,7 @@ async fn previous_response_not_found_allows_client_full_request_retry() {
 }
 
 #[tokio::test]
-async fn persisted_context_rejection_is_not_replayed_without_a_new_client_request() {
+async fn persisted_context_rejection_without_previous_response_id_is_not_replayed() {
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = upstream.local_addr().unwrap();
     let upstream_task = tokio::spawn(async move {
@@ -2186,6 +2192,369 @@ async fn persisted_context_rejection_is_not_replayed_without_a_new_client_reques
     upstream_task.await.unwrap();
     client.close(None).await.unwrap();
     router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn persisted_context_rejection_recovers_same_turn_over_http_with_complete_history() {
+    for sse_wrapped in [false, true] {
+        let logs = tempfile::tempdir().unwrap();
+        let auth_home = tempfile::tempdir().unwrap();
+        let auth_path = auth_home.path().join("auth.json");
+        std::fs::write(
+            &auth_path,
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"test-access","account_id":"test-account"}}"#,
+        )
+        .unwrap();
+        let first_output = json!([
+            {"type":"message","id":"msg-first","role":"assistant","status":"completed",
+                "content":[{"type":"output_text","text":"first answer","annotations":[]}]},
+            {"type":"reasoning","id":"rs-first","summary":[],"encrypted_content":"encrypted-reasoning"},
+            {"type":"compaction","encrypted_content":"encrypted-compaction"}
+        ]);
+        let expected_output = first_output.clone();
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = upstream.local_addr().unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (stream, _) = upstream.accept().await.unwrap();
+            let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let _first = websocket.next().await.unwrap().unwrap();
+            websocket
+                .send(WebSocketMessage::Text(
+                    json!({"type":"response.completed","response":{
+                        "id":"resp-first","status":"completed","output":first_output
+                    }})
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            let WebSocketMessage::Text(text) =
+                tokio::time::timeout(Duration::from_secs(5), websocket.next())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap()
+            else {
+                panic!("expected continuation on the original WebSocket");
+            };
+            let continuation: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(continuation["previous_response_id"], "resp-first");
+            assert_eq!(continuation["input"], "next task");
+            assert_eq!(continuation["type"], "response.create");
+            assert!(continuation.get("stream").is_none());
+            let error = json!({"type":"error","status":400,"error":{
+                "type":"invalid_request_error","code":"unsupported_persisted_item_context",
+                "message":"Persisted context cannot be replayed"
+            }});
+            websocket
+                .send(WebSocketMessage::Text(
+                    if sse_wrapped {
+                        format!("data: {error}\n\n")
+                    } else {
+                        error.to_string()
+                    }
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            let (mut http, _) = tokio::time::timeout(Duration::from_secs(5), upstream.accept())
+                .await
+                .expect("the rejected continuation must recover during the same client request")
+                .unwrap();
+            let request =
+                tokio::time::timeout(Duration::from_secs(5), read_http_request(&mut http))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/v1/responses");
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            let events = [
+                json!({"type":"response.created","response":{"id":"resp-http","status":"in_progress"}}),
+                json!({"type":"response.output_text.delta","response_id":"resp-http","delta":"recovered"}),
+                json!({"type":"response.completed","response":{"id":"resp-http","status":"completed","output":[]}}),
+            ];
+            let response = events
+                .iter()
+                .map(|event| format!("data: {event}\n\n"))
+                .collect::<String>();
+            write_static_response(&mut http, "text/event-stream", response.as_bytes())
+                .await
+                .unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(300), upstream.accept())
+                    .await
+                    .is_err(),
+                "one rejected continuation must produce only one HTTP recovery request"
+            );
+            body
+        });
+        let (mut config, provider, model) = router_config(format!("http://{address}/v1"));
+        config.profiles[0].supports_websockets = true;
+        config.route_request_log.enabled = true;
+        config.route_request_log.backend = crate::config::RouteRequestLogBackend::Sqlite;
+        let router = LocalRouter::start_with_logger(
+            &config,
+            Arc::new(RouteRequestLogController::with_root(
+                logs.path().to_path_buf(),
+            )),
+        )
+        .await
+        .unwrap();
+        let mut snapshot = RouterSnapshot::from_config(&config);
+        let route = Arc::make_mut(snapshot.routes.get_mut(&provider).unwrap());
+        route.official_account = true;
+        route.official_auth = Some(OfficialRouteAuth {
+            account_id: "test-account".into(),
+            email: None,
+            record_path: auth_path.clone(),
+            path: auth_path,
+            siwc_path: None,
+            accepts_incoming_authorization: false,
+        });
+        *router.snapshot.write().unwrap() = Arc::new(snapshot);
+        let mut client = connect_router_websocket(&router.endpoint()).await;
+        let alias = model_alias(&provider, &model);
+        let first = send_router_websocket_request(&mut client, &alias, "first task").await;
+        assert_eq!(first.last().unwrap()["response"]["id"], "resp-first");
+        client
+            .send(WebSocketMessage::Text(
+                json!({
+                    "type":"response.create","model":alias,"previous_response_id":"resp-first",
+                    "input":"next task","instructions":"keep this instruction","service_tier":"priority"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let events = read_router_websocket_turn(&mut client).await;
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "response.created",
+                "response.output_text.delta",
+                "response.completed"
+            ],
+            "the client must receive only the recovered HTTP turn: {events:?}"
+        );
+        assert_eq!(events[1]["delta"], "recovered");
+        assert_eq!(events.last().unwrap()["response"]["id"], "resp-http");
+        let body = tokio::time::timeout(Duration::from_secs(5), upstream_task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body["model"], model);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["instructions"], "keep this instruction");
+        assert_eq!(body["service_tier"], "priority");
+        assert!(body.get("type").is_none());
+        assert!(body.get("previous_response_id").is_none());
+        let mut expected = vec![json!({"role":"user","content":"first task"})];
+        expected.extend(expected_output.as_array().unwrap().iter().cloned());
+        expected.push(json!({"role":"user","content":"next task"}));
+        assert_eq!(body["input"], Value::Array(expected));
+        client.close(None).await.unwrap();
+        router.stop().await.unwrap();
+        let page = crate::route_request_log::query_route_request_logs(
+            logs.path(),
+            crate::config::RouteRequestLogBackend::Sqlite,
+            crate::route_request_log::RouteRequestLogQuery::default(),
+        )
+        .unwrap();
+        assert_eq!(page.total, 2);
+        let recovered = page
+            .items
+            .iter()
+            .find(|item| item.fallback_count == 1)
+            .unwrap();
+        assert_eq!(recovered.status, "succeeded");
+        assert!(recovered.error_code.is_none());
+        assert_eq!(
+            recovered.fallback_reason.as_deref(),
+            Some("websocket_persisted_context_rejected")
+        );
+        assert_eq!(recovered.upstream_attempts.len(), 2);
+        assert_eq!(
+            recovered.upstream_attempts[0].transport,
+            UpstreamTransport::WebSocket
+        );
+        assert_eq!(
+            recovered.upstream_attempts[0].outcome,
+            crate::route_request_log::AttemptOutcome::Failed
+        );
+        assert_eq!(
+            recovered.upstream_attempts[1].transport,
+            UpstreamTransport::HttpSse
+        );
+        assert_eq!(
+            recovered.upstream_attempts[1].trigger,
+            crate::route_request_log::AttemptTrigger::TransportFallback
+        );
+        assert_eq!(
+            recovered.upstream_attempts[1].outcome,
+            crate::route_request_log::AttemptOutcome::Succeeded
+        );
+    }
+}
+
+async fn assert_persisted_context_rejection_is_not_replayed(
+    first_output: Option<Value>,
+    continuation_input: Value,
+    preceding_event: Option<Value>,
+    error_type: &str,
+    error_code: &str,
+) {
+    let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = upstream.local_addr().unwrap();
+    let mut first_response = json!({"type":"response.completed","response":{
+        "id":"resp-first","status":"completed"
+    }});
+    if let Some(output) = first_output {
+        first_response["response"]["output"] = output;
+    }
+    let error = json!({"type":"error","status":400,"error":{
+        "type":error_type,"code":error_code,"message":"Persisted context cannot be replayed"
+    }});
+    let expected_preceding_event = preceding_event.clone();
+    let upstream_task = tokio::spawn(async move {
+        let (stream, _) = upstream.accept().await.unwrap();
+        let mut websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        let _first = websocket.next().await.unwrap().unwrap();
+        websocket
+            .send(WebSocketMessage::Text(first_response.to_string().into()))
+            .await
+            .unwrap();
+        let WebSocketMessage::Text(text) =
+            tokio::time::timeout(Duration::from_secs(5), websocket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected continuation on the original WebSocket");
+        };
+        let continuation: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(continuation["previous_response_id"], "resp-first");
+        if let Some(event) = preceding_event {
+            websocket
+                .send(WebSocketMessage::Text(event.to_string().into()))
+                .await
+                .unwrap();
+        }
+        websocket
+            .send(WebSocketMessage::Text(error.to_string().into()))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), upstream.accept())
+                .await
+                .is_err(),
+            "unsafe continuation must not start another upstream request"
+        );
+    });
+    let (mut config, provider, model) = router_config(format!("http://{address}/v1"));
+    config.profiles[0].supports_websockets = true;
+    let router = LocalRouter::start(&config).await.unwrap();
+    let mut client = connect_router_websocket(&router.endpoint()).await;
+    let alias = model_alias(&provider, &model);
+    let first = send_router_websocket_request(&mut client, &alias, "first task").await;
+    assert_eq!(first.last().unwrap()["response"]["id"], "resp-first");
+    client
+        .send(WebSocketMessage::Text(
+            json!({"type":"response.create","model":alias,
+                "previous_response_id":"resp-first","input":continuation_input})
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+    let events = read_router_websocket_turn(&mut client).await;
+    if let Some(event) = expected_preceding_event {
+        assert_eq!(events.first().unwrap()["type"], event["type"]);
+        assert_eq!(events.len(), 2, "{events:?}");
+    } else {
+        assert_eq!(events.len(), 1, "{events:?}");
+    }
+    assert_eq!(
+        events.last().unwrap()["type"],
+        "response.failed",
+        "{events:?}"
+    );
+    let error = &events.last().unwrap()["response"]["error"];
+    assert_eq!(error["codey"]["originalCode"], error_code, "{error}");
+    tokio::time::timeout(Duration::from_secs(5), upstream_task)
+        .await
+        .unwrap()
+        .unwrap();
+    client.close(None).await.unwrap();
+    router.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn persisted_context_rejection_after_any_response_event_is_not_replayed() {
+    for event in [
+        json!({"type":"response.created","response":{"id":"resp-next","status":"in_progress"}}),
+        json!({"type":"response.output_text.delta","response_id":"resp-next","delta":"started"}),
+        json!({"type":"response.output_item.added","response_id":"resp-next","output_index":0,
+            "item":{"type":"function_call","id":"fc-next","call_id":"call-next","name":"run","arguments":"{}"}}),
+    ] {
+        assert_persisted_context_rejection_is_not_replayed(
+            Some(json!([])),
+            json!("next task"),
+            Some(event),
+            "invalid_request_error",
+            "unsupported_persisted_item_context",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn persisted_context_rejection_without_complete_replayable_history_is_not_replayed() {
+    for (output, input) in [
+        (None, json!("next task")),
+        (
+            Some(json!([{ "type":"item_reference","id":"unavailable-item" }])),
+            json!("next task"),
+        ),
+        (
+            Some(json!([])),
+            json!([{ "type":"function_call_output","call_id":"unknown-call","output":"done" }]),
+        ),
+    ] {
+        assert_persisted_context_rejection_is_not_replayed(
+            output,
+            input,
+            None,
+            "invalid_request_error",
+            "unsupported_persisted_item_context",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn persisted_context_recovery_requires_exact_error_type_and_code() {
+    for (error_type, error_code) in [
+        ("server_error", "unsupported_persisted_item_context"),
+        (
+            "invalid_request_error",
+            "unsupported_persisted_item_context_other",
+        ),
+    ] {
+        assert_persisted_context_rejection_is_not_replayed(
+            Some(json!([])),
+            json!("next task"),
+            None,
+            error_type,
+            error_code,
+        )
+        .await;
+    }
 }
 
 #[tokio::test]

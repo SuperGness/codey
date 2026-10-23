@@ -2300,9 +2300,11 @@ impl RouterServer {
                     UpstreamWebSocketAttempt::Completed => return Ok(()),
                     UpstreamWebSocketAttempt::UseHttp(reason) => reason,
                 };
-                if had_previous_response && responses_previous_response_id(&upstream_body).is_none()
+                if fallback_reason == "websocket_persisted_context_rejected"
+                    || (had_previous_response
+                        && responses_previous_response_id(&upstream_body).is_none())
                 {
-                    // Reconnection may have expanded history before its handshake failed.
+                    // 重连可能已展开历史；同轮恢复也必须按恢复后的 HTTP 正文重新编码。
                     body_mutated = true;
                     encoded_body = None;
                 }
