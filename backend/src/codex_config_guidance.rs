@@ -336,7 +336,7 @@ every attempt is terminal or fenced. Then the root agent validates the combined 
 continues the work or finishes. While an attempt is active, Codey's gate blocks non-collaboration \
 tools and Stop. If collaboration tools are unavailable, do not loop on an unregistered tool.";
 
-pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT: &str = "\
+const LIST_AFTER_TIMEOUT_COLLABORATION_USAGE_HINT: &str = "\
 `agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools use the current \
 client's declared tool interface. Native clients expose direct commentary tools; never call them through \
 `functions.exec` as a JavaScript aggregate. If a client explicitly exposes a tool catalog through a \
@@ -364,6 +364,41 @@ child tool access before the provider call. Queued followups may still start ano
 restore tool access. Match evidence and write reports to the exact task and attempt; never transfer \
 another attempt's no-change claim or infer a transport stall from elapsed time alone. If a wait times \
 out or lacks per-agent terminal details, call unfiltered `agents.list_agents` before waiting again. \
+Continue until all planned work has been performed and every attempt is terminal or fenced. Then the \
+root agent validates the combined result and either continues the work or finishes. While an attempt \
+is active, Codey's gate blocks non-collaboration tools and Stop. If collaboration tools are unavailable, \
+do not loop on an unregistered tool.";
+
+pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT: &str = "\
+`agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools use the current \
+client's declared tool interface. Native clients expose direct commentary tools; never call them through \
+`functions.exec` as a JavaScript aggregate. If a client explicitly exposes a tool catalog through a \
+transport-only endpoint, use that documented endpoint with the exact catalog name and argument schema. \
+A catalog-listed collaboration tool is available even without a same-named direct schema. Do not invent \
+wrappers or bypass lifecycle and permission checks. Before waiting, dispatch independent tasks up to \
+the concurrency limit of two; investigation, review and edits may share a workspace. Roles have the same \
+tool capabilities; native sandbox, approval policy, permission profile and writable roots bound what \
+each tool can touch. Because concurrent edits to one file can overwrite each other, assign distinct files \
+when dispatching parallel writers, and re-read a file before editing it. When two writers must change the \
+same code, serialize them or give each an isolated worktree and let Git surface the conflict at merge time. \
+Review may see changing files; \
+report the revision or content examined and recheck conclusions after all attempts settle. \
+While any attempt is active, use only the relevant `agents.spawn_agent`, `agents.send_message`, \
+`agents.followup_task`, `agents.interrupt_agent`, `agents.list_agents`, or `agents.wait_agent`. \
+After a terminal or successfully fenced update, check remaining capacity before dispatching the next \
+planned, unspawned task with a new `task_name`; otherwise return to `agents.wait_agent` with \
+`timeout_ms: 30000`. `MESSAGE` and mailbox updates are not completion. Use `followup_task` only for \
+a bound nonterminal attempt. If `CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT` is denied, do not \
+retry or wait for that target; take over or use a fresh `task_name` for a materially changed task. \
+Treat `FINAL_ANSWER`, `task_complete`, `completed`, `errored`, `error`, `failed`, `shutdown`, and \
+`not_found` as terminal. A successful root interrupt permanently abandons and fences that attempt \
+and settles it for the lifecycle ledger; do not wait for or follow up that target. Interrupt revokes \
+child tool access before the provider call. Queued followups may still start another turn; they cannot \
+restore tool access. Match evidence and write reports to the exact task and attempt; never transfer \
+another attempt's no-change claim or infer a transport stall from elapsed time alone. A timed-out \
+wait only means no new message arrived; call `agents.wait_agent` again directly. Call unfiltered \
+`agents.list_agents` only when a wait completes without per-agent terminal details or Codey's gate shows \
+that an attempt left the active list. \
 Continue until all planned work has been performed and every attempt is terminal or fenced. Then the \
 root agent validates the combined result and either continues the work or finishes. While an attempt \
 is active, Codey's gate blocks non-collaboration tools and Stop. If collaboration tools are unavailable, \
@@ -401,6 +436,7 @@ mode remains active until a later multi-agent mode developer message changes it.
 /// Remove the previous owned paragraph when installing the current guidance.
 pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS: &[&str] = &[
     ROOT_AGENT_COLLABORATION_USAGE_HINT,
+    LIST_AFTER_TIMEOUT_COLLABORATION_USAGE_HINT,
     COMMAND_WORKSPACE_CLAIM_COLLABORATION_USAGE_HINT,
     WORKSPACE_WRITE_COLLABORATION_USAGE_HINT,
     WRITE_AT_SPAWN_COLLABORATION_USAGE_HINT,
@@ -521,7 +557,8 @@ pub(crate) const SUBAGENT_TASK_BOUNDARY_GUARD: &str = "\
 执行前确认本次任务正文完整可读。正文为空、缺失或无法解密时，只向主代理报告阻塞，等待明确重述；\
 不得凭继承对话或旧任务猜测目标，也不要扫描工作区或尝试写入。按本次任务指定的路径、工具和清理分工执行；\
 任务未要求时不要做全仓库哈希。中止后即使收到排队任务，也不能恢复已撤销的工具权限。\
-返回时区分本次实际修改、已清理内容和未完成要求，不能用其他尝试的结果代替本次证据。";
+返回时区分本次实际修改、已清理内容和未完成要求，不能用其他尝试的结果代替本次证据。\
+协作工具只能用 `agents.send_message` 向 `/root` 回报，不能联系其他子代理；需要其他子代理配合时，把依赖写进回报，由主代理协调。";
 
 pub(crate) fn subagent_source_config(role: &str) -> Option<&'static str> {
     match role {
@@ -1053,6 +1090,31 @@ mod tests {
         assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("let Git surface the conflict"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("Give parallel writers distinct files"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("let Git surface the conflict"));
+    }
+
+    #[test]
+    fn root_hint_waits_again_after_a_timeout_and_replaces_the_list_after_timeout_rule() {
+        assert!(!ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("If a wait times"));
+        assert!(
+            ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("call `agents.wait_agent` again directly")
+        );
+        let custom = "Preserve my root usage hint.";
+        let upgraded = append_root_agent_collaboration_usage_hint(&format!(
+            "{custom}\n\n{LIST_AFTER_TIMEOUT_COLLABORATION_USAGE_HINT}"
+        ));
+        assert!(upgraded.contains(custom));
+        assert!(!upgraded.contains("If a wait times"));
+        assert_eq!(
+            upgraded
+                .matches(ROOT_AGENT_COLLABORATION_USAGE_HINT)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn children_are_told_to_report_only_to_root() {
+        assert!(SUBAGENT_TASK_BOUNDARY_GUARD.contains("向 `/root` 回报，不能联系其他子代理"));
     }
 
     #[test]
