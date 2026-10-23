@@ -76,7 +76,8 @@ pub fn list_plugins(home: &Path) -> Result<Value> {
                 error_log::record_failure(
                     "patch_status_failed",
                     "read_plugin_marketplace_file",
-                    error.to_string(),
+                    // 去重只看错误文本，带上路径才不会吞掉其他文件的同类错误。
+                    format!("{}: {error}", marketplace_path.display()),
                     serde_json::json!({
                         "path": marketplace_path,
                     }),
@@ -90,7 +91,7 @@ pub fn list_plugins(home: &Path) -> Result<Value> {
                 error_log::record_failure(
                     "patch_status_failed",
                     "parse_plugin_marketplace_file",
-                    error.to_string(),
+                    format!("{}: {error}", marketplace_path.display()),
                     serde_json::json!({
                         "path": marketplace_path,
                     }),

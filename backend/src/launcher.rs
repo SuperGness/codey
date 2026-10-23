@@ -469,13 +469,19 @@ async fn run_startup_session_maintenance(
                     summary.deleted, summary.cleared_sessions
                 );
             }
+            // 失败日志按错误文本去重，不看上下文；同一错误的会话必须合并成一条，
+            // 否则同一次启动里第二个及之后的会话会被静默吞掉。
+            let mut failures = std::collections::BTreeMap::<String, Vec<String>>::new();
             for (session_id, message) in summary.failures {
+                failures.entry(message).or_default().push(session_id);
+            }
+            for (message, session_ids) in failures {
                 error_log::record_failure(
                     "patch_failed",
                     "reapply_message_deletion",
                     message,
                     serde_json::json!({
-                        "sessionId": session_id,
+                        "sessionIds": session_ids,
                     }),
                 );
             }

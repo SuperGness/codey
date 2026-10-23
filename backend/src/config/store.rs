@@ -152,7 +152,8 @@ impl ConfigStore {
                 crate::error_log::record_failure(
                     "config_backup_rotate_failed",
                     "rotate_codey_config_backups",
-                    format!("{error:#}"),
+                    // 去重只看错误文本，带上路径才不会吞掉其他备份的同类错误。
+                    format!("{}: {error:#}", from.display()),
                     serde_json::json!({ "from": from.display().to_string() }),
                 );
             }
