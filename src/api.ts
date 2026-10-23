@@ -90,21 +90,12 @@ declare global {
   }
 }
 
-/** Cross-module marker: ESM loaders can hand different instances the class. */
-export const CodeyApiErrorMarker: unique symbol = Symbol.for("codey.api.error");
-
 /** A request the Codey bridge answered with an explicit failure. */
 export class CodeyApiError extends Error {
-  readonly [CodeyApiErrorMarker] = true;
-
   constructor(message: string) {
     super(message);
     this.name = "CodeyApiError";
   }
-}
-
-export function isCodeyApiError(error: unknown): error is CodeyApiError {
-  return typeof error === "object" && error !== null && CodeyApiErrorMarker in error;
 }
 
 export async function invoke<T>(

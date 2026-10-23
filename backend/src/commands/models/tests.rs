@@ -660,6 +660,31 @@ fn native_model_conversion_uses_synced_upstream_models_without_enabled_targets()
 }
 
 #[test]
+fn native_model_conversion_preserves_known_raw_ids_and_expands_aliases_only_once() {
+    let config = CodeyConfig {
+        local_router_enabled: false,
+        profiles: vec![
+            configured_route("route-a", None),
+            configured_route("route-b", None),
+        ],
+        selected_models_by_provider: BTreeMap::from([
+            ("route-a".into(), vec!["Vendor/Model".into()]),
+            ("route-b".into(), vec!["route-a/Vendor/Model".into()]),
+        ]),
+        model_alias_history: BTreeMap::from([("vendor/model".into(), "Model".into())]),
+        ..CodeyConfig::default()
+    };
+    for (input, expected) in [
+        (" ROUTE-A/vendor/model ", "route-a/Vendor/Model"),
+        ("route-b/route-a/vendor/model", "route-a/Vendor/Model"),
+        ("vendor/model", "Vendor/Model"),
+        ("unknown/Vendor/Model", "unknown/Vendor/Model"),
+    ] {
+        assert_eq!(native_upstream_model(&config, input), expected, "{input}");
+    }
+}
+
+#[test]
 fn deleted_route_aliases_survive_native_catalog_and_model_conversion() {
     let config = CodeyConfig {
         local_router_enabled: false,

@@ -2,6 +2,8 @@ use super::*;
 
 pub(crate) fn native_upstream_model(config: &CodeyConfig, model: &str) -> String {
     let model = model.trim();
+    // Native selections can already be raw ids from an earlier save. Preserve
+    // known raw spelling before aliases so a restart cannot strip another part.
     if let Some(raw) = config
         .upstream_models_by_provider
         .values()

@@ -29,47 +29,14 @@
     flex-wrap: wrap;
   }
 
-  .operations-header {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .operations-heading {
-    min-width: 0;
-  }
-
-  .operations-heading > div {
-    min-width: 0;
-  }
-
-  .operations-actions {
-    width: 100%;
-    flex-wrap: wrap;
-  }
-
-  .operations-status-chips {
-    margin-right: auto;
-    flex-wrap: wrap;
-  }
-
   .route-editor-row-names {
     grid-template-columns: 1fr;
   }
 
-  .route-heading-actions,
   .catalog-aggregate-heading,
   .provider-model-empty {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .route-heading-actions .local-router-toggle {
-    justify-content: space-between;
-  }
-
-  .route-heading-actions .local-router-toggle-group .local-router-toggle-item {
-    flex: 1;
-    justify-content: space-between;
   }
 
   .route-catalog-pane {

@@ -121,10 +121,7 @@ test("request log model cell shows requested, mapped and returned models", async
   ]);
 
   assert.ok(viewer.includes('import { modelIdsEqual } from "./modelIds";'));
-  assert.ok(viewer.includes('const requestedModelText = item.requestedModel.trim();'));
-  assert.ok(viewer.includes('const sentModelRaw = (item.model ?? "").trim();'));
-  assert.ok(viewer.includes('const returnedModelRaw = (item.upstreamResponseModel ?? "").trim();'));
-  assert.ok(viewer.includes('const primaryModel = displayModelName(requestedModelText || sentModelRaw, providerKeys);'));
+  assert.ok(viewer.includes('const { primaryModel, sentDisplay, returnedDisplay } = requestLogRowModelNames(item, modelLabels);'));
   assert.ok(viewer.includes('!modelIdsEqual(sentDisplay, primaryModel)'));
   assert.ok(viewer.includes('!modelIdsEqual(returnedDisplay, mappedModel || sentDisplay || primaryModel)'));
   assert.ok(viewer.includes('{primaryModel || "—"}'));

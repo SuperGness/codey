@@ -76,9 +76,3 @@ export function formatRouteName(name: string, shortName: string) {
   const prefix = shortName.trim();
   return routeName ? (prefix ? `[${prefix}] ${routeName}` : routeName) : prefix;
 }
-
-/** @internal 仅供测试使用 */
-export function prefixedRouteModelName(profile: Profile, modelName: string) {
-  const prefix = routeDisplayPrefix(profile);
-  return prefix ? `[${prefix}] ${modelName}` : modelName;
-}

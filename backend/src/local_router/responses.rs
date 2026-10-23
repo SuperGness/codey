@@ -358,17 +358,31 @@ impl RouterServer {
                         return Ok(());
                     }
                 };
-                let backend = self
-                    .snapshot
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .request_log_backend;
+                let (backend, model_aliases) = {
+                    let snapshot = self
+                        .snapshot
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let aliases = if statistics {
+                        crate::route_request_log::RouteRequestLogModelAliases::new(
+                            snapshot
+                                .aliases
+                                .iter()
+                                .map(|(alias, target)| (alias.clone(), target.model.clone())),
+                            snapshot.raw_models.keys().cloned(),
+                            snapshot.model_alias_history.clone(),
+                        )
+                    } else {
+                        Default::default()
+                    };
+                    (snapshot.request_log_backend, aliases)
+                };
                 let root = self.request_log.root().to_path_buf();
                 match tokio::task::spawn_blocking(move || {
                     let value = if statistics {
                         serde_json::to_value(
-                            crate::route_request_log::query_route_request_log_stats(
-                                &root, backend, query,
+                            crate::route_request_log::query_route_request_log_stats_with_model_aliases(
+                                &root, backend, query, model_aliases,
                             )?,
                         )
                     } else {
@@ -556,8 +570,23 @@ impl RouterServer {
                 return Ok(());
             }
         };
-        let (route_hint, body_mutated) =
-            match take_codey_route_metadata(&mut request, &mut body, None) {
+        let snapshot = Arc::clone(
+            &self
+                .snapshot
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let image_model = body
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(probe) = &probe {
+            probe.record_request_model(&image_model, snapshot.request_model_name(&image_model));
+        }
+        let explicit_model_alias = snapshot.active_model_alias(&image_model);
+        let (route_hint, mut body_mutated) =
+            match take_codey_route_metadata(&mut request, &mut body, explicit_model_alias) {
                 Ok(extracted) => extracted,
                 Err(error) => {
                     mark_error(400, "route_metadata_invalid");
@@ -572,19 +601,9 @@ impl RouterServer {
                     return Ok(());
                 }
             };
-        let snapshot = Arc::clone(
-            &self
-                .snapshot
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        let image_model = body
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
         let mut route_decision = crate::route_request_log::RouteDecision::default();
         let resolved = snapshot.route_for_image_request_observed(
-            image_model,
+            &image_model,
             route_hint.as_deref(),
             probe
                 .as_ref()
@@ -594,8 +613,8 @@ impl RouterServer {
         if let Some(probe) = &probe {
             probe.record_route_decision(route_decision);
         }
-        let route = match resolved {
-            Ok(route) => route,
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
             Err(error) => {
                 mark_error(404, "route_not_enabled");
                 write_error_response(
@@ -609,11 +628,12 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        let route = resolved.route;
+        if image_model != resolved.upstream_model {
+            body["model"] = Value::String(resolved.upstream_model.clone());
+            body_mutated = true;
+        }
         if let Some(probe) = &probe {
-            let model = body
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
             probe.resolve_route(
                 &route.provider_id,
                 &route.route_name,
@@ -621,8 +641,8 @@ impl RouterServer {
                     .official_auth
                     .as_ref()
                     .map(|auth| auth.account_id.as_str()),
-                model,
-                model,
+                &image_model,
+                &resolved.upstream_model,
                 &route.upstream_authority,
                 route.protocol.label(),
                 "images",
@@ -1571,6 +1591,18 @@ impl RouterServer {
                 .await;
         }
         if let Some(probe) = &probe {
+            let requested_model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let snapshot = self
+                .snapshot
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            probe.record_request_model(
+                requested_model,
+                snapshot.request_model_name(requested_model),
+            );
             probe.set_subagent(request_is_subagent(&request));
             probe.set_requested_service_tier(body.get("service_tier").and_then(Value::as_str));
             probe.record_request_body(RequestBodySummary::from_responses_body(

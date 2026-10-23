@@ -1,6 +1,6 @@
 //! 日志查询、统计与文件清理；查询连接保持只读并兼容历史 schema。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use rusqlite::params;
-use rusqlite::{Connection, OpenFlags, params_from_iter, types::Value as SqlValue};
+use rusqlite::{
+    Connection, OpenFlags, functions::FunctionFlags, params_from_iter, types::Value as SqlValue,
+};
 
 #[cfg(test)]
 use super::SessionRecordedTiming;
@@ -30,6 +32,68 @@ const MAX_QUERY_PAGE_SIZE: u64 = 100;
 const MAX_QUERY_SEARCH_BYTES: usize = 256;
 const MAX_QUERY_FILTER_BYTES: usize = 128;
 const DAY_MS: u64 = 86_400_000;
+
+/// 只接受配置或路由快照提供的别名，不能按斜杠猜测模型来源。
+#[derive(Default)]
+pub(crate) struct RouteRequestLogModelAliases {
+    sources: HashMap<String, String>,
+}
+
+impl RouteRequestLogModelAliases {
+    pub(crate) fn new(
+        current_aliases: impl IntoIterator<Item = (String, String)>,
+        raw_models: impl IntoIterator<Item = String>,
+        historical_aliases: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        let raw_models = raw_models
+            .into_iter()
+            .map(|model| crate::model_id::key(&model))
+            .collect::<HashSet<_>>();
+        let mut sources = historical_aliases
+            .into_iter()
+            .filter(|(alias, source)| {
+                !alias.trim().is_empty()
+                    && !source.trim().is_empty()
+                    && !raw_models.contains(&crate::model_id::key(alias))
+            })
+            .map(|(alias, source)| (crate::model_id::key(&alias), source.trim().to_owned()))
+            .collect::<HashMap<_, _>>();
+        // 与路由选择一致：当前别名优先，其次是原始模型，最后才是历史别名。
+        sources.extend(current_aliases.into_iter().filter_map(|(alias, source)| {
+            (!alias.trim().is_empty() && !source.trim().is_empty())
+                .then(|| (crate::model_id::key(&alias), source.trim().to_owned()))
+        }));
+        Self { sources }
+    }
+
+    fn source<'a>(&'a self, selector: &'a str) -> &'a str {
+        self.sources
+            .get(&crate::model_id::key(selector))
+            .map_or(selector, String::as_str)
+    }
+
+    fn register(self, connection: &Connection) -> rusqlite::Result<()> {
+        connection.create_scalar_function(
+            "route_request_log_model",
+            2,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            move |context| {
+                let model = context.get::<Option<String>>(0)?;
+                let requested_model = context.get::<String>(1)?;
+                // 实际上游模型不能再次解别名。历史图片请求可能把选择器同时
+                // 写入两列，提前失败的请求则只有 requested_model。
+                if let Some(model) = &model
+                    && !crate::model_id::equal(model, &requested_model)
+                {
+                    return Ok(model.clone());
+                }
+                Ok(self
+                    .source(model.as_deref().unwrap_or(&requested_model))
+                    .to_owned())
+            },
+        )
+    }
+}
 
 /// 上游响应阶段每秒输出 Token 数，口径与写入侧的 `output_tokens_per_second` 一致。
 /// 上游首字节时间以发送上游请求为起点，先加路由前置耗时，再从请求总耗时扣除。
@@ -791,10 +855,20 @@ pub(crate) fn query_route_request_log_models(
     Ok(result)
 }
 
+#[cfg(test)]
 pub(crate) fn query_route_request_log_stats(
     root: &Path,
     backend: RouteRequestLogBackend,
+    query: RouteRequestLogQuery,
+) -> anyhow::Result<RouteRequestLogAnalytics> {
+    query_route_request_log_stats_with_model_aliases(root, backend, query, Default::default())
+}
+
+pub(crate) fn query_route_request_log_stats_with_model_aliases(
+    root: &Path,
+    backend: RouteRequestLogBackend,
     mut query: RouteRequestLogQuery,
+    model_aliases: RouteRequestLogModelAliases,
 ) -> anyhow::Result<RouteRequestLogAnalytics> {
     if query.all_time
         && (query.from_unix_ms.is_some()
@@ -807,6 +881,11 @@ pub(crate) fn query_route_request_log_stats(
     query.cursor_mode = !query.all_time;
     query.cursor = None;
     let mut query = query.normalize()?;
+    let model_column = if model_aliases.sources.is_empty() {
+        "COALESCE(model, requested_model)"
+    } else {
+        "route_request_log_model(model, requested_model)"
+    };
     let to = query.to_unix_ms.unwrap_or_else(unix_timestamp_ms);
     let from = query
         .from_unix_ms
@@ -840,6 +919,9 @@ pub(crate) fn query_route_request_log_stats(
         return Ok(result);
     }
     let mut connection = open_query_connection(&path)?;
+    if !model_aliases.sources.is_empty() {
+        model_aliases.register(&connection)?;
+    }
     let transaction = connection.transaction()?;
     let optional_columns = sqlite_optional_columns(&transaction, &path)?;
     if query.all_time {
@@ -874,7 +956,7 @@ pub(crate) fn query_route_request_log_stats(
         && (group_by != "official_account" || optional_columns.official_account)
     {
         let column = match group_by.as_str() {
-            "model" => "COALESCE(model, requested_model)",
+            "model" => model_column,
             "provider" => "provider",
             "status" => "status",
             "protocol" => "upstream_transport",

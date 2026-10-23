@@ -1,7 +1,7 @@
 use codey_runtime_core::bridge::{self, BRIDGE_BINDING_NAME};
 use codey_runtime_core::cdp::{
-    CdpTarget, is_avatar_overlay_page_target, is_primary_codex_page_target, list_targets,
-    pick_injectable_codex_page_target,
+    CdpTarget, is_auxiliary_codex_window_url, is_avatar_overlay_page_target,
+    is_primary_codex_page_target, list_targets, pick_injectable_codex_page_target,
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -278,6 +278,108 @@ fn primary_target_selection_skips_v1_and_v2_overlay_candidates() {
 }
 
 #[test]
+fn prewarmed_auxiliary_windows_listed_first_never_replace_the_main_window() {
+    // `/json` 按最近活动排序：主窗口启动后预热的隐藏窗口常排在前面，Windows
+    // 版标题还可能就是应用名。
+    let targets = vec![
+        target(
+            "detached",
+            "page",
+            "Codex",
+            "app://-/detached-window.html?initialRoute=%2Fdetached-window",
+            Some("ws://detached"),
+        ),
+        target(
+            "hotkey",
+            "page",
+            "Codex",
+            "app://-/index.html?initialRoute=%2Fhotkey-window",
+            Some("ws://hotkey"),
+        ),
+        target(
+            "spotlight",
+            "page",
+            "Codex",
+            "app://-/index.html?initialRoute=/spotlight",
+            Some("ws://spotlight"),
+        ),
+        target(
+            "main",
+            "page",
+            "修复启动问题",
+            "app://-/index.html",
+            Some("ws://main"),
+        ),
+    ];
+
+    assert_eq!(
+        pick_injectable_codex_page_target(&targets).unwrap().id,
+        "main"
+    );
+    pick_injectable_codex_page_target(&targets[..3])
+        .expect_err("auxiliary windows alone must not become the injection target");
+}
+
+#[test]
+fn plain_main_document_outranks_routed_primary_windows_in_json_order() {
+    let targets = vec![
+        target(
+            "local-page",
+            "page",
+            "Codex",
+            "app://-/index.html?initialRoute=%2Fspace%2Flocal-page-1",
+            Some("ws://local-page"),
+        ),
+        target(
+            "main",
+            "page",
+            "",
+            "app://-/index.html#/",
+            Some("ws://main"),
+        ),
+        target(
+            "second",
+            "page",
+            "",
+            "app://-/index.html",
+            Some("ws://second"),
+        ),
+    ];
+    assert_eq!(
+        pick_injectable_codex_page_target(&targets).unwrap().id,
+        "main"
+    );
+    assert_eq!(
+        pick_injectable_codex_page_target(&targets[..1]).unwrap().id,
+        "local-page"
+    );
+}
+
+#[test]
+fn auxiliary_window_urls_cover_route_and_document_forms() {
+    for url in [
+        "app://-/index.html?initialRoute=%2Favatar-overlay",
+        "app://-/index.html?initialroute=%2FHOTKEY-WINDOW&x=1",
+        "app://-/index.html?foo=1&initialRoute=/spotlight#top",
+        "app://-/detached-window.html?initialRoute=%2Fdetached-window",
+        "app://-/detached-window.html",
+        "APP://-/avatar-overlay",
+    ] {
+        assert!(is_auxiliary_codex_window_url(url), "{url}");
+    }
+    for url in [
+        "app://-/index.html",
+        "app://-/index.html?initialRoute=%2Flocal%2Fthread-1",
+        "app://-/index.html?initialRoute=%2Fsettings",
+        "https://example.test/detached-window.html",
+        "about:blank",
+        "",
+    ] {
+        assert!(!is_auxiliary_codex_window_url(url), "{url}");
+    }
+}
+
+#[test]
 fn packaged_codex_main_target_does_not_require_a_ready_title() {
     let targets = vec![target(
         "main",
@@ -395,14 +497,14 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
     let log_path = temp.path().join("codey.log");
     codey_runtime_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=4 {
+        for expected_id in 1..=5 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
         }
 
         let evaluate = recv_json(&mut socket).await;
-        assert_eq!(evaluate["id"], 5);
+        assert_eq!(evaluate["id"], 6);
         assert_eq!(evaluate["method"], "Runtime.evaluate");
         send_json(
             &mut socket,
@@ -418,7 +520,7 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
             }),
         )
         .await;
-        send_json(&mut socket, json!({ "id": 5, "result": {} })).await;
+        send_json(&mut socket, json!({ "id": 6, "result": {} })).await;
 
         let response = recv_json(&mut socket).await;
         assert_eq!(response["method"], "Runtime.evaluate");
@@ -469,7 +571,7 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
 #[tokio::test]
 async fn install_bridge_immediately_evaluates_new_document_scripts() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -524,6 +626,87 @@ async fn install_bridge_immediately_evaluates_new_document_scripts() {
         .await
         .expect("server task should finish without panicking");
     pump.close().await;
+}
+
+#[tokio::test]
+async fn document_scripts_are_registered_on_a_page_enabled_session() {
+    // Page 域未启用的会话里注册的文档脚本不会在新文档中执行（Chromium 155 实测），
+    // 页面重载后桥接就无法自恢复。
+    let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
+        let mut methods = Vec::new();
+        for _ in 0..6 {
+            let command = recv_json(&mut socket).await;
+            methods.push(command["method"].as_str().unwrap().to_string());
+            send_json(&mut socket, json!({ "id": command["id"], "result": {} })).await;
+        }
+        assert_eq!(
+            methods,
+            [
+                "Runtime.enable",
+                "Runtime.removeBinding",
+                "Runtime.addBinding",
+                "Page.enable",
+                "Page.addScriptToEvaluateOnNewDocument",
+                "Runtime.evaluate",
+            ]
+        );
+        close_socket(&mut socket).await;
+    })
+    .await;
+
+    let pump = bridge::install_bridge(&url, BRIDGE_BINDING_NAME, noop_handler(), &[])
+        .await
+        .expect("bridge should install");
+    request_rx
+        .await
+        .expect("server task should finish without panicking");
+    pump.close().await;
+}
+
+#[tokio::test]
+async fn install_probe_runs_on_the_bridge_session_without_failing_the_install() {
+    for (probe_result, expected) in [
+        (
+            json!({ "result": { "type": "string", "value": "ready" } }),
+            Some(json!("ready")),
+        ),
+        (json!({ "exceptionDetails": { "text": "Uncaught" } }), None),
+    ] {
+        let (url, request_rx) = spawn_cdp_server(move |mut socket| async move {
+            for _ in 0..8 {
+                let command = recv_json(&mut socket).await;
+                send_json(&mut socket, json!({ "id": command["id"], "result": {} })).await;
+            }
+            let probe = recv_json(&mut socket).await;
+            assert_eq!(probe["method"], "Runtime.evaluate");
+            assert_eq!(probe["params"]["expression"], "probe()");
+            send_json(
+                &mut socket,
+                json!({ "id": probe["id"], "result": probe_result }),
+            )
+            .await;
+            close_socket(&mut socket).await;
+        })
+        .await;
+
+        let (pump, probe) = bridge::install_bridge_with_options(
+            &url,
+            BRIDGE_BINDING_NAME,
+            noop_handler(),
+            &["window.mainInjected = true;".to_string()],
+            bridge::BridgeInstallOptions {
+                readiness_probe: Some("probe()"),
+            },
+        )
+        .await
+        .expect("a failed probe must not fail an installed bridge");
+        let probe_value = probe.map(|response| response["result"]["result"]["value"].clone());
+        assert_eq!(probe_value, expected);
+        request_rx
+            .await
+            .expect("server task should finish without panicking");
+        pump.close().await;
+    }
 }
 
 #[tokio::test]
@@ -673,7 +856,7 @@ async fn install_bridge_rejects_javascript_exceptions_and_closes_failed_sessions
 #[tokio::test]
 async fn install_bridge_returns_after_installing_and_keeps_message_pump_alive() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -757,7 +940,7 @@ async fn install_bridge_returns_after_installing_and_keeps_message_pump_alive() 
 #[tokio::test]
 async fn bridge_pump_handle_close_stops_the_persistent_cdp_session() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -887,7 +1070,7 @@ async fn install_bridge_command_error_mentions_method_and_id() {
 #[tokio::test]
 async fn install_bridge_rejects_bad_payload_with_id_and_continues_after_unparseable_payload() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -973,7 +1156,7 @@ async fn install_bridge_rejects_bad_payload_with_id_and_continues_after_unparsea
 #[tokio::test]
 async fn install_bridge_queues_consecutive_bindings_without_recursive_dispatch() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -1035,7 +1218,7 @@ async fn install_bridge_queues_consecutive_bindings_without_recursive_dispatch()
 #[tokio::test]
 async fn install_bridge_does_not_wait_for_resolve_runtime_evaluate_ack() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -1108,7 +1291,7 @@ async fn bridge_read_routes_bypass_a_slow_serial_handler() {
     let release_slow_handler = Arc::new(tokio::sync::Notify::new());
     let server_release = Arc::clone(&release_slow_handler);
     let (url, request_rx) = spawn_cdp_server(move |mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -1176,14 +1359,14 @@ async fn accept_installed_bridge(listener: &TcpListener) -> (TestSocket, String)
         .await
         .expect("websocket should upgrade");
 
-    for expected_id in 1..=3 {
+    for expected_id in 1..=4 {
         let command = recv_json(&mut socket).await;
         assert_eq!(command["id"], expected_id);
         send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
     }
 
     let add_script = recv_json(&mut socket).await;
-    assert_eq!(add_script["id"], 4);
+    assert_eq!(add_script["id"], 5);
     assert_eq!(
         add_script["method"],
         "Page.addScriptToEvaluateOnNewDocument"
@@ -1193,12 +1376,12 @@ async fn accept_installed_bridge(listener: &TcpListener) -> (TestSocket, String)
             .as_str()
             .expect("bridge source should be a string"),
     );
-    send_json(&mut socket, json!({ "id": 4, "result": {} })).await;
+    send_json(&mut socket, json!({ "id": 5, "result": {} })).await;
 
     let evaluate = recv_json(&mut socket).await;
-    assert_eq!(evaluate["id"], 5);
+    assert_eq!(evaluate["id"], 6);
     assert_eq!(evaluate["method"], "Runtime.evaluate");
-    send_json(&mut socket, json!({ "id": 5, "result": {} })).await;
+    send_json(&mut socket, json!({ "id": 6, "result": {} })).await;
     (socket, session_token)
 }
 

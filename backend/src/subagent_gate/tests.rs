@@ -1618,7 +1618,7 @@ fn resumed_root_recovers_binding_from_its_aborted_turn_without_cancelling_childr
     fs::create_dir_all(&sessions).unwrap();
     let session_id = "resume-session";
     let runtime_id = "runtime-a";
-    let transcript = sessions.join(format!("rollout-{session_id}.jsonl"));
+    let transcript = sessions.join(format!("rollout-{session_id}_resume-suffix.jsonl"));
     create_active_marker(&root, runtime_id, session_id, "child-a").unwrap();
     let mut interrupt = input("PreToolUse", session_id);
     interrupt.turn_id = Some("new-turn".into());

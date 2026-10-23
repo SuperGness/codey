@@ -479,8 +479,32 @@ pub(super) fn apply_overrides_to_models(
 pub(crate) fn runtime_context_metadata(
     home: &Path,
 ) -> std::collections::BTreeMap<String, serde_json::Map<String, Value>> {
-    read_runtime_catalog_models(home)
-        .unwrap_or_default()
+    context_metadata_from_models(read_runtime_catalog_models(home).unwrap_or_default())
+}
+
+pub(crate) fn context_metadata_for_config(
+    home: &Path,
+    config: &crate::config::CodeyConfig,
+) -> std::collections::BTreeMap<String, serde_json::Map<String, Value>> {
+    let mut models = read_runtime_catalog_models(home).unwrap_or_default();
+    // 保存设置会提前改写共享目录；页面必须按已生效的配置重新计算预算。
+    // 先恢复原始声明，再依次应用插件默认值和用户覆盖，避免沿用待重启的值。
+    let overrides = CatalogOverrides {
+        plugin_contexts: &config.runtime_plugin_model_contexts(),
+        contexts: &config.runtime_model_contexts(),
+        reasoning_efforts: &Default::default(),
+        display_names: &Default::default(),
+    };
+    if apply_overrides_to_models(&mut models, overrides).is_err() {
+        return BTreeMap::new();
+    }
+    context_metadata_from_models(models)
+}
+
+fn context_metadata_from_models(
+    models: Vec<Value>,
+) -> std::collections::BTreeMap<String, serde_json::Map<String, Value>> {
+    models
         .into_iter()
         .filter_map(|model| {
             let slug = model["slug"].as_str()?.to_string();

@@ -31,6 +31,7 @@ import { loadRequestLogModels, type ModelPage } from "./requestLogModels";
 import { errorText } from "./appUtils";
 import { formatBytes, formatTimestamp } from "./formatters";
 import { modelIdsEqual } from "./modelIds";
+import { displayRequestLogModelName, requestLogModelLabels, requestLogRowModelNames, type RequestLogModelLabels } from "./requestLogModelLabels";
 import { formatRouteName } from "./routeShortNames";
 import type { LogAnalytics } from "./usageAnalysis";
 import { maskEmail } from "./sensitiveText";
@@ -159,6 +160,7 @@ export type RequestLogCatalog = {
   selectedModelsByProvider: Config["selectedModelsByProvider"];
   declaredOfficialModelsByProvider: Config["declaredOfficialModelsByProvider"];
   upstreamModelsByProvider: Config["upstreamModelsByProvider"];
+  modelAliasHistory?: Config["modelAliasHistory"];
 };
 
 type RequestLogDialogProps = {
@@ -322,22 +324,6 @@ function cacheRateValue(input?: number | null, cached?: number | null) {
 function freshInputTokens(input?: number | null, cached?: number | null, cacheWrite?: number | null) {
   if (input == null || !Number.isFinite(input)) return null;
   return Math.max(0, input - (cached ?? 0) - (cacheWrite ?? 0));
-}
-
-// 限定选择器的首段是编码后的线路 ID，供应商列已经给出线路名，模型列只显示上游模型。
-function displayModelName(model: string, providerKeys: ReadonlySet<string>) {
-  const slash = model.indexOf("/");
-  if (slash <= 0) return model;
-  const qualifier = model.slice(0, slash).trim();
-  const rest = model.slice(slash + 1).trim();
-  if (!rest || !qualifier) return model;
-  let decoded = qualifier;
-  try {
-    decoded = decodeURIComponent(qualifier);
-  } catch {
-    // 编码不完整时按原样比对。
-  }
-  return providerKeys.has(qualifier) || providerKeys.has(decoded) ? rest : model;
 }
 
 // 单元格悬浮明细：标签-读数两列，总量行与明细之间留一条分隔线。
@@ -677,7 +663,7 @@ const RequestLogRow = memo(function RequestLogRow({
   item,
   providerLabel,
   officialAccountLabel,
-  providerKeys,
+  modelLabels,
   selected,
   onOpen,
   onCopyId,
@@ -685,7 +671,7 @@ const RequestLogRow = memo(function RequestLogRow({
   item: RouteRequestLogItem;
   providerLabel: string;
   officialAccountLabel: (accountId?: string | null) => string;
-  providerKeys: ReadonlySet<string>;
+  modelLabels: RequestLogModelLabels;
   selected: boolean;
   onOpen: (item: RouteRequestLogItem) => void;
   onCopyId: (requestId: string, options: CopyIdOptions) => void;
@@ -702,13 +688,11 @@ const RequestLogRow = memo(function RequestLogRow({
   const reasoning = reasoningLabel(item);
   const displayedTtft = item.downstreamFirstContentMs ?? item.ttftMs;
   // 模型链分三级：客户端的请求模型是主读数，网关映射后的发送模型与上游
-  // 响应回报的模型在与上一级不同时各挂一行路由标记；显示时剥掉线路限定前缀。
+  // 响应回报的模型在与上一级不同时各挂一行路由标记；仅请求选择器恢复上游名称。
   const requestedModelText = item.requestedModel.trim();
   const sentModelRaw = (item.model ?? "").trim();
   const returnedModelRaw = (item.upstreamResponseModel ?? "").trim();
-  const primaryModel = displayModelName(requestedModelText || sentModelRaw, providerKeys);
-  const sentDisplay = displayModelName(sentModelRaw, providerKeys);
-  const returnedDisplay = displayModelName(returnedModelRaw, providerKeys);
+  const { primaryModel, sentDisplay, returnedDisplay } = requestLogRowModelNames(item, modelLabels);
   const mappedModel = sentDisplay && primaryModel && !modelIdsEqual(sentDisplay, primaryModel)
     ? sentDisplay
     : "";
@@ -1236,17 +1220,7 @@ export function RequestLogDialog({
     ];
   }, [catalog.profiles]);
 
-  // 限定选择器 `线路/模型` 的首段是这些 provider id（编码后同形）；用于展示时剥离。
-  const providerKeySet = useMemo(() => {
-    const keys = new Set<string>();
-    for (const profile of catalog.profiles) {
-      for (const key of [profile.sourceProviderId, profile.id]) {
-        const trimmed = key?.trim();
-        if (trimmed) keys.add(trimmed);
-      }
-    }
-    return keys;
-  }, [catalog.profiles]);
+  const modelLabels = useMemo(() => requestLogModelLabels(catalog), [catalog]);
 
   // 独立托管的日志页只拿到配置本身，启动期能力标志可能缺失；存储账号的官方
   // 线路自带凭据，只要配置里存在官方线路就读取账号列表，与线路列表口径一致。
@@ -1298,9 +1272,9 @@ export function RequestLogDialog({
       { label: "全部模型", value: "all" },
       ...[...models]
         .sort((left, right) => left.localeCompare(right))
-        .map((value) => ({ label: displayModelName(value, providerKeySet), value })),
+        .map((value) => ({ label: displayRequestLogModelName(value, modelLabels), value })),
     ];
-  }, [usedModels, result?.items, model, providerKeySet]);
+  }, [usedModels, result?.items, model, modelLabels]);
 
   useEffect(() => {
     if (!opened || !validRange) return;
@@ -1551,7 +1525,7 @@ export function RequestLogDialog({
   if (model !== "all") {
     filterChips.push({
       key: "model",
-      label: `模型：${displayModelName(model, providerKeySet)}`,
+      label: `模型：${displayRequestLogModelName(model, modelLabels)}`,
       onRemove: () => {
         setModel("all");
         resetPagination();
@@ -2295,7 +2269,7 @@ export function RequestLogDialog({
                         item={item}
                         providerLabel={requestLogProviderLabel(item, catalog.profiles)}
                         officialAccountLabel={officialAccountLabel}
-                        providerKeys={providerKeySet}
+                        modelLabels={modelLabels}
                         selected={
                           selectedItem != null
                           && selectedItem.requestId === item.requestId

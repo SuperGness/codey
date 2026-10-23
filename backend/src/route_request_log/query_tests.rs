@@ -11,9 +11,10 @@ use super::super::{
 };
 use super::{
     DAY_MS, MAX_QUERY_PAGE, MAX_QUERY_PAGE_SIZE, MAX_QUERY_SEARCH_BYTES,
-    clear_route_request_log_files, latest_session_recorded_speed, query_route_request_log_models,
-    query_route_request_log_stats, query_route_request_logs, session_recorded_timing,
-    sqlite_query_filters,
+    RouteRequestLogModelAliases, clear_route_request_log_files, latest_session_recorded_speed,
+    query_route_request_log_models, query_route_request_log_stats,
+    query_route_request_log_stats_with_model_aliases, query_route_request_logs,
+    session_recorded_timing, sqlite_query_filters,
 };
 use crate::config::RouteRequestLogBackend;
 
@@ -541,6 +542,305 @@ fn sqlite_token_group_order_applies_before_truncation_and_preserves_unknowns() {
     assert_eq!(unknown.groups[0].key, "high");
     assert_eq!(unknown.groups[1].key, "unknown");
     assert_eq!(unknown.groups[1].summary.total_tokens_sum, None);
+}
+
+#[test]
+fn sqlite_model_alias_groups_merge_failed_and_historical_image_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut sink = SqliteSink::open(&directory.path().join(SQLITE_FILE_NAME), 30).unwrap();
+    let entries = [
+        ("text", "gpt", Some("gpt"), "responses", Some(100)),
+        ("failed", "official/gpt", None, "responses", None),
+        ("zero", "official/gpt", Some("gpt"), "responses", Some(0)),
+        (
+            "old-image",
+            "old/image",
+            Some("old/image"),
+            "images",
+            Some(20),
+        ),
+        ("image", "image", Some("image"), "images", Some(30)),
+        ("old-failed", "old/image", None, "images", None),
+        ("real-slash", "org/model", None, "responses", None),
+        ("unknown-prefix", "unknown/gpt", None, "responses", None),
+    ]
+    .map(|(id, requested, model, kind, total_tokens)| {
+        let mut entry = sample_entry(id);
+        entry.provider = None;
+        entry.provider_name = None;
+        entry.requested_model = requested.into();
+        entry.model = model.map(str::to_owned);
+        entry.request_kind = kind.into();
+        entry.token_usage = RequestTokenUsage {
+            total_tokens,
+            ..Default::default()
+        };
+        entry.usage_reported = total_tokens.is_some();
+        if total_tokens.is_none() {
+            entry.status = RequestStatus::Failed;
+        }
+        queued(entry)
+    });
+    sink.write_batch(&entries).unwrap();
+    let query = RouteRequestLogQuery {
+        from_unix_ms: Some(0),
+        to_unix_ms: Some(2000),
+        group_by: Some("model".into()),
+        group_sort: Some("tokens".into()),
+        include_daily_trend: true,
+        ..Default::default()
+    };
+    let aliases = || {
+        RouteRequestLogModelAliases::new(
+            [("official/gpt".into(), "gpt".into())],
+            ["gpt".into(), "image".into(), "org/model".into()],
+            [("old/image".into(), "image".into())],
+        )
+    };
+    let original = query_route_request_log_stats(
+        directory.path(),
+        RouteRequestLogBackend::Sqlite,
+        query.clone(),
+    )
+    .unwrap();
+    let stats = query_route_request_log_stats_with_model_aliases(
+        directory.path(),
+        RouteRequestLogBackend::Sqlite,
+        query.clone(),
+        aliases(),
+    )
+    .unwrap();
+    assert_eq!(stats.groups.len(), 4);
+    let groups = stats
+        .groups
+        .iter()
+        .map(|group| {
+            (
+                group.key.as_str(),
+                group.summary.total,
+                group.summary.total_tokens_sum,
+                group.summary.total_tokens_known_count,
+                group.summary.usage_reported_count,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        groups,
+        [
+            ("gpt", 3, Some(100), 2, 2),
+            ("image", 3, Some(50), 2, 2),
+            ("org/model", 1, None, 0, 0),
+            ("unknown/gpt", 1, None, 0, 0),
+        ]
+    );
+    assert_eq!(stats.summary.total, 8);
+    assert_eq!(stats.summary.total_tokens_sum, Some(150));
+    assert_eq!(stats.summary.total_tokens_known_count, 4);
+    assert_eq!(
+        serde_json::to_value(&stats.summary).unwrap(),
+        serde_json::to_value(&original.summary).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&stats.trend).unwrap(),
+        serde_json::to_value(&original.trend).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&stats.daily_trend).unwrap(),
+        serde_json::to_value(&original.daily_trend).unwrap()
+    );
+
+    // 原有模型筛选保留日志模型语义，规范化只改变所选记录的分组。
+    for (model, total, known) in [("gpt", 2, 2), ("OFFICIAL/GPT", 1, 0)] {
+        let filtered = query_route_request_log_stats_with_model_aliases(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery {
+                all_time: true,
+                from_unix_ms: None,
+                to_unix_ms: None,
+                model: Some(model.into()),
+                ..query.clone()
+            },
+            aliases(),
+        )
+        .unwrap();
+        assert_eq!(filtered.from_unix_ms, 1);
+        assert_eq!(filtered.summary.total, total);
+        assert_eq!(filtered.summary.total_tokens_known_count, known);
+        assert_eq!(filtered.groups.len(), 1);
+        assert_eq!(filtered.groups[0].key, "gpt");
+        assert_eq!(filtered.daily_trend[0].total, total);
+    }
+    let failed = query_route_request_log_stats_with_model_aliases(
+        directory.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery {
+            status: Some("failed".into()),
+            ..query
+        },
+        aliases(),
+    )
+    .unwrap();
+    assert_eq!(failed.summary.total, 4);
+    assert_eq!(failed.summary.total_tokens_sum, None);
+    assert!(failed.groups.iter().all(|group| {
+        group.summary.total_tokens_sum.is_none()
+            && group.summary.total_tokens_known_count == 0
+            && group.summary.usage_reported_count == 0
+    }));
+    let details = query_route_request_logs(
+        directory.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery {
+            request_id: Some("old-image".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(details.items[0].requested_model, "old/image");
+    assert_eq!(details.items[0].model.as_deref(), Some("old/image"));
+}
+
+#[test]
+fn sqlite_model_alias_groups_respect_raw_models_and_resolve_only_once() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut sink = SqliteSink::open(&directory.path().join(SQLITE_FILE_NAME), 30).unwrap();
+    let entries = [
+        ("raw", "org/model", None),
+        ("current", "ROUTE/ORG/MODEL", None),
+        ("historical", "old/route/org/model", None),
+        ("current-wins", "route/changed", None),
+        ("actual", "other-selector", Some("route/org/model")),
+        ("unknown", "unknown/org/model", None),
+    ]
+    .map(|(id, requested, model)| {
+        let mut entry = sample_entry(id);
+        entry.requested_model = requested.into();
+        entry.model = model.map(str::to_owned);
+        queued(entry)
+    });
+    sink.write_batch(&entries).unwrap();
+    let stats = query_route_request_log_stats_with_model_aliases(
+        directory.path(),
+        RouteRequestLogBackend::Sqlite,
+        RouteRequestLogQuery {
+            all_time: true,
+            group_by: Some("model".into()),
+            ..Default::default()
+        },
+        RouteRequestLogModelAliases::new(
+            [
+                ("route/org/model".into(), "org/model".into()),
+                ("route/changed".into(), "new".into()),
+            ],
+            ["ORG/MODEL".into(), "route/changed".into()],
+            [
+                ("org/model".into(), "model".into()),
+                ("old/route/org/model".into(), "route/org/model".into()),
+                ("route/changed".into(), "old".into()),
+            ],
+        ),
+    )
+    .unwrap();
+    let groups = stats
+        .groups
+        .iter()
+        .map(|group| (group.key.as_str(), group.summary.total))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        groups,
+        [
+            ("org/model", 2),
+            ("route/org/model", 2),
+            ("new", 1),
+            ("unknown/org/model", 1)
+        ]
+    );
+}
+
+#[test]
+fn sqlite_model_alias_groups_merge_before_ordering_and_truncation() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut sink = SqliteSink::open(&directory.path().join(SQLITE_FILE_NAME), 30).unwrap();
+    let mut entries = Vec::new();
+    let mut aliases = Vec::new();
+    for index in 0..60 {
+        let mut entry = sample_entry(&format!("alias-{index}"));
+        entry.requested_model = format!("route-{index}/merged");
+        entry.model = None;
+        entry.token_usage = RequestTokenUsage {
+            total_tokens: (index < 50).then_some(1),
+            ..Default::default()
+        };
+        entry.usage_reported = index < 50;
+        aliases.push((entry.requested_model.clone(), "merged".into()));
+        entries.push(queued(entry));
+    }
+    for index in 0..49 {
+        let mut entry = sample_entry(&format!("other-{index}"));
+        entry.model = Some(format!("other-{index:02}"));
+        entry.token_usage.total_tokens = Some(2);
+        entries.push(queued(entry));
+    }
+    sink.write_batch(&entries).unwrap();
+    for group_sort in [None, Some("tokens".into())] {
+        let stats = query_route_request_log_stats_with_model_aliases(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            RouteRequestLogQuery {
+                all_time: true,
+                group_by: Some("model".into()),
+                group_sort,
+                ..Default::default()
+            },
+            RouteRequestLogModelAliases::new(aliases.clone(), ["merged".into()], []),
+        )
+        .unwrap();
+        assert_eq!(stats.groups.len(), 50);
+        assert!(!stats.groups_truncated);
+        assert_eq!(stats.groups[0].key, "merged");
+        assert_eq!(stats.groups[0].summary.total, 60);
+        assert_eq!(stats.groups[0].summary.total_tokens_sum, Some(50));
+        assert_eq!(stats.groups[0].summary.total_tokens_known_count, 50);
+        assert_eq!(stats.summary.total, 109);
+        assert_eq!(stats.summary.total_tokens_sum, Some(148));
+        assert_eq!(stats.summary.total_tokens_known_count, 99);
+        assert_eq!(stats.summary.usage_reported_count, 99);
+        assert_eq!(
+            stats
+                .groups
+                .iter()
+                .map(|group| group.summary.total)
+                .sum::<u64>(),
+            stats.summary.total
+        );
+        assert_eq!(
+            Some(
+                stats
+                    .groups
+                    .iter()
+                    .filter_map(|group| group.summary.total_tokens_sum)
+                    .sum::<u64>()
+            ),
+            stats.summary.total_tokens_sum
+        );
+        assert_eq!(
+            stats
+                .groups
+                .iter()
+                .map(|group| group.summary.total_tokens_known_count)
+                .sum::<u64>(),
+            stats.summary.total_tokens_known_count
+        );
+        assert_eq!(
+            stats
+                .groups
+                .iter()
+                .map(|group| group.summary.usage_reported_count)
+                .sum::<u64>(),
+            stats.summary.usage_reported_count
+        );
+    }
 }
 
 #[test]

@@ -525,6 +525,134 @@ fn native_subagent_runtime_uses_synced_upstream_model_without_route_targets() {
 }
 
 #[test]
+fn native_subagent_runtime_recovers_deleted_route_aliases_when_catalog_read_fails() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(home.path().join("config.toml"), "[invalid").unwrap();
+    let config = CodeyConfig {
+        local_router_enabled: false,
+        subagent_model: " Deleted/Vendor/Model ".into(),
+        subagent_roles: crate::config::uniform_subagent_roles("Deleted/Vendor/Model", "high"),
+        model_alias_history: std::collections::BTreeMap::from([
+            ("deleted/vendor/model".into(), "Vendor/Model".into()),
+            ("vendor/model".into(), "Model".into()),
+        ]),
+        ..CodeyConfig::default()
+    };
+    assert!(crate::commands::native_subagent_model_state(&config, home.path()).is_err());
+
+    let native = reconciled_native_subagent_runtime_config(&config, home.path());
+
+    assert_eq!(native.subagent_model, "Vendor/Model");
+    assert!(
+        native
+            .subagent_roles
+            .values()
+            .all(|role| role.model == "Vendor/Model")
+    );
+    assert_eq!(config.subagent_model, " Deleted/Vendor/Model ");
+}
+
+#[test]
+fn native_subagent_runtime_preserves_raw_ids_matching_provider_prefixes() {
+    let mut route = ProviderProfile::new("Custom");
+    route.id = "custom".into();
+    route.base_url = "https://relay.example/v1".into();
+    route.api_key = "secret".into();
+    route.normalize();
+    let config = CodeyConfig {
+        local_router_enabled: false,
+        active_profile_id: route.id.clone(),
+        profiles: vec![route],
+        upstream_models_by_provider: std::collections::BTreeMap::from([
+            ("custom".into(), vec!["Vendor/Model".into()]),
+            ("native".into(), vec!["Custom/Vendor/Model".into()]),
+        ]),
+        model_alias_history: std::collections::BTreeMap::from([(
+            "custom/vendor/model".into(),
+            "Vendor/Model".into(),
+        )]),
+        subagent_model: " custom/vendor/model ".into(),
+        subagent_roles: crate::config::uniform_subagent_roles("custom/vendor/model", "high"),
+        ..CodeyConfig::default()
+    };
+    assert!(config.runtime_model_targets().is_empty());
+
+    let native = native_subagent_runtime_config(&config);
+
+    assert_eq!(native.subagent_model, "Custom/Vendor/Model");
+    assert!(
+        native
+            .subagent_roles
+            .values()
+            .all(|role| role.model == "Custom/Vendor/Model")
+    );
+}
+
+#[test]
+fn native_subagent_runtime_preserves_expanded_raw_models_across_saved_restarts() {
+    let home = tempfile::tempdir().unwrap();
+    let store = crate::config::ConfigStore::new(home.path().join("codey.json"));
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model_provider = \"native\"\n[model_providers.native]\nname = \"Native\"\nbase_url = \"https://native.example/v1\"\nwire_api = \"responses\"\n",
+    )
+    .unwrap();
+    let profiles = ["vendor", "native"]
+        .map(|id| {
+            let mut route = ProviderProfile::new(id);
+            route.id = id.into();
+            route.base_url = format!("https://{id}.example/v1");
+            route.api_key = "secret".into();
+            route.normalize();
+            route
+        })
+        .to_vec();
+    let mut config = CodeyConfig {
+        local_router_enabled: false,
+        active_profile_id: "native".into(),
+        profiles,
+        selected_models_by_provider: std::collections::BTreeMap::from([
+            ("vendor".into(), vec!["Model".into()]),
+            (
+                "native".into(),
+                vec!["fallback-model".into(), "Vendor/Model".into()],
+            ),
+        ]),
+        model_alias_history: std::collections::BTreeMap::from([(
+            "deleted/vendor/model".into(),
+            "Vendor/Model".into(),
+        )]),
+        subagent_model: "native/Vendor/Model".into(),
+        subagent_roles: crate::config::uniform_subagent_roles("native/Vendor/Model", "high"),
+        ..CodeyConfig::default()
+    };
+
+    for requested in ["native/Vendor/Model", "Deleted/Vendor/Model"] {
+        config.subagent_model = requested.into();
+        config.subagent_roles = crate::config::uniform_subagent_roles(requested, "high");
+        let native = reconciled_native_subagent_runtime_config(&config, home.path());
+
+        assert_eq!(native.subagent_model, "Vendor/Model", "{requested}");
+        assert!(
+            native
+                .subagent_roles
+                .values()
+                .all(|role| role.model == "Vendor/Model")
+        );
+        store.save(&native).unwrap();
+        let saved = store.load().unwrap();
+        let restarted = reconciled_native_subagent_runtime_config(&saved, home.path());
+        assert_eq!(restarted.subagent_model, "Vendor/Model", "{requested}");
+        assert!(
+            restarted
+                .subagent_roles
+                .values()
+                .all(|role| role.model == "Vendor/Model")
+        );
+    }
+}
+
+#[test]
 fn native_subagent_runtime_follows_the_current_provider_models_and_efforts() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(

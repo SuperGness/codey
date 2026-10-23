@@ -34,7 +34,7 @@ test("third-party route short names are required and limited to four characters"
   );
 });
 
-test("route and model labels use the first two name characters or a custom short name", () => {
+test("route labels use the first two name characters or a custom short name", () => {
   const officialDefault = {
     authMode: "officialAccount",
     officialAccount: true,
@@ -54,13 +54,11 @@ test("route and model labels use the first two name characters or a custom short
     shortName: "备",
   };
 
-  assert.equal(shortNames.prefixedRouteModelName(officialDefault, "gpt-5.6-sol"), "[Op] gpt-5.6-sol");
-  assert.equal(shortNames.prefixedRouteModelName(officialCustom, "gpt-5.6-sol"), "[官1] gpt-5.6-sol");
-  assert.equal(shortNames.prefixedRouteModelName(relay, "claude-opus"), "[备] claude-opus");
   assert.equal(shortNames.fallbackRouteShortName(" 备用中转 "), "备用");
   assert.equal(shortNames.fallbackRouteShortName("😀备用"), "😀备");
   assert.equal(shortNames.fallbackRouteShortName("主"), "主");
   assert.equal(shortNames.prefixedRouteName({ ...officialDefault, name: "Plus" }), "[Pl] Plus");
+  assert.equal(shortNames.prefixedRouteName(officialCustom), "[官1] OpenAI 官方直登");
   assert.equal(shortNames.prefixedRouteName({ ...relay, shortName: "", name: "自建" }), "[自建] 自建");
   assert.equal(shortNames.prefixedRouteName({ ...relay, shortName: " 晚 ", name: "晚安" }), "[晚] 晚安");
   assert.equal(shortNames.prefixedRouteName({ ...relay, name: "" }), "备");
