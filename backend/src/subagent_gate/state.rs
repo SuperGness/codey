@@ -26,28 +26,39 @@ pub(super) struct HookStateLock(File);
 
 impl HookStateLock {
     pub(super) fn acquire(state_root: &Path) -> Result<Self> {
-        fs::create_dir_all(state_root)?;
         let path = state_root.join(HOOK_STATE_LOCK_FILE);
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)?;
         let started = Instant::now();
+        // 空闲会话目录会被后台清理；锁到已删除的文件时重新创建目录和锁文件。
         loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => return Ok(Self(file)),
-                Err(error) if crate::fs_util::file_lock_is_contended(&error) => {
-                    anyhow::ensure!(
-                        started.elapsed() < Duration::from_secs(2),
-                        "获取 Codex 子代理 Hook 状态锁超时：{}",
-                        path.display()
-                    );
-                    thread::sleep(Duration::from_millis(5));
+            fs::create_dir_all(state_root)?;
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&path)?;
+            loop {
+                match file.try_lock_exclusive() {
+                    Ok(()) => break,
+                    Err(error) if crate::fs_util::file_lock_is_contended(&error) => {
+                        anyhow::ensure!(
+                            started.elapsed() < Duration::from_secs(2),
+                            "获取 Codex 子代理 Hook 状态锁超时：{}",
+                            path.display()
+                        );
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(error.into()),
                 }
-                Err(error) => return Err(error.into()),
             }
+            if crate::fs_util::locked_file_matches_path(&file, &path) {
+                return Ok(Self(file));
+            }
+            anyhow::ensure!(
+                started.elapsed() < Duration::from_secs(2),
+                "获取 Codex 子代理 Hook 状态锁超时：{}",
+                path.display()
+            );
         }
     }
 }

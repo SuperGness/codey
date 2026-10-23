@@ -161,37 +161,53 @@ impl LedgerStore {
         })?;
         let session_hash = hash_component(session_id);
         let session_dir = state_root.join(&session_hash);
-        fs::create_dir_all(&session_dir).with_context(|| {
-            format!(
-                "创建 Codey 子代理会话状态目录失败：{}",
-                session_dir.display()
-            )
-        })?;
         // The ledger is per session; other sessions only read it through
         // atomic-write snapshots, so the lock lives next to it instead of at
         // the state root where every window would queue behind each other.
         let lock_path = session_dir.join(LEDGER_LOCK_FILE);
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .with_context(|| format!("打开 Codey 子代理编排账本锁失败：{}", lock_path.display()))?;
-        crate::fs_util::acquire_exclusive_lock_with_timeout(
-            &lock,
-            &lock_path,
-            Duration::from_millis(LEDGER_LOCK_TIMEOUT_MILLIS),
-            Duration::from_millis(LEDGER_LOCK_RETRY_MILLIS),
-            || {
+        // Idle session directories are swept in the background. Retry when the
+        // lock we obtained belongs to a file that was removed meanwhile.
+        let mut attempts = 0;
+        let lock = loop {
+            fs::create_dir_all(&session_dir).with_context(|| {
                 format!(
-                    "获取 Codey 子代理编排账本锁超时（{} ms）：{}",
-                    LEDGER_LOCK_TIMEOUT_MILLIS,
-                    lock_path.display()
+                    "创建 Codey 子代理会话状态目录失败：{}",
+                    session_dir.display()
                 )
-            },
-            || format!("获取 Codey 子代理编排账本锁失败：{}", lock_path.display()),
-        )?;
+            })?;
+            let lock = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .with_context(|| {
+                    format!("打开 Codey 子代理编排账本锁失败：{}", lock_path.display())
+                })?;
+            crate::fs_util::acquire_exclusive_lock_with_timeout(
+                &lock,
+                &lock_path,
+                Duration::from_millis(LEDGER_LOCK_TIMEOUT_MILLIS),
+                Duration::from_millis(LEDGER_LOCK_RETRY_MILLIS),
+                || {
+                    format!(
+                        "获取 Codey 子代理编排账本锁超时（{} ms）：{}",
+                        LEDGER_LOCK_TIMEOUT_MILLIS,
+                        lock_path.display()
+                    )
+                },
+                || format!("获取 Codey 子代理编排账本锁失败：{}", lock_path.display()),
+            )?;
+            if crate::fs_util::locked_file_matches_path(&lock, &lock_path) {
+                break lock;
+            }
+            attempts += 1;
+            anyhow::ensure!(
+                attempts < 3,
+                "Codey 子代理编排账本锁文件被反复替换：{}",
+                lock_path.display()
+            );
+        };
         cleanup_stale_ledger_temps(&session_dir)?;
         Ok(Self {
             lock,

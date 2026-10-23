@@ -63,6 +63,28 @@ pub(crate) fn acquire_exclusive_lock_with_timeout(
     }
 }
 
+/// 加锁后确认路径仍指向被锁的那个文件。空闲状态清理会删除锁文件；若删除发生在
+/// 本进程打开之后、拿到锁之前，锁住的是已脱离目录的旧文件，其他进程会在新建的
+/// 同名文件上同时持锁。返回 false 时调用方应丢弃句柄并重新打开。
+pub(crate) fn locked_file_matches_path(file: &File, path: &Path) -> bool {
+    let Ok(current) = fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata()
+            .is_ok_and(|locked| locked.dev() == current.dev() && locked.ino() == current.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows 上已删除但仍被打开的文件处于删除挂起状态，按路径取元数据会失败，
+        // 上面的检查已覆盖该情况。
+        let _ = (file, current);
+        true
+    }
+}
+
 /// 以毫秒时间戳命名的唯一子目录（不创建）。同一毫秒内的重复调用追加 `-n` 后缀。
 /// 此前 session_index_cleanup 与 codex_config 各自实现了一份备份目录命名。
 pub(crate) fn unique_timestamp_dir(root: &Path) -> PathBuf {
@@ -244,6 +266,22 @@ pub(crate) fn read_bounded(path: &Path, max_bytes: u64) -> anyhow::Result<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locked_file_must_still_be_the_file_at_its_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("hook-state.lock");
+        let opened = File::create(&path).unwrap();
+        assert!(locked_file_matches_path(&opened, &path));
+        // A sweep removed the lock after it was opened: the handle is orphaned.
+        fs::remove_file(&path).unwrap();
+        assert!(!locked_file_matches_path(&opened, &path));
+        // Another process recreated the name; it is still not our file.
+        let recreated = File::create(&path).unwrap();
+        #[cfg(unix)]
+        assert!(!locked_file_matches_path(&opened, &path));
+        assert!(locked_file_matches_path(&recreated, &path));
+    }
 
     #[test]
     fn exclusive_lock_times_out_then_succeeds_after_release() {
