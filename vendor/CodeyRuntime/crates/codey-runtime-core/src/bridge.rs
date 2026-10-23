@@ -11,7 +11,7 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 
 pub const BRIDGE_BINDING_NAME: &str = "codexSessionDeleteV2";
@@ -244,6 +244,31 @@ pub async fn install_bridge(
     handler: BridgeHandler,
     new_document_scripts: &[String],
 ) -> anyhow::Result<BridgePumpHandle> {
+    install_bridge_with_options(
+        websocket_url,
+        binding_name,
+        handler,
+        new_document_scripts,
+        BridgeInstallOptions::default(),
+    )
+    .await
+    .map(|(pump, _)| pump)
+}
+
+#[derive(Default)]
+pub struct BridgeInstallOptions<'a> {
+    /// 装桥后在同一会话上执行的就绪探针，省掉校验阶段的额外连接与会话。探针
+    /// 只作确认：执行失败返回 `None`，不影响已装好的桥接。
+    pub readiness_probe: Option<&'a str>,
+}
+
+pub async fn install_bridge_with_options(
+    websocket_url: &str,
+    binding_name: &str,
+    handler: BridgeHandler,
+    new_document_scripts: &[String],
+    options: BridgeInstallOptions<'_>,
+) -> anyhow::Result<(BridgePumpHandle, Option<Value>)> {
     let socket = connect_cdp_websocket(websocket_url).await?;
     let session_token = format!("bridge-{}", next_message_id());
     let mut session = CdpSession::new(socket)
@@ -257,6 +282,9 @@ pub async fn install_bridge(
     session
         .send_command(3, "Runtime.addBinding", json!({ "name": binding_name }))
         .await?;
+    // 文档脚本只在启用了 Page 域的会话上随新文档执行；不启用时页面重载后
+    // 桥接不会自动恢复，只能等看门狗重新注入。
+    session.send_command(4, "Page.enable", json!({})).await?;
 
     // 重复装桥先注销同一 target 上的旧持久脚本：注册标识没有枚举接口，只能由
     // 上一次装桥记下。注销失败不阻断安装，残项随下次装桥再清。
@@ -278,7 +306,7 @@ pub async fn install_bridge(
     let bridge_script = build_bridge_script_for_session(binding_name, &session_token);
     let response = session
         .send_command(
-            4,
+            5,
             "Page.addScriptToEvaluateOnNewDocument",
             json!({ "source": bridge_script }),
         )
@@ -286,7 +314,7 @@ pub async fn install_bridge(
     remember_document_script(websocket_url, &response);
     let response = session
         .send_command(
-            5,
+            6,
             "Runtime.evaluate",
             runtime_evaluate_params(&bridge_script),
         )
@@ -314,6 +342,19 @@ pub async fn install_bridge(
         ensure_runtime_evaluate_succeeded(response)?;
     }
 
+    let probe = match options.readiness_probe {
+        Some(script) => session
+            .send_command(
+                next_message_id(),
+                "Runtime.evaluate",
+                runtime_evaluate_params(script),
+            )
+            .await
+            .and_then(ensure_runtime_evaluate_succeeded)
+            .ok(),
+        None => None,
+    };
+
     let closing = Arc::new(AtomicBool::new(false));
     let shutdown = Arc::new(Notify::new());
     let task_closing = Arc::clone(&closing);
@@ -331,11 +372,14 @@ pub async fn install_bridge(
         }
     });
 
-    Ok(BridgePumpHandle {
-        task: Some(task),
-        closing,
-        shutdown,
-    })
+    Ok((
+        BridgePumpHandle {
+            task: Some(task),
+            closing,
+            shutdown,
+        },
+        probe,
+    ))
 }
 
 pub fn runtime_evaluate_params(script: &str) -> Value {
@@ -370,6 +414,25 @@ pub type ConnectedCdpSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub async fn connect_cdp_websocket(websocket_url: &str) -> anyhow::Result<ConnectedCdpSocket> {
+    connect_cdp_websocket_with_config(websocket_url, None).await
+}
+
+/// 传输整份渲染资产的连接：Chromium 把每条 CDP 消息作为单个 WebSocket 帧发送，
+/// 十几 MB 的 bundle 经 base64 后会超过默认的 16 MiB 帧上限而断开连接。
+pub async fn connect_cdp_websocket_for_bulk_transfer(
+    websocket_url: &str,
+    max_message_bytes: usize,
+) -> anyhow::Result<ConnectedCdpSocket> {
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(max_message_bytes))
+        .max_frame_size(Some(max_message_bytes));
+    connect_cdp_websocket_with_config(websocket_url, Some(config)).await
+}
+
+async fn connect_cdp_websocket_with_config(
+    websocket_url: &str,
+    config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
+) -> anyhow::Result<ConnectedCdpSocket> {
     let candidates = cdp_websocket_connect_candidates(websocket_url);
     // 候选共享原来的连接总预算，避免回退把单轮代价翻倍后吃掉启动注入窗口。
     let attempt_timeout = cdp_connect_attempt_timeout(candidates.len());
@@ -378,7 +441,7 @@ pub async fn connect_cdp_websocket(websocket_url: &str) -> anyhow::Result<Connec
         // The TLS-capable handshake future is large even for loopback ws://.
         // Keep it out of every enclosing startup future: their nested poll
         // frames can otherwise exhaust the Windows main thread's 1 MiB stack.
-        let connect = Box::pin(connect_async(candidate.as_str()));
+        let connect = Box::pin(connect_async_with_config(candidate.as_str(), config, false));
         match tokio::time::timeout(attempt_timeout, connect).await {
             Ok(Ok((socket, _))) => return Ok(socket),
             Ok(Err(error)) => {

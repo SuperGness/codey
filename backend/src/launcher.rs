@@ -1242,7 +1242,7 @@ async fn inject_initial_renderer(
     spawned: &SpawnedCodex,
     child: &Arc<Mutex<Option<Child>>>,
     restore_context: RuntimeConfigRestoreContext<'_>,
-    prefetched_target: Option<crate::early_attach::PrefetchTask>,
+    prefetched_target: Option<crate::target_prefetch::PrefetchTask>,
 ) -> Result<cdp::InjectedTarget> {
     let failure = match cdp::retry_inject_with_scripts(
         debug_port,
@@ -1955,10 +1955,10 @@ async fn spawn_and_inject_runtime(
             Some(plan) => Some(plan.start().await?),
             None => None,
         };
-    // 调试端口在 Chromium 主进程就绪后先于 CLI 包装器握手可用：与其并行预取
-    // 页面目标——除 /json 枚举外还尝试浏览器端点自动挂载，页面在首个导航前被
-    // 暂停时 Fetch 拦截能赶在任何资产请求之前落位。任务自带暂停态清理
-    // （EarlyAttachHold 的 Drop 保证放行），spawn 失败时直接放弃即可。
+    // 资产补丁服务先于 Codex 拉起：端点一出现就挂上页面，Fetch 拦截赶在主窗口
+    // 首次导航之前落位。调试端口在 Chromium 主进程就绪后先于 CLI 包装器握手
+    // 可用，与其并行预取页面目标；spawn 失败时直接放弃即可。
+    crate::renderer_asset_patch::start_service(patch.debug_port, config.slim_codex_pet);
     let target_prefetch = cdp::spawn_injectable_target_prefetch(patch.debug_port);
     let mut spawned = match spawn_codex(
         &mut storage.app_dir,

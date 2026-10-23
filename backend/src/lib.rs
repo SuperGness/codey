@@ -14,7 +14,6 @@ mod conversation_stats;
 mod crashpad_pending_guard;
 #[cfg(windows)]
 mod desktop_instance;
-mod early_attach;
 mod error_log;
 pub mod fastctx;
 mod fastctx_route_gate;
@@ -54,6 +53,7 @@ mod subagent;
 mod subagent_gate;
 mod subagent_orchestrator;
 mod subagent_policy;
+mod target_prefetch;
 mod task_activity;
 mod trace_log_guard;
 mod trace_log_stats;
@@ -372,8 +372,6 @@ async fn run(ui: NativeUpdateUi, lifecycle: Arc<DesktopLifecycle>) -> Result<()>
         ShutdownReason::Signal => "Codey 收到退出信号",
         ShutdownReason::RuntimeRestartFailed => "Codey 自动重启 Codex 失败",
     };
-    // The public no-argument helper remains available for callers without a shutdown boundary:
-    // terminate_other_codey_processes().await
     match process_cleanup::terminate_other_codey_processes_since(shutdown_started_at).await {
         Ok(0) => {}
         Ok(count) => eprintln!("{shutdown_context}，已终止 {count} 个遗留 Codey 进程"),

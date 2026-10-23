@@ -111,17 +111,44 @@ async fn query_targets_url(client: &reqwest::Client, url: &str) -> anyhow::Resul
         .context("failed to deserialize CDP targets")
 }
 
+/// Codex 在主窗口之外还会创建隐藏的预热窗口（分离会话、快捷窗口、Spotlight、
+/// 宠物浮层）。它们与主窗口同源、标题也可能是应用名，`/json` 又按最近活动
+/// 排序，新建的预热窗口常排在主窗口前面；注入到这些窗口里，主窗口就拿不到
+/// 桥接，请求入口也永远找不到会话管理器。
+const AUXILIARY_WINDOW_ROUTES: [&str; 4] = [
+    "/avatar-overlay",
+    "/detached-window",
+    "/hotkey-window",
+    "/spotlight",
+];
+
+/// 按主窗口优先选择注入目标：未带路由参数的主文档优先，其余候选保持 `/json`
+/// 原有顺序。
 pub fn pick_injectable_codex_page_target(targets: &[CdpTarget]) -> anyhow::Result<CdpTarget> {
+    let mut best: Option<(u8, &CdpTarget)> = None;
     for target in targets
         .iter()
-        .filter(|target| is_injectable_page_target(target))
+        .filter(|target| is_injectable_page_target(target) && is_primary_codex_page_target(target))
     {
-        if is_primary_codex_page_target(target) {
-            return Ok(target.clone());
+        let rank = primary_page_rank(&target.url);
+        if best.is_none_or(|(best_rank, _)| rank > best_rank) {
+            best = Some((rank, target));
         }
     }
+    match best {
+        Some((_, target)) => Ok(target.clone()),
+        None => bail!("No injectable Codex page target found"),
+    }
+}
 
-    bail!("No injectable Codex page target found")
+fn primary_page_rank(url: &str) -> u8 {
+    let (path, query) = split_app_url(url);
+    let main_document = path.eq_ignore_ascii_case("app://-/index.html");
+    match (main_document, query_param(query, "initialRoute")) {
+        (true, None) => 2,
+        (true, Some(route)) if route.is_empty() || route == "/" => 2,
+        _ => 1,
+    }
 }
 
 pub fn is_injectable_page_target(target: &CdpTarget) -> bool {
@@ -149,17 +176,73 @@ pub fn is_codex_page_target(target: &CdpTarget) -> bool {
 }
 
 pub fn is_primary_codex_page_target(target: &CdpTarget) -> bool {
-    is_codex_page_target(target) && !is_avatar_overlay_page_target(target)
+    is_codex_page_target(target) && !is_auxiliary_codex_window_url(&target.url)
 }
 
 pub fn is_avatar_overlay_page_target(target: &CdpTarget) -> bool {
-    if !is_injectable_page_target(target) {
-        return false;
+    is_injectable_page_target(target)
+        && auxiliary_codex_window_route(&target.url) == Some("/avatar-overlay")
+}
+
+/// 页面地址是否属于 Codex 的辅助窗口。也用于注入后按页面实际地址复核目标。
+pub fn is_auxiliary_codex_window_url(url: &str) -> bool {
+    auxiliary_codex_window_route(url).is_some()
+}
+
+/// 辅助窗口既可能以 `index.html?initialRoute=/x` 打开，也可能使用独立文档
+/// （`detached-window.html`）或直接以路由为路径。
+fn auxiliary_codex_window_route(url: &str) -> Option<&'static str> {
+    let (path, query) = split_app_url(url);
+    let path = path.to_ascii_lowercase();
+    let document = path.strip_prefix("app://-/")?;
+    let document = document.strip_suffix(".html").unwrap_or(document);
+    let route = query_param(query, "initialRoute").map(|route| route.to_ascii_lowercase());
+    AUXILIARY_WINDOW_ROUTES
+        .into_iter()
+        .find(|candidate| route.as_deref() == Some(*candidate) || document == &candidate[1..])
+}
+
+/// 拆出不含片段的地址主体与查询串。
+fn split_app_url(url: &str) -> (&str, &str) {
+    let url = url.trim();
+    let url = url.split_once('#').map_or(url, |(head, _)| head);
+    url.split_once('?').unwrap_or((url, ""))
+}
+
+fn query_param(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        key.eq_ignore_ascii_case(name)
+            .then(|| percent_decode(value))
+    })
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let escaped = (bytes[index] == b'%')
+            .then(|| bytes.get(index + 1..index + 3))
+            .flatten()
+            .and_then(|hex| std::str::from_utf8(hex).ok())
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match (escaped, bytes[index]) {
+            (Some(byte), _) => {
+                decoded.push(byte);
+                index += 3;
+            }
+            (None, b'+') => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            (None, byte) => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
     }
-    let url = target.url.trim().to_ascii_lowercase();
-    url.starts_with("app://-/index.html?")
-        && (url.contains("initialroute=%2favatar-overlay")
-            || url.contains("initialroute=/avatar-overlay"))
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn is_chatgpt_desktop_page(title: &str, url: &str) -> bool {
