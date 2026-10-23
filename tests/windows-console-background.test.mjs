@@ -42,7 +42,10 @@ test("Windows source contract: fatal startup failures remain visible", async () 
     failureBranch,
     /if let Err\(error\) = &result \{\s*show_initial_startup_failure\(error\)\.await;/,
   );
-  assert.match(failureBranch, /return result\.map_err\(anyhow::Error::msg\)/);
+  assert.match(
+    failureBranch,
+    /return result\s*\.map\(\|reason\| lifecycle\.shutdown_requested\(reason\)\)\s*\.map_err\(anyhow::Error::msg\)/,
+  );
 
   const cleanupHelper = library.slice(
     library.indexOf("async fn stop_runtime_with_retry"),
@@ -116,12 +119,13 @@ test("Windows source contract: packaged Codex exit uses an OS process wait", asy
 
   assert.match(
     watcher,
-    /codey_runtime_core::launcher::wait_for_windows_process_id\(process_id\)/,
+    /codey_runtime_core::launcher::wait_for_windows_process_exit\(process_id\)/,
   );
   assert.match(
     coreLauncher,
-    /pub async fn wait_for_windows_process_id\(process_id: u32\)/,
+    /pub async fn wait_for_windows_process_exit\(process_id: u32\) -> anyhow::Result<Option<u32>>/,
   );
+  assert.match(watcher, /Ok\(code\) => \{\s*exit_code = code;\s*true/);
   assert.match(coreLauncher, /WaitForSingleObject\(HANDLE\(handle\.as_raw_handle\(\)\), 0\)/);
   assert.match(coreLauncher, /OwnedHandle/);
   assert.doesNotMatch(coreLauncher, /WaitForSingleObject\([^\n]*INFINITE\)/);

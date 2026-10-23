@@ -1201,6 +1201,7 @@ async fn stop_runtime_watcher(
 async fn stop_codex_processes(
     app_dir: &std::path::Path,
     process_id: Option<u32>,
+    #[cfg(windows)] renderer_websocket_url: Option<&str>,
     #[cfg(unix)] process_group_id: Option<u32>,
 ) -> Result<()> {
     #[cfg(target_os = "macos")]
@@ -1217,7 +1218,11 @@ async fn stop_codex_processes(
     }
     #[cfg(windows)]
     {
-        terminate_windows_codex_processes(app_dir, process_id).await
+        if let Some(websocket_url) = renderer_websocket_url {
+            stop_windows_codex_processes(app_dir, process_id, websocket_url).await
+        } else {
+            terminate_windows_codex_processes(app_dir, process_id).await
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -1296,6 +1301,8 @@ async fn inject_initial_renderer(
     if let Err(stop_error) = stop_codex_processes(
         app_dir,
         spawned.process_id,
+        #[cfg(windows)]
+        None,
         #[cfg(unix)]
         spawned.process_group_id,
     )
@@ -2374,10 +2381,14 @@ impl CodeyRuntime {
     }
 
     pub async fn stop(&self) -> Result<()> {
+        #[cfg(windows)]
+        let renderer_websocket_url = self.injection_websocket_url.read().await.clone();
         self.stop_with_cleanup(
             stop_codex_processes(
                 &self.codex_app_path,
                 self.process_id,
+                #[cfg(windows)]
+                Some(&renderer_websocket_url),
                 #[cfg(unix)]
                 self.process_group_id,
             ),

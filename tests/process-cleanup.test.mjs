@@ -17,13 +17,16 @@ test("every shutdown path reaps Codex and Codey process trees", async () => {
     ]);
   const launcherModules = `${launcher}\n${launcherProcess}\n${launcherPlatform}`;
 
-  const shutdownStart = library.indexOf("let cleanup = stop_runtime_with_retry(&state).await;");
+  const shutdownStart = library.indexOf("let shutdown_started_at = std::time::SystemTime::now();");
   const shutdownEnd = library.indexOf("runtime_shutdown_result(shutdown_reason, cleanup)", shutdownStart);
   assert.notEqual(shutdownStart, -1);
   assert.ok(shutdownEnd > shutdownStart);
   const finalShutdown = library.slice(shutdownStart, shutdownEnd);
   assert.match(finalShutdown, /stop_runtime_with_retry\(&state\)\.await/);
-  assert.match(finalShutdown, /terminate_other_codey_processes_since\(shutdown_started_at\)\.await/);
+  assert.match(
+    finalShutdown,
+    /process_cleanup::terminate_other_codey_processes_since\(shutdown_started_at\)\.await/,
+  );
   assert.doesNotMatch(
     finalShutdown,
     /if shutdown_reason == ShutdownReason::CodexExited/,

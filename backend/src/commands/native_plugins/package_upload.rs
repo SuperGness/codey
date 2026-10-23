@@ -41,8 +41,12 @@ struct Uploads {
 
 impl Uploads {
     fn receive(&mut self, value: Value) -> Result<Value, String> {
+        self.receive_at(value, Instant::now())
+    }
+
+    fn receive_at(&mut self, value: Value, now: Instant) -> Result<Value, String> {
         self.files
-            .retain(|_, upload| upload.touched.elapsed() < UPLOAD_LIFETIME);
+            .retain(|_, upload| now.saturating_duration_since(upload.touched) < UPLOAD_LIFETIME);
         let chunk: Chunk = serde_json::from_value(value)
             .map_err(|error| format!("插件包上传参数无效：{error}"))?;
         if chunk.name.len() > 255
@@ -79,7 +83,7 @@ impl Uploads {
                         name: chunk.name.clone(),
                         size: 0,
                         ready: false,
-                        touched: Instant::now(),
+                        touched: now,
                     },
                 );
                 id
@@ -101,7 +105,7 @@ impl Uploads {
                 .write_all(&bytes)
                 .map_err(|error| error.to_string())?;
             upload.size += bytes.len() as u64;
-            upload.touched = Instant::now();
+            upload.touched = now;
             if !chunk.complete {
                 return Ok(json!({"uploadId": id}));
             }
@@ -213,14 +217,23 @@ mod tests {
                 .unwrap_err()
                 .contains("64 MiB")
         );
+        let now = Instant::now();
         for _ in 0..MAX_UPLOADS {
-            uploads.receive(chunk(None, 0, b"data", false)).unwrap();
+            uploads
+                .receive_at(chunk(None, 0, b"data", false), now)
+                .unwrap();
         }
-        assert!(uploads.receive(chunk(None, 0, b"data", false)).is_err());
-        for upload in uploads.files.values_mut() {
-            upload.touched = Instant::now() - UPLOAD_LIFETIME;
-        }
-        uploads.receive(chunk(None, 0, b"data", false)).unwrap();
+        assert!(
+            uploads
+                .receive_at(
+                    chunk(None, 0, b"data", false),
+                    now + UPLOAD_LIFETIME - Duration::from_nanos(1),
+                )
+                .is_err()
+        );
+        uploads
+            .receive_at(chunk(None, 0, b"data", false), now + UPLOAD_LIFETIME)
+            .unwrap();
         assert_eq!(uploads.files.len(), 1);
     }
 
