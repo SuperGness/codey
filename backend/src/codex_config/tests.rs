@@ -1312,12 +1312,10 @@ fn runtime_analysis_agents_share_tools_and_keep_task_boundaries() {
 
     for plan in &plans {
         let config = parse_document(std::str::from_utf8(&plan.contents).unwrap()).unwrap();
-        assert!(
-            config["developer_instructions"]
-                .as_str()
-                .unwrap()
-                .contains(SUBAGENT_TASK_BOUNDARY_GUARD)
-        );
+        let instructions = config["developer_instructions"].as_str().unwrap();
+        assert!(instructions.contains(SUBAGENT_TASK_BOUNDARY_GUARD));
+        assert!(instructions.contains("不要单独发送进度消息"));
+        assert!(!instructions.contains("契约显式授予"));
     }
     let quick_scan = plans
         .iter()
@@ -3102,11 +3100,11 @@ command = "echo preserve-user-hook"
     );
     assert_eq!(
         multi_agent["default_wait_timeout_ms"].as_integer(),
-        Some(30_000)
+        Some(120_000)
     );
     assert_eq!(
         multi_agent["max_wait_timeout_ms"].as_integer(),
-        Some(30_000)
+        Some(120_000)
     );
     assert_eq!(multi_agent["custom_setting"].as_str(), Some("preserved"));
     assert_eq!(document["features"]["hooks"].as_bool(), Some(true));
@@ -3898,7 +3896,7 @@ wire_api = "responses"
         applied
             .runtime_config_overrides
             .iter()
-            .any(|entry| entry == "features.multi_agent_v2.max_wait_timeout_ms=30000")
+            .any(|entry| entry == "features.multi_agent_v2.max_wait_timeout_ms=120000")
     );
     assert!(!home.join("AGENTS.md").exists());
     assert!(!home.join("agents/default.toml").exists());
