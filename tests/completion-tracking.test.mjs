@@ -440,12 +440,19 @@ test("reconciles when the conversation appears after renderer startup", async ()
   assert.equal(events.length, 0);
 
   runtime.setSessionId("session-1");
-  runtime.emitMutations([{
+  const mutation = {
     type: "childList",
     target: new FakeElement(),
     addedNodes: [],
     removedNodes: [],
-  }]);
+  };
+  // The session lookup reads layout, so mutation batches defer it to a timer.
+  runtime.emitMutations([mutation]);
+  runtime.emitMutations([mutation]);
+  await flushMicrotasks();
+  assert.equal(events.length, 0);
+
+  runtime.flushTimers();
   await flushMicrotasks();
 
   assert.deepEqual(events.map((event) => event.payload.conversationId), ["session-1"]);

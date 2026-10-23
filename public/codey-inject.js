@@ -62,6 +62,7 @@
   let completionReconcileInFlight = false;
   let completionNextReconcileAt = 0;
   let completionReconcileSessionId = "";
+  let completionReconcileCheckTimer = 0;
   let sidebarActionTooltipTimer = 0;
   let sidebarActionTooltipAnchor = null;
   let threadUpdatedAtFetchTimer = 0;
@@ -107,6 +108,9 @@
   // 一次超时置失败后按常规周期重试即可。
   const threadTimestampFetchTimeoutMs = 10_000;
   const completedTaskReconcileIntervalMs = 15_000;
+  // getSessionId() reads layout (getClientRects); calling it inside every
+  // mutation batch forced a synchronous reflow per streamed chunk.
+  const completionReconcileMutationDelayMs = 250;
   const threadTimestampBridgePath = "/session/timestamps";
   const maxPendingThreadTimestampRefs = 200;
   const fallbackSessionExportMaxBytes = 64 * 1024 * 1024;
@@ -3799,16 +3803,11 @@
     if (pendingScanRoots.size) {
       scheduleIncrementalScan(null);
     }
-    const sessionId = getSessionId();
-    if (
-      sessionId
-      && !completionReconcileInFlight
-      && (
-        sessionId !== completionReconcileSessionId
-        || Date.now() >= completionNextReconcileAt
-      )
-    ) {
-      void reconcileStaleCompletedTask();
+    if (!completionReconcileCheckTimer && !completionReconcileInFlight) {
+      completionReconcileCheckTimer = window.setTimeout(() => {
+        completionReconcileCheckTimer = 0;
+        void reconcileStaleCompletedTask();
+      }, completionReconcileMutationDelayMs);
     }
   };
   const sessionToolMutationOptions = {
@@ -3852,7 +3851,12 @@
       try { target.removeEventListener?.(type, handler, options); } catch {}
     }
     for (const id of installedIntervals) window.clearInterval?.(id);
-    for (const id of [scanTimer, watcherWakeTimer, threadUpdatedAtFetchTimer]) {
+    for (const id of [
+      scanTimer,
+      watcherWakeTimer,
+      threadUpdatedAtFetchTimer,
+      completionReconcileCheckTimer,
+    ]) {
       window.clearTimeout(id);
     }
     if (initialScanUsesIdleCallback) window.cancelIdleCallback?.(initialScanHandle);
