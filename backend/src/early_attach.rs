@@ -359,7 +359,7 @@ fn log_early_attach(event: &str, detail: Value) {
 /// 反复发送注定失败的命令只会污染诊断。Armed 附带握手窗口内被跳过
 /// 的挂载事件：页面创建可能落在应答之前，事件不补处理目标会一直暂停。
 enum ArmAttempt {
-    Armed(BrowserArm, Vec<Value>),
+    Armed(Box<BrowserArm>, Vec<Value>),
     Retry,
     GiveUp,
 }
@@ -424,7 +424,7 @@ async fn arm_browser_endpoint(
     match response {
         Some((true, pending)) => {
             log_early_attach("early_attach.armed", json!({}));
-            ArmAttempt::Armed(arm, pending)
+            ArmAttempt::Armed(Box::new(arm), pending)
         }
         Some((false, _)) => {
             diagnostics.lock().unwrap().last_arm_error = Some("autoAttachRejected".to_string());
@@ -597,7 +597,7 @@ async fn run_early_attach_prefetch(
                 }
                 match arm_browser_endpoint(debug_port, diagnostics, cleanup_tasks).await {
                     ArmAttempt::Armed(session, pending) => {
-                        arm = Some(session);
+                        arm = Some(*session);
                         for payload in pending {
                             if let Some(result) =
                                 handle_attached(&mut arm, debug_port, &payload).await

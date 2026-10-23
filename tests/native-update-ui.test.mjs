@@ -18,7 +18,7 @@ test("automatic update checks start after Codex launches and share runtime shutd
   assert.ok(launch < update);
   assert.match(
     library.slice(launch, update),
-    /Ok\(_\) => \{\s*break wait_for_runtime_shutdown\(/,
+    /Ok\(_\) => \{\s*lifecycle\.set_reason\("runtime_failed"\);\s*break wait_for_runtime_shutdown\(/,
   );
   assert.match(
     library,

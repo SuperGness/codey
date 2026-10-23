@@ -648,17 +648,11 @@ pub(crate) fn observe_siwc_upstream_rejection(route: &RouteTarget, status: u16, 
         | Some("chatpass_v2_invalid_authorization_context") => {
             "官方直连的授权范围已失效，请重新授权"
         }
-        Some(_) => {
-            if status == 401 {
-                "官方直连凭据被官方拒绝，请重新授权"
-            } else {
-                return;
-            }
-        }
+        Some(_) if status == 401 => "官方直连凭据被官方拒绝，请重新授权",
         // direct-admission 的 401 可能没有结构化 code；凭据被明确拒绝同样按
         // 失效处理，400/403/429/503 一律不动。
         None if status == 401 => "官方直连凭据被官方拒绝，请重新授权",
-        None => return,
+        _ => return,
     };
     let store = crate::official_accounts::OfficialAccountStore::for_config_path(
         &crate::config::default_config_path(),

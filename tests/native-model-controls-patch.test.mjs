@@ -709,14 +709,17 @@ test("starting or restarting Codex replaces the old runtime with one managed by 
   assert.match(restartFlow, /restart_task/);
   assert.match(restartFlow, /oneshot::channel\(\)/);
   assert.match(restartFlow, /is_shutting_down\(\)/);
-  assert.match(restartFlow, /request_shutdown\(\)/);
+  assert.match(
+    restartFlow,
+    /request_shutdown_with_reason\(super::AppShutdownReason::RuntimeRestartFailed\)/,
+  );
   assert.match(
     runtimeSource,
     /pub async fn begin_shutdown[\s\S]*?cancel\.send\(\(\)\)[\s\S]*?task\.await/,
   );
   assert.match(
     runtimeSource,
-    /runtime_generation\.load\(Ordering::Acquire\) == runtime_generation/,
+    /let current_generation = exit_state\.runtime_generation\.load\(Ordering::Acquire\);\s*let current_runtime = current_generation == runtime_generation;[\s\S]*?if current_runtime \{\s*exit_state\.request_shutdown\(\)/,
   );
   assert.match(
     launcherModules,

@@ -560,9 +560,7 @@ const PREFETCH_HANDOFF_BUDGET: Duration = Duration::from_secs(8);
 /// 端点的自动挂载——窗口在首个导航前被暂停时，Fetch 拦截能赶在任何资产
 /// 请求之前落位（early_attach 模块负责）。找不到目标返回 None，注入主
 /// 流程照常走发现重试。
-pub fn spawn_injectable_target_prefetch(
-    debug_port: u16,
-) -> crate::early_attach::PrefetchTask {
+pub fn spawn_injectable_target_prefetch(debug_port: u16) -> crate::early_attach::PrefetchTask {
     crate::early_attach::spawn_early_attach_prefetch(debug_port, PREFETCH_BUDGET)
 }
 
@@ -692,8 +690,8 @@ fn prefetch_deadlines(
         crate::early_attach::PREFETCH_CLEANUP_BUDGET + MINIMUM_VERIFICATION_BUDGET,
     ));
     let handoff_deadline = started + wait_budget;
-    let cleanup_deadline = (handoff_deadline + crate::early_attach::PREFETCH_CLEANUP_BUDGET)
-        .min(deadline);
+    let cleanup_deadline =
+        (handoff_deadline + crate::early_attach::PREFETCH_CLEANUP_BUDGET).min(deadline);
     (handoff_deadline, cleanup_deadline)
 }
 
