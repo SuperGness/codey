@@ -1143,6 +1143,56 @@ pub(super) fn windows_extend_tracked_descendants_from_snapshot<'a>(
     }
 }
 
+#[cfg(any(windows, test))]
+fn windows_discover_tracked_descendants_from_snapshot<'a>(
+    expected_creation_times: &HashMap<u32, Option<u64>>,
+    processes: impl IntoIterator<Item = (u32, u32, Option<&'a Path>, Option<u64>)>,
+) -> HashSet<u32> {
+    let processes = processes.into_iter().collect::<Vec<_>>();
+    // 已退出或身份未知的父进程不能证明新的父子关系；已捕获的后代由调用方独立保留。
+    let mut verified_creation_times = processes
+        .iter()
+        .filter_map(|(process_id, _, _, creation_time)| {
+            let creation_time = (*creation_time)?;
+            (expected_creation_times.get(process_id) == Some(&Some(creation_time)))
+                .then_some((*process_id, creation_time))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut process_ids = verified_creation_times
+        .keys()
+        .copied()
+        .collect::<HashSet<_>>();
+    loop {
+        let previous_len = process_ids.len();
+        for (process_id, parent_process_id, executable_path, creation_time) in &processes {
+            if process_ids.contains(process_id) || expected_creation_times.contains_key(process_id)
+            {
+                continue;
+            }
+            let Some(parent_creation_time) =
+                verified_creation_times.get(parent_process_id).copied()
+            else {
+                continue;
+            };
+            // Toolhelp 保留旧父 PID；早于当前父进程创建的孤儿不属于它。
+            if creation_time.is_some_and(|created| created < parent_creation_time)
+                || executable_path.is_some_and(windows_executable_is_codex_service)
+            {
+                continue;
+            }
+            process_ids.insert(*process_id);
+            // 未知身份只用于阻止误报清理成功，不能作为后代发现或终止重试的依据。
+            if let Some(creation_time) = creation_time {
+                verified_creation_times.insert(*process_id, *creation_time);
+            }
+        }
+        if process_ids.len() == previous_len {
+            break;
+        }
+    }
+    process_ids
+}
+
 #[cfg(windows)]
 pub(super) async fn terminate_windows_codex_processes(
     app_dir: &Path,
@@ -1302,27 +1352,14 @@ async fn terminate_windows_codex_processes_with_snapshot(
             .filter(|process| !windows_executable_name_is_codex_service(&process.exe_file))
             .collect::<Vec<_>>();
         let previous_process_ids = process_ids.clone();
-        // A reused PID must not make the replacement process's children ours.
-        let mut discovery_process_ids = process_ids.clone();
-        discovery_process_ids.retain(|process_id| {
-            current_processes
-                .iter()
-                .find(|process| process.process_id == *process_id)
-                .is_none_or(|process| {
-                    expected_creation_times
-                        .get(process_id)
-                        .is_some_and(|expected| {
-                            process_creation_identity_matches(*expected, process.creation_time)
-                        })
-                })
-        });
-        windows_extend_tracked_descendants_from_snapshot(
-            &mut discovery_process_ids,
+        let discovery_process_ids = windows_discover_tracked_descendants_from_snapshot(
+            &expected_creation_times,
             current_processes.iter().map(|process| {
                 (
                     process.process_id,
                     process.parent_process_id,
                     process.executable_path.as_deref(),
+                    process.creation_time,
                 )
             }),
         );
@@ -1799,6 +1836,89 @@ mod compatibility_tests {
     }
 
     #[test]
+    fn descendant_discovery_ignores_a_reused_parent_after_it_exits() {
+        let expected = HashMap::from([(10, Some(1)), (11, Some(2))]);
+        for replacement_exists in [true, false] {
+            let mut current = vec![
+                (11, 10, None, Some(2)),
+                (12, 11, None, Some(3)),
+                (90, 10, None, Some(100)),
+            ];
+            if replacement_exists {
+                current.push((10, 4, None, Some(99)));
+            }
+            assert_eq!(
+                windows_discover_tracked_descendants_from_snapshot(&expected, current),
+                HashSet::from([11, 12]),
+                "replacement_exists={replacement_exists}",
+            );
+        }
+    }
+
+    #[test]
+    fn descendant_discovery_requires_a_verified_parent_identity() {
+        for (expected, actual) in [(None, None), (None, Some(1)), (Some(1), None)] {
+            assert!(
+                windows_discover_tracked_descendants_from_snapshot(
+                    &HashMap::from([(10, expected)]),
+                    [(10, 4, None, actual), (11, 10, None, Some(2))],
+                )
+                .is_empty(),
+                "expected={expected:?}, actual={actual:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn descendant_discovery_checks_creation_order_through_new_generations() {
+        let service = Path::new(r"C:\Shared\codex-windows-sandbox-service.exe");
+        assert_eq!(
+            windows_discover_tracked_descendants_from_snapshot(
+                &HashMap::from([(10, Some(100))]),
+                [
+                    (10, 4, None, Some(100)),
+                    (11, 10, None, Some(200)),
+                    (12, 11, None, Some(50)),
+                    (13, 11, None, None),
+                    (14, 13, None, Some(300)),
+                    (15, 11, None, Some(250)),
+                    (16, 11, Some(service), Some(250)),
+                    (17, 16, None, Some(300)),
+                ],
+            ),
+            HashSet::from([10, 11, 13, 15]),
+        );
+    }
+
+    #[test]
+    fn descendant_discovery_does_not_retrust_changed_or_unknown_identities() {
+        for expected_child_creation_time in [None, Some(2)] {
+            let expected = HashMap::from([(10, Some(1)), (11, expected_child_creation_time)]);
+            assert_eq!(
+                windows_discover_tracked_descendants_from_snapshot(
+                    &expected,
+                    [
+                        (10, 4, None, Some(1)),
+                        (11, 10, None, Some(99)),
+                        (12, 11, None, Some(100)),
+                    ],
+                ),
+                HashSet::from([10]),
+            );
+            let survivors = windows_stop_survivors(
+                &expected,
+                &[(11, "worker.exe".into(), Some(99))],
+                &expected.keys().copied().collect(),
+            );
+            if expected_child_creation_time.is_none() {
+                assert_eq!(survivors, vec![(11, "worker.exe".into(), None)]);
+            } else {
+                assert!(survivors.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn codex_instance_summary_lists_a_few_processes() {
         let instances = (1..=4)
             .map(|process_id| WindowsCodexInstance {
@@ -1886,7 +2006,9 @@ mod compatibility_tests {
             creation_time: Some(3),
             ..child.clone()
         };
-        for force_succeeds in [true, false] {
+        for (force_succeeds, replacement_exists) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
             let started = tokio::time::Instant::now();
             let snapshots = std::cell::Cell::new(0);
             let terminated = std::cell::RefCell::new(HashSet::new());
@@ -1899,18 +2021,18 @@ mod compatibility_tests {
                     if snapshots.get() == 1 {
                         return Ok(vec![root.clone(), child.clone()]);
                     }
-                    let mut remaining = vec![
-                        codey_runtime_core::WindowsProcessInfo {
+                    let mut remaining = vec![codey_runtime_core::WindowsProcessInfo {
+                        process_id: 90,
+                        parent_process_id: root.process_id,
+                        creation_time: Some(100),
+                        ..grandchild.clone()
+                    }];
+                    if replacement_exists {
+                        remaining.push(codey_runtime_core::WindowsProcessInfo {
                             creation_time: Some(99),
                             ..root.clone()
-                        },
-                        codey_runtime_core::WindowsProcessInfo {
-                            process_id: 90,
-                            parent_process_id: root.process_id,
-                            creation_time: Some(100),
-                            ..grandchild.clone()
-                        },
-                    ];
+                        });
+                    }
                     for process in [&child, &grandchild] {
                         if !force_succeeds || !terminated.borrow().contains(&process.process_id) {
                             remaining.push(codey_runtime_core::WindowsProcessInfo {
@@ -2062,8 +2184,7 @@ mod compatibility_tests {
         }
     }
 
-    // Toolhelp names identify unreadable services; other unreadable children
-    // must still prevent cleanup from being reported as successful.
+    // 已捕获的未知身份后代仍阻止误报成功；父进程退出后才出现的 PID 关系不授予所有权。
     #[cfg(windows)]
     #[tokio::test]
     async fn cleanup_snapshot_filters_unreadable_services_but_keeps_other_descendants() {
@@ -2116,7 +2237,7 @@ mod compatibility_tests {
                 .await;
                 assert_eq!(
                     result.is_ok(),
-                    expected_success,
+                    expected_success || !present_initially,
                     "{exe_file}, present_initially={present_initially}: {result:?}",
                 );
                 assert_eq!(calls, 2);
