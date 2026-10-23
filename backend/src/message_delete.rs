@@ -6,9 +6,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use codey_runtime_core::codex_sqlite::{
-    codex_session_db_paths_from_home, codex_sqlite_sidecar_paths,
-};
+use codey_runtime_core::codex_sqlite::codex_session_db_paths_from_home;
 use fs2::FileExt;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -263,11 +261,10 @@ pub(crate) fn reapply_persisted_deletions(home: &Path) -> Result<MessageDeleteRe
                 }
             }
             Ok(result) => {
-                // 未识别结构的库可能只是目录型 catalog。只有 rollout 文件和所有
-                // 数据库（含原始字节层面）都找不到该会话时，才认定整条会话已被
-                // 整体删除：删除意图已经无从落地，清掉失效墓碑，不再每次启动
-                // 重复报 patch_failed。任一存储仍引用该会话时保持保守失败。
-                if session_absent_from_every_store(home, &session_id) {
+                // 未识别结构的库可能只是目录型 catalog。记录文件已不存在、被删
+                // 轮次也查不到时，删除意图已经无从落地，清掉失效墓碑，不再每次
+                // 启动重复报 patch_failed。仍可能存在时保持保守失败。
+                if deleted_turns_absent_from_every_store(home, &session_id, &message_ids) {
                     match remove_delete_tombstones(&paths) {
                         Ok(()) => {
                             summary.cleared_sessions += 1;
@@ -279,13 +276,18 @@ pub(crate) fn reapply_persisted_deletions(home: &Path) -> Result<MessageDeleteRe
                     summary.failures.push((
                         session_id,
                         format!(
-                            "无法确认消息删除是否已落地；{} 个数据库结构不受支持（{}）；且未找到匹配的会话记录文件",
+                            "无法确认消息删除是否已落地；{} 个数据库结构不受支持（{}），且会话记录或数据库仍可能保留已删除的对话轮",
                             result.unsupported_databases.len(),
                             result
                                 .unsupported_databases
                                 .iter()
-                                .filter_map(|path| Path::new(path).file_name())
-                                .map(|name| name.to_string_lossy().to_string())
+                                .map(|path| {
+                                    let path = Path::new(path);
+                                    path.strip_prefix(home)
+                                        .unwrap_or(path)
+                                        .to_string_lossy()
+                                        .to_string()
+                                })
                                 .collect::<Vec<_>>()
                                 .join(", "),
                         ),
@@ -737,13 +739,19 @@ fn rollout_thread_id_from_filename(name: &str) -> Option<String> {
     valid.then(|| candidate.to_string())
 }
 
-/// 扫描字节时的上限。超大文件宁可保留墓碑保守失败，也不在启动路径上全文扫描。
-const MAX_SESSION_SCAN_BYTES: usize = 256 * 1024 * 1024;
+/// 逻辑扫描的库大小上限。超大库宁可保留墓碑保守失败，也不在启动路径上全表扫描。
+const MAX_DATABASE_SCAN_BYTES: u64 = 256 * 1024 * 1024;
 
-/// 仅当整条会话在所有已知存储中都找不到时才返回 true：
-/// 文件名兜底扫描一无所获，且每个候选数据库（含 wal/shm）的原始字节里都不出现
-/// 该会话 id。非 uuid 形态的 id 无法通过文件名匹配验证，一律保持保守（false）。
-fn session_absent_from_every_store(home: &Path, session_id: &str) -> bool {
+/// 会话记录文件已找不到时，判断删除意图是否已无处可落：被删的轮次不在任何存储里，
+/// 且线程历史以外的库也不再引用该会话（引用说明线程仍存活，记录文件可能只是暂时
+/// 找不到）。线程历史只是记录文件的派生投影，Codex 整体删除线程后可能残留其他轮次，
+/// 这些残留不会让已删轮次复活，因此那里只按轮次查。非 uuid 形态的 id 无法通过
+/// 文件名匹配验证，一律保持保守（false）。
+fn deleted_turns_absent_from_every_store(
+    home: &Path,
+    session_id: &str,
+    turn_ids: &[String],
+) -> bool {
     if rollout_thread_id_from_filename(&format!("rollout-anchor-{session_id}.jsonl"))
         .is_none_or(|thread_id| thread_id != session_id)
     {
@@ -752,63 +760,66 @@ fn session_absent_from_every_store(home: &Path, session_id: &str) -> bool {
     if find_rollout_file_by_session_id(home, session_id).is_some() {
         return false;
     }
-    !databases_reference_session(home, session_id)
+    !databases_reference_deleted_turns(home, session_id, turn_ids)
 }
 
-/// 未知结构的库仍可能藏着这段历史，因此按原始字节查证会话 id 是否被引用。
-/// SQLite 的 TEXT/blob 值不压缩存储，会话 id 会以明文出现在文件或 wal 中；
-/// 查不到只说明「没有证据表明它存在」，误报方向是继续保守失败而非丢墓碑。
-fn databases_reference_session(home: &Path, session_id: &str) -> bool {
-    let needle = session_id.as_bytes();
-    let mut database_paths = codex_session_db_paths_from_home(home);
-    // 线程历史库常超过字节扫描上限，会被一律当作仍有引用，墓碑因而每次启动
-    // 都重放；结构可识别时改用按 thread_id 的索引查询。
-    match thread_history_references_session(&home.join(THREAD_HISTORY_DB), session_id) {
-        Ok(Some(true)) => return true,
+/// 查证只看现存行：已删除的数据会留在 SQLite 空闲页里，按原始字节扫描会把这些
+/// 残留误判为仍被引用，导致墓碑永远无法清除。任何无法查证的情况都按「仍被引用」处理。
+fn databases_reference_deleted_turns(home: &Path, session_id: &str, turn_ids: &[String]) -> bool {
+    let thread_history = home.join(THREAD_HISTORY_DB);
+    match thread_history_references_turns(&thread_history, session_id, turn_ids) {
+        Ok(Some(true)) | Err(_) => return true,
         Ok(Some(false)) => {}
-        Ok(None) | Err(_) => database_paths.push(home.join(THREAD_HISTORY_DB)),
-    }
-    for db_path in database_paths {
-        for path in codex_sqlite_sidecar_paths(&db_path) {
-            if scan_session_reference(&path, needle).unwrap_or(true) {
+        Ok(None) => {
+            if database_rows_reference_any(&thread_history, session_id, turn_ids).unwrap_or(true) {
                 return true;
             }
         }
     }
-    false
+    codex_session_db_paths_from_home(home)
+        .iter()
+        .any(|path| database_rows_reference_any(path, session_id, turn_ids).unwrap_or(true))
 }
 
-/// `None` 表示库不存在或结构未识别，由调用方回落到字节扫描。
-fn thread_history_references_session(path: &Path, session_id: &str) -> Result<Option<bool>> {
+/// `None` 表示库不存在或结构未识别，由调用方回落到逐列查证。
+fn thread_history_references_turns(
+    path: &Path,
+    session_id: &str,
+    turn_ids: &[String],
+) -> Result<Option<bool>> {
     if !path.exists() {
         return Ok(None);
     }
     let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     connection.busy_timeout(MESSAGE_DELETE_SQLITE_BUSY_TIMEOUT)?;
-    let tables = {
-        let mut statement =
-            connection.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
-        statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    let mut thread_tables = Vec::new();
-    for table in tables {
-        if crate::sqlite_util::table_columns(&connection, &table)?.contains("thread_id") {
-            thread_tables.push(table);
+    let mut turn_tables = Vec::new();
+    for table in sqlite_table_names(&connection)? {
+        let columns = crate::sqlite_util::table_columns(&connection, &table)?;
+        if columns.contains("thread_id") && columns.contains("turn_id") {
+            turn_tables.push(table);
         }
     }
     if !["thread_items", "thread_turns"]
         .iter()
-        .all(|required| thread_tables.iter().any(|table| table == required))
+        .all(|required| turn_tables.iter().any(|table| table == required))
     {
         return Ok(None);
     }
-    for table in thread_tables {
+    if turn_ids.is_empty() {
+        return Ok(Some(false));
+    }
+    let placeholders = std::iter::repeat_n("?", turn_ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut values = vec![session_id.to_string()];
+    values.extend(turn_ids.iter().cloned());
+    for table in turn_tables {
         let escaped = table.replace('"', "\"\"");
         let referenced: bool = connection.query_row(
-            &format!("SELECT EXISTS(SELECT 1 FROM \"{escaped}\" WHERE thread_id = ?1)"),
-            [session_id],
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM \"{escaped}\" WHERE thread_id = ? AND turn_id IN ({placeholders}))"
+            ),
+            params_from_iter(values.iter()),
             |row| row.get(0),
         )?;
         if referenced {
@@ -818,39 +829,69 @@ fn thread_history_references_session(path: &Path, session_id: &str) -> Result<Op
     Ok(Some(false))
 }
 
-fn scan_session_reference(path: &Path, needle: &[u8]) -> std::io::Result<bool> {
-    let mut file = match fs::File::open(path) {
-        Ok(file) => file,
+/// 结构未识别的库逐表逐列查找会话或被删轮次的标识。带 `threads(id)` 表的状态库
+/// 只以该表判断会话是否存活：子代理线程等元数据会在父会话删除后继续提到它的 id。
+/// SQLite 打开时会合并 wal 中已提交的内容。
+fn database_rows_reference_any(path: &Path, session_id: &str, turn_ids: &[String]) -> Result<bool> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     };
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.len() > MAX_SESSION_SCAN_BYTES as u64 || needle.is_empty() {
+    if !metadata.is_file() || metadata.len() > MAX_DATABASE_SCAN_BYTES {
         return Ok(true);
     }
-    let mut buffer = vec![0; 64 * 1024 + needle.len()];
-    let mut overlap = 0;
-    let mut total = 0;
-    loop {
-        let count = file.read(&mut buffer[overlap..])?;
-        total += count;
-        if total > MAX_SESSION_SCAN_BYTES {
+    let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(MESSAGE_DELETE_SQLITE_BUSY_TIMEOUT)?;
+    let tables = sqlite_table_names(&connection)?;
+    let mut needles = turn_ids.to_vec();
+    if tables.iter().any(|table| table == "threads")
+        && crate::sqlite_util::table_columns(&connection, "threads")?.contains("id")
+    {
+        let alive: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM threads WHERE id = ?1)",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        if alive {
             return Ok(true);
         }
-        let available = overlap + count;
-        if buffer[..available]
-            .windows(needle.len())
-            .any(|value| value == needle)
-        {
-            return Ok(true);
-        }
-        if count == 0 {
-            return Ok(!same_rollout_metadata(&metadata, &file.metadata()?)
-                || !same_rollout_metadata(&metadata, &fs::metadata(path)?));
-        }
-        overlap = available.min(needle.len() - 1);
-        buffer.copy_within(available - overlap..available, 0);
+    } else {
+        needles.push(session_id.to_string());
     }
+    for table in tables {
+        let columns = crate::sqlite_util::table_columns(&connection, &table)?;
+        if columns.is_empty() {
+            continue;
+        }
+        let condition = columns
+            .iter()
+            .map(|column| {
+                let column = column.replace('"', "\"\"");
+                format!("instr(CAST(\"{column}\" AS TEXT), ?1) > 0")
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let table = table.replace('"', "\"\"");
+        let mut statement = connection.prepare(&format!(
+            "SELECT EXISTS(SELECT 1 FROM \"{table}\" WHERE {condition})"
+        ))?;
+        for needle in needles.iter().filter(|needle| !needle.is_empty()) {
+            if statement.query_row([needle], |row| row.get::<_, bool>(0))? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn sqlite_table_names(connection: &Connection) -> Result<Vec<String>> {
+    let mut statement =
+        connection.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(names)
 }
 
 fn delete_turns_from_rollout(
@@ -1431,24 +1472,94 @@ mod tests {
     }
 
     #[test]
-    fn session_scan_is_bounded_and_preserves_uncertain_references() {
+    fn unverifiable_databases_preserve_uncertain_references() {
         let directory = tempdir().unwrap();
         let path = directory.path().join(THREAD_HISTORY_DB);
         let session = "019ff8aa-0b6e-7a01-a605-7a717a7795e3";
-        let mut bytes = vec![b'x'; 64 * 1024 + session.len() - 4];
-        bytes.extend_from_slice(session.as_bytes());
-        fs::write(&path, bytes).unwrap();
-        assert!(scan_session_reference(&path, session.as_bytes()).unwrap());
+        let turns = vec!["t1".to_string()];
+        fs::write(&path, b"not a sqlite database").unwrap();
+        assert!(!deleted_turns_absent_from_every_store(
+            directory.path(),
+            session,
+            &turns
+        ));
         fs::OpenOptions::new()
             .write(true)
             .open(&path)
             .unwrap()
-            .set_len(MAX_SESSION_SCAN_BYTES as u64 + 1)
+            .set_len(MAX_DATABASE_SCAN_BYTES + 1)
             .unwrap();
-        assert!(!session_absent_from_every_store(directory.path(), session));
+        assert!(database_rows_reference_any(&path, session, &turns).unwrap());
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
-        assert!(!session_absent_from_every_store(directory.path(), session));
+        assert!(!deleted_turns_absent_from_every_store(
+            directory.path(),
+            session,
+            &turns
+        ));
+    }
+
+    #[test]
+    fn deleted_row_residue_in_free_pages_is_not_a_reference() {
+        let directory = tempdir().unwrap();
+        let session = "019ff8aa-0b6e-7a01-a605-7a717a7795e3";
+        let path = directory.path().join("state_5.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA secure_delete = OFF;\
+                 CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT);",
+            )
+            .unwrap();
+        connection
+            .execute("INSERT INTO threads VALUES (?1, 'deleted')", [session])
+            .unwrap();
+        connection
+            .execute("DELETE FROM threads WHERE id = ?1", [session])
+            .unwrap();
+        drop(connection);
+        let bytes = fs::read(&path).unwrap();
+        assert!(
+            bytes
+                .windows(session.len())
+                .any(|window| window == session.as_bytes()),
+            "fixture must leave the deleted id in a free page"
+        );
+
+        assert!(deleted_turns_absent_from_every_store(
+            directory.path(),
+            session,
+            &["t1".to_string()]
+        ));
+        // 父会话删除后，子代理线程的元数据仍会提到它的 id，这不代表父会话存活。
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads VALUES ('child', ?1)",
+                [format!("{{\"parent_thread_id\":\"{session}\"}}")],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(deleted_turns_absent_from_every_store(
+            directory.path(),
+            session,
+            &["t1".to_string()]
+        ));
+        assert!(!deleted_turns_absent_from_every_store(
+            directory.path(),
+            session,
+            &["child".to_string()]
+        ));
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute("INSERT INTO threads VALUES (?1, 'live')", [session])
+            .unwrap();
+        drop(connection);
+        assert!(!deleted_turns_absent_from_every_store(
+            directory.path(),
+            session,
+            &["t1".to_string()]
+        ));
     }
 
     #[test]
@@ -1473,10 +1584,25 @@ mod tests {
             .write(true)
             .open(&path)
             .unwrap()
-            .set_len(MAX_SESSION_SCAN_BYTES as u64 + 1)
+            .set_len(MAX_DATABASE_SCAN_BYTES + 1)
             .unwrap();
-        assert!(!session_absent_from_every_store(directory.path(), present));
-        assert!(session_absent_from_every_store(directory.path(), absent));
+        let deleted = ["t1".to_string()];
+        assert!(!deleted_turns_absent_from_every_store(
+            directory.path(),
+            present,
+            &deleted
+        ));
+        assert!(deleted_turns_absent_from_every_store(
+            directory.path(),
+            absent,
+            &deleted
+        ));
+        // 线程整体删除后残留的其他轮次不会让已删轮次复活。
+        assert!(deleted_turns_absent_from_every_store(
+            directory.path(),
+            present,
+            &["t2".to_string()]
+        ));
     }
 
     #[test]
@@ -2649,6 +2775,50 @@ mod tests {
         let replay = reapply_persisted_deletions(home.path()).unwrap();
 
         assert_eq!(replay.deleted, 0);
+        assert_eq!(replay.cleared_sessions, 1);
+        assert!(replay.failures.is_empty());
+        assert!(!tombstone.exists());
+    }
+
+    #[test]
+    fn drops_a_tombstone_when_only_unrelated_projected_turns_remain() {
+        let home = tempdir().unwrap();
+        let session_id = "019ff8aa-0b6e-7a01-a605-7a717a7795e3";
+        let history = Connection::open(home.path().join(THREAD_HISTORY_DB)).unwrap();
+        history
+            .execute_batch(
+                "CREATE TABLE thread_turns (thread_id TEXT, turn_id TEXT);\
+                 CREATE TABLE thread_items (thread_id TEXT, turn_id TEXT);",
+            )
+            .unwrap();
+        history
+            .execute("INSERT INTO thread_turns VALUES (?1, 't0')", [session_id])
+            .unwrap();
+        drop(history);
+        let sqlite_dir = home.path().join("sqlite");
+        fs::create_dir_all(&sqlite_dir).unwrap();
+        let catalog = Connection::open(sqlite_dir.join("codex.db")).unwrap();
+        catalog
+            .execute("CREATE TABLE automation_runs (id TEXT PRIMARY KEY)", [])
+            .unwrap();
+        drop(catalog);
+
+        let directory = tombstone_directory(home.path());
+        create_private_directory(&directory).unwrap();
+        let tombstone = tombstone_path(&directory, session_id, "t1");
+        write_private_file(
+            &tombstone,
+            &serde_json::to_vec(&MessageDeleteTombstone {
+                version: TOMBSTONE_VERSION,
+                session_id: session_id.into(),
+                message_id: "t1".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let replay = reapply_persisted_deletions(home.path()).unwrap();
+
         assert_eq!(replay.cleared_sessions, 1);
         assert!(replay.failures.is_empty());
         assert!(!tombstone.exists());
