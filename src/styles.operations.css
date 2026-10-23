@@ -10,67 +10,6 @@
   min-width: 0;
 }
 
-.operations-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 0 0 20px;
-}
-
-.operations-heading {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-
-.operations-heading-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.operations-title-row {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.codex-version-tag {
-  display: inline-flex;
-  align-items: center;
-  max-width: 220px;
-  min-height: 24px;
-  padding: 3px 9px;
-  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.08);
-  border-radius: 7px;
-  background: rgba(var(--codey-surface-rgb, 255, 255, 255), 0.78);
-  color: var(--codey-text-soft, #3a3a3c);
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 16px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.operations-heading p {
-  margin: 0;
-  font-size: 12px;
-  color: var(--codey-muted, #6e6e73);
-}
-
-.operations-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
 .operations-status-dot {
   width: 7px;
   height: 7px;
@@ -78,91 +17,6 @@
   background: currentColor;
   display: inline-block;
   margin-right: 4px;
-}
-
-.operations-status-chips {
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  padding-right: 12px;
-  border-right: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.08);
-  margin-right: 4px;
-  min-width: 0;
-  flex-shrink: 1;
-  flex-wrap: wrap;
-}
-
-.operations-status-chip {
-  --chip-tone: var(--codey-muted, #6e6e73);
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 0;
-  border: 0;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-  background: transparent;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.operations-status-chip:hover,
-.operations-status-chip.active {
-  border-bottom-color: var(--mac-blue);
-}
-
-.operations-status-chip:focus-visible {
-  outline: 2px solid var(--mac-blue);
-  outline-offset: 3px;
-}
-
-.operations-status-chip.tone-success {
-  --chip-tone: var(--codey-green, #248a3d);
-}
-
-.operations-status-chip.tone-warning {
-  --chip-tone: var(--codey-amber, #c26d00);
-}
-
-.operations-status-chip.tone-destructive {
-  --chip-tone: var(--codey-red, #d70015);
-}
-
-.operations-status-chip.tone-info {
-  --chip-tone: var(--codey-blue, #007aff);
-}
-
-.operations-status-chip-icon {
-  display: grid;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  place-items: center;
-  color: var(--chip-tone);
-}
-
-.operations-status-chip-copy {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 6px;
-  line-height: 1.4;
-}
-
-.operations-status-chip-copy strong {
-  color: var(--codey-text-soft, #3a3a3c);
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.operations-status-chip-copy small {
-  color: var(--chip-tone);
-  font-size: 10px;
-  font-weight: 500;
-  white-space: nowrap;
 }
 
 .operations-status-cards {
@@ -328,20 +182,6 @@
 
 [data-theme="dark"] .expanded-tray-toolbar {
   border-bottom-color: rgba(255, 255, 255, 0.06);
-}
-
-.expanded-card-feature-count {
-  color: var(--codey-muted, #6e6e73);
-  font-size: 11.5px;
-  font-weight: 500;
-}
-
-.expanded-card-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-left: auto;
 }
 
 .expanded-card-body {
@@ -540,39 +380,6 @@
   padding-top: 4px;
 }
 
-.path-display {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-radius: 8px;
-  background: var(--codey-surface-sunken, #f2f2f7);
-  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.04);
-  overflow: hidden;
-}
-
-.path-display code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-  color: var(--codey-text, #1d1d1f);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.operations-status-chip-wrap {
-  display: inline-flex;
-  align-items: center;
-}
-
-.settings-page .header-path-display {
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-
-.settings-page .expanded-card-icon,
 .settings-page .expanded-metric-icon,
 .settings-page .injection-script-icon {
   border-radius: 0;

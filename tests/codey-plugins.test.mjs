@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
-const { parseCodeyPluginsResult, validatePluginConfigText, pluginStatusLabel, pluginConfigBusinessValuesEqual } = await loadTypeScriptModule(
+const { parseCodeyPluginsResult, validatePluginConfigText, pluginConfigBusinessValuesEqual } = await loadTypeScriptModule(
   new URL("../src/codeyPlugins.ts", import.meta.url),
 );
 
@@ -12,13 +12,6 @@ test("plugin list validation distinguishes valid empty lists from malformed stat
   const plugin = { id: "demo", name: "Demo", version: "1", status: "stopped", enabled: false, configPath: "/demo/config.json", capabilities: [] };
   assert.equal(parseCodeyPluginsResult({ ...empty, plugins: [plugin] }).plugins[0], plugin);
   for (const value of [null, {}, { plugins: [] }, { ...empty, plugins: [null] }, { ...empty, plugins: [{ ...plugin, enabled: "false" }] }, { ...empty, plugins: [{ ...plugin, capabilities: null }] }, { ...empty, plugins: [plugin, plugin] }]) assert.throws(() => parseCodeyPluginsResult(value));
-});
-
-test("runtime errors remain visible when an upgrade is pending", () => {
-  assert.equal(pluginStatusLabel({ enabled: true, restartRequired: true, lastError: "failed" }), "运行异常");
-  assert.equal(pluginStatusLabel({ enabled: false, status: "enabling", lastError: "old" }), "正在启用");
-  assert.equal(pluginStatusLabel({ enabled: true, restartRequired: true }), "待重新启用");
-  assert.equal(pluginStatusLabel({ enabled: false }), "已停用");
 });
 
 test("file validation checks JSON object and UTF-8 byte limit", () => {

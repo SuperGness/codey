@@ -8,33 +8,6 @@ export type RouteCompactionStatus = {
   reason?: string;
 };
 
-export function remoteCompactionStatusText(status?: RuntimeStatus | null) {
-  const compaction = status?.remoteCompaction;
-  if (!compaction) {
-    return { title: "压缩方式待确认", detail: "尚未读取到压缩运行状态。" };
-  }
-  const activeMode = compaction.activeMode ?? (compaction.active ? "remote" : "local");
-  const configuredMode = compaction.configuredMode ?? (compaction.configured ? "remote" : "local");
-  const title = !status?.running
-    ? "Codex 未运行"
-    : compaction.active === null
-      ? "压缩由 Codex 自行管理"
-      : activeMode === "mixed"
-        ? "当前按线路选择压缩方式"
-        : activeMode === "remote"
-          ? "当前已启用远程压缩"
-          : "当前由 Codey 网关生成压缩摘要";
-  const saved = configuredMode === "mixed"
-    ? "已保存配置中，原生支持的线路透传上游压缩，其余线路由网关生成摘要"
-    : compaction.configured
-      ? "已保存配置声明了原生远程压缩"
-      : "已保存配置未声明原生远程压缩，由网关生成摘要";
-  return {
-    title,
-    detail: `${saved}；压缩方式随所选线路自动生效。`,
-  };
-}
-
 export function getRouteCompactionStatus(
   profile: Profile,
   runtimeStatus?: RuntimeStatus | null,

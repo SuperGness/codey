@@ -329,18 +329,6 @@
   border-top-color: transparent;
 }
 
-.route-item-usage-toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.route-item-usage-label {
-  font-size: 11px;
-  color: var(--mac-text-secondary);
-  user-select: none;
-}
-
 /* ==========================================================================
    Provider Group Container & Model Tag Pills
    ========================================================================== */
@@ -766,13 +754,6 @@
   color: var(--codey-blue, #007aff);
 }
 
-.route-option-content {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
 .route-option-title {
   color: var(--mac-text-primary);
   font-size: 12px;
@@ -1001,12 +982,6 @@
   color: var(--mac-text-secondary);
 }
 
-.route-auxiliary-action {
-  display: inline-flex;
-  align-items: center;
-  flex-shrink: 0;
-}
-
 .route-setting-row {
   display: flex;
   align-items: center;
@@ -1135,14 +1110,6 @@
 
 .readonly-note-tag {
   flex: 0 0 auto;
-}
-
-.model-context-details > summary {
-  list-style: none;
-}
-
-.model-context-details > summary::-webkit-details-marker {
-  display: none;
 }
 
 /* ==========================================================================
