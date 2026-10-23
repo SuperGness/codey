@@ -41,6 +41,136 @@ fn unavailable_wait(session: &str) -> HookInput {
     wait
 }
 
+fn write_resumed_root_rollout(path: &Path, session: &str) {
+    let records = [
+        json!({"type": "session_meta", "payload": {"id": session, "source": "vscode"}}),
+        json!({"type": "event_msg", "payload": {"type": "turn_aborted", "turn_id": "root-turn-a"}}),
+        json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "root-turn-b"}}),
+    ];
+    fs::write(
+        path,
+        records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn resumed_root_with_rollout_suffix_can_orchestrate_before_and_after_status_read() {
+    for suffix in ["", "_00000000-0000-4000-8000-000000000002"] {
+        for read_status_first in [false, true] {
+            for tool in [
+                "agents.send_message",
+                "agents.followup_task",
+                "agents.interrupt_agent",
+            ] {
+                let temp = tempfile::tempdir().unwrap();
+                let root = temp.path().join(STATE_DIRECTORY);
+                let sessions = temp.path().join("sessions/2026/10/22");
+                fs::create_dir_all(&sessions).unwrap();
+                let session = "00000000-0000-4000-8000-000000000001";
+                start_recovery_child(&root, session);
+                let transcript = sessions.join(format!(
+                    "rollout-2026-10-22T16-25-46-{session}{suffix}.jsonl"
+                ));
+                write_resumed_root_rollout(&transcript, session);
+                let mut request = input("PreToolUse", session);
+                request.turn_id = Some("root-turn-b".into());
+                request.transcript_path = Some(transcript.to_string_lossy().into_owned());
+                if read_status_first {
+                    request.tool_name = Some("agents.list_agents".into());
+                    request.tool_input = Some(json!({}));
+                    assert_eq!(
+                        handle_hook_for_runtime_at(&request, &root, "runtime-a", 20).unwrap(),
+                        json!({})
+                    );
+                    request.hook_event_name = "PostToolUse".into();
+                    request.tool_response = Some(json!({
+                        "agents": [{"agent_id": "/root/reader", "status": "interrupted"}]
+                    }));
+                    assert_eq!(
+                        handle_hook_for_runtime_at(&request, &root, "runtime-a", 21).unwrap()["decision"],
+                        "block"
+                    );
+                    request.hook_event_name = "PreToolUse".into();
+                    request.tool_response = None;
+                }
+                request.tool_name = Some(tool.into());
+                request.tool_input = Some(if tool == "agents.interrupt_agent" {
+                    json!({"target": "/root/reader"})
+                } else {
+                    json!({"target": "/root/reader", "message": "Continue the assigned task"})
+                });
+                assert_eq!(
+                    handle_hook_for_runtime_at(&request, &root, "runtime-a", 30).unwrap(),
+                    json!({}),
+                    "{suffix:?}, read_status_first={read_status_first}, {tool}"
+                );
+                assert!(
+                    root_turn_matches(&root, "runtime-a", session, Some("root-turn-b")).unwrap()
+                );
+                assert_eq!(
+                    active_agent_count_for_runtime(&root, "runtime-a", session).unwrap(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn resumed_root_rejects_non_rollout_paths_and_paths_outside_sessions() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join(STATE_DIRECTORY);
+    let sessions = temp.path().join("sessions");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = "resume-path-session";
+    start_recovery_child(&root, session);
+    let mut transcripts = vec![
+        temp.path().join(format!("rollout-{session}_suffix.jsonl")),
+        sessions.join(format!("events-{session}.jsonl")),
+        sessions.join(format!("rollout-{session}.txt")),
+    ];
+    for transcript in &transcripts {
+        write_resumed_root_rollout(transcript, session);
+    }
+    let directory = sessions.join(format!("rollout-{session}_directory.jsonl"));
+    fs::create_dir(&directory).unwrap();
+    transcripts.push(directory);
+    #[cfg(unix)]
+    {
+        let target = sessions.join(format!("rollout-{session}_target.jsonl"));
+        write_resumed_root_rollout(&target, session);
+        let link = sessions.join(format!("rollout-{session}_link.jsonl"));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        transcripts.push(link);
+        let linked_directory = sessions.join("outside");
+        std::os::unix::fs::symlink(temp.path(), &linked_directory).unwrap();
+        transcripts.push(linked_directory.join(format!("rollout-{session}_suffix.jsonl")));
+    }
+    for transcript in transcripts {
+        let mut request = input("PreToolUse", session);
+        request.turn_id = Some("root-turn-b".into());
+        request.transcript_path = Some(transcript.to_string_lossy().into_owned());
+        request.tool_name = Some("agents.send_message".into());
+        request.tool_input = Some(json!({"target": "/root/reader", "message": "Continue"}));
+        assert_eq!(
+            handle_hook_for_runtime_at(&request, &root, "runtime-a", 30).unwrap()["hookSpecificOutput"]
+                ["permissionDecision"],
+            "deny",
+            "{}",
+            transcript.display()
+        );
+        assert!(!root_turn_matches(&root, "runtime-a", session, Some("root-turn-b")).unwrap());
+        assert_eq!(
+            active_agent_count_for_runtime(&root, "runtime-a", session).unwrap(),
+            1
+        );
+    }
+}
+
 #[test]
 fn root_entry_points_recover_after_status_tool_failure_without_stop() {
     for event in ["PreToolUse", "UserPromptSubmit", "PostToolUse"] {

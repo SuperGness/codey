@@ -873,13 +873,14 @@ fn trusted_root_turn_matches(
     ) else {
         return Ok(false);
     };
+    // 恢复后的文件名可能在会话 ID 后追加后缀；会话身份由下方 session_meta 校验。
     if !transcript.is_absolute()
         || !metadata.is_file()
         || !path.starts_with(sessions)
         || !path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(&format!("-{}.jsonl", input.session_id)))
+            .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
     {
         return Ok(false);
     }
