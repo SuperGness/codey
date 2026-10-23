@@ -511,7 +511,8 @@ async fn assert_native_new_session_delivery(commit_delay: Duration, two_database
     }
     let scan = start_recent_session_scan_at(Default::default(), home.clone());
     start_waiting_webhook_watcher(&state, scan).await;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // 只是等待启动扫描结束，不是延迟断言；全量并行测试时阻塞线程池会排队。
+    tokio::time::timeout(Duration::from_secs(10), async {
         while state.notification_outbox.get().is_none() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
