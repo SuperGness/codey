@@ -337,9 +337,9 @@ impl NativeResponsesHistory {
                 .validated_http_restore_input(owner, allow_native_compaction)
                 .is_ok_and(|input| {
                     // 同轮恢复必须保留全部上下文，不能靠丢弃空推理绕过拒绝。
-                    input.iter().all(|item| {
-                        item["type"] != "reasoning" || replayable_reasoning_item(item)
-                    })
+                    input
+                        .iter()
+                        .all(|item| item["type"] != "reasoning" || replayable_reasoning_item(item))
                 })
     }
 

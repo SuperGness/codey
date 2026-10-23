@@ -899,15 +899,16 @@ impl WebSocketResponsesDownstream {
                         {
                             // HTTP 使用当前请求头身份；刷新令牌及工具历史校验沿用既有规则。
                             // 只在明确拒绝后重新暂存，健康 WS 不增加历史复制。
-                            let http_owner = self
-                                .native_history
-                                .prepare_for_route(route, auth_identity, body);
+                            let http_owner =
+                                self.native_history
+                                    .prepare_for_route(route, auth_identity, body);
                             if self.native_history.can_recover_rejected_continuation(
                                 http_owner,
                                 route.official_account || route.supports_remote_compaction,
                             ) {
                                 self.native_history.mark_continuation_rejected();
-                                let object = body.as_object_mut().expect("validated request object");
+                                let object =
+                                    body.as_object_mut().expect("validated request object");
                                 for (name, value) in [
                                     ("stream", http_stream),
                                     ("background", http_background),
