@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "76";
+  const patchVersion = "77";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -354,6 +354,13 @@
     }
     return params;
   };
+  const collaborationSettingsForRequest = (method, params) => {
+    if (method !== "turn/start") return null;
+    const mode = params?.collaborationMode;
+    const settings = mode && typeof mode === "object" && !Array.isArray(mode) ? mode.settings : null;
+    return settings && typeof settings === "object" && !Array.isArray(settings)
+      && Object.hasOwn(settings, "model") ? settings : null;
+  };
   const routedRequestParams = (method, source, model, route) => {
     const routeProviderId = requestProviderId(route?.routeProviderId);
     const threadId = threadIdFromParams(source);
@@ -368,6 +375,12 @@
     const next = { ...source };
     // null 表示沿用对话模型；空字符串会让 app-server 报没有可用模型。
     if (routedModel) next.model = routedModel;
+    const collaborationSettings = collaborationSettingsForRequest(method, source);
+    if (collaborationSettings && routedModel) {
+      // Native collaboration mode owns the effective turn model, including Resume.
+      next.collaborationMode = { ...source.collaborationMode,
+        settings: { ...collaborationSettings, model: routedModel } };
+    }
     delete next.model_provider;
     if (threadProviderRequestMethods.has(method)) {
       next.modelProvider = routedProviderId;
@@ -393,6 +406,11 @@
           : {}),
         [routeMetadataKey]: routeProviderId,
       };
+    } else if (collaborationSettings && source[routeMetadataParam]) {
+      const metadata = { ...source[routeMetadataParam] };
+      delete metadata[routeMetadataKey];
+      if (Object.keys(metadata).length) next[routeMetadataParam] = metadata;
+      else delete next[routeMetadataParam];
     }
     let blocked = false;
     if (providerBoundExistingThreadMethods.has(method) && routedProviderId) {
@@ -2560,6 +2578,8 @@
   const patchedRequestParams = (method, params) => {
     if (!modelBoundRequestMethods.has(method)) return params;
     let source = params && typeof params === "object" ? params : {};
+    const collaborationSettings = collaborationSettingsForRequest(method, source);
+    if (collaborationSettings) source = { ...source, model: collaborationSettings.model };
     if (method === "thread/resume" && restoredRequestEfforts.has(source)) {
       const evidence = restoredRequestEfforts.get(source);
       const effort = evidence.revision === threadEffortRevisions.get(threadIdFromParams(source))
@@ -2569,9 +2589,14 @@
       else config.model_reasoning_effort = effort;
       source = { ...source, config };
     }
-    const hasModelOverride = Object.hasOwn(source, "model")
-      && (method === "thread/settings/update" || source.model != null);
+    const hasModelOverride = Boolean(collaborationSettings) || (Object.hasOwn(source, "model")
+      && (method === "thread/settings/update" || source.model != null));
     const userIntentRoute = catalog.loaded ? pendingIntentRouteForRequest() : null;
+    // Invalid native selections must reach validation unchanged, never a saved route.
+    if (collaborationSettings && !userIntentRoute
+      && (typeof source.model !== "string" || !source.model.trim())) {
+      return routedRequestParams(method, source, "", null);
+    }
     // Opening history can include the composer's global default before the
     // thread's settings arrive. Explicit picker intent and settings updates
     // still take precedence over the saved route.
@@ -2641,6 +2666,7 @@
     const threadId = threadIdFromParams(source);
     const requestedBinding = threadRequestedRoutes.get(threadId);
     const requestedThreadRoute = requestedBinding && method !== "thread/start" && method !== "thread/fork"
+      && (!collaborationSettings || routeMatchesModel(requestedBinding, requestedModel))
       ? routeForHintedRawModel(requestedBinding.routeProviderId, requestedBinding.sourceModel) : null;
     const threadRoute = requestedModel
       ? routeForThreadModel(threadId, requestedModel)
@@ -2675,6 +2701,7 @@
       && requestUsesSupersededDefault(requestedModel)
     ) ? defaultRoute : null;
     const staleExplicitAliasRoute = (() => {
+      if (collaborationSettings) return null;
       if (!requestedProvider || isGatewayProviderId(requestedProvider)) return null;
       const prefix = `${requestedProvider}/`;
       if (!requestedModel.toLowerCase().startsWith(prefix.toLowerCase())) return null;
@@ -3293,7 +3320,10 @@
         if ((aborted || disposed) && prepared?.token) void bridge("/session/portable-compaction/cancel", { threadId: target.threadId, token: prepared.token }).catch(() => {});
         return prepared;
       }));
-      if (ticket?.status !== "ok" || typeof ticket.required !== "boolean") throw new Error("无法确认任务的原线路，请稍后重试。");
+      if (ticket?.status !== "ok" || typeof ticket.required !== "boolean") {
+        const message = ticket?.status === "failed" && typeof ticket.message === "string" ? ticket.message.trim() : "";
+        throw new Error(message || "无法确认任务的原线路，请稍后重试。");
+      }
       if (!ticket.required) return;
       if (!ticket.token) throw new Error("交接摘要凭据无效，请稍后重试。");
       const thread = await checked(send("thread/read", { threadId: target.threadId, includeTurns: false }));

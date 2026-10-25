@@ -862,7 +862,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "76");
+  assert.equal(patch.version, "77");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -5871,6 +5871,131 @@ test("portable guard waits for matching compaction and confirms before dispatch"
     });
   assert.equal(await result, "sent");
   assert.deepEqual(calls, ["prepare", "thread/read", "thread/compact/start", "status", "confirm", "target"]);
+  runtime.patch.dispose();
+});
+
+test("portable prepare failures show the backend reason without dispatching or changing the route", async () => {
+  const fallback = "无法确认任务的原线路，请稍后重试。";
+  const reason = "原账号额度已用完，请检查账号状态后重试。";
+  const responses = [
+    [{ status: "failed", message: reason }, reason],
+    [{ status: "failed", message: `  ${reason}\n` }, reason],
+    ...[undefined, null, "", " \n ", 42, { detail: reason }].map((message) => [{ status: "failed", message }, fallback]),
+    ...[null, {}, "failed", { status: "unknown", message: reason }, { status: "ok", message: reason }, { status: "ok", required: "false", message: reason }].map((response) => [response, fallback]),
+  ];
+  for (const [response, expected] of responses) {
+    const storage = memoryStorage();
+    storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+      ["failed-prepare", { routeProviderId: "local", sourceModel: "shared" }],
+    ]));
+    const body = new FakeElementCore("body");
+    const calls = [];
+    const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], {
+      storage, documentBody: body,
+      portableBridge: async (path) => { calls.push(path); return response; },
+    });
+    try {
+      const before = storage.getItem("codey.thread-route-bindings.v1");
+      assert.ok(before, "the original route is persisted before attempting the switch");
+      await assert.rejects(runtime.patch.guardOutgoingRequest({ hostId: "local" }, "turn/start",
+        { threadId: "failed-prepare", model: "remote/shared" },
+        () => assert.fail("must not dispatch the turn"),
+        () => assert.fail("must not read or compact the thread")), { message: expected });
+      assert.deepEqual(calls, ["/session/portable-compaction/prepare"], "a response without a token must not be cancelled");
+      assert.equal(storage.getItem("codey.thread-route-bindings.v1"), before);
+      const notice = body.children.find((child) => child.id === "codey-provider-mismatch-notice");
+      assert.equal(notice?.getAttribute("role"), "alert");
+      assert.equal(notice?.textContent, expected);
+    } finally {
+      runtime.patch.dispose();
+    }
+  }
+});
+
+test("native Resume collaboration models route preparation and dispatch to the selected account", async () => {
+  for (const [freshMenuIntent, topModel] of [[false, null], [false, undefined], [false, "codey-official-account-a/shared"], [true, null]]) {
+    const routes = ["codey-official-account-a", "codey-official-account-b"];
+    const models = routes.map((route) => `${route}/shared`);
+    const storage = memoryStorage();
+    storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+      ["native-resume", { routeProviderId: routes[0], sourceModel: "shared" }],
+    ]));
+    const prepares = [];
+    const runtime = await loadPatch({
+      status: "ok", models, default_model: models[0],
+      model_metadata: models.map((model, index) => ({ model, source_model: "shared",
+        route_provider_id: routes[index], provider_id: "codey_router", official_account: true })),
+    }, [statsigClient()], { storage,
+      portableBridge: async (path, target) => { prepares.push({ path, target }); return { status: "ok", required: false }; },
+    });
+    compactionReply(runtime, "carrier", { thread: { id: "native-resume", modelProvider: "codey_router" } });
+    if (freshMenuIntent) runtime.dispatchDocumentEvent("pointerdown", { target: {
+      closest: () => ({ dataset: { codeyRouteModel: models[1] } }),
+    } });
+    const settings = Object.freeze({ model: models[freshMenuIntent ? 0 : 1], reasoning_effort: "high", developer_instructions: "keep", extra: true });
+    const collaborationMode = Object.freeze({ mode: "default", settings, extraMode: "preserved" });
+    const params = Object.freeze({ threadId: "native-resume", ...(topModel === undefined ? {} : { model: topModel }), collaborationMode,
+      responsesapiClientMetadata: Object.freeze({ codey_route: routes[0], trace: "keep" }),
+      input: Object.freeze([{ type: "text", text: "continue" }]) });
+    const before = storage.getItem("codey.thread-route-bindings.v1");
+    let sent;
+    const pending = runtime.patch.guardOutgoingRequest({ hostId: "local" }, "turn/start", params, () => {
+      assert.equal(storage.getItem("codey.thread-route-bindings.v1"), before, "preflight must not commit the selection");
+      sent = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", params));
+    });
+    await pending;
+    assert.deepEqual(prepares, [{ path: "/session/portable-compaction/prepare", target: {
+      threadId: "native-resume", targetProviderId: routes[1], targetModel: "shared",
+    } }]);
+    assert.equal(sent.request.params.model, models[1]);
+    assert.deepEqual(sent.request.params.collaborationMode, { ...collaborationMode, settings: { ...settings, model: models[1] } });
+    assert.deepEqual(sent.request.params.responsesapiClientMetadata, { codey_route: routes[1], trace: "keep" });
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(sent), false);
+    const again = runtime.patch.rewriteOutgoingMessage(JSON.parse(JSON.stringify(sent)));
+    assert.deepEqual(again.request.params, sent.request.params);
+    assert.equal(params.model, topModel);
+    assert.equal(params.collaborationMode, collaborationMode);
+    assert.equal(settings.model, models[freshMenuIntent ? 0 : 1]);
+    runtime.patch.dispose();
+  }
+});
+
+test("invalid collaboration selections cannot inherit old requested routes or defaults", async () => {
+  for (const model of ["missing/shared", "deleted/shared", "codey-official-account-deleted/shared", "", "  ", 42, null]) {
+    const storage = memoryStorage();
+    for (const key of ["codey.thread-route-bindings.v1", "codey.thread-requested-routes.v1"]) storage.setItem(key, JSON.stringify([
+      ["invalid-mode", { routeProviderId: "local", sourceModel: "shared" }],
+    ]));
+    const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { storage });
+    compactionReply(runtime, "carrier", { thread: { id: "invalid-mode", modelProvider: "codey_router" } });
+    const params = { threadId: "invalid-mode", model: "local/shared", collaborationMode: { mode: "plan", settings: { model } },
+      responsesapiClientMetadata: { codey_route: "local", trace: "keep" } };
+    const sent = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", params)).request.params;
+    assert.equal(sent.model, model);
+    assert.equal(sent.collaborationMode.settings.model, model);
+    assert.deepEqual(sent.responsesapiClientMetadata, { trace: "keep" });
+    runtime.patch.dispose();
+  }
+});
+
+test("ambiguous collaboration raw models do not guess an account without route evidence", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+  const params = { threadId: "unbound-mode", model: null, collaborationMode: { mode: "default", settings: { model: "shared" } } };
+  assert.equal(runtime.patch.guardOutgoingRequest({ hostId: "local" }, "turn/start", params, () => assert.fail()), null);
+  const actual = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", params)).request.params;
+  assert.equal(actual.model, "shared");
+  assert.equal(actual.responsesapiClientMetadata, undefined);
+  assert.equal(actual.collaborationMode.settings.model, "shared");
+  runtime.patch.dispose();
+});
+
+test("native selection mode leaves collaboration models untouched", async () => {
+  const runtime = await loadPatch({ status: "ok", native_selection_only: true, native_model_provider: "openai",
+    models: ["gpt-6-astra"], default_model: "gpt-6-astra" }, [statsigClient()], { nativeSelectionOnly: true });
+  const collaborationMode = Object.freeze({ mode: "plan", settings: Object.freeze({ model: "gpt-6-astra", reasoning_effort: "high" }) });
+  const params = Object.freeze({ threadId: "native-mode", model: null, collaborationMode });
+  const actual = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", params)).request.params;
+  assert.equal(actual, params);
   runtime.patch.dispose();
 });
 
