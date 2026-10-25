@@ -93,6 +93,10 @@ impl MockCdp {
                 let state = ws_state.clone();
                 connections.spawn(async move {
                     let mut path = String::new();
+                    #[allow(
+                        clippy::result_large_err,
+                        reason = "tungstenite 握手回调要求直接返回 HTTP 响应，无法改用装箱错误"
+                    )]
                     let Ok(mut socket) = tokio_tungstenite::accept_hdr_async(
                         socket,
                         |request: &Request, response| {
