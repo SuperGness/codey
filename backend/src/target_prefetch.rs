@@ -19,6 +19,7 @@ pub(crate) struct PrefetchDiagnostics {
     total_ms: u64,
     wait_ms: u64,
     pub(crate) last_discovery_error: Option<String>,
+    pub(crate) reached_debug_endpoint: bool,
 }
 
 type Diagnostics = Arc<Mutex<PrefetchDiagnostics>>;
@@ -107,14 +108,18 @@ pub fn spawn_target_prefetch(debug_port: u16, budget: Duration) -> PrefetchTask 
 
 async fn poll_targets_once(debug_port: u16, diagnostics: &Diagnostics) -> Option<CdpTarget> {
     match list_targets(debug_port).await {
-        Ok(targets) => match pick_injectable_codex_page_target(&targets) {
-            Ok(target) => Some(target),
-            Err(_) => {
-                diagnostics.lock().unwrap().last_discovery_error =
-                    Some(format!("noMatchingPage: targetCount={}", targets.len()));
-                None
+        Ok(targets) => {
+            let mut diagnostics = diagnostics.lock().unwrap();
+            diagnostics.reached_debug_endpoint = true;
+            match pick_injectable_codex_page_target(&targets) {
+                Ok(target) => Some(target),
+                Err(_) => {
+                    diagnostics.last_discovery_error =
+                        Some(format!("noMatchingPage: targetCount={}", targets.len()));
+                    None
+                }
             }
-        },
+        }
         Err(error) => {
             diagnostics.lock().unwrap().last_discovery_error =
                 Some(safe_prefetch_error("listTargets", &error));
@@ -246,6 +251,7 @@ mod tests {
         let diagnostics = Diagnostics::default();
         assert!(poll_targets_once(port, &diagnostics).await.is_none());
         server.abort();
+        assert!(!diagnostics.lock().unwrap().reached_debug_endpoint);
         let detail = diagnostics
             .lock()
             .unwrap()
@@ -256,6 +262,42 @@ mod tests {
         assert!(!detail.contains("secret-token"));
         assert!(!detail.contains("localhost"));
         assert!(!detail.contains(&port.to_string()));
+    }
+
+    #[tokio::test]
+    async fn successful_enumeration_survives_a_later_prefetch_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for response in [
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]",
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).await.unwrap();
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let diagnostics = Diagnostics::default();
+        assert!(poll_targets_once(port, &diagnostics).await.is_none());
+        {
+            let diagnostics = diagnostics.lock().unwrap();
+            assert!(diagnostics.reached_debug_endpoint);
+            assert_eq!(
+                diagnostics.last_discovery_error.as_deref(),
+                Some("noMatchingPage: targetCount=0")
+            );
+        }
+        assert!(poll_targets_once(port, &diagnostics).await.is_none());
+        server.await.unwrap();
+        let diagnostics = diagnostics.lock().unwrap();
+        assert!(diagnostics.reached_debug_endpoint);
+        let error = diagnostics.last_discovery_error.as_deref().unwrap();
+        assert!(error.starts_with("listTargets:"), "{error}");
+        assert!(error.contains("httpStatus=503"), "{error}");
     }
 
     #[test]
