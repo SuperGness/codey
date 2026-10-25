@@ -65,6 +65,8 @@ use process::{codex_runtime_arguments, gpu_launch_arguments};
 
 const CDP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
 const CDP_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
+// 页面明确答复桥接失效后，确认这一判断不必再等一整轮巡检。
+const CDP_WATCHDOG_UNHEALTHY_CONFIRM_INTERVAL: Duration = Duration::from_secs(5);
 // 页面端点对 CDP 命令完全没有回应：页面忙碌不成立，target 很可能已被替换。
 // 连续多轮无响应后重新发现 target，而不是一直当作"页面忙"等下去。
 const CDP_WATCHDOG_UNRESPONSIVE_THRESHOLD: u8 = 3;
@@ -1376,11 +1378,20 @@ fn spawn_injection_watchdog(
         let mut failure_counters = InjectionFailureCounters::default();
         let mut reported_health: Option<InjectionHealth> = None;
         let mut endpoint_losses: u8 = 0;
+        let mut confirm_unhealthy = false;
         'watchdog: loop {
+            // 泵已结束而重建失败时不再监听，否则会跳过重试间隔空转。
+            let pump_running = !target.pump_finished();
+            let wait = if confirm_unhealthy {
+                CDP_WATCHDOG_UNHEALTHY_CONFIRM_INTERVAL
+            } else {
+                retry_interval
+            };
             tokio::select! {
                 biased;
                 _ = &mut shutdown_rx => break,
-                _ = tokio::time::sleep(retry_interval) => {}
+                _ = target.pump_closed(), if pump_running => {}
+                _ = tokio::time::sleep(wait) => {}
             }
             // A finished message pump means the in-page bridge can no longer
             // reach the backend at all. Probing again cannot change that, so
@@ -1456,7 +1467,9 @@ fn spawn_injection_watchdog(
                 endpoint_losses = 0;
                 retry_interval = CDP_WATCHDOG_INTERVAL;
             }
-            if !watchdog_should_reinject(&mut failure_counters, health) {
+            let reinject = watchdog_should_reinject(&mut failure_counters, health);
+            confirm_unhealthy = !reinject && health == InjectionHealth::Unhealthy;
+            if !reinject {
                 continue;
             }
             let reinjection = tokio::select! {

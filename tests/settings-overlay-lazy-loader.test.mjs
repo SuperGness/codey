@@ -101,3 +101,53 @@ test("settings overlay loader reports a failure and permits a retry", async () =
   assert.equal(window.__codeySettingsOverlay, realOverlay);
   assert.equal(realOverlay.opened, 1);
 });
+
+test("settings overlay loader bounds the bridge call and retries once after a bridge rebuild", async () => {
+  const alerts = [];
+  const calls = [];
+  const realOverlay = { opened: 0, open() { this.opened += 1; }, toggle() {} };
+  const window = {
+    alert(message) {
+      alerts.push(message);
+    },
+    async __codexSessionDeleteBridge(path, payload, options) {
+      calls.push(options);
+      if (calls.length === 1) {
+        return { status: "failed", code: "bridge_reinstalled", message: "Codey 桥接已重新注入，请重试" };
+      }
+      window.__codeySettingsOverlay = realOverlay;
+      return { status: "ok" };
+    },
+  };
+
+  vm.runInNewContext(loaderScript, { Error, Promise, String, window });
+  window.__codeySettingsOverlay.toggle();
+  await flushPromises();
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((options) => options?.timeoutMs >= 15_000));
+  assert.deepEqual(alerts, []);
+  assert.equal(realOverlay.opened, 1);
+});
+
+test("settings overlay loader opens a panel that finished loading after the backend timed out", async () => {
+  const alerts = [];
+  const realOverlay = { opened: 0, open() { this.opened += 1; }, toggle() {} };
+  const window = {
+    alert(message) {
+      alerts.push(message);
+    },
+    async __codexSessionDeleteBridge() {
+      // The renderer kept evaluating after the backend's CDP deadline.
+      window.__codeySettingsOverlay = realOverlay;
+      return { status: "failed", code: "bridge_request_failed", message: "timed out waiting for CDP command" };
+    },
+  };
+
+  vm.runInNewContext(loaderScript, { Error, Promise, String, window });
+  window.__codeySettingsOverlay.toggle();
+  await flushPromises();
+
+  assert.deepEqual(alerts, []);
+  assert.equal(realOverlay.opened, 1);
+});

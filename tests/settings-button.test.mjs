@@ -1157,11 +1157,19 @@ test("marks the Codey icon unavailable after consecutive hung health checks and 
   assert.equal(button.getAttribute("data-codey-runtime-state"), "unavailable");
   assert.match(button.getAttribute("aria-label"), /Codey 连接中断/);
   assert.match(button.title, /Codey 后端未响应/);
+  assert.ok(
+    fixture.activeTimers().some((candidate) => candidate.delay === 5_000),
+    "an unavailable backend should be rechecked quickly",
+  );
   button.dispatchEvent({
     type: "click",
     preventDefault() {},
     stopPropagation() {},
   });
+  // 点击先当场复查，复查仍超时才提示。
+  assert.deepEqual(fixture.alerts, []);
+  fireLatestHealthTimeout();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(fixture.alerts, [
     "Codey 与 Codex 的连接已中断，当前配置面板无法连接。"
     + "Codey 会继续尝试自动恢复；若长时间仍未恢复，请退出 Codex 后重新启动 Codey。",
@@ -1174,6 +1182,55 @@ test("marks the Codey icon unavailable after consecutive hung health checks and 
   assert.equal(button.getAttribute("aria-label"), "打开 Codey 配置");
   assert.equal(button.title, "打开 Codey 配置");
   assert.equal(fixture.window.__codeyRuntimeHealth.consecutiveFailures, 0);
+});
+
+test("opens settings instead of warning when a stale unavailable state has recovered", async () => {
+  let healthy = false;
+  const fixture = createStartupUpdateFixture(async (path) => {
+    if (path === "/backend/status") return { status: "ok", availableUpdate: null };
+    if (path === "/backend/health") {
+      return healthy ? { status: "ok" } : { status: "failed", code: "bridge_unavailable" };
+    }
+    throw new Error(`unexpected bridge path: ${path}`);
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const button = fixture.document.getElementById("codey-settings-button");
+  assert.equal(button.getAttribute("data-codey-runtime-state"), "unavailable");
+
+  let toggles = 0;
+  fixture.window.__codeySettingsOverlay = { toggle: () => { toggles += 1; } };
+  healthy = true;
+  button.dispatchEvent({ type: "click", preventDefault() {}, stopPropagation() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(fixture.alerts, []);
+  assert.equal(toggles, 1);
+  assert.equal(button.getAttribute("data-codey-runtime-state"), "healthy");
+});
+
+test("does not count bridge rebuilds or renderer stalls as backend failures", async () => {
+  let healthResult = { status: "failed", code: "bridge_reinstalled" };
+  const fixture = createStartupUpdateFixture(async (path) => {
+    if (path === "/backend/status") return { status: "ok", availableUpdate: null };
+    if (path === "/backend/health") return healthResult;
+    throw new Error(`unexpected bridge path: ${path}`);
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.window.__codeyRuntimeHealth?.consecutiveFailures ?? 0, 0);
+
+  // 主线程卡住时超时回调远晚于预算才触发，同样不能据此判定后端中断。
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    healthResult = new Promise(() => {});
+    const check = fixture.window.__codeyRefreshRuntimeHealth();
+    fixture.advanceClock(10_000);
+    const timeout = fixture.activeTimers().filter((timer) => timer.delay === 3_250).at(-1);
+    timeout.cleared = true;
+    timeout.callback();
+    await check;
+  }
+  const button = fixture.document.getElementById("codey-settings-button");
+  assert.notEqual(button.getAttribute("data-codey-runtime-state"), "unavailable");
+  assert.equal(fixture.window.__codeyRuntimeHealth?.consecutiveFailures ?? 0, 0);
 });
 
 test("pauses Codey health checks while the page is hidden and resumes immediately", async () => {

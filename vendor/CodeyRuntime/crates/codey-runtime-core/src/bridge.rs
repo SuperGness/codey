@@ -10,7 +10,7 @@ use anyhow::{Context, bail};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -33,6 +33,8 @@ pub struct BridgePumpHandle {
     task: Option<tokio::task::JoinHandle<()>>,
     closing: Arc<AtomicBool>,
     shutdown: Arc<Notify>,
+    /// 发送端随泵任务一起释放（含被中止），接收端据此得知泵已结束。
+    finished: watch::Receiver<()>,
 }
 
 impl BridgePumpHandle {
@@ -40,6 +42,12 @@ impl BridgePumpHandle {
         self.task
             .as_ref()
             .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
+
+    /// 消息泵结束时返回，看门狗据此立即重建桥接，不必等下一轮巡检。
+    pub async fn finished(&self) {
+        let mut finished = self.finished.clone();
+        while finished.changed().await.is_ok() {}
     }
 
     pub async fn close(mut self) {
@@ -360,7 +368,9 @@ pub async fn install_bridge_with_options(
     let task_closing = Arc::clone(&closing);
     let task_shutdown = Arc::clone(&shutdown);
     let task_websocket_url = websocket_url.to_owned();
+    let (finished_tx, finished) = watch::channel(());
     let task = tokio::spawn(async move {
+        let _finished = finished_tx;
         if let Err(error) = run_bridge_pump(session, task_closing, task_shutdown).await {
             let _ = crate::diagnostic_log::append_diagnostic_log(
                 "bridge.pump_failed",
@@ -377,6 +387,7 @@ pub async fn install_bridge_with_options(
             task: Some(task),
             closing,
             shutdown,
+            finished,
         },
         probe,
     ))
