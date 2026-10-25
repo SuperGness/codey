@@ -2015,6 +2015,53 @@ async fn official_prewarm_generate_false_is_answered_locally_on_http_fallback() 
 }
 
 #[tokio::test]
+async fn missing_codey_history_requests_full_input_before_sending_upstream() {
+    for protocol in [
+        crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+        crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+        // 原生线路续接旧适配线路的合成响应。
+        crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+    ] {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (mut config, provider, model) =
+            router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
+        config.profiles[0].upstream_protocol = protocol.into();
+        let router = LocalRouter::start(&config).await.unwrap();
+        let mut client = connect_router_websocket(&router.endpoint()).await;
+        client
+            .send(WebSocketMessage::Text(
+                json!({
+                    "type":"response.create", "model":model_alias(&provider, &model),
+                    "previous_response_id":"resp_codey_missing", "input":"next"
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let WebSocketMessage::Text(text) =
+            tokio::time::timeout(Duration::from_secs(5), client.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("expected recovery error");
+        };
+        let event: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(event["type"], "error", "{protocol}: {event}");
+        assert_eq!(event["error"]["code"], "previous_response_not_found");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+        client.close(None).await.unwrap();
+        router.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn previous_response_not_found_allows_client_full_request_retry() {
     for sse_wrapped in [false, true] {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

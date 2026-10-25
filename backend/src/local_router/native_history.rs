@@ -1,5 +1,16 @@
 use super::*;
 
+#[derive(Debug)]
+pub(crate) struct MissingResponseHistory;
+
+impl std::fmt::Display for MissingResponseHistory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("会话历史已失效，请重新发送完整输入")
+    }
+}
+
+impl std::error::Error for MissingResponseHistory {}
+
 const NATIVE_HISTORY_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const NATIVE_HISTORY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 // Entries hold whole session snapshots, so this bound counts conversations
@@ -42,23 +53,31 @@ impl NativeHistoryCache {
         scope: [u8; 32],
         owner: [u8; 32],
         id: &str,
-    ) -> Option<(Arc<AdaptedResponsesHistory>, bool)> {
+    ) -> Result<Option<(Arc<AdaptedResponsesHistory>, bool)>> {
         self.prune(Instant::now());
         // Linear scan of at most NATIVE_HISTORY_CACHE_ENTRIES snapshots; use a
         // map if this bound grows.
-        self.entries
-            .iter()
-            .rev()
-            .find(|entry| {
-                entry.scope == scope
-                    && entry.owner == owner
-                    && entry
-                        .history
-                        .last
-                        .as_ref()
-                        .is_some_and(|(response_id, _)| response_id == id)
-            })
-            .map(|entry| (Arc::clone(&entry.history), entry.continuation_rejected))
+        let mut other_owner = false;
+        for entry in self.entries.iter().rev().filter(|entry| {
+            entry.scope == scope
+                && entry
+                    .history
+                    .last
+                    .as_ref()
+                    .is_some_and(|(response_id, _)| response_id == id)
+        }) {
+            if entry.owner == owner {
+                return Ok(Some((
+                    Arc::clone(&entry.history),
+                    entry.continuation_rejected,
+                )));
+            }
+            other_owner = true;
+        }
+        if other_owner {
+            anyhow::bail!("上游身份已变化，无法安全恢复续接历史；请重新发送完整上下文");
+        }
+        Ok(None)
     }
 
     fn mark_requires_http(&mut self, scope: [u8; 32], owner: [u8; 32], id: [u8; 32]) {
@@ -115,7 +134,7 @@ pub(crate) struct NativeResponsesHistory {
     latest: Option<Arc<AdaptedResponsesHistory>>,
     latest_continuation_rejected: bool,
     history: AdaptedResponsesHistory,
-    unavailable: Option<String>,
+    unavailable: Option<anyhow::Error>,
 }
 
 pub(crate) fn native_history_key(
@@ -176,7 +195,9 @@ impl NativeResponsesHistory {
             self.owner = Some(owner);
         }
         self.prepare(owner, body);
-        self.refresh_scope = refresh_scope;
+        if self.owner == Some(owner) {
+            self.refresh_scope = refresh_scope;
+        }
         owner
     }
 
@@ -229,6 +250,29 @@ impl NativeResponsesHistory {
     }
 
     pub(crate) fn prepare(&mut self, owner: [u8; 32], body: &mut Value) {
+        self.pending_previous_response =
+            responses_previous_response_id(body).map(|id| Sha256::digest(id.as_bytes()).into());
+        if self
+            .owner
+            .is_some_and(|previous_owner| previous_owner != owner)
+            && responses_previous_response_id(body).is_some_and(|id| {
+                self.latest.as_ref().is_some_and(|history| {
+                    history
+                        .last
+                        .as_ref()
+                        .is_some_and(|(response_id, _)| response_id == id)
+                })
+            })
+        {
+            // 保留原身份，HTTP 回退再次 prepare 时仍须拒绝这条续接。
+            self.history.clear_pending();
+            self.history.requires_native_http = false;
+            self.continuation_rejected = false;
+            self.unavailable = Some(anyhow::anyhow!(
+                "上游身份已变化，无法安全恢复续接历史；请重新发送完整上下文"
+            ));
+            return;
+        }
         if self.owner != Some(owner) {
             self.history = AdaptedResponsesHistory::default();
             self.latest = None;
@@ -237,34 +281,49 @@ impl NativeResponsesHistory {
             self.refresh_scope = None;
             self.continuation_rejected = false;
         }
-        self.pending_previous_response =
-            responses_previous_response_id(body).map(|id| Sha256::digest(id.as_bytes()).into());
-        let previous = responses_previous_response_id(body).and_then(|id| {
-            let cached = self.scope.and_then(|scope| {
-                self.cache
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get(scope, owner, id)
-            });
-            self.latest
-                .as_ref()
-                .filter(|history| {
+        let previous = responses_previous_response_id(body)
+            .map(|id| {
+                let latest = self.latest.as_ref().filter(|history| {
                     history
                         .last
                         .as_ref()
                         .is_some_and(|(response_id, _)| response_id == id)
-                })
-                .map(|history| {
-                    (
-                        Arc::clone(history),
-                        self.latest_continuation_rejected
-                            || cached
-                                .as_ref()
-                                .is_some_and(|(_, continuation_rejected)| *continuation_rejected),
-                    )
-                })
-                .or(cached)
-        });
+                });
+                let cached = self.scope.map_or(Ok(None), |scope| {
+                    self.cache
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(scope, owner, id)
+                });
+                let cached = match cached {
+                    Ok(cached) => cached,
+                    // 同账号令牌刷新只允许使用当前连接已确认归属的快照。
+                    Err(_) if latest.is_some() => None,
+                    Err(error) => return Err(error),
+                };
+                Ok(latest
+                    .map(|history| {
+                        (
+                            Arc::clone(history),
+                            self.latest_continuation_rejected
+                                || cached.as_ref().is_some_and(|(_, continuation_rejected)| {
+                                    *continuation_rejected
+                                }),
+                        )
+                    })
+                    .or(cached))
+            })
+            .transpose();
+        let previous = match previous {
+            Ok(previous) => previous.flatten(),
+            Err(error) => {
+                self.history.clear_pending();
+                self.history.requires_native_http = false;
+                self.continuation_rejected = false;
+                self.unavailable = Some(error);
+                return;
+            }
+        };
         self.continuation_rejected = previous
             .as_ref()
             .is_some_and(|(_, continuation_rejected)| *continuation_rejected);
@@ -274,8 +333,7 @@ impl NativeResponsesHistory {
         self.unavailable = self
             .history
             .stage_native(body, previous.as_ref().map(|(history, _)| history.as_ref()))
-            .err()
-            .map(|error| error.to_string());
+            .err();
         if self.unavailable.is_some() {
             self.history.clear_pending();
         }
@@ -316,6 +374,9 @@ impl NativeResponsesHistory {
             anyhow::bail!("上游身份已变化，无法安全恢复续接历史；请重新发送完整上下文");
         }
         if let Some(reason) = &self.unavailable {
+            if reason.is::<MissingResponseHistory>() {
+                return Err(MissingResponseHistory.into());
+            }
             anyhow::bail!("无法恢复原生续接历史：{reason}；请重新发送完整上下文");
         }
         let input = self
@@ -386,11 +447,21 @@ impl NativeResponsesHistory {
             return;
         }
         let response = &event["response"];
-        let complete = event.get("type").and_then(Value::as_str) == Some("response.completed")
-            && response
-                .get("status")
-                .and_then(Value::as_str)
-                .is_none_or(|status| status == "completed");
+        let compacting = self.history.pending_input.as_ref().is_some_and(|input| {
+            input
+                .iter()
+                .any(|item| item["type"] == "compaction_trigger")
+        });
+        let status = response.get("status").and_then(Value::as_str);
+        // 被中断或截断的响应仍由上游保存，Codex 会直接以它的 id 续接；
+        // 未完成的压缩不是完整窗口，必须保留上一份历史。
+        let complete = match event.get("type").and_then(Value::as_str) {
+            Some("response.completed") => status.is_none_or(|status| {
+                status == "completed" || (!compacting && status == "incomplete")
+            }),
+            Some("response.incomplete") => !compacting,
+            _ => false,
+        };
         let id = response
             .get("id")
             .and_then(Value::as_str)
@@ -402,19 +473,11 @@ impl NativeResponsesHistory {
                 // Missing/oversized terminal output makes recovery unavailable;
                 // it must not turn an already delivered generation into a retry.
                 let output = terminal_output.map_or(&[][..], Vec::as_slice);
-                if self.history.pending_input.as_ref().is_some_and(|input| {
-                    input
-                        .iter()
-                        .any(|item| item["type"] == "compaction_trigger")
-                }) {
+                if compacting {
                     // 显式压缩的 output 是完整的新窗口，不能再拼接旧历史与触发项。
                     self.history.pending_input = Some(Vec::new());
                 }
-                self.unavailable = self
-                    .history
-                    .remember(id, output)
-                    .err()
-                    .map(|error| error.to_string());
+                self.unavailable = self.history.remember(id, output).err();
                 remembered = self.unavailable.is_none();
             }
         }
@@ -1413,31 +1476,330 @@ mod tests {
             .await
             .unwrap();
         let failure = terminal(&mut client).await;
-        assert_eq!(failure["response"]["error"]["code"], "invalid_prompt");
-        assert_eq!(
-            failure["response"]["error"]["codey"]["errorCode"],
-            "context_not_recoverable"
-        );
+        assert_eq!(failure["type"], "error");
+        assert_eq!(failure["error"]["code"], "previous_response_not_found");
         client.close(None).await.unwrap();
         router.stop().await.unwrap();
     }
 
     #[tokio::test]
-    async fn unknown_native_tool_continuation_never_reaches_upstream() {
+    async fn interrupted_websocket_response_stays_restorable_for_compaction() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (mut config, provider, model) =
             router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
         config.profiles[0].supports_websockets = true;
+        config.profiles[0].supports_remote_compaction = true;
+        let partial = json!({
+            "type":"message","role":"assistant",
+            "content":[{"type":"output_text","text":"partial"}]
+        });
+        let upstream_partial = partial.clone();
+        let upstream = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for frame in [
+                completed("resp-first", vec![]),
+                json!({"type":"response.incomplete","response":{
+                    "id":"resp-interrupted","object":"response","status":"incomplete",
+                    "incomplete_details":{"reason":"interrupted"},"output":[upstream_partial]
+                }}),
+                completed("resp-after-interrupt", vec![]),
+            ] {
+                socket.next().await.unwrap().unwrap();
+                socket
+                    .send(WebSocketMessage::Text(frame.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            let (mut http, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut http).await.unwrap();
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert!(body.get("previous_response_id").is_none(), "{body}");
+            assert_eq!(
+                body["input"],
+                json!([
+                    {"role":"user","content":"task"}, {"role":"user","content":"next"},
+                    partial, {"role":"user","content":"steer"},
+                    {"type":"compaction_trigger"}
+                ])
+            );
+            let window = vec![json!({"type":"compaction","encrypted_content":"opaque"})];
+            write_json_response(
+                &mut http,
+                200,
+                &completed("resp-compact", window)["response"],
+            )
+            .await
+            .unwrap();
+        });
+        let router = LocalRouter::start(&config).await.unwrap();
+        let mut client = connect_router_websocket(&router.endpoint()).await;
+        let model = model_alias(&provider, &model);
+        for (previous, input, expected) in [
+            (None, json!("task"), "resp-first"),
+            (Some("resp-first"), json!("next"), "resp-interrupted"),
+            (
+                Some("resp-interrupted"),
+                json!([{"role":"user","content":"steer"}]),
+                "resp-after-interrupt",
+            ),
+            (
+                Some("resp-after-interrupt"),
+                json!([{"type":"compaction_trigger"}]),
+                "resp-compact",
+            ),
+        ] {
+            let mut request = json!({"type":"response.create","model":model,"input":input});
+            if let Some(previous) = previous {
+                request["previous_response_id"] = previous.into();
+            }
+            client
+                .send(WebSocketMessage::Text(request.to_string().into()))
+                .await
+                .unwrap();
+            let event = terminal(&mut client).await;
+            assert_eq!(event["response"]["id"], expected, "{event}");
+        }
+        upstream.await.unwrap();
+        client.close(None).await.unwrap();
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unknown_native_tool_continuation_requests_full_input_before_sending_upstream() {
+        for supports_websockets in [false, true] {
+            for custom in [false, true] {
+                let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+                let (mut config, provider, model) =
+                    router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
+                config.profiles[0].supports_websockets = supports_websockets;
+                let router = LocalRouter::start(&config).await.unwrap();
+                let alias = model_alias(&provider, &model);
+                let mut client = connect_router_websocket(&router.endpoint()).await;
+                client
+                    .send(WebSocketMessage::Text(
+                        json!({
+                            "type":"response.create", "model":alias, "stream_id":"missing",
+                            "previous_response_id":"resp-from-another-socket",
+                            "input":[result(custom, "call-1")]
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                let error = terminal(&mut client).await;
+                assert_eq!(error["type"], "error", "{error}");
+                assert_eq!(error["error"]["code"], "previous_response_not_found");
+                assert_eq!(error["error"]["type"], "invalid_request_error");
+                assert_eq!(error["status"], 400);
+                assert!(error.get("response").is_none());
+                assert_eq!(error["stream_id"], "missing");
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                        .await
+                        .is_err()
+                );
+                client.close(None).await.unwrap();
+
+                let full_input = json!([
+                    {"role":"user","content":"task"},
+                    call(custom, "call-1"), result(custom, "call-1")
+                ]);
+                let expected_input = full_input.clone();
+                let upstream = tokio::spawn(async move {
+                    if supports_websockets {
+                        let (stream, _) = listener.accept().await.unwrap();
+                        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                        let WebSocketMessage::Text(text) = ws.next().await.unwrap().unwrap() else {
+                            panic!("expected complete retry");
+                        };
+                        let body: Value = serde_json::from_str(&text).unwrap();
+                        assert!(body.get("previous_response_id").is_none());
+                        assert_eq!(body["input"], expected_input);
+                        ws.send(WebSocketMessage::Text(
+                            completed("resp-recovered", vec![call(custom, "call-2")])
+                                .to_string()
+                                .into(),
+                        ))
+                        .await
+                        .unwrap();
+                        let WebSocketMessage::Text(text) = ws.next().await.unwrap().unwrap() else {
+                            panic!("expected incremental continuation");
+                        };
+                        let body: Value = serde_json::from_str(&text).unwrap();
+                        assert_eq!(body["previous_response_id"], "resp-recovered");
+                        assert_eq!(body["input"], json!([result(custom, "call-2")]));
+                        ws.send(WebSocketMessage::Text(
+                            completed("resp-next", vec![]).to_string().into(),
+                        ))
+                        .await
+                        .unwrap();
+                    } else {
+                        let mut expected_input = expected_input.as_array().unwrap().clone();
+                        for (id, output) in [
+                            ("resp-recovered", vec![call(custom, "call-2")]),
+                            ("resp-next", vec![]),
+                        ] {
+                            let (mut stream, _) = listener.accept().await.unwrap();
+                            let request = read_http_request(&mut stream).await.unwrap();
+                            assert_eq!(request.method, "POST");
+                            let body: Value = serde_json::from_slice(&request.body).unwrap();
+                            assert!(body.get("previous_response_id").is_none());
+                            assert_eq!(body["input"], json!(expected_input));
+                            write_json_response(
+                                &mut stream,
+                                200,
+                                &completed(id, output)["response"],
+                            )
+                            .await
+                            .unwrap();
+                            expected_input
+                                .extend([call(custom, "call-2"), result(custom, "call-2")]);
+                        }
+                    }
+                    assert!(
+                        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                            .await
+                            .is_err()
+                    );
+                });
+                client = connect_router_websocket(&router.endpoint()).await;
+                client
+                    .send(WebSocketMessage::Text(
+                        json!({
+                            "type":"response.create", "model":alias, "stream_id":"retry",
+                            "input":full_input
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                let recovered = terminal(&mut client).await;
+                assert_eq!(recovered["type"], "response.completed", "{recovered}");
+                assert_eq!(recovered["response"]["id"], "resp-recovered");
+                assert_eq!(recovered["stream_id"], "retry");
+                client.send(WebSocketMessage::Text(json!({
+                    "type":"response.create", "model":alias, "stream_id":"next",
+                    "previous_response_id":"resp-recovered", "input":[result(custom, "call-2")]
+                }).to_string().into())).await.unwrap();
+                let next = terminal(&mut client).await;
+                assert_eq!(next["response"]["id"], "resp-next", "{next}");
+                assert_eq!(next["stream_id"], "next");
+                upstream.await.unwrap();
+                client.close(None).await.unwrap();
+                router.stop().await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn changed_native_credentials_do_not_request_client_replay() {
+        for supports_websockets in [false, true] {
+            for reconnect in [false, true] {
+                let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+                let (mut config, provider, model) =
+                    router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
+                config.profiles[0].supports_websockets = false;
+                let router = LocalRouter::start(&config).await.unwrap();
+                let alias = model_alias(&provider, &model);
+                let headers = [("session-id", "changed-native-credentials")];
+                let upstream = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let request = read_http_request(&mut stream).await.unwrap();
+                    assert_eq!(request.method, "POST");
+                    write_json_response(
+                        &mut stream,
+                        200,
+                        &completed("resp-before-credentials-change", vec![])["response"],
+                    )
+                    .await
+                    .unwrap();
+                    listener
+                });
+                let mut client =
+                    connect_router_websocket_with_headers(&router.endpoint(), &headers).await;
+                client
+                    .send(WebSocketMessage::Text(
+                        json!({
+                            "type":"response.create", "model":alias, "input":"task"
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    terminal(&mut client).await["response"]["id"],
+                    "resp-before-credentials-change"
+                );
+                let listener = upstream.await.unwrap();
+                // 模拟发送前刷新凭据，线路配置标识本身保持不变。
+                let mut snapshot = RouterSnapshot::from_config(&config);
+                let route = Arc::make_mut(snapshot.routes.get_mut(&provider).unwrap());
+                route.upstream_headers.as_mut().unwrap().insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_static("Bearer sk-changed-identity"),
+                );
+                route.supports_websockets = supports_websockets;
+                *router.snapshot.write().unwrap() = Arc::new(snapshot);
+                if reconnect {
+                    client.close(None).await.unwrap();
+                    client =
+                        connect_router_websocket_with_headers(&router.endpoint(), &headers).await;
+                }
+                for _ in 0..2 {
+                    client.send(WebSocketMessage::Text(json!({
+                        "type":"response.create", "model":alias,
+                        "previous_response_id":"resp-before-credentials-change", "input":"next"
+                    }).to_string().into())).await.unwrap();
+                    let failure = terminal(&mut client).await;
+                    assert_eq!(failure["type"], "response.failed", "{failure}");
+                    assert_eq!(failure["response"]["error"]["code"], "invalid_prompt");
+                    assert_eq!(
+                        failure["response"]["error"]["codey"]["errorCode"],
+                        "context_not_recoverable"
+                    );
+                }
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                        .await
+                        .is_err()
+                );
+                client.close(None).await.unwrap();
+                router.stop().await.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_native_full_input_is_not_a_recoverable_cache_miss() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let (mut config, provider, model) =
+            router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
+        config.profiles[0].supports_websockets = false;
         let router = LocalRouter::start(&config).await.unwrap();
         let mut client = connect_router_websocket(&router.endpoint()).await;
         for custom in [false, true] {
-            client.send(WebSocketMessage::Text(json!({"type":"response.create","model":model_alias(&provider, &model),"previous_response_id":"resp-from-another-socket","input":[result(custom, "missing-call")]}).to_string().into())).await.unwrap();
+            client
+                .send(WebSocketMessage::Text(
+                    json!({
+                        "type":"response.create", "model":model_alias(&provider, &model),
+                        "input":[result(custom, "missing-call")]
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
             let error = terminal(&mut client).await;
+            assert_eq!(error["type"], "response.failed", "{error}");
+            assert_eq!(error["response"]["error"]["code"], "invalid_prompt");
             assert_eq!(
                 error["response"]["error"]["codey"]["errorCode"],
                 "context_not_recoverable"
             );
-            assert_eq!(error["response"]["error"]["code"], "invalid_prompt");
         }
         assert!(
             tokio::time::timeout(Duration::from_millis(100), listener.accept())
@@ -1641,7 +2003,8 @@ mod tests {
             let mut next =
                 json!({"previous_response_id":"resp-known","input":[result(custom, "call-1")]});
             history.prepare(key, &mut next);
-            assert!(history.restore([2; 32], &mut next).is_err());
+            let error = history.restore([2; 32], &mut next).unwrap_err();
+            assert!(!error.is::<MissingResponseHistory>());
             assert_eq!(next["previous_response_id"], "resp-known");
             assert!(history.restore(key, &mut next).unwrap());
             assert_eq!(next["input"].as_array().unwrap().len(), 3);
@@ -1652,7 +2015,9 @@ mod tests {
             assert!(history.restore(key, &mut next).is_err());
             let mut orphan = json!({"input":[result(custom, "missing-call")]});
             history.prepare(key, &mut orphan);
-            let error = history.restore(key, &mut orphan).unwrap_err().to_string();
+            let error = history.restore(key, &mut orphan).unwrap_err();
+            assert!(!error.is::<MissingResponseHistory>());
+            let error = error.to_string();
             assert!(error.contains("工具结果缺少对应的完整调用历史"), "{error}");
             assert!(error.contains("call_id=missing-call"), "{error}");
         }
@@ -1808,6 +2173,7 @@ mod tests {
                     .unavailable
                     .as_ref()
                     .unwrap()
+                    .to_string()
                     .contains("流式输出条目超过")
             );
             assert_eq!(
@@ -2098,7 +2464,8 @@ mod tests {
         let mut body =
             json!({"previous_response_id":"resp-shared","input":[result(false,"call-1")]});
         expired.prepare([1; 32], &mut body);
-        assert!(expired.restore([1; 32], &mut body).is_err());
+        let error = expired.restore([1; 32], &mut body).unwrap_err();
+        assert!(error.is::<MissingResponseHistory>());
     }
 
     #[test]
@@ -2122,6 +2489,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get(scope, [1; 32], "resp-0")
+                .unwrap()
                 .is_none()
         );
         for index in 0..3 {
@@ -2136,9 +2504,9 @@ mod tests {
         }
         let mut cache = cache.lock().unwrap();
         assert!(cache.bytes <= NATIVE_HISTORY_CACHE_BYTES);
-        assert!(cache.get(scope, [1; 32], "large-0").is_none());
-        assert!(cache.get(scope, [1; 32], "large-1").is_some());
-        assert!(cache.get(scope, [1; 32], "large-2").is_some());
+        assert!(cache.get(scope, [1; 32], "large-0").unwrap().is_none());
+        assert!(cache.get(scope, [1; 32], "large-1").unwrap().is_some());
+        assert!(cache.get(scope, [1; 32], "large-2").unwrap().is_some());
     }
 
     #[test]
@@ -2175,6 +2543,68 @@ mod tests {
             key,
             native_history_key(&changed.routes[&provider], auth, &body)
         );
+    }
+
+    #[test]
+    fn known_native_identity_changes_remain_fatal_after_reprepare() {
+        let (config, provider, model) = router_config("http://127.0.0.1:9/v1".into());
+        let snapshot = RouterSnapshot::from_config(&config);
+        let route = snapshot.routes[&provider].as_ref();
+        let original_auth = UpstreamWebSocketAuthIdentity {
+            authorization: Some([1; 32]),
+            account_id: Some([2; 32]),
+        };
+        for scoped in [false, true] {
+            for changed in 0..4 {
+                let headers = if scoped {
+                    vec![("session-id".into(), "identity-change".into())]
+                } else {
+                    vec![]
+                };
+                let cache = Arc::new(Mutex::new(NativeHistoryCache::default()));
+                let mut history = NativeResponsesHistory::with_cache(Arc::clone(&cache), &headers);
+                history.prepare_for_route(
+                    route,
+                    original_auth,
+                    &mut json!({"model":model,"input":"task"}),
+                );
+                history.observe(&completed("resp-original-identity", vec![]));
+                let mut changed_route = route.clone();
+                let mut changed_auth = original_auth;
+                let mut next = json!({
+                    "model":model,"previous_response_id":"resp-original-identity","input":"next"
+                });
+                match changed {
+                    0 => changed_route.provider_id.push_str("-other"),
+                    1 => next["model"] = "other-model".into(),
+                    2 => changed_auth.authorization = Some([3; 32]),
+                    _ => changed_auth.account_id = Some([4; 32]),
+                }
+                for _ in 0..2 {
+                    let owner = history.prepare_for_route(&changed_route, changed_auth, &mut next);
+                    let error = history.restore(owner, &mut next).unwrap_err();
+                    assert!(!error.is::<MissingResponseHistory>());
+                    assert!(error.to_string().contains("上游身份已变化"), "{error}");
+                }
+                if scoped {
+                    let mut separate = NativeResponsesHistory::with_cache(cache, &headers);
+                    for _ in 0..2 {
+                        let owner =
+                            separate.prepare_for_route(&changed_route, changed_auth, &mut next);
+                        let error = separate.restore(owner, &mut next).unwrap_err();
+                        assert!(!error.is::<MissingResponseHistory>());
+                        assert!(error.to_string().contains("上游身份已变化"), "{error}");
+                    }
+                }
+                next.as_object_mut().unwrap().remove("previous_response_id");
+                let owner = history.prepare_for_route(&changed_route, changed_auth, &mut next);
+                assert!(!history.restore(owner, &mut next).unwrap());
+                history.observe(&completed("resp-new-identity", vec![]));
+                next["previous_response_id"] = "resp-new-identity".into();
+                history.prepare_for_route(&changed_route, changed_auth, &mut next);
+                assert!(history.restore(owner, &mut next).unwrap());
+            }
+        }
     }
 
     #[test]
@@ -2222,11 +2652,10 @@ mod tests {
             let mut separate = NativeResponsesHistory::with_cache(cache, &headers);
             let mut separate_body = next_body.clone();
             let owner = separate.prepare_for_route(&route, next_auth, &mut separate_body);
-            assert!(
-                separate
-                    .restore_for_http(owner, &mut separate_body, true)
-                    .is_err()
-            );
+            let error = separate
+                .restore_for_http(owner, &mut separate_body, true)
+                .unwrap_err();
+            assert!(!error.is::<MissingResponseHistory>());
             let mut next = next_body;
             let owner = history.prepare_for_route(&route, next_auth, &mut next);
             assert_eq!(history.requires_http(), allowed);
@@ -2244,6 +2673,11 @@ mod tests {
                 );
             } else {
                 assert_eq!(next["previous_response_id"], "resp-refresh");
+                let owner = history.prepare_for_route(&route, next_auth, &mut next);
+                let error = history
+                    .restore_for_http(owner, &mut next, true)
+                    .unwrap_err();
+                assert!(!error.is::<MissingResponseHistory>());
             }
         }
     }
