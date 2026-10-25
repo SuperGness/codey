@@ -2952,9 +2952,14 @@
 
   const archivePlacementTarget = (thread, archiveControl) => {
     const wrapper = archiveControl.parentElement;
-    return wrapper instanceof HTMLElement && wrapper !== thread
-      ? wrapper
-      : archiveControl;
+    if (!(wrapper instanceof HTMLElement) || wrapper === thread) return archiveControl;
+    // 新版按钮直接位于浮动操作栏内；仅跳过旧版的单按钮提示包装层，
+    // 避免把整个操作栏当成按钮包装层，将图标插到聊天行下方。
+    const style = window.getComputedStyle?.(wrapper);
+    const isActionRow = /^(?:inline-)?(?:flex|grid)$/.test(style?.display || "")
+      || /^(?:absolute|fixed)$/.test(style?.position || "")
+      || wrapper.querySelectorAll("button, [role=button]").length !== 1;
+    return isActionRow ? archiveControl : wrapper;
   };
 
   const installSessionDeleteButtons = (root = document) => {

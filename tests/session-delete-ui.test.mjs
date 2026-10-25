@@ -65,6 +65,8 @@ function loadInjection({
   menuItems,
   outerMenuItems,
   mouseEvent = FakeMouseEvent,
+  directArchiveButton = false,
+  withPinButton = false,
 } = {}) {
   const body = new FakeElement("body");
   const documentElement = new FakeElement("html");
@@ -73,7 +75,9 @@ function loadInjection({
     "data-app-action-sidebar-thread-id": "local:thread-1",
     "data-app-action-sidebar-thread-title": "待删除会话",
   });
-  const actionBar = new FakeElement("div");
+  const actionBar = new FakeElement("div", { class: "flex" });
+  const hoverCard = new FakeElement("div", { class: "contents" });
+  const pinButton = new FakeElement("button", { "aria-label": "置顶聊天" });
   const archiveTooltip = new FakeElement("span");
   const archiveButton = new FakeElement("button", {
     "aria-label": "归档任务",
@@ -109,9 +113,16 @@ function loadInjection({
   body.appendChild(thread);
   body.appendChild(project);
   body.appendChild(tasksSection);
-  thread.appendChild(actionBar);
-  actionBar.appendChild(archiveTooltip);
-  archiveTooltip.appendChild(archiveButton);
+  if (directArchiveButton) {
+    thread.appendChild(hoverCard);
+    hoverCard.appendChild(actionBar);
+    if (withPinButton) actionBar.appendChild(pinButton);
+    actionBar.appendChild(archiveButton);
+  } else {
+    thread.appendChild(actionBar);
+    actionBar.appendChild(archiveTooltip);
+    archiveTooltip.appendChild(archiveButton);
+  }
   project.appendChild(projectActionButton);
   tasksSection.appendChild(tasksTitleRow);
   tasksTitleRow.append(tasksTitleLabel, tasksActionBar);
@@ -190,6 +201,9 @@ function loadInjection({
     dispatchEvent() {},
     innerHeight: 800,
     innerWidth: 1200,
+    getComputedStyle(element) {
+      return { display: element === actionBar ? "flex" : "inline", position: "static" };
+    },
     localStorage: {
       getItem: () => null,
       key: () => null,
@@ -232,7 +246,10 @@ function loadInjection({
   });
   return {
     actionBar,
+    archiveButton,
     archiveTooltip,
+    hoverCard,
+    pinButton,
     bridgeCalls,
     dispatched,
     document,
@@ -245,6 +262,23 @@ function loadInjection({
 }
 
 const deleteMenuItem = (onSelect) => ({ id: "delete-thread", onSelect });
+
+for (const withPinButton of [false, true]) {
+  test(`keeps injected icons inside the native action rail without tooltip wrappers (pin: ${withPinButton})`, () => {
+    const runtime = loadInjection({ directArchiveButton: true, withPinButton });
+    const exportButton = runtime.thread.querySelector("[data-codey-session-export]");
+    const deleteButton = runtime.thread.querySelector("[data-codey-session-delete]");
+    assert.deepEqual(runtime.actionBar.children, [
+      ...(withPinButton ? [runtime.pinButton] : []),
+      exportButton,
+      runtime.archiveButton,
+      deleteButton,
+    ]);
+    assert.deepEqual(runtime.hoverCard.children, [runtime.actionBar]);
+    assert.equal(runtime.actionBar.getAttribute("data-codey-session-action-row"), "true");
+    assert.equal(runtime.hoverCard.hasAttribute("data-codey-session-action-row"), false);
+  });
+}
 
 test("injects the sidebar delete icon and opens the official permanent delete entry", async () => {
   const calls = [];
