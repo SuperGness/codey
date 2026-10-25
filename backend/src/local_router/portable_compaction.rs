@@ -861,6 +861,145 @@ mod tests {
         router.stop().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn portable_compaction_source_quota_failure_preserves_route_for_explicit_switch() {
+        for native in [false, true] {
+            let (router, upstream, source, target, model) =
+                fixture_with_target_model("provider-model").await;
+            let home = tempfile::tempdir().unwrap();
+            let visible = json!({"role":"user","content":"complete visible history"});
+            let history = if native {
+                json!([
+                    {"type":"compaction","encrypted_content":"source-only-ciphertext"},
+                    {"role":"user","content":"continue after compaction"}
+                ])
+            } else {
+                json!([visible.clone()])
+            };
+            let expected_history = history.clone();
+            let mock = tokio::spawn(async move {
+                for stage in 0..if native { 2 } else { 3 } {
+                    let (mut socket, _) = upstream.accept().await.unwrap();
+                    let request = read_http_request(&mut socket).await.unwrap();
+                    assert_eq!(
+                        incoming_header(&request, "authorization"),
+                        Some(if stage == 2 {
+                            "Bearer sk-target"
+                        } else {
+                            "Bearer sk-upstream"
+                        })
+                    );
+                    let body: Value = serde_json::from_slice(&request.body).unwrap();
+                    assert_eq!(body["model"], "provider-model");
+                    if stage > 0 {
+                        assert_eq!(body["input"], expected_history);
+                    }
+                    if stage == 1 {
+                        write_json_response(
+                            &mut socket,
+                            429,
+                            &json!({"error":{
+                                "code":"usage_limit_reached","message":"source account quota exhausted"
+                            }}),
+                        )
+                        .await
+                        .unwrap();
+                    } else {
+                        let output = if native {
+                            json!([{"type":"compaction","encrypted_content":"source-only-ciphertext"}])
+                        } else {
+                            json!([])
+                        };
+                        write_json_response(
+                            &mut socket,
+                            200,
+                            &json!({
+                                "id":"reply","status":"completed","output":output
+                            }),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                }
+            });
+            let client = client();
+            let first_input = if native {
+                json!([visible, {"type":"compaction_trigger"}])
+            } else {
+                history.clone()
+            };
+            let first = post(
+                &client,
+                &router,
+                "parent",
+                &model_alias(&source, &model),
+                first_input,
+            )
+            .send()
+            .await
+            .unwrap();
+            assert_eq!(first.status().as_u16(), 200);
+            let _ = first.bytes().await.unwrap();
+            let failed = post(
+                &client,
+                &router,
+                "parent",
+                &model_alias(&source, &model),
+                history.clone(),
+            )
+            .send()
+            .await
+            .unwrap();
+            assert_eq!(failed.status().as_u16(), 429);
+            let error = failed.text().await.unwrap();
+            assert!(error.contains("source account quota exhausted"), "{error}");
+
+            let binding = router.bindings.lock().unwrap().routes["thread-id:parent"].clone();
+            assert_eq!(binding.provider_id, source);
+            assert_eq!(binding.upstream_model, model);
+            assert_eq!(binding.portable, !native);
+            let prepared = router
+                .portable_compaction_from_home(
+                    "prepare",
+                    &json!({
+                        "threadId":"parent","targetProviderId":target,"targetModel":model
+                    }),
+                    home.path(),
+                )
+                .unwrap();
+            assert_eq!(prepared["required"], native);
+            assert_binding_unchanged(&router, &binding);
+            if native {
+                assert_eq!(prepared["sourceProviderId"], source);
+                assert_eq!(prepared["sourceModel"], model);
+                let bindings = router.bindings.lock().unwrap();
+                let ticket = &bindings.portable_tickets["thread-id:parent"];
+                assert_eq!(ticket.source.provider_id, source);
+                assert_eq!(ticket.target.provider_id, target);
+                assert_eq!(ticket.state, "prepared");
+            } else {
+                let resumed = post(
+                    &client,
+                    &router,
+                    "parent",
+                    &model_alias(&target, &model),
+                    history,
+                )
+                .send()
+                .await
+                .unwrap();
+                assert_eq!(resumed.status().as_u16(), 200);
+                let _ = resumed.bytes().await.unwrap();
+                assert_eq!(
+                    router.bindings.lock().unwrap().routes["thread-id:parent"].provider_id,
+                    target
+                );
+            }
+            mock.await.unwrap();
+            router.stop().await.unwrap();
+        }
+    }
+
     #[test]
     fn cross_route_compaction_trigger_is_an_operation_not_history() {
         let valid = json!({"input":[{"role":"user","content":"full history"},{"type":"compaction_trigger"}]});
@@ -2014,6 +2153,12 @@ mod tests {
     }
 
     async fn fixture() -> (LocalRouter, TcpListener, String, String, String) {
+        fixture_with_target_model("target-model").await
+    }
+
+    async fn fixture_with_target_model(
+        target_model: &str,
+    ) -> (LocalRouter, TcpListener, String, String, String) {
         let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (mut config, source, model) = super::super::tests::router_config(format!(
             "http://{}/v1",
@@ -2028,11 +2173,11 @@ mod tests {
         config.profiles.push(target);
         config
             .selected_models_by_provider
-            .insert(target_id.clone(), vec!["target-model".into()]);
+            .insert(target_id.clone(), vec![target_model.into()]);
         config.model_context_by_provider.insert(
             target_id.clone(),
             BTreeMap::from([(
-                "target-model".into(),
+                target_model.into(),
                 crate::config::ModelContextConfig {
                     context_window_tokens: 1_000_000,
                     auto_compact_token_limit: None,
