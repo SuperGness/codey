@@ -74,6 +74,21 @@ test("renamed minified variables still match the semantic anchors exactly once",
   assert.equal(h.patch(renamed), patched);
 });
 
+test("Codex 26.1021 composer adapter chunk passes a derived collaboration mode", () => {
+  // The submission now receives J=H!=null&&cr&&!In?null:K while the quota
+  // check still reads K.settings.model, so the mode binding may differ.
+  const derived = fixture
+    .replace("const submission=", "const activeMode=zt;const submission=")
+    .replace("activeCollaborationMode:zt", "activeCollaborationMode:activeMode");
+  const h = harness({ allowsLocalSend: ({ model }) => model === "third-party" });
+  const patched = h.patch(derived, "app://-/assets/codex-composer-adapter-8f303ad0f240.js");
+  assert.equal(patched.split(marker).length - 1, 1);
+  vm.runInContext(patched, h.context);
+  assert.equal(h.context.render("third-party", "local", true, false), false);
+  assert.equal(h.context.render("gpt-official", "local", true, false), true);
+  assert.deepEqual(h.failures, []);
+});
+
 test("duplicate or drifted quota gates are left unchanged and reported", () => {
   for (const [source, count] of [[fixture + fixture, 2], [fixture.replace("resolvedHostId:bt", "resolvedHostId:anotherHost"), 0], [fixture.replace("||vn,Qn", "||anotherQuota,Qn"), 0]]) {
     const h = harness();

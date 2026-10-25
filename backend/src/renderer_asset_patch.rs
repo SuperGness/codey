@@ -30,7 +30,13 @@ use crate::error_log;
 /// 补丁脚本注入页面后暴露的纯函数入口：`(url, source) => patched | null`。
 const RENDERER_ASSET_PATCH_SCRIPT: &str = include_str!("renderer_asset_patch.js");
 /// 需要改写的脚本名前缀，与页面侧 isCodexRendererAssetUrl 的名单保持一致。
-const PATCHABLE_ASSET_PREFIXES: [&str; 3] = ["app-initial", "app-primary", "app-shared"];
+const PATCHABLE_ASSET_PREFIXES: [&str; 5] = [
+    "app-initial",
+    "app-primary",
+    "app-shared",
+    "codex-composer-adapter",
+    "initialize-app-host-services",
+];
 /// 仅在关闭宠物时改写的设置页脚本。
 const PET_ASSET_PREFIXES: [&str; 1] = ["pets-settings"];
 /// 等 Codex 调试端点就绪的总预算；超时后由下一次注入重新拉起服务。

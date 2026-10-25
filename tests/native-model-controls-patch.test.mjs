@@ -20,7 +20,7 @@ test("Fast access follows model tiers for every login and third-party routes kee
 
     const ultraQuerySource = [
       "const ultraGate={},queryFactory=(_,factory)=>factory;",
-      "const query=queryFactory(null,({includeUltraReasoningEffort:i,isCustomModelProvider:a},",
+      "const query=queryFactory(null,({includeUltraReasoningEffort:i,isCustomModelProvider:a,modelCatalogPath:c},",
       "{get:l})=>{let m=i&&l(ultraGate,`1186680773`);",
       "return {select:({data:r,enabledReasoningEfforts:n})=>r.map(e=>({...e,",
       "supportedReasoningEfforts:e.supportedReasoningEfforts.filter(",
@@ -112,6 +112,21 @@ test("Fast access follows model tiers for every login and third-party routes kee
       );
     }
     assert.deepEqual(records, [], "current Fast shapes must patch without compatibility errors");
+
+    // Codex 26.1021 host services pass the same Ultra gate into the model
+    // picker but hold no model catalog query; leave that chunk untouched.
+    const hostServicesSource = [
+      "function Hs(t,e,c){return Sm({hostId:e.hostId,includeUltraReasoningEffort:Kl(t,`1186680773`),",
+      "isAuthLoading:c.isLoading,isCustomModelProvider:e.isCustomModelProvider})}",
+    ].join("");
+    assert.equal(
+      globalThis.__codeyRendererPatchEntry(
+        "app://-/assets/initialize-app-host-services-5891c906a171.js",
+        hostServicesSource,
+      ),
+      null,
+    );
+    assert.deepEqual(records, [], "a gate argument without the catalog query is not a drift");
 
     // Assets outside the patch set return null so the paused request keeps its
     // original body — the entry never reads or clones them.

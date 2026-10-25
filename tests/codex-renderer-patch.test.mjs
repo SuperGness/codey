@@ -185,6 +185,87 @@ test("draft default patch is atomic when anchors drift and idempotent when reapp
   }
 });
 
+// Codex 26.1021+ stores manual draft choices natively and passes them to the
+// settings hook as draftModelSettings; only the initial reasoning changes.
+const nativeDraftFixture = [
+  "let Dfa=bn(V,e=>({isManuallyChanged:!1,modelSettings:null,serviceTier:null}));",
+  "function Cfa(e){return{...e,modelSettings:null,modelSettingsPersistAsDefault:void 0}}",
+  "function klo({userSavedModelString:e,userSavedReasoningEffort:t,listModelsData:n}){let r=n?.models.find(m=>m.model===e),i=r?.supportedReasoningEfforts?.map(e=>e.reasoningEffort),a=t!=null&&i!=null&&i.includes(t)?t:r?.defaultReasoningEffort;return{model:r?r.model:e,reasoningEffort:a??t??`medium`,profile:null,isLoading:!1}}",
+  "function Llo(e){let t=(0,A2.c)(32),{hostId:n,managedNewThreadModelSettings:s,draftModelSettings:c,waitForModelList:l,isNewThreadDraft:d}=e,z=Cat(n),I=s?.model??null,ne=I==null?Saved().reasoningEffort:s?.modelReasoningEffort??null,ae=klo({userSavedModelString:I??Saved().model,userSavedReasoningEffort:ne,listModelsData:l&&z!=null?{...z,defaultModel:z.models[0]}:z}),me={...ae,isLoading:!1};c!=null&&(me={...me,model:c.model,reasoningEffort:c.reasoningEffort});return{modelSettings:me}}",
+  "function afterLlo(){}",
+].join("");
+
+test("native draft settings start at supported medium reasoning and ordinary speed", async (t) => {
+  (0, eval)(await loadStartupPatchTemplate());
+  const errors = [];
+  const savedLog = globalThis.__codeyPatchLog;
+  globalThis.__codeyPatchLog = (record) => errors.push(JSON.parse(record));
+  let patched;
+  try {
+    patched = globalThis.__codeyRendererPatchEntry("app://-/assets/app-initial-native-drafts.js", nativeDraftFixture);
+  } finally {
+    globalThis.__codeyPatchLog = savedLog;
+  }
+  assert.deepEqual(errors, []);
+  assert.ok(patched?.includes("/*codey-new-thread-draft-defaults*/"));
+  const syntax = spawnSync(process.execPath, ["--check", "--input-type=module"], { input: patched, encoding: "utf8" });
+  assert.equal(syntax.status, 0, syntax.stderr);
+  const factory = patched.match(/=>\(\{isManuallyChanged:!1,modelSettings:null,serviceTier:\{value:`default`\}\}\)/)?.[0];
+  assert.ok(factory, "each draft starts with ordinary speed");
+
+  const state = {
+    saved: { model: "chosen-model", reasoningEffort: "high" },
+    catalog: {
+      models: [
+        { model: "chosen-model", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ reasoningEffort: "medium" }, { reasoningEffort: "high" }] },
+        { model: "high-only", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ reasoningEffort: "high" }] },
+      ],
+    },
+  };
+  const start = patched.indexOf("function Llo(");
+  const useSettings = Function("A2", "Cat", "Saved", `${patched.slice(start, patched.indexOf("function afterLlo"))}${patched.slice(patched.indexOf("function klo("), patched.indexOf("function Llo("))}return Llo`)(
+    { c: (size) => Array(size) },
+    () => state.catalog,
+    () => state.saved,
+  );
+  const effort = (options) => useSettings({ hostId: "local", waitForModelList: true, ...options }).modelSettings.reasoningEffort;
+
+  await t.test("a new draft ignores the saved reasoning", () => {
+    assert.equal(effort({ isNewThreadDraft: true }), "medium");
+    assert.equal(useSettings({ hostId: "local", isNewThreadDraft: true }).modelSettings.model, "chosen-model");
+  });
+  await t.test("manual draft choices, managed settings and existing threads stay native", () => {
+    assert.equal(effort({ isNewThreadDraft: true, draftModelSettings: { model: "chosen-model", reasoningEffort: "high" } }), "high");
+    assert.equal(effort({ isNewThreadDraft: true, managedNewThreadModelSettings: { model: "chosen-model", modelReasoningEffort: "high" } }), "high");
+    assert.equal(effort({ isNewThreadDraft: false }), "high");
+    assert.equal(effort({}), "high");
+  });
+  await t.test("unsupported medium and unknown models use the native result", () => {
+    state.saved = { model: "high-only", reasoningEffort: "high" };
+    assert.equal(effort({ isNewThreadDraft: true }), "high");
+    state.saved = { model: "not-in-catalog", reasoningEffort: "low" };
+    assert.equal(effort({ isNewThreadDraft: true }), "low");
+    state.catalog = undefined;
+    assert.equal(effort({ isNewThreadDraft: true }), "low");
+  });
+
+  const patch = (source) => globalThis.__codeyRendererPatchEntry("app://-/assets/app-initial-native-drafts.js", source) ?? source;
+  assert.equal(patch(patched), patched, "reapplying is idempotent");
+  globalThis.__codeyPatchLog = () => {};
+  const savedError = console.error;
+  console.error = () => {};
+  try {
+    for (const source of [
+      nativeDraftFixture.replace("serviceTier:null", "serviceTier:void 0"),
+      `${nativeDraftFixture}function Mlo(e){let t=(0,A2.c)(1),{managedNewThreadModelSettings:s,draftModelSettings:c,isNewThreadDraft:d}=e,x=1}`,
+      nativeDraftFixture.replace("me={...ae,", "me={...klo({userSavedModelString:null}),...ae,"),
+    ]) assert.equal(patch(source), source, "drifted anchors leave the asset untouched");
+  } finally {
+    globalThis.__codeyPatchLog = savedLog;
+    console.error = savedError;
+  }
+});
+
 test("an incompatible optional renderer patch never blocks the Codex module response", async () => {
   const patchRecords = [];
   const patchErrors = [];
@@ -776,6 +857,32 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     };
     for (const [requestId, reason] of [["beat", "heartbeat"], ["jank", "main_thread_jank"]]) {
       await onAppMessage({
+        type: "electron-app-state-snapshot-request",
+        hostId: "local",
+        requestId,
+        reason,
+      }, snapshotStore, snapshotBridge);
+    }
+    assert.deepEqual(collectedReasons, ["main_thread_jank"]);
+    assert.deepEqual(snapshotResponses, ["jank"]);
+
+    // Codex 26.1021 moved the handler into the host services chunk and uses an
+    // unlabelled switch break; a skipped heartbeat must not send workRoute.
+    const hostServicesSnapshotSource = [
+      "async function onHostMessage(e,t,tt){switch(e.type){",
+      "case`electron-app-state-snapshot-request`:{let n=t.get(`host`,e.hostId),r=t.get(`sampler`),i=null;",
+      "if(n!=null&&r!=null){let[a]=await Promise.all([r.collectAppStateSnapshot(e.hostId,e.reason)]);i=a}",
+      "let a=t.get(`route`);if(i==null&&a==null)break;",
+      "tt.dispatchMessage(`electron-app-state-snapshot-response`,{requestId:e.requestId,fields:i,workRoute:a});break}",
+      "case`other`:break}}",
+    ].join("");
+    const onHostMessage = Function(
+      `${patch("app://-/assets/initialize-app-host-services-5891c906a171.js", hostServicesSnapshotSource)};return onHostMessage`,
+    )();
+    collectedReasons.length = 0;
+    snapshotResponses.length = 0;
+    for (const [requestId, reason] of [["beat", "heartbeat"], ["jank", "main_thread_jank"]]) {
+      await onHostMessage({
         type: "electron-app-state-snapshot-request",
         hostId: "local",
         requestId,
