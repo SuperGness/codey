@@ -390,15 +390,35 @@
       && !source.includes("/*codey-local-quota-gate*/")) {
       // 只改变 Codex 本机发送按钮的额度条件。保留共享额度状态、官方警告
       // 和其他禁用条件；每次渲染读取当前模型，避免模型切换后复用旧判断。
+      const localSendGate = (marker, host, mode) =>
+        `/*${marker}*/(()=>{try{return globalThis.__codeyQuotaUnlock?.allowsLocalSend?.({hostId:${host},model:${mode}.settings.model})!==true}catch{return true}})()`;
+      let quotaGate = null;
       patched = replaceUniqueRendererGate(
         patched,
         /let\{agentMode:[^;]{0,1024}?(?<mode>[$A-Z_a-z][$\w]*)\.settings\.model===`gpt-reserve`[^;]{0,1024}?,(?<quota>[$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*\((?<host>[$A-Z_a-z][$\w]*)===`local`&&[$A-Z_a-z][$\w]*\)(?=,[\s\S]{0,10000}?activeCollaborationMode:[$A-Z_a-z][$\w]*,[\s\S]{0,2000}?resolvedHostId:\k<host>,[\s\S]{0,10000}?let (?<disabled>[$A-Z_a-z][$\w]*)=[^;]{0,512}?\|\|\k<quota>,[\s\S]{0,6000}?submitDisabled:\k<disabled>,)/g,
         (...args) => {
-          const { host, mode } = args.at(-1);
-          return `${args[0]}&&/*codey-local-quota-gate*/(()=>{try{return globalThis.__codeyQuotaUnlock?.allowsLocalSend?.({hostId:${host},model:${mode}.settings.model})!==true}catch{return true}})()`;
+          quotaGate = args.at(-1);
+          return `${args[0]}&&${localSendGate("codey-local-quota-gate", quotaGate.host, quotaGate.mode)}`;
         },
         "local third-party composer quota",
       );
+      // Codex 26.1021 起 Team 等工作空间额度耗尽时另有按主机的硬阻断，
+      // 在禁用表达式中紧挨额度条件；旧版没有该条件时保持不变。
+      if (quotaGate != null && patched.includes("/*codey-local-quota-gate*/")) {
+        const { disabled, host, mode, quota } = quotaGate;
+        const name = value => value.replace(/\$/g, "\\$");
+        const ident = "[$A-Z_a-z][$\\w]*";
+        const disabledMatches = [...patched.matchAll(new RegExp(`let ${name(disabled)}=[^;]{0,512}?\\|\\|(${ident})\\|\\|${name(quota)},`, "g"))];
+        const hard = disabledMatches.length === 1 ? disabledMatches[0][1] : null;
+        if (hard != null
+          && hard !== host
+          && patched.match(new RegExp(`[,;{]${name(hard)}=${ident}\\(${ident},${name(host)}\\)[,;]`, "g"))?.length === 1) {
+          const [{ 0: matched, index }] = disabledMatches;
+          const term = `||${hard}||${quota},`;
+          const offset = index + matched.length - term.length;
+          patched = `${patched.slice(0, offset)}||${hard}&&${localSendGate("codey-local-hard-block-gate", host, mode)}||${quota},${patched.slice(offset + term.length)}`;
+        }
+      }
     }
     if (
       source.includes("codex-message-from-view")
