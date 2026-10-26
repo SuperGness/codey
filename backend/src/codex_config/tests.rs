@@ -1220,7 +1220,6 @@ fn isolated_prompt_sources_migrate_historical_defaults_and_preserve_user_guidanc
     let temp = tempfile::tempdir().unwrap();
     let mut sources = Vec::new();
     for (name, current, versions) in [
-        ("root.md", SUBAGENT_GUIDANCE, SUBAGENT_GUIDANCE_VERSIONS),
         (
             "fastctx.md",
             CODEY_FASTCTX_GUIDANCE,
@@ -1257,17 +1256,11 @@ enabled = true
         "User collaboration policy.\n\n{}",
         ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS[1..].join("\n\n"),
     ));
-    apply_isolated_prompt_sources(
-        &mut document,
-        Some(&sources[0]),
-        Some(&sources[1]),
-        Some(&sources[2]),
-    )
-    .unwrap();
+    apply_isolated_prompt_sources(&mut document, Some(&sources[0]), Some(&sources[1])).unwrap();
     let first = document_string(&document).unwrap();
     let root = document["developer_instructions"].as_str().unwrap();
     assert!(root.contains("User root guidance."));
-    assert_eq!(root.matches(SUBAGENT_GUIDANCE.trim()).count(), 1);
+    assert!(!root.contains("## 子代理使用"));
     assert_eq!(root.matches(CODEY_FASTCTX_GUIDANCE).count(), 1);
     let child = document["features"]["multi_agent_v2"]["subagent_developer_instructions"]
         .as_str()
@@ -1291,13 +1284,7 @@ enabled = true
     ] {
         assert!(!first.contains(stale), "{stale}");
     }
-    apply_isolated_prompt_sources(
-        &mut document,
-        Some(&sources[0]),
-        Some(&sources[1]),
-        Some(&sources[2]),
-    )
-    .unwrap();
+    apply_isolated_prompt_sources(&mut document, Some(&sources[0]), Some(&sources[1])).unwrap();
     assert_eq!(document_string(&document).unwrap(), first);
 }
 
@@ -3864,8 +3851,8 @@ wire_api = "responses"
     let seeded_constraints_dir = state_dir.join(CODEY_CONSTRAINTS_DIR);
     fs::create_dir_all(&seeded_constraints_dir).unwrap();
     fs::write(
-        seeded_constraints_dir.join(CODEY_ROOT_INSTRUCTIONS_FILE),
-        SUBAGENT_GUIDANCE,
+        seeded_constraints_dir.join(CODEY_RETIRED_ROOT_INSTRUCTIONS_FILE),
+        SUBAGENT_GUIDANCE_VERSIONS[0],
     )
     .unwrap();
     fs::write(
@@ -4088,11 +4075,11 @@ wire_api = "responses"
         Some(crate::subagent_orchestrator::POST_TOOL_HOOK_MATCHER)
     );
     let constraints_dir = state_dir.join(CODEY_CONSTRAINTS_DIR);
-    assert_eq!(
-        fs::read_to_string(constraints_dir.join(CODEY_ROOT_INSTRUCTIONS_FILE)).unwrap(),
-        SUBAGENT_GUIDANCE
+    assert!(
+        !constraints_dir
+            .join(CODEY_RETIRED_ROOT_INSTRUCTIONS_FILE)
+            .exists()
     );
-    assert!(constraints_dir.join(CODEY_ROOT_INSTRUCTIONS_FILE).exists());
     assert!(
         constraints_dir
             .join(CODEY_FASTCTX_INSTRUCTIONS_FILE)
@@ -4151,7 +4138,7 @@ wire_api = "responses"
     // Codey-owned constraint files are rebuilt from the current definitions;
     // hand-edited or stale content there does not carry into the runtime.
     fs::write(
-        constraints_dir.join(CODEY_ROOT_INSTRUCTIONS_FILE),
+        constraints_dir.join(CODEY_RETIRED_ROOT_INSTRUCTIONS_FILE),
         "CUSTOM ROOT CONSTRAINT",
     )
     .unwrap();
@@ -4183,9 +4170,10 @@ wire_api = "responses"
         &backup_root,
     )
     .unwrap();
-    assert_eq!(
-        fs::read_to_string(constraints_dir.join(CODEY_ROOT_INSTRUCTIONS_FILE)).unwrap(),
-        SUBAGENT_GUIDANCE
+    assert!(
+        !constraints_dir
+            .join(CODEY_RETIRED_ROOT_INSTRUCTIONS_FILE)
+            .exists()
     );
     assert_eq!(
         fs::read_to_string(constraints_dir.join(CODEY_COLLABORATION_HINT_FILE)).unwrap(),
@@ -4202,7 +4190,7 @@ wire_api = "responses"
         .as_str()
         .unwrap();
     // Injected text is trimmed, so compare against the trimmed guidance.
-    assert!(developer_instructions.contains(SUBAGENT_GUIDANCE.trim()));
+    assert!(!developer_instructions.contains("## 子代理使用"));
     assert!(developer_instructions.contains(CODEY_FASTCTX_GUIDANCE));
     assert!(!developer_instructions.contains("CUSTOM ROOT CONSTRAINT"));
     let collaboration_override = reapplied

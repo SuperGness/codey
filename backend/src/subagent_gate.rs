@@ -607,7 +607,7 @@ fn user_prompt_submit_output(
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": format!(
-                "Codey 检测到本轮用户输入到达时仍有 {active} 个子代理未确认终态。当前用户输入优先于旧任务描述：先调用一次不带筛选的 agents.list_agents 对账；若用户明确取消或缩小了某个子任务，只中断仍非终态且被明确取消的 target。应用新输入后，如仍有计划内未派发的独立任务，检查剩余并发额度；存在空余槽位时调用 agents.spawn_agent 补位，否则继续 wait/list。普通状态询问或补充信息不得被解释为取消全部代理；所有活动 attempt 结算前不得恢复非协作本地工作。{compatibility}"
+                "Codey 检测到本轮用户输入到达时仍有 {active} 个子代理未确认终态。当前用户输入优先于旧任务描述：先调用一次不带筛选的 agents.list_agents 对账；若用户明确取消或缩小了某个子任务，只中断仍非终态且被明确取消的 target。应用新输入后，如仍有计划内未派发的独立任务，检查剩余并发额度；存在空余槽位时调用 agents.spawn_agent 补位，否则继续 wait/list。普通状态询问或补充信息不得被解释为取消全部代理；所有活动 attempt 结算前只可使用协作工具和只读工具。{compatibility}"
             )
         }
     }))
@@ -1072,8 +1072,25 @@ fn pre_tool_use_output(
     if active == 0 {
         return Ok(json!({}));
     }
+    // Reading lets the root prepare review while children run; writes,
+    // commands and Stop stay blocked until every attempt settles.
+    if input
+        .tool_name
+        .as_deref()
+        .is_some_and(is_root_read_only_tool)
+        && trusted_root_turn_matches(input, state_root, runtime_id, now_ms)?
+    {
+        return Ok(json!({}));
+    }
     let protocol_issue = protocol_issue_reason(state_root, runtime_id, &input.session_id)?;
     Ok(pre_tool_denial(active, protocol_issue.as_deref()))
+}
+
+fn is_root_read_only_tool(tool_name: &str) -> bool {
+    matches!(
+        normalized_collaboration_tool(tool_name).as_str(),
+        "read_file" | "inspect_local_file" | "grep" | "glob" | "view_image"
+    )
 }
 
 fn requested_spawn_role(tool_input: Option<&Value>) -> Option<&str> {
@@ -1333,13 +1350,13 @@ fn post_tool_use_output(
             "reason": format!("Codey 子代理门禁：agents.agent_status 返回后仍有 {active} 个子代理未确认终态。只接受与请求目标一致的状态回复，单个目标的终态不能代表所有子代理已结束。请使用本轮实际提供的状态工具继续核对；工具未注册时不要重复调用，门禁会在恢复等待期结束后的下一次根调用中处理遗留状态。\n\n{returned_update}")
         }))
     } else if is_wait_agent_tool(tool_name) {
+        let task_names = crate::subagent_orchestrator::active_task_names(
+            state_root,
+            runtime_id,
+            &input.session_id,
+            now_ms,
+        )?;
         if wait_response_is_bare_timeout(input.tool_response.as_ref()) {
-            let task_names = crate::subagent_orchestrator::active_task_names(
-                state_root,
-                runtime_id,
-                &input.session_id,
-                now_ms,
-            )?;
             return Ok(post_wait_timeout_continuation(
                 active,
                 task_names.as_deref(),
@@ -1348,12 +1365,20 @@ fn post_tool_use_output(
         }
         Ok(post_wait_continuation(
             active,
+            task_names.as_deref(),
             input.tool_response.as_ref(),
             protocol_issue.as_deref(),
         ))
     } else {
+        let task_names = crate::subagent_orchestrator::active_task_names(
+            state_root,
+            runtime_id,
+            &input.session_id,
+            now_ms,
+        )?;
         Ok(post_list_continuation(
             active,
+            task_names.as_deref(),
             input.tool_response.as_ref(),
             protocol_issue.as_deref(),
         ))
@@ -1661,7 +1686,7 @@ fn pre_tool_denial(active: usize, protocol_issue: Option<&str>) -> Value {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": format!(
-                "Codey 子代理门禁：仍有 {active} 个子代理尚未确认进入终态。现在只可调用本轮已提供的 agents.* 协作工具；可用 agents.list_agents 或 agents.agent_status 核对状态，再对仍在运行的代理调用可用的 agents.wait_agent。工具未注册时不要重复调用；门禁恢复计时由根调用、用户输入和 Stop 共同推进，恢复后由主代理核验并继续工作。{compatibility}"
+                "Codey 子代理门禁：仍有 {active} 个子代理尚未确认进入终态。现在只可调用本轮已提供的 agents.* 协作工具和只读工具（读文件、搜索、看图），写入、命令和结束任务须等全部结算；可用 agents.list_agents 或 agents.agent_status 核对状态，再对仍在运行的代理调用可用的 agents.wait_agent。工具未注册时不要重复调用；门禁恢复计时由根调用、用户输入和 Stop 共同推进，恢复后由主代理核验并继续工作。{compatibility}"
             ),
         }
     })
@@ -1687,12 +1712,17 @@ fn subagent_identity_missing_denial() -> Value {
     })
 }
 
+// Wait and list results only need the current state: the root usage hint
+// already carries the full lifecycle rules, and this text stays in the root
+// context for every returned update.
 fn post_wait_continuation(
     active: usize,
+    task_names: Option<&[String]>,
     tool_response: Option<&Value>,
     protocol_issue: Option<&str>,
 ) -> Value {
     let returned_update = render_untrusted_tool_result(tool_response, "wait_agent");
+    let names = active_task_label(active, task_names);
     let task_body_recovery = tool_response
         .filter(|response| {
             crate::subagent::protocol::response_reports_task_body_unavailable(response)
@@ -1704,23 +1734,16 @@ fn post_wait_continuation(
     let compatibility = protocol_issue
         .map(|issue| format!("\n\nHook 协议兼容性诊断：{issue}。"))
         .unwrap_or_default();
-    let local_read_guidance = " 在所有子代理进入终态或被根成功中断并 fence 前，不得恢复非协作本地工作、形成最终结论或结束当前任务。";
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动标记尚未核销。保留下方内容；可继续使用 agents.wait_agent 或不带筛选的 agents.list_agents 对账。只有当前调用仍携带并匹配本批首个根派生调用的 turn_id 时，才可使用 agents.spawn_agent、agents.send_message、agents.followup_task 或 agents.interrupt_agent 协调；缺少该绑定时按匿名主体 fail-closed。completed、errored、shutdown、not_found、FINAL_ANSWER 和 task_complete 都视为终态；任一 attempt 终态或被根成功中断并 fence 后，如仍有计划内未派发的独立任务，检查剩余并发额度，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待。后来仍显示已 fence target 为活动的上游快照不得触发再次等待。不得自动重派已结束或已放弃的旧任务；不得仅因运行时长、状态未变化或缺少新消息中断或回收子代理。工具明确未注册时不要重复调用；使用当前可用的 list_agents 或 agent_status 核对，收到工具不可用回执后，若 30 秒内仍无可用状态回复且没有子代理工具正在执行，下一次根调用才会触发恢复，不得把失联任务当作成功。{local_read_guidance}{task_body_recovery}{compatibility}\n\n本次 wait_agent 已返回内容：\n{returned_update}"
+            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动{names}。保留下方内容；可继续使用 agents.wait_agent，名单中消失的任务已结束，需要结果或补位时调用一次不带筛选的 agents.list_agents。有计划内未派发任务且有空余槽位时用新 task_name 补位；不得仅因运行时长或没有新消息中断、重派子代理。所有子代理终态或被根成功中断前只能使用 agents.* 协作工具和只读工具，不得形成最终结论或结束当前任务。{task_body_recovery}{compatibility}\n\n本次 wait_agent 已返回内容：\n{returned_update}"
         ),
     })
 }
 
-// A bare timeout carries no per-agent update, so it gets a short summary
-// instead of the full guidance; the root hint already holds the full rules.
-fn post_wait_timeout_continuation(
-    active: usize,
-    task_names: Option<&[String]>,
-    protocol_issue: Option<&str>,
-) -> Value {
-    let names = task_names
+fn active_task_label(active: usize, task_names: Option<&[String]>) -> String {
+    task_names
         .filter(|names| !names.is_empty() && names.len() == active)
         .map(|names| {
             let quoted = names
@@ -1730,32 +1753,43 @@ fn post_wait_timeout_continuation(
                 .join("、");
             format!("（{quoted}）")
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+// A bare timeout carries no per-agent update, so it gets a short summary
+// instead of the full guidance; the root hint already holds the full rules.
+fn post_wait_timeout_continuation(
+    active: usize,
+    task_names: Option<&[String]>,
+    protocol_issue: Option<&str>,
+) -> Value {
+    let names = active_task_label(active, task_names);
     let compatibility = protocol_issue
         .map(|issue| format!(" Hook 协议兼容性诊断：{issue}。"))
         .unwrap_or_default();
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：wait_agent 等待超时，仍有 {active} 个子代理在运行{names}。超时只表示这段时间没有新消息，不代表异常；直接再次调用 agents.wait_agent，不需要先调用 list_agents。名单中消失的任务已经结束，需要它的结果或补位时再调用一次不带筛选的 agents.list_agents。活动期间只能使用 agents.* 协作工具。{compatibility}"
+            "Codey 子代理汇合门禁：wait_agent 等待超时，仍有 {active} 个子代理在运行{names}。超时只表示这段时间没有新消息，不代表异常；直接再次调用 agents.wait_agent，不需要先调用 list_agents。名单中消失的任务已经结束，需要它的结果或补位时再调用一次不带筛选的 agents.list_agents。活动期间只能使用 agents.* 协作工具和只读工具。{compatibility}"
         ),
     })
 }
 
 fn post_list_continuation(
     active: usize,
+    task_names: Option<&[String]>,
     tool_response: Option<&Value>,
     protocol_issue: Option<&str>,
 ) -> Value {
     let returned_update = render_untrusted_tool_result(tool_response, "list_agents");
+    let names = active_task_label(active, task_names);
     let compatibility = protocol_issue
         .map(|issue| format!("\n\nHook 协议兼容性诊断：{issue}。"))
         .unwrap_or_default();
-    let local_read_guidance = " 所有活动代理结算前继续保持全局本地工具屏障。";
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：agents.list_agents 核对后仍有 {active} 个子代理尚未确认进入终态。任一 attempt 已终态或被成功中断并 fence 后，如仍有计划内未派发的独立任务，可信根代理应检查剩余并发额度，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待、转向或停止。completed、errored、shutdown 和 not_found 不再阻塞。不得仅因运行时长、状态未变化或缺少新消息中断子代理；只有用户明确取消或有证据确认任务无法继续时才中断一次。中断获得结构化成功回执后，确认遗留工具和写入任务已停止再接管，不再等待该 target 的上游状态变化，只有中断失败或目标无法匹配时才继续对账。每次等待保持有界并继续核对，不得自动重派已结束或已放弃的旧任务。若 pending_init 实际已僵死，门禁会在持续 10 分钟无法进展后释放遗留状态。{local_read_guidance}{compatibility}\n\n本次 list_agents 已返回内容：\n{returned_update}"
+            "Codey 子代理汇合门禁：agents.list_agents 核对后仍有 {active} 个子代理尚未确认进入终态{names}。有计划内未派发任务且有空余槽位时用新 task_name 补位，否则对仍活动的 running、pending_init 或 interrupted 代理调用 agents.wait_agent；completed、errored、shutdown 和 not_found 不再阻塞。不得仅因运行时长或没有新消息中断子代理，只有用户明确取消或有证据确认任务无法继续时才中断一次；中断获得成功回执后不再等待该 target。不得自动重派已结束或已放弃的旧任务；pending_init 持续 10 分钟无法进展时门禁会释放遗留状态。所有活动代理结算前只可使用协作工具和只读工具。{compatibility}\n\n本次 list_agents 已返回内容：\n{returned_update}"
         ),
     })
 }

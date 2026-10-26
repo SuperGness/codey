@@ -15,8 +15,9 @@ use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, TableLike, Value, 
 use crate::codex_config_guidance::{
     CODEY_FASTCTX_GUIDANCE, ROOT_AGENT_COLLABORATION_USAGE_HINT,
     ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS, ROOT_AGENT_MULTI_AGENT_MODE_HINT,
-    SUBAGENT_GUIDANCE, SUBAGENT_TASK_BOUNDARY_GUARD, append_root_agent_collaboration_usage_hint,
-    remove_codey_fastctx_guidance, remove_subagent_guidance, subagent_source_config,
+    ROOT_AGENT_MULTI_AGENT_MODE_HINT_VERSIONS, SUBAGENT_TASK_BOUNDARY_GUARD,
+    append_root_agent_collaboration_usage_hint, remove_codey_fastctx_guidance,
+    remove_subagent_guidance, subagent_source_config,
 };
 use crate::config::{
     CodeyConfig, SUBAGENT_REASONING_EFFORTS, SUBAGENT_ROLE_DEFAULT, SUBAGENT_ROLE_IDS,
@@ -71,7 +72,7 @@ const CODEY_FASTCTX_TOOL_TIMEOUT_SECONDS: i64 = 300;
 const DEFAULT_SUBAGENT_MAX_CONCURRENCY: i64 = 2;
 const APPLIED_HOOKS_JSON_FILE: &str = "applied-hooks.json";
 const CODEY_CONSTRAINTS_DIR: &str = "codex-constraints";
-const CODEY_ROOT_INSTRUCTIONS_FILE: &str = "root-instructions.md";
+const CODEY_RETIRED_ROOT_INSTRUCTIONS_FILE: &str = "root-instructions.md";
 const CODEY_FASTCTX_INSTRUCTIONS_FILE: &str = "fastctx-instructions.md";
 const CODEY_COLLABORATION_HINT_FILE: &str = "collaboration-hint.md";
 const CODEY_SUBAGENT_SOURCE_FILE: &str = "subagent.toml";
@@ -492,20 +493,20 @@ fn apply_isolated_runtime_router_config(
     } else {
         Vec::new()
     };
-    let (root_instructions, collaboration_hint, runtime_agents) = if subagent_optimization {
+    // Desktop replaces config `developer_instructions` with its own per-thread
+    // text, so root guidance travels only in the multi-agent hints.
+    crate::fs_util::remove_file_if_exists(
+        &constraints_dir.join(CODEY_RETIRED_ROOT_INSTRUCTIONS_FILE),
+    )?;
+    let (collaboration_hint, runtime_agents) = if subagent_optimization {
         // Every file under `codex-constraints/` is Codey's own asset and is
         // rewritten from the current definitions; nothing there needs an
         // upgrade path. Only text injected into Codex's `config.toml` keeps
         // migration lists, because that file belongs to the user.
         rebuild_constraint_file(
-            &constraints_dir.join(CODEY_ROOT_INSTRUCTIONS_FILE),
-            SUBAGENT_GUIDANCE,
-        )?;
-        rebuild_constraint_file(
             &constraints_dir.join(CODEY_COLLABORATION_HINT_FILE),
             ROOT_AGENT_COLLABORATION_USAGE_HINT,
         )?;
-        let root_instructions = SUBAGENT_GUIDANCE.to_string();
         let collaboration_hint = ROOT_AGENT_COLLABORATION_USAGE_HINT.to_string();
         let registration_roles = runtime_registration_roles(
             &runtime_roles,
@@ -519,17 +520,12 @@ fn apply_isolated_runtime_router_config(
             fastctx_instructions.as_deref(),
             remote_compaction_models.as_ref(),
         )?;
-        (
-            Some(root_instructions),
-            Some(collaboration_hint),
-            runtime_agents,
-        )
+        (Some(collaboration_hint), runtime_agents)
     } else {
-        (None, None, Vec::new())
+        (None, Vec::new())
     };
     apply_isolated_prompt_sources(
         &mut effective_document,
-        root_instructions.as_deref(),
         fastctx_instructions.as_deref(),
         collaboration_hint.as_deref(),
     )?;
@@ -586,7 +582,6 @@ fn apply_isolated_runtime_router_config(
     )?;
     let runtime_config_overrides = build_isolated_runtime_overrides(
         &effective_document,
-        root_instructions.as_deref(),
         &runtime_agents,
         fastctx_namespace,
         local_router.map(|_| local_router::ROUTER_PROVIDER_ID),
@@ -974,7 +969,6 @@ fn runtime_agent_hashes(registrations: &[RuntimeAgentRegistration]) -> BTreeMap<
 
 fn apply_isolated_prompt_sources(
     document: &mut DocumentMut,
-    root_instructions: Option<&str>,
     fastctx_instructions: Option<&str>,
     collaboration_hint: Option<&str>,
 ) -> Result<()> {
@@ -996,15 +990,6 @@ fn apply_isolated_prompt_sources(
             "developer_instructions",
         )?;
     }
-    if let Some(instructions) = root_instructions {
-        append_table_constraint_text(
-            document.as_table_mut(),
-            "developer_instructions",
-            instructions,
-            "developer_instructions",
-        )?;
-    }
-
     let Some(multi_agent) = document
         .get_mut("features")
         .and_then(Item::as_table_like_mut)
@@ -1981,7 +1966,7 @@ fn persistent_codey_subagent_config_is_owned(doc: &DocumentMut) -> bool {
             multi_agent
                 .get("multi_agent_mode_hint_text")
                 .and_then(Item::as_str)
-                == Some(ROOT_AGENT_MULTI_AGENT_MODE_HINT)
+                .is_some_and(|hint| ROOT_AGENT_MULTI_AGENT_MODE_HINT_VERSIONS.contains(&hint))
                 || multi_agent
                     .get("root_agent_usage_hint_text")
                     .and_then(Item::as_str)
@@ -2528,7 +2513,6 @@ fn json_hook_group_is_codey_owned(group: &serde_json::Value) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn build_isolated_runtime_overrides(
     effective: &DocumentMut,
-    root_instructions: Option<&str>,
     runtime_agents: &[RuntimeAgentRegistration],
     fastctx_namespace: Option<&str>,
     provider_id: Option<&str>,
@@ -2701,7 +2685,9 @@ fn build_isolated_runtime_overrides(
         )?;
     }
 
-    if fastctx_namespace.is_some() || root_instructions.is_some() {
+    // Keep the cleaned value authoritative over historical Codey guidance
+    // that may still sit in the user's `developer_instructions`.
+    if fastctx_namespace.is_some() || !runtime_agents.is_empty() {
         push_document_override(
             &mut overrides,
             effective,
