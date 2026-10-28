@@ -16,8 +16,8 @@ const mixedCompactionCatalog = {
   ],
 };
 const compactionRequest = (method, params, id = method) => ({ type: "mcp-request", request: { id, method, params } });
-const compactionReply = (runtime, id, result) => runtime.dispatchWindowEvent("message", {
-  data: { type: "mcp-response", message: { id, result } },
+const compactionReply = (runtime, id, result, responseKey = "message") => runtime.dispatchWindowEvent("message", {
+  data: { type: "mcp-response", [responseKey]: { id, result } },
 });
 
 test("third-party classification requires a current local catalog route and excludes official routes", async () => {
@@ -224,6 +224,153 @@ for (const returnedProvider of [undefined, "codey_router", "codey_router_remote"
     runtime.patch.dispose();
   });
 }
+
+for (const wrapped of [false, true]) {
+  for (const responseKey of ["message", "response"]) {
+    test(`marked compatibility resumes restore the page carrier (wrapped=${wrapped}, ${responseKey})`, async () => {
+      const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+      const threadId = "page-compatibility-thread";
+      const request = compactionRequest("thread/resume", { threadId, model: "gpt-6-astra" });
+      if (wrapped) request.request = { method: "send-cli-request-for-host", params: {
+        hostId: "local", method: "thread/resume", params: request.request.params,
+      } };
+      delete request.request.id;
+      const outgoing = runtime.patch.rewriteOutgoingMessage(request);
+      outgoing.request.id = `thread/resume:${threadId}`;
+      runtime.patch.trackOutgoingMessage(outgoing);
+      const result = compatibilityResumeResult(threadId);
+      const historicalProvider = wrapped ? "openai" : "codey_router";
+      result.thread.modelProvider = historicalProvider;
+      if (wrapped) Object.freeze(result);
+      const message = { id: outgoing.request.id, result };
+      if (!wrapped && responseKey === "response") Object.freeze(message);
+      runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", [responseKey]: message } });
+      const turn = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId, model: "gpt-6-astra" }));
+      assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), false,
+        "the explicit runtime marker must prevent a false OpenAI migration block");
+      assert.equal(message.result.modelProvider, "codey_router");
+      assert.equal(Object.hasOwn(message.result, "codeyRuntimeModelProvider"), false);
+      assert.equal(message.result.thread.modelProvider, historicalProvider, "rollout history stays unchanged");
+      runtime.patch.dispose();
+    });
+  }
+}
+
+function compatibilityResumeResult(threadId, overrides = {}) {
+  return {
+    modelProvider: "openai", codeyRuntimeModelProvider: "codey_router",
+    thread: { id: threadId, model: "gpt-6-astra", modelProvider: "openai" },
+    ...overrides,
+  };
+}
+
+test("the source result hook restores marked compatibility resumes before promise consumers run", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+  for (const method of ["thread/resume", "send-cli-request-for-host"]) {
+    const threadId = `source-${method}`;
+    const original = Object.freeze(compatibilityResumeResult(threadId));
+    const result = runtime.patch.rewriteIncomingResult(method, original, "local");
+    assert.equal(result.modelProvider, "codey_router");
+    assert.equal(Object.hasOwn(result, "codeyRuntimeModelProvider"), false);
+    assert.equal(result.thread, original.thread);
+    assert.equal(original.modelProvider, "openai");
+    assert.equal(original.codeyRuntimeModelProvider, "codey_router");
+    const turn = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId, model: "gpt-6-astra" }));
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), false, "the guard sees the carrier before the response event");
+  }
+  runtime.patch.dispose();
+});
+
+test("the fallback request resolver restores marked compatibility resumes for local clients", async () => {
+  class NativeClient {
+    constructor(hostId = "local") { this.hostId = hostId; this.requestPromises = new Map(); this.sent = []; }
+    enqueueRequest(method, params) {
+      const created = this.createRequest(method, params);
+      this.sent.push(created.request);
+      return created.promise;
+    }
+    createRequest(method, params) {
+      const id = `thread/resume:${params.threadId}`;
+      const promise = new Promise((resolve) => this.requestPromises.set(id, { method, resolve }));
+      return { request: { id, method, params }, promise };
+    }
+    onResult(id, result) { this.requestPromises.get(id)?.resolve(result); this.requestPromises.delete(id); }
+  }
+  const client = new NativeClient();
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { requestClient: client });
+  await runtime.patch.ensureRequestGate();
+  for (const hostId of ["local", "remote-host"]) {
+    const target = hostId === "local" ? client : new NativeClient(hostId);
+    const threadId = `fallback-${hostId}`;
+    const pending = target.enqueueRequest("thread/resume", { threadId, model: "gpt-6-astra" });
+    assert.equal(target.sent[0].params.modelProvider, hostId === "local" ? "codey_router" : undefined);
+    const original = Object.freeze(compatibilityResumeResult(threadId));
+    target.onResult(target.sent[0].id, original);
+    const result = await pending;
+    assert.equal(result.modelProvider, hostId === "local" ? "codey_router" : "openai");
+    assert.equal(Object.hasOwn(result, "codeyRuntimeModelProvider"), hostId !== "local");
+    assert.equal(result.thread.modelProvider, "openai");
+    const turn = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId, model: "gpt-6-astra" }));
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), hostId !== "local");
+    if (hostId !== "local") assert.equal(result, original);
+  }
+  runtime.patch.dispose();
+});
+
+test("unmarked, mismatched and remote compatibility replies do not relax provider protection", async () => {
+  for (const [overrides, hostId] of [
+    [{ codeyRuntimeModelProvider: undefined }, "local"],
+    [{ codeyRuntimeModelProvider: "unknown-provider" }, "local"],
+    [{ modelProvider: "external-provider" }, "local"],
+    [{}, "remote-host"],
+  ]) {
+    const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+    const threadId = "protected-compatibility-thread";
+    const original = compatibilityResumeResult(threadId, overrides);
+    if (original.codeyRuntimeModelProvider === undefined) delete original.codeyRuntimeModelProvider;
+    const sourceResult = runtime.patch.rewriteIncomingResult("thread/resume", original, hostId);
+    assert.equal(sourceResult, original);
+    runtime.patch.trackOutgoingMessage(compactionRequest("thread/resume", { threadId }, `thread/resume:${threadId}`));
+    const message = { id: `thread/resume:${threadId}`, result: original };
+    runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", hostId, message } });
+    assert.equal(message.result.modelProvider, original.modelProvider);
+    const turn = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId, model: "gpt-6-astra" }));
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), true);
+    runtime.patch.dispose();
+  }
+});
+
+test("late marked resumes preserve runtime evidence alongside thread lists and started notifications", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+  const threadId = "late-compatibility-thread";
+  const turn = () => runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId, model: "gpt-6-astra" }));
+  for (const responseKey of ["message", "response"]) {
+    compactionReply(runtime, `thread/resume:${threadId}`, compatibilityResumeResult(threadId), responseKey);
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn()), false, "late replies need no pending request");
+    compactionReply(runtime, "thread-list", { data: [{ id: threadId, model: "gpt-6-astra", modelProvider: "openai" }] });
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn()), false, "thread lists only update persisted providers");
+  }
+  compactionReply(runtime, `thread/resume:${threadId}`, compatibilityResumeResult(threadId, { codeyRuntimeModelProvider: undefined }));
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(turn()), true, "unmarked late OpenAI replies remain authoritative");
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    method: "thread/started", params: { thread: { id: threadId, modelProvider: "codey_router" } },
+  } } });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(turn()), false);
+  const listed = runtime.patch.rewriteIncomingResult("model/list", compatibilityResumeResult("model-list-thread"), "local");
+  assert.equal(listed.modelProvider, "openai", "model/list never restores a thread carrier");
+  runtime.patch.trackOutgoingMessage(compactionRequest("model/list", {}, "marked-model-list"));
+  compactionReply(runtime, "marked-model-list", compatibilityResumeResult("model-list-thread"));
+  const listTurn = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId: "model-list-thread", model: "gpt-6-astra" }));
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(listTurn), true, "model/list markers cannot confirm a router carrier");
+  const history = runtime.patch.rewriteIncomingResult("thread/list", {
+    modelProvider: "openai", codeyRuntimeModelProvider: "codey_router",
+    data: [{ id: threadId, model: "gpt-6-astra", modelProvider: "openai" }],
+  }, "local");
+  assert.equal(history.modelProvider, "openai");
+  assert.equal(history.data[0].modelProvider, "openai");
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(turn()), false);
+  runtime.patch.dispose();
+});
 
 test("a resume response without any provider cannot confirm the requested carrier", async () => {
   const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
@@ -862,7 +1009,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "77");
+  assert.equal(patch.version, "78");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],

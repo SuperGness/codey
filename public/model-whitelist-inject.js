@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "77";
+  const patchVersion = "78";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -2851,6 +2851,30 @@
     if (nativeSelectionOnly && modelKey(provider) === modelKey(catalog.nativeProviderId)
       && threadRoutes.delete(threadId)) persistThreadRoutes();
   };
+  const restoredThreadRuntimePayload = (method, value) => {
+    // The startup wrapper exposes OpenAI to the prediction helper while keeping
+    // the actual carrier in this explicit marker. Request ids are shared with
+    // normal page resumes, so they cannot distinguish those two consumers.
+    if ((method && method !== "thread/resume" && method !== "send-cli-request-for-host")
+      || value?.modelProvider !== officialProviderId
+      || value?.codeyRuntimeModelProvider !== localRouterProviderId
+      || typeof value?.thread?.id !== "string" || !value.thread.id.trim()
+      || Array.isArray(value.data)) return value;
+    const next = { ...value, modelProvider: localRouterProviderId };
+    delete next.codeyRuntimeModelProvider;
+    return next;
+  };
+  const rewrittenIncomingResult = (method, value, hostId) => {
+    if (hostId != null && hostId !== "local") return value;
+    if (method === "model/list") return patchedModelPayload(value).value;
+    const restored = restoredThreadRuntimePayload(method, value);
+    if (restored !== value) {
+      // Source-patched resolvers run before the observational response event.
+      rememberThreadRuntimeProvider(restored.thread, restored.modelProvider);
+      unconfirmedThreadProviders.delete(restored.thread.id);
+    }
+    return patchedThreadDisplayPayload(restored).value;
+  };
   const rememberThreadRoute = (thread, fallbackRoute = null) => {
     const threadId = typeof thread?.id === "string" ? thread.id.trim() : "";
     if (!threadId) return;
@@ -2920,7 +2944,24 @@
       rememberBoundedThreadRoute(pending.threadId, pending.route);
     }
     if (pending?.nativeModelUpdate && threadRoutes.delete(pending.threadId)) persistThreadRoutes();
-    const result = message.result;
+    const method = pending?.method || data?.requestMethod || message.requestMethod
+      || (modelListRequestIds.has(requestId) ? "model/list" : "");
+    const result = restoredThreadRuntimePayload(method, message.result);
+    if (result !== message.result) {
+      try {
+        message.result = result;
+      } catch {
+        // A frozen envelope can still contain a mutable result below.
+      }
+      if (message.result !== result) {
+        try {
+          message.result.modelProvider = result.modelProvider;
+          delete message.result.codeyRuntimeModelProvider;
+        } catch {
+          // Native resolver hooks use the returned clone for immutable payloads.
+        }
+      }
+    }
     const resultThread = (result?.thread || (pending?.threadId && result?.model)) && {
       id: pending?.threadId,
       ...result.thread,
@@ -3459,9 +3500,9 @@
       function (id, value, ...args) {
         if (this.hostId === "local" && !disposed) {
           const method = this.requestPromises?.get(id)?.method;
-          rememberThreadProvidersFromResponse(null, { id, result: value });
-          if (method === "model/list") value = patchedModelPayload(value).value;
-          else value = patchedThreadDisplayPayload(value).value;
+          const message = { id, result: value, requestMethod: method };
+          rememberThreadProvidersFromResponse(null, message);
+          value = rewrittenIncomingResult(method, message.result, this.hostId);
         }
         return result.call(this, id, value, ...args);
       },
@@ -3529,10 +3570,7 @@
     // CustomEvent. The startup source gate invokes this synchronous hook at the
     // real transport boundary so thread/start receives modelProvider in time.
     rewriteOutgoingMessage: rewrittenOutgoingMessage,
-    rewriteIncomingResult: (method, result, hostId) => (
-      hostId != null && hostId !== "local" ? result
-        : method === "model/list" ? patchedModelPayload(result).value : patchedThreadDisplayPayload(result).value
-    ),
+    rewriteIncomingResult: rewrittenIncomingResult,
     trackOutgoingMessage: (detail) => {
       if (portablePendingMessages.has(detail)) return detail;
       // AppServerRequestClient runs rewriteOutgoingMessage before createRequest

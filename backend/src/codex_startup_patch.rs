@@ -500,21 +500,39 @@ fn observe_local_app_server_output(
     let mut buffer = [0; 8192];
     let mut line = Vec::new();
     let mut oversized = false;
+    // 小行等到换行才转发以便改写；超过暂存上限后剩余字节随读随转发。
+    let mut streaming = false;
     loop {
         let count = input.read(&mut buffer)?;
         if count == 0 {
+            if !streaming {
+                output.write_all(&line)?;
+                output.flush()?;
+            }
             if !oversized && !line.is_empty() {
                 remember_app_server_settings(&line, home);
             }
             return Ok(());
         }
-        for &byte in &buffer[..count] {
+        let mut start = 0;
+        for (index, &byte) in buffer[..count].iter().enumerate() {
             if byte == b'\n' {
                 if !oversized {
                     remember_app_server_settings(&line, home);
                 }
+                if streaming {
+                    output.write_all(&buffer[start..=index])?;
+                } else {
+                    match rewrite_prediction_resume_response(&line) {
+                        Some(rewritten) => output.write_all(&rewritten)?,
+                        None => output.write_all(&line)?,
+                    }
+                    output.write_all(b"\n")?;
+                }
+                start = index + 1;
                 line.clear();
                 oversized = false;
+                streaming = false;
             } else if !oversized {
                 // 大型响应仍原样转发，但无需为观察小型设置通知保留完整副本。
                 if line.len() == 1024 * 1024 {
@@ -522,12 +540,54 @@ fn observe_local_app_server_output(
                     oversized = true;
                 } else {
                     line.push(byte);
+                    if !streaming && line.len() > PREDICTION_RESUME_LINE_LIMIT {
+                        output.write_all(&line)?;
+                        streaming = true;
+                        start = index + 1;
+                    }
                 }
             }
         }
-        output.write_all(&buffer[..count])?;
+        if streaming {
+            output.write_all(&buffer[start..count])?;
+        }
         output.flush()?;
     }
+}
+
+/// 预测前的会话设置回复不含历史轮次，远小于此上限。
+#[cfg(any(windows, target_os = "macos", test))]
+const PREDICTION_RESUME_LINE_LIMIT: usize = 256 * 1024;
+
+/// Codex 主进程只为 openai provider 的会话生成输入框预测，预测前会读取会话设置。
+/// 主进程与页面的请求均使用 `thread/resume:<uuid>`，不能据此区分来源。
+/// 官方账号线路兼容预测时改报 openai，同时用 codeyRuntimeModelProvider 保留真实
+/// provider，供页面恢复运行时状态；预测的 thread/fork 仍走本地路由。
+#[cfg(any(windows, target_os = "macos", test))]
+fn rewrite_prediction_resume_response(line: &[u8]) -> Option<Vec<u8>> {
+    const RESUME_ID_PREFIX: &str = "thread/resume:";
+    if !line
+        .windows(RESUME_ID_PREFIX.len() + 1)
+        .any(|window| window[0] == b'"' && &window[1..] == RESUME_ID_PREFIX.as_bytes())
+    {
+        return None;
+    }
+    let mut message = serde_json::from_slice::<serde_json::Value>(line).ok()?;
+    if !message.get("id")?.as_str()?.starts_with(RESUME_ID_PREFIX) {
+        return None;
+    }
+    let result = message.get_mut("result")?.as_object_mut()?;
+    let official = result.get("modelProvider")?.as_str()?
+        == crate::local_router::ROUTER_PROVIDER_ID
+        && crate::model_id::parse_alias(result.get("model")?.as_str()?)
+            .is_some_and(|alias| crate::config::is_official_profile_id(alias.provider_key));
+    if !official {
+        return None;
+    }
+    let runtime_provider = result.get("modelProvider")?.clone();
+    result.insert("codeyRuntimeModelProvider".into(), runtime_provider);
+    result.insert("modelProvider".into(), "openai".into());
+    serde_json::to_vec(&message).ok()
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -1397,6 +1457,91 @@ mod tests {
                 "missing"
             );
         }
+    }
+
+    #[test]
+    fn output_observer_preserves_runtime_provider_for_main_and_page_resume() {
+        struct SplitRead<'a>(&'a [u8]);
+        impl std::io::Read for SplitRead<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                let end = 7.min(buffer.len());
+                std::io::Read::read(&mut self.0, &mut buffer[..end])
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let resume = |id: serde_json::Value, model: &str, provider: &str| {
+            serde_json::json!({"id":id,"result":{"thread":{"id":"t",
+                "model":"historical/model","modelProvider":"historical-provider","turns":[]},
+                "model":model,"modelProvider":provider,"serviceTier":null,
+                "reasoningEffort":"high","cwd":"/workspace/project"}})
+        };
+        let official = "codey-official-account-a1/gpt-6-astra";
+        // 主进程预测和页面 AppServerRequestClient 使用相同的 UUID 请求 ID 格式。
+        let internal = resume(
+            "thread/resume:3b771392-5499-4e6d-b053-464bac001422".into(),
+            official,
+            "codey_router",
+        );
+        let mut page = resume(
+            "thread/resume:adeea1ac-2707-4580-a4ee-8cadb48187e0".into(),
+            official,
+            "codey_router",
+        );
+        page["result"]["thread"]["turns"] = serde_json::json!([{
+            "id":"old-turn","model":"historical/other-model","modelProvider":"other-provider",
+            "items":[{"type":"userMessage","content":[{"type":"text","text":"保留历史"}]}]
+        }]);
+        let mut large = page.clone();
+        large["result"]["thread"]["preview"] = "z".repeat(PREDICTION_RESUME_LINE_LIMIT + 1).into();
+        let unchanged = [
+            resume(
+                "thread/resume:2".into(),
+                "third-party/model",
+                "codey_router",
+            ),
+            resume(3.into(), official, "codey_router"),
+            resume("thread/resume:4".into(), official, "other"),
+            resume("thread/resume:5".into(), "gpt-6-astra", "codey_router"),
+            resume(
+                "thread/fork:68756161-c580-4637-b424-fc4056064ce5".into(),
+                official,
+                "codey_router",
+            ),
+            resume("thread/resume:6".into(), official, "openai"),
+            large,
+        ];
+        let input = format!(
+            "{}\r\n{}\n{}\n{}",
+            internal,
+            page,
+            unchanged
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\r\n"),
+            "y".repeat(PREDICTION_RESUME_LINE_LIMIT + 1)
+        );
+        let mut output = Vec::new();
+        observe_local_app_server_output(SplitRead(input.as_bytes()), &mut output, home.path())
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        let (first, rest) = output.split_once('\n').unwrap();
+        let (second, rest) = rest.split_once('\n').unwrap();
+        for (line, mut expected) in [(first, internal), (second, page)] {
+            let actual: serde_json::Value = serde_json::from_str(line).unwrap();
+            let runtime_provider = expected["result"]["modelProvider"].clone();
+            expected["result"]["codeyRuntimeModelProvider"] = runtime_provider;
+            expected["result"]["modelProvider"] = "openai".into();
+            assert_eq!(
+                actual, expected,
+                "all other response fields must be preserved"
+            );
+        }
+        assert_eq!(
+            rest,
+            input.splitn(3, '\n').nth(2).unwrap(),
+            "other responses and large lines must pass through byte-for-byte"
+        );
     }
 
     #[test]
