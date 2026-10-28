@@ -306,13 +306,14 @@ pub(crate) fn validate_cross_route_history_items(body: &Value) -> Result<()> {
     Ok(())
 }
 
-/// 原生 Responses 线路在发送前统一处理协作任务载荷和跨线路 reasoning 状态。
+/// 原生 Responses 线路在发送前统一处理协作任务载荷、跨线路及已被上游拒绝的 reasoning 状态。
 pub(crate) fn normalize_native_responses_context(
     body: &mut Value,
     discard_opaque_reasoning: bool,
 ) -> bool {
     let mut changed = restore_codey_compaction_summaries(body).unwrap_or(false);
     changed |= normalize_encrypted_agent_payloads(body);
+    changed |= strip_rejected_reasoning_items(body);
     // 同一线路必须原样回传 reasoning，包括第三方 thinking 模式需要的明文内容。
     // 换线路时只去掉上一供应商的密文，可见摘要改成官方可接受的 summary。
     if discard_opaque_reasoning {
@@ -754,13 +755,13 @@ fn rewrite_history_items(body: &mut Value, rewrite: fn(&mut Value) -> HistoryIte
     }
 }
 
-enum HistoryItemRewrite {
+pub(crate) enum HistoryItemRewrite {
     Keep,
     Changed,
     Drop,
 }
 
-fn port_reasoning_item(item: &mut Value) -> HistoryItemRewrite {
+pub(crate) fn port_reasoning_item(item: &mut Value) -> HistoryItemRewrite {
     if item.get("type").and_then(Value::as_str) != Some("reasoning") {
         return HistoryItemRewrite::Keep;
     }

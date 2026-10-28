@@ -370,7 +370,7 @@ where
         let transport = attempts.transport;
         let trigger = match attempts.retry_reason() {
             Some(RetryReason::Plugin) => crate::route_request_log::AttemptTrigger::PluginRetry,
-            Some(RetryReason::ReasoningText) => {
+            Some(RetryReason::ReasoningText | RetryReason::EncryptedReasoning) => {
                 crate::route_request_log::AttemptTrigger::ReasoningRepair
             }
             None => crate::route_request_log::AttemptTrigger::Initial,

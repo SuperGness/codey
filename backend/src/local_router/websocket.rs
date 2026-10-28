@@ -727,6 +727,8 @@ impl WebSocketResponsesDownstream {
             .to_string();
         // 必须按实际发送的正文判断；重连时可能已经移除了 previous_response_id。
         let mut can_recover_persisted_context = responses_previous_response_id(body).is_some();
+        // 被拒密文只会出现在客户端带来的完整历史里；续接请求改走 HTTP 还要额外恢复历史。
+        let mut can_retry_rejected_reasoning = !can_recover_persisted_context;
         let message_body = body
             .as_object_mut()
             .context("Responses WebSocket 上游请求必须是 JSON 对象")?;
@@ -846,6 +848,7 @@ impl WebSocketResponsesDownstream {
                         )
                         .context("序列化 Responses WebSocket 中断事件失败")?;
                         can_recover_persisted_context = false;
+                        can_retry_rejected_reasoning = false;
                         match tokio::time::timeout(
                             DOWNSTREAM_WRITE_TIMEOUT,
                             upstream.socket.send(WebSocketMessage::Text(message.into())),
@@ -962,6 +965,44 @@ impl WebSocketResponsesDownstream {
                             }
                         }
                         can_recover_persisted_context = false;
+                        let retry_rejected_reasoning =
+                            std::mem::take(&mut can_retry_rejected_reasoning);
+                        if let Some(item_id) = responses_event_rejected_reasoning_item(&event) {
+                            // 即使本轮不能改走 HTTP，后续请求也应避开这一项。
+                            record_rejected_reasoning_item(item_id);
+                            if retry_rejected_reasoning
+                                && only_event_in_frame
+                                && persisted_rejection_has_no_execution(&event)
+                                && strip_rejected_reasoning_items(body)
+                            {
+                                let object =
+                                    body.as_object_mut().expect("validated request object");
+                                for (name, value) in [
+                                    ("stream", http_stream),
+                                    ("background", http_background),
+                                    ("type", http_type),
+                                ] {
+                                    object.remove(name);
+                                    if let Some(value) = value {
+                                        object.insert(name.into(), value);
+                                    }
+                                }
+                                if let Some(probe) = probe {
+                                    probe.mark_upstream_error_summary(&redact_upstream_error_text(
+                                        &event.to_string(),
+                                        route,
+                                    ));
+                                    probe.finish_upstream_attempt(
+                                        crate::route_request_log::AttemptOutcome::Failed,
+                                        crate::route_request_log::AttemptPhase::ResponseBody,
+                                    );
+                                }
+                                // 去掉被拒项后的正文与已暂存的历史不同，同一连接不再续用。
+                                return Ok(UpstreamWebSocketAttempt::UseHttp(
+                                    "websocket_encrypted_reasoning_rejected",
+                                ));
+                            }
+                        }
                         if collaboration_alias
                             .as_ref()
                             .is_some_and(|alias| alias.apply(&mut event))

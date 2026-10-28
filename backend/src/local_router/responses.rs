@@ -2323,8 +2323,11 @@ impl RouterServer {
                     UpstreamWebSocketAttempt::Completed => return Ok(()),
                     UpstreamWebSocketAttempt::UseHttp(reason) => reason,
                 };
-                if fallback_reason == "websocket_persisted_context_rejected"
-                    || (had_previous_response
+                if matches!(
+                    fallback_reason,
+                    "websocket_persisted_context_rejected"
+                        | "websocket_encrypted_reasoning_rejected"
+                ) || (had_previous_response
                         && responses_previous_response_id(&upstream_body).is_none())
                 {
                     // 重连可能已展开历史；同轮恢复也必须按恢复后的 HTTP 正文重新编码。
