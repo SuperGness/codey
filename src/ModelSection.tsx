@@ -781,10 +781,10 @@ function ModelSectionComponent({
   const miscModelTooltip = (
     <div className="flex flex-col gap-1 text-xs leading-relaxed max-w-[360px]">
       <div className="font-semibold text-foreground">
-        统一指定会话命名、Git 提交消息、环境建议与自动复核回退使用的模型
+        统一指定会话命名与自动复核回退使用的模型
       </div>
       <div className="text-muted">
-        留空时沿用默认选择：会话命名优先使用官方 Luna，第三方线路使用已启用的 Luna 或默认模型；Git 提交消息和环境建议沿用内置模型。选择模型后，这些功能及自动复核回退使用所选模型；只要任一线路声明支持 codex-auto-review，自动复核仍使用专用模型。自动复核回退在保存后生效，其余功能需要重启 Codex，且依赖当前版本的主进程补丁支持。
+        留空时，会话命名沿用 Codex 的默认模型选择。选择后，会话命名在重启 Codex 后使用所选模型，自动复核回退在保存后生效；任一线路提供 codex-auto-review 时，自动复核仍优先使用专用模型。
       </div>
       {miscModelUnavailable && (
         <div className="text-warning font-medium">

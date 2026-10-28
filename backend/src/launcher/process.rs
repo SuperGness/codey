@@ -265,7 +265,7 @@ pub(super) async fn spawn_codex(
         runtime_config_overrides,
     );
     #[cfg(any(windows, target_os = "macos"))]
-    let _ = (disable_codex_pet, misc_model);
+    let _ = disable_codex_pet;
     let mut runtime_arguments = codex_runtime_arguments(
         options.gpu_launch_mode,
         !cfg!(target_os = "macos"),
@@ -291,21 +291,25 @@ pub(super) async fn spawn_codex(
             // Store 使用原生激活，包装器环境走受限通道投递。
             let packaged_activation = windows_app_dir_supports_packaged_activation(app_dir);
 
-            let (wrapper, wrapper_preparation_error) =
-                match prepare_cli_wrapper(app_dir, subagent_gate_active, runtime_config_overrides)
-                    .await
-                {
-                    Ok(wrapper) => (Some(wrapper), None),
-                    Err(error) => {
-                        error_log::record_failure(
-                            "compatibility_fallback",
-                            "prepare_windows_codex_cli_wrapper",
-                            format!("{error:#}"),
-                            serde_json::json!({ "platform": "windows" }),
-                        );
-                        (None, Some(error))
-                    }
-                };
+            let (wrapper, wrapper_preparation_error) = match prepare_cli_wrapper(
+                app_dir,
+                subagent_gate_active,
+                runtime_config_overrides,
+                misc_model.as_deref(),
+            )
+            .await
+            {
+                Ok(wrapper) => (Some(wrapper), None),
+                Err(error) => {
+                    error_log::record_failure(
+                        "compatibility_fallback",
+                        "prepare_windows_codex_cli_wrapper",
+                        format!("{error:#}"),
+                        serde_json::json!({ "platform": "windows" }),
+                    );
+                    (None, Some(error))
+                }
+            };
             let Some(wrapper) = wrapper else {
                 // 唯一兼容入口在启动前就不可用：直接降级，不启动注定要被停掉的进程。
                 let error = wrapper_preparation_error
@@ -315,7 +319,7 @@ pub(super) async fn spawn_codex(
                     debug_port,
                     &runtime_arguments,
                     runtime_config_overrides,
-                    subagent_gate_active,
+                    subagent_gate_active || misc_model.is_some(),
                     launch_proxy_environment.as_deref(),
                     format!("启动尝试 {attempt}/2：Codex CLI 兼容入口不可用：{error:#}"),
                 )
@@ -326,7 +330,9 @@ pub(super) async fn spawn_codex(
                 launch_environment.extend(environment.iter().cloned());
             }
             // 包装器是唯一入口：受限启动必须带着环境落进 Codex，否则宁可降级。
-            let constrained = !runtime_config_overrides.is_empty() || subagent_gate_active;
+            let constrained = !runtime_config_overrides.is_empty()
+                || subagent_gate_active
+                || misc_model.is_some();
             let wrapper_environment_required = constrained;
             let launch = spawn_windows_codex(
                 app_dir,
@@ -466,7 +472,7 @@ pub(super) async fn spawn_codex(
                             "Codex 启动兼容方案未能确认 app-server 运行时覆盖；Codey 集成未启用：{startup_error}"
                         )));
                     }
-                    if subagent_gate_active {
+                    if subagent_gate_active || misc_model.is_some() {
                         return Err(recovery::recoverable(format!(
                             "Codex 启动兼容方案未能安装；Codey 集成未启用：{startup_error}"
                         )));
@@ -510,9 +516,14 @@ pub(super) async fn spawn_codex(
         let is_app_bundle = app_dir.extension().and_then(|value| value.to_str()) == Some("app");
         // 唯一的进程注入入口是 CLI 包装器：Codex 原生读取 CODEX_CLI_PATH，
         // Electron fuse 关闭后 NODE_OPTIONS 与 --inspect 不再可用。
-        let wrapper = prepare_cli_wrapper(app_dir, subagent_gate_active, runtime_config_overrides)
-            .await
-            .map_err(recovery::recoverable)?;
+        let wrapper = prepare_cli_wrapper(
+            app_dir,
+            subagent_gate_active,
+            runtime_config_overrides,
+            misc_model.as_deref(),
+        )
+        .await
+        .map_err(recovery::recoverable)?;
         let mut command = if is_app_bundle {
             build_fresh_macos_open_command(app_dir, debug_port, &runtime_arguments)
         } else {
@@ -1135,6 +1146,7 @@ async fn prepare_cli_wrapper(
     app_dir: &std::path::Path,
     subagent_gate_active: bool,
     runtime_config_overrides: &[String],
+    misc_model: Option<&str>,
 ) -> Result<CliWrapperLaunch> {
     let codey = std::env::current_exe().context("定位 Codey 兼容执行器失败")?;
     let source =
@@ -1179,6 +1191,10 @@ async fn prepare_cli_wrapper(
             overrides,
         ),
         (
+            crate::codex_startup_patch::CLI_WRAPPER_MISC_MODEL_ENV.to_string(),
+            misc_model.unwrap_or_default().to_string(),
+        ),
+        (
             crate::codex_startup_patch::CLI_WRAPPER_SUBAGENT_ENV.to_string(),
             u8::from(subagent_gate_active).to_string(),
         ),
@@ -1195,9 +1211,13 @@ async fn prepare_cli_wrapper(
             marker_path.to_string_lossy().to_string(),
         ),
     ];
-    if crate::codex_startup_patch::local_router_runtime_enabled(runtime_config_overrides) {
+    let input_relay_required = crate::codex_startup_patch::app_server_input_relay_required(
+        runtime_config_overrides,
+        misc_model,
+    );
+    if input_relay_required {
         // 主进程补丁移除后，包装器环境是此变量唯一的投递通道：
-        // 让 Desktop 始终为本进程拉起本地 app-server CLI（走包装器路由）。
+        // 让 Desktop 为本进程拉起 app-server CLI，经包装器转发请求。
         environment.push(("CODEX_APP_SERVER_FORCE_CLI".to_string(), "1".to_string()));
         environment.extend(local_router_proxy_bypass_environment(
             runtime_config_overrides,
@@ -1221,7 +1241,7 @@ async fn prepare_cli_wrapper(
         .context("写入 macOS Codex CLI 兼容入口的任务异常退出")??;
         path
     };
-    if crate::codex_startup_patch::local_router_runtime_enabled(runtime_config_overrides) {
+    if input_relay_required {
         environment.push((
             crate::codex_startup_patch::CLI_WRAPPER_STDIN_RELAY_ENV.to_string(),
             wrapper.to_string_lossy().to_string(),
@@ -1385,7 +1405,7 @@ async fn launch_windows_codex_without_compatibility(
     debug_port: u16,
     runtime_arguments: &[String],
     runtime_config_overrides: &[String],
-    subagent_gate_active: bool,
+    compatibility_required: bool,
     launch_proxy_environment: Option<&[(String, String)]>,
     startup_error: String,
 ) -> Result<SpawnedCodex> {
@@ -1394,7 +1414,7 @@ async fn launch_windows_codex_without_compatibility(
             "Codex 启动兼容入口不可用，无法应用 app-server 运行时覆盖；Codey 集成未启用：{startup_error}"
         )));
     }
-    if subagent_gate_active {
+    if compatibility_required {
         return Err(recovery::recoverable(format!(
             "Codex 启动兼容入口不可用；Codey 集成未启用：{startup_error}"
         )));

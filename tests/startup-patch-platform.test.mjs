@@ -97,9 +97,13 @@ test("the CLI wrapper is the only main-process compatibility entry", async () =>
     launcher.indexOf("async fn spawned_codex_alive"),
   );
   const overrideGuard = noEntryLaunch.indexOf("if !runtime_config_overrides.is_empty() {");
-  const subagentGuard = noEntryLaunch.indexOf("if subagent_gate_active {");
+  const compatibilityGuard = noEntryLaunch.indexOf("if compatibility_required {");
   const degradedLaunch = noEntryLaunch.indexOf("spawn_windows_codex(");
-  assert.ok(overrideGuard >= 0 && overrideGuard < subagentGuard && subagentGuard < degradedLaunch);
+  assert.ok(overrideGuard >= 0 && overrideGuard < compatibilityGuard && compatibilityGuard < degradedLaunch);
+  assert.match(
+    windowsSpawn.slice(noEntry, launch),
+    /subagent_gate_active \|\| misc_model\.is_some\(\)/,
+  );
   assert.match(
     noEntryLaunch.slice(degradedLaunch, degradedLaunch + 400),
     /runtime_arguments,\s*launch_proxy_environment\.unwrap_or\(&\[\]\),\s*launch_proxy_environment\.is_some\(\)/,
