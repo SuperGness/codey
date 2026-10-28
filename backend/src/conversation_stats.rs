@@ -1,12 +1,13 @@
 //! 会话统计：原生 rollout 提供持久化累计，路由探针提供本次运行期间的请求信息。
 //! 两种累计不可相加；找不到原生累计时，返回明确标注范围的运行期数据。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::route_request_log::{RouteRequestLogEntry, SessionGenerationTotals};
 
@@ -26,6 +27,7 @@ pub(crate) const CONVERSATION_REQUEST_KIND: &str = "responses";
 const MAX_TRACKED_SESSIONS: usize = 512;
 const MAX_ACTIVE_REQUESTS: usize = 256;
 const MAX_BOUNDARY_REQUESTS: usize = 256;
+const MAX_RECENT_COMPLETIONS: usize = 512;
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -88,6 +90,7 @@ pub(crate) struct ConversationStatsSnapshot {
 #[derive(Debug, Default)]
 struct SessionStats {
     turn: turn::TurnRuntime,
+    completions: RecentCompletions,
     model: Option<String>,
     requests: u64,
     active_requests: HashMap<String, ActiveRequestStats>,
@@ -112,6 +115,30 @@ struct SessionStats {
     timing_request_count: u64,
     ttft_total_ms: u64,
     ttft_sample_count: u64,
+}
+
+/// 收尾事件的去重与用量、速度、轮次累计共用一个入口，避免各字段口径不同。
+/// 只保存有界摘要；正常请求仍由探针的 finish-once 保证不会重复收尾。
+#[derive(Debug, Default)]
+struct RecentCompletions {
+    ids: HashSet<[u8; 32]>,
+    order: VecDeque<[u8; 32]>,
+}
+
+impl RecentCompletions {
+    fn insert(&mut self, request_id: &str) -> bool {
+        let digest: [u8; 32] = Sha256::digest(request_id.as_bytes()).into();
+        if !self.ids.insert(digest) {
+            return false;
+        }
+        self.order.push_back(digest);
+        if self.order.len() > MAX_RECENT_COMPLETIONS
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.ids.remove(&oldest);
+        }
+        true
+    }
 }
 
 /// 历史只取最早跟踪请求之前的记录，之后的请求全部由运行期累计负责。
@@ -286,6 +313,9 @@ impl ConversationStatsRegistry {
         let touched_seq = self.sequence.fetch_add(1, Ordering::Relaxed);
         let mut sessions = lock_unpoisoned(&self.sessions);
         let stats = sessions.entry(session_id.to_string()).or_default();
+        if !stats.completions.insert(&entry.request_id) {
+            return;
+        }
         stats.active_requests.remove(&entry.request_id);
         stats.touched_seq = touched_seq;
         let own_generation =
@@ -524,7 +554,7 @@ mod tests {
             requested_service_tier: None,
             service_tier: None,
             schema_version: 1,
-            request_id: "request".into(),
+            request_id: uuid::Uuid::new_v4().to_string(),
             trace_id: "trace".into(),
             timestamp_unix_ms: 1_000,
             provider: None,
@@ -590,9 +620,10 @@ mod tests {
     #[test]
     fn aggregates_usage_and_speed_per_session() {
         let registry = ConversationStatsRegistry::default();
-        registry.begin_request("thread-a", "request", 1_000);
+        let entry = sample_entry(Some("thread-a"), "responses");
+        registry.begin_request("thread-a", &entry.request_id, 1_000);
         registry.begin_request("thread-b", "request", 1_000);
-        registry.finish_request(&sample_entry(Some("thread-a"), "responses"));
+        registry.finish_request(&entry);
         registry.finish_request(&sample_entry(Some("thread-a"), "responses_compact"));
 
         let a = registry.snapshot("thread-a").unwrap();
@@ -617,6 +648,42 @@ mod tests {
         let registry = ConversationStatsRegistry::default();
         registry.finish_request(&sample_entry(None, "responses"));
         assert!(registry.snapshot("thread-a").is_none());
+    }
+
+    #[test]
+    fn repeated_completion_cannot_recount_usage_timing_or_generation() {
+        let registry = ConversationStatsRegistry::default();
+        let mut own = sample_entry(Some("thread-a"), "responses");
+        own.total_duration_ms = 1300;
+        own.router_pre_upstream_ms = Some(100);
+        own.upstream_first_byte_ms = Some(200);
+        own.downstream_first_content_ms = Some(300);
+        let compact = sample_entry(Some("thread-a"), "responses_compact");
+        let mut child = sample_entry(Some("thread-a"), "responses");
+        child.codex_session_is_parent = true;
+        let turn = LastTurnStatsSnapshot {
+            id: "turn".into(),
+            started_at_unix_ms: Some(900),
+            status: "running",
+            ..Default::default()
+        };
+        registry.begin_request("thread-a", &own.request_id, 1000);
+        for entry in [&own, &compact, &child] {
+            registry.finish_request(entry);
+        }
+        let snapshot = registry
+            .snapshot_with_turn("thread-a", Some(turn.clone()))
+            .unwrap();
+        assert_eq!(snapshot.requests, Some(1));
+        assert_eq!(snapshot.total_tokens, Some(3600));
+        assert_eq!(snapshot.average_output_tokens_per_second, Some(200.0));
+        assert_eq!(snapshot.last_turn.as_ref().unwrap().step_count, Some(1));
+        let before = serde_json::to_value(snapshot).unwrap();
+        for entry in [&child, &compact, &own, &own] {
+            registry.finish_request(entry);
+        }
+        let after = registry.snapshot_with_turn("thread-a", Some(turn)).unwrap();
+        assert_eq!(serde_json::to_value(after).unwrap(), before);
     }
 
     #[test]
@@ -666,13 +733,13 @@ mod tests {
     fn new_request_and_unreported_speed_clear_previous_speed() {
         let registry = ConversationStatsRegistry::default();
         registry.finish_request(&sample_entry(Some("thread-a"), "responses"));
-        registry.begin_request("thread-a", "request", 1_000);
+        let mut entry = sample_entry(Some("thread-a"), "responses");
+        registry.begin_request("thread-a", &entry.request_id, 1_000);
         let active = registry.snapshot("thread-a").unwrap();
         assert_eq!(active.output_tokens_per_second, None);
         assert_eq!(active.model, None);
         assert_eq!(active.last_status, None);
         assert_eq!(active.updated_at_unix_ms, 0);
-        let mut entry = sample_entry(Some("thread-a"), "responses");
         entry.output_tokens_per_second = None;
         entry.model = None;
         entry.requested_model.clear();
@@ -690,9 +757,11 @@ mod tests {
         entry.router_pre_upstream_ms = Some(200);
         entry.downstream_first_content_ms = Some(300);
         registry.finish_request(&entry);
+        entry.request_id = "without-content".into();
         entry.downstream_first_content_ms = None;
         entry.ttft_ms = Some(1);
         registry.finish_request(&entry);
+        entry.request_id = "inherited".into();
         entry.codex_session_is_parent = true;
         registry.finish_request(&entry);
         let snapshot = registry.snapshot("thread-a").unwrap();
@@ -922,6 +991,8 @@ mod tests {
         let sessions = lock_unpoisoned(&registry.sessions);
         let stats = sessions.get("thread-average").unwrap();
         assert_eq!(stats.completed_generation.requests, 10_000);
+        assert_eq!(stats.completions.ids.len(), MAX_RECENT_COMPLETIONS);
+        assert_eq!(stats.completions.order.len(), MAX_RECENT_COMPLETIONS);
         assert_eq!(stats.active_requests.len(), MAX_ACTIVE_REQUESTS);
         let boundary = stats.history_boundary.as_ref().unwrap();
         assert!(boundary.exclude_entire_millisecond);

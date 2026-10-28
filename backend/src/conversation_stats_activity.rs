@@ -125,10 +125,11 @@ impl Activity {
             self.last_read_bytes = 0;
         }
         let mut reader = BufReader::new(file);
+        let mut line = Vec::new();
         loop {
             // 单行保留上限 8 MiB，超大工具输出按块跳过。未写完的末行下次再读。
             let start = self.offset;
-            let mut line = Vec::new();
+            line.clear();
             let mut oversized = false;
             let mut consumed = 0u64;
             loop {
@@ -140,7 +141,7 @@ impl Activity {
                     }
                     return Ok(());
                 }
-                let end = buf.iter().position(|v| *v == b'\n');
+                let end = memchr::memchr(b'\n', buf);
                 let size = end.map_or(buf.len(), |v| v + 1);
                 consumed += size as u64;
                 #[cfg(test)]
@@ -355,6 +356,38 @@ mod tests {
 
     fn start(id: &str, second: u32) -> Value {
         json!({"type":"event_msg","timestamp":format!("2026-10-18T00:00:{second:02}Z"),"payload":{"type":"task_started","turn_id":id}})
+    }
+
+    #[test]
+    fn append_reader_preserves_stats_across_large_buffered_content() {
+        use std::io::Write;
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(file, "{}", start("large", 0)).unwrap();
+        let content = json!({"type":"response_item","payload":{"type":"function_call_output","output":"tool output 中文 ".repeat(8192)}});
+        for _ in 0..100 {
+            writeln!(file, "{content}").unwrap();
+        }
+        writeln!(file, "{}", json!({"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":123}}}})).unwrap();
+
+        let mut activity = Activity::default();
+        activity.read_append(file.path(), "own").unwrap();
+        let mut snapshot = activity.usage_snapshot.clone().unwrap();
+        activity.apply(&mut snapshot);
+        assert_eq!(snapshot.total_tokens, Some(123));
+        assert_eq!(snapshot.turn_count, Some(1));
+        assert_eq!(snapshot.last_turn.unwrap().id, "large");
+        assert_eq!(activity.offset, file.as_file().metadata().unwrap().len());
+
+        // 大行后的短记录和后续追加都必须独立解析，重复读取不能增加轮数。
+        writeln!(file, "{}", start("next", 1)).unwrap();
+        activity.read_append(file.path(), "own").unwrap();
+        activity.read_append(file.path(), "own").unwrap();
+        let mut snapshot = activity.usage_snapshot.clone().unwrap();
+        activity.apply(&mut snapshot);
+        assert_eq!(snapshot.total_tokens, Some(123));
+        assert_eq!(snapshot.turn_count, Some(2));
+        assert_eq!(snapshot.last_turn.unwrap().id, "next");
+        assert_eq!(activity.offset, file.as_file().metadata().unwrap().len());
     }
 
     #[test]

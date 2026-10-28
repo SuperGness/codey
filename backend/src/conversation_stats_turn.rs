@@ -166,14 +166,7 @@ impl TurnRuntime {
     }
 
     pub(super) fn finish(&mut self, entry: &RouteRequestLogEntry) {
-        // Probe 的 finish-once 保证常规完成不会重放；短期 ID 去重也保护迟到重复通知。
-        if self
-            .recent
-            .iter()
-            .any(|request| request.id == entry.request_id)
-        {
-            return;
-        }
+        // 会话入口已统一去重，轮次累计无需重复扫描最近完成的请求。
         let totals = TurnRequestTotals::from_entry(entry);
         if let Some(current) = &mut self.current {
             if current.window.contains(entry.timestamp_unix_ms) {

@@ -79,8 +79,9 @@ const createEnvironment = (options = {}) => {
       latestObserver = this;
     }
 
-    observe() {
+    observe(_target, options) {
       this.observed = true;
+      this.options = options;
     }
 
     disconnect() {
@@ -137,6 +138,7 @@ const createEnvironment = (options = {}) => {
   };
 
   const testSetTimeout = (callback, delay, ...args) => {
+    options.onTimer?.(delay);
     const timer = setTimeout(callback, delay, ...args);
     timer.unref?.();
     return timer;
@@ -170,7 +172,8 @@ const createEnvironment = (options = {}) => {
       anchor.setAttribute("data-above-composer-conversation-id", id);
     },
     emitMutation: (mutations = [{ type: "childList", target: documentElement }]) => {
-      if (observer?.observed) observer.callback(mutations);
+      if (observer?.observed) observer.callback(mutations.filter(mutation => mutation.type !== "attributes"
+        || observer.options?.attributeFilter?.includes(mutation.attributeName)));
     },
     emitAnchorMutation: () => {
       observer?.callback?.([
@@ -262,6 +265,228 @@ test("refreshes with one composer scan per async phase and only writes changed t
     assert.equal(field(env.bar(), "totalTokens"), "500 tok");
     assert.equal(metric(env.bar(), "speed"), "50.0 tok/s");
     assert.equal(field(env.bar(), "speed"), "50.0 tok/s");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("unchanged refreshes with an open panel reduce geometry reads and repeated attribute writes", async t => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    click(summary(env));
+    const counts = observeRenderWork(env);
+    const geometryReads = { button: 0, panel: 0 };
+    let attributeWrites = 0;
+    for (const [kind, element] of [["button", summary(env)], ["panel", panel(env)]]) {
+      const readRect = element.getBoundingClientRect.bind(element);
+      element.getBoundingClientRect = () => { geometryReads[kind] += 1; return readRect(); };
+    }
+    for (const element of Object.values(env.bar().__codeyCs.buttons)) {
+      const setAttribute = element.setAttribute.bind(element);
+      element.setAttribute = (...args) => { attributeWrites += 1; setAttribute(...args); };
+    }
+    for (let index = 0; index < 10; index += 1) {
+      env.refresh();
+      await flushTimers(15);
+    }
+    t.diagnostic(`10 unchanged refreshes: ${counts.composerScans} composer scans, ${geometryReads.button} button geometry reads, ${geometryReads.panel} panel geometry reads, ${counts.textWrites} text writes, ${attributeWrites} label writes`);
+    assert.deepEqual(counts, { composerScans: 20, textWrites: 0 });
+    assert.deepEqual(geometryReads, { button: 20, panel: 0 });
+    // 两个入口各更新一次读取中状态和一次完成状态。
+    assert.equal(attributeWrites, 40);
+    attributeWrites = 0;
+    env.emitAnchorMutation();
+    await flushTimers(160);
+    assert.equal(attributeWrites, 0, "a DOM rescan with the same data must not rewrite labels");
+    assert.deepEqual(geometryReads, { button: 21, panel: 0 });
+  } finally {
+    env.dispose();
+  }
+});
+
+test("repositions an unchanged panel when its entry moves without resize or scroll", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    panel(env).getBoundingClientRect = () => ({ width: 300, height: 200 });
+    click(summary(env));
+    const original = summary(env).getBoundingClientRect();
+    const originalLeft = Number.parseFloat(panel(env).style.left);
+    summary(env).getBoundingClientRect = () => ({ ...original, left: original.left + 200 });
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(Number.parseFloat(panel(env).style.left), originalLeft + 200);
+    assertExpanded(env, true);
+  } finally {
+    env.dispose();
+  }
+});
+
+test("repositions an open panel after its visible content changes", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    click(summary(env));
+    panel(env).getBoundingClientRect = () => ({ width: 300, height: 200 });
+    env.setStats("conversation-1", { ...STATS, lastTurn: { ...LAST_TURN, averageOutputTokensPerSecond: 42 } });
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(field(env.bar(), "speed"), "42.0 tok/s");
+    assert.equal(panel(env).style.left, "150px");
+    assertExpanded(env, true);
+    panel(env).getBoundingClientRect = () => ({ width: 400, height: 200 });
+    env.setStats("conversation-1", { ...STATS, turnCount: 10,
+      lastTurn: { ...LAST_TURN, averageOutputTokensPerSecond: 42 } });
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(panel(env).style.left, "100px", "summary width changes must also reposition the panel");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("keeps an open panel theme current without rewriting unchanged style properties", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    let color = "#111";
+    env.window.getComputedStyle = () => ({ getPropertyValue: name => name === "--text-primary" ? color : "", colorScheme: "dark" });
+    click(summary(env));
+    const overlay = env.bar().__codeyCs.overlay;
+    let writes = 0;
+    const setProperty = overlay.style.setProperty;
+    overlay.style.setProperty = (...args) => { writes += 1; setProperty(...args); };
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(writes, 0);
+    color = "#eee";
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(writes, 1);
+    assert.equal(overlay.style.getPropertyValue("--text-primary"), "#eee");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("mounts promptly when a textarea itself is inserted beside the composer marker", async () => {
+  const env = createEnvironment({ inputVisible: false, statsBySession: { "conversation-1": STATS } });
+  try {
+    env.textarea.remove();
+    await flushTimers(30);
+    assert.equal(env.bar(), null);
+    env.textarea.visible = true;
+    env.scope.appendChild(env.textarea);
+    env.emitMutation([{ type: "childList", target: env.scope, addedNodes: [env.textarea] }]);
+    await flushTimers(160);
+    assert.equal(metric(env.bar(), "total"), "132k tok");
+    assert.equal(env.calls.length, 1);
+  } finally {
+    env.dispose();
+  }
+});
+
+test("does not keep scheduling polling timers while the page is hidden", async () => {
+  const timers = [];
+  let resolve;
+  const env = createEnvironment({ onTimer: delay => timers.push(delay),
+    request: () => new Promise(done => { resolve = done; }) });
+  try {
+    await flushTimers(30);
+    env.document.visibilityState = "hidden";
+    env.document.dispatchEvent({ type: "visibilitychange" });
+    const scheduledBefore = timers.length;
+    resolve({ status: "ok", stats: STATS });
+    await flushTimers(30);
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(timers.length, scheduledBefore);
+    env.document.visibilityState = "visible";
+    env.document.dispatchEvent({ type: "visibilitychange" });
+    await flushTimers(30);
+    assert.equal(env.calls.length, 2);
+  } finally {
+    env.dispose();
+  }
+});
+
+test("restores a composer promptly when its hidden attribute is removed", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    env.scope.setAttribute("hidden", "");
+    env.emitMutation([{ type: "attributes", target: env.scope, attributeName: "hidden" }]);
+    await flushTimers(160);
+    assert.equal(env.bar().hidden, true);
+    env.scope.removeAttribute("hidden");
+    env.emitMutation([{ type: "attributes", target: env.scope, attributeName: "hidden" }]);
+    await flushTimers(160);
+    assert.equal(env.bar().hidden, false);
+    assert.equal(metric(env.bar(), "total"), "132k tok");
+  } finally {
+    env.dispose();
+  }
+});
+
+for (const attribute of ["data-session-id", "data-thread-id", "data-app-action-sidebar-thread-active"]) {
+  test(`refreshes fallback session context on ${attribute} changes`, async () => {
+    const env = createEnvironment({ anchor: false, statsBySession: {
+      "conversation-1": STATS, "conversation-2": { ...STATS, totalTokens: 42 },
+    } });
+    try {
+      const marker = env.document.createElement("div");
+      if (attribute === "data-app-action-sidebar-thread-active") {
+        marker.setAttribute("data-app-action-sidebar-thread-id", "conversation-1");
+        marker.setAttribute(attribute, "true");
+      } else marker.setAttribute(attribute, "conversation-1");
+      env.scope.appendChild(marker);
+      await flushTimers(30);
+      assert.equal(env.snapshot().sessionId, "conversation-1");
+      if (attribute === "data-app-action-sidebar-thread-active") {
+        marker.setAttribute(attribute, "false");
+        const active = env.document.createElement("div");
+        active.setAttribute("data-app-action-sidebar-thread-id", "conversation-2");
+        active.setAttribute(attribute, "true");
+        env.scope.appendChild(active);
+      } else marker.setAttribute(attribute, "conversation-2");
+      env.emitMutation([{ type: "attributes", target: marker, attributeName: attribute }]);
+      await flushTimers(160);
+      assert.equal(env.snapshot().sessionId, "conversation-2");
+      assert.equal(env.snapshot().stats.totalTokens, 42);
+    } finally {
+      env.dispose();
+    }
+  });
+}
+
+test("shows precise totals in the tooltip and avoids a rounded 1000k boundary", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": { ...STATS, totalTokens: 999_999 } } });
+  try {
+    await flushTimers(30);
+    assert.equal(metric(env.bar(), "total"), "1.0M tok");
+    assert.equal(env.bar().__codeyCs.total.title, "本次运行 999,999 tok；摘要为四舍五入值，详情显示完整数量。");
+    assert.equal(field(env.bar(), "totalTokens"), "999,999 tok");
+    assert.match(env.bar().__codeyCs.notes.activity.textContent, /首字节等待和工具间隔不计/);
+  } finally {
+    env.dispose();
+  }
+});
+
+test("rejects fractional or imprecise token and step counts", async () => {
+  const env = createEnvironment();
+  try {
+    for (const value of [1.5, "42", Number.MAX_SAFE_INTEGER + 1]) {
+      env.setStats("conversation-1", { ...STATS, turnCount: value, totalTokens: value,
+        inputTokens: value, cachedInputTokens: value, outputTokens: value,
+        lastTurn: { ...LAST_TURN, stepCount: value } });
+      env.refresh();
+      await flushTimers(30);
+      assert.equal(metric(env.bar(), "total"), "—");
+      assert.equal(metric(env.bar(), "activity"), "— 轮 · — 步");
+      assert.equal(field(env.bar(), "outputTokens"), "—");
+      assert.equal(metric(env.bar(), "cache-rate"), "—");
+    }
   } finally {
     env.dispose();
   }
@@ -761,7 +986,7 @@ test("session totals own the turn count while the last turn owns speed, steps an
   assert.equal(metric(env.bar(), "total"), "132k tok");
   assert.equal(field(env.bar(), "outputTokens"), "3,100 tok");
   assert.equal(panel(env).querySelectorAll("dt").at(-1).textContent, "平均速度（TPS）");
-  assert.match(env.bar().__codeyCs.notes.activity.textContent, /本轮总输出 Token ÷ 本轮生成耗时，工具间隔不计/);
+  assert.match(env.bar().__codeyCs.notes.activity.textContent, /本轮有效步骤的输出 Token 总和 ÷ 生成耗时总和，首字节等待和工具间隔不计/);
 });
 
 test("uses only the reported session turn count and preserves zero independently of last turn availability", async () => {

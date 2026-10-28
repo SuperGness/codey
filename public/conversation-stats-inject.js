@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 7;
+  const VERSION = 8;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -26,6 +26,13 @@
     .map((attribute) => `[${attribute}]`)
     .join(",");
   const activeThreadSelector = '[data-app-action-sidebar-thread-active="true"]';
+  const contextAttributes = [
+    ...sessionIdAttributes,
+    "data-app-action-sidebar-thread-active",
+    "data-app-action-sidebar-thread-id",
+    "hidden",
+    "aria-hidden",
+  ];
   const POLL_IDLE_MS = 3_000;
   const POLL_ACTIVE_MS = 1_100;
   const RESCAN_DEBOUNCE_MS = 120;
@@ -267,29 +274,33 @@
     if (!overlay || !computed) return;
     for (const name of ["--text-primary", "--bg-primary", "--cs-text", "--cs-muted", "--cs-line", "--cs-surface"]) {
       const value = computed.getPropertyValue(name).trim();
+      if (overlay.style.getPropertyValue(name) === value) continue;
       if (value) overlay.style.setProperty(name, value);
       else overlay.style.removeProperty(name);
     }
-    overlay.style.colorScheme = computed.colorScheme;
+    setValue(overlay.style, "colorScheme", computed.colorScheme);
   };
 
   const formatTokenCount = (value) => {
     if (value == null || !Number.isFinite(value)) return "—";
     if (value < 1_000) return `${Math.round(value)}`;
-    if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+    if (value < 999_500) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
     return `${(value / 1_000_000).toFixed(1)}M`;
   };
 
-  const positionPanel = () => {
+  const positionPanel = (anchor, onlyIfMoved = false) => {
     const refs = statsElement?.__codeyCs;
     if (!refs?.active) return;
-    if (!statsElement.isConnected || !findVisibleComposerAnchor()) { setExpanded(false); return; }
+    if (!statsElement.isConnected || !(anchor === undefined ? findVisibleComposerAnchor() : anchor)) { setExpanded(false); return; }
     syncPanelTheme();
     const panel = refs.panels[refs.active];
     const rect = refs.buttons[refs.active].getBoundingClientRect();
-    const panelRect = panel.getBoundingClientRect();
     const height = window.innerHeight || document.documentElement.clientHeight;
     const width = window.innerWidth || document.documentElement.clientWidth;
+    const placement = [refs.active, rect.left, rect.top, rect.width, rect.height, width, height].join(":");
+    if (onlyIfMoved && refs.placement === placement) return;
+    refs.placement = placement;
+    const panelRect = panel.getBoundingClientRect();
     // 气泡贴近入口，鼠标可以直接移入；只覆盖编辑器，不推动页面布局。
     const available = Math.max(80, rect.top - 20);
     panel.style.left = `${Math.max(12, Math.min(rect.left + (rect.width - panelRect.width) / 2, width - panelRect.width - 12))}px`;
@@ -308,11 +319,11 @@
       const panel = refs.panels[key];
       const visible = expanded && key === active;
       if (!visible && panel.hasAttribute("popover") && panel.matches(":popover-open")) panel.hidePopover();
-      panel.hidden = !visible;
+      setValue(panel, "hidden", !visible);
       if (visible && panel.hasAttribute("popover") && !panel.matches(":popover-open")) {
         try { panel.showPopover(); } catch { panel.removeAttribute("popover"); }
       }
-      refs.buttons[key].setAttribute("aria-expanded", String(visible));
+      setAttribute(refs.buttons[key], "aria-expanded", String(visible));
     }
     if (expanded) positionPanel();
     else if (restoreFocus) {
@@ -347,7 +358,17 @@
 
   const setText = (element, value) => {
     // 相同 textContent 仍会替换文本节点，触发其他页面观察器。
-    if (element.textContent !== value) element.textContent = value;
+    if (element.textContent === value) return false;
+    element.textContent = value;
+    return true;
+  };
+
+  const setValue = (target, key, value) => {
+    if (target[key] !== value) target[key] = value;
+  };
+
+  const setAttribute = (element, name, value) => {
+    if (element.getAttribute(name) !== value) element.setAttribute(name, value);
   };
 
   const render = (anchor) => {
@@ -356,10 +377,10 @@
     if (!bar) {
       // 输入框不可见（例如离开会话页）时，若旧宿主仍在隐藏会话里，显式
       // 隐藏状态条，避免恢复可见时短暂展示过期数据。
-      if (statsElement) { statsElement.hidden = true; setExpanded(false); }
+      if (statsElement) { setValue(statsElement, "hidden", true); setExpanded(false); }
       return;
     }
-    bar.hidden = false;
+    setValue(bar, "hidden", false);
     const data = { ...stats };
     const sessionUsage = data.usageSource === "rollout" && data.usageScope === "session";
     const runtimeRequests = data.requestsScope === "runtime"
@@ -374,9 +395,9 @@
     }
     // 最近一轮由后端按用户 turn 归属聚合；不回退到会话累计或单次请求字段。
     for (const key of ["totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteInputTokens", "requests", "inFlight"]) {
-      if (!Number.isFinite(data[key]) || data[key] < 0) data[key] = null;
+      if (!Number.isSafeInteger(data[key]) || data[key] < 0) data[key] = null;
     }
-    if (!Number.isInteger(data.turnCount) || data.turnCount < 0) data.turnCount = null;
+    if (!Number.isSafeInteger(data.turnCount) || data.turnCount < 0) data.turnCount = null;
     const formattedSpeed = formatSpeed(running && stale ? null : turn?.averageOutputTokensPerSecond);
     const speedKnown = formattedSpeed != null;
     const estimatedSpeed = turn?.speedIsEstimate === true;
@@ -388,22 +409,22 @@
       partial: "本轮记录不完整，仅统计可恢复的部分",
     })[turn?.coverage] || "本轮统计范围未知，缺失值显示 —";
     const speedNote = running && stale ? "实时统计更新失败，恢复后继续显示本轮平均速度"
-      : `本轮总输出 Token ÷ 本轮生成耗时，工具间隔不计；${coverageNote}${estimatedSpeed && speedKnown ? "；含生成中的 Token 估算" : ""}`;
+      : `本轮有效步骤的输出 Token 总和 ÷ 生成耗时总和，首字节等待和工具间隔不计；${coverageNote}${estimatedSpeed && speedKnown ? "；含生成中的 Token 估算" : ""}`;
     const rate = cacheRatePercent(data.inputTokens, data.cachedInputTokens) || "—";
     const refs = bar.__codeyCs;
-    setText(refs.speed, speedText);
-    refs.speed.title = speedNote;
-    setText(refs["cache-rate"], rate);
-    setText(refs.total, data.totalTokens == null ? "—" : `${formatTokenCount(data.totalTokens)} tok`);
+    let panelContentChanged = setText(refs.speed, speedText);
+    setValue(refs.speed, "title", speedNote);
+    panelContentChanged = setText(refs["cache-rate"], rate) || panelContentChanged;
+    panelContentChanged = setText(refs.total, data.totalTokens == null ? "—" : `${formatTokenCount(data.totalTokens)} tok`) || panelContentChanged;
     const finite = value => Number.isFinite(value) && value >= 0;
-    const count = value => finite(value) ? value.toLocaleString("zh-CN") : "—";
+    const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString("zh-CN") : "—";
     const duration = (value, average = false) => {
       if (!finite(value)) return "—";
       const seconds = value / 1000;
       if (average || seconds < 60) return `${Number(seconds.toFixed(1))}秒`;
       return `${Math.floor(seconds / 60)}分 ${Math.floor(seconds % 60)}秒`;
     };
-    setText(refs.activity, `${count(data.turnCount)} 轮 · ${count(turn?.stepCount)} 步`);
+    panelContentChanged = setText(refs.activity, `${count(data.turnCount)} 轮 · ${count(turn?.stepCount)} 步`) || panelContentChanged;
     const hasData = stats && (turn || hasRuntimeRequest || [data.turnCount, data.totalTokens, data.inputTokens, data.outputTokens].some(finite));
     const unknownUsage = data.usageSource === "unknown" || data.usageScope === "unknown";
     const scopeLabel = !stats || unknownUsage ? "统计范围未知" : sessionUsage ? "会话累计" : "本次运行";
@@ -412,28 +433,31 @@
       waiting: "等待会话", loading: "读取统计中", stale: "统计暂不可用", empty: "暂无统计",
       ok: fetchInFlight ? "更新统计中" : running ? "本轮进行中" : turn?.status === "aborted" ? "本轮已中止" : (sessionUsage ? "历史统计" : "运行期统计"),
     }[state];
-    bar.dataset.status = status;
+    setValue(bar.dataset, "status", status);
     const tokenValue = value => finite(value) ? `${count(value)} tok` : "—";
+    setValue(refs.total, "title", data.totalTokens == null ? `${scopeLabel}，缺失数据以 — 显示。` : `${scopeLabel} ${tokenValue(data.totalTokens)}；摘要为四舍五入值，详情显示完整数量。`);
     data.uncachedInputTokens = finite(data.inputTokens) && finite(data.cachedInputTokens) && data.cachedInputTokens <= data.inputTokens ? data.inputTokens - data.cachedInputTokens : null;
     for (const [key, element] of Object.entries(refs.fields)) {
-      setText(element, key === "cacheRate" ? rate : key === "speed" ? speedText : key.endsWith("Ms") ? duration(turn?.[key], key === "averageTtftMs") : tokenValue(data[key]));
+      panelContentChanged = setText(element, key === "cacheRate" ? rate : key === "speed" ? speedText : key.endsWith("Ms") ? duration(turn?.[key], key === "averageTtftMs") : tokenValue(data[key])) || panelContentChanged;
     }
     const pendingNote = stale ? (stats ? "更新失败，当前数据可能已过期。" : "暂时无法读取统计，将自动重试。") : !currentSessionId ? "建立会话后显示统计。" : !stats ? "缺失数据以 — 显示。" : "";
     const sourceNote = unknownUsage ? "Token 统计范围未知。" : sessionUsage ? "会话累计用量，缓存已包含在输入中。" : "仅统计本次运行的用量。";
     const activityNote = turn ? "一次提问为一轮，步数为该轮模型生成次数。" : "暂无可识别的最近一轮。";
     const toolNote = finite(turn?.toolDurationMs) ? "工具用时为本轮累计值，并行调用可能重叠。" : "";
-    setText(refs.notes.activity, `${pendingNote}${activityNote}${toolNote}${speedNote}。`);
-    setText(refs.notes.tokens, `${pendingNote}${sourceNote}`);
-    refs.buttons.activity.setAttribute("aria-label", `会话总轮数 ${count(data.turnCount)} 轮，最近一轮统计 ${count(turn?.stepCount)} 步，本轮平均速度 ${speedText}，${status}。${speedNote}。查看统计详情`);
-    refs.buttons.tokens.setAttribute("aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
-    bar.dataset.running = running ? "true" : "false";
-    bar.dataset.state = state;
-    positionPanel();
+    panelContentChanged = setText(refs.notes.activity, `${pendingNote}${activityNote}${toolNote}${speedNote}。`) || panelContentChanged;
+    panelContentChanged = setText(refs.notes.tokens, `${pendingNote}${sourceNote}`) || panelContentChanged;
+    setAttribute(refs.buttons.activity, "aria-label", `会话总轮数 ${count(data.turnCount)} 轮，最近一轮统计 ${count(turn?.stepCount)} 步，本轮平均速度 ${speedText}，${status}。${speedNote}。查看统计详情`);
+    setAttribute(refs.buttons.tokens, "aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
+    setValue(bar.dataset, "running", running ? "true" : "false");
+    setValue(bar.dataset, "state", state);
+    // 入口仍可能因侧栏或输入框布局变化而移动；位置和数据都不变时才跳过浮层测量。
+    positionPanel(anchor, !panelContentChanged);
   };
 
   const schedulePoll = (delay) => {
-    if (disposed) return;
     clearTimeout(pollTimer);
+    pollTimer = 0;
+    if (disposed || document.visibilityState === "hidden") return;
     pollTimer = setTimeout(poll, delay);
   };
 
@@ -442,10 +466,7 @@
 
   const poll = async () => {
     if (disposed) return;
-    if (document.visibilityState === "hidden") {
-      schedulePoll(POLL_IDLE_MS);
-      return;
-    }
+    if (document.visibilityState === "hidden") return;
     const { anchor, sessionId } = resolveSessionContext();
     if (sessionId !== currentSessionId) {
       resetSession(sessionId);
@@ -514,16 +535,13 @@
         const target = mutation.target;
         if (!(target instanceof HTMLElement)) continue;
         if (containsStats(target)) continue;
-        if (
-          target.hasAttribute?.(conversationAttribute)
-          || target.hasAttribute?.("hidden")
-          || target.hasAttribute?.("aria-hidden")
-        ) {
+        if (contextAttributes.includes(mutation.attributeName)) {
           scheduleRescan();
           return;
         }
         continue;
       }
+      if (containsStats(mutation.target)) continue;
       const nodes = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])];
       for (const node of nodes) {
         if (!(node instanceof HTMLElement)) continue;
@@ -537,13 +555,14 @@
         if (
           node.matches?.(sessionAttributeSelector)
           || node.querySelector?.(sessionAttributeSelector)
+          || node.matches?.(activeThreadSelector)
           || node.querySelector?.(activeThreadSelector)
         ) {
           scheduleRescan();
           return;
         }
         // 会话容器子树变化一律重扫，代价只是一次 debounce 查询。
-        if (node.querySelector?.("[contenteditable='true'], textarea")) {
+        if (node.matches?.(composerInputSelector) || node.querySelector?.(composerInputSelector)) {
           scheduleRescan();
           return;
         }
@@ -556,12 +575,7 @@
     render();
     const options = {
       attributes: true,
-      attributeFilter: [
-        conversationAttribute,
-        "data-app-action-sidebar-thread-active",
-        "hidden",
-        "aria-hidden",
-      ],
+      attributeFilter: contextAttributes,
       childList: true,
       subtree: true,
     };
@@ -579,13 +593,11 @@
       observer.observe(document.documentElement, options);
       window.__codeyConversationStatsObserver = observer;
     }
-    listen(document, "visibilitychange", () => {
-      if (document.visibilityState !== "hidden") schedulePoll(0);
-    });
+    listen(document, "visibilitychange", () => schedulePoll(0));
     listen(window, "focus", () => schedulePoll(0));
     listen(window, "pageshow", () => schedulePoll(0));
-    listen(window, "resize", positionPanel);
-    listen(document, "scroll", positionPanel, true);
+    listen(window, "resize", () => positionPanel());
+    listen(document, "scroll", () => positionPanel(), true);
     listen(document, "pointerdown", (event) => {
       if (statsElement && !containsStats(event.target)) setExpanded(false);
     });
