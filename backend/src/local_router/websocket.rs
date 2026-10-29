@@ -1954,20 +1954,22 @@ where
     Ok(())
 }
 
-pub(crate) async fn write_json_response(
-    stream: &mut TcpStream,
-    status: u16,
-    value: &Value,
-) -> Result<()> {
+pub(crate) async fn write_json_response<W>(stream: &mut W, status: u16, value: &Value) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     write_json_response_with_retry_after(stream, status, value, None).await
 }
 
-pub(crate) async fn write_json_response_with_retry_after(
-    stream: &mut TcpStream,
+pub(crate) async fn write_json_response_with_retry_after<W>(
+    stream: &mut W,
     status: u16,
     value: &Value,
     retry_after: Option<&str>,
-) -> Result<()> {
+) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let mut body = serde_json::to_vec(value).context("序列化 Codey 本地路由响应失败")?;
     body.push(b'\n');
     let reason = reason_phrase(status);

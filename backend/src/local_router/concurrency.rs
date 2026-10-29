@@ -273,7 +273,7 @@ where
             Err(anyhow::Error::new(result.unwrap_err()).context(DownstreamClosed))
         }
         result = &mut future => {
-            if let Some(error) = stream.take_error()? {
+            if let Some(error) = http_reset_error(stream)? {
                 return Err(anyhow::Error::new(error).context(DownstreamClosed));
             }
             Ok(result)
@@ -281,14 +281,29 @@ where
     }
 }
 
+fn http_reset_error(stream: &TcpStream) -> std::io::Result<Option<std::io::Error>> {
+    if let Some(error) = stream.take_error()? {
+        return Ok(Some(error));
+    }
+    // Mio 将 Windows 的 AFD_POLL_ABORT 映射成 WRITE_CLOSED，SO_ERROR 可能仍为空。
+    // FIN 仅设置 READ_CLOSED；检查写关闭不会消费流水线字节或误判写入半关闭。
+    #[cfg(windows)]
+    if let Some(ready) =
+        futures_util::FutureExt::now_or_never(stream.ready(tokio::io::Interest::WRITABLE))
+        && ready?.is_write_closed()
+    {
+        return Ok(Some(std::io::ErrorKind::ConnectionReset.into()));
+    }
+    Ok(None)
+}
+
 async fn await_http_reset(stream: &TcpStream) -> std::io::Result<()> {
-    // Windows 的 reset 只有读写关闭就绪，不能单独等待 ERROR。定期检查
-    // SO_ERROR 保留 FIN 和流水线字节，也不清除后续响应写入所需的可写就绪。
     #[cfg(windows)]
     loop {
-        if let Some(error) = stream.take_error()? {
+        if let Some(error) = http_reset_error(stream)? {
             return Err(error);
         }
+        // 普通可写就绪会一直保留；定时重查关闭标记，不清除就绪或反复重新注册。
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     // Unix 的错误就绪不受 FIN 或未消费字节影响，虚假唤醒由 WouldBlock 清除。

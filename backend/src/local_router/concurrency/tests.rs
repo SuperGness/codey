@@ -155,37 +155,91 @@ async fn http_write_half_close_does_not_cancel_admission() {
 
 #[tokio::test]
 async fn http_reset_cancels_queued_request_without_upstream_work() {
-    for prefix in ["none", "fin", "pipelined"] {
+    for prefix in ["none", "fin", "pipelined", "pipelined_fin"] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut client = TcpStream::connect(listener.local_addr().unwrap())
             .await
             .unwrap();
         let (mut server, _) = listener.accept().await.unwrap();
-        match prefix {
-            "fin" => client.shutdown().await.unwrap(),
-            "pipelined" => client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap(),
-            _ => {}
+        if prefix.starts_with("pipelined") {
+            client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+        }
+        if prefix.ends_with("fin") {
+            client.shutdown().await.unwrap();
+        }
+        if prefix != "none" {
+            let mut byte = [0];
+            assert_eq!(
+                server.peek(&mut byte).await.unwrap(),
+                usize::from(prefix != "fin"),
+                "{prefix}"
+            );
         }
         let registry = registry(1);
         let first = ready(&registry);
         let waiter = queued(&registry);
         let admission = await_http_admission(&mut server, waiter.wait());
         tokio::pin!(admission);
-        // 先轮询监听，再发送 reset，验证等待期间新出现的连接错误。
-        assert!(futures_util::poll!(admission.as_mut()).is_pending());
+        // 先保留 FIN / 流水线数据等待一轮监测周期，再发送 reset。
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), admission.as_mut())
+                .await
+                .is_err(),
+            "{prefix}: admission ended before reset"
+        );
         socket2::SockRef::from(&client)
             .set_linger(Some(Duration::ZERO))
             .unwrap();
         drop(client);
         let error = tokio::time::timeout(Duration::from_secs(1), admission)
             .await
-            .unwrap()
+            .unwrap_or_else(|_| panic!("{prefix}: reset did not cancel queued admission"))
             .err()
             .unwrap();
         assert!(error.is::<DownstreamClosed>(), "{prefix}: {error:#}");
         assert_eq!(counts(&registry), (1, 0), "{prefix}");
         drop(first);
     }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn http_reset_with_empty_so_error_still_cancels_admission() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut server, _) = listener.accept().await.unwrap();
+    socket2::SockRef::from(&client)
+        .set_linger(Some(Duration::ZERO))
+        .unwrap();
+    drop(client);
+    // 确认 Windows reactor 已收到 AFD_POLL_ABORT，随后清空 SO_ERROR。
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if server
+                .ready(tokio::io::Interest::WRITABLE)
+                .await
+                .unwrap()
+                .is_write_closed()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("Windows reactor did not report WRITE_CLOSED after reset");
+    let _ = server.take_error().unwrap();
+    assert!(server.take_error().unwrap().is_none());
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        await_http_admission(&mut server, std::future::pending::<()>()),
+    )
+    .await
+    .expect("reset with empty SO_ERROR did not cancel admission")
+    .unwrap_err();
+    assert!(error.is::<DownstreamClosed>(), "{error:#}");
 }
 
 #[tokio::test]

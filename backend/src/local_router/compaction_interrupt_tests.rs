@@ -709,6 +709,7 @@ async fn backpressured_http_delivery(
     TcpStream,
     Vec<u8>,
     tokio::task::JoinHandle<Result<()>>,
+    oneshot::Sender<()>,
 ) {
     let (router, upstream, model) = fixture().await;
     let (config, _, _) = super::super::tests::router_config("http://127.0.0.1:9/v1".into());
@@ -717,19 +718,16 @@ async fn backpressured_http_delivery(
     server.bindings = Arc::clone(&router.bindings);
     server.portable_history_cache = router.portable_history_cache.upgrade().unwrap();
 
-    // 同时限制两端缓冲区；仅缩小接收端无法阻止系统提前缓存整个成功响应。
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-    let client = tokio::net::TcpSocket::new_v4().unwrap();
-    client.set_recv_buffer_size(64 * 1024).unwrap();
     let (client, socket) = tokio::join!(
-        client.connect(listener.local_addr().unwrap()),
+        TcpStream::connect(listener.local_addr().unwrap()),
         listener.accept()
     );
     let mut client = client.unwrap();
     let (socket, _) = socket.unwrap();
-    socket2::SockRef::from(&socket)
-        .set_send_buffer_size(16 * 1024)
-        .unwrap();
+    let mut downstream = HttpResponsesDownstream::new(socket);
+    // 保留真实 HTTP 序列化和 TCP 交付，在固定字节数后暂停，消除系统缓冲区差异。
+    let resume = downstream.pause_json_write_after(1024);
     let body = json!({"model":model,"input":"context"});
     let pending = tokio::spawn(async move {
         server
@@ -744,7 +742,7 @@ async fn backpressured_http_delivery(
                 body,
                 None,
                 ResponsesRequestKind::Compact,
-                &mut HttpResponsesDownstream::new(socket),
+                &mut downstream,
             )
             .await
     });
@@ -753,18 +751,17 @@ async fn backpressured_http_delivery(
     write_json_response(&mut socket, 200, value).await.unwrap();
     drop(socket);
     let mut prefix = vec![0; 1024];
-    let count = client.read(&mut prefix).await.unwrap();
-    prefix.truncate(count);
+    client.read_exact(&mut prefix).await.unwrap();
     assert!(prefix.starts_with(b"HTTP/1.1 200"));
     assert!(!pending.is_finished());
-    (router, model, client, prefix, pending)
+    (router, model, client, prefix, pending, resume)
 }
 
 #[tokio::test]
 async fn interrupt_after_http_delivery_starts_finishes_the_same_response() {
     let mut value = result();
     value["output"][0]["encrypted_content"] = json!("x".repeat(8 * 1024 * 1024));
-    let (router, _model, mut client, mut prefix, pending) =
+    let (router, _model, mut client, mut prefix, pending, resume) =
         backpressured_http_delivery(&value).await;
     let payload = json!({"threadId":THREAD});
     let stopping = router.interrupt_portable_compaction(&payload);
@@ -782,6 +779,7 @@ async fn interrupt_after_http_delivery_starts_finishes_the_same_response() {
             .routes
             .contains_key(&format!("thread-id:{THREAD}"))
     );
+    resume.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut prefix))
         .await
         .unwrap()
@@ -806,7 +804,7 @@ async fn interrupt_after_http_delivery_starts_finishes_the_same_response() {
 async fn interrupt_http_delivery_deadline_keeps_native_binding_and_checkpoint_uncommitted() {
     let mut value = result();
     value["output"][0]["encrypted_content"] = json!("x".repeat(2 * 1024 * 1024));
-    let (router, model, mut client, mut received, pending) =
+    let (router, model, mut client, mut received, pending, _resume) =
         backpressured_http_delivery(&value).await;
     let resolved = router
         .snapshot

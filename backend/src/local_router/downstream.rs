@@ -1,4 +1,12 @@
 use super::*;
+#[cfg(test)]
+use std::{
+    future::Future,
+    pin::Pin,
+    task::{Context as TaskContext, Poll},
+};
+#[cfg(test)]
+use tokio::io::AsyncWrite;
 
 #[async_trait]
 pub(crate) trait ResponsesDownstream: Send {
@@ -467,6 +475,8 @@ pub(crate) struct HttpResponsesDownstream {
     event_stream_started: bool,
     streaming_errors: bool,
     compaction_disconnect_monitor: bool,
+    #[cfg(test)]
+    write_pause: Option<(usize, oneshot::Receiver<()>)>,
 }
 
 impl HttpResponsesDownstream {
@@ -476,7 +486,63 @@ impl HttpResponsesDownstream {
             event_stream_started: false,
             streaming_errors: false,
             compaction_disconnect_monitor: false,
+            #[cfg(test)]
+            write_pause: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_json_write_after(&mut self, bytes: usize) -> oneshot::Sender<()> {
+        let (resume, resumed) = oneshot::channel();
+        self.write_pause = Some((bytes, resumed));
+        resume
+    }
+}
+
+#[cfg(test)]
+struct ControlledHttpWrite<'a> {
+    stream: &'a mut TcpStream,
+    remaining: Option<usize>,
+    resume: Option<oneshot::Receiver<()>>,
+}
+
+#[cfg(test)]
+impl AsyncWrite for ControlledHttpWrite<'_> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        bytes: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        // 写出真实响应的指定前缀后暂停，恢复信号也负责唤醒写入任务。
+        if this.remaining == Some(0) && !bytes.is_empty() {
+            let Some(resume) = this.resume.as_mut() else {
+                return Poll::Pending;
+            };
+            let resumed = std::task::ready!(Pin::new(resume).poll(cx));
+            this.resume = None;
+            if resumed.is_err() {
+                return Poll::Pending;
+            }
+            this.remaining = None;
+        }
+        let bytes = match this.remaining {
+            Some(remaining) => &bytes[..bytes.len().min(remaining)],
+            None => bytes,
+        };
+        let written = std::task::ready!(Pin::new(&mut *this.stream).poll_write(cx, bytes))?;
+        if let Some(remaining) = &mut this.remaining {
+            *remaining -= written;
+        }
+        Poll::Ready(Ok(written))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.get_mut().stream).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut *self.get_mut().stream).poll_shutdown(cx)
     }
 }
 
@@ -602,6 +668,15 @@ impl ResponsesDownstream for HttpResponsesDownstream {
 
     async fn write_json(&mut self, status: u16, value: &Value) -> Result<()> {
         begin_compaction_delivery();
+        #[cfg(test)]
+        if let Some((remaining, resume)) = self.write_pause.take() {
+            let mut stream = ControlledHttpWrite {
+                stream: &mut self.stream,
+                remaining: Some(remaining),
+                resume: Some(resume),
+            };
+            return write_json_response(&mut stream, status, value).await;
+        }
         write_json_response(&mut self.stream, status, value).await
     }
 
