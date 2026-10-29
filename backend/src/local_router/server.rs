@@ -607,6 +607,7 @@ async fn run_router_listener(
                                 // 客户端提前断开（取消请求、关闭会话）是正常结束，不记为失败。
                                 if let Err(error) = server.handle_connection(stream).await
                                     && !error.is::<DownstreamClosed>()
+                                    && !error.is::<CompactionInterrupted>()
                                 {
                                     record_router_failure_nonblocking(
                                         "local_router_request_failed",
@@ -967,6 +968,7 @@ pub(crate) struct RouteBindings {
     pub(crate) portable_source_retries: HashMap<String, PortableSourceRetry>,
     pub(crate) portable_tickets: HashMap<String, PortableTicket>,
     pub(crate) compacting: HashSet<String>,
+    pub(crate) compaction_operations: HashMap<Uuid, Arc<CompactionOperation>>,
     pub(crate) routes: HashMap<String, RouteBinding>,
     pub(crate) order: VecDeque<(String, u64)>,
     pub(crate) next_generation: u64,

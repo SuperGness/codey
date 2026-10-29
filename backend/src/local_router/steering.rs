@@ -76,6 +76,21 @@ impl SteeringState {
             .collect()
     }
 
+    pub(crate) fn response_id(&self) -> Option<&str> {
+        self.response_id.as_deref()
+    }
+
+    pub(crate) fn interrupt(&mut self) -> Vec<Value> {
+        self.settings = None;
+        self.settings_permit = None;
+        self.response_id = None;
+        self.completed = Some(false);
+        self.required.clear();
+        self.unsupported_output = false;
+        self.continuation_offered = false;
+        self.fail_pending("response_interrupted", "目标响应已中断，补充消息未应用")
+    }
+
     pub(crate) fn begin_request(
         &mut self,
         body: &mut Value,
@@ -441,6 +456,29 @@ mod tests {
         );
         drop(state);
         assert_eq!(budget.available_permits(), REQUEST_BODY_BUDGET_PERMITS);
+    }
+
+    #[test]
+    fn interrupt_releases_pending_and_submitted_steering_without_continuation() {
+        let (mut state, budget) = setup();
+        let submitted = state.accept(&steer("submitted"), &budget);
+        assert_eq!(state.take_input().len(), 1);
+        let pending = state.accept(&steer("pending"), &budget);
+        let failures = state.interrupt();
+        assert_eq!(failures.len(), 2);
+        for accepted in [submitted, pending] {
+            assert!(failures.iter().any(|event| {
+                event["steer"]["id"] == accepted["steer"]["id"]
+                    && event["error"]["code"] == "response_interrupted"
+            }));
+        }
+        assert_eq!(budget.available_permits(), REQUEST_BODY_BUDGET_PERMITS);
+        assert!(state.take_continuation().is_none());
+        assert!(state.notifications().is_empty());
+        assert_eq!(
+            state.accept(&steer("late"), &budget)["error"]["code"],
+            "response_not_found"
+        );
     }
 
     #[test]

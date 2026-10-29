@@ -580,6 +580,12 @@ impl<D: ResponsesDownstream + ?Sized> ResponsesDownstream for LifecycleDownstrea
     fn set_streaming_errors(&mut self, enabled: bool) {
         self.inner.set_streaming_errors(enabled);
     }
+    fn set_compaction_disconnect_monitor(&mut self, enabled: bool) {
+        self.inner.set_compaction_disconnect_monitor(enabled);
+    }
+    fn compaction_disconnect_monitor(&self) -> bool {
+        self.inner.compaction_disconnect_monitor()
+    }
     fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
         self.inner.request_log_probe()
     }
@@ -641,6 +647,9 @@ impl<D: ResponsesDownstream + ?Sized> ResponsesDownstream for LifecycleDownstrea
     }
     async fn finish_event_stream(&mut self) -> Result<()> {
         self.inner.finish_event_stream().await
+    }
+    async fn finish_delivered_compaction_stream(&mut self) {
+        self.inner.finish_delivered_compaction_stream().await;
     }
     async fn proxy_response_with_probe(
         &mut self,

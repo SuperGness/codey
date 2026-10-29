@@ -475,11 +475,12 @@ impl BudgetedWebSocket {
         &mut self,
         message: WebSocketMessage,
     ) -> std::result::Result<(), WebSocketError> {
-        self.socket
-            .as_mut()
-            .ok_or(WebSocketError::AlreadyClosed)?
-            .send(message)
-            .await
+        // send 可能先排入帧、再等待 flush。将 socket 的所有权留在 future 中，
+        // 取消或写入失败时直接关闭，避免下一次 flush 发出旧终态或残缺帧。
+        let mut socket = self.socket.take().ok_or(WebSocketError::AlreadyClosed)?;
+        socket.send(message).await?;
+        self.socket = Some(socket);
+        Ok(())
     }
 
     #[allow(
@@ -865,5 +866,160 @@ mod tests {
             assert!(ingress.prepare_header().is_err());
             assert!(ingress.permit.is_none());
         }
+    }
+
+    async fn assert_send_connection_closed(socket: &mut BudgetedWebSocket) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            assert!(matches!(
+                socket.send(WebSocketMessage::Text("later".into())).await,
+                Err(WebSocketError::AlreadyClosed)
+            ));
+            assert!(matches!(
+                socket.flush().await,
+                Err(WebSocketError::AlreadyClosed)
+            ));
+            assert!(socket.next().await.is_none());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn plain_websocket_send_success_keeps_connection_reusable() {
+        let budget = Arc::new(Semaphore::new(8));
+        let (mut socket, peer) = raw_pair(budget).await;
+        let mut peer = WebSocketStream::from_raw_socket(
+            peer,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            for (response, request) in [("reply-1", "request-1"), ("reply-2", "request-2")] {
+                socket
+                    .send(WebSocketMessage::Text(response.into()))
+                    .await
+                    .unwrap();
+                socket.flush().await.unwrap();
+                assert_eq!(
+                    peer.next().await.unwrap().unwrap().into_text().unwrap(),
+                    response
+                );
+                peer.send(WebSocketMessage::Text(request.into()))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    socket.next().await.unwrap().unwrap().into_text().unwrap(),
+                    request
+                );
+                drop(socket.take_message_permit());
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn plain_websocket_send_cancellation_closes_connection() {
+        let budget = Arc::new(Semaphore::new(8));
+        let (mut socket, mut peer) = raw_pair(budget).await;
+        let ingress = socket.socket.as_ref().unwrap().get_ref();
+        socket2::SockRef::from(ingress.stream.as_ref().unwrap())
+            .set_send_buffer_size(1024)
+            .unwrap();
+        socket2::SockRef::from(&peer)
+            .set_recv_buffer_size(1024)
+            .unwrap();
+        let payload_bytes = 8 * 1024 * 1024;
+        // 对端暂停读取，较小的收发缓冲区使普通文本帧在实际写入中等待。
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                socket.send(WebSocketMessage::Text("x".repeat(payload_bytes).into())),
+            )
+            .await
+            .is_err()
+        );
+        assert_send_connection_closed(&mut socket).await;
+        socket2::SockRef::from(&peer)
+            .set_recv_buffer_size(256 * 1024)
+            .unwrap();
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), peer.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!bytes.is_empty(), "取消发生前应已写出部分帧");
+        assert!(bytes.len() < payload_bytes, "取消后不得补发完整帧");
+    }
+
+    #[tokio::test]
+    async fn plain_websocket_send_error_closes_connection() {
+        let budget = Arc::new(Semaphore::new(8));
+        let (mut socket, peer) = raw_pair(budget).await;
+        // 零等待关闭会发送 TCP reset，验证真实传输错误而非注入的写入错误。
+        socket2::SockRef::from(&peer)
+            .set_linger(Some(Duration::ZERO))
+            .unwrap();
+        drop(peer);
+        let ingress = socket.socket.as_ref().unwrap().get_ref();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            ingress.stream.as_ref().unwrap().readable(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            socket.send(WebSocketMessage::Text("after reset".into())),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(WebSocketError::Io(_))));
+        assert_send_connection_closed(&mut socket).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_terminal_write_discards_buffer_and_does_not_remember_native_history() {
+        let budget = Arc::new(Semaphore::new(REQUEST_BODY_BUDGET_PERMITS));
+        let (socket, mut peer) = raw_pair(budget).await;
+        socket2::SockRef::from(&peer)
+            .set_recv_buffer_size(1024)
+            .unwrap();
+        let mut downstream = WebSocketResponsesDownstream::new(socket);
+        let (config, provider, model) =
+            super::super::tests::router_config("http://127.0.0.1:9/v1".into());
+        let snapshot = RouterSnapshot::from_config(&config);
+        downstream.prepare_native_http_fallback(
+            &snapshot.routes[&provider], &HeaderMap::new(),
+            &mut json!({"model":model,"input":[{"role":"user","content":"context"},{"type":"compaction_trigger"}]}),
+        ).unwrap();
+        let event = json!({"type":"response.completed","response":{
+            "id":"resp-not-delivered","object":"response","status":"completed",
+            "output":[{"type":"compaction","encrypted_content":"x".repeat(8 * 1024 * 1024)}]
+        }});
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), downstream.write_event(&event))
+                .await
+                .is_err()
+        );
+        assert!(downstream.terminal_started);
+        assert!(!downstream.native_history.has_history());
+        downstream.finish_compaction_interrupt().await.unwrap();
+        assert!(downstream.socket.flush().await.is_err());
+        assert!(!downstream.native_history.has_history());
+        socket2::SockRef::from(&peer)
+            .set_recv_buffer_size(256 * 1024)
+            .unwrap();
+        let mut bytes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(3), peer.read_to_end(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            bytes.len() < event.to_string().len(),
+            "cancelled frame must remain incomplete"
+        );
     }
 }

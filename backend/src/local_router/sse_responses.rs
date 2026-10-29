@@ -833,11 +833,22 @@ pub(crate) async fn write_responses_response_as_events<D>(
 where
     D: ResponsesDownstream + ?Sized,
 {
+    write_responses_response_events(downstream, response).await?;
+    downstream.finish_event_stream().await
+}
+
+pub(crate) async fn write_responses_response_events<D>(
+    downstream: &mut D,
+    response: &Value,
+) -> Result<()>
+where
+    D: ResponsesDownstream + ?Sized,
+{
     downstream.start_event_stream().await?;
     for event in responses_event_sequence(response)? {
         downstream.write_event(&event).await?;
     }
-    downstream.finish_event_stream().await
+    Ok(())
 }
 
 pub(crate) fn append_message_sse_events(

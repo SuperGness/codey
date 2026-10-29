@@ -457,6 +457,16 @@ impl AppState {
                 self.session_scan_wake.notify_one();
                 json!({"status":"ok"})
             }
+            "/session/portable-compaction/interrupt" => {
+                let runtime = self.runtime.lock().await.clone();
+                match runtime {
+                    Some(runtime) => runtime
+                        .interrupt_portable_compaction(&payload)
+                        .await
+                        .unwrap_or_else(api_error_message),
+                    None => api_error_message(anyhow::anyhow!("Codex 尚未启动")),
+                }
+            }
             "/session/portable-compaction/prepare"
             | "/session/portable-compaction/status"
             | "/session/portable-compaction/cancel"

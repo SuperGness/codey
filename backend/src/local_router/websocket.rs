@@ -237,6 +237,36 @@ impl WebSocketResponsesDownstream {
         self.pending_interrupt.take()
     }
 
+    pub(crate) async fn finish_compaction_interrupt(&mut self) -> Result<()> {
+        self.upstream.take();
+        self.pending_interrupt.take();
+        self.interrupt_forwarding = false;
+        self.adapted_history.clear_pending();
+        self.native_history.clear_pending();
+        let response_id = self
+            .steering
+            .response_id()
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("resp_codey_compaction_{}", Uuid::new_v4().simple()));
+        for event in self.steering.interrupt() {
+            self.write_steering_event(&event).await?;
+        }
+        // 压缩完整校验前没有 response.created，此时才分配本地 ID。终态保留
+        // 当前 stream_id，但不会作为可续接的上游响应保存到历史中。
+        self.write_event(&json!({
+            "type":"response.incomplete",
+            "sequence_number":0,
+            "response":{
+                "id":response_id,
+                "object":"response",
+                "status":"incomplete",
+                "output":[],
+                "incomplete_details":{"reason":"interrupted"}
+            }
+        }))
+        .await
+    }
+
     pub(crate) fn handle_idle_response_interrupt(
         &mut self,
         message: &BudgetedWebSocketMessage,
@@ -1583,10 +1613,12 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
     }
 
     async fn start_event_stream(&mut self) -> Result<()> {
+        begin_compaction_delivery();
         Ok(())
     }
 
     async fn write_event(&mut self, event: &Value) -> Result<()> {
+        begin_compaction_delivery();
         let mut event = normalized_response_event(event);
         if self.steering.controls_sent {
             self.steering.sequence_response_event(event.to_mut());
@@ -1597,8 +1629,6 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
             }
             self.terminal_started = true;
         }
-        self.native_history.observe(&event);
-        self.steering.observe(&event);
         let encoded = encode_responses_websocket_event(
             &event,
             self.event_needs_stream_id(&event).then(|| {
@@ -1607,7 +1637,10 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
                     .expect("stream id must exist when insertion is required")
             }),
         )?;
-        self.write_text(encoded).await
+        self.write_text(encoded).await?;
+        self.native_history.observe(&event);
+        self.steering.observe(&event);
+        Ok(())
     }
 
     async fn finish_event_stream(&mut self) -> Result<()> {
@@ -2336,6 +2369,45 @@ mod admission_tests {
             panic!("expected failure event")
         };
         serde_json::from_str(&text).unwrap()
+    }
+
+    #[tokio::test]
+    async fn compaction_interrupt_keeps_the_started_response_id_and_releases_steering() {
+        let (socket, mut peer) = local_websocket_pair().await;
+        let mut downstream = WebSocketResponsesDownstream::new(socket);
+        downstream.set_stream_id(Some("compact-lane".into()));
+        downstream
+            .steering
+            .begin_request(
+                &mut json!({"model":"test","input":"context","stream_id":"compact-lane"}),
+                &downstream.request_body_budget,
+            )
+            .unwrap();
+        downstream.write_event(&json!({
+            "type":"response.created", "sequence_number":0,
+            "response":{"id":"resp-started","object":"response","status":"in_progress","output":[]}
+        })).await.unwrap();
+        assert_eq!(receive_failure(&mut peer).await["type"], "response.created");
+        let accepted = downstream.steering.accept(
+            &json!({"type":"response.steer","previous_response_id":"resp-started","input":"update"}),
+            &downstream.request_body_budget,
+        );
+        assert_eq!(accepted["type"], "response.steer.accepted");
+        downstream.finish_compaction_interrupt().await.unwrap();
+        let failed_steer = receive_failure(&mut peer).await;
+        assert_eq!(failed_steer["type"], "response.steer.failed");
+        assert_eq!(failed_steer["stream_id"], "compact-lane");
+        let terminal = receive_failure(&mut peer).await;
+        assert_eq!(terminal["type"], "response.incomplete");
+        assert_eq!(terminal["response"]["id"], "resp-started");
+        assert_eq!(terminal["stream_id"], "compact-lane");
+        assert!(terminal["sequence_number"].as_u64() > failed_steer["sequence_number"].as_u64());
+        assert!(downstream.steering.take_continuation().is_none());
+        assert_eq!(
+            downstream.request_body_budget.available_permits(),
+            REQUEST_BODY_BUDGET_PERMITS
+        );
+        assert!(!downstream.native_history.has_history());
     }
 
     #[tokio::test]

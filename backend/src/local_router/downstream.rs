@@ -36,6 +36,12 @@ pub(crate) trait ResponsesDownstream: Send {
 
     fn set_streaming_errors(&mut self, _enabled: bool) {}
 
+    fn set_compaction_disconnect_monitor(&mut self, _enabled: bool) {}
+
+    fn compaction_disconnect_monitor(&self) -> bool {
+        false
+    }
+
     fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
         None
     }
@@ -90,6 +96,10 @@ pub(crate) trait ResponsesDownstream: Send {
     async fn start_event_stream(&mut self) -> Result<()>;
     async fn write_event(&mut self, event: &Value) -> Result<()>;
     async fn finish_event_stream(&mut self) -> Result<()>;
+    /// 仅用于已成功交付并提交的压缩响应，传输收尾不再决定逻辑结果。
+    async fn finish_delivered_compaction_stream(&mut self) {
+        let _ = self.finish_event_stream().await;
+    }
     /// Relays a native upstream response. The probe, when present, records
     /// first-byte and completion timing; wrappers inject their own probe.
     async fn proxy_response_with_probe(
@@ -131,15 +141,17 @@ pub(crate) trait ResponsesDownstream: Send {
     }
 }
 
-// HTTP FIN cannot distinguish a legal write-half shutdown from cancellation.
-// HTTP also avoids an extra async-trait allocation on every response chunk.
+// 普通 HTTP 避免为每个响应块增加 async-trait 分配；压缩单独监视连接重置。
 pub(crate) async fn await_upstream<D, T, F>(downstream: &mut D, future: F) -> Result<T>
 where
     D: ResponsesDownstream + ?Sized,
     T: Send,
     F: std::future::Future<Output = T> + Send,
 {
-    if downstream.is_websocket() || downstream.event_stream_started() {
+    if downstream.is_websocket()
+        || downstream.event_stream_started()
+        || downstream.compaction_disconnect_monitor()
+    {
         downstream.wait_for_upstream(future).await
     } else {
         Ok(future.await)
@@ -260,6 +272,14 @@ where
 
     fn set_streaming_errors(&mut self, enabled: bool) {
         self.inner.set_streaming_errors(enabled);
+    }
+
+    fn set_compaction_disconnect_monitor(&mut self, enabled: bool) {
+        self.inner.set_compaction_disconnect_monitor(enabled);
+    }
+
+    fn compaction_disconnect_monitor(&self) -> bool {
+        self.inner.compaction_disconnect_monitor()
     }
 
     fn request_log_probe(&self) -> Option<&RouteRequestLogProbe> {
@@ -383,6 +403,13 @@ where
         result
     }
 
+    async fn finish_delivered_compaction_stream(&mut self) {
+        if let Some(probe) = self.probe.as_ref() {
+            probe.finish_success();
+        }
+        self.inner.finish_delivered_compaction_stream().await;
+    }
+
     async fn proxy_response_with_probe(
         &mut self,
         response: reqwest::Response,
@@ -439,6 +466,7 @@ pub(crate) struct HttpResponsesDownstream {
     pub(crate) stream: TcpStream,
     event_stream_started: bool,
     streaming_errors: bool,
+    compaction_disconnect_monitor: bool,
 }
 
 impl HttpResponsesDownstream {
@@ -447,6 +475,7 @@ impl HttpResponsesDownstream {
             stream,
             event_stream_started: false,
             streaming_errors: false,
+            compaction_disconnect_monitor: false,
         }
     }
 }
@@ -467,6 +496,7 @@ impl ResponsesDownstream for HttpResponsesDownstream {
         message: String,
         route: Option<&RouteTarget>,
     ) -> Result<()> {
+        begin_compaction_delivery();
         write_error_response(&mut self.stream, status, code, message, route).await
     }
     fn event_stream_started(&self) -> bool {
@@ -477,6 +507,14 @@ impl ResponsesDownstream for HttpResponsesDownstream {
         self.streaming_errors = enabled;
     }
 
+    fn set_compaction_disconnect_monitor(&mut self, enabled: bool) {
+        self.compaction_disconnect_monitor = enabled;
+    }
+
+    fn compaction_disconnect_monitor(&self) -> bool {
+        self.compaction_disconnect_monitor
+    }
+
     async fn wait_for_upstream<T, F>(&mut self, future: F) -> Result<T>
     where
         T: Send,
@@ -484,6 +522,8 @@ impl ResponsesDownstream for HttpResponsesDownstream {
     {
         if self.event_stream_started {
             await_http_stream_upstream(&mut self.stream, future).await
+        } else if self.compaction_disconnect_monitor {
+            await_http_admission(&mut self.stream, future).await
         } else {
             Ok(future.await)
         }
@@ -496,6 +536,7 @@ impl ResponsesDownstream for HttpResponsesDownstream {
         message: String,
         route: Option<&RouteTarget>,
     ) -> Result<()> {
+        begin_compaction_delivery();
         if self.streaming_errors || self.event_stream_started {
             return self
                 .write_response_failure(&ResponsesFailure::new(status, code, message, route))
@@ -505,6 +546,7 @@ impl ResponsesDownstream for HttpResponsesDownstream {
     }
 
     async fn write_text_error(&mut self, status: u16, code: &str, message: String) -> Result<()> {
+        begin_compaction_delivery();
         if self.streaming_errors || self.event_stream_started {
             return self.write_error(status, code, message, None).await;
         }
@@ -512,6 +554,7 @@ impl ResponsesDownstream for HttpResponsesDownstream {
     }
 
     async fn write_response_failure(&mut self, failure: &ResponsesFailure) -> Result<()> {
+        begin_compaction_delivery();
         if self.streaming_errors || self.event_stream_started {
             self.start_event_stream().await?;
             self.write_event(&failure.normalized_event()).await?;
@@ -541,6 +584,7 @@ impl ResponsesDownstream for HttpResponsesDownstream {
     }
 
     async fn write_json_response_failure(&mut self, failure: &ResponsesFailure) -> Result<()> {
+        begin_compaction_delivery();
         if self.streaming_errors || self.event_stream_started {
             return self.write_response_failure(failure).await;
         }
@@ -557,10 +601,12 @@ impl ResponsesDownstream for HttpResponsesDownstream {
     }
 
     async fn write_json(&mut self, status: u16, value: &Value) -> Result<()> {
+        begin_compaction_delivery();
         write_json_response(&mut self.stream, status, value).await
     }
 
     async fn start_event_stream(&mut self) -> Result<()> {
+        begin_compaction_delivery();
         if self.event_stream_started {
             return Ok(());
         }
@@ -579,6 +625,7 @@ impl ResponsesDownstream for HttpResponsesDownstream {
     }
 
     async fn write_event(&mut self, event: &Value) -> Result<()> {
+        begin_compaction_delivery();
         let event = normalized_response_event(event);
         write_responses_sse_event(&mut self.stream, &event).await
     }

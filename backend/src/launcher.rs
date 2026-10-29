@@ -2123,6 +2123,17 @@ impl CodeyRuntime {
             .portable_compaction(operation, payload)
     }
 
+    pub(crate) async fn interrupt_portable_compaction(
+        &self,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.local_router
+            .as_ref()
+            .context("本地路由尚未启动")?
+            .interrupt_portable_compaction(payload)
+            .await
+    }
+
     pub(crate) fn revert_local_router_routes(&self, swap: local_router::RouterSnapshotSwap) {
         if let Some(local_router) = self.local_router.as_ref() {
             local_router.revert_config(swap);

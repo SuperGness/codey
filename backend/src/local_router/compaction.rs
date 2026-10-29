@@ -892,9 +892,18 @@ pub(crate) fn summary_replay_text(item: &Value) -> Option<String> {
 
 // Only in-flight work is owned here. Codex remains responsible for history
 // versions, retries and installing a successful compaction result.
+#[derive(Debug)]
+pub(crate) struct CompactionOperation {
+    pub(crate) thread_key: Option<String>,
+    pub(crate) cancel: tokio::sync::watch::Sender<bool>,
+    pub(crate) finished: tokio::sync::watch::Sender<bool>,
+}
+
 pub(crate) struct CompactionGuard {
     bindings: Arc<Mutex<RouteBindings>>,
     keys: Vec<String>,
+    id: Uuid,
+    operation: Arc<CompactionOperation>,
 }
 
 impl CompactionGuard {
@@ -906,9 +915,25 @@ impl CompactionGuard {
             anyhow::bail!("同一会话已有压缩请求正在执行，请等待完成后重试");
         }
         state.compacting.extend(keys.iter().cloned());
+        let id = Uuid::new_v4();
+        let operation = Arc::new(CompactionOperation {
+            // session-only 主会话已由 request_binding_keys 建立 thread-id 别名。
+            // 子任务共用的 session-id 不能用来取消父任务或其它线程。
+            thread_key: keys
+                .iter()
+                .find(|key| key.starts_with("thread-id:"))
+                .cloned(),
+            cancel: tokio::sync::watch::channel(false).0,
+            finished: tokio::sync::watch::channel(false).0,
+        });
+        state
+            .compaction_operations
+            .insert(id, Arc::clone(&operation));
         Ok(Self {
             bindings: Arc::clone(bindings),
             keys,
+            id,
+            operation,
         })
     }
 }
@@ -922,7 +947,126 @@ impl Drop for CompactionGuard {
         for key in &self.keys {
             state.compacting.remove(key);
         }
+        state.compaction_operations.remove(&self.id);
+        // 内层请求 future 和 PortableAttempt 先退出，再释放互斥并通知停止接口。
+        self.operation.finished.send_replace(true);
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct CompactionInterrupted;
+
+impl std::fmt::Display for CompactionInterrupted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("压缩请求已停止")
+    }
+}
+
+impl std::error::Error for CompactionInterrupted {}
+
+// 收到停止后，剩余交付、状态提交与传输收尾共用期限，给停止接口留出余量。
+pub(crate) const COMPACTION_DELIVERY_TIMEOUT: Duration = Duration::from_secs(4);
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CompactionDelivery {
+    started: bool,
+    finish_event_stream: bool,
+    deadline: Option<tokio::time::Instant>,
+}
+
+tokio::task_local! {
+    static COMPACTION_DELIVERY: tokio::sync::watch::Sender<CompactionDelivery>;
+}
+
+/// 只在开始写当前请求的响应时调用；等待上游、Pong 和排队请求不进入提交阶段。
+pub(crate) fn begin_compaction_delivery() {
+    let _ = COMPACTION_DELIVERY.try_with(|delivery| {
+        delivery.send_modify(|state| state.started = true);
+    });
+}
+
+async fn compaction_cancelled(cancelled: &mut tokio::sync::watch::Receiver<bool>) {
+    while !*cancelled.borrow_and_update() {
+        if cancelled.changed().await.is_err() {
+            break;
+        }
+    }
+}
+
+pub(crate) async fn await_compaction_operation<F>(
+    mut cancelled: tokio::sync::watch::Receiver<bool>,
+    future: F,
+) -> Result<CompactionDelivery>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    let (delivery, state) = tokio::sync::watch::channel(CompactionDelivery::default());
+    let work = COMPACTION_DELIVERY.scope(delivery, future);
+    tokio::pin!(work);
+    let deadline = tokio::select! {
+        biased;
+        _ = compaction_cancelled(&mut cancelled) => {
+            // 一旦开始写回，继续驱动同一个 future，连同 PortableAttempt 和原生
+            // 绑定的提交一起结束；不能丢掉已进入 socket 缓冲区的成功终态。
+            if !state.borrow().started {
+                return Err(CompactionInterrupted.into());
+            }
+            tokio::time::Instant::now() + COMPACTION_DELIVERY_TIMEOUT
+        },
+        result = &mut work => {
+            result?;
+            return Ok(*state.borrow());
+        },
+    };
+    // 超时会先销毁工作 future 和正在写入的 WebSocket，再释放操作锁。
+    // HTTP 使用 Connection: close，调用方退出后直接丢弃未写完的连接。
+    tokio::time::timeout_at(deadline, &mut work)
+        .await
+        .context("压缩结果交付超时")
+        .context(DownstreamClosed)??;
+    Ok(CompactionDelivery {
+        deadline: Some(deadline),
+        ..*state.borrow()
+    })
+}
+
+async fn write_compaction_response_as_events<D: ResponsesDownstream + ?Sized>(
+    downstream: &mut D,
+    response: &Value,
+) -> Result<()> {
+    write_responses_response_events(downstream, response).await?;
+    // HTTP 成功终态完整写出后，先提交票据、检查点和原生绑定，再单独结束分块传输。
+    // 直接调用转换器的场景仍使用原有收尾流程。
+    if !downstream.is_websocket()
+        && COMPACTION_DELIVERY
+            .try_with(|delivery| delivery.send_modify(|state| state.finish_event_stream = true))
+            .is_ok()
+    {
+        return Ok(());
+    }
+    downstream.finish_event_stream().await
+}
+
+async fn finish_compaction_event_stream<D: ResponsesDownstream + ?Sized>(
+    downstream: &mut D,
+    mut cancelled: tokio::sync::watch::Receiver<bool>,
+    deadline: Option<tokio::time::Instant>,
+) {
+    let finish = downstream.finish_delivered_compaction_stream();
+    tokio::pin!(finish);
+    let deadline = if let Some(deadline) = deadline {
+        deadline
+    } else {
+        tokio::select! {
+            biased;
+            _ = compaction_cancelled(&mut cancelled) => {
+                tokio::time::Instant::now() + COMPACTION_DELIVERY_TIMEOUT
+            },
+            () = &mut finish => return,
+        }
+    };
+    // 逻辑结果已提交；结束 chunk 的失败或超时只结束连接，不再改变交付结果。
+    let _ = tokio::time::timeout_at(deadline, finish).await;
 }
 
 impl RouterServer {
@@ -948,7 +1092,7 @@ impl RouterServer {
         } else {
             keys
         };
-        let _guard = match CompactionGuard::acquire(&self.bindings, keys) {
+        let guard = match CompactionGuard::acquire(&self.bindings, keys) {
             Ok(guard) => guard,
             Err(error) => {
                 return downstream
@@ -958,8 +1102,33 @@ impl RouterServer {
         };
         // 压缩结果必须完整校验后才能写回下游：等待上游期间不能先开始 SSE 或
         // HTTP 响应，否则失败时只能在已经开始的响应里追加 JSON 错误。
-        self.proxy_parsed_responses_inner(request, body, encoded_body, kind, downstream)
-            .await
+        downstream.set_compaction_disconnect_monitor(true);
+        let cancelled = guard.operation.cancel.subscribe();
+        let result = await_compaction_operation(
+            cancelled.clone(),
+            self.proxy_parsed_responses_inner(request, body, encoded_body, kind, downstream),
+        )
+        .await;
+        downstream.set_compaction_disconnect_monitor(false);
+        let result = match result {
+            Ok(delivery) => {
+                if delivery.finish_event_stream {
+                    finish_compaction_event_stream(downstream, cancelled, delivery.deadline).await;
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        };
+        if result
+            .as_ref()
+            .is_err_and(|error| error.is::<CompactionInterrupted>())
+            && let Some(probe) = downstream.request_log_probe()
+        {
+            probe.mark_cancelled("compaction_interrupted");
+            probe.finish_cancelled();
+        }
+        drop(guard);
+        result
     }
 }
 
@@ -1005,6 +1174,55 @@ pub(crate) fn validate_compaction_result(value: &Value, v2: bool) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn compaction_delivery_transport_finish_uses_the_remaining_cancel_deadline() {
+        struct PendingFinish;
+        #[async_trait]
+        impl ResponsesDownstream for PendingFinish {
+            async fn write_error(
+                &mut self,
+                _: u16,
+                _: &str,
+                _: String,
+                _: Option<&RouteTarget>,
+            ) -> Result<()> {
+                unreachable!()
+            }
+            async fn write_json(&mut self, _: u16, _: &Value) -> Result<()> {
+                unreachable!()
+            }
+            async fn start_event_stream(&mut self) -> Result<()> {
+                unreachable!()
+            }
+            async fn write_event(&mut self, _: &Value) -> Result<()> {
+                unreachable!()
+            }
+            async fn finish_event_stream(&mut self) -> Result<()> {
+                std::future::pending().await
+            }
+            async fn proxy_response_with_probe(
+                &mut self,
+                _: reqwest::Response,
+                _: Option<&RouteRequestLogProbe>,
+            ) -> Result<()> {
+                unreachable!()
+            }
+        }
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        let started = tokio::time::Instant::now();
+        let delivery = await_compaction_operation(receiver.clone(), async {
+            begin_compaction_delivery();
+            cancel.send_replace(true);
+            tokio::task::yield_now().await;
+            tokio::time::sleep(COMPACTION_DELIVERY_TIMEOUT * 3 / 4).await;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        finish_compaction_event_stream(&mut PendingFinish, receiver, delivery.deadline).await;
+        assert_eq!(started.elapsed(), COMPACTION_DELIVERY_TIMEOUT);
+    }
 
     fn fernet_token(ciphertext: &[u8]) -> String {
         let mut token = vec![0x80];
@@ -2032,7 +2250,7 @@ pub(crate) async fn write_gateway_compaction<D: ResponsesDownstream + ?Sized>(
     match result {
         Ok(value) => {
             if stream {
-                write_responses_response_as_events(downstream, &value).await?;
+                write_compaction_response_as_events(downstream, &value).await?;
             } else {
                 downstream.write_json(200, &value).await?;
             }
@@ -2104,6 +2322,11 @@ pub(crate) async fn write_validated_compaction<D: ResponsesDownstream + ?Sized>(
     .await?;
     match result {
         Ok(value) => {
+            if stream {
+                write_compaction_response_as_events(downstream, &value).await?;
+            } else {
+                downstream.write_json(200, &value).await?;
+            }
             if let Some((checkpoint, cache)) = checkpoint
                 && let Some(entry) = checkpoint.finish(&value)
             {
@@ -2112,11 +2335,7 @@ pub(crate) async fn write_validated_compaction<D: ResponsesDownstream + ?Sized>(
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(entry);
             }
-            if stream {
-                write_responses_response_as_events(downstream, &value).await
-            } else {
-                downstream.write_json(200, &value).await
-            }
+            Ok(())
         }
         Err(error) => {
             let timeout = is_upstream_timeout_error(&error);

@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "78";
+  const patchVersion = "80";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -3087,7 +3087,7 @@
       ? patchedNativeRequestParams(method, params)
       : patchedRequestParams(method, params);
     const localClient = window.__codeyAppServerRequestClients?.get?.("local");
-    if (nextParams && typeof nextParams === "object" && localClient && portableReentry.has(localClient)) portableApprovedParams.add(nextParams);
+    if (nextParams && typeof nextParams === "object") portableReentryFor(localClient, method, params)?.approved.add(nextParams);
     if (nextParams === params) {
       rememberOutgoingThreadRequest(detail);
       return detail;
@@ -3268,12 +3268,157 @@
     deliveryState.responsePatchInstalled = true;
   }
 
-  const portableQueues = new Map();
+  // Retain unconfirmed resources across patch replacement until their token is cleaned.
+  const portableQueues = window.__codeyPortableCompactionQueues ||= new Map();
   const portableCancels = new Set();
-  const portableReentry = new WeakSet();
-  const portableApprovedParams = new WeakSet();
+  const portableReentry = new WeakMap();
+  const portableReentryFor = (client, method, params) => {
+    const entry = client && portableReentry.get(client);
+    return entry && entry.state.generation === entry.generation && entry.method === method
+      && (entry.params === params || entry.approved.has(params)) ? entry : null;
+  };
   const portablePendingMessages = new WeakSet();
   const selectedThreadModels = new Set();
+  const portableAbort = (message = "模型请求校验已重新加载") => Object.assign(new Error(message), { name: "AbortError" });
+  const portableThreadState = (threadId) => {
+    if (!portableQueues.has(threadId)) portableQueues.set(threadId, {
+      generation: 0, requests: new Set(), tail: null, cleanup: null,
+      needsInterrupt: false, cleanupError: null, interruptedRequests: new Set(), failedCleanups: new Set(),
+    });
+    return portableQueues.get(threadId);
+  };
+  const releasePortableThread = (threadId, state) => {
+    if (portableQueues.get(threadId) === state && !state.requests.size && !state.cleanup && !state.needsInterrupt
+      && !state.failedCleanups.size && !state.interruptedRequests.size) {
+      portableQueues.delete(threadId);
+    }
+  };
+  const portableCleanupDeadline = () => {
+    let timer;
+    let active = true;
+    const expired = new Promise((_, reject) => {
+      timer = window.setTimeout(() => {
+        active = false;
+        reject(new Error("摘要清理超时，尚未确认完成"));
+      }, 10_000);
+    });
+    void expired.catch(() => {});
+    return {
+      wait: (promise) => Promise.race([promise, expired]), active: () => active,
+      clear: () => { active = false; window.clearTimeout(timer); },
+    };
+  };
+  const waitPortableRequestCleanup = async (request) => {
+    // Keep the original prepare observer alive so a late token is still cancelled.
+    await request.preparedCleanup;
+    if (!request.cleanupDone || request.cleanupConfirmed) return;
+    await Promise.race([request.cleanupDone, Promise.resolve(request.cancelCleanup).then(() => {
+      if (!request.cleanupConfirmed) throw request.cleanupError || new Error("交接摘要凭据清理尚未确认");
+    })]);
+  };
+  const retainPortableCleanup = (threadId, state, request) => {
+    if (!request.cleanupDone || request.cleanupConfirmed) return;
+    state.failedCleanups.add(request);
+    state.needsInterrupt = true;
+    state.cleanupError = request.cleanupError || new Error("交接摘要凭据清理尚未确认");
+    releasePortableThread(threadId, state);
+  };
+  const cleanupPortableInterrupt = (threadId, state) => {
+    if (state.cleanup) return state.cleanup;
+    state.needsInterrupt = true;
+    const cleanup = Promise.resolve().then(async () => {
+      for (const request of state.failedCleanups) {
+        state.interruptedRequests.add(request);
+      }
+      const deadline = portableCleanupDeadline();
+      let failure = null;
+      let interruptConfirmed = false;
+      const cancellationsBeforeInterrupt = new Map();
+      try {
+        const bridge = window.__codexSessionDeleteBridge;
+        if (typeof bridge !== "function") throw new Error("摘要停止服务尚未就绪");
+        const result = await deadline.wait(bridge("/session/portable-compaction/interrupt", { threadId }, { timeoutMs: 10_000 }));
+        if (result?.status !== "ok") throw new Error(
+          typeof result?.message === "string" && result.message.trim() || "摘要停止服务未确认完成",
+        );
+        interruptConfirmed = true;
+        for (const request of state.interruptedRequests) {
+          if (request.cancelCleanup) cancellationsBeforeInterrupt.set(request, request.cancelCleanup);
+        }
+      } catch (error) { failure = error; }
+      // A prepare response can arrive after stop. Wait for its token cancellation
+      // as well as the backend interrupt before allowing the next generation.
+      try {
+        while (state.interruptedRequests.size) {
+          const interrupted = [...state.interruptedRequests];
+          const outcomes = await deadline.wait(Promise.all(interrupted.map(async (request) => {
+            await request.finished;
+            let retried = false;
+            const retryAfterInterrupt = () => {
+              if (!deadline.active() || !interruptConfirmed || retried || request.cleanupConfirmed
+                || !request.cleanupRetryNeeded || !request.retryCleanup
+                || !cancellationsBeforeInterrupt.has(request)
+                || cancellationsBeforeInterrupt.get(request) !== request.cancelCleanup) return false;
+              retried = true;
+              request.retryCleanup();
+              return true;
+            };
+            try {
+              retryAfterInterrupt();
+              try { await waitPortableRequestCleanup(request); }
+              catch (error) {
+                // A token cancellation sent before interrupt completed can still
+                // see a running ticket. Retry once after the request has exited.
+                if (!retryAfterInterrupt()) throw error;
+                await waitPortableRequestCleanup(request);
+              }
+              return { request };
+            }
+            catch (error) { return { request, error }; }
+          })));
+          for (const { request, error } of outcomes) {
+            state.interruptedRequests.delete(request);
+            if (error && !request.cleanupConfirmed) {
+              request.cleanupError = error;
+              request.cleanupRetryNeeded = true;
+              state.failedCleanups.add(request);
+              failure ||= error;
+            } else state.failedCleanups.delete(request);
+          }
+        }
+      } catch (error) {
+        failure ||= error;
+        for (const request of state.interruptedRequests) {
+          if (request.cleanupDone && !request.cleanupConfirmed) {
+            request.cleanupError ||= error;
+            request.cleanupRetryNeeded = true;
+            state.failedCleanups.add(request);
+          }
+        }
+      } finally { deadline.clear(); }
+      state.cleanupError = failure;
+      state.needsInterrupt = Boolean(failure || state.failedCleanups.size || state.interruptedRequests.size);
+    }).finally(() => {
+      if (state.cleanup === cleanup) state.cleanup = null;
+      releasePortableThread(threadId, state);
+    });
+    state.cleanup = cleanup;
+    return cleanup;
+  };
+  const interruptPortableThread = (threadId) => {
+    const state = portableThreadState(threadId);
+    state.generation++;
+    for (const request of state.requests) {
+      if (request.status === "sent" || request.status === "finished") continue;
+      state.interruptedRequests.add(request);
+      request.cancel(portableAbort("发送已取消"));
+    }
+    state.tail = null;
+    // Native stop must remain synchronous even if this service fails.
+    void cleanupPortableInterrupt(threadId, state);
+  };
+  const needsPortableInterruptWait = (method, params) => !nativeSelectionOnly && method === "turn/start"
+    && Boolean(portableQueues.get(threadIdFromParams(params))?.needsInterrupt);
   const needsHistoricalModel = (method, params) => !nativeSelectionOnly
     && method === "thread/resume" && Boolean(threadIdFromParams(params))
     && !threadModelSelections.has(threadIdFromParams(params))
@@ -3281,20 +3426,22 @@
     && !params?.[patchedRouteKey] && !pendingIntentRouteForRequest()
     && (!catalog.loaded || params?.model == null
       || routeMatchesModel(routeForModel(catalog.defaultModel), params.model));
-  const restoreHistoricalModel = async (params) => {
+  const restoreHistoricalModel = async (params, request) => {
     const threadId = threadIdFromParams(params);
-    if (!catalog.loaded) await loadModelCatalog();
+    if (!catalog.loaded) await request.checked(loadModelCatalog());
+    request.check();
     if (!catalog.loaded) throw portableFailure("无法读取模型列表，已暂停恢复会话，请稍后重试。");
     if (!needsHistoricalModel("thread/resume", params)) return;
     const bridge = window.__codexSessionDeleteBridge;
     if (typeof bridge !== "function") throw portableFailure("会话模型读取服务尚未就绪，请稍后重试。");
     let saved;
     const effortRevision = threadEffortRevisions.get(threadId);
-    try { saved = await bridge("/session/model", { threadId }, { timeoutMs: 20_000 }); }
+    try { saved = await request.checked(bridge("/session/model", { threadId }, { timeoutMs: 20_000 })); }
     catch {
+      request.check();
       if (!threadModelSelections.has(threadId)) throw portableFailure("无法读取会话保存的模型，已暂停恢复会话，请稍后重试。");
     }
-    if (disposed) throw new Error("模型请求校验已重新加载");
+    request.check();
     // A newer explicit selection also wins over a late failed metadata read.
     if (pendingIntentRouteForRequest() || selectedThreadModels.has(threadId) || threadModelSelections.has(threadId)) return;
     if (saved?.status === "missing" && saved.threadId === threadId) {
@@ -3341,26 +3488,47 @@
     if (!disposed) showBlockedProviderNotice({ request: { params: { [blockedProviderRequestKey]: { message } } } });
     return new Error(message);
   };
-  const preparePortableCompaction = async (client, target, send) => {
+  const preparePortableCompaction = async (target, send, request) => {
     const bridge = window.__codexSessionDeleteBridge;
     if (typeof bridge !== "function") throw portableFailure("切换线路前的摘要服务尚未就绪，请稍后重试。");
-    let ticket, timer, pollTimer, listener;
-    let aborted = false;
-    let rejectAbort;
-    const abortPromise = new Promise((_, reject) => { rejectAbort = reject; });
-    const cancel = () => { aborted = true; rejectAbort(new Error("模型请求校验已重新加载")); };
-    portableCancels.add(cancel);
-    timer = window.setTimeout(() => { aborted = true; rejectAbort(new Error("生成交接摘要超时，请回到原线路检查任务后重试。")); }, 180000);
-    const checked = async (promise) => {
-      const value = await Promise.race([promise, abortPromise]);
-      if (aborted || disposed) throw new Error("模型请求校验已重新加载");
-      return value;
+    let ticket, preparedTicket, timer, pollTimer, listener, completeCleanup;
+    const cleanupConfirmed = () => {
+      request.cleanupConfirmed = true;
+      request.cleanupError = null;
+      completeCleanup();
     };
+    const checked = request.checked;
+    const cancelTicket = (prepared) => {
+      if (!prepared?.token || request.cleanupConfirmed) return;
+      request.retryCleanup = () => {
+        request.cleanupError = null;
+        request.cancelCleanup = null;
+        request.cleanupRetryNeeded = false;
+        return cancelTicket(prepared);
+      };
+      if (!request.cancelCleanup) request.cancelCleanup = Promise.resolve().then(async () => {
+        const result = await bridge("/session/portable-compaction/cancel", { threadId: target.threadId, token: prepared.token });
+        if (result?.status !== "ok") throw new Error("交接摘要凭据清理尚未确认");
+        cleanupConfirmed();
+      }).catch((error) => {
+        if (!request.cleanupConfirmed) {
+          request.cleanupError = error;
+          request.cleanupRetryNeeded = true;
+        }
+      });
+      return request.cancelCleanup;
+    };
+    timer = window.setTimeout(() => request.cancel(new Error("生成交接摘要超时，请回到原线路检查任务后重试。")), 180000);
     try {
-      ticket = await checked(Promise.resolve(bridge("/session/portable-compaction/prepare", target)).then((prepared) => {
-        if ((aborted || disposed) && prepared?.token) void bridge("/session/portable-compaction/cancel", { threadId: target.threadId, token: prepared.token }).catch(() => {});
-        return prepared;
-      }));
+      request.check();
+      request.cleanupDone = new Promise((resolve) => { completeCleanup = resolve; });
+      const preparing = Promise.resolve().then(() => bridge("/session/portable-compaction/prepare", target));
+      request.preparedCleanup = preparing.then((prepared) => {
+        preparedTicket = prepared;
+        if (!prepared?.token) cleanupConfirmed();
+        else if (request.cleanupRequired || request.cancelError || disposed) cancelTicket(prepared);
+      }, () => { cleanupConfirmed(); });
+      ticket = await checked(preparing);
       if (ticket?.status !== "ok" || typeof ticket.required !== "boolean") {
         const message = ticket?.status === "failed" && typeof ticket.message === "string" ? ticket.message.trim() : "";
         throw new Error(message || "无法确认任务的原线路，请稍后重试。");
@@ -3386,67 +3554,146 @@
         const state = await checked(bridge("/session/portable-compaction/status", { threadId: target.threadId, token: ticket.token }));
         if (state?.status !== "ok" || ["failed", "expired"].includes(state.state)) throw new Error("交接摘要未完成，已保留原线路，请稍后重试。");
         if (state.state === "completed" && completed) {
-          const confirmed = await checked(bridge("/session/portable-compaction/confirm", { threadId: target.threadId, token: ticket.token }));
+          const confirming = Promise.resolve(bridge("/session/portable-compaction/confirm", { threadId: target.threadId, token: ticket.token })).then((result) => {
+            if (result?.status === "ok") cleanupConfirmed();
+            return result;
+          });
+          const confirmed = await checked(confirming);
           if (confirmed?.status !== "ok") throw new Error("交接摘要保存尚未确认，请稍后重试。");
           break;
         }
         await checked(new Promise((resolve) => { pollTimer = window.setTimeout(resolve, 300); }));
       }
     } catch (error) {
-      if (ticket?.token) void bridge("/session/portable-compaction/cancel", { threadId: target.threadId, token: ticket.token }).catch(() => {});
+      request.cleanupRequired = true;
+      cancelTicket(ticket || preparedTicket);
+      const deadline = portableCleanupDeadline();
+      try { await deadline.wait(request.checked(waitPortableRequestCleanup(request))); }
+      catch (cleanupError) {
+        if (!request.cleanupConfirmed && cleanupError !== request.cancelError) {
+          request.cleanupError ||= cleanupError;
+          request.cleanupRetryNeeded = true;
+        }
+      } finally { deadline.clear(); }
+      retainPortableCleanup(target.threadId, request.state, request);
+      if (error?.name === "AbortError") throw error;
+      try { request.check(); } catch (cancelled) {
+        if (cancelled?.name === "AbortError") throw cancelled;
+      }
       throw portableFailure(error?.message || "无法生成交接摘要，已保留原线路。");
     } finally {
       window.clearTimeout(timer);
       window.clearTimeout(pollTimer);
       if (listener) window.removeEventListener("message", listener);
-      portableCancels.delete(cancel);
     }
   };
   // Return null for an unguarded request so existing synchronous dispatch remains intact.
   const guardOutgoingRequest = (client, method, params, proceed, send = (name, value) => client.enqueueRequest(name, value)) => {
-    if (client?.hostId !== "local" || portableReentry.has(client)) return null;
+    if (client?.hostId !== "local" || disposed) return null;
+    const detail = { request: { method, params } };
+    if (!isLocalMessage(detail)) return null;
+    ({ method, params } = outgoingRequestParts(detail.request));
+    const threadId = threadIdFromParams(params);
+    if (!nativeSelectionOnly && method === "turn/interrupt" && threadId) {
+      interruptPortableThread(threadId);
+      return null;
+    }
+    if (portableReentryFor(client, method, params)) return null;
     const restoreHistory = needsHistoricalModel(method, params);
     const target = portableTarget(method, params);
-    if (!target && !restoreHistory) return null;
-    const threadId = target?.threadId || threadIdFromParams(params);
-    const previous = portableQueues.get(threadId) || Promise.resolve();
-    const task = previous.catch(() => {}).then(async () => {
-      if (disposed) throw new Error("模型请求校验已重新加载");
-      if (restoreHistory) await restoreHistoricalModel(params);
-      if (target) await preparePortableCompaction(client, target, send);
-      if (disposed) throw new Error("模型请求校验已重新加载");
-      portableReentry.add(client);
+    if (!target && !restoreHistory && !needsPortableInterruptWait(method, params)) return null;
+    const state = portableThreadState(threadId);
+    // A new explicit send retries a failed cleanup once; no background retries.
+    if (state.needsInterrupt && !state.cleanup) void cleanupPortableInterrupt(threadId, state);
+    const previous = state.tail || Promise.resolve();
+    const generation = state.generation;
+    let rejectAbort;
+    const aborted = new Promise((_, reject) => { rejectAbort = reject; });
+    void aborted.catch(() => {});
+    const request = {
+      status: "queued", cancelError: null, state,
+      cancel(error = portableAbort()) {
+        if (this.status === "sent" || this.status === "finished" || this.cancelError) return;
+        this.status = "cancelled";
+        this.cancelError = error;
+        this.cleanupRequired = true;
+        retainPortableCleanup(threadId, state, this);
+        rejectAbort(error);
+      },
+      check() {
+        if (disposed) throw portableAbort();
+        if (state.generation !== generation) throw portableAbort("发送已取消");
+        if (this.cancelError) throw this.cancelError;
+      },
+      async checked(promise) {
+        const value = await Promise.race([promise, aborted]);
+        request.check();
+        return value;
+      },
+    };
+    const cancel = (error) => request.cancel(error);
+    portableCancels.add(cancel);
+    state.requests.add(request);
+    const task = request.checked(previous.catch(() => {})).then(async () => {
+      request.check();
+      if (state.cleanup) await request.checked(state.cleanup);
+      request.check();
+      if (state.needsInterrupt) throw portableFailure(`上次停止后的摘要清理未完成：${state.cleanupError?.message || "服务未确认完成"}。请再次发送重试。`);
+      request.status = "preparing";
+      if (restoreHistory) await restoreHistoricalModel(params, request);
+      if (target) await preparePortableCompaction(target, (name, value) => {
+        request.check();
+        return send(name, value, request);
+      }, request);
+      request.check();
+      request.status = "sent";
+      portableReentry.set(client, { method, params, state, generation, approved: new WeakSet() });
       try { return proceed(); } finally {
         portableReentry.delete(client);
         restoredRequestEfforts.delete(params);
       }
     });
-    portableQueues.set(threadId, task);
-    void task.finally(() => { if (portableQueues.get(threadId) === task) portableQueues.delete(threadId); }).catch(() => {});
-    return task;
+    const pending = Promise.race([task, aborted]);
+    void pending.catch(() => {});
+    state.tail = pending;
+    request.finished = task.then(() => {}, () => {});
+    void task.finally(() => {
+      if (request.status !== "cancelled") request.status = "finished";
+      portableCancels.delete(cancel);
+      state.requests.delete(request);
+      restoredRequestEfforts.delete(params);
+      if (state.tail === pending) state.tail = null;
+      releasePortableThread(threadId, state);
+    }).catch(() => {});
+    return pending;
   };
   const guardDirectBridgeMessage = (detail, proceed) => {
+    if (disposed) return true;
     const { method, params } = outgoingRequestParts(detail?.request);
-    if (params && portableApprovedParams.has(params)) return true;
     if (!isLocalMessage(detail)) return true;
-    if (window.__codeyAppServerRequestClients?.get?.("local") && portableReentry.has(window.__codeyAppServerRequestClients.get("local"))) return true;
-    if (!portableTarget(method, params) && !needsHistoricalModel(method, params)) return true;
+    if (!nativeSelectionOnly && method === "turn/interrupt" && threadIdFromParams(params)) {
+      interruptPortableThread(threadIdFromParams(params));
+      return true;
+    }
+    if (portableReentryFor(window.__codeyAppServerRequestClients?.get?.("local"), method, params)) return true;
+    if (!portableTarget(method, params) && !needsHistoricalModel(method, params) && !needsPortableInterruptWait(method, params)) return true;
     // Codex emits its tracking event synchronously after this bridge call.
     // Ignore that event until preparation allows the actual transport rewrite.
     portablePendingMessages.add(detail);
     const client = { hostId: "local" };
-    const send = async (method, value) => {
+    const send = async (method, value, request) => {
       let actual = window.__codeyAppServerRequestClients?.get?.("local");
       if (!actual && typeof window.__codeyLoadCodexRequestClientFromModule === "function") {
         try { actual = await window.__codeyLoadCodexRequestClientFromModule(); } catch {}
       }
+      request.check();
       if (!actual) {
         if (typeof window.__codeyLoadCodexRequestClient !== "function") {
           await window.__codexSessionDeleteBridge("/internal/codey/session-tools/load", {}, { timeoutMs: 20_000 });
         }
         actual = await window.__codeyLoadCodexRequestClient?.();
       }
-      if (disposed) throw new Error("模型请求校验已重新加载");
+      request.check();
       if (actual?.hostId !== "local" || typeof actual.enqueueRequest !== "function") throw new Error("模型请求校验尚未就绪");
       (window.__codeyAppServerRequestClients ||= new Map()).set("local", actual);
       return actual.enqueueRequest(method, value);

@@ -1302,6 +1302,10 @@ impl RouterServer {
                     downstream.adapted_history.clear_pending();
                     downstream.native_history.clear_pending();
                     if let Err(error) = result {
+                        if error.is::<CompactionInterrupted>() {
+                            downstream.finish_compaction_interrupt().await?;
+                            continue;
+                        }
                         if error.is::<DownstreamClosed>() {
                             // Reading a Close queues tungstenite's close reply.
                             // Drop the proxy future/upstream before flushing it.

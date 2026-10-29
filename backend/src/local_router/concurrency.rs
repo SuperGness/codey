@@ -267,25 +267,22 @@ where
     F: std::future::Future<Output = T> + Send,
 {
     tokio::pin!(future);
-    let mut monitor_read = true;
-    let mut byte = [0; 1];
-    loop {
-        tokio::select! {
-            biased;
-            result = stream.peek(&mut byte), if monitor_read => {
-                match result {
-                    // FIN 同时表示合法的 HTTP 写半关闭，不能据此取消。
-                    // 停止读监听，避免 EOF 或流水线字节造成持续唤醒。
-                    Ok(_) => monitor_read = false,
-                    Err(error) => return Err(anyhow::Error::new(error).context(DownstreamClosed)),
-                }
+    tokio::select! {
+        biased;
+        // 错误就绪不受 FIN 或未消费的流水线字节影响。无 SO_ERROR 的虚假
+        // 唤醒由 async_io 的 WouldBlock 清除，避免 EOF 造成持续唤醒。
+        result = stream.async_io(tokio::io::Interest::ERROR, || {
+            Err::<(), _>(stream.take_error()?.unwrap_or_else(|| {
+                std::io::ErrorKind::WouldBlock.into()
+            }))
+        }) => {
+            Err(anyhow::Error::new(result.unwrap_err()).context(DownstreamClosed))
+        }
+        result = &mut future => {
+            if let Some(error) = stream.take_error()? {
+                return Err(anyhow::Error::new(error).context(DownstreamClosed));
             }
-            result = &mut future => {
-                if let Some(error) = stream.take_error()? {
-                    return Err(anyhow::Error::new(error).context(DownstreamClosed));
-                }
-                return Ok(result);
-            }
+            Ok(result)
         }
     }
 }

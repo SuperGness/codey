@@ -71,6 +71,44 @@ pub(crate) fn portable_request_key(request: &HttpRequest) -> Option<String> {
 }
 
 impl LocalRouter {
+    pub(crate) async fn interrupt_portable_compaction(&self, payload: &Value) -> Result<Value> {
+        let thread = payload
+            .get("threadId")
+            .and_then(Value::as_str)
+            .and_then(valid_codex_session_id)
+            .context("缺少有效的 threadId")?;
+        let key = format!("thread-id:{thread}");
+        let operations = {
+            let bindings = self
+                .bindings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let operations = bindings
+                .compaction_operations
+                .values()
+                .filter(|operation| operation.thread_key.as_deref() == Some(key.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            for operation in &operations {
+                operation.cancel.send_replace(true);
+            }
+            operations
+        };
+        // 只等待调用时捕获的操作，新一轮压缩不会被旧停止请求取消。
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for operation in operations {
+                let mut finished = operation.finished.subscribe();
+                while !*finished.borrow_and_update() {
+                    finished.changed().await.context("压缩取消状态已失效")?;
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .context("等待压缩请求取消超时，请重试停止操作")??;
+        Ok(json!({"status":"ok"}))
+    }
+
     pub(crate) fn portable_compaction(&self, operation: &str, payload: &Value) -> Result<Value> {
         self.portable_compaction_from_home(operation, payload, crate::codex_config::codex_home())
     }
@@ -230,7 +268,17 @@ impl LocalRouter {
         let token = payload
             .get("token")
             .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
             .context("缺少 token")?;
+        // 清理回复可能丢失；旧凭据已不存在时重复取消成功，不触碰新的凭据。
+        if operation == "cancel"
+            && bindings
+                .portable_tickets
+                .get(&key)
+                .is_none_or(|ticket| ticket.token != token)
+        {
+            return Ok(json!({"status":"ok"}));
+        }
         let ticket = bindings
             .portable_tickets
             .get(&key)
@@ -276,10 +324,13 @@ impl LocalRouter {
             }
             "cancel" => {
                 anyhow::ensure!(
-                    matches!(ticket.state, "prepared" | "failed" | "expired"),
-                    "只能取消尚未开始、失败或过期的可移植摘要"
+                    matches!(
+                        ticket.state,
+                        "prepared" | "failed" | "expired" | "completed"
+                    ),
+                    "可移植摘要仍在执行，请先停止后重试"
                 );
-                // 前端失败处理会清理 failed ticket；仅尚未开始的主动取消撤销回源提示。
+                // 清理终态凭据不回滚已确认的历史或线路；失败时保留回源提示。
                 if ticket.state != "failed" {
                     bindings.portable_source_retries.remove(&key);
                 }
@@ -1895,6 +1946,79 @@ mod tests {
         router.stop().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn portable_cancel_is_idempotent_and_preserves_a_newer_ticket() {
+        let (router, _upstream, source, target, model) = fixture().await;
+        bind_source(&router, &source, &model);
+        let payload =
+            json!({"threadId":"parent","targetProviderId":target,"targetModel":"target-model"});
+        let first = router.portable_compaction("prepare", &payload).unwrap();
+        let old = json!({"threadId":"parent","token":first["token"]});
+        assert_eq!(
+            router.portable_compaction("cancel", &old).unwrap()["status"],
+            "ok"
+        );
+        assert_eq!(
+            router.portable_compaction("cancel", &old).unwrap()["status"],
+            "ok"
+        );
+
+        let next = router.portable_compaction("prepare", &payload).unwrap();
+        let current = json!({"threadId":"parent","token":next["token"]});
+        assert_ne!(first["token"], next["token"]);
+        assert_eq!(
+            router.portable_compaction("cancel", &old).unwrap()["status"],
+            "ok"
+        );
+        assert_eq!(
+            router.portable_compaction("status", &current).unwrap()["state"],
+            "prepared"
+        );
+        assert!(router.portable_compaction("confirm", &old).is_err());
+        assert!(
+            router
+                .portable_compaction("cancel", &json!({"threadId":"parent","token":""}))
+                .is_err()
+        );
+        router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn portable_cancel_completed_ticket_preserves_confirmed_and_unconfirmed_bindings() {
+        for confirmed in [false, true] {
+            let (router, _upstream, source, target, model) = fixture().await;
+            bind_source(&router, &source, &model);
+            let payload =
+                json!({"threadId":"parent","targetProviderId":target,"targetModel":"target-model"});
+            let prepared = router.portable_compaction("prepare", &payload).unwrap();
+            let handle = json!({"threadId":"parent","token":prepared["token"]});
+            router
+                .bindings
+                .lock()
+                .unwrap()
+                .portable_tickets
+                .get_mut("thread-id:parent")
+                .unwrap()
+                .state = "completed";
+            if confirmed {
+                router.portable_compaction("confirm", &handle).unwrap();
+            }
+            let original = router.bindings.lock().unwrap().routes["thread-id:parent"].clone();
+            assert_eq!(original.portable, confirmed);
+            assert_eq!(
+                router.portable_compaction("cancel", &handle).unwrap()["status"],
+                "ok"
+            );
+            assert_eq!(
+                router.portable_compaction("cancel", &handle).unwrap()["status"],
+                "ok"
+            );
+            assert_binding_unchanged(&router, &original);
+            assert!(router.portable_compaction("status", &handle).is_err());
+            router.stop().await.unwrap();
+        }
+    }
+
     fn acquire_attempt(router: &LocalRouter) -> Result<PortableAttempt> {
         let mut server = super::super::lifecycle_tests::test_server(&CodeyConfig::default());
         server.bindings = Arc::clone(&router.bindings);
@@ -3191,4 +3315,63 @@ mod tests {
         );
         router.stop().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn portable_interrupt_waits_for_attempt_cleanup_and_preserves_ticket_ownership() {
+        let (router, upstream, source, target, model) = fixture().await;
+        bind_source(&router, &source, &model);
+        let payload =
+            json!({"threadId":"parent","targetProviderId":target,"targetModel":"target-model"});
+        let prepared = router.portable_compaction("prepare", &payload).unwrap();
+        let handle = json!({"threadId":"parent","token":prepared["token"]});
+        let client = client();
+        let pending = tokio::spawn(post(&client, &router, "parent", &model_alias(&target, "target-model"),
+            json!([{"type":"compaction","encrypted_content":"opaque"},{"type":"compaction_trigger"}]))
+            .send());
+        let (mut socket, _) = upstream.accept().await.unwrap();
+        read_http_request(&mut socket).await.unwrap();
+        assert_eq!(
+            router.portable_compaction("status", &handle).unwrap()["state"],
+            "running"
+        );
+        assert!(router.portable_compaction("cancel", &handle).is_err());
+        router
+            .interrupt_portable_compaction(&json!({"threadId":"other"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            router.portable_compaction("status", &handle).unwrap()["state"],
+            "running"
+        );
+        router
+            .interrupt_portable_compaction(&json!({"threadId":"parent"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            router.portable_compaction("status", &handle).unwrap()["state"],
+            "failed"
+        );
+        assert!(router.bindings.lock().unwrap().compacting.is_empty());
+        assert!(pending.await.unwrap().is_err());
+        assert_eq!(
+            router
+                .portable_compaction("cancel", &json!({"threadId":"parent","token":"wrong"}))
+                .unwrap()["status"],
+            "ok"
+        );
+        assert_eq!(
+            router.portable_compaction("status", &handle).unwrap()["state"],
+            "failed"
+        );
+        router.portable_compaction("cancel", &handle).unwrap();
+        assert_eq!(
+            router.portable_compaction("prepare", &payload).unwrap()["required"],
+            true
+        );
+        router.stop().await.unwrap();
+    }
 }
+
+#[cfg(test)]
+#[path = "compaction_interrupt_tests.rs"]
+mod interrupt_tests;
