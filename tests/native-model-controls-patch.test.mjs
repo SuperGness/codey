@@ -184,10 +184,8 @@ test("starting or restarting Codex replaces the old runtime with one managed by 
     runtimeSource,
     /pub async fn begin_shutdown[\s\S]*?cancel\.send\(\(\)\)[\s\S]*?task\.await/,
   );
-  assert.match(
-    runtimeSource,
-    /let current_generation = exit_state\.runtime_generation\.load\(Ordering::Acquire\);\s*let current_runtime = current_generation == runtime_generation;[\s\S]*?if current_runtime \{\s*exit_state\.request_shutdown\(\)/,
-  );
+  // 当前运行代、崩溃恢复与退出竞争由 Rust 生命周期测试验证。
+
   assert.match(
     launcherModules,
     /stop_codex_processes\([\s\S]*?&self\.codex_app_path,[\s\S]*?self\.process_id,[\s\S]*?self\.process_group_id/,

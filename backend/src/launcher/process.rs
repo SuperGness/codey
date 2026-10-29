@@ -66,7 +66,7 @@ pub(super) fn spawn_codex_exit_watcher(
     codex_exited: Arc<AtomicBool>,
 ) -> (
     oneshot::Sender<()>,
-    oneshot::Receiver<()>,
+    oneshot::Receiver<CodexExit>,
     tokio::task::JoinHandle<()>,
 ) {
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -92,7 +92,10 @@ pub(super) fn spawn_codex_exit_watcher(
                     status.code().map(i64::from),
                     Some(status.success()),
                 );
-                true
+                Some(CodexExit {
+                    platform: std::env::consts::OS,
+                    exit_code: status.code().map(i64::from),
+                })
             }
             Some(Err(error)) => {
                 error_log::record_failure(
@@ -104,16 +107,16 @@ pub(super) fn spawn_codex_exit_watcher(
                     }),
                 );
                 *child.lock().await = Some(process);
-                false
+                None
             }
             None => {
                 *child.lock().await = Some(process);
-                false
+                None
             }
         };
-        if natural_exit {
+        if let Some(exit) = natural_exit {
             codex_exited.store(true, Ordering::Release);
-            let _ = exit_tx.send(());
+            let _ = exit_tx.send(exit);
         }
     });
     (shutdown_tx, exit_rx, task)
@@ -126,7 +129,7 @@ pub(super) fn spawn_codex_exit_watcher(
     codex_exited: Arc<AtomicBool>,
 ) -> (
     oneshot::Sender<()>,
-    oneshot::Receiver<()>,
+    oneshot::Receiver<CodexExit>,
     tokio::task::JoinHandle<()>,
 ) {
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
@@ -206,7 +209,10 @@ pub(super) fn spawn_codex_exit_watcher(
                 exit_code.map(|code| code == 0),
             );
             codex_exited.store(true, Ordering::Release);
-            let _ = exit_tx.send(());
+            let _ = exit_tx.send(CodexExit {
+                platform: "windows",
+                exit_code: exit_code.map(i64::from),
+            });
         }
     });
     (shutdown_tx, exit_rx, task)
@@ -240,6 +246,8 @@ fn windows_app_dir_supports_packaged_activation(app_dir: &std::path::Path) -> bo
 }
 
 pub(super) struct CodexLaunchOptions<'a> {
+    #[cfg(windows)]
+    pub local_router_enabled: bool,
     pub gpu_launch_mode: GpuLaunchMode,
     pub launch_proxy: Option<&'a crate::launch_proxy::CodexLaunchProxy>,
 }
@@ -443,9 +451,20 @@ pub(super) async fn spawn_codex(
                     if let Err(cleanup_error) =
                         stop_windows_spawned_codex(&mut spawned, app_dir).await
                     {
-                        anyhow::bail!(
-                            "Codex 启动兼容方案未能安装，且无法安全清理启动进程：{startup_error}；{cleanup_error:#}"
-                        );
+                        return Err(PendingStartupFailure {
+                            cleanup: Arc::new(PendingRuntimeCleanup {
+                                home: codex_home().to_path_buf(),
+                                app_dir: app_dir.clone(),
+                                process_id: spawned.process_id,
+                                child: Arc::new(Mutex::new(spawned.child.take())),
+                                local_router_enabled: options.local_router_enabled,
+                                local_router: Mutex::new(None),
+                            }),
+                            message: format!(
+                                "Codex 启动兼容方案未能安装，且无法安全清理启动进程：{startup_error}；{cleanup_error:#}"
+                            ),
+                        }
+                        .into());
                     }
                     if single_instance_exit {
                         // Report other installations without stopping them;

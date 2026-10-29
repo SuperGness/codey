@@ -1014,20 +1014,202 @@ async fn unix_shutdown_terminates_the_spawned_process_group() {
 
 #[tokio::test]
 async fn exit_watcher_reports_a_naturally_exited_child() {
-    let child = Command::new("sh")
-        .args(["-c", "exit 0"])
-        .spawn()
-        .expect("spawn short-lived child");
-    let child = Arc::new(Mutex::new(Some(child)));
-    let exited = Arc::new(AtomicBool::new(false));
-    let (_shutdown, exit_rx, task) = spawn_codex_exit_watcher(child, exited.clone());
+    for code in [0, 23] {
+        let child = Command::new("sh")
+            .args(["-c", &format!("exit {code}")])
+            .spawn()
+            .expect("spawn short-lived child");
+        let child = Arc::new(Mutex::new(Some(child)));
+        let exited = Arc::new(AtomicBool::new(false));
+        let (_shutdown, exit_rx, task) = spawn_codex_exit_watcher(child, exited.clone());
 
-    tokio::time::timeout(Duration::from_secs(2), exit_rx)
+        let exit = tokio::time::timeout(Duration::from_secs(2), exit_rx)
+            .await
+            .expect("watcher timed out")
+            .expect("watcher was cancelled");
+        task.await.expect("watcher task failed");
+        assert!(exited.load(Ordering::Acquire));
+        assert_eq!(exit.exit_code, Some(code));
+        assert_eq!(exit.platform, std::env::consts::OS);
+    }
+}
+
+#[tokio::test]
+async fn startup_patch_cleanup_retains_process_identity_until_stop_succeeds() {
+    let child = Command::new("sleep")
+        .arg("30")
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let process_id = child.id();
+    let mut spawned = SpawnedCodex {
+        child: Some(child),
+        process_id,
+        process_group_id: process_id,
+        performance_status: String::new(),
+        performance_detail: String::new(),
+        startup_injection_mode: String::new(),
+    };
+    for _ in 0..2 {
+        assert!(
+            complete_spawned_codex_cleanup(&mut spawned, Err(anyhow::anyhow!("stop failed")))
+                .await
+                .is_err()
+        );
+        assert_eq!(spawned.process_id, process_id);
+        let child = spawned.child.as_mut().unwrap();
+        assert_eq!(child.id(), process_id);
+        assert!(child.try_wait().unwrap().is_none());
+    }
+    spawned.child.as_mut().unwrap().kill().await.unwrap();
+    complete_spawned_codex_cleanup(&mut spawned, Ok(()))
         .await
-        .expect("watcher timed out")
-        .expect("watcher was cancelled");
-    task.await.expect("watcher task failed");
-    assert!(exited.load(Ordering::Acquire));
+        .unwrap();
+    assert!(spawned.child.is_none());
+    assert!(spawned.process_id.is_none());
+}
+
+#[tokio::test]
+async fn failed_renderer_injection_retains_cleanup_until_process_tree_stop_succeeds() {
+    for final_reap in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.toml");
+        std::fs::write(&config_path, "runtime config").unwrap();
+        let router = LocalRouter::start(&CodeyConfig::default()).await.unwrap();
+        let router_url = router.endpoint().base_url;
+        let child = Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let process_id = child.id();
+        let cleanup = Arc::new(PendingRuntimeCleanup {
+            home: temp.path().to_path_buf(),
+            app_dir: temp.path().join("missing-codex-app"),
+            process_id,
+            process_group_id: process_id,
+            child: Arc::new(Mutex::new(Some(child))),
+            local_router_enabled: true,
+            local_router: Mutex::new(None),
+        });
+        let restore = || async {
+            std::fs::write(&config_path, "restored config").map_err(anyhow::Error::from)
+        };
+        // 使用注入失败分支的同一清理动作，首次失败不能回收 Child 或恢复配置。
+        let error = cleanup_initial_renderer_failure(
+            Arc::clone(&cleanup),
+            recovery::recoverable("renderer injection failed"),
+            async { anyhow::bail!("process snapshot unavailable") },
+            restore(),
+        )
+        .await
+        .context("startup context");
+        // 启动握手失败会先经过此层，仍须保留类型化的清理责任。
+        let error = restore_runtime_config_after_error(temp.path(), true, error).await;
+        assert!(PendingRuntimeCleanup::from_error(&error).is_some());
+        let error =
+            finish_failed_runtime_start(error, Some(router), temp.path(), &cleanup.app_dir, true)
+                .await;
+        assert!(!error.is::<recovery::IntegrationFailure>());
+        // 原生回退不得吞掉携带进程身份的错误。
+        let error =
+            recovery::after_integration_failure(temp.path(), &cleanup.app_dir, true, error).await;
+        let state = Arc::new(crate::commands::AppState::default());
+        *state.failed_runtime_start.lock().await = PendingRuntimeCleanup::from_error(&error);
+        drop(error);
+        assert!(state.runtime.lock().await.is_none());
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        for _ in 0..2 {
+            let retained = state.failed_runtime_start.lock().await.clone().unwrap();
+            assert!(Arc::ptr_eq(&retained, &cleanup));
+            assert_eq!(retained.process_id, process_id);
+            assert_eq!(retained.process_group_id, process_id);
+            assert_eq!(
+                retained.child.lock().await.as_ref().unwrap().id(),
+                process_id
+            );
+            assert_eq!(
+                std::fs::read_to_string(&config_path).unwrap(),
+                "runtime config"
+            );
+            assert!(client.get(&router_url).send().await.is_ok());
+            // 生产 stop 的保留与重试分支继续使用同一清理对象。
+            let failed =
+                crate::commands::cleanup_pending_runtime_start_with(&state, |pending| async move {
+                    pending
+                        .stop_with_cleanup(async { anyhow::bail!("still unavailable") }, restore())
+                        .await
+                })
+                .await;
+            assert!(failed.is_err());
+        }
+        if final_reap {
+            crate::commands::reap_runtime_child_before_exit(&state)
+                .await
+                .unwrap();
+            assert!(cleanup.child.lock().await.is_none());
+            assert!(state.failed_runtime_start.lock().await.is_some());
+            assert_eq!(
+                std::fs::read_to_string(&config_path).unwrap(),
+                "runtime config"
+            );
+            assert!(client.get(&router_url).send().await.is_ok());
+        }
+        let cleaned =
+            crate::commands::cleanup_pending_runtime_start_with(&state, |pending| async move {
+                pending
+                    .stop_with_cleanup(
+                        stop_codex_processes(
+                            &pending.app_dir,
+                            pending.process_id,
+                            pending.process_group_id,
+                        ),
+                        restore(),
+                    )
+                    .await
+            })
+            .await
+            .unwrap();
+        assert!(cleaned);
+        assert!(state.failed_runtime_start.lock().await.is_none());
+        assert!(cleanup.child.lock().await.is_none());
+        assert!(cleanup.local_router.lock().await.is_none());
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            "restored config"
+        );
+        assert!(client.get(&router_url).send().await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn completed_renderer_failure_cleanup_preserves_native_fallback_cause() {
+    let temp = tempfile::tempdir().unwrap();
+    let cleanup = Arc::new(PendingRuntimeCleanup {
+        home: temp.path().to_path_buf(),
+        app_dir: temp.path().join("missing-codex-app"),
+        process_id: None,
+        process_group_id: None,
+        child: Arc::new(Mutex::new(None)),
+        local_router_enabled: false,
+        local_router: Mutex::new(None),
+    });
+    let restored = AtomicBool::new(false);
+    let error = cleanup_initial_renderer_failure(
+        cleanup,
+        recovery::recoverable("renderer injection failed"),
+        async { Ok(()) },
+        async {
+            restored.store(true, Ordering::SeqCst);
+            Ok(())
+        },
+    )
+    .await;
+    assert!(restored.load(Ordering::SeqCst));
+    assert!(error.is::<recovery::IntegrationFailure>());
+    assert!(PendingRuntimeCleanup::from_error(&error).is_none());
 }
 
 #[tokio::test]

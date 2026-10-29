@@ -58,6 +58,8 @@ mod task_activity;
 mod trace_log_guard;
 mod trace_log_stats;
 mod update_helper;
+#[cfg(any(windows, test))]
+mod windows_session;
 
 // 单元测试不能写入用户真实的 Codey 状态目录：诊断日志和错误日志都按该目录
 // 定位，否则测试记录会淹没真实故障并提前触发日志轮转。在 main 之前设置，

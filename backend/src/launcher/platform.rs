@@ -9,10 +9,12 @@ use anyhow::Result;
 #[cfg(windows)]
 use tokio::process::Command;
 
+#[cfg(windows)]
+use super::build_codex_command;
 #[cfg(any(windows, test))]
 use super::recovery;
-#[cfg(windows)]
-use super::{SpawnedCodex, build_codex_command, reap_child_after_cleanup};
+#[cfg(any(windows, test))]
+use super::{SpawnedCodex, reap_child_after_cleanup};
 #[cfg(windows)]
 use crate::error_log;
 
@@ -581,16 +583,13 @@ pub(super) async fn stop_windows_spawned_codex(
     spawned: &mut SpawnedCodex,
     app_dir: &std::path::Path,
 ) -> Result<()> {
-    let process_id = spawned.process_id.take();
+    let process_id = spawned.process_id;
     let process_stop = terminate_windows_codex_processes_with_timeout(
         app_dir,
         process_id,
         WINDOWS_STARTUP_PATCH_FAILURE_STOP_TIMEOUT,
     )
     .await;
-    if let Some(child) = spawned.child.take() {
-        reap_child_after_cleanup(child, "reap_child_after_startup_patch_failure").await;
-    }
     if let Err(error) = &process_stop {
         error_log::record_failure(
             "cleanup_failed",
@@ -603,7 +602,21 @@ pub(super) async fn stop_windows_spawned_codex(
         );
         eprintln!("Codex 启动失败后的进程清理失败：{error:#}");
     }
-    process_stop
+    complete_spawned_codex_cleanup(spawned, process_stop).await
+}
+
+#[cfg(any(windows, test))]
+pub(super) async fn complete_spawned_codex_cleanup(
+    spawned: &mut SpawnedCodex,
+    process_stop: Result<()>,
+) -> Result<()> {
+    // 清理失败时保留同一进程身份，交给启动失败后的统一清理继续处理。
+    process_stop?;
+    spawned.process_id.take();
+    if let Some(child) = spawned.child.take() {
+        reap_child_after_cleanup(child, "reap_child_after_startup_patch_failure").await;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

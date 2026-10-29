@@ -54,6 +54,8 @@ use prompt_optimization::{
     fetch_prompt_optimization_models_command, optimize_prompt_command,
     test_prompt_optimization_command,
 };
+#[cfg(all(test, unix))]
+pub(crate) use runtime::cleanup_pending_runtime_start_with;
 use runtime::runtime_status_with_options;
 #[cfg(test)]
 use runtime::{begin_shutdown, launch_codey_inner};
@@ -150,6 +152,7 @@ pub struct AppState {
     official_account_refresh_lock: Mutex<()>,
     account_usage_cache: Arc<Mutex<account_usage::AccountUsageCaches>>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
+    pub(crate) failed_runtime_start: Mutex<Option<Arc<crate::launcher::PendingRuntimeCleanup>>>,
     runtime_operation: Mutex<()>,
     diagnostic_storage_operation: Mutex<()>,
     trace_log_write_protection_active: AtomicBool,
@@ -168,6 +171,9 @@ pub struct AppState {
     shutting_down: AtomicBool,
     restart_task: Mutex<Option<ScheduledRestart>>,
     runtime_generation: AtomicU64,
+    runtime_intent: watch::Sender<u64>,
+    #[cfg(any(windows, test))]
+    codex_crash_recovery: Mutex<runtime::CrashRecoveryBudget>,
     session_titles: RwLock<HashMap<String, String>>,
     session_metadata_cache: BlockingMutex<session_metadata::SessionMetadataCache>,
     notification_title_cache: BlockingMutex<webhooks::NotificationTitleCache>,
@@ -291,6 +297,7 @@ impl AppState {
             official_account_refresh_lock: Mutex::new(()),
             account_usage_cache: Arc::new(Mutex::new(account_usage::AccountUsageCaches::default())),
             runtime: Mutex::new(None),
+            failed_runtime_start: Mutex::new(None),
             runtime_operation: Mutex::new(()),
             diagnostic_storage_operation: Mutex::new(()),
             trace_log_write_protection_active: AtomicBool::new(false),
@@ -307,6 +314,9 @@ impl AppState {
             shutting_down: AtomicBool::new(false),
             restart_task: Mutex::new(None),
             runtime_generation: AtomicU64::new(0),
+            runtime_intent: watch::channel(0).0,
+            #[cfg(any(windows, test))]
+            codex_crash_recovery: Mutex::new(runtime::CrashRecoveryBudget::default()),
             session_titles: RwLock::new(HashMap::new()),
             session_metadata_cache: BlockingMutex::new(
                 session_metadata::SessionMetadataCache::default(),
@@ -406,6 +416,7 @@ impl AppState {
 
     fn request_shutdown_with_reason(&self, reason: AppShutdownReason) {
         self.shutting_down.store(true, Ordering::Release);
+        self.cancel_pending_runtime_recovery();
         self.shutdown_reason.send_if_modified(|current| {
             if current.is_some() {
                 return false;
@@ -417,6 +428,11 @@ impl AppState {
 
     fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::Acquire)
+    }
+
+    fn cancel_pending_runtime_recovery(&self) {
+        self.runtime_intent
+            .send_modify(|intent| *intent = intent.wrapping_add(1));
     }
 
     pub async fn wait_for_shutdown(&self) -> AppShutdownReason {

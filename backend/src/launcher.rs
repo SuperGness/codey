@@ -81,6 +81,14 @@ const _: () = assert!(CDP_WATCHDOG_UNRESPONSIVE_THRESHOLD < CDP_WATCHDOG_INCONCL
 const CDP_WATCHDOG_ENDPOINT_LOSS_LIMIT: u8 = 3;
 const CDP_WATCHDOG_ENDPOINT_RETRY_INTERVAL: Duration = Duration::from_secs(120);
 
+/// A probe that only confirms disappearance deliberately keeps the code unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodexExit {
+    pub(crate) platform: &'static str,
+    pub(crate) exit_code: Option<i64>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InjectionHealth {
     Healthy,
@@ -1263,6 +1271,127 @@ struct RuntimeConfigRestoreContext<'a> {
     local_router_enabled: bool,
 }
 
+/// 启动尚未完成时也要保留整个进程树的清理责任，直到 stop 确认成功。
+pub(crate) struct PendingRuntimeCleanup {
+    home: PathBuf,
+    app_dir: PathBuf,
+    process_id: Option<u32>,
+    #[cfg(unix)]
+    process_group_id: Option<u32>,
+    child: Arc<Mutex<Option<Child>>>,
+    local_router_enabled: bool,
+    local_router: Mutex<Option<LocalRouter>>,
+}
+
+#[derive(Debug)]
+struct PendingStartupFailure {
+    cleanup: Arc<PendingRuntimeCleanup>,
+    message: String,
+}
+
+impl std::fmt::Debug for PendingRuntimeCleanup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingRuntimeCleanup")
+            .field("app_dir", &self.app_dir)
+            .field("process_id", &self.process_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for PendingStartupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PendingStartupFailure {}
+
+impl PendingRuntimeCleanup {
+    pub(crate) fn from_error(error: &anyhow::Error) -> Option<Arc<Self>> {
+        error
+            .downcast_ref::<PendingStartupFailure>()
+            .map(|failure| Arc::clone(&failure.cleanup))
+    }
+
+    pub(crate) async fn stop(&self) -> Result<()> {
+        let result = self
+            .stop_with_cleanup(
+                stop_codex_processes(
+                    &self.app_dir,
+                    self.process_id,
+                    #[cfg(windows)]
+                    None,
+                    #[cfg(unix)]
+                    self.process_group_id,
+                ),
+                restore_runtime_config_for_router_mode(&self.home, self.local_router_enabled),
+            )
+            .await;
+        if let Err(error) = &result {
+            error_log::record_failure(
+                "cleanup_failed",
+                "retry_failed_runtime_start_cleanup",
+                format!("{error:#}"),
+                serde_json::json!({"appPath": self.app_dir, "processId": self.process_id}),
+            );
+        }
+        result
+    }
+
+    async fn stop_with_cleanup(
+        &self,
+        process_stop: impl std::future::Future<Output = Result<()>>,
+        config_restore: impl std::future::Future<Output = Result<()>>,
+    ) -> Result<()> {
+        process_stop.await.context("清理 Codex 遗留进程失败")?;
+        if let Some(child) = self.child.lock().await.take() {
+            reap_child_after_cleanup(child, "reap_child_after_failed_start_cleanup").await;
+        }
+        config_restore.await.context("恢复 Codex 配置失败")?;
+        let mut router = self.local_router.lock().await;
+        if let Some(router) = router.as_ref() {
+            router.stop().await.context("关闭本地线路路由失败")?;
+        }
+        router.take();
+        Ok(())
+    }
+
+    pub(crate) async fn reap_owned_child_before_exit(&self) -> Result<()> {
+        // 局部回收不完成进程树清理，不恢复配置，也不释放路由。
+        process::reap_owned_child_before_exit(&self.child).await
+    }
+}
+
+async fn cleanup_initial_renderer_failure(
+    cleanup: Arc<PendingRuntimeCleanup>,
+    error: anyhow::Error,
+    process_stop: impl std::future::Future<Output = Result<()>>,
+    config_restore: impl std::future::Future<Output = Result<()>>,
+) -> anyhow::Error {
+    match cleanup
+        .stop_with_cleanup(process_stop, config_restore)
+        .await
+    {
+        Ok(()) => error,
+        Err(stop_error) => {
+            error_log::record_failure(
+                "cleanup_failed",
+                injection_failure_cleanup_operation(),
+                format!("{stop_error:#}"),
+                serde_json::json!({"appPath": cleanup.app_dir, "processId": cleanup.process_id}),
+            );
+            PendingStartupFailure {
+                cleanup,
+                message: format!(
+                    "{error:#}；Codex 注入失败后的清理尚未完成，请退出残留 Codex 后重试：{stop_error:#}"
+                ),
+            }
+            .into()
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn inject_initial_renderer(
     debug_port: u16,
@@ -1292,7 +1421,7 @@ async fn inject_initial_renderer(
         stage: Some("startup.renderer_injection".to_string()),
         recoverable: Some(false),
     };
-    let mut error = recovery::recoverable(failure.into_error());
+    let error = recovery::recoverable(failure.into_error());
     error_log::record_failure_with_metadata(
         "injection_failed",
         "inject_cdp_bridge",
@@ -1306,49 +1435,31 @@ async fn inject_initial_renderer(
         }),
     );
 
-    if let Err(stop_error) = stop_codex_processes(
-        app_dir,
-        spawned.process_id,
-        #[cfg(windows)]
-        None,
+    let cleanup = Arc::new(PendingRuntimeCleanup {
+        home: restore_context.home.to_path_buf(),
+        app_dir: app_dir.to_path_buf(),
+        process_id: spawned.process_id,
         #[cfg(unix)]
-        spawned.process_group_id,
-    )
-    .await
-    {
-        let context = serde_json::json!({
-            "appPath": app_dir,
-            "processId": spawned.process_id,
-        });
-        #[cfg(unix)]
-        let context = {
-            let mut context = context;
-            if let Some(context) = context.as_object_mut() {
-                context.insert(
-                    "processGroupId".to_string(),
-                    serde_json::json!(spawned.process_group_id),
-                );
-            }
-            context
-        };
-        error_log::record_failure(
-            "cleanup_failed",
-            injection_failure_cleanup_operation(),
-            format!("{stop_error:#}"),
-            context,
-        );
-        eprintln!("Codex 注入失败后的进程清理失败：{stop_error:#}");
-        error = anyhow::anyhow!(
-            "{error:#}；Codex 注入失败后的进程清理失败，请退出残留 Codex 后重试：{stop_error:#}"
-        );
-    }
-    if let Some(child) = child.lock().await.take() {
-        reap_child_after_cleanup(child, "reap_child_after_injection_failure").await;
-    }
-    Err(restore_runtime_config_after_error(
-        restore_context.home,
-        restore_context.local_router_enabled,
+        process_group_id: spawned.process_group_id,
+        child: Arc::clone(child),
+        local_router_enabled: restore_context.local_router_enabled,
+        local_router: Mutex::new(None),
+    });
+    Err(cleanup_initial_renderer_failure(
+        cleanup,
         error,
+        stop_codex_processes(
+            app_dir,
+            spawned.process_id,
+            #[cfg(windows)]
+            None,
+            #[cfg(unix)]
+            spawned.process_group_id,
+        ),
+        restore_runtime_config_for_router_mode(
+            restore_context.home,
+            restore_context.local_router_enabled,
+        ),
     )
     .await)
 }
@@ -1599,7 +1710,7 @@ struct RuntimeWatchers {
     crashpad_guard_task: tokio::task::JoinHandle<()>,
     exit_watchdog_shutdown: oneshot::Sender<()>,
     exit_watchdog_task: tokio::task::JoinHandle<()>,
-    codex_exit: oneshot::Receiver<()>,
+    codex_exit: oneshot::Receiver<CodexExit>,
 }
 
 struct RuntimeWatcherInputs {
@@ -1957,6 +2068,8 @@ async fn spawn_and_inject_runtime(
         config.subagent_optimization,
         config.misc_model_catalog_id(),
         CodexLaunchOptions {
+            #[cfg(windows)]
+            local_router_enabled: config.local_router_enabled,
             gpu_launch_mode: config.gpu_launch_mode,
             launch_proxy: launch_proxy.as_ref(),
         },
@@ -2241,7 +2354,7 @@ impl CodeyRuntime {
         trace_guard_state: Arc<trace_log_guard::TraceLogGuardState>,
         crashpad_pending_stats: CrashpadPendingStatsHandle,
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
-    ) -> Result<(Self, oneshot::Receiver<()>)> {
+    ) -> Result<(Self, oneshot::Receiver<CodexExit>)> {
         let mut stage_timings = StartupStageTimings::default();
         if !crate::codex_config::runtime_router_platform_supported() {
             return Err(anyhow::anyhow!(
@@ -2353,12 +2466,12 @@ impl CodeyRuntime {
         {
             Ok(spawned) => spawned,
             Err(error) => {
-                stop_local_router_after_failed_start(local_router.as_ref()).await;
-                return Err(recovery::after_integration_failure(
+                return Err(finish_failed_runtime_start(
+                    error,
+                    local_router,
                     home,
                     &recovery_app_dir,
                     config.local_router_enabled,
-                    error,
                 )
                 .await);
             }
@@ -2514,6 +2627,21 @@ impl CodeyRuntime {
         }
         local_router_stop.context("关闭本地线路路由失败")
     }
+}
+
+async fn finish_failed_runtime_start(
+    error: anyhow::Error,
+    local_router: Option<LocalRouter>,
+    home: &std::path::Path,
+    app_dir: &std::path::Path,
+    local_router_enabled: bool,
+) -> anyhow::Error {
+    if let Some(cleanup) = PendingRuntimeCleanup::from_error(&error) {
+        *cleanup.local_router.lock().await = local_router;
+        return error;
+    }
+    stop_local_router_after_failed_start(local_router.as_ref()).await;
+    recovery::after_integration_failure(home, app_dir, local_router_enabled, error).await
 }
 
 /// 启动失败时路由已经在监听。直接 Drop 会中止 accept 任务，来不及排空
@@ -2710,6 +2838,9 @@ async fn restore_runtime_config_after_error(
     local_router_enabled: bool,
     error: anyhow::Error,
 ) -> anyhow::Error {
+    if PendingRuntimeCleanup::from_error(&error).is_some() {
+        return error;
+    }
     match restore_runtime_config_for_router_mode(home, local_router_enabled).await {
         Ok(()) => error,
         Err(restore_error) => {
