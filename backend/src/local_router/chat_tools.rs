@@ -326,6 +326,93 @@ fn has_collaboration_header(text: &str, message_type: &str) -> bool {
     })
 }
 
+/// 第三方原生 Responses 不一定识别 Codex 自定义的 agent_message。
+/// 完全可读的协作消息按原方向改为标准 message；密文和未知内容保持原样。
+pub(crate) fn replay_third_party_agent_messages(body: &mut Value) -> bool {
+    match body.get_mut("input") {
+        Some(Value::Array(items)) => {
+            let mut changed = false;
+            for item in items {
+                changed |= replay_third_party_agent_message(item);
+            }
+            changed
+        }
+        Some(item @ Value::Object(_)) => replay_third_party_agent_message(item),
+        _ => false,
+    }
+}
+
+fn replay_third_party_agent_message(item: &mut Value) -> bool {
+    let Some(object) = item.as_object() else {
+        return false;
+    };
+    if object.get("type").and_then(Value::as_str) != Some("agent_message") {
+        return false;
+    }
+    let role = if agent_message_carries_instruction(object) {
+        "user"
+    } else {
+        "assistant"
+    };
+    let Some(content) = standard_agent_message_content(object, role) else {
+        return false;
+    };
+    *item = json!({"type":"message", "role":role, "content":content});
+    true
+}
+
+fn standard_agent_message_content(
+    object: &serde_json::Map<String, Value>,
+    role: &str,
+) -> Option<Value> {
+    let text_type = standard_agent_message_text_type(role);
+    match object.get("content") {
+        None | Some(Value::Null) => object
+            .get("message")
+            .and_then(Value::as_str)
+            .map(|text| json!([{"type":text_type, "text":text}])),
+        Some(Value::String(text)) => Some(json!([{"type":text_type, "text":text}])),
+        Some(Value::Array(parts)) => {
+            let parts = parts
+                .iter()
+                .map(|part| standard_agent_message_part(part, role))
+                .collect::<Option<Vec<_>>>()?;
+            (!parts.is_empty()).then_some(Value::Array(parts))
+        }
+        Some(part @ Value::Object(_)) => {
+            Some(Value::Array(vec![standard_agent_message_part(part, role)?]))
+        }
+        _ => None,
+    }
+}
+
+fn standard_agent_message_part(part: &Value, role: &str) -> Option<Value> {
+    let text = match part {
+        Value::String(text) => text.as_str(),
+        Value::Object(object)
+            if matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("input_text" | "output_text" | "text")
+            ) =>
+        {
+            object.get("text").and_then(Value::as_str)?
+        }
+        _ => return None,
+    };
+    Some(json!({
+        "type":standard_agent_message_text_type(role),
+        "text":text
+    }))
+}
+
+fn standard_agent_message_text_type(role: &str) -> &'static str {
+    if role == "user" {
+        "input_text"
+    } else {
+        "output_text"
+    }
+}
+
 pub(crate) fn append_responses_message_object(
     object: &serde_json::Map<String, Value>,
     messages: &mut Vec<Value>,

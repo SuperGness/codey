@@ -2081,6 +2081,10 @@ impl RouterServer {
                 body_mutated = true;
                 encoded_body = None;
             }
+            if !resolved.route.official_account && replay_third_party_agent_messages(&mut body) {
+                body_mutated = true;
+                encoded_body = None;
+            }
             if resolved.route.official_account && sanitize_official_upstream_history(&mut body) {
                 body_mutated = true;
                 encoded_body = None;
@@ -2432,6 +2436,12 @@ impl RouterServer {
                     .await;
             }
             if normalize_native_responses_context(&mut upstream_body, discard_opaque_reasoning) {
+                body_mutated = true;
+                encoded_body = None;
+            }
+            if !resolved.route.official_account
+                && replay_third_party_agent_messages(&mut upstream_body)
+            {
                 body_mutated = true;
                 encoded_body = None;
             }
