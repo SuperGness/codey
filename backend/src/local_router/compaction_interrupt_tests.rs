@@ -19,6 +19,13 @@ async fn compact_request(router: &LocalRouter, model: &str) -> TcpStream {
     let mut client = TcpStream::connect((url.host_str().unwrap(), url.port().unwrap()))
         .await
         .unwrap();
+    write_compact_request(&mut client, router, model).await;
+    client
+}
+
+async fn write_compact_request(client: &mut TcpStream, router: &LocalRouter, model: &str) {
+    let endpoint = router.endpoint();
+    let url = reqwest::Url::parse(&endpoint.base_url).unwrap();
     let body = serde_json::to_vec(&json!({"model":model,"input":"context"})).unwrap();
     let headers = format!(
         "POST {}/responses/compact HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nthread-id: {THREAD}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -28,7 +35,36 @@ async fn compact_request(router: &LocalRouter, model: &str) -> TcpStream {
     );
     client.write_all(headers.as_bytes()).await.unwrap();
     client.write_all(&body).await.unwrap();
-    client
+}
+
+async fn resettable_compact_request(
+    router: &LocalRouter,
+    model: &str,
+) -> (
+    TcpStream,
+    socket2::Socket,
+    tokio::task::JoinHandle<Result<()>>,
+) {
+    let (config, _, _) = super::super::tests::router_config("http://127.0.0.1:9/v1".into());
+    let mut server = super::super::lifecycle_tests::test_server(&config);
+    server.endpoint = router.endpoint();
+    server.token = server.endpoint.token.clone();
+    server.bearer_token = format!("Bearer {}", server.token);
+    server.snapshot = Arc::clone(&router.snapshot);
+    server.bindings = Arc::clone(&router.bindings);
+    server.portable_history_cache = router.portable_history_cache.upgrade().unwrap();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let (client, socket) = tokio::join!(
+        TcpStream::connect(listener.local_addr().unwrap()),
+        listener.accept()
+    );
+    let mut client = client.unwrap();
+    let (socket, _) = socket.unwrap();
+    // 保留实际 HTTP 处理入口，同时取得测试自己的服务端 socket。
+    let reset_sender = socket2::SockRef::from(&socket).try_clone().unwrap();
+    let pending = tokio::spawn(async move { server.handle_connection(socket).await });
+    write_compact_request(&mut client, router, model).await;
+    (client, reset_sender, pending)
 }
 
 fn result() -> Value {
@@ -54,6 +90,10 @@ async fn held_upstream(upstream: &TcpListener, body_wait: bool) -> TcpStream {
 }
 
 async fn assert_released(router: &LocalRouter) {
+    assert_released_with_context(router, "").await;
+}
+
+async fn assert_released_with_context(router: &LocalRouter, context: &str) {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             let released = {
@@ -68,7 +108,7 @@ async fn assert_released(router: &LocalRouter) {
         }
     })
     .await
-    .expect("compaction must release without an upstream response");
+    .unwrap_or_else(|_| panic!("compaction must release without an upstream response: {context}"));
     assert!(
         router
             .bindings
@@ -137,7 +177,15 @@ async fn reset_cancels_header_and_body_waits_after_fin_or_pipelined_bytes() {
     for body_wait in [false, true] {
         for prefix in ["none", "fin", "pipelined", "pipelined_fin"] {
             let (router, upstream, model) = fixture().await;
-            let mut client = compact_request(&router, &model).await;
+            // Windows 测试通过让客户端保留未读数据来构造 FIN 后的 RST，因此保留服务端 socket。
+            // 其余情况仍通过路由监听器测试完整的连接处理流程。
+            let (mut client, reset_fixture) = if cfg!(windows) && prefix.ends_with("fin") {
+                let (client, reset_sender, pending) =
+                    resettable_compact_request(&router, &model).await;
+                (client, Some((reset_sender, pending)))
+            } else {
+                (compact_request(&router, &model).await, None)
+            };
             let mut socket = held_upstream(&upstream, body_wait).await;
             if prefix.starts_with("pipelined") {
                 client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
@@ -156,12 +204,43 @@ async fn reset_cancels_header_and_body_waits_after_fin_or_pipelined_bytes() {
                     .contains(&format!("thread-id:{THREAD}")),
                 "body_wait={body_wait}, prefix={prefix}: compaction ended before reset"
             );
-            socket2::SockRef::from(&client)
-                .set_linger(Some(Duration::ZERO))
-                .unwrap();
-            drop(client);
-            assert_released(&router).await;
+            let mut byte = [0];
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), client.read(&mut byte))
+                    .await
+                    .is_err(),
+                "body_wait={body_wait}, prefix={prefix}: monitoring wrote unexpected response bytes"
+            );
+            let pending = if let Some((reset_sender, pending)) = reset_fixture {
+                super::super::concurrency::tests::reset_http_test_client(
+                    client,
+                    &reset_sender,
+                    true,
+                )
+                .await;
+                drop(reset_sender);
+                Some(pending)
+            } else {
+                socket2::SockRef::from(&client)
+                    .set_linger(Some(Duration::ZERO))
+                    .unwrap();
+                drop(client);
+                None
+            };
+            assert_released_with_context(
+                &router,
+                &format!("body_wait={body_wait}, prefix={prefix}"),
+            )
+            .await;
             assert_upstream_cancelled(&mut socket).await;
+            if let Some(pending) = pending {
+                let error = tokio::time::timeout(Duration::from_secs(3), pending)
+                    .await
+                    .expect("reset must end the HTTP handler")
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error.is::<DownstreamClosed>(), "{prefix}: {error:#}");
+            }
             router.stop().await.unwrap();
         }
     }

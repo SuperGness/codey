@@ -296,8 +296,7 @@ fn http_reset_error(stream: &TcpStream) -> std::io::Result<Option<std::io::Error
     {
         return Ok(Some(std::io::ErrorKind::ConnectionReset.into()));
     }
-    // Windows 在 FIN 之后可能不再报告 RST 的 SO_ERROR / AFD_POLL_ABORT。
-    // 直接读取 TCP 状态，CLOSE_WAIT 仍可写回响应，CLOSED 才取消等待。
+    // 补查 TCP 状态；CLOSE_WAIT 仍可写回响应，只有 CLOSED 才取消等待。
     #[cfg(windows)]
     if windows_http_tcp_state(stream)? == Some(windows::Win32::Networking::WinSock::TCPSTATE_CLOSED)
     {
@@ -506,4 +505,4 @@ impl std::fmt::Display for AdmissionEnded {
 impl std::error::Error for AdmissionEnded {}
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

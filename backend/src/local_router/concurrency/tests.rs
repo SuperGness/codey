@@ -1,6 +1,39 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+pub(crate) async fn reset_http_test_client(
+    client: TcpStream,
+    server: &socket2::Socket,
+    after_fin: bool,
+) {
+    #[cfg(windows)]
+    if after_fin {
+        // SD_SEND 已启动正常关闭，随后零 linger 的 closesocket 不保证另发 RST。
+        // 测试端先确认接收缓冲区有数据，再 SD_RECEIVE，按 Winsock 语义强制重置。
+        // 临时响应由测试发送，监测逻辑仍不得写入 HTTP 数据。
+        let interim = b"HTTP/1.1 100 Continue\r\n\r\n";
+        assert_eq!(server.send(interim).unwrap(), interim.len());
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), client.peek(&mut byte))
+                .await
+                .expect("reset fixture byte did not reach client")
+                .unwrap(),
+            1
+        );
+        assert_eq!(byte, [b'H']);
+        socket2::SockRef::from(&client)
+            .shutdown(std::net::Shutdown::Read)
+            .unwrap();
+    }
+    #[cfg(not(windows))]
+    let _ = (server, after_fin);
+    socket2::SockRef::from(&client)
+        .set_linger(Some(Duration::ZERO))
+        .unwrap();
+    drop(client);
+}
+
 fn registry(limit: u32) -> Arc<OfficialConcurrency> {
     let registry = Arc::new(OfficialConcurrency::default());
     registry.gates.lock().unwrap().insert(
@@ -161,6 +194,7 @@ async fn http_reset_cancels_queued_request_without_upstream_work() {
             .await
             .unwrap();
         let (mut server, _) = listener.accept().await.unwrap();
+        let reset_sender = socket2::SockRef::from(&server).try_clone().unwrap();
         if prefix.starts_with("pipelined") {
             client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
         }
@@ -194,10 +228,7 @@ async fn http_reset_cancels_queued_request_without_upstream_work() {
                 .is_err(),
             "{prefix}: admission monitoring wrote unexpected response bytes"
         );
-        socket2::SockRef::from(&client)
-            .set_linger(Some(Duration::ZERO))
-            .unwrap();
-        drop(client);
+        reset_http_test_client(client, &reset_sender, prefix.ends_with("fin")).await;
         let error = tokio::time::timeout(Duration::from_secs(1), admission)
             .await
             .unwrap_or_else(|_| panic!("{prefix}: reset did not cancel queued admission"))
@@ -226,10 +257,8 @@ async fn http_tcp_state_distinguishes_half_close_from_reset() {
         windows_http_tcp_state(&server).unwrap(),
         Some(TCPSTATE_CLOSE_WAIT)
     );
-    socket2::SockRef::from(&client)
-        .set_linger(Some(Duration::ZERO))
-        .unwrap();
-    drop(client);
+    let reset_sender = socket2::SockRef::from(&server).try_clone().unwrap();
+    reset_http_test_client(client, &reset_sender, true).await;
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             // SO_ERROR 可以始终为空；此处直接验证 TCP 状态，不依赖 reactor 标记。
