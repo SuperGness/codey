@@ -37,7 +37,7 @@ pub(crate) struct WebSocketIngress {
     read_deadline: Option<Pin<Box<tokio::time::Sleep>>>,
     reading: bool,
     #[cfg(test)]
-    write_blocked: bool,
+    write_remaining: Option<usize>,
 }
 
 impl WebSocketIngress {
@@ -75,7 +75,7 @@ impl WebSocketIngress {
             read_deadline: None,
             reading: false,
             #[cfg(test)]
-            write_blocked: false,
+            write_remaining: None,
         }
     }
 
@@ -342,18 +342,23 @@ impl AsyncWrite for WebSocketIngress {
         cx: &mut TaskContext<'_>,
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
-        // 测试直接阻塞写入，避免依赖操作系统的套接字缓冲区大小。
+        let this = self.get_mut();
+        // 测试在真实写出指定字节后阻塞，避免依赖操作系统的缓冲区大小。
         #[cfg(test)]
-        if self.write_blocked {
-            return Poll::Pending;
+        let bytes = match this.write_remaining {
+            Some(0) if !bytes.is_empty() => return Poll::Pending,
+            Some(remaining) => &bytes[..bytes.len().min(remaining)],
+            None => bytes,
+        };
+        let written = std::task::ready!(
+            Pin::new(this.stream.as_mut().ok_or(io::ErrorKind::NotConnected)?)
+                .poll_write(cx, bytes)
+        )?;
+        #[cfg(test)]
+        if let Some(remaining) = &mut this.write_remaining {
+            *remaining -= written;
         }
-        Pin::new(
-            self.get_mut()
-                .stream
-                .as_mut()
-                .ok_or(io::ErrorKind::NotConnected)?,
-        )
-        .poll_write(cx, bytes)
+        Poll::Ready(Ok(written))
     }
     fn poll_flush(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         Pin::new(
@@ -682,7 +687,7 @@ mod tests {
         prefetched.resize(prefetched.len() + 16 * 1024, b'x');
         ingress.prefetched_end = prefetched.len();
         ingress.prefetched = prefetched.into_boxed_slice();
-        ingress.write_blocked = true;
+        ingress.write_remaining = Some(0);
         let stream = WebSocketStream::from_raw_socket(
             ingress,
             tokio_tungstenite::tungstenite::protocol::Role::Server,
@@ -923,15 +928,8 @@ mod tests {
     async fn plain_websocket_send_cancellation_closes_connection() {
         let budget = Arc::new(Semaphore::new(8));
         let (mut socket, mut peer) = raw_pair(budget).await;
-        let ingress = socket.socket.as_ref().unwrap().get_ref();
-        socket2::SockRef::from(ingress.stream.as_ref().unwrap())
-            .set_send_buffer_size(1024)
-            .unwrap();
-        socket2::SockRef::from(&peer)
-            .set_recv_buffer_size(1024)
-            .unwrap();
-        let payload_bytes = 8 * 1024 * 1024;
-        // 对端暂停读取，较小的收发缓冲区使普通文本帧在实际写入中等待。
+        socket.socket.as_mut().unwrap().get_mut().write_remaining = Some(128);
+        let payload_bytes = 8 * 1024;
         assert!(
             tokio::time::timeout(
                 Duration::from_millis(100),
@@ -941,15 +939,12 @@ mod tests {
             .is_err()
         );
         assert_send_connection_closed(&mut socket).await;
-        socket2::SockRef::from(&peer)
-            .set_recv_buffer_size(256 * 1024)
-            .unwrap();
         let mut bytes = Vec::new();
         tokio::time::timeout(Duration::from_secs(3), peer.read_to_end(&mut bytes))
             .await
             .unwrap()
             .unwrap();
-        assert!(!bytes.is_empty(), "取消发生前应已写出部分帧");
+        assert_eq!(bytes.len(), 128, "取消发生前应已写出指定长度的部分帧");
         assert!(bytes.len() < payload_bytes, "取消后不得补发完整帧");
     }
 
@@ -983,10 +978,8 @@ mod tests {
     #[tokio::test]
     async fn cancelled_terminal_write_discards_buffer_and_does_not_remember_native_history() {
         let budget = Arc::new(Semaphore::new(REQUEST_BODY_BUDGET_PERMITS));
-        let (socket, mut peer) = raw_pair(budget).await;
-        socket2::SockRef::from(&peer)
-            .set_recv_buffer_size(1024)
-            .unwrap();
+        let (mut socket, mut peer) = raw_pair(budget).await;
+        socket.socket.as_mut().unwrap().get_mut().write_remaining = Some(128);
         let mut downstream = WebSocketResponsesDownstream::new(socket);
         let (config, provider, model) =
             super::super::tests::router_config("http://127.0.0.1:9/v1".into());
@@ -997,7 +990,7 @@ mod tests {
         ).unwrap();
         let event = json!({"type":"response.completed","response":{
             "id":"resp-not-delivered","object":"response","status":"completed",
-            "output":[{"type":"compaction","encrypted_content":"x".repeat(8 * 1024 * 1024)}]
+            "output":[{"type":"compaction","encrypted_content":"x".repeat(8 * 1024)}]
         }});
         assert!(
             tokio::time::timeout(Duration::from_millis(200), downstream.write_event(&event))
@@ -1009,14 +1002,12 @@ mod tests {
         downstream.finish_compaction_interrupt().await.unwrap();
         assert!(downstream.socket.flush().await.is_err());
         assert!(!downstream.native_history.has_history());
-        socket2::SockRef::from(&peer)
-            .set_recv_buffer_size(256 * 1024)
-            .unwrap();
         let mut bytes = Vec::new();
         tokio::time::timeout(Duration::from_secs(3), peer.read_to_end(&mut bytes))
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(bytes.len(), 128, "取消发生前应已写出指定长度的部分帧");
         assert!(
             bytes.len() < event.to_string().len(),
             "cancelled frame must remain incomplete"

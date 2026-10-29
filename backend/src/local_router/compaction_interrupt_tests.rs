@@ -293,6 +293,10 @@ async fn interrupt_timeout_keeps_exclusion_until_the_operation_finishes() {
 #[tokio::test]
 async fn interrupt_cancels_an_incomplete_upstream_upload() {
     let (router, upstream, model) = fixture().await;
+    // 在握手前限制接收窗口，确保上传受阻，也保留足够的窗口让取消后的缓冲区及时排空。
+    socket2::SockRef::from(&upstream)
+        .set_recv_buffer_size(128 * 1024)
+        .unwrap();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -305,9 +309,6 @@ async fn interrupt_cancels_an_incomplete_upstream_upload() {
         .send();
     let pending = tokio::spawn(request);
     let (mut socket, _) = upstream.accept().await.unwrap();
-    socket2::SockRef::from(&socket)
-        .set_recv_buffer_size(1024)
-        .unwrap();
     let mut prefix = [0; 1024];
     assert!(socket.read(&mut prefix).await.unwrap() > 0);
     router
@@ -700,21 +701,71 @@ async fn interrupt_delivery_deadline_closes_socket_and_fails_ticket_without_a_te
     router.stop().await.unwrap();
 }
 
-#[tokio::test]
-async fn interrupt_after_http_delivery_starts_finishes_the_same_response() {
+async fn backpressured_http_delivery(
+    value: &Value,
+) -> (
+    LocalRouter,
+    String,
+    TcpStream,
+    Vec<u8>,
+    tokio::task::JoinHandle<Result<()>>,
+) {
     let (router, upstream, model) = fixture().await;
-    let mut client = compact_request(&router, &model).await;
+    let (config, _, _) = super::super::tests::router_config("http://127.0.0.1:9/v1".into());
+    let mut server = super::super::lifecycle_tests::test_server(&config);
+    server.snapshot = Arc::clone(&router.snapshot);
+    server.bindings = Arc::clone(&router.bindings);
+    server.portable_history_cache = router.portable_history_cache.upgrade().unwrap();
+
+    // 同时限制两端缓冲区；仅缩小接收端无法阻止系统提前缓存整个成功响应。
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let client = tokio::net::TcpSocket::new_v4().unwrap();
+    client.set_recv_buffer_size(64 * 1024).unwrap();
+    let (client, socket) = tokio::join!(
+        client.connect(listener.local_addr().unwrap()),
+        listener.accept()
+    );
+    let mut client = client.unwrap();
+    let (socket, _) = socket.unwrap();
+    socket2::SockRef::from(&socket)
+        .set_send_buffer_size(16 * 1024)
+        .unwrap();
+    let body = json!({"model":model,"input":"context"});
+    let pending = tokio::spawn(async move {
+        server
+            .proxy_with_compaction_budget(
+                HttpRequest {
+                    method: "POST".into(),
+                    path: "/v1/responses/compact".into(),
+                    headers: vec![("thread-id".into(), THREAD.into())],
+                    body: vec![],
+                    _body_budget_permit: None,
+                },
+                body,
+                None,
+                ResponsesRequestKind::Compact,
+                &mut HttpResponsesDownstream::new(socket),
+            )
+            .await
+    });
     let (mut socket, _) = upstream.accept().await.unwrap();
     read_http_request(&mut socket).await.unwrap();
-    let mut value = result();
-    value["output"][0]["encrypted_content"] = json!("x".repeat(8 * 1024 * 1024));
-    write_json_response(&mut socket, 200, &value).await.unwrap();
+    write_json_response(&mut socket, 200, value).await.unwrap();
     drop(socket);
     let mut prefix = vec![0; 1024];
     let count = client.read(&mut prefix).await.unwrap();
     prefix.truncate(count);
     assert!(prefix.starts_with(b"HTTP/1.1 200"));
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!pending.is_finished());
+    (router, model, client, prefix, pending)
+}
+
+#[tokio::test]
+async fn interrupt_after_http_delivery_starts_finishes_the_same_response() {
+    let mut value = result();
+    value["output"][0]["encrypted_content"] = json!("x".repeat(8 * 1024 * 1024));
+    let (router, _model, mut client, mut prefix, pending) =
+        backpressured_http_delivery(&value).await;
     let payload = json!({"threadId":THREAD});
     let stopping = router.interrupt_portable_compaction(&payload);
     tokio::pin!(stopping);
@@ -745,6 +796,7 @@ async fn interrupt_after_http_delivery_starts_finishes_the_same_response() {
         value
     );
     assert_eq!(stopping.await.unwrap()["status"], "ok");
+    pending.await.unwrap().unwrap();
     assert_released(&router).await;
     assert!(!router.bindings.lock().unwrap().routes[&format!("thread-id:{THREAD}")].portable);
     router.stop().await.unwrap();
@@ -752,21 +804,10 @@ async fn interrupt_after_http_delivery_starts_finishes_the_same_response() {
 
 #[tokio::test]
 async fn interrupt_http_delivery_deadline_keeps_native_binding_and_checkpoint_uncommitted() {
-    let (router, upstream, model) = fixture().await;
-    let mut client = compact_request(&router, &model).await;
-    socket2::SockRef::from(&client)
-        .set_recv_buffer_size(1024)
-        .unwrap();
-    let (mut socket, _) = upstream.accept().await.unwrap();
-    read_http_request(&mut socket).await.unwrap();
     let mut value = result();
     value["output"][0]["encrypted_content"] = json!("x".repeat(2 * 1024 * 1024));
-    write_json_response(&mut socket, 200, &value).await.unwrap();
-    drop(socket);
-    let mut received = vec![0; 1024];
-    let count = client.read(&mut received).await.unwrap();
-    received.truncate(count);
-    assert!(received.starts_with(b"HTTP/1.1 200"));
+    let (router, model, mut client, mut received, pending) =
+        backpressured_http_delivery(&value).await;
     let resolved = router
         .snapshot
         .read()
@@ -816,6 +857,7 @@ async fn interrupt_http_delivery_deadline_keeps_native_binding_and_checkpoint_un
         .await
         .unwrap();
     assert_released(&router).await;
+    assert!(pending.await.unwrap().unwrap_err().is::<DownstreamClosed>());
     assert!(!router.bindings.lock().unwrap().routes.contains_key(&key));
     assert!(
         cache
@@ -829,9 +871,6 @@ async fn interrupt_http_delivery_deadline_keeps_native_binding_and_checkpoint_un
             )
             .is_none()
     );
-    socket2::SockRef::from(&client)
-        .set_recv_buffer_size(256 * 1024)
-        .unwrap();
     tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut received))
         .await
         .unwrap()

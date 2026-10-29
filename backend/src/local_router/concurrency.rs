@@ -269,13 +269,7 @@ where
     tokio::pin!(future);
     tokio::select! {
         biased;
-        // 错误就绪不受 FIN 或未消费的流水线字节影响。无 SO_ERROR 的虚假
-        // 唤醒由 async_io 的 WouldBlock 清除，避免 EOF 造成持续唤醒。
-        result = stream.async_io(tokio::io::Interest::ERROR, || {
-            Err::<(), _>(stream.take_error()?.unwrap_or_else(|| {
-                std::io::ErrorKind::WouldBlock.into()
-            }))
-        }) => {
+        result = await_http_reset(stream) => {
             Err(anyhow::Error::new(result.unwrap_err()).context(DownstreamClosed))
         }
         result = &mut future => {
@@ -285,6 +279,29 @@ where
             Ok(result)
         }
     }
+}
+
+async fn await_http_reset(stream: &TcpStream) -> std::io::Result<()> {
+    // Windows 的 reset 只有读写关闭就绪，不能单独等待 ERROR。定期检查
+    // SO_ERROR 保留 FIN 和流水线字节，也不清除后续响应写入所需的可写就绪。
+    #[cfg(windows)]
+    loop {
+        if let Some(error) = stream.take_error()? {
+            return Err(error);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // Unix 的错误就绪不受 FIN 或未消费字节影响，虚假唤醒由 WouldBlock 清除。
+    #[cfg(not(windows))]
+    stream
+        .async_io(tokio::io::Interest::ERROR, || {
+            Err::<(), _>(
+                stream
+                    .take_error()?
+                    .unwrap_or_else(|| std::io::ErrorKind::WouldBlock.into()),
+            )
+        })
+        .await
 }
 
 impl RouterServer {

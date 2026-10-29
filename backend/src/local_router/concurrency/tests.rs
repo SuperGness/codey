@@ -155,29 +155,60 @@ async fn http_write_half_close_does_not_cancel_admission() {
 
 #[tokio::test]
 async fn http_reset_cancels_queued_request_without_upstream_work() {
+    for prefix in ["none", "fin", "pipelined"] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        match prefix {
+            "fin" => client.shutdown().await.unwrap(),
+            "pipelined" => client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap(),
+            _ => {}
+        }
+        let registry = registry(1);
+        let first = ready(&registry);
+        let waiter = queued(&registry);
+        let admission = await_http_admission(&mut server, waiter.wait());
+        tokio::pin!(admission);
+        // 先轮询监听，再发送 reset，验证等待期间新出现的连接错误。
+        assert!(futures_util::poll!(admission.as_mut()).is_pending());
+        socket2::SockRef::from(&client)
+            .set_linger(Some(Duration::ZERO))
+            .unwrap();
+        drop(client);
+        let error = tokio::time::timeout(Duration::from_secs(1), admission)
+            .await
+            .unwrap()
+            .err()
+            .unwrap();
+        assert!(error.is::<DownstreamClosed>(), "{prefix}: {error:#}");
+        assert_eq!(counts(&registry), (1, 0), "{prefix}");
+        drop(first);
+    }
+}
+
+#[tokio::test]
+async fn http_admission_preserves_pipelined_bytes() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = TcpStream::connect(listener.local_addr().unwrap())
+    let mut client = TcpStream::connect(listener.local_addr().unwrap())
         .await
         .unwrap();
     let (mut server, _) = listener.accept().await.unwrap();
-    socket2::SockRef::from(&client)
-        .set_linger(Some(Duration::ZERO))
-        .unwrap();
-    drop(client);
-    let registry = registry(1);
-    let first = ready(&registry);
-    let waiter = queued(&registry);
-    let error = tokio::time::timeout(
-        Duration::from_secs(1),
-        await_http_admission(&mut server, waiter.wait()),
-    )
-    .await
-    .unwrap()
-    .err()
-    .unwrap();
-    assert!(error.is::<DownstreamClosed>());
-    assert_eq!(counts(&registry), (1, 0));
-    drop(first);
+    let pipelined = b"GET / HTTP/1.1\r\n\r\n";
+    client.write_all(pipelined).await.unwrap();
+    assert_eq!(
+        await_http_admission(&mut server, async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            7
+        })
+        .await
+        .unwrap(),
+        7
+    );
+    let mut received = vec![0; pipelined.len()];
+    server.read_exact(&mut received).await.unwrap();
+    assert_eq!(received, pipelined);
 }
 
 #[test]
