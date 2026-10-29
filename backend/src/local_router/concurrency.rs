@@ -273,10 +273,12 @@ where
             Err(anyhow::Error::new(result.unwrap_err()).context(DownstreamClosed))
         }
         result = &mut future => {
-            if let Some(error) = http_reset_error(stream)? {
-                return Err(anyhow::Error::new(error).context(DownstreamClosed));
+            match http_reset_error(stream) {
+                Ok(None) => Ok(result),
+                Ok(Some(error)) | Err(error) => {
+                    Err(anyhow::Error::new(error).context(DownstreamClosed))
+                }
             }
-            Ok(result)
         }
     }
 }
@@ -294,7 +296,56 @@ fn http_reset_error(stream: &TcpStream) -> std::io::Result<Option<std::io::Error
     {
         return Ok(Some(std::io::ErrorKind::ConnectionReset.into()));
     }
+    // Windows 在 FIN 之后可能不再报告 RST 的 SO_ERROR / AFD_POLL_ABORT。
+    // 直接读取 TCP 状态，CLOSE_WAIT 仍可写回响应，CLOSED 才取消等待。
+    #[cfg(windows)]
+    if windows_http_tcp_state(stream)? == Some(windows::Win32::Networking::WinSock::TCPSTATE_CLOSED)
+    {
+        return Ok(Some(std::io::ErrorKind::ConnectionReset.into()));
+    }
     Ok(None)
+}
+
+#[cfg(windows)]
+fn windows_http_tcp_state(
+    stream: &TcpStream,
+) -> std::io::Result<Option<windows::Win32::Networking::WinSock::TCPSTATE>> {
+    use std::os::windows::io::AsRawSocket;
+    use windows::Win32::Networking::WinSock::{
+        SIO_TCP_INFO, SOCKET, SOCKET_ERROR, TCP_INFO_v0, WSAEINVAL, WSAEOPNOTSUPP, WSAGetLastError,
+        WSAIoctl,
+    };
+
+    let version = 0u32;
+    let mut info = TCP_INFO_v0::default();
+    let mut returned = 0u32;
+    // 同步查询只写入栈上的固定大小缓冲区，不发送或读取 HTTP 字节，
+    // 也不改变 Tokio/Mio 的就绪注册。SIO_TCP_INFO 不需要管理员权限。
+    let result = unsafe {
+        WSAIoctl(
+            SOCKET(stream.as_raw_socket() as usize),
+            SIO_TCP_INFO,
+            Some(std::ptr::from_ref(&version).cast()),
+            std::mem::size_of_val(&version) as u32,
+            Some(std::ptr::from_mut(&mut info).cast()),
+            std::mem::size_of_val(&info) as u32,
+            &mut returned,
+            None,
+            None,
+        )
+    };
+    if result == SOCKET_ERROR {
+        let error = unsafe { WSAGetLastError() };
+        // 旧版 Windows 或第三方 Winsock provider 不支持此查询时保留原有监测。
+        if error == WSAEOPNOTSUPP || error == WSAEINVAL {
+            return Ok(None);
+        }
+        return Err(std::io::Error::from_raw_os_error(error.0));
+    }
+    if returned < std::mem::size_of_val(&info.State) as u32 {
+        return Err(std::io::ErrorKind::InvalidData.into());
+    }
+    Ok(Some(info.State))
 }
 
 async fn await_http_reset(stream: &TcpStream) -> std::io::Result<()> {
@@ -303,7 +354,7 @@ async fn await_http_reset(stream: &TcpStream) -> std::io::Result<()> {
         if let Some(error) = http_reset_error(stream)? {
             return Err(error);
         }
-        // 普通可写就绪会一直保留；定时重查关闭标记，不清除就绪或反复重新注册。
+        // 普通可写就绪会一直保留；定时重查关闭标记和 TCP 状态，不清除就绪。
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     // Unix 的错误就绪不受 FIN 或未消费字节影响，虚假唤醒由 WouldBlock 清除。

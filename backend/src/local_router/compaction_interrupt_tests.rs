@@ -135,17 +135,27 @@ async fn interrupt_cancels_header_and_body_waits_after_fin_and_allows_resend() {
 #[tokio::test]
 async fn reset_cancels_header_and_body_waits_after_fin_or_pipelined_bytes() {
     for body_wait in [false, true] {
-        for prefix in ["none", "fin", "pipelined"] {
+        for prefix in ["none", "fin", "pipelined", "pipelined_fin"] {
             let (router, upstream, model) = fixture().await;
             let mut client = compact_request(&router, &model).await;
             let mut socket = held_upstream(&upstream, body_wait).await;
-            match prefix {
-                "fin" => client.shutdown().await.unwrap(),
-                "pipelined" => client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap(),
-                _ => {}
+            if prefix.starts_with("pipelined") {
+                client.write_all(b"GET / HTTP/1.1\r\n\r\n").await.unwrap();
+            }
+            if prefix.ends_with("fin") {
+                client.shutdown().await.unwrap();
             }
             // 先让监听处理 FIN 或已到达的字节，再单独发送 RST。
             tokio::time::sleep(Duration::from_millis(75)).await;
+            assert!(
+                router
+                    .bindings
+                    .lock()
+                    .unwrap()
+                    .compacting
+                    .contains(&format!("thread-id:{THREAD}")),
+                "body_wait={body_wait}, prefix={prefix}: compaction ended before reset"
+            );
             socket2::SockRef::from(&client)
                 .set_linger(Some(Duration::ZERO))
                 .unwrap();

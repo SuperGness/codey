@@ -144,7 +144,7 @@ async fn http_write_half_close_does_not_cancel_admission() {
     client.shutdown().await.unwrap();
     assert_eq!(
         await_http_admission(&mut server, async {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(Duration::from_millis(75)).await;
             7
         })
         .await
@@ -187,6 +187,13 @@ async fn http_reset_cancels_queued_request_without_upstream_work() {
                 .is_err(),
             "{prefix}: admission ended before reset"
         );
+        let mut byte = [0];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), client.read(&mut byte))
+                .await
+                .is_err(),
+            "{prefix}: admission monitoring wrote unexpected response bytes"
+        );
         socket2::SockRef::from(&client)
             .set_linger(Some(Duration::ZERO))
             .unwrap();
@@ -200,6 +207,55 @@ async fn http_reset_cancels_queued_request_without_upstream_work() {
         assert_eq!(counts(&registry), (1, 0), "{prefix}");
         drop(first);
     }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn http_tcp_state_distinguishes_half_close_from_reset() {
+    use windows::Win32::Networking::WinSock::{TCPSTATE_CLOSE_WAIT, TCPSTATE_CLOSED};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (server, _) = listener.accept().await.unwrap();
+    client.shutdown().await.unwrap();
+    let mut byte = [0];
+    assert_eq!(server.peek(&mut byte).await.unwrap(), 0);
+    assert_eq!(
+        windows_http_tcp_state(&server).unwrap(),
+        Some(TCPSTATE_CLOSE_WAIT)
+    );
+    socket2::SockRef::from(&client)
+        .set_linger(Some(Duration::ZERO))
+        .unwrap();
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            // SO_ERROR 可以始终为空；此处直接验证 TCP 状态，不依赖 reactor 标记。
+            let _ = server.take_error().unwrap();
+            match windows_http_tcp_state(&server) {
+                Ok(Some(TCPSTATE_CLOSED)) => break,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::NotConnected
+                    ) =>
+                {
+                    break;
+                }
+                state => assert!(
+                    matches!(state, Ok(Some(TCPSTATE_CLOSE_WAIT))),
+                    "unexpected state after reset: {state:?}"
+                ),
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("TCP state did not report reset after FIN");
 }
 
 #[cfg(windows)]
@@ -244,25 +300,38 @@ async fn http_reset_with_empty_so_error_still_cancels_admission() {
 
 #[tokio::test]
 async fn http_admission_preserves_pipelined_bytes() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let mut client = TcpStream::connect(listener.local_addr().unwrap())
-        .await
-        .unwrap();
-    let (mut server, _) = listener.accept().await.unwrap();
-    let pipelined = b"GET / HTTP/1.1\r\n\r\n";
-    client.write_all(pipelined).await.unwrap();
-    assert_eq!(
-        await_http_admission(&mut server, async {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    for fin in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        let pipelined = b"GET / HTTP/1.1\r\n\r\n";
+        client.write_all(pipelined).await.unwrap();
+        if fin {
+            client.shutdown().await.unwrap();
+        }
+        assert_eq!(
+            await_http_admission(&mut server, async {
+                tokio::time::sleep(Duration::from_millis(75)).await;
+                7
+            })
+            .await
+            .unwrap(),
             7
-        })
-        .await
-        .unwrap(),
-        7
-    );
-    let mut received = vec![0; pipelined.len()];
-    server.read_exact(&mut received).await.unwrap();
-    assert_eq!(received, pipelined);
+        );
+        let mut received = vec![0; pipelined.len()];
+        server.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, pipelined);
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        server.write_all(response).await.unwrap();
+        let mut received = vec![0; response.len()];
+        client.read_exact(&mut received).await.unwrap();
+        assert_eq!(
+            received, response,
+            "fin={fin}: monitoring changed the HTTP response"
+        );
+    }
 }
 
 #[test]
