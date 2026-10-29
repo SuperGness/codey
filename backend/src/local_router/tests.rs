@@ -12797,7 +12797,7 @@ async fn router_rewrites_alias_and_keeps_upstream_credentials_private() {
 }
 
 #[tokio::test]
-async fn native_passthrough_rewrites_plaintext_agent_payload_before_send() {
+async fn third_party_native_route_replays_plaintext_agent_task_as_user_message() {
     let task = "只读冒烟任务（第 1 轮）。禁止写入、创建或删除任何文件。";
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();
@@ -12851,12 +12851,16 @@ async fn native_passthrough_rewrites_plaintext_agent_payload_before_send() {
 
     let body = upstream_task.await.unwrap();
     assert_eq!(body["model"], model);
-    // 新任务即使在原生直通线路也保持 agent_message 形态，只有协议转换线路
-    // 才需要把它改写成用户消息；这里确认正文可见且未被当成助手历史。
-    assert_eq!(body["input"][1]["type"], "agent_message");
     assert_eq!(
-        body["input"][1]["content"][1],
-        json!({"type":"input_text","text":task})
+        body["input"][1],
+        json!({
+            "type":"message",
+            "role":"user",
+            "content":[
+                {"type":"input_text","text":"Message Type: NEW_TASK\nPayload:\n"},
+                {"type":"input_text","text":task}
+            ]
+        })
     );
     assert_eq!(
         body["input"][0],
@@ -13143,8 +13147,15 @@ async fn upstream_websocket_requests_rewrite_plaintext_agent_payloads() {
 
     let body = upstream_task.await.unwrap();
     assert_eq!(
-        body["input"][1]["content"][1],
-        json!({"type":"input_text","text":task})
+        body["input"][1],
+        json!({
+            "type":"message",
+            "role":"user",
+            "content":[
+                {"type":"input_text","text":"Message Type: NEW_TASK\nPayload:\n"},
+                {"type":"input_text","text":task}
+            ]
+        })
     );
     client.close(None).await.unwrap();
     router.stop().await.unwrap();

@@ -1697,6 +1697,67 @@ mod tests {
     }
 
     #[test]
+    fn third_party_agent_messages_replay_as_standard_messages() {
+        let task = "只读调查员工同步逻辑，不修改文件。";
+        let followup = "补充报告匹配字段。";
+        let answer = "已确认按员工工号匹配。";
+        let sealed = fernet_token(&[0x55; 16]);
+        let mut body = json!({"input":[
+            agent_message(json!([
+                {"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/child\nPayload:\n"},
+                {"type":"encrypted_content","encrypted_content":task}
+            ])),
+            agent_message(json!([
+                {"type":"input_text","text":"Message Type: MESSAGE\nTask name: /root/child\nPayload:\n"},
+                {"type":"encrypted_content","encrypted_content":followup}
+            ])),
+            {
+                "type":"agent_message",
+                "id":"amsg_answer",
+                "author":"/root/child",
+                "recipient":"/root",
+                "content":[
+                    {"type":"output_text","text":"Message Type: FINAL_ANSWER\nTask name: /root/child\nPayload:\n"},
+                    {"type":"encrypted_content","encrypted_content":answer}
+                ]
+            },
+            agent_message(json!([
+                {"type":"input_text","text":"Message Type: NEW_TASK\nPayload:\n"},
+                {"type":"encrypted_content","encrypted_content":sealed}
+            ]))
+        ]});
+        assert!(normalize_native_responses_context(&mut body, false));
+        let sealed_item = body["input"][3].clone();
+
+        assert!(replay_third_party_agent_messages(&mut body));
+        assert_eq!(
+            body["input"][0],
+            json!({
+                "type":"message",
+                "role":"user",
+                "content":[
+                    {"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/child\nPayload:\n"},
+                    {"type":"input_text","text":task}
+                ]
+            })
+        );
+        assert_eq!(body["input"][1]["type"], "message");
+        assert_eq!(body["input"][1]["role"], "user");
+        assert_eq!(
+            body["input"][1]["content"][1],
+            json!({"type":"input_text","text":followup})
+        );
+        assert_eq!(body["input"][2]["type"], "message");
+        assert_eq!(body["input"][2]["role"], "assistant");
+        assert_eq!(
+            body["input"][2]["content"][1],
+            json!({"type":"output_text","text":answer})
+        );
+        assert_eq!(body["input"][3], sealed_item);
+        assert!(!replay_third_party_agent_messages(&mut body));
+    }
+
+    #[test]
     fn encrypted_agent_payloads_are_preserved_byte_for_byte() {
         let mut body = json!({
             "input":[agent_message(json!([

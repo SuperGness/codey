@@ -656,6 +656,9 @@ impl WebSocketResponsesDownstream {
             self.upstream.take();
         }
         normalize_native_responses_context(body, discard_opaque_reasoning);
+        if !route.official_account {
+            replay_third_party_agent_messages(body);
+        }
         if route.official_account {
             sanitize_official_upstream_history(body);
         }
