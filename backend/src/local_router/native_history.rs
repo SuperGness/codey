@@ -686,7 +686,14 @@ fn validate_native_tool_history(input: &[Value], restoring: bool) -> Result<()> 
                     }
                     continue;
                 };
-                if !calls.remove(&(call_kind, id)) {
+                // custom 工具可能继续以同一 call_id 发送异步通知，
+                // 保留调用记录，让后续结果仍可找到对应调用。
+                let matched = if kind == "custom_tool_call_output" {
+                    calls.contains(&(call_kind, id))
+                } else {
+                    calls.remove(&(call_kind, id))
+                };
+                if !matched {
                     anyhow::bail!(
                         "工具结果缺少对应的完整调用历史（{kind} call_id={id}{}），请重新发送完整上下文",
                         tool_name_label(item)
@@ -720,6 +727,201 @@ mod tests {
 
     fn completed(id: &str, output: Vec<Value>) -> Value {
         json!({"type":"response.completed","response":{"id":id,"object":"response","status":"completed","output":output}})
+    }
+
+    fn custom_notification_history() -> Vec<Value> {
+        let mut input = vec![json!({"role":"user","content":"run synthetic tasks"})];
+        for index in 0..5 {
+            let id = format!("call-notify-{index}");
+            input.extend([
+                json!({
+                    "type":"custom_tool_call","call_id":id,"name":"exec",
+                    "status":"completed","input":"notify(\"synthetic progress\");"
+                }),
+                json!({
+                    "type":"custom_tool_call_output","call_id":id,
+                    "output":format!("Script running with cell ID synthetic-{index}")
+                }),
+            ]);
+        }
+        input.extend((0..148).map(|index| {
+            json!({
+                "type":"custom_tool_call_output",
+                "call_id":format!("call-notify-{}", index % 5),"name":"exec",
+                "output":format!("synthetic progress {index}")
+            })
+        }));
+        input
+    }
+
+    #[test]
+    fn custom_tool_notifications_preserve_full_cached_and_compacted_history() {
+        for compacted in [false, true] {
+            let owner = [1; 32];
+            let cache = Arc::new(Mutex::new(NativeHistoryCache::default()));
+            let headers = vec![("session-id".into(), "custom-notifications".into())];
+            let mut history = NativeResponsesHistory::with_cache(Arc::clone(&cache), &headers);
+            let mut expected = custom_notification_history();
+            if compacted {
+                expected.insert(0, json!({"type":"compaction","encrypted_content":"opaque"}));
+            }
+            let mut full = json!({"input":expected});
+            history.prepare(owner, &mut full);
+            assert!(
+                !history
+                    .restore_for_http(owner, &mut full, compacted)
+                    .unwrap()
+            );
+            assert_eq!(full["input"], json!(expected));
+            history.observe(&completed("resp-notifications", vec![]));
+            drop(history);
+
+            let mut restored = NativeResponsesHistory::with_cache(cache, &headers);
+            let delta = vec![
+                json!({
+                    "type":"custom_tool_call_output","call_id":"call-notify-0",
+                    "name":"exec","output":"synthetic final output"
+                }),
+                json!({"role":"user","content":"continue"}),
+            ];
+            let mut next = json!({"previous_response_id":"resp-notifications","input":delta});
+            restored.prepare(owner, &mut next);
+            assert!(restored.can_recover_rejected_continuation(owner, compacted));
+            assert!(
+                restored
+                    .restore_for_http(owner, &mut next, compacted)
+                    .unwrap()
+            );
+            expected.extend(delta);
+            assert_eq!(next["input"], json!(expected));
+            assert!(next.get("previous_response_id").is_none());
+        }
+    }
+
+    #[test]
+    fn custom_tool_notifications_preserve_pairing_guards() {
+        for (input, expected_error) in [
+            (
+                vec![result(true, "call-1")],
+                "工具结果缺少对应的完整调用历史",
+            ),
+            (
+                vec![result(true, "call-1"), call(true, "call-1")],
+                "工具结果缺少对应的完整调用历史",
+            ),
+            (
+                vec![call(false, "call-1"), result(true, "call-1")],
+                "工具结果缺少对应的完整调用历史",
+            ),
+            (
+                vec![call(true, "call-1"), result(false, "call-1")],
+                "工具结果缺少对应的完整调用历史",
+            ),
+            (
+                vec![call(true, "call-1"), call(true, "call-1")],
+                "历史中工具调用 ID 重复",
+            ),
+            (
+                vec![
+                    call(true, "call-1"),
+                    result(true, "call-1"),
+                    call(true, "call-1"),
+                ],
+                "历史中工具调用 ID 重复",
+            ),
+            (
+                vec![
+                    call(false, "call-1"),
+                    result(false, "call-1"),
+                    result(false, "call-1"),
+                ],
+                "工具结果缺少对应的完整调用历史",
+            ),
+        ] {
+            for restoring in [false, true] {
+                let error = validate_native_tool_history(&input, restoring)
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(expected_error), "{input:?}: {error}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_tool_notifications_reach_native_http_and_sse_in_order() {
+        for sse in [false, true] {
+            for compacted in [false, true] {
+                let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+                let (mut config, provider, model) =
+                    router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
+                config.profiles[0].supports_websockets = false;
+                config.profiles[0].supports_remote_compaction = compacted;
+                let mut expected = custom_notification_history();
+                if compacted {
+                    expected.insert(0, json!({"type":"compaction","encrypted_content":"opaque"}));
+                }
+                let split = expected.len() - 74;
+                let first = expected[..split].to_vec();
+                let later = expected[split..].to_vec();
+                let upstream_first = first.clone();
+                let upstream = tokio::spawn(async move {
+                    for (id, expected) in [
+                        ("resp-notify-first", upstream_first),
+                        ("resp-notify-later", expected),
+                    ] {
+                        let (mut stream, _) = listener.accept().await.unwrap();
+                        let request = read_http_request(&mut stream).await.unwrap();
+                        assert_eq!(request.method, "POST");
+                        assert_eq!(request.path, "/v1/responses");
+                        let body: Value = serde_json::from_slice(&request.body).unwrap();
+                        assert!(body.get("previous_response_id").is_none(), "{body}");
+                        assert_eq!(body["input"], json!(expected));
+                        let event = completed(id, vec![]);
+                        if sse {
+                            let response = format!("data: {event}\n\n");
+                            stream.write_all(format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                                response.len()
+                            ).as_bytes()).await.unwrap();
+                        } else {
+                            write_json_response(&mut stream, 200, &event["response"])
+                                .await
+                                .unwrap();
+                        }
+                    }
+                });
+                let router = LocalRouter::start(&config).await.unwrap();
+                for (previous, input, id) in [
+                    (None, first, "resp-notify-first"),
+                    (Some("resp-notify-first"), later, "resp-notify-later"),
+                ] {
+                    let mut client = connect_router_websocket_with_headers(
+                        &router.endpoint(),
+                        &[("session-id", "custom-notification-http")],
+                    )
+                    .await;
+                    let mut body = json!({
+                        "type":"response.create","model":model_alias(&provider, &model),"input":input
+                    });
+                    if let Some(previous) = previous {
+                        body["previous_response_id"] = previous.into();
+                    }
+                    client
+                        .send(WebSocketMessage::Text(body.to_string().into()))
+                        .await
+                        .unwrap();
+                    let event = terminal(&mut client).await;
+                    assert_eq!(
+                        event["type"], "response.completed",
+                        "sse={sse} compacted={compacted}: {event}"
+                    );
+                    assert_eq!(event["response"]["id"], id, "{event}");
+                    client.close(None).await.unwrap();
+                }
+                upstream.await.unwrap();
+                router.stop().await.unwrap();
+            }
+        }
     }
 
     #[test]
