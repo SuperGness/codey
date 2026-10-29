@@ -69,8 +69,8 @@
   let threadUpdatedAtFetchInFlight = false;
   const threadUpdatedAtCache = new Map();
   const threadWorkStateByRow = new WeakMap();
-  // React can briefly detach the native status rail or replace a virtualized
-  // row. Preserve the last confirmed running state until a delayed rescan.
+  // 同一主机和会话可出现在多个列表中。运行状态统一维护，行记录只保留
+  // 原生状态观测，不能用已显示的置顶标记恢复上一轮任务。
   const threadRunningStateByCacheKey = new Map();
   const threadRunningRecheckTimers = new Map();
   const projectRunningRecoveryClickedAt = new WeakMap();
@@ -1329,13 +1329,18 @@
     return [...(element.children || [])].some((child) => nativeElementLooksLikeThreadStatus(child));
   };
 
-  const nativeThreadWorkInProgress = (row) => {
+  const nativeThreadWorkState = (row) => {
     const statusState = nativeReactThreadStatusState(row);
-    if (nativeThreadStatusTypeLooksActive(statusState?.type)) {
-      return true;
-    }
+    const completed = /^(?:complete(?:d)?|finished|done|error|failed|failure|interrupted|cancelled|canceled|stopped)$/i
+      .test(String(statusState?.type || "").trim());
     const { trailing } = threadUpdatedAtPlacement(row);
-    return (trailing || []).some((candidate) => nativeElementLooksLikeThreadStatus(candidate));
+    return {
+      completed,
+      workInProgress: !completed && (
+        nativeThreadStatusTypeLooksActive(statusState?.type)
+        || (trailing || []).some((candidate) => nativeElementLooksLikeThreadStatus(candidate))
+      ),
+    };
   };
 
   const threadKindFromRow = (row) => {
@@ -1392,6 +1397,43 @@
     threadRunningRecheckTimers.delete(cacheKey);
   };
 
+  const threadObservationMatchesRow = (row, observation, cacheKey) => (
+    observation?.cacheKey === cacheKey
+    && observation.hostId === threadHostIdFromRow(row)
+    && observation.sessionId === threadSessionIdFromRow(threadIdentityNode(row) || row)
+  );
+
+  const syncThreadRunningRows = (cacheKey, workInProgress) => {
+    forEachTrackedThreadRow((row) => {
+      const observation = threadWorkStateByRow.get(row);
+      if (!threadObservationMatchesRow(row, observation, cacheKey)) return;
+      // 其他列表未更新的运行图标仍属于上一轮，需先观测到非运行状态，
+      // 该行后续的运行信号才可启动新一轮。
+      if (!workInProgress && observation.detectedWorkInProgress) observation.suppressed = true;
+      updateThreadRunningPriority(row, workInProgress);
+    });
+  };
+
+  const finishThreadRunningState = (cacheKey, state) => {
+    state.workInProgress = false;
+    state.missingSince = null;
+    state.completionVersion = (state.completionVersion || 0) + 1;
+    rememberBoundedMapValue(threadRunningStateByCacheKey, cacheKey, state);
+    cancelThreadRunningRecheck(cacheKey);
+    syncThreadRunningRows(cacheKey, false);
+    return false;
+  };
+
+  const hasObservedThreadWorkInProgress = (cacheKey) => {
+    let running = false;
+    forEachTrackedThreadRow((row) => {
+      const observation = threadWorkStateByRow.get(row);
+      if (observation?.detectedWorkInProgress && !observation.suppressed
+        && threadObservationMatchesRow(row, observation, cacheKey)) running = true;
+    });
+    return running;
+  };
+
   const scheduleThreadRunningRecheck = (cacheKey, delayMs) => {
     if (disposed || !cacheKey || threadRunningRecheckTimers.has(cacheKey)) return;
     const timer = window.setTimeout(() => {
@@ -1406,8 +1448,9 @@
       }
       refreshTrackedThreadUpdatedTimes();
       const current = threadRunningStateByCacheKey.get(cacheKey);
-      if (current === state && current?.missingSince === state.missingSince) {
-        threadRunningStateByCacheKey.delete(cacheKey);
+      if (current?.workInProgress && Number.isFinite(current.missingSince)
+        && Date.now() - current.missingSince >= threadRunningLossGraceMs) {
+        finishThreadRunningState(cacheKey, current);
       }
     }, Math.max(0, Number(delayMs) || 0));
     threadRunningRecheckTimers.set(cacheKey, timer);
@@ -1416,11 +1459,13 @@
   const stableThreadWorkInProgress = (
     cacheKey,
     detectedWorkInProgress,
-    previouslyRunning = false,
+    completed = false,
     runningContext = {},
     now = Date.now(),
   ) => {
     if (!cacheKey) return detectedWorkInProgress;
+    const state = threadRunningStateByCacheKey.get(cacheKey);
+    if (completed) return finishThreadRunningState(cacheKey, { ...state, ...runningContext });
     if (detectedWorkInProgress) {
       rememberBoundedMapValue(
         threadRunningStateByCacheKey,
@@ -1429,20 +1474,21 @@
           ...(threadRunningStateByCacheKey.get(cacheKey) || {}),
           ...runningContext,
           missingSince: null,
+          workInProgress: true,
         },
       );
       cancelThreadRunningRecheck(cacheKey);
       return true;
     }
-    let state = threadRunningStateByCacheKey.get(cacheKey);
-    if (!state && previouslyRunning) {
-      state = { ...runningContext, missingSince: now };
-      rememberBoundedMapValue(threadRunningStateByCacheKey, cacheKey, state);
-    }
-    if (!state) return false;
+    if (!state?.workInProgress) return false;
     if (runningContext.sessionId) state.sessionId = runningContext.sessionId;
     if (runningContext.hostId) state.hostId = runningContext.hostId;
     if (runningContext.projectListId) state.projectListId = runningContext.projectListId;
+    if (hasObservedThreadWorkInProgress(cacheKey)) {
+      state.missingSince = null;
+      cancelThreadRunningRecheck(cacheKey);
+      return true;
+    }
     if (!Number.isFinite(state.missingSince)) {
       state.missingSince = now;
       rememberBoundedMapValue(threadRunningStateByCacheKey, cacheKey, state);
@@ -1452,13 +1498,12 @@
       scheduleThreadRunningRecheck(cacheKey, remainingMs);
       return true;
     }
-    threadRunningStateByCacheKey.delete(cacheKey);
-    cancelThreadRunningRecheck(cacheKey);
-    return false;
+    return finishThreadRunningState(cacheKey, state);
   };
 
   const sidebarThreadTimestampState = (row, now = Date.now()) => {
-    const detectedWorkInProgress = nativeThreadWorkInProgress(row);
+    const nativeState = nativeThreadWorkState(row);
+    const detectedWorkInProgress = nativeState.workInProgress;
     const identity = threadIdentityNode(row);
     if (!(identity instanceof HTMLElement)) {
       return {
@@ -1484,22 +1529,45 @@
     }
     const cacheKey = threadTimestampCacheKey(hostId, sessionId);
     const previous = threadWorkStateByRow.get(row);
-    if (previous?.cacheKey && previous.cacheKey !== cacheKey) {
+    // 仅在临时会话获得正式 ID 时迁移状态；复用行或切换主机不能迁移其他
+    // 会话的运行状态，也不能取消其复查定时器。
+    if (previous?.cacheKey !== cacheKey && previous?.hostId === hostId
+      && previous?.sessionId?.startsWith("client-new-thread:")
+      && !sessionId.startsWith("client-new-thread:")) {
       const previousRunningState = threadRunningStateByCacheKey.get(previous.cacheKey);
       if (previousRunningState && !threadRunningStateByCacheKey.has(cacheKey)) {
         rememberBoundedMapValue(
           threadRunningStateByCacheKey,
           cacheKey,
-          previousRunningState,
+          { ...previousRunningState, hostId, sessionId },
         );
       }
       threadRunningStateByCacheKey.delete(previous.cacheKey);
       cancelThreadRunningRecheck(previous.cacheKey);
     }
+    const shared = threadRunningStateByCacheKey.get(cacheKey);
+    const sameIdentity = previous?.cacheKey === cacheKey;
+    const observation = {
+      cacheKey,
+      completionVersion: shared?.completionVersion || 0,
+      detectedWorkInProgress,
+      hostId,
+      nativeCompleted: nativeState.completed,
+      sessionId,
+      suppressed: detectedWorkInProgress && sameIdentity && (
+        previous.suppressed === true
+        || (previous.detectedWorkInProgress && (
+          shared?.workInProgress === false
+          || (previous.completionVersion || 0) < (shared?.completionVersion || 0)
+        ))
+      ),
+    };
+    threadWorkStateByRow.set(row, observation);
+    const previouslyRunning = shared?.workInProgress === true;
     const workInProgress = stableThreadWorkInProgress(
       cacheKey,
-      detectedWorkInProgress,
-      previous?.workInProgress === true,
+      detectedWorkInProgress && !observation.suppressed,
+      nativeState.completed && (!sameIdentity || !previous.nativeCompleted),
       {
         hostId,
         projectListId: threadProjectListIdFromRow(row),
@@ -1507,13 +1575,8 @@
       },
       now,
     );
-    const completedWork = Boolean(
-      previous
-      && previous.cacheKey === cacheKey
-      && previous.workInProgress
-      && !workInProgress
-    );
-    threadWorkStateByRow.set(row, { cacheKey, workInProgress });
+    const completedWork = previouslyRunning && !workInProgress;
+    if (!previouslyRunning && workInProgress) syncThreadRunningRows(cacheKey, true);
     return {
       cacheKey,
       completedWork,
@@ -1646,7 +1709,7 @@
   const recoverHiddenRunningThreads = (root = document) => {
     if (!threadRunningStateByCacheKey.size) return;
     const runningStates = [...threadRunningStateByCacheKey.values()]
-      .filter((state) => state?.sessionId);
+      .filter((state) => state?.sessionId && state.workInProgress);
     if (!runningStates.length) return;
     const now = Date.now();
     projectListsForRunningRecovery(root).forEach((projectList) => {
