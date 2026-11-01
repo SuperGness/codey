@@ -948,20 +948,24 @@ impl RouteRequestLogProbe {
             .and_then(|start| {
                 start.checked_add(Duration::from_micros(first_byte.saturating_sub(1)))
             });
-        let mut progress = lock_unpoisoned(&self.shared.live_output);
-        if let Some(sample) = progress.observe(
-            quarters,
-            reported_tokens,
-            observed_at,
-            upstream_first_byte_at,
-        ) {
-            registry.update_request_speed(
-                session_id,
-                request_id,
-                sample,
-                unix_timestamp_ms_at(observed_at),
-            );
-        }
+        let sample = {
+            let mut progress = lock_unpoisoned(&self.shared.live_output);
+            progress.observe(
+                quarters,
+                reported_tokens,
+                observed_at,
+                upstream_first_byte_at,
+            )
+        };
+        let Some(sample) = sample else {
+            return;
+        };
+        registry.update_request_speed(
+            session_id,
+            request_id,
+            sample,
+            unix_timestamp_ms_at(observed_at),
+        );
     }
 
     /// Applies the small terminal metadata projection produced by the raw
