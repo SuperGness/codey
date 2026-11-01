@@ -37,11 +37,20 @@ pub(crate) fn responses_to_chat_completions_request(
         .as_ref()
         .map(|tools| responses_tools_to_chat_tools_with_bridge(tools, &mut tool_bridge))
         .transpose()?;
-    let chat_reasoning_summaries = append_chat_messages_from_responses_input(
+    let mut chat_reasoning_summaries = append_chat_messages_from_responses_input(
         normalized_input.as_ref(),
         &mut messages,
         &mut tool_bridge,
     )?;
+    // 尾部 assistant 消息会被部分上游当成续写前缀（OpenRouter 会把结尾的
+    // assistant 映射为 DeepSeek prefix），而 prefix 与函数调用互斥。只在
+    // 请求涉及函数调用时归一化，普通多轮对话的结尾保持不变。
+    let function_calling = merged_tools.is_some()
+        || object.contains_key("function_call")
+        || messages.iter().any(chat_message_carries_function_call);
+    if function_calling {
+        normalize_trailing_chat_assistant(&mut messages, &mut chat_reasoning_summaries);
+    }
     if messages.is_empty() {
         anyhow::bail!("缺少可转换为 Chat Completions messages 的 input");
     }
@@ -160,6 +169,12 @@ pub(crate) fn responses_to_chat_completions_request(
         tool_bridge,
         chat_reasoning_summaries,
     })
+}
+
+fn chat_message_carries_function_call(message: &Value) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("tool")
+        || message.get("tool_calls").is_some()
+        || message.get("function_call").is_some()
 }
 
 pub(crate) fn responses_input_without_additional_tools(

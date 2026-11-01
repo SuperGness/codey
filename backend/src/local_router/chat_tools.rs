@@ -112,6 +112,46 @@ pub(crate) fn move_tool_images_after_tool_results(messages: &mut Vec<Value>) {
     *messages = ordered;
 }
 
+/// Responses 语义里结尾的 assistant 项只表示上下文到此为止、模型应继续
+/// 生成新的回复；部分上游却把它当成续写前缀，前缀模式与函数调用互斥会
+/// 直接拒绝整条请求。这里把尾部带正文的 assistant 改成 user，丢弃只剩
+/// reasoning 的尾部；带 tool_calls 的尾部保持原样，悬挂调用交给上游
+/// 如实报错。`chat_reasoning_summaries` 与缺少明文的 assistant 按顺序
+/// 对齐，移除或改写尾部时要同步弹出。
+pub(crate) fn normalize_trailing_chat_assistant(
+    messages: &mut Vec<Value>,
+    chat_reasoning_summaries: &mut Vec<Option<String>>,
+) {
+    while let Some(last) = messages.last() {
+        if last.get("role").and_then(Value::as_str) != Some("assistant")
+            || last.get("tool_calls").is_some()
+            || last.get("function_call").is_some()
+        {
+            return;
+        }
+        let has_reasoning = last
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.trim().is_empty());
+        if !has_reasoning {
+            chat_reasoning_summaries.pop();
+        }
+        if last
+            .get("content")
+            .is_some_and(|content| !content.is_null())
+        {
+            let object = messages
+                .last_mut()
+                .and_then(Value::as_object_mut)
+                .expect("chat message must be an object");
+            object.insert("role".to_string(), Value::String("user".to_string()));
+            object.remove("reasoning_content");
+            return;
+        }
+        messages.pop();
+    }
+}
+
 pub(crate) fn is_tool_image_message(message: &Value) -> bool {
     let Some(object) = message.as_object() else {
         return false;

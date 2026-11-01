@@ -7116,6 +7116,75 @@ fn collaboration_new_task_and_message_convert_to_user_messages() {
 }
 
 #[test]
+fn function_calling_requests_never_end_with_an_assistant_message() {
+    let body = json!({
+        "model":"provider-model",
+        "tools":[{"type":"function","name":"wait_agent","parameters":{"type":"object"}}],
+        "input":[
+            {"role":"user","content":"keep going"},
+            {"type":"function_call","call_id":"call_1","name":"wait_agent","arguments":"{}"},
+            {"type":"function_call_output","call_id":"call_1","output":"{\"message\":\"Wait completed.\"}"},
+            {
+                "type":"agent_message",
+                "author":"/root/quota_notice_dismiss",
+                "recipient":"/root",
+                "content":[{"type":"input_text","text":"Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/quota_notice_dismiss\nPayload:\nstatus: completed\n"}]
+            }
+        ]
+    });
+
+    let chat = responses_to_chat_completions_body(&body).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+    let last = messages.last().unwrap();
+    assert_eq!(
+        last["role"], "user",
+        "结尾的助手消息会被上游当成续写前缀并与函数调用冲突，必须改成用户消息：{messages:?}"
+    );
+    assert!(last.to_string().contains("Message Type: FINAL_ANSWER"));
+
+    let anthropic = responses_to_anthropic_messages_body(&body).unwrap();
+    let anthropic_messages = anthropic["messages"].as_array().unwrap();
+    assert_eq!(anthropic_messages.last().unwrap()["role"], "user");
+}
+
+#[test]
+fn function_calling_requests_drop_a_reasoning_only_trailing_assistant() {
+    let body = json!({
+        "model":"provider-model",
+        "tools":[{"type":"function","name":"run","parameters":{"type":"object"}}],
+        "input":[
+            {"role":"user","content":"keep going"},
+            {"type":"reasoning","content":[{"type":"reasoning_text","text":"计划下一步"}]}
+        ]
+    });
+
+    let chat = responses_to_chat_completions_body(&body).unwrap();
+    let messages = chat["messages"].as_array().unwrap();
+    assert_eq!(messages.last().unwrap()["role"], "user");
+    assert!(
+        messages
+            .iter()
+            .all(|message| message.get("reasoning_content").is_none())
+    );
+}
+
+#[test]
+fn function_calling_requests_keep_a_dangling_tool_call_tail() {
+    let body = json!({
+        "model":"provider-model",
+        "input":[
+            {"role":"user","content":"keep going"},
+            {"type":"function_call","call_id":"call_1","name":"run","arguments":"{}"}
+        ]
+    });
+
+    let chat = responses_to_chat_completions_body(&body).unwrap();
+    let last = chat["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["role"], "assistant");
+    assert!(last.get("tool_calls").is_some());
+}
+
+#[test]
 fn opaque_responses_content_parts_are_ignored_during_chat_fallback_conversion() {
     let body = json!({
         "model":"provider-model",
