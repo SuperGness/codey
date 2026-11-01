@@ -826,6 +826,66 @@ pub(crate) fn responses_event_sequence(response: &Value) -> Result<Vec<Value>> {
     Ok(events)
 }
 
+/// 返回序列化响应所需字节数的保守下界，避免为阈值判断复制或完整序列化响应。
+fn response_reaches_serialized_threshold(response: &Value, threshold: usize) -> bool {
+    fn add_raw(bytes: &mut usize, added: usize, threshold: usize) -> bool {
+        *bytes = bytes.saturating_add(added);
+        *bytes >= threshold
+    }
+
+    fn add(value: &Value, bytes: &mut usize, threshold: usize) -> bool {
+        let added = match value {
+            Value::Null | Value::Bool(_) => 4,
+            Value::Number(number) => number.to_string().len(),
+            Value::String(text) => text.len().saturating_add(2),
+            Value::Array(items) => {
+                let structural = 2_usize.saturating_add(items.len().saturating_sub(1));
+                return add_raw(bytes, structural, threshold)
+                    || items.iter().any(|item| add(item, bytes, threshold));
+            }
+            Value::Object(object) => {
+                let structural = 2_usize
+                    .saturating_add(3_usize.saturating_mul(object.len()))
+                    .saturating_add(object.len().saturating_sub(1));
+                if add_raw(bytes, structural, threshold) {
+                    return true;
+                }
+                for (key, value) in object {
+                    if add_raw(bytes, key.len(), threshold) || add(value, bytes, threshold) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        };
+        add_raw(bytes, added, threshold)
+    }
+
+    let mut bytes = 0;
+    add(response, &mut bytes, threshold)
+}
+
+fn should_offload_responses_event_sequence(response: &Value) -> bool {
+    response_reaches_serialized_threshold(response, REQUEST_JSON_OFFLOAD_BYTES)
+        && tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        })
+}
+
+fn run_responses_event_sequence<T>(offload: bool, build: impl FnOnce() -> T) -> T {
+    if offload {
+        tokio::task::block_in_place(build)
+    } else {
+        build()
+    }
+}
+
+pub(crate) fn build_responses_event_sequence(response: &Value) -> Result<Vec<Value>> {
+    run_responses_event_sequence(should_offload_responses_event_sequence(response), || {
+        responses_event_sequence(response)
+    })
+}
+
 pub(crate) async fn write_responses_response_as_events<D>(
     downstream: &mut D,
     response: &Value,
@@ -845,7 +905,7 @@ where
     D: ResponsesDownstream + ?Sized,
 {
     downstream.start_event_stream().await?;
-    for event in responses_event_sequence(response)? {
+    for event in build_responses_event_sequence(response)? {
         downstream.write_event(&event).await?;
     }
     Ok(())
@@ -933,4 +993,150 @@ pub(crate) fn reason_phrase(status: u16) -> &'static str {
         .ok()
         .and_then(|status| status.canonical_reason())
         .unwrap_or("Unknown")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn threshold_response(at_threshold: bool) -> Value {
+        let overhead = serde_json::to_vec(&json!({"id":""})).unwrap().len();
+        json!({
+            "id": "x".repeat(
+                REQUEST_JSON_OFFLOAD_BYTES
+                    .saturating_sub(overhead)
+                    .saturating_sub(1)
+                    .saturating_add(usize::from(at_threshold))
+            )
+        })
+    }
+
+    fn representative_response() -> Value {
+        json!({
+            "id":"resp_test",
+            "object":"response",
+            "created_at":123,
+            "status":"completed",
+            "model":"test-model",
+            "output":[
+                {
+                    "id":"msg_test",
+                    "type":"message",
+                    "status":"completed",
+                    "role":"assistant",
+                    "content":[
+                        {"type":"output_text","text":"hello","annotations":[]},
+                        {"type":"refusal","refusal":"no"}
+                    ]
+                },
+                {
+                    "id":"fc_test",
+                    "type":"function_call",
+                    "status":"completed",
+                    "call_id":"call_test",
+                    "name":"lookup",
+                    "arguments":"{\"q\":\"rust\"}"
+                }
+            ],
+            "usage":{"input_tokens":3,"output_tokens":5}
+        })
+    }
+
+    #[test]
+    fn response_offload_threshold_is_straddled() {
+        let small = threshold_response(false);
+        let large = threshold_response(true);
+
+        assert!(serde_json::to_vec(&small).unwrap().len() < REQUEST_JSON_OFFLOAD_BYTES);
+        assert!(serde_json::to_vec(&large).unwrap().len() >= REQUEST_JSON_OFFLOAD_BYTES);
+        assert!(!response_reaches_serialized_threshold(
+            &small,
+            REQUEST_JSON_OFFLOAD_BYTES
+        ));
+        assert!(response_reaches_serialized_threshold(
+            &large,
+            REQUEST_JSON_OFFLOAD_BYTES
+        ));
+    }
+
+    #[test]
+    fn offloaded_event_sequence_preserves_order_and_content() {
+        let response = representative_response();
+        let inline =
+            run_responses_event_sequence(false, || responses_event_sequence(&response).unwrap());
+        let offloaded =
+            run_responses_event_sequence(true, || responses_event_sequence(&response).unwrap());
+
+        assert_eq!(inline, offloaded);
+        assert_eq!(
+            inline
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta",
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.content_part.added",
+                "response.refusal.delta",
+                "response.refusal.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.output_item.added",
+                "response.function_call_arguments.delta",
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+                "response.completed",
+            ]
+        );
+    }
+
+    #[test]
+    fn large_responses_offload_only_on_multi_thread_runtime() {
+        let small = threshold_response(false);
+        let response = threshold_response(true);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (small_offload, offload, events) = runtime.block_on(async {
+            let (runtime_progress, runtime_progress_rx) = std::sync::mpsc::channel();
+            tokio::spawn(async move {
+                runtime_progress.send(()).unwrap();
+            });
+            (
+                should_offload_responses_event_sequence(&small),
+                should_offload_responses_event_sequence(&response),
+                run_responses_event_sequence(true, || {
+                    runtime_progress_rx
+                        .recv_timeout(std::time::Duration::from_secs(1))
+                        .expect("block_in_place should let the runtime worker continue");
+                    responses_event_sequence(&response).unwrap()
+                }),
+            )
+        });
+
+        assert!(!small_offload);
+        assert!(offload);
+        assert_eq!(events, responses_event_sequence(&response).unwrap());
+    }
+
+    #[test]
+    fn current_thread_runtime_falls_back_to_inline_construction() {
+        let response = threshold_response(true);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let events = runtime.block_on(async {
+            assert!(!should_offload_responses_event_sequence(&response));
+            build_responses_event_sequence(&response).unwrap()
+        });
+
+        assert_eq!(events, responses_event_sequence(&response).unwrap());
+    }
 }

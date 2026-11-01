@@ -792,6 +792,63 @@ pub(crate) struct AdaptedResponsesHistory {
 
 const STREAMED_OUTPUT_ITEM_LIMIT: usize = 512;
 
+/// 返回序列化正文所需字节数的保守下界，用于让大型历史准备走阻塞路径。
+fn json_value_reaches_serialized_threshold(value: &Value, threshold: usize) -> bool {
+    fn add_raw(bytes: &mut usize, added: usize, threshold: usize) -> bool {
+        *bytes = bytes.saturating_add(added);
+        *bytes >= threshold
+    }
+
+    fn add(value: &Value, bytes: &mut usize, threshold: usize) -> bool {
+        let added = match value {
+            Value::Null | Value::Bool(_) => 4,
+            Value::Number(number) => number.to_string().len(),
+            Value::String(text) => text.len().saturating_add(2),
+            Value::Array(items) => {
+                let structural = 2_usize.saturating_add(items.len().saturating_sub(1));
+                return add_raw(bytes, structural, threshold)
+                    || items.iter().any(|item| add(item, bytes, threshold));
+            }
+            Value::Object(object) => {
+                let structural = 2_usize
+                    .saturating_add(3_usize.saturating_mul(object.len()))
+                    .saturating_add(object.len().saturating_sub(1));
+                if add_raw(bytes, structural, threshold) {
+                    return true;
+                }
+                for (key, value) in object {
+                    if add_raw(bytes, key.len(), threshold) || add(value, bytes, threshold) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        };
+        add_raw(bytes, added, threshold)
+    }
+
+    let mut bytes = 0;
+    add(value, &mut bytes, threshold)
+}
+
+fn is_multi_thread_runtime() -> bool {
+    tokio::runtime::Handle::try_current()
+        .is_ok_and(|handle| handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+}
+
+fn run_history_preparation<T>(offload: bool, prepare: impl FnOnce() -> T) -> T {
+    if offload {
+        tokio::task::block_in_place(prepare)
+    } else {
+        prepare()
+    }
+}
+
+fn should_offload_history_preparation(body: &Value) -> bool {
+    json_value_reaches_serialized_threshold(body, REQUEST_JSON_OFFLOAD_BYTES)
+        && is_multi_thread_runtime()
+}
+
 impl AdaptedResponsesHistory {
     pub(crate) fn clear_pending(&mut self) {
         self.pending_input = None;
@@ -929,7 +986,7 @@ impl AdaptedResponsesHistory {
     }
 
     pub(crate) fn prepare(&mut self, body: &mut Value) -> Result<bool> {
-        self.prepare_context(body, false, true, None)
+        self.prepare_context_maybe_offloaded(body, false, true, None)
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
@@ -941,7 +998,20 @@ impl AdaptedResponsesHistory {
         body: &mut Value,
         previous: Option<&Self>,
     ) -> Result<bool> {
-        self.prepare_context(body, true, false, previous)
+        self.prepare_context_maybe_offloaded(body, true, false, previous)
+    }
+
+    fn prepare_context_maybe_offloaded(
+        &mut self,
+        body: &mut Value,
+        native: bool,
+        expand: bool,
+        previous_history: Option<&Self>,
+    ) -> Result<bool> {
+        let offload = should_offload_history_preparation(body);
+        run_history_preparation(offload, || {
+            self.prepare_context(body, native, expand, previous_history)
+        })
     }
 
     fn prepare_context(
@@ -1187,5 +1257,120 @@ mod history_tests {
             assert!(error.to_string().contains("会话历史已失效"));
             assert!(history.pending_input.is_none());
         }
+    }
+
+    fn history_threshold_body(at_threshold: bool) -> Value {
+        let overhead = serde_json::to_vec(&json!({"input": ""})).unwrap().len();
+        let len = REQUEST_JSON_OFFLOAD_BYTES - overhead - 1 + usize::from(at_threshold);
+        json!({"input": "x".repeat(len)})
+    }
+
+    fn history_input(at_threshold: bool) -> Value {
+        let overhead = serde_json::to_vec(&json!({"input": ""})).unwrap().len();
+        let len = REQUEST_JSON_OFFLOAD_BYTES - overhead - 1 + usize::from(at_threshold);
+        json!("x".repeat(len))
+    }
+
+    #[test]
+    fn history_offload_threshold_uses_the_existing_request_boundary() {
+        let small = history_threshold_body(false);
+        let large = history_threshold_body(true);
+        assert_eq!(
+            serde_json::to_vec(&small).unwrap().len(),
+            REQUEST_JSON_OFFLOAD_BYTES - 1
+        );
+        assert_eq!(
+            serde_json::to_vec(&large).unwrap().len(),
+            REQUEST_JSON_OFFLOAD_BYTES
+        );
+        assert!(!json_value_reaches_serialized_threshold(
+            &small,
+            REQUEST_JSON_OFFLOAD_BYTES
+        ));
+        assert!(json_value_reaches_serialized_threshold(
+            &large,
+            REQUEST_JSON_OFFLOAD_BYTES
+        ));
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            assert!(!should_offload_history_preparation(&small));
+            assert!(should_offload_history_preparation(&large));
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            assert!(!should_offload_history_preparation(&large));
+        });
+    }
+
+    #[test]
+    fn offloaded_history_preserves_expansion_budget_and_missing_history_behavior() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut history = AdaptedResponsesHistory::default();
+            let mut first = history_threshold_body(false);
+            assert!(!history.prepare(&mut first).unwrap());
+            history
+                .remember(
+                    "resp_codey_large",
+                    &[json!({"role":"assistant","content":"ok"})],
+                )
+                .unwrap();
+
+            let mut continuation = json!({
+                "previous_response_id": "resp_codey_large",
+                "input": history_input(true),
+            });
+            assert!(history.prepare(&mut continuation).unwrap());
+            assert!(continuation.get("previous_response_id").is_none());
+            assert_eq!(
+                continuation["input"],
+                json!([
+                    history_input(false),
+                    {"role":"assistant","content":"ok"},
+                    history_input(true),
+                ])
+            );
+            assert_eq!(history.pending_input.as_ref().unwrap().len(), 3);
+
+            history.clear_pending();
+            let mut missing = json!({
+                "input": history_threshold_body(true)["input"].clone(),
+            });
+            missing["previous_response_id"] = json!("resp_codey_missing");
+            let original = missing.clone();
+            let error = history.prepare(&mut missing).unwrap_err();
+            assert!(error.is::<MissingResponseHistory>());
+            assert_eq!(missing, original);
+            assert!(history.pending_input.is_none());
+
+            let mut history = AdaptedResponsesHistory {
+                last: Some((
+                    "resp-retained".into(),
+                    vec![json!({"role":"assistant","content":"retained"})],
+                )),
+                last_bytes: RETAINED_RESPONSE_BUDGET_BYTES,
+                ..Default::default()
+            };
+            let mut body = json!({
+                "input": history_threshold_body(true)["input"].clone(),
+            });
+            let original = body.clone();
+            assert!(history.prepare(&mut body).is_err());
+            assert_eq!(body, original);
+            assert!(history.pending_input.is_none());
+        });
     }
 }

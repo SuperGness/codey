@@ -23,6 +23,77 @@ impl BudgetedWebSocketMessage {
     }
 }
 
+/// 返回序列化正文所需字节数的保守下界。字符串转义只会增加输出，
+/// 达到门槛的正文可以安全交给阻塞路径。
+fn json_value_reaches_serialized_threshold(value: &Value, threshold: usize) -> bool {
+    fn add_raw(bytes: &mut usize, added: usize, threshold: usize) -> bool {
+        *bytes = bytes.saturating_add(added);
+        *bytes >= threshold
+    }
+
+    fn add(value: &Value, bytes: &mut usize, threshold: usize) -> bool {
+        let added = match value {
+            Value::Null | Value::Bool(_) => 4,
+            Value::Number(number) => number.to_string().len(),
+            Value::String(text) => text.len().saturating_add(2),
+            Value::Array(items) => {
+                // 括号和逗号始终输出；其他值由递归分支计入。
+                let structural = 2_usize.saturating_add(items.len().saturating_sub(1));
+                return add_raw(bytes, structural, threshold)
+                    || items.iter().any(|item| add(item, bytes, threshold));
+            }
+            Value::Object(object) => {
+                // 字符串值由递归分支计入；这里只累加键、引号、冒号和逗号。
+                let structural = 2_usize
+                    .saturating_add(3_usize.saturating_mul(object.len()))
+                    .saturating_add(object.len().saturating_sub(1));
+                if add_raw(bytes, structural, threshold) {
+                    return true;
+                }
+                for (key, value) in object {
+                    if add_raw(bytes, key.len(), threshold) || add(value, bytes, threshold) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        };
+        add_raw(bytes, added, threshold)
+    }
+
+    let mut bytes = 0;
+    add(value, &mut bytes, threshold)
+}
+
+fn should_offload_responses_json_parse(body: &[u8]) -> bool {
+    body.len() >= REQUEST_JSON_OFFLOAD_BYTES
+        && tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        })
+}
+
+fn parse_responses_json_fallback(body: &[u8]) -> serde_json::Result<Value> {
+    if should_offload_responses_json_parse(body) {
+        tokio::task::block_in_place(|| serde_json::from_slice(body))
+    } else {
+        serde_json::from_slice(body)
+    }
+}
+
+/// 大正文借用原请求树，在 `block_in_place` 中序列化，不需要复制正文。
+/// 外层任务因中断取消时，同步段退出后正文和预算许可照常返回 HTTP 回退。
+fn serialize_responses_websocket_request(body: &Value) -> serde_json::Result<String> {
+    if json_value_reaches_serialized_threshold(body, REQUEST_JSON_OFFLOAD_BYTES)
+        && tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        })
+    {
+        tokio::task::block_in_place(|| serde_json::to_string(body))
+    } else {
+        serde_json::to_string(body)
+    }
+}
+
 async fn parse_websocket_message(
     message: WebSocketMessage,
     permit: Option<OwnedSemaphorePermit>,
@@ -768,8 +839,8 @@ impl WebSocketResponsesDownstream {
             "type".to_string(),
             Value::String("response.create".to_string()),
         );
-        let message =
-            serde_json::to_string(body).context("序列化 Responses WebSocket 上游请求失败")?;
+        let message = serialize_responses_websocket_request(body)
+            .context("序列化 Responses WebSocket 上游请求失败")?;
 
         // 发送后通常不能重放。唯一例外是首事件明确拒绝持久化续接且没有执行迹象，
         // 此时仍须验证完整历史，才能通过 HTTP 继续当前请求。
@@ -1605,10 +1676,7 @@ impl ResponsesDownstream for WebSocketResponsesDownstream {
                 .write_response_failure(&ResponsesFailure::from_json(status, value))
                 .await;
         }
-        self.start_event_stream().await?;
-        for event in responses_event_sequence(value)? {
-            self.write_event(&event).await?;
-        }
+        write_responses_response_events(self, value).await?;
         self.finish_event_stream().await
     }
 
@@ -1818,7 +1886,7 @@ pub(crate) async fn proxy_native_response_to_websocket(
         }
         return downstream.finish_event_stream().await;
     }
-    match serde_json::from_slice::<Value>(&body) {
+    match parse_responses_json_fallback(&body) {
         Ok(mut value) => {
             if let Some(fix) = response_fix.as_ref() {
                 fix.apply(&mut value);
@@ -2288,6 +2356,167 @@ mod http_fallback_history_tests {
 #[cfg(test)]
 mod encode_stream_id_tests {
     use super::*;
+
+    #[test]
+    fn websocket_request_serialization_straddles_the_offload_threshold() {
+        let overhead = 12;
+        let small = json!({
+            "input": "x".repeat(REQUEST_JSON_OFFLOAD_BYTES - overhead - 1)
+        });
+        let large = json!({
+            "input": "x".repeat(REQUEST_JSON_OFFLOAD_BYTES - overhead)
+        });
+
+        assert_eq!(
+            serde_json::to_string(&small).unwrap().len(),
+            REQUEST_JSON_OFFLOAD_BYTES - 1
+        );
+        assert!(!json_value_reaches_serialized_threshold(
+            &small,
+            REQUEST_JSON_OFFLOAD_BYTES
+        ));
+        assert_eq!(
+            serde_json::to_string(&large).unwrap().len(),
+            REQUEST_JSON_OFFLOAD_BYTES
+        );
+        assert!(json_value_reaches_serialized_threshold(
+            &large,
+            REQUEST_JSON_OFFLOAD_BYTES
+        ));
+
+        let array_small_len = (REQUEST_JSON_OFFLOAD_BYTES - 2) / 5;
+        let array_small = Value::Array(std::iter::repeat_n(Value::Null, array_small_len).collect());
+        let array_large =
+            Value::Array(std::iter::repeat_n(Value::Null, array_small_len + 1).collect());
+        assert_eq!(
+            serde_json::to_string(&array_small).unwrap().len(),
+            array_small_len * 5 + 1
+        );
+        assert!(serde_json::to_string(&array_small).unwrap().len() < REQUEST_JSON_OFFLOAD_BYTES);
+        assert!(!json_value_reaches_serialized_threshold(
+            &array_small,
+            REQUEST_JSON_OFFLOAD_BYTES
+        ));
+        assert_eq!(
+            serde_json::to_string(&array_large).unwrap().len(),
+            (array_small_len + 1) * 5 + 1
+        );
+        assert!(serde_json::to_string(&array_large).unwrap().len() >= REQUEST_JSON_OFFLOAD_BYTES);
+        assert!(json_value_reaches_serialized_threshold(
+            &array_large,
+            REQUEST_JSON_OFFLOAD_BYTES
+        ));
+    }
+
+    #[test]
+    fn fallback_json_parse_uses_size_and_runtime_boundaries() {
+        let overhead = serde_json::to_vec(&json!({"id": ""})).unwrap().len();
+        let small = serde_json::to_vec(&json!({
+            "id": "x".repeat(REQUEST_JSON_OFFLOAD_BYTES - overhead - 1)
+        }))
+        .unwrap();
+        let large = serde_json::to_vec(&json!({
+            "id": "x".repeat(REQUEST_JSON_OFFLOAD_BYTES - overhead)
+        }))
+        .unwrap();
+        assert_eq!(small.len(), REQUEST_JSON_OFFLOAD_BYTES - 1);
+        assert_eq!(large.len(), REQUEST_JSON_OFFLOAD_BYTES);
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            assert!(!should_offload_responses_json_parse(&small));
+            assert!(should_offload_responses_json_parse(&large));
+            assert_eq!(
+                parse_responses_json_fallback(&large).unwrap()["id"],
+                json!("x".repeat(REQUEST_JSON_OFFLOAD_BYTES - overhead))
+            );
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            assert!(!should_offload_responses_json_parse(&large));
+            assert_eq!(
+                parse_responses_json_fallback(&large).unwrap()["id"],
+                json!("x".repeat(REQUEST_JSON_OFFLOAD_BYTES - overhead))
+            );
+        });
+    }
+
+    #[test]
+    fn fallback_json_events_keep_the_shared_sequence_and_content() {
+        let response = json!({
+            "id":"resp_fallback",
+            "object":"response",
+            "status":"completed",
+            "model":"test-model",
+            "output":[
+                {
+                    "id":"msg_fallback",
+                    "type":"message",
+                    "status":"completed",
+                    "role":"assistant",
+                    "content":[{"type":"output_text","text":"hello","annotations":[]}]
+                },
+                {
+                    "id":"fc_fallback",
+                    "type":"function_call",
+                    "status":"completed",
+                    "call_id":"call_fallback",
+                    "name":"lookup",
+                    "arguments":"{\"q\":\"rust\"}"
+                }
+            ]
+        });
+        let events = build_responses_event_sequence(&response).unwrap();
+
+        assert_eq!(events, responses_event_sequence(&response).unwrap());
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event["type"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "response.created",
+                "response.output_item.added",
+                "response.content_part.added",
+                "response.output_text.delta",
+                "response.output_text.done",
+                "response.content_part.done",
+                "response.output_item.done",
+                "response.output_item.added",
+                "response.function_call_arguments.delta",
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+                "response.completed",
+            ]
+        );
+        assert_eq!(events[3]["delta"], "hello");
+        assert_eq!(events[9]["arguments"], "{\"q\":\"rust\"}");
+    }
+
+    #[test]
+    fn large_websocket_request_serialization_retains_the_fallback_body() {
+        let body = json!({"input": "x".repeat(REQUEST_JSON_OFFLOAD_BYTES)});
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let serialized =
+            runtime.block_on(async { serialize_responses_websocket_request(&body).unwrap() });
+        assert_eq!(
+            body["input"].as_str().unwrap().len(),
+            REQUEST_JSON_OFFLOAD_BYTES
+        );
+        assert!(serialized.len() >= REQUEST_JSON_OFFLOAD_BYTES);
+    }
 
     #[test]
     fn inserted_stream_id_matches_map_insert_key_order() {
