@@ -195,31 +195,40 @@
   const mutationSubscribers = new Map();
   let mutationObserver = null;
   let nextMutationSubscriberId = 1;
+  const pendingMutationBatches = [];
+  let mutationDispatchRunning = false;
+  let mutationDispatchScheduled = false;
+  const mutationDispatchBudgetMs = 8;
+  const maxMutationSubscribersPerFrame = 16;
+
+  const codeyNow = () =>
+    typeof performance === "object" && typeof performance.now === "function"
+      ? performance.now()
+      : Date.now();
 
   // Lightweight observer telemetry: per-handler call count, mutation count and
   // wall time, exposed on window.__codeyObserverStats for performance triage.
   // No behavior change; timing falls back to Date.now() where performance is
   // unavailable (test sandboxes).
   const codeyTimed = (name, count, run) => {
-    const now = () =>
-      typeof performance === "object" && typeof performance.now === "function"
-        ? performance.now()
-        : Date.now();
     const stats = (window.__codeyObserverStats ||= {});
     const entry = (stats[name] ||= { calls: 0, items: 0, totalMs: 0, maxMs: 0 });
-    const startedAt = now();
+    const startedAt = codeyNow();
     try {
       return run();
     } finally {
-      const elapsed = now() - startedAt;
+      const elapsed = codeyNow() - startedAt;
       entry.calls += 1;
       entry.items += count;
       entry.totalMs += elapsed;
       if (elapsed > entry.maxMs) entry.maxMs = elapsed;
     }
   };
-  const dispatchMutations = (mutations) =>
-    codeyTimed("bridge.dispatchMutations", mutations?.length ?? 0, () => dispatchMutationsImpl(mutations));
+  const dispatchMutations = (mutations) => {
+    codeyTimed("bridge.dispatchMutations", mutations?.length ?? 0, () => {
+      dispatchMutationsImpl(mutations);
+    });
+  };
   // The shared observer unions every subscriber's options, so a class flip
   // anywhere in the document would otherwise wake the childList-only shields.
   // Hand each subscriber only the records its own options would have produced;
@@ -230,7 +239,7 @@
     if (type === "attributes") {
       if (!subscriber.attributes) return false;
       if (subscriber.attributeFilter === null) return true;
-      return subscriber.attributeFilter.includes(mutation.attributeName);
+      return subscriber.attributeFilter.has(mutation.attributeName);
     }
     return true;
   };
@@ -248,15 +257,120 @@
     }
     return filtered === null ? mutations : filtered;
   };
-  const dispatchMutationsImpl = (mutations) => {
-    for (const subscriber of [...mutationSubscribers.values()]) {
-      const own = mutationsFor(mutations, subscriber);
-      if (Array.isArray(own) && own.length === 0) continue;
+
+  let dispatchMutationsFrame = null;
+  const scheduleMutationDispatch = () => {
+    if (
+      mutationDispatchScheduled
+      || mutationDispatchRunning
+      || !pendingMutationBatches.length
+    ) return;
+    if (typeof window.requestAnimationFrame === "function") {
+      mutationDispatchScheduled = true;
+      window.requestAnimationFrame(() => {
+        mutationDispatchScheduled = false;
+        dispatchMutationsFrame();
+      });
+      return;
+    }
+    const scheduleTimer =
+      typeof window.setTimeout === "function"
+        ? window.setTimeout.bind(window)
+        : typeof globalThis.setTimeout === "function"
+          ? globalThis.setTimeout
+          : null;
+    if (!scheduleTimer) return;
+    mutationDispatchScheduled = true;
+    scheduleTimer(() => {
+      mutationDispatchScheduled = false;
+      dispatchMutationsFrame();
+    }, 0);
+  };
+
+  const batchSynchronousIndex = (batch) => {
+    const cached = batch.synchronousIndex;
+    if (cached === -1) return cached;
+    if (cached !== undefined && cached >= batch.index) {
+      const candidate = batch.subscribers[cached];
+      if (mutationSubscribers.get(candidate.id) === candidate) return cached;
+    }
+    let found = -1;
+    for (let index = batch.index; index < batch.subscribers.length; index += 1) {
+      const candidate = batch.subscribers[index];
+      if (mutationSubscribers.get(candidate.id) !== candidate) continue;
       try {
-        subscriber.callback(own);
-      } catch (error) {
-        window.console?.error?.("[Codey] mutation subscriber failed", error);
+        if (candidate.requiresSynchronousDelivery?.(batch.mutations) === true) {
+          found = index;
+          break;
+        }
+      } catch {
       }
+    }
+    batch.synchronousIndex = found;
+    return found;
+  };
+  const nextSynchronousDelivery = () => {
+    for (const batch of pendingMutationBatches) {
+      const index = batchSynchronousIndex(batch);
+      if (index >= 0) return { batch, index };
+    }
+    return null;
+  };
+
+  dispatchMutationsFrame = () => {
+    if (mutationDispatchRunning) return;
+    mutationDispatchRunning = true;
+    const deadline = codeyNow() + mutationDispatchBudgetMs;
+    let processedSubscribers = 0;
+    try {
+      while (pendingMutationBatches.length) {
+        const batch = pendingMutationBatches[0];
+        if (batch.index >= batch.subscribers.length) {
+          pendingMutationBatches.shift();
+          continue;
+        }
+        if (
+          processedSubscribers >= maxMutationSubscribersPerFrame
+          || codeyNow() >= deadline
+        ) {
+          // Direct controls must keep their pre-paint path. Continue earlier
+          // batches in order until that subscriber has run, then resume the
+          // normal per-frame budget.
+          const synchronous = nextSynchronousDelivery();
+          if (!synchronous) break;
+        }
+
+        const subscriber = batch.subscribers[batch.index];
+        batch.index += 1;
+        processedSubscribers += 1;
+        if (mutationSubscribers.get(subscriber.id) !== subscriber) continue;
+        const own = mutationsFor(batch.mutations, subscriber);
+        if (Array.isArray(own) && own.length === 0) continue;
+        try {
+          subscriber.callback(own);
+        } catch (error) {
+          window.console?.error?.("[Codey] mutation subscriber failed", error);
+        }
+      }
+    } finally {
+      mutationDispatchRunning = false;
+    }
+    if (pendingMutationBatches.length) scheduleMutationDispatch();
+  };
+  const dispatchMutationsImpl = (mutations) => {
+    const batch = {
+      index: 0,
+      mutations,
+      subscribers: [...mutationSubscribers.values()],
+      synchronousIndex: undefined,
+    };
+    pendingMutationBatches.push(batch);
+    const hasSynchronousDelivery = batchSynchronousIndex(batch) >= 0;
+    if (
+      !mutationDispatchRunning
+      && (!mutationDispatchScheduled || hasSynchronousDelivery)
+    ) {
+      dispatchMutationsFrame();
     }
   };
 
@@ -303,15 +417,20 @@
     const id = nextMutationSubscriberId;
     nextMutationSubscriberId += 1;
     const attributes = options.attributes === true;
-    mutationSubscribers.set(id, {
+    const subscriber = {
       callback,
       attributes,
       attributeOldValue: attributes && options.attributeOldValue === true,
       childList: options.childList === true,
       attributeFilter: attributes && Array.isArray(options.attributeFilter)
-        ? [...new Set(options.attributeFilter.map(String))]
+        ? new Set(options.attributeFilter.map(String))
         : null,
-    });
+      id,
+      requiresSynchronousDelivery: typeof options.requiresSynchronousDelivery === "function"
+        ? options.requiresSynchronousDelivery
+        : null,
+    };
+    mutationSubscribers.set(id, subscriber);
     syncMutationObserver();
 
     let subscribed = true;
@@ -338,60 +457,125 @@
     control?.textContent,
   ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
 
+  const defaultStreamingTurnSelector = "[data-turn-key]";
+  const defaultCriticalContextSelector = [
+    "dialog",
+    "[role='dialog']",
+    "[role='alertdialog']",
+    "[aria-modal='true']",
+    "[data-codey-critical-context]",
+    "aside",
+    "[data-above-composer-conversation-id]",
+    "[data-app-action-sidebar-thread-active]",
+    "[data-app-action-sidebar-thread-id]",
+    "[data-sidebar]",
+    "[data-testid*='sidebar']",
+    "[data-testid*='composer']",
+    "[data-radix-portal]",
+    "[data-testid*='portal']",
+    "[data-testid*='dialog']",
+    "[data-testid*='modal']",
+    "[data-slot='sidebar']",
+    "[data-slot='dialog']",
+    "[data-slot='popover']",
+    "[data-slot='sheet']",
+    "[data-slot='drawer']",
+  ].join(", ");
+
   const createShieldLifecycle = ({
     attributeFilter,
     block,
+    criticalContextSelector = defaultCriticalContextSelector,
     eventSelector,
+    frameRootLimit = 24,
+    nodeLimitPerRoot = 256,
     isControl,
     mutationSelector = eventSelector,
+    pendingRootLimit = 64,
+    probeNodeLimit = 0,
+    streamingTurnSelector = defaultStreamingTurnSelector,
   }) => {
     let flushTimer = 0;
     let cancelPendingFlush = null;
     let active = true;
+    let flushing = false;
     const pendingRoots = new Set();
-    const pendingRootLimit = 64;
-    const documentRoot = document.documentElement || document.body;
-
+    const resumedRoots = new Set();
+    const normalizedPendingRootLimit = Number.isInteger(pendingRootLimit)
+      ? Math.max(1, pendingRootLimit)
+      : 64;
+    const normalizedFrameRootLimit = Number.isInteger(frameRootLimit)
+      ? Math.max(1, frameRootLimit)
+      : 24;
+    const normalizedNodeLimit = Number.isInteger(nodeLimitPerRoot)
+      ? Math.max(1, nodeLimitPerRoot)
+      : 256;
+    const normalizedProbeNodeLimit = Number.isInteger(probeNodeLimit)
+      ? Math.max(0, probeNodeLimit)
+      : 0;
+    const nextTraversalCursors = new WeakMap();
+    const clearTraversalCursor = (root) => {
+      nextTraversalCursors.delete(root);
+    };
     const addPendingRoot = (root) => {
       if (!(root instanceof HTMLElement) || pendingRoots.has(root)) return;
-      if (documentRoot && pendingRoots.has(documentRoot)) return;
-      if (pendingRoots.size >= pendingRootLimit && documentRoot) {
-        pendingRoots.clear();
-        pendingRoots.add(documentRoot);
-        return;
-      }
       for (const pending of pendingRoots) {
         if (pending.contains?.(root)) return;
       }
       for (const pending of [...pendingRoots]) {
-        if (root.contains?.(pending)) pendingRoots.delete(pending);
+        if (root.contains?.(pending)) {
+          clearTraversalCursor(pending);
+          pendingRoots.delete(pending);
+        }
+      }
+      while (pendingRoots.size >= normalizedPendingRootLimit) {
+        const evicted = pendingRoots.values().next().value;
+        clearTraversalCursor(evicted);
+        pendingRoots.delete(evicted);
       }
       pendingRoots.add(root);
     };
-
-    const flushPendingRoots = () => {
-      flushTimer = 0;
-      cancelPendingFlush = null;
-      if (!pendingRoots.size) return;
-      const roots = [...pendingRoots];
-      pendingRoots.clear();
-      for (const root of roots) {
-        if (root.isConnected === false) continue;
-        block(root);
+    const scanRoot = (
+      root,
+      { maxNodes = normalizedNodeLimit, restart = false } = {},
+    ) => {
+      if (!(root instanceof HTMLElement)) {
+        return { blocked: 0, progressed: false };
       }
-    };
-
-    const blockBeforePaint = (root) => {
-      if (!(root instanceof HTMLElement) || root.isConnected === false) return 0;
-      const hasControlCandidate =
-        root.matches?.(mutationSelector) || root.querySelector?.(mutationSelector);
-      return hasControlCandidate ? block(root) : 0;
-    };
-
-    const queueMutationRoot = (root) => {
-      if (!(root instanceof HTMLElement)) return;
-      if (blockBeforePaint(root) > 0) return;
-      addPendingRoot(root);
+      const startCursor = restart ? null : nextTraversalCursors.get(root) || null;
+      let progress = null;
+      const blocked = block(root, {
+        maxNodes,
+        maxControls: maxNodes,
+        onProgress: (nextProgress) => {
+          progress = nextProgress;
+        },
+        startCursor,
+      });
+      const nextCursor = progress?.nextCursor;
+      if (!progress || progress.complete) {
+        clearTraversalCursor(root);
+        return { blocked, progressed: Boolean(progress) };
+      }
+      if (nextCursor == null) {
+        const nextIndex = Number.isInteger(progress.nextIndex)
+          ? progress.nextIndex
+          : -1;
+        if (nextIndex <= (Number.isInteger(startCursor) ? startCursor : -1)) {
+          clearTraversalCursor(root);
+          return { blocked, progressed: false };
+        }
+        nextTraversalCursors.set(root, nextIndex);
+      } else {
+        if (nextCursor === startCursor) {
+          clearTraversalCursor(root);
+          return { blocked, progressed: false };
+        }
+        nextTraversalCursors.set(root, nextCursor);
+      }
+      if (flushing) resumedRoots.add(root);
+      else addPendingRoot(root);
+      return { blocked, progressed: true };
     };
 
     const schedulePendingFlush = () => {
@@ -409,19 +593,110 @@
       cancelPendingFlush = () => window.clearTimeout?.(flushTimer);
     };
 
+    const flushPendingRoots = () => {
+      flushTimer = 0;
+      cancelPendingFlush = null;
+      let remaining = normalizedFrameRootLimit;
+      flushing = true;
+      try {
+        while (pendingRoots.size && remaining > 0) {
+          const root = pendingRoots.values().next().value;
+          pendingRoots.delete(root);
+          remaining -= 1;
+          if (root.isConnected === false) {
+            clearTraversalCursor(root);
+            continue;
+          }
+          scanRoot(root);
+        }
+      } finally {
+        flushing = false;
+      }
+      for (const root of resumedRoots) addPendingRoot(root);
+      resumedRoots.clear();
+      if (pendingRoots.size && active) schedulePendingFlush();
+    };
+
+    const directControlFor = (root) => (
+      root instanceof HTMLElement && root.matches?.(mutationSelector) ? root : null
+    );
     const mutationRoot = (node) => {
       if (node instanceof HTMLElement) return node;
       return node?.parentElement instanceof HTMLElement ? node.parentElement : null;
     };
+    const hasDirectControlMutation = (mutations) => {
+      for (const mutation of mutations || []) {
+        const target = mutationRoot(mutation?.target);
+        if (directControlFor(target?.closest?.(mutationSelector))) return true;
+        if (mutation?.type === "attributes") continue;
+        for (const node of mutation?.addedNodes || []) {
+          if (directControlFor(node)) return true;
+        }
+      }
+      return false;
+    };
+
+    const blockBeforePaint = (root) => {
+      if (!(root instanceof HTMLElement) || root.isConnected === false) return 0;
+      const directControl = directControlFor(root);
+      if (directControl) {
+        if (!isControl(directControl)) return 0;
+        scanRoot(root, { restart: true });
+        return 1;
+      }
+      if (normalizedProbeNodeLimit === 0) return 0;
+      // Probe a bounded prefix before deferring. A deep querySelector() would
+      // still traverse the entire streamed subtree even though the following
+      // inspection is budgeted, which defeats the frame budget on large roots.
+      const result = scanRoot(root, {
+        maxNodes: Math.min(normalizedNodeLimit, normalizedProbeNodeLimit),
+        restart: true,
+      });
+      // Block callbacks without cursor progress use an opaque full-root scan.
+      // Keep their previous deferred behavior instead of assuming no controls.
+      return result.progressed ? 1 : 0;
+    };
+
+    const queueMutationRoot = (root, { probeBudget } = {}) => {
+      if (!(root instanceof HTMLElement) || !active) return;
+      if (directControlFor(root)) {
+        if (isControl(root)) scanRoot(root, { restart: true });
+        return;
+      }
+      if (probeBudget && probeBudget.remaining > 0) {
+        probeBudget.remaining -= 1;
+        if (blockBeforePaint(root) > 0) return;
+      }
+      addPendingRoot(root);
+    };
+
     const unsubscribeMutations = document.documentElement
       ? subscribeMutations((mutations) => {
+        const probeBudget = { remaining: 8 };
         for (const mutation of mutations) {
           const target = mutationRoot(mutation.target);
+          const targetTurn = target?.closest?.(streamingTurnSelector);
+          const targetCritical = Boolean(target?.closest?.(criticalContextSelector));
           const containingControl = target?.closest?.(mutationSelector);
-          if (containingControl) queueMutationRoot(containingControl);
+          if (containingControl && (containingControl === target || !targetTurn)) {
+            queueMutationRoot(containingControl, { probeBudget });
+          }
           if (mutation.type === "attributes") continue;
+
           for (const node of mutation.addedNodes || []) {
-            if (node instanceof HTMLElement) queueMutationRoot(node);
+            if (!(node instanceof HTMLElement)) continue;
+            const nodeCritical = Boolean(
+              node.matches?.(criticalContextSelector)
+                || node.closest?.(criticalContextSelector),
+            );
+            const nodeTurn = targetTurn || node.closest?.(streamingTurnSelector);
+            const nodeDirectControl = directControlFor(node);
+            if (nodeTurn && !targetCritical && !nodeCritical && !nodeDirectControl) {
+              continue;
+            }
+            queueMutationRoot(node, {
+              probeBudget,
+            });
           }
         }
         if (pendingRoots.size) schedulePendingFlush();
@@ -429,6 +704,7 @@
         attributes: true,
         attributeFilter,
         childList: true,
+        requiresSynchronousDelivery: hasDirectControlMutation,
       })
       : null;
 
@@ -455,6 +731,7 @@
         flushTimer = 0;
         cancelPendingFlush = null;
         pendingRoots.clear();
+        resumedRoots.clear();
         eventNames.forEach((eventName) => {
           document.removeEventListener(eventName, stopControlEvent, true);
         });

@@ -429,6 +429,38 @@ test("reconciles the current session through AppServerManager without a completi
   assert.equal(events.length, 1);
 });
 
+test("uses the visible retained session for initial reconciliation", async () => {
+  const events = [];
+  const hidden = new FakeElement({
+    "data-response-annotation-conversation": "session-hidden",
+  });
+  hidden.layoutHidden = true;
+  const visible = new FakeElement({
+    "data-response-annotation-conversation": "session-visible",
+  });
+  const selector = [
+    "[data-above-composer-conversation-id]",
+    "[data-session-id]",
+    "[data-conversation-id]",
+    "[data-thread-id]",
+    "[data-request-user-input-auto-resolution-conversation-id]",
+    "[data-response-annotation-conversation]",
+  ].join(", ");
+  loadInjection({
+    codexSessionController: createRecoveryController(events),
+    sessionElements: {
+      [selector]: [hidden, visible],
+    },
+  });
+
+  await flushMicrotasks();
+
+  assert.deepEqual(
+    events.map((event) => event.payload.conversationId),
+    ["session-visible"],
+  );
+});
+
 test("reconciles when the conversation appears after renderer startup", async () => {
   const events = [];
   const runtime = loadInjection({

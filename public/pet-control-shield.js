@@ -74,46 +74,153 @@
     if (fallbackLabelPattern.test(descriptor)) return true;
 
     // Deliberately not memoised. React reuses host elements and swaps both
-    // __reactProps$ and __reactFiber$ independently, and the walk below reads
-    // every matching key, so no cheap identity token covers the whole verdict.
-    // At ~3 µs per control the shared walk is not worth a fail-open cache on a shield
-    // that has to fail closed; the observer throttling above is what keeps this
-    // off the streaming hot path.
+    // __reactProps$ and __reactFiber$ independently, so the walk runs on every
+    // live control. The lifecycle's mutation filtering and scan budgets keep
+    // streamed turns away from this path.
     return window.__codeySharedRuntime.reactInternalGraphIncludes(
       control,
       isPetControlId,
     );
   };
 
-  const controlsWithin = window.__codeyMutationDispatcher.controlsWithin;
+  const createElementWalker = (root) => {
+    let createTreeWalker = null;
+    try {
+      createTreeWalker = root?.ownerDocument?.createTreeWalker?.bind(root.ownerDocument)
+        || (typeof document?.createTreeWalker === "function"
+          ? document.createTreeWalker.bind(document)
+          : null);
+    } catch {
+      return null;
+    }
+    if (!createTreeWalker) return null;
+    try {
+      const walker = createTreeWalker(root, 1 | 0x100 | 0x200 | 0x400);
+      walker.currentNode = root;
+      return walker;
+    } catch {
+      return null;
+    }
+  };
 
-  const block = (root = document) => {
+  // The fallback reads only the current node's child, sibling and parent links.
+  // It never materialises the subtree, so a frame can stop between any two
+  // nodes without paying a full DOM lookup first.
+  const nextElement = (root, node) => {
+    const children = node?.children;
+    if (children?.[0]) return children[0];
+    let current = node;
+    while (current && current !== root) {
+      const parent = current.parentElement;
+      const siblings = parent?.children;
+      if (siblings) {
+        const index = siblings.indexOf(current);
+        if (index >= 0 && siblings[index + 1]) return siblings[index + 1];
+      }
+      current = parent;
+    }
+    return null;
+  };
+
+  const block = (root = document, options = {}) => {
+    const maxNodes = Number.isInteger(options.maxNodes)
+      ? Math.max(1, options.maxNodes)
+      : Number.isInteger(options.maxControls)
+        ? Math.max(1, options.maxControls)
+        : Number.MAX_SAFE_INTEGER;
     if (!enabled) return 0;
+    const traversalRoot = !(root instanceof HTMLElement)
+      && root?.documentElement instanceof HTMLElement
+      ? root.documentElement
+      : root;
+    const initialCursor = options.startCursor || null;
+    if (initialCursor && !root?.contains?.(initialCursor)) {
+      options.startCursor = null;
+    }
+
+    const walker = createElementWalker(traversalRoot);
+    let node = options.startCursor || traversalRoot;
     let blocked = 0;
-    controlsWithin(root, controlSelector).forEach((control) => {
-      if (!isPetControl(control)) return;
-      const fullyBlocked = control.getAttribute("data-codey-pet-control-blocked") === "true"
-        && control.getAttribute("aria-hidden") === "true"
-        && control.getAttribute("tabindex") === "-1"
-        && control.getAttribute("inert") !== null
-        && String(control.style.display || "").startsWith("none")
-        && (!("disabled" in control) || control.disabled);
+    let controlsInspected = 0;
+    let nodesVisited = 0;
+    let complete = false;
+    let resumed = Boolean(options.startCursor);
+
+    const visit = (current) => {
+      nodesVisited += 1;
+      if (!(current instanceof HTMLElement) || !current.matches?.(controlSelector)) {
+        return;
+      }
+      controlsInspected += 1;
+      if (!isPetControl(current)) return;
+      const fullyBlocked = current.getAttribute("data-codey-pet-control-blocked") === "true"
+        && current.getAttribute("aria-hidden") === "true"
+        && current.getAttribute("tabindex") === "-1"
+        && current.getAttribute("inert") !== null
+        && String(current.style.display || "").startsWith("none")
+        && (!("disabled" in current) || current.disabled);
       if (!fullyBlocked) {
-        control.setAttribute("data-codey-pet-control-blocked", "true");
-        control.setAttribute("aria-hidden", "true");
-        control.setAttribute("tabindex", "-1");
-        control.setAttribute("inert", "");
-        control.style.setProperty("display", "none", "important");
-        if ("disabled" in control && !control.disabled) control.disabled = true;
+        current.setAttribute("data-codey-pet-control-blocked", "true");
+        current.setAttribute("aria-hidden", "true");
+        current.setAttribute("tabindex", "-1");
+        current.setAttribute("inert", "");
+        current.style.setProperty("display", "none", "important");
+        if ("disabled" in current && !current.disabled) current.disabled = true;
       }
       blocked += 1;
+    };
+
+    if (!resumed && node !== null) visit(node);
+    while (nodesVisited < maxNodes) {
+      if (resumed) {
+        // A saved cursor means the previous frame already visited it. Seek
+        // to it and advance once without charging the cursor to this frame.
+        resumed = false;
+        if (walker) {
+          try {
+            walker.currentNode = node;
+            node = walker.nextNode();
+          } catch {
+            node = nextElement(traversalRoot, node);
+          }
+        } else {
+          node = nextElement(traversalRoot, node);
+        }
+      } else if (walker) {
+        try {
+          node = walker.nextNode();
+        } catch {
+          options.startCursor = null;
+          walker.currentNode = traversalRoot;
+          block(root, options);
+          return blocked;
+        }
+      } else {
+        node = nextElement(traversalRoot, node);
+      }
+      if (!node) {
+        complete = true;
+        break;
+      }
+      visit(node);
+    }
+
+    options.onProgress?.({
+      complete,
+      controlsInspected,
+      nextCursor: complete ? null : node,
+      nodesVisited,
     });
     return blocked;
   };
 
   if (!enabled) {
     window.__codeyBlockNativePetControls = () => 0;
-    window.__codeyPetControlShield = Object.freeze({ enabled, block: () => 0, isPetControl });
+    window.__codeyPetControlShield = Object.freeze({
+      enabled,
+      block: () => 0,
+      isPetControl,
+    });
     window.__codeyPetControlShieldCleanup = () => {
       delete window.__codeyBlockNativePetControls;
       delete window.__codeyPetControlShield;
@@ -127,6 +234,7 @@
     block,
     eventSelector: controlSelector,
     isControl: isPetControl,
+    probeNodeLimit: 64,
   });
   window.__codeyBlockNativePetControls = block;
   window.__codeyPetControlShield = Object.freeze({ enabled, block, isPetControl });

@@ -1415,6 +1415,14 @@
       const target = mutation.target instanceof HTMLElement
         ? mutation.target
         : mutation.target?.parentElement;
+      const conversationTurn = target?.closest?.("[data-turn-key]");
+      if (
+        mutation.type === "childList"
+        && conversationTurn
+        && conversationTurn.isConnected !== false
+      ) {
+        continue;
+      }
       if (
         target?.id === accountUsageId
         || target?.closest?.(`#${accountUsageId}`)

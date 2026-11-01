@@ -62,6 +62,7 @@
   let completionReconcileInFlight = false;
   let completionNextReconcileAt = 0;
   let completionReconcileSessionId = "";
+  let completionCandidateSessionId = "";
   let completionReconcileCheckTimer = 0;
   let sidebarActionTooltipTimer = 0;
   let sidebarActionTooltipAnchor = null;
@@ -90,6 +91,17 @@
     "[data-message-id]",
   ].join(", ");
   const canonicalConversationTurnSelector = "[data-turn-key]";
+  const sessionIdentityAttributes = [
+    "data-above-composer-conversation-id",
+    "data-session-id",
+    "data-conversation-id",
+    "data-thread-id",
+    "data-request-user-input-auto-resolution-conversation-id",
+    "data-response-annotation-conversation",
+  ];
+  const sessionIdentitySelector = sessionIdentityAttributes
+    .map((attribute) => `[${attribute}]`)
+    .join(", ");
   const sidebarScanRootSelector = [
     "header",
     "nav",
@@ -110,13 +122,22 @@
   const completedTaskReconcileIntervalMs = 15_000;
   // getSessionId() reads layout (getClientRects); calling it inside every
   // mutation batch forced a synchronous reflow per streamed chunk.
-  const completionReconcileMutationDelayMs = 250;
+  const completionReconcileMutationDelayMs = 1_000;
   const threadTimestampBridgePath = "/session/timestamps";
   const maxPendingThreadTimestampRefs = 200;
   const fallbackSessionExportMaxBytes = 64 * 1024 * 1024;
   const maxSessionCacheEntries = 2_048;
   const maxHardDeletedMessageKeys = 10_000;
   const maxPendingScanRoots = 64;
+  const maxIncrementalScanRootsPerFlush = 8;
+  const maxIncrementalScanDurationMs = 8;
+  const maxIncrementalMutationRecordsPerBatch = 512;
+  const maxIncrementalNodesPerBatch = 256;
+  const maxDeferredMutationTasks = 2_048;
+  const maxDeferredMutationBatches = 64;
+  const maxDeferredMutationNodes = 16_384;
+  const maxCriticalMutationProbeNodes = 16;
+  const maxAdjacentMessageSelectionRows = 9;
   const maxMessageLogicalGroupKeys = 4_096;
   const maxSelectedLogicalMessageKeys = 2_048;
   const projectRunningRecoveryClickCooldownMs = 1_000;
@@ -163,21 +184,34 @@
     return [...document.querySelectorAll(selector)].find(isRenderedSessionElement);
   };
 
-  const getSessionId = () => {
-    const attributes = [
-      // Codex keeps inactive conversations mounted. Prefer the visible
-      // composer, and never use an identifier from a hidden conversation.
-      "data-above-composer-conversation-id",
-      "data-session-id",
-      "data-conversation-id",
-      "data-thread-id",
-      "data-request-user-input-auto-resolution-conversation-id",
-      "data-response-annotation-conversation",
-    ];
-    for (const attribute of attributes) {
-      const value = visibleSessionElement(`[${attribute}]`)?.getAttribute(attribute);
-      if (value) return value.replace(/^local:/, "");
+  const visibleSessionIdentityValue = () => {
+    // Codex keeps inactive conversations mounted. Query the combined selector
+    // once, then apply the attribute order only to visible candidates.
+    let candidates = [...(document.querySelectorAll?.(sessionIdentitySelector) || [])];
+    if (!candidates.length) {
+      // A few test DOMs and older renderer shims do not implement compound
+      // selector matching. Keep the production fast path and fall back per
+      // attribute so a visible session switch still invalidates the interval.
+      candidates = sessionIdentityAttributes.flatMap((attribute) => {
+        const selector = `[${attribute}]`;
+        const first = document.querySelector?.(selector);
+        const all = [...(document.querySelectorAll?.(selector) || [])];
+        return first && !all.includes(first) ? [first, ...all] : all;
+      });
     }
+    const visibleCandidates = candidates.filter(isRenderedSessionElement);
+    for (const attribute of sessionIdentityAttributes) {
+      const value = visibleCandidates
+        .find((element) => element.hasAttribute?.(attribute))
+        ?.getAttribute(attribute);
+      if (value) return String(value).replace(/^local:/, "");
+    }
+    return "";
+  };
+
+  const getSessionId = () => {
+    const sessionIdentity = visibleSessionIdentityValue();
+    if (sessionIdentity) return sessionIdentity;
     const activeThread = visibleSessionElement('[data-app-action-sidebar-thread-active="true"]')
       ?.getAttribute("data-app-action-sidebar-thread-id");
     if (activeThread) return activeThread.replace(/^local:/, "");
@@ -185,6 +219,7 @@
     if (match) return match[1];
     return new URLSearchParams(location.search).get("conversation_id") || new URLSearchParams(location.search).get("session_id") || "";
   };
+  const sessionIdentityCandidate = visibleSessionIdentityValue;
 
   const sidebarTitles = (root = document) => queryWithin(root,
     "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]",
@@ -2687,19 +2722,27 @@
 
   const reconcileStaleCompletedTask = async () => {
     if (disposed || document.visibilityState === "hidden") return false;
-    const sessionId = getSessionId();
+    const now = Date.now();
+    if (completionReconcileInFlight) return false;
+    const candidateSessionId = sessionIdentityCandidate();
+    const candidateChanged = (
+      candidateSessionId
+      && candidateSessionId !== completionCandidateSessionId
+    );
+    // A cheap attribute lookup detects session switches. The geometry-based
+    // getSessionId() lookup stays on the throttled/reconcile path.
+    if (!candidateChanged && now < completionNextReconcileAt) return false;
+    completionCandidateSessionId = candidateSessionId;
+    const sessionId = candidateSessionId || getSessionId();
     if (!sessionId) {
       completionReconcileSessionId = "";
-      completionNextReconcileAt = 0;
       return false;
     }
     if (completionReconcileSessionId !== sessionId) {
       completionReconcileSessionId = sessionId;
       completionNextReconcileAt = 0;
     }
-    const now = Date.now();
-    if (completionReconcileInFlight || now < completionNextReconcileAt) return false;
-
+    if (now < completionNextReconcileAt) return false;
     completionReconcileInFlight = true;
     completionNextReconcileAt = now + completedTaskReconcileIntervalMs;
     try {
@@ -3473,10 +3516,67 @@
     return { button, installed: true };
   };
 
+  const adjacentMessageSelectionRows = (root) => {
+    if (!(root instanceof HTMLElement)) return [];
+    const nearestRows = (elements) => {
+      const rows = [];
+      for (const element of elements) {
+        rows.push(...messageSelectionRowsWithin(element));
+      }
+      return rows.filter((row, index) => (
+        isRenderedSessionElement(row)
+        && rows.indexOf(row) === index
+        && !hasCanonicalTurnAncestor(row)
+      ));
+    };
+    let current = root;
+    for (let level = 0; level < 4 && current; level += 1) {
+      const precedingSiblings = [];
+      const followingSiblings = [];
+      let sibling = current.previousElementSibling;
+      while (sibling && precedingSiblings.length < maxAdjacentMessageSelectionRows) {
+        precedingSiblings.push(sibling);
+        sibling = sibling.previousElementSibling;
+      }
+      sibling = current.nextElementSibling;
+      while (sibling && followingSiblings.length < maxAdjacentMessageSelectionRows) {
+        followingSiblings.push(sibling);
+        sibling = sibling.nextElementSibling;
+      }
+      const preceding = nearestRows(precedingSiblings).at(-1);
+      const following = nearestRows(followingSiblings)[0];
+      if (preceding || following) {
+        // Keep a short run of nearby turns. This covers virtualized wrappers
+        // and logical continuations without returning to a full-page scan.
+        const siblings = current.parentElement?.children || [];
+        const currentIndex = siblings.indexOf(current);
+        const nearby = currentIndex >= 0
+          ? siblings.slice(
+            Math.max(0, currentIndex - maxAdjacentMessageSelectionRows),
+            currentIndex + maxAdjacentMessageSelectionRows + 1,
+          )
+          : [current];
+        const nearbyRows = nearestRows(nearby);
+        return [...new Set([preceding, ...nearbyRows, root, following].filter(Boolean))];
+      }
+      current = current.parentElement;
+    }
+    return [root];
+  };
+
+  const directMessageSelectionRoot = (root) => (
+    root instanceof HTMLElement
+    && root.matches?.(canonicalConversationTurnSelector)
+    && !hasCanonicalTurnAncestor(root)
+    && isRenderedSessionElement(root)
+  );
+
   const installMessageSelection = (root = document) => {
     mountToolbar();
     if (lastSelectedRow?.isConnected === false) lastSelectedRow = null;
-    let rows = messageSelectionRowsWithin(root);
+    let rows = directMessageSelectionRoot(root)
+      ? [root]
+      : messageSelectionRowsWithin(root);
     let installed = false;
     const directCanonicalRow = (
       rows.length === 1
@@ -3515,8 +3615,8 @@
       // relationship with the immediately preceding turn. Recompute the
       // mounted conversation once for those bounded transitions; stable
       // streaming scans retain the direct-row fast path above.
-      const documentRows = messageSelectionRowsWithin(document);
-      if (documentRows.includes(root)) rows = documentRows;
+      const adjacentRows = adjacentMessageSelectionRows(root);
+      if (adjacentRows.includes(root)) rows = adjacentRows;
     }
     // Stable scans return through the direct-row signature fast path above.
     // Resolve the session only for rows whose identity or logical grouping may
@@ -3607,13 +3707,18 @@
     // Streaming output makes conversation turns by far the most frequent scan
     // root. Sidebar controls can never live inside a turn, so running their
     // installers there is a guaranteed-miss walk of the whole turn subtree.
-    if (
-      root instanceof HTMLElement
-      && root.matches?.(conversationTurnSelector)
-      && !root.matches?.(sidebarScanRootSelector)
-    ) {
-      installMessageSelection(root);
-      return;
+    if (root instanceof HTMLElement) {
+      const directConversationRoot = root.matches?.(conversationTurnSelector)
+        && !root.matches?.(sidebarScanRootSelector);
+      const conversationOnlyWrapper = (
+        !root.matches?.(sidebarScanRootSelector)
+        && !root.querySelector?.(sidebarScanRootSelector)
+        && Boolean(root.querySelector?.(conversationTurnSelector))
+      );
+      if (directConversationRoot || conversationOnlyWrapper) {
+        installMessageSelection(root);
+        return;
+      }
     }
     installSessionExportButtons(root);
     installTasksImportButton(root);
@@ -3678,6 +3783,73 @@
     interactiveControlSelector,
   ].join(", ");
   const pendingScanRoots = new Set();
+  let pendingScanRootsByNode = new WeakMap();
+  const pendingScanRootsByIdentity = new Map();
+  const deferredMutationBatches = [];
+  const deferredMutationSourceQueue = [];
+  const deferredMutationInputQueue = [];
+  const deferredMutationIdentityIndex = new Map();
+  let deferredMutationSequence = 0;
+  const deferredMutationSequences = new WeakMap();
+  let deferredMutationTaskCount = 0;
+  let deferredMutationNodeCount = 0;
+  let deferredMutationInputRecordCount = 0;
+  let deferredMutationInputNodeCount = 0;
+  let deferredMutationFlushScheduled = false;
+  let deferredMutationFlushHandle = 0;
+  let deferredMutationFlushUsesAnimationFrame = false;
+  const deferredMutationTaskSet = new WeakSet();
+  const nowMs = () => (
+    typeof globalThis.performance === "object"
+      && typeof globalThis.performance?.now === "function"
+      ? globalThis.performance.now()
+      : Date.now()
+  );
+  const sessionMutationTelemetryKey = "codey-inject.sessionToolMutations";
+  const sessionMutationTelemetry = () => (
+    (window.__codeyObserverStats ||= {})[sessionMutationTelemetryKey]
+    || ((window.__codeyObserverStats[sessionMutationTelemetryKey] = {}))
+  );
+  const nextSessionMutationStats = () => {
+    const existing = sessionMutationTelemetry();
+    const codeyTiming = existing.__codeyTiming || {};
+    return {
+      ...existing,
+      calls: Number(codeyTiming.calls) || 0,
+      items: Number(codeyTiming.items) || 0,
+      totalMs: Number(codeyTiming.totalMs) || 0,
+      maxMs: Number(codeyTiming.maxMs) || 0,
+      mutations: Number(existing.mutations) || 0,
+      nodes: Number(existing.nodes) || 0,
+      processedNodes: Number(existing.processedNodes) || 0,
+      pending: deferredMutationTaskCount + deferredMutationInputRecordCount + pendingScanRoots.size,
+      pendingNodes: deferredMutationNodeCount + deferredMutationInputNodeCount,
+      skipped: Number(existing.skipped) || 0,
+      timing: {
+        handleMs: Number(existing.timing?.handleMs) || 0,
+        flushMs: Number(existing.timing?.flushMs) || 0,
+        scanMs: Number(existing.timing?.scanMs) || 0,
+      },
+    };
+  };
+  const recordSessionMutationStats = (changes = {}) => {
+    const stats = nextSessionMutationStats();
+    const timing = changes.timing || {};
+    Object.assign(stats, changes);
+    stats.timing = {
+      handleMs: (stats.timing.handleMs || 0) + (Number(timing.handleMs) || 0),
+      flushMs: (stats.timing.flushMs || 0) + (Number(timing.flushMs) || 0),
+      scanMs: (stats.timing.scanMs || 0) + (Number(timing.scanMs) || 0),
+    };
+    if (changes.timing) stats.__codeyTiming = { ...stats.timing };
+    stats.pending = deferredMutationTaskCount + deferredMutationInputRecordCount + pendingScanRoots.size;
+    stats.pendingNodes = deferredMutationNodeCount + deferredMutationInputNodeCount;
+    (window.__codeyObserverStats ||= {})["codey-inject.sessionToolMutations"] = stats;
+    return stats;
+  };
+  const updateSessionMutationPending = () => {
+    recordSessionMutationStats();
+  };
 
   const isCodeyOwned = (element) => (
     element instanceof HTMLElement
@@ -3686,13 +3858,36 @@
       || element.closest?.(codeyOwnedSelector)
     )
   );
-  const containsRelevantElement = (element) => (
-    element instanceof HTMLElement
-    && (
-      element.matches?.(relevantAddedSelector)
-      || element.querySelector?.(relevantAddedSelector)
-    )
-  );
+  const containsRelevantElement = (
+    element,
+    relevance = new WeakMap(),
+    selector = relevantAddedSelector,
+  ) => {
+    if (!(element instanceof HTMLElement)) return false;
+    const cached = relevance.get(element);
+    if (cached?.has(selector)) return cached.get(selector);
+    // One containment query per candidate subtree. Scoping the cache by
+    // selector keeps interactive-only additions separate from removed turns.
+    const relevantDescendant = element.querySelector?.(selector);
+    const found = Boolean(element.matches?.(selector) || relevantDescendant);
+    let current = relevantDescendant || element;
+    while (current) {
+      let currentResults = relevance.get(current);
+      if (!currentResults) {
+        currentResults = new Map();
+        relevance.set(current, currentResults);
+      }
+      currentResults.set(selector, true);
+      if (current === element) break;
+      current = current.parentElement;
+    }
+    if (!relevantDescendant) {
+      const currentResults = relevance.get(element) || new Map();
+      currentResults.set(selector, false);
+      relevance.set(element, currentResults);
+    }
+    return found;
+  };
   const nearestScanRoot = (element) => {
     if (!(element instanceof HTMLElement)) return null;
     return element.closest?.(scanBoundarySelector)
@@ -3713,8 +3908,32 @@
     || nativeThreadStatusClassPattern.test(String(oldClassName || ""))
     || nativeThreadStatusClassPattern.test(String(target?.className || ""))
   );
+  const scanRootPriority = (root) => {
+    if (root === document.documentElement || root === document.body) return 4;
+    if (root.matches?.("header, nav, [data-app-action-sidebar-section]")) return 3;
+    if (root.matches?.(sidebarThreadRowSelector)) return 2;
+    if (root.matches?.(canonicalConversationTurnSelector)) return 0;
+    return 1;
+  };
+  const scanRootIdentity = (root) => {
+    const turnKey = root.getAttribute?.("data-turn-key");
+    if (turnKey) return `turn:${turnKey}`;
+    const threadId = root.getAttribute?.("data-app-action-sidebar-thread-id");
+    if (threadId) return `thread:${threadId}`;
+    const projectId = root.getAttribute?.("data-app-action-sidebar-project-id");
+    if (projectId) return `project:${projectId}`;
+    return "";
+  };
+  const removePendingScanRoot = (root) => {
+    if (!pendingScanRoots.delete(root)) return;
+    const metadata = pendingScanRootsByNode.get(root);
+    const identity = metadata?.identity;
+    if (identity && pendingScanRootsByIdentity.get(identity) === root) {
+      pendingScanRootsByIdentity.delete(identity);
+    }
+  };
   const addPendingScanRoot = (root) => {
-    if (!(root instanceof HTMLElement)) return;
+    if (!(root instanceof HTMLElement)) return false;
     // Header mounts must stay fresh even while the root budget is saturated,
     // otherwise the settings button can go stale for a whole mutation storm.
     if (root.matches?.("header, nav")) {
@@ -3723,29 +3942,80 @@
     // Unknown/new Codex DOM shapes must degrade by skipping optional controls,
     // not by turning a burst of virtualized rows into a synchronous full-page
     // scan on the renderer thread.
-    if (pendingScanRoots.size >= maxPendingScanRoots) return;
+    if (pendingScanRoots.has(root)) return false;
+    const identity = scanRootIdentity(root);
+    const sameIdentityRoot = identity
+      ? pendingScanRootsByIdentity.get(identity)
+      : null;
+    if (sameIdentityRoot && sameIdentityRoot !== root) {
+      removePendingScanRoot(sameIdentityRoot);
+      pendingScanRoots.add(root);
+      pendingScanRootsByNode.set(root, { identity });
+      pendingScanRootsByIdentity.set(identity, root);
+      updateSessionMutationPending();
+      return true;
+    }
+    if (pendingScanRoots.size >= maxPendingScanRoots) {
+      // A later mutation for the same priority replaces stale work so the
+      // newest identity, topology or interaction change is retained.
+      const staleRoot = [...pendingScanRoots]
+        .sort((left, right) => scanRootPriority(left) - scanRootPriority(right))[0];
+      if (!staleRoot || scanRootPriority(staleRoot) > scanRootPriority(root)) return false;
+      removePendingScanRoot(staleRoot);
+    }
     for (const pendingRoot of pendingScanRoots) {
-      if (pendingRoot === root || pendingRoot.contains?.(root)) return;
-      if (root.contains?.(pendingRoot)) pendingScanRoots.delete(pendingRoot);
+      if (pendingRoot === root || pendingRoot.contains?.(root)) return false;
+      if (root.contains?.(pendingRoot)) removePendingScanRoot(pendingRoot);
     }
     pendingScanRoots.add(root);
+    pendingScanRootsByNode.set(root, { identity });
+    if (identity) pendingScanRootsByIdentity.set(identity, root);
+    updateSessionMutationPending();
+    return true;
   };
   const flushIncrementalScans = () => {
     if (disposed) return;
     scanTimer = 0;
     scanDeadline = 0;
-    const roots = [...pendingScanRoots]
-      .filter((root) => root.isConnected !== false)
-      .filter((root, index, candidates) => !candidates.some((
-        candidate,
-        candidateIndex,
-      ) => candidateIndex !== index && candidate.contains?.(root)));
+    // addPendingScanRoot() maintains a nested-free queue, so the flush must
+    // not repeat the same containment checks over every pending root.
+    const roots = [...pendingScanRoots].filter((root) => root.isConnected !== false);
     pendingScanRoots.clear();
-    roots.forEach((root) => scan(root, true));
+    pendingScanRootsByIdentity.clear();
+    updateSessionMutationPending();
+    const startedAt = nowMs();
+    let scannedRoots = 0;
+    for (let index = 0; index < roots.length; index += 1) {
+      const root = roots[index];
+      if (scannedRoots > 0) {
+        const elapsed = nowMs() - startedAt;
+        if (
+          elapsed >= maxIncrementalScanDurationMs
+          || scannedRoots >= maxIncrementalScanRootsPerFlush
+        ) {
+          roots.slice(index).forEach(addPendingScanRoot);
+          break;
+        }
+      }
+      scan(root, true);
+      scannedRoots += 1;
+    }
+    const stats = nextSessionMutationStats();
+    recordSessionMutationStats({
+      scannedRoots: (Number(stats.scannedRoots) || 0) + scannedRoots,
+      timing: { scanMs: nowMs() - startedAt },
+    });
+    if (pendingScanRoots.size) scheduleIncrementalScan(null);
   };
   const scheduleIncrementalScan = (root) => {
     if (disposed) return;
-    addPendingScanRoot(root);
+    if (root === null) {
+      // A flush already left its overflow roots in the queue. Do not let the
+      // root-only scheduling entry point consume the budget a second time.
+      if (!pendingScanRoots.size) return;
+    } else {
+      addPendingScanRoot(root);
+    }
     const now = Date.now();
     if (!scanDeadline) scanDeadline = now + maxScanLatencyMs;
     // The debounce restarts on every batch, so a sustained mutation stream
@@ -3783,43 +4053,590 @@
   // No behavior change; timing falls back to Date.now() where performance is
   // unavailable (test sandboxes).
   const codeyTimed = (name, count, run) => {
-    const now = () =>
-      typeof performance === "object" && typeof performance.now === "function"
-        ? performance.now()
-        : Date.now();
-    const stats = (window.__codeyObserverStats ||= {});
-    const entry = (stats[name] ||= { calls: 0, items: 0, totalMs: 0, maxMs: 0 });
-    const startedAt = now();
+    const observerStats = (window.__codeyObserverStats ||= {});
+    const entry = (observerStats[name] ||= { calls: 0, items: 0, totalMs: 0, maxMs: 0 });
+    const startedAt = nowMs();
     try {
       return run();
     } finally {
-      const elapsed = now() - startedAt;
-      entry.calls += 1;
-      entry.items += count;
-      entry.totalMs += elapsed;
-      if (elapsed > entry.maxMs) entry.maxMs = elapsed;
+      const elapsed = nowMs() - startedAt;
+      const isSessionTelemetry = name === sessionMutationTelemetryKey;
+      const current = isSessionTelemetry ? sessionMutationTelemetry() : entry;
+      const previous = isSessionTelemetry ? current.__codeyTiming || {} : current;
+      const next = {
+        calls: (Number(previous.calls) || 0) + 1,
+        items: (Number(previous.items) || 0) + count,
+        totalMs: (Number(previous.totalMs) || 0) + elapsed,
+        maxMs: Math.max(Number(previous.maxMs) || 0, elapsed),
+      };
+      if (isSessionTelemetry) {
+        observerStats[name] = {
+          ...next,
+          mutations: Number(current.mutations) || 0,
+          nodes: Number(current.nodes) || 0,
+          processedNodes: Number(current.processedNodes) || 0,
+          pending: deferredMutationTaskCount + pendingScanRoots.size,
+          pendingNodes: deferredMutationNodeCount,
+          skipped: Number(current.skipped) || 0,
+          timing: {
+            ...(current.timing || {}),
+            handleMs: (Number(current.timing?.handleMs) || 0) + elapsed,
+          },
+          __codeyTiming: next,
+        };
+      } else {
+        Object.assign(entry, next);
+      }
     }
   };
-  const handleSessionToolMutations = (mutations) =>
-    codeyTimed("codey-inject.sessionToolMutations", mutations?.length ?? 0, () => handleSessionToolMutationsImpl(mutations));
-  const handleSessionToolMutationsImpl = (mutations) => {
+  const mutationNodeCount = (mutation) => (
+    (mutation.addedNodes?.length || 0) + (mutation.removedNodes?.length || 0)
+  );
+  const mutationSequenceFor = (mutation) => {
+    if (!mutation || typeof mutation !== "object") return ++deferredMutationSequence;
+    let sequence = deferredMutationSequences.get(mutation);
+    if (sequence === undefined) {
+      sequence = ++deferredMutationSequence;
+      deferredMutationSequences.set(mutation, sequence);
+    }
+    return sequence;
+  };
+  const mutationHasBoundaryNode = (nodes, selector, probeBudget) => {
+    const length = nodes?.length || 0;
+    for (let index = 0; index < length; index += 1) {
+      if (probeBudget.remaining <= 0) return false;
+      const node = nodes[index];
+      if (!(node instanceof HTMLElement)) continue;
+      probeBudget.remaining -= 1;
+      if (node.matches?.(selector) || node.querySelector?.(selector)) return true;
+    }
+    return false;
+  };
+  const isCriticalMutation = (mutation, probeBudget) => (
+    mutation.type === "childList"
+    && (
+      mutationHasBoundaryNode(
+        mutation.addedNodes,
+        scanBoundarySelector,
+        probeBudget,
+      )
+      || mutationHasBoundaryNode(
+        mutation.removedNodes,
+        conversationTurnSelector,
+        probeBudget,
+      )
+    )
+  );
+  const mutationTaskNodeCount = (task) => {
+    const addedStart = Number(task.addedOffset) || 0;
+    const removedStart = Number(task.removedOffset) || 0;
+    return Math.max(0, (task.addedNodes?.length || 0) - addedStart)
+      + Math.max(0, (task.removedNodes?.length || 0) - removedStart);
+  };
+  const arraySlice = (values, start, end) => (
+    Array.prototype.slice.call(values || [], start, end)
+  );
+  const sliceMutationTask = (task, nodeLimit) => {
+    const addedOffset = Number(task.addedOffset) || 0;
+    const removedOffset = Number(task.removedOffset) || 0;
+    const addedCount = Math.min(
+      Math.max(0, (task.addedNodes?.length || 0) - addedOffset),
+      nodeLimit,
+    );
+    const removedCount = Math.min(
+      Math.max(0, (task.removedNodes?.length || 0) - removedOffset),
+      nodeLimit - addedCount,
+    );
+    const batchAddedNodes = arraySlice(
+      task.addedNodes,
+      addedOffset,
+      addedOffset + addedCount,
+    );
+    const batchRemovedNodes = arraySlice(
+      task.removedNodes,
+      removedOffset,
+      removedOffset + removedCount,
+    );
+    const nextAddedOffset = addedOffset + addedCount;
+    const nextRemovedOffset = removedOffset + removedCount;
+    return {
+      batch: {
+        sequence: task.sequence,
+        critical: task.critical,
+        deferredIdentity: task.deferredIdentity,
+        addedNodes: batchAddedNodes,
+        removedNodes: batchRemovedNodes,
+        mutation: {
+          type: "childList",
+          target: task.mutation.target,
+          addedNodes: batchAddedNodes,
+          removedNodes: batchRemovedNodes,
+        },
+      },
+      tail: mutationTaskNodeCount({
+        ...task,
+        addedOffset: nextAddedOffset,
+        removedOffset: nextRemovedOffset,
+      }) > 0 ? {
+        ...task,
+        addedOffset: nextAddedOffset,
+        removedOffset: nextRemovedOffset,
+      } : null,
+    };
+  };
+  const mutationBatchNodeCount = (batch) => batch
+    .reduce((count, task) => count + mutationTaskNodeCount(task), 0);
+  const deferredMutationTaskIdentity = (task) => {
+    if (task.deferredIdentity !== undefined) return task.deferredIdentity;
+    const boundaryIdentity = scanRootIdentity(task.mutation?.target);
+    if (boundaryIdentity) {
+      task.deferredIdentity = boundaryIdentity;
+      return boundaryIdentity;
+    }
+    let nodeIdentity = "";
+    const addedStart = Number(task.addedOffset) || 0;
+    const removedStart = Number(task.removedOffset) || 0;
+    const addedEnd = Math.min(task.addedNodes?.length || 0, addedStart + 16);
+    const removedEnd = Math.min(task.removedNodes?.length || 0, removedStart + 16);
+    for (let index = addedStart; index < addedEnd && !nodeIdentity; index += 1) {
+      const node = task.addedNodes[index];
+      nodeIdentity = scanRootIdentity(node instanceof HTMLElement ? node : null);
+    }
+    for (let index = removedStart; index < removedEnd && !nodeIdentity; index += 1) {
+      const node = task.removedNodes[index];
+      nodeIdentity = scanRootIdentity(node instanceof HTMLElement ? node : null);
+    }
+    task.deferredIdentity = nodeIdentity || "";
+    return task.deferredIdentity;
+  };
+  const deferredMutationEntryIdentity = (task) => {
+    if (!deferredMutationTaskSet.has(task)) return task.deferredIdentity || "";
+    const identity = deferredMutationTaskIdentity(task);
+    if (identity) task.deferredIdentity = identity;
+    return identity;
+  };
+  const deferredMutationTaskGroups = () => (
+    deferredMutationBatches.length || !deferredMutationSourceQueue.length
+      ? [...deferredMutationBatches, deferredMutationSourceQueue]
+      : [deferredMutationSourceQueue]
+  );
+  const forEachDeferredMutationTask = (callback) => {
+    for (const batch of deferredMutationTaskGroups()) {
+      for (const task of batch) callback(task);
+    }
+  };
+  const rebuildDeferredMutationIdentityIndex = () => {
+    deferredMutationIdentityIndex.clear();
+    forEachDeferredMutationTask((pending) => {
+      const identity = deferredMutationEntryIdentity(pending);
+      const indexed = identity ? deferredMutationIdentityIndex.get(identity) : null;
+      if (identity && (!indexed || indexed.sequence < pending.sequence)) {
+        deferredMutationIdentityIndex.set(identity, pending);
+      }
+    });
+  };
+  const oldestDeferredMutationTask = (predicate = () => true) => {
+    let selected = null;
+    forEachDeferredMutationTask((task) => {
+      if (
+        predicate(task)
+        && (!selected || Number(task.sequence) < Number(selected.sequence))
+      ) {
+        selected = task;
+      }
+    });
+    return selected;
+  };
+  const newestDeferredMutationTaskForIdentity = (identity) => {
+    let selected = null;
+    forEachDeferredMutationTask((task) => {
+      if (
+        deferredMutationEntryIdentity(task) === identity
+        && (!selected || Number(task.sequence) > Number(selected.sequence))
+      ) {
+        selected = task;
+      }
+    });
+    return selected;
+  };
+  const removeDeferredMutationTask = (task) => {
+    const batch = task?.deferredBatch;
+    const taskIndex = batch?.indexOf(task) ?? -1;
+    if (taskIndex < 0) return false;
+    const identity = deferredMutationEntryIdentity(task);
+    batch.splice(taskIndex, 1);
+    deferredMutationTaskCount = Math.max(0, deferredMutationTaskCount - 1);
+    deferredMutationNodeCount = Math.max(
+      0,
+      deferredMutationNodeCount - mutationTaskNodeCount(task),
+    );
+    if (batch !== deferredMutationSourceQueue && !batch.length) {
+      const batchIndex = deferredMutationBatches.indexOf(batch);
+      if (batchIndex >= 0) deferredMutationBatches.splice(batchIndex, 1);
+    }
+    task.deferredBatch = null;
+    if (identity && deferredMutationIdentityIndex.get(identity) === task) {
+      deferredMutationIdentityIndex.delete(identity);
+      const replacement = newestDeferredMutationTaskForIdentity(identity);
+      if (replacement) deferredMutationIdentityIndex.set(identity, replacement);
+    }
+    return true;
+  };
+  const trimDeferredMutationQueue = () => {
+    while (
+      deferredMutationBatches.length > maxDeferredMutationBatches
+      || deferredMutationTaskCount > maxDeferredMutationTasks
+      || deferredMutationNodeCount > maxDeferredMutationNodes
+    ) {
+      // Recomputable optional UI work goes first. For keyed work, retain the
+      // newest task of each identity and evict one older task at a time so a
+      // crowded batch cannot take unrelated identities with it.
+      const task = oldestDeferredMutationTask((pending) => !pending.critical)
+        || oldestDeferredMutationTask((pending) => (
+          deferredMutationIdentityIndex.get(deferredMutationEntryIdentity(pending)) !== pending
+        ))
+        || oldestDeferredMutationTask();
+      if (!task) break;
+      removeDeferredMutationTask(task);
+    }
+    rebuildDeferredMutationIdentityIndex();
+    updateSessionMutationPending();
+  };
+  const enqueueMutationBatchTask = (pending, identity) => {
+    const lastBatch = deferredMutationBatches.at(-1);
+    const pendingNodes = mutationTaskNodeCount(pending);
+    if (identity) pending.deferredIdentity = identity;
+    deferredMutationTaskSet.add(pending);
+    pending.sequence ??= mutationSequenceFor(pending.mutation);
+    if (
+      lastBatch?.length < maxIncrementalMutationRecordsPerBatch
+      && mutationBatchNodeCount(lastBatch) + pendingNodes <= maxIncrementalNodesPerBatch
+    ) {
+      lastBatch.push(pending);
+      pending.deferredBatch = lastBatch;
+    } else {
+      const nextBatch = [pending];
+      pending.deferredBatch = nextBatch;
+      deferredMutationBatches.push(nextBatch);
+    }
+    deferredMutationTaskCount += 1;
+    deferredMutationNodeCount += pendingNodes;
+    if (identity) deferredMutationIdentityIndex.set(identity, pending);
+  };
+  const enqueueMutationSourceTask = (task, identity) => {
+    const pendingNodes = mutationTaskNodeCount(task);
+    if (!pendingNodes) return;
+    if (identity) task.deferredIdentity = identity;
+    deferredMutationTaskSet.add(task);
+    task.sequence ??= mutationSequenceFor(task.mutation);
+    task.deferredBatch = deferredMutationSourceQueue;
+    deferredMutationSourceQueue.push(task);
+    deferredMutationTaskCount += 1;
+    deferredMutationNodeCount += pendingNodes;
+    if (identity) deferredMutationIdentityIndex.set(identity, task);
+  };
+  const enqueueMutationTask = (task) => {
+    const sourceIdentity = deferredMutationTaskIdentity(task);
+    const split = task.mutation.type === "childList"
+      ? sliceMutationTask(task, maxIncrementalNodesPerBatch)
+      : { batch: task, tail: null };
+    if (task.mutation.type !== "childList" || mutationTaskNodeCount(split.batch)) {
+      enqueueMutationBatchTask(split.batch, sourceIdentity);
+    }
+    if (split.tail) enqueueMutationSourceTask(split.tail, sourceIdentity);
+    trimDeferredMutationQueue();
+    const stats = nextSessionMutationStats();
+    recordSessionMutationStats({ skipped: stats.skipped + 1 });
+  };
+  const queueDeferredMutationInputs = (mutations, start) => {
+    let records = 0;
+    let nodes = 0;
+    for (let index = start; index < mutations.length; index += 1) {
+      records += 1;
+      nodes += mutationNodeCount(mutations[index]);
+    }
+    if (!records) return 0;
+    deferredMutationInputQueue.push({
+      mutations,
+      offset: start,
+      sequence: mutationSequenceFor(mutations[start]),
+    });
+    deferredMutationInputRecordCount += records;
+    deferredMutationInputNodeCount += nodes;
+    return nodes;
+  };
+  const nextDeferredMutationTask = () => {
+    let selected = null;
+    for (const batch of deferredMutationTaskGroups()) {
+      for (const task of batch) {
+        if (!selected || Number(task.sequence) < Number(selected.sequence)) {
+          selected = task;
+        }
+      }
+    }
+    return selected;
+  };
+  const takeDeferredMutationInput = () => {
+    const entry = deferredMutationInputQueue[0];
+    if (!entry) return null;
+    const end = Math.min(
+      entry.mutations.length,
+      entry.offset + maxIncrementalMutationRecordsPerBatch,
+    );
+    const mutations = arraySlice(entry.mutations, entry.offset, end);
+    let nodes = 0;
+    for (const mutation of mutations) nodes += mutationNodeCount(mutation);
+    deferredMutationInputRecordCount = Math.max(
+      0,
+      deferredMutationInputRecordCount - mutations.length,
+    );
+    deferredMutationInputNodeCount = Math.max(
+      0,
+      deferredMutationInputNodeCount - nodes,
+    );
+    entry.offset = end;
+    if (entry.offset >= entry.mutations.length) {
+      deferredMutationInputQueue.shift();
+    } else {
+      entry.sequence = mutationSequenceFor(entry.mutations[entry.offset]);
+    }
+    return mutations;
+  };
+  const runDeferredMutationFlush = () => {
+    deferredMutationFlushScheduled = false;
+    deferredMutationFlushHandle = 0;
+    deferredMutationFlushUsesAnimationFrame = false;
     if (disposed) return;
+    let mutations = null;
+    const nextTask = nextDeferredMutationTask();
+    const nextInput = deferredMutationInputQueue[0];
+    if (
+      nextTask
+      && (!nextInput || Number(nextTask.sequence) <= Number(nextInput.sequence))
+    ) {
+      const identity = deferredMutationEntryIdentity(nextTask);
+      removeDeferredMutationTask(nextTask);
+      const split = nextTask.mutation.type === "childList"
+        ? sliceMutationTask(nextTask, maxIncrementalNodesPerBatch)
+        : { batch: nextTask, tail: null };
+      if (split.tail) enqueueMutationSourceTask(split.tail, identity);
+      mutations = [split.batch.mutation];
+    } else {
+      mutations = takeDeferredMutationInput();
+    }
+    if (!mutations?.length) {
+      updateSessionMutationPending();
+      return;
+    }
+    rebuildDeferredMutationIdentityIndex();
+    updateSessionMutationPending();
+    const startedAt = nowMs();
+    handleSessionToolMutations(mutations, {
+      deferred: true,
+      countTotals: false,
+    });
+    if (
+      deferredMutationBatches.length
+      || deferredMutationSourceQueue.length
+      || deferredMutationInputQueue.length
+    ) scheduleDeferredMutationFlush({ yieldToFrame: true });
+  };
+  const scheduleDeferredMutationFlush = ({ yieldToFrame = false } = {}) => {
+    if (
+      disposed
+      || deferredMutationFlushScheduled
+      || (!deferredMutationBatches.length
+        && !deferredMutationSourceQueue.length
+        && !deferredMutationInputQueue.length)
+    ) return;
+    deferredMutationFlushScheduled = true;
+    if (yieldToFrame && typeof window.requestAnimationFrame === "function") {
+      deferredMutationFlushUsesAnimationFrame = true;
+      deferredMutationFlushHandle = window.requestAnimationFrame(runDeferredMutationFlush);
+    } else if (yieldToFrame || typeof window.queueMicrotask !== "function") {
+      deferredMutationFlushUsesAnimationFrame = false;
+      deferredMutationFlushHandle = window.setTimeout(runDeferredMutationFlush, 0);
+    } else {
+      window.queueMicrotask(runDeferredMutationFlush);
+    }
+  };
+  const handleSessionToolMutations = (
+    mutations,
+    { deferred = false, countTotals = !deferred } = {},
+  ) => {
+    if (!mutations?.length) {
+      if (
+        !deferred
+        && (
+          deferredMutationBatches.length
+          || deferredMutationSourceQueue.length
+          || deferredMutationInputQueue.length
+        )
+      ) scheduleDeferredMutationFlush();
+      return;
+    }
+    const startedAt = nowMs();
+    const inputCount = mutations.length;
+    const handleCount = Math.min(inputCount, maxIncrementalMutationRecordsPerBatch);
+    const currentMutations = handleCount < inputCount
+      ? arraySlice(mutations, 0, handleCount)
+      : mutations;
+    // Sequence the records that run now before assigning a sequence to the
+    // overflow entry. Otherwise later overflow work can jump ahead of an
+    // earlier record whose large node list needs a deferred tail.
+    for (const mutation of currentMutations) mutationSequenceFor(mutation);
+    const overflowNodes = handleCount < inputCount
+      ? queueDeferredMutationInputs(mutations, handleCount)
+      : 0;
+    const taskCount = currentMutations.length;
+    const nodes = currentMutations.reduce(
+      (count, mutation) => count + mutationNodeCount(mutation),
+      0,
+    );
+    if (countTotals) {
+      const initialStats = nextSessionMutationStats();
+      recordSessionMutationStats({
+        mutations: initialStats.mutations + inputCount,
+        nodes: initialStats.nodes + nodes + overflowNodes,
+      });
+    }
+    try {
+      const accepted = [];
+      const deferredTasks = [];
+      const probeBudget = { remaining: maxCriticalMutationProbeNodes };
+      let acceptedNodes = 0;
+      let deferRemainingTasks = false;
+      const tasks = currentMutations.map((mutation) => {
+        const sequence = mutationSequenceFor(mutation);
+        if (mutation.type !== "childList") {
+          return {
+            mutation,
+            sequence,
+            critical: false,
+            addedNodes: [],
+            removedNodes: [],
+          };
+        }
+        return {
+          mutation,
+          sequence,
+          critical: isCriticalMutation(mutation, probeBudget),
+          addedNodes: mutation.addedNodes || [],
+          removedNodes: mutation.removedNodes || [],
+        };
+      });
+      for (const task of tasks) {
+        // Once one record needs a deferred tail, queue every later record too.
+        // This preserves MutationRecord order while still allowing the first
+        // record to use the current batch budget.
+        if (deferRemainingTasks) {
+          deferredTasks.push(task);
+          continue;
+        }
+        const taskNodes = mutationTaskNodeCount(task);
+        const nodeCapacity = Math.max(0, maxIncrementalNodesPerBatch - acceptedNodes);
+        if (task.mutation.type !== "childList") {
+          accepted.push(task);
+        } else if (taskNodes <= nodeCapacity) {
+          const { batch } = sliceMutationTask(task, nodeCapacity);
+          accepted.push(batch);
+          acceptedNodes += mutationTaskNodeCount(batch);
+        } else if (nodeCapacity > 0 && taskNodes > 0) {
+          const { batch, tail } = sliceMutationTask(task, nodeCapacity);
+          accepted.push(batch);
+          acceptedNodes += mutationTaskNodeCount(batch);
+          deferRemainingTasks = true;
+          if (tail) deferredTasks.push(tail);
+        } else {
+          deferRemainingTasks = true;
+          deferredTasks.push(task);
+        }
+      }
+      for (const task of deferredTasks) enqueueMutationTask(task);
+      const processedNodes = codeyTimed(
+        "codey-inject.sessionToolMutations",
+        taskCount,
+        () => handleSessionToolMutationsImpl(accepted.map((task) => task.mutation)),
+      );
+      const stats = nextSessionMutationStats();
+      recordSessionMutationStats({
+        processedNodes: stats.processedNodes + processedNodes,
+      });
+    } finally {
+      recordSessionMutationStats({
+        timing: countTotals
+          ? { handleMs: nowMs() - startedAt }
+          : { flushMs: nowMs() - startedAt },
+      });
+      if (
+        !deferred
+        && (
+          deferredMutationBatches.length
+          || deferredMutationSourceQueue.length
+          || deferredMutationInputQueue.length
+        )
+      ) scheduleDeferredMutationFlush();
+    }
+  };
+  const handleSessionToolMutationsImpl = (mutations) => {
+    if (disposed) return 0;
+    let processedNodes = 0;
+    const removalTargets = new Set();
+    const relevanceCache = new WeakMap();
+    const removalRelevanceCache = new WeakMap();
+    const targetContextCache = new WeakMap();
+    const contextForTarget = (target) => {
+      if (!(target instanceof HTMLElement)) {
+        return { conversationTurn: null, threadRow: null };
+      }
+      const cached = targetContextCache.get(target);
+      if (cached) return cached;
+      const context = {
+        conversationTurn: target.closest?.(canonicalConversationTurnSelector) || null,
+        threadRow: target.closest?.(sidebarThreadRowSelector) || null,
+      };
+      targetContextCache.set(target, context);
+      return context;
+    };
     for (const mutation of mutations) {
       const target = mutation.target instanceof HTMLElement
         ? mutation.target
         : mutation.target?.parentElement;
       if (mutation.type === "attributes") {
         if (target && !isCodeyOwned(target)) {
-          const threadRow = target.closest?.(sidebarThreadRowSelector) || null;
+          const { threadRow } = contextForTarget(target);
           const relevantThreadClassChange = threadRow
             && mutation.attributeName === "class"
             && threadClassMutationMayAffectStatus(target, threadRow, mutation.oldValue);
-          if (relevantThreadClassChange || mutation.attributeName !== "class") {
-            addPendingScanRoot(threadRow || nearestScanRoot(target));
+          const pureUiAttributeChange = [
+            "aria-label",
+            "aria-hidden",
+            "disabled",
+            "hidden",
+          ].includes(mutation.attributeName);
+          if (relevantThreadClassChange || (
+            mutation.attributeName !== "class"
+            && !pureUiAttributeChange
+          )) {
+            const topologyRoot = (
+              threadRow
+              || nearestScanRoot(target)
+              || (sessionIdentityAttributes.includes(mutation.attributeName)
+                ? document.body
+                : null)
+            );
+            if (addPendingScanRoot(topologyRoot)) {
+              processedNodes += 1;
+            }
           }
         }
         continue;
       }
+      const targetContext = contextForTarget(target);
+      // Mutation storms inside one mounted turn do not need sidebar or toolbar
+      // discovery. Rejecting the whole record before inspecting every added or
+      // removed node keeps streaming churn off the optional tool path.
+      if (targetContext.conversationTurn) continue;
       // Depends only on mutation.target, so it is identical for every node in
       // this record; streaming appends many text nodes per record.
       let interactiveRoot;
@@ -3835,39 +4652,41 @@
           if (node?.nodeType !== Node.TEXT_NODE) continue;
           const root = interactiveRootFor();
           if (root && !isCodeyOwned(root)) {
-            addPendingScanRoot(root);
+            if (addPendingScanRoot(root)) processedNodes += 1;
           }
           continue;
         }
         if (isCodeyOwned(element)) continue;
         const threadRow = element.closest?.(sidebarThreadRowSelector)
-          || target?.closest?.(sidebarThreadRowSelector)
-          || null;
+          || targetContext.threadRow;
         if (threadRow) {
-          addPendingScanRoot(threadRow);
+          if (addPendingScanRoot(threadRow)) processedNodes += 1;
           continue;
         }
-        if (!containsRelevantElement(element)) continue;
-        addPendingScanRoot(addedSubtreeScanRoot(element));
+        if (!containsRelevantElement(element, relevanceCache)) continue;
+        if (addPendingScanRoot(addedSubtreeScanRoot(element))) processedNodes += 1;
       }
       for (const node of mutation.removedNodes || []) {
         const element = node instanceof HTMLElement ? node : null;
         if (!element) continue;
-        const threadRow = target?.closest?.(sidebarThreadRowSelector) || null;
-        if (threadRow && !isCodeyOwned(target)) {
-          addPendingScanRoot(threadRow);
+        if (targetContext.threadRow && !isCodeyOwned(target)) {
+          if (addPendingScanRoot(targetContext.threadRow)) processedNodes += 1;
           continue;
         }
-        if (!containsRelevantElement(element)) continue;
-        if (target && !isCodeyOwned(target)) {
-          const topologyRoot = addedSubtreeScanRoot(target) || nearestScanRoot(target);
-          messageSelectionRowsWithin(topologyRoot).forEach((row) => {
-            delete row.dataset.codeySelectionSignature;
-          });
-          addPendingScanRoot(topologyRoot);
+        if (!containsRelevantElement(element, removalRelevanceCache, conversationTurnSelector)) {
+          continue;
         }
+        if (target && !isCodeyOwned(target)) removalTargets.add(target);
       }
     }
+    removalTargets.forEach((target) => {
+      const topologyRoot = addedSubtreeScanRoot(target) || nearestScanRoot(target);
+      if (!topologyRoot) return;
+      messageSelectionRowsWithin(topologyRoot).forEach((row) => {
+        delete row.dataset.codeySelectionSignature;
+      });
+      if (addPendingScanRoot(topologyRoot)) processedNodes += 1;
+    });
     if (pendingScanRoots.size) {
       scheduleIncrementalScan(null);
     }
@@ -3877,20 +4696,29 @@
         void reconcileStaleCompletedTask();
       }, completionReconcileMutationDelayMs);
     }
+    return processedNodes;
   };
   const sessionToolMutationOptions = {
+
     attributes: true,
     attributeOldValue: true,
     attributeFilter: [
-      "aria-label",
       "aria-expanded",
-      "aria-hidden",
+      "class",
       "data-turn-key",
       "data-message-id",
       "data-messageid",
       "data-item-id",
       "data-id",
+      "data-message-author-role",
+      "data-testid",
+      "data-above-composer-conversation-id",
+      "data-session-id",
+      "data-conversation-id",
+      "data-thread-id",
       "data-request-user-input-auto-resolution-conversation-id",
+      "data-response-annotation-conversation",
+      "data-app-action-sidebar-thread-active",
       "data-app-action-sidebar-thread-host-id",
       "data-app-action-sidebar-thread-id",
       "data-app-action-sidebar-thread-kind",
@@ -3898,11 +4726,9 @@
       "data-app-action-sidebar-project-id",
       "data-app-action-sidebar-project-list-id",
       "data-app-action-sidebar-project-row",
+      "data-app-action-sidebar-section-heading",
+      "data-app-action-sidebar-section-toggle",
       sidebarProjectShowAllAttribute,
-      "data-testid",
-      "disabled",
-      "hidden",
-      "class",
     ],
     childList: true,
     subtree: true,
@@ -3927,12 +4753,30 @@
     ]) {
       window.clearTimeout(id);
     }
+    if (deferredMutationFlushUsesAnimationFrame) {
+      window.cancelAnimationFrame?.(deferredMutationFlushHandle);
+    } else {
+      window.clearTimeout(deferredMutationFlushHandle);
+    }
     if (initialScanUsesIdleCallback) window.cancelIdleCallback?.(initialScanHandle);
     else window.clearTimeout(initialScanHandle);
     hideSidebarActionTooltip();
     for (const id of threadRunningRecheckTimers.values()) window.clearTimeout(id);
     threadRunningRecheckTimers.clear();
     pendingScanRoots.clear();
+    pendingScanRootsByIdentity.clear();
+    pendingScanRootsByNode = new WeakMap();
+    deferredMutationBatches.length = 0;
+    deferredMutationSourceQueue.length = 0;
+    deferredMutationInputQueue.length = 0;
+    deferredMutationTaskCount = 0;
+    deferredMutationNodeCount = 0;
+    deferredMutationInputRecordCount = 0;
+    deferredMutationInputNodeCount = 0;
+    deferredMutationFlushScheduled = false;
+    deferredMutationFlushUsesAnimationFrame = false;
+    deferredMutationIdentityIndex.clear();
+    updateSessionMutationPending();
     pendingThreadUpdatedAtRefs.clear();
     threadUpdatedAtRows.clear();
     // Native-operation timeout promises must still settle after disposal.

@@ -5,13 +5,22 @@ import vm from "node:vm";
 import { readSource } from "./helpers/read-source.mjs";
 
 test("renderer core loads session tools after idle time or sidebar use", async () => {
-  const [inject, sessionTools, bridge, petShield, securityShield, promptOptimize] = await Promise.all([
+  const [
+    inject,
+    sessionTools,
+    bridge,
+    petShield,
+    securityShield,
+    promptOptimize,
+    quotaDismiss,
+  ] = await Promise.all([
     readSource("public/renderer-inject.js"),
     readSource("public/codey-inject.js"),
     readSource("public/codey-bridge.js"),
     readSource("public/pet-control-shield.js"),
     readSource("public/security-warning-shield.js"),
     readSource("public/prompt-optimize.js"),
+    readSource("public/quota-notice-dismiss.js"),
   ]);
 
   assert.match(inject, /const queryWithin = \(root, selector\)/);
@@ -106,11 +115,14 @@ test("renderer core loads session tools after idle time or sidebar use", async (
     /const reconcileStaleCompletedTask = async \(\) => \{([\s\S]*?)\n  \};/,
   )?.[1] ?? "";
   assert.ok(reconcileBody.length > 0);
-  assert.match(reconcileBody, /const sessionId = getSessionId\(\)/);
+  assert.match(reconcileBody, /const candidateSessionId = sessionIdentityCandidate\(\)/);
+  assert.match(reconcileBody, /const sessionId = candidateSessionId \|\| getSessionId\(\)/);
   assert.doesNotMatch(
     reconcileBody,
     /querySelector|data-turn-key|textContent|discardConversation|unsubscribe|interrupt|turn\/start/,
   );
+  assert.match(sessionTools, /const visibleSessionIdentityValue = \(\) => \{/);
+  assert.match(sessionTools, /candidates\.filter\(isRenderedSessionElement\)/);
   assert.match(sessionTools, /window\.__codeyRendererInvalidateHeaderMount\?\.\(root\)/);
   assert.doesNotMatch(sessionTools, /headerMountDirty/);
   assert.match(sessionTools, /const threadUpdatedAtRows = new Set\(\)/);
@@ -157,11 +169,19 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   )?.[1] ?? "";
   assert.match(sessionObserverBody, /addPendingScanRoot\(threadRow\)/);
   assert.match(sessionObserverBody, /reconcileStaleCompletedTask/);
+  assert.match(
+    sessionObserverBody,
+    /const targetContext = contextForTarget\(target\);[\s\S]*?if \(targetContext\.conversationTurn\) continue;/,
+  );
   // getSessionId() reads layout; it must not run synchronously per mutation batch.
   assert.doesNotMatch(sessionObserverBody, /getSessionId\(\)/);
   assert.match(
     sessionObserverBody,
     /completionReconcileCheckTimer = window\.setTimeout\(\(\) => \{[\s\S]*?void reconcileStaleCompletedTask\(\);[\s\S]*?\}, completionReconcileMutationDelayMs\)/,
+  );
+  assert.match(
+    sessionTools,
+    /const conversationOnlyWrapper = \([\s\S]*?installMessageSelection\(root\);\s*return;/,
   );
   assert.match(sessionTools, /mutationDispatcher\.subscribe\(\s*handleSessionToolMutations/);
   assert.match(sessionTools, /new MutationObserver\(handleSessionToolMutations\)/);
@@ -178,7 +198,7 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   );
   assert.match(modelWhitelist, /characterData:\s*true/);
   assert.doesNotMatch(inject, /__codeyBlockNativePetControls/);
-  assert.match(petShield, /const block = \(root = document\)/);
+  assert.match(petShield, /const block = \(root = document, options = \{\}\)/);
   assert.match(petShield, /if \(!enabled\) \{/);
   assert.match(bridge, /window\.__codeyMutationDispatcher = Object\.freeze/);
   assert.match(bridge, /const createShieldLifecycle = \(\{/);
@@ -186,6 +206,17 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   assert.doesNotMatch(petShield, /const controlsWithin = \(root, selector\) =>/);
   assert.match(petShield, /__codeyMutationDispatcher\?\.createShieldLifecycle/);
   assert.match(securityShield, /__codeyMutationDispatcher\.subscribe/);
+  assert.match(quotaDismiss, /__codeyMutationDispatcher\.subscribe/);
+  assert.match(quotaDismiss, /const conversationTurnSelector = "\[data-turn-key\]"/);
+  assert.match(quotaDismiss, /shouldSkipMountedTurnMutation/);
+  assert.match(quotaDismiss, /warningSurfaceSelector[\s\S]*node\.children[\s\S]*warningSurfaceSelector/);
+  assert.match(quotaDismiss, /pendingRoots\.values\(\)\.next\(\)\.value/);
+  assert.doesNotMatch(quotaDismiss, /pendingRoots\.add\(document\.documentElement\)/);
+  assert.match(securityShield, /const conversationTurnSelector = "\[data-turn-key\]"/);
+  assert.match(securityShield, /shouldSkipMountedTurnMutation/);
+  assert.match(securityShield, /warningSurfaceSelector[\s\S]*node\.children[\s\S]*warningSurfaceSelector/);
+  assert.match(securityShield, /pendingRoots\.values\(\)\.next\(\)\.value/);
+  assert.doesNotMatch(securityShield, /pendingRoots\.add\(document\.documentElement\)/);
   assert.doesNotMatch(petShield, /new MutationObserver/);
   assert.doesNotMatch(securityShield, /new MutationObserver/);
 });

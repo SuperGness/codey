@@ -15,6 +15,12 @@ class FakeElement extends FakeElementCore {
   constructor(tagName = "div", { visible = true } = {}) {
     super(tagName);
     this.visible = visible;
+    this.querySelectorCalls = [];
+  }
+
+  querySelector(selector) {
+    this.querySelectorCalls.push(selector);
+    return super.querySelector(selector);
   }
 
   matches(selector) {
@@ -424,6 +430,41 @@ test("restores a composer promptly when its hidden attribute is removed", async 
     await flushTimers(160);
     assert.equal(env.bar().hidden, false);
     assert.equal(metric(env.bar(), "total"), "132k tok");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("ignores streaming child churn and visibility flips inside conversation turns", async () => {
+  const delays = [];
+  const env = createEnvironment({
+    onTimer: (delay) => delays.push(delay),
+    statsBySession: { "conversation-1": STATS },
+  });
+  try {
+    await flushTimers(30);
+    const turn = env.document.createElement("div");
+    turn.setAttribute("data-turn-key", "turn-1");
+    env.scope.appendChild(turn);
+    const streamedNode = turn.appendChild(env.document.createElement("span"));
+    streamedNode.querySelectorCalls.length = 0;
+    delays.length = 0;
+
+    env.emitMutation([{
+      type: "childList",
+      target: turn,
+      addedNodes: [streamedNode],
+    }]);
+    turn.setAttribute("aria-hidden", "true");
+    env.emitMutation([{
+      type: "attributes",
+      target: turn,
+      attributeName: "aria-hidden",
+    }]);
+    await flushTimers(160);
+
+    assert.deepEqual(streamedNode.querySelectorCalls, []);
+    assert.equal(delays.includes(120), false);
   } finally {
     env.dispose();
   }

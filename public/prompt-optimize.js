@@ -39,6 +39,7 @@
   let ready = false;
   let inputElement = null;
   let button = null;
+  let buttonHiddenWithoutTarget = false;
   let busy = false;
 
   const publishInjectionStatus = () => {
@@ -86,6 +87,12 @@
       timer = setTimeout(() => resolve({ status: "failed", message }), ms);
     });
     return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  };
+
+  const findComposerAnchorNode = (node) => {
+    if (!node || typeof node !== "object") return null;
+    const target = node.closest?.(composerAnchorSelector);
+    return target || node.querySelector?.(composerAnchorSelector) || null;
   };
 
   const addStyle = () => {
@@ -214,59 +221,130 @@
     return element.getAttribute?.("role") === "textbox";
   };
 
-  const isVisible = (element) => {
-    if (!isComposerInput(element)) return false;
-    if (element.closest?.(ignoredComposerContainerSelector)) return false;
-    if (element.closest?.("[hidden], [aria-hidden='true']")) return false;
-    if (element.disabled || element.readOnly) return false;
-    const style = window.getComputedStyle(element);
-    if (style.display === "none" || style.visibility === "hidden") return false;
-    const rect = element.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
+  const createGeometryCache = () => ({
+    inputs: new Map(),
+    controls: new Map(),
+  });
+
+  const trackedComposerRegion = () => {
+    const buttonHost = button?.parentElement;
+    if (buttonHost) return buttonHost.parentElement || buttonHost;
+    const scope = findComposerAnchorNode(inputElement)?.parentElement;
+    return scope || inputElement?.parentElement || null;
   };
+
+  const nodeInsideComposerRegion = (node) => {
+    const region = trackedComposerRegion();
+    return Boolean(
+      region &&
+        node &&
+        (node === region || region.contains?.(node)),
+    );
+  };
+
+  const measureInput = (element, cache = null) => {
+    if (cache?.inputs.has(element)) return cache.inputs.get(element);
+    let measured = null;
+    if (isComposerInput(element)) {
+      const ignored =
+        element.closest?.(ignoredComposerContainerSelector) ||
+        element.closest?.("[hidden], [aria-hidden='true']") ||
+        element.disabled ||
+        element.readOnly;
+      if (!ignored) {
+        const style = window.getComputedStyle(element);
+        if (style.display !== "none" && style.visibility !== "hidden") {
+          const rect = element.getBoundingClientRect();
+          measured = {
+            rect,
+            visible: rect.width > 0 && rect.height > 0,
+          };
+        }
+      }
+    }
+    cache?.inputs.set(element, measured);
+    return measured;
+  };
+
+  const isVisible = (element, cache = null) =>
+    measureInput(element, cache)?.visible === true;
 
   const controlLooksLikeComposerAction = (control) =>
     /(^|[^a-z])(model|send|submit|attach|upload|microphone|mic|voice|full access|permissions?|approvals?)([^a-z]|$)|模型|发送|提交|附件|上传|语音|麦克风|完全访问|权限|审批|只读/i.test(
       controlDescriptor(control),
     );
 
-  const controlIsNearInput = (control, inputRect) => {
-    const rect = control.getBoundingClientRect();
+  const measureVisibleControl = (control, cache = null) => {
+    if (!control || control === button) return null;
+    if (cache?.controls.has(control)) return cache.controls.get(control);
+    let measured = null;
+    if (
+      !control.closest?.(ignoredControlContainerSelector) &&
+      !control.closest?.("[hidden], [aria-hidden='true']") &&
+      !control.disabled
+    ) {
+      const style = window.getComputedStyle(control);
+      if (style.display !== "none" && style.visibility !== "hidden") {
+        const rect = control.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          measured = { rect, visible: true };
+        }
+      }
+    }
+    cache?.controls.set(control, measured);
+    return measured;
+  };
+
+  const controlIsNearInput = (control, inputRect, measured = null) => {
+    const rect = measured?.rect;
+    if (!rect) return false;
     if (rect.bottom <= inputRect.top) return false;
     const controlMiddle = rect.top + rect.height / 2;
     const inputMiddle = inputRect.top + inputRect.height / 2;
     return Math.abs(controlMiddle - inputMiddle) <= Math.max(96, inputRect.height);
   };
 
-  const scopeHasComposerActions = (scope, inputRect) =>
+  const scopeHasComposerActions = (scope, inputRect, cache) =>
     [...(scope?.querySelectorAll?.(composerControlSelector) || [])].some(
-      (control) =>
-        isVisibleControl(control) &&
-        controlIsNearInput(control, inputRect) &&
-        controlLooksLikeComposerAction(control),
+      (control) => {
+        const measured = measureVisibleControl(control, cache);
+        return (
+          measured &&
+          controlIsNearInput(control, inputRect, measured) &&
+          controlLooksLikeComposerAction(control)
+        );
+      },
     );
 
-  const scopeHasVisibleControls = (scope, inputRect) =>
+  const scopeHasVisibleControls = (scope, inputRect, cache) =>
     [...(scope?.querySelectorAll?.(composerControlSelector) || [])].some(
-      (control) =>
-        isVisibleControl(control) && controlIsNearInput(control, inputRect),
+      (control) => {
+        const measured = measureVisibleControl(control, cache);
+        return measured && controlIsNearInput(control, inputRect, measured);
+      },
     );
 
-  const hasComposerActionContext = (element) => {
+  const hasComposerActionContext = (
+    element,
+    measuredInput = null,
+    cache = null,
+  ) => {
     if (!element?.parentElement) return false;
-    const inputRect = element.getBoundingClientRect();
+    const measured = measuredInput || measureInput(element, cache);
+    if (!measured?.visible) return false;
+    const inputRect = measured.rect;
     let scope = element.parentElement;
     let depth = 0;
     while (scope && depth < 6) {
-      if (scopeHasComposerActions(scope, inputRect)) return true;
-      if (scopeHasVisibleControls(scope, inputRect)) return false;
+      if (scopeHasComposerActions(scope, inputRect, cache)) return true;
+      if (scopeHasVisibleControls(scope, inputRect, cache)) return false;
       scope = scope.parentElement;
       depth += 1;
     }
     return false;
   };
 
-  const findComposerInput = () => {
+  const findComposerInput = (cache = createGeometryCache()) => {
     const seen = new Set();
     for (const anchor of document.querySelectorAll(composerAnchorSelector)) {
       if (seen.has(anchor)) continue;
@@ -274,7 +352,7 @@
       const scope = anchor.parentElement || anchor;
       const candidates = [...scope.querySelectorAll(composerCandidateSelector)];
       for (const candidate of candidates) {
-        if (isVisible(candidate)) return candidate;
+        if (isVisible(candidate, cache)) return candidate;
       }
     }
     // New conversations do not have a conversation-id anchor yet. Prefer the
@@ -287,9 +365,10 @@
     for (const candidate of document.querySelectorAll(
       composerFallbackSelector,
     )) {
-      if (!isVisible(candidate)) continue;
-      if (!hasComposerActionContext(candidate)) continue;
-      const rect = candidate.getBoundingClientRect();
+      const measuredInput = measureInput(candidate, cache);
+      if (!measuredInput?.visible) continue;
+      if (!hasComposerActionContext(candidate, measuredInput, cache)) continue;
+      const rect = measuredInput.rect;
       if (
         viewportHeight > 0 &&
         (rect.bottom <= 0 || rect.top >= viewportHeight)
@@ -319,21 +398,13 @@
       .replace(/\s+/g, " ")
       .trim();
 
-  const isVisibleControl = (element) => {
-    if (!element || element === button) return false;
-    if (element.closest?.(ignoredControlContainerSelector)) return false;
-    if (element.closest?.("[hidden], [aria-hidden='true']")) return false;
-    if (element.disabled) return false;
-    const style = window.getComputedStyle(element);
-    if (style.display === "none" || style.visibility === "hidden") return false;
-    const rect = element.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  };
-
-  const accessControlScore = (control, inputRect) => {
-    const rect = control.getBoundingClientRect();
+  const accessControlScore = (control, inputRect, measured) => {
+    const rect = measured?.rect;
+    if (!rect) return Number.NEGATIVE_INFINITY;
     if (rect.bottom <= inputRect.top) return Number.NEGATIVE_INFINITY;
-    if (!controlIsNearInput(control, inputRect)) return Number.NEGATIVE_INFINITY;
+    if (!controlIsNearInput(control, inputRect, measured)) {
+      return Number.NEGATIVE_INFINITY;
+    }
     const descriptor = controlDescriptor(control);
     const visibleText = (control.textContent || control.innerText || "")
       .replace(/\s+/g, " ")
@@ -352,9 +423,17 @@
     );
   };
 
-  const findAccessInsertionTarget = (input = inputElement) => {
+  const findAccessInsertionTarget = (
+    input = inputElement,
+    measuredInput = null,
+    cache = null,
+  ) => {
     if (!input?.parentElement) return null;
-    const inputRect = input.getBoundingClientRect();
+    const geometryCache = cache || createGeometryCache();
+    const measured = measuredInput || measureInput(input, geometryCache);
+    geometryCache.inputs.set(input, measured);
+    if (!measured?.visible) return null;
+    const inputRect = measured.rect;
     const seen = new Set();
     let bestControl = null;
     let bestScore = Number.NEGATIVE_INFINITY;
@@ -363,10 +442,15 @@
     while (scope && depth < 8) {
       for (const control of scope.querySelectorAll?.(composerControlSelector) ||
         []) {
-        if (input.contains?.(control)) continue;
-        if (seen.has(control) || !isVisibleControl(control)) continue;
+        if (input.contains?.(control) || seen.has(control)) continue;
         seen.add(control);
-        const score = accessControlScore(control, inputRect);
+        const measuredControl = measureVisibleControl(control, geometryCache);
+        if (!measuredControl) continue;
+        const score = accessControlScore(
+          control,
+          inputRect,
+          measuredControl,
+        );
         if (score > bestScore) {
           bestControl = control;
           bestScore = score;
@@ -377,7 +461,7 @@
       depth += 1;
     }
     if (!bestControl) return null;
-    if (!hasComposerActionContext(input)) return null;
+    if (!hasComposerActionContext(input, measured, geometryCache)) return null;
 
     let anchor = bestControl;
     let host = bestControl.parentElement;
@@ -421,17 +505,24 @@
     }
   };
 
-  const updateButtonPosition = () => {
+  const updateButtonPosition = (geometryCache = createGeometryCache()) => {
     if (!button || !inputElement) return;
-    if (!isVisible(inputElement)) {
+    const measuredInput = measureInput(inputElement, geometryCache);
+    if (!measuredInput?.visible) {
       inputElement = null;
+      buttonHiddenWithoutTarget = false;
       button.style.display = "none";
       scheduleScan(true);
       return;
     }
-    const target = findAccessInsertionTarget();
+    const target = findAccessInsertionTarget(
+      inputElement,
+      measuredInput,
+      geometryCache,
+    );
     if (!target) {
       removeButtonFromEditableInput();
+      buttonHiddenWithoutTarget = true;
       button.style.display = "none";
       return;
     }
@@ -440,6 +531,7 @@
       nodeIsInsideInputElement(target.anchor)
     ) {
       removeButtonFromEditableInput();
+      buttonHiddenWithoutTarget = true;
       button.style.display = "none";
       return;
     }
@@ -448,6 +540,7 @@
     }
     button.style.top = "";
     button.style.left = "";
+    buttonHiddenWithoutTarget = false;
     button.style.display = "inline-flex";
     button.dataset.codeyPromptOptimizeLayout = "access-picker";
     updateButtonState();
@@ -510,7 +603,7 @@
     enabled &&
     inputElement === context.element &&
     elementMatchesComposerContext(context, context.element) &&
-    isVisible(context.element) &&
+    measureInput(context.element)?.visible === true &&
     readComposerText(context.element) === context.text;
 
   const updateButtonState = () => {
@@ -638,24 +731,31 @@
 
   const refreshButton = () => {
     if (!enabled) {
-      if (button) button.style.display = "none";
+      if (button) {
+        buttonHiddenWithoutTarget = false;
+        button.style.display = "none";
+      }
       return;
     }
-    const input = findComposerInput();
+    const geometryCache = createGeometryCache();
+    const input = findComposerInput(geometryCache);
     if (input) applyPendingOptimization(input);
     if (input === inputElement && input) {
-      updateButtonPosition();
+      updateButtonPosition(geometryCache);
       return;
     }
     inputElement = input || null;
     if (!inputElement) {
-      if (button) button.style.display = "none";
+      if (button) {
+        buttonHiddenWithoutTarget = false;
+        button.style.display = "none";
+      }
       return;
     }
     if (!button) {
       button = createButton();
     }
-    updateButtonPosition();
+    updateButtonPosition(geometryCache);
   };
 
   const scheduleScan = (urgent = false) => {
@@ -673,24 +773,22 @@
   };
 
   const scheduleReposition = () => {
-    if (!enabled || !button || !inputElement) return;
+    if (!enabled || !button || !inputElement) {
+      scheduleScan();
+      return;
+    }
     clearTimeout(repositionTimer);
     repositionTimer = setTimeout(updateButtonPosition, repositionDelayMs);
   };
 
-  const nodeTouchesTrackedComposer = (node, includeAncestors = false) => {
+  const nodeTouchesTrackedComposer = (node) => {
     if (!node || typeof node !== "object") return false;
     const buttonHost = button?.parentElement;
     return Boolean(
-      node === inputElement ||
-        node === button ||
-        node === buttonHost ||
-        node === inputElement?.parentElement ||
+      node === inputElement?.parentElement ||
         node === buttonHost?.parentElement ||
-        inputElement?.contains?.(node) ||
-        buttonHost?.contains?.(node) ||
-        (includeAncestors &&
-          (node.contains?.(inputElement) || node.contains?.(buttonHost))),
+        (node !== inputElement && inputElement?.contains?.(node)) ||
+        buttonHost?.contains?.(node),
     );
   };
 
@@ -701,21 +799,104 @@
         node?.querySelector?.(composerAnchorSelector),
     );
 
-  const mutationRequiresComposerScan = (mutation) => {
-    if (!inputElement?.isConnected) return true;
-    if (nodeTouchesTrackedComposer(mutation.target)) return true;
-    if (
+  const nodeContainsButton = (node) =>
+    Boolean(node === button || node?.contains?.(button));
+
+  const nodeInsideTrackedInput = (node) =>
+    Boolean(
+      inputElement &&
+        node &&
+        (node === inputElement || inputElement.contains?.(node)),
+    );
+
+  const mutationInsideTrackedInput = (mutation) =>
+    Boolean(mutation?.target && nodeInsideTrackedInput(mutation.target));
+
+  const editableStateAttributes = new Set([
+    "aria-multiline",
+    "cols",
+    "contenteditable",
+    "dir",
+    "maxlength",
+    "minlength",
+    "placeholder",
+    "readonly",
+    "role",
+    "rows",
+    "spellcheck",
+    "tabindex",
+    "wrap",
+  ]);
+
+  const isPlainTrackedInputMutation = (mutation) => {
+    if (!mutationInsideTrackedInput(mutation)) return false;
+    if (mutation.type === "characterData") return true;
+    if (mutation.type === "childList") {
+      const changedNodes = [
+        ...(mutation.addedNodes || []),
+        ...(mutation.removedNodes || []),
+      ];
+      return !changedNodes.some(
+        (node) =>
+          nodeContainsButton(node) ||
+          nodeContainsComposerCandidate(node),
+      );
+    }
+    return (
       mutation.type === "attributes" &&
+      editableStateAttributes.has(mutation.attributeName)
+    );
+  };
+
+  const composerRegionChanged = (mutation) => {
+    const changedNodes = [
+      ...(mutation?.addedNodes || []),
+      ...(mutation?.removedNodes || []),
+    ];
+    const composerScope = document.querySelector(composerAnchorSelector)
+      ?.parentElement;
+    if (
+      findComposerAnchorNode(mutation?.target) ||
+      changedNodes.some(findComposerAnchorNode)
+    ) {
+      return true;
+    }
+    if (
+      mutation?.type === "childList" &&
+      (mutation.target === composerScope ||
+        mutation.target === inputElement?.parentElement)
+    ) {
+      return true;
+    }
+    if (
+      inputElement &&
+      mutation?.type === "attributes" &&
+      (mutation.target === inputElement ||
+        mutation.target?.parentElement === inputElement.parentElement)
+    ) {
+      return true;
+    }
+    if (nodeInsideComposerRegion(mutation?.target)) return true;
+    if (
+      mutation?.type === "attributes" &&
       mutation.attributeName === "data-above-composer-conversation-id"
     ) {
       return true;
     }
-    if (mutation.type !== "childList") return false;
-    return [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])].some(
+    if (mutation?.type !== "childList") return false;
+    return changedNodes.some(
       (node) =>
-        nodeTouchesTrackedComposer(node, true) ||
+        nodeInsideComposerRegion(node) ||
+        nodeInsideTrackedInput(node) ||
         nodeContainsComposerCandidate(node),
     );
+  };
+
+  const mutationRequiresComposerScan = (mutation) => {
+    if (!inputElement?.isConnected || !button?.isConnected) return true;
+    if (buttonHiddenWithoutTarget) return composerRegionChanged(mutation);
+    if (isPlainTrackedInputMutation(mutation)) return false;
+    return composerRegionChanged(mutation);
   };
 
   // Lightweight observer telemetry: per-handler call count, mutation count and
@@ -743,34 +924,56 @@
   const handleComposerMutations = (mutations) =>
     codeyTimed("prompt-optimize.composerMutations", mutations?.length ?? 0, () => handleComposerMutationsImpl(mutations));
   const handleComposerMutationsImpl = (mutations) => {
-    if (!enabled) return;
-    const hasExternalMutation = mutations.some((mutation) => {
-      const target = mutation.target;
-      if (!target) return true;
-      if (target === button || target.id === toastId) return false;
-      if (target.id === styleId) return false;
-      return (
-        !target.closest?.(`#${buttonId}, #${toastId}`) &&
-        mutationRequiresComposerScan(mutation)
-      );
-    });
-    if (hasExternalMutation) {
-      const conversationChanged = mutations.some((mutation) =>
-        mutation.type === "attributes" && mutation.attributeName === "data-above-composer-conversation-id",
-      );
-      const needsMount = !inputElement?.isConnected || !button?.isConnected || button.style.display === "none";
-      const composerChanged = needsMount && mutations.some((mutation) =>
-        nodeTouchesTrackedComposer(mutation.target) ||
-        [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])].some((node) =>
-          nodeTouchesTrackedComposer(node, true) || nodeContainsComposerCandidate(node),
-        ),
-      );
-      scheduleScan(conversationChanged || composerChanged);
+    if (!enabled || !Array.isArray(mutations)) return;
+    let conversationChanged = false;
+    let composerChanged = false;
+    const buttonConnected = button?.isConnected === true;
+    const inputConnected = inputElement?.isConnected === true;
+    const needsMount =
+      (!buttonConnected || !inputConnected) ||
+      (button.style.display === "none" && !buttonHiddenWithoutTarget);
+    if (!buttonConnected || !inputConnected) composerChanged = true;
+    for (const mutation of mutations) {
+      const target = mutation?.target;
+      if (!target) {
+        conversationChanged = true;
+        composerChanged = true;
+        continue;
+      }
+      if (target === button || target.id === toastId || target.id === styleId) {
+        continue;
+      }
+      if (target.closest?.(`#${buttonId}, #${toastId}`)) continue;
+      if (
+        mutation.type === "attributes" &&
+        mutation.attributeName === "style" &&
+        target.parentElement === inputElement?.parentElement
+      ) {
+        composerChanged = true;
+        continue;
+      }
+      if (mutationInsideTrackedInput(mutation)) {
+        updateButtonState();
+        if (isPlainTrackedInputMutation(mutation)) continue;
+      }
+      if (
+        mutation.type === "attributes" &&
+        mutation.attributeName === "data-above-composer-conversation-id"
+      ) {
+        conversationChanged = true;
+        continue;
+      }
+      if (mutationRequiresComposerScan(mutation)) {
+        composerChanged = true;
+      }
     }
+    if (!conversationChanged && !composerChanged) return;
+    scheduleScan(conversationChanged || needsMount);
   };
 
   const composerMutationOptions = {
     childList: true,
+    characterData: true,
     subtree: true,
     attributes: true,
     attributeFilter: [
@@ -882,7 +1085,7 @@
   document.addEventListener(
     "input",
     (event) => {
-      if (event.target === inputElement) updateButtonState();
+      if (nodeInsideTrackedInput(event.target)) updateButtonState();
     },
     true,
   );
@@ -903,6 +1106,13 @@
       enabled: enabled,
       hasInput: Boolean(inputElement && isVisible(inputElement)),
       hasButton: Boolean(button && button.style.display !== "none"),
+      buttonState: !button
+        ? "unmounted"
+        : button.style.display === "none"
+          ? buttonHiddenWithoutTarget
+            ? "hidden"
+            : "pending"
+          : "visible",
       buttonBusy: Boolean(button && busy),
       buttonDisabled: Boolean(button?.disabled),
     }),

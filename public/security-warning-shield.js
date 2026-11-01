@@ -39,6 +39,22 @@
     /with ultra and full access enabled/i,
     /开启\s*ultra\s*和完整访问权限后/i,
   ];
+  const conversationTurnSelector = "[data-turn-key]";
+  const warningSurfaceSelector = [
+    "dialog",
+    "[role='dialog']",
+    "[role='alertdialog']",
+    "[aria-modal='true']",
+    "textarea",
+    "[contenteditable='true']",
+    "[contenteditable='plaintext-only']",
+    "[role='textbox']",
+    "[data-app-action-sidebar-section]",
+    "[data-app-action-sidebar-thread-row]",
+    "[data-app-action-sidebar-project-row]",
+    "[data-radix-portal]",
+    "[data-portal]",
+  ].join(", ");
   let enabled = false;
   let scanTimer = 0;
   let unsubscribeMutations = null;
@@ -72,8 +88,56 @@
     control?.getAttribute?.("aria-label"),
     control?.textContent,
   ].map(normalizedValue).filter(Boolean);
-
   const matchesAny = (value, patterns) => patterns.some((pattern) => pattern.test(value));
+
+  const hasWarningControl = (root) => (
+    [...(root.querySelectorAll?.("button, [role=button]") || [])]
+      .some((control) => normalizedControlLabels(control).some((label) => (
+        matchesAny(label, actionPatterns)
+        || matchesAny(label, ultraActionPatterns)
+      )))
+  );
+
+  const hasMountedWarning = (root) => (
+    matchesAny(normalizedText(root), titlePatterns)
+    || hasWarningControl(root)
+  );
+
+  const shouldSkipMountedTurnMutation = (mutation, target) => {
+    if (
+      (mutation.type !== "childList" && mutation.type !== "characterData")
+      || !target?.closest?.(conversationTurnSelector)
+    ) {
+      return false;
+    }
+    const targetSurface = target.closest?.(warningSurfaceSelector);
+    const targetPortal = target.closest?.("[data-radix-portal], [data-portal]");
+    if (
+      targetSurface
+      && (
+        targetSurface !== targetPortal
+        || (
+          targetPortal
+          && (
+            matchesAny(normalizedText(targetPortal), titlePatterns)
+            || hasWarningControl(targetPortal)
+          )
+        )
+      )
+    ) {
+      return false;
+    }
+    return ![...(mutation.addedNodes || [])].some((node) => (
+      node instanceof Element
+      && (
+        node.matches?.(warningSurfaceSelector) && hasMountedWarning(node)
+        || [...(node.children || [])].some((child) => (
+          child.matches?.(warningSurfaceSelector)
+          || child.querySelector?.(warningSurfaceSelector)
+        ))
+      )
+    ));
+  };
 
   const warningContainerFor = (control) => {
     let candidate = control?.parentElement || null;
@@ -88,21 +152,81 @@
     return null;
   };
 
-  const actionControls = (root = document) => {
+  const createFrame = (element) => ({
+    element,
+    nextChildIndex: 0,
+    visited: false,
+  });
+  const createContinuation = (root, continuation = null) => {
+    const segments = continuation?.segments
+      ? [...continuation.segments]
+      : [];
+    segments.push([createFrame(root)]);
+    return { segments };
+  };
+  const hasContinuation = (continuation) => (
+    continuation?.segments?.some?.((segment) => segment.length > 0) === true
+  );
+
+  const controlsWithin = (
+    root,
+    { continuation = null, remaining = null } = {},
+  ) => {
     const controls = [];
-    if (root instanceof Element && root.matches?.("button, [role=button]")) {
-      controls.push(root);
+    const state = continuation || createContinuation(
+      root instanceof Element ? root : document.documentElement,
+    );
+    let visited = 0;
+    while (remaining ? remaining.value > 0 : true) {
+      const segment = state.segments[0];
+      if (!segment?.length) {
+        state.segments.shift();
+        if (!state.segments.length) break;
+        continue;
+      }
+      const frame = segment[segment.length - 1];
+      const element = frame.element;
+      if (!(element instanceof Element)) {
+        segment.pop();
+        continue;
+      }
+      if (!frame.visited) {
+        frame.visited = true;
+        if (remaining) remaining.value -= 1;
+        scannedElements += 1;
+        visited += 1;
+        if (element.matches?.("button, [role=button]")) controls.push(element);
+      }
+      if (remaining?.value <= 0) break;
+      if (frame.nextChildIndex < element.children.length) {
+        const child = element.children[frame.nextChildIndex];
+        frame.nextChildIndex += 1;
+        childExpansions += 1;
+        segment.push(createFrame(child));
+      } else {
+        segment.pop();
+      }
     }
-    if (typeof root?.querySelectorAll === "function") {
-      controls.push(...root.querySelectorAll("button, [role=button]"));
-    }
-    return controls;
+    scanCount += 1;
+    return {
+      continuation: {
+        segments: state.segments.filter((segment) => segment.length > 0),
+      },
+      controls,
+      visited,
+    };
   };
 
-  const dismissWarnings = (root = document) => {
+  let scheduleScan = () => {};
+  let addPendingRoot = () => {};
+
+  const dismissWarnings = (root = document, controls = null) => {
     if (!enabled) return 0;
+    const traversal = controls
+      ? { controls }
+      : controlsWithin(root);
     let dismissed = 0;
-    for (const control of actionControls(root)) {
+    for (const control of traversal.controls) {
       if (control.disabled || control.getAttribute?.(dismissedAttribute) === "true") {
         continue;
       }
@@ -124,15 +248,18 @@
       }
       dismissed += 1;
     }
+    if (!controls && hasContinuation(traversal.continuation)) {
+      pendingRootStates.set(root, traversal.continuation);
+      addPendingRoot(root);
+      scheduleScan();
+    }
     return dismissed;
   };
 
   const setEnabled = (next) => {
+    const wasEnabled = enabled;
     enabled = next === true;
-    if (enabled) {
-      ensureObserver();
-      dismissWarnings();
-    } else {
+    if (!enabled) {
       if (scanTimer) {
         window.clearTimeout?.(scanTimer);
         scanTimer = 0;
@@ -140,6 +267,10 @@
       pendingRoots.clear();
       unsubscribeMutations?.();
       unsubscribeMutations = null;
+    } else if (!wasEnabled) {
+      ensureObserver();
+      addPendingRoot(document.documentElement);
+      scheduleScan();
     }
     publishInjectionStatus();
     return enabled;
@@ -158,35 +289,104 @@
   };
 
   const pendingRoots = new Set();
+  const pendingRootStates = new WeakMap();
   const pendingRootLimit = 32;
+  const batchElementLimit = 160;
+  let scanCount = 0;
+  let scannedElements = 0;
+  let childExpansions = 0;
 
-  const addPendingRoot = (root) => {
-    if (!(root instanceof Element)) return;
-    if (pendingRoots.has(document.documentElement)) return;
-    if (pendingRoots.size >= pendingRootLimit) {
-      pendingRoots.clear();
-      pendingRoots.add(document.documentElement);
-      return;
+  const mergeContinuations = (...continuations) => {
+    const segments = [];
+    const seenElements = new Set();
+    for (const continuation of continuations) {
+      for (const segment of continuation?.segments || []) {
+        if (!segment.some((frame) => !seenElements.has(frame.element))) continue;
+        for (const frame of segment) seenElements.add(frame.element);
+        segments.push(segment);
+      }
     }
-    pendingRoots.add(root);
+    return { segments };
   };
 
-  const scheduleScan = () => {
-    if (!enabled || scanTimer) return;
-    scanTimer = window.setTimeout(() => {
-      scanTimer = 0;
-      if (!pendingRoots.size) {
-        dismissWarnings();
+  addPendingRoot = (root, continuation = pendingRootStates.get(root)) => {
+    if (!(root instanceof Element) || root.isConnected === false) return;
+    for (const pendingRoot of pendingRoots) {
+      if (pendingRoot === root || pendingRoot.contains?.(root)) {
+        const rootState = pendingRootStates.get(root);
+        const pendingState = pendingRootStates.get(pendingRoot);
+        if (hasContinuation(rootState) || hasContinuation(pendingState)) {
+          pendingRootStates.set(
+            pendingRoot,
+            mergeContinuations(
+              pendingState,
+              hasContinuation(rootState)
+                ? rootState
+                : createContinuation(root, pendingState),
+            ),
+          );
+        }
         return;
       }
+    }
+    let mergedContinuation = pendingRootStates.get(root) || pendingRootStates.get(
+      [...pendingRoots].find((pendingRoot) => pendingRoot.contains?.(root)),
+    ) || { segments: [] };
+    for (const pendingRoot of [...pendingRoots]) {
+      if (!root.contains?.(pendingRoot)) continue;
+      mergedContinuation = mergeContinuations(
+        mergedContinuation,
+        pendingRootStates.get(pendingRoot) || createContinuation(pendingRoot),
+      );
+      pendingRoots.delete(pendingRoot);
+      pendingRootStates.delete(pendingRoot);
+    }
+    // Keep the bounded set local. Under a long streaming burst, retain the
+    // newest roots so a warning mounted later still gets scanned.
+    if (pendingRoots.size >= pendingRootLimit) {
+      const evicted = pendingRoots.values().next().value;
+      pendingRoots.delete(evicted);
+      pendingRootStates.delete(evicted);
+    }
+    pendingRoots.add(root);
+    mergedContinuation = mergeContinuations(mergedContinuation, continuation);
+    if (hasContinuation(mergedContinuation)) {
+      pendingRootStates.set(root, mergedContinuation);
+    }
+  };
+
+  scheduleScan = () => {
+    if (!enabled || scanTimer || !pendingRoots.size) return;
+    scanTimer = window.setTimeout(() => {
+      scanTimer = 0;
       const roots = [...pendingRoots];
       pendingRoots.clear();
-      // Scanning only the inserted subtrees avoids a full-document button sweep
-      // on every batch of DOM churn.
-      roots.forEach((root) => {
-        if (root.isConnected === false) return;
-        dismissWarnings(root);
+      const remaining = { value: batchElementLimit };
+      const skippedRoots = [];
+      while (roots.length && remaining.value > 0) {
+        const root = roots.shift();
+        const state = pendingRootStates.get(root);
+        pendingRootStates.delete(root);
+        if (root.isConnected !== false) {
+          const continuation = state || createContinuation(root);
+          const traversal = controlsWithin(root, {
+            continuation,
+            remaining,
+          });
+          if (traversal.controls.length) {
+            dismissWarnings(root, traversal.controls);
+          }
+          if (hasContinuation(traversal.continuation)) {
+            pendingRootStates.set(root, traversal.continuation);
+            skippedRoots.push(root);
+          }
+        }
+      }
+      skippedRoots.push(...roots);
+      skippedRoots.forEach((root) => {
+        addPendingRoot(root, pendingRootStates.get(root));
       });
+      scheduleScan();
     }, 40);
   };
 
@@ -200,27 +400,77 @@
     }
     unsubscribeMutations = window.__codeyMutationDispatcher.subscribe((mutations) => {
       if (!enabled) return;
-      let added = false;
+      const batchRoots = new Map();
+      const addBatchRoot = (root, immediate) => {
+        if (!(root instanceof Element)) return;
+        for (const [candidate, candidateImmediate] of batchRoots) {
+          if (candidate === root || candidate.contains?.(root)) {
+            if (!immediate && candidateImmediate) batchRoots.set(candidate, false);
+            return;
+          }
+        }
+        for (const candidate of [...batchRoots.keys()]) {
+          if (root.contains?.(candidate)) batchRoots.delete(candidate);
+        }
+        batchRoots.set(root, immediate);
+      };
       for (const mutation of mutations) {
         if (!(mutation.addedNodes?.length > 0)) continue;
-        added = true;
-        for (const node of mutation.addedNodes) {
-          if (node instanceof Element) addPendingRoot(node);
-        }
         // The warning label often arrives as a text node inside an existing
-        // button, and an inserted element may sit below the button rather than
-        // contain it, so the mutation target has to be scanned as well.
+        // button, so scan that button instead of its arbitrary parent subtree.
         const target = mutation.target instanceof Element
           ? mutation.target
           : mutation.target?.parentElement;
+        if (shouldSkipMountedTurnMutation(mutation, target)) continue;
+        const targetSurface = target?.closest?.(warningSurfaceSelector);
+        const targetPortal = target?.closest?.("[data-radix-portal], [data-portal]");
+        if (
+          targetSurface
+          && targetPortal
+          && (
+            matchesAny(normalizedText(targetSurface), titlePatterns)
+            || hasWarningControl(targetSurface)
+          )
+        ) {
+          addBatchRoot(targetSurface, false);
+        }
         if (target) {
-          const scanRoot = target.closest?.("button, [role=button]") || target;
-          addPendingRoot(scanRoot);
-          // Process the mutation before the browser can paint the new dialog.
-          dismissWarnings(scanRoot);
+          const scanRoot = target.closest?.("button, [role=button]");
+          if (scanRoot) addBatchRoot(scanRoot, true);
+          const warningSurface = target.closest?.(warningSurfaceSelector);
+          if (warningSurface) addBatchRoot(warningSurface, false);
+        }
+        for (const node of mutation.addedNodes) {
+          if (!(node instanceof Element)) continue;
+          // Check a direct control now. A wrapper can contain a large streaming
+          // subtree, so defer that traversal to the next short batch.
+          addBatchRoot(node, node.matches?.("button, [role=button]") === true);
         }
       }
-      if (added) scheduleScan();
+      const remaining = { value: batchElementLimit };
+      for (const [root, immediate] of batchRoots) {
+        if (!immediate) {
+          addPendingRoot(root);
+          continue;
+        }
+        if (root.isConnected === false) continue;
+        if (remaining.value <= 0) {
+          addPendingRoot(root);
+          continue;
+        }
+        const traversal = controlsWithin(root, { remaining });
+        // Unrelated streaming subtrees usually contain no action controls.
+        // Drop them here so text updates never queue another button walk.
+        if (!traversal.controls.length && !hasContinuation(traversal.continuation)) {
+          continue;
+        }
+        dismissWarnings(root, traversal.controls);
+        if (hasContinuation(traversal.continuation)) {
+          pendingRootStates.set(root, traversal.continuation);
+          addPendingRoot(root);
+        }
+      }
+      scheduleScan();
     }, { childList: true });
   };
 
@@ -239,6 +489,13 @@
     dismissWarnings,
     refreshConfig,
     setEnabled,
+    snapshot: () => Object.freeze({
+      batchElementLimit,
+      childExpansions,
+      pendingRoots: pendingRoots.size,
+      scanCount,
+      scannedElements,
+    }),
   };
 
   void refreshConfig();

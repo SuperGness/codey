@@ -15,8 +15,13 @@ const bridgeTemplate = readFileSync(
 );
 
 class FakeElement extends FakeElementCore {
-  constructor(text = "", isControl = true, children = []) {
-    super();
+  constructor(
+    text = "",
+    isControl = true,
+    children = [],
+    attributes = {},
+  ) {
+    super("div", { attributes });
     delete this.isConnected;
     this.textContent = text;
     this.children = children;
@@ -26,23 +31,34 @@ class FakeElement extends FakeElementCore {
     });
   }
 
-  closest() {
-    return this.isControl ? this : null;
+  closest(selector) {
+    const selectors = String(selector).split(",").map((part) => part.trim());
+    let current = this;
+    while (current) {
+      if (selectors.some((candidate) => current.matches(candidate))) return current;
+      current = current.parentElement;
+    }
+    return null;
   }
 
-  contains() {
-    return false;
+  matches(selector) {
+    return super.matches(selector) || (
+      this.isControl
+        && String(selector).split(",").some((part) => {
+          const candidate = part.trim();
+          return candidate === "button" || candidate.endsWith("[role=button]");
+        })
+    );
   }
 
-  matches() {
-    return this.isControl;
-  }
-
-  querySelectorAll() {
+  querySelectorAll(selector) {
+    const selectors = String(selector).split(",").map((part) => part.trim());
     const controls = [];
     const visit = (node) => {
       for (const child of node.children) {
-        if (child.isControl) controls.push(child);
+        if (selectors.some((candidate) => child.matches(candidate))) {
+          controls.push(child);
+        }
         visit(child);
       }
     };
@@ -114,15 +130,25 @@ function loadShield(enabled) {
     }
   }
   const documentElement = new FakeElement("", false);
+  documentElement.isConnected = true;
   const document = {
     documentElement,
-    querySelectorAll: () => controls,
+    querySelectorAll: () => {
+      throw new Error("pet scans must not materialise the full control list");
+    },
     addEventListener: (name, listener) => listeners.set(name, listener),
     removeEventListener: (name) => listeners.delete(name),
   };
   const window = {};
   window.window = window;
   const pendingTimers = new Map();
+  controls.forEach((control) => {
+    if (!control.parentElement && control.isControl) {
+      control.parentElement = documentElement;
+      documentElement.children.push(control);
+    }
+  });
+
   const pendingAnimationFrames = new Map();
   let nextTimerId = 1;
   let nextAnimationFrameId = 1;
@@ -198,6 +224,13 @@ function loadShield(enabled) {
     runPendingTimers,
     get scheduledFlushes() {
       return scheduledFlushes;
+    },
+    runAllAnimationFrames: () => {
+      let guard = 0;
+      while (pendingAnimationFrames.size && guard < 100) {
+        runPendingAnimationFrames();
+        guard += 1;
+      }
     },
     semantic,
     semanticMini,
@@ -297,7 +330,10 @@ test("disabling pet slim mode restores native pet controls", () => {
   assert.equal(runtime.localized.getAttribute("data-codey-pet-control-blocked"), null);
   assert.equal(runtime.localizedMini.getAttribute("data-codey-pet-control-blocked"), null);
   assert.equal(runtime.semanticMini.getAttribute("data-codey-pet-control-blocked"), null);
-  assert.equal(runtime.mutationCallback, null);
+  assert.equal(
+    runtime.window.__codeyMutationDispatcher.snapshot().subscriberCount,
+    0,
+  );
   assert.equal(runtime.window.__codeyBlockNativePetControls(), 0);
 });
 
@@ -324,10 +360,24 @@ test("pet slim mode blocks inserted menu controls before a deferred flush", () =
   assert.equal(runtime.observerOptions.subtree, true);
 });
 
-test("streaming mutation batches coalesce into a single deferred sweep", () => {
+test("turn-external mutation batches coalesce into a single deferred sweep", () => {
   const runtime = loadShield(true);
   const flushesAfterLoad = runtime.scheduledFlushes;
-  const dynamics = Array.from({ length: 12 }, (_, index) => new FakeElement(`节点${index}`));
+  const dynamics = Array.from(
+    { length: 12 },
+    (_, index) => {
+      const node = new FakeElement(
+        "节点" + index,
+        false,
+        [],
+        { "data-codey-critical-context": "" },
+      );
+      for (let childIndex = 0; childIndex < 70; childIndex += 1) {
+        node.appendChild(new FakeElement("子节点" + childIndex, false));
+      }
+      return node;
+    },
+  );
 
   dynamics.forEach((node) => {
     runtime.mutationCallback([{
@@ -393,6 +443,111 @@ test("pet control text changes are picked up without a React update", () => {
   // prop update at all.
   control.textContent = "唤醒宠物";
   assert.equal(runtime.window.__codeyPetControlShield.isPetControl(control), true);
+});
+
+test("streaming child insertions inside a mounted turn are skipped", () => {
+  const runtime = loadShield(true);
+  const turn = new FakeElement("", false, [], { "data-turn-key": "turn-1" });
+  const stream = new FakeElement("普通流式节点");
+  const before = runtime.scheduledFlushes;
+
+  runtime.mutationCallback([{
+    addedNodes: [stream],
+    target: turn,
+    type: "childList",
+  }]);
+
+  assert.equal(runtime.scheduledFlushes, before);
+  assert.equal(runtime.pendingFlushCount, 0);
+});
+
+test("direct pet buttons inserted in a mounted turn remain immediately eligible", () => {
+  const runtime = loadShield(true);
+  const turn = new FakeElement("", false, [], { "data-turn-key": "turn-1" });
+  const pet = new FakeElement("显示宠物");
+
+  runtime.mutationCallback([{
+    addedNodes: [pet],
+    target: turn,
+    type: "childList",
+  }]);
+
+  assert.equal(pet.getAttribute("data-codey-pet-control-blocked"), "true");
+  assert.equal(runtime.pendingFlushCount, 0);
+});
+
+test("dialog and portal controls nested in a mounted turn remain eligible", () => {
+  const runtime = loadShield(true);
+  const turn = new FakeElement("", false, [], { "data-turn-key": "turn-1" });
+  const dialog = new FakeElement("", false, [], { role: "dialog" });
+  const dialogControl = new FakeElement("显示宠物");
+  dialog.appendChild(dialogControl);
+  const portal = new FakeElement("", false, [], { "data-radix-portal": "true" });
+  const portalControl = new FakeElement("显示宠物");
+  portal.appendChild(portalControl);
+  turn.appendChild(dialog);
+  turn.appendChild(portal);
+
+  runtime.mutationCallback([
+    { addedNodes: [dialogControl], target: dialog, type: "childList" },
+    { addedNodes: [portal], target: turn, type: "childList" },
+  ]);
+
+  assert.equal(dialogControl.getAttribute("data-codey-pet-control-blocked"), "true");
+  assert.equal(portalControl.getAttribute("data-codey-pet-control-blocked"), "true");
+});
+
+test("overlay, composer, and sidebar containers stay eligible inside a turn", () => {
+  const runtime = loadShield(true);
+  const turn = new FakeElement("", false, [], { "data-turn-key": "turn-1" });
+  const contexts = [
+    { role: "alertdialog" },
+    { "aria-modal": "true" },
+    { "data-testid": "modal" },
+    { "data-testid": "composer" },
+    { "data-testid": "sidebar" },
+    { "data-radix-portal": "true" },
+  ].map((attributes) => {
+    const container = new FakeElement("", false, [], attributes);
+    const control = new FakeElement("显示宠物");
+    container.appendChild(control);
+    turn.appendChild(container);
+    return { container, control };
+  });
+
+  runtime.mutationCallback(contexts.map(({ container, control }) => ({
+    addedNodes: [control],
+    target: container,
+    type: "childList",
+  })));
+
+  contexts.forEach(({ control }) => {
+    assert.equal(control.getAttribute("data-codey-pet-control-blocked"), "true");
+  });
+});
+
+test("deferred pet scans have a node budget and reach the trailing pet", () => {
+  const runtime = loadShield(true);
+  const menu = new FakeElement("", false);
+  for (let index = 0; index < 320; index += 1) {
+    menu.appendChild(new FakeElement("普通入口" + index, false));
+  }
+  const latePet = new FakeElement("显示宠物", true);
+  menu.appendChild(latePet);
+  const flushesBefore = runtime.scheduledFlushes;
+  runtime.mutationCallback([{
+    addedNodes: [menu],
+    target: runtime.documentElement,
+    type: "childList",
+  }]);
+  assert.equal(runtime.scheduledFlushes - flushesBefore, 1);
+  runtime.runPendingAnimationFrames();
+  assert.equal(runtime.scheduledFlushes - flushesBefore, 2);
+  assert.equal(latePet.getAttribute("data-codey-pet-control-blocked"), null);
+
+  runtime.runAllAnimationFrames();
+  assert.equal(runtime.pendingFlushCount, 0);
+  assert.equal(latePet.getAttribute("data-codey-pet-control-blocked"), "true");
 });
 
 test("pet shield cleanup disconnects the insertion observer", () => {

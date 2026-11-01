@@ -26,6 +26,7 @@
     .map((attribute) => `[${attribute}]`)
     .join(",");
   const activeThreadSelector = '[data-app-action-sidebar-thread-active="true"]';
+  const conversationTurnSelector = "[data-turn-key]";
   const contextAttributes = [
     ...sessionIdAttributes,
     "data-app-action-sidebar-thread-active",
@@ -535,13 +536,33 @@
         const target = mutation.target;
         if (!(target instanceof HTMLElement)) continue;
         if (containsStats(target)) continue;
+        const visibilityChanged = (
+          mutation.attributeName === "hidden"
+          || mutation.attributeName === "aria-hidden"
+        );
+        if (visibilityChanged) {
+          if (target.closest?.(conversationTurnSelector)) continue;
+          const host = statsElement?.parentElement;
+          const touchesComposer = host
+            ? target === host || host.contains(target) || target.contains(host)
+            : target.matches?.(composerInputSelector)
+              || target.querySelector?.(composerInputSelector);
+          if (!touchesComposer) continue;
+        }
         if (contextAttributes.includes(mutation.attributeName)) {
           scheduleRescan();
           return;
         }
         continue;
       }
-      if (containsStats(mutation.target)) continue;
+      const target = mutation.target;
+      if (containsStats(target)) continue;
+      // A mounted turn is message content. Session and composer markers live
+      // outside it, so streaming additions do not need selector walks here.
+      if (
+        target instanceof HTMLElement
+        && target.closest?.(conversationTurnSelector)
+      ) continue;
       const nodes = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])];
       for (const node of nodes) {
         if (!(node instanceof HTMLElement)) continue;
