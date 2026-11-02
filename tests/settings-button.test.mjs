@@ -593,6 +593,10 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
       unlimited: false,
       balance: "42",
     },
+    resetCredits: {
+      availableCount: 3,
+      nextExpiresAt: Math.floor(tomorrowResetAt.getTime() / 1000),
+    },
   };
   let accountUsageCalls = 0;
   let appServerUsageCalls = 0;
@@ -610,6 +614,13 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
         balance: "77",
       },
       planType: "plus",
+    },
+    rateLimitResetCredits: {
+      availableCount: 2,
+      credits: [
+        { id: "credit-1", status: "available", expiresAt: Math.floor(todayResetAt.getTime() / 1000) },
+        { id: "credit-2", status: "redeemed", expiresAt: Math.floor(tomorrowResetAt.getTime() / 1000) },
+      ],
     },
     rateLimitsByLimitId: {
       codex_bengalfox: {
@@ -633,6 +644,11 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
       if (path === "/api/store_official_account_usage") {
         assert.equal(args.authGeneration, 1);
         assert.equal(args.snapshot.primary.usedPercent, 20);
+        assert.equal(args.snapshot.resetCredits.availableCount, 2);
+        assert.equal(
+          args.snapshot.resetCredits.nextExpiresAt,
+          Math.floor(todayResetAt.getTime() / 1000),
+        );
         assert.ok(args.snapshot.fetchedAt > 0);
         return { status: "ok" };
       }
@@ -688,7 +704,9 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.match(injectedStyle.textContent, /data-tone="warning"[^}]*--codey-usage-accent: light-dark\(/);
   assert.match(injectedStyle.textContent, /data-tone="critical"[^}]*--codey-usage-accent: light-dark\(/);
   assert.match(injectedStyle.textContent, /#codey-account-usage:hover \.codey-usage-details/);
-  assert.match(injectedStyle.textContent, /--codey-usage-surface: light-dark\(#ffffff, #252525\);/);
+  assert.match(injectedStyle.textContent, /--codey-usage-surface: light-dark\(rgba\(255, 255, 255, \.82\), rgba\(32, 32, 36, \.82\)\);/);
+  assert.match(injectedStyle.textContent, /\.codey-usage-details \{[^}]*backdrop-filter: blur\(24px\) saturate\(180%\);/);
+  assert.match(injectedStyle.textContent, /\.codey-usage-details \{[^}]*-webkit-backdrop-filter: blur\(24px\) saturate\(180%\);/);
   assert.match(injectedStyle.textContent, /\.codey-usage-details \{[^}]*background: var\(--codey-usage-surface\);/);
   assert.doesNotMatch(injectedStyle.textContent, /#codey-account-usage\[data-state="stale"\] \{[^}]*opacity:/);
   assert.match(injectedStyle.textContent, /\.codey-usage-plan-tag \{[^}]*border:[^}]*background: color-mix\(in srgb, #0a84ff 13%, transparent\);/);
@@ -713,6 +731,8 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.match(usage.innerHTML, /周额度[\s\S]*?剩余 60%[\s\S]*?已用 40%/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?42/);
   assert.match(usage.innerHTML, /更新于 \d{2}:\d{2}/);
+  assert.match(usage.innerHTML, /额度详情[\s\S]*?更新于 \d{2}:\d{2}/);
+  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?3 次[\s\S]*?明天 \d{2}:\d{2} 过期/);
   assert.equal(usage.dataset.windowCount, "2");
   assert.equal(usage.dataset.plan, undefined);
   assert.equal(usage.getAttribute("tabindex"), "0");
@@ -749,6 +769,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.doesNotMatch(usage.getAttribute("aria-label"), /5 小时额度/);
   assert.match(usage.getAttribute("aria-label"), /1 天 5 小时后重置/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?77/);
+  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?2 次[\s\S]*?今天 \d{2}:\d{2} 过期/);
   assert.match(usage.innerHTML, /class="codey-usage-plan-tag" data-plan="plus">Plus<\/span>/);
 
   accountUsageResult = { status: "unavailable", reason: "third_party" };
@@ -1622,4 +1643,44 @@ test("MCP reload bootstrap talks to the patched App Server client", async () => 
   });
   assert.equal((await window.__codeyReloadMcpServers()).ok, true);
   assert.equal(JSON.stringify(requests), JSON.stringify([["config/mcpServer/reload", {}]]));
+});
+
+test("settings overlay preloads on a hover dwell, press, or focus but not a drive-by pass", async () => {
+  const fixture = createStartupUpdateFixture(async (path) => {
+    if (path === "/backend/status") return { status: "ok", availableUpdate: null };
+    if (path === "/backend/health") return { status: "ok" };
+    throw new Error(`unexpected bridge path: ${path}`);
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const button = fixture.document.getElementById("codey-settings-button");
+  let loads = 0;
+  fixture.window.__codeySettingsOverlay = {
+    __codeyLazyLoader: true,
+    load: async () => {
+      loads += 1;
+      throw new Error("passive preload failures stay silent");
+    },
+    toggle() {},
+  };
+  const preloadTimer = () => fixture.activeTimers().filter((timer) => timer.delay === 120).at(-1);
+
+  button.dispatchEvent({ type: "pointerenter" });
+  const pass = preloadTimer();
+  assert.equal(pass?.cleared, false, "hovering schedules a preload");
+  button.dispatchEvent({ type: "pointerleave" });
+  assert.equal(pass.cleared, true, "a drive-by pass cancels the preload");
+  assert.equal(loads, 0);
+
+  button.dispatchEvent({ type: "pointerenter" });
+  const dwell = preloadTimer();
+  dwell.cleared = true;
+  dwell.callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(loads, 1);
+
+  button.dispatchEvent({ type: "pointerdown" });
+  button.dispatchEvent({ type: "focus" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(loads, 3);
+  assert.deepEqual(fixture.alerts, []);
 });

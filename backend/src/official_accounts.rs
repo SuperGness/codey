@@ -45,7 +45,7 @@ struct StoreWriteGuard {
 
 pub(crate) const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OAUTH_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
-const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+pub(crate) const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OAUTH_CALLBACK_PORT: u16 = 1455;
 const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const OAUTH_SCOPE: &str = "openid profile email offline_access";

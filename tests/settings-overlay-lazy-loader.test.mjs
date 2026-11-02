@@ -151,3 +151,61 @@ test("settings overlay loader opens a panel that finished loading after the back
   assert.deepEqual(alerts, []);
   assert.equal(realOverlay.opened, 1);
 });
+
+test("a click during a passive preload opens the panel once it has loaded", async () => {
+  let bridgeCalls = 0;
+  let resolveLoad;
+  const realOverlay = { opened: 0, open() { this.opened += 1; }, toggle() {} };
+  const window = {
+    alert(message) {
+      throw new Error(`unexpected alert: ${message}`);
+    },
+    __codexSessionDeleteBridge() {
+      bridgeCalls += 1;
+      return new Promise((resolve) => {
+        resolveLoad = () => {
+          window.__codeySettingsOverlay = realOverlay;
+          resolve({ status: "ok" });
+        };
+      });
+    },
+  };
+
+  vm.runInNewContext(loaderScript, { Error, Promise, String, window });
+  const proxy = window.__codeySettingsOverlay;
+  void proxy.load();
+  proxy.toggle();
+  resolveLoad();
+  await flushPromises();
+
+  assert.equal(bridgeCalls, 1);
+  assert.equal(realOverlay.opened, 1);
+});
+
+test("a failed passive preload leaves the next click free to retry", async () => {
+  let bridgeCalls = 0;
+  const alerts = [];
+  const realOverlay = { opened: 0, open() { this.opened += 1; }, toggle() {} };
+  const window = {
+    alert(message) {
+      alerts.push(message);
+    },
+    async __codexSessionDeleteBridge() {
+      bridgeCalls += 1;
+      if (bridgeCalls === 1) return { status: "failed", message: "temporary failure" };
+      window.__codeySettingsOverlay = realOverlay;
+      return { status: "ok" };
+    },
+  };
+
+  vm.runInNewContext(loaderScript, { Error, Promise, String, window });
+  const proxy = window.__codeySettingsOverlay;
+  await assert.rejects(proxy.load(), /temporary failure/);
+  assert.deepEqual(alerts, [], "a passive preload never alerts");
+
+  proxy.toggle();
+  await flushPromises();
+
+  assert.equal(bridgeCalls, 2);
+  assert.equal(realOverlay.opened, 1);
+});

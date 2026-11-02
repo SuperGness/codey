@@ -347,7 +347,7 @@ pub(crate) async fn fetch_official_route_models(
         official_models_endpoint(base_url, client_version.as_deref())
     };
     let client = if profile.upstream_proxy.trim().is_empty() {
-        state.http_client.clone()
+        state.http_client.current(&endpoint).await
     } else {
         reqwest::Client::builder()
             .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))

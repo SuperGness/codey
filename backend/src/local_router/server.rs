@@ -292,10 +292,8 @@ impl LocalRouter {
             native_history_cache: Arc::new(Mutex::new(NativeHistoryCache::default())),
             portable_history_cache: Arc::new(Mutex::new(PortableHistoryCache::default())),
             idle_downstreams: Arc::new(Mutex::new(IdleDownstreamRegistry::default())),
-            // 系统证书与代理配置加载是同步操作，不占用路由的异步工作线程。
-            client: tokio::task::spawn_blocking(|| upstream_http_client_builder().build())
+            client: SystemProxyClient::new(upstream_http_client_builder)
                 .await
-                .context("创建 Codey 本地路由 HTTP 客户端任务异常退出")?
                 .context("创建 Codey 本地路由 HTTP 客户端失败")?,
             proxied_clients: Mutex::new(HashMap::new()),
             official_auth_path,
@@ -892,7 +890,8 @@ pub(crate) struct RouterServer {
     pub(crate) native_history_cache: Arc<Mutex<NativeHistoryCache>>,
     pub(crate) portable_history_cache: Arc<Mutex<PortableHistoryCache>>,
     pub(crate) idle_downstreams: Arc<Mutex<IdleDownstreamRegistry>>,
-    pub(crate) client: reqwest::Client,
+    /// 未配置线路代理时共用的默认客户端，随系统代理变化重建。
+    pub(crate) client: SystemProxyClient,
     /// 按代理地址缓存的线路专用客户端，保留连接池复用。上限内缓存，
     /// 超出后清空重建（代理地址变更是罕见操作，代价仅为重建连接）。
     pub(crate) proxied_clients: Mutex<HashMap<String, reqwest::Client>>,
@@ -909,14 +908,22 @@ pub(crate) struct RouterServer {
 const MAX_PROXIED_CLIENTS: usize = 8;
 
 impl RouterServer {
+    /// 线路地址无效时直接返回当前客户端，错误留给后续发送步骤报告。
+    pub(crate) async fn default_client(&self, route: &RouteTarget) -> reqwest::Client {
+        match route.upstream_url.as_deref() {
+            Ok(url) => self.client.current(url).await,
+            Err(_) => self.client.cached(),
+        }
+    }
+
     /// 选择线路的上游 HTTP 客户端：未配置代理的线路共用默认客户端（遵循
     /// 系统代理），配置了上游代理的线路使用仅走该代理的专用客户端。
-    pub(crate) fn upstream_client(
+    pub(crate) async fn upstream_client(
         &self,
         route: &RouteTarget,
     ) -> std::result::Result<reqwest::Client, String> {
         let Some(proxy) = route.upstream_proxy.as_deref() else {
-            return Ok(self.client.clone());
+            return Ok(self.default_client(route).await);
         };
         let mut clients = self
             .proxied_clients

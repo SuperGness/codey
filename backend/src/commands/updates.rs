@@ -624,10 +624,12 @@ async fn fetch_release_admin_update(
     if let Some(os_version) = current_os_version() {
         query.push(("osVersion", os_version));
     }
+    let shared_client;
     let client = if identity.is_some() {
         device_http_client()?
     } else {
-        &state.http_client
+        shared_client = state.http_client.current(endpoint.as_str()).await;
+        &shared_client
     };
     let mut request = client.get(endpoint).query(&query);
     if let Some(identity) = &identity {
@@ -773,7 +775,7 @@ async fn download_update_candidate_with_mode(
         .as_ref()
         .ok_or_else(|| "没有适用于当前系统的可安装更新包".to_string())?;
     let file_path = match download_update_asset(
-        &state.http_client,
+        &state.http_client.current(&asset.url).await,
         &state.store,
         &candidate.check.latest_version,
         asset,
@@ -1011,6 +1013,8 @@ async fn fetch_configured_update_manifest(
 
     let response = state
         .http_client
+        .current(url.as_str())
+        .await
         .get(url)
         .header(
             USER_AGENT,
@@ -1638,7 +1642,9 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let state = AppState {
                 store: ConfigStore::new(directory.path().join("config.json")),
-                http_client: reqwest::Client::builder().no_proxy().build().unwrap(),
+                http_client: crate::system_proxy_client::SystemProxyClient::fixed(
+                    reqwest::Client::builder().no_proxy().build().unwrap(),
+                ),
                 ..AppState::default()
             };
             TEST_DEVICE_VERSIONS
@@ -1679,6 +1685,7 @@ mod tests {
             assert!(
                 state
                     .http_client
+                    .cached()
                     .get(&source_url)
                     .send()
                     .await
@@ -2023,7 +2030,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = AppState {
             store: ConfigStore::new(directory.path().join("config.json")),
-            http_client: reqwest::Client::builder().no_proxy().build().unwrap(),
+            http_client: crate::system_proxy_client::SystemProxyClient::fixed(
+                reqwest::Client::builder().no_proxy().build().unwrap(),
+            ),
             ..AppState::default()
         };
         // AppState::default() 会读取真实用户配置，更新策略必须显式固定。

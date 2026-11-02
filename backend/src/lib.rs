@@ -53,6 +53,7 @@ mod subagent;
 mod subagent_gate;
 mod subagent_orchestrator;
 mod subagent_policy;
+mod system_proxy_client;
 mod target_prefetch;
 mod task_activity;
 mod trace_log_guard;

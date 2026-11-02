@@ -49,6 +49,7 @@ use crate::route_request_log::{
     RouteRequestLogReconfigure, RouteRequestLogStart, UpstreamTransport,
     observe_upstream_response_model,
 };
+use crate::system_proxy_client::SystemProxyClient;
 
 pub(crate) const ROUTER_PROVIDER_ID: &str = "codey_router";
 /// Codey 曾为原生远程压缩单独创建 Provider。旧配置可能残留这张表，这里只用于

@@ -947,6 +947,28 @@
     openSettingsOverlay();
   };
 
+  // 配置面板按需加载；悬停停留或按下、聚焦时提前加载，点击时直接打开。
+  // 掠过按钮不加载，失败也不提示，错误与重试留给真正的点击。
+  const settingsPreloadDelayMs = 120;
+  let settingsPreloadTimer = 0;
+  const preloadSettingsOverlay = () => {
+    window.clearTimeout(settingsPreloadTimer);
+    settingsPreloadTimer = 0;
+    const overlay = window.__codeySettingsOverlay;
+    if (runtimeHealthState === "unavailable"
+      || !overlay?.__codeyLazyLoader
+      || typeof overlay.load !== "function") return;
+    void Promise.resolve().then(() => overlay.load()).catch(() => {});
+  };
+  const scheduleSettingsPreload = () => {
+    window.clearTimeout(settingsPreloadTimer);
+    settingsPreloadTimer = window.setTimeout(preloadSettingsOverlay, settingsPreloadDelayMs);
+  };
+  const cancelSettingsPreload = () => {
+    window.clearTimeout(settingsPreloadTimer);
+    settingsPreloadTimer = 0;
+  };
+
   const openSettingsOverlay = () => {
     if (window.__codeySettingsOverlay?.toggle) {
       window.__codeySettingsOverlay.toggle();
@@ -1142,6 +1164,10 @@
         event.stopPropagation();
         void openSettings();
       }, true);
+      button.addEventListener("pointerenter", scheduleSettingsPreload, { passive: true });
+      button.addEventListener("pointerleave", cancelSettingsPreload, { passive: true });
+      button.addEventListener("pointerdown", preloadSettingsOverlay, { passive: true });
+      button.addEventListener("focus", preloadSettingsOverlay);
     }
     if (railMount) {
       button.dataset.codeyRailSlot = "true";

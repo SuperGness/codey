@@ -130,7 +130,8 @@ pub struct AppState {
     /// changes arrive on plugin threads, which cannot see that runtime via
     /// `Handle::try_current`.
     runtime_handle: Option<tokio::runtime::Handle>,
-    pub http_client: reqwest::Client,
+    /// 官方账号授权、更新检查与模型拉取共用的客户端，随系统代理变化重建。
+    pub http_client: crate::system_proxy_client::SystemProxyClient,
     /// Official token refresh clients keyed by account proxy URL.
     official_proxied_clients: BlockingMutex<HashMap<String, reqwest::Client>>,
     #[cfg(test)]
@@ -260,6 +261,12 @@ fn load_config_or_defaults(store: &ConfigStore) -> (CodeyConfig, Option<String>)
     (CodeyConfig::default(), Some(message))
 }
 
+fn shared_http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder()
+        .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(5))
+}
+
 impl Default for AppState {
     fn default() -> Self {
         Self::with_store(ConfigStore::default())
@@ -280,11 +287,10 @@ impl AppState {
             config_apply: BlockingMutex::new(config_apply::ApplyQueue::default()),
             model_delivery_lock: Mutex::new(()),
             runtime_handle: tokio::runtime::Handle::try_current().ok(),
-            http_client: reqwest::Client::builder()
-                .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(Duration::from_secs(5))
-                .build()
-                .expect("shared Codey HTTP client should be constructible"),
+            http_client: crate::system_proxy_client::SystemProxyClient::new_blocking(
+                shared_http_client_builder,
+            )
+            .expect("shared Codey HTTP client should be constructible"),
             official_proxied_clients: BlockingMutex::new(HashMap::new()),
             #[cfg(test)]
             webhook_http_client_override: None,

@@ -197,9 +197,14 @@ pub(super) async fn start_official_account_login(state: &Arc<AppState>) -> Resul
     }
     // Give the aborted listener a moment to release the callback port.
     tokio::task::yield_now().await;
-    let session = start_login(state.http_client.clone())
-        .await
-        .map_err(|error| format!("{error:#}"))?;
+    let session = start_login(
+        state
+            .http_client
+            .current(crate::official_accounts::OAUTH_TOKEN_URL)
+            .await,
+    )
+    .await
+    .map_err(|error| format!("{error:#}"))?;
     let auth_url = session.auth_url.clone();
     let login_id = uuid::Uuid::new_v4().to_string();
     state
@@ -300,9 +305,16 @@ pub(super) async fn start_official_account_siwc(
         state.official_siwc_logins.lock().await.cancel_all();
     }
     tokio::task::yield_now().await;
-    let session = start_siwc_login(state.http_client.clone(), &record, &host_id)
-        .await
-        .map_err(|error| format!("{error:#}"))?;
+    let session = start_siwc_login(
+        state
+            .http_client
+            .current(crate::official_accounts::OAUTH_TOKEN_URL)
+            .await,
+        &record,
+        &host_id,
+    )
+    .await
+    .map_err(|error| format!("{error:#}"))?;
     let auth_url = session.auth_url.clone();
     let login_id = uuid::Uuid::new_v4().to_string();
     state
@@ -426,9 +438,15 @@ pub(super) async fn remove_official_account_siwc(
         .map_err(|error| format!("{error:#}"))?
         .ok_or_else(|| format!("找不到官方账号：{account_id}"))?;
     let remote_confirmed = match record.siwc.as_ref() {
-        Some(credential) => revoke_siwc_session(&state.http_client, credential)
-            .await
-            .is_ok(),
+        Some(credential) => revoke_siwc_session(
+            &state
+                .http_client
+                .current(crate::official_accounts::OAUTH_TOKEN_URL)
+                .await,
+            credential,
+        )
+        .await
+        .is_ok(),
         None => true,
     };
     let clear_store = state.official_accounts();
@@ -463,7 +481,10 @@ pub(super) async fn import_official_account_credential(
     credential: String,
 ) -> Result<Value, String> {
     let record = crate::official_accounts::official_account_from_manual_input(
-        &state.http_client,
+        &state
+            .http_client
+            .current(crate::official_accounts::OAUTH_TOKEN_URL)
+            .await,
         &credential,
     )
     .await
@@ -542,7 +563,10 @@ pub(super) async fn refresh_official_account_tokens(
             let expected = record.clone();
             let proxy = super::official_account_usage_proxy(state, account_id).await;
             match refresh_if_stale_cached(
-                &state.http_client,
+                &state
+                    .http_client
+                    .current(crate::official_accounts::OAUTH_TOKEN_URL)
+                    .await,
                 &mut record,
                 proxy.as_deref(),
                 Some(&state.official_proxied_clients),
@@ -612,7 +636,10 @@ pub(super) async fn refresh_official_account_tokens(
     // 在线路重算后自动回落到 Codex 平面。
     if !record.invalid() && record.siwc.is_some() {
         match refresh_siwc_if_stale(
-            &state.http_client,
+            &state
+                .http_client
+                .current(crate::official_accounts::OAUTH_TOKEN_URL)
+                .await,
             &store,
             account_id,
             Some(&state.official_proxied_clients),
@@ -766,7 +793,14 @@ pub(super) async fn remove_official_account(
         .map_err(|error| format!("移除官方账号任务异常退出：{error}"))?
         .map_err(|error| format!("{error:#}"))?;
     if let Some(credential) = siwc_credential
-        && let Err(error) = revoke_siwc_session(&state.http_client, &credential).await
+        && let Err(error) = revoke_siwc_session(
+            &state
+                .http_client
+                .current(crate::official_accounts::OAUTH_TOKEN_URL)
+                .await,
+            &credential,
+        )
+        .await
     {
         error_log::record_failure(
             "official_siwc_revoke_failed",

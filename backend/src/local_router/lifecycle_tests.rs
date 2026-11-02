@@ -139,10 +139,12 @@ pub(super) fn test_server(config: &CodeyConfig) -> RouterServer {
         native_history_cache: Arc::default(),
         portable_history_cache: Arc::default(),
         idle_downstreams: Arc::default(),
-        client: super::server::upstream_http_client_builder()
-            .no_proxy()
-            .build()
-            .unwrap(),
+        client: SystemProxyClient::fixed(
+            super::server::upstream_http_client_builder()
+                .no_proxy()
+                .build()
+                .unwrap(),
+        ),
         proxied_clients: Mutex::default(),
         official_auth_path: PathBuf::from("/nonexistent/codey-lifecycle-test-auth"),
         account_usage_cache: Arc::default(),
@@ -1422,10 +1424,11 @@ async fn rejected_response_releases_request_memory_before_reading_its_body() {
     let mut downstream = CapturedDownstream::default();
     let mut lifecycle = LifecycleRequest::inert();
     let mut headers = HeaderMap::new();
+    let client = server.client.cached();
     let send = execution.send(
         &mut downstream,
         &mut lifecycle,
-        &server.client,
+        &client,
         &mut headers,
         request,
         &[],

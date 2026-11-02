@@ -737,7 +737,7 @@ impl RouterServer {
         if let Some(probe) = &probe {
             probe.set_upstream_request_headers(&format_upstream_headers(&headers));
         }
-        let upstream_client = match self.upstream_client(&route) {
+        let upstream_client = match self.upstream_client(&route).await {
             Ok(client) => client,
             Err(message) => {
                 mark_error(502, "route_configuration_error");
@@ -978,11 +978,12 @@ impl RouterServer {
             }) {
                 // SIWC 直连平面：令牌来自账号的 SIWC 槽位，不接受下游自带的
                 // Codex 令牌；backend-api 专属头一律剥掉。
+                let default_client = self.default_client(route).await;
                 let siwc_auth = resolve_siwc_upstream_auth(
                     siwc_path,
                     account_id,
                     &self.siwc_auth_cache,
-                    &self.client,
+                    &default_client,
                     &self.proxied_clients,
                 )
                 .await
@@ -2525,7 +2526,7 @@ impl RouterServer {
         // 用 .header() 会追加重复值。只在 HTTP 请求上设置，上游 WebSocket 握手已在
         // 此前发起，不携带 content-type。
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let upstream_client = match self.upstream_client(&resolved.route) {
+        let upstream_client = match self.upstream_client(&resolved.route).await {
             Ok(client) => client,
             Err(message) => {
                 return downstream
