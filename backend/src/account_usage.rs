@@ -186,6 +186,8 @@ pub struct AccountUsageSnapshot {
     pub secondary: Option<AccountUsageWindow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credits: Option<AccountCredits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_credits: Option<AccountResetCredits>,
     pub fetched_at: u64,
 }
 
@@ -205,6 +207,17 @@ pub struct AccountCredits {
     pub unlimited: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance: Option<String>,
+}
+
+/// 官方额度附带的速率限制重置次数。用量响应只回传剩余次数，单次的过期
+/// 时间由 rate-limit-reset-credits 明细接口补充，拿不到时只显示次数。
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountResetCredits {
+    #[serde(default)]
+    pub available_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_expires_at: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -550,13 +563,59 @@ pub async fn fetch_official_account_usage(
         let payload =
             serde_json::from_slice::<Value>(&response).with_context(|| "官方额度响应格式无效")?;
         LAST_GOOD_USAGE_ENDPOINT.store(index, std::sync::atomic::Ordering::Relaxed);
-        return parse_account_usage(&payload, unix_timestamp());
+        let mut snapshot = parse_account_usage(&payload, unix_timestamp())?;
+        if let Some(credits) = snapshot.reset_credits.as_mut()
+            && credits.available_count > 0
+            && credits.next_expires_at.is_none()
+        {
+            credits.next_expires_at = fetch_reset_credits_expiry(client, &auth, index).await;
+        }
+        return Ok(snapshot);
     }
 
     bail!(
         "{}",
         last_error.unwrap_or_else(|| "未找到可用的官方额度接口".to_string())
     )
+}
+
+/// 重置次数的过期明细只在剩余次数大于零时才补查；请求失败、超时或响应
+/// 格式不符都不影响额度快照本身。
+async fn fetch_reset_credits_expiry(
+    client: &Client,
+    auth: &OfficialAuth,
+    usage_endpoint_index: usize,
+) -> Option<u64> {
+    let base = USAGE_ENDPOINTS[usage_endpoint_index].rsplit_once('/')?.0;
+    let endpoint = format!("{base}/rate-limit-reset-credits");
+    let mut request = client
+        .get(&endpoint)
+        .timeout(Duration::from_secs(8))
+        .header(ACCEPT, "application/json")
+        .header("user-agent", "codex_cli_rs")
+        .bearer_auth(&auth.access_token);
+    if let Some(account_id) = auth.account_id.as_deref() {
+        request = request.header("chatgpt-account-id", account_id);
+    }
+    let response = request.send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body = crate::http_response::read_bounded_body(
+        response,
+        MAX_ACCOUNT_USAGE_RESPONSE_BYTES,
+        "额度重置次数明细响应",
+    )
+    .await
+    .ok()?;
+    let payload: Value = serde_json::from_slice(&body).ok()?;
+    let now = unix_timestamp();
+    reset_credits_next_expiry(&payload, now).or_else(|| {
+        ["rate_limit_reset_credits", "rateLimitResetCredits"]
+            .iter()
+            .find_map(|key| payload.get(*key))
+            .and_then(|summary| reset_credits_next_expiry(summary, now))
+    })
 }
 
 pub(crate) fn read_official_auth(path: &Path) -> Result<OfficialAuth> {
@@ -688,13 +747,66 @@ fn parse_account_usage(value: &Value, fetched_at: u64) -> Result<AccountUsageSna
 
     let plan_type = string_field(value, &["plan_type", "planType"])
         .or_else(|| string_field(snapshot, &["plan_type", "planType"]));
+    let reset_credits =
+        parse_reset_credits(value, fetched_at).or_else(|| parse_reset_credits(snapshot, fetched_at));
     Ok(AccountUsageSnapshot {
         plan_type,
         primary,
         secondary,
         credits,
+        reset_credits,
         fetched_at,
     })
+}
+
+fn parse_reset_credits(value: &Value, fetched_at: u64) -> Option<AccountResetCredits> {
+    let summary = ["rate_limit_reset_credits", "rateLimitResetCredits"]
+        .iter()
+        .find_map(|key| value.get(*key))?;
+    let available_count = u64_field(summary, &["available_count", "availableCount"])?;
+    Some(AccountResetCredits {
+        available_count,
+        next_expires_at: reset_credits_next_expiry(summary, fetched_at),
+    })
+}
+
+/// 明细行里取最近一次未过期的过期时间；已核销或状态不明的行不再参与计算。
+fn reset_credits_next_expiry(summary: &Value, now: u64) -> Option<u64> {
+    summary
+        .get("credits")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter(|credit| {
+            !matches!(
+                string_field(credit, &["status"]).as_deref(),
+                Some("redeemed") | Some("unknown")
+            )
+        })
+        .filter_map(|credit| {
+            ["expires_at", "expiresAt"]
+                .iter()
+                .find_map(|key| credit.get(*key))
+                .and_then(reset_credit_timestamp)
+        })
+        .filter(|expires_at| *expires_at > now)
+        .min()
+}
+
+/// 官方明细接口的过期时间是 RFC3339 字符串，AppServer 明细行是 Unix 秒。
+fn reset_credit_timestamp(value: &Value) -> Option<u64> {
+    let timestamp = if let Some(text) = value.as_str() {
+        let trimmed = text.trim();
+        match chrono::DateTime::parse_from_rfc3339(trimmed) {
+            Ok(datetime) => datetime.timestamp(),
+            Err(_) => trimmed.parse::<f64>().ok()?.round() as i64,
+        }
+    } else {
+        value.as_f64()?.round() as i64
+    };
+    u64::try_from(timestamp)
+        .ok()
+        .filter(|timestamp| *timestamp > 0)
+        .map(normalize_timestamp)
 }
 
 fn parse_window(value: &Value, keys: &[&str], fetched_at: u64) -> Option<AccountUsageWindow> {
@@ -823,6 +935,7 @@ mod tests {
                 unlimited: false,
                 balance: Some("10".to_string()),
             }),
+            reset_credits: None,
             fetched_at: 1_700_000_000,
         }
     }
@@ -1346,6 +1459,32 @@ mod tests {
         assert_eq!(snapshot.plan_type.as_deref(), Some("plus"));
         assert_eq!(snapshot.primary.unwrap().window_minutes, 300);
         assert_eq!(snapshot.secondary.unwrap().window_minutes, 10_080);
+    }
+
+    #[test]
+    fn parses_reset_credit_count_and_nearest_expiry() {
+        let value = serde_json::json!({
+            "rate_limits": {
+                "primary": {"used_percent": 15.0, "window_minutes": 300}
+            },
+            "rate_limit_reset_credits": {
+                "available_count": 2,
+                "credits": [
+                    {"id": "a", "status": "available", "expires_at": "2027-01-14T15:03:00Z"},
+                    {"id": "b", "status": "redeemed", "expires_at": "2026-11-09T15:03:00Z"},
+                    {"id": "c", "status": "available", "expires_at": null},
+                    {"id": "d", "status": "available", "expiresAt": 1_800_600_000}
+                ]
+            }
+        });
+
+        let snapshot = parse_account_usage(&value, 1_700_000_000).unwrap();
+        let credits = snapshot.reset_credits.unwrap();
+        assert_eq!(credits.available_count, 2);
+        let expected = chrono::DateTime::parse_from_rfc3339("2027-01-14T15:03:00Z")
+            .unwrap()
+            .timestamp() as u64;
+        assert_eq!(credits.next_expires_at, Some(expected));
     }
 
     #[test]

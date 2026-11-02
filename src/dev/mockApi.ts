@@ -1002,7 +1002,7 @@ if (import.meta.env.DEV) {
         for (const character of accountId) seed = (seed * 31 + character.charCodeAt(0)) % 60;
         return { status: "ok", fetchedAt, planType: account?.planType, secondary: {
           usedPercent: 20 + seed, windowMinutes: 10080, resetsAt: fetchedAt + 3 * 86400,
-        } };
+        }, resetCredits: { availableCount: 1 + (seed % 3), nextExpiresAt: fetchedAt + 5 * 86400 } };
       }
       if (command === "query_route_request_logs" || command === "query_route_request_log_stats" || command === "query_route_request_log_models") {
         const page = Math.max(1, Number(args.page) || 1);

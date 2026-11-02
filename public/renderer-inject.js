@@ -130,14 +130,15 @@
       #${buttonId}[data-codey-update-available="true"]::after { opacity: 1; transform: scale(1); }
       #${buttonId}[data-codey-header-actions="true"]::after { top: 4px; right: 4px; }
       #${buttonId}[data-codey-runtime-state="unavailable"][data-codey-update-available="true"]::after { top: auto; right: 3px; bottom: 3px; width: 5px; height: 5px; }
-      /* 跟随宿主 color-scheme；明确的主题类优先于系统偏好。浮层保持不透明。 */
-      #${accountUsageId} { --codey-usage-surface: light-dark(#ffffff, #252525); --codey-usage-ink: light-dark(#202124, #f3f3f3); --codey-usage-muted: light-dark(#65686d, #b1b1b5); --codey-usage-line: light-dark(#e7e8ea, #3d3d40); --codey-usage-track: light-dark(#e9ebed, #3c3d40); -webkit-app-region: no-drag !important; position: relative; display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: 9px 16px 10px; background: transparent; color: var(--codey-usage-ink); container-type: inline-size; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif; line-height: 1.4; pointer-events: auto !important; user-select: none; }
+      /* 跟随宿主 color-scheme；明确的主题类优先于系统偏好。iOS 克制毛玻璃质感。 */
+      #${accountUsageId} { --codey-usage-surface: light-dark(rgba(255, 255, 255, .82), rgba(32, 32, 36, .82)); --codey-usage-border: light-dark(rgba(255, 255, 255, .65), rgba(255, 255, 255, .12)); --codey-usage-ink: light-dark(#1d1d1f, #f5f5f7); --codey-usage-muted: light-dark(#86868b, #98989d); --codey-usage-line: light-dark(rgba(60, 60, 67, .08), rgba(235, 235, 245, .08)); --codey-usage-track: light-dark(rgba(0, 0, 0, .05), rgba(255, 255, 255, .10)); -webkit-app-region: no-drag !important; position: relative; display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: 9px 16px 10px; border-radius: 8px; background: transparent; color: var(--codey-usage-ink); container-type: inline-size; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif; line-height: 1.4; pointer-events: auto !important; user-select: none; transition: background .15s ease; }
       :where(.light, [data-theme="light"]) #${accountUsageId} { color-scheme: light; }
       :where(.dark, [data-theme="dark"]) #${accountUsageId} { color-scheme: dark; }
+      #${accountUsageId}:hover { background: light-dark(rgba(0, 0, 0, .025), rgba(255, 255, 255, .04)); }
       #${accountUsageId}[data-state="stale"] .codey-usage-details-updated::before { content: "上次成功数据 · "; }
       #${accountUsageId}[data-state="error"] { padding-block: 8px; color: color-mix(in srgb, CanvasText 58%, transparent); font-size: 10px; }
       #${accountUsageId} .codey-usage-list { display: grid; min-width: 0; grid-template-columns: repeat(var(--codey-usage-window-count), minmax(0, 1fr)); gap: 12px; }
-      #${accountUsageId} .codey-usage-segment, #${accountUsageId} .codey-usage-detail-row { --codey-usage-accent: light-dark(#00865c, #34d399); --codey-usage-accent-bg: light-dark(#e2f5ed, #183e32); min-width: 0; }
+      #${accountUsageId} .codey-usage-segment, #${accountUsageId} .codey-usage-detail-row { --codey-usage-accent: light-dark(#288e40, #30d158); --codey-usage-accent-bg: light-dark(rgba(40, 142, 64, .11), rgba(48, 209, 88, .18)); min-width: 0; }
       #${accountUsageId}[data-window-count="2"] .codey-usage-segment + .codey-usage-segment { border-inline-start: 1px solid color-mix(in srgb, CanvasText 9%, transparent); padding-inline-start: 12px; }
       #${accountUsageId} .codey-usage-overview { display: flex; min-width: 0; align-items: center; gap: 6px; }
       #${accountUsageId} .codey-usage-window-label { min-width: 0; overflow: hidden; color: var(--codey-usage-muted); font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
@@ -150,26 +151,26 @@
       #${accountUsageId} .codey-usage-meter { display: block; box-sizing: border-box; width: 100%; height: 3px; min-height: 3px; max-height: 3px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: var(--codey-usage-track); contain: size; line-height: 0; }
       #${accountUsageId} .codey-usage-meter > span { display: block; box-sizing: border-box; width: 100%; height: 100%; border-radius: inherit; background: var(--codey-usage-accent); transform: scaleX(var(--codey-usage-remaining)); transform-origin: left center; }
       #${accountUsageId} .codey-usage-reset { display: block; overflow: hidden; margin-top: 5px; color: var(--codey-usage-muted); font-size: 9px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-      #${accountUsageId} [data-tone="normal"] { --codey-usage-accent: light-dark(#0070d9, #69b1ff); --codey-usage-accent-bg: light-dark(#e6f1ff, #20364d); }
-      #${accountUsageId} [data-tone="warning"] { --codey-usage-accent: light-dark(#ad5a00, #ffb454); --codey-usage-accent-bg: light-dark(#fff0dc, #49331c); }
-      #${accountUsageId} [data-tone="critical"] { --codey-usage-accent: light-dark(#c92a2a, #ff827a); --codey-usage-accent-bg: light-dark(#ffebea, #4a2928); }
-      #${accountUsageId} .codey-usage-details { position: absolute; z-index: 2; right: 10px; bottom: calc(100% + 4px); left: 10px; box-sizing: border-box; min-width: 0; padding: 13px; border: 1px solid var(--codey-usage-line); border-radius: 12px; background: var(--codey-usage-surface); box-shadow: 0 8px 28px light-dark(rgb(28 35 45 / .14), rgb(0 0 0 / .34)); color: var(--codey-usage-ink); opacity: 0; pointer-events: none; transform: translateY(4px); transition: opacity .14s ease, transform .14s ease, visibility .14s ease; visibility: hidden; }
-      #${accountUsageId}:hover .codey-usage-details, #${accountUsageId}:focus-visible .codey-usage-details { opacity: 1; transform: translateY(0); visibility: visible; pointer-events: auto; }
-      #${accountUsageId} .codey-usage-details::after { content: ""; position: absolute; inset: 100% 0 auto; height: 5px; }
+      #${accountUsageId} [data-tone="normal"] { --codey-usage-accent: light-dark(#0071e3, #0a84ff); --codey-usage-accent-bg: light-dark(rgba(0, 113, 227, .10), rgba(10, 132, 255, .18)); }
+      #${accountUsageId} [data-tone="warning"] { --codey-usage-accent: light-dark(#c96400, #ff9f0a); --codey-usage-accent-bg: light-dark(rgba(201, 100, 0, .11), rgba(255, 159, 10, .18)); }
+      #${accountUsageId} [data-tone="critical"] { --codey-usage-accent: light-dark(#d70015, #ff453a); --codey-usage-accent-bg: light-dark(rgba(215, 0, 21, .11), rgba(255, 69, 58, .20)); }
+      #${accountUsageId} .codey-usage-details { position: absolute; z-index: 2; right: 8px; bottom: calc(100% + 6px); left: 8px; box-sizing: border-box; min-width: 0; padding: 13px 14px 14px; border: 1px solid var(--codey-usage-border); border-radius: 14px; background: var(--codey-usage-surface); box-shadow: 0 16px 36px light-dark(rgba(0, 0, 0, .10), rgba(0, 0, 0, .48)), 0 3px 10px light-dark(rgba(0, 0, 0, .03), rgba(0, 0, 0, .24)), inset 0 0.5px 0 0 light-dark(rgba(255, 255, 255, .95), rgba(255, 255, 255, .16)); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%); color: var(--codey-usage-ink); opacity: 0; pointer-events: none; transform: translateY(6px) scale(.97); transition: opacity .18s cubic-bezier(.16, 1, .3, 1), transform .18s cubic-bezier(.16, 1, .3, 1), visibility .18s cubic-bezier(.16, 1, .3, 1); visibility: hidden; }
+      #${accountUsageId}:hover .codey-usage-details, #${accountUsageId}:focus-visible .codey-usage-details { opacity: 1; transform: translateY(0) scale(1); visibility: visible; pointer-events: auto; }
+      #${accountUsageId} .codey-usage-details::after { content: ""; position: absolute; inset: 100% 0 auto; height: 8px; }
       #${accountUsageId}:focus-visible { border-radius: 6px; outline: 2px solid color-mix(in srgb, #0a84ff 72%, transparent); outline-offset: -2px; }
-      #${accountUsageId} .codey-usage-details-heading { display: flex; min-width: 0; align-items: center; gap: 8px; padding-bottom: 11px; }
-      #${accountUsageId} .codey-usage-details-title { font-size: 11px; font-weight: 650; }
-      #${accountUsageId} .codey-usage-details-list { display: grid; min-width: 0; gap: 12px; }
-      #${accountUsageId} .codey-usage-detail-row { padding-block-start: 11px; border-block-start: 1px solid var(--codey-usage-line); }
-      #${accountUsageId} .codey-usage-detail-main, #${accountUsageId} .codey-usage-detail-meta { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
+      #${accountUsageId} .codey-usage-details-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 10px; }
+      #${accountUsageId} .codey-usage-details-title { font-size: 11.5px; font-weight: 650; letter-spacing: -.01em; }
+      #${accountUsageId} .codey-usage-details-updated { margin-inline-start: auto; color: var(--codey-usage-muted); font-size: 9.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      #${accountUsageId} .codey-usage-details-list { display: grid; min-width: 0; gap: 11px; }
+      #${accountUsageId} .codey-usage-detail-row { padding-block-start: 10px; border-block-start: 1px solid var(--codey-usage-line); }
+      #${accountUsageId} .codey-usage-detail-main, #${accountUsageId} .codey-usage-detail-meta { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; }
       #${accountUsageId} .codey-usage-detail-label { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
       #${accountUsageId} .codey-usage-detail-value { margin-inline-start: auto; font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
-      #${accountUsageId} .codey-usage-detail-row[data-tone] .codey-usage-detail-value { padding: 1px 7px; border-radius: 999px; background: var(--codey-usage-accent-bg); color: var(--codey-usage-accent); font-size: 10px; }
-      #${accountUsageId} .codey-usage-detail-row .codey-usage-meter { height: 5px; min-height: 5px; max-height: 5px; margin-top: 8px; }
-      #${accountUsageId} .codey-usage-detail-meta { flex-wrap: wrap; margin-top: 6px; gap: 3px 8px; color: var(--codey-usage-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+      #${accountUsageId} .codey-usage-detail-row[data-tone] .codey-usage-detail-value { padding: 1.5px 7px; border-radius: 999px; background: var(--codey-usage-accent-bg); color: var(--codey-usage-accent); font-size: 10px; font-weight: 650; }
+      #${accountUsageId} .codey-usage-detail-row .codey-usage-meter { height: 4px; min-height: 4px; max-height: 4px; margin-top: 7px; }
+      #${accountUsageId} .codey-usage-detail-meta { flex-wrap: wrap; margin-top: 5px; gap: 3px 8px; color: var(--codey-usage-muted); font-size: 9.5px; font-variant-numeric: tabular-nums; line-height: 1.35; }
       #${accountUsageId} .codey-usage-detail-meta span { white-space: nowrap; }
       #${accountUsageId} .codey-usage-detail-meta span + span { margin-inline-start: auto; }
-      #${accountUsageId} .codey-usage-details-updated { margin-top: 11px; padding-top: 9px; border-top: 1px solid var(--codey-usage-line); color: var(--codey-usage-muted); font-size: 9px; font-variant-numeric: tabular-nums; }
       #${accountUsageId}[data-window-count="2"] .codey-usage-list:has(.codey-usage-plan-tag) { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
       @container (max-width: 280px) {
         #${accountUsageId} .codey-usage-list { gap: 8px; }
@@ -501,13 +502,41 @@
       .map((bucket) => bucket.planType)
       .find((value) => typeof value === "string" && value.trim())
       || (typeof payload.planType === "string" ? payload.planType : undefined);
+    const resetCredits = normalizeResetCreditsSummary(
+      payload.rateLimitResetCredits ?? payload.rate_limit_reset_credits
+        ?? payload.rateLimits?.rateLimitResetCredits ?? payload.rateLimits?.rate_limit_reset_credits,
+    );
     return {
       status: "ok",
       ...(planType ? { planType } : {}),
       ...(primary ? { primary } : {}),
       ...(secondary ? { secondary } : {}),
       ...(credits ? { credits } : {}),
+      ...(resetCredits ? { resetCredits } : {}),
       fetchedAt: Math.floor(Date.now() / 1000),
+    };
+  };
+
+  // AppServer 的 rateLimitResetCredits 带剩余次数与明细行；明细行取最近一次
+  // 过期时间，明细缺失时只保留次数。
+  const normalizeResetCreditsSummary = (summary) => {
+    if (!summary || typeof summary !== "object") return null;
+    const count = Number(summary.availableCount ?? summary.available_count);
+    if (!Number.isFinite(count)) return null;
+    let nextExpiresAt;
+    const rows = Array.isArray(summary.credits) ? summary.credits : [];
+    for (const row of rows) {
+      const status = String(row?.status || "");
+      if (status === "redeemed" || status === "unknown") continue;
+      const raw = Number(row?.expiresAt ?? row?.expires_at);
+      if (!Number.isFinite(raw) || raw <= 0) continue;
+      const expires = Math.round(raw > 10_000_000_000 ? raw / 1000 : raw);
+      if (expires * 1000 <= Date.now()) continue;
+      nextExpiresAt = nextExpiresAt === undefined ? expires : Math.min(nextExpiresAt, expires);
+    }
+    return {
+      availableCount: Math.max(0, Math.round(count)),
+      ...(nextExpiresAt ? { nextExpiresAt } : {}),
     };
   };
 
@@ -564,7 +593,7 @@
     return hours ? `${days} 天 ${hours} 小时后重置` : `${days} 天后重置`;
   };
 
-  const accountUsageResetTimeLabel = (resetsAt) => {
+  const accountUsageDayTimeLabel = (resetsAt) => {
     const timestamp = Number(resetsAt);
     if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
     const resetAt = new Date(timestamp * 1000);
@@ -588,9 +617,14 @@
       minute: "2-digit",
       hour12: false,
     });
-    if (dayOffset === 0) return `今天 ${time} 重置`;
-    if (dayOffset === 1) return `明天 ${time} 重置`;
-    return `${resetAt.getMonth() + 1}月${resetAt.getDate()}日 ${time} 重置`;
+    if (dayOffset === 0) return `今天 ${time}`;
+    if (dayOffset === 1) return `明天 ${time}`;
+    return `${resetAt.getMonth() + 1}月${resetAt.getDate()}日 ${time}`;
+  };
+
+  const accountUsageResetTimeLabel = (resetsAt) => {
+    const label = accountUsageDayTimeLabel(resetsAt);
+    return label ? `${label} 重置` : "";
   };
 
   // Codex 把侧边栏底部内容收进贴底的绝对定位 footer 容器后，容器内容由 Codex
@@ -723,6 +757,21 @@
     `;
   };
 
+  const accountUsageResetCreditsDetail = (resetCredits) => {
+    const count = Number(resetCredits?.availableCount);
+    if (!Number.isFinite(count)) return "";
+    const expiry = accountUsageDayTimeLabel(resetCredits.nextExpiresAt);
+    return `
+      <div class="codey-usage-detail-row">
+        <div class="codey-usage-detail-main">
+          <span class="codey-usage-detail-label">剩余重置次数</span>
+          <span class="codey-usage-detail-value">${Math.max(0, Math.round(count))} 次</span>
+        </div>
+        ${expiry ? `<div class="codey-usage-detail-meta"><span>最近 ${escapeAccountUsageText(expiry)} 过期</span></div>` : ""}
+      </div>
+    `;
+  };
+
   const accountUsageFetchedLabel = (fetchedAt) => {
     const timestamp = Number(fetchedAt);
     if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
@@ -740,6 +789,7 @@
       accountUsageDetailWindow(result?.primary),
       accountUsageDetailWindow(result?.secondary),
       accountUsageCreditsDetail(result?.credits),
+      accountUsageResetCreditsDetail(result?.resetCredits),
     ].filter(Boolean);
     const fetched = accountUsageFetchedLabel(result?.fetchedAt);
     if (!rows.length && !fetched) return "";
@@ -747,9 +797,9 @@
       <div id="codey-account-usage-details" class="codey-usage-details" role="tooltip">
         <div class="codey-usage-details-heading">
           <span class="codey-usage-details-title">额度详情</span>
+          ${fetched ? `<span class="codey-usage-details-updated">${escapeAccountUsageText(fetched)}</span>` : ""}
         </div>
         <div class="codey-usage-details-list">${rows.join("")}</div>
-        ${fetched ? `<div class="codey-usage-details-updated">${escapeAccountUsageText(fetched)}</div>` : ""}
       </div>
     `;
   };
