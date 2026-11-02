@@ -2101,7 +2101,52 @@
     return key ? element[key] : null;
   };
 
-  const collectAppServerScopeCandidates = (root, candidates, seen) => {
+  const inspectAppServerScopeValue = (value) => {
+    let descriptors;
+    try {
+      descriptors = Object.getOwnPropertyDescriptors(value);
+    } catch {
+      return null;
+    }
+    const hasFunction = (name) => {
+      if (typeof descriptors[name]?.value === "function") return true;
+      try {
+        return typeof value[name] === "function";
+      } catch {
+        return false;
+      }
+    };
+    return {
+      candidate: hasFunction("get")
+        && hasFunction("set")
+        && hasFunction("watch")
+        && hasFunction("when")
+        && Object.prototype.hasOwnProperty.call(descriptors, "query"),
+      descriptors,
+      children: null,
+    };
+  };
+
+  const appServerScopeChildren = (inspection) => {
+    if (inspection.children) return inspection.children;
+    const children = [];
+    for (const [key, descriptor] of Object.entries(inspection.descriptors)) {
+      if (
+        !Object.prototype.hasOwnProperty.call(descriptor, "value")
+        || ["return", "child", "sibling", "alternate", "stateNode", "_owner"].includes(key)
+      ) continue;
+      const nested = descriptor.value;
+      if (nested && (typeof nested === "object" || typeof nested === "function")) children.push(nested);
+    }
+    inspection.children = children;
+    inspection.descriptors = null;
+    return children;
+  };
+
+  // `inspections` memoizes per-object results for one synchronous scan. Fibers
+  // share large objects (one has ~35k own keys), and re-enumerating them for
+  // every fiber blocked the main thread for ~2 s per failed discovery.
+  const collectAppServerScopeCandidates = (root, candidates, seen, inspections) => {
     const queue = [{ depth: 0, value: root }];
     let cursor = 0;
     let inspected = 0;
@@ -2115,39 +2160,16 @@
       ) continue;
       seen.add(value);
       inspected += 1;
-      let descriptors;
-      try {
-        descriptors = Object.getOwnPropertyDescriptors(value);
-      } catch {
-        continue;
+      let inspection = inspections.get(value);
+      if (inspection === undefined) {
+        inspection = inspectAppServerScopeValue(value);
+        inspections.set(value, inspection);
       }
-      const hasFunction = (name) => {
-        if (typeof descriptors[name]?.value === "function") return true;
-        try {
-          return typeof value[name] === "function";
-        } catch {
-          return false;
-        }
-      };
-      if (
-        hasFunction("get")
-        && hasFunction("set")
-        && hasFunction("watch")
-        && hasFunction("when")
-        && Object.prototype.hasOwnProperty.call(descriptors, "query")
-      ) {
-        candidates.push(value);
-      }
+      if (!inspection) continue;
+      if (inspection.candidate) candidates.push(value);
       if (depth >= 6) continue;
-      for (const [key, descriptor] of Object.entries(descriptors)) {
-        if (
-          !Object.prototype.hasOwnProperty.call(descriptor, "value")
-          || ["return", "child", "sibling", "alternate", "stateNode", "_owner"].includes(key)
-        ) continue;
-        const nested = descriptor.value;
-        if (nested && (typeof nested === "object" || typeof nested === "function")) {
-          queue.push({ depth: depth + 1, value: nested });
-        }
+      for (const nested of appServerScopeChildren(inspection)) {
+        queue.push({ depth: depth + 1, value: nested });
       }
     }
   };
@@ -2162,15 +2184,16 @@
       document.body,
     ].filter((element) => element instanceof HTMLElement))].slice(0, 32);
     const seenScopes = new WeakSet();
+    const inspections = new WeakMap();
     for (const element of elements) {
       let fiber = reactFiberFromElement(element);
       for (let depth = 0; fiber && depth < 24; depth += 1, fiber = fiber.return) {
         const candidates = [];
         const seenValues = new WeakSet();
-        collectAppServerScopeCandidates(fiber.memoizedState, candidates, seenValues);
-        collectAppServerScopeCandidates(fiber.memoizedProps, candidates, seenValues);
-        collectAppServerScopeCandidates(fiber.dependencies, candidates, seenValues);
-        collectAppServerScopeCandidates(fiber.updateQueue, candidates, seenValues);
+        collectAppServerScopeCandidates(fiber.memoizedState, candidates, seenValues, inspections);
+        collectAppServerScopeCandidates(fiber.memoizedProps, candidates, seenValues, inspections);
+        collectAppServerScopeCandidates(fiber.dependencies, candidates, seenValues, inspections);
+        collectAppServerScopeCandidates(fiber.updateQueue, candidates, seenValues, inspections);
         for (const scope of candidates) {
           if (seenScopes.has(scope)) continue;
           seenScopes.add(scope);
@@ -2556,7 +2579,10 @@
         return registered;
       }
       state.failures += 1;
-      state.retryAt = Date.now() + Math.min(30_000, 1_000 * 2 ** Math.min(state.failures - 1, 5));
+      // 完成状态同步只是后台修复，由 15 秒定时器和页面事件反复触发；接口长期
+      // 不可用时每轮失败发现都要遍历 React 树，上限放宽到 5 分钟。
+      const maxRetryMs = feature === "reconcile" ? 300_000 : 30_000;
+      state.retryAt = Date.now() + Math.min(maxRetryMs, 1_000 * 2 ** Math.min(state.failures - 1, 9));
       const capabilityError = unavailableCapability(feature);
       // 探测超时、资源导入失败等真实原因要带进抛出的错误里：capability 状态
       // 对用户保持通用文案，但错误日志需要能区分结构漂移和探测失败。

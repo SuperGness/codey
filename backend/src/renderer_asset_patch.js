@@ -496,6 +496,22 @@
       );
     }
     if (
+      disablePet
+      && source.includes("`electron-avatar-overlay-restore-ready`")
+      && source.includes("shouldPrewarmAvatarOverlay:")
+    ) {
+      // Once the app is ready and realtime voice is available, Codex asks main
+      // to prewarm the hidden avatar overlay window, which keeps a full renderer
+      // resident. With the pet slimmed, only skip that prewarm; main still
+      // creates the shared overlay on demand for voice.
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(`electron-avatar-overlay-restore-ready`,\{[^{}]*?\bshouldPrewarmAvatarOverlay:)[^,{}]+/g,
+        (_match, prefix) => `${prefix}!1`,
+        "avatar overlay prewarm",
+      );
+    }
+    if (
       !source.includes("codeyReconcileCompletedConversation")
       && source.includes("getHasInProgressLocalConversation(")
       && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
@@ -615,7 +631,7 @@
           ) ||
           (
             disablePet &&
-            /\/(?:(?:pets-settings)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
+            /\/(?:(?:pets-settings|app-runtime)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
               url.pathname,
             )
           )

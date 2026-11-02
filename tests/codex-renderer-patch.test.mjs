@@ -932,3 +932,22 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     }
   }
 });
+
+test("slim pet stops the hidden avatar overlay prewarm without blocking on-demand voice", async () => {
+  const runtimeSource = [
+    "function eJ(){let O=Y(`2635985366`),t=tJ(),s=Co(),Be=Cf();",
+    "(0,nJ.useEffect)(()=>{s||jr.dispatchMessage(`electron-avatar-overlay-restore-ready`,{onDemandEnabled:O,shouldPrewarmAvatarOverlay:t&&Be})},[O,t,s,Be]);}",
+  ].join("");
+  const url = "app://-/assets/app-runtime-aa2c0a69096f.js";
+  for (const disablePet of [true, false]) {
+    delete globalThis.__codeyRendererPatchInstalled;
+    (0, eval)(await loadStartupPatchTemplate({ disablePet }));
+    const patched = globalThis.__codeyRendererPatchEntry(url, runtimeSource);
+    if (!disablePet) {
+      assert.equal(patched, null, "app-runtime is only intercepted for the slim pet");
+      continue;
+    }
+    assert.match(patched, /\{onDemandEnabled:O,shouldPrewarmAvatarOverlay:!1\}/);
+    assert.equal(globalThis.__codeyRendererPatchEntry(url, patched), null, "the patch is idempotent");
+  }
+});

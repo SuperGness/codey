@@ -633,6 +633,54 @@ test("native model routing discovers a cached manager when its registry is no lo
   }
 });
 
+test("React manager discovery enumerates an object shared by many fibers once per scan", () => {
+  const runtime = loadInjection({ initialSessionId: "" });
+  let enumerations = 0;
+  const shared = new Proxy(Object.fromEntries(Array.from({ length: 2_000 }, (_, index) => [`k${index}`, index])), {
+    ownKeys(target) {
+      enumerations += 1;
+      return Reflect.ownKeys(target);
+    },
+  });
+  const manager = { sendRequest() { throw Error("must not send"); } };
+  const scope = { query: null, get() {}, set() {}, watch() {}, when() {} };
+  let fiber = { memoizedState: { scope }, memoizedProps: { shared }, return: null };
+  for (let depth = 1; depth < 24; depth += 1) {
+    fiber = { memoizedProps: { shared }, return: fiber };
+  }
+  runtime.document.body.__reactFiber$shared = fiber;
+  const found = runtime.window.__codeyAppServerManagerFromReact((candidate, hostId) => (
+    candidate === scope && hostId === "local" ? manager : null
+  ));
+  assert.equal(found, manager, "the deepest fiber is still scanned");
+  assert.equal(enumerations, 1);
+});
+
+test("background completion reconcile backs off longer than other failed capabilities", async () => {
+  for (const [feature, capMs] of [["reconcile", 300_000], ["usage", 30_000]]) {
+    const runtime = loadInjection({ initialSessionId: "" });
+    let discoveries = 0;
+    runtime.document.scripts.push({ src: "app://-/assets/app-initial-unsupported.js" });
+    runtime.window.__codeyImportCodexAsset = async () => {
+      discoveries += 1;
+      return {};
+    };
+    const load = () => runtime.window.__codeyLoadCodexSessionController({ feature });
+    for (let failure = 0; failure < 10; failure += 1) {
+      await assert.rejects(load(), /暂不支持/);
+      runtime.advanceTime(600_000);
+    }
+    await assert.rejects(load(), /暂不支持/);
+    assert.equal(discoveries, 11, `${feature} retries after each expired backoff`);
+    runtime.advanceTime(capMs - 1);
+    await assert.rejects(load(), /暂不支持/);
+    assert.equal(discoveries, 11, `${feature} skips discovery inside its backoff cap`);
+    runtime.advanceTime(1);
+    await assert.rejects(load(), /暂不支持/);
+    assert.equal(discoveries, 12, `${feature} rediscovers once its backoff cap expires`);
+  }
+});
+
 test("cached manager discovery rejects remote, incomplete, ambiguous, and unmounted clients", async () => {
   const manager = (hostId = "local") => ({
     requestClient: { hostId, enqueueRequest() {}, createRequest() {}, onResult() {} },

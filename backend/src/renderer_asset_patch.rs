@@ -37,8 +37,8 @@ const PATCHABLE_ASSET_PREFIXES: [&str; 5] = [
     "codex-composer-adapter",
     "initialize-app-host-services",
 ];
-/// 仅在关闭宠物时改写的设置页脚本。
-const PET_ASSET_PREFIXES: [&str; 1] = ["pets-settings"];
+/// 仅在关闭宠物时改写的脚本：设置页预览资源，以及决定是否预热隐藏浮窗的运行时。
+const PET_ASSET_PREFIXES: [&str; 2] = ["pets-settings", "app-runtime"];
 /// 等 Codex 调试端点就绪的总预算；超时后由下一次注入重新拉起服务。
 const CONNECT_BUDGET: Duration = Duration::from_secs(60);
 /// 端点未就绪时的重连间隔：主窗口通常在端点出现后数百毫秒内导航，间隔要短。
