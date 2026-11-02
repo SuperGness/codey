@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 
 use super::channels::{NotificationChannelAdapter, adapter_for};
 use super::{NotificationChannelConfig, NotificationEvent};
+use crate::system_proxy_client::SystemProxyClient;
 
 const MAX_NOTIFICATION_RESPONSE_BYTES: usize = 256 * 1024;
 
@@ -369,38 +370,41 @@ fn is_permanent_client_error(status: StatusCode) -> bool {
         )
 }
 
-pub(crate) fn notification_http_client() -> Result<Client> {
+fn notification_http_client_builder() -> reqwest::ClientBuilder {
     Client::builder()
         .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(8))
         .redirect(redirect::Policy::none())
+}
+
+#[cfg(test)]
+pub(crate) fn notification_http_client() -> Result<Client> {
+    notification_http_client_builder()
         .build()
         .context("创建通知 HTTP 客户端失败")
 }
 
-/// How long a built client is reused before the system proxy configuration
-/// and root store are snapshotted again.
+/// How long a built client is reused before the root store is loaded again.
 const SHARED_CLIENT_MAX_AGE: Duration = Duration::from_secs(10 * 60);
 
 /// Building a reqwest client loads the operating-system root certificates,
-/// which is measurable on macOS. reqwest also snapshots the system proxy
-/// configuration at build time, so the shared client is rebuilt periodically
-/// instead of living for the whole process.
-pub(crate) fn shared_notification_http_client() -> Result<Client> {
-    static SHARED: std::sync::Mutex<Option<(std::time::Instant, Client)>> =
-        std::sync::Mutex::new(None);
-    let mut shared = SHARED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some((built_at, client)) = shared.as_ref()
-        && built_at.elapsed() < SHARED_CLIENT_MAX_AGE
-    {
-        return Ok(client.clone());
-    }
-    let client = notification_http_client()?;
-    *shared = Some((std::time::Instant::now(), client.clone()));
-    Ok(client)
+/// which is measurable on macOS, so delivery shares one client. It is rebuilt
+/// when the shared system proxy snapshot changes, and at least every 10 minutes
+/// to pick up root store changes. Channels have no fixed host, so the proxy is
+/// compared for an arbitrary host.
+pub(crate) async fn shared_notification_http_client() -> Result<Client> {
+    static SHARED: std::sync::OnceLock<SystemProxyClient> = std::sync::OnceLock::new();
+    let shared = match SHARED.get() {
+        Some(shared) => shared,
+        None => {
+            let client = SystemProxyClient::new_blocking(notification_http_client_builder)
+                .context("创建通知 HTTP 客户端失败")?
+                .with_max_age(SHARED_CLIENT_MAX_AGE);
+            SHARED.get_or_init(|| client)
+        }
+    };
+    Ok(shared.current_for_any_host().await)
 }
 
 fn notification_response_code(body: &str) -> Option<i64> {

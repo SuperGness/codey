@@ -14,6 +14,7 @@ use crate::config::ProviderProfile;
 use crate::local_router::{UpstreamProtocol, apply_upstream_headers, prepare_upstream_headers};
 use crate::model_id;
 use crate::model_list::{self, ModelEndpointError};
+use crate::system_proxy_client::SystemProxyClient;
 
 const PROVIDER_MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_PROVIDER_MODEL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -56,14 +57,15 @@ impl fmt::Display for ModelListError {
 
 impl std::error::Error for ModelListError {}
 
-pub(crate) fn http_client() -> &'static Client {
-    static CLIENT: OnceLock<Client> = OnceLock::new();
+pub(crate) fn http_client() -> &'static SystemProxyClient {
+    static CLIENT: OnceLock<SystemProxyClient> = OnceLock::new();
     CLIENT.get_or_init(|| {
-        Client::builder()
-            .connect_timeout(Duration::from_secs(5))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("provider model HTTP client should be constructible")
+        SystemProxyClient::new_blocking(|| {
+            Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .redirect(reqwest::redirect::Policy::none())
+        })
+        .expect("provider model HTTP client should be constructible")
     })
 }
 
@@ -507,7 +509,7 @@ mod tests {
             ("x-remove".into(), String::new()),
             ("x-tenant".into(), "tenant".into()),
         ]);
-        let models = fetch(&profile, http_client()).await.unwrap();
+        let models = fetch(&profile, &http_client().cached()).await.unwrap();
         assert_eq!(models, ["test-model"]);
         server.await.unwrap();
     }
@@ -536,7 +538,7 @@ mod tests {
             profile
                 .model_request_headers
                 .insert("x-api-key".into(), "test-secret".into());
-            let error = fetch(&profile, http_client()).await.unwrap_err();
+            let error = fetch(&profile, &http_client().cached()).await.unwrap_err();
             assert!(error.to_string().contains(&status.to_string()));
             server.await.unwrap();
             assert!(

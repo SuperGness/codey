@@ -14,31 +14,37 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::AppState;
 use crate::config::ConfigStore;
+use crate::system_proxy_client::SystemProxyClient;
 
 const UPDATE_CHECK_CACHE_TTL: Duration = Duration::from_secs(30);
 const UPDATE_DOWNLOAD_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_UPDATE_MANIFEST_BYTES: usize = 1024 * 1024;
 static DEVICE_IDENTITY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn device_http_client() -> Result<&'static reqwest::Client, String> {
-    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
-    CLIENT
+fn device_http_client_builder() -> reqwest::ClientBuilder {
+    // 注册请求体和检查、上报请求头都包含密钥，禁止转发到重定向目标。
+    let builder = reqwest::Client::builder()
+        .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            attempt.error("设备身份请求不允许重定向")
+        }));
+    #[cfg(test)]
+    let builder = builder.no_proxy();
+    builder
+}
+
+/// 返回访问 `url` 的设备身份客户端，随系统代理变化重建。
+async fn device_http_client(url: &str) -> Result<reqwest::Client, String> {
+    static CLIENT: OnceLock<Result<SystemProxyClient, String>> = OnceLock::new();
+    let client = CLIENT
         .get_or_init(|| {
-            // 注册请求体和检查、上报请求头都包含密钥，禁止转发到重定向目标。
-            let builder = reqwest::Client::builder()
-                .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(Duration::from_secs(5))
-                .redirect(reqwest::redirect::Policy::custom(|attempt| {
-                    attempt.error("设备身份请求不允许重定向")
-                }));
-            #[cfg(test)]
-            let builder = builder.no_proxy();
-            builder
-                .build()
-                .map_err(|error| format!("创建设备更新客户端失败：{error}"))
+            SystemProxyClient::new_blocking(device_http_client_builder)
+                .map_err(|error| format!("创建设备更新客户端失败：{error:#}"))
         })
         .as_ref()
-        .map_err(Clone::clone)
+        .map_err(Clone::clone)?;
+    Ok(client.current(url).await)
 }
 
 #[derive(Clone, Copy)]
@@ -559,9 +565,11 @@ async fn load_or_register_device(
         "osName": current_os_name(),
         "osVersion": current_os_version(),
     });
-    let response = device_http_client()
+    let register_url = format!("{base_url}/api/devices/register");
+    let response = device_http_client(&register_url)
+        .await
         .map_err(|error| device_identity_failure("client", error))?
-        .post(format!("{base_url}/api/devices/register"))
+        .post(register_url)
         .json(&body)
         .timeout(Duration::from_secs(10))
         .send()
@@ -624,12 +632,10 @@ async fn fetch_release_admin_update(
     if let Some(os_version) = current_os_version() {
         query.push(("osVersion", os_version));
     }
-    let shared_client;
     let client = if identity.is_some() {
-        device_http_client()?
+        device_http_client(endpoint.as_str()).await?
     } else {
-        shared_client = state.http_client.current(endpoint.as_str()).await;
-        &shared_client
+        state.http_client.current(endpoint.as_str()).await
     };
     let mut request = client.get(endpoint).query(&query);
     if let Some(identity) = &identity {
@@ -835,7 +841,8 @@ async fn report_publish_event(
         "errorMessage": error_message,
     });
     let mut last_error = String::from("上报更新状态失败");
-    let client = device_http_client()?;
+    let client =
+        device_http_client(&format!("{base_url}/api/publishes/{publish_id}/report")).await?;
     for attempt in 0..3 {
         match client
             .post(format!("{base_url}/api/publishes/{publish_id}/report"))
@@ -1629,7 +1636,8 @@ mod tests {
         });
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             for method in [reqwest::Method::GET, reqwest::Method::POST] {
-                let error = device_http_client()
+                let error = device_http_client(&source_url)
+                    .await
                     .unwrap()
                     .request(method, &source_url)
                     .header("x-device-key", "test-install-key")

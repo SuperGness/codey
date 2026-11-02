@@ -215,7 +215,7 @@ pub(super) async fn send_current(
             retry_after_ms: Some(remaining.as_millis() as u64),
         };
     }
-    let Ok(client) = current_notification_http_client(state) else {
+    let Ok(client) = current_notification_http_client(state).await else {
         return DeliveryOutcome::Retryable {
             retry_after_ms: None,
         };

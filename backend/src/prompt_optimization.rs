@@ -13,6 +13,7 @@ use crate::config::{
     UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS, UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
 };
 use crate::model_list::{self, ModelEndpointError};
+use crate::system_proxy_client::SystemProxyClient;
 
 /// Built-in optimizer instruction used when the user leaves the custom
 /// instruction empty. The model must return only the rewritten prompt so the
@@ -113,19 +114,25 @@ enum OptimizerProxyMode {
     Disabled,
 }
 
-fn build_optimizer_http_client(
+fn optimizer_http_client_builder(
     builder: reqwest::ClientBuilder,
     proxy_mode: OptimizerProxyMode,
-) -> Result<Client, String> {
+) -> reqwest::ClientBuilder {
     let builder = builder
         .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none());
-    let builder = match proxy_mode {
+    match proxy_mode {
         OptimizerProxyMode::System => builder,
         OptimizerProxyMode::Disabled => builder.no_proxy(),
-    };
-    builder
+    }
+}
+
+fn build_optimizer_http_client(
+    builder: reqwest::ClientBuilder,
+    proxy_mode: OptimizerProxyMode,
+) -> Result<Client, String> {
+    optimizer_http_client_builder(builder, proxy_mode)
         .build()
         .map_err(|error| format!("创建优化 HTTP 客户端失败：{error}"))
 }
@@ -134,8 +141,11 @@ fn build_optimizer_http_client(
 /// `AppState` client caps connects at 5s, which is too tight for provider
 /// relays behind a system proxy (CONNECT + TLS handshake routinely exceed
 /// that). The per-request `.timeout()` still bounds the whole call.
-pub fn optimizer_http_client() -> Result<Client, String> {
-    build_optimizer_http_client(Client::builder(), OptimizerProxyMode::System)
+pub fn optimizer_http_client() -> Result<SystemProxyClient, String> {
+    SystemProxyClient::new_blocking(|| {
+        optimizer_http_client_builder(Client::builder(), OptimizerProxyMode::System)
+    })
+    .map_err(|error| format!("创建优化 HTTP 客户端失败：{error:#}"))
 }
 
 /// Builds an optimizer client for Codey's loopback router. Local requests must

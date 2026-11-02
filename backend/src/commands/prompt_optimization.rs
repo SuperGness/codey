@@ -12,29 +12,35 @@ use crate::config::PromptOptimizationConfig;
 use crate::error_log;
 use crate::local_router;
 use crate::prompt_optimization;
+use crate::system_proxy_client::SystemProxyClient;
 
-static OPTIMIZER_CLIENT: OnceLock<Client> = OnceLock::new();
+static OPTIMIZER_CLIENT: OnceLock<SystemProxyClient> = OnceLock::new();
 static LOOPBACK_OPTIMIZER_CLIENT: OnceLock<Client> = OnceLock::new();
 const CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
 const CODEX_INSTALLATION_ID_FILE: &str = "installation_id";
 
-pub(super) fn optimizer_client(uses_codey_route: bool) -> Result<&'static Client, String> {
-    let slot = if uses_codey_route {
-        &LOOPBACK_OPTIMIZER_CLIENT
-    } else {
-        &OPTIMIZER_CLIENT
-    };
-    if let Some(client) = slot.get() {
-        return Ok(client);
-    }
-    let client = if uses_codey_route {
-        prompt_optimization::loopback_optimizer_http_client()?
-    } else {
-        prompt_optimization::optimizer_http_client()?
-    };
+/// 回环路由客户端不走代理；外部服务客户端随系统代理变化重建。
+pub(super) async fn optimizer_client(
+    uses_codey_route: bool,
+    base_url: &str,
+) -> Result<Client, String> {
     // Concurrent callers may build a duplicate client; the first successful
     // one wins and the rest reuse it.
-    Ok(slot.get_or_init(|| client))
+    if uses_codey_route {
+        if let Some(client) = LOOPBACK_OPTIMIZER_CLIENT.get() {
+            return Ok(client.clone());
+        }
+        let client = prompt_optimization::loopback_optimizer_http_client()?;
+        return Ok(LOOPBACK_OPTIMIZER_CLIENT.get_or_init(|| client).clone());
+    }
+    let client = match OPTIMIZER_CLIENT.get() {
+        Some(client) => client,
+        None => {
+            let client = prompt_optimization::optimizer_http_client()?;
+            OPTIMIZER_CLIENT.get_or_init(|| client)
+        }
+    };
+    Ok(client.current(base_url).await)
 }
 
 pub(super) async fn resolve_request_config(
@@ -155,8 +161,8 @@ pub async fn optimize_prompt_command(state: &Arc<AppState>, text: String) -> Res
     }
     let uses_codey_route = optimization.uses_codey_route();
     let request_config = resolve_request_config(state, &optimization).await?;
-    let client = optimizer_client(uses_codey_route)?;
-    match prompt_optimization::optimize_prompt_resolved(client, &request_config, &text).await {
+    let client = optimizer_client(uses_codey_route, &request_config.base_url).await?;
+    match prompt_optimization::optimize_prompt_resolved(&client, &request_config, &text).await {
         Ok(optimized) => Ok(json!({"optimized": optimized})),
         Err(error) => {
             error_log::record_failure(
@@ -185,8 +191,8 @@ pub async fn fetch_prompt_optimization_models_command(
     // 获取列表不需要预先选择模型，连接参数由后续请求流程校验。
     let uses_codey_route = optimization.uses_codey_route();
     let request_config = resolve_request_config(state, &optimization).await?;
-    let client = optimizer_client(uses_codey_route)?;
-    let models = prompt_optimization::fetch_models_resolved(client, &request_config).await;
+    let client = optimizer_client(uses_codey_route, &request_config.base_url).await?;
+    let models = prompt_optimization::fetch_models_resolved(&client, &request_config).await;
     match models {
         Ok(models) => Ok(json!({"models": models})),
         Err(error) => {
@@ -214,8 +220,8 @@ pub async fn test_prompt_optimization_command(
     optimization.validate()?;
     let uses_codey_route = optimization.uses_codey_route();
     let request_config = resolve_request_config(state, &optimization).await?;
-    let client = optimizer_client(uses_codey_route)?;
-    match prompt_optimization::test_configuration_resolved(client, &request_config).await {
+    let client = optimizer_client(uses_codey_route, &request_config.base_url).await?;
+    match prompt_optimization::test_configuration_resolved(&client, &request_config).await {
         Ok(result) => Ok(json!({"status": "ok", "result": result})),
         Err(error) => {
             error_log::record_failure(
