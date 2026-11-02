@@ -3574,14 +3574,9 @@
       if (preceding || following) {
         // Keep a short run of nearby turns. This covers virtualized wrappers
         // and logical continuations without returning to a full-page scan.
-        const siblings = current.parentElement?.children || [];
-        const currentIndex = siblings.indexOf(current);
-        const nearby = currentIndex >= 0
-          ? siblings.slice(
-            Math.max(0, currentIndex - maxAdjacentMessageSelectionRows),
-            currentIndex + maxAdjacentMessageSelectionRows + 1,
-          )
-          : [current];
+        // The sibling walks above already hold that run, so reuse them
+        // instead of materialising the parent's live HTMLCollection.
+        const nearby = [...precedingSiblings].reverse().concat(current, followingSiblings);
         const nearbyRows = nearestRows(nearby);
         return [...new Set([preceding, ...nearbyRows, root, following].filter(Boolean))];
       }

@@ -111,13 +111,9 @@
     if (children?.[0]) return children[0];
     let current = node;
     while (current && current !== root) {
-      const parent = current.parentElement;
-      const siblings = parent?.children;
-      if (siblings) {
-        const index = siblings.indexOf(current);
-        if (index >= 0 && siblings[index + 1]) return siblings[index + 1];
-      }
-      current = parent;
+      const next = current.nextElementSibling;
+      if (next) return next;
+      current = current.parentElement;
     }
     return null;
   };

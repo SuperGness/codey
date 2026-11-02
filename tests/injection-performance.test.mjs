@@ -632,3 +632,33 @@ test("selection changes resynchronize adjacent-turn grouping", async () => {
   assert.match(source, /row\.dataset\.codeySelectedPrevious = "true"/);
   assert.match(source, /row\.dataset\.codeySelectedNext = "true"/);
 });
+
+test("adjacent message rows are collected from live sibling collections", async () => {
+  const source = await readSource("public/codey-inject.js");
+  const start = source.indexOf("  const adjacentMessageSelectionRows = (root) => {");
+  const end = source.indexOf("\n  };\n", start) + "\n  };\n".length;
+  assert.ok(start >= 0 && end > start);
+  const { FakeElementCore, useLiveChildren } = await import("./helpers/fake-element.mjs");
+  const parent = new FakeElementCore("div");
+  const rows = Array.from({ length: 25 }, (_, index) => {
+    const row = parent.appendChild(new FakeElementCore("div"));
+    row.dataset.row = String(index);
+    return row;
+  });
+  useLiveChildren(parent);
+  const context = {
+    HTMLElement: FakeElementCore,
+    hasCanonicalTurnAncestor: () => false,
+    isRenderedSessionElement: () => true,
+    maxAdjacentMessageSelectionRows: 9,
+    messageSelectionRowsWithin: (element) => [element],
+  };
+  vm.runInNewContext(`${source.slice(start, end)}; this.adjacent = adjacentMessageSelectionRows;`, context);
+
+  const collected = context.adjacent(rows[12]);
+
+  assert.deepEqual(
+    Array.from(collected, (row) => Number(row.dataset.row)).sort((a, b) => a - b),
+    rows.slice(3, 22).map((row) => Number(row.dataset.row)),
+  );
+});

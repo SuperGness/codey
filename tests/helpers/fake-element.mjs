@@ -27,8 +27,16 @@ export class FakeElementCore {
 
   get nextElementSibling() {
     if (!this.parentElement) return null;
-    const index = this.parentElement.children.indexOf(this);
-    return index >= 0 ? this.parentElement.children[index + 1] || null : null;
+    const siblings = this.parentElement.children;
+    const index = Array.prototype.indexOf.call(siblings, this);
+    return index >= 0 ? siblings[index + 1] || null : null;
+  }
+
+  get previousElementSibling() {
+    if (!this.parentElement) return null;
+    const siblings = this.parentElement.children;
+    const index = Array.prototype.indexOf.call(siblings, this);
+    return index > 0 ? siblings[index - 1] : null;
   }
 
   addEventListener(type, handler) {
@@ -175,4 +183,31 @@ export class FakeElementCore {
     this.parentElement = null;
     this.isConnected = false;
   }
+}
+
+// Mirrors HTMLCollection / NodeList: indexed, iterable and sized, but without
+// Array.prototype methods such as indexOf, slice or filter.
+export function liveCollection(items) {
+  return new Proxy(items, {
+    get(target, property, receiver) {
+      if (
+        typeof property === "string"
+        && property !== "constructor"
+        && typeof Array.prototype[property] === "function"
+      ) {
+        return undefined;
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+}
+
+export function useLiveChildren(root) {
+  const visit = (node) => {
+    const children = [...node.children];
+    children.forEach(visit);
+    node.children = liveCollection(children);
+  };
+  visit(root);
+  return root;
 }

@@ -1749,7 +1749,7 @@
 
   const probeAddedMutationNodes = (nodes, target) => {
     if (!turnAncestor(target)) return null;
-    const roots = (nodes || [])
+    const roots = Array.from(nodes || [])
       .filter((node) => node?.nodeType !== 3)
       .map(groupedMenuElement)
       .filter(Boolean);

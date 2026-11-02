@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-import { FakeElementCore } from "./helpers/fake-element.mjs";
+import { FakeElementCore, useLiveChildren } from "./helpers/fake-element.mjs";
 
 const template = readFileSync(
   new URL("../public/pet-control-shield.js", import.meta.url),
@@ -546,6 +546,25 @@ test("deferred pet scans have a node budget and reach the trailing pet", () => {
   assert.equal(latePet.getAttribute("data-codey-pet-control-blocked"), null);
 
   runtime.runAllAnimationFrames();
+  assert.equal(runtime.pendingFlushCount, 0);
+  assert.equal(latePet.getAttribute("data-codey-pet-control-blocked"), "true");
+});
+
+test("fallback traversal walks live child collections to a later sibling", () => {
+  const runtime = loadShield(true);
+  const menu = new FakeElement("", false);
+  const group = menu.appendChild(new FakeElement("", false));
+  group.appendChild(new FakeElement("普通入口", false));
+  const latePet = menu.appendChild(new FakeElement("显示宠物", true));
+  useLiveChildren(menu);
+
+  runtime.mutationCallback([{
+    addedNodes: [menu],
+    target: runtime.documentElement,
+    type: "childList",
+  }]);
+  runtime.runAllAnimationFrames();
+
   assert.equal(runtime.pendingFlushCount, 0);
   assert.equal(latePet.getAttribute("data-codey-pet-control-blocked"), "true");
 });

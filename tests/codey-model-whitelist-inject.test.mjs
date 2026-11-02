@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { FakeElementCore } from "./helpers/fake-element.mjs";
+import { FakeElementCore, liveCollection } from "./helpers/fake-element.mjs";
 
 const MODEL_CONFIG_ID = "107580212";
 
@@ -3937,6 +3937,28 @@ test("nested turn wrappers enhance a menu and picker mounted after patch startup
   assert.equal(menu.children.find((child) => child.dataset.codeyRouteHeading)?.dataset.codeyRouteHeading, "[主] 主");
   runtime.patch.dispose();
   assert.equal(textNode.nodeValue, composerRouteModel);
+});
+
+test("turn mutations accept NodeList-shaped added nodes", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const turn = body.appendChild(new FakeElementCore("div", {
+    attributes: { "data-turn-key": "model-in-turn-nodelist" },
+  }));
+  const runtime = await loadPatch(composerCatalog(), [statsigClient()], {
+    documentBody: body,
+  });
+  const wrapper = turn.appendChild(new FakeElementCore("div"));
+  const { textNode } = composerModelTrigger(wrapper, composerRouteModel);
+
+  runtime.dispatchObserverMutations(body, [{
+    addedNodes: liveCollection([wrapper]),
+    removedNodes: liveCollection([]),
+    target: turn,
+    type: "childList",
+  }]);
+
+  assert.equal(textNode.nodeValue, "[主] gpt-6-astra");
+  runtime.patch.dispose();
 });
 
 test("repeated catalog delivery updates tracked pickers without another document picker scan", async () => {
