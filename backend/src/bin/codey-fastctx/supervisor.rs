@@ -17,11 +17,39 @@ const WORKER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 const CLIENT_EOF_GRACE_PERIOD: Duration = Duration::from_secs(5);
 const RECOVERY_WINDOW: Duration = Duration::from_secs(60);
 const MAX_RECOVERIES_IN_WINDOW: usize = 3;
+/// Codex 为每个已加载的线程各起一组 FastCtx MCP，线程空闲后仍常驻。worker 只是
+/// 连到共享控制中心的薄代理，重启约 10 ms，因此空闲后回收，下次消息到达时重建。
+const WORKER_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// 测试与诊断用的空闲阈值（毫秒），0 表示不回收。
+const WORKER_IDLE_TIMEOUT_ENV: &str = "CODEY_FASTCTX_WORKER_IDLE_MS";
+const WORKER_IDLE_EXIT_GRACE: Duration = Duration::from_secs(1);
+/// fastshell 的后台任务随连接存在；工具清单出现该工具时不回收 worker。
+const SHELL_TOOL_MARKER: &[u8] = b"\"run_background\"";
+const SHELL_TOOL_SCAN_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone, Copy)]
 struct WorkerConfig<'a> {
     argument: &'a str,
     limits: ProtocolLimits,
+    idle_timeout: Option<Duration>,
+}
+
+fn worker_idle_timeout() -> Option<Duration> {
+    match std::env::var(WORKER_IDLE_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+    {
+        Some(0) => None,
+        Some(milliseconds) => Some(Duration::from_millis(milliseconds)),
+        None => Some(WORKER_IDLE_TIMEOUT),
+    }
+}
+
+fn announces_shell_tools(line: &[u8]) -> bool {
+    line.len() <= SHELL_TOOL_SCAN_LIMIT
+        && line
+            .windows(SHELL_TOOL_MARKER.len())
+            .any(|window| window == SHELL_TOOL_MARKER)
 }
 
 pub async fn run(worker_argument: &str) -> Result<()> {
@@ -29,6 +57,7 @@ pub async fn run(worker_argument: &str) -> Result<()> {
     let worker_config = WorkerConfig {
         argument: worker_argument,
         limits,
+        idle_timeout: worker_idle_timeout(),
     };
     let mut worker = Worker::spawn(worker_argument, limits).await?;
     let (client_tx, mut client_rx) = mpsc::channel(32);
@@ -79,13 +108,29 @@ where
     let mut state = ProtocolState::new(worker_config.limits.max_pending_requests);
     let mut recoveries = RecoveryBudget::default();
     let mut client_open = true;
+    // worker 已因空闲回收；收到下一条客户端消息时重建并重放初始化。
+    let mut parked = false;
+    let mut last_activity = tokio::time::Instant::now();
+    let mut shell_tools = false;
 
     loop {
         enum Event {
             Client(Option<ClientInput>),
             WorkerOutput(Option<WorkerOutput>),
             WorkerExit(std::io::Result<ExitStatus>),
+            Idle,
         }
+
+        let idle_deadline = worker_config
+            .idle_timeout
+            .filter(|_| {
+                !parked
+                    && client_open
+                    && !shell_tools
+                    && state.initialization_complete()
+                    && state.pending_len() == 0
+            })
+            .map(|timeout| last_activity + timeout);
 
         // worker stdout 由独立 reader task 经 channel 送达：若在此处直接对管道
         // `read_until`，select! 取消该分支时会丢弃已读入的半行字节。
@@ -98,14 +143,32 @@ where
             } = worker;
             tokio::select! {
                 input = client_rx.recv(), if client_open => Event::Client(input),
-                output = output_rx.recv() => Event::WorkerOutput(output),
-                status = child.wait() => Event::WorkerExit(status),
+                output = output_rx.recv(), if !parked => Event::WorkerOutput(output),
+                status = child.wait(), if !parked => Event::WorkerExit(status),
+                () = sleep_until_deadline(idle_deadline), if idle_deadline.is_some() => Event::Idle,
             }
         };
 
         match event {
+            Event::Idle => {
+                // 先关闭 stdin 让薄代理正常断开控制中心，超时再由 finalize 终止。
+                worker.stdin.take();
+                let _ = tokio::time::timeout(WORKER_IDLE_EXIT_GRACE, worker.child.wait()).await;
+                worker
+                    .finalize()
+                    .await
+                    .context("回收空闲的 FastCtx worker 失败")?;
+                parked = true;
+            }
             Event::Client(Some(ClientInput::Line(line))) => {
+                last_activity = tokio::time::Instant::now();
                 state.observe_client(&line)?;
+                if parked {
+                    recover_worker(worker_config.argument, worker_config.limits, worker, &state)
+                        .await
+                        .context("空闲回收后重新启动 FastCtx worker 失败")?;
+                    parked = false;
+                }
                 let forwarded = write_protocol_line(
                     worker
                         .stdin
@@ -145,6 +208,9 @@ where
                 bail!("读取 MCP stdin 失败：{error}");
             }
             Event::Client(Some(ClientInput::Eof)) | Event::Client(None) => {
+                if parked {
+                    return Ok(());
+                }
                 client_open = false;
                 if let Some(mut stdin) = worker.stdin.take() {
                     stdin
@@ -154,6 +220,8 @@ where
                 }
             }
             Event::WorkerOutput(Some(WorkerOutput::Line(line))) => {
+                last_activity = tokio::time::Instant::now();
+                shell_tools |= announces_shell_tools(&line);
                 state.observe_server(&line);
                 stdout
                     .write_all(&line)
@@ -208,6 +276,13 @@ where
             }
             Event::WorkerExit(Err(error)) => bail!("等待 FastCtx worker 退出失败：{error}"),
         }
+    }
+}
+
+async fn sleep_until_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -603,6 +678,22 @@ mod tests {
         assert!(budget.begin_recovery(start + Duration::from_secs(61)));
         assert!(budget.begin_recovery(start + Duration::from_secs(70)));
         assert!(!budget.begin_recovery(start + Duration::from_secs(71)));
+    }
+
+    #[test]
+    fn shell_tool_listing_disables_idle_reclaim_detection() {
+        assert!(announces_shell_tools(
+            br#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"run_background"}]}}"#
+        ));
+        assert!(!announces_shell_tools(
+            br#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"grep"}]}}"#
+        ));
+        let mut large = vec![b'A'; SHELL_TOOL_SCAN_LIMIT];
+        large.extend_from_slice(SHELL_TOOL_MARKER);
+        assert!(
+            !announces_shell_tools(&large),
+            "large tool output is not scanned"
+        );
     }
 
     #[test]
