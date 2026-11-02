@@ -747,8 +747,8 @@ fn parse_account_usage(value: &Value, fetched_at: u64) -> Result<AccountUsageSna
 
     let plan_type = string_field(value, &["plan_type", "planType"])
         .or_else(|| string_field(snapshot, &["plan_type", "planType"]));
-    let reset_credits =
-        parse_reset_credits(value, fetched_at).or_else(|| parse_reset_credits(snapshot, fetched_at));
+    let reset_credits = parse_reset_credits(value, fetched_at)
+        .or_else(|| parse_reset_credits(snapshot, fetched_at));
     Ok(AccountUsageSnapshot {
         plan_type,
         primary,
