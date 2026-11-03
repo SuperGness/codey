@@ -35,7 +35,7 @@ pub fn run_hook_if_requested() -> Result<bool> {
     }
     let raw = crate::hook_io::read_stdin_bounded(
         MAX_HOOK_INPUT_BYTES,
-        "读取 Codex 范围约束 Hook 输入失败",
+        "读取 Codex 防御性编程控制 Hook 输入失败",
     )?;
     // The rule is advisory context, not a gate: an unreadable payload simply
     // injects nothing, matching a launch without this hook.
@@ -45,12 +45,12 @@ pub fn run_hook_if_requested() -> Result<bool> {
         match serde_json::from_slice::<HookInput>(&raw) {
             Ok(input) => hook_output(&input),
             Err(error) => {
-                eprintln!("Codey 范围约束 Hook 输入无效，已跳过：{error:#}");
+                eprintln!("Codey 防御性编程控制 Hook 输入无效，已跳过：{error:#}");
                 json!({})
             }
         }
     };
-    crate::hook_io::write_output(&output, "序列化 Codex 范围约束 Hook 输出失败")?;
+    crate::hook_io::write_output(&output, "序列化 Codex 防御性编程控制 Hook 输出失败")?;
     Ok(true)
 }
 

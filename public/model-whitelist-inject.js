@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "81";
+  const patchVersion = "82";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -3646,7 +3646,7 @@
     if (!disposed) showBlockedProviderNotice({ request: { params: { [blockedProviderRequestKey]: { message } } } });
     return new Error(message);
   };
-  const preparePortableCompaction = async (target, send, request) => {
+  const preparePortableCompaction = async (target, send, request, compactionSettled = null) => {
     const bridge = window.__codexSessionDeleteBridge;
     if (typeof bridge !== "function") throw portableFailure("切换线路前的摘要服务尚未就绪，请稍后重试。");
     let ticket, preparedTicket, timer, pollTimer, listener, completeCleanup;
@@ -3698,7 +3698,8 @@
       if (status !== "idle" && status?.type !== "idle") throw new Error("任务仍在运行或状态尚未确认，请等待任务完成后切换线路。");
       let startedItem = null;
       let completed = false;
-      listener = (event) => {
+      // 宿主托管的会话不经页面消息通道转发通知，改由宿主任务状态确认压缩轮次已结束。
+      if (!compactionSettled) listener = (event) => {
         const data = event?.data;
         if (data?.type !== "mcp-notification" || data.hostId !== "local" || data.params?.threadId !== target.threadId) return;
         const { item, turnId } = data.params;
@@ -3706,12 +3707,12 @@
         if (data.method === "item/started") startedItem = { id: item.id, turnId };
         if (data.method === "item/completed" && startedItem?.id === item.id && startedItem.turnId === turnId) completed = true;
       };
-      window.addEventListener("message", listener);
+      if (listener) window.addEventListener("message", listener);
       await checked(send("thread/compact/start", { threadId: target.threadId }));
       while (true) {
         const state = await checked(bridge("/session/portable-compaction/status", { threadId: target.threadId, token: ticket.token }));
         if (state?.status !== "ok" || ["failed", "expired"].includes(state.state)) throw new Error("交接摘要未完成，已保留原线路，请稍后重试。");
-        if (state.state === "completed" && completed) {
+        if (state.state === "completed" && (compactionSettled ? await checked(compactionSettled()) : completed)) {
           const confirming = Promise.resolve(bridge("/session/portable-compaction/confirm", { threadId: target.threadId, token: ticket.token })).then((result) => {
             if (result?.status === "ok") cleanupConfirmed();
             return result;
@@ -3746,7 +3747,7 @@
     }
   };
   // Return null for an unguarded request so existing synchronous dispatch remains intact.
-  const guardOutgoingRequest = (client, method, params, proceed, send = (name, value) => client.enqueueRequest(name, value)) => {
+  const guardOutgoingRequest = (client, method, params, proceed, send = (name, value) => client.enqueueRequest(name, value), hosted = null) => {
     if (client?.hostId !== "local" || disposed) return null;
     const detail = { request: { method, params } };
     if (!isLocalMessage(detail)) return null;
@@ -3758,7 +3759,7 @@
     }
     if (portableReentryFor(client, method, params)) return null;
     const restoreHistory = needsHistoricalModel(method, params);
-    const target = portableTarget(method, params);
+    const target = hosted ? hosted.target : portableTarget(method, params);
     if (!target && !restoreHistory && !needsPortableInterruptWait(method, params)) return null;
     const state = portableThreadState(threadId);
     // A new explicit send retries a failed cleanup once; no background retries.
@@ -3802,7 +3803,7 @@
       if (target) await preparePortableCompaction(target, (name, value) => {
         request.check();
         return send(name, value, request);
-      }, request);
+      }, request, hosted?.compactionSettled);
       request.check();
       request.status = "sent";
       portableReentry.set(client, { method, params, state, generation, approved: new WeakSet() });
@@ -3860,6 +3861,60 @@
       portablePendingMessages.delete(detail);
       return proceed();
     }, send).finally(() => portablePendingMessages.delete(detail));
+  };
+  // 宿主托管会话（会话管理器在桌面宿主进程）不经页面请求客户端，资源补丁把输入框
+  // 的发送入口改为调用这里。只在线程空闲时准备交接：运行中的消息会被宿主引导或排队，
+  // 准备凭据会拦住进行中的请求。目标无法确认时原样发送，由本地路由按历史拒绝。
+  const hostedRpcResult = async (call) => {
+    const pending = call();
+    try { return await pending; } finally { try { pending?.[Symbol.dispose]?.(); } catch {} }
+  };
+  const hostedThreadIdle = async (rpc, threadId) => {
+    const state = await hostedRpcResult(() => rpc.getThreadExecutionState(threadId));
+    return state != null && state.inProgress !== true;
+  };
+  const hostedTurnModel = (options) => {
+    for (const source of [options?.request, options]) {
+      for (const model of [source?.collaborationMode?.settings?.model, source?.model]) {
+        if (typeof model === "string" && model.trim()) return model.trim();
+      }
+    }
+    return "";
+  };
+  const hostedPortableTarget = async (threadId, requestedModel) => {
+    if (!catalog.loaded) await loadModelCatalog();
+    if (!catalog.loaded || disposed) return null;
+    let model = requestedModel;
+    let provider = "";
+    if (!model) {
+      // 未改模型时沿用会话最近确认的设置，宿主每次更新设置都会写入这份记录。
+      const bridge = window.__codexSessionDeleteBridge;
+      if (typeof bridge !== "function") return null;
+      const saved = await bridge("/session/model", { threadId }, { timeoutMs: 20_000 });
+      if (saved?.status !== "ok" || saved.threadId !== threadId || typeof saved.model !== "string") return null;
+      model = saved.model.trim();
+      provider = typeof saved.modelProvider === "string" ? saved.modelProvider : "";
+    }
+    const route = model && (routeForModel(model) || routeForProviderAlias(model)
+      || (provider && uniqueRouteForProviderModel(provider, model)) || uniqueRouteForRawModel(model));
+    return route?.routeProviderId && route.sourceModel
+      ? { threadId, targetProviderId: route.routeProviderId, targetModel: route.sourceModel }
+      : null;
+  };
+  const hostedTurnCall = async (rpc, method, threadId, options, ...rest) => {
+    const proceed = () => rpc[method](threadId, options, ...rest);
+    if (disposed || nativeSelectionOnly || globalThis.__codeyAppServerManagerHosted !== true
+      || typeof threadId !== "string" || !threadId.trim()) return proceed();
+    let target = null;
+    try {
+      if (await hostedThreadIdle(rpc, threadId)) target = await hostedPortableTarget(threadId, hostedTurnModel(options));
+    } catch {
+      target = null;
+    }
+    const guarded = guardOutgoingRequest({ hostId: "local" }, "turn/start", { threadId }, proceed,
+      (name, value) => hostedRpcResult(() => rpc.sendRequest(name, value)),
+      { target, compactionSettled: () => hostedThreadIdle(rpc, threadId) });
+    return guarded ?? proceed();
   };
   let requestGatePending = null;
   const requestGateRestorers = [];
@@ -3971,6 +4026,7 @@
     ensureRequestGate,
     guardOutgoingRequest,
     guardDirectBridgeMessage,
+    hostedTurnCall,
     // The Codex renderer calls electronBridge before emitting its diagnostic
     // CustomEvent. The startup source gate invokes this synchronous hook at the
     // real transport boundary so thread/start receives modelProvider in time.

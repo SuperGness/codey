@@ -1325,8 +1325,9 @@ fn record_request_gate_verdict(
     // sourceGate/moduleGate 区分源码补丁、模块级 DI 直取与 React 遍历三条
     // 就绪路径；patchSession 记录补丁服务是否赶在首个文档前挂上该页面，
     // attachedBeforeLoad 为 false 时主 bundle 没有补丁，属于预期内的降级。
-    // hostManaged 表示请求由桌面宿主进程发出，页面里的源码门禁不在请求路径上，
-    // 线路只由 CLI 输入中继固定，sourceGate 不代表请求已被页面校验。
+    // hostManaged 表示请求由桌面宿主进程发出，页面里的源码门禁不在请求路径上：
+    // 线路由 CLI 输入中继固定，跨线路交接改由输入框发送入口的补丁完成，
+    // sourceGate 不代表请求已被页面校验。
     let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
         event,
         serde_json::json!({

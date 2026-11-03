@@ -713,14 +713,14 @@ function FeaturePolicyCardComponent({
               className={`feature-card ${config.scopeGuard ? "active" : ""}`}
             >
               <div className="feature-card-header">
-                <strong>范围约束</strong>
+                <strong>防御性编程控制</strong>
                 <Switch
                   checked={config.scopeGuard}
                   disabled={isBusy}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, scopeGuard: checked })
                   }
-                  aria-label="范围约束"
+                  aria-label="防御性编程控制"
                 />
               </div>
               <div className="feature-card-body">

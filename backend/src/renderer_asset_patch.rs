@@ -30,13 +30,15 @@ use crate::error_log;
 /// 补丁脚本注入页面后暴露的纯函数入口：`(url, source) => patched | null`。
 const RENDERER_ASSET_PATCH_SCRIPT: &str = include_str!("renderer_asset_patch.js");
 /// 需要改写的脚本名前缀，与页面侧 isCodexRendererAssetUrl 的名单保持一致。
-const PATCHABLE_ASSET_PREFIXES: [&str; 7] = [
+const PATCHABLE_ASSET_PREFIXES: [&str; 9] = [
     "app-initial",
     "app-primary",
     "app-shared",
     "codex-composer-adapter",
     "initialize-app-host-services",
     "renderer-app-server-managers",
+    "send-follow-up-message",
+    "start-turn",
     "webview-page",
 ];
 /// 仅在关闭宠物时改写的脚本：设置页预览资源，以及决定是否预热隐藏浮窗的运行时。

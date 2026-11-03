@@ -551,6 +551,31 @@
         "hosted app server manager marker",
       );
     }
+    // 宿主托管时输入框发送经 RPC 存根直达宿主，页面请求客户端上的跨线路交接
+    // 不再经过。把两个发送入口改为先交给模型请求校验，缺少校验时原样调用。
+    const hostedTurnCall = "(globalThis.__codeyModelWhitelistPatch?.hostedTurnCall??((t,m,...a)=>t[m](...a)))";
+    const hostedFollowUpSend = /\b([$A-Z_a-z][$\w]*)\.sendFollowUpMessage\((?=[$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,useUserMessageAdmission:)/g;
+    // 以字面量开头的预检让大包快速跳过；只有命中的小模块才运行带接收者的匹配。
+    const hostedSendAnchor = (method, rest) => new RegExp(`\\.${method}\\([$A-Z_a-z][$\\w]*,\\{\\.\\.\\.[$A-Z_a-z][$\\w]*,${rest}`);
+    if (!source.includes("__codeyModelWhitelistPatch?.hostedTurnCall")
+      && hostedSendAnchor("sendFollowUpMessage", "useUserMessageAdmission:").test(source)) {
+      patched = replaceUniqueRendererGate(
+        patched,
+        hostedFollowUpSend,
+        (_match, rpc) => `${hostedTurnCall}(${rpc},"sendFollowUpMessage",`,
+        "hosted follow-up portable handoff",
+      );
+    }
+    const hostedTurnStart = /\b([$A-Z_a-z][$\w]*)\.startTurn\((?=[$A-Z_a-z][$\w]*,\{\.\.\.[$A-Z_a-z][$\w]*,context:\{\.\.\.[$A-Z_a-z][$\w]*\.context,onRequestDispatched:)/g;
+    if (!source.includes("__codeyModelWhitelistPatch?.hostedTurnCall")
+      && hostedSendAnchor("startTurn", "context:\\{\\.\\.\\.[$A-Z_a-z][$\\w]*\\.context,onRequestDispatched:").test(source)) {
+      patched = replaceUniqueRendererGate(
+        patched,
+        hostedTurnStart,
+        (_match, rpc) => `${hostedTurnCall}(${rpc},"startTurn",`,
+        "hosted turn start portable handoff",
+      );
+    }
     if (
       !source.includes("codeyReconcileCompletedConversation")
       && source.includes("getHasInProgressLocalConversation(")
@@ -666,7 +691,7 @@
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
         (
-          /\/(?:(?:app-initial|app-primary|app-shared|codex-composer-adapter|initialize-app-host-services|renderer-app-server-managers|webview-page)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
+          /\/(?:(?:app-initial|app-primary|app-shared|codex-composer-adapter|initialize-app-host-services|renderer-app-server-managers|send-follow-up-message|start-turn|webview-page)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
             url.pathname,
           ) ||
           (

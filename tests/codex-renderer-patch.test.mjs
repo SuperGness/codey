@@ -983,3 +983,36 @@ test("the hosted AppServerManager service leaves a diagnostic marker when it con
   delete globalThis.__codeyAppServerManagerHosted;
   assert.equal(globalThis.__codeyRendererPatchEntry(url, patched), null, "the patch is idempotent");
 });
+
+test("hosted composer sends pass through the portable handoff gate", async () => {
+  delete globalThis.__codeyRendererPatchInstalled;
+  (0, eval)(await loadStartupPatchTemplate({ disablePet: false }));
+  const followUp = "async function f(e,n,i,o){let l=d(e,n),m=null;return f=await l.sendFollowUpMessage(i,{...o,useUserMessageAdmission:c(e,n),writingBlockContextPrepared:m!=null}),f}";
+  const turnStart = "async function f(e,n,r,a){let c=d(e,n);return await c.startTurn(r,{...a,context:{...a.context,onRequestDispatched:a.context?.onRequestDispatched},request:{...a.request}})}async function p(e,n,r,a){let s=d(e,n);await s.startEmptyTurn(r,a)}";
+  const cases = [
+    ["app://-/assets/send-follow-up-message-41b7bd38775d.js", followUp, "sendFollowUpMessage", { prompt: "hi" }],
+    ["app://-/assets/start-turn-e9a3bd89232f.js", turnStart, "startTurn", { request: { input: [] } }],
+  ];
+  for (const [url, source, method, options] of cases) {
+    const patched = globalThis.__codeyRendererPatchEntry(url, source);
+    assert.ok(patched?.includes(`"${method}",`), method);
+    assert.equal(globalThis.__codeyRendererPatchEntry(url, patched), null, `${method} patch is idempotent`);
+    const calls = [];
+    const rpc = { [method]: async (...args) => { calls.push(["native", ...args]); return "sent"; } };
+    const run = Function("d", "c", `${patched};return f`)(() => rpc, () => true);
+    delete globalThis.__codeyModelWhitelistPatch;
+    assert.equal(await run({}, "local", "thread", options), "sent", `${method} works without the gate`);
+    globalThis.__codeyModelWhitelistPatch = { hostedTurnCall: async (target, name, threadId, value) => {
+      calls.push(["gate", name, threadId]);
+      return target[name](threadId, value);
+    } };
+    try {
+      assert.equal(await run({}, "local", "thread", options), "sent");
+    } finally {
+      delete globalThis.__codeyModelWhitelistPatch;
+    }
+    assert.deepEqual(calls.map(([kind, name]) => kind === "gate" ? `gate:${name}` : kind), ["native", `gate:${method}`, "native"]);
+  }
+  const lock = "function t(e){return!r.has(e)&&(r.add(e),!0)}";
+  assert.equal(globalThis.__codeyRendererPatchEntry("app://-/assets/start-turn-lock-be4319076981.js", lock), null);
+});

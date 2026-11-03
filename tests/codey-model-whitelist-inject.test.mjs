@@ -663,6 +663,7 @@ async function loadPatch(
       return timers.size;
     },
     portableQueueCount() { return window.__codeyPortableCompactionQueues?.size || 0; },
+    setWindowValue(name, value) { window[name] = value; },
   };
 }
 
@@ -1088,7 +1089,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "81");
+  assert.equal(patch.version, "82");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -7309,4 +7310,113 @@ test("late rejected cleanup attempts leave no unhandled promise rejections after
     process.off("unhandledRejection", onUnhandled);
     runtime?.patch.dispose();
   }
+});
+
+// Codex 26.1027 hosts the session manager in the desktop process. The composer
+// calls the host RPC stub directly; the asset patch routes those sends here.
+function hostedRpc({ running = false, settleAfter = 0, failCompact = false } = {}) {
+  const calls = [];
+  let compacting = false;
+  let pendingPolls = settleAfter;
+  return {
+    calls,
+    getThreadExecutionState(threadId) {
+      calls.push(["state", threadId]);
+      if (compacting && pendingPolls-- > 0) return Promise.resolve({ inProgress: true });
+      return Promise.resolve({ inProgress: running });
+    },
+    sendRequest(method, params) {
+      calls.push([method, params.threadId]);
+      if (method === "thread/read") return Promise.resolve({ thread: { status: { type: "idle" } } });
+      if (method === "thread/compact/start") {
+        if (failCompact) return Promise.reject(new Error("compact rejected"));
+        compacting = true;
+      }
+      return Promise.resolve({});
+    },
+    sendFollowUpMessage(threadId, options) {
+      calls.push(["sendFollowUpMessage", threadId, options.prompt]);
+      return Promise.resolve("turn-1");
+    },
+    startTurn(threadId, options) {
+      calls.push(["startTurn", threadId, options.request.input]);
+      return Promise.resolve({ turn: { id: "turn-2" } });
+    },
+  };
+}
+
+function hostedPortableBridge(bridgeCalls, prepare = { status: "ok", required: true, token: "ticket" }) {
+  return async (path, params) => {
+    const operation = path.split("/").at(-1);
+    bridgeCalls.push(operation === "prepare" ? [operation, params] : [operation]);
+    if (operation === "prepare") return prepare;
+    if (operation === "status") return { status: "ok", state: "completed" };
+    return { status: "ok" };
+  };
+}
+
+test("hosted sends summarize on the source route before the host starts the turn", async () => {
+  const bridgeCalls = [];
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { portableBridge: hostedPortableBridge(bridgeCalls) });
+  runtime.setWindowValue("__codeyAppServerManagerHosted", true);
+  const rpc = hostedRpc({ settleAfter: 1 });
+  const sent = runtime.patch.hostedTurnCall(rpc, "sendFollowUpMessage", "hosted-thread", { prompt: "hi", model: "remote/shared" });
+  await new Promise(setImmediate);
+  assert.ok(!rpc.calls.some(([name]) => name === "sendFollowUpMessage"), "the host must not start the turn while compaction runs");
+  await runtime.runTimers(300);
+  assert.equal(await sent, "turn-1");
+  assert.deepEqual(bridgeCalls, [
+    ["prepare", { threadId: "hosted-thread", targetProviderId: "remote", targetModel: "shared" }],
+    ["status"], ["status"], ["confirm"],
+  ]);
+  assert.deepEqual(rpc.calls.map(([name]) => name), [
+    "state", "thread/read", "thread/compact/start", "state", "state", "sendFollowUpMessage",
+  ]);
+  runtime.patch.dispose();
+});
+
+test("hosted turn starts use the saved thread model when the composer keeps it", async () => {
+  const bridgeCalls = [];
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], {
+    portableBridge: hostedPortableBridge(bridgeCalls, { status: "ok", required: false }),
+    sessionModelBridge: ({ threadId }) => ({ status: "ok", threadId, model: "local/shared", modelProvider: "codey_router" }),
+  });
+  runtime.setWindowValue("__codeyAppServerManagerHosted", true);
+  const rpc = hostedRpc();
+  const result = await runtime.patch.hostedTurnCall(rpc, "startTurn", "kept-model", { request: { threadId: "kept-model", input: ["go"] } });
+  assert.deepEqual(result, { turn: { id: "turn-2" } });
+  assert.deepEqual(bridgeCalls, [["prepare", { threadId: "kept-model", targetProviderId: "local", targetModel: "shared" }]]);
+  assert.deepEqual(rpc.calls, [["state", "kept-model"], ["startTurn", "kept-model", ["go"]]]);
+  runtime.patch.dispose();
+});
+
+test("hosted sends skip handoff for running threads, unknown targets and non-hosted pages", async () => {
+  for (const scenario of ["running", "unknown-model", "not-hosted"]) {
+    const bridgeCalls = [];
+    const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], {
+      portableBridge: hostedPortableBridge(bridgeCalls),
+      sessionModelBridge: () => ({ status: "error" }),
+    });
+    if (scenario !== "not-hosted") runtime.setWindowValue("__codeyAppServerManagerHosted", true);
+    const rpc = hostedRpc({ running: scenario === "running" });
+    const options = { prompt: scenario, ...(scenario === "unknown-model" ? {} : { model: "remote/shared" }) };
+    assert.equal(await runtime.patch.hostedTurnCall(rpc, "sendFollowUpMessage", "skip", options), "turn-1", scenario);
+    // A prepared ticket would block requests of a turn that is still running.
+    assert.deepEqual(bridgeCalls, [], scenario);
+    assert.equal(rpc.calls.at(-1)[0], "sendFollowUpMessage", scenario);
+    assert.equal(rpc.calls.some(([name]) => name === "state"), scenario !== "not-hosted", scenario);
+    runtime.patch.dispose();
+  }
+});
+
+test("hosted handoff failures keep the source route and never reach the host", async () => {
+  const bridgeCalls = [];
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { portableBridge: hostedPortableBridge(bridgeCalls) });
+  runtime.setWindowValue("__codeyAppServerManagerHosted", true);
+  const rpc = hostedRpc({ failCompact: true });
+  await assert.rejects(runtime.patch.hostedTurnCall(rpc, "sendFollowUpMessage", "failed", { prompt: "hi", model: "remote/shared" }),
+    /compact rejected/);
+  assert.ok(!rpc.calls.some(([name]) => name === "sendFollowUpMessage"));
+  assert.deepEqual(bridgeCalls.map(([name]) => name), ["prepare", "cancel"]);
+  runtime.patch.dispose();
 });
