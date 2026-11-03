@@ -512,6 +512,33 @@
       );
     }
     if (
+      source.includes("forcePricingRefreshInBackground")
+      && source.includes("`use_embedded_checkout`")
+    ) {
+      // 账号命中内嵌结账实验时，Codex 会在后台把 chatgpt.com 定价页预载进隐藏
+      // webview 并常驻（独立渲染进程）。只去掉这份后台预取：打开定价页时原生仍按
+      // 路由直接加载，离开后不再保留隐藏副本。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /([$A-Z_a-z][$\w]*)=![$A-Z_a-z][$\w]*\(\)&&[^;]{0,600}?\.get\(`use_embedded_checkout`,!1\)\?[$A-Z_a-z][$\w]*\(\{currentPlan:[^;]{0,200}?\}\):null/g,
+        (_match, desired) => `${desired}=null`,
+        "pricing webview prewarm",
+      );
+    }
+    if (
+      source.includes("isPrewarm:")
+      && source.includes("`use_embedded_credit_checkout`")
+      && !/&&\(!0\|\|[^;]{0,600}?`use_embedded_credit_checkout`/.test(source)
+    ) {
+      // 额度购买页同理：未展示时不再挂载隐藏的预热 webview，展示时照常加载。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /,!([$A-Z_a-z][$\w]*)&&\((?=[^;]{0,600}?\.get\(`use_embedded_credit_checkout`,!1\)\)\)return null;)/g,
+        (_match, presented) => `,!${presented}&&(!0||`,
+        "credit checkout webview prewarm",
+      );
+    }
+    if (
       source.includes("Desktop host did not provide its AppServerManager service")
       && !source.includes("__codeyAppServerManagerHosted")
     ) {
@@ -639,7 +666,7 @@
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
         (
-          /\/(?:(?:app-initial|app-primary|app-shared|codex-composer-adapter|initialize-app-host-services|renderer-app-server-managers)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
+          /\/(?:(?:app-initial|app-primary|app-shared|codex-composer-adapter|initialize-app-host-services|renderer-app-server-managers|webview-page)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
             url.pathname,
           ) ||
           (

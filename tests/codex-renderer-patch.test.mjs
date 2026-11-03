@@ -952,6 +952,22 @@ test("slim pet stops the hidden avatar overlay prewarm without blocking on-deman
   }
 });
 
+test("checkout webviews load on demand instead of prewarming hidden pages", async () => {
+  delete globalThis.__codeyRendererPatchInstalled;
+  (0, eval)(await loadStartupPatchTemplate({ disablePet: false }));
+  const url = "app://-/assets/webview-page-71976c9e9730.js";
+  const pricing = "function ue(a,s,c,h,l,p,_,C){let O;e[9]!==a?(O=!re()&&a===`chatgpt`&&!s&&c!=null&&!h&&l?.structure===`personal`&&ee(p,He,{disableExposureLog:!0}).get(`use_embedded_checkout`,!1)?_e({currentPlan:ye(l.plan_type),url:_()}):null,e[9]=a,e[16]=O):O=e[16];let A=C??O;return(0,X.jsx)(me,{forcePricingRefreshInBackground:!0,search:A})}";
+  const credit = "function U(y,eligible){let T,E,Y={useLayoutEffect(){}},re=()=>!eligible,ee=()=>({get:()=>eligible}),d,He;if((0,Y.useLayoutEffect)(T,E),!y&&(re()||!ee(d,He,{disableExposureLog:!0}).get(`use_embedded_credit_checkout`,!1)))return null;let N=!y;return{isPrewarm:N}}";
+  const patched = globalThis.__codeyRendererPatchEntry(url, `${pricing}${credit}`);
+  assert.match(patched, /\(O=null,e\[9\]=a,e\[16\]=O\)/, "no background pricing search without a pricing route");
+  assert.match(patched, /let A=C\?\?O;/, "an opened pricing route still drives the native webview");
+  const creditGate = Function(`${patched.slice(patched.indexOf("function U("))};return U`)();
+  assert.equal(creditGate(false, true), null, "an eligible account no longer mounts the hidden credit page");
+  assert.deepEqual({ ...creditGate(true, true) }, { isPrewarm: false }, "a presented credit page still loads");
+  assert.deepEqual({ ...creditGate(true, false) }, { isPrewarm: false });
+  assert.equal(globalThis.__codeyRendererPatchEntry(url, patched), null, "the patch is idempotent");
+});
+
 test("the hosted AppServerManager service leaves a diagnostic marker when it connects", async () => {
   delete globalThis.__codeyRendererPatchInstalled;
   (0, eval)(await loadStartupPatchTemplate({ disablePet: false }));
