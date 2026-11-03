@@ -710,8 +710,8 @@
   );
 
   const addStyle = () => {
-    if (document.getElementById(styleId)) return;
-    const style = document.createElement("style");
+    // 重新注入时沿用同一节点但刷新规则，新增的样式不必等页面重载。
+    const style = document.getElementById(styleId) || document.createElement("style");
     style.id = styleId;
     style.textContent = `
       #${toolbarId} { -webkit-app-region: no-drag !important; position: fixed; right: 18px; top: 60px; z-index: 2147483644; display: flex; align-items: center; gap: 7px; padding: 6px 8px; border: 1px solid rgba(124, 140, 255, .44); border-radius: 999px; background: rgba(20, 24, 36, .68); color: rgba(238, 242, 255, .94); box-shadow: 0 8px 24px rgba(0,0,0,.18); backdrop-filter: blur(10px); font: 12px/1 system-ui, sans-serif; }
@@ -733,6 +733,7 @@
       [data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title],
       [data-app-action-sidebar-project-row][data-app-action-sidebar-project-id] { position: relative; }
       :where([data-codey-message-row]) { position: relative; }
+      [data-codey-hard-deleted="true"] { display: none !important; }
       [data-app-action-sidebar-thread-row] [${threadUpdatedAtAttribute}] { display: block; flex: 0 0 auto; min-width: 26px; margin-inline-start: auto; color: inherit; font: 400 12px/16px system-ui, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: 0; text-align: end; opacity: .52; pointer-events: none; white-space: nowrap; }
       [data-app-action-sidebar-thread-row]:hover [${threadUpdatedAtAttribute}],
       [data-app-action-sidebar-thread-row]:has(:focus-visible) [${threadUpdatedAtAttribute}] { opacity: 0; }
@@ -748,7 +749,106 @@
       #${sidebarActionTooltipId} { position: fixed; z-index: 2147483647; max-width: min(20rem, calc(100vw - 16px)); pointer-events: none; }
       [data-codey-pet-control-blocked="true"] { display: none !important; pointer-events: none !important; }
     `;
-    document.documentElement.appendChild(style);
+    if (!style.isConnected) document.documentElement.appendChild(style);
+  };
+
+  // 宿主模式删除后要让宿主丢弃并重新载入会话，视图会短暂清空再重建。重载期间用
+  // 当前画面的静态副本盖住对话区和输入框，重建完成、恢复滚动位置后再淡出。
+  const reloadMaskAttribute = "data-codey-reload-mask";
+  // 副本保留样式依赖的 id、类名和 data-thread-* 等属性，只去掉让扫描器把它当成
+  // 真实轮次或输入框的标记；副本排在原节点之后，按 id 查找仍先命中原节点。
+  const reloadMaskStrippedAttribute = (name, value) => (
+    name === "data-turn-key" || name === "data-message-author-role" || name === "data-message-id"
+    || name === "data-testid" || name === "contenteditable" || name.startsWith("data-app-action-")
+    || (name === "role" && value === "textbox")
+  );
+  const opaqueBackgroundColor = (element) => {
+    for (let node = element; node instanceof Element; node = node.parentElement) {
+      const color = getComputedStyle(node).backgroundColor;
+      if (color && color !== "transparent" && !/^rgba\([^)]*,\s*0\)$/.test(color)) return color;
+    }
+    return "";
+  };
+  const firstVisibleTurnAnchor = (scroller) => {
+    const top = scroller.getBoundingClientRect().top;
+    for (const row of scroller.querySelectorAll(canonicalConversationTurnSelector)) {
+      const rect = row.getBoundingClientRect();
+      if (rect.height > 0 && rect.bottom > top + 1) {
+        return { key: row.getAttribute("data-turn-key"), offset: rect.top - top };
+      }
+    }
+    return null;
+  };
+  const createConversationReloadMask = () => {
+    const scroller = document.querySelector(".thread-scroll-container");
+    if (!(scroller instanceof HTMLElement) || !scroller.parentElement) return null;
+    const rect = scroller.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const background = opaqueBackgroundColor(scroller);
+    const anchor = firstVisibleTurnAnchor(scroller);
+    const footer = [...scroller.children].find((child) => child.hasAttribute("data-thread-scroll-footer"));
+    const layers = [];
+    const addLayer = (source, box, removeFooter) => {
+      const layer = source.cloneNode(true);
+      if (removeFooter) {
+        [...layer.children].find((child) => child.hasAttribute("data-thread-scroll-footer"))?.remove();
+      }
+      for (const element of [layer, ...layer.querySelectorAll("*")]) {
+        for (const { name, value } of [...element.attributes]) {
+          if (reloadMaskStrippedAttribute(name, value)) element.removeAttribute(name);
+        }
+      }
+      Object.assign(layer.style, {
+        position: "fixed", left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`,
+        height: `${box.height}px`, margin: "0", zIndex: String(40 + layers.length), pointerEvents: "none",
+        background, opacity: "1", transition: "opacity 120ms ease",
+      });
+      layer.setAttribute(reloadMaskAttribute, "true");
+      layer.setAttribute("aria-hidden", "true");
+      layer.inert = true;
+      scroller.parentElement.appendChild(layer);
+      // 祖先若带 transform，fixed 会相对它定位；按实际偏差校正一次。
+      const placed = layer.getBoundingClientRect();
+      if (Math.abs(placed.left - box.left) > 0.5 || Math.abs(placed.top - box.top) > 0.5) {
+        layer.style.left = `${box.left * 2 - placed.left}px`;
+        layer.style.top = `${box.top * 2 - placed.top}px`;
+      }
+      layers.push(layer);
+      return layer;
+    };
+    addLayer(scroller, rect, true).scrollTop = scroller.scrollTop;
+    if (footer instanceof HTMLElement) addLayer(footer, footer.getBoundingClientRect(), false);
+    let released = false;
+    return {
+      async settle() {
+        const startedAt = performance.now();
+        let lastHeight = -1;
+        let stableReads = 0;
+        while (performance.now() - startedAt < 2500) {
+          await new Promise((resolve) => window.setTimeout(resolve, 50));
+          const live = document.querySelector(`.thread-scroll-container:not([${reloadMaskAttribute}])`);
+          if (!live?.querySelector(canonicalConversationTurnSelector)) {
+            stableReads = 0;
+            continue;
+          }
+          stableReads = live.scrollHeight === lastHeight ? stableReads + 1 : 0;
+          lastHeight = live.scrollHeight;
+          if (stableReads < 3 || performance.now() - startedAt < 150) continue;
+          const row = anchor && [...live.querySelectorAll(canonicalConversationTurnSelector)]
+            .find((candidate) => candidate.getAttribute("data-turn-key") === anchor.key);
+          if (row) {
+            live.scrollTop += row.getBoundingClientRect().top - live.getBoundingClientRect().top - anchor.offset;
+          }
+          return;
+        }
+      },
+      release() {
+        if (released) return;
+        released = true;
+        for (const layer of layers) layer.style.opacity = "0";
+        window.setTimeout(() => layers.forEach((layer) => layer.remove()), 140);
+      },
+    };
   };
 
   const logicalAnchorForMessageRow = (row) => messageLogicalAnchorByRow.get(row) || row;
@@ -2535,6 +2635,7 @@
         : hostedDeletion ? (conversationId) => manager.codeyPrepareMessageDeletion(conversationId) : null,
       finishMessageDeletion: canDeleteMessages ? messageDeletionMethods.finish.bind(manager)
         : hostedDeletion ? (conversationId, messageIds) => manager.codeyFinishMessageDeletion(conversationId, messageIds) : null,
+      reloadsConversationAfterDeletion: hostedDeletion,
       refreshRecentConversations: typeof manager.refreshRecentConversations === "function"
         ? () => manager.refreshRecentConversations() : null,
       reconcileCompletedConversation: typeof manager.codeyReconcileCompletedConversation === "function"
@@ -3421,13 +3522,22 @@
         ? result.resolvedMessageIds.map(normalizeMessageId).filter(Boolean)
         : messageIds;
       const deletedIds = [...new Set([...messageIds, ...resolvedMessageIds])];
+      let reloadMask = null;
       try {
         prepared = false;
+        if (controller.reloadsConversationAfterDeletion === true) {
+          // 先隐藏已删除的轮次再拍静态副本，遮罩期间看到的就是删除后的画面。
+          physicalRows.forEach((row) => { row.dataset.codeyHardDeleted = "true"; });
+          try { reloadMask = createConversationReloadMask(); } catch { reloadMask = null; }
+        }
         await controller.finishMessageDeletion(sessionId, deletedIds);
+        await reloadMask?.settle();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         window.alert(`消息已永久删除，但页面状态更新失败，请重新打开当前对话。\n\n${message}`);
         return;
+      } finally {
+        reloadMask?.release();
       }
       forgetLogicalMessageSelections(sessionId, deletedIds);
       forgetLogicalMessageIds(sessionId, deletedIds);

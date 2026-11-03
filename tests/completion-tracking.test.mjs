@@ -3038,8 +3038,8 @@ function fakeRpcStub(handlers) {
   });
 }
 
-function loadHostedManagerInjection(handlers) {
-  const runtime = loadInjection({ initialSessionId: "" });
+function loadHostedManagerInjection(handlers, options = {}) {
+  const runtime = loadInjection({ initialSessionId: "", ...options });
   const connection = { kind: "signal-family" };
   const account = { kind: "signal-family" };
   const calls = [];
@@ -3274,4 +3274,32 @@ test("a reinjected script replaces a cached hosted adapter that lacks deletion",
   runtime.window.__codeyCodexSessionController = { kind: "manager", manager: { codeyHostedAppServerManager: true, sendRequest() {} } };
   const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
   assert.equal(typeof controller.prepareMessageDeletion, "function");
+});
+
+test("hosted deletion hides the deleted turns at once and reloads the conversation behind them", async () => {
+  const events = [];
+  const { handlers } = hostedDeletionHandlers({
+    sendRequest: () => { events.push("unsubscribe"); return { status: "unsubscribed" }; },
+    discardConversationFromCache: (id) => { events.push(`discard:${id}`); },
+    refreshRecentConversations: () => { events.push("refresh"); },
+  });
+  const runtime = loadHostedManagerInjection(handlers, {
+    turnIds: ["turn-1", "turn-2"],
+    selectedTurnIds: ["turn-1"],
+    bridgeHandler: async (path) => {
+      if (path !== "/session/delete-messages") return { status: "ok" };
+      events.push("persist");
+      return { status: "ok", deleted: 1 };
+    },
+  });
+  runtime.setSessionId("session-1");
+  const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+  assert.equal(controller.reloadsConversationAfterDeletion, true);
+  await runtime.window.__codeyDeleteSelectedMessages();
+  assert.deepEqual(events, ["unsubscribe", "persist", "discard:session-1", "refresh"]);
+  // Until the host reloads, the stale row stays hidden instead of reappearing.
+  assert.equal(runtime.getTurnRow(0).dataset.codeyHardDeleted, "true");
+  assert.equal(runtime.getTurnRow(1).dataset.codeyHardDeleted, undefined);
+  assert.deepEqual(runtime.alerts, []);
+  assert.equal(runtime.getReloadCount(), 0);
 });
