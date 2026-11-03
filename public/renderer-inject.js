@@ -130,47 +130,54 @@
       #${buttonId}[data-codey-update-available="true"]::after { opacity: 1; transform: scale(1); }
       #${buttonId}[data-codey-header-actions="true"]::after { top: 4px; right: 4px; }
       #${buttonId}[data-codey-runtime-state="unavailable"][data-codey-update-available="true"]::after { top: auto; right: 3px; bottom: 3px; width: 5px; height: 5px; }
-      /* 跟随宿主 color-scheme；明确的主题类优先于系统偏好。iOS 克制毛玻璃质感。 */
-      #${accountUsageId} { --codey-usage-surface: light-dark(rgba(255, 255, 255, .82), rgba(32, 32, 36, .82)); --codey-usage-border: light-dark(rgba(255, 255, 255, .65), rgba(255, 255, 255, .12)); --codey-usage-ink: light-dark(#1d1d1f, #f5f5f7); --codey-usage-muted: light-dark(#86868b, #98989d); --codey-usage-line: light-dark(rgba(60, 60, 67, .08), rgba(235, 235, 245, .08)); --codey-usage-track: light-dark(rgba(0, 0, 0, .05), rgba(255, 255, 255, .10)); -webkit-app-region: no-drag !important; position: relative; display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: 9px 16px 10px; border-radius: 8px; background: transparent; color: var(--codey-usage-ink); container-type: inline-size; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif; line-height: 1.4; pointer-events: auto !important; user-select: none; transition: background .15s ease; }
+      /* 跟随宿主 color-scheme；明确的主题类优先于系统偏好。iOS 液态玻璃质感。 */
+      #${accountUsageId} { --codey-usage-ink: light-dark(#1d1d1f, #f5f5f7); --codey-usage-muted: light-dark(#86868b, #98989d); --codey-usage-line: light-dark(rgba(60, 60, 67, .09), rgba(235, 235, 245, .09)); --codey-usage-track: light-dark(rgba(0, 0, 0, .05), rgba(255, 255, 255, .08)); -webkit-app-region: no-drag !important; position: relative; display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: 9px 16px 10px; border: 0; border-radius: 12px; background: light-dark(#ffffff, #222226); box-shadow: 0 1px 5px -1px light-dark(rgba(0, 0, 0, .08), rgba(0, 0, 0, .4)); color: var(--codey-usage-ink); container-type: inline-size; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif; line-height: 1.4; pointer-events: auto !important; user-select: none; transition: box-shadow .18s ease; }
       :where(.light, [data-theme="light"]) #${accountUsageId} { color-scheme: light; }
       :where(.dark, [data-theme="dark"]) #${accountUsageId} { color-scheme: dark; }
-      #${accountUsageId}:hover { background: light-dark(rgba(0, 0, 0, .025), rgba(255, 255, 255, .04)); }
+      #${accountUsageId}:hover { box-shadow: 0 3px 14px -3px light-dark(rgba(0, 0, 0, .12), rgba(0, 0, 0, .5)); }
       #${accountUsageId}[data-state="stale"] .codey-usage-details-updated::before { content: "上次成功数据 · "; }
       #${accountUsageId}[data-state="error"] { padding-block: 8px; color: color-mix(in srgb, CanvasText 58%, transparent); font-size: 10px; }
       #${accountUsageId} .codey-usage-list { display: grid; min-width: 0; grid-template-columns: repeat(var(--codey-usage-window-count), minmax(0, 1fr)); gap: 12px; }
-      #${accountUsageId} .codey-usage-segment, #${accountUsageId} .codey-usage-detail-row { --codey-usage-accent: light-dark(#288e40, #30d158); --codey-usage-accent-bg: light-dark(rgba(40, 142, 64, .11), rgba(48, 209, 88, .18)); min-width: 0; }
+      #${accountUsageId} .codey-usage-segment, #${accountUsageId} .codey-usage-detail-row { --codey-usage-accent: light-dark(#248a3d, #30d158); --codey-usage-accent-bg: light-dark(rgba(52, 199, 89, .14), rgba(48, 209, 88, .22)); min-width: 0; }
       #${accountUsageId}[data-window-count="2"] .codey-usage-segment + .codey-usage-segment { border-inline-start: 1px solid color-mix(in srgb, CanvasText 9%, transparent); padding-inline-start: 12px; }
       #${accountUsageId} .codey-usage-overview { display: flex; min-width: 0; align-items: center; gap: 6px; }
       #${accountUsageId} .codey-usage-window-label { min-width: 0; overflow: hidden; color: var(--codey-usage-muted); font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-      #${accountUsageId} .codey-usage-plan-tag { flex: 0 0 auto; overflow: hidden; max-width: 44%; border: 1px solid color-mix(in srgb, #0a84ff 32%, transparent); border-radius: 999px; padding: 1px 6px; background: color-mix(in srgb, #0a84ff 13%, transparent); color: light-dark(#0068cc, #69b1ff); font-size: 9px; font-weight: 600; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+      #${accountUsageId} .codey-usage-plan-tag { flex: 0 0 auto; overflow: hidden; max-width: 44%; border: 1px solid color-mix(in srgb, #0a84ff 32%, transparent); border-radius: 999px; padding: 1px 6px; background: color-mix(in srgb, #0a84ff 13%, transparent); color: light-dark(#0068cc, #69b1ff); font-size: 9px; font-weight: 600; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; box-shadow: inset 0 1px 0.5px light-dark(rgba(255, 255, 255, .6), rgba(255, 255, 255, .2)); }
       #${accountUsageId} .codey-usage-plan-tag[data-plan="plus"] { border-color: light-dark(#a4d4c8, #37695e); background: light-dark(#e6f5f1, #193d37); color: light-dark(#0f766e, #91d6c1); }
-      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="100"] { border-color: light-dark(#cbd5e1, #64748b); background: linear-gradient(135deg, light-dark(#f8fafc, #394452), light-dark(#e2e8f0, #262e39)); color: light-dark(#475569, #dbe4ef); box-shadow: inset 0 1px 0 rgb(255 255 255 / .18); }
-      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="200"] { border-color: light-dark(#d6b86b, #8f7035); background: linear-gradient(135deg, light-dark(#fff8e7, #4b3b1f), light-dark(#f2dfb0, #302719)); color: light-dark(#78530e, #f2d58d); box-shadow: inset 0 1px 0 rgb(255 255 255 / .24); }
-      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="500"] { border-color: light-dark(#b89654, #c6a663); background: linear-gradient(135deg, light-dark(#49305f, #59406e), light-dark(#25182f, #302039)); color: light-dark(#f8e5af, #ffe9b0); box-shadow: inset 0 1px 0 rgb(255 234 184 / .24), 0 1px 3px rgb(37 28 54 / .15); }
-      #${accountUsageId} .codey-usage-value { flex: 0 0 auto; margin-inline-start: auto; padding: 1px 6px; border-radius: 999px; background: var(--codey-usage-accent-bg); color: var(--codey-usage-accent); font-size: 10px; font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
-      #${accountUsageId} .codey-usage-meter { display: block; box-sizing: border-box; width: 100%; height: 3px; min-height: 3px; max-height: 3px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: var(--codey-usage-track); contain: size; line-height: 0; }
-      #${accountUsageId} .codey-usage-meter > span { display: block; box-sizing: border-box; width: 100%; height: 100%; border-radius: inherit; background: var(--codey-usage-accent); transform: scaleX(var(--codey-usage-remaining)); transform-origin: left center; }
-      #${accountUsageId} .codey-usage-reset { display: block; overflow: hidden; margin-top: 5px; color: var(--codey-usage-muted); font-size: 9px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
-      #${accountUsageId} [data-tone="normal"] { --codey-usage-accent: light-dark(#0071e3, #0a84ff); --codey-usage-accent-bg: light-dark(rgba(0, 113, 227, .10), rgba(10, 132, 255, .18)); }
-      #${accountUsageId} [data-tone="warning"] { --codey-usage-accent: light-dark(#c96400, #ff9f0a); --codey-usage-accent-bg: light-dark(rgba(201, 100, 0, .11), rgba(255, 159, 10, .18)); }
-      #${accountUsageId} [data-tone="critical"] { --codey-usage-accent: light-dark(#d70015, #ff453a); --codey-usage-accent-bg: light-dark(rgba(215, 0, 21, .11), rgba(255, 69, 58, .20)); }
-      #${accountUsageId} .codey-usage-details { position: absolute; z-index: 2; right: 8px; bottom: calc(100% + 6px); left: 8px; box-sizing: border-box; min-width: 0; padding: 13px 14px 14px; border: 1px solid var(--codey-usage-border); border-radius: 14px; background: var(--codey-usage-surface); box-shadow: 0 16px 36px light-dark(rgba(0, 0, 0, .10), rgba(0, 0, 0, .48)), 0 3px 10px light-dark(rgba(0, 0, 0, .03), rgba(0, 0, 0, .24)), inset 0 0.5px 0 0 light-dark(rgba(255, 255, 255, .95), rgba(255, 255, 255, .16)); backdrop-filter: blur(24px) saturate(180%); -webkit-backdrop-filter: blur(24px) saturate(180%); color: var(--codey-usage-ink); opacity: 0; pointer-events: none; transform: translateY(6px) scale(.97); transition: opacity .18s cubic-bezier(.16, 1, .3, 1), transform .18s cubic-bezier(.16, 1, .3, 1), visibility .18s cubic-bezier(.16, 1, .3, 1); visibility: hidden; }
+      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="100"] { border-color: light-dark(#cbd5e1, #64748b); background: linear-gradient(135deg, light-dark(#f8fafc, #394452), light-dark(#e2e8f0, #262e39)); color: light-dark(#475569, #dbe4ef); box-shadow: inset 0 1px 0.5px rgb(255 255 255 / .35), 0 1px 2px rgb(0 0 0 / .06); }
+      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="200"] { border-color: light-dark(#d6b86b, #8f7035); background: linear-gradient(135deg, light-dark(#fff8e7, #4b3b1f), light-dark(#f2dfb0, #302719)); color: light-dark(#78530e, #f2d58d); box-shadow: inset 0 1px 0.5px rgb(255 255 255 / .4), 0 1px 2px rgb(0 0 0 / .08); }
+      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="500"] { border-color: light-dark(#b89654, #c6a663); background: linear-gradient(135deg, light-dark(#49305f, #59406e), light-dark(#25182f, #302039)); color: light-dark(#f8e5af, #ffe9b0); box-shadow: inset 0 1px 0.5px rgb(255 234 184 / .4), 0 1px 3px rgb(37 28 54 / .2); }
+      #${accountUsageId} .codey-usage-value { flex: 0 0 auto; margin-inline-start: auto; padding: 1.5px 7px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--codey-usage-accent) 25%, transparent); background: linear-gradient(180deg, light-dark(rgba(255, 255, 255, .35), rgba(255, 255, 255, .12)) 0%, transparent 100%), var(--codey-usage-accent-bg); color: var(--codey-usage-accent); font-size: 10px; font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; box-shadow: inset 0 1px 0.5px light-dark(rgba(255, 255, 255, .6), rgba(255, 255, 255, .2)); }
+      #${accountUsageId} .codey-usage-meter { display: block; box-sizing: border-box; width: 100%; height: 3px; min-height: 3px; max-height: 3px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: var(--codey-usage-track); contain: size; line-height: 0; box-shadow: inset 0 0.5px 1px light-dark(rgba(0, 0, 0, .08), rgba(0, 0, 0, .25)); }
+      #${accountUsageId} .codey-usage-meter > span { display: block; box-sizing: border-box; width: 100%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, color-mix(in srgb, var(--codey-usage-accent) 80%, white 20%), var(--codey-usage-accent)); box-shadow: 0 0 6px color-mix(in srgb, var(--codey-usage-accent) 45%, transparent), inset 0 0.5px 0 rgba(255, 255, 255, .4); transform: scaleX(var(--codey-usage-remaining)); transform-origin: left center; transition: transform .25s ease-out; }
+      #${accountUsageId} .codey-usage-reset { display: block; overflow: hidden; margin-top: 5px; color: color-mix(in srgb, var(--codey-usage-ink) 70%, transparent); font-size: 10.5px; font-variant-numeric: tabular-nums; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+      #${accountUsageId} [data-tone="normal"] { --codey-usage-accent: light-dark(#0071e3, #0a84ff); --codey-usage-accent-bg: light-dark(rgba(0, 113, 227, .12), rgba(10, 132, 255, .20)); }
+      #${accountUsageId} [data-tone="warning"] { --codey-usage-accent: light-dark(#c96400, #ff9f0a); --codey-usage-accent-bg: light-dark(rgba(201, 100, 0, .14), rgba(255, 159, 10, .20)); }
+      #${accountUsageId} [data-tone="critical"] { --codey-usage-accent: light-dark(#d70015, #ff453a); --codey-usage-accent-bg: light-dark(rgba(215, 0, 21, .14), rgba(255, 69, 58, .22)); }
+      #${accountUsageId} .codey-usage-details { position: absolute; z-index: 2; right: 8px; bottom: calc(100% + 7px); left: 8px; box-sizing: border-box; min-width: 0; padding: 14px 15px 15px; border: 0; border-radius: 14px; background: light-dark(#ffffff, #222226); box-shadow: 0 18px 44px -10px light-dark(rgba(20, 40, 70, .2), rgba(0, 0, 0, .6)), 0 4px 14px -4px light-dark(rgba(20, 40, 70, .1), rgba(0, 0, 0, .4)); color: var(--codey-usage-ink); opacity: 0; pointer-events: none; transform: translateY(6px) scale(.97); transition: opacity .2s cubic-bezier(.16, 1, .3, 1), transform .2s cubic-bezier(.16, 1, .3, 1), visibility .2s cubic-bezier(.16, 1, .3, 1); visibility: hidden; }
       #${accountUsageId}:hover .codey-usage-details, #${accountUsageId}:focus-visible .codey-usage-details { opacity: 1; transform: translateY(0) scale(1); visibility: visible; pointer-events: auto; }
-      #${accountUsageId} .codey-usage-details::after { content: ""; position: absolute; inset: 100% 0 auto; height: 8px; }
-      #${accountUsageId}:focus-visible { border-radius: 6px; outline: 2px solid color-mix(in srgb, #0a84ff 72%, transparent); outline-offset: -2px; }
-      #${accountUsageId} .codey-usage-details-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 10px; }
-      #${accountUsageId} .codey-usage-details-title { font-size: 11.5px; font-weight: 650; letter-spacing: -.01em; }
+      #${accountUsageId} .codey-usage-details::after { content: ""; position: absolute; inset: 100% 0 auto; height: 9px; }
+      #${accountUsageId}:focus-visible { outline: 2px solid color-mix(in srgb, #0a84ff 72%, transparent); outline-offset: -2px; }
+      #${accountUsageId} .codey-usage-details-heading { position: relative; z-index: 1; display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 11px; }
+      #${accountUsageId} .codey-usage-details-title { font-size: 12px; font-weight: 650; letter-spacing: -.01em; }
       #${accountUsageId} .codey-usage-details-updated { margin-inline-start: auto; color: var(--codey-usage-muted); font-size: 9.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-      #${accountUsageId} .codey-usage-details-list { display: grid; min-width: 0; gap: 11px; }
-      #${accountUsageId} .codey-usage-detail-row { padding-block-start: 10px; border-block-start: 1px solid var(--codey-usage-line); }
+      #${accountUsageId} .codey-usage-details-list { position: relative; z-index: 1; display: grid; min-width: 0; gap: 12px; }
+      #${accountUsageId} .codey-usage-detail-row { position: relative; padding-block-start: 11px; border-block-start: 1px solid var(--codey-usage-line); }
       #${accountUsageId} .codey-usage-detail-main, #${accountUsageId} .codey-usage-detail-meta { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; }
-      #${accountUsageId} .codey-usage-detail-label { overflow: hidden; font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+      #${accountUsageId} .codey-usage-detail-label { overflow: hidden; font-size: 11.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
       #${accountUsageId} .codey-usage-detail-value { margin-inline-start: auto; font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
-      #${accountUsageId} .codey-usage-detail-row[data-tone] .codey-usage-detail-value { padding: 1.5px 7px; border-radius: 999px; background: var(--codey-usage-accent-bg); color: var(--codey-usage-accent); font-size: 10px; font-weight: 650; }
-      #${accountUsageId} .codey-usage-detail-row .codey-usage-meter { height: 4px; min-height: 4px; max-height: 4px; margin-top: 7px; }
-      #${accountUsageId} .codey-usage-detail-meta { flex-wrap: wrap; margin-top: 5px; gap: 3px 8px; color: var(--codey-usage-muted); font-size: 9.5px; font-variant-numeric: tabular-nums; line-height: 1.35; }
+      #${accountUsageId} .codey-usage-detail-row[data-tone] .codey-usage-detail-value { padding: 1.5px 8px; border-radius: 999px; border: 1px solid color-mix(in srgb, var(--codey-usage-accent) 30%, transparent); background: linear-gradient(180deg, light-dark(rgba(255, 255, 255, .35), rgba(255, 255, 255, .12)) 0%, transparent 100%), var(--codey-usage-accent-bg); color: var(--codey-usage-accent); font-size: 10.5px; font-weight: 650; box-shadow: inset 0 1px 0.5px light-dark(rgba(255, 255, 255, .7), rgba(255, 255, 255, .25)), 0 1px 3px light-dark(rgba(0, 0, 0, .05), rgba(0, 0, 0, .2)); }
+      #${accountUsageId} .codey-usage-detail-row .codey-usage-meter { height: 5px; min-height: 5px; max-height: 5px; border-radius: 999px; background: var(--codey-usage-track); box-shadow: inset 0 1px 2px light-dark(rgba(0, 0, 0, .08), rgba(0, 0, 0, .3)); }
+      #${accountUsageId} .codey-usage-detail-reset { flex: 0 1 auto; margin-inline-start: auto; overflow: hidden; color: color-mix(in srgb, var(--codey-usage-ink) 78%, transparent); font-size: 11px; font-variant-numeric: tabular-nums; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+      #${accountUsageId} .codey-usage-detail-gauge { display: flex; min-width: 0; align-items: center; gap: 9px; margin-top: 8px; }
+      #${accountUsageId} .codey-usage-detail-gauge .codey-usage-meter { flex: 1 1 auto; margin-top: 0; }
+      #${accountUsageId} .codey-usage-detail-percent { flex: 0 0 auto; color: var(--codey-usage-accent); font-size: 16px; font-variant-numeric: tabular-nums; font-weight: 700; line-height: 1.1; text-shadow: 0 0 12px color-mix(in srgb, var(--codey-usage-accent) 35%, transparent); white-space: nowrap; }
+      #${accountUsageId} .codey-usage-detail-meta { flex-wrap: wrap; margin-top: 6px; gap: 3px 8px; color: color-mix(in srgb, var(--codey-usage-ink) 66%, transparent); font-size: 10.5px; font-variant-numeric: tabular-nums; line-height: 1.35; }
       #${accountUsageId} .codey-usage-detail-meta span { white-space: nowrap; }
       #${accountUsageId} .codey-usage-detail-meta span + span { margin-inline-start: auto; }
+      #${accountUsageId} .codey-usage-detail-meta .is-expiring { color: var(--codey-usage-accent); font-weight: 600; }
+      #${accountUsageId} .codey-usage-credit-dot { flex: 0 0 auto; width: 6px; height: 6px; margin-inline-start: -2px; border-radius: 999px; background: currentColor; color: light-dark(#d70015, #ff453a); animation: codey-usage-breathe 1.6s ease-in-out infinite; }
+      @keyframes codey-usage-breathe { 0%, 100% { opacity: .3; transform: scale(.72); box-shadow: 0 0 0 0 rgba(255, 59, 48, .5); } 50% { opacity: 1; transform: scale(1); box-shadow: 0 0 0 5px rgba(255, 59, 48, .06); } }
       #${accountUsageId}[data-window-count="2"] .codey-usage-list:has(.codey-usage-plan-tag) { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
       @container (max-width: 280px) {
         #${accountUsageId} .codey-usage-list { gap: 8px; }
@@ -181,6 +188,8 @@
       }
       @media (prefers-reduced-motion: reduce) {
         #${buttonId}, #${buttonId} *, #${accountUsageId}, #${accountUsageId} * { animation: none !important; transition: none !important; }
+        /* 预警灯保留仅透明度的慢速呼吸，不带位移和光环。 */
+        #${accountUsageId} .codey-usage-credit-dot { animation: codey-usage-breathe 3.2s ease-in-out infinite !important; transform: none !important; box-shadow: none !important; }
       }
     `;
     document.documentElement.appendChild(style);
@@ -676,7 +685,7 @@
     ? "critical"
     : remaining <= 40 ? "warning" : remaining <= 70 ? "normal" : "healthy";
 
-  const accountUsageWindowSegment = (window, kind, plan = "") => {
+  const accountUsageWindowSegment = (window, kind, plan = "", creditDot = false) => {
     if (!window || accountUsageWindowKind(window) !== kind) return null;
     const proTier = /^Pro (100|200|500)$/.exec(plan)?.[1];
     const remaining = Math.max(0, Math.min(100, 100 - Number(window.usedPercent)));
@@ -691,6 +700,7 @@
       html: `
         <span class="codey-usage-segment" data-window="${kind}" data-tone="${tone}" style="--codey-usage-remaining:${remaining / 100}">
           <span class="codey-usage-overview">
+            ${creditDot ? `<span class="codey-usage-credit-dot" aria-hidden="true"></span>` : ""}
             ${plan ? `<span class="codey-usage-plan-tag"${plan === "Plus" ? ' data-plan="plus"' : ""}${proTier ? ` data-pro-tier="${proTier}"` : ""}>${escapeAccountUsageText(plan)}</span>` : ""}
             <span class="codey-usage-window-label">${label}</span>
             <span class="codey-usage-value">${roundedRemaining}%</span>
@@ -702,7 +712,7 @@
     };
   };
 
-  const accountUsageSegments = (result) => {
+  const accountUsageSegments = (result, creditExpiring = false) => {
     const windowsByKind = new Map();
     for (const window of [result?.primary, result?.secondary]) {
       const kind = accountUsageWindowKind(window);
@@ -715,6 +725,7 @@
       windowsByKind.get(kind),
       kind,
       index === 0 ? plan : "",
+      index === 0 && creditExpiring,
     ));
   };
 
@@ -727,12 +738,11 @@
       <div class="codey-usage-detail-row" data-tone="${accountUsageTone(Math.round(remaining))}" style="--codey-usage-remaining:${remaining / 100}">
         <div class="codey-usage-detail-main">
           <span class="codey-usage-detail-label">${escapeAccountUsageText(accountUsageWindowLabel(window))}</span>
-          <span class="codey-usage-detail-value">剩余 ${Math.round(remaining)}%</span>
+          ${reset ? `<span class="codey-usage-detail-reset">${escapeAccountUsageText(reset)}</span>` : ""}
         </div>
-        <span class="codey-usage-meter" aria-hidden="true"><span></span></span>
-        <div class="codey-usage-detail-meta">
-          <span>已用 ${Math.round(used)}%</span>
-          ${reset ? `<span>${escapeAccountUsageText(reset)}</span>` : ""}
+        <div class="codey-usage-detail-gauge">
+          <span class="codey-usage-meter" aria-hidden="true"><span></span></span>
+          <span class="codey-usage-detail-percent">${Math.round(remaining)}%</span>
         </div>
       </div>
     `;
@@ -740,13 +750,17 @@
 
   const accountUsageCreditsDetail = (credits) => {
     if (!credits) return "";
+    const numeric = Number(credits.balance);
+    const explicitBalance = credits.balance !== undefined && credits.balance !== null
+      && credits.balance !== "" && Number.isFinite(numeric);
+    // 余额为零时不占行：显式 0 直接隐藏；无余额字段时按 hasCredits 兜底。
+    if (!credits.unlimited && explicitBalance && numeric <= 0) return "";
+    if (!credits.unlimited && !explicitBalance && !credits.hasCredits) return "";
     const balance = credits.unlimited
       ? "不限"
-      : credits.balance !== undefined && credits.balance !== null
+      : explicitBalance
         ? String(credits.balance).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "")
-        : credits.hasCredits
-          ? "可用"
-          : "0";
+        : "可用";
     return `
       <div class="codey-usage-detail-row">
         <div class="codey-usage-detail-main">
@@ -757,17 +771,28 @@
     `;
   };
 
+  // 充值卡在最近一次过期 12 小时内进入预警：详情行转红色并加呼吸灯，
+  // 侧栏摘要也亮一颗红点。
+  const accountUsageResetExpiring = (resetCredits) => {
+    if (!(Number(resetCredits?.availableCount) > 0)) return false;
+    const expiresAt = Number(resetCredits?.nextExpiresAt) * 1000;
+    const now = Date.now();
+    return Number.isFinite(expiresAt) && expiresAt > now && expiresAt - now <= 12 * 60 * 60 * 1000;
+  };
+
   const accountUsageResetCreditsDetail = (resetCredits) => {
     const count = Number(resetCredits?.availableCount);
-    if (!Number.isFinite(count)) return "";
+    if (!Number.isFinite(count) || count <= 0) return "";
     const expiry = accountUsageDayTimeLabel(resetCredits.nextExpiresAt);
+    const expiring = accountUsageResetExpiring(resetCredits);
     return `
-      <div class="codey-usage-detail-row">
+      <div class="codey-usage-detail-row"${expiring ? ' data-tone="critical"' : ""}>
         <div class="codey-usage-detail-main">
           <span class="codey-usage-detail-label">剩余重置次数</span>
+          ${expiring ? `<span class="codey-usage-credit-dot" aria-hidden="true"></span>` : ""}
           <span class="codey-usage-detail-value">${Math.max(0, Math.round(count))} 次</span>
         </div>
-        ${expiry ? `<div class="codey-usage-detail-meta"><span>最近 ${escapeAccountUsageText(expiry)} 过期</span></div>` : ""}
+        ${expiry ? `<div class="codey-usage-detail-meta"><span${expiring ? ' class="is-expiring"' : ""}>最近 ${escapeAccountUsageText(expiry)} 过期</span></div>` : ""}
       </div>
     `;
   };
@@ -863,6 +888,7 @@
         return;
       }
       usage.dataset.state = "error";
+      delete usage.dataset.creditExpiring;
       usage.setAttribute("aria-label", "官方账号额度暂不可用");
       usage.title = String(result.message || "官方账号额度暂不可用");
       usage.__codeyLastUsageHtml = "";
@@ -871,7 +897,8 @@
     }
     if (result.status !== "ok") return;
 
-    const segments = accountUsageSegments(result);
+    const creditExpiring = accountUsageResetExpiring(result?.resetCredits);
+    const segments = accountUsageSegments(result, creditExpiring);
     accountUsageLastResult = result;
     if (!segments.length) {
       removeAccountUsage();
@@ -879,9 +906,12 @@
     }
     const usage = accountUsageMount();
     if (!usage) return;
-    const aria = segments.map((segment) => segment.aria).join("；");
+    const aria = segments.map((segment) => segment.aria).join("；")
+      + (creditExpiring ? "；重置次数即将过期" : "");
     usage.dataset.state = "ready";
     usage.dataset.windowCount = String(segments.length);
+    if (creditExpiring) usage.dataset.creditExpiring = "true";
+    else delete usage.dataset.creditExpiring;
     delete usage.dataset.plan;
     usage.style.setProperty("--codey-usage-window-count", String(segments.length));
     usage.setAttribute("aria-label", aria);

@@ -574,6 +574,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   todayResetAt.setHours(23, 45, 0, 0);
   const tomorrowResetAt = new Date(todayResetAt);
   tomorrowResetAt.setDate(todayResetAt.getDate() + 1);
+  const appServerCreditExpiresAt = Math.floor(Date.now() / 1000) + 6 * 3600;
   let accountUsageResult = {
     status: "ok",
     planType: "pro",
@@ -618,7 +619,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
     rateLimitResetCredits: {
       availableCount: 2,
       credits: [
-        { id: "credit-1", status: "available", expiresAt: Math.floor(todayResetAt.getTime() / 1000) },
+        { id: "credit-1", status: "available", expiresAt: appServerCreditExpiresAt },
         { id: "credit-2", status: "redeemed", expiresAt: Math.floor(tomorrowResetAt.getTime() / 1000) },
       ],
     },
@@ -647,7 +648,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
         assert.equal(args.snapshot.resetCredits.availableCount, 2);
         assert.equal(
           args.snapshot.resetCredits.nextExpiresAt,
-          Math.floor(todayResetAt.getTime() / 1000),
+          appServerCreditExpiresAt,
         );
         assert.ok(args.snapshot.fetchedAt > 0);
         return { status: "ok" };
@@ -697,17 +698,15 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.ok(usage);
   assert.ok(settingsButton);
   assert.ok(injectedStyle);
-  assert.match(injectedStyle.textContent, /#codey-account-usage \{[^}]*background: transparent;/);
+  assert.match(injectedStyle.textContent, /#codey-account-usage \{[^}]*border: 0;[^}]*background: light-dark\(#ffffff/);
   assert.doesNotMatch(injectedStyle.textContent, /#codey-account-usage \{[^}]*background:[^;}]*Canvas/);
+  assert.doesNotMatch(injectedStyle.textContent, /backdrop-filter/);
   assert.match(injectedStyle.textContent, /\.codey-usage-meter \{ display: block;[^}]*height: 3px;[^}]*max-height: 3px;/);
   assert.match(injectedStyle.textContent, /data-tone="normal"[^}]*--codey-usage-accent: light-dark\(/);
   assert.match(injectedStyle.textContent, /data-tone="warning"[^}]*--codey-usage-accent: light-dark\(/);
   assert.match(injectedStyle.textContent, /data-tone="critical"[^}]*--codey-usage-accent: light-dark\(/);
   assert.match(injectedStyle.textContent, /#codey-account-usage:hover \.codey-usage-details/);
-  assert.match(injectedStyle.textContent, /--codey-usage-surface: light-dark\(rgba\(255, 255, 255, \.82\), rgba\(32, 32, 36, \.82\)\);/);
-  assert.match(injectedStyle.textContent, /\.codey-usage-details \{[^}]*backdrop-filter: blur\(24px\) saturate\(180%\);/);
-  assert.match(injectedStyle.textContent, /\.codey-usage-details \{[^}]*-webkit-backdrop-filter: blur\(24px\) saturate\(180%\);/);
-  assert.match(injectedStyle.textContent, /\.codey-usage-details \{[^}]*background: var\(--codey-usage-surface\);/);
+  assert.match(injectedStyle.textContent, /\.codey-usage-details \{[^}]*border: 0;[^}]*background: light-dark\(#ffffff/);
   assert.doesNotMatch(injectedStyle.textContent, /#codey-account-usage\[data-state="stale"\] \{[^}]*opacity:/);
   assert.match(injectedStyle.textContent, /\.codey-usage-plan-tag \{[^}]*border:[^}]*background: color-mix\(in srgb, #0a84ff 13%, transparent\);/);
   assert.equal(usage.parentElement, sidebarFooterHost);
@@ -727,12 +726,15 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.match(summaryHtml, /class="codey-usage-plan-tag" data-pro-tier="200">Pro 200<\/span>[\s\S]*?周额度[\s\S]*?60%/);
   assert.doesNotMatch(summaryHtml, /余额|42/);
   assert.match(usage.innerHTML, /class="codey-usage-details" role="tooltip"/);
-  assert.match(usage.innerHTML, /5 小时额度[\s\S]*?剩余 85%[\s\S]*?已用 15%/);
-  assert.match(usage.innerHTML, /周额度[\s\S]*?剩余 60%[\s\S]*?已用 40%/);
+  assert.match(usage.innerHTML, /5 小时额度[\s\S]*?今天 \d{2}:\d{2} 重置[\s\S]*?codey-usage-detail-percent">85%/);
+  assert.match(usage.innerHTML, /周额度[\s\S]*?明天 \d{2}:\d{2} 重置[\s\S]*?codey-usage-detail-percent">60%/);
+  assert.doesNotMatch(usage.innerHTML, /已用|detail-value">剩余/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?42/);
   assert.match(usage.innerHTML, /更新于 \d{2}:\d{2}/);
   assert.match(usage.innerHTML, /额度详情[\s\S]*?更新于 \d{2}:\d{2}/);
   assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?3 次[\s\S]*?明天 \d{2}:\d{2} 过期/);
+  assert.equal(usage.dataset.creditExpiring, undefined);
+  assert.doesNotMatch(usage.innerHTML, /codey-usage-credit-dot/);
   assert.equal(usage.dataset.windowCount, "2");
   assert.equal(usage.dataset.plan, undefined);
   assert.equal(usage.getAttribute("tabindex"), "0");
@@ -753,11 +755,15 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
     ...accountUsageResult,
     primary: accountUsageResult.secondary,
     secondary: null,
+    credits: { hasCredits: false, unlimited: false, balance: "0" },
+    resetCredits: { availableCount: 0, nextExpiresAt: Math.floor(Date.now() / 1000) + 3600 },
   };
   await window.__codeyRefreshAccountUsage();
   assert.equal(usage.dataset.windowCount, "1");
   assert.match(usage.innerHTML, /周额度/);
   assert.doesNotMatch(usage.innerHTML, /data-window="five-hour"/);
+  assert.doesNotMatch(usage.innerHTML, /Credits 余额|剩余重置次数|codey-usage-credit-dot/);
+  assert.equal(usage.dataset.creditExpiring, undefined);
 
   accountUsageResult = { status: "error", message: "官方额度接口返回 401", authGeneration: 1 };
   appServerUsageResult.rateLimits.primary.resetsAt = Math.floor(Date.now() / 1000) + 29.5 * 60 * 60;
@@ -769,7 +775,11 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.doesNotMatch(usage.getAttribute("aria-label"), /5 小时额度/);
   assert.match(usage.getAttribute("aria-label"), /1 天 5 小时后重置/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?77/);
-  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?2 次[\s\S]*?今天 \d{2}:\d{2} 过期/);
+  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?2 次[\s\S]*?\d{2}:\d{2} 过期/);
+  assert.equal(usage.dataset.creditExpiring, "true");
+  assert.match(usage.innerHTML, /codey-usage-credit-dot[\s\S]*?codey-usage-plan-tag/);
+  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-credit-dot[\s\S]*?is-expiring[\s\S]*?过期/);
+  assert.match(usage.getAttribute("aria-label"), /重置次数即将过期/);
   assert.match(usage.innerHTML, /class="codey-usage-plan-tag" data-plan="plus">Plus<\/span>/);
 
   accountUsageResult = { status: "unavailable", reason: "third_party" };
