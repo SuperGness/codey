@@ -3108,7 +3108,7 @@ test("hosted AppServerManager serves MCP reload, usage, and refresh through its 
 
 test("hosted AppServerManager rejects page-only capabilities once without rescanning", async () => {
   const runtime = loadHostedManagerInjection({ sendRequest: () => assert.fail("must not send") });
-  for (const feature of ["modelRouting", "modelRouting", "deleteMessages"]) {
+  for (const feature of ["modelRouting", "modelRouting"]) {
     await assert.rejects(
       runtime.window.__codeyLoadCodexSessionController({ feature }),
       (error) => error.code === "codey_capability_unavailable" && /桌面宿主进程/.test(error.message),
@@ -3200,4 +3200,78 @@ test("hosted completion reconcile leaves live, pending, follower, changing, and 
       assert.ok(!names.includes("unsubscribeInactiveConversation"), `${label}: no unsubscribe`);
     }
   }
+});
+
+function hostedDeletionHandlers(overrides = {}) {
+  const state = { execution: { inProgress: false, activeTurnId: null }, role: { role: "owner" } };
+  const handlers = {
+    getThreadExecutionState: () => state.execution,
+    getStreamRole: () => state.role,
+    unsubscribeInactiveConversation: () => {},
+    sendRequest: (method, params) => {
+      assert.equal(method, "thread/unsubscribe");
+      assert.deepEqual({ ...params }, { threadId: "thread-1" });
+      return { status: "unsubscribed" };
+    },
+    getConversationCwd: () => "/repo",
+    resumeConversation: () => ({ status: "ready" }),
+    discardConversationFromCache: () => {},
+    refreshRecentConversations: () => {},
+    ...overrides,
+  };
+  return { state, handlers };
+}
+
+test("hosted message deletion releases the thread before files change and reloads the rewritten history afterwards", async () => {
+  const { handlers } = hostedDeletionHandlers();
+  const runtime = loadHostedManagerInjection(handlers);
+  const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+  await controller.prepareMessageDeletion("thread-1");
+  // The host call updates its own state; the direct call covers streams it skips.
+  assert.deepEqual(runtime.calls.map(([name, arg]) => name === "sendRequest" ? arg : name), [
+    "getThreadExecutionState", "getStreamRole", "unsubscribeInactiveConversation", "thread/unsubscribe",
+  ]);
+  runtime.calls.length = 0;
+  // Host resume merges loaded turns back in; evicting the cache makes the open
+  // view reload the rewritten history, and the list refresh restores its row.
+  await controller.finishMessageDeletion("thread-1", ["turn-1"]);
+  assert.deepEqual(runtime.calls.map(([name, arg]) => [name, arg]), [
+    ["discardConversationFromCache", "thread-1"], ["refreshRecentConversations", undefined],
+  ]);
+  runtime.calls.length = 0;
+  // A failed delete changes no files; restore the stream without dropping the view.
+  await controller.finishMessageDeletion("thread-1", []);
+  assert.ok(!runtime.calls.some(([name]) => name === "discardConversationFromCache"));
+  const resume = runtime.calls.find(([name]) => name === "resumeConversation")[1];
+  assert.deepEqual({ ...resume, workspaceRoots: [...resume.workspaceRoots] }, {
+    conversationId: "thread-1", model: null, reasoningEffort: null, workspaceRoots: ["/repo"],
+  });
+  assert.equal(runtime.window.__codeyPageCapabilities.deleteMessages.status, "available");
+});
+
+test("hosted message deletion leaves running, unloaded, and follower threads untouched", async () => {
+  for (const [label, setup, pattern] of [
+    ["running", ({ state }) => { state.execution = { inProgress: true, activeTurnId: "turn-1" }; }, /仍在运行/],
+    ["follower", ({ state }) => { state.role = { role: "follower" }; }, /拥有当前会话的窗口/],
+    ["not loaded", ({ state }) => { state.execution = null; }, /尚未加载/],
+  ]) {
+    const fixture = hostedDeletionHandlers();
+    setup(fixture);
+    const runtime = loadHostedManagerInjection(fixture.handlers);
+    const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+    await assert.rejects(controller.prepareMessageDeletion("thread-1"), pattern, label);
+    assert.ok(!runtime.calls.some(([name]) => name === "unsubscribeInactiveConversation" || name === "sendRequest"), label);
+  }
+  const notReady = hostedDeletionHandlers({ resumeConversation: () => ({ status: "not-ready", reason: "inactive-window" }) });
+  const notReadyRuntime = loadHostedManagerInjection(notReady.handlers);
+  const notReadyController = await notReadyRuntime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+  await assert.rejects(notReadyController.finishMessageDeletion("thread-1", []), /无法重新载入/);
+});
+
+test("a reinjected script replaces a cached hosted adapter that lacks deletion", async () => {
+  const { handlers } = hostedDeletionHandlers();
+  const runtime = loadHostedManagerInjection(handlers);
+  runtime.window.__codeyCodexSessionController = { kind: "manager", manager: { codeyHostedAppServerManager: true, sendRequest() {} } };
+  const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+  assert.equal(typeof controller.prepareMessageDeletion, "function");
 });

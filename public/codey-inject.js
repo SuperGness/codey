@@ -2319,8 +2319,43 @@
     return state != null && state.inProgress !== true;
   };
 
+  // 宿主托管时页面拿不到会话状态：删除前由宿主退订并标记待恢复，再按原流程直接
+  // 退订一次（宿主只在本窗口持有历史流时才会发出）；app-server 仍可能保留已加载的
+  // 会话，后端为此记录删除墓碑并在启动维护时重放。完成后经宿主恢复重建页面历史。
+  const prepareHostedMessageDeletion = async (rpc, conversationId) => {
+    const [state, role] = await Promise.all([
+      callHostedAppServer(() => rpc().getThreadExecutionState(conversationId)),
+      callHostedAppServer(() => rpc().getStreamRole(conversationId)),
+    ]);
+    if (state == null) throw new Error("当前会话尚未加载，请打开该对话后再删除");
+    if (state.inProgress === true) throw new Error("当前任务仍在运行，请等待任务结束后再删除");
+    if (role?.role === "follower") throw new Error("请在拥有当前会话的窗口中删除消息");
+    await callHostedAppServer(() => rpc().unsubscribeInactiveConversation(conversationId));
+    await callHostedAppServer(() => rpc().sendRequest("thread/unsubscribe", { threadId: conversationId }));
+  };
+  const finishHostedMessageDeletion = async (rpc, conversationId, messageIds = []) => {
+    if (messageIds.length) {
+      // 宿主恢复和后台补读都会把已载入的旧轮次并回来，正在查看时也不会清空。
+      // 让宿主丢弃该会话的缓存，打开中的对话随即按改写后的文件重新载入；
+      // 丢弃会移除列表摘要，随后刷新会话列表补回。
+      await callHostedAppServer(() => rpc().discardConversationFromCache(conversationId));
+      await callHostedAppServer(() => rpc().refreshRecentConversations());
+      return;
+    }
+    const cwd = await callHostedAppServer(() => rpc().getConversationCwd(conversationId));
+    const result = await callHostedAppServer(() => rpc().resumeConversation({
+      conversationId,
+      model: null,
+      reasoningEffort: null,
+      workspaceRoots: [cwd || "/"],
+    }));
+    if (result?.status !== "ready") throw new Error("Codex 暂时无法重新载入当前对话");
+  };
+
   // 每次调用都重新读取连接信号：宿主重连会换存根，不能继续用已断开的旧连接。
   const hostedAppServerManagers = new WeakMap();
+  // 重新注入时旧脚本缓存的适配器可能缺少新方法，只信任本次脚本创建的实例。
+  const ownHostedAppServerManagers = new WeakSet();
   const hostedAppServerManager = (scope, family, hostId) => {
     const cached = hostedAppServerManagers.get(family);
     if (cached) return cached;
@@ -2336,8 +2371,11 @@
       )),
       refreshRecentConversations: () => callHostedAppServer(() => rpc().refreshRecentConversations()),
       codeyReconcileCompletedConversation: (params) => reconcileHostedConversation(rpc, params),
+      codeyPrepareMessageDeletion: (conversationId) => prepareHostedMessageDeletion(rpc, conversationId),
+      codeyFinishMessageDeletion: (conversationId, messageIds) => finishHostedMessageDeletion(rpc, conversationId, messageIds),
     };
     hostedAppServerManagers.set(family, manager);
+    ownHostedAppServerManagers.add(manager);
     return manager;
   };
 
@@ -2488,11 +2526,15 @@
 
   const managerSessionController = (manager) => {
     const canDeleteMessages = isLocalMessageDeletionManager(manager);
+    const hostedDeletion = !canDeleteMessages && ownHostedAppServerManagers.has(manager);
     return {
       kind: "manager",
       manager,
-      prepareMessageDeletion: canDeleteMessages ? messageDeletionMethods.prepare.bind(manager) : null,
-      finishMessageDeletion: canDeleteMessages ? messageDeletionMethods.finish.bind(manager) : null,
+      // RPC 存根的任意属性都像函数，宿主删除只认本脚本创建的适配器。
+      prepareMessageDeletion: canDeleteMessages ? messageDeletionMethods.prepare.bind(manager)
+        : hostedDeletion ? (conversationId) => manager.codeyPrepareMessageDeletion(conversationId) : null,
+      finishMessageDeletion: canDeleteMessages ? messageDeletionMethods.finish.bind(manager)
+        : hostedDeletion ? (conversationId, messageIds) => manager.codeyFinishMessageDeletion(conversationId, messageIds) : null,
       refreshRecentConversations: typeof manager.refreshRecentConversations === "function"
         ? () => manager.refreshRecentConversations() : null,
       reconcileCompletedConversation: typeof manager.codeyReconcileCompletedConversation === "function"
@@ -2570,7 +2612,7 @@
     const hostedUnsupported = () => new Error("Codex 的会话管理运行在桌面宿主进程，页面无法接管该接口");
     // 宿主进程里的管理器只开放 RPC 方法；请求客户端与本地会话状态都不在页面里，
     // 资源模块中也没有别的实例，已确认后不再重扫 React 或逐个导入资源。
-    if (window.__codeyCodexSessionController?.manager?.codeyHostedAppServerManager === true) {
+    if (ownHostedAppServerManagers.has(window.__codeyCodexSessionController?.manager)) {
       throw hostedUnsupported();
     }
     const cachedManager = appServerManagerFromReact(cachedAppServerManagerFromScope);
