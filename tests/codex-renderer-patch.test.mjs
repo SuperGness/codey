@@ -951,3 +951,19 @@ test("slim pet stops the hidden avatar overlay prewarm without blocking on-deman
     assert.equal(globalThis.__codeyRendererPatchEntry(url, patched), null, "the patch is idempotent");
   }
 });
+
+test("the hosted AppServerManager service leaves a diagnostic marker when it connects", async () => {
+  delete globalThis.__codeyRendererPatchInstalled;
+  (0, eval)(await loadStartupPatchTemplate({ disablePet: false }));
+  const url = "app://-/assets/renderer-app-server-managers-8103218e001d.js";
+  const source = "function im(e){let t=A.appServerManagers;if(t==null)throw Error(`Desktop host did not provide its AppServerManager service`);return tm(e,t)}";
+  const patched = globalThis.__codeyRendererPatchEntry(url, source);
+  const connect = (service) => Function("A", "tm", `${patched};return im`)({ appServerManagers: service }, () => "connected");
+  delete globalThis.__codeyAppServerManagerHosted;
+  assert.throws(() => connect(null)(), /did not provide/);
+  assert.equal(globalThis.__codeyAppServerManagerHosted, undefined, "a missing host service is not marked");
+  assert.equal(connect({})(), "connected");
+  assert.equal(globalThis.__codeyAppServerManagerHosted, true);
+  delete globalThis.__codeyAppServerManagerHosted;
+  assert.equal(globalThis.__codeyRendererPatchEntry(url, patched), null, "the patch is idempotent");
+});

@@ -512,6 +512,19 @@
       );
     }
     if (
+      source.includes("Desktop host did not provide its AppServerManager service")
+      && !source.includes("__codeyAppServerManagerHosted")
+    ) {
+      // 新版把 AppServerManager 放在桌面宿主进程，页面只拿到 RPC 存根，页面里
+      // 打在请求客户端上的门禁不会经过。在宿主服务实际接入时留下标记供诊断。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(if\(([$A-Z_a-z][$\w]*)==null\)throw Error\(`Desktop host did not provide its AppServerManager service`\);)/g,
+        (_match, check) => `${check}globalThis.__codeyAppServerManagerHosted=true;`,
+        "hosted app server manager marker",
+      );
+    }
+    if (
       !source.includes("codeyReconcileCompletedConversation")
       && source.includes("getHasInProgressLocalConversation(")
       && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
@@ -626,7 +639,7 @@
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
         (
-          /\/(?:(?:app-initial|app-primary|app-shared|codex-composer-adapter|initialize-app-host-services)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
+          /\/(?:(?:app-initial|app-primary|app-shared|codex-composer-adapter|initialize-app-host-services|renderer-app-server-managers)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
             url.pathname,
           ) ||
           (

@@ -2255,9 +2255,96 @@
   };
   window.__codeyAppServerManagerRegistryResolverFromModule = appServerManagerRegistryResolverFromModule;
 
+  // Codex 26.1027 起 AppServerManager 运行在桌面宿主进程，页面只在宿主连接
+  // 信号里持有它的 RPC 存根：{status:"ready", client:{hostId, rpc}}。存根的任意
+  // 属性都可调用，只能按原型上的 dup/onRpcBroken 识别。
+  const isAppServerRpcStub = (value) => (
+    typeof value === "function"
+    && Boolean(declaredMethod(value, "dup"))
+    && Boolean(declaredMethod(value, "onRpcBroken"))
+  );
+  const hostedAppServerConnection = (state, hostId) => (
+    state?.status === "ready"
+    && state.client?.hostId === hostId
+    && isAppServerRpcStub(state.client.rpc)
+  );
+
+  // RPC 结果用完即释放，与 Codex 自己调用宿主接口的方式一致。
+  const callHostedAppServer = async (call) => {
+    const pending = call();
+    try {
+      return await pending;
+    } finally {
+      try { pending?.[Symbol.dispose]?.(); } catch {}
+    }
+  };
+
+  // 与资源补丁里的 codeyReconcileCompletedConversation 同一判定：原生 app-server
+  // 两次确认已结束、其间没有新提交，才退订并按重连恢复的方式重新载入。宿主不暴露
+  // 流修订号，改为比对进行中的轮次；尚未确认的提交没有轮次 ID，不会被当作卡住。
+  const reconcileHostedConversation = async (rpc, params) => {
+    const conversationId = params?.conversationId;
+    if (conversationId == null) return false;
+    const runningTurnId = async () => {
+      const [state, role] = await Promise.all([
+        callHostedAppServer(() => rpc().getThreadExecutionState(conversationId)),
+        callHostedAppServer(() => rpc().getStreamRole(conversationId)),
+      ]);
+      return state?.inProgress === true && state.activeTurnId != null && role?.role !== "follower"
+        ? state.activeTurnId : null;
+    };
+    const readStatus = async () => {
+      const response = await callHostedAppServer(() => rpc().sendRequest("thread/read", {
+        threadId: conversationId,
+        includeTurns: false,
+      }));
+      const status = response?.thread?.status;
+      return typeof status === "string" ? status : status?.type;
+    };
+    const turnId = await runningTurnId();
+    if (turnId == null) return false;
+    const status = await readStatus();
+    if (status !== "idle" && status !== "systemError" && status !== "error") return false;
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    if (await readStatus() !== status || await runningTurnId() !== turnId) return false;
+    const cwd = await callHostedAppServer(() => rpc().getConversationCwd(conversationId));
+    // 宿主只在本窗口持有该会话的历史流时退订，退订后标记 needs_resume 并释放流。
+    await callHostedAppServer(() => rpc().unsubscribeInactiveConversation(conversationId));
+    if (await runningTurnId() === turnId) return false;
+    await callHostedAppServer(() => rpc().resumeConversation({
+      ...params,
+      workspaceRoots: params.workspaceRoots?.length ? params.workspaceRoots : cwd ? [cwd] : ["/"],
+    }));
+    const state = await callHostedAppServer(() => rpc().getThreadExecutionState(conversationId));
+    return state != null && state.inProgress !== true;
+  };
+
+  // 每次调用都重新读取连接信号：宿主重连会换存根，不能继续用已断开的旧连接。
+  const hostedAppServerManagers = new WeakMap();
+  const hostedAppServerManager = (scope, family, hostId) => {
+    const cached = hostedAppServerManagers.get(family);
+    if (cached) return cached;
+    const rpc = () => {
+      const state = scope.get(family, hostId);
+      if (!hostedAppServerConnection(state, hostId)) throw new Error("Codex 宿主会话接口未连接");
+      return state.client.rpc;
+    };
+    const manager = {
+      codeyHostedAppServerManager: true,
+      sendRequest: (method, params) => callHostedAppServer(() => (
+        params === undefined ? rpc().sendRequest(method) : rpc().sendRequest(method, params)
+      )),
+      refreshRecentConversations: () => callHostedAppServer(() => rpc().refreshRecentConversations()),
+      codeyReconcileCompletedConversation: (params) => reconcileHostedConversation(rpc, params),
+    };
+    hostedAppServerManagers.set(family, manager);
+    return manager;
+  };
+
   const cachedAppServerManagerFromScope = (scope, hostId) => {
     if (hostId !== "local") return null;
     const managers = new Set();
+    const connections = new Set();
     const seenFamilies = new Set();
     const nodes = new Set([scope.node, ...scope.chain?.values?.() || []]);
     for (const node of nodes) {
@@ -2269,6 +2356,10 @@
         seenFamilies.add(family);
         try {
           const manager = scope.get(family, hostId);
+          if (hostedAppServerConnection(manager, hostId)) {
+            connections.add(family);
+            continue;
+          }
           const client = manager && Object.getOwnPropertyDescriptor(manager, "requestClient")?.value;
           if (client?.hostId !== hostId || !declaredMethod(manager, "sendRequest")
             || !["enqueueRequest", "createRequest", "onResult"].every((method) => declaredMethod(client, method))) continue;
@@ -2278,7 +2369,10 @@
         }
       }
     }
-    return managers.size === 1 ? managers.values().next().value : null;
+    if (managers.size) return managers.size === 1 ? managers.values().next().value : null;
+    return connections.size === 1
+      ? hostedAppServerManager(scope, connections.values().next().value, hostId)
+      : null;
   };
 
   const appServerManagerRegistryResolverFromSource = (source, module) => {
@@ -2473,11 +2567,21 @@
     if (sessionControllerLooksUsable(window.__codeyCodexSessionController, feature)) {
       return window.__codeyCodexSessionController;
     }
+    const hostedUnsupported = () => new Error("Codex 的会话管理运行在桌面宿主进程，页面无法接管该接口");
+    // 宿主进程里的管理器只开放 RPC 方法；请求客户端与本地会话状态都不在页面里，
+    // 资源模块中也没有别的实例，已确认后不再重扫 React 或逐个导入资源。
+    if (window.__codeyCodexSessionController?.manager?.codeyHostedAppServerManager === true) {
+      throw hostedUnsupported();
+    }
     const cachedManager = appServerManagerFromReact(cachedAppServerManagerFromScope);
     const cachedController = cachedManager && managerSessionController(cachedManager);
     if (sessionControllerLooksUsable(cachedController, feature)) {
       window.__codeyCodexSessionController = cachedController;
       return cachedController;
+    }
+    if (cachedManager?.codeyHostedAppServerManager === true) {
+      window.__codeyCodexSessionController = cachedController;
+      throw hostedUnsupported();
     }
     let fallbackDispatcher = typeof window.__codeyCodexSignalDispatcher === "function"
       ? window.__codeyCodexSignalDispatcher

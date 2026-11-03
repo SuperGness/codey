@@ -1141,6 +1141,8 @@ struct RequestGateVerdict {
     #[serde(default)]
     module_gate: bool,
     #[serde(default)]
+    host_managed: bool,
+    #[serde(default)]
     patch_present: bool,
 }
 
@@ -1174,6 +1176,7 @@ const REQUEST_GATE_VERIFY_SCRIPT_TEMPLATE: &str = r#"(async () => {
     polls,
     sourceGate: window.__codeyModelRequestSourceGateInstalled === true,
     moduleGate: window.__codeyModelRequestModuleGateInstalled === true,
+    hostManaged: window.__codeyAppServerManagerHosted === true,
   });
   for (;;) {
     if (!patchPresent()) {
@@ -1322,6 +1325,8 @@ fn record_request_gate_verdict(
     // sourceGate/moduleGate 区分源码补丁、模块级 DI 直取与 React 遍历三条
     // 就绪路径；patchSession 记录补丁服务是否赶在首个文档前挂上该页面，
     // attachedBeforeLoad 为 false 时主 bundle 没有补丁，属于预期内的降级。
+    // hostManaged 表示请求由桌面宿主进程发出，页面里的源码门禁不在请求路径上，
+    // 线路只由 CLI 输入中继固定，sourceGate 不代表请求已被页面校验。
     let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
         event,
         serde_json::json!({
@@ -1332,6 +1337,7 @@ fn record_request_gate_verdict(
             "settleMs": settle_ms,
             "sourceGate": verdict.source_gate,
             "moduleGate": verdict.module_gate,
+            "hostManaged": verdict.host_managed,
             "patchSession": crate::renderer_asset_patch::page_stats(target_id),
         }),
     );
