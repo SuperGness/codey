@@ -997,6 +997,7 @@ async fn prepare_codex_startup_state(
         crate::codex_config::runtime_required_catalog_models(config, home, use_official_catalog);
     let remote_compaction_models = config.runtime_remote_compaction_model_aliases();
     let fast_context_tools = config.fast_context_tools;
+    let scope_guard = config.scope_guard;
     let mut runtime_subagent_config = config.clone();
     runtime_subagent_config.active_profile_id = current_profile.id.clone();
     subagent_policy::reconcile_with_model_state(&mut runtime_subagent_config, Some(&model_state));
@@ -1024,6 +1025,7 @@ async fn prepare_codex_startup_state(
                 subagent_model: &subagent_model,
                 subagent_reasoning_effort: &subagent_reasoning_effort,
                 subagent_roles: Some(&subagent_roles),
+                scope_guard,
                 stream_max_retries,
             },
         )
@@ -1940,6 +1942,7 @@ async fn prepare_native_runtime_state(
     let runtime_config_home = home.to_path_buf();
     let fast_context_tools = config.fast_context_tools;
     let subagent_optimization = config.subagent_optimization;
+    let scope_guard = config.scope_guard;
     let stream_max_retries = config.stream_max_retries;
     let native_subagent_config = config.clone();
     let applied = tokio::task::spawn_blocking(move || {
@@ -1961,6 +1964,7 @@ async fn prepare_native_runtime_state(
                 subagent_model: &native_subagent_config.subagent_model,
                 subagent_reasoning_effort: &native_subagent_config.subagent_reasoning_effort,
                 subagent_roles: Some(&native_subagent_config.subagent_roles),
+                scope_guard,
                 stream_max_retries,
             },
         )

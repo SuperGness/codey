@@ -245,6 +245,7 @@ if (import.meta.env.DEV) {
       codexLaunchProxy: "",
       fastContextTools: false,
       subagentOptimization: false,
+      scopeGuard: false,
       subagentModel: "gpt-5.6-terra",
       subagentReasoningEffort: "medium",
       subagentRoles: {

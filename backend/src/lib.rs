@@ -43,6 +43,7 @@ mod prompt_optimization;
 mod provider_models;
 mod renderer_asset_patch;
 mod route_request_log;
+mod scope_guard;
 mod session_index_cleanup;
 mod session_metadata;
 mod session_model;
@@ -226,6 +227,10 @@ pub fn run_subagent_gate_hook_if_requested() -> Result<bool> {
 
 pub fn run_fastctx_route_hook_if_requested() -> Result<bool> {
     fastctx_route_gate::run_hook_if_requested()
+}
+
+pub fn run_scope_guard_hook_if_requested() -> Result<bool> {
+    scope_guard::run_hook_if_requested()
 }
 
 pub fn run_desktop_application() -> Result<()> {

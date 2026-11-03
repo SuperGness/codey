@@ -65,6 +65,7 @@ test("settings controls and popups share the modal busy and portal boundaries", 
   assert.match(featurePolicySource, /className="gpu-mode-fieldset"\s*disabled=\{isBusy\}/);
   for (const setting of [
     "slimCodexPet",
+    "scopeGuard",
     "disableTraceLogWrites",
     "protectCrashpadPending",
     "hideFullAccessWarning",

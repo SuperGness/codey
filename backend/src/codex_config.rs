@@ -227,6 +227,7 @@ pub(crate) struct RuntimeRouterConfigOptions<'a> {
     pub subagent_model: &'a str,
     pub subagent_reasoning_effort: &'a str,
     pub subagent_roles: Option<&'a BTreeMap<String, SubagentRoleConfig>>,
+    pub scope_guard: bool,
     pub stream_max_retries: u32,
 }
 
@@ -258,6 +259,7 @@ struct RouterApplyOptions<'a> {
     subagent_model: &'a str,
     subagent_reasoning_effort: &'a str,
     subagent_roles: Option<&'a BTreeMap<String, SubagentRoleConfig>>,
+    scope_guard: bool,
     marker: &'a Path,
     backup_root: &'a Path,
 }
@@ -320,6 +322,7 @@ pub(crate) fn apply_runtime_router_config(
             subagent_model: options.subagent_model,
             subagent_reasoning_effort: options.subagent_reasoning_effort,
             subagent_roles: options.subagent_roles,
+            scope_guard: options.scope_guard,
             marker: &marker,
             backup_root: &backup_root,
         },
@@ -404,6 +407,7 @@ fn apply_isolated_runtime_router_config(
         subagent_model,
         subagent_reasoning_effort,
         subagent_roles,
+        scope_guard,
         marker,
         backup_root,
     } = options;
@@ -453,6 +457,7 @@ fn apply_isolated_runtime_router_config(
             subagent_optimization,
             subagent_model,
             subagent_reasoning_effort,
+            scope_guard,
             local_router,
         },
     )?;
@@ -530,7 +535,7 @@ fn apply_isolated_runtime_router_config(
         collaboration_hint.as_deref(),
     )?;
 
-    let runtime_hooks_enabled = subagent_optimization || fastctx_namespace.is_some();
+    let runtime_hooks_enabled = subagent_optimization || fastctx_namespace.is_some() || scope_guard;
     let original_hooks = if runtime_hooks_enabled {
         read_optional(&hooks_path)?
     } else {
@@ -547,6 +552,9 @@ fn apply_isolated_runtime_router_config(
     let fastctx_hook_commands = (fastctx_namespace.is_some() && !subagent_optimization)
         .then(|| crate::subagent_gate::hook_commands_for(crate::fastctx_route_gate::HOOK_ARGUMENT))
         .transpose()?;
+    let scope_guard_hook_commands = scope_guard
+        .then(|| crate::subagent_gate::hook_commands_for(crate::scope_guard::HOOK_ARGUMENT))
+        .transpose()?;
     let (updated_hooks, hook_trust_entries) = if runtime_hooks_enabled {
         let RuntimeHooksFile {
             contents,
@@ -557,6 +565,7 @@ fn apply_isolated_runtime_router_config(
             subagent_hook_commands.as_ref(),
             fastctx_hook_commands.as_ref(),
             combined_hook_commands.as_ref(),
+            scope_guard_hook_commands.as_ref(),
         )?;
         (Some(contents), trust_entries)
     } else {
@@ -586,6 +595,7 @@ fn apply_isolated_runtime_router_config(
         fastctx_namespace,
         local_router.map(|_| local_router::ROUTER_PROVIDER_ID),
         &hook_trust_entries,
+        scope_guard,
         stream_max_retries,
     )?;
 
@@ -718,6 +728,7 @@ fn apply_isolated_test_runtime_config(
             subagent_model,
             subagent_reasoning_effort,
             subagent_roles,
+            scope_guard: false,
             marker,
             backup_root,
         },
@@ -2166,6 +2177,7 @@ fn patch_config_with_fastctx(
             subagent_optimization,
             subagent_model: DEFAULT_SUBAGENT_MODEL,
             subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+            scope_guard: false,
             local_router: Some(test_runtime_router_endpoint()),
         },
     )
@@ -2191,6 +2203,7 @@ struct RouterPatchOptions<'a> {
     subagent_optimization: bool,
     subagent_model: &'a str,
     subagent_reasoning_effort: &'a str,
+    scope_guard: bool,
     local_router: Option<&'a RuntimeRouterEndpoint>,
 }
 
@@ -2206,6 +2219,7 @@ fn patch_config_with_fastctx_mode(
         subagent_optimization,
         subagent_model,
         subagent_reasoning_effort,
+        scope_guard,
         local_router,
     } = options;
     let mut doc = parse_document(existing)?;
@@ -2236,7 +2250,7 @@ fn patch_config_with_fastctx_mode(
             fastctx_namespace.as_deref(),
         )?;
     }
-    if fastctx_namespace.is_some() {
+    if fastctx_namespace.is_some() || scope_guard {
         // Hook definitions live in the runtime hooks.json built by
         // `build_runtime_hooks_file`; the TOML document only carries the
         // feature flag that `build_isolated_runtime_overrides` forwards.
@@ -2393,12 +2407,28 @@ const FASTCTX_ROUTE_HOOKS: [CodeyHookSpec; 1] = [CodeyHookSpec {
     timeout_seconds: crate::fastctx_route_gate::HOOK_TIMEOUT_SECONDS,
 }];
 
+const SCOPE_GUARD_HOOKS: [CodeyHookSpec; 2] = [
+    CodeyHookSpec {
+        toml_event: "SessionStart",
+        event_key: "session_start",
+        matcher: Some(crate::scope_guard::SESSION_START_MATCHER),
+        timeout_seconds: crate::scope_guard::HOOK_TIMEOUT_SECONDS,
+    },
+    CodeyHookSpec {
+        toml_event: "SubagentStart",
+        event_key: "subagent_start",
+        matcher: None,
+        timeout_seconds: crate::scope_guard::HOOK_TIMEOUT_SECONDS,
+    },
+];
+
 fn build_runtime_hooks_file(
     existing: Option<&[u8]>,
     hooks_path: &Path,
     subagent_commands: Option<&crate::subagent_gate::HookCommands>,
     fastctx_commands: Option<&crate::subagent_gate::HookCommands>,
     combined_commands: Option<&crate::subagent_gate::HookCommands>,
+    scope_guard_commands: Option<&crate::subagent_gate::HookCommands>,
 ) -> Result<RuntimeHooksFile> {
     let mut root = match existing {
         Some(existing) => serde_json::from_slice::<serde_json::Value>(existing)
@@ -2424,7 +2454,7 @@ fn build_runtime_hooks_file(
         }
     }
 
-    let mut hook_plans = Vec::with_capacity(3);
+    let mut hook_plans = Vec::with_capacity(4);
     if let Some(subagent_commands) = subagent_commands {
         if let Some(combined_commands) = combined_commands {
             hook_plans.push((&SUBAGENT_GATE_HOOKS[..1], combined_commands));
@@ -2435,6 +2465,9 @@ fn build_runtime_hooks_file(
     }
     if let Some(fastctx_commands) = fastctx_commands {
         hook_plans.push((&FASTCTX_ROUTE_HOOKS[..], fastctx_commands));
+    }
+    if let Some(scope_guard_commands) = scope_guard_commands {
+        hook_plans.push((&SCOPE_GUARD_HOOKS[..], scope_guard_commands));
     }
     let mut trust_entries =
         Vec::with_capacity(hook_plans.iter().map(|(specs, _)| specs.len()).sum());
@@ -2517,6 +2550,7 @@ fn build_isolated_runtime_overrides(
     fastctx_namespace: Option<&str>,
     provider_id: Option<&str>,
     hook_trust_entries: &[RuntimeHookTrustEntry],
+    scope_guard: bool,
     stream_max_retries: u32,
 ) -> Result<Vec<String>> {
     let mut overrides = Vec::new();
@@ -2802,7 +2836,7 @@ fn build_isolated_runtime_overrides(
             usize::from(fastctx_namespace.is_some())
         } else {
             SUBAGENT_GATE_HOOKS.len()
-        };
+        } + usize::from(scope_guard) * SCOPE_GUARD_HOOKS.len();
         anyhow::ensure!(
             hook_trust_entries.len() == expected_hook_count,
             "Codey Hook 信任项不完整"
@@ -2974,6 +3008,7 @@ fn enable_hooks_feature(doc: &mut DocumentMut) -> Result<()> {
 fn hook_command_is_codey_owned(command: &str) -> bool {
     command.contains(crate::subagent_gate::HOOK_ARGUMENT)
         || command.contains(crate::fastctx_route_gate::HOOK_ARGUMENT)
+        || command.contains(crate::scope_guard::HOOK_ARGUMENT)
 }
 
 /// Releases before the runtime `hooks.json` carried their hook definitions in

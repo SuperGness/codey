@@ -727,6 +727,10 @@ pub struct CodeyConfig {
     /// the next runtime. Disabled by default and restored on shutdown.
     #[serde(default)]
     pub subagent_optimization: bool,
+    /// Injects Codey's proportionality rule into new and compacted Codex
+    /// sessions and spawned subagents through runtime hooks. Opt-in.
+    #[serde(default)]
+    pub scope_guard: bool,
     /// Default model used by newly spawned subagents while Codey's
     /// multi-agent optimization is enabled.
     #[serde(default = "default_subagent_model")]
@@ -867,6 +871,7 @@ impl Default for CodeyConfig {
             codex_launch_proxy: String::new(),
             fast_context_tools: false,
             subagent_optimization: false,
+            scope_guard: false,
             subagent_model: default_subagent_model(),
             subagent_reasoning_effort: default_subagent_reasoning_effort(),
             subagent_roles: default_subagent_roles(),

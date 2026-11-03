@@ -710,6 +710,29 @@ function FeaturePolicyCardComponent({
             </div>
 
             <div
+              className={`feature-card ${config.scopeGuard ? "active" : ""}`}
+            >
+              <div className="feature-card-header">
+                <strong>范围约束</strong>
+                <Switch
+                  checked={config.scopeGuard}
+                  disabled={isBusy}
+                  onCheckedChange={(checked) =>
+                    onConfigChange({ ...config, scopeGuard: checked })
+                  }
+                  aria-label="范围约束"
+                />
+              </div>
+              <div className="feature-card-body">
+                <small>
+                  {config.scopeGuard
+                    ? "新会话和压缩后向代理注入防护尺度规则，减少不必要的兼容层、兜底和重复检查"
+                    : "不注入额外规则，保持 Codex 默认行为"}
+                </small>
+              </div>
+            </div>
+
+            <div
               className={`feature-card ${config.disableTraceLogWrites ? "active" : ""}`}
             >
               <div className="feature-card-header">

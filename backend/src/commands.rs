@@ -1958,6 +1958,7 @@ async fn save_codey_config_locked(
     config.disable_trace_log_writes = config_input.disable_trace_log_writes;
     config.protect_crashpad_pending = config_input.protect_crashpad_pending;
     config.slim_codex_pet = config_input.slim_codex_pet;
+    config.scope_guard = config_input.scope_guard;
     config.gpu_launch_mode = config_input.gpu_launch_mode;
     let codex_launch_proxy = config_input.codex_launch_proxy.trim();
     if !codex_launch_proxy.is_empty() {
@@ -3135,6 +3136,7 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.codex_launch_proxy != current.codex_launch_proxy
         || applied.fast_context_tools != current.fast_context_tools
         || applied.subagent_optimization != current.subagent_optimization
+        || applied.scope_guard != current.scope_guard
         || !applied
             .misc_model
             .trim()
