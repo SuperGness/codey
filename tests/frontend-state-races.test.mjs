@@ -213,7 +213,7 @@ test("account panel keeps mutation results when its earlier refresh resolves or 
 });
 
 async function accountPanelHarness(context, ids = ["old"]) {
-  const calls = [], loaded = [], changed = [], remembered = [], notices = [];
+  const calls = [], loaded = [], changed = [], remembered = [], notices = [], downloads = [];
   const h = componentHarness("OfficialAccountsPanel", {
     officialAccountAvailable: true, isBusy: false, active: false, popupContainer: null,
     onAccountsLoaded: accounts => loaded.push(accounts), onAccountsChanged: result => changed.push(result),
@@ -224,6 +224,9 @@ async function accountPanelHarness(context, ids = ["old"]) {
       rememberOfficialAccounts: result => remembered.push(result),
     },
     "./api": { invoke: (command, args) => { const call = { command, args, ...deferred() }; calls.push(call); return call.promise; } },
+    "./features/codex-extensions/download": {
+      downloadResource: (...args) => downloads.push(args),
+    },
   });
   context.after(() => h.dispose());
   await flush(); h.render();
@@ -236,7 +239,7 @@ async function accountPanelHarness(context, ids = ["old"]) {
     assert.equal(calls.at(-1).command, "refresh_official_account_routes");
     return calls.at(-1);
   };
-  return { h, calls, loaded, changed, remembered, notices, invalidateUsage };
+  return { h, calls, loaded, changed, remembered, notices, downloads, invalidateUsage };
 }
 
 for (const completion of ["resolve", "reject"]) {
@@ -335,6 +338,71 @@ for (const kind of ["login", "siwc"]) {
     assert.equal(h.find((props, node) => elementType(node) === h.ui.Dialog && props.open).length, 0);
   });
 }
+
+test("account export downloads the server-named file without account mutations", async context => {
+  const { h, calls, downloads, notices } = await accountPanelHarness(context);
+  const exportButton = h.find(props => props["aria-label"] === "导出官方账号 old@example.test")[0];
+  assert.ok(exportButton);
+  let stopped = 0;
+  elementProps(exportButton).onClick({ stopPropagation: () => { stopped += 1; } });
+  assert.equal(stopped, 1);
+  assert.equal(calls.at(-1).command, "export_official_account_credential");
+  assert.deepEqual(calls.at(-1).args, { accountId: "old" });
+  calls.at(-1).resolve({
+    status: "ok",
+    fileName: "served-account.json",
+    content: "{\"refresh_token\":\"secret\"}",
+  });
+  await flush(); h.render();
+  assert.deepEqual(downloads, [[
+    "served-account.json",
+    "{\"refresh_token\":\"secret\"}",
+    "application/json;charset=utf-8",
+  ]]);
+  assert.deepEqual(notices, [{ tone: "success", text: "账号文件已导出，请妥善保管，不要分享给他人" }]);
+  assert.equal(calls.some(call => call.command === "set_default_official_account"
+    || call.command === "remove_official_account"), false);
+});
+
+test("account export reports failures and leaves the account idle", async context => {
+  const { h, calls, downloads, notices } = await accountPanelHarness(context);
+  const exportButton = h.find(props => props["aria-label"] === "导出官方账号 old@example.test")[0];
+  elementProps(exportButton).onClick({ stopPropagation() {} });
+  calls.at(-1).reject(new Error("export denied"));
+  await flush(); h.render();
+  assert.equal(downloads.length, 0);
+  assert.deepEqual(notices, [{ tone: "error", text: "export denied" }]);
+  const rerendered = h.find(props => props["aria-label"] === "导出官方账号 old@example.test")[0];
+  assert.equal(elementProps(rerendered).loading, false);
+});
+
+test("manual account file content uses the existing import path and stale reads are ignored", async context => {
+  const { h, calls } = await accountPanelHarness(context);
+  h.click("手动输入");
+  const input = () => h.find(props => props["aria-label"] === "选择 Codey 导出的账号文件")[0];
+  const firstText = deferred();
+  elementProps(input()).onChange({
+    target: { value: "chosen", files: [{ name: "first.json", size: 10, text: () => firstText.promise }] },
+  });
+  h.render();
+  h.click("取消");
+  h.click("手动输入");
+  const secondText = deferred();
+  elementProps(input()).onChange({
+    target: { value: "chosen", files: [{ name: "second.json", size: 10, text: () => secondText.promise }] },
+  });
+  secondText.resolve("{\"refresh_token\":\"latest\"}"); await flush(); h.render();
+  firstText.resolve("{\"refresh_token\":\"stale\"}"); await flush(); h.render();
+  const editor = h.find(props => props["aria-label"] === "Refresh Token 或 OAuth JSON")[0];
+  assert.equal(elementProps(editor).value, "{\"refresh_token\":\"latest\"}");
+  assert.match(h.text, /已载入 second\.json/);
+  assert.doesNotMatch(h.text, /已载入 first\.json/);
+  h.click("添加");
+  assert.deepEqual(calls.at(-1).args, { credential: "{\"refresh_token\":\"latest\"}" });
+  calls.at(-1).resolve(accountResult("imported"));
+  await flush(); h.render();
+  assert.match(h.text, /imported@example.test/);
+});
 
 test("plugin route refresh reports failures without changing the completed plugin operation", async () => {
   // 执行 App 中实际注册的刷新回调，依赖边界使用内存替身。

@@ -1250,6 +1250,7 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
             RuntimeSubagentConfig::from_config(&config),
         )),
         subagent_route_catalog_installed: false,
+        subagent_restart_config: RwLock::new(None),
         applied_config: config,
         injection_statuses: Arc::new(RwLock::new(Arc::from([]))),
         injection_scripts: cdp::prepare_injection_scripts(false, false, false, &[]),

@@ -43,6 +43,23 @@ fn official_subagent_config(account_count: usize) -> CodeyConfig {
 }
 
 #[test]
+fn live_route_edits_preserve_subagent_hot_reload_support() {
+    for local_router_enabled in [false, true] {
+        let mut initial = official_subagent_config(2);
+        initial.local_router_enabled = local_router_enabled;
+        let runtime = CodeyRuntime::for_model_delivery_test(initial.clone(), "ws://unused", None);
+        let mut latest = initial.clone();
+        latest.profiles[0].name = "新线路名称".into();
+        latest.profiles[0].base_url = "https://gateway.example/v1".into();
+        assert!(runtime.supports_subagent_config_hot_reload(&latest));
+        latest.active_profile_id = latest.profiles.last().unwrap().id.clone();
+        assert!(runtime.supports_subagent_config_hot_reload(&latest));
+        latest.fast_context_tools = !initial.fast_context_tools;
+        assert!(!runtime.supports_subagent_config_hot_reload(&latest));
+    }
+}
+
+#[test]
 fn official_subagent_models_match_catalog_and_preserve_account_selection() {
     for account_count in [1, 2] {
         let mut config = official_subagent_config(account_count);
@@ -572,6 +589,7 @@ async fn subagent_catalog_fallback_keeps_live_routes_and_roles_until_restart() {
         )),
         applied_config: config.clone(),
         subagent_route_catalog_installed: false,
+        subagent_restart_config: RwLock::new(None),
         injection_statuses: Arc::new(RwLock::new(Arc::from([]))),
         injection_scripts: cdp::prepare_injection_scripts(false, false, false, &[]),
         injection_websocket_url: Arc::new(RwLock::new(Arc::from(""))),

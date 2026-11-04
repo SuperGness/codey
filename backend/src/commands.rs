@@ -102,7 +102,7 @@ use crate::crashpad_pending_guard::{
 use crate::error_log;
 #[cfg(windows)]
 use crate::launcher::{CODEX_APP_NOT_FOUND_ERROR, CODEX_APP_PATH_INVALID_ERROR};
-use crate::launcher::{CodeyRuntime, RuntimeModelConfig, RuntimeSubagentConfig};
+use crate::launcher::{CodeyRuntime, RuntimeSubagentConfig};
 use crate::message_delete::delete_messages_persistently;
 use crate::model_catalog;
 use crate::model_id;
@@ -1261,6 +1261,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         | "cancel_official_account_login"
         | "import_current_codex_login"
         | "import_official_account_credential"
+        | "export_official_account_credential"
         | "set_default_official_account"
         | "remove_official_account"
         | "start_official_account_siwc"
@@ -2612,10 +2613,7 @@ impl SubagentHotReloadOutcome {
     }
 
     pub(super) fn requires_restart(&self) -> bool {
-        matches!(
-            self.status,
-            SubagentHotReloadStatus::Failed | SubagentHotReloadStatus::PendingRestart
-        )
+        self.status == SubagentHotReloadStatus::PendingRestart
     }
 
     pub(super) fn health(&self) -> &'static str {
@@ -2626,7 +2624,7 @@ impl SubagentHotReloadOutcome {
             SubagentHotReloadStatus::Repaired => "repaired",
             SubagentHotReloadStatus::PendingRestart => "pending_restart",
             SubagentHotReloadStatus::Superseded => "superseded",
-            SubagentHotReloadStatus::Failed => "restart_required",
+            SubagentHotReloadStatus::Failed => "failed",
         }
     }
 
@@ -2749,10 +2747,10 @@ async fn hot_reload_runtime_subagent_config_locked(
                     "子代理热更新期间配置或运行时已变化；等待最新配置应用",
                 );
             }
+            runtime.mark_subagent_config_applied(&current_config).await;
             if !report.repaired && !applied_config_changed {
                 return SubagentHotReloadOutcome::unchanged();
             }
-            runtime.mark_subagent_config_applied(&current_config).await;
             SubagentHotReloadOutcome::applied(
                 report.repaired,
                 report
@@ -2764,6 +2762,9 @@ async fn hot_reload_runtime_subagent_config_locked(
         }
         Err(error) => {
             if error.is::<crate::codex_config::SubagentRoleRegistrationChanged>() {
+                runtime
+                    .mark_subagent_config_requires_restart(&current_config)
+                    .await;
                 return SubagentHotReloadOutcome::pending_restart(error.to_string());
             }
             let error = format!("{error:#}");
@@ -3105,26 +3106,18 @@ fn official_account_available_for_usage(config: &CodeyConfig) -> bool {
 }
 
 #[cfg(test)]
-fn config_requires_restart(
-    applied: &CodeyConfig,
-    applied_models: &RuntimeModelConfig,
-    applied_subagent: &RuntimeSubagentConfig,
-    current: &CodeyConfig,
-) -> bool {
+fn config_requires_restart(applied: &CodeyConfig, current: &CodeyConfig) -> bool {
     config_requires_restart_with_route_status(
         provider_route_requires_restart(applied, current),
         applied,
-        applied_models,
-        applied_subagent,
         current,
     )
 }
 
+/// 仅比较当前进程无法热更新的配置；尚未送达的目录和角色配置由应用结果处理。
 pub(super) fn config_requires_restart_with_route_status(
     provider_route_restart_required: bool,
     applied: &CodeyConfig,
-    applied_models: &RuntimeModelConfig,
-    applied_subagent: &RuntimeSubagentConfig,
     current: &CodeyConfig,
 ) -> bool {
     provider_route_restart_required
@@ -3141,9 +3134,6 @@ pub(super) fn config_requires_restart_with_route_status(
             .misc_model
             .trim()
             .eq_ignore_ascii_case(current.misc_model.trim())
-        || !applied_models.matches(current)
-        || ((applied.subagent_optimization || current.subagent_optimization)
-            && !applied_subagent.matches(current))
 }
 
 pub(super) fn provider_route_restart_required_for_runtime(
@@ -3157,22 +3147,27 @@ pub(super) fn provider_route_restart_required_for_runtime(
         || native_web_search_capability_requires_restart(applied, current)
 }
 
+fn runtime_requires_restart(
+    runtime: &CodeyRuntime,
+    pending_subagent: Option<&RuntimeSubagentConfig>,
+    current: &CodeyConfig,
+) -> bool {
+    config_requires_restart_with_route_status(
+        provider_route_restart_required_for_runtime(&runtime.applied_config, current)
+            || runtime.subagent_routes_require_restart(current),
+        &runtime.applied_config,
+        current,
+    ) || (current.subagent_optimization
+        && pending_subagent.is_some_and(|pending| pending.matches(current)))
+}
+
 async fn runtime_config_requires_restart(state: &Arc<AppState>, current: &CodeyConfig) -> bool {
     let runtime = state.runtime.lock().await.clone();
     let Some(runtime) = runtime else {
         return false;
     };
-    let applied_models = runtime.applied_model_config().await;
-    let applied_subagent = runtime.applied_subagent_config().await;
-    let provider_route_restart_required =
-        provider_route_restart_required_for_runtime(&runtime.applied_config, current);
-    config_requires_restart_with_route_status(
-        provider_route_restart_required,
-        &runtime.applied_config,
-        &applied_models,
-        &applied_subagent,
-        current,
-    )
+    let pending_subagent = runtime.subagent_restart_config().await;
+    runtime_requires_restart(&runtime, pending_subagent.as_ref(), current)
 }
 
 #[cfg(test)]

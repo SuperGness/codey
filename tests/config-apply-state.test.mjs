@@ -20,6 +20,39 @@ test("late save and polling responses cannot replace newer or completed applicat
   assert.equal(status.restartRequired, false);
 });
 
+test("pending application does not report restart until its outcome is known", () => {
+  const pending = { revision: 2, state: "pending" };
+  const status = reconcileRuntimeStatus(
+    { running: true, restartRequired: false },
+    { running: true, configApply: pending, restartRequired: true },
+  );
+  assert.equal(status.configApply, pending);
+  assert.equal(status.restartRequired, false);
+
+  const terminal = reconcileRuntimeStatus(status, {
+    running: true,
+    configApply: { revision: 2, state: "restart_required" },
+    restartRequired: true,
+  });
+  assert.equal(terminal.restartRequired, true);
+  const cleared = reconcileRuntimeStatus(terminal, {
+    running: true,
+    configApply: terminal.configApply,
+    restartRequired: false,
+  });
+  assert.equal(cleared.restartRequired, false, "a fresh runtime snapshot can clear an earlier restart requirement");
+  const confirmed = reconcileRuntimeStatus(terminal, {
+    running: true,
+    configApply: { revision: 3, state: "applied" },
+    restartRequired: true,
+  });
+  assert.equal(
+    confirmed.restartRequired,
+    true,
+    "a newer terminal response must keep its own restart confirmation",
+  );
+});
+
 test("successful restart accepts a newer confirmation and rejects the old terminal result", () => {
   for (const state of ["failed", "restart_required", "saved"]) {
     const previous = { revision: 7, state };

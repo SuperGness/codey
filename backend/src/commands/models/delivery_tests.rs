@@ -61,6 +61,50 @@ async fn background_apply_coalesces_queued_saves_and_ignores_old_results() {
     })
     .await
     .unwrap();
+    let latest = state.config.read().await.clone();
+    assert!(!runtime_config_requires_restart(&state, &latest).await);
+    assert_eq!(
+        crate::commands::runtime_status(&state).await.unwrap()["restartRequired"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn background_model_delivery_only_waits_for_application_not_restart() {
+    use crate::commands::config_apply;
+    for delivered in ["active", "deferred"] {
+        let mut renderer = Renderer::start().await;
+        let initial = config_with_models(&["old"]);
+        let latest = config_with_models(&["new"]);
+        let state = state_with_runtime(&initial, &renderer).await;
+        let lifecycle = state.runtime_operation.lock().await;
+        {
+            let _commit = state.config_write_lock.lock().await;
+            *state.config.write().await = latest.clone();
+            config_apply::enqueue(&state, false);
+        }
+        assert!(!runtime_config_requires_restart(&state, &latest).await);
+        assert_eq!(
+            crate::commands::runtime_status(&state).await.unwrap()["restartRequired"],
+            false
+        );
+        drop(lifecycle);
+        let attempt = renderer.next().await;
+        assert_models(&attempt.catalog, &["new"]);
+        attempt
+            .reply
+            .send(json!({"ok": true, "delivered": delivered}))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while config_apply::status(&state)["state"] == "pending" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(config_apply::status(&state)["state"], "applied");
+        assert!(!runtime_config_requires_restart(&state, &latest).await);
+    }
 }
 
 #[tokio::test]
@@ -87,6 +131,10 @@ async fn background_apply_skips_renderer_for_unchanged_catalog() {
     .await
     .unwrap();
     assert!(renderer.attempts.try_recv().is_err());
+    assert_eq!(
+        crate::commands::runtime_status(&state).await.unwrap()["restartRequired"],
+        true
+    );
 }
 
 struct Renderer {

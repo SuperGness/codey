@@ -54,10 +54,10 @@ fn enabled_saves_reconcile_runtime_files_even_when_roles_are_unchanged() {
 }
 
 #[test]
-fn failed_reconciliation_forces_a_restart_but_superseded_work_does_not() {
+fn failed_and_superseded_reconciliation_do_not_imply_restart() {
     let failed = SubagentHotReloadOutcome::failed("lease unavailable");
-    assert!(failed.requires_restart());
-    assert_eq!(failed.health(), "restart_required");
+    assert!(!failed.requires_restart());
+    assert_eq!(failed.health(), "failed");
 
     let superseded = SubagentHotReloadOutcome::superseded("newer save won");
     assert!(!superseded.requires_restart());

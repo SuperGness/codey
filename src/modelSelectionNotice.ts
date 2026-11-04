@@ -57,7 +57,7 @@ function savedModelNotice(result: ModelRuntimeUpdate, summary: string): Notice {
   if (result.modelHotReloadError) {
     return {
       tone: "info",
-      text: `${summary}；模型刷新失败，需重启 Codex 后生效`,
+      text: `${summary}；模型刷新失败，请重试同步${result.restartRequired ? "；部分设置需重启 Codex 后生效" : ""}`,
     };
   }
 

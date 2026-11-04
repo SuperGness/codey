@@ -801,8 +801,6 @@ fn model_hot_reload_keeps_startup_capabilities_pending_without_blocking_other_ro
             config_requires_restart_with_route_status(
                 provider_route_restart_required_for_runtime(&applied, &current),
                 &applied,
-                &RuntimeModelConfig::from_config(&current),
-                &RuntimeSubagentConfig::from_config(&current),
                 &current,
             ),
             websockets || web_search,
@@ -823,104 +821,48 @@ fn model_hot_reload_keeps_startup_capabilities_pending_without_blocking_other_ro
 #[test]
 fn restart_sensitive_config_changes_are_detected() {
     let applied = CodeyConfig::default();
-    let applied_models = RuntimeModelConfig::from_config(&applied);
-    let applied_subagent = RuntimeSubagentConfig::from_config(&applied);
 
     let mut local_router_change = applied.clone();
     local_router_change.local_router_enabled = false;
-    assert!(config_requires_restart(
-        &applied,
-        &applied_models,
-        &applied_subagent,
-        &local_router_change
-    ));
+    assert!(config_requires_restart(&applied, &local_router_change));
 
     let mut model_change = applied.clone();
     let provider_id = model_change.current_provider_id().unwrap().to_string();
     model_change
         .selected_models_by_provider
         .insert(provider_id, vec!["third-party-model".into()]);
-    assert!(config_requires_restart(
-        &applied,
-        &applied_models,
-        &applied_subagent,
-        &model_change
-    ));
-    assert!(!config_requires_restart(
-        &applied,
-        &RuntimeModelConfig::from_config(&model_change),
-        &applied_subagent,
-        &model_change
-    ));
+    assert!(!config_requires_restart(&applied, &model_change));
 
     let mut default_model_change = applied.clone();
     default_model_change.default_model = "provider-default".into();
-    assert!(config_requires_restart(
-        &applied,
-        &applied_models,
-        &applied_subagent,
-        &default_model_change
-    ));
-    assert!(!config_requires_restart(
-        &applied,
-        &RuntimeModelConfig::from_config(&default_model_change),
-        &applied_subagent,
-        &default_model_change
-    ));
+    assert!(!config_requires_restart(&applied, &default_model_change));
 
     let mut stream_retry_change = applied.clone();
     stream_retry_change.stream_max_retries += 1;
-    assert!(config_requires_restart(
-        &applied,
-        &applied_models,
-        &applied_subagent,
-        &stream_retry_change
-    ));
+    assert!(config_requires_restart(&applied, &stream_retry_change));
 
     let mut gpu_mode_change = applied.clone();
     gpu_mode_change.gpu_launch_mode = crate::config::GpuLaunchMode::DisableGpuRasterization;
-    assert!(config_requires_restart(
-        &applied,
-        &applied_models,
-        &applied_subagent,
-        &gpu_mode_change
-    ));
+    assert!(config_requires_restart(&applied, &gpu_mode_change));
 
     let mut account_usage_change = applied.clone();
     account_usage_change.show_account_usage_in_header = true;
-    assert!(!config_requires_restart(
-        &applied,
-        &applied_models,
-        &applied_subagent,
-        &account_usage_change
-    ));
+    assert!(!config_requires_restart(&applied, &account_usage_change));
 
     let mut disabled_subagent_change = applied.clone();
     disabled_subagent_change.subagent_model = "gpt-5.6-sol".into();
     assert!(!config_requires_restart(
         &applied,
-        &applied_models,
-        &applied_subagent,
         &disabled_subagent_change
     ));
 
     let mut enabled_subagents = applied.clone();
     enabled_subagents.subagent_optimization = true;
-    let enabled_models = RuntimeModelConfig::from_config(&enabled_subagents);
-    let enabled_subagent = RuntimeSubagentConfig::from_config(&enabled_subagents);
     let mut changed_subagent = enabled_subagents.clone();
     changed_subagent.subagent_model = "gpt-5.6-sol".into();
     changed_subagent.subagent_reasoning_effort = "high".into();
-    assert!(config_requires_restart(
-        &enabled_subagents,
-        &enabled_models,
-        &enabled_subagent,
-        &changed_subagent
-    ));
     assert!(!config_requires_restart(
         &enabled_subagents,
-        &enabled_models,
-        &RuntimeSubagentConfig::from_config(&changed_subagent),
         &changed_subagent
     ));
 
@@ -929,10 +871,8 @@ fn restart_sensitive_config_changes_are_detected() {
         crate::config::SUBAGENT_ROLE_QUICK_SCAN.into(),
         crate::config::SubagentRoleConfig::new("gpt-5.6-sol", "high"),
     );
-    assert!(config_requires_restart(
+    assert!(!config_requires_restart(
         &enabled_subagents,
-        &enabled_models,
-        &enabled_subagent,
         &changed_task_role
     ));
     for enabled in [false, true] {
@@ -943,8 +883,6 @@ fn restart_sensitive_config_changes_are_detected() {
             .enabled = enabled;
         assert!(!config_requires_restart(
             &enabled_subagents,
-            &enabled_models,
-            &RuntimeSubagentConfig::from_config(&changed_task_role),
             &changed_task_role
         ));
     }
@@ -955,14 +893,10 @@ fn restart_sensitive_config_changes_are_detected() {
     second_route.api_key = "route-b-key".into();
     second_route.normalize();
     two_routes.profiles.push(second_route.clone());
-    let two_route_models = RuntimeModelConfig::from_config(&two_routes);
-    let two_route_subagent = RuntimeSubagentConfig::from_config(&two_routes);
     let mut projection_only_change = two_routes.clone();
     projection_only_change.active_profile_id = second_route.id;
     assert!(!config_requires_restart(
         &two_routes,
-        &two_route_models,
-        &two_route_subagent,
         &projection_only_change
     ));
 }
@@ -970,18 +904,11 @@ fn restart_sensitive_config_changes_are_detected() {
 #[test]
 fn request_log_only_config_changes_do_not_require_restart() {
     let applied = CodeyConfig::default();
-    let applied_models = RuntimeModelConfig::from_config(&applied);
-    let applied_subagent = RuntimeSubagentConfig::from_config(&applied);
     let mut current = applied.clone();
     current.route_request_log.enabled = true;
     current.route_request_log.backend = crate::config::RouteRequestLogBackend::Sqlite;
 
-    assert!(!config_requires_restart(
-        &applied,
-        &applied_models,
-        &applied_subagent,
-        &current,
-    ));
+    assert!(!config_requires_restart(&applied, &current));
 }
 
 #[test]
@@ -1073,8 +1000,6 @@ async fn shutdown_rejects_new_runtime_launches_and_restarts() {
 #[test]
 fn live_config_changes_do_not_require_restart() {
     let applied = CodeyConfig::default();
-    let applied_models = RuntimeModelConfig::from_config(&applied);
-    let applied_subagent = RuntimeSubagentConfig::from_config(&applied);
     let mut current = applied.clone();
     current.webhook.channels.push(NotificationChannelConfig {
         url: "https://example.test/webhook".into(),
@@ -1083,12 +1008,7 @@ fn live_config_changes_do_not_require_restart() {
     current.disable_trace_log_writes = !current.disable_trace_log_writes;
     current.protect_crashpad_pending = !current.protect_crashpad_pending;
 
-    assert!(!config_requires_restart(
-        &applied,
-        &applied_models,
-        &applied_subagent,
-        &current
-    ));
+    assert!(!config_requires_restart(&applied, &current));
 }
 
 #[tokio::test]
@@ -1292,10 +1212,6 @@ fn codex_launch_proxy_change_requires_restart() {
     let mut current = applied.clone();
     current.codex_launch_proxy = "http://127.0.0.1:7890".into();
     assert!(config_requires_restart_with_route_status(
-        false,
-        &applied,
-        &RuntimeModelConfig::from_config(&applied),
-        &RuntimeSubagentConfig::from_config(&applied),
-        &current
+        false, &applied, &current
     ));
 }

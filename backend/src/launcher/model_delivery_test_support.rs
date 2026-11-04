@@ -26,6 +26,7 @@ impl CodeyRuntime {
                 &config,
             ))),
             applied_config: config,
+            subagent_restart_config: RwLock::new(None),
             subagent_route_catalog_installed: true,
             injection_statuses: Arc::new(RwLock::new(Arc::from([]))),
             injection_scripts: cdp::prepare_injection_scripts(false, false, false, &[]),

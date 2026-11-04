@@ -13,9 +13,9 @@ use super::webhooks::{
     start_waiting_webhook_watcher, stop_waiting_webhook_watcher, webhook_watcher_should_run,
 };
 use super::{
-    AppState, RestartInProgressGuard, ScheduledRestart, config_requires_restart_with_route_status,
-    current_update_platform, make_bridge_handler, prepare_routes_for_current_launch,
-    provider_route_restart_required_for_runtime, sync_provider_models_for_launch,
+    AppState, RestartInProgressGuard, ScheduledRestart, current_update_platform,
+    make_bridge_handler, prepare_routes_for_current_launch, runtime_requires_restart,
+    sync_provider_models_for_launch,
 };
 use crate::codex_config::codex_home;
 use crate::error_log;
@@ -88,19 +88,13 @@ pub(super) async fn runtime_status_with_options(
     refresh_injection_status: bool,
 ) -> Result<Value, String> {
     let runtime = state.runtime.lock().await.clone();
-    // 先在无锁状态取运行时模型基线，再持配置读锁做同步比较：读守卫跨
-    // await 会让排队写者阻塞所有新的桥接请求。
-    let (applied_models, applied_subagent, crashpad_disk_protection_active) = match runtime.as_ref()
-    {
-        Some(runtime) => {
-            let (models, subagent, crashpad) = tokio::join!(
-                runtime.applied_model_config(),
-                runtime.applied_subagent_config(),
-                runtime.crashpad_pending_protection_active(),
-            );
-            (Some(models), Some(subagent), crashpad)
-        }
-        None => (None, None, false),
+    // 先读取运行时状态，避免持配置读锁跨 await 阻塞后续配置写入。
+    let (subagent_restart_config, crashpad_disk_protection_active) = match runtime.as_ref() {
+        Some(runtime) => tokio::join!(
+            runtime.subagent_restart_config(),
+            runtime.crashpad_pending_protection_active(),
+        ),
+        None => (None, false),
     };
     let config = state.config.read().await;
     let profile = config.active_profile();
@@ -119,22 +113,10 @@ pub(super) async fn runtime_status_with_options(
     let runtime_codex_app_path = runtime
         .as_ref()
         .map(|runtime| runtime.codex_app_path.clone());
-    let restart_required = match (
-        runtime.as_ref(),
-        applied_models.as_ref(),
-        applied_subagent.as_ref(),
-    ) {
-        (Some(runtime), Some(applied_models), Some(applied_subagent)) => {
-            config_requires_restart_with_route_status(
-                provider_route_restart_required_for_runtime(&runtime.applied_config, &config),
-                &runtime.applied_config,
-                applied_models,
-                applied_subagent,
-                &config,
-            )
-        }
-        _ => false,
-    };
+    let apply_status = super::config_apply::status(state);
+    let restart_required = runtime.as_ref().is_some_and(|runtime| {
+        runtime_requires_restart(runtime, subagent_restart_config.as_ref(), &config)
+    });
     let fast_context_tools_active = runtime
         .as_ref()
         .is_some_and(|runtime| runtime.applied_config.fast_context_tools);
@@ -163,7 +145,7 @@ pub(super) async fn runtime_status_with_options(
         0
     };
     let mut status = json!({
-        "configApply": super::config_apply::status(state),
+        "configApply": apply_status,
         "running": runtime.is_some(),
         "appVersion": env!("CARGO_PKG_VERSION"),
         "codeyUpdatePolicy": codey_update_policy,

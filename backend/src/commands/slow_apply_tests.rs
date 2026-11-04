@@ -6,6 +6,62 @@ type Reconcile = dyn Fn(&CodeyConfig) -> anyhow::Result<crate::codex_config::Run
     + Send
     + Sync;
 
+#[tokio::test]
+async fn subagent_restart_requires_a_confirmed_registration_change() {
+    for registration_changed in [false, true] {
+        let initial = CodeyConfig {
+            subagent_optimization: true,
+            local_router_enabled: false,
+            ..Default::default()
+        };
+        let mut latest = initial.clone();
+        latest.subagent_reasoning_effort = "high".into();
+        let runtime = Arc::new(CodeyRuntime::for_model_delivery_test(
+            initial.clone(),
+            "ws://unused",
+            None,
+        ));
+        let state = Arc::new(AppState {
+            config: RwLock::new(latest.clone()),
+            runtime: Mutex::new(Some(runtime.clone())),
+            slow_apply_test: TestHooks {
+                subagents: Some(Arc::new(move |_| {
+                    if registration_changed {
+                        Err(crate::codex_config::SubagentRoleRegistrationChanged.into())
+                    } else {
+                        anyhow::bail!("test role file write failed")
+                    }
+                })),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(!runtime_config_requires_restart(&state, &latest).await);
+        let outcome = hot_reload_runtime_subagent_config(&state, &latest).await;
+        assert_eq!(outcome.requires_restart(), registration_changed);
+        assert_eq!(
+            outcome.health(),
+            if registration_changed {
+                "pending_restart"
+            } else {
+                "failed"
+            }
+        );
+        assert_eq!(
+            runtime_config_requires_restart(&state, &latest).await,
+            registration_changed
+        );
+        assert_eq!(
+            runtime_status(&state).await.unwrap()["restartRequired"],
+            registration_changed
+        );
+        *state.config.write().await = initial.clone();
+        assert!(!runtime_config_requires_restart(&state, &initial).await);
+        runtime.mark_subagent_config_applied(&latest).await;
+        assert!(!runtime_config_requires_restart(&state, &latest).await);
+    }
+}
+
 #[derive(Default)]
 pub(super) struct TestHooks {
     pub request_log: Option<Arc<Gate>>,

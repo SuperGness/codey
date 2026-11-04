@@ -122,7 +122,9 @@ async fn apply(state: &Arc<AppState>, config: &CodeyConfig, reconcile: bool) -> 
     runtime.set_crashpad_pending_protection(config.protect_crashpad_pending);
     let models = models::hot_reload_runtime_models_locked(state, true).await;
     let logs = hot_reload_runtime_request_log_locked(state, config).await;
-    let subagents = if reconcile && config.subagent_optimization {
+    let subagents = if config.subagent_optimization
+        && (reconcile || !runtime.applied_subagent_config().await.matches(config))
+    {
         hot_reload_runtime_subagent_config_locked(state, config).await
     } else {
         SubagentHotReloadOutcome::default()
@@ -145,14 +147,18 @@ async fn apply(state: &Arc<AppState>, config: &CodeyConfig, reconcile: bool) -> 
         );
         return json!({"state":"failed","error":error});
     }
-    if models.deferred
-        || subagents.requires_restart()
-        || runtime_config_requires_restart(state, config).await
-    {
-        json!({"state":"restart_required"})
-    } else {
-        json!({"state":"applied"})
+    if subagents.requires_restart() || runtime_config_requires_restart(state, config).await {
+        return json!({"state":"restart_required"});
     }
+    let models = runtime.applied_model_config().await;
+    let subagents = runtime.applied_subagent_config().await;
+    if !models.matches(config)
+        || ((runtime.applied_config.subagent_optimization || config.subagent_optimization)
+            && !subagents.matches(config))
+    {
+        return json!({"state":"failed","error":"配置已保存，但当前 Codex 实例尚未完成热更新；可重新应用配置"});
+    }
+    json!({"state":"applied"})
 }
 
 async fn apply_trace_guard(

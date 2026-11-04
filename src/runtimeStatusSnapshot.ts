@@ -46,8 +46,9 @@ export function reconcileRuntimeStatus(
   const reconciled = { ...next };
   const configApply = reconcileConfigApply(current.configApply, next.configApply);
   if (configApply !== undefined) reconciled.configApply = configApply;
-  if (current.configApply && next.configApply && (next.configApply.revision < current.configApply.revision ||
-    (next.configApply.revision === current.configApply.revision && current.configApply.state !== "pending" && next.configApply.state === "pending"))) {
+  if (next.configApply?.state === "pending" || (current.configApply && next.configApply &&
+    next.configApply.revision < current.configApply.revision)) {
+    // 应用未结束或响应已过期时，不能把过渡差异当成最终重启结论。
     reconciled.restartRequired = current.restartRequired;
   }
   if (next.maintenance !== undefined) {

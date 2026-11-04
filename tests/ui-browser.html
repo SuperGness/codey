@@ -149,7 +149,7 @@
         if (!restartCheck || command !== "runtime_status") return result;
         return {
           ...result,
-          restartRequired: restartState === "waiting" || restartState === "restarting",
+          restartRequired: restartState === "pending" || restartState === "waiting" || restartState === "restarting",
           restartInProgress: restartState === "restarting",
           configApply: {
             revision: restartRevision,
@@ -193,6 +193,7 @@
         restartRevision++;
         window.dispatchEvent(new Event("codey-settings-opened"));
         await waitFor(() => [...shadow.querySelectorAll('[role="status"]')].some(notice => notice.textContent.includes("配置已保存，正在应用")));
+        if (action().textContent.trim() !== "重启" || action().classList.contains("is-warning")) throw new Error("应用未结束时错误显示等待重启");
         restartState = "saved";
         restartRevision++;
         window.dispatchEvent(new Event("codey-settings-opened"));
