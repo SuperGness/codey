@@ -23,6 +23,7 @@ export const CODEY_API_COMMANDS = [
   "cancel_official_account_login",
   "import_current_codex_login",
   "import_official_account_credential",
+  "export_official_account_credential",
   "set_default_official_account",
   "remove_official_account",
   "start_official_account_siwc",

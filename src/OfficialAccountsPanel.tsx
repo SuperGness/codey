@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { IconAlertCircle, IconBrandOpenai, IconClipboard, IconClock, IconLogin2 as IconLogin, IconPlus, IconRefresh, IconSparkles, IconTrash } from "@tabler/icons-react";
+import { IconAlertCircle, IconBrandOpenai, IconClipboard, IconClock, IconDownload, IconFolderOpen, IconLogin2 as IconLogin, IconPlus, IconRefresh, IconSparkles, IconTrash } from "@tabler/icons-react";
 
 import { invoke } from "./api";
 import { errorText } from "./appUtils";
 import { useOfficialAccounts } from "./useOfficialAccounts";
 import { useOfficialAccountLoginPoll } from "./useOfficialAccountLoginPoll";
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, TextArea, Tooltip } from "./components/ui";
+import { downloadResource } from "./features/codex-extensions/download";
 import { maskEmail } from "./sensitiveText";
 import type { Confirmation, OfficialAccount, OfficialAccountsResult } from "./App.types";
 
@@ -18,9 +19,15 @@ type AccountUsageSnapshot = {
 };
 
 type LoginStart = { loginId: string; authUrl: string; browserOpened?: boolean };
+type OfficialAccountCredentialExport = {
+  status?: string;
+  fileName: string;
+  content: string;
+};
 
 // 账号较多时连续额度查询容易触发官方风控，逐条读取之间留出间隔。
 const USAGE_QUERY_STAGGER_MS = 200;
+const MANUAL_CREDENTIAL_MAX_BYTES = 64 * 1024;
 
 function normalizePlan(plan?: string) {
   const value = plan?.trim().toLowerCase() || "";
@@ -248,6 +255,8 @@ export function OfficialAccountsPanel({
   const [manualOpen, setManualOpen] = useState(false);
   const [manualInput, setManualInput] = useState("");
   const [manualError, setManualError] = useState("");
+  const [manualFileReading, setManualFileReading] = useState(false);
+  const [manualFileName, setManualFileName] = useState("");
   // SIWC 二次授权与添加账号的登录共用轮询形态，但作用于既有账号。
   const [siwcLogin, setSiwcLogin] = useState<(LoginStart & { accountId: string }) | null>(null);
   const [siwcError, setSiwcError] = useState("");
@@ -260,6 +269,8 @@ export function OfficialAccountsPanel({
   loginRef.current = login;
   const siwcLoginRef = useRef<(LoginStart & { accountId: string }) | null>(null);
   siwcLoginRef.current = siwcLogin;
+  const manualFileInputRef = useRef<HTMLInputElement | null>(null);
+  const manualFileReadSequenceRef = useRef(0);
 
   const accountsRef = useRef<OfficialAccount[]>([]);
   accountsRef.current = accounts ?? [];
@@ -465,21 +476,58 @@ export function OfficialAccountsPanel({
     }
   }
 
+  function cancelManualFileRead() {
+    manualFileReadSequenceRef.current += 1;
+    setManualFileReading(false);
+    setManualFileName("");
+  }
+
   function openManual() {
+    cancelManualFileRead();
     setManualError("");
     setManualInput("");
+    if (manualFileInputRef.current) manualFileInputRef.current.value = "";
     setManualOpen(true);
   }
 
   function closeManual() {
     if (pending === "manual") return;
+    cancelManualFileRead();
     setManualOpen(false);
     setManualInput("");
     setManualError("");
+    if (manualFileInputRef.current) manualFileInputRef.current.value = "";
+  }
+
+  async function readManualFile(file: File) {
+    const request = ++manualFileReadSequenceRef.current;
+    setManualError("");
+    setManualFileName("");
+    setManualInput("");
+    setManualFileReading(true);
+    try {
+      if (!file.name.toLowerCase().endsWith(".json")) {
+        throw new Error("请选择 .json 格式的账号文件");
+      }
+      if (file.size > MANUAL_CREDENTIAL_MAX_BYTES) {
+        throw new Error("账号文件不能超过 64 KiB");
+      }
+      const content = await file.text();
+      if (request !== manualFileReadSequenceRef.current) return;
+      setManualInput(content);
+      setManualFileName(file.name);
+    } catch (error) {
+      if (request === manualFileReadSequenceRef.current) {
+        setManualError(error instanceof Error ? error.message : `无法读取账号文件：${errorText(error)}`);
+      }
+    } finally {
+      if (request === manualFileReadSequenceRef.current) setManualFileReading(false);
+    }
   }
 
   async function submitManual() {
     const credential = manualInput.trim();
+    if (manualFileReading) return;
     if (!credential) {
       setManualError("请粘贴 Refresh Token 或 OAuth JSON");
       return;
@@ -489,6 +537,7 @@ export function OfficialAccountsPanel({
     try {
       const result = await invoke<OfficialAccountsResult>("import_official_account_credential", { credential });
       applyResult(result);
+      cancelManualFileRead();
       setManualOpen(false);
       setManualInput("");
       onNotice({
@@ -499,6 +548,31 @@ export function OfficialAccountsPanel({
       setManualError(errorText(error));
     } finally {
       setPending(null);
+    }
+  }
+
+  async function exportAccount(account: OfficialAccount) {
+    const pendingKey = `export:${account.id}`;
+    setPending(pendingKey);
+    try {
+      const result = await invoke<OfficialAccountCredentialExport>(
+        "export_official_account_credential",
+        { accountId: account.id },
+      );
+      if (
+        typeof result.fileName !== "string"
+        || result.fileName.trim() === ""
+        || typeof result.content !== "string"
+        || result.content.trim() === ""
+      ) {
+        throw new Error("账号文件内容无效，请重试");
+      }
+      downloadResource(result.fileName, result.content, "application/json;charset=utf-8");
+      onNotice({ tone: "success", text: "账号文件已导出，请妥善保管，不要分享给他人" });
+    } catch (error) {
+      onNotice({ tone: "error", text: errorText(error) });
+    } finally {
+      setPending((current) => current === pendingKey ? null : current);
     }
   }
 
@@ -846,6 +920,22 @@ export function OfficialAccountsPanel({
                       </Button>
                     </Tooltip>
                   )}
+                  <Tooltip content="导出账号文件；文件含登录凭据，请妥善保管">
+                    <Button
+                      variant="link"
+                      size="icon-sm"
+                      className="official-account-export-btn"
+                      disabled={disabled}
+                      loading={pending === `export:${account.id}`}
+                      aria-label={`导出官方账号 ${label}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void exportAccount(account);
+                      }}
+                    >
+                      <IconDownload size={14} aria-hidden="true" />
+                    </Button>
+                  </Tooltip>
                   <Button
                     variant="link"
                     color="danger"
@@ -942,10 +1032,38 @@ export function OfficialAccountsPanel({
           <DialogHeader>
             <DialogTitle>手动添加官方账号</DialogTitle>
             <DialogDescription>
-              粘贴 Refresh Token，或包含 access_token 与 refresh_token 的 OAuth JSON。只含 Refresh Token 时会向官方换取登录；已含 access token 的 JSON 直接保存，不会轮换来源令牌。
+              粘贴 Refresh Token 或 OAuth JSON，也可以选择其他 Codey 导出的账号文件。只含 Refresh Token 时会向官方换取登录；已含 access token 的 JSON 直接保存，不会轮换来源令牌。
             </DialogDescription>
           </DialogHeader>
           <div className="official-login-body">
+            <div className="official-manual-file-row">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={pending === "manual" || manualFileReading}
+                loading={manualFileReading}
+                onClick={() => manualFileInputRef.current?.click()}
+              >
+                <IconFolderOpen size={14} aria-hidden="true" />
+                {manualFileReading ? "正在读取" : "选择账号文件"}
+              </Button>
+              <span className="official-manual-file-help">
+                仅支持 .json，最多 64 KiB
+              </span>
+              <input
+                ref={manualFileInputRef}
+                type="file"
+                accept=".json,application/json"
+                className="sr-only"
+                aria-label="选择 Codey 导出的账号文件"
+                disabled={pending === "manual" || manualFileReading}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (file) void readManualFile(file);
+                }}
+              />
+            </div>
             <TextArea
               aria-label="Refresh Token 或 OAuth JSON"
               autoFocus
@@ -956,15 +1074,22 @@ export function OfficialAccountsPanel({
               spellCheck={false}
               value={manualInput}
               onChange={(event) => {
+                if (manualFileReading) cancelManualFileRead();
+                setManualFileName("");
                 setManualInput(event.target.value);
                 if (manualError) setManualError("");
               }}
             />
+            {manualFileName ? (
+              <small className="official-manual-file-loaded">
+                已载入 {manualFileName}，请检查内容后添加
+              </small>
+            ) : null}
             {manualError ? <small className="official-accounts-error">{manualError}</small> : null}
           </div>
           <DialogFooter>
             <Button variant="outline" size="sm" disabled={pending === "manual"} onClick={closeManual}>取消</Button>
-            <Button size="sm" disabled={disabled || manualInput.trim() === ""} loading={pending === "manual"} onClick={() => void submitManual()}>
+            <Button size="sm" disabled={disabled || manualFileReading || manualInput.trim() === ""} loading={pending === "manual"} onClick={() => void submitManual()}>
               添加
             </Button>
           </DialogFooter>

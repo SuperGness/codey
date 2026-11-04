@@ -1293,6 +1293,58 @@ fn stored_official_account(
 }
 
 #[tokio::test]
+async fn official_account_export_rejects_a_missing_account() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        ..AppState::default()
+    });
+
+    let result = invoke_api(
+        &state,
+        "export_official_account_credential",
+        json!({ "accountId": "missing" }),
+    )
+    .await;
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(result["message"], "找不到要导出的官方账号：missing");
+}
+
+#[tokio::test]
+async fn official_account_export_returns_only_the_requested_credential() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        ..AppState::default()
+    });
+    let mut record = stored_official_account("acct_export", 1);
+    record.route_name = Some("本机线路".into());
+    record.route_short_name = Some("本".into());
+    record.upstream_proxy = Some("http://127.0.0.1:7890".into());
+    record.base_url = Some("https://gateway.example/v1".into());
+    state.official_accounts().upsert(&record).unwrap();
+
+    let result = invoke_api(
+        &state,
+        "export_official_account_credential",
+        json!({ "accountId": record.id }),
+    )
+    .await;
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["fileName"], "codey-official-acct_export.json");
+    let credential: Value = serde_json::from_str(result["content"].as_str().unwrap()).unwrap();
+    assert_eq!(credential["email"], json!(record.email));
+    assert_eq!(credential["planType"], json!(record.plan_type));
+    assert_eq!(credential["accountId"], json!(record.account_id));
+    assert_eq!(credential["auth"], record.auth);
+    assert!(credential.get("siwc").is_none());
+    assert!(credential.get("routeName").is_none());
+    assert!(!result["content"].as_str().unwrap().contains("127.0.0.1"));
+}
+
+#[tokio::test]
 async fn official_launch_commit_rebuilds_routes_after_a_newer_account_refresh() {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().join("codex-home");

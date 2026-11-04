@@ -79,6 +79,10 @@ pub(super) async fn invoke(
             Ok(credential) => import_official_account_credential(state, credential).await,
             Err(error) => Err(error),
         },
+        "export_official_account_credential" => match string_argument(args, "accountId") {
+            Ok(account_id) => export_official_account_credential(state, account_id).await,
+            Err(error) => Err(error),
+        },
         "set_default_official_account" => match string_argument(args, "accountId") {
             Ok(account_id) => set_default_official_account(state, account_id).await,
             Err(error) => Err(error),
@@ -491,6 +495,38 @@ pub(super) async fn import_official_account_credential(
     .map_err(|error| format!("{error:#}"))?;
     let payload = add_account(state, record).await?;
     Ok(merge(payload, json!({ "status": "ok" })))
+}
+
+pub(super) async fn export_official_account_credential(
+    state: &Arc<AppState>,
+    account_id: String,
+) -> Result<Value, String> {
+    let store = state.official_accounts();
+    let account_id = account_id.trim().to_string();
+    let missing_id = account_id.clone();
+    let home = codex_home().to_path_buf();
+    let record = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        if store.default_account_id()?.as_deref() == Some(account_id.as_str()) {
+            // Codex 可能已在本地刷新凭据，导出前复用现有同步流程，不发起换票。
+            store.sync_default_from_codex_home(&home)?;
+        }
+        store.get(&account_id)
+    })
+    .await
+    .map_err(|error| format!("读取官方账号任务异常退出：{error}"))?
+    .map_err(|error| format!("{error:#}"))?
+    .ok_or_else(|| format!("找不到要导出的官方账号：{missing_id}"))?;
+    let file_name = record.export_file_name();
+    let content = serde_json::to_string_pretty(&record.export_credential())
+        .map_err(|error| format!("生成官方账号导出内容失败：{error}"))?;
+    if content.len() > crate::official_accounts::MAX_MANUAL_CREDENTIAL_BYTES {
+        return Err("账号凭据超过现有手动导入的大小上限，无法生成可导入的 JSON".to_string());
+    }
+    Ok(json!({
+        "status": "ok",
+        "fileName": file_name,
+        "content": content,
+    }))
 }
 
 /// Stores a freshly obtained account. The first stored account becomes the

@@ -63,7 +63,7 @@ const TOKEN_REFRESH_MARGIN_SECONDS: u64 = 5 * 60;
 /// just drops the older pools.
 const MAX_OFFICIAL_PROXY_CLIENTS: usize = 8;
 /// 手动粘贴的 Refresh Token 或 OAuth JSON 上限。正常登录文档远小于此值。
-const MAX_MANUAL_CREDENTIAL_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_MANUAL_CREDENTIAL_BYTES: usize = 64 * 1024;
 const MIN_REFRESH_TOKEN_CHARS: usize = 20;
 
 // ---------------------------------------------------------------------------
@@ -411,6 +411,51 @@ impl OfficialAccountRecord {
                 mine.is_some() && mine == theirs
             }
         }
+    }
+
+    /// 生成只包含账号身份和 OAuth 登录文档的导出内容。
+    pub fn export_credential(&self) -> Value {
+        let mut credential = serde_json::Map::new();
+        for (key, value) in [
+            ("email", self.email.as_ref()),
+            ("accountId", self.account_id.as_ref()),
+            ("planType", self.plan_type.as_ref()),
+        ] {
+            if let Some(value) = value {
+                credential.insert(key.to_string(), json!(value));
+            }
+        }
+        credential.insert("auth".to_string(), self.auth.clone());
+        Value::Object(credential)
+    }
+
+    /// 导出文件名只使用账号标识或邮箱中的安全字符。
+    pub fn export_file_name(&self) -> String {
+        let stem = [
+            self.account_id.as_deref(),
+            self.email.as_deref(),
+            Some(self.id.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|identity| {
+            identity
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                        character
+                    } else {
+                        '-'
+                    }
+                })
+                .take(96)
+                .collect::<String>()
+                .trim_matches('-')
+                .to_string()
+        })
+        .find(|name| !name.is_empty())
+        .unwrap_or_else(|| "official-account".to_string());
+        format!("codey-official-{stem}.json")
     }
 }
 
@@ -4764,6 +4809,37 @@ mod tests {
             ManualOfficialCredential::Record(record) => *record,
             ManualOfficialCredential::RefreshToken(_) => panic!("应直接保存登录文档"),
         }
+    }
+
+    #[tokio::test]
+    async fn exported_credential_round_trips_through_manual_input_without_network() {
+        let mut original = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_export", "export@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        original.route_name = Some("不应导出的线路".into());
+        original.route_short_name = Some("私".into());
+        original.upstream_proxy = Some("http://127.0.0.1:7890".into());
+        original.base_url = Some("https://gateway.example/v1".into());
+
+        let exported = serde_json::to_string_pretty(&original.export_credential()).unwrap();
+        assert!(!exported.contains("不应导出的线路"));
+        assert!(!exported.contains("127.0.0.1:7890"));
+        assert!(!exported.contains("gateway.example"));
+
+        let imported = official_account_from_manual_input(&reqwest::Client::new(), &exported)
+            .await
+            .unwrap();
+        assert_eq!(imported.id, original.id);
+        assert_eq!(imported.account_id, original.account_id);
+        assert_eq!(imported.email, original.email);
+        assert_eq!(imported.plan_type, original.plan_type);
+        assert_eq!(imported.auth, original.auth);
+        assert_eq!(
+            original.export_file_name(),
+            "codey-official-acct_export.json"
+        );
     }
 
     fn manual_refresh(input: &str) -> String {

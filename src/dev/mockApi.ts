@@ -909,6 +909,25 @@ if (import.meta.env.DEV) {
         previewDeriveOfficialProfiles();
         return { status: "ok", accounts: previewOfficialAccounts, defaultAccountId: previewDefaultOfficialAccountId(), officialAccountAvailable: true, config: previewConfig, modelState: previewModelState, restartRequired: false };
       }
+      if (command === "export_official_account_credential") {
+        const account = previewOfficialAccounts.find((item) => item.id === args.accountId);
+        if (!account) return { status: "failed", message: "未找到要导出的官方账号" };
+        const fileName = `codey-official-${account.id}.json`;
+        const content = JSON.stringify({
+          email: account.email,
+          accountId: account.accountId,
+          planType: account.planType,
+          auth: {
+            auth_mode: "chatgpt",
+            tokens: {
+              access_token: `preview-access-${account.id}`,
+              refresh_token: `preview-refresh-${account.id}`,
+              account_id: account.accountId,
+            },
+          },
+        }, null, 2);
+        return { status: "ok", fileName, content };
+      }
       if (command === "set_default_official_account") {
         const target = previewOfficialAccounts.find((account) => account.id === args.accountId);
         if (target?.invalid) {
