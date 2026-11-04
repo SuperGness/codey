@@ -1172,8 +1172,7 @@ impl PatchCache {
         let cache = self.clone();
         let prune = patch.is_some()
             || (self.unchanged_since_prune.fetch_add(1, Ordering::Relaxed) + 1)
-                % UNCHANGED_STORES_PER_PRUNE
-                == 0;
+                .is_multiple_of(UNCHANGED_STORES_PER_PRUNE);
         let _ = tokio::task::spawn_blocking(move || {
             if let Err(error) = store_entry(&cache.dir, &name, patch) {
                 log_service_event(
