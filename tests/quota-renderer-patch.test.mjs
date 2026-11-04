@@ -21,6 +21,21 @@ return view.submitDisabled;
 // codexComposerAdapter.CodexComposerAdapter.interruptThreadError
 `;
 
+// Codex 26.1029 numeric chunk: the model identity moved behind A.qz,
+// the local quota hook uses a double-quoted host check, and submitDisabled ends
+// with a semicolon. The remaining disabled conditions stay in their real place.
+const numericChunkFixture = `function render(model,host,quotaBlocked,otherDisabled,hardBlocked=false){
+const n1={settings:{model}},nB=host,R={U:quotaBlocked},i={Ul:value=>value,_U:()=>hardBlocked},ei={r9:()=>0},A={qz:"reserve-model"},tq={model};
+const nO=(0,i._U)(A.F9,nB),tm=otherDisabled;
+let{agentMode:os}={},ou=n1.settings.model!==tq.model&&(n1.settings.model===A.qz?n1.settings.model!==tq.model:n1.settings.model!==tq.model),om=(0,ei.r9)(),op=(0,i.Ul)("local"===nB&&R.U),nN=false,nA=false,nP=false,nK=false,ot=true,n3=false,or=null;
+const submission={activeCollaborationMode:n1,agentMode:os,resolvedHostId:nB,useAsbDirect:false};
+let oT=void 0!==tm&&tm||ou||nN||nA&&nP||nK||ot&&n3||or?.isLoading===!0||nO||op;
+const view={submitDisabled:oT,onSubmitLocal:null};
+return view.submitDisabled;
+}
+// codexComposerAdapter.CodexComposerAdapter.interruptThreadError
+`;
+
 function harness(helper) {
   const failures = [];
   const context = vm.createContext({
@@ -120,6 +135,53 @@ test("Codex 26.1021 workspace hard block follows the same local third-party gate
   }
 });
 
+test("Codex 26.1029 numeric composer chunk preserves quota and hard blocks", () => {
+  const h = harness({ allowsLocalSend: ({ hostId, model }) => hostId === "local" && model === "third-party" });
+  const numericUrl = "app://codex/assets/async/634303.855e57c3e7.js";
+  const patched = h.patch(numericChunkFixture, numericUrl);
+  const hardMarker = "/*codey-local-hard-block-gate*/";
+  assert.equal(patched.split(marker).length - 1, 1);
+  assert.equal(patched.split(hardMarker).length - 1, 1);
+  assert.match(patched, /op=\(0,i\.Ul\)\("local"===nB&&R\.U\)&&\/\*codey-local-quota-gate\*\//);
+  assert.equal(h.patch(patched, numericUrl), patched);
+  vm.runInContext(patched, h.context);
+  const render = h.context.render;
+  assert.equal(render("third-party", "local", true, false), false);
+  assert.equal(render("gpt-official", "local", true, false), true);
+  assert.equal(render("unknown", "local", true, false), true);
+  assert.equal(render("third-party", "remote", true, false), false);
+  assert.equal(render("third-party", "local", true, true), true);
+  assert.equal(render("gpt-official", "local", false, false, true), true);
+  assert.equal(render("third-party", "local", false, false, true), false);
+  assert.equal(render("third-party", "local", false, true, true), true);
+  assert.equal(render("third-party", "remote", false, false, true), true);
+  assert.equal(render("gpt-official", "local", false, false, false), false);
+  assert.deepEqual(h.failures, []);
+});
+
+test("numeric composer matching follows renamed bindings and verifies the host", () => {
+  const renamed = numericChunkFixture
+    .replace(/\bom\b/g, "workMode")
+    .replace(/\bn1\b/g, "selectedMode")
+    .replace(/\bnB\b/g, "resolvedHost")
+    .replace(/\bqz\b/g, "reserveModel");
+  const h = harness({ allowsLocalSend: () => true });
+  vm.runInContext(h.patch(renamed), h.context);
+  assert.equal(h.context.render("third-party", "local", true, false, true), false);
+  for (const source of [numericChunkFixture + numericChunkFixture,
+    numericChunkFixture.replace("resolvedHostId:nB", "resolvedHostId:anotherHost")]) {
+    const incompatible = harness({ allowsLocalSend: () => true });
+    assert.equal(incompatible.patch(source), source);
+    assert.equal(incompatible.failures.length, 1);
+  }
+  for (const helper of [undefined, { allowsLocalSend() { throw Error("unavailable"); } }]) {
+    const unavailable = harness(helper);
+    vm.runInContext(unavailable.patch(numericChunkFixture), unavailable.context);
+    assert.equal(unavailable.context.render("third-party", "local", true, false), true);
+    assert.equal(unavailable.context.render("third-party", "local", false, false, true), true);
+  }
+});
+
 test("duplicate or drifted quota gates are left unchanged and reported", () => {
   for (const [source, count] of [[fixture + fixture, 2], [fixture.replace("resolvedHostId:bt", "resolvedHostId:anotherHost"), 0], [fixture.replace("||vn,Qn", "||anotherQuota,Qn"), 0]]) {
     const h = harness();
@@ -137,4 +199,32 @@ test("unrelated assets and non-Codex code are untouched", () => {
   const unrelated = fixture.replace("codexComposerAdapter.CodexComposerAdapter.interruptThreadError", "unrelated");
   assert.equal(h.patch(unrelated), unrelated);
   assert.equal(h.failures.length, 0);
+});
+
+test("numeric renderer URLs require a bounded hashed chunk name", () => {
+  const sourceUrl = "app://-/assets/async/634303.855e57c3e7.js?cache=1";
+  const accepted = harness({ allowsLocalSend: () => true });
+  assert.notEqual(accepted.patch(numericChunkFixture, sourceUrl), numericChunkFixture);
+  assert.notEqual(accepted.patch(numericChunkFixture, "app://-/assets/async/0513.ABCDEF01.js"), numericChunkFixture);
+  assert.notEqual(accepted.patch(numericChunkFixture, "app://-/assets/634303.855e57c3e7.js"), numericChunkFixture);
+  assert.notEqual(accepted.patch(numericChunkFixture, `app://-/assets/async/1234567890.${"a".repeat(32)}.js`), numericChunkFixture);
+
+  for (const rejectedUrl of [
+    "app://-/assets/async/composer.855e57c3e7.js",
+    "app://-/assets/async/12345678901.855e57c3e7.js",
+    "app://-/assets/async/634303.js",
+    "app://-/assets/async/634303.abcdefg1.js",
+    `app://-/assets/async/634303.${"a".repeat(33)}.js`,
+    "app://-/assets/async/634303.855e57c3e7.cjs",
+    "app://-/assets/async/634303.855e57c3e7.mjs",
+    "app://-/assets/async/634303.not-a-hash.js",
+    "app://-/assets/async/634303.855e57c3e7.js.map",
+    "app://-/assets/634303.js",
+    "app://-/webview/assets/async/634303.855e57c3e7.js",
+    "app://-/assets/other/634303.855e57c3e7.js",
+    "https://codex.example/assets/async/634303.855e57c3e7.js",
+  ]) {
+    const h = harness({ allowsLocalSend: () => true });
+    assert.equal(h.patch(numericChunkFixture, rejectedUrl), numericChunkFixture);
+  }
 });

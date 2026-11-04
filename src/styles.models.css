@@ -1757,6 +1757,24 @@
   border-radius: 6px;
 }
 
+.official-account-export-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--mac-text-tertiary);
+  transition: all 0.15s ease;
+  border-radius: 6px;
+}
+
+.official-account-export-btn:hover:not(:disabled) {
+  color: var(--mac-text-primary);
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
+}
+
+[data-theme="dark"] .official-account-export-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .official-account-delete-btn:hover:not(:disabled) {
   color: var(--codey-red, #d70015);
   background: rgba(215, 0, 21, 0.08);
@@ -1771,6 +1789,25 @@
   display: grid;
   gap: 8px;
   margin-top: 12px;
+}
+
+.official-manual-file-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.official-manual-file-help,
+.official-manual-file-loaded {
+  color: var(--mac-text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.official-manual-file-loaded {
+  color: var(--codey-green, #10a37f);
+  overflow-wrap: anywhere;
 }
 
 .official-login-url {

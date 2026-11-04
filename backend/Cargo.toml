@@ -23,6 +23,7 @@ path = "src/bin/codey-fastctx.rs"
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
+aho-corasick = "1"
 async-trait = "0.1"
 base64.workspace = true
 bytes.workspace = true

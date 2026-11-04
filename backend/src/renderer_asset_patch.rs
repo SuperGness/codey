@@ -3,7 +3,8 @@
 //! Electron fuse 关闭后主进程 `protocol.handle` 改写不可用，这里改用 Fetch 域
 //! 改写 `app://` 脚本响应。新页面经自动挂载在创建时暂停，Fetch 拦截落位后才
 //! 放行；连接前已存在的页面直接挂上，只要尚未导航就能覆盖首个文档。拦截只匹配
-//! 补丁名单里的脚本，其余资产不经过 Codey。
+//! 补丁名单里的语义脚本和带内容哈希的数字 chunk；正文不含补丁前置字面量的
+//! 资产不送进页面求值，只记为无需改写。
 //!
 //! 补丁入口是纯函数，结果只取决于补丁脚本与资产内容，而 Codex 的资产文件名
 //! 自带内容哈希：结果按「补丁脚本版本 + 文件名」缓存到磁盘，命中时在请求阶段
@@ -12,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
@@ -43,6 +44,12 @@ const PATCHABLE_ASSET_PREFIXES: [&str; 9] = [
 ];
 /// 仅在关闭宠物时改写的脚本：设置页预览资源，以及决定是否预热隐藏浮窗的运行时。
 const PET_ASSET_PREFIXES: [&str; 2] = ["pets-settings", "app-runtime"];
+/// CDP Fetch 的通配符不支持字符类；数字 chunk 先宽匹配，再在请求处理时严格筛选。
+const NUMERIC_ASSET_URL_PATTERN: &str = "app://*/assets/?*.js*";
+/// 宠物精灵图。rspack 构建保留可读文件名，按宠物 id 前缀识别；只在关闭宠物时拦截。
+const PET_SPRITE_URL_PATTERN: &str = "app://*/assets/*-spritesheet-v*.webp*";
+/// 未选择过宠物时 Codex 使用的内置形象。
+const DEFAULT_AVATAR_ID: &str = "codex";
 /// 等 Codex 调试端点就绪的总预算；超时后由下一次注入重新拉起服务。
 const CONNECT_BUDGET: Duration = Duration::from_secs(60);
 /// 端点未就绪时的重连间隔：主窗口通常在端点出现后数百毫秒内导航，间隔要短。
@@ -55,6 +62,15 @@ const MAX_MESSAGE_BYTES: usize = 256 << 20;
 const MAX_CONCURRENT_PATCHES: usize = 2;
 /// 磁盘缓存上限，约可容纳三个 Codex 版本的补丁结果。
 const MAX_CACHE_BYTES: u64 = 96 << 20;
+/// 缓存条目上限。数字 chunk 每个都会留一条「无需改写」记录，体积很小但数量
+/// 随版本累积，单靠字节上限压不住目录规模。
+const MAX_CACHE_ENTRIES: usize = 12_000;
+/// 「无需改写」记录不占体积，每写入这么多条才整理一次目录；写入改写结果时
+/// 照常立即整理。
+const UNCHANGED_STORES_PER_PRUNE: usize = 256;
+/// 页面补丁里前置字面量表的起止标记，后端据此预筛资源。
+const PATCH_ANCHORS_START: &str = "/*codey-renderer-patch-anchors*/";
+const PATCH_ANCHORS_END: &str = "/*end-codey-renderer-patch-anchors*/";
 const CACHE_DIR_NAME: &str = "renderer-patch-cache";
 
 static NEXT_MESSAGE_ID: AtomicU64 = AtomicU64::new(1);
@@ -79,13 +95,26 @@ pub(crate) fn renderer_asset_patch_document_script(disable_pet: bool) -> String 
 struct ServiceHandle {
     debug_port: u16,
     disable_pet: bool,
+    paths: Option<CodexPaths>,
     context: Arc<ServiceContext>,
     task: tokio::task::JoinHandle<()>,
 }
 
+/// 本次启动的 Codex 安装目录与数据目录：前者用于离线扫描前端资源，后者用于
+/// 读取当前选中的宠物。
+#[derive(Clone, Debug)]
+pub(crate) struct CodexPaths {
+    pub(crate) app_dir: PathBuf,
+    pub(crate) codex_home: PathBuf,
+}
+
 /// Codex 启动前调用：替换旧服务，从端点一出现就开始挂载页面。
-pub(crate) fn start_service(debug_port: u16, disable_pet: bool) {
-    let context = Arc::new(ServiceContext::new(disable_pet, default_cache_dir()));
+pub(crate) fn start_service(debug_port: u16, disable_pet: bool, paths: Option<CodexPaths>) {
+    let mut context = ServiceContext::new(disable_pet, default_cache_dir());
+    if let Some(paths) = &paths {
+        context.start_asset_scan(paths);
+    }
+    let context = Arc::new(context);
     let task = tokio::spawn(run_service(debug_port, context.clone()));
     let previous = service_slot()
         .lock()
@@ -93,6 +122,7 @@ pub(crate) fn start_service(debug_port: u16, disable_pet: bool) {
         .replace(ServiceHandle {
             debug_port,
             disable_pet,
+            paths,
             context,
             task,
         });
@@ -101,19 +131,23 @@ pub(crate) fn start_service(debug_port: u16, disable_pet: bool) {
     }
 }
 
-/// 注入路径调用：同一端口的服务仍在运行时什么都不做。
+/// 注入路径调用：同一端口的服务仍在运行时什么都不做；重启时沿用上次启动
+/// 登记的 Codex 路径。
 pub(crate) fn ensure_service(debug_port: u16, disable_pet: bool) {
-    let running = service_slot()
-        .lock()
-        .expect("patch service slot poisoned")
-        .as_ref()
-        .is_some_and(|service| {
-            service.debug_port == debug_port
-                && service.disable_pet == disable_pet
-                && !service.task.is_finished()
-        });
+    let (running, paths) = {
+        let slot = service_slot().lock().expect("patch service slot poisoned");
+        let service = slot.as_ref();
+        (
+            service.is_some_and(|service| {
+                service.debug_port == debug_port
+                    && service.disable_pet == disable_pet
+                    && !service.task.is_finished()
+            }),
+            service.and_then(|service| service.paths.clone()),
+        )
+    };
     if !running {
-        start_service(debug_port, disable_pet);
+        start_service(debug_port, disable_pet, paths);
     }
 }
 
@@ -133,6 +167,8 @@ pub(crate) struct PageStats {
     pub(crate) patched: u64,
     pub(crate) cache_hits: u64,
     pub(crate) skipped: u64,
+    /// 关闭宠物时拦下的未选中宠物精灵图。
+    pub(crate) blocked: u64,
 }
 
 struct PageEntry {
@@ -140,9 +176,19 @@ struct PageEntry {
     stats: PageStats,
 }
 
+type PendingAssetScan = tokio::task::JoinHandle<Result<crate::renderer_asset_scan::ScanOutcome>>;
+
 struct ServiceContext {
     install_script: Arc<str>,
-    patterns: Value,
+    /// 当前拦截规则。离线扫描完成后换成精确地址，并下发给已挂上的页面。
+    patterns: Mutex<Value>,
+    disable_pet: bool,
+    /// Codex 数据目录；读取当前选中的宠物。
+    codex_home: Option<PathBuf>,
+    /// 与连接调试端点并行进行的资源扫描，服务开始时取走。
+    pending_scan: Mutex<Option<PendingAssetScan>>,
+    /// 页面补丁的前置字面量；资源一个都不含时不必送进页面求值。
+    anchors: Vec<String>,
     cache: PatchCache,
     /// 按扁平化会话 id 记录已挂上的页面。
     pages: Mutex<HashMap<String, PageEntry>>,
@@ -155,10 +201,84 @@ impl ServiceContext {
         Self {
             cache: PatchCache::new(cache_dir, &install_script),
             install_script,
-            patterns: fetch_patterns(disable_pet),
+            patterns: Mutex::new(fetch_patterns(disable_pet, None)),
+            disable_pet,
+            codex_home: None,
+            pending_scan: Mutex::new(None),
+            anchors: renderer_patch_anchors(RENDERER_ASSET_PATCH_SCRIPT)
+                .expect("renderer_asset_patch.js 内置前置字面量表无效"),
             pages: Mutex::new(HashMap::new()),
             permits: tokio::sync::Semaphore::new(MAX_CONCURRENT_PATCHES),
         }
+    }
+
+    fn start_asset_scan(&mut self, paths: &CodexPaths) {
+        self.codex_home = Some(paths.codex_home.clone());
+        let app_dir = paths.app_dir.clone();
+        let cache_file = self
+            .cache
+            .dir
+            .join(format!("{}-asset-scan.json", self.cache.tag));
+        let anchors = self.anchors.clone();
+        *self
+            .pending_scan
+            .get_mut()
+            .expect("asset scan slot poisoned") = Some(tokio::task::spawn_blocking(move || {
+            crate::renderer_asset_scan::load_or_scan(&app_dir, &cache_file, &anchors)
+        }));
+    }
+
+    fn current_patterns(&self) -> Value {
+        self.patterns
+            .lock()
+            .expect("patch pattern slot poisoned")
+            .clone()
+    }
+
+    /// 采用扫描结果；扫描失败时保留通配拦截，补丁照常生效。
+    fn apply_asset_scan(
+        &self,
+        outcome: std::result::Result<
+            Result<crate::renderer_asset_scan::ScanOutcome>,
+            tokio::task::JoinError,
+        >,
+        started: std::time::Instant,
+    ) -> bool {
+        let outcome = match outcome {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => {
+                log_service_event(
+                    "renderer_asset_patch.asset_scan_failed",
+                    json!({ "message": format!("{error:#}") }),
+                );
+                return false;
+            }
+            Err(error) => {
+                log_service_event(
+                    "renderer_asset_patch.asset_scan_failed",
+                    json!({ "message": error.to_string() }),
+                );
+                return false;
+            }
+        };
+        if let Some(message) = &outcome.cache_write_error {
+            log_service_event(
+                "renderer_asset_patch.asset_scan_cache_write_failed",
+                json!({ "message": message }),
+            );
+        }
+        log_service_event(
+            "renderer_asset_patch.asset_scan",
+            json!({
+                "cached": outcome.cached,
+                "numericChunks": outcome.scan.numeric_chunks,
+                "candidates": outcome.scan.candidates.len(),
+                "waitedMs": started.elapsed().as_millis() as u64,
+            }),
+        );
+        *self.patterns.lock().expect("patch pattern slot poisoned") =
+            fetch_patterns(self.disable_pet, Some(&outcome.scan));
+        true
     }
 
     fn page_stats(&self, target_id: &str) -> Option<PageStats> {
@@ -182,18 +302,40 @@ impl ServiceContext {
     }
 }
 
+/// 读取页面补丁登记的前置字面量表。表随二进制内置，由单元测试保证可解析。
+fn renderer_patch_anchors(script: &str) -> Result<Vec<String>> {
+    let start = script
+        .find(PATCH_ANCHORS_START)
+        .context("缺少前置字面量表起始标记")?
+        + PATCH_ANCHORS_START.len();
+    let end = start
+        + script[start..]
+            .find(PATCH_ANCHORS_END)
+            .context("缺少前置字面量表结束标记")?;
+    let anchors: Vec<String> =
+        serde_json::from_str(&script[start..end]).context("前置字面量表不是 JSON 字符串数组")?;
+    if anchors.is_empty() || anchors.iter().any(String::is_empty) {
+        bail!("前置字面量表不能为空，也不能含空字符串");
+    }
+    Ok(anchors)
+}
+
 fn default_cache_dir() -> PathBuf {
     codey_runtime_core::paths::default_app_state_dir().join(CACHE_DIR_NAME)
 }
 
 /// 只在请求阶段拦截名单内的脚本；未命中缓存的请求再要求暂停在响应阶段。
-fn fetch_patterns(disable_pet: bool) -> Value {
+/// 数字 chunk 有扫描结果时只拦截候选地址，否则按通配地址拦截再在正文上预筛。
+fn fetch_patterns(
+    disable_pet: bool,
+    scan: Option<&crate::renderer_asset_scan::AssetScan>,
+) -> Value {
     let pet: &[&str] = if disable_pet {
         &PET_ASSET_PREFIXES
     } else {
         &[]
     };
-    PATCHABLE_ASSET_PREFIXES
+    let mut patterns: Vec<Value> = PATCHABLE_ASSET_PREFIXES
         .iter()
         .chain(pet)
         .map(|prefix| {
@@ -203,7 +345,123 @@ fn fetch_patterns(disable_pet: bool) -> Value {
                 "requestStage": "Request",
             })
         })
-        .collect()
+        .collect();
+    let numeric_patterns = match scan {
+        Some(scan) => scan
+            .candidates
+            .iter()
+            .map(|path| format!("app://*/assets/{path}*"))
+            .collect(),
+        None => vec![NUMERIC_ASSET_URL_PATTERN.to_string()],
+    };
+    patterns.extend(numeric_patterns.into_iter().map(|url_pattern| {
+        json!({
+            "urlPattern": url_pattern,
+            "resourceType": "Script",
+            "requestStage": "Request",
+        })
+    }));
+    if disable_pet {
+        // Codex 以图片元素解码精灵图。
+        patterns.push(json!({
+            "urlPattern": PET_SPRITE_URL_PATTERN,
+            "resourceType": "Image",
+            "requestStage": "Request",
+        }));
+    }
+    Value::Array(patterns)
+}
+
+/// 内置宠物精灵图的宠物 id，如 `null-signal-spritesheet-v7.e7af0b42f5.webp` 为
+/// `null-signal`；不是精灵图时返回 None。
+fn pet_sprite_id(url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    if url.scheme() != "app" {
+        return None;
+    }
+    let name = url.path().strip_prefix("/assets/")?;
+    let stem = name.strip_suffix(".webp")?;
+    let (pet, version) = stem.rsplit_once("-spritesheet-v")?;
+    let (number, hash) = version.split_once('.')?;
+    let valid_pet = !pet.is_empty()
+        && pet
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    (valid_pet
+        && !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
+        && (8..=32).contains(&hash.len())
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| pet.to_string())
+}
+
+/// 当前选中的内置宠物；读不到设置时按 Codex 默认形象处理。自定义宠物使用
+/// 自己的精灵图地址，不会与任何内置精灵图同名。
+async fn selected_pet_id(context: &ServiceContext) -> String {
+    let Some(home) = context.codex_home.clone() else {
+        return DEFAULT_AVATAR_ID.to_string();
+    };
+    match tokio::task::spawn_blocking(move || crate::pet_slim_patch::selected_avatar_id(&home))
+        .await
+    {
+        Ok(Ok(selected)) => selected.unwrap_or_else(|| DEFAULT_AVATAR_ID.to_string()),
+        Ok(Err(error)) => {
+            log_service_event(
+                "renderer_asset_patch.selected_pet_unreadable",
+                json!({ "message": format!("{error:#}") }),
+            );
+            DEFAULT_AVATAR_ID.to_string()
+        }
+        Err(_) => DEFAULT_AVATAR_ID.to_string(),
+    }
+}
+
+/// 识别可改写的脚本 URL。语义文件名沿用旧版规则；数字 chunk 只接受根资源目录
+/// 或 async 子目录下、数字 id 点 8 至 32 位十六进制哈希的 JavaScript。
+fn is_patchable_asset_url(url: &str, disable_pet: bool) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if url.scheme() != "app" {
+        return false;
+    }
+    let path = url.path();
+    if let Some(name) = path.strip_prefix("/assets/async/") {
+        return numeric_asset_name(name);
+    }
+    let Some(name) = path.strip_prefix("/assets/") else {
+        return false;
+    };
+    numeric_asset_name(name)
+        || named_asset_name(name, &PATCHABLE_ASSET_PREFIXES)
+        || (disable_pet && named_asset_name(name, &PET_ASSET_PREFIXES))
+}
+
+pub(crate) fn numeric_asset_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".js") else {
+        return false;
+    };
+    let Some((id, hash)) = stem.split_once('.') else {
+        return false;
+    };
+    !id.is_empty()
+        && id.len() <= 10
+        && id.bytes().all(|byte| byte.is_ascii_digit())
+        && (8..=32).contains(&hash.len())
+        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn named_asset_name(name: &str, prefixes: &[&str]) -> bool {
+    let Some(stem) = [".js", ".mjs", ".cjs"]
+        .iter()
+        .find_map(|extension| name.strip_suffix(extension))
+    else {
+        return false;
+    };
+    prefixes.iter().any(|prefix| {
+        stem.strip_prefix(prefix)
+            .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(['~', '-']))
+    })
 }
 
 type CommandResult = Result<Value, String>;
@@ -218,11 +476,17 @@ struct BrowserConnection {
 
 impl BrowserConnection {
     fn frame(id: u64, method: &str, params: Value, session_id: Option<&str>) -> Message {
-        let mut payload = json!({ "id": id, "method": method, "params": params });
+        let mut payload = serde_json::Map::new();
+        payload.insert("id".to_string(), Value::from(id));
+        payload.insert("method".to_string(), Value::String(method.to_string()));
+        payload.insert("params".to_string(), params);
         if let Some(session_id) = session_id {
-            payload["sessionId"] = json!(session_id);
+            payload.insert(
+                "sessionId".to_string(),
+                Value::String(session_id.to_string()),
+            );
         }
-        Message::Text(payload.to_string().into())
+        Message::Text(Value::Object(payload).to_string().into())
     }
 
     async fn call(&self, method: &str, params: Value, session_id: Option<&str>) -> Result<Value> {
@@ -333,6 +597,26 @@ where
         pending: Pending::default(),
     };
     let mut tasks = tokio::task::JoinSet::new();
+    // 资源扫描与连接调试端点并行进行。已完成时（通常是读到缓存）在挂载页面
+    // 前换上精确规则；未完成时先按通配规则挂载，完成后再更新各页面。
+    let pending_scan = context
+        .pending_scan
+        .lock()
+        .expect("asset scan slot poisoned")
+        .take();
+    if let Some(scan) = pending_scan {
+        let started = std::time::Instant::now();
+        if scan.is_finished() {
+            context.apply_asset_scan(scan.await, started);
+        } else {
+            let (connection, context) = (connection.clone(), context.clone());
+            tasks.spawn(async move {
+                if context.apply_asset_scan(scan.await, started) {
+                    refresh_fetch_patterns(&connection, &context).await;
+                }
+            });
+        }
+    }
     tasks.spawn(attach_pages(connection.clone(), context.clone()));
     let result = loop {
         tokio::select! {
@@ -377,6 +661,33 @@ where
     drop(connection);
     let _ = writer_task.await;
     result
+}
+
+/// 把当前拦截规则下发给已挂上的页面；重复 Fetch.enable 会替换原有规则。
+async fn refresh_fetch_patterns(connection: &BrowserConnection, context: &ServiceContext) {
+    let patterns = context.current_patterns();
+    let sessions: Vec<String> = context
+        .pages
+        .lock()
+        .expect("patch page registry poisoned")
+        .keys()
+        .cloned()
+        .collect();
+    for session in sessions {
+        if let Err(error) = connection
+            .call(
+                "Fetch.enable",
+                json!({ "patterns": patterns }),
+                Some(session.as_str()),
+            )
+            .await
+        {
+            log_service_event(
+                "renderer_asset_patch.fetch_refresh_failed",
+                json!({ "message": format!("{error:#}") }),
+            );
+        }
+    }
 }
 
 /// 开启自动挂载并挂上已存在的页面。自动挂载只覆盖之后创建的目标，主窗口常在
@@ -513,7 +824,7 @@ async fn on_attached(connection: BrowserConnection, context: Arc<ServiceContext>
     if let Err(error) = connection
         .call(
             "Fetch.enable",
-            json!({ "patterns": context.patterns }),
+            json!({ "patterns": context.current_patterns() }),
             Some(session_id),
         )
         .await
@@ -550,29 +861,53 @@ async fn on_request_paused(
             session,
         );
     };
+    if context.disable_pet
+        && let Some(pet) = pet_sprite_id(url)
+    {
+        // 关闭宠物时只放行当前选中宠物的精灵图：语音浮窗仍会显示它，其余
+        // 每张解码后约 13 MB，主要由设置页的选择网格一次性加载。
+        if pet == selected_pet_id(&context).await {
+            pass_through();
+        } else {
+            connection.notify(
+                "Fetch.failRequest",
+                json!({ "requestId": request_id, "errorReason": "BlockedByClient" }),
+                session,
+            );
+            context.update_page(&session_id, |stats| stats.blocked += 1);
+        }
+        return;
+    }
+    if !is_patchable_asset_url(url, context.disable_pet) {
+        pass_through();
+        return;
+    }
     let response_stage =
         params.get("responseStatusCode").is_some() || params.get("responseErrorReason").is_some();
     if !response_stage {
         context.update_page(&session_id, |stats| stats.intercepted += 1);
+        let Ok(permit) = context.permits.acquire().await else {
+            pass_through();
+            return;
+        };
         match context.cache.load(url).await {
             Some(CachedAsset::Patched(asset)) => {
+                let mut params = json!({
+                    "requestId": request_id,
+                    "responseCode": asset.status,
+                    "responseHeaders": asset.headers,
+                });
+                params["body"] = Value::String(asset.body_base64);
                 let fulfilled = connection
-                    .call(
-                        "Fetch.fulfillRequest",
-                        json!({
-                            "requestId": request_id,
-                            "responseCode": asset.status,
-                            "responseHeaders": asset.headers,
-                            "body": asset.body_base64,
-                        }),
-                        session,
-                    )
+                    .call("Fetch.fulfillRequest", params, session)
                     .await;
                 match fulfilled {
-                    Ok(_) => context.update_page(&session_id, |stats| {
-                        stats.patched += 1;
-                        stats.cache_hits += 1;
-                    }),
+                    Ok(_) => {
+                        context.update_page(&session_id, |stats| {
+                            stats.patched += 1;
+                            stats.cache_hits += 1;
+                        });
+                    }
                     Err(error) => {
                         log_patch_skip(url, format!("fulfill cached: {error:#}"));
                         context.update_page(&session_id, |stats| stats.skipped += 1);
@@ -582,9 +917,11 @@ async fn on_request_paused(
             }
             Some(CachedAsset::Unchanged) => {
                 context.update_page(&session_id, |stats| stats.cache_hits += 1);
+                drop(permit);
                 pass_through();
             }
             None => {
+                drop(permit);
                 let intercept = connection
                     .call(
                         "Fetch.continueRequest",
@@ -619,17 +956,14 @@ async fn on_request_paused(
     match patch_response(&connection, &context, session, request_id, url).await {
         Ok(Some(patched)) => {
             let body_base64 = base64::engine::general_purpose::STANDARD.encode(patched.as_bytes());
+            let mut params = json!({
+                "requestId": request_id,
+                "responseCode": status,
+                "responseHeaders": headers,
+            });
+            params["body"] = Value::String(body_base64);
             let fulfilled = connection
-                .call(
-                    "Fetch.fulfillRequest",
-                    json!({
-                        "requestId": request_id,
-                        "responseCode": status,
-                        "responseHeaders": headers,
-                        "body": body_base64,
-                    }),
-                    session,
-                )
+                .call("Fetch.fulfillRequest", params, session)
                 .await;
             if let Err(error) = fulfilled {
                 log_patch_skip(url, format!("fulfillRequest: {error:#}"));
@@ -673,33 +1007,35 @@ async fn patch_response(
             session,
         )
         .await?;
-    let raw = body["result"]["body"].as_str().unwrap_or_default();
-    let source = if body["result"]["base64Encoded"].as_bool().unwrap_or(false) {
-        String::from_utf8(
-            base64::engine::general_purpose::STANDARD
-                .decode(raw)
-                .context("响应正文 base64 解码失败")?,
-        )
-        .context("响应正文不是 UTF-8")?
-    } else {
-        raw.to_string()
-    };
-    let response = connection
-        .call(
-            "Runtime.evaluate",
-            json!({
-                "expression": patch_expression(&context.install_script, url, &source)?,
-                "returnByValue": true,
-            }),
-            session,
-        )
+    let source = take_response_source(body)?;
+    // 数字 chunk 大多与补丁无关：先按前置字面量预筛，免得逐个把源码连同补丁
+    // 脚本送进页面求值。
+    if !context
+        .anchors
+        .iter()
+        .any(|anchor| source.contains(anchor.as_str()))
+    {
+        return Ok(None);
+    }
+    let expression = patch_expression(&context.install_script, url, source)?;
+    let mut params = serde_json::Map::new();
+    params.insert("expression".to_string(), Value::String(expression));
+    params.insert("returnByValue".to_string(), Value::Bool(true));
+    let mut response = connection
+        .call("Runtime.evaluate", Value::Object(params), session)
         .await?;
     if let Some(exception) = response["result"].get("exceptionDetails") {
         bail!("补丁求值抛出异常：{exception}");
     }
+    let outcome_value = response
+        .get_mut("result")
+        .and_then(|result| result.get_mut("result"))
+        .and_then(|result| result.get_mut("value"))
+        .map(Value::take)
+        .unwrap_or(Value::Null);
+    drop(response);
     let outcome: PatchOutcome =
-        serde_json::from_value(response["result"]["result"]["value"].clone())
-            .context("补丁求值结果格式无效")?;
+        serde_json::from_value(outcome_value).context("补丁求值结果格式无效")?;
     for record in &outcome.logs {
         record_patch_log(record);
     }
@@ -707,6 +1043,30 @@ async fn patch_response(
         bail!("页面未能装上补丁入口");
     }
     Ok(outcome.patched)
+}
+
+fn take_response_source(mut body: Value) -> Result<String> {
+    let base64_encoded = body
+        .get("result")
+        .and_then(|result| result.get("base64Encoded"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let raw = body
+        .pointer_mut("/result/body")
+        .and_then(|value| match value {
+            Value::String(text) => Some(std::mem::take(text)),
+            _ => None,
+        })
+        .unwrap_or_default();
+    if !base64_encoded {
+        return Ok(raw);
+    }
+    String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(raw)
+            .context("响应正文 base64 解码失败")?,
+    )
+    .context("响应正文不是 UTF-8")
 }
 
 #[derive(Deserialize)]
@@ -720,7 +1080,9 @@ struct PatchOutcome {
 
 /// 页面里的补丁入口缺失时就地安装（幂等）；失败记录经返回值带回，不依赖
 /// CDP binding。
-fn patch_expression(install_script: &str, url: &str, source: &str) -> Result<String> {
+fn patch_expression(install_script: &str, url: &str, source: String) -> Result<String> {
+    let url = serde_json::to_string(url).context("补丁 URL 序列化失败")?;
+    let source = serde_json::to_string(&source).context("补丁源码序列化失败")?;
     Ok(format!(
         "(()=>{{const logs=[];const previous=globalThis.__codeyPatchLog;\
 globalThis.__codeyPatchLog=(record)=>{{logs.push(String(record))}};\
@@ -730,8 +1092,8 @@ if(typeof entry!==\"function\")return{{installed:false,logs}};\
 return{{installed:true,patched:entry({url},{source}),logs}}}}\
 catch(error){{logs.push(String(error));return{{installed:false,logs}}}}\
 finally{{if(previous===undefined)delete globalThis.__codeyPatchLog;else globalThis.__codeyPatchLog=previous}}}})()",
-        url = serde_json::to_string(url).context("补丁 URL 序列化失败")?,
-        source = serde_json::to_string(source).context("补丁源码序列化失败")?,
+        url = url,
+        source = source,
     ))
 }
 
@@ -741,6 +1103,8 @@ finally{{if(previous===undefined)delete globalThis.__codeyPatchLog;else globalTh
 struct PatchCache {
     dir: PathBuf,
     tag: String,
+    /// 距上次整理以来写入的「无需改写」记录数。
+    unchanged_since_prune: Arc<AtomicUsize>,
 }
 
 enum CachedAsset {
@@ -779,7 +1143,12 @@ impl PatchCache {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        Self { dir, tag }
+        Self {
+            dir,
+            tag,
+            // 首次写入即整理一次，清掉其他补丁版本留下的条目。
+            unchanged_since_prune: Arc::new(AtomicUsize::new(UNCHANGED_STORES_PER_PRUNE - 1)),
+        }
     }
 
     fn entry_name(&self, url: &str) -> Option<String> {
@@ -801,6 +1170,10 @@ impl PatchCache {
             return;
         };
         let cache = self.clone();
+        let prune = patch.is_some()
+            || (self.unchanged_since_prune.fetch_add(1, Ordering::Relaxed) + 1)
+                % UNCHANGED_STORES_PER_PRUNE
+                == 0;
         let _ = tokio::task::spawn_blocking(move || {
             if let Err(error) = store_entry(&cache.dir, &name, patch) {
                 log_service_event(
@@ -808,17 +1181,19 @@ impl PatchCache {
                     json!({ "entry": name, "message": format!("{error:#}") }),
                 );
             }
-            cache.prune();
+            if prune {
+                cache.prune();
+            }
         })
         .await;
     }
 
     fn prune(&self) {
-        self.prune_to(MAX_CACHE_BYTES);
+        self.prune_to(MAX_CACHE_BYTES, MAX_CACHE_ENTRIES);
     }
 
-    /// 删掉其他补丁版本的条目，并按最近使用时间把总量压到上限以内。
-    fn prune_to(&self, max_bytes: u64) {
+    /// 删掉其他补丁版本的条目，并按最近使用时间把总量和条目数压到上限以内。
+    fn prune_to(&self, max_bytes: u64, max_entries: usize) {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
             return;
         };
@@ -843,9 +1218,9 @@ impl PatchCache {
         }
         current.sort_by_key(|(used, _, _)| std::cmp::Reverse(*used));
         let mut total = 0;
-        for (_, base, size) in current {
+        for (index, (_, base, size)) in current.into_iter().enumerate() {
             total += size;
-            if total > max_bytes {
+            if total > max_bytes || index >= max_entries {
                 let _ = std::fs::remove_file(self.dir.join(format!("{base}.meta.json")));
                 let _ = std::fs::remove_file(self.dir.join(&base));
             }
@@ -990,9 +1365,15 @@ mod tests {
 
     impl TestService {
         async fn start(cache_dir: &Path) -> Self {
+            Self::start_with(cache_dir, |_| {}).await
+        }
+
+        async fn start_with(cache_dir: &Path, configure: impl FnOnce(&mut ServiceContext)) -> Self {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            let context = Arc::new(ServiceContext::new(true, cache_dir.to_path_buf()));
+            let mut context = ServiceContext::new(true, cache_dir.to_path_buf());
+            configure(&mut context);
+            let context = Arc::new(context);
             let client = tokio::spawn({
                 let context = context.clone();
                 async move {
@@ -1107,7 +1488,12 @@ mod tests {
         assert_eq!(fetch["sessionId"], "page-session");
         let patterns = fetch["params"]["patterns"].as_array().unwrap();
         assert!(patterns.iter().all(|pattern| {
-            pattern["resourceType"] == "Script"
+            let expected_type = if pattern["urlPattern"] == PET_SPRITE_URL_PATTERN {
+                "Image"
+            } else {
+                "Script"
+            };
+            pattern["resourceType"] == expected_type
                 && pattern["requestStage"] == "Request"
                 && pattern["urlPattern"]
                     .as_str()
@@ -1175,7 +1561,7 @@ mod tests {
 
         service.send(paused("s1", "r1", url, true)).await;
         let body = service.expect("Fetch.getResponseBody").await;
-        let encoded = base64::engine::general_purpose::STANDARD.encode("old");
+        let encoded = base64::engine::general_purpose::STANDARD.encode("old.sendMessageFromView");
         service
             .reply(&body, json!({ "body": encoded, "base64Encoded": true }))
             .await;
@@ -1183,7 +1569,7 @@ mod tests {
         assert_eq!(evaluate["sessionId"], "s1");
         let expression = evaluate["params"]["expression"].as_str().unwrap();
         assert!(expression.contains("__codeyRendererPatchEntry"));
-        assert!(expression.contains("\"old\""));
+        assert!(expression.contains("\"old.sendMessageFromView\""));
         service
             .reply(
                 &evaluate,
@@ -1240,7 +1626,9 @@ mod tests {
         let url = "app://-/assets/app-initial-90eb42395b7d.js";
         service.send(paused("s1", "r1", url, true)).await;
         let body = service.expect("Fetch.getResponseBody").await;
-        service.reply(&body, json!({ "body": "old" })).await;
+        service
+            .reply(&body, json!({ "body": "old.sendMessageFromView" }))
+            .await;
         let evaluate = service.expect("Runtime.evaluate").await;
         service
             .reply(
@@ -1256,8 +1644,253 @@ mod tests {
         service.finish().await;
     }
 
+    #[tokio::test]
+    async fn cached_fulfillments_release_a_shared_limited_slot() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = TestService::start(temp.path()).await;
+        service.answer_startup(json!([])).await;
+        service.attach_page("s1", "main", "", true).await;
+        let _ = service.expect("Runtime.runIfWaitingForDebugger").await;
+        let url = "app://-/assets/app-shared-52443cbe9ac4.js";
+        service
+            .context
+            .cache
+            .store(
+                url,
+                Some(StoredPatch {
+                    status: 200,
+                    headers: vec![json!({ "name": "Content-Type", "value": "text/javascript" })],
+                    body: "patched()".to_string(),
+                }),
+            )
+            .await;
+
+        for request_id in ["r1", "r2", "r3"] {
+            service.send(paused("s1", request_id, url, false)).await;
+        }
+        let first = service.expect("Fetch.fulfillRequest").await;
+        let second = service.expect("Fetch.fulfillRequest").await;
+        assert_ne!(first["params"]["requestId"], second["params"]["requestId"]);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), service.recv())
+                .await
+                .is_err()
+        );
+        service.reply(&first, json!({})).await;
+        let third = service.expect("Fetch.fulfillRequest").await;
+        assert_ne!(third["params"]["requestId"], first["params"]["requestId"]);
+        assert_ne!(third["params"]["requestId"], second["params"]["requestId"]);
+        service.reply(&second, json!({})).await;
+        service.reply(&third, json!({})).await;
+        service.finish().await;
+    }
+
+    #[tokio::test]
+    async fn cold_responses_and_cached_requests_share_slots_without_holding_idle_permits() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = TestService::start(temp.path()).await;
+        service.answer_startup(json!([])).await;
+        service.attach_page("s1", "main", "", true).await;
+        let _ = service.expect("Runtime.runIfWaitingForDebugger").await;
+        let cached_url = "app://-/assets/app-shared-52443cbe9ac4.js";
+        let cold_url = "app://-/assets/app-initial-90eb42395b7d.js";
+        service
+            .context
+            .cache
+            .store(
+                cached_url,
+                Some(StoredPatch {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: "patched()".to_string(),
+                }),
+            )
+            .await;
+
+        service.send(paused("s1", "cold", cold_url, false)).await;
+        let intercept = service.expect("Fetch.continueRequest").await;
+        assert_eq!(intercept["params"]["interceptResponse"], true);
+        service.reply(&intercept, json!({})).await;
+
+        service
+            .send(paused("s1", "warm-1", cached_url, false))
+            .await;
+        let first = service.expect("Fetch.fulfillRequest").await;
+        service
+            .send(paused("s1", "warm-2", cached_url, false))
+            .await;
+        let second = service.expect("Fetch.fulfillRequest").await;
+        service.send(paused("s1", "cold", cold_url, true)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), service.recv())
+                .await
+                .is_err()
+        );
+        service.reply(&first, json!({})).await;
+        let body = service.expect("Fetch.getResponseBody").await;
+        service
+            .reply(&body, json!({ "body": "old.sendMessageFromView" }))
+            .await;
+        let evaluate = service.expect("Runtime.evaluate").await;
+        service
+            .reply(
+                &evaluate,
+                json!({ "result": { "value": { "installed": true, "patched": "new()", "logs": [] } } }),
+            )
+            .await;
+        let fulfilled = service.expect("Fetch.fulfillRequest").await;
+        service.reply(&fulfilled, json!({})).await;
+        service.reply(&second, json!({})).await;
+        service.finish().await;
+    }
+
+    #[tokio::test]
+    async fn cached_fulfillment_errors_release_the_shared_slot() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = TestService::start(temp.path()).await;
+        service.answer_startup(json!([])).await;
+        service.attach_page("s1", "main", "", true).await;
+        let _ = service.expect("Runtime.runIfWaitingForDebugger").await;
+        let url = "app://-/assets/app-shared-52443cbe9ac4.js";
+        service
+            .context
+            .cache
+            .store(
+                url,
+                Some(StoredPatch {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: "patched()".to_string(),
+                }),
+            )
+            .await;
+        service.send(paused("s1", "r1", url, false)).await;
+        let first = service.expect("Fetch.fulfillRequest").await;
+        service.send(paused("s1", "r2", url, false)).await;
+        let second = service.expect("Fetch.fulfillRequest").await;
+        service.send(paused("s1", "r3", url, false)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), service.recv())
+                .await
+                .is_err()
+        );
+        service
+            .send(json!({
+                "id": first["id"],
+                "error": { "message": "request cancelled" }
+            }))
+            .await;
+        let pass = service.expect("Fetch.continueRequest").await;
+        assert_eq!(pass["params"], json!({ "requestId": "r1" }));
+        let third = service.expect("Fetch.fulfillRequest").await;
+        assert_eq!(third["params"]["requestId"], "r3");
+        service.reply(&second, json!({})).await;
+        service.reply(&third, json!({})).await;
+        service.finish().await;
+    }
+
     #[test]
-    fn interception_covers_only_named_scripts() {
+    fn plain_response_source_moves_instead_of_copying() {
+        let mut body = json!({ "result": { "body": "", "base64Encoded": false } });
+        let stored = body
+            .pointer_mut("/result/body")
+            .and_then(|value| match value {
+                Value::String(text) => Some(text),
+                _ => None,
+            })
+            .unwrap();
+        stored.push_str(&"x".repeat(8 << 20));
+        let pointer = stored.as_ptr();
+        let source = take_response_source(body).unwrap();
+        assert_eq!(source.as_ptr(), pointer);
+    }
+
+    #[tokio::test]
+    async fn assets_without_patch_anchors_skip_page_evaluation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut service = TestService::start(temp.path()).await;
+        service.answer_startup(json!([])).await;
+        service.attach_page("s1", "main", "", true).await;
+        let _ = service.expect("Runtime.runIfWaitingForDebugger").await;
+        let url = "app://-/assets/async/634303.855e57c3e7.js";
+        service.send(paused("s1", "r1", url, true)).await;
+        let body = service.expect("Fetch.getResponseBody").await;
+        service
+            .reply(&body, json!({ "body": "export const icon=1;" }))
+            .await;
+        let pass = service.expect("Fetch.continueRequest").await;
+        assert_eq!(pass["params"], json!({ "requestId": "r1" }));
+        let mut cached = false;
+        for _ in 0..50 {
+            if matches!(
+                service.context.cache.load(url).await,
+                Some(CachedAsset::Unchanged)
+            ) {
+                cached = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            cached,
+            "unrelated numeric chunks should be cached as unchanged"
+        );
+        service.finish().await;
+    }
+
+    #[test]
+    fn patch_anchor_table_parses_and_covers_every_gate_precondition() {
+        let anchors = renderer_patch_anchors(RENDERER_ASSET_PATCH_SCRIPT).unwrap();
+        for required in [
+            "codexComposerAdapter.CodexComposerAdapter.interruptThreadError",
+            "AppServerRequestClient is missing a message dispatcher",
+            "serviceTierAccess:",
+            ".startTurn(",
+        ] {
+            assert!(
+                anchors.iter().any(|anchor| anchor == required),
+                "{required}"
+            );
+        }
+        assert!(renderer_patch_anchors("const a=[];").is_err());
+        assert!(
+            renderer_patch_anchors(&format!("{PATCH_ANCHORS_START}[]{PATCH_ANCHORS_END}")).is_err()
+        );
+    }
+
+    #[test]
+    fn prune_caps_entry_count_by_recent_use() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = PatchCache::new(temp.path().to_path_buf(), "patch-script");
+        for index in 0..4u64 {
+            let entry = format!("{}-{index}.11111111.js", cache.tag);
+            store_entry(temp.path(), &entry, None).unwrap();
+            std::fs::File::options()
+                .append(true)
+                .open(temp.path().join(format!("{entry}.meta.json")))
+                .unwrap()
+                .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(1_000 + index))
+                .unwrap();
+        }
+        cache.prune_to(u64::MAX, 2);
+        let mut left: Vec<String> = std::fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".meta.json"))
+            .collect();
+        left.sort();
+        let tag = &cache.tag;
+        assert_eq!(
+            left,
+            [
+                format!("{tag}-2.11111111.js.meta.json"),
+                format!("{tag}-3.11111111.js.meta.json"),
+            ]
+        );
+    }
+
+    #[test]
+    fn interception_covers_named_and_numeric_scripts() {
         let urls = |patterns: Value| -> Vec<String> {
             patterns
                 .as_array()
@@ -1266,12 +1899,215 @@ mod tests {
                 .map(|pattern| pattern["urlPattern"].as_str().unwrap().to_string())
                 .collect()
         };
-        let with_pet = urls(fetch_patterns(true));
-        let without_pet = urls(fetch_patterns(false));
+        let with_pet = urls(fetch_patterns(true, None));
+        let without_pet = urls(fetch_patterns(false, None));
         assert!(with_pet.contains(&"app://*/assets/app-initial*".to_string()));
         assert!(with_pet.contains(&"app://*/assets/pets-settings*".to_string()));
+        assert!(with_pet.contains(&NUMERIC_ASSET_URL_PATTERN.to_string()));
+        assert!(with_pet.contains(&PET_SPRITE_URL_PATTERN.to_string()));
         assert!(!without_pet.iter().any(|url| url.contains("pets-settings")));
-        assert_eq!(with_pet.len(), without_pet.len() + PET_ASSET_PREFIXES.len());
+        assert!(!without_pet.contains(&PET_SPRITE_URL_PATTERN.to_string()));
+        assert_eq!(
+            with_pet.len(),
+            without_pet.len() + PET_ASSET_PREFIXES.len() + 1
+        );
+        assert!(
+            with_pet
+                .iter()
+                .filter(|pattern| *pattern == NUMERIC_ASSET_URL_PATTERN)
+                .count()
+                == 1
+        );
+    }
+
+    #[test]
+    fn asset_scans_replace_the_numeric_wildcard_with_exact_chunks() {
+        let urls = |patterns: Value| -> Vec<String> {
+            patterns
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|pattern| pattern["urlPattern"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let scan = crate::renderer_asset_scan::AssetScan {
+            numeric_chunks: 9012,
+            candidates: vec![
+                "348410.ae8bb87271.js".to_string(),
+                "async/24191.589dcc9878.js".to_string(),
+            ],
+        };
+        let exact = urls(fetch_patterns(false, Some(&scan)));
+        assert!(exact.contains(&"app://*/assets/348410.ae8bb87271.js*".to_string()));
+        assert!(exact.contains(&"app://*/assets/async/24191.589dcc9878.js*".to_string()));
+        assert!(!exact.contains(&NUMERIC_ASSET_URL_PATTERN.to_string()));
+        assert!(exact.contains(&"app://*/assets/app-initial*".to_string()));
+
+        let named = crate::renderer_asset_scan::AssetScan {
+            numeric_chunks: 0,
+            candidates: Vec::new(),
+        };
+        assert_eq!(
+            urls(fetch_patterns(false, Some(&named))).len(),
+            PATCHABLE_ASSET_PREFIXES.len()
+        );
+    }
+
+    #[test]
+    fn pet_sprites_are_identified_by_their_hashed_file_names() {
+        for (url, pet) in [
+            (
+                "app://-/assets/hoots-spritesheet-v8.52075ad356.webp",
+                "hoots",
+            ),
+            (
+                "app://codex/assets/null-signal-spritesheet-v7.e7af0b42f5.webp?x=1",
+                "null-signal",
+            ),
+        ] {
+            assert_eq!(pet_sprite_id(url).as_deref(), Some(pet), "{url}");
+        }
+        for url in [
+            "https://codex.example/assets/hoots-spritesheet-v8.52075ad356.webp",
+            "app://-/assets/async/hoots-spritesheet-v8.52075ad356.webp",
+            "app://-/assets/hoots-spritesheet-v8.webp",
+            "app://-/assets/hoots-spritesheet-v8.52075ad356.png",
+            "app://-/assets/Hoots-spritesheet-v8.52075ad356.webp",
+            "app://-/assets/-spritesheet-v8.52075ad356.webp",
+            "app://-/assets/hoots-spritesheet-vX.52075ad356.webp",
+            "app://-/assets/bsod-spritesheet-v5.not-a-hash.webp",
+        ] {
+            assert_eq!(pet_sprite_id(url), None, "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn slim_pet_keeps_only_the_selected_pet_sprite() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join(".codex-global-state.json"),
+            r#"{"selected-avatar-id":"hoots"}"#,
+        )
+        .unwrap();
+        let mut service = TestService::start_with(&temp.path().join("cache"), |context| {
+            context.codex_home = Some(home.clone());
+        })
+        .await;
+        service.answer_startup(json!([])).await;
+        service.attach_page("s1", "main", "", true).await;
+        let _ = service.expect("Runtime.runIfWaitingForDebugger").await;
+
+        let selected = "app://-/assets/hoots-spritesheet-v8.52075ad356.webp";
+        service.send(paused("s1", "r1", selected, false)).await;
+        let pass = service.expect("Fetch.continueRequest").await;
+        assert_eq!(pass["params"], json!({ "requestId": "r1" }));
+
+        let other = "app://-/assets/dewey-spritesheet-v5.81cf696c13.webp";
+        service.send(paused("s1", "r2", other, false)).await;
+        let blocked = service.expect("Fetch.failRequest").await;
+        assert_eq!(
+            blocked["params"],
+            json!({ "requestId": "r2", "errorReason": "BlockedByClient" })
+        );
+
+        std::fs::remove_file(home.join(".codex-global-state.json")).unwrap();
+        let default = "app://-/assets/codex-spritesheet-v6.922b99db4b.webp";
+        service.send(paused("s1", "r3", default, false)).await;
+        assert_eq!(
+            service.expect("Fetch.continueRequest").await["params"],
+            json!({ "requestId": "r3" }),
+            "without a saved choice Codex shows its default pet"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(service.context.page_stats("main").unwrap().blocked, 1);
+        service.finish().await;
+    }
+
+    #[tokio::test]
+    async fn late_asset_scans_narrow_interception_on_attached_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let mut service = TestService::start_with(temp.path(), |context| {
+            *context.pending_scan.get_mut().unwrap() =
+                Some(tokio::task::spawn_blocking(move || {
+                    gate.recv().unwrap();
+                    Ok(crate::renderer_asset_scan::ScanOutcome {
+                        scan: crate::renderer_asset_scan::AssetScan {
+                            numeric_chunks: 2,
+                            candidates: vec!["async/24191.589dcc9878.js".to_string()],
+                        },
+                        cached: false,
+                        cache_write_error: None,
+                    })
+                }));
+        })
+        .await;
+        service.answer_startup(json!([])).await;
+        service
+            .send(json!({ "method": "Target.attachedToTarget", "params": {
+                "sessionId": "s1", "waitingForDebugger": false,
+                "targetInfo": { "targetId": "main", "type": "page", "url": "" }
+            }}))
+            .await;
+        let broad = service.expect("Fetch.enable").await;
+        assert!(
+            broad["params"]["patterns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|pattern| pattern["urlPattern"] == NUMERIC_ASSET_URL_PATTERN)
+        );
+        service.reply(&broad, json!({})).await;
+
+        release.send(()).unwrap();
+        let narrowed = service.expect("Fetch.enable").await;
+        assert_eq!(narrowed["sessionId"], "s1");
+        let patterns = narrowed["params"]["patterns"].as_array().unwrap();
+        assert!(
+            patterns
+                .iter()
+                .any(|pattern| pattern["urlPattern"] == "app://*/assets/async/24191.589dcc9878.js*")
+        );
+        assert!(
+            !patterns
+                .iter()
+                .any(|pattern| pattern["urlPattern"] == NUMERIC_ASSET_URL_PATTERN)
+        );
+        service.reply(&narrowed, json!({})).await;
+        service.finish().await;
+    }
+
+    #[test]
+    fn numeric_assets_require_bounded_hashed_chunk_names() {
+        for url in [
+            "app://-/assets/104974.1e9a7f6707.js",
+            "app://codex/assets/async/634303.855e57c3e7.js?cache=1#loader",
+        ] {
+            assert!(is_patchable_asset_url(url, false), "{url}");
+        }
+        assert!(is_patchable_asset_url(
+            "app://-/assets/app-initial-90eb42395b7d.js",
+            false
+        ));
+        assert!(is_patchable_asset_url(
+            "app://-/assets/pets-settings-90eb42395b7d.js",
+            true
+        ));
+        for url in [
+            "https://codex.example/assets/async/634303.855e57c3e7.js",
+            "app://-/assets/async/composer.855e57c3e7.js",
+            "app://-/assets/async/634303.js",
+            "app://-/assets/async/634303.not-a-hash.js",
+            "app://-/assets/async/634303.855e57c3e7.mjs",
+            "app://-/assets/async/634303.855e57c3e7.js.map",
+            "app://-/assets/other/634303.855e57c3e7.js",
+            "app://-/assets/634303.855e57c3e7.js/extra",
+            "app://-/assets/12345678901.855e57c3e7.js",
+        ] {
+            assert!(!is_patchable_asset_url(url, true), "{url}");
+        }
     }
 
     #[test]
@@ -1293,6 +2129,8 @@ mod tests {
             "app-initial-90eb42395b7d.js",
             "app-primary~b4ce9e46.mjs",
             "general-settings-679bf39c78a4.js",
+            "104974.1e9a7f6707.js",
+            "634303.855e57c3e7.js",
         ] {
             assert!(cacheable_asset_name(name), "{name}");
         }
@@ -1300,6 +2138,9 @@ mod tests {
             "app-initial.js",
             "app-initial-dev.js",
             "app-initial-90eb4239.css",
+            "634303.js",
+            "634303.not-a-hash.js",
+            "634303.855e57c3e7.js.map",
             "..-90eb42395b7d.js",
             "app initial-90eb42395b7d.js",
         ] {
@@ -1309,6 +2150,10 @@ mod tests {
         assert_eq!(
             cache.entry_name("app://-/assets/app-initial-90eb42395b7d.js?build=1#x"),
             Some(format!("{}-app-initial-90eb42395b7d.js", cache.tag))
+        );
+        assert_eq!(
+            cache.entry_name("app://-/assets/async/634303.855e57c3e7.js?build=1#x"),
+            Some(format!("{}-634303.855e57c3e7.js", cache.tag))
         );
     }
 
@@ -1371,7 +2216,7 @@ mod tests {
                 .set_modified(used)
                 .unwrap();
         }
-        cache.prune_to(600);
+        cache.prune_to(600, usize::MAX);
         let mut left: Vec<String> = std::fs::read_dir(temp.path())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())

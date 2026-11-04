@@ -2063,7 +2063,14 @@ async fn spawn_and_inject_runtime(
     // 资产补丁服务先于 Codex 拉起：端点一出现就挂上页面，Fetch 拦截赶在主窗口
     // 首次导航之前落位。调试端口在 Chromium 主进程就绪后先于 CLI 包装器握手
     // 可用，与其并行预取页面目标；spawn 失败时直接放弃即可。
-    crate::renderer_asset_patch::start_service(patch.debug_port, config.slim_codex_pet);
+    crate::renderer_asset_patch::start_service(
+        patch.debug_port,
+        config.slim_codex_pet,
+        Some(crate::renderer_asset_patch::CodexPaths {
+            app_dir: storage.app_dir.clone(),
+            codex_home: home.to_path_buf(),
+        }),
+    );
     let target_prefetch = cdp::spawn_injectable_target_prefetch(patch.debug_port);
     let mut spawned = match spawn_codex(
         &mut storage.app_dir,

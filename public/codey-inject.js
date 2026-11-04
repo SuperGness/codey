@@ -2106,6 +2106,10 @@
   };
   window.__codeyCodexAssetReferencesFromSource = codexAssetReferencesFromSource;
 
+  const numericCodexChunkUrl = (url) => (
+    /\/assets\/(?:async\/)?\d{1,10}\.[a-f0-9]{8,32}\.js(?:[?#]|$)/i.test(String(url || ""))
+  );
+
   const discoverCodexAppAssetUrls = async () => {
     const loadedUrls = codexAppAssetUrls();
     const discoveredUrls = loadedUrls.filter((url) => (
@@ -2118,6 +2122,8 @@
       : (typeof fetch === "function" ? fetch : null);
     if (!fetchAsset) return discoveredUrls;
 
+    // rspack 构建的数字 chunk 只导出模块工厂表，不含按名引用，导入后也拿不到
+    // 模块实例，抓取它们只会白白读取大文件。
     const scriptUrls = [...new Set([
       ...Array.from(document.scripts || []).map((script) => script.src),
       ...loadedUrls,
@@ -2126,6 +2132,7 @@
       && !url.includes("app-server-manager-signals-")
       && !url.includes("app-initial-")
       && !url.includes("app-shared-")
+      && !numericCodexChunkUrl(url)
     )).slice(0, 6);
     for (const scriptUrl of scriptUrls) {
       try {
@@ -2644,12 +2651,15 @@
     };
   };
 
-  const registeredMessageDeletionController = (feature) => {
-    if (feature !== "deleteMessages") return null;
+  // 渲染补丁在原生管理器被读取时登记本机实例。登记后各项会话能力都直接复用
+  // 它，不必遍历 React 或按文件名导入资源（Codex 26.1029 起资源全是数字 chunk）。
+  const registeredSessionController = (feature) => {
     try {
       const registry = globalThis.__codeyAppServerManagers;
       const manager = registry instanceof Map ? registry.get("local") : null;
-      return isLocalMessageDeletionManager(manager) ? managerSessionController(manager) : null;
+      if (!manager || manager.disposed === true) return null;
+      const controller = managerSessionController(manager);
+      return sessionControllerLooksUsable(controller, feature) ? controller : null;
     } catch {
       return null;
     }
@@ -2697,7 +2707,7 @@
 
   const discoverCodexSessionController = async (feature) => {
     if (disposed) throw unavailableCapability(feature);
-    const registered = registeredMessageDeletionController(feature);
+    const registered = registeredSessionController(feature);
     if (registered) {
       window.__codeyCodexSessionController = registered;
       return registered;
@@ -2740,7 +2750,7 @@
           : await import(url);
         // 旧安装的迟到探测不能替换新安装已确认的接口。
         if (disposed) throw unavailableCapability(feature);
-        const registered = registeredMessageDeletionController(feature);
+        const registered = registeredSessionController(feature);
         if (registered) {
           window.__codeyCodexSessionController = registered;
           return registered;
@@ -2762,7 +2772,7 @@
         if (feature === "deleteMessages" || feature === "modelRouting") {
           const resolver = await loadManagerSourceResolver(url, module);
           if (disposed) throw unavailableCapability(feature);
-          const registered = registeredMessageDeletionController(feature);
+          const registered = registeredSessionController(feature);
           const manager = !registered && resolver ? appServerManagerFromReact(resolver) : null;
           const controller = registered || (manager && managerSessionController(manager));
           if (sessionControllerLooksUsable(controller, feature)) {
@@ -2789,7 +2799,7 @@
     if (disposed) throw unavailableCapability(feature);
     const cached = window.__codeyCodexSessionController;
     // 新管理器可能在此前探测失败后才登记，必须先于缓存和失败退避检查。
-    const current = registeredMessageDeletionController(feature)
+    const current = registeredSessionController(feature)
       || (cached?.manager ? managerSessionController(cached.manager) : cached);
     if (sessionControllerLooksUsable(current, feature)) {
       window.__codeyCodexSessionController = current;
@@ -2810,14 +2820,14 @@
       ? Promise.resolve().then(discover)
       : waitForNativeSessionOperation(discover)).then((controller) => {
       if (disposed) throw unavailableCapability(feature);
-      controller = registeredMessageDeletionController(feature) || controller;
+      controller = registeredSessionController(feature) || controller;
       window.__codeyCodexSessionController = controller;
       state.failures = 0;
       state.retryAt = 0;
       publishCapability(feature, true);
       return controller;
     }, (error) => {
-      const registered = !disposed && registeredMessageDeletionController(feature);
+      const registered = !disposed && registeredSessionController(feature);
       if (registered) {
         window.__codeyCodexSessionController = registered;
         state.failures = 0;
@@ -2884,6 +2894,9 @@
       if (discovered.length) moduleClientUrls = discovered;
       if (probe.urlsN == null) probe.urlsN = moduleClientUrls?.length ?? 0;
     }
+    // 没有可导入的命名入口（如 rspack 数字 chunk 构建）时只是快路径不可用，
+    // 调用方会回落到登记表或 React 路径，不能把模型请求校验标成不可用。
+    if (!moduleClientUrls?.length) throw new Error("当前 Codex 没有可导入的模块入口");
     for (const url of moduleClientUrls || []) {
       try {
         const module = typeof window.__codeyImportCodexAsset === "function"

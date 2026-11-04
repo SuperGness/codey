@@ -1044,6 +1044,41 @@ test("late direct registration bypasses discovery backoff and replaces a cached 
   assert.equal((await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" })).manager, replacement);
 });
 
+test("a registered local manager serves every session capability without asset discovery", async () => {
+  const client = { hostId: "local", enqueueRequest() {}, createRequest() {}, onResult() {} };
+  const manager = createLocalDeletionManager({
+    requestClient: client,
+    async refreshRecentConversations() {},
+    async codeyReconcileCompletedConversation() { return true; },
+  });
+  const runtime = loadInjection({ initialSessionId: "", appServerManagers: new Map([["local", manager]]) });
+  runtime.document.scripts.push({ src: "app://-/assets/782259.9dd29a0a62.js" });
+  let fetches = 0;
+  runtime.window.fetch = async () => { fetches += 1; return { ok: false }; };
+  for (const feature of ["session", "usage", "mcpReload", "reconcile", "refresh", "modelRouting", "deleteMessages"]) {
+    runtime.window.__codeyCodexSessionController = null;
+    assert.equal((await runtime.window.__codeyLoadCodexSessionController({ feature })).manager, manager, feature);
+    assert.equal(runtime.window.__codeyPageCapabilities[feature].status, "available", feature);
+  }
+  assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client);
+  assert.equal(fetches, 0, "registered managers need no asset discovery");
+});
+
+test("numeric rspack chunks are neither fetched nor reported as a model routing outage", async () => {
+  const runtime = loadInjection({ initialSessionId: "" });
+  runtime.document.scripts.push(
+    { src: "app://-/assets/782259.9dd29a0a62.js" },
+    { src: "app://-/assets/async/24191.589dcc9878.js?v=1" },
+  );
+  let fetches = 0;
+  runtime.window.fetch = async () => { fetches += 1; return { ok: false }; };
+  runtime.window.__codeyImportCodexAsset = async () => assert.fail("numeric chunks expose no module instances");
+  await assert.rejects(runtime.window.__codeyLoadCodexRequestClientFromModule(), /没有可导入的模块入口/);
+  assert.equal(runtime.window.__codeyPageCapabilities.modelRouting, undefined, "the fast path failure is not a capability verdict");
+  await assert.rejects(runtime.window.__codeyLoadCodexSessionController({ feature: "refresh" }));
+  assert.equal(fetches, 0);
+});
+
 test("direct registry rejects remote incomplete disposed and RPC managers before persistence", async () => {
   const rpcCalls = [];
   const rpc = new Proxy({}, { get(_target, key) { return async () => { rpcCalls.push(key); }; } });

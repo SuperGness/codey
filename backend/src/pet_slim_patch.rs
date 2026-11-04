@@ -7,6 +7,8 @@ use serde_json::value::{RawValue, to_raw_value};
 
 const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
 const PET_OPEN_KEY: &str = "electron-avatar-overlay-open";
+/// Codex 设置注册表里的当前宠物，与其他设置一同存放在全局状态中。
+const SELECTED_AVATAR_KEY: &str = "selected-avatar-id";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PetSlimReport {
@@ -43,6 +45,19 @@ pub fn configure(codex_home: &Path, slim_enabled: bool) -> Result<PetSlimReport>
     })
 }
 
+/// 当前选中的 Codex 宠物 id；从未选择过时为 None。
+pub fn selected_avatar_id(codex_home: &Path) -> Result<Option<String>> {
+    let state = read_state(
+        &codex_home.join(GLOBAL_STATE_FILE),
+        &codex_home.join(format!("{GLOBAL_STATE_FILE}.bak")),
+    )?;
+    Ok(state
+        .get(SELECTED_AVATAR_KEY)
+        .and_then(|value| serde_json::from_str::<Option<String>>(value.get()).ok())
+        .flatten()
+        .filter(|id| !id.is_empty()))
+}
+
 fn read_state(primary: &Path, backup: &Path) -> Result<BTreeMap<String, Box<RawValue>>> {
     match read_state_file(primary) {
         Ok(Some(state)) => Ok(state),
@@ -73,6 +88,20 @@ fn read_state_file(path: &Path) -> Result<Option<BTreeMap<String, Box<RawValue>>
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn reads_the_selected_avatar_from_global_state() {
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(selected_avatar_id(temp.path()).unwrap(), None);
+        let path = temp.path().join(GLOBAL_STATE_FILE);
+        fs::write(&path, r#"{"selected-avatar-id":"hoots","other":1}"#).unwrap();
+        assert_eq!(
+            selected_avatar_id(temp.path()).unwrap().as_deref(),
+            Some("hoots")
+        );
+        fs::write(&path, r#"{"selected-avatar-id":null}"#).unwrap();
+        assert_eq!(selected_avatar_id(temp.path()).unwrap(), None);
+    }
 
     #[test]
     fn defaults_to_a_closed_pet_without_losing_other_state() {

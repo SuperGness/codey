@@ -29,9 +29,8 @@
   const maxRendererPatchFingerprints = 64;
   const rendererPatchFailuresByFingerprint = new Map();
   let activeRendererPatchFailures = null;
-  // 指纹只作补丁结果缓存键，不需要加密强度；原主进程版用 sha256，
-  // 页面里用同步的双路 32 位 FNV-1a 即可；缓存命中时整段耗时都在这里，
-  // Math.imul 比逐字符 BigInt 运算约快一倍。
+  // 指纹只作同一源码的失败门禁去重键，不需要加密强度；原主进程版用
+  // sha256，页面里用同步的双路 32 位 FNV-1a 即可。
   const rendererPatchFingerprint = (source) => {
     try {
       let first = 0x811c9dc5;
@@ -43,23 +42,8 @@
       }
       return `${source.length}:${(first >>> 0).toString(36)}:${(second >>> 0).toString(36)}`;
     } catch {
-      // Fingerprinting is only an optimization. If it is unavailable, keep
-      // the existing compatibility behavior instead of risking a false cache hit.
+      // 指纹不可用时不做失败门禁去重，补丁行为保持原样。
       return null;
-    }
-  };
-  // Patching is a pure function of the asset text: reloads, renderer recovery
-  // and the locale-forced first-launch reload re-request the same app-initial
-  // chunk, so remember the patched output instead of rerunning every gate.
-  const maxRendererPatchedOutputs = 4;
-  const rendererPatchedOutputByFingerprint = new Map();
-  const rememberRendererPatchedOutput = (fingerprint, patched) => {
-    if (fingerprint == null) return;
-    rendererPatchedOutputByFingerprint.delete(fingerprint);
-    rendererPatchedOutputByFingerprint.set(fingerprint, patched);
-    while (rendererPatchedOutputByFingerprint.size > maxRendererPatchedOutputs) {
-      const oldest = rendererPatchedOutputByFingerprint.keys().next().value;
-      rendererPatchedOutputByFingerprint.delete(oldest);
     }
   };
   const rendererPatchFailuresForFingerprint = (fingerprint) => {
@@ -270,14 +254,16 @@
     if (count === 0) return recordIncompatibleRendererGate(source, name, count);
     return patched;
   };
-  const draftFactoryPattern = /\b[$A-Z_a-z][$\w]*=[$A-Z_a-z][$\w]*\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*=>\(\{isManuallyChanged:!1,modelSettings:null,serviceTier:null\}\)\)/g;
+  const draftFactoryPattern = /\b[$A-Z_a-z][$\w]*=(?:[$A-Z_a-z][$\w]*|\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\))\([$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?,[$A-Z_a-z][$\w]*=>\(\{isManuallyChanged:!1,modelSettings:null,serviceTier:null\}\)\)/g;
   const draftResolverPattern = /function ([$A-Z_a-z][$\w]*)\(\{userSavedModelString:[$A-Z_a-z][$\w]*,userSavedReasoningEffort:[$A-Z_a-z][$\w]*,listModelsData:[$A-Z_a-z][$\w]*\}\)/g;
   // Codex 26.1021 起，草稿原生保存手动选择并以 draftModelSettings 传入设置
   // hook，只需把未手动选择的新草稿的推理强度初值换成 medium。返回改写后的
   // 源码；无法唯一识别时返回匹配次数。
+  // Codex 26.1029 起 hook 先声明 var/let 槽位；resolver 为 null 时从 hook 内
+  // 唯一的解析器调用处取得调用表达式（模块导入或本地函数）。
   const patchNativeDraftReasoningEffort = (source, resolver) => {
     const hooks = [...source.matchAll(
-      /function [$A-Z_a-z][$\w]*\(([$A-Z_a-z][$\w]*)\)\{let [$A-Z_a-z][$\w]*=\(0,[$A-Z_a-z][$\w]*\.c\)\(\d+\),\{((?=[^{}]*\bmanagedNewThreadModelSettings:)(?=[^{}]*\bdraftModelSettings:)(?=[^{}]*\bisNewThreadDraft:)[^{}]*)\}=\1,/g,
+      /function [$A-Z_a-z][$\w]*\(([$A-Z_a-z][$\w]*)\)\{(?:var [$\w,]+;)?let (?:[$A-Z_a-z][$\w]*,)*[$A-Z_a-z][$\w]*=\(0,[$A-Z_a-z][$\w]*\.c\)\(\d+\),\{((?=[^{}]*\bmanagedNewThreadModelSettings:)(?=[^{}]*\bdraftModelSettings:)(?=[^{}]*\bisNewThreadDraft:)[^{}]*)\}=\1,/g,
     )];
     if (hooks.length !== 1) return hooks.length;
     const hook = hooks[0];
@@ -288,6 +274,12 @@
     if (![managed, draft, isDraft].every((binding) => /^[$A-Z_a-z][$\w]*$/.test(binding ?? ""))) return 0;
     const hookEnd = source.indexOf("}function ", hook.index + hook[0].length);
     if (hookEnd < 0) return 0;
+    if (resolver == null) {
+      const scope = source.slice(hook.index, hookEnd);
+      const calls = [...scope.matchAll(/(\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)|\b[$A-Z_a-z][$\w]*)\(\{userSavedModelString:/g)];
+      if (calls.length !== 1) return calls.length;
+      resolver = calls[0][1];
+    }
     const call = `${resolver}({userSavedModelString:`;
     const callStart = source.indexOf(call, hook.index);
     const nextCall = callStart < 0 ? -1 : source.indexOf(call, callStart + 1);
@@ -356,8 +348,18 @@
     // 草稿速度初值与推理强度初值必须同时识别；缓存中的默认模型继续有效，
     // 旧推理强度不再成为下一个草稿的初值。
     const factories = [...source.matchAll(draftFactoryPattern)];
-    if (factories.length !== 1) return recordIncompatibleRendererGate(source, name, factories.length);
     const resolvers = [...source.matchAll(draftResolverPattern)];
+    // Codex 26.1029 把草稿工厂和设置 hook 拆进不同 chunk（解析器可能随 hook
+    // 打包，也可能经模块导入）：hook 所在 chunk 只改推理强度，速度初值由工厂
+    // 所在 chunk 的独立改写负责。
+    // 同一 chunk 里有草稿工厂但形状漂移时仍按合并布局处理，两处须同时识别。
+    if (!source.includes("isManuallyChanged:!1,modelSettings:null")
+      && source.includes("draftModelSettings:")) {
+      const patched = patchNativeDraftReasoningEffort(source, null);
+      if (typeof patched !== "string") return recordIncompatibleRendererGate(source, name, patched);
+      return patched;
+    }
+    if (factories.length !== 1) return recordIncompatibleRendererGate(source, name, factories.length);
     if (resolvers.length !== 1) return recordIncompatibleRendererGate(source, name, resolvers.length);
     const patched = source.includes("draftModelSettings:")
       ? patchNativeDraftReasoningEffort(source, resolvers[0][1])
@@ -366,12 +368,46 @@
     const factory = factories[0][0];
     return patched.replace(factory, () => factory.replace("serviceTier:null", "serviceTier:{value:`default`}"));
   };
+  // 每项改写的前置字面量。资源一个都不含时整段跳过；Codey 后端读取同一份
+  // 列表，在把资源送进页面求值前预筛。新增改写必须登记它依赖的字面量。
+  const rendererPatchAnchors = /*codey-renderer-patch-anchors*/[
+    "isNewThreadDraft:",
+    "isManuallyChanged:!1,modelSettings:null,serviceTier:null",
+    "inactiveThreadUnsubscriber.clearConversationStreamOwnership",
+    "codexComposerAdapter.CodexComposerAdapter.interruptThreadError",
+    "sendMessageFromView",
+    "AppServerRequestClient is missing a message dispatcher",
+    "codex-avatar",
+    "codex-pet-assets",
+    "avatar-mascot-button",
+    "use-avatar-options",
+    "shouldPrewarmAvatarOverlay:",
+    "forcePricingRefreshInBackground",
+    "use_embedded_credit_checkout",
+    "Desktop host did not provide its AppServerManager service",
+    ".sendFollowUpMessage(",
+    ".startTurn(",
+    "includeUltraReasoningEffort:",
+    "supportsIndependentSpeedModes",
+    "serviceTierAccess:",
+    "electron-app-state-snapshot-request",
+    "activeInteractions=new Map"
+  ]/*end-codey-renderer-patch-anchors*/;
   const patchCodexRendererAsset = (source) => {
+    if (!rendererPatchAnchors.some((anchor) => source.includes(anchor))) return source;
     let patched = source;
     if (source.includes("isNewThreadDraft:")
       && source.includes("modelSettingsPersistAsDefault:")
       && source.includes("userSavedReasoningEffort:")) {
       patched = patchNewThreadDraftDefaults(patched);
+    } else if (source.includes("isManuallyChanged:!1,modelSettings:null,serviceTier:null")) {
+      // Codex 26.1029 起草稿工厂单独成 chunk：只把新草稿的速度初值设为默认档。
+      patched = replaceUniqueRendererGate(
+        patched,
+        draftFactoryPattern,
+        (factory) => factory.replace("serviceTier:null", "serviceTier:{value:`default`}"),
+        "new thread draft speed default",
+      );
     }
     if (!source.includes("/*codey-app-server-manager-registry*/")
       && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
@@ -393,13 +429,26 @@
       const localSendGate = (marker, host, mode) =>
         `/*${marker}*/(()=>{try{return globalThis.__codeyQuotaUnlock?.allowsLocalSend?.({hostId:${host},model:${mode}.settings.model})!==true}catch{return true}})()`;
       let quotaGate = null;
+      const replaceQuota = (...args) => {
+        quotaGate = args.at(-1);
+        const gate = localSendGate("codey-local-quota-gate", quotaGate.host, quotaGate.mode);
+        return `${args[0]}&&${gate}`;
+      };
       patched = replaceUniqueRendererGate(
         patched,
-        /let\{agentMode:[^;]{0,1024}?(?<mode>[$A-Z_a-z][$\w]*)\.settings\.model===`gpt-reserve`[^;]{0,1024}?,(?<quota>[$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*\((?<host>[$A-Z_a-z][$\w]*)===`local`&&[$A-Z_a-z][$\w]*\)(?=,[\s\S]{0,10000}?activeCollaborationMode:[$A-Z_a-z][$\w]*,[\s\S]{0,2000}?resolvedHostId:\k<host>,[\s\S]{0,10000}?let (?<disabled>[$A-Z_a-z][$\w]*)=[^;]{0,512}?\|\|\k<quota>,[\s\S]{0,6000}?submitDisabled:\k<disabled>,)/g,
-        (...args) => {
-          quotaGate = args.at(-1);
-          return `${args[0]}&&${localSendGate("codey-local-quota-gate", quotaGate.host, quotaGate.mode)}`;
-        },
+        [
+          {
+            pattern: /let\{agentMode:[^;]{0,1024}?(?<mode>[$A-Z_a-z][$\w]*)\.settings\.model===`gpt-reserve`[^;]{0,1024}?,(?<quota>[$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*\((?<host>[$A-Z_a-z][$\w]*)===`local`&&[$A-Z_a-z][$\w]*\)(?=,[\s\S]{0,10000}?activeCollaborationMode:[$A-Z_a-z][$\w]*,[\s\S]{0,2000}?resolvedHostId:\k<host>,[\s\S]{0,10000}?let (?<disabled>[$A-Z_a-z][$\w]*)=[^;]{0,512}?\|\|\k<quota>,[\s\S]{0,6000}?submitDisabled:\k<disabled>,)/g,
+            replacement: replaceQuota,
+          },
+          // Codex 26.1029 使用模块导出的模型常量和 Hook，主机比较顺序
+          // 反转，禁用表达式以分号结束。仍在额度读取后追加门禁，保留订阅。
+          {
+            pattern: /let\{agentMode:[^;]{0,1024}?(?<mode>[$A-Z_a-z][$\w]*)\.settings\.model===[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*[^;]{0,1024}?,(?<quota>[$A-Z_a-z][$\w]*)=\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\("local"===(?<host>[$A-Z_a-z][$\w]*)&&[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)(?=,[\s\S]{0,10000}?activeCollaborationMode:[$A-Z_a-z][$\w]*,[\s\S]{0,2000}?resolvedHostId:\k<host>,[\s\S]{0,10000}?let (?<disabled>[$A-Z_a-z][$\w]*)=[^;]{0,512}?\|\|\k<quota>;[\s\S]{0,6000}?submitDisabled:\k<disabled>,)/g,
+            replacement: replaceQuota,
+          },
+        ],
+        null,
         "local third-party composer quota",
       );
       // Codex 26.1021 起 Team 等工作空间额度耗尽时另有按主机的硬阻断，
@@ -408,15 +457,26 @@
         const { disabled, host, mode, quota } = quotaGate;
         const name = value => value.replace(/\$/g, "\\$");
         const ident = "[$A-Z_a-z][$\\w]*";
-        const disabledMatches = [...patched.matchAll(new RegExp(`let ${name(disabled)}=[^;]{0,512}?\\|\\|(${ident})\\|\\|${name(quota)},`, "g"))];
+        const disabledMatches = [...patched.matchAll(new RegExp(`let ${name(disabled)}=[^;]{0,512}?\\|\\|(${ident})\\|\\|${name(quota)}([,;])`, "g"))];
         const hard = disabledMatches.length === 1 ? disabledMatches[0][1] : null;
+        const terminator = disabledMatches.length === 1 ? disabledMatches[0][2] : null;
+        const hardDefinitions = hard == null
+          ? []
+          : [
+            ...patched.matchAll(
+              new RegExp(
+                `(?:^|[,;{]|(?:const|let|var) )${name(hard)}=(?:${ident}\\(${ident},${name(host)}\\)|\\(0,${ident}\\.${ident}\\)\\(${ident}\\.${ident},${name(host)}\\))`,
+                "g",
+              ),
+            ),
+          ];
         if (hard != null
           && hard !== host
-          && patched.match(new RegExp(`[,;{]${name(hard)}=${ident}\\(${ident},${name(host)}\\)[,;]`, "g"))?.length === 1) {
+          && hardDefinitions.length === 1) {
           const [{ 0: matched, index }] = disabledMatches;
-          const term = `||${hard}||${quota},`;
+          const term = `||${hard}||${quota}${terminator}`;
           const offset = index + matched.length - term.length;
-          patched = `${patched.slice(0, offset)}||${hard}&&${localSendGate("codey-local-hard-block-gate", host, mode)}||${quota},${patched.slice(offset + term.length)}`;
+          patched = `${patched.slice(0, offset)}||${hard}&&${localSendGate("codey-local-hard-block-gate", host, mode)}||${quota}${terminator}${patched.slice(offset + term.length)}`;
         }
       }
     }
@@ -424,24 +484,36 @@
       source.includes("codex-message-from-view")
       && source.includes("sendMessageFromView")
       && source.includes("Failed to send message from view")
+      && !source.includes("__codeyModelWhitelistPatch?.guardDirectBridgeMessage")
     ) {
       // The native renderer forwards the request through Electron before it
       // emits codex-message-from-view. Event-only injections therefore see an
       // already-sent payload. Guard at the bridge boundary and rewrite only
       // after preparation. The guard suppresses early observational tracking
       // while pending; transport failures retain the renderer's original catch.
+      const guardedBridgeSend = (bridgeName, sourceName) =>
+        `let __codeySend=()=>{let __codeyMessage=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.(${sourceName})??${sourceName};if(globalThis.__codeyModelWhitelistPatch?.isBlockedOutgoingMessage?.(__codeyMessage)){globalThis.__codeyModelWhitelistPatch?.notifyBlockedOutgoingMessage?.(__codeyMessage);return Promise.resolve()}return ${bridgeName}.sendMessageFromView(__codeyMessage)};let __codeyGuard=globalThis.__codeyModelWhitelistPatch?.guardDirectBridgeMessage?.(${sourceName},__codeySend);return __codeyGuard==null||__codeyGuard===true?__codeySend():__codeyGuard`;
       patched = replaceUniqueRendererGate(
         patched,
-        /if\(([$A-Z_a-z][$\w]*)\?\.sendMessageFromView\)\{let ([$A-Z_a-z][$\w]*)=([$A-Z_a-z][$\w]*);\1\.sendMessageFromView\(\2\)\.catch\(([$A-Z_a-z][$\w]*)=>\{/g,
-        (_match, bridgeName, messageName, sourceName, errorName) =>
+        [{
+          pattern: /if\(([$A-Z_a-z][$\w]*)\?\.sendMessageFromView\)\{let ([$A-Z_a-z][$\w]*)=([$A-Z_a-z][$\w]*);\1\.sendMessageFromView\(\2\)\.catch\(([$A-Z_a-z][$\w]*)=>\{/g,
+          replacement: (_match, bridgeName, messageName, sourceName, errorName) =>
           `if(${bridgeName}?.sendMessageFromView){let ${messageName}=${sourceName};let __codeySend=()=>{${messageName}=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.(${sourceName})??${sourceName};if(globalThis.__codeyModelWhitelistPatch?.isBlockedOutgoingMessage?.(${messageName})){globalThis.__codeyModelWhitelistPatch?.notifyBlockedOutgoingMessage?.(${messageName});return Promise.resolve()}return ${bridgeName}.sendMessageFromView(${messageName})};let __codeyGuard=globalThis.__codeyModelWhitelistPatch?.guardDirectBridgeMessage?.(${sourceName},__codeySend);(__codeyGuard==null||__codeyGuard===true?__codeySend():__codeyGuard).catch(${errorName}=>{`,
+        }, {
+          // Codex 26.1029：`bridge?.sendMessageFromView&&(bridge.sendMessageFromView(message).catch(...))`。
+          // 失败日志仍记录原始消息。
+          pattern: /\b([$A-Z_a-z][$\w]*)\?\.sendMessageFromView&&\(\1\.sendMessageFromView\(([$A-Z_a-z][$\w]*)\)\.catch\(/g,
+          replacement: (_match, bridgeName, sourceName) =>
+            `${bridgeName}?.sendMessageFromView&&((()=>{${guardedBridgeSend(bridgeName, sourceName)}})().catch(`,
+        }],
+        null,
         "model route bridge preflight",
       );
     }
     if (
       source.includes("AppServerRequestClient is missing a message dispatcher")
       && source.includes("mcp_request_enqueued")
-      && source.includes("this.dispatchMessage?.(`mcp-request`")
+      && /this\.dispatchMessage\?\.\([`"]mcp-request[`"]/.test(source)
     ) {
       // Current Codex can create threads through AppServerRequestClient without
       // touching the renderer bridge helper above. Rewrite at enqueue time so
@@ -450,7 +522,7 @@
       // config/mcpServer/reload without walking the React tree.
       patched = replaceUniqueRendererGate(
         patched,
-        /(enqueueRequest\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*=>\{this\.dispatchMessage\?\.\(`mcp-request`,\{request:[$A-Z_a-z][$\w]*,hostId:this\.hostId,[\s\S]{0,700}?widget:\4\?\.widget\}\)\},[$A-Z_a-z][$\w]*=null\)\{)let /g,
+        /(enqueueRequest\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*=>\{this\.dispatchMessage\?\.\([`"]mcp-request[`"],\{request:[$A-Z_a-z][$\w]*,hostId:this\.hostId,[\s\S]{0,1500}?widget:\4\?\.widget\}\)\},[$A-Z_a-z][$\w]*=null\)\{)let /g,
         (_match, prefix, methodName, paramsName) =>
           `${prefix}let __codeyGuard=globalThis.__codeyModelWhitelistPatch?.guardOutgoingRequest?.(this,${methodName},${paramsName},()=>this.enqueueRequest(...arguments));if(__codeyGuard)return __codeyGuard;(globalThis.__codeyAppServerRequestClients??(globalThis.__codeyAppServerRequestClients=new Map)).set(this.hostId,this);let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.({type:\`mcp-request\`,hostId:this.hostId,request:{method:${methodName},params:${paramsName}}});if(__codeyRoute?.request){if(globalThis.__codeyModelWhitelistPatch?.isBlockedOutgoingMessage?.(__codeyRoute)){globalThis.__codeyModelWhitelistPatch?.notifyBlockedOutgoingMessage?.(__codeyRoute);return Promise.reject(Error(\`Codey blocked cross-provider model request\`))}${methodName}=__codeyRoute.request.method??${methodName},${paramsName}=__codeyRoute.request.params??${paramsName}}let `,
         "app server request route preflight",
@@ -471,7 +543,7 @@
       // result can never replace Codey's current route catalog.
       patched = replaceUniqueRendererGate(
         patched,
-        /(([$A-Z_a-z][$\w]*)\.resolve\()([$A-Z_a-z][$\w]*)(\),this\.emitRequestLifecycleEvent\(\{type:`completed`,hostId:this\.hostId,method:\2\.method)/g,
+        /(([$A-Z_a-z][$\w]*)\.resolve\()([$A-Z_a-z][$\w]*)(\),this\.emitRequestLifecycleEvent\(\{type:[`"]completed[`"],hostId:this\.hostId,method:\2\.method)/g,
         (_match, prefix, requestName, resultName, suffix) =>
           `${prefix}${resultName}=globalThis.__codeyModelWhitelistPatch?.rewriteIncomingResult?.(${requestName}.method,${resultName},this.hostId)??${resultName}${suffix}`,
         "app server model result rewrite",
@@ -497,7 +569,7 @@
     }
     if (
       disablePet
-      && source.includes("`electron-avatar-overlay-restore-ready`")
+      && /[`"]electron-avatar-overlay-restore-ready[`"]/.test(source)
       && source.includes("shouldPrewarmAvatarOverlay:")
     ) {
       // Once the app is ready and realtime voice is available, Codex asks main
@@ -506,34 +578,41 @@
       // creates the shared overlay on demand for voice.
       patched = replaceUniqueRendererGate(
         patched,
-        /(`electron-avatar-overlay-restore-ready`,\{[^{}]*?\bshouldPrewarmAvatarOverlay:)[^,{}]+/g,
+        /([`"]electron-avatar-overlay-restore-ready[`"],\{[^{}]*?\bshouldPrewarmAvatarOverlay:)[^,{}]+/g,
         (_match, prefix) => `${prefix}!1`,
         "avatar overlay prewarm",
       );
     }
     if (
       source.includes("forcePricingRefreshInBackground")
-      && source.includes("`use_embedded_checkout`")
+      && /[`"]use_embedded_checkout[`"]/.test(source)
     ) {
       // 账号命中内嵌结账实验时，Codex 会在后台把 chatgpt.com 定价页预载进隐藏
       // webview 并常驻（独立渲染进程）。只去掉这份后台预取：打开定价页时原生仍按
       // 路由直接加载，离开后不再保留隐藏副本。
       patched = replaceUniqueRendererGate(
         patched,
-        /([$A-Z_a-z][$\w]*)=![$A-Z_a-z][$\w]*\(\)&&[^;]{0,600}?\.get\(`use_embedded_checkout`,!1\)\?[$A-Z_a-z][$\w]*\(\{currentPlan:[^;]{0,200}?\}\):null/g,
-        (_match, desired) => `${desired}=null`,
+        [{
+          pattern: /([$A-Z_a-z][$\w]*)=![$A-Z_a-z][$\w]*\(\)&&[^;]{0,600}?\.get\(`use_embedded_checkout`,!1\)\?[$A-Z_a-z][$\w]*\(\{currentPlan:[^;]{0,200}?\}\):null/g,
+          replacement: (_match, desired) => `${desired}=null`,
+        }, {
+          // Codex 26.1029 把 URL 构造内联成函数表达式；让条件恒假即得 null。
+          pattern: /\b([$A-Z_a-z][$\w]*)=(?=!\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\(\)&&[^;]{0,600}?\.get\("use_embedded_checkout",!1\)\?function\(\{currentPlan:)/g,
+          replacement: (_match, desired) => `${desired}=!1&&`,
+        }],
+        null,
         "pricing webview prewarm",
       );
     }
     if (
       source.includes("isPrewarm:")
-      && source.includes("`use_embedded_credit_checkout`")
-      && !/&&\(!0\|\|[^;]{0,600}?`use_embedded_credit_checkout`/.test(source)
+      && /[`"]use_embedded_credit_checkout[`"]/.test(source)
+      && !/&&\(!0\|\|[^;]{0,600}?[`"]use_embedded_credit_checkout[`"]/.test(source)
     ) {
       // 额度购买页同理：未展示时不再挂载隐藏的预热 webview，展示时照常加载。
       patched = replaceUniqueRendererGate(
         patched,
-        /,!([$A-Z_a-z][$\w]*)&&\((?=[^;]{0,600}?\.get\(`use_embedded_credit_checkout`,!1\)\)\)return null;)/g,
+        /,!([$A-Z_a-z][$\w]*)&&\((?=[^;]{0,600}?\.get\([`"]use_embedded_credit_checkout[`"],!1\)\)\)return null;)/g,
         (_match, presented) => `,!${presented}&&(!0||`,
         "credit checkout webview prewarm",
       );
@@ -546,7 +625,7 @@
       // 打在请求客户端上的门禁不会经过。在宿主服务实际接入时留下标记供诊断。
       patched = replaceUniqueRendererGate(
         patched,
-        /(if\(([$A-Z_a-z][$\w]*)==null\)throw Error\(`Desktop host did not provide its AppServerManager service`\);)/g,
+        /(if\((?:[$A-Z_a-z][$\w]*==null|null==[$A-Z_a-z][$\w]*)\)throw Error\([`"]Desktop host did not provide its AppServerManager service[`"]\);)/g,
         (_match, check) => `${check}globalThis.__codeyAppServerManagerHosted=true;`,
         "hosted app server manager marker",
       );
@@ -591,7 +670,7 @@
       // predicate is the one getHasInProgressLocalConversation already uses.
       patched = replaceUniqueRendererGate(
         patched,
-        /getHasInProgressLocalConversation\(\{exceptConversationId:([$A-Z_a-z][$\w]*)\}=\{\}\)\{for\(let ([$A-Z_a-z][$\w]*) of this\.threadStore\.getRecentConversationIds\(\)\)\{if\(\2===\1\)continue;let ([$A-Z_a-z][$\w]*)=this\.conversations\.get\(\2\);if\(\3!=null&&([$A-Z_a-z][$\w]*)\(\3\)\)return!0\}return!1\}/g,
+        /getHasInProgressLocalConversation\(\{exceptConversationId:([$A-Z_a-z][$\w]*)\}=\{\}\)\{for\(let ([$A-Z_a-z][$\w]*) of this\.threadStore\.getRecentConversationIds\(\)\)\{if\(\2===\1\)continue;let ([$A-Z_a-z][$\w]*)=this\.conversations\.get\(\2\);if\((?:\3!=null|null!=\3)&&([$A-Z_a-z][$\w]*)\(\3\)\)return!0\}return!1\}/g,
         (match, _exceptName, _idName, _conversationName, inProgressName) =>
           `async codeyReconcileCompletedConversation(__codeyParams){let __codeyId=__codeyParams?.conversationId,__codeyRunning=()=>{let __codeyConversation=__codeyId==null?null:this.getConversation(__codeyId);return __codeyConversation!=null&&__codeyConversation.unconfirmedTurnSubmissions?.some(e=>e.terminal!==!0)!==!0&&${inProgressName}(__codeyConversation)&&this.getStreamRole(__codeyId)?.role!==\`follower\`};if(!__codeyRunning())return!1;let __codeyRevision=this.getConversationStreamRevision(__codeyId),__codeyReadStatus=async()=>{let __codeyResponse=await this.sendRequest(\`thread/read\`,{threadId:__codeyId,includeTurns:!1}),__codeyStatus=__codeyResponse?.thread?.status;return typeof __codeyStatus===\`string\`?__codeyStatus:__codeyStatus?.type},__codeyStatus=await __codeyReadStatus();if(__codeyStatus!==\`idle\`&&__codeyStatus!==\`systemError\`&&__codeyStatus!==\`error\`)return!1;await new Promise(__codeyResolve=>setTimeout(__codeyResolve,250));if(await __codeyReadStatus()!==__codeyStatus||this.getConversationStreamRevision(__codeyId)!==__codeyRevision||!__codeyRunning())return!1;let __codeyCwd=this.getConversation(__codeyId)?.cwd;this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(__codeyId);this.updateConversationState(__codeyId,__codeyState=>{__codeyState.resumeState=\`needs_resume\`},!1);await this.resumeConversation({...__codeyParams,workspaceRoots:__codeyParams.workspaceRoots?.length?__codeyParams.workspaceRoots:__codeyCwd?[__codeyCwd]:[\`/\`]});let __codeyConversation=this.getConversation(__codeyId);return __codeyConversation!=null&&!${inProgressName}(__codeyConversation)}${match}`,
         "completed thread reconciliation",
@@ -607,7 +686,7 @@
       // 宿主服务 chunk 只把同一开关作为参数传入，没有模型目录查询，不在此改写。
       patched = replaceUniqueRendererGate(
         patched,
-        /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\bisCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[^{}]*\b[$A-Z_a-z][$\w]*\s*=\s*\2\s*&&\s*)(\4\(\s*[$A-Z_a-z][$\w]*\s*,\s*(["'`])1186680773\6\s*\))/g,
+        /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\bisCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[^{}]*\b[$A-Z_a-z][$\w]*\s*=\s*\2\s*&&\s*)(\4\(\s*[$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?\s*,\s*(["'`])1186680773\6\s*\))/g,
         (_match, prefix, _includeUltra, customProvider, _get, gate) =>
           `${prefix}(${customProvider}||${gate})`,
         "third-party Ultra reasoning",
@@ -623,7 +702,7 @@
       // allows every tier; the model's serviceTiers still decide what exists.
       patched = replaceUniqueRendererGate(
         patched,
-        /if\s*\(\s*([$A-Z_a-z][$\w]*)\s*==\s*null\s*\)\s*return\s*!1\s*;\s*let\s+([$A-Z_a-z][$\w]*)\s*=\s*[$A-Z_a-z][$\w]*\(\s*([$A-Z_a-z][$\w]*)\s*\)\s*;\s*return\s+\3\s*===\s*`flex`\s*\|\|\s*\1\[\s*\2\s*\?\?\s*`fast`\s*\]/g,
+        /if\s*\(\s*(?:([$A-Z_a-z][$\w]*)\s*==\s*null|null\s*==\s*([$A-Z_a-z][$\w]*))\s*\)\s*return\s*!1\s*;\s*let\s+([$A-Z_a-z][$\w]*)\s*=\s*[$A-Z_a-z][$\w]*\(\s*([$A-Z_a-z][$\w]*)\s*\)\s*;\s*return\s*(?:\4\s*===\s*[`"]flex[`"]|[`"]flex[`"]\s*===\s*\4)\s*\|\|\s*(?:\1|\2)\[\s*\3\s*\?\?\s*[`"]fast[`"]\s*\]/g,
         "return!0",
         "service tier access",
       );
@@ -634,12 +713,12 @@
       // grant so visibility follows the model's own service tiers.
       patched = replaceUniqueRendererGate(
         patched,
-        /(\b([$A-Z_a-z][$\w]*)=)[$A-Z_a-z][$\w]*&&![$A-Z_a-z][$\w]*&&[$A-Z_a-z][$\w]*!=null\?[$A-Z_a-z][$\w]*\([$A-Z_a-z][$\w]*\):null(?=[^;]{0,200};let [$A-Z_a-z][$\w]*=\2,[$A-Z_a-z][$\w]*;return[^;]{0,200}?\{serviceTierAccess:)/g,
+        /(\b([$A-Z_a-z][$\w]*)=)[$A-Z_a-z][$\w]*&&![$A-Z_a-z][$\w]*&&(?:[$A-Z_a-z][$\w]*!=null|null!=[$A-Z_a-z][$\w]*)\?(?:[$A-Z_a-z][$\w]*|\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\))\([$A-Z_a-z][$\w]*\):null(?=[^;]{0,200};let [$A-Z_a-z][$\w]*=\2(?:,[$A-Z_a-z][$\w]*)?;return[^;]{0,200}?\{serviceTierAccess:)/g,
         (_match, assignment) => `${assignment}{fast:!0,ultrafast:!0}`,
         "service tier access state",
       );
     }
-    if (source.includes("case`electron-app-state-snapshot-request`:")) {
+    if (/case[`"]electron-app-state-snapshot-request[`"]:/.test(source)) {
       // Main asks the focused window for a full app-state snapshot every 30 s,
       // then adds process sampling, a debug log and a Sentry breadcrumb. Skip
       // only the heartbeat reason; other diagnostic triggers still reply, and
@@ -647,7 +726,7 @@
       // Builds differ only in whether the switch break is labelled.
       patched = replaceUniqueRendererGate(
         patched,
-        /(case`electron-app-state-snapshot-request`:\{)(?=[\s\S]{0,2000}?collectAppStateSnapshot\(([$A-Z_a-z][$\w]*)\.hostId,\2\.reason\)[\s\S]{0,2000}?dispatchMessage\(`electron-app-state-snapshot-response`[^;]{0,400};break((?: [$A-Z_a-z][$\w]*)?)\})/g,
+        /(case[`"]electron-app-state-snapshot-request[`"]:\{)(?=[\s\S]{0,2000}?collectAppStateSnapshot\(([$A-Z_a-z][$\w]*)\.hostId,\2\.reason\)[\s\S]{0,2000}?dispatchMessage\([`"]electron-app-state-snapshot-response[`"][^;]{0,400};break((?: [$A-Z_a-z][$\w]*)?)\})/g,
         (_match, prefix, messageName, label) =>
           `${prefix}if(${messageName}.reason===\`heartbeat\`)break${label};`,
         "app state heartbeat snapshot",
@@ -656,9 +735,7 @@
     if (
       source.includes("activeInteractions=new Map") &&
       source.includes("beginCpuSampling") &&
-      source.includes(
-        "ensureHeartbeat(){this.heartbeatTimer??=setInterval",
-      )
+      /ensureHeartbeat\(\)\{(?:this\.heartbeatTimer\?\?=|null==this\.heartbeatTimer&&\(this\.heartbeatTimer=)setInterval/.test(source)
     ) {
       // Codey launches app-server with analytics.enabled=false, so renderer
       // interaction telemetry is discarded after paying for main/renderer CPU
@@ -666,13 +743,13 @@
       // removing only those two recurring/IPC costs.
       patched = replaceUniqueRendererGate(
         patched,
-        /cpuSampling:([$A-Z_a-z][$\w]*)===`dropped`\|\|([$A-Z_a-z][$\w]*)\.backfilled===!0\?null:this\.beginCpuSampling\(\)/g,
+        /cpuSampling:(?:[$A-Z_a-z][$\w]*===[`"]dropped[`"]|[`"]dropped[`"]===[$A-Z_a-z][$\w]*)\|\|(?:[$A-Z_a-z][$\w]*\.backfilled===!0|!0===[$A-Z_a-z][$\w]*\.backfilled)\?null:this\.beginCpuSampling\(\)/g,
         "cpuSampling:null",
         "interaction CPU sampling",
       );
       patched = replaceUniqueRendererGate(
         patched,
-        /ensureHeartbeat\(\)\{this\.heartbeatTimer\?\?=setInterval\(\(\)=>\{let ([$A-Z_a-z][$\w]*)=this\.now\(\),([$A-Z_a-z][$\w]*)=this\.wallNow\(\);for\(let ([$A-Z_a-z][$\w]*) of this\.activeInteractions\.values\(\)\)this\.recordHeartbeat\(\3,\1,\2\)\},([$A-Z_a-z][$\w]*)\)\}/g,
+        /ensureHeartbeat\(\)\{(?:this\.heartbeatTimer\?\?=setInterval\(\(\)=>\{let ([$A-Z_a-z][$\w]*)=this\.now\(\),([$A-Z_a-z][$\w]*)=this\.wallNow\(\);for\(let ([$A-Z_a-z][$\w]*) of this\.activeInteractions\.values\(\)\)this\.recordHeartbeat\(\3,\1,\2\)\},[$A-Z_a-z][$\w]*\)|null==this\.heartbeatTimer&&\(this\.heartbeatTimer=setInterval\(\(\)=>\{let ([$A-Z_a-z][$\w]*)=this\.now\(\),([$A-Z_a-z][$\w]*)=this\.wallNow\(\);for\(let ([$A-Z_a-z][$\w]*) of this\.activeInteractions\.values\(\)\)this\.recordHeartbeat\(\6,\4,\5\)\},[$\w.]+\)\))\}/g,
         "ensureHeartbeat(){}",
         "interaction heartbeat",
       );
@@ -692,6 +769,9 @@
         url.pathname.includes("/assets/") &&
         (
           /\/(?:(?:app-initial|app-primary|app-shared|codex-composer-adapter|initialize-app-host-services|renderer-app-server-managers|send-follow-up-message|start-turn|webview-page)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
+            url.pathname,
+          ) ||
+          /^\/assets\/(?:async\/)?\d{1,10}\.[a-f0-9]{8,32}\.js$/i.test(
             url.pathname,
           ) ||
           (
@@ -715,20 +795,10 @@
       if (!isCodexRendererAssetUrl(requestUrl)) return null;
       let patched;
       const fingerprint = rendererPatchFingerprint(source);
-      if (
-        fingerprint != null &&
-        rendererPatchedOutputByFingerprint.has(fingerprint)
-      ) {
-        patched = rendererPatchedOutputByFingerprint.get(fingerprint);
-        // Refresh insertion order so the bounded map behaves as an LRU.
-        rememberRendererPatchedOutput(fingerprint, patched);
-        return patched === source ? null : patched;
-      }
       const previousRendererPatchFailures = activeRendererPatchFailures;
       activeRendererPatchFailures = rendererPatchFailuresForFingerprint(fingerprint);
       try {
         patched = patchCodexRendererAsset(source);
-        rememberRendererPatchedOutput(fingerprint, patched);
       } catch (error) {
         // Codex renderer bundles are minified implementation details and their
         // shapes change between releases. These UI restorations are optional:
