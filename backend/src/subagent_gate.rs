@@ -1686,7 +1686,7 @@ fn pre_tool_denial(active: usize, protocol_issue: Option<&str>) -> Value {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": format!(
-                "Codey 子代理门禁：仍有 {active} 个子代理尚未确认进入终态。现在只可调用本轮已提供的 agents.* 协作工具和只读工具（读文件、搜索、看图），写入、命令和结束任务须等全部结算；可用 agents.list_agents 或 agents.agent_status 核对状态，再对仍在运行的代理调用可用的 agents.wait_agent。工具未注册时不要重复调用；门禁恢复计时由根调用、用户输入和 Stop 共同推进，恢复后由主代理核验并继续工作。{compatibility}"
+                "Codey 子代理门禁：仍有 {active} 个子代理尚未确认进入终态。现在只可调用本轮已提供的 agents.* 协作工具和五项只读工具（read_file、inspect_local_file、grep、glob、view_image），写入、命令和结束任务须等全部结算；可用 agents.list_agents 或 agents.agent_status 核对状态，再对仍在运行的代理调用可用的 agents.wait_agent。工具未注册时不要重复调用；门禁恢复计时由根调用、用户输入和 Stop 共同推进，恢复后由主代理核验并继续工作。{compatibility}"
             ),
         }
     })
@@ -1737,7 +1737,7 @@ fn post_wait_continuation(
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动{names}。保留下方内容；可继续使用 agents.wait_agent，名单中消失的任务已结束，需要结果或补位时调用一次不带筛选的 agents.list_agents。有计划内未派发任务且有空余槽位时用新 task_name 补位；不得仅因运行时长或没有新消息中断、重派子代理。所有子代理终态或被根成功中断前只能使用 agents.* 协作工具和只读工具，不得形成最终结论或结束当前任务。{task_body_recovery}{compatibility}\n\n本次 wait_agent 已返回内容：\n{returned_update}"
+            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动{names}。保留下方内容；可继续使用 agents.wait_agent，名单中消失的任务已结束，需要结果或补位时调用一次不带筛选的 agents.list_agents。有计划内未派发任务且有空余槽位时用新 task_name 补位；不得仅因运行时长或没有新消息中断、重派子代理。所有子代理终态或被根成功中断前只能使用 agents.* 协作工具和 read_file、inspect_local_file、grep、glob、view_image 五项只读工具，不得形成最终结论或结束当前任务。{task_body_recovery}{compatibility}\n\n本次 wait_agent 已返回内容：\n{returned_update}"
         ),
     })
 }
@@ -1770,7 +1770,7 @@ fn post_wait_timeout_continuation(
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：wait_agent 等待超时，仍有 {active} 个子代理在运行{names}。超时只表示这段时间没有新消息，不代表异常；直接再次调用 agents.wait_agent，不需要先调用 list_agents。名单中消失的任务已经结束，需要它的结果或补位时再调用一次不带筛选的 agents.list_agents。活动期间只能使用 agents.* 协作工具和只读工具。{compatibility}"
+            "Codey 子代理汇合门禁：wait_agent 等待超时，仍有 {active} 个子代理在运行{names}。超时只表示这段时间没有新消息，不代表异常；直接再次调用 agents.wait_agent，不需要先调用 list_agents。名单中消失的任务已经结束，需要它的结果或补位时再调用一次不带筛选的 agents.list_agents。活动期间只能使用 agents.* 协作工具和 read_file、inspect_local_file、grep、glob、view_image 五项只读工具。{compatibility}"
         ),
     })
 }
@@ -1789,7 +1789,7 @@ fn post_list_continuation(
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：agents.list_agents 核对后仍有 {active} 个子代理尚未确认进入终态{names}。有计划内未派发任务且有空余槽位时用新 task_name 补位，否则对仍活动的 running、pending_init 或 interrupted 代理调用 agents.wait_agent；completed、errored、shutdown 和 not_found 不再阻塞。不得仅因运行时长或没有新消息中断子代理，只有用户明确取消或有证据确认任务无法继续时才中断一次；中断获得成功回执后不再等待该 target。不得自动重派已结束或已放弃的旧任务；pending_init 持续 10 分钟无法进展时门禁会释放遗留状态。所有活动代理结算前只可使用协作工具和只读工具。{compatibility}\n\n本次 list_agents 已返回内容：\n{returned_update}"
+            "Codey 子代理汇合门禁：agents.list_agents 核对后仍有 {active} 个子代理尚未确认进入终态{names}。本地账本活动名单是权威状态；原始快照可能迟到，已由根成功中断的 target 不得因 pending_init 再次 wait、follow-up 或追派。只对本地活动名单中的 target 调用 agents.wait_agent；有计划内未派发任务且有空余槽位时用新 task_name 补位。所有活动结算前只可使用协作工具和 read_file、inspect_local_file、grep、glob、view_image 五项只读工具。{compatibility}\n\n本次 list_agents 已返回内容：\n{returned_update}"
         ),
     })
 }

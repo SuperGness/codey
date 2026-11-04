@@ -560,9 +560,10 @@ already been checked or ruled out. Omit `fork_turns` only when the task depends 
 content that cannot be restated as text or paths. Do not request interim progress: children \
 message only for blockers or plan-changing facts, and final answers arrive through \
 `agents.wait_agent`; use `agents.send_message` only for facts that change a child's task. While \
-any attempt is active, Codey's gate allows only `agents.*` tools plus file reads, search and image \
-viewing; use them between waits to prepare review, not to redo delegated work. Writes, commands \
-and Stop wait until every attempt settles. After a terminal or successfully fenced update, check remaining capacity before \
+any attempt is active, Codey's gate allows only `agents.*` tools plus `read_file`, \
+`inspect_local_file`, `grep`, `glob`, and `view_image`; use them between waits to prepare \
+review, not to redo delegated work. Writes, commands and Stop wait until every attempt \
+settles. After a terminal or successfully fenced update, check remaining capacity before \
 dispatching the next planned, unspawned task with a new `task_name`; otherwise return to \
 `agents.wait_agent` with `timeout_ms: 120000`. A timed-out wait only means no new message arrived; \
 call `agents.wait_agent` again directly. Call unfiltered `agents.list_agents` only when a wait \
@@ -660,7 +661,7 @@ description = "General-purpose subagent using the configured default model and r
 sandbox_mode = "workspace-write"
 
 developer_instructions = """
-你是通用子代理。按本次任务调用需要的工具，包括读写、命令、视觉和未归类工具；实际文件与命令访问仍受 Codex 原生权限约束。
+你是通用子代理。按本次任务调用需要的工具。代码、日志和文档任务先读取相关文件并执行必要的本地命令；仅在任务需要用户图片、截图、页面、GUI 或渲染证据时使用视觉工具。实际文件与命令访问仍受 Codex 原生权限约束。
 不要派生、调用或者请求新的子代理；任务若是需要进一步拆分，把拆分的建议返回给主代理。不做方案取舍或者最终判断——那些是主代理的事。
 
 你交回给主代理的东西：
@@ -683,7 +684,7 @@ description = "Fast lookup for exact locations, repetitive checks, and low-risk 
 sandbox_mode = "workspace-write"
 
 developer_instructions = """
-你是快速定位子代理。优先处理范围明确、低风险的定位与事实检索，不做方案取舍，也不派生其他子代理。按本次任务授权使用所需工具，包括命令、读写和视觉工具；实际操作受 Codex 原生权限约束。
+你是快速定位子代理。优先处理范围明确、低风险的定位与事实检索，不做方案取舍，也不派生其他子代理。按本次任务授权使用所需工具。代码、日志和文档任务先读取相关文件并按需执行本地命令；仅在任务需要用户图片、截图、页面、GUI 或渲染证据时使用视觉工具。实际操作受 Codex 原生权限约束。
 优先返回最短可核验证据：确切路径、`file:line`、符号名、匹配数量和必要的关键原文。任务超出小范围快速检索时，明确说明应改派深度检索或视觉分析角色。
 你的回复直接供主代理使用：区分事实与推断，不寒暄、不复述过程。
 首行写 `status: completed | partial | blocked`；最多保留 5 条会影响决策的关键证据，并明确未覆盖范围。
@@ -696,7 +697,7 @@ description = "Broad research across code, logs, and documents for synthesis and
 sandbox_mode = "workspace-write"
 
 developer_instructions = """
-你是深度检索子代理。负责跨文件、跨目录的代码、日志和文档检索、归纳与架构探索，不做最终方案取舍，也不派生其他子代理。按本次任务授权使用所需工具，包括命令、读写和视觉工具；实际操作受 Codex 原生权限约束。
+你是深度检索子代理。负责跨文件、跨目录的代码、日志和文档检索、归纳与架构探索，不做最终方案取舍，也不派生其他子代理。按本次任务授权使用所需工具。代码、日志和文档任务先读取相关文件并按需执行本地命令；仅在任务需要用户图片、截图、页面、GUI 或渲染证据时使用视觉工具。实际操作受 Codex 原生权限约束。
 覆盖任务给定范围，返回符号关系、关键路径、`file:line` 和必要原文。把已确认事实、推断、缺口与矛盾分开，保留足够证据供主代理抽查。
 你的输出直接供主代理使用，结构紧凑、信息密集。
 首行写 `status: completed | partial | blocked`；只返回会影响决策的结论、最多 5 条关键证据和明确 gaps。
@@ -1355,6 +1356,35 @@ mod tests {
             ROOT_AGENT_COLLABORATION_USAGE_HINT
                 .contains("full tests and formatting that workers leave to the root")
         );
+    }
+
+    #[test]
+    fn retrieval_roles_use_visual_tools_only_for_visual_evidence() {
+        for template in [
+            DEFAULT_AGENT_CONFIG,
+            QUICK_SCAN_AGENT_CONFIG,
+            DEEP_RESEARCH_AGENT_CONFIG,
+        ] {
+            assert!(template.contains("代码、日志和文档任务先读取相关文件"));
+            assert!(template.contains("本地命令"));
+            assert!(
+                template.contains("仅在任务需要用户图片、截图、页面、GUI 或渲染证据时使用视觉工具")
+            );
+            assert!(!template.contains(r"\n"));
+        }
+
+        assert!(VISUAL_ANALYSIS_AGENT_CONFIG.contains("先读取或捕获必要视觉证据"));
+        assert!(
+            VISUAL_WORKER_AGENT_CONFIG.contains("修改后优先用客户端已授权的渲染或截图工具核验")
+        );
+    }
+
+    #[test]
+    fn root_hint_lists_the_exact_active_gate_read_allowlist() {
+        let expected = "`read_file`, \
+`inspect_local_file`, `grep`, `glob`, and `view_image`";
+        assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains(expected));
+        assert!(!ROOT_AGENT_COLLABORATION_USAGE_HINT.contains(r"\n"));
     }
 
     #[test]

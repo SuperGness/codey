@@ -1639,9 +1639,7 @@ fn reconcile_pending_init_observations(
         let Some(reservation) = ledger.reservations.get_mut(&task_id) else {
             continue;
         };
-        let next_observed_at = if reservation.state.is_active()
-            && reservation.fenced_at_ms.is_none()
-            && state == AgentState::PendingInit
+        let next_observed_at = if reservation.state.is_active() && state == AgentState::PendingInit
         {
             Some(reservation.pending_init_observed_at_ms.unwrap_or(now_ms))
         } else {

@@ -1074,6 +1074,282 @@ fn successful_root_interrupt_fences_the_attempt_and_releases_the_gate() {
 }
 
 #[test]
+fn successful_pending_interrupt_releases_the_gate_without_a_provider_binding() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write_test_runtime_policy(root);
+    let runtime_id = "runtime-a";
+    let session_id = "pending-interrupt-session";
+    let task_id = "pending_reader";
+
+    let mut spawn = input("PreToolUse", session_id);
+    spawn.turn_id = Some("root-turn-a".to_string());
+    spawn.cwd = Some("/repo".to_string());
+    spawn.tool_name = Some("agents.spawn_agent".to_string());
+    spawn.tool_input = Some(json!({
+        "task_name": task_id,
+        "agent_type": "codey_deep_research",
+        "fork_turns": "none",
+        "message": delegation_message(json!({}))
+    }));
+    assert_eq!(
+        handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap(),
+        json!({})
+    );
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        1
+    );
+
+    let mut interrupt = input("PreToolUse", session_id);
+    interrupt.turn_id = Some("root-turn-a".to_string());
+    interrupt.tool_name = Some("agents.interrupt_agent".to_string());
+    interrupt.tool_input = Some(json!({ "target": task_id }));
+    assert_eq!(
+        handle_hook_for_runtime_at(&interrupt, root, runtime_id, 20).unwrap(),
+        json!({})
+    );
+
+    interrupt.hook_event_name = "PostToolUse".to_string();
+    interrupt.tool_response = Some(json!({ "previous_status": "pending_init" }));
+    assert_eq!(
+        handle_hook_for_runtime_at(&interrupt, root, runtime_id, 21).unwrap(),
+        json!({})
+    );
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        0
+    );
+
+    let mut root_write = input("PreToolUse", session_id);
+    root_write.turn_id = Some("root-turn-a".to_string());
+    root_write.tool_name = Some("apply_patch".to_string());
+    root_write.tool_input = Some(json!({ "patch": "*** Begin Patch\n*** End Patch" }));
+    assert_eq!(
+        handle_hook_for_runtime_at(&root_write, root, runtime_id, 22).unwrap(),
+        json!({})
+    );
+    root_write.tool_name = Some("functions.exec".to_string());
+    root_write.tool_input = None;
+    assert_eq!(
+        handle_hook_for_runtime_at(&root_write, root, runtime_id, 23).unwrap(),
+        json!({})
+    );
+
+    let mut followup = input("PreToolUse", session_id);
+    followup.turn_id = Some("root-turn-a".to_string());
+    followup.tool_name = Some("agents.followup_task".to_string());
+    followup.tool_input = Some(json!({ "target": task_id, "message": "resume" }));
+    let denied = handle_hook_for_runtime_at(&followup, root, runtime_id, 24).unwrap();
+    assert!(
+        denied["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .is_some_and(|reason| {
+                reason.contains("CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT")
+            })
+    );
+}
+
+#[test]
+fn late_list_snapshot_cannot_revive_an_interrupted_target_while_a_sibling_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write_test_runtime_policy(root);
+    let runtime_id = "runtime-a";
+    let session_id = "stale-list-with-sibling";
+    let root_turn = "root-turn-a";
+    let stale_target = "/root/stale_reader";
+    let sibling_target = "/root/sibling_reader";
+
+    let mut stale_spawn = input("PreToolUse", session_id);
+    stale_spawn.turn_id = Some(root_turn.to_string());
+    stale_spawn.cwd = Some("/repo".to_string());
+    stale_spawn.tool_name = Some("agents.spawn_agent".to_string());
+    stale_spawn.tool_input = Some(json!({
+        "task_name": "stale_reader",
+        "agent_type": "codey_deep_research",
+        "message": "Inspect the stale task."
+    }));
+    handle_hook_for_runtime_at(&stale_spawn, root, runtime_id, 10).unwrap();
+    let mut stale_spawned = input("PostToolUse", session_id);
+    stale_spawned.tool_name = stale_spawn.tool_name.clone();
+    stale_spawned.tool_input = stale_spawn.tool_input.clone();
+    stale_spawned.tool_response = Some(json!({ "agent_id": stale_target }));
+    handle_hook_for_runtime_at(&stale_spawned, root, runtime_id, 11).unwrap();
+
+    let mut interrupt = input("PreToolUse", session_id);
+    interrupt.turn_id = Some(root_turn.to_string());
+    interrupt.tool_name = Some("agents.interrupt_agent".to_string());
+    interrupt.tool_input = Some(json!({ "target": stale_target }));
+    handle_hook_for_runtime_at(&interrupt, root, runtime_id, 12).unwrap();
+    interrupt.hook_event_name = "PostToolUse".to_string();
+    interrupt.tool_response = Some(json!({ "previous_status": "pending_init" }));
+    assert_eq!(
+        handle_hook_for_runtime_at(&interrupt, root, runtime_id, 13).unwrap(),
+        json!({})
+    );
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        0
+    );
+
+    let mut sibling_spawn = input("PreToolUse", session_id);
+    sibling_spawn.turn_id = Some(root_turn.to_string());
+    sibling_spawn.cwd = Some("/repo".to_string());
+    sibling_spawn.tool_name = Some("agents.spawn_agent".to_string());
+    sibling_spawn.tool_input = Some(json!({
+        "task_name": "sibling_reader",
+        "agent_type": "codey_deep_research",
+        "message": "Inspect the sibling task."
+    }));
+    handle_hook_for_runtime_at(&sibling_spawn, root, runtime_id, 20).unwrap();
+    let mut sibling_spawned = input("PostToolUse", session_id);
+    sibling_spawned.tool_name = sibling_spawn.tool_name.clone();
+    sibling_spawned.tool_input = sibling_spawn.tool_input.clone();
+    sibling_spawned.tool_response = Some(json!({ "agent_id": sibling_target }));
+    handle_hook_for_runtime_at(&sibling_spawned, root, runtime_id, 21).unwrap();
+    let mut sibling_started = input("SubagentStart", session_id);
+    sibling_started.agent_id = Some(sibling_target.to_string());
+    sibling_started.agent_type = Some("codey_deep_research".to_string());
+    handle_hook_for_runtime_at(&sibling_started, root, runtime_id, 22).unwrap();
+
+    let mut list = input("PostToolUse", session_id);
+    list.turn_id = Some(root_turn.to_string());
+    list.tool_name = Some("agents.list_agents".to_string());
+    list.tool_input = Some(json!({}));
+    list.tool_response = Some(json!({
+        "agents": [
+            { "agent_name": "/root", "status": "running" },
+            { "agent_name": stale_target, "status": "pending_init" },
+            { "agent_name": sibling_target, "status": "running" }
+        ]
+    }));
+    let continuation = handle_hook_for_runtime_at(&list, root, runtime_id, 30).unwrap();
+    assert_eq!(continuation["decision"].as_str(), Some("block"));
+    let reason = continuation["reason"].as_str().unwrap();
+    assert!(reason.contains("本地账本活动名单是权威状态"));
+    assert!(reason.contains("已由根成功中断的 target"));
+    assert!(reason.contains("（`sibling_reader`）"));
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        1
+    );
+
+    let mut write = input("PreToolUse", session_id);
+    write.turn_id = Some(root_turn.to_string());
+    write.tool_name = Some("apply_patch".to_string());
+    let denied = handle_hook_for_runtime_at(&write, root, runtime_id, 31).unwrap();
+    assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
+    let denial_reason = denied["hookSpecificOutput"]["permissionDecisionReason"]
+        .as_str()
+        .unwrap();
+    for tool in [
+        "read_file",
+        "inspect_local_file",
+        "grep",
+        "glob",
+        "view_image",
+    ] {
+        assert!(denial_reason.contains(tool), "{tool}: {denial_reason}");
+    }
+    assert!(!denial_reason.contains("tool_search"));
+    assert!(!denial_reason.contains("通用 MCP"));
+
+    let mut sibling_stop = input("SubagentStop", session_id);
+    sibling_stop.agent_id = Some(sibling_target.to_string());
+    sibling_stop.agent_type = Some("codey_deep_research".to_string());
+    handle_hook_for_runtime_at(&sibling_stop, root, runtime_id, 32).unwrap();
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        0
+    );
+    assert_eq!(
+        handle_hook_for_runtime_at(&write, root, runtime_id, 33).unwrap(),
+        json!({})
+    );
+}
+
+#[test]
+fn fenced_pending_init_recovers_and_reopens_the_root_gate_after_grace() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    write_test_runtime_policy(root);
+    let runtime_id = "runtime-a";
+    let session_id = "fenced-pending-init";
+    let root_turn = "root-turn-a";
+    let target = "/root/fenced_pending";
+
+    let mut spawn = input("PreToolUse", session_id);
+    spawn.turn_id = Some(root_turn.to_string());
+    spawn.cwd = Some("/repo".to_string());
+    spawn.tool_name = Some("agents.spawn_agent".to_string());
+    spawn.tool_input = Some(json!({
+        "task_name": "fenced_pending",
+        "agent_type": "codey_deep_research",
+        "message": "Inspect the pending task."
+    }));
+    handle_hook_for_runtime_at(&spawn, root, runtime_id, 10).unwrap();
+
+    let mut interrupt = input("PreToolUse", session_id);
+    interrupt.turn_id = Some(root_turn.to_string());
+    interrupt.tool_name = Some("agents.interrupt_agent".to_string());
+    interrupt.tool_input = Some(json!({ "target": target }));
+    handle_hook_for_runtime_at(&interrupt, root, runtime_id, 20).unwrap();
+
+    let mut list = input("PostToolUse", session_id);
+    list.turn_id = Some(root_turn.to_string());
+    list.tool_name = Some("agents.list_agents".to_string());
+    list.tool_input = Some(json!({}));
+    list.tool_response = Some(json!({
+        "agents": [
+            { "agent_name": "/root", "status": "running" },
+            { "agent_name": target, "status": "pending_init" }
+        ]
+    }));
+    let first_seen = 1_000;
+    assert_eq!(
+        handle_hook_for_runtime_at(&list, root, runtime_id, first_seen).unwrap()["decision"]
+            .as_str(),
+        Some("block")
+    );
+
+    let mut write = input("PreToolUse", session_id);
+    write.turn_id = Some(root_turn.to_string());
+    write.tool_name = Some("apply_patch".to_string());
+    assert_eq!(
+        handle_hook_for_runtime_at(
+            &write,
+            root,
+            runtime_id,
+            first_seen + PENDING_INIT_GRACE_MILLIS - 1,
+        )
+        .unwrap()["hookSpecificOutput"]["permissionDecision"],
+        "deny"
+    );
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        1
+    );
+
+    assert_eq!(
+        handle_hook_for_runtime_at(
+            &write,
+            root,
+            runtime_id,
+            first_seen + PENDING_INIT_GRACE_MILLIS,
+        )
+        .unwrap(),
+        json!({})
+    );
+    assert_eq!(
+        active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
+        0
+    );
+    let trace = std::fs::read_to_string(crate::subagent::telemetry::trace_file(root)).unwrap();
+    assert!(trace.contains("pending_init_grace_elapsed"));
+}
+
+#[test]
 fn terminal_unknown_interrupt_ack_is_idempotent() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
