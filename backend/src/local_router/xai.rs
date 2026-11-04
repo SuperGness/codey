@@ -197,7 +197,7 @@ fn flatten_namespaces(body: &mut Value) -> Result<(bool, HashMap<String, XaiTool
     let mut seen = HashSet::new();
     for tool in tools {
         if tool.get("type").and_then(Value::as_str) == Some("namespace") {
-            lift_namespace_tool(&tool, &[], &owners, &mut seen, &mut flattened);
+            lift_namespace_tool(&tool, &[], "", &owners, &mut seen, &mut flattened);
         } else {
             flattened.push(tool);
         }
@@ -296,6 +296,7 @@ fn collect_namespace_owners(
 fn lift_namespace_tool(
     tool: &Value,
     namespace: &[String],
+    parent_context: &str,
     owners: &HashMap<String, XaiToolOrigin>,
     seen: &mut HashSet<String>,
     flattened: &mut Vec<Value>,
@@ -308,9 +309,14 @@ fn lift_namespace_tool(
     }
     let mut path = namespace.to_vec();
     path.push(name.to_string());
+    let namespace_context = namespace_tool_context(
+        tool.as_object().expect("namespace tools are JSON objects"),
+        &path,
+        parent_context,
+    );
     for child in namespace_children(tool) {
         if child.get("type").and_then(Value::as_str) == Some("namespace") {
-            lift_namespace_tool(&child, &path, owners, seen, flattened);
+            lift_namespace_tool(&child, &path, &namespace_context, owners, seen, flattened);
             continue;
         }
         if child.get("type").and_then(Value::as_str) != Some("function") {
@@ -326,7 +332,17 @@ fn lift_namespace_tool(
         }
         let mut lifted = child;
         if let Some(object) = lifted.as_object_mut() {
+            let description = flattened_tool_description(
+                &path,
+                &child_name,
+                &namespace_context,
+                object
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            );
             object.insert("name".to_string(), Value::String(flat));
+            object.insert("description".to_string(), Value::String(description));
             object.remove("namespace");
         }
         if is_automation_update_tool(&child_name) {
@@ -338,11 +354,12 @@ fn lift_namespace_tool(
 }
 
 fn namespace_children(tool: &Value) -> Vec<Value> {
-    tool.get("tools")
-        .or_else(|| tool.get("children"))
-        .and_then(Value::as_array)
+    ["tools", "children"]
+        .into_iter()
+        .filter_map(|key| tool.get(key).and_then(Value::as_array))
+        .flatten()
         .cloned()
-        .unwrap_or_default()
+        .collect()
 }
 
 fn rewrite_namespace_calls(value: &mut Value, owners: &HashMap<String, XaiToolOrigin>) {
@@ -891,6 +908,46 @@ mod tests {
             "https://relay.example.com/v1/responses",
             "gpt-5"
         ));
+    }
+
+    #[test]
+    fn namespace_instructions_survive_xai_flattening() {
+        let mut body = json!({
+            "model": "grok-4",
+            "input": "Read the source file.",
+            "tools": [{
+                "type": "namespace",
+                "name": "local_files",
+                "description": "These tools access the local workspace.",
+                "tools": [{
+                    "type": "function",
+                    "name": "list",
+                    "parameters": {"type": "object"}
+                }],
+                "children": [{
+                    "type": "namespace",
+                    "name": "source",
+                    "description": "Use absolute paths.",
+                    "tools": [{
+                        "type": "function",
+                        "name": "read",
+                        "description": "Read source text.",
+                        "parameters": {"type": "object"}
+                    }]
+                }]
+            }]
+        });
+        prepare_xai_native_request(&mut body).unwrap();
+        assert_eq!(body["tools"].as_array().unwrap().len(), 2);
+        let list = body["tools"][0]["description"].as_str().unwrap();
+        assert!(list.contains("local_files.list"));
+        assert!(list.contains("These tools access the local workspace."));
+        assert!(!list.contains("Use absolute paths."));
+        let description = body["tools"][1]["description"].as_str().unwrap();
+        assert!(description.contains("These tools access the local workspace."));
+        assert!(description.contains("Use absolute paths."));
+        assert!(description.contains("local_files.source.read"));
+        assert!(description.contains("Read source text."));
     }
 
     #[test]

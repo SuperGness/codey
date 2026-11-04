@@ -1645,7 +1645,7 @@ pub(crate) fn responses_tools_to_chat_tools_with_bridge(
         web_search_tool_seen: false,
     };
     for tool in tools {
-        append_responses_tool_to_chat_tools(tool, &[], &mut conversion)?;
+        append_responses_tool_to_chat_tools(tool, &[], "", &mut conversion)?;
     }
     Ok(ResponsesChatTools {
         tools: (!conversion.converted.is_empty()).then_some(Value::Array(conversion.converted)),
@@ -1657,6 +1657,7 @@ pub(crate) fn responses_tools_to_chat_tools_with_bridge(
 pub(crate) fn append_responses_tool_to_chat_tools(
     tool: &Value,
     namespace_path: &[String],
+    namespace_context: &str,
     conversion: &mut ResponsesChatToolsConversion<'_>,
 ) -> Result<()> {
     let object = tool
@@ -1668,6 +1669,20 @@ pub(crate) fn append_responses_tool_to_chat_tools(
     {
         let mut function = responses_function_tool_map(object)?;
         let name = response_function_name(&function, "function tool")?.to_string();
+        // 冲突判定比较客户端原始定义；展平说明只写进发往上游的副本。
+        let original_definition = Value::Object(function.clone());
+        if !namespace_path.is_empty() {
+            let description = flattened_tool_description(
+                namespace_path,
+                &name,
+                namespace_context,
+                function
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            );
+            function.insert("description".to_string(), Value::String(description));
+        }
         let tool_name = ResponsesToolName {
             kind: ResponsesToolKind::Function,
             namespace: namespace_path.to_vec(),
@@ -1682,7 +1697,6 @@ pub(crate) fn append_responses_tool_to_chat_tools(
             true
         } else {
             validate_namespaced_function_name(&name)?;
-            let original_definition = Value::Object(function.clone());
             match register_namespaced_tool_name(
                 tool_name,
                 &original_definition,
@@ -1708,11 +1722,22 @@ pub(crate) fn append_responses_tool_to_chat_tools(
         return Ok(());
     }
     if tool_type == Some("namespace") {
-        return append_responses_namespace_tools(object, namespace_path, conversion);
+        return append_responses_namespace_tools(
+            object,
+            namespace_path,
+            namespace_context,
+            conversion,
+        );
     }
     if tool_type == Some("custom") {
         let name = response_function_name(object, "custom tool")?.to_string();
         let tool_name = ResponsesToolName::custom_in_namespace(namespace_path, &name);
+        let description = custom_tool_bridge_description(object)?;
+        let description = if namespace_path.is_empty() {
+            description
+        } else {
+            flattened_tool_description(namespace_path, &name, namespace_context, &description)
+        };
         let original_definition = Value::Object(object.clone());
         let Some(upstream_name) = register_custom_tool_name(
             tool_name,
@@ -1728,7 +1753,7 @@ pub(crate) fn append_responses_tool_to_chat_tools(
             "type":"function",
             "function":{
                 "name":upstream_name,
-                "description":custom_tool_bridge_description(object)?,
+                "description":description,
                 "parameters":{
                     "type":"object",
                     "properties":{
@@ -1921,6 +1946,7 @@ pub(crate) fn responses_web_search_user_location_to_chat(user_location: &Value) 
 pub(crate) fn append_responses_namespace_tools(
     object: &serde_json::Map<String, Value>,
     parent_namespace: &[String],
+    parent_context: &str,
     conversion: &mut ResponsesChatToolsConversion<'_>,
 ) -> Result<()> {
     let namespace = responses_namespace_name(object)?;
@@ -1929,6 +1955,7 @@ pub(crate) fn append_responses_namespace_tools(
     if namespace_path.len() > MAX_RESPONSES_NAMESPACE_DEPTH {
         anyhow::bail!("namespace 嵌套层级超过 {MAX_RESPONSES_NAMESPACE_DEPTH}");
     }
+    let namespace_context = namespace_tool_context(object, &namespace_path, parent_context);
     let tools = object.get("tools");
     let children = object.get("children");
     if tools.is_none() && children.is_none() {
@@ -1939,7 +1966,12 @@ pub(crate) fn append_responses_namespace_tools(
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("namespace.tools 必须是数组"))?;
         for tool in tools {
-            append_responses_tool_to_chat_tools(tool, &namespace_path, conversion)?;
+            append_responses_tool_to_chat_tools(
+                tool,
+                &namespace_path,
+                &namespace_context,
+                conversion,
+            )?;
         }
     }
     if let Some(children) = children {
@@ -1947,10 +1979,54 @@ pub(crate) fn append_responses_namespace_tools(
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("namespace.children 必须是数组"))?;
         for child in children {
-            append_responses_tool_to_chat_tools(child, &namespace_path, conversion)?;
+            append_responses_tool_to_chat_tools(
+                child,
+                &namespace_path,
+                &namespace_context,
+                conversion,
+            )?;
         }
     }
     Ok(())
+}
+
+// 扁平工具协议没有命名空间说明字段，将说明和原工具名保留到具体工具中。
+pub(crate) fn namespace_tool_context(
+    object: &serde_json::Map<String, Value>,
+    namespace_path: &[String],
+    parent_context: &str,
+) -> String {
+    let mut context = parent_context.to_string();
+    if let Some(description) = object
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|description| !description.is_empty())
+    {
+        if !context.is_empty() {
+            context.push_str("\n\n");
+        }
+        context.push_str(&format!(
+            "Namespace `{}`:\n{description}",
+            namespace_path.join(".")
+        ));
+    }
+    context
+}
+
+pub(crate) fn flattened_tool_description(
+    namespace_path: &[String],
+    name: &str,
+    namespace_context: &str,
+    description: &str,
+) -> String {
+    let mut result = format!("Original tool: `{}.{name}`.", namespace_path.join("."));
+    for part in [namespace_context, description] {
+        if !part.is_empty() {
+            result.push_str("\n\n");
+            result.push_str(part);
+        }
+    }
+    result
 }
 
 pub(crate) fn responses_function_tool_map(
@@ -2608,6 +2684,100 @@ fn move_ref_into_all_of(map: &mut serde_json::Map<String, Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_namespace_with_different_instructions_keeps_tool_dedup() {
+        let tools = |description: &str| {
+            json!({
+                "type": "namespace",
+                "name": "local_files",
+                "description": description,
+                "tools": [{
+                    "type": "function",
+                    "name": "read",
+                    "description": "Read source text.",
+                    "parameters": {"type": "object"}
+                }, {
+                    "type": "custom",
+                    "name": "patch",
+                    "description": "Apply a source patch."
+                }]
+            })
+        };
+        let body = json!({
+            "model": "provider-model",
+            "input": "Read the source file.",
+            "tools": [tools("First declaration."), tools("Second declaration.")]
+        });
+        let chat = responses_to_chat_completions_request(&body).unwrap();
+        let converted = chat.body["tools"].as_array().unwrap();
+        assert_eq!(converted.len(), 2);
+        for tool in converted {
+            let description = tool["function"]["description"].as_str().unwrap();
+            assert!(description.contains("First declaration."));
+            assert!(!description.contains("Second declaration."));
+        }
+    }
+
+    #[test]
+    fn namespace_instructions_survive_chat_and_anthropic_conversion() {
+        let body = json!({
+            "model": "provider-model",
+            "input": "Read and edit the source file.",
+            "tools": [{
+                "type": "namespace",
+                "name": "local_files",
+                "description": "These tools access the local workspace. Use absolute paths.",
+                "tools": [{
+                    "type": "function",
+                    "name": "read",
+                    "description": "Read source text.",
+                    "parameters": {"type": "object"}
+                }],
+                "children": [{
+                    "type": "namespace",
+                    "name": "editing",
+                    "description": "Read the current file before changing it.",
+                    "tools": [{
+                        "type": "custom",
+                        "name": "patch",
+                        "description": "Apply a source patch."
+                    }]
+                }]
+            }, {
+                "type": "function",
+                "name": "plain",
+                "description": "Unchanged tool description.",
+                "parameters": {"type": "object"}
+            }]
+        });
+        let chat = responses_to_chat_completions_request(&body).unwrap();
+        let anthropic = responses_to_anthropic_messages_request(&body).unwrap();
+        for tools in [
+            chat.body["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["function"].clone())
+                .collect::<Vec<_>>(),
+            anthropic.body["tools"].as_array().unwrap().clone(),
+        ] {
+            assert_eq!(tools.len(), 3);
+            let read = tools[0]["description"].as_str().unwrap();
+            assert!(read.contains("These tools access the local workspace. Use absolute paths."));
+            assert!(read.contains("local_files.read"));
+            assert!(read.contains("Read source text."));
+            assert!(!read.contains("Read the current file before changing it."));
+
+            let patch = tools[1]["description"].as_str().unwrap();
+            assert!(patch.contains("These tools access the local workspace. Use absolute paths."));
+            assert!(patch.contains("Read the current file before changing it."));
+            assert!(patch.contains("local_files.editing.patch"));
+            assert!(patch.contains("Apply a source patch."));
+            assert!(patch.contains("exactly one `input` string"));
+            assert_eq!(tools[2]["description"], "Unchanged tool description.");
+        }
+    }
 
     #[test]
     fn normalizes_final_upstream_tool_schema_shapes() {
