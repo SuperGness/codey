@@ -772,6 +772,7 @@ pub(super) async fn set_default_official_account(
     let mut payload = refresh_official_route_after_account_change(state)
         .await
         .map_err(|error| format!("默认官方账号已切换，但刷新官方线路失败：{error}"))?;
+    notify_official_send_bypass(state).await;
     if let Err(error) = usage_setting {
         let warning = format!("默认官方账号已切换，但开启页头额度显示失败：{error}");
         let warning = match payload.get("warning").and_then(Value::as_str) {
@@ -781,6 +782,25 @@ pub(super) async fn set_default_official_account(
         payload = merge(payload, json!({ "warning": warning }));
     }
     Ok(merge(payload, json!({ "accountId": record.id })))
+}
+
+/// 会话内的官方额度快照仍按启动账号刷新；目录热更新可能跳过未变化的目录，
+/// 这里把不受快照约束的官方线路 provider id 单独送达页面的发送判断。
+async fn notify_official_send_bypass(state: &Arc<AppState>) {
+    let Some(runtime) = state.runtime.lock().await.clone() else {
+        return;
+    };
+    let websocket_url = runtime.renderer_websocket_url().await;
+    let config = state.config.read().await.clone();
+    let provider_ids = super::models::official_send_bypass_provider_ids(state, &config).await;
+    if let Err(error) = crate::cdp::set_official_send_bypass(&websocket_url, &provider_ids).await {
+        error_log::record_failure(
+            "official_send_bypass_failed",
+            "set_default_official_account",
+            format!("{error:#}"),
+            json!({ "providerIds": provider_ids.len() }),
+        );
+    }
 }
 
 pub(super) async fn remove_official_account(

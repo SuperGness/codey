@@ -60,7 +60,63 @@ pub(crate) async fn runtime_renderer_model_catalog(state: &Arc<AppState>) -> Res
         runtime.as_ref().map(|runtime| &runtime.applied_config),
         applied.as_ref(),
     );
-    current_renderer_model_catalog_async(config.clone()).await
+    renderer_catalog_with_official_send_bypass(state, config).await
+}
+
+/// 绑定到其他官方账号的线路不受会话额度快照约束。运行中的 Codex 会话按
+/// 启动时的登录身份刷新额度；切换默认账号后这些线路的凭据已经换掉，
+/// 页面发送判断据此放行。跟随默认账号的线路按当前默认账号计算。
+pub(crate) async fn official_send_bypass_provider_ids(
+    state: &Arc<AppState>,
+    config: &CodeyConfig,
+) -> Vec<String> {
+    if !config.local_router_enabled {
+        return Vec::new();
+    }
+    let Some(runtime) = state.runtime.lock().await.clone() else {
+        return Vec::new();
+    };
+    let session_account = runtime.session_official_account_id().await;
+    let default_account = super::super::header_official_account_id(state).await;
+    bypassed_official_provider_ids(
+        config,
+        session_account.as_deref(),
+        default_account.as_deref(),
+    )
+}
+
+fn bypassed_official_provider_ids(
+    config: &CodeyConfig,
+    session_account: Option<&str>,
+    default_account: Option<&str>,
+) -> Vec<String> {
+    let Some(session) = session_account else {
+        return Vec::new();
+    };
+    config
+        .profiles
+        .iter()
+        .filter(|profile| profile.official_account)
+        .filter(|profile| {
+            let bound =
+                official_models_account_id(profile).or_else(|| default_account.map(str::to_string));
+            bound.as_deref().is_some_and(|bound| bound != session)
+        })
+        .map(|profile| profile.provider_id().to_string())
+        .filter(|provider_id| !provider_id.is_empty())
+        .collect()
+}
+
+pub(crate) async fn renderer_catalog_with_official_send_bypass(
+    state: &Arc<AppState>,
+    config: &CodeyConfig,
+) -> Result<Value, String> {
+    let mut catalog = current_renderer_model_catalog_async(config.clone()).await?;
+    let provider_ids = official_send_bypass_provider_ids(state, config).await;
+    if !provider_ids.is_empty() {
+        catalog["official_send_bypass_provider_ids"] = json!(provider_ids);
+    }
+    Ok(catalog)
 }
 
 async fn refresh_current_renderer(
@@ -105,7 +161,8 @@ pub(crate) async fn hot_reload_runtime_models_locked(
         } else {
             config_with_launch_pinned_transport(&runtime.applied_config, &config)
         };
-    let expected_catalog = match current_renderer_model_catalog_async(delivered.clone()).await {
+    let expected_catalog = match renderer_catalog_with_official_send_bypass(state, &delivered).await
+    {
         Ok(catalog) => catalog,
         Err(error) => return ModelHotReloadOutcome::failed(error),
     };
@@ -119,7 +176,8 @@ pub(crate) async fn hot_reload_runtime_models_locked(
         None
     };
     if skip_unchanged
-        && let Ok(previous_catalog) = current_renderer_model_catalog_async(previous.clone()).await
+        && let Ok(previous_catalog) =
+            renderer_catalog_with_official_send_bypass(state, &previous).await
         && previous_catalog == expected_catalog
     {
         runtime.mark_model_config_applied(&delivered).await;
@@ -139,7 +197,8 @@ pub(crate) async fn hot_reload_runtime_models_locked(
             if let Some(swap) = router_swap {
                 runtime.revert_local_router_routes(swap);
             }
-            let rollback = match current_renderer_model_catalog_async(previous).await {
+            let rollback = match renderer_catalog_with_official_send_bypass(state, &previous).await
+            {
                 Ok(catalog) => refresh_current_renderer(&runtime, &catalog)
                     .await
                     .map(|_| ()),

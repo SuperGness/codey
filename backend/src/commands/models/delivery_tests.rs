@@ -557,3 +557,83 @@ async fn rollback_follows_renderer_replacement() {
     assert!(!error.contains("恢复原模型列表失败"));
     assert_eq!(runtime.applied_model_catalog_config().await, initial);
 }
+
+fn official_profile(id: &str, account_id: Option<&str>) -> ProviderProfile {
+    let mut profile = ProviderProfile::new("Official");
+    profile.id = id.into();
+    profile.official_account = true;
+    profile.official_account_id = account_id.map(str::to_string);
+    profile
+}
+
+#[test]
+fn official_send_bypass_lists_only_accounts_other_than_the_session() {
+    let session = crate::config::official_profile_id("acc-session");
+    let other = crate::config::official_profile_id("acc-other");
+    let mut config = config_with_models(&[]);
+    config.profiles = vec![
+        official_profile(&session, Some("acc-session")),
+        official_profile(&other, Some("acc-other")),
+        official_profile(crate::config::DERIVED_OFFICIAL_PROFILE_ID, None),
+        ProviderProfile::new("ThirdParty"),
+    ];
+    assert_eq!(
+        bypassed_official_provider_ids(&config, Some("acc-session"), Some("acc-session")),
+        vec![other]
+    );
+}
+
+#[test]
+fn official_send_bypass_tracks_the_current_default_account() {
+    let session = crate::config::official_profile_id("acc-a");
+    let switched = crate::config::official_profile_id("acc-b");
+    let mut config = config_with_models(&[]);
+    config.profiles = vec![
+        official_profile(&session, Some("acc-a")),
+        official_profile(&switched, Some("acc-b")),
+        official_profile(crate::config::DERIVED_OFFICIAL_PROFILE_ID, None),
+    ];
+    assert_eq!(
+        bypassed_official_provider_ids(&config, Some("acc-a"), Some("acc-b")),
+        vec![
+            switched.clone(),
+            crate::config::DERIVED_OFFICIAL_PROFILE_ID.to_string()
+        ]
+    );
+    assert_eq!(
+        bypassed_official_provider_ids(&config, Some("acc-a"), Some("acc-a")),
+        vec![switched]
+    );
+}
+
+#[test]
+fn official_send_bypass_requires_a_session_account() {
+    let mut config = config_with_models(&[]);
+    config.profiles = vec![official_profile(
+        &crate::config::official_profile_id("acc-b"),
+        Some("acc-b"),
+    )];
+    assert!(bypassed_official_provider_ids(&config, None, Some("acc-b")).is_empty());
+}
+
+#[tokio::test]
+async fn official_send_bypass_stays_empty_without_router_or_runtime() {
+    let mut config = config_with_models(&[]);
+    config.profiles = vec![official_profile(
+        &crate::config::official_profile_id("acc-b"),
+        Some("acc-b"),
+    )];
+    config.local_router_enabled = false;
+    let state = Arc::new(AppState::default());
+    assert!(
+        official_send_bypass_provider_ids(&state, &config)
+            .await
+            .is_empty()
+    );
+    config.local_router_enabled = true;
+    assert!(
+        official_send_bypass_provider_ids(&state, &config)
+            .await
+            .is_empty()
+    );
+}

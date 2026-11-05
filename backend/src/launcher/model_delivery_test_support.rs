@@ -42,6 +42,7 @@ impl CodeyRuntime {
             crashpad_guard_enabled: Arc::new(AtomicBool::new(false)),
             crashpad_guard_shutdown: Mutex::new(None),
             crashpad_guard_task: Mutex::new(None),
+            session_official_account_id: Mutex::new(None),
             local_router,
         }
     }

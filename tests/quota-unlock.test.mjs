@@ -5,7 +5,7 @@ import vm from "node:vm";
 
 const source = await readFile(new URL("../public/quota-unlock.js", import.meta.url), "utf8");
 
-function createRuntime(initialValue = null) {
+function createRuntime(initialValue = null, beforeInstall = null) {
   const values = new Map(initialValue === null ? [] : [["codeyQuotaUnlock", initialValue]]);
   const localStorage = {
     getItem: (key) => values.get(key) ?? null,
@@ -20,6 +20,7 @@ function createRuntime(initialValue = null) {
   window.window = window;
   const context = vm.createContext({ window, localStorage, console });
   const nativeParse = vm.runInContext("JSON.parse", context);
+  beforeInstall?.(window);
   vm.runInContext(source, context);
   return { context, window, localStorage, nativeParse, WebSocket, api: window.__codeyQuotaUnlock };
 }
@@ -84,6 +85,65 @@ test("only confirmed third-party models on the local host allow sending", () => 
   assert.equal(calls.length, before);
 });
 
+test("switched official routes send only when their provider is bypassed", () => {
+  const { window, api } = createRuntime();
+  const calls = [];
+  window.__codeyModelWhitelistPatch = {
+    isThirdPartyModel: () => false,
+    officialRouteProviderId(context) {
+      calls.push(context);
+      return context.model === "official-b" ? "codey-official-account-b" : "";
+    },
+  };
+
+  const context = { hostId: "local", model: "official-b" };
+  assert.equal(api.allowsLocalSend(context), false);
+  assert.equal(api.setOfficialSendBypass(["codey-official-account-b"]), 1);
+  assert.equal(api.allowsLocalSend(context), true);
+  assert.equal(api.allowsLocalSend({ hostId: "local", model: "official-a" }), false);
+  assert.equal(api.setOfficialSendBypass([]), 0);
+  assert.equal(api.allowsLocalSend(context), false);
+
+  // 第三方判断优先，不依赖 bypass 名单。
+  window.__codeyModelWhitelistPatch = {
+    isThirdPartyModel: () => true,
+    officialRouteProviderId: () => "",
+  };
+  assert.equal(api.allowsLocalSend({ hostId: "local", model: "third-party" }), true);
+});
+
+test("install picks up the bypass list the model patch already received", () => {
+  const { window, api } = createRuntime(null, (w) => {
+    w.__codeyModelWhitelistPatch = {
+      isThirdPartyModel: () => false,
+      officialRouteProviderId: () => "codey-official-account-b",
+      officialSendBypassProviderIds: () => [" codey-official-account-b ", ""],
+    };
+  });
+  assert.equal(api.status().officialSendBypass, 1);
+  assert.equal(api.allowsLocalSend({ hostId: "local", model: "official-b" }), true);
+  api.setOfficialSendBypass([]);
+  assert.equal(api.allowsLocalSend({ hostId: "local", model: "official-b" }), false);
+});
+
+test("bypass entries normalize input and never apply to other contexts", () => {
+  const { window, api } = createRuntime();
+  window.__codeyModelWhitelistPatch = {
+    isThirdPartyModel: () => false,
+    officialRouteProviderId: () => "codey-official-account-b",
+  };
+  assert.equal(
+    api.setOfficialSendBypass([" codey-official-account-b ", "", null, 42]),
+    1,
+  );
+  for (const invalid of [undefined, null, {}, { model: "official-b" },
+    { hostId: "remote", model: "official-b" }, { hostId: "local" },
+    { hostId: "local", model: "" }, { hostId: "local", model: "  " }]) {
+    assert.equal(api.allowsLocalSend(invalid), false);
+  }
+  assert.equal(api.status().officialSendBypass, 1);
+});
+
 test("missing, failing and unconfirmed helpers preserve restrictions", () => {
   const { window, api } = createRuntime();
   const context = { hostId: "local", model: "third-party" };
@@ -100,7 +160,7 @@ test("enable and disable take immediate effect and persist the local option", ()
   const { window, api, localStorage } = createRuntime("off");
   window.__codeyModelWhitelistPatch = { isThirdPartyModel: () => true };
   const context = { hostId: "local", model: "third-party" };
-  assert.equal(api.status().version, "2.0.0");
+  assert.equal(api.status().version, "2.1.0");
   assert.ok(Number.isFinite(Date.parse(api.status().installedAt)));
   assert.equal(api.status().enabled, false);
   assert.equal(api.allowsLocalSend(context), false);

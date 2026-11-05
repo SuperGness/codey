@@ -1265,6 +1265,7 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
         crashpad_guard_enabled: Arc::new(AtomicBool::new(false)),
         crashpad_guard_shutdown: Mutex::new(None),
         crashpad_guard_task: Mutex::new(None),
+        session_official_account_id: Mutex::new(None),
         local_router: Some(router),
     };
     let restore = || async { std::fs::write(&config_path, "restored config").map_err(Into::into) };

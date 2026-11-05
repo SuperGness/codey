@@ -604,6 +604,7 @@ async fn subagent_catalog_fallback_keeps_live_routes_and_roles_until_restart() {
         crashpad_guard_enabled: Arc::new(AtomicBool::new(false)),
         crashpad_guard_shutdown: Mutex::new(None),
         crashpad_guard_task: Mutex::new(None),
+        session_official_account_id: Mutex::new(None),
         local_router: Some(router),
     };
     let original = runtime.subagent_reconcile_config(&config).unwrap();

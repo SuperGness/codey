@@ -7,16 +7,44 @@
   if (window.__codeyQuotaUnlock) return;
   let enabled = true;
   try { enabled = localStorage.getItem("codeyQuotaUnlock") !== "off"; } catch {}
-  const version = "2.0.0";
+  // 运行中的 Codex 会话按启动时的官方账号显示额度；切换默认账号后这些线路
+  // 凭据已经换掉，发送判断由后端按 provider id 放行。
+  const normalizeBypassIds = (providerIds) => new Set(
+    (Array.isArray(providerIds) ? providerIds : [])
+      .map((id) => (typeof id === "string" ? id.trim() : ""))
+      .filter(Boolean),
+  );
+  let officialSendBypass = new Set();
+  // 本脚本注入在模型补丁之后，安装时先回读补丁已收到的名单。
+  try {
+    const pending = window.__codeyModelWhitelistPatch?.officialSendBypassProviderIds?.();
+    if (Array.isArray(pending)) officialSendBypass = normalizeBypassIds(pending);
+  } catch {}
+  const version = "2.1.0";
   const installedAt = new Date().toISOString();
   window.__codeyQuotaUnlock = {
     version,
-    status() { return { version, enabled, installedAt }; },
+    status() {
+      return {
+        version,
+        enabled,
+        installedAt,
+        officialSendBypass: officialSendBypass.size,
+      };
+    },
+    setOfficialSendBypass(providerIds) {
+      officialSendBypass = normalizeBypassIds(providerIds);
+      return officialSendBypass.size;
+    },
     allowsLocalSend(context) {
       if (!enabled || !context || context.hostId !== "local" ||
           typeof context.model !== "string" || context.model.trim() === "") return false;
       try {
-        return window.__codeyModelWhitelistPatch?.isThirdPartyModel(context) === true;
+        const patch = window.__codeyModelWhitelistPatch;
+        if (patch?.isThirdPartyModel(context) === true) return true;
+        if (!officialSendBypass.size) return false;
+        const providerId = patch?.officialRouteProviderId?.(context);
+        return typeof providerId === "string" && officialSendBypass.has(providerId);
       } catch { return false; }
     },
     enable() {

@@ -54,6 +54,66 @@ test("third-party classification requires a current local catalog route and excl
   assert.equal(runtime.patch.isThirdPartyModel({ hostId: "local", model: "other/shared" }), false);
 });
 
+test("official route provider ids resolve only for official routes", async () => {
+  const catalog = {
+    status: "ok",
+    models: ["third/model", "codey-official-account-b/gpt", "official/model", "unrouted"],
+    default_model: "third/model",
+    model_metadata: [
+      { model: "codey-official-account-b/gpt", provider_id: "codey_router", route_provider_id: "codey-official-account-b", source_model: "gpt", official_account: true },
+      { model: "official/model", provider_id: "codey_router", route_provider_id: "official", source_model: "model", official_account: true },
+    ],
+  };
+  const runtime = await loadPatch(catalog, [statsigClient()]);
+  assert.equal(
+    runtime.patch.officialRouteProviderId({ hostId: "local", model: "codey-official-account-b/gpt" }),
+    "codey-official-account-b",
+  );
+  assert.equal(
+    runtime.patch.officialRouteProviderId({ hostId: "local", model: "official/model" }),
+    "official",
+  );
+  for (const [context, expected] of [
+    [{ hostId: "local", model: "third/model" }, ""],
+    [{ hostId: "local", model: "unrouted" }, ""],
+    [{ hostId: "local", model: "missing/model" }, ""],
+    [{ hostId: "remote", model: "official/model" }, ""],
+    [{ model: "official/model" }, ""],
+    [{ hostId: "local" }, ""],
+    [{ hostId: "local", model: "" }, ""],
+  ]) {
+    assert.equal(runtime.patch.officialRouteProviderId(context), expected, JSON.stringify(context));
+  }
+  runtime.patch.dispose();
+});
+
+test("the catalog forwards official send bypass ids to the quota unlock helper", async () => {
+  const catalog = {
+    status: "ok",
+    models: ["codey-official-account-b/gpt"],
+    default_model: "codey-official-account-b/gpt",
+    official_send_bypass_provider_ids: ["codey-official-account-b"],
+    model_metadata: [
+      { model: "codey-official-account-b/gpt", provider_id: "codey_router", route_provider_id: "codey-official-account-b", source_model: "gpt", official_account: true },
+    ],
+  };
+  const received = [];
+  const runtime = await loadPatch(catalog, [statsigClient()], {
+    beforeInstall({ window }) {
+      window.__codeyQuotaUnlock = {
+        setOfficialSendBypass(ids) { received.push([...ids]); return ids.length; },
+      };
+    },
+  });
+  await runtime.patch.refresh();
+  assert.deepEqual(received.at(-1), ["codey-official-account-b"]);
+  assert.deepEqual(runtime.patch.officialSendBypassProviderIds(), ["codey-official-account-b"]);
+  await runtime.patch.setCatalog({ ...catalog, official_send_bypass_provider_ids: [] });
+  assert.deepEqual(received.at(-1), []);
+  assert.deepEqual(runtime.patch.officialSendBypassProviderIds(), []);
+  runtime.patch.dispose();
+});
+
 test("third-party classification is disabled before catalog load and in native selection mode", async () => {
   const catalog = { status: "ok", models: ["third/model"], default_model: "third/model" };
   const pending = await loadPatch(catalog, [statsigClient()], { bridgeReady: false });
@@ -402,7 +462,7 @@ test("non-Codey providers still require migration before route changes", async (
 async function loadPatch(
   catalogResponse,
   clients,
-  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false, requestClient = null, cachedRequestClient = null, portableBridge = null, sessionModelBridge = null } = {},
+  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false, requestClient = null, cachedRequestClient = null, portableBridge = null, sessionModelBridge = null, beforeInstall = null } = {},
 ) {
   const [bridgeSource, source] = await Promise.all([
     readFile(new URL("../public/codey-bridge.js", import.meta.url), "utf8"),
@@ -526,6 +586,7 @@ async function loadPatch(
   if (requestClient) window.__codeyLoadCodexRequestClient = async () => requestClient;
   if (cachedRequestClient) window.__codeyAppServerRequestClients = new Map([["local", cachedRequestClient]]);
   if (bridgeReady) window.__codexSessionDeleteBridge = bridge;
+  beforeInstall?.({ window, document });
   Function("window", "document", "globalThis", "console", bridgeSource)(
     window,
     document,
@@ -1089,7 +1150,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "82");
+  assert.equal(patch.version, "83");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],

@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "82";
+  const patchVersion = "83";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -640,6 +640,12 @@
       const separator = alias.indexOf("/");
       if (separator > 0) historicalRouteProviderKeys.add(alias.slice(0, separator));
     }
+    const officialSendBypassProviderIds = new Set(
+      (Array.isArray(value.official_send_bypass_provider_ids)
+        ? value.official_send_bypass_provider_ids : [])
+        .map((id) => (typeof id === "string" ? id.trim() : ""))
+        .filter(Boolean),
+    );
     return {
       loaded: true,
       models,
@@ -655,6 +661,7 @@
       legacyAliases,
       routePrefixByProviderKey,
       historicalRouteProviderKeys,
+      officialSendBypassProviderIds,
       nativeProviderId: nativeSelectionOnly ? requestProviderId(value.native_model_provider) : "",
     };
   };
@@ -2240,6 +2247,7 @@
       catalogRevision += 1;
       catalog = nextCatalog;
     }
+    syncOfficialSendBypass(nextCatalog);
     const revision = catalogRevision;
     try {
       return await deliverModelCatalog({
@@ -2326,9 +2334,52 @@
     if (!canonicalModel) return false;
     const route = routeForModel(canonicalModel);
     if (!route || isOfficialRoute(route)) return false;
-    return ![canonicalModel, route.routeProviderId, route.providerId].some((value) => (
-      modelKey(value).startsWith("codey-official-account-")
-    ));
+    return ![canonicalModel, route.routeProviderId, route.providerId].some((value) => {
+      const key = modelKey(value);
+      return key === "codey-official-account" || key.startsWith("codey-official-account-");
+    });
+  };
+
+  const officialRouteProviderId = ({ hostId, model } = {}) => {
+    if (hostId !== "local" || !catalog.loaded || disposed || nativeSelectionOnly
+      || typeof model !== "string" || !model.trim()) return "";
+    const canonicalModel = catalog.modelNamesByKey.get(modelKey(model));
+    if (!canonicalModel) return "";
+    const route = routeForModel(canonicalModel);
+    if (!route || !isOfficialRoute(route)) return "";
+    return requestProviderId(route.routeProviderId);
+  };
+
+  let officialSendBypassSignature = "";
+  // 额度提示展示的是启动账号的快照，切换默认账号后内容已经过期；bypass
+  // 名单更新时连同提示一起清掉，避免挡住刚切换的账号。
+  const dismissStaleQuotaNotices = () => {
+    const helper = window.__codeyQuotaNoticeDismiss;
+    if (typeof helper?.scan !== "function" || typeof helper?.dismiss !== "function") return;
+    try { helper.scan(document); } catch { return; }
+    let notices = [];
+    try {
+      notices = [...(document.querySelectorAll?.('[data-codey-quota-notice="true"]') || [])];
+    } catch { return; }
+    for (const notice of notices) {
+      if (notice.getAttribute?.("data-codey-quota-notice-dismissed") === "true") continue;
+      try { helper.dismiss(notice); } catch {}
+    }
+  };
+  // quota-unlock 注入在本补丁之后，最后一份 bypass 名单留在补丁上，
+  // helper 安装时通过 officialSendBypassProviderIds() 回读，不靠注入顺序。
+  let latestOfficialSendBypass = [];
+  const syncOfficialSendBypass = (sourceCatalog) => {
+    const ids = sourceCatalog?.officialSendBypassProviderIds;
+    latestOfficialSendBypass = ids ? [...ids] : [];
+    try {
+      window.__codeyQuotaUnlock?.setOfficialSendBypass?.(latestOfficialSendBypass);
+    } catch {}
+    const signature = ids?.size ? [...ids].sort().join("|") : "";
+    if (signature && signature !== officialSendBypassSignature) {
+      dismissStaleQuotaNotices();
+    }
+    officialSendBypassSignature = signature;
   };
 
   const rememberSupersededModelMenuItems = (previousCatalog, nextCatalog) => {
@@ -4023,6 +4074,8 @@
     refresh: loadModelCatalog,
     setCatalog: setModelCatalog,
     isThirdPartyModel,
+    officialRouteProviderId,
+    officialSendBypassProviderIds: () => [...latestOfficialSendBypass],
     ensureRequestGate,
     guardOutgoingRequest,
     guardDirectBridgeMessage,

@@ -305,6 +305,9 @@ pub struct CodeyRuntime {
     crashpad_guard_enabled: Arc<AtomicBool>,
     crashpad_guard_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     crashpad_guard_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// 运行中 Codex 会话启动时持有的官方账号；会话内的官方额度快照一直按
+    /// 这个账号刷新，即使默认账号随后被切换。
+    session_official_account_id: Mutex<Option<String>>,
     local_router: Option<LocalRouter>,
 }
 
@@ -2199,6 +2202,12 @@ impl CodeyRuntime {
         self.applied_model_config.read().await.catalog.clone()
     }
 
+    /// 会话启动时持有的官方账号；会话内的官方额度快照按它刷新，与随后
+    /// 切换的默认账号无关。
+    pub(crate) async fn session_official_account_id(&self) -> Option<String> {
+        self.session_official_account_id.lock().await.clone()
+    }
+
     pub async fn mark_model_config_applied(&self, config: &CodeyConfig) {
         *self.applied_model_config.write().await = AppliedModelConfig::new(config.clone());
     }
@@ -2504,6 +2513,13 @@ impl CodeyRuntime {
         stage_timings.mark("spawnAndInjectMs");
         stage_timings.report();
         let process_id = spawned.process_id;
+        // 会话内的官方额度数据按启动时的登录身份刷新；记下这个身份，之后
+        // 切换默认账号时页面可以区分哪些官方线路已经换了凭据。
+        let session_official_account_id =
+            crate::official_accounts::OfficialAccountStore::read_codex_login(home)
+                .ok()
+                .flatten()
+                .map(|record| record.id);
         let RuntimeWatchers {
             injection_statuses,
             injection_websocket_url,
@@ -2552,6 +2568,7 @@ impl CodeyRuntime {
                 crashpad_guard_enabled,
                 crashpad_guard_shutdown: Mutex::new(Some(crashpad_guard_shutdown)),
                 crashpad_guard_task: Mutex::new(Some(crashpad_guard_task)),
+                session_official_account_id: Mutex::new(session_official_account_id),
                 local_router,
             },
             codex_exit,

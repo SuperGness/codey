@@ -1859,6 +1859,33 @@ fn verify_model_whitelist_refresh_response(
     anyhow::bail!("Codex 模型列表热更新失败：{error}")
 }
 
+/// 把不受会话额度快照约束的官方线路 provider id 直接交给页面的发送判断，
+/// 模型目录热更新之外单独送达，保证切换默认账号后立即生效。
+pub async fn set_official_send_bypass(websocket_url: &str, provider_ids: &[String]) -> Result<()> {
+    let provider_ids = serde_json::to_string(provider_ids)
+        .expect("official send bypass provider ids should serialize");
+    let response = codey_runtime_core::bridge::evaluate_script(
+        websocket_url,
+        &format!(
+            r#"(() => {{
+  try {{
+    window.__codeyQuotaUnlock?.setOfficialSendBypass?.({provider_ids});
+    return true;
+  }} catch {{
+    return false;
+  }}
+}})()"#
+        ),
+    )
+    .await
+    .context("请求 Codex 更新官方线路发送判断失败")?;
+    anyhow::ensure!(
+        runtime_value(&response).and_then(serde_json::Value::as_bool) == Some(true),
+        "Codex 未确认官方线路发送判断更新"
+    );
+    Ok(())
+}
+
 fn injection_status_snapshot_script(descriptors: &[InjectionScriptDescriptor]) -> String {
     let mut probes = String::from("{\n");
     for descriptor in descriptors {
