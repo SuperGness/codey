@@ -144,7 +144,7 @@ const createEnvironment = (options = {}) => {
   };
 
   const testSetTimeout = (callback, delay, ...args) => {
-    options.onTimer?.(delay);
+    options.onTimer?.(delay, () => callback(...args));
     const timer = setTimeout(callback, delay, ...args);
     timer.unref?.();
     return timer;
@@ -266,11 +266,12 @@ test("refreshes with one composer scan per async phase and only writes changed t
     env.setStats("conversation-1", { ...STATS, totalTokens: 500, lastTurn: { ...LAST_TURN, averageOutputTokensPerSecond: 50 } });
     env.refresh();
     await flushTimers(30);
-    assert.deepEqual(counts, { composerScans: 4, textWrites: 4 });
-    assert.equal(metric(env.bar(), "total"), "500 tok");
-    assert.equal(field(env.bar(), "totalTokens"), "500 tok");
-    assert.equal(metric(env.bar(), "speed"), "50.0 tok/s");
-    assert.equal(field(env.bar(), "speed"), "50.0 tok/s");
+    // 速度（摘要与详情）和完整累计各写一次；新增值未变，摘要不重写。
+    assert.deepEqual(counts, { composerScans: 4, textWrites: 3 });
+    assert.equal(metric(env.bar(), "total"), "新增 12k Tokens");
+    assert.equal(field(env.bar(), "totalTokens"), "500 Tokens");
+    assert.equal(metric(env.bar(), "speed"), "50.0 Token/s");
+    assert.equal(field(env.bar(), "speed"), "50.0 Token/s");
   } finally {
     env.dispose();
   }
@@ -298,14 +299,13 @@ test("unchanged refreshes with an open panel reduce geometry reads and repeated 
     }
     t.diagnostic(`10 unchanged refreshes: ${counts.composerScans} composer scans, ${geometryReads.button} button geometry reads, ${geometryReads.panel} panel geometry reads, ${counts.textWrites} text writes, ${attributeWrites} label writes`);
     assert.deepEqual(counts, { composerScans: 20, textWrites: 0 });
-    assert.deepEqual(geometryReads, { button: 20, panel: 0 });
-    // 两个入口各更新一次读取中状态和一次完成状态。
-    assert.equal(attributeWrites, 40);
-    attributeWrites = 0;
+    // 轮询期间不切换读取中状态：每次刷新只在响应后渲染一次，且不改写标签。
+    assert.deepEqual(geometryReads, { button: 10, panel: 0 });
+    assert.equal(attributeWrites, 0);
     env.emitAnchorMutation();
     await flushTimers(160);
     assert.equal(attributeWrites, 0, "a DOM rescan with the same data must not rewrite labels");
-    assert.deepEqual(geometryReads, { button: 21, panel: 0 });
+    assert.deepEqual(geometryReads, { button: 11, panel: 0 });
   } finally {
     env.dispose();
   }
@@ -335,18 +335,22 @@ test("repositions an open panel after its visible content changes", async () => 
     await flushTimers(30);
     click(summary(env));
     panel(env).getBoundingClientRect = () => ({ width: 300, height: 200 });
-    env.setStats("conversation-1", { ...STATS, lastTurn: { ...LAST_TURN, averageOutputTokensPerSecond: 42 } });
+    env.setStats("conversation-1", { ...STATS, lastTurn: {
+      ...LAST_TURN, modelDurationMs: 121_000, averageOutputTokensPerSecond: 42,
+    } });
     env.refresh();
     await flushTimers(30);
-    assert.equal(field(env.bar(), "speed"), "42.0 tok/s");
+    assert.equal(field(env.bar(), "speed"), "42.0 Token/s");
     assert.equal(panel(env).style.left, "150px");
     assertExpanded(env, true);
     panel(env).getBoundingClientRect = () => ({ width: 400, height: 200 });
-    env.setStats("conversation-1", { ...STATS, turnCount: 10,
-      lastTurn: { ...LAST_TURN, averageOutputTokensPerSecond: 42 } });
+    env.setStats("conversation-1", { ...STATS, lastTurn: {
+      ...LAST_TURN, stepCount: 3, averageOutputTokensPerSecond: 42,
+    } });
     env.refresh();
     await flushTimers(30);
-    assert.equal(panel(env).style.left, "100px", "summary width changes must also reposition the panel");
+    assert.equal(summary(env).querySelector(".codey-cs-activity").textContent, "本轮 3 步");
+    assert.equal(panel(env).style.left, "100px");
   } finally {
     env.dispose();
   }
@@ -386,7 +390,7 @@ test("mounts promptly when a textarea itself is inserted beside the composer mar
     env.scope.appendChild(env.textarea);
     env.emitMutation([{ type: "childList", target: env.scope, addedNodes: [env.textarea] }]);
     await flushTimers(160);
-    assert.equal(metric(env.bar(), "total"), "132k tok");
+    assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
     assert.equal(env.calls.length, 1);
   } finally {
     env.dispose();
@@ -429,7 +433,7 @@ test("restores a composer promptly when its hidden attribute is removed", async 
     env.emitMutation([{ type: "attributes", target: env.scope, attributeName: "hidden" }]);
     await flushTimers(160);
     assert.equal(env.bar().hidden, false);
-    assert.equal(metric(env.bar(), "total"), "132k tok");
+    assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
   } finally {
     env.dispose();
   }
@@ -502,13 +506,13 @@ for (const attribute of ["data-session-id", "data-thread-id", "data-app-action-s
 }
 
 test("shows precise totals in the tooltip and avoids a rounded 1000k boundary", async () => {
-  const env = createEnvironment({ statsBySession: { "conversation-1": { ...STATS, totalTokens: 999_999 } } });
+  const env = createEnvironment({ statsBySession: { "conversation-1": { ...STATS, totalTokens: 999_999, cachedInputTokens: null } } });
   try {
     await flushTimers(30);
-    assert.equal(metric(env.bar(), "total"), "1.0M tok");
-    assert.equal(env.bar().__codeyCs.total.title, "本次运行 999,999 tok；摘要为四舍五入值，详情显示完整数量。");
-    assert.equal(field(env.bar(), "totalTokens"), "999,999 tok");
-    assert.match(env.bar().__codeyCs.notes.activity.textContent, /首字节等待和工具间隔不计/);
+    assert.equal(metric(env.bar(), "total"), "累计 1.0M Tokens");
+    assert.equal(env.bar().__codeyCs.total.title, "本次运行 Token 总量 999,999 Tokens，包含缓存读取。");
+    assert.equal(field(env.bar(), "totalTokens"), "999,999 Tokens");
+    assert.match(env.bar().__codeyCs.notes.activity.textContent, /不含首内容等待和工具时间/);
   } finally {
     env.dispose();
   }
@@ -524,7 +528,7 @@ test("rejects fractional or imprecise token and step counts", async () => {
       env.refresh();
       await flushTimers(30);
       assert.equal(metric(env.bar(), "total"), "—");
-      assert.equal(metric(env.bar(), "activity"), "— 轮 · — 步");
+      assert.equal(metric(env.bar(), "activity"), "本轮 — 步");
       assert.equal(field(env.bar(), "outputTokens"), "—");
       assert.equal(metric(env.bar(), "cache-rate"), "—");
     }
@@ -550,7 +554,7 @@ test("remounts into a replacement composer after an in-flight stats response", a
     await flushTimers(30);
     assert.equal(env.bar(), originalBar);
     assert.equal(env.bar().parentElement, replacement);
-    assert.equal(metric(env.bar(), "total"), "132k tok");
+    assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
   } finally {
     env.dispose();
   }
@@ -568,7 +572,7 @@ test("discards a response after navigation without a mutation notification", asy
     assert.equal(pending[1].sessionId, "conversation-2");
     pending[1].resolve({ status: "ok", stats: { ...STATS, totalTokens: 700 } });
     await flushTimers(30);
-    assert.equal(metric(env.bar(), "total"), "700 tok");
+    assert.equal(field(env.bar(), "totalTokens"), "700 Tokens");
   } finally {
     env.dispose();
   }
@@ -584,7 +588,7 @@ test("mounts cached stats when the composer appears after the initial response",
     env.emitAnchorMutation();
     await flushTimers(160);
     assert.equal(env.bar().parentElement, env.scope);
-    assert.equal(metric(env.bar(), "total"), "132k tok");
+    assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
     assert.equal(env.calls.length, 1, "mounting must not refetch the same session");
   } finally {
     env.dispose();
@@ -599,21 +603,24 @@ test("mounts the stats bar under the composer and renders speed/cache/total", as
   assert.ok(bar, "stats bar should exist");
   assert.equal(bar.parentElement, env.scope);
   assert.equal(bar.hidden, false);
-  assert.equal(metric(bar, "speed"), "188 tok/s");
-  assert.equal(metric(bar, "activity"), "4 轮 · 2 步");
-  assert.match(bar.__codeyCs.activity.title, /轮数为会话总轮数，步骤和速度为最近一轮/);
+  assert.equal(metric(bar, "speed"), "188 Token/s");
+  assert.equal(metric(bar, "activity"), "本轮 2 步");
+  assert.match(bar.__codeyCs.activity.title, /最近一轮的模型生成步数/);
   assert.equal(metric(bar, "cache-rate"), "93%");
-  assert.equal(metric(bar, "total"), "132k tok");
-  assert.equal(field(bar, "outputTokens"), "3,100 tok");
+  assert.equal(metric(bar, "total"), "新增 12k Tokens");
+  assert.equal(field(bar, "freshTokens"), "11,500 Tokens");
+  assert.equal(bar.__codeyCs.total.title, "新增 11,500 Tokens，为未命中缓存的输入与输出合计；本次运行 Token 总量 131,500 Tokens，包含缓存读取。");
+  assert.match(bar.querySelector(".codey-cs-tokens-summary").getAttribute("aria-label"), /本次运行 新增 12k Tokens，总量 132k Tokens，缓存命中 93%/);
+  assert.equal(field(bar, "outputTokens"), "3,100 Tokens");
   assert.equal(summary(env).querySelectorAll(".codey-cs-metric").length, 2);
   for (const selector of [".codey-cs-meta", ".codey-cs-status", '[data-field="model"]']) {
     assert.equal(summary(env).querySelector(selector), null);
   }
-  assert.equal(field(bar, "totalTokens"), "131,500 tok");
-  assert.equal(field(bar, "cachedInputTokens"), "120,000 tok");
-  assert.match(summary(env).getAttribute("aria-label"), /最近一轮统计/);
-  assert.match(summary(env).getAttribute("aria-label"), /会话总轮数 4 轮，最近一轮统计 2 步/);
-  assert.match(summary(env).getAttribute("aria-label"), /查看统计详情/);
+  assert.equal(field(bar, "totalTokens"), "131,500 Tokens");
+  assert.equal(field(bar, "cachedInputTokens"), "120,000 Tokens");
+  assert.match(summary(env).getAttribute("aria-label"), /查看最近一轮详情/);
+  assert.match(summary(env).getAttribute("aria-label"), /本轮 2 步/);
+  assert.match(summary(env).getAttribute("aria-label"), /会话共 4 轮/);
   assert.equal(
     env.calls.filter((call) => call.path === "/session/stats").at(-1).payload.sessionId,
     "conversation-1",
@@ -645,7 +652,8 @@ test("shows unknown values when upstream omits speed and cache", async () => {
   assert.equal(metric(bar, "speed"), "—");
   assert.equal(metric(bar, "cache-rate"), "—");
   assert.equal(field(bar, "cachedInputTokens"), "—");
-  assert.equal(metric(bar, "total"), "132k tok");
+  assert.equal(metric(bar, "total"), "累计 132k Tokens", "without cache data the headline falls back to the cumulative total");
+  assert.equal(field(bar, "freshTokens"), "—");
 });
 
 test("switches stats context when the conversation changes", async () => {
@@ -656,14 +664,14 @@ test("switches stats context when the conversation changes", async () => {
     },
   });
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "total"), "132k tok");
+  assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
 
   env.setConversation("conversation-2");
   env.emitAnchorMutation();
   await flushTimers(200);
 
   const bar = env.bar();
-  assert.equal(metric(bar, "total"), "900 tok");
+  assert.equal(field(bar, "totalTokens"), "900 Tokens");
   assert.equal(env.calls.at(-1).payload.sessionId, "conversation-2");
 });
 
@@ -679,9 +687,9 @@ test("clears stale numbers immediately on a session switch before refetch", asyn
   const bar = env.bar();
   assert.equal(bar.hidden, false);
   assert.equal(metric(bar, "total"), "—", "previous session totals must be cleared");
-  assert.equal(metric(bar, "activity"), "— 轮 · — 步");
+  assert.equal(metric(bar, "activity"), "本轮 — 步");
   assert.equal(metric(bar, "status"), "暂无统计");
-  assert.match(summary(env).getAttribute("aria-label"), /最近一轮统计/);
+  assert.match(summary(env).getAttribute("aria-label"), /查看最近一轮详情/);
   assert.doesNotMatch(summary(env).getAttribute("aria-label"), /132k/);
 });
 
@@ -779,8 +787,9 @@ test("preserves reported zero tokens and zero cache hit rate", async () => {
     cachedInputTokens: 0, cacheWriteInputTokens: 0, inFlight: 0,
   } } });
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "total"), "0 tok");
-  assert.equal(field(env.bar(), "outputTokens"), "0 tok");
+  assert.equal(field(env.bar(), "totalTokens"), "0 Tokens");
+  assert.equal(metric(env.bar(), "total"), "新增 100 Tokens");
+  assert.equal(field(env.bar(), "outputTokens"), "0 Tokens");
   assert.equal(metric(env.bar(), "cache-rate"), "0%");
   assert.equal(metric(env.bar(), "status"), "运行期统计");
 });
@@ -899,7 +908,7 @@ test("reuses one detached bar and overlay and closes panels on remount", async (
   env.emitMutation([{ type: "childList", target: env.document.body, removedNodes: [overlay] }]);
   await flushTimers(160);
   assert.equal(overlay.parentElement, env.document.body);
-  assert.equal(metric(env.bar(), "total"), "132k tok");
+  assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
 });
 
 test("dispose removes portal, listeners and pending response without resurrecting UI", async () => {
@@ -954,14 +963,14 @@ test("keeps current totals on failed refresh and recovers after retry", async ()
     response = failure;
     env.refresh();
     await flushTimers(30);
-    assert.equal(metric(env.bar(), "total"), "132k tok");
-    assert.equal(metric(env.bar(), "status"), "统计暂不可用");
+    assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
+    assert.equal(metric(env.bar(), "status"), "统计更新失败");
     assert.equal(env.bar().hidden, false);
   }
   response = { status: "ok", stats: { ...STATS, totalTokens: 200 } };
   env.refresh();
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "total"), "200 tok");
+  assert.equal(field(env.bar(), "totalTokens"), "200 Tokens");
   assert.equal(metric(env.bar(), "status"), "运行期统计");
 });
 
@@ -987,24 +996,24 @@ test("discards the original A response after switching A to B to A", async () =>
   assert.equal(pending[1].sessionId, "conversation-1");
   pending[1].resolve({ status: "ok", stats: { ...STATS, totalTokens: 700 } });
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "total"), "700 tok");
+  assert.equal(field(env.bar(), "totalTokens"), "700 Tokens");
 });
 
 test("restores historical totals without inventing historical request information", async () => {
   const history = { ...STATS, usageSource: "rollout", usageScope: "session", requestsScope: null, requests: null, inFlight: null, cacheWriteInputTokens: null };
   const env = createEnvironment({ statsBySession: { "conversation-1": history } });
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "total"), "132k tok");
+  assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
   assert.equal(metric(env.bar(), "status"), "历史统计");
-  assert.match(env.bar().querySelector(".codey-cs-tokens-summary").getAttribute("aria-label"), /会话累计 132k/);
+  assert.match(env.bar().querySelector(".codey-cs-tokens-summary").getAttribute("aria-label"), /会话累计 新增 12k Tokens，总量 132k Tokens/);
   assert.equal(env.bar().dataset.running, "false");
 });
 
 test("historical tokens and current runtime request details keep separate scopes", async () => {
   const env = createEnvironment({ statsBySession: { "conversation-1": { ...STATS, usageSource: "rollout", usageScope: "session" } } });
   await flushTimers(30);
-  assert.equal(field(env.bar(), "totalTokens"), "131,500 tok");
-  assert.equal(metric(env.bar(), "speed"), "188 tok/s");
+  assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
+  assert.equal(metric(env.bar(), "speed"), "188 Token/s");
   env.setStats("conversation-1", { ...STATS, usageSource: "rollout", usageScope: "session", lastTurn: { ...LAST_TURN, averageOutputTokensPerSecond: null } });
   env.refresh();
   await flushTimers(30);
@@ -1019,15 +1028,15 @@ test("session totals own the turn count while the last turn owns speed, steps an
     lastTurn: { ...LAST_TURN, stepCount: 3, averageOutputTokensPerSecond: 20 },
   } } });
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "activity"), "99 轮 · 3 步");
+  assert.equal(metric(env.bar(), "activity"), "本轮 3 步");
   assert.equal(field(env.bar(), "modelDurationMs"), "10秒");
   assert.equal(field(env.bar(), "toolDurationMs"), "3秒");
   assert.equal(field(env.bar(), "averageTtftMs"), "0.5秒");
-  assert.equal(metric(env.bar(), "speed"), "20.0 tok/s");
-  assert.equal(metric(env.bar(), "total"), "132k tok");
-  assert.equal(field(env.bar(), "outputTokens"), "3,100 tok");
-  assert.equal(panel(env).querySelectorAll("dt").at(-1).textContent, "平均速度（TPS）");
-  assert.match(env.bar().__codeyCs.notes.activity.textContent, /本轮有效步骤的输出 Token 总和 ÷ 生成耗时总和，首字节等待和工具间隔不计/);
+  assert.equal(metric(env.bar(), "speed"), "20.0 Token/s");
+  assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
+  assert.equal(field(env.bar(), "outputTokens"), "3,100 Tokens");
+  assert.equal(panel(env).querySelectorAll("dt").at(-1).textContent, "平均生成速度");
+  assert.match(env.bar().__codeyCs.notes.activity.textContent, /不含首内容等待和工具时间/);
 });
 
 test("uses only the reported session turn count and preserves zero independently of last turn availability", async () => {
@@ -1039,13 +1048,14 @@ test("uses only the reported session turn count and preserves zero independently
       env.refresh();
       await flushTimers(30);
       const expected = turnCount === 0 || turnCount === 4 ? String(turnCount) : "—";
-      assert.equal(metric(env.bar(), "activity"), `${expected} 轮 · 2 步`);
-      assert.equal(metric(env.bar(), "speed"), "188 tok/s");
+      assert.equal(env.bar().__codeyCs.headingTotal.textContent, `会话 ${expected} 轮`);
+      assert.equal(metric(env.bar(), "activity"), "本轮 2 步");
+      assert.equal(metric(env.bar(), "speed"), "188 Token/s");
     }
     env.setStats("conversation-1", { turnCount: 0 });
     env.refresh();
     await flushTimers(30);
-    assert.equal(metric(env.bar(), "activity"), "0 轮 · — 步");
+    assert.equal(metric(env.bar(), "activity"), "本轮 — 步");
     assert.equal(metric(env.bar(), "speed"), "—");
     assert.notEqual(env.bar().dataset.state, "empty");
   } finally {
@@ -1059,7 +1069,7 @@ test("does not reuse session or request statistics without an identified turn", 
     env.setStats("conversation-1", { ...STATS, lastTurn, modelDurationMs: 500, toolDurationMs: 10, stepCount: 9 });
     env.refresh();
     await flushTimers(30);
-    assert.equal(metric(env.bar(), "activity"), "4 轮 · — 步");
+    assert.equal(metric(env.bar(), "activity"), "本轮 — 步");
     for (const name of ["modelDurationMs", "toolDurationMs", "averageTtftMs", "speed"]) assert.equal(field(env.bar(), name), "—");
     assert.match(env.bar().__codeyCs.notes.activity.textContent, /暂无可识别的最近一轮/);
   }
@@ -1075,8 +1085,8 @@ test("keeps the same turn average through multiple steps and tool intervals with
       lastTurn: { ...LAST_TURN, status: "running", stepCount: 3, inFlight, speedState: "waiting" } });
     env.refresh();
     await flushTimers(30);
-    assert.equal(metric(env.bar(), "speed"), "188 tok/s");
-    assert.equal(field(env.bar(), "speed"), "188 tok/s");
+    assert.equal(metric(env.bar(), "speed"), "188 Token/s");
+    assert.equal(field(env.bar(), "speed"), "188 Token/s");
     assert.equal(env.bar().dataset.running, "true");
     assert.equal(panel(env), originalPanel);
     assertExpanded(env, true);
@@ -1092,9 +1102,9 @@ test("a new user turn clears all prior turn values without clearing session toke
   env.refresh();
   await flushTimers(30);
   assert.equal(metric(env.bar(), "speed"), "等待输出");
-  assert.equal(metric(env.bar(), "activity"), "5 轮 · 0 步");
+  assert.equal(metric(env.bar(), "activity"), "本轮 0 步");
   for (const name of ["modelDurationMs", "toolDurationMs", "averageTtftMs"]) assert.equal(field(env.bar(), name), "—");
-  assert.equal(metric(env.bar(), "total"), "132k tok");
+  assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
   assertExpanded(env, true);
 });
 
@@ -1103,9 +1113,9 @@ test("distinguishes waiting, streaming, estimated average and completed average 
   for (const [changes, expected] of [
     [{ status: "running", speedState: "waiting", averageOutputTokensPerSecond: null }, "等待输出"],
     [{ status: "running", speedState: "streaming", averageOutputTokensPerSecond: null }, "生成中"],
-    [{ status: "running", speedIsEstimate: true, averageOutputTokensPerSecond: 62.35 }, "≈62.4 tok/s"],
-    [{ status: "running", speedIsEstimate: false, averageOutputTokensPerSecond: 65 }, "65.0 tok/s"],
-    [{ status: "completed", averageOutputTokensPerSecond: 71.2 }, "71.2 tok/s"],
+    [{ status: "running", speedIsEstimate: true, averageOutputTokensPerSecond: 62.35 }, "≈62.4 Token/s"],
+    [{ status: "running", speedIsEstimate: false, averageOutputTokensPerSecond: 65 }, "65.0 Token/s"],
+    [{ status: "completed", averageOutputTokensPerSecond: 71.2 }, "71.2 Token/s"],
     [{ status: "completed", averageOutputTokensPerSecond: null }, "—"],
   ]) {
     env.setStats("conversation-1", { ...STATS, lastTurn: { ...LAST_TURN, ...changes } });
@@ -1113,7 +1123,7 @@ test("distinguishes waiting, streaming, estimated average and completed average 
     await flushTimers(30);
     assert.equal(metric(env.bar(), "speed"), expected);
     assert.equal(field(env.bar(), "speed"), expected);
-    assert.match(summary(env).getAttribute("aria-label"), /本轮平均速度/);
+    assert.match(summary(env).getAttribute("aria-label"), /平均生成速度/);
     assert.equal(env.bar().__codeyCs.notes.activity.textContent.includes("含生成中的 Token 估算"), changes.speedIsEstimate === true);
   }
 });
@@ -1126,8 +1136,8 @@ test("uses the backend weighted turn average and preserves valid zero values", a
       averageOutputTokensPerSecond, stepCount: 0, modelDurationMs: 0, toolDurationMs: 0, averageTtftMs: 0 } });
     env.refresh();
     await flushTimers(30);
-    assert.equal(metric(env.bar(), "speed"), `${averageOutputTokensPerSecond.toFixed(1)} tok/s`);
-    assert.equal(metric(env.bar(), "activity"), "4 轮 · 0 步");
+    assert.equal(metric(env.bar(), "speed"), `${averageOutputTokensPerSecond.toFixed(1)} Token/s`);
+    assert.equal(metric(env.bar(), "activity"), "本轮 0 步");
     for (const name of ["modelDurationMs", "toolDurationMs", "averageTtftMs"]) assert.equal(field(env.bar(), name), "0秒");
   }
 });
@@ -1139,7 +1149,7 @@ test("rejects invalid last turn values and keeps absent values unknown", async (
       averageOutputTokensPerSecond: value, stepCount: value, modelDurationMs: value, toolDurationMs: value, averageTtftMs: value } });
     env.refresh();
     await flushTimers(30);
-    assert.equal(metric(env.bar(), "activity"), "4 轮 · — 步");
+    assert.equal(metric(env.bar(), "activity"), "本轮 — 步");
     for (const name of ["speed", "modelDurationMs", "toolDurationMs", "averageTtftMs"]) assert.equal(field(env.bar(), name), "—");
   }
 });
@@ -1147,18 +1157,19 @@ test("rejects invalid last turn values and keeps absent values unknown", async (
 test("explains limited coverage of historical and partial turn records", async () => {
   const env = createEnvironment();
   for (const [coverage, note] of [
-    ["recorded", "仅覆盖本轮可恢复且有有效计时的记录"],
-    ["recorded_and_runtime", "合并本轮可恢复记录与本次运行统计，缺失记录不计入"],
-    ["partial", "本轮记录不完整，仅统计可恢复的部分"],
-    ["runtime", "仅覆盖本轮在本次运行中可统计的步骤"],
+    ["recorded", "仅包含可恢复且有有效计时的记录"],
+    ["recorded_and_runtime", "合并可恢复记录与本次运行统计，缺失记录不计入"],
+    ["partial", "本轮记录不完整，仅统计可恢复部分"],
+    ["runtime", "仅包含本次运行可统计的步骤"],
     ["unknown", "本轮统计范围未知"],
   ]) {
     env.setStats("conversation-1", { ...STATS, requestsScope: null, requests: null,
       lastTurn: { ...LAST_TURN, coverage } });
     env.refresh();
     await flushTimers(30);
-    assert.equal(metric(env.bar(), "speed"), "188 tok/s");
-    assert.ok(env.bar().__codeyCs.notes.activity.textContent.includes(note));
+    assert.equal(metric(env.bar(), "speed"), "188 Token/s");
+    assert.ok(env.bar().__codeyCs.turnCoverage.title.includes(note));
+    if (coverage === "partial") assert.match(env.bar().__codeyCs.notes.activity.textContent, /记录不完整/);
   }
 });
 
@@ -1169,17 +1180,17 @@ test("hides a frozen live turn speed after failure and resumes without changing 
   await flushTimers(30);
   click(summary(env));
   const originalPanel = panel(env);
-  assert.equal(metric(env.bar(), "speed"), "≈188 tok/s");
+  assert.equal(metric(env.bar(), "speed"), "≈188 Token/s");
   response = { status: "failed" };
   env.refresh();
   await flushTimers(30);
   assert.equal(metric(env.bar(), "speed"), "更新暂停");
   assert.equal(field(env.bar(), "speed"), "更新暂停");
-  assert.equal(metric(env.bar(), "total"), "132k tok");
+  assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
   response = { status: "ok", stats: { ...live, lastTurn: { ...live.lastTurn, averageOutputTokensPerSecond: 54 } } };
   env.refresh();
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "speed"), "≈54.0 tok/s");
+  assert.equal(metric(env.bar(), "speed"), "≈54.0 Token/s");
   assert.equal(panel(env), originalPanel);
   assertExpanded(env, true);
 });
@@ -1189,7 +1200,7 @@ test("clears live turn speed and waiting state on conversation changes", async (
     ...STATS, lastTurn: { ...LAST_TURN, status: "running", speedIsEstimate: true },
   } } });
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "speed"), "≈188 tok/s");
+  assert.equal(metric(env.bar(), "speed"), "≈188 Token/s");
   env.setConversation("conversation-2");
   env.emitAnchorMutation();
   await flushTimers(160);
@@ -1212,7 +1223,7 @@ test("normalizes local conversation IDs before reading historical stats", async 
   const env = createEnvironment({ conversationId: " local:conversation-1 ", statsBySession: { "conversation-1": STATS } });
   await flushTimers(30);
   assert.equal(env.calls[0].payload.sessionId, "conversation-1");
-  assert.equal(metric(env.bar(), "total"), "132k tok");
+  assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
 });
 
 test("preserves the same session values while refreshing and marks failed values stale", async () => {
@@ -1225,11 +1236,11 @@ test("preserves the same session values while refreshing and marks failed values
   await flushTimers(30);
   env.refresh();
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "total"), "132k tok");
-  assert.equal(metric(env.bar(), "status"), "更新统计中");
+  assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
+  assert.equal(metric(env.bar(), "status"), "运行期统计", "an in-flight refresh keeps the current status");
   resolveRefresh({ status: "failed" });
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "total"), "132k tok");
+  assert.equal(field(env.bar(), "totalTokens"), "131,500 Tokens");
   assert.match(env.bar().__codeyCs.notes.activity.textContent, /可能已过期/);
 });
 
@@ -1239,12 +1250,34 @@ test("shows reference activity rows and computes uncached input without double c
       averageTtftMs: 2800, coverage: "recorded" },
   } } });
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "activity"), "4 轮 · 209 步");
+  assert.equal(metric(env.bar(), "activity"), "本轮 209 步");
   assert.equal(field(env.bar(), "modelDurationMs"), "21分 26秒");
   assert.equal(field(env.bar(), "toolDurationMs"), "9分 33秒");
   assert.equal(field(env.bar(), "averageTtftMs"), "2.8秒");
-  assert.equal(field(env.bar(), "uncachedInputTokens"), "8,400 tok");
+  assert.equal(field(env.bar(), "uncachedInputTokens"), "8,400 Tokens");
   assert.equal(env.bar().querySelectorAll(".codey-cs-summary").length, 2);
+});
+
+test("formats long durations by hours and keeps model wait, tool accumulation and coverage distinct", async () => {
+  const env = createEnvironment();
+  try {
+    for (const status of ["completed", "running"]) {
+      env.setStats("conversation-1", { ...STATS,
+        lastTurn: { ...LAST_TURN, status, modelDurationMs: 15_543_000, toolDurationMs: 14_567_000,
+          averageTtftMs: 4_800, coverage: "recorded_and_runtime" },
+      });
+      env.refresh();
+      await flushTimers(30);
+      assert.equal(field(env.bar(), "modelDurationMs"), "4小时 19分 3秒");
+      assert.equal(field(env.bar(), "toolDurationMs"), "4小时 2分 47秒");
+      assert.equal(env.bar().__codeyCs.turnCoverage.textContent, "会话记录 + 本次运行");
+      assert.equal(env.bar().__codeyCs.modelHint.textContent, "含首内容等待");
+      assert.equal(env.bar().__codeyCs.toolHint.textContent, "调用累计 · 并行可能重叠");
+      assert.match(env.bar().__codeyCs.notes.activity.textContent, /不含首内容等待和工具时间/);
+    }
+  } finally {
+    env.dispose();
+  }
 });
 
 test("renders merged timing of one turn without accumulating again or restoring another session response", async () => {
@@ -1265,12 +1298,12 @@ test("renders merged timing of one turn without accumulating again or restoring 
     return { status: "ok", stats: sessionId === "conversation-1" ? merged : runtime };
   } });
   const assertMerged = () => {
-    assert.equal(field(env.bar(), "modelDurationMs"), "2分 0秒");
+    assert.equal(field(env.bar(), "modelDurationMs"), "2分");
     assert.equal(field(env.bar(), "averageTtftMs"), "0.8秒");
-    assert.equal(field(env.bar(), "speed"), "42.0 tok/s");
-    assert.equal(metric(env.bar(), "speed"), "42.0 tok/s");
-    assert.match(env.bar().__codeyCs.notes.activity.textContent, /合并本轮可恢复记录与本次运行统计/);
-    assert.doesNotMatch(env.bar().__codeyCs.notes.activity.textContent, /仅覆盖本轮在本次运行中/);
+    assert.equal(field(env.bar(), "speed"), "42.0 Token/s");
+    assert.equal(metric(env.bar(), "speed"), "42.0 Token/s");
+    assert.match(env.bar().__codeyCs.turnCoverage.title, /合并可恢复记录与本次运行统计/);
+    assert.doesNotMatch(env.bar().__codeyCs.turnCoverage.title, /仅包含本次运行可统计的步骤/);
   };
   try {
     await flushTimers(30);
@@ -1285,7 +1318,7 @@ test("renders merged timing of one turn without accumulating again or restoring 
     env.emitAnchorMutation();
     await flushTimers(160);
     assert.equal(field(env.bar(), "modelDurationMs"), "0.5秒");
-    assert.match(env.bar().__codeyCs.notes.activity.textContent, /仅覆盖本轮在本次运行中/);
+    assert.match(env.bar().__codeyCs.turnCoverage.title, /仅包含本次运行可统计的步骤/);
 
     deferNext = true;
     env.refresh();
@@ -1328,7 +1361,7 @@ test("does not fabricate missing activity or subtract inconsistent cache", async
       averageTtftMs: null }, cachedInputTokens: 999999,
   } } });
   await flushTimers(30);
-  assert.equal(metric(env.bar(), "activity"), "4 轮 · — 步");
+  assert.equal(metric(env.bar(), "activity"), "本轮 — 步");
   assert.equal(field(env.bar(), "toolDurationMs"), "0秒");
   for (const key of ["modelDurationMs", "averageTtftMs", "uncachedInputTokens", "cacheRate"]) assert.equal(field(env.bar(), key), "—");
 });
@@ -1339,7 +1372,113 @@ test("explains turn boundaries and accumulated tool timing", async () => {
   } } });
   await flushTimers(30);
   const note = env.bar().__codeyCs.notes.activity.textContent;
-  assert.match(note, /一次提问为一轮，步数为该轮模型生成次数/);
-  assert.match(note, /有有效计时的记录/);
-  assert.match(note, /工具用时为本轮累计值，并行调用可能重叠/);
+  assert.equal(env.bar().__codeyCs.activity.textContent, "本轮 2 步");
+  assert.equal(env.bar().__codeyCs.headingTotal.textContent, "会话 4 轮");
+  assert.equal(env.bar().__codeyCs.modelHint.textContent, "含首内容等待");
+  assert.equal(note, "速度仅统计有效计时步骤，不含首内容等待和工具时间。");
+  assert.match(env.bar().__codeyCs.speed.title, /按有效步骤的生成 Token 总量与生成耗时计算/);
+  assert.match(env.bar().__codeyCs.turnCoverage.title, /仅包含可恢复且有有效计时的记录/);
+  assert.equal(env.bar().__codeyCs.toolHint.textContent, "调用累计 · 并行可能重叠");
+});
+
+test("renders token composition, cache ring and panel subtitles without rewriting unchanged styles", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    const refs = env.bar().__codeyCs;
+    const grow = key => refs.segments[key].style.getPropertyValue("flex-grow");
+    assert.equal(refs.composition.hidden, false);
+    assert.deepEqual(["cachedInputTokens", "uncachedInputTokens", "outputTokens"].map(grow), ["913", "64", "24"]);
+    assert.equal(refs.ring.style.getPropertyValue("--cs-rate"), "93");
+    assert.equal(refs.rows.cacheWriteInputTokens.hidden, false);
+    assert.equal(field(env.bar(), "cacheWriteInputTokens"), "2,000 Tokens");
+    assert.equal(refs.subtitles.activity.textContent, "2 步 · 已完成");
+    assert.equal(refs.subtitles.tokens.textContent, "本次运行 · 含缓存读取");
+
+    let styleWrites = 0;
+    for (const element of [refs.ring, ...Object.values(refs.segments)]) {
+      const setProperty = element.style.setProperty;
+      element.style.setProperty = (...args) => { styleWrites += 1; setProperty(...args); };
+    }
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(styleWrites, 0, "unchanged stats must not rewrite composition styles");
+
+    env.setStats("conversation-1", { ...STATS, cachedInputTokens: null, cacheWriteInputTokens: null,
+      lastTurn: { ...LAST_TURN, status: "running" } });
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(refs.composition.hidden, true);
+    assert.equal(refs.ring.style.getPropertyValue("--cs-rate"), "0");
+    assert.equal(refs.rows.cacheWriteInputTokens.hidden, true);
+    assert.equal(refs.subtitles.activity.textContent, "2 步 · 进行中");
+  } finally {
+    env.dispose();
+  }
+});
+
+const pollTimers = () => {
+  const timers = [];
+  return {
+    timers,
+    onTimer: (delay, run) => { if (delay >= 1_000) timers.push({ delay, run }); },
+    // 直接触发最近一次排定的轮询，避免测试真实等待数秒。
+    async fireLatest() {
+      const timer = timers.at(-1);
+      timers.length = 0;
+      timer.run();
+      await flushTimers(30);
+      return timers.at(-1)?.delay;
+    },
+  };
+};
+
+test("backs off idle polling while results stay unchanged and resets on change or activity", async () => {
+  const polls = pollTimers();
+  const env = createEnvironment({ onTimer: polls.onTimer, statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    assert.equal(polls.timers.at(-1).delay, 3_000);
+    assert.equal(await polls.fireLatest(), 6_000);
+    assert.equal(await polls.fireLatest(), 12_000);
+    assert.equal(await polls.fireLatest(), 12_000, "idle backoff is capped");
+    env.setStats("conversation-1", { ...STATS, totalTokens: 140_000 });
+    assert.equal(await polls.fireLatest(), 3_000, "changed stats reset the backoff");
+    env.setStats("conversation-1", { ...STATS, lastTurn: { ...LAST_TURN, status: "running" } });
+    assert.equal(await polls.fireLatest(), 1_100);
+    assert.equal(await polls.fireLatest(), 1_100, "a running turn never backs off");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("polls soon after the composer submits and keeps fast polling while the turn starts", async () => {
+  const delays = [];
+  const env = createEnvironment({ onTimer: delay => delays.push(delay), statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    const fetches = () => env.calls.filter(call => call.path === "/session/stats").length;
+    const before = fetches();
+    env.document.dispatchEvent({ type: "keydown", key: "Enter", shiftKey: true, target: env.textarea });
+    env.document.dispatchEvent({ type: "keydown", key: "Enter", isComposing: true, target: env.textarea });
+    env.document.dispatchEvent({ type: "keydown", key: "Enter", target: env.document.body });
+    assert.equal(delays.includes(300), false, "newlines, IME input and keys outside the composer do not poll");
+
+    delays.length = 0;
+    env.document.dispatchEvent({ type: "keydown", key: "Enter", target: env.textarea });
+    assert.deepEqual(delays, [300]);
+    await flushTimers(330);
+    assert.equal(fetches(), before + 1);
+    assert.equal(delays.at(-1), 1_100, "the submit watch window polls at the active rate");
+
+    delays.length = 0;
+    const send = env.scope.appendChild(env.document.createElement("button"));
+    env.document.dispatchEvent({ type: "click", target: send });
+    assert.deepEqual(delays, [300]);
+    delays.length = 0;
+    env.document.dispatchEvent({ type: "click", target: env.bar().querySelector(".codey-cs-tokens-summary") });
+    assert.equal(delays.includes(300), false, "the stats buttons themselves do not count as a submit");
+  } finally {
+    env.dispose();
+  }
 });

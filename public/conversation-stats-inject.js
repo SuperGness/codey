@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 8;
+  const VERSION = 10;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -34,9 +34,15 @@
     "hidden",
     "aria-hidden",
   ];
+  // 空闲时结果连续不变就逐步放慢（3s → 6s → 12s）；发送消息后立即恢复快速
+  // 轮询一段时间，所以新一轮的开始不依赖空闲间隔。
   const POLL_IDLE_MS = 3_000;
+  const POLL_IDLE_MAX_MS = 12_000;
   const POLL_ACTIVE_MS = 1_100;
+  const SUBMIT_POLL_DELAY_MS = 300;
+  const SUBMIT_WATCH_MS = 15_000;
   const RESCAN_DEBOUNCE_MS = 120;
+  const compositionKeys = ["cachedInputTokens", "uncachedInputTokens", "outputTokens"];
 
   let statsElement = null;
   let currentSessionId = "";
@@ -48,6 +54,9 @@
   let lastResult = null;
   let sessionGeneration = 0;
   let fetchAttempted = false;
+  let idleStreak = 0;
+  let lastStatsKey = "";
+  let watchUntil = 0;
   let disposed = false;
   const listeners = [];
   const listen = (target, type, handler, options) => {
@@ -136,26 +145,59 @@
     const style = document.createElement("style");
     style.id = styleId;
     style.textContent = `
-      ${styleScope} { --cs-text: var(--text-primary, CanvasText); --cs-muted: color-mix(in srgb, var(--cs-text) 60%, transparent); --cs-line: color-mix(in srgb, var(--cs-text) 11%, transparent); --cs-surface: color-mix(in srgb, var(--bg-primary, Canvas) 97%, var(--cs-text)); -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; box-sizing: border-box; width: 100%; min-width: 0; padding: 5px 4px 0; color: var(--cs-text); font: 12px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; font-variant-numeric: tabular-nums; }
-      ${styleScope} *, ${styleScope} *::before { box-sizing: border-box; }
+      ${styleScope} { --cs-text: var(--text-primary, CanvasText); --cs-muted: color-mix(in srgb, var(--cs-text) 56%, transparent); --cs-soft: color-mix(in srgb, var(--cs-text) 80%, transparent); --cs-line: color-mix(in srgb, var(--cs-text) 10%, transparent); --cs-fill: color-mix(in srgb, var(--cs-text) 5%, transparent); --cs-surface: color-mix(in srgb, var(--bg-primary, Canvas) 97%, var(--cs-text)); --cs-live: light-dark(#248a3d, #30d158); --cs-seg-cached: color-mix(in srgb, var(--cs-text) 26%, transparent); --cs-seg-input: light-dark(#0071e3, #0a84ff); --cs-seg-output: light-dark(#8944ab, #bf5af2); -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; box-sizing: border-box; width: 100%; min-width: 0; padding: 5px 4px 0; color: var(--cs-text); font: 12px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; font-variant-numeric: tabular-nums; }
+      ${styleScope} *, ${styleScope} *::before, ${styleScope} *::after { box-sizing: border-box; }
       ${styleScope}[hidden], ${styleScope} [hidden] { display: none !important; }
-      ${styleScope} .codey-cs-groups { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px 10px; }
+      ${styleScope} .codey-cs-groups { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px 4px; }
+      ${styleScope} .codey-cs-divider { width: 1px; height: 12px; margin: 0 2px; background: var(--cs-line); }
       ${styleScope} button { font: inherit; color: inherit; cursor: pointer; }
-      ${styleScope} .codey-cs-summary { display: inline-flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; padding: 4px 9px; border: 0; border-radius: 999px; background: transparent; color: var(--cs-muted); text-align: center; }
-      ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[aria-expanded="true"] { background: color-mix(in srgb, var(--cs-text) 5%, transparent); color: color-mix(in srgb, var(--cs-text) 72%, transparent); }
+      ${styleScope} .codey-cs-summary { display: inline-flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; min-height: 24px; padding: 2px 10px; border: 0; border-radius: 999px; background: transparent; color: var(--cs-muted); text-align: center; transition: background-color .15s ease, color .15s ease, opacity .2s ease; }
+      ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[aria-expanded="true"] { background: var(--cs-fill); color: var(--cs-soft); }
       ${styleScope} button:focus-visible { outline: 2px solid var(--cs-text); outline-offset: 2px; }
-      ${styleScope} .codey-cs-icon { display: inline-block; width: 15px; height: 15px; flex: 0 0 15px; background: currentColor; mask: var(--cs-icon) center / contain no-repeat; }
+      ${styleScope} .codey-cs-icon { display: inline-block; width: 14px; height: 14px; flex: 0 0 14px; background: currentColor; mask: var(--cs-icon) center / contain no-repeat; }
       ${styleScope} .codey-cs-metric { white-space: nowrap; }
-      ${styleScope} .codey-cs-details { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(360px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 17px 18px 15px; color: var(--cs-text); background: var(--cs-surface); border: 1px solid var(--cs-line); border-radius: 15px; box-shadow: 0 5px 20px #0000000d; user-select: text; }
-      ${styleScope} .codey-cs-heading { display: flex; align-items: center; gap: 8px; padding-bottom: 11px; margin-bottom: 10px; border-bottom: 1px solid var(--cs-line); }
-      ${styleScope} .codey-cs-heading strong { font-size: 13px; font-weight: 550; white-space: nowrap; }
-      ${styleScope} .codey-cs-heading-total { margin-left: auto; font-size: 13px; text-align: right; }
+      ${styleScope} .codey-cs-sep { opacity: .5; }
+      ${styleScope} .codey-cs-speed, ${styleScope} .codey-cs-total { color: var(--cs-soft); font-weight: 560; }
+      ${styleScope} .codey-cs-cache { display: inline-flex; align-items: center; gap: 4px; }
+      ${styleScope} .codey-cs-ring { --cs-rate: 0; width: 12px; height: 12px; flex: none; border-radius: 50%; background: conic-gradient(currentColor calc(var(--cs-rate) * 1%), var(--cs-line) 0); mask: radial-gradient(circle, transparent 3.4px, #000 3.9px); }
+      ${styleScope} .codey-cs-live { position: relative; display: none; width: 6px; height: 6px; flex: none; border-radius: 50%; background: var(--cs-live); }
+      ${styleScope} .codey-cs-live::after { content: ""; position: absolute; inset: 0; border-radius: inherit; background: inherit; animation: codey-cs-pulse 1.8s ease-out infinite; }
+      #${barId}[data-running="true"] .codey-cs-live { display: inline-block; }
+      #${barId}[data-state="stale"] .codey-cs-summary { opacity: .55; }
+      @keyframes codey-cs-pulse { from { transform: scale(1); opacity: .55; } to { transform: scale(2.8); opacity: 0; } }
+      @media (prefers-reduced-motion: reduce) { ${styleScope} .codey-cs-live::after { animation: none; } ${styleScope} .codey-cs-summary { transition: none; } }
+      ${styleScope} .codey-cs-details { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(360px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 15px 16px 13px; color: var(--cs-text); background: var(--cs-surface); border: 1px solid var(--cs-line); border-radius: 14px; box-shadow: 0 12px 32px -12px #0000003d, 0 2px 6px #0000000d; user-select: text; }
+      ${styleScope} .codey-cs-heading { display: flex; align-items: center; gap: 10px; margin-bottom: 13px; }
+      ${styleScope} .codey-cs-badge { display: grid; place-items: center; width: 28px; height: 28px; flex: none; border-radius: 8px; background: var(--cs-fill); color: var(--cs-soft); }
+      ${styleScope} .codey-cs-titles { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+      ${styleScope} .codey-cs-titles strong { font-size: 13px; font-weight: 600; white-space: nowrap; }
+      ${styleScope} .codey-cs-subtitle { color: var(--cs-muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      ${styleScope} .codey-cs-heading-total { margin-left: auto; font-size: 15px; font-weight: 600; letter-spacing: -.01em; text-align: right; white-space: nowrap; }
       ${styleScope} dl { margin: 0; }
-      ${styleScope} .codey-cs-detail-row { display: flex; justify-content: space-between; gap: 14px; padding: 4px 0; }
       ${styleScope} dt { color: var(--cs-muted); }
-      ${styleScope} dd { margin: 0; text-align: right; color: color-mix(in srgb, var(--cs-text) 72%, transparent); overflow-wrap: anywhere; }
-      ${styleScope} .codey-cs-note { margin: 10px 0 0; color: var(--cs-muted); font-size: 10px; line-height: 1.6; }
-      @media (max-width: 480px) { ${styleScope} .codey-cs-groups { gap: 2px; } ${styleScope} .codey-cs-summary { padding-inline: 6px; font-size: 11px; } ${styleScope} .codey-cs-details { padding: 14px; } }
+      ${styleScope} dd { margin: 0; color: var(--cs-soft); overflow-wrap: anywhere; }
+      ${styleScope} .codey-cs-section-label { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin: 1px 1px 7px; color: var(--cs-muted); font-size: 10.5px; }
+      ${styleScope} .codey-cs-section-label span:last-child { color: var(--cs-soft); font-weight: 560; }
+      ${styleScope} .codey-cs-activity-details dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+      ${styleScope} .codey-cs-activity-details .codey-cs-detail-row { display: flex; flex-direction: column; gap: 3px; padding: 8px 10px 9px; border-radius: 10px; background: var(--cs-fill); }
+      ${styleScope} .codey-cs-activity-details dt { display: flex; flex-direction: column; gap: 2px; font-size: 11px; line-height: 1.35; }
+      ${styleScope} .codey-cs-activity-details dd { font-size: 15px; font-weight: 600; line-height: 1.3; }
+      ${styleScope} .codey-cs-tool-hint { color: var(--cs-muted); font-size: 9.5px; font-weight: 400; white-space: nowrap; }
+      ${styleScope} .codey-cs-composition { display: flex; gap: 2px; height: 8px; margin: 0 0 10px; border-radius: 4px; overflow: hidden; background: var(--cs-fill); }
+      ${styleScope} .codey-cs-seg { flex: 0 1 0; min-width: 3px; }
+      ${styleScope} [data-key="cachedInputTokens"] { --cs-dot: var(--cs-seg-cached); }
+      ${styleScope} [data-key="uncachedInputTokens"] { --cs-dot: var(--cs-seg-input); }
+      ${styleScope} [data-key="outputTokens"] { --cs-dot: var(--cs-seg-output); }
+      ${styleScope} .codey-cs-seg { background: var(--cs-dot); }
+      ${styleScope} .codey-cs-tokens-details .codey-cs-detail-row { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; padding: 4px 0; }
+      ${styleScope} .codey-cs-tokens-details dd { text-align: right; }
+      ${styleScope} .codey-cs-tokens-details .codey-cs-detail-row[data-key$="Tokens"]:not([data-key="freshTokens"]) dt::before { content: ""; display: inline-block; width: 7px; height: 7px; margin: 0 7px 1px 0; border-radius: 2px; background: var(--cs-dot, transparent); box-shadow: inset 0 0 0 1px var(--cs-line); }
+      ${styleScope} .codey-cs-detail-row[data-key="freshTokens"] { margin-top: 4px; padding-top: 8px; border-top: 1px solid var(--cs-line); }
+      ${styleScope} .codey-cs-detail-row:is([data-key="freshTokens"], [data-key="cacheRate"]) dd { font-weight: 600; }
+      ${styleScope} .codey-cs-note { margin: 11px 0 0; padding-top: 9px; border-top: 1px solid var(--cs-line); color: var(--cs-muted); font-size: 10.5px; line-height: 1.55; }
+      ${styleScope} .codey-cs-note:empty { display: none; }
+      @media (max-width: 480px) { ${styleScope} .codey-cs-groups { gap: 2px; } ${styleScope} .codey-cs-divider { display: none; } ${styleScope} .codey-cs-summary { padding-inline: 6px; font-size: 11px; } ${styleScope} .codey-cs-details { padding: 12px; } }
+      @media (max-width: 360px) { ${styleScope} .codey-cs-activity-details dl { grid-template-columns: 1fr; } }
     `;
     document.documentElement.appendChild(style);
   };
@@ -182,7 +224,7 @@
       const overlay = make("div", "", "", document.body || document.documentElement);
       overlay.id = overlayId;
       overlay.style.display = "contents";
-      const refs = { overlay, buttons: {}, panels: {}, fields: {}, notes: {}, active: null, pinned: false, closeTimer: 0 };
+      const refs = { overlay, buttons: {}, panels: {}, fields: {}, rows: {}, notes: {}, subtitles: {}, segments: {}, active: null, pinned: false, closeTimer: 0 };
       // Tabler Icons v3.45.0 (MIT), matching the existing application icon family.
       const paths = {
         activity: ["M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0", "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0", "M13.41 10.59l2.59 -2.59", "M7 12a5 5 0 0 1 5 -5"],
@@ -194,42 +236,77 @@
         const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[kind].map(d => `<path d="${d}"/>`).join("")}</svg>`;
         element.style.setProperty?.("--cs-icon", `url("data:image/svg+xml,${encodeURIComponent(svg)}")`);
       };
+      const decorative = (className, parent, text = "") => {
+        const element = make("span", className, text, parent);
+        element.setAttribute("aria-hidden", "true");
+        return element;
+      };
       for (const [kind, title, fields] of [
-        ["activity", "最近一轮统计", [["modelDurationMs", "模型用时"], ["toolDurationMs", "工具调用用时"], ["averageTtftMs", "首 token 平均（TTFT）"], ["speed", "平均速度（TPS）"]]],
-        ["tokens", "Token 用量", [["cacheRate", "缓存命中"], ["uncachedInputTokens", "未缓存输入"], ["cachedInputTokens", "缓存读取"], ["outputTokens", "输出"]]],
+        ["activity", "最近一轮", [["modelDurationMs", "模型请求耗时"], ["toolDurationMs", "工具耗时"], ["averageTtftMs", "首内容平均等待"], ["speed", "平均生成速度"]]],
+        // 前三项与构成条同序同色；缓存写入只在上游回报时显示。
+        ["tokens", "Token 用量", [["cachedInputTokens", "缓存读取"], ["uncachedInputTokens", "未缓存输入"], ["outputTokens", "输出"], ["cacheWriteInputTokens", "缓存写入"], ["freshTokens", "新增合计"], ["cacheRate", "缓存命中率"]]],
       ]) {
+        if (kind === "tokens") decorative("codey-cs-divider", groups);
         const button = make("button", `codey-cs-summary codey-cs-${kind}-summary`, "", groups);
         button.type = "button";
         button.setAttribute("aria-expanded", "false");
         button.setAttribute("aria-controls", `${barId}-${kind}`);
-        icon(kind, button);
         if (kind === "activity") {
-          refs.activity = make("span", "codey-cs-metric codey-cs-activity", "— 轮 · — 步", button);
-          refs.activity.title = "轮数为会话总轮数，步骤和速度为最近一轮统计。";
-          make("span", "", "·", button).setAttribute("aria-hidden", "true");
+          decorative("codey-cs-live", button);
+          icon(kind, button);
+          refs.activity = make("span", "codey-cs-metric codey-cs-activity", "本轮 — 步", button);
+          refs.activity.title = "最近一轮的模型生成步数；会话总轮数见详情。";
+          decorative("codey-cs-sep", button, "·");
           refs.speed = make("span", "codey-cs-metric codey-cs-speed", "—", button);
         } else {
+          icon(kind, button);
           refs.total = make("span", "codey-cs-metric codey-cs-total", "—", button);
-          make("span", "", "·", button).setAttribute("aria-hidden", "true");
-          const cache = make("span", "codey-cs-metric", "缓存命中 ", button);
+          decorative("codey-cs-sep", button, "·");
+          const cache = make("span", "codey-cs-metric codey-cs-cache", "", button);
+          cache.title = "缓存命中率：缓存读取占输入总量的比例";
+          refs.ring = decorative("codey-cs-ring", cache);
+          make("span", "", "缓存", cache);
           refs["cache-rate"] = make("span", "codey-cs-cache-rate", "—", cache);
         }
-        const panel = make("section", "codey-cs-details", "", overlay);
+        const panel = make("section", `codey-cs-details codey-cs-${kind}-details`, "", overlay);
         panel.id = `${barId}-${kind}`;
         panel.hidden = true;
         if (typeof panel.showPopover === "function") panel.setAttribute("popover", "manual");
         panel.setAttribute("aria-label", title);
         const heading = make("div", "codey-cs-heading", "", panel);
-        icon(kind, heading);
-        make("strong", "", title, heading);
+        icon(kind, make("span", "codey-cs-badge", "", heading));
+        const titles = make("div", "codey-cs-titles", "", heading);
+        make("strong", "", title, titles);
+        refs.subtitles[kind] = make("span", "codey-cs-subtitle", "", titles);
+        if (kind === "activity") {
+          refs.headingTotal = make("span", "codey-cs-heading-total", "—", heading);
+        }
         if (kind === "tokens") {
           refs.fields.totalTokens = make("span", "codey-cs-heading-total", "—", heading);
           refs.fields.totalTokens.setAttribute("data-field", "totalTokens");
+          refs.composition = make("div", "codey-cs-composition", "", panel);
+          refs.composition.setAttribute("aria-hidden", "true");
+          refs.composition.hidden = true;
+          for (const key of compositionKeys) {
+            refs.segments[key] = make("span", "codey-cs-seg", "", refs.composition);
+            refs.segments[key].setAttribute("data-key", key);
+          }
+        }
+        const sectionLabel = kind === "activity"
+          ? make("div", "codey-cs-section-label", "", panel)
+          : null;
+        if (sectionLabel) {
+          make("span", "", "统计范围", sectionLabel);
+          refs.turnCoverage = make("span", "", "统计范围未知", sectionLabel);
         }
         const list = make("dl", "", "", panel);
         for (const [key, label] of fields) {
           const row = make("div", "codey-cs-detail-row", "", list);
-          make("dt", "", label, row);
+          row.setAttribute("data-key", key);
+          const term = make("dt", "", label, row);
+          refs.rows[key] = row;
+          if (key === "modelDurationMs") refs.modelHint = make("small", "codey-cs-tool-hint", "含首内容等待", term);
+          if (key === "toolDurationMs") refs.toolHint = make("small", "codey-cs-tool-hint", "调用累计 · 并行可能重叠", term);
           refs.fields[key] = make("dd", "", "—", row);
           refs.fields[key].setAttribute("data-field", key);
         }
@@ -341,20 +418,22 @@
     lastResult = null;
     lastFetchOk = false;
     fetchAttempted = false;
+    idleStreak = 0;
+    lastStatsKey = "";
     setExpanded(false);
   };
 
   const formatSpeed = (value) => (
     value == null || !Number.isFinite(value) || value < 0
       ? null
-      : `${value >= 100 ? Math.round(value) : value.toFixed(1)} tok/s`
+      : `${value >= 100 ? Math.round(value) : value.toFixed(1)} Token/s`
   );
 
   // 与请求日志同一口径：缓存读占输入总量的百分比；上游未回报缓存字段时
   // 返回 null，状态条显示未知值而不是显示 0%。
   const cacheRatePercent = (input, cached) => {
     if (input == null || cached == null || input <= 0 || cached < 0 || cached > input) return null;
-    return `${Math.round((cached / input) * 100)}%`;
+    return Math.round((cached / input) * 100);
   };
 
   const setText = (element, value) => {
@@ -370,6 +449,14 @@
 
   const setAttribute = (element, name, value) => {
     if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+  };
+
+  // CSSOM 会规范化数值写法，读回比较不可靠；按元素记住上次写入值。
+  const setStyle = (element, name, value) => {
+    const written = element.__codeyCsStyle ||= {};
+    if (written[name] === value) return;
+    written[name] = value;
+    element.style.setProperty?.(name, value);
   };
 
   const render = (anchor) => {
@@ -403,52 +490,91 @@
     const speedKnown = formattedSpeed != null;
     const estimatedSpeed = turn?.speedIsEstimate === true;
     const speedText = speedKnown ? `${estimatedSpeed ? "≈" : ""}${formattedSpeed}` : running ? stale ? "更新暂停" : turn.speedState === "waiting" ? "等待输出" : "生成中" : "—";
+    const coverageLabel = ({
+      runtime: "本次运行",
+      recorded: "会话记录",
+      recorded_and_runtime: "会话记录 + 本次运行",
+      partial: "部分记录",
+    })[turn?.coverage] || "范围未知";
     const coverageNote = ({
-      runtime: "仅覆盖本轮在本次运行中可统计的步骤",
-      recorded: "仅覆盖本轮可恢复且有有效计时的记录",
-      recorded_and_runtime: "合并本轮可恢复记录与本次运行统计，缺失记录不计入",
-      partial: "本轮记录不完整，仅统计可恢复的部分",
-    })[turn?.coverage] || "本轮统计范围未知，缺失值显示 —";
-    const speedNote = running && stale ? "实时统计更新失败，恢复后继续显示本轮平均速度"
-      : `本轮有效步骤的输出 Token 总和 ÷ 生成耗时总和，首字节等待和工具间隔不计；${coverageNote}${estimatedSpeed && speedKnown ? "；含生成中的 Token 估算" : ""}`;
-    const rate = cacheRatePercent(data.inputTokens, data.cachedInputTokens) || "—";
+      runtime: "仅包含本次运行可统计的步骤。",
+      recorded: "仅包含可恢复且有有效计时的记录。",
+      recorded_and_runtime: "合并可恢复记录与本次运行统计，缺失记录不计入。",
+      partial: "本轮记录不完整，仅统计可恢复部分。",
+    })[turn?.coverage] || "本轮统计范围未知。";
+    const speedNote = running && stale ? "实时更新失败，恢复后继续显示本轮平均生成速度"
+      : `按有效步骤的生成 Token 总量与生成耗时计算，不含等待首内容和工具间隔。${coverageNote}${estimatedSpeed && speedKnown ? "包含生成中的 Token 估算。" : ""}`;
+    const rateValue = cacheRatePercent(data.inputTokens, data.cachedInputTokens);
+    const rate = rateValue == null ? "—" : `${rateValue}%`;
     const refs = bar.__codeyCs;
     let panelContentChanged = setText(refs.speed, speedText);
     setValue(refs.speed, "title", speedNote);
     panelContentChanged = setText(refs["cache-rate"], rate) || panelContentChanged;
-    panelContentChanged = setText(refs.total, data.totalTokens == null ? "—" : `${formatTokenCount(data.totalTokens)} tok`) || panelContentChanged;
     const finite = value => Number.isFinite(value) && value >= 0;
     const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString("zh-CN") : "—";
-    const duration = (value, average = false) => {
+    const duration = (value, state = "") => {
       if (!finite(value)) return "—";
       const seconds = value / 1000;
-      if (average || seconds < 60) return `${Number(seconds.toFixed(1))}秒`;
-      return `${Math.floor(seconds / 60)}分 ${Math.floor(seconds % 60)}秒`;
+      if (state === "average" || seconds < 60) return `${Number(seconds.toFixed(1))}秒`;
+      const hours = Math.floor(seconds / 3600);
+      const minutes = Math.floor(seconds % 3600 / 60);
+      const remainder = Math.floor(seconds % 60);
+      return [hours ? `${hours}小时` : "", minutes ? `${minutes}分` : "", remainder ? `${remainder}秒` : ""].filter(Boolean).join(" ");
     };
-    panelContentChanged = setText(refs.activity, `${count(data.turnCount)} 轮 · ${count(turn?.stepCount)} 步`) || panelContentChanged;
+    panelContentChanged = setText(refs.activity, `本轮 ${count(turn?.stepCount)} 步`) || panelContentChanged;
     const hasData = stats && (turn || hasRuntimeRequest || [data.turnCount, data.totalTokens, data.inputTokens, data.outputTokens].some(finite));
     const unknownUsage = data.usageSource === "unknown" || data.usageScope === "unknown";
     const scopeLabel = !stats || unknownUsage ? "统计范围未知" : sessionUsage ? "会话累计" : "本次运行";
     const state = !currentSessionId ? "waiting" : stale ? "stale" : !fetchAttempted ? "loading" : !hasData ? "empty" : "ok";
     const status = {
-      waiting: "等待会话", loading: "读取统计中", stale: "统计暂不可用", empty: "暂无统计",
-      ok: fetchInFlight ? "更新统计中" : running ? "本轮进行中" : turn?.status === "aborted" ? "本轮已中止" : (sessionUsage ? "历史统计" : "运行期统计"),
+      waiting: "等待会话", loading: "读取统计中", stale: stats ? "统计更新失败" : "统计暂不可用", empty: "暂无统计",
+      ok: running ? "本轮进行中" : turn?.status === "aborted" ? "本轮已中止" : (sessionUsage ? "历史统计" : "运行期统计"),
     }[state];
     setValue(bar.dataset, "status", status);
-    const tokenValue = value => finite(value) ? `${count(value)} tok` : "—";
-    setValue(refs.total, "title", data.totalTokens == null ? `${scopeLabel}，缺失数据以 — 显示。` : `${scopeLabel} ${tokenValue(data.totalTokens)}；摘要为四舍五入值，详情显示完整数量。`);
+    const tokenValue = value => finite(value) ? `${count(value)} Tokens` : "—";
     data.uncachedInputTokens = finite(data.inputTokens) && finite(data.cachedInputTokens) && data.cachedInputTokens <= data.inputTokens ? data.inputTokens - data.cachedInputTokens : null;
+    // 累计总量每步都会重复计入已缓存的上下文；摘要优先显示未命中缓存的输入与
+    // 输出之和，缓存字段缺失时才回退为累计总量。
+    data.freshTokens = data.uncachedInputTokens != null && finite(data.outputTokens) ? data.uncachedInputTokens + data.outputTokens : null;
+    const headline = data.freshTokens != null ? `新增 ${formatTokenCount(data.freshTokens)} Tokens`
+      : data.totalTokens != null ? `累计 ${formatTokenCount(data.totalTokens)} Tokens` : "—";
+    panelContentChanged = setText(refs.total, headline) || panelContentChanged;
+    setValue(refs.total, "title", data.totalTokens == null && data.freshTokens == null ? `${scopeLabel} Token 用量未知。`
+      : `${data.freshTokens != null ? `新增 ${tokenValue(data.freshTokens)}，为未命中缓存的输入与输出合计；` : ""}${scopeLabel} Token 总量 ${tokenValue(data.totalTokens)}，包含缓存读取。`);
     for (const [key, element] of Object.entries(refs.fields)) {
-      panelContentChanged = setText(element, key === "cacheRate" ? rate : key === "speed" ? speedText : key.endsWith("Ms") ? duration(turn?.[key], key === "averageTtftMs") : tokenValue(data[key])) || panelContentChanged;
+      const durationState = key === "averageTtftMs" ? "average" : "";
+      panelContentChanged = setText(element, key === "cacheRate" ? rate : key === "speed" ? speedText : key.endsWith("Ms") ? duration(turn?.[key], durationState) : tokenValue(data[key])) || panelContentChanged;
     }
-    const pendingNote = stale ? (stats ? "更新失败，当前数据可能已过期。" : "暂时无法读取统计，将自动重试。") : !currentSessionId ? "建立会话后显示统计。" : !stats ? "缺失数据以 — 显示。" : "";
-    const sourceNote = unknownUsage ? "Token 统计范围未知。" : sessionUsage ? "会话累计用量，缓存已包含在输入中。" : "仅统计本次运行的用量。";
-    const activityNote = turn ? "一次提问为一轮，步数为该轮模型生成次数。" : "暂无可识别的最近一轮。";
-    const toolNote = finite(turn?.toolDurationMs) ? "工具用时为本轮累计值，并行调用可能重叠。" : "";
-    panelContentChanged = setText(refs.notes.activity, `${pendingNote}${activityNote}${toolNote}${speedNote}。`) || panelContentChanged;
-    panelContentChanged = setText(refs.notes.tokens, `${pendingNote}${sourceNote}`) || panelContentChanged;
-    setAttribute(refs.buttons.activity, "aria-label", `会话总轮数 ${count(data.turnCount)} 轮，最近一轮统计 ${count(turn?.stepCount)} 步，本轮平均速度 ${speedText}，${status}。${speedNote}。查看统计详情`);
-    setAttribute(refs.buttons.tokens, "aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
+    // 构成条按千分比分配宽度，避免同一数据每次轮询都改写样式。
+    const parts = data.uncachedInputTokens == null || !finite(data.outputTokens) ? null
+      : { cachedInputTokens: data.cachedInputTokens, uncachedInputTokens: data.uncachedInputTokens, outputTokens: data.outputTokens };
+    const partsTotal = parts ? compositionKeys.reduce((sum, key) => sum + parts[key], 0) : 0;
+    setValue(refs.composition, "hidden", partsTotal <= 0);
+    if (partsTotal > 0) {
+      for (const key of compositionKeys) {
+        setValue(refs.segments[key], "hidden", parts[key] <= 0);
+        setStyle(refs.segments[key], "flex-grow", String(Math.round((parts[key] / partsTotal) * 1000)));
+      }
+    }
+    setStyle(refs.ring, "--cs-rate", String(rateValue ?? 0));
+    setValue(refs.rows.cacheWriteInputTokens, "hidden", !finite(data.cacheWriteInputTokens));
+    const turnState = running ? "进行中" : turn?.status === "aborted" ? "已中止" : "已完成";
+    setText(refs.headingTotal, state === "ok" ? `会话 ${count(data.turnCount)} 轮` : "—");
+    setValue(refs.turnCoverage, "hidden", state !== "ok" || !turn);
+    setText(refs.turnCoverage, state === "ok" && turn ? coverageLabel : status);
+    setValue(refs.turnCoverage, "title", coverageNote);
+    setText(refs.subtitles.activity, state === "ok" && turn ? `${count(turn.stepCount)} 步 · ${turnState}` : status);
+    setText(refs.subtitles.tokens, state === "ok" ? (unknownUsage ? scopeLabel : `${scopeLabel} · 含缓存读取`) : status);
+    const pendingNote = stale ? (stats ? "更新失败，当前数据可能已过期。" : "暂时无法读取统计，稍后自动重试。") : !currentSessionId ? "建立会话后显示统计。" : !stats ? "暂无统计数据。" : "";
+    const activitySummary = turn ? "" : "暂无可识别的最近一轮。";
+    const activityNote = [
+      speedKnown ? "速度仅统计有效计时步骤，不含首内容等待和工具时间。" : "",
+      turn?.coverage === "partial" ? "记录不完整。" : "",
+      estimatedSpeed && speedKnown ? "含生成中的 Token 估算。" : "",
+    ].join("");
+    panelContentChanged = setText(refs.notes.activity, pendingNote || activitySummary || activityNote) || panelContentChanged;
+    setAttribute(refs.buttons.activity, "aria-label", `本轮 ${count(turn?.stepCount)} 步，平均生成速度 ${speedText}，${status}。会话共 ${count(data.turnCount)} 轮。查看最近一轮详情`);
+    setAttribute(refs.buttons.tokens, "aria-label", `Token 用量，${scopeLabel}${data.freshTokens != null ? ` 新增 ${formatTokenCount(data.freshTokens)} Tokens，` : " "}总量 ${data.totalTokens == null ? "—" : `${formatTokenCount(data.totalTokens)} Tokens`}，缓存命中 ${rate}，${status}。查看 Token 详情`);
     setValue(bar.dataset, "running", running ? "true" : "false");
     setValue(bar.dataset, "state", state);
     // 入口仍可能因侧栏或输入框布局变化而移动；位置和数据都不变时才跳过浮层测量。
@@ -462,8 +588,19 @@
     pollTimer = setTimeout(poll, delay);
   };
 
-  const pollInterval = () => stats?.lastTurn?.status === "running" || stats?.inFlight > 0
-    ? POLL_ACTIVE_MS : POLL_IDLE_MS;
+  const pollInterval = () => {
+    if (stats?.lastTurn?.status === "running" || stats?.inFlight > 0 || Date.now() < watchUntil) {
+      return POLL_ACTIVE_MS;
+    }
+    return Math.min(POLL_IDLE_MAX_MS, POLL_IDLE_MS * 2 ** Math.min(idleStreak, 2));
+  };
+
+  // 页面重新可见、获得焦点或用户发送消息时，空闲退避作废并尽快刷新。
+  const wake = (delay = 0, watch = false) => {
+    idleStreak = 0;
+    if (watch) watchUntil = Date.now() + SUBMIT_WATCH_MS;
+    schedulePoll(delay);
+  };
 
   const poll = async () => {
     if (disposed) return;
@@ -478,8 +615,8 @@
       return;
     }
     if (!fetchInFlight) {
+      // 轮询中不切换显示状态：数据未变时整轮请求不产生任何 DOM 写入。
       fetchInFlight = true;
-      render(anchor);
       const requestSessionId = currentSessionId;
       const requestGeneration = sessionGeneration;
       let completedContext = null;
@@ -493,8 +630,12 @@
         if (result?.status === "ok") {
           lastFetchOk = true;
           stats = result.stats ?? null;
+          const statsKey = JSON.stringify(stats);
+          idleStreak = statsKey === lastStatsKey ? idleStreak + 1 : 0;
+          lastStatsKey = statsKey;
         } else {
           lastFetchOk = false;
+          idleStreak = 0;
         }
       } catch {
         if (!disposed) completedContext = resolveSessionContext();
@@ -614,9 +755,20 @@
       observer.observe(document.documentElement, options);
       window.__codeyConversationStatsObserver = observer;
     }
-    listen(document, "visibilitychange", () => schedulePoll(0));
-    listen(window, "focus", () => schedulePoll(0));
-    listen(window, "pageshow", () => schedulePoll(0));
+    listen(document, "visibilitychange", () => wake());
+    listen(window, "focus", () => wake());
+    listen(window, "pageshow", () => wake());
+    // 发送入口只看当前输入卡片：Enter 提交或点击卡片内按钮。误判只多一次轮询。
+    const composerHost = () => statsElement?.isConnected ? statsElement.parentElement : null;
+    const inComposer = (target) => Boolean(target && !containsStats(target) && composerHost()?.contains(target));
+    listen(document, "keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && inComposer(event.target)) {
+        wake(SUBMIT_POLL_DELAY_MS, true);
+      }
+    }, true);
+    listen(document, "click", (event) => {
+      if (inComposer(event.target) && event.target.closest?.("button")) wake(SUBMIT_POLL_DELAY_MS, true);
+    }, true);
     listen(window, "resize", () => positionPanel());
     listen(document, "scroll", () => positionPanel(), true);
     listen(document, "pointerdown", (event) => {
@@ -641,7 +793,7 @@
         lastFetchOk,
         lastResult,
       }),
-      refresh: () => schedulePoll(0),
+      refresh: () => wake(),
       dispose: () => {
         if (disposed) return;
         disposed = true;
