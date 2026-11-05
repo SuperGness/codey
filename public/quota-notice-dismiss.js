@@ -231,7 +231,73 @@
         .map((anchor) => nearestNotice(anchor, isNotice))
         .filter(Boolean),
     );
-    return nested[0] || notice;
+    return completeNotice(nested[0] || notice, isNotice);
+  };
+
+  // 标题和说明文字组成的子块会单独命中通知规则，真正的重置按钮在兄弟
+  // 容器里。把关闭按钮锚到最近一个带重置控件的祖先，而不是文字块的角落。
+  const completeNotice = (resolved, isNotice) => {
+    if (!resolved || hasResetControl(resolved)) return resolved;
+    return nearestNotice(resolved.parentElement, (candidate) => (
+      isNotice(candidate) && hasResetControl(candidate)
+    )) || resolved;
+  };
+
+  // 圆角外框常是通知外面一层没有自身内容的纯包裹；只隐藏内层会留下空壳，
+  // 继续向上找真正画出提示框的最外层节点。
+  const surfaceStopSelector = [
+    "main",
+    "[role='main']",
+    "form",
+    "nav",
+    "dialog",
+    "[role='dialog']",
+    "[role='alertdialog']",
+    "[aria-modal='true']",
+    "textarea",
+    "[contenteditable='true']",
+    "[contenteditable='plaintext-only']",
+    "[role='textbox']",
+    conversationTurnSelector,
+  ].join(", ");
+  const ignorableShellSibling = (element) => (
+    element instanceof Element
+    && (
+      element.getAttribute?.(closeAttribute) === "true"
+      || ["SCRIPT", "STYLE", "TEMPLATE", "NOSCRIPT", "LINK", "META", "BR", "HR"]
+        .includes(element.tagName)
+      || (
+        ["DIV", "SPAN", "SECTION", "ASIDE", "P"].includes(element.tagName)
+        && element.children.length === 0
+        && !directText(element)
+      )
+    )
+  );
+  // 已定位的浮层本身就是可见表面，停在它身上，不并入外面的纯包裹。
+  const positionedSurfaceSelector = [
+    "dialog",
+    "[role='dialog']",
+    "[role='alertdialog']",
+    "[aria-modal='true']",
+    "[data-radix-portal]",
+    "[data-portal]",
+  ].join(", ");
+  const noticeSurface = (resolved) => {
+    let surface = resolved;
+    for (let depth = 0; depth < 12; depth += 1) {
+      if (surface?.matches?.(positionedSurfaceSelector)) break;
+      const parent = surface?.parentElement;
+      if (!(parent instanceof Element)
+        || parent === document.body
+        || parent === document.documentElement
+        || parent.matches?.(surfaceStopSelector)
+        || directText(parent)) break;
+      if ([...(parent.children || [])].some((child) => (
+        child !== surface && !ignorableShellSibling(child)
+      ))) break;
+      surface = parent;
+    }
+    return surface || resolved;
   };
 
   const addStyle = () => {
@@ -245,8 +311,8 @@
         all: unset !important;
         position: absolute !important;
         z-index: 6 !important;
-        inset-block-start: 8px !important;
-        inset-inline-end: 8px !important;
+        inset-block-start: -8px !important;
+        inset-inline-end: -8px !important;
         display: grid !important;
         place-items: center !important;
         box-sizing: border-box !important;
@@ -280,8 +346,8 @@
       }
       @media (max-width: 520px) {
         button[${closeAttribute}="true"] {
-          inset-block-start: 6px !important;
-          inset-inline-end: 6px !important;
+          inset-block-start: -7px !important;
+          inset-inline-end: -7px !important;
           width: 28px !important;
           height: 28px !important;
           font-size: 19px !important;
@@ -293,12 +359,15 @@
 
   const hideNotice = (notice) => {
     if (!notice) return false;
+    const surface = noticeSurface(notice);
     dismissedNotices.add(notice);
-    notice.querySelector?.(`[${closeAttribute}="true"]`)?.remove?.();
+    dismissedNotices.add(surface);
+    surface.querySelector?.(`[${closeAttribute}="true"]`)?.remove?.();
     notice.setAttribute?.(noticeAttribute, "true");
     notice.setAttribute?.(dismissedAttribute, "true");
-    notice.setAttribute?.("aria-hidden", "true");
-    notice.style?.setProperty?.("display", "none", "important");
+    surface.setAttribute?.(dismissedAttribute, "true");
+    surface.setAttribute?.("aria-hidden", "true");
+    surface.style?.setProperty?.("display", "none", "important");
     return true;
   };
 
@@ -308,11 +377,12 @@
   };
 
   const ensureCloseButton = (notice) => {
-    if (dismissedNotices.has(notice)) {
+    const surface = noticeSurface(notice);
+    if (dismissedNotices.has(notice) || dismissedNotices.has(surface)) {
       hideNotice(notice);
       return null;
     }
-    const existing = notice.querySelector?.(`[${closeAttribute}="true"]`);
+    const existing = surface.querySelector?.(`[${closeAttribute}="true"]`);
     if (existing) return existing;
 
     const button = document.createElement("button");
@@ -326,11 +396,11 @@
       hideNotice(notice);
     });
     notice.setAttribute?.(noticeAttribute, "true");
-    const computedPosition = window.getComputedStyle?.(notice)?.position;
+    const computedPosition = window.getComputedStyle?.(surface)?.position;
     if (!computedPosition || computedPosition === "static") {
-      notice.style?.setProperty?.("position", "relative", "important");
+      surface.style?.setProperty?.("position", "relative", "important");
     }
-    notice.insertBefore?.(button, notice.firstChild || null);
+    surface.insertBefore?.(button, surface.firstChild || null);
     return button;
   };
 
@@ -356,12 +426,13 @@
     );
     let found = 0;
     for (const notice of matches) {
-      if (notice.isConnected === false) continue;
-      if (dismissedNotices.has(notice)) {
-        hideNotice(notice);
+      const resolved = completeNotice(notice, detector);
+      if (resolved.isConnected === false) continue;
+      if (dismissedNotices.has(resolved)) {
+        hideNotice(resolved);
         continue;
       }
-      if (ensureCloseButton(notice)) found += 1;
+      if (ensureCloseButton(resolved)) found += 1;
     }
     return {
       continuation: nextContinuation,

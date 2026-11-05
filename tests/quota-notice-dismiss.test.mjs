@@ -217,6 +217,74 @@ test("native click hides the notice and repeated scans do not inject it again", 
   assert.equal(notice.style.display, "none:important");
 });
 
+test("anchors the close button to the outer notice that owns the reset controls", () => {
+  const runtime = createRuntime();
+  const banner = runtime.body.appendChild(createElement("section"));
+  const textBlock = banner.appendChild(createElement("div"));
+  textBlock.appendChild(createElement("h2", "Codex 和工作使用额度已用完"));
+  textBlock.appendChild(createElement(
+    "p",
+    "你的速率限制将于 19:34 重置。立即升级，或使用一次速率限制重置机会。",
+  ));
+  const actions = banner.appendChild(createElement("div"));
+  actions.appendChild(createElement("button", "重置使用量"));
+  actions.appendChild(createElement("button", "升级"));
+
+  runtime.window.__codeyQuotaNoticeDismiss.scan(runtime.body);
+
+  const close = findCloseButton(banner);
+  assert.ok(close);
+  assert.equal(close.parentElement, banner);
+  assert.equal(findCloseButton(textBlock), null);
+  assert.equal(banner.getAttribute("data-codey-quota-notice"), "true");
+  assert.equal(textBlock.getAttribute("data-codey-quota-notice"), null);
+
+  close.click();
+  assert.equal(banner.style.display, "none:important");
+  assert.equal(textBlock.style.display, undefined);
+});
+
+test("dismiss resolves the outer notice even when called on the text block", () => {
+  const runtime = createRuntime();
+  const banner = runtime.body.appendChild(createElement("section"));
+  const textBlock = banner.appendChild(createElement("div"));
+  textBlock.appendChild(createElement("h2", "Codex 和工作使用额度已用完"));
+  textBlock.appendChild(createElement(
+    "p",
+    "你的速率限制将于 19:34 重置。立即升级，或使用一次速率限制重置机会。",
+  ));
+  const actions = banner.appendChild(createElement("div"));
+  actions.appendChild(createElement("button", "重置使用量"));
+
+  assert.equal(runtime.window.__codeyQuotaNoticeDismiss.dismiss(textBlock), true);
+  assert.equal(banner.style.display, "none:important");
+});
+
+test("dismiss removes the pure wrapper shell instead of leaving an empty box", () => {
+  const runtime = createRuntime();
+  const row = runtime.body.appendChild(createElement("div"));
+  const shell = row.appendChild(createElement("section"));
+  const notice = shell.appendChild(createElement("div"));
+  notice.appendChild(createElement("h2", "Codex 和工作使用额度已用完"));
+  notice.appendChild(createElement(
+    "p",
+    "你的速率限制将于 19:34 重置。立即升级，或使用一次速率限制重置机会。",
+  ));
+  const actions = notice.appendChild(createElement("div"));
+  actions.appendChild(createElement("button", "重置使用量"));
+  const composer = row.appendChild(createElement("form"));
+  composer.appendChild(createElement("textarea"));
+
+  runtime.window.__codeyQuotaNoticeDismiss.scan(runtime.body);
+
+  const close = findCloseButton(shell);
+  assert.ok(close);
+  assert.equal(findCloseButton(notice), null);
+  close.click();
+  assert.equal(shell.style.display, "none:important");
+  assert.equal(composer.style.display, undefined);
+});
+
 test("ordinary quota panels and unrelated upgrade controls remain untouched", () => {
   const runtime = createRuntime();
   const panel = runtime.body.appendChild(createElement("section"));
