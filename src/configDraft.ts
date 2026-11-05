@@ -1,7 +1,27 @@
 import type { Config, Profile } from "./App.types";
 
 function equal(left: unknown, right: unknown): boolean {
-  return left === right || JSON.stringify(left) === JSON.stringify(right);
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => equal(value, right[index]));
+  }
+  if (!object(left) || !object(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length &&
+    leftKeys.every((key) => (
+      Object.prototype.hasOwnProperty.call(right, key) && equal(left[key], right[key])
+    ));
+}
+
+export function configsHaveSameDraftValues(left: Config | null, right: Config | null) {
+  if (!left || !right) return left === right;
+  const { settingsRevision: _leftRevision, ...leftValues } = left;
+  const { settingsRevision: _rightRevision, ...rightValues } = right;
+  return equal(leftValues, rightValues);
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -41,5 +61,5 @@ export function reconcileConfigDraft(base: Config | null, draft: Config | null, 
   if (!config.profiles.some((profile) => profile.id === config.activeProfileId)) {
     config.activeProfileId = incoming.activeProfileId;
   }
-  return { config, dirty: !equal(config, incoming) };
+  return { config, dirty: !configsHaveSameDraftValues(config, incoming) };
 }

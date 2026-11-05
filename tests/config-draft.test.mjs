@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
-const { reconcileConfigDraft } = await loadTypeScriptModule(new URL("../src/configDraft.ts", import.meta.url));
+const { configsHaveSameDraftValues, reconcileConfigDraft } = await loadTypeScriptModule(new URL("../src/configDraft.ts", import.meta.url));
 
 const baseline = () => ({
   settingsRevision: 1,
@@ -47,4 +47,27 @@ test("locally added and removed custom routes survive account updates", () => {
   const result = reconcileConfigDraft(base, draft, incoming);
   assert.deepEqual(result.config.profiles.map((profile) => profile.id), ["official", "new"]);
   assert.equal(result.dirty, true);
+});
+
+test("draft comparison ignores revision and object key order but keeps route values significant", () => {
+  const left = baseline();
+  const right = structuredClone(left);
+  right.settingsRevision = 9;
+  right.routeRequestLog = {
+    batchSize: right.routeRequestLog.batchSize,
+    enabled: right.routeRequestLog.enabled,
+  };
+  assert.equal(configsHaveSameDraftValues(left, right), true);
+
+  right.profiles = [{ id: "custom", name: "changed" }, right.profiles[0]];
+  assert.equal(configsHaveSameDraftValues(left, right), false);
+});
+
+test("saved revision changes do not make an acknowledged submitted draft dirty", () => {
+  const submitted = baseline();
+  const incoming = structuredClone(submitted);
+  incoming.settingsRevision = 2;
+  const result = reconcileConfigDraft(submitted, submitted, incoming);
+  assert.equal(result.dirty, false);
+  assert.equal(result.config.settingsRevision, 2);
 });

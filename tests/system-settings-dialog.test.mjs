@@ -335,8 +335,8 @@ test("实验版必须先确认，取消不改设置，切回稳定版无需确�
   const handler = appSource.slice(appSource.indexOf("  function changeUpdatePolicy("), appSource.indexOf("  async function persist("));
   let config = { codeyUpdatePolicy: "stable" };
   let confirmation = null;
-  const factory = new Function("config", "isBusy", "editConfig", "setConfirmation", "setConfig", "setDirty", ts.transpile(handler) + "\nreturn changeUpdatePolicy;");
-  const change = factory(config, false, value => { config = value; }, value => { confirmation = value; }, update => { config = update(config); }, () => {});
+  const factory = new Function("config", "isBusy", "editConfig", "setConfirmation", "updateDraft", ts.transpile(handler) + "\nreturn changeUpdatePolicy;");
+  const change = factory(config, false, value => { config = value; }, value => { confirmation = value; }, update => { config = update(config); });
   change("experimental");
   assert.equal(config.codeyUpdatePolicy, "stable");
   assert.match(confirmation.description, /尚未经过充分验证/);

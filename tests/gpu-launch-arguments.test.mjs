@@ -23,7 +23,7 @@ test("three-position GPU slider is accessible and available only on Windows", as
   );
   assert.match(
     sectionsSource,
-    /\{isWindowsClient && \([\s\S]{0,500}<fieldset[\s\S]{0,150}disabled=\{isBusy\}/,
+    /\{isWindowsClient && \([\s\S]{0,500}<fieldset[\s\S]{0,150}disabled=\{configEditingDisabled\}/,
   );
   assert.match(sectionsSource, /type="radio"/);
   assert.match(sectionsSource, /checked=\{gpuLaunchMode\.value === mode\.value\}/);

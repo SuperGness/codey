@@ -123,13 +123,13 @@ export function App({
     `${FEEDBACK_GROUP_QR_BASE_URL}?date=${localDateCacheKey(new Date())}`;
   const {
     config,
-    setConfig,
     dirty,
     setDirty,
     persistedConfigRef,
     setPersistedConfig,
     canSyncCurrentProvider,
     editConfig,
+    updateDraft,
     isOnlyNativeRouterToggle,
     adoptRouteConfig,
     adoptSavedConfig,
@@ -168,6 +168,7 @@ export function App({
     return () => cancelAnimationFrame(frame);
   }, [usageAnalysisOpen]);
   const [busy, setBusy] = useState<string | null>(null);
+  const saveInFlightRef = useRef(false);
   const [loadFailed, setLoadFailed] = useState(false);
   const [configRepairNotice, setConfigRepairNotice] = useState<{ tone: "info" | "success" | "error"; text: string } | null>(null);
   const [systemSettingsOpen, setSystemSettingsOpen] = useState(false);
@@ -186,11 +187,8 @@ export function App({
   const isBusy = busy !== null;
   const configLoaded = config !== null;
   const setSubagentOptimization = useCallback((enabled: boolean) => {
-    setConfig((current) =>
-      current ? { ...current, subagentOptimization: enabled } : current,
-    );
-    setDirty(true);
-  }, []);
+    updateDraft((current) => ({ ...current, subagentOptimization: enabled }));
+  }, [updateDraft]);
   const runOperation = useCallback(
     async (name: string, action: () => Promise<void>) => {
       if (isBusy) return;
@@ -422,10 +420,7 @@ export function App({
       title: "切换到实验版更新？",
       description: "实验版尚未经过充分验证，可能出现功能异常、启动失败或数据兼容问题。请先备份重要数据，避免在关键工作环境使用。确认并保存设置后生效；取消会保留原设置。",
       confirmLabel: "了解风险，使用实验版",
-      run: () => {
-        setConfig((current) => current ? { ...current, codeyUpdatePolicy: policy } : current);
-        setDirty(true);
-      },
+      run: () => updateDraft((current) => ({ ...current, codeyUpdatePolicy: policy })),
     });
   }
 
@@ -761,12 +756,7 @@ export function App({
             : config.activeProfileId,
         profiles,
       };
-      setConfig(next);
-      setDirty(
-        !persisted ||
-          JSON.stringify({ ...next, settingsRevision: 0 }) !==
-            JSON.stringify({ ...persisted, settingsRevision: 0 }),
-      );
+      editConfig(next);
       return;
     }
     if (dirty) {
@@ -957,55 +947,61 @@ export function App({
   }
 
   async function saveCurrent() {
-    if (!config) return;
-    await runOperation("save", async () => {
-      const retryCountChanged =
-        persistedConfigRef.current?.streamMaxRetries !== config.streamMaxRetries;
-      const result = await persist(config);
-      if (result.configApply) {
-        setNotice(configApplyNotice(result.configApply));
-        return;
-      }
-      const subagentHotReloaded = Boolean(result.subagentConfigHotReloaded);
-      const subagentHotReloadFailed = Boolean(result.subagentConfigHotReloadError);
-      const subagentNote = subagentUpdateNote(result);
-      const subagentConfigRepaired = Boolean(result.subagentConfigRepaired);
-      const requestLogHealth = result.routeRequestLogHealth;
-      const requestLogHotReloadFailed = requestLogHealth === "failed";
-      const requestLogSuperseded = requestLogHealth === "superseded";
-      const restartSuffix = result.restartRequired
-        ? "；其他启动参数将在重启 Codex 后生效"
-        : "";
-      let noticeTone: "success" | "info" | "error" =
-        result.restartRequired || subagentHotReloadFailed ? "info" : "success";
-      let noticeText = result.restartRequired && !subagentNote
-        ? "Codey 设置已保存，启动参数将在重启 Codex 后生效"
-        : "Codey 设置已保存";
-      if (subagentConfigRepaired) {
-        noticeText = "Codey 设置已保存；子代理配置已同步";
-      } else if (subagentHotReloaded) {
-        noticeText = "Codey 设置已保存；子代理配置已实时更新";
-      }
-      if (requestLogHotReloadFailed) {
-        noticeTone = "error";
-        noticeText = `Codey 设置已保存；${result.routeRequestLogHotReloadError || "请求日志记录未能实时更新"}`;
-      } else if (requestLogSuperseded) {
-        noticeTone = "info";
-        noticeText = `Codey 设置已保存；${result.routeRequestLogHotReloadError || "请求日志配置被更新的设置取代，请确认当前开关状态"}`;
-      } else if (requestLogHealth === "enabled") {
-        noticeText = `Codey 设置已保存；请求日志记录已实时开启，无需重启${restartSuffix}`;
-      } else if (requestLogHealth === "disabled") {
-        noticeText = `Codey 设置已保存；请求日志记录已实时关闭，无需重启${restartSuffix}`;
-      }
-      if (retryCountChanged && result.restartRequired) {
-        noticeText = "Codey 设置已保存；会话重试次数将在重启 Codex 后生效";
-      }
-      if (subagentNote) {
-        noticeText += `；${subagentNote}`;
-        if (noticeTone === "success") noticeTone = "info";
-      }
-      setNotice({ tone: noticeTone, text: noticeText });
-    });
+    if (!config || !dirty || saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
+    const submitted = config;
+    try {
+      await runOperation("save", async () => {
+        const retryCountChanged =
+          persistedConfigRef.current?.streamMaxRetries !== submitted.streamMaxRetries;
+        const result = await persist(submitted);
+        if (result.configApply) {
+          setNotice(configApplyNotice(result.configApply));
+          return;
+        }
+        const subagentHotReloaded = Boolean(result.subagentConfigHotReloaded);
+        const subagentHotReloadFailed = Boolean(result.subagentConfigHotReloadError);
+        const subagentNote = subagentUpdateNote(result);
+        const subagentConfigRepaired = Boolean(result.subagentConfigRepaired);
+        const requestLogHealth = result.routeRequestLogHealth;
+        const requestLogHotReloadFailed = requestLogHealth === "failed";
+        const requestLogSuperseded = requestLogHealth === "superseded";
+        const restartSuffix = result.restartRequired
+          ? "；其他启动参数将在重启 Codex 后生效"
+          : "";
+        let noticeTone: "success" | "info" | "error" =
+          result.restartRequired || subagentHotReloadFailed ? "info" : "success";
+        let noticeText = result.restartRequired && !subagentNote
+          ? "Codey 设置已保存，启动参数将在重启 Codex 后生效"
+          : "Codey 设置已保存";
+        if (subagentConfigRepaired) {
+          noticeText = "Codey 设置已保存；子代理配置已同步";
+        } else if (subagentHotReloaded) {
+          noticeText = "Codey 设置已保存；子代理配置已实时更新";
+        }
+        if (requestLogHotReloadFailed) {
+          noticeTone = "error";
+          noticeText = `Codey 设置已保存；${result.routeRequestLogHotReloadError || "请求日志记录未能实时更新"}`;
+        } else if (requestLogSuperseded) {
+          noticeTone = "info";
+          noticeText = `Codey 设置已保存；${result.routeRequestLogHotReloadError || "请求日志配置被更新的设置取代，请确认当前开关状态"}`;
+        } else if (requestLogHealth === "enabled") {
+          noticeText = `Codey 设置已保存；请求日志记录已实时开启，无需重启${restartSuffix}`;
+        } else if (requestLogHealth === "disabled") {
+          noticeText = `Codey 设置已保存；请求日志记录已实时关闭，无需重启${restartSuffix}`;
+        }
+        if (retryCountChanged && result.restartRequired) {
+          noticeText = "Codey 设置已保存；会话重试次数将在重启 Codex 后生效";
+        }
+        if (subagentNote) {
+          noticeText += `；${subagentNote}`;
+          if (noticeTone === "success") noticeTone = "info";
+        }
+        setNotice({ tone: noticeTone, text: noticeText });
+      });
+    } finally {
+      saveInFlightRef.current = false;
+    }
   }
 
   function closeSettings() {
@@ -1389,22 +1385,23 @@ export function App({
     </div>
   );
 
+  const saving = busy === "save";
+  const saveButtonText = saving ? "保存中" : dirty ? "保存更改" : "已保存";
   const saveButton = (
     <Button
-      aria-label={dirty ? "保存更改" : "已保存"}
+      aria-label={saving ? "正在保存设置" : saveButtonText}
       className="sidebar-save-button"
       disabled={!dirty || isBusy}
+      loading={saving}
       onClick={handleSaveCurrent}
       variant={dirty ? "default" : "secondary"}
     >
-      {busy === "save" ? (
-        <LoaderCircle className="animate-spin" size={14} aria-hidden="true" />
-      ) : dirty ? (
+      {!saving && (dirty ? (
         <Save size={14} aria-hidden="true" />
       ) : (
         <Check size={14} aria-hidden="true" />
-      )}
-      <span>{dirty ? "保存更改" : "已保存"}</span>
+      ))}
+      <span>{saveButtonText}</span>
     </Button>
   );
 
@@ -1661,6 +1658,7 @@ export function App({
                 onAnalyzeDiagnosticStorage={handleAnalyzeDiagnosticStorage}
                 popupContainer={popupContainer}
                 isBusy={isBusy}
+                configEditingDisabled={isBusy && busy !== "save"}
                 onConfigChange={handleConfigChange}
                 onAddChannel={handleAddNotificationChannel}
                 onChannelChange={handleNotificationChannelChange}

@@ -420,6 +420,7 @@ type FeaturePolicyCardProps = {
   onAnalyzeDiagnosticStorage: (target: DiagnosticStorageTarget) => void;
   popupContainer: HTMLElement | null;
   isBusy: boolean;
+  configEditingDisabled: boolean;
   onConfigChange: (config: Config) => void;
   onAddChannel?: (channel: NotificationChannel) => Promise<boolean>;
   onChannelChange?: (
@@ -461,6 +462,7 @@ function FeaturePolicyCardComponent({
   onAnalyzeDiagnosticStorage,
   popupContainer,
   isBusy,
+  configEditingDisabled,
   onConfigChange,
   onAddChannel,
   onChannelChange,
@@ -493,7 +495,7 @@ function FeaturePolicyCardComponent({
   const fastContextToolsSwitch = (
     <Switch
       checked={fastContextToolsEnabled}
-      disabled={isBusy || fastctxStatusBlocksEmbedded}
+      disabled={configEditingDisabled || fastctxStatusBlocksEmbedded}
       onCheckedChange={(checked) =>
         onConfigChange({ ...config, fastContextTools: checked })
       }
@@ -544,7 +546,7 @@ function FeaturePolicyCardComponent({
                   : undefined
               }
               value={launchProxy}
-              disabled={isBusy}
+              disabled={configEditingDisabled}
               placeholder="留空不走代理，例如 http://127.0.0.1:7890"
               rightSection={
                 launchProxy ? (
@@ -609,7 +611,7 @@ function FeaturePolicyCardComponent({
                 <div className="feature-card-body gpu-mode-card-body">
                   <fieldset
                     className="gpu-mode-fieldset"
-                    disabled={isBusy}
+                    disabled={configEditingDisabled}
                     aria-describedby="gpu-launch-mode-description"
                   >
                     <legend className="sr-only">Codex GPU 启动模式</legend>
@@ -655,7 +657,7 @@ function FeaturePolicyCardComponent({
                 <strong>精简 Codex 宠物模块</strong>
                 <Switch
                   checked={config.slimCodexPet}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, slimCodexPet: checked })
                   }
@@ -716,7 +718,7 @@ function FeaturePolicyCardComponent({
                 <strong>防御性编程控制</strong>
                 <Switch
                   checked={config.scopeGuard}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, scopeGuard: checked })
                   }
@@ -750,7 +752,7 @@ function FeaturePolicyCardComponent({
                   </Button>
                   <Switch
                     checked={config.disableTraceLogWrites}
-                    disabled={isBusy}
+                    disabled={configEditingDisabled}
                     onCheckedChange={(checked) =>
                       onConfigChange({
                         ...config,
@@ -785,7 +787,7 @@ function FeaturePolicyCardComponent({
                     </Button>
                     <Switch
                       checked={config.protectCrashpadPending}
-                      disabled={isBusy}
+                      disabled={configEditingDisabled}
                       onCheckedChange={(checked) =>
                         onConfigChange({
                           ...config,
@@ -812,7 +814,7 @@ function FeaturePolicyCardComponent({
                 <strong>屏蔽完全访问安全提示</strong>
                 <Switch
                   checked={config.hideFullAccessWarning}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, hideFullAccessWarning: checked })
                   }

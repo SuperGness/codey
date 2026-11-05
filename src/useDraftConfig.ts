@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 
 import type { Config } from "./App.types";
-import { reconcileConfigDraft } from "./configDraft";
+import { configsHaveSameDraftValues, reconcileConfigDraft } from "./configDraft";
 
 function onlyLocalRouterToggleChanged(current: Config, persisted: Config) {
   if (current.localRouterEnabled === persisted.localRouterEnabled) return false;
@@ -28,7 +28,9 @@ export function useDraftConfig() {
 
   const setPersistedConfig = useCallback((next: Config) => {
     persistedConfigRef.current = next;
+    draftConfigRef.current = next;
     setConfig(next);
+    setDirty(false);
   }, []);
 
   const pendingNativeRouterToggle = useMemo(() => Boolean(
@@ -38,10 +40,11 @@ export function useDraftConfig() {
       onlyLocalRouterToggleChanged(config, persistedConfigRef.current),
   ), [config]);
 
-  function editConfig(next: Config) {
+  const editConfig = useCallback((next: Config) => {
+    draftConfigRef.current = next;
     setConfig(next);
-    setDirty(true);
-  }
+    setDirty(!configsHaveSameDraftValues(next, persistedConfigRef.current));
+  }, []);
 
   function isOnlyNativeRouterToggle(current: Config) {
     const persisted = persistedConfigRef.current;
@@ -72,8 +75,17 @@ export function useDraftConfig() {
     return merged;
   }
 
+  const updateDraft = useCallback((
+    update: (current: Config) => Config,
+  ) => {
+    const current = draftConfigRef.current;
+    if (!current) return;
+    editConfig(update(current));
+  }, [editConfig]);
+
   function discardDraft() {
     if (persistedConfigRef.current) {
+      draftConfigRef.current = persistedConfigRef.current;
       setConfig(persistedConfigRef.current);
     }
     setDirty(false);
@@ -81,7 +93,6 @@ export function useDraftConfig() {
 
   return {
     config,
-    setConfig,
     dirty,
     setDirty,
     persistedConfigRef,
@@ -89,6 +100,7 @@ export function useDraftConfig() {
     pendingNativeRouterToggle,
     canSyncCurrentProvider: !dirty || pendingNativeRouterToggle,
     editConfig,
+    updateDraft,
     isOnlyNativeRouterToggle,
     adoptRouteConfig,
     adoptSavedConfig,

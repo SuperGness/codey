@@ -52,7 +52,7 @@ test("settings modal keeps dismissal and stacking inside the overlay", async () 
   assert.equal(constants.SETTINGS_OVERLAY_Z_INDEX_CSS, "2147483647");
 });
 
-test("settings controls and popups share the modal busy and portal boundaries", async () => {
+test("settings allow draft edits during saving and preserve operation and portal boundaries", async () => {
   const [appSource, featurePolicySource, promptSource, channelCardSource, channelDialogSource] =
     await Promise.all([
       readFile(new URL("src/App.tsx", root), "utf8"),
@@ -62,7 +62,8 @@ test("settings controls and popups share the modal busy and portal boundaries", 
       readFile(new URL("src/notifications/NotificationChannelDialog.tsx", root), "utf8"),
     ]);
 
-  assert.match(featurePolicySource, /className="gpu-mode-fieldset"\s*disabled=\{isBusy\}/);
+  assert.match(appSource, /configEditingDisabled=\{isBusy && busy !== "save"\}/);
+  assert.match(featurePolicySource, /className="gpu-mode-fieldset"\s*disabled=\{configEditingDisabled\}/);
   for (const setting of [
     "slimCodexPet",
     "scopeGuard",
@@ -72,7 +73,7 @@ test("settings controls and popups share the modal busy and portal boundaries", 
   ]) {
     assert.match(
       featurePolicySource,
-      new RegExp(`checked=\\{config\\.${setting}\\}[\\s\\S]{0,80}disabled=\\{isBusy\\}`),
+      new RegExp(`checked=\\{config\\.${setting}\\}[\\s\\S]{0,80}disabled=\\{configEditingDisabled\\}`),
     );
   }
   assert.match(appSource, /const popupContainer = modalContainer \?\? null/);

@@ -47,7 +47,7 @@ test("user FastCtx blocks embedded tools across the backend and settings", async
   );
   assert.match(uiSource, /const fastContextToolsEnabled =\s*config\.fastContextTools && !fastctxStatusBlocksEmbedded/);
   assert.match(uiSource, /checked=\{fastContextToolsEnabled\}/);
-  assert.match(uiSource, /disabled=\{isBusy \|\| fastctxStatusBlocksEmbedded\}/);
+  assert.match(uiSource, /disabled=\{configEditingDisabled \|\| fastctxStatusBlocksEmbedded\}/);
   assert.match(uiSource, /aria-label="启用 FastCtx 上下文工具"/);
   assert.match(
     uiSource,

@@ -78,6 +78,33 @@ test("save response retains edits made after submitting the draft", () => {
   assert.equal(h.draft().dirty, true);
 });
 
+test("save acknowledgement clears dirty and later runtime states cannot restore it", () => {
+  const h = harness();
+  const submitted = { ...h.draft().config, miscModel: "submitted" };
+  h.draft().editConfig(submitted);
+  const incoming = { ...submitted, settingsRevision: 2 };
+  assert.equal(h.apply({ config: incoming }, submitted), true);
+  assert.equal(h.draft().dirty, false);
+
+  for (const state of ["pending", "restart_required", "failed"]) {
+    assert.equal(h.apply({
+      config: incoming,
+      configApply: { revision: 2, state },
+      restartRequired: true,
+    }, submitted), true);
+    assert.equal(h.draft().dirty, false);
+  }
+});
+
+test("editing a saved value back to its baseline clears dirty", () => {
+  const h = harness();
+  const initial = h.draft().config;
+  h.draft().editConfig({ ...initial, miscModel: "changed" });
+  assert.equal(h.draft().dirty, true);
+  h.draft().editConfig({ ...initial, settingsRevision: 99 });
+  assert.equal(h.draft().dirty, false);
+});
+
 test("route responses merge saved routes while retaining unrelated draft edits", () => {
   const h = harness();
   const initial = h.draft().config;

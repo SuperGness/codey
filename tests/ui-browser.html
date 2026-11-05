@@ -133,17 +133,32 @@
         document.body.style.background = "#181818";
         document.body.style.color = "#ffffff";
       }
-      const restartCheck = new URLSearchParams(location.search).get("check") === "restart-state";
+      const check = new URLSearchParams(location.search).get("check");
+      const restartCheck = check === "restart-state";
+      const saveButtonCheck = check === "save-button";
       const restartPreview = new URLSearchParams(location.search).get("state");
       let restartState = restartPreview || "waiting";
       let restartRevision = 1;
       let restartRequests = 0;
+      let saveRequestCount = 0;
+      let saveAttemptCount = 0;
+      let pendingSaveConfig = null;
+      let releaseSave = null;
       const invokeFixture = async (command, args) => {
         if (restartCheck && command === "restart_codey") {
           restartRequests++;
           restartState = "restarting";
           setTimeout(() => { restartState = "complete"; restartRevision++; }, 1200);
           return { status: "restarting" };
+        }
+        if (saveButtonCheck && command === "save_codey_config") {
+          saveRequestCount++;
+          saveAttemptCount++;
+          pendingSaveConfig = structuredClone(args.config);
+          await new Promise(resolve => { releaseSave = resolve; });
+          if (saveAttemptCount === 1) {
+            return { status: "failed", message: "测试：保存失败，草稿应保留" };
+          }
         }
         const result = await mock(command, args);
         if (!restartCheck || command !== "runtime_status") return result;
@@ -166,6 +181,68 @@
       button.onclick = () => window.__codeySettingsOverlay.open();
       document.body.append(button);
       window.__codeySettingsOverlay.open();
+      if (saveButtonCheck) {
+        const shadow = document.querySelector("#codey-settings-overlay-host").shadowRoot;
+        const nextFrame = () => new Promise(requestAnimationFrame);
+        const waitFor = async (read, message) => {
+          const deadline = performance.now() + 5000;
+          while (!read()) {
+            if (performance.now() > deadline) throw new Error(message);
+            await nextFrame();
+          }
+        };
+        const saveButton = () => shadow.querySelector(".sidebar-save-button");
+        const dirtyHint = () => [...shadow.querySelectorAll('[role="status"]')]
+          .some(node => node.textContent.includes("有未保存的更改"));
+        const petSwitch = () => shadow.querySelector('[role="switch"][aria-label="精简 Codex 宠物模块"]');
+        const fullAccessWarningSwitch = () => shadow.querySelector('[role="switch"][aria-label="屏蔽完全访问安全提示"]');
+        const scopeGuardSwitch = () => shadow.querySelector('[role="switch"][aria-label="防御性编程控制"]');
+        await waitFor(() => saveButton()?.textContent.trim() === "已保存", "保存按钮初始状态不正确");
+        if (!saveButton().disabled || dirtyHint()) throw new Error("已保存按钮仍可操作或显示未保存提示");
+        petSwitch().click();
+        await waitFor(() => saveButton()?.textContent.trim() === "保存更改", "修改后保存按钮未启用");
+        if (saveButton().disabled || !dirtyHint()) throw new Error("修改后未显示未保存状态");
+        petSwitch().click();
+        await waitFor(() => saveButton()?.textContent.trim() === "已保存", "改回原值后仍显示未保存");
+        if (!saveButton().disabled || dirtyHint()) throw new Error("改回原值后未清除未保存状态");
+
+        petSwitch().click();
+        await waitFor(() => saveButton()?.textContent.trim() === "保存更改", "失败测试前未启用保存");
+        saveButton().click();
+        saveButton().click();
+        await waitFor(() => releaseSave && saveButton()?.textContent.trim() === "保存中", "保存中状态未出现");
+        if (!saveButton().disabled || saveRequestCount !== 1 || !dirtyHint()) {
+          throw new Error(`保存中状态错误或重复写入：${saveRequestCount}`);
+        }
+        releaseSave();
+        await waitFor(() => saveButton()?.textContent.trim() === "保存更改" && !saveButton().disabled, "保存失败后未恢复重试");
+        if (!dirtyHint()) throw new Error("保存失败后草稿未保留");
+
+        if (petSwitch().checked) throw new Error("保存失败后宠物草稿未保留");
+        fullAccessWarningSwitch().click();
+        await waitFor(() => fullAccessWarningSwitch().checked && saveButton()?.textContent.trim() === "保存更改", "失败后无法继续编辑");
+        const submittedPet = JSON.parse(JSON.stringify(pendingSaveConfig)).slimCodexPet;
+        saveButton().click();
+        await waitFor(() => releaseSave && saveButton()?.textContent.trim() === "保存中", "重试未进入保存中");
+        if (
+          saveRequestCount !== 2 ||
+          JSON.parse(JSON.stringify(pendingSaveConfig)).slimCodexPet !== submittedPet ||
+          !JSON.parse(JSON.stringify(pendingSaveConfig)).hideFullAccessWarning
+        ) {
+          throw new Error("重试未提交保留的草稿");
+        }
+        scopeGuardSwitch().click();
+        await waitFor(() => scopeGuardSwitch().checked && saveButton()?.textContent.trim() === "保存中", "保存期间编辑未保留或状态提前结束");
+        releaseSave();
+        await waitFor(() => saveButton()?.textContent.trim() === "保存更改" && !saveButton().disabled, "保存完成后新编辑未变为待保存");
+        if (!dirtyHint() || !scopeGuardSwitch().checked) throw new Error("保存完成后未保留保存期间的新编辑");
+        saveButton().click();
+        await waitFor(() => releaseSave && saveButton()?.textContent.trim() === "保存中", "新编辑未进入保存中");
+        releaseSave();
+        await waitFor(() => saveButton()?.textContent.trim() === "已保存" && saveButton().disabled, "新编辑保存后未恢复已保存");
+        if (dirtyHint() || saveRequestCount !== 3) throw new Error("新编辑保存完成后状态错误");
+        document.body.dataset.saveButtonResult = "PASS：启用条件、保存中、防重复、失败重试、保存期间编辑与保存后状态均正常";
+      }
       if (restartCheck && !restartPreview) {
         const shadow = document.querySelector("#codey-settings-overlay-host").shadowRoot;
         const waitFor = async (read) => {
