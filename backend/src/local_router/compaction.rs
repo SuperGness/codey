@@ -2221,12 +2221,12 @@ pub(crate) async fn write_gateway_compaction<D: ResponsesDownstream + ?Sized>(
                 observe_upstream_response_model(probe.as_ref(), &value);
                 match bridge {
                     ProtocolBridge::ResponsesToChatCompletions => chat_completion_to_responses_body_with_tool_bridge(value, model, tool_bridge)?,
-                    ProtocolBridge::ResponsesToAnthropicMessages => anthropic_message_to_responses_body_with_tool_bridge(&value, model, tool_bridge)?,
+                    ProtocolBridge::ResponsesToAnthropicMessages => anthropic_message_to_route_responses_body(&value, model, tool_bridge, route)?,
                     _ => value,
                 }
             }
             ProtocolBridge::ResponsesToChatCompletions => read_chat_completions_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()).await?,
-            ProtocolBridge::ResponsesToAnthropicMessages => read_anthropic_messages_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()).await?,
+            ProtocolBridge::ResponsesToAnthropicMessages => read_anthropic_messages_as_responses(&mut prepared, model, route, tool_bridge, probe.as_ref()).await?,
             _ => {
                 let mut accumulator = CompactionAccumulator { ordinary_response: true, ..Default::default() };
                 collect_sse_frames(&mut prepared, &mut accumulator, probe.as_ref()).await?;

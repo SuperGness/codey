@@ -143,11 +143,66 @@ pub(crate) fn responses_to_anthropic_messages_request(
             anthropic.insert("tool_choice".to_string(), tool_choice);
         }
     }
+    mark_anthropic_prompt_cache(&mut anthropic);
     Ok(ConvertedResponsesRequest {
         body: Value::Object(anthropic),
         tool_bridge,
         chat_reasoning_summaries: Vec::new(),
     })
+}
+
+/// Anthropic 只缓存到带 `cache_control` 的块为止，Responses 请求本身没有
+/// 这类标记。固定前缀（工具与系统提示）和当前对话末尾各标一处，下一轮只在
+/// 末尾追加内容，可从上一轮写入的位置读取缓存；两处标记低于上限 4。
+/// 自动缓存的兼容上游会忽略该字段。
+pub(crate) fn mark_anthropic_prompt_cache(anthropic: &mut serde_json::Map<String, Value>) {
+    let mark = || json!({"type":"ephemeral"});
+    match anthropic.remove("system") {
+        Some(Value::String(system)) if !system.is_empty() => {
+            anthropic.insert(
+                "system".into(),
+                json!([{"type":"text","text":system,"cache_control":mark()}]),
+            );
+        }
+        other => {
+            if let Some(system) = other {
+                anthropic.insert("system".into(), system);
+            }
+            if let Some(tool) = anthropic
+                .get_mut("tools")
+                .and_then(Value::as_array_mut)
+                .and_then(|tools| tools.last_mut())
+                .and_then(Value::as_object_mut)
+            {
+                tool.insert("cache_control".into(), mark());
+            }
+        }
+    }
+    let Some(block) = anthropic
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .and_then(|messages| messages.last_mut())
+        .and_then(|message| message.get_mut("content"))
+        .and_then(Value::as_array_mut)
+        .and_then(|blocks| {
+            // 思考块和空文本块不能带缓存标记。
+            blocks
+                .iter_mut()
+                .rev()
+                .find(|block| match block.get("type").and_then(Value::as_str) {
+                    Some("thinking" | "redacted_thinking") | None => false,
+                    Some("text") => block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.is_empty()),
+                    Some(_) => true,
+                })
+        })
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    block.insert("cache_control".into(), mark());
 }
 
 pub(crate) fn append_anthropic_message_from_chat(

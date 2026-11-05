@@ -64,7 +64,13 @@ where
     let collected = if anthropic {
         await_upstream(
             downstream,
-            read_anthropic_messages_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()),
+            read_anthropic_messages_as_responses(
+                &mut prepared,
+                model,
+                route,
+                tool_bridge,
+                probe.as_ref(),
+            ),
         )
         .await?
     } else {
@@ -162,6 +168,7 @@ pub(crate) async fn read_bounded_upstream_error_body(
 pub(crate) async fn read_anthropic_messages_as_responses(
     prepared: &mut PreparedUpstreamResponse,
     model: &str,
+    route: &RouteTarget,
     tool_bridge: &ResponsesToolBridge,
     probe: Option<&RouteRequestLogProbe>,
 ) -> Result<Value> {
@@ -195,5 +202,5 @@ pub(crate) async fn read_anthropic_messages_as_responses(
         }
     };
     observe_upstream_response_model(probe, &message);
-    anthropic_message_to_responses_body_with_tool_bridge(&message, model, tool_bridge)
+    anthropic_message_to_route_responses_body(&message, model, tool_bridge, route)
 }

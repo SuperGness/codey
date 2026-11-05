@@ -9,10 +9,39 @@ pub(crate) fn anthropic_message_to_responses_body(
     anthropic_message_to_responses_body_with_tool_bridge(message, fallback_model, &tool_bridge)
 }
 
+#[cfg(test)]
 pub(crate) fn anthropic_message_to_responses_body_with_tool_bridge(
     message: &Value,
     fallback_model: &str,
     tool_bridge: &ResponsesToolBridge,
+) -> Result<Value> {
+    convert_anthropic_message(
+        message,
+        fallback_model,
+        tool_bridge,
+        AnthropicInputTokens::Uncached,
+    )
+}
+
+/// 转换上游消息，并按该线路已观察到的用量口径换算输入 Token。
+pub(crate) fn anthropic_message_to_route_responses_body(
+    message: &Value,
+    fallback_model: &str,
+    tool_bridge: &ResponsesToolBridge,
+    route: &RouteTarget,
+) -> Result<Value> {
+    let input_tokens = message
+        .get("usage")
+        .map(|usage| observe_anthropic_input_tokens(route, usage))
+        .unwrap_or(AnthropicInputTokens::Uncached);
+    convert_anthropic_message(message, fallback_model, tool_bridge, input_tokens)
+}
+
+fn convert_anthropic_message(
+    message: &Value,
+    fallback_model: &str,
+    tool_bridge: &ResponsesToolBridge,
+    input_tokens: AnthropicInputTokens,
 ) -> Result<Value> {
     check_context_length_error(message)?;
     if message.get("type").and_then(Value::as_str) == Some("error") {
@@ -145,27 +174,112 @@ pub(crate) fn anthropic_message_to_responses_body_with_tool_bridge(
             .expect("Responses wrapper must be an object")
             .insert(
                 "usage".to_string(),
-                anthropic_usage_to_responses_usage(usage),
+                anthropic_usage_to_responses_usage(usage, input_tokens),
             );
     }
     Ok(responses)
 }
 
-pub(crate) fn anthropic_usage_to_responses_usage(usage: &Value) -> Value {
-    let uncached_input_tokens = usage
-        .get("input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+/// Anthropic 规定 `input_tokens` 只含未命中缓存的部分；部分 OpenAI 转
+/// Anthropic 的中继沿用 OpenAI 口径，把缓存读写也算进 `input_tokens`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AnthropicInputTokens {
+    Uncached,
+    IncludesCache,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AnthropicInputTokensEvidence {
+    #[default]
+    Unknown,
+    /// 缓存读取接近但从未超过 `input_tokens` 的次数。
+    Suspected(u8),
+    Uncached,
+    IncludesCache,
+}
+
+/// 连续出现这么多次高比例缓存读取且从未超过 `input_tokens`，才认定线路
+/// 使用含缓存口径；标准口径在缓存命中稳定后，读取量很快就会超过未缓存部分。
+const ANTHROPIC_INCLUSIVE_USAGE_SAMPLES: u8 = 3;
+const ANTHROPIC_USAGE_EVIDENCE_ROUTES: usize = 256;
+
+static ANTHROPIC_INPUT_TOKENS_EVIDENCE: std::sync::LazyLock<
+    Mutex<HashMap<String, AnthropicInputTokensEvidence>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn anthropic_usage_count(usage: &Value, field: &str) -> u64 {
+    usage.get(field).and_then(Value::as_u64).unwrap_or(0)
+}
+
+/// 记录一次上游用量并返回本次应采用的口径。缓存读取超过 `input_tokens`
+/// 只可能是标准口径，立即生效；含缓存口径只能由多次样本推断，推断前按
+/// Anthropic 规范计算。证据只存于路由进程，线路地址变化后重新判断。
+pub(crate) fn observe_anthropic_input_tokens(
+    route: &RouteTarget,
+    usage: &Value,
+) -> AnthropicInputTokens {
+    let key = format!(
+        "{}\0{}",
+        route.provider_id,
+        route.upstream_url.as_deref().unwrap_or_default()
+    );
+    let mut evidence = ANTHROPIC_INPUT_TOKENS_EVIDENCE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !evidence.contains_key(&key) && evidence.len() >= ANTHROPIC_USAGE_EVIDENCE_ROUTES {
+        evidence.clear();
+    }
+    let state = evidence.entry(key).or_default();
+    *state = next_anthropic_input_tokens_evidence(
+        *state,
+        anthropic_usage_count(usage, "input_tokens"),
+        anthropic_usage_count(usage, "cache_read_input_tokens"),
+    );
+    if *state == AnthropicInputTokensEvidence::IncludesCache {
+        AnthropicInputTokens::IncludesCache
+    } else {
+        AnthropicInputTokens::Uncached
+    }
+}
+
+fn next_anthropic_input_tokens_evidence(
+    state: AnthropicInputTokensEvidence,
+    input: u64,
+    cache_read: u64,
+) -> AnthropicInputTokensEvidence {
+    use AnthropicInputTokensEvidence::*;
+    if cache_read == 0 {
+        return state;
+    }
+    if cache_read > input {
+        return Uncached;
+    }
+    match state {
+        Uncached | IncludesCache => state,
+        // 读取量达到 input_tokens 的 80% 以上：标准口径下这相当于命中率
+        // 44%–50%，在持续续写的对话里很少连续出现。
+        _ if cache_read.saturating_mul(5) < input.saturating_mul(4) => state,
+        Unknown => Suspected(1),
+        Suspected(count) if count + 1 >= ANTHROPIC_INCLUSIVE_USAGE_SAMPLES => IncludesCache,
+        Suspected(count) => Suspected(count + 1),
+    }
+}
+
+pub(crate) fn anthropic_usage_to_responses_usage(
+    usage: &Value,
+    semantics: AnthropicInputTokens,
+) -> Value {
+    let reported_input_tokens = anthropic_usage_count(usage, "input_tokens");
     let cache_creation_tokens = usage
         .get("cache_creation_input_tokens")
         .and_then(Value::as_u64);
-    let cached_tokens = usage
-        .get("cache_read_input_tokens")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    let input_tokens = uncached_input_tokens
-        .saturating_add(cache_creation_tokens.unwrap_or(0))
-        .saturating_add(cached_tokens);
+    let cached_tokens = anthropic_usage_count(usage, "cache_read_input_tokens");
+    let input_tokens = match semantics {
+        AnthropicInputTokens::Uncached => reported_input_tokens
+            .saturating_add(cache_creation_tokens.unwrap_or(0))
+            .saturating_add(cached_tokens),
+        AnthropicInputTokens::IncludesCache => reported_input_tokens,
+    };
     let output_tokens = usage
         .get("output_tokens")
         .and_then(Value::as_u64)
@@ -526,7 +640,7 @@ where
         let message = accumulator.into_message()?;
         observe_upstream_response_model(request_log_probe.as_ref(), &message);
         let completed =
-            anthropic_message_to_responses_body_with_tool_bridge(&message, model, tool_bridge)?;
+            anthropic_message_to_route_responses_body(&message, model, tool_bridge, route)?;
         drop(message);
         if output.output_order.is_empty() {
             let events = output.ensure_message();
@@ -734,4 +848,126 @@ pub(crate) fn chat_message_annotations(message: &serde_json::Map<String, Value>)
         .filter(|annotations| annotations.is_array())
         .cloned()
         .unwrap_or_else(|| Value::Array(Vec::new()))
+}
+
+#[cfg(test)]
+mod input_tokens_semantics_tests {
+    use super::*;
+    use crate::local_router::tests::router_config;
+
+    fn route(upstream: &str) -> RouteTarget {
+        let (config, provider, _) = router_config(upstream.into());
+        RouterSnapshot::from_config(&config).routes[&provider]
+            .as_ref()
+            .clone()
+    }
+
+    fn usage(input: u64, cache_read: u64) -> Value {
+        json!({"input_tokens":input,"cache_read_input_tokens":cache_read,"output_tokens":1})
+    }
+
+    #[test]
+    fn relay_counting_cache_inside_input_is_learned_after_repeated_high_hits() {
+        // obu 中继实测：DeepSeek 经 OpenAI 转 Anthropic 后，缓存读取始终
+        // 不超过 input_tokens，且命中率接近 100%。
+        let route = route("http://127.0.0.1:9/inclusive-relay/v1");
+        let samples = [(104_878, 51_712), (106_557, 53_120), (107_075, 53_376)];
+        let observed: Vec<_> = samples
+            .iter()
+            .map(|(input, read)| observe_anthropic_input_tokens(&route, &usage(*input, *read)))
+            .collect();
+        assert_eq!(
+            observed,
+            [
+                AnthropicInputTokens::Uncached,
+                AnthropicInputTokens::Uncached,
+                AnthropicInputTokens::Uncached,
+            ],
+            "51% of input is no evidence of the inclusive form"
+        );
+        let samples = [(108_402, 107_000), (108_968, 108_000), (112_079, 110_000)];
+        let observed: Vec<_> = samples
+            .iter()
+            .map(|(input, read)| observe_anthropic_input_tokens(&route, &usage(*input, *read)))
+            .collect();
+        assert_eq!(
+            observed,
+            [
+                AnthropicInputTokens::Uncached,
+                AnthropicInputTokens::Uncached,
+                AnthropicInputTokens::IncludesCache,
+            ]
+        );
+        let converted = anthropic_usage_to_responses_usage(
+            &usage(112_079, 110_000),
+            AnthropicInputTokens::IncludesCache,
+        );
+        assert_eq!(converted["input_tokens"], 112_079);
+        assert_eq!(converted["input_tokens_details"]["cached_tokens"], 110_000);
+        assert_eq!(converted["total_tokens"], 112_080);
+    }
+
+    #[test]
+    fn a_read_larger_than_input_proves_anthropic_semantics_for_good() {
+        let route = route("http://127.0.0.1:9/anthropic/v1");
+        for _ in 0..2 {
+            observe_anthropic_input_tokens(&route, &usage(10_000, 9_500));
+        }
+        assert_eq!(
+            observe_anthropic_input_tokens(&route, &usage(800, 40_000)),
+            AnthropicInputTokens::Uncached
+        );
+        for _ in 0..5 {
+            assert_eq!(
+                observe_anthropic_input_tokens(&route, &usage(10_000, 9_500)),
+                AnthropicInputTokens::Uncached
+            );
+        }
+        let converted =
+            anthropic_usage_to_responses_usage(&usage(800, 40_000), AnthropicInputTokens::Uncached);
+        assert_eq!(converted["input_tokens"], 40_800);
+    }
+
+    #[test]
+    fn inclusive_routes_switch_back_when_the_upstream_changes_its_form() {
+        use AnthropicInputTokensEvidence::*;
+        let mut state = Unknown;
+        for _ in 0..ANTHROPIC_INCLUSIVE_USAGE_SAMPLES {
+            state = next_anthropic_input_tokens_evidence(state, 1_000, 900);
+        }
+        assert_eq!(state, IncludesCache);
+        assert_eq!(
+            next_anthropic_input_tokens_evidence(state, 1_000, 0),
+            IncludesCache
+        );
+        assert_eq!(
+            next_anthropic_input_tokens_evidence(state, 100, 900),
+            Uncached
+        );
+        assert_eq!(
+            next_anthropic_input_tokens_evidence(Unknown, 1_000, 0),
+            Unknown
+        );
+        assert_eq!(
+            next_anthropic_input_tokens_evidence(Unknown, 1_000, 700),
+            Unknown
+        );
+    }
+
+    #[test]
+    fn evidence_is_kept_per_upstream_address() {
+        let inclusive = route("http://127.0.0.1:9/per-address-a/v1");
+        let other = route("http://127.0.0.1:9/per-address-b/v1");
+        for _ in 0..ANTHROPIC_INCLUSIVE_USAGE_SAMPLES {
+            observe_anthropic_input_tokens(&inclusive, &usage(1_000, 990));
+        }
+        assert_eq!(
+            observe_anthropic_input_tokens(&inclusive, &usage(1_000, 990)),
+            AnthropicInputTokens::IncludesCache
+        );
+        assert_eq!(
+            observe_anthropic_input_tokens(&other, &usage(1_000, 990)),
+            AnthropicInputTokens::Uncached
+        );
+    }
 }

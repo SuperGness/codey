@@ -6976,7 +6976,8 @@ fn agent_message_items_convert_to_assistant_history() {
         anthropic["messages"][1]["content"],
         json!([
             {"type":"text","text":"The visual worker saw an error banner."},
-            {"type":"text","text":"The selected route is Chat Completions."}
+            {"type":"text","text":"The selected route is Chat Completions.",
+                "cache_control":{"type":"ephemeral"}}
         ])
     );
 }
@@ -9264,7 +9265,10 @@ fn responses_request_converts_messages_images_tools_and_results_to_anthropic() {
     }))
     .unwrap();
 
-    assert_eq!(anthropic["system"], "Be concise");
+    assert_eq!(
+        anthropic["system"],
+        json!([{"type":"text","text":"Be concise","cache_control":{"type":"ephemeral"}}])
+    );
     assert_eq!(anthropic["model"], "claude-sonnet-test");
     assert_eq!(anthropic["max_tokens"], 2048);
     assert_eq!(anthropic["messages"][0]["role"], "user");
@@ -9285,6 +9289,72 @@ fn responses_request_converts_messages_images_tools_and_results_to_anthropic() {
     assert_eq!(anthropic["tool_choice"]["disable_parallel_tool_use"], true);
     assert_eq!(anthropic["output_config"]["effort"], "high");
     assert_eq!(anthropic["stream"], true);
+    assert_eq!(
+        anthropic["messages"][2]["content"][0]["cache_control"],
+        json!({"type":"ephemeral"})
+    );
+    assert!(anthropic["tools"][0].get("cache_control").is_none());
+    assert_eq!(anthropic.to_string().matches("cache_control").count(), 2);
+}
+
+#[test]
+fn anthropic_prompt_cache_marks_tools_without_system_and_skips_empty_text() {
+    let mut anthropic = json!({
+        "tools":[{"name":"a"},{"name":"b"}],
+        "messages":[
+            {"role":"user","content":[{"type":"text","text":"first"}]},
+            {"role":"assistant","content":[
+                {"type":"text","text":"answer"},
+                {"type":"thinking","thinking":"private"},
+                {"type":"text","text":""}
+            ]}
+        ]
+    });
+    mark_anthropic_prompt_cache(anthropic.as_object_mut().unwrap());
+    assert!(anthropic.get("system").is_none());
+    assert!(anthropic["tools"][0].get("cache_control").is_none());
+    assert_eq!(anthropic["tools"][1]["cache_control"]["type"], "ephemeral");
+    let tail = &anthropic["messages"][1]["content"];
+    assert_eq!(tail[0]["cache_control"]["type"], "ephemeral");
+    assert!(tail[1].get("cache_control").is_none());
+    assert!(tail[2].get("cache_control").is_none());
+    assert!(
+        anthropic["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+}
+
+#[test]
+fn anthropic_prompt_cache_keeps_the_prefix_byte_stable_across_turns() {
+    let turn = |input: Value| {
+        responses_to_anthropic_messages_body(&json!({
+            "model":"claude-sonnet-test",
+            "instructions":"rules",
+            "input":input,
+            "tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]
+        }))
+        .unwrap()
+    };
+    let first = turn(json!([{"role":"user","content":"look"}]));
+    let second = turn(json!([
+        {"role":"user","content":"look"},
+        {"type":"function_call","call_id":"c1","name":"lookup","arguments":"{}"},
+        {"type":"function_call_output","call_id":"c1","output":"found"}
+    ]));
+    // 第二轮的工具、系统提示和首条消息必须与第一轮逐字一致（除去标记本身）。
+    assert_eq!(first["system"], second["system"]);
+    assert_eq!(first["tools"], second["tools"]);
+    let mut first_message = first["messages"][0].clone();
+    first_message["content"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("cache_control");
+    assert_eq!(first_message, second["messages"][0]);
+    assert_eq!(
+        second["messages"][2]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
 }
 
 #[tokio::test]
