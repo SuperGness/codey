@@ -59,14 +59,19 @@ pub(super) fn prepare_task_capsule(
     if workspace_root.is_none() {
         return Err(contract_error("子代理缺少可信工作目录"));
     }
-    // All roles share capabilities. Only trusted native workspace metadata
+    // Roles share capabilities except that the explorer never edits files:
+    // that lets the root keep writing while only explorers run. Commands stay
+    // available to every role. Only trusted native workspace metadata
     // establishes the workspace identity; task text cannot change it.
-    let capabilities = vec![
+    let mut capabilities = vec![
         "command.execute".to_string(),
         "files.read".to_string(),
         "workspace.write".to_string(),
         "visual.inspect".to_string(),
     ];
+    if role == crate::config::SUBAGENT_ROLE_EXPLORER {
+        capabilities.retain(|capability| capability != "workspace.write");
+    }
     Ok(PreparedContract {
         capsule: TaskCapsule {
             id: task_name.to_string(),

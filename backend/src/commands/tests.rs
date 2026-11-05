@@ -1962,7 +1962,7 @@ async fn legacy_save_without_subagent_roles_preserves_differentiated_roles() {
         .model = "worker-specialized".to_string();
     initial
         .subagent_roles
-        .get_mut("codey_deep_research")
+        .get_mut("codey_reviewer")
         .unwrap()
         .reasoning_effort = "ultra".to_string();
     let expected_roles = initial.subagent_roles.clone();
@@ -2058,10 +2058,10 @@ async fn partial_subagent_role_payload_merges_with_existing_roles() {
     let mut initial = CodeyConfig::default();
     initial
         .subagent_roles
-        .get_mut("codey_deep_research")
+        .get_mut("codey_reviewer")
         .unwrap()
         .model = "research-specialized".to_string();
-    let expected_research = initial.subagent_roles["codey_deep_research"].clone();
+    let expected_research = initial.subagent_roles["codey_reviewer"].clone();
     let expected_default = initial.subagent_roles[SUBAGENT_ROLE_DEFAULT].clone();
     let state = Arc::new(AppState {
         store: ConfigStore::new(directory.path().join("config.json")),
@@ -2080,10 +2080,7 @@ async fn partial_subagent_role_payload_merges_with_existing_roles() {
 
     assert_eq!(result["status"], "ok");
     let saved = state.config.read().await;
-    assert_eq!(
-        saved.subagent_roles["codey_deep_research"],
-        expected_research
-    );
+    assert_eq!(saved.subagent_roles["codey_reviewer"], expected_research);
     assert_eq!(
         saved.subagent_roles[SUBAGENT_ROLE_DEFAULT],
         expected_default
@@ -2104,23 +2101,15 @@ async fn custom_role_matrix_persists_official_models_for_the_current_provider() 
     });
     let mut payload = serde_json::to_value(initial).unwrap();
     payload["subagentRoles"] = json!({
-        "codey_quick_scan": {
+        "codey_explorer": {
             "model": "gpt-5.6-luna",
             "reasoningEffort": "low"
         },
-        "codey_deep_research": {
-            "model": "gpt-5.6-luna",
-            "reasoningEffort": "high"
-        },
-        "codey_visual_analysis": {
+        "codey_reviewer": {
             "model": "gpt-5.6-terra",
             "reasoningEffort": "high"
         },
         "codey_worker": {
-            "model": "gpt-5.6-terra",
-            "reasoningEffort": "max"
-        },
-        "codey_visual_worker": {
             "model": "gpt-5.6-terra",
             "reasoningEffort": "max"
         },
@@ -2135,10 +2124,17 @@ async fn custom_role_matrix_persists_official_models_for_the_current_provider() 
     assert_eq!(result["status"], "ok");
     let saved = state.config.read().await.clone();
     assert_eq!(
-        saved.subagent_roles["codey_quick_scan"],
+        saved.subagent_roles["codey_explorer"],
         SubagentRoleConfig::new(
             crate::local_router::model_alias(&provider_id, "gpt-5.6-luna"),
             "low",
+        )
+    );
+    assert_eq!(
+        saved.subagent_roles["codey_reviewer"],
+        SubagentRoleConfig::new(
+            crate::local_router::model_alias(&provider_id, "gpt-5.6-terra"),
+            "high",
         )
     );
     assert_eq!(

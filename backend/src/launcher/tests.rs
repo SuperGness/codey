@@ -431,12 +431,12 @@ fn native_subagent_runtime_models_use_upstream_model_ids() {
         local_router::model_alias("route-a", "worker-model");
     config
         .subagent_roles
-        .get_mut("codey_quick_scan")
+        .get_mut("codey_explorer")
         .unwrap()
         .model = local_router::model_alias("route-a", "gpt-5.6-terra");
     config
         .subagent_roles
-        .get_mut("codey_visual_worker")
+        .get_mut("codey_reviewer")
         .unwrap()
         .model = "custom/gpt-5.6-luna".to_string();
     let native = native_subagent_runtime_config(&config);
@@ -444,11 +444,11 @@ fn native_subagent_runtime_models_use_upstream_model_ids() {
     assert_eq!(native.subagent_model, "shared-model");
     assert_eq!(native.subagent_roles["codey_worker"].model, "worker-model");
     assert_eq!(
-        native.subagent_roles["codey_quick_scan"].model,
+        native.subagent_roles["codey_explorer"].model,
         "gpt-5.6-terra"
     );
     assert_eq!(
-        native.subagent_roles["codey_visual_worker"].model,
+        native.subagent_roles["codey_reviewer"].model,
         "custom/gpt-5.6-luna"
     );
 }
@@ -471,32 +471,26 @@ fn native_subagent_runtime_strips_official_provider_prefix_without_route_targets
     };
     config
         .subagent_roles
-        .get_mut("codey_quick_scan")
+        .get_mut("codey_explorer")
         .unwrap()
         .model = "custom/gpt-5.6-terra".to_string();
+    config.subagent_roles.get_mut("codey_worker").unwrap().model =
+        "custom/gpt-5.6-luna".to_string();
     config
         .subagent_roles
-        .get_mut("codey_visual_worker")
-        .unwrap()
-        .model = "custom/gpt-5.6-luna".to_string();
-    config
-        .subagent_roles
-        .get_mut("codey_deep_research")
+        .get_mut("codey_reviewer")
         .unwrap()
         .model = "custom/vendor/model".to_string();
     let native = native_subagent_runtime_config(&config);
 
     assert_eq!(native.subagent_model, "gpt-5.6-sol");
     assert_eq!(
-        native.subagent_roles["codey_quick_scan"].model,
+        native.subagent_roles["codey_explorer"].model,
         "gpt-5.6-terra"
     );
+    assert_eq!(native.subagent_roles["codey_worker"].model, "gpt-5.6-luna");
     assert_eq!(
-        native.subagent_roles["codey_visual_worker"].model,
-        "gpt-5.6-luna"
-    );
-    assert_eq!(
-        native.subagent_roles["codey_deep_research"].model,
+        native.subagent_roles["codey_reviewer"].model,
         "custom/vendor/model"
     );
 }

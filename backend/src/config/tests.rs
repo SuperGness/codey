@@ -2068,7 +2068,7 @@ fn fresh_subagent_defaults_keep_the_original_role_preset() {
         "medium"
     );
     assert_eq!(
-        config.subagent_roles[SUBAGENT_ROLE_VISUAL_WORKER].reasoning_effort,
+        config.subagent_roles[SUBAGENT_ROLE_REVIEWER].reasoning_effort,
         "high"
     );
 }
@@ -2089,7 +2089,7 @@ fn legacy_subagent_roles_default_to_enabled_and_explicit_disables_survive_normal
     .normalize();
 
     assert!(!config.subagent_roles[SUBAGENT_ROLE_WORKER].enabled);
-    assert!(config.subagent_roles[SUBAGENT_ROLE_QUICK_SCAN].enabled);
+    assert!(config.subagent_roles[SUBAGENT_ROLE_EXPLORER].enabled);
     assert!(config.subagent_roles[SUBAGENT_ROLE_DEFAULT].enabled);
 }
 
@@ -2228,7 +2228,7 @@ fn subagent_role_map_normalizes_independently_and_syncs_the_legacy_fallback() {
             "subagentModel":"legacy-model",
             "subagentReasoningEffort":"low",
             "subagentRoles":{
-                "codey_quick_scan":{"model":" quick-model ","reasoningEffort":"MEDIUM"},
+                "codey_explorer":{"model":" quick-model ","reasoningEffort":"MEDIUM"},
                 "default":{"model":" fallback-model ","reasoningEffort":"high"},
                 "unknown":{"model":"ignored","reasoningEffort":"low"}
             }
@@ -2240,7 +2240,7 @@ fn subagent_role_map_normalizes_independently_and_syncs_the_legacy_fallback() {
     assert_eq!(config.subagent_roles.len(), SUBAGENT_ROLE_IDS.len());
     assert!(!config.subagent_roles.contains_key("unknown"));
     assert_eq!(
-        config.subagent_roles[SUBAGENT_ROLE_QUICK_SCAN],
+        config.subagent_roles[SUBAGENT_ROLE_EXPLORER],
         SubagentRoleConfig::new("quick-model", "medium")
     );
     assert_eq!(config.subagent_model, "fallback-model");
@@ -2582,4 +2582,51 @@ fn explicit_prompt_optimization_key_clear_does_not_restore_the_previous_secret()
 
     assert!(incoming.prompt_optimization.api_key.is_empty());
     assert!(!incoming.prompt_optimization.api_key_configured);
+}
+
+#[test]
+fn retired_subagent_roles_migrate_to_their_successors() {
+    let config = serde_json::from_str::<CodeyConfig>(
+        r#"{
+            "activeProfileId":"",
+            "profiles":[],
+            "subagentRoles":{
+                "codey_deep_research":{"enabled":false,"model":"deep-model","reasoningEffort":"high"},
+                "codey_quick_scan":{"enabled":true,"model":"quick-model","reasoningEffort":"low"},
+                "codey_worker":{"enabled":true,"model":"worker-model","reasoningEffort":"medium"},
+                "codey_visual_worker":{"enabled":true,"model":"ui-model","reasoningEffort":"high"},
+                "codey_visual_analysis":{"enabled":false,"model":"review-model","reasoningEffort":"xhigh"},
+                "default":{"model":"fallback-model","reasoningEffort":"medium"}
+            }
+        }"#,
+    )
+    .unwrap()
+    .normalize();
+
+    let explorer = &config.subagent_roles[SUBAGENT_ROLE_EXPLORER];
+    assert_eq!(
+        (explorer.model.as_str(), explorer.enabled),
+        ("quick-model", true)
+    );
+    assert_eq!(
+        config.subagent_roles[SUBAGENT_ROLE_WORKER].model,
+        "worker-model"
+    );
+    let reviewer = &config.subagent_roles[SUBAGENT_ROLE_REVIEWER];
+    assert_eq!(
+        (reviewer.model.as_str(), reviewer.enabled),
+        ("review-model", false)
+    );
+    assert_eq!(
+        config
+            .subagent_roles
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        {
+            let mut ids = SUBAGENT_ROLE_IDS.to_vec();
+            ids.sort_unstable();
+            ids
+        }
+    );
 }

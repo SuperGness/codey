@@ -249,15 +249,13 @@ if (import.meta.env.DEV) {
       subagentModel: "gpt-5.6-terra",
       subagentReasoningEffort: "medium",
       subagentRoles: {
-        codey_quick_scan: { enabled: true, model: "gpt-5.6-sol", reasoningEffort: "low" },
-        codey_deep_research: { enabled: true, model: "gpt-5.6-sol", reasoningEffort: "high" },
-        codey_visual_analysis: {
+        codey_explorer: { enabled: true, model: "gpt-5.6-sol", reasoningEffort: "medium" },
+        codey_worker: { enabled: true, model: "provider-fast-coder", reasoningEffort: "medium" },
+        codey_reviewer: {
           enabled: true,
           model: "backup/claude-sonnet-4-5",
           reasoningEffort: "high",
         },
-        codey_worker: { enabled: true, model: "provider-fast-coder", reasoningEffort: "medium" },
-        codey_visual_worker: { enabled: true, model: "gpt-5.6-sol", reasoningEffort: "high" },
         default: { enabled: true, model: "gpt-5.6-sol", reasoningEffort: "medium" },
       },
       miscModel: "",

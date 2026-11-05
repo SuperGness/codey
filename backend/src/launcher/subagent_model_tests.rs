@@ -135,18 +135,18 @@ fn subagent_catalog_fallback_uses_native_ids_without_mutating_saved_routes() {
     config.subagent_roles.get_mut("codey_worker").unwrap().model = "route-a/gpt-5.6-terra".into();
     config
         .subagent_roles
-        .get_mut("codey_quick_scan")
+        .get_mut("codey_explorer")
         .unwrap()
         .reasoning_effort = "low".into();
     let saved = config.clone();
     let runtime = router_subagent_runtime_config(&config, false).unwrap();
     assert_eq!(runtime.subagent_model, "gpt-6-astra");
     assert_eq!(
-        runtime.subagent_roles["codey_quick_scan"].model,
+        runtime.subagent_roles["codey_explorer"].model,
         "gpt-6-astra"
     );
     assert_eq!(
-        runtime.subagent_roles["codey_quick_scan"].reasoning_effort,
+        runtime.subagent_roles["codey_explorer"].reasoning_effort,
         "low"
     );
     assert_eq!(
@@ -472,7 +472,7 @@ fn subagent_catalog_fallback_rejects_ambiguous_routes_but_custom_catalog_preserv
         "route-b/gpt-6-astra"
     );
     assert_eq!(
-        runtime.subagent_roles["codey_quick_scan"].model,
+        runtime.subagent_roles["codey_explorer"].model,
         "route-a/gpt-6-astra"
     );
 }

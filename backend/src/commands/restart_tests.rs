@@ -868,7 +868,7 @@ fn restart_sensitive_config_changes_are_detected() {
 
     let mut changed_task_role = enabled_subagents.clone();
     changed_task_role.subagent_roles.insert(
-        crate::config::SUBAGENT_ROLE_QUICK_SCAN.into(),
+        crate::config::SUBAGENT_ROLE_EXPLORER.into(),
         crate::config::SubagentRoleConfig::new("gpt-5.6-sol", "high"),
     );
     assert!(!config_requires_restart(
@@ -878,7 +878,7 @@ fn restart_sensitive_config_changes_are_detected() {
     for enabled in [false, true] {
         changed_task_role
             .subagent_roles
-            .get_mut(crate::config::SUBAGENT_ROLE_QUICK_SCAN)
+            .get_mut(crate::config::SUBAGENT_ROLE_EXPLORER)
             .unwrap()
             .enabled = enabled;
         assert!(!config_requires_restart(

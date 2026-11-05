@@ -1731,11 +1731,9 @@ pub(super) fn merge_declared_official_models_into_upstream(
 
 pub fn default_subagent_roles() -> BTreeMap<String, SubagentRoleConfig> {
     [
-        (SUBAGENT_ROLE_QUICK_SCAN, "low"),
-        (SUBAGENT_ROLE_DEEP_RESEARCH, "high"),
-        (SUBAGENT_ROLE_VISUAL_ANALYSIS, "high"),
+        (SUBAGENT_ROLE_EXPLORER, "medium"),
         (SUBAGENT_ROLE_WORKER, "medium"),
-        (SUBAGENT_ROLE_VISUAL_WORKER, "high"),
+        (SUBAGENT_ROLE_REVIEWER, "high"),
         (SUBAGENT_ROLE_DEFAULT, DEFAULT_SUBAGENT_REASONING_EFFORT),
     ]
     .into_iter()
@@ -1805,12 +1803,36 @@ pub(super) fn normalize_auth_mode(value: &str, official: bool) -> String {
     .to_string()
 }
 
+/// Carry selections saved under retired role IDs over to their successor when
+/// the successor has no saved selection yet; an enabled legacy role wins.
+fn migrate_legacy_subagent_roles(roles: &mut BTreeMap<String, SubagentRoleConfig>) {
+    for successor in SUBAGENT_ROLE_IDS {
+        if roles.contains_key(successor) {
+            continue;
+        }
+        let candidates = LEGACY_SUBAGENT_ROLES
+            .iter()
+            .filter(|(_, next)| *next == successor)
+            .filter_map(|(legacy, _)| roles.get(*legacy))
+            .collect::<Vec<_>>();
+        let selected = candidates
+            .iter()
+            .find(|selection| selection.enabled)
+            .or_else(|| candidates.first())
+            .map(|selection| (*selection).clone());
+        if let Some(selection) = selected {
+            roles.insert(successor.to_string(), selection);
+        }
+    }
+}
+
 pub(super) fn normalize_subagent_config(
     model: &mut String,
     reasoning_effort: &mut String,
     roles: &mut BTreeMap<String, SubagentRoleConfig>,
 ) {
     normalize_subagent_selection(model, reasoning_effort);
+    migrate_legacy_subagent_roles(roles);
     roles.retain(|role, _| SUBAGENT_ROLE_IDS.contains(&role.as_str()));
     if roles.is_empty() {
         *roles = uniform_subagent_roles(model, reasoning_effort);

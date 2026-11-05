@@ -905,20 +905,32 @@ pub const AUTH_MODE_OFFICIAL_ACCOUNT: &str = "officialAccount";
 pub const AUTH_MODE_API_KEY: &str = "apiKey";
 pub const SUBAGENT_REASONING_EFFORTS: [&str; 6] =
     ["low", "medium", "high", "xhigh", "max", "ultra"];
-pub const SUBAGENT_ROLE_QUICK_SCAN: &str = "codey_quick_scan";
-pub const SUBAGENT_ROLE_DEEP_RESEARCH: &str = "codey_deep_research";
-pub const SUBAGENT_ROLE_VISUAL_ANALYSIS: &str = "codey_visual_analysis";
+pub const SUBAGENT_ROLE_EXPLORER: &str = "codey_explorer";
 pub const SUBAGENT_ROLE_WORKER: &str = "codey_worker";
-pub const SUBAGENT_ROLE_VISUAL_WORKER: &str = "codey_visual_worker";
+pub const SUBAGENT_ROLE_REVIEWER: &str = "codey_reviewer";
 pub const SUBAGENT_ROLE_DEFAULT: &str = "default";
-pub const SUBAGENT_ROLE_IDS: [&str; 6] = [
-    SUBAGENT_ROLE_QUICK_SCAN,
-    SUBAGENT_ROLE_DEEP_RESEARCH,
-    SUBAGENT_ROLE_VISUAL_ANALYSIS,
+pub const SUBAGENT_ROLE_IDS: [&str; 4] = [
+    SUBAGENT_ROLE_EXPLORER,
     SUBAGENT_ROLE_WORKER,
-    SUBAGENT_ROLE_VISUAL_WORKER,
+    SUBAGENT_ROLE_REVIEWER,
     SUBAGENT_ROLE_DEFAULT,
 ];
+/// Roles registered by earlier releases, paired with the role that replaced
+/// them. Saved selections migrate in this order (first enabled match wins), and
+/// Codey-owned files or config tables under these names are still cleaned up.
+pub const LEGACY_SUBAGENT_ROLES: [(&str, &str); 4] = [
+    ("codey_deep_research", SUBAGENT_ROLE_EXPLORER),
+    ("codey_quick_scan", SUBAGENT_ROLE_EXPLORER),
+    ("codey_visual_worker", SUBAGENT_ROLE_WORKER),
+    ("codey_visual_analysis", SUBAGENT_ROLE_REVIEWER),
+];
+
+/// Every role ID Codey has registered, current and retired, for cleanup paths.
+pub fn owned_subagent_role_ids() -> impl Iterator<Item = &'static str> {
+    SUBAGENT_ROLE_IDS
+        .into_iter()
+        .chain(LEGACY_SUBAGENT_ROLES.into_iter().map(|(legacy, _)| legacy))
+}
 
 pub(super) fn default_upstream_protocol() -> String {
     UPSTREAM_PROTOCOL_OPENAI_RESPONSES.to_string()

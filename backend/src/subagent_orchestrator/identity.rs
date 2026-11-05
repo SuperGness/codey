@@ -232,6 +232,8 @@ pub(super) fn identity_task_candidates(
         .iter()
         .filter(|(task_id, reservation)| {
             reservation.agent_id_hash.as_deref() == Some(identifier_hash.as_str())
+                || (reservation.resume_requested_at_ms.is_some()
+                    && reservation.last_agent_id_hash.as_deref() == Some(identifier_hash.as_str()))
                 || identifier_mentions_task(identifier, task_id)
         })
         .map(|(task_id, _)| task_id.clone())

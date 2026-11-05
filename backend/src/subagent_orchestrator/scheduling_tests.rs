@@ -83,7 +83,7 @@ fn review_and_writer_run_concurrently_in_the_same_workspace() {
         temp.path(),
         "review-session",
         "review",
-        "codey_deep_research",
+        "codey_reviewer",
         "/repo/src",
     );
     for name in [
@@ -110,13 +110,7 @@ fn review_and_writer_run_concurrently_in_the_same_workspace() {
 fn same_session_review_and_writer_obey_concurrency() {
     let temp = tempdir().unwrap();
     spawn(temp.path(), "session", "writer", "codey_worker", "/repo");
-    spawn(
-        temp.path(),
-        "session",
-        "review",
-        "codey_quick_scan",
-        "/repo",
-    );
+    spawn(temp.path(), "session", "review", "codey_explorer", "/repo");
     let third = json!({"task_name":"third", "agent_type":"codey_worker", "message":"Work"});
     assert!(
         pre_spawn(temp.path(), "runtime", "session", Some(&third), 2, 12)
@@ -128,9 +122,10 @@ fn same_session_review_and_writer_obey_concurrency() {
         tool(temp.path(), "session", "writer", "apply_patch").unwrap(),
         None
     );
-    assert_eq!(
-        tool(temp.path(), "session", "review", "apply_patch").unwrap(),
-        None
+    assert!(
+        tool(temp.path(), "session", "review", "apply_patch")
+            .unwrap()
+            .is_some_and(|reason| reason.contains("不具备写入权限"))
     );
 }
 
@@ -178,13 +173,7 @@ fn unbound_or_fenced_attempts_cannot_use_tools() {
             .unwrap()
             .is_some()
     );
-    spawn(
-        temp.path(),
-        "session",
-        "review",
-        "codey_quick_scan",
-        "/repo",
-    );
+    spawn(temp.path(), "session", "review", "codey_explorer", "/repo");
     pre_interrupt_agent(
         temp.path(),
         "runtime",

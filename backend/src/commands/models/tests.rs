@@ -1030,7 +1030,7 @@ fn deleting_a_route_used_only_by_one_role_falls_back_to_the_existing_default() {
     let route_b = configured_route("route-b", Some("model-b"));
     let mut roles = crate::config::uniform_subagent_roles("route-a/model-a", "high");
     roles.insert(
-        crate::config::SUBAGENT_ROLE_QUICK_SCAN.into(),
+        crate::config::SUBAGENT_ROLE_EXPLORER.into(),
         crate::config::SubagentRoleConfig::new("route-b/model-b", "low"),
     );
     let previous = CodeyConfig {
@@ -1053,11 +1053,11 @@ fn deleting_a_route_used_only_by_one_role_falls_back_to_the_existing_default() {
     assert_eq!(next.default_model, "route-a/model-a");
     assert_eq!(next.subagent_model, "route-a/model-a");
     assert_eq!(
-        next.subagent_roles[crate::config::SUBAGENT_ROLE_QUICK_SCAN].model,
+        next.subagent_roles[crate::config::SUBAGENT_ROLE_EXPLORER].model,
         "route-a/model-a"
     );
     assert_eq!(
-        next.subagent_roles[crate::config::SUBAGENT_ROLE_QUICK_SCAN].reasoning_effort,
+        next.subagent_roles[crate::config::SUBAGENT_ROLE_EXPLORER].reasoning_effort,
         "low"
     );
 }

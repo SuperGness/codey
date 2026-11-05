@@ -112,8 +112,7 @@ pub(super) fn refresh_runtime_subagent_roles_at(
 }
 
 fn snapshot_runtime_agent_files(constraints_dir: &Path) -> Result<Vec<RuntimeAgentFileSnapshot>> {
-    SUBAGENT_ROLE_IDS
-        .into_iter()
+    crate::config::owned_subagent_role_ids()
         .map(|role| {
             let path = runtime_agent_path(constraints_dir, role);
             let contents = read_optional(&path)?;

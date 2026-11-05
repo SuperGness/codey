@@ -1,8 +1,6 @@
 import { memo, type CSSProperties } from "react";
 import {
   IconAdjustments,
-  IconDeviceDesktopCode,
-  IconFocus2,
   IconHelpCircle,
   IconInfoCircle,
   IconNetwork,
@@ -62,45 +60,31 @@ const DEFAULT_SUBAGENT_TASK = {
 } as const;
 const SUBAGENT_TASK_TYPES = [
   {
-    id: "codey_quick_scan",
-    name: "快速定位",
-    kind: "analysis",
-    icon: IconFocus2,
-    description: "用于精确位置、重复性检查、低风险事实查找和小范围快速检索。",
-  },
-  {
-    id: "codey_deep_research",
-    name: "深度检索",
+    id: "codey_explorer",
+    name: "检索",
     kind: "analysis",
     icon: IconWorldSearch,
-    description: "用于跨文件、日志、代码和文档的宽范围检索、归纳与架构探索。",
+    description: "只读检索代码、日志和文档，从快速定位到跨目录归纳，深浅由任务决定。",
   },
   {
-    id: "codey_visual_analysis",
-    name: "界面核验",
+    id: "codey_reviewer",
+    name: "复核",
     kind: "analysis",
     icon: IconPhotoSearch,
-    description: "用于截图、页面、GUI、PDF 的视觉证据观察，以及前端改动的独立核验。",
+    description: "独立核验已完成的改动，包括差异、针对性测试和界面渲染效果。",
   },
   {
     id: "codey_worker",
-    name: "逻辑开发",
+    name: "开发",
     kind: "implementation",
     icon: IconTerminal2,
-    description: "用于后端、数据、算法、命令行和脚本等不改变可见界面的逻辑实现。",
-  },
-  {
-    id: "codey_visual_worker",
-    name: "前端开发",
-    kind: "implementation",
-    icon: IconDeviceDesktopCode,
-    description: "用于界面、布局、样式与交互实现，客户端可截图时附渲染证据。",
+    description: "负责前端、后端、数据和脚本等各类实现，改动界面时附渲染核验。",
   },
 ] as const satisfies ReadonlyArray<{
   id: SubagentRoleId;
   name: string;
   kind: "analysis" | "implementation";
-  icon: typeof IconFocus2;
+  icon: typeof IconWorldSearch;
   description: string;
 }>;
 
@@ -338,7 +322,7 @@ export function SubagentPolicyCardComponent({
                     </div>
                   </div>
                   <span className="subagent-group-desc">
-                    负责定位、跨文件检索及界面核验，可按任务授权调用工具
+                    负责检索与独立复核，可按任务授权调用工具
                   </span>
                 </div>
                 <div className="subagent-table-head" aria-hidden="true">
@@ -365,7 +349,7 @@ export function SubagentPolicyCardComponent({
                     </div>
                   </div>
                   <span className="subagent-group-desc">
-                    负责前端界面与逻辑实现，受父任务权限约束
+                    负责前后端各类实现，受父任务权限约束
                   </span>
                 </div>
                 <div className="subagent-table-head" aria-hidden="true">

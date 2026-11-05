@@ -548,6 +548,51 @@ commentary tools in native clients; never call them through `functions.exec` as 
 aggregate. If a client explicitly exposes a tool catalog through a transport-only endpoint, use \
 that endpoint with the exact catalog name and argument schema; a catalog-listed tool is available \
 even without a same-named direct schema. Do not invent wrappers or bypass lifecycle and permission \
+checks. Spawn one child per part that justifies one; never fill the two slots for their own \
+sake. Assign distinct files to parallel writers and have them re-read a file before \
+editing it; when two writers must change the same code, serialize them or give each an isolated \
+worktree and let Git surface the conflict at merge time. Pass `fork_turns: \"none\"` for every \
+role and make `message` self-contained: goal, scope, paths, constraints, expected output, absolute \
+paths of user attachments and screenshots, the user's stated preferences and settled decisions, and \
+what has already been checked or ruled out. Never put passwords, tokens or keys in `message`; \
+keep work needing them in the root. Omit `fork_turns` only when the task depends on \
+conversation content that cannot be restated as text or paths. Do not request interim progress: \
+children message only for blockers or plan-changing facts, and final answers arrive through \
+`agents.wait_agent`; use `agents.send_message` only for facts that change a child's task. While \
+only `codey_explorer` children run, keep working, writes and commands included, and wait when \
+you need their findings; tell an explorer if you edit files it is reading. Any other active child \
+limits you to `agents.*` tools and the read tools `read_file`, \
+`inspect_local_file`, `grep`, `glob`, and `view_image`, to prepare review, not redo delegated work. Stop waits for every \
+attempt. After a terminal or fenced update, dispatch the next planned, unspawned task with a new \
+`task_name` if a slot is free; otherwise return to `agents.wait_agent` with \
+`timeout_ms: 120000`. Call unfiltered `agents.list_agents` only when a wait \
+completes without per-agent terminal details or Codey's gate shows that an attempt left the active \
+list. `MESSAGE` and mailbox updates are not completion. Treat `FINAL_ANSWER`, `task_complete`, \
+`completed`, `errored`, `error`, `failed`, `shutdown`, and `not_found` as terminal. Use \
+`agents.followup_task` to continue a child's own earlier work, even from a later turn: it keeps \
+the child's context, so prefer it over a fresh spawn. Give one `codey_explorer` all related \
+questions about an area, and follow up with it on that area; spawn fresh only for unrelated \
+work. If \
+`CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT` is denied, do not retry or wait for that target; \
+take over or use a fresh `task_name`. A successful root interrupt \
+permanently abandons and fences that attempt, revokes its tool access and settles it for the \
+lifecycle ledger; do not wait for or follow up that target. Match evidence to the exact task and attempt; never \
+reuse another attempt's no-change claim or infer a stall from elapsed time alone. If a child \
+cannot decrypt its task body, restate the complete task with `agents.send_message` exactly once; \
+do not interrupt or respawn it, and take over if that fails. On \
+`CODEY_SUBAGENT_DUPLICATE_TASK_ID`, call unfiltered `agents.list_agents` once: wait for the \
+original if present, otherwise take over; only a materially changed task may retry once with a \
+fresh `task_name`. If every spawn fails, take over; if collaboration tools are unavailable, do not \
+loop on an unregistered tool. Continue until all planned work has been performed and every attempt \
+is terminal or fenced, then validate the combined result, including the full tests and formatting \
+that workers leave to the root, before continuing or finishing.";
+
+const FIVE_ROLE_COLLABORATION_USAGE_HINT: &str = "\
+`agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools are direct \
+commentary tools in native clients; never call them through `functions.exec` as a JavaScript \
+aggregate. If a client explicitly exposes a tool catalog through a transport-only endpoint, use \
+that endpoint with the exact catalog name and argument schema; a catalog-listed tool is available \
+even without a same-named direct schema. Do not invent wrappers or bypass lifecycle and permission \
 checks. Before waiting, dispatch independent tasks up to the concurrency limit of two; \
 investigation, review and edits may share a workspace. Roles have the same tools; native sandbox, \
 approval policy, permission profile and writable roots bound what each tool can touch. Assign \
@@ -616,6 +661,21 @@ materially changed task may retry once with a fresh `task_name`. This \
 mode remains active until a later multi-agent mode developer message changes it.";
 
 pub(crate) const ROOT_AGENT_MULTI_AGENT_MODE_HINT: &str = "\
+Sub-agents never spawn and report only to the root. The root works by default; any earlier rule \
+requiring an explicit user request before spawning is relaxed only as follows, and an explicit \
+user request to delegate always applies. Keep in the root: a single search or read, Git status, \
+diff and commits, release or version checks, a single host or service check, short questions, \
+edits at a known location, and any step whose raw output you must read anyway. Send read-only \
+research that takes several steps (search, read, then follow references, call paths, logs or \
+documents) to `codey_explorer` at any size, stating quick, medium or thorough; Codey roles may run \
+cheaper models. Send implementation of any kind, frontend or backend, to `codey_worker`, and \
+independent verification of finished changes, including rendered UI, to `codey_reviewer`, only \
+when that part is independent, clearly larger than a handful of tool calls, and returns a compact \
+result you will not redo. Always set `agent_type`. At most two sub-agents run at once; \
+`CODEY_SUBAGENT_CONCURRENCY_LIMIT` means wait for a slot. This mode remains active until a later \
+multi-agent mode developer message changes it.";
+
+const FIVE_ROLE_MULTI_AGENT_MODE_HINT: &str = "\
 Proactive multi-agent delegation is active for the root agent; any earlier rule requiring an \
 explicit user request before spawning no longer applies. Sub-agents never spawn and report only to \
 the root. Do small, well-scoped work in the root: bug fixes, edits at a known location, short \
@@ -635,12 +695,14 @@ slot. This mode remains active until a later multi-agent mode developer message 
 /// Detect Codey-owned mode hints written by earlier releases.
 pub(crate) const ROOT_AGENT_MULTI_AGENT_MODE_HINT_VERSIONS: &[&str] = &[
     ROOT_AGENT_MULTI_AGENT_MODE_HINT,
+    FIVE_ROLE_MULTI_AGENT_MODE_HINT,
     EARLY_DELEGATION_MULTI_AGENT_MODE_HINT,
 ];
 
 /// Remove the previous owned paragraph when installing the current guidance.
 pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS: &[&str] = &[
     ROOT_AGENT_COLLABORATION_USAGE_HINT,
+    FIVE_ROLE_COLLABORATION_USAGE_HINT,
     SELECTIVE_FORK_COLLABORATION_USAGE_HINT,
     WAIT_120S_COLLABORATION_USAGE_HINT,
     WAIT_30S_COLLABORATION_USAGE_HINT,
@@ -678,68 +740,42 @@ developer_instructions = """
 """
 "#####;
 
-pub(crate) const QUICK_SCAN_AGENT_CONFIG: &str = r#####"name = "codey_quick_scan"
+pub(crate) const EXPLORER_AGENT_CONFIG: &str = r#####"name = "codey_explorer"
 
-description = "Fast lookup for exact locations, repetitive checks, and low-risk factual retrieval."
+description = "Read-only research across code, logs and documents, from quick lookups to thorough cross-directory synthesis at the depth the task states."
 sandbox_mode = "workspace-write"
 
 developer_instructions = """
-你是快速定位子代理。优先处理范围明确、低风险的定位与事实检索，不做方案取舍，也不派生其他子代理。按本次任务授权使用所需工具。代码、日志和文档任务先读取相关文件并按需执行本地命令；仅在任务需要用户图片、截图、页面、GUI 或渲染证据时使用视觉工具。实际操作受 Codex 原生权限约束。
-优先返回最短可核验证据：确切路径、`file:line`、符号名、匹配数量和必要的关键原文。任务超出小范围快速检索时，明确说明应改派深度检索或视觉分析角色。
-你的回复直接供主代理使用：区分事实与推断，不寒暄、不复述过程。
-首行写 `status: completed | partial | blocked`；最多保留 5 条会影响决策的关键证据，并明确未覆盖范围。
-"""
-"#####;
-
-pub(crate) const DEEP_RESEARCH_AGENT_CONFIG: &str = r#####"name = "codey_deep_research"
-
-description = "Broad research across code, logs, and documents for synthesis and architecture exploration."
-sandbox_mode = "workspace-write"
-
-developer_instructions = """
-你是深度检索子代理。负责跨文件、跨目录的代码、日志和文档检索、归纳与架构探索，不做最终方案取舍，也不派生其他子代理。按本次任务授权使用所需工具。代码、日志和文档任务先读取相关文件并按需执行本地命令；仅在任务需要用户图片、截图、页面、GUI 或渲染证据时使用视觉工具。实际操作受 Codex 原生权限约束。
-覆盖任务给定范围，返回符号关系、关键路径、`file:line` 和必要原文。把已确认事实、推断、缺口与矛盾分开，保留足够证据供主代理抽查。
-你的输出直接供主代理使用，结构紧凑、信息密集。
-首行写 `status: completed | partial | blocked`；只返回会影响决策的结论、最多 5 条关键证据和明确 gaps。
-"""
-"#####;
-
-pub(crate) const VISUAL_ANALYSIS_AGENT_CONFIG: &str = r#####"name = "codey_visual_analysis"
-
-description = "Read-only visual and UI evidence review for screenshots, pages, GUI states and PDFs, plus independent verification of frontend changes."
-sandbox_mode = "workspace-write"
-
-developer_instructions = """
-你是界面核验子代理。负责截图、页面、GUI、PDF 和渲染结果的观察，以及前端改动的独立核验；不做最终方案取舍，也不派生其他子代理。按本次任务授权使用所需工具，包括命令、读写和视觉工具；实际操作受 Codex 原生权限约束。
-先读取或捕获必要视觉证据，再报告可见事实、位置关系、状态差异和可复核出处；推断必须单独标注。不要仅凭文件名或代码猜测视觉结果。核验前端改动时，说明所依据的代码版本或内容、实际观察到的呈现，以及尚未覆盖的状态或断点。
-你的输出直接供主代理决策，保持精炼、具体、可核验。
-首行写 `status: completed | partial | blocked`；只返回会影响决策的可见事实、最多 5 条关键证据和明确 gaps。
+你是检索子代理，只读：不修改、创建或删除文件，不做方案取舍，也不派生其他子代理。可以运行搜索、查看文件、`git status/diff/log`、日志查询等只读命令；仅在任务需要截图、页面或渲染证据时使用视觉工具。实际操作受 Codex 原生权限约束。
+按任务写明的深度工作，未写明时按中等：快速——只定位确切位置与事实，找到即止；中等——沿调用和引用读关键片段；彻底——覆盖给定范围内的依赖、测试与配置。实际范围明显超出任务预期时，先交回已确认部分并说明剩余范围，不要自行扩大。
+你的输出交给没有读过这些文件的主代理：给出 `file:line`、符号名、确切取值和必要原文，区分事实与推断，不寒暄、不复述过程。
+首行写 `status: completed | partial | blocked`；只保留会影响决策的结论、最多 5 条关键证据和明确的未覆盖范围。
 """
 "#####;
 
 pub(crate) const WORKER_AGENT_CONFIG: &str = r#####"name = "codey_worker"
 
-description = "Implementation for backend, data, algorithm, CLI, scripting and build-tooling logic that does not change user-visible UI."
+description = "Implementation of any kind: frontend UI and interaction, backend, data, algorithms, CLI, scripts and build tooling, with render evidence for user-visible changes when the client can capture it."
 sandbox_mode = "workspace-write"
 
 developer_instructions = """
-你是逻辑开发子代理。负责主代理明确授权、边界清晰、可回滚且可测试的实现：后端服务、数据处理、算法、命令行、脚本和构建工具等不改变用户可见界面的逻辑；不承担界面与交互实现，不扩大范围，不做跨模块架构取舍，也不派生其他子代理。
-修改前读取将要编辑的确切代码，保留并适配其他人的并行改动。按任务需要运行覆盖本次改动的针对性构建、测试和检查；不要格式化或批量改写本次未修改的文件，全量测试和全仓库格式化留给主代理汇合后统一执行。检查失败在你未修改的文件或其他写入者正在修改的代码时不要去修，在回报中写明失败位置和输出摘要。实际文件与命令访问受 Codex 原生权限约束，命令被拒绝或无法运行时，列出需要主代理执行的检查。返回修改文件、关键位置、已取得的验证证据和仍存风险。
+你是开发子代理。负责主代理明确授权、边界清晰、可回滚且可测试的实现，前端界面与交互、后端、数据、算法、命令行、脚本和构建工具都在范围内；不扩大范围，不做跨模块架构取舍，也不派生其他子代理。
+修改前读取将要编辑的确切代码，保留并适配其他人的并行改动。按任务需要运行覆盖本次改动的针对性构建、测试和检查；改动影响用户可见界面时，优先用客户端已授权的渲染或截图工具核验实际呈现，无法捕获时明确说明只有代码层验证，不要声称已核验渲染效果。不要格式化或批量改写本次未修改的文件，全量测试和全仓库格式化留给主代理汇合后统一执行。检查失败在你未修改的文件或其他写入者正在修改的代码时不要去修，在回报中写明失败位置和输出摘要。实际文件与命令访问受 Codex 原生权限约束，命令被拒绝或无法运行时，列出需要主代理执行的检查。
 遇到需要产品选择、破坏性操作或范围不明确时停止修改，把阻塞点交回主代理。
-首行写 `status: completed | partial | blocked`；紧凑列出改动、确定性验证结果和未完成项，不回传冗长日志。
+首行写 `status: completed | partial | blocked`；紧凑列出修改文件、关键位置、验证结果（含界面证据或明确的验证缺口）和未完成项，不回传冗长日志。
 """
 "#####;
 
-pub(crate) const VISUAL_WORKER_AGENT_CONFIG: &str = r#####"name = "codey_visual_worker"
+pub(crate) const REVIEWER_AGENT_CONFIG: &str = r#####"name = "codey_reviewer"
 
-description = "Frontend implementation for UI, layout, style, component and interaction changes, with render or screenshot evidence when the client can capture it."
+description = "Independent verification of finished changes in any area: diffs, targeted tests and checks, plus screenshots or rendered pages for user-visible changes."
 sandbox_mode = "workspace-write"
 
 developer_instructions = """
-你是前端开发子代理。负责主代理明确授权、边界清晰的界面与交互实现：页面结构、样式布局、组件、状态呈现和用户可见的交互行为；不承担后端、数据、算法和构建工具层面的逻辑实现，不扩大范围，不做跨模块架构取舍，也不派生其他子代理。
-修改前读取将要编辑的确切代码与现有界面基线，保留并适配其他人的并行改动。修改后优先用客户端已授权的渲染或截图工具核验实际呈现并报告可见结果；客户端不具备视觉捕获能力时，明确说明本次只有代码层验证，不要声称已核验渲染效果。按任务需要运行覆盖本次改动的针对性构建或测试；不要格式化或批量改写本次未修改的文件，全量测试和全仓库格式化留给主代理汇合后统一执行。检查失败在你未修改的文件或其他写入者正在修改的代码时不要去修，在回报中写明失败位置和输出摘要。实际文件与命令访问受 Codex 原生权限约束，命令被拒绝或无法运行时，列出需要主代理执行的检查。
-返回修改文件、关键位置、界面证据或明确的验证缺口和仍存风险。遇到需要产品选择、破坏性操作或范围不明确时停止修改，把阻塞点交回主代理。
-首行写 `status: completed | partial | blocked`；紧凑列出改动、渲染或确定性验证结果和未完成项，不回传冗长日志。
+你是复核子代理，独立验证主代理或其他子代理已完成的改动；不修改源码、不修复问题，也不派生其他子代理。可以读取代码与差异、运行针对性测试、构建和只读检查；改动影响用户可见界面时，读取或捕获截图、页面、GUI、PDF 等渲染证据，不要仅凭代码或文件名猜测视觉结果。实际操作受 Codex 原生权限约束。
+先确认复核对象：依据的代码版本或差异范围、任务要求与验收标准。对照要求检查正确性、回归风险和遗漏的边界情况；每个问题给出 `file:line` 或可见位置、触发条件与依据，区分已确认问题和疑点。没有发现问题时，说明检查了什么、还有什么没有覆盖。
+你的输出直接供主代理决策，保持精炼、具体、可核验。
+首行写 `status: completed | partial | blocked`；按严重程度列出问题，最多 5 条关键证据和明确的未覆盖范围。
 """
 "#####;
 
@@ -747,17 +783,16 @@ pub(crate) const SUBAGENT_TASK_BOUNDARY_GUARD: &str = "\
 执行前确认本次任务正文完整可读，可读时直接开始，收到任务或追派都无需为此发消息。正文为空、缺失或无法解密时，只向主代理报告阻塞，等待明确重述；\
 不得凭继承对话或旧任务猜测目标，也不要扫描工作区或尝试写入。按本次任务指定的路径、工具和清理分工执行；\
 任务未要求时不要做全仓库哈希。中止后即使收到排队任务，也不能恢复已撤销的工具权限。\
+完成后收到追派时沿用已有上下文，但相关文件可能已被他人修改，引用或编辑前先重新读取。\
 返回时区分本次实际修改、已清理内容和未完成要求，不能用其他尝试的结果代替本次证据。\
 协作工具只能用 `agents.send_message` 向 `/root` 回报，不能联系其他子代理；需要其他子代理配合时，把依赖写进回报，由主代理协调。\
 只在遇到阻塞、需要主代理决定，或发现会改变主代理计划或其他并行任务的事实时立即发消息，例如任务前提不成立、范围明显超出预期、其他写入者的改动导致你的检查失败；常规进度、中间发现和最终结果都写进最终回报，不要单独发送进度消息。";
 
 pub(crate) fn subagent_source_config(role: &str) -> Option<&'static str> {
     match role {
-        "codey_quick_scan" => Some(QUICK_SCAN_AGENT_CONFIG),
-        "codey_deep_research" => Some(DEEP_RESEARCH_AGENT_CONFIG),
-        "codey_visual_analysis" => Some(VISUAL_ANALYSIS_AGENT_CONFIG),
+        "codey_explorer" => Some(EXPLORER_AGENT_CONFIG),
         "codey_worker" => Some(WORKER_AGENT_CONFIG),
-        "codey_visual_worker" => Some(VISUAL_WORKER_AGENT_CONFIG),
+        "codey_reviewer" => Some(REVIEWER_AGENT_CONFIG),
         "default" => Some(DEFAULT_AGENT_CONFIG),
         _ => None,
     }
@@ -1071,16 +1106,13 @@ mod tests {
 
         assert!(combined.contains(custom));
         assert!(combined.contains("`agents.spawn_agent`"));
-        assert!(combined.contains("Before waiting, dispatch independent tasks"));
+        assert!(combined.contains("Spawn one child per part that justifies one"));
         assert!(combined.contains("direct commentary tools"));
         assert!(combined.contains("`timeout_ms: 120000`"));
         assert!(combined.contains("mailbox updates are not completion"));
         assert!(combined.contains("`MESSAGE`"));
-        assert!(combined.contains("concurrency limit of two"));
-        assert!(combined.contains("investigation, review and edits may share a workspace"));
-        assert!(combined.contains(
-            "native sandbox, approval policy, permission profile and writable roots bound what"
-        ));
+        assert!(combined.contains("never fill the two slots"));
+        assert!(combined.contains("Give one `codey_explorer` all related"));
         for retired in [
             "claim their complete target paths",
             "claim workspace writing",
@@ -1096,7 +1128,7 @@ mod tests {
         assert!(combined.contains("serialize them or give each an isolated worktree"));
         assert!(!combined.contains("`CODEY_SUBAGENT_WORKSPACE_BUSY`"));
         assert!(combined.contains("`agents.send_message`"));
-        assert!(combined.contains("Use `followup_task` only for"));
+        assert!(combined.contains("prefer it over a fresh spawn"));
         assert!(combined.contains("`CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT`"));
         assert!(combined.contains("use a fresh `task_name`"));
         assert!(combined.contains("`FINAL_ANSWER`"));
@@ -1109,11 +1141,11 @@ mod tests {
         assert!(combined.contains("successful root interrupt permanently abandons and fences"));
         assert!(combined.contains("settles it for the lifecycle ledger"));
         assert!(combined.contains("do not wait for or follow up that target"));
-        assert!(combined.contains("Queued followups may still start another turn"));
+        assert!(combined.contains("even from a later turn"));
         assert!(!combined.contains("active-looking provider state stale"));
         assert!(combined.contains("terminal or fenced"));
         assert!(combined.contains("unfiltered `agents.list_agents`"));
-        assert!(combined.contains("check remaining capacity before dispatching"));
+        assert!(combined.contains("if a slot is free"));
         assert!(combined.contains("planned, unspawned task"));
         assert!(combined.contains("all planned work has been performed"));
         assert!(combined.contains("do not loop on an unregistered tool"));
@@ -1175,18 +1207,23 @@ mod tests {
 
     #[test]
     fn multi_agent_mode_hint_uses_uniform_concurrency_without_spawn_budgets() {
-        for role in [
-            "codey_quick_scan",
-            "codey_deep_research",
-            "codey_visual_analysis",
-            "codey_worker",
-            "codey_visual_worker",
-        ] {
-            assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains(role));
+        for role in crate::config::SUBAGENT_ROLE_IDS
+            .into_iter()
+            .filter(|role| *role != crate::config::SUBAGENT_ROLE_DEFAULT)
+        {
+            assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains(role), "{role}");
         }
-        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("Explicitly set `agent_type`"));
-        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("a preference, not a restriction"));
-        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("another available role"));
+        for (retired, _) in crate::config::LEGACY_SUBAGENT_ROLES {
+            assert!(
+                !ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains(retired),
+                "{retired}"
+            );
+            assert!(
+                !ROOT_AGENT_COLLABORATION_USAGE_HINT.contains(retired),
+                "{retired}"
+            );
+        }
+        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("Always set `agent_type`"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("At most two sub-agents run at once"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("Sub-agents never spawn"));
         for retired in [
@@ -1230,12 +1267,36 @@ mod tests {
     }
 
     #[test]
-    fn mode_hint_keeps_small_fixes_in_root_and_delegates_multi_step_work() {
+    fn mode_hint_defaults_to_root_work_and_names_what_stays_there() {
+        let hint = ROOT_AGENT_MULTI_AGENT_MODE_HINT;
+        assert!(hint.contains("The root works by default"));
+        assert!(hint.contains("clearly larger than a handful of tool calls"));
+        assert!(hint.contains("Keep in the root: a single search or read"));
+        assert!(hint.contains("research that takes several steps"));
+        assert!(hint.contains("at any size"));
+        for kept in [
+            "Git status, diff and commits",
+            "release or version checks",
+            "a single host or",
+            "raw output you must",
+        ] {
+            assert!(hint.contains(kept), "{kept}");
+        }
+        assert!(hint.contains("explicit user request to"));
+        assert!(!hint.contains("Proactive multi-agent delegation is active"));
+        assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("never fill the two slots"));
+        assert!(!ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("dispatch independent tasks up to"));
         assert!(
-            ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("Do small, well-scoped work in the root")
+            ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("Never put passwords, tokens or keys")
         );
-        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("Delegate multi-step work"));
-        assert!(!ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("are not delegation cutoffs"));
+        assert_eq!(
+            append_root_agent_collaboration_usage_hint(&format!(
+                "Keep this.\n\n{FIVE_ROLE_COLLABORATION_USAGE_HINT}"
+            ))
+            .matches(ROOT_AGENT_COLLABORATION_USAGE_HINT)
+            .count(),
+            1
+        );
         assert_eq!(
             ROOT_AGENT_MULTI_AGENT_MODE_HINT_VERSIONS[0],
             ROOT_AGENT_MULTI_AGENT_MODE_HINT
@@ -1281,11 +1342,9 @@ mod tests {
     }
 
     #[test]
-    fn root_hint_waits_again_after_a_timeout_and_replaces_the_list_after_timeout_rule() {
+    fn root_hint_replaces_the_list_after_timeout_rule() {
+        // The gate's timeout feedback tells the root to wait again directly.
         assert!(!ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("If a wait times"));
-        assert!(
-            ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("call `agents.wait_agent` again directly")
-        );
         let custom = "Preserve my root usage hint.";
         let upgraded = append_root_agent_collaboration_usage_hint(&format!(
             "{custom}\n\n{LIST_AFTER_TIMEOUT_COLLABORATION_USAGE_HINT}"
@@ -1345,13 +1404,11 @@ mod tests {
     }
 
     #[test]
-    fn worker_roles_run_their_own_verification_commands() {
-        for template in [WORKER_AGENT_CONFIG, VISUAL_WORKER_AGENT_CONFIG] {
-            assert!(!template.contains("契约显式授予"));
-            assert!(template.contains("命令被拒绝或无法运行时"));
-            assert!(template.contains("不要格式化或批量改写本次未修改的文件"));
-            assert!(template.contains("其他写入者正在修改的代码时不要去修"));
-        }
+    fn worker_role_runs_its_own_verification_commands() {
+        assert!(!WORKER_AGENT_CONFIG.contains("契约显式授予"));
+        assert!(WORKER_AGENT_CONFIG.contains("命令被拒绝或无法运行时"));
+        assert!(WORKER_AGENT_CONFIG.contains("不要格式化或批量改写本次未修改的文件"));
+        assert!(WORKER_AGENT_CONFIG.contains("其他写入者正在修改的代码时不要去修"));
         assert!(
             ROOT_AGENT_COLLABORATION_USAGE_HINT
                 .contains("full tests and formatting that workers leave to the root")
@@ -1359,24 +1416,36 @@ mod tests {
     }
 
     #[test]
-    fn retrieval_roles_use_visual_tools_only_for_visual_evidence() {
+    fn role_templates_split_by_function_not_depth_or_domain() {
+        assert!(
+            DEFAULT_AGENT_CONFIG
+                .contains("仅在任务需要用户图片、截图、页面、GUI 或渲染证据时使用视觉工具")
+        );
+        assert!(EXPLORER_AGENT_CONFIG.contains("你是检索子代理，只读"));
+        assert!(EXPLORER_AGENT_CONFIG.contains("未写明时按中等"));
+        assert!(EXPLORER_AGENT_CONFIG.contains("仅在任务需要截图、页面或渲染证据时使用视觉工具"));
+        assert!(WORKER_AGENT_CONFIG.contains("前端界面与交互、后端"));
+        assert!(
+            WORKER_AGENT_CONFIG
+                .contains("改动影响用户可见界面时，优先用客户端已授权的渲染或截图工具核验")
+        );
+        assert!(REVIEWER_AGENT_CONFIG.contains("不修改源码、不修复问题"));
+        assert!(REVIEWER_AGENT_CONFIG.contains("不要仅凭代码或文件名猜测视觉结果"));
         for template in [
             DEFAULT_AGENT_CONFIG,
-            QUICK_SCAN_AGENT_CONFIG,
-            DEEP_RESEARCH_AGENT_CONFIG,
+            EXPLORER_AGENT_CONFIG,
+            WORKER_AGENT_CONFIG,
+            REVIEWER_AGENT_CONFIG,
         ] {
-            assert!(template.contains("代码、日志和文档任务先读取相关文件"));
-            assert!(template.contains("本地命令"));
-            assert!(
-                template.contains("仅在任务需要用户图片、截图、页面、GUI 或渲染证据时使用视觉工具")
-            );
             assert!(!template.contains(r"\n"));
+            assert!(template.contains("status: completed | partial | blocked"));
         }
-
-        assert!(VISUAL_ANALYSIS_AGENT_CONFIG.contains("先读取或捕获必要视觉证据"));
-        assert!(
-            VISUAL_WORKER_AGENT_CONFIG.contains("修改后优先用客户端已授权的渲染或截图工具核验")
-        );
+        for role in crate::config::SUBAGENT_ROLE_IDS {
+            assert!(subagent_source_config(role).is_some(), "{role}");
+        }
+        for (retired, _) in crate::config::LEGACY_SUBAGENT_ROLES {
+            assert!(subagent_source_config(retired).is_none(), "{retired}");
+        }
     }
 
     #[test]
@@ -1384,6 +1453,9 @@ mod tests {
         let expected = "`read_file`, \
 `inspect_local_file`, `grep`, `glob`, and `view_image`";
         assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains(expected));
+        assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains(
+            "While only `codey_explorer` children run, keep working, writes and commands included"
+        ));
         assert!(!ROOT_AGENT_COLLABORATION_USAGE_HINT.contains(r"\n"));
     }
 
@@ -1393,6 +1465,7 @@ mod tests {
         assert!(SUBAGENT_TASK_BOUNDARY_GUARD.contains("不要单独发送进度消息"));
         assert!(SUBAGENT_TASK_BOUNDARY_GUARD.contains("收到任务或追派都无需为此发消息"));
         assert!(SUBAGENT_TASK_BOUNDARY_GUARD.contains("其他写入者的改动导致你的检查失败"));
+        assert!(SUBAGENT_TASK_BOUNDARY_GUARD.contains("完成后收到追派时沿用已有上下文"));
     }
 
     #[test]

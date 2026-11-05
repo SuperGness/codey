@@ -11,7 +11,7 @@ fn start_recovery_child_named(root: &Path, session: &str, task_name: &str) {
     spawn.turn_id = Some("root-turn-a".into());
     spawn.tool_name = Some("agents.spawn_agent".into());
     spawn.tool_input = Some(json!({
-        "task_name": task_name, "agent_type": "codey_quick_scan", "message": "Read the source"
+        "task_name": task_name, "agent_type": "codey_explorer", "message": "Read the source"
     }));
     assert_eq!(
         handle_hook_for_runtime_at(&spawn, root, "runtime-a", 10).unwrap(),
@@ -23,7 +23,7 @@ fn start_recovery_child_named(root: &Path, session: &str, task_name: &str) {
     handle_hook_for_runtime_at(&spawn, root, "runtime-a", 11).unwrap();
     let mut start = input("SubagentStart", session);
     start.agent_id = Some(target);
-    start.agent_type = Some("codey_quick_scan".into());
+    start.agent_type = Some("codey_explorer".into());
     handle_hook_for_runtime_at(&start, root, "runtime-a", 12).unwrap();
 }
 
@@ -260,7 +260,7 @@ fn unavailable_status_tools_recover_after_short_grace_and_reject_late_child_work
 
     let mut child = root_command(session);
     child.agent_id = Some("/root/reader".into());
-    child.agent_type = Some("codey_quick_scan".into());
+    child.agent_type = Some("codey_explorer".into());
     child.tool_name = Some("mcp__codey_fastctx__inspect_local_file".into());
     attest_test_child(&child, root, "runtime-a");
     assert_eq!(
@@ -448,7 +448,7 @@ fn child_hooks_cannot_release_root_gate_after_status_failure() {
     for event in ["PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop"] {
         let mut child = input(event, session);
         child.agent_id = Some("/root/reader".into());
-        child.agent_type = Some("codey_quick_scan".into());
+        child.agent_type = Some("codey_explorer".into());
         handle_hook_for_runtime_at(
             &child,
             root,
@@ -518,7 +518,7 @@ fn single_target_status_rejects_mismatched_or_mixed_response_identities() {
 fn reader_tool(session: &str, event: &str) -> HookInput {
     let mut child = input(event, session);
     child.agent_id = Some("/root/reader".into());
-    child.agent_type = Some("codey_quick_scan".into());
+    child.agent_type = Some("codey_explorer".into());
     child.tool_name = Some("mcp__codey_fastctx__inspect_local_file".into());
     child
 }
@@ -552,7 +552,7 @@ fn stopping_a_child_clears_its_in_flight_tool_before_status_failure_recovery() {
 
     let mut stopped = input("SubagentStop", session);
     stopped.agent_id = Some("/root/reader".into());
-    stopped.agent_type = Some("codey_quick_scan".into());
+    stopped.agent_type = Some("codey_explorer".into());
     handle_hook_for_runtime_at(&stopped, root, "runtime-a", 3_000).unwrap();
     assert!(!child_tool_in_flight_exists(root, session));
     assert_eq!(
@@ -640,7 +640,7 @@ fn timed_out_wait_returns_a_compact_continuation_naming_active_tasks() {
 
     let mut stopped = input("SubagentStop", session);
     stopped.agent_id = Some("/root/sibling".into());
-    stopped.agent_type = Some("codey_quick_scan".into());
+    stopped.agent_type = Some("codey_explorer".into());
     handle_hook_for_runtime_at(&stopped, root, "runtime-a", 1_100).unwrap();
     wait.tool_response = Some(json!({"message": "Wait timed out.", "timed_out": true}));
     let reason = handle_hook_for_runtime_at(&wait, root, "runtime-a", 1_200).unwrap()["reason"]

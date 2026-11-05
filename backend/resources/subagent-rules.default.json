@@ -1,14 +1,12 @@
 {
   "schemaVersion": 1,
-  "revision": 11,
+  "revision": 12,
   "conflictResolution": "highest_priority_deny_wins",
   "fallback": "deny",
   "roles": {
-    "codey_quick_scan": { "access": "write", "visual": true },
-    "codey_deep_research": { "access": "write", "visual": true },
-    "codey_visual_analysis": { "access": "write", "visual": true },
+    "codey_explorer": { "access": "write", "visual": true },
     "codey_worker": { "access": "write", "visual": true },
-    "codey_visual_worker": { "access": "write", "visual": true },
+    "codey_reviewer": { "access": "write", "visual": true },
     "default": { "access": "write", "visual": true }
   },
   "rules": [
@@ -33,7 +31,7 @@
       "priority": 800,
       "effect": "allow",
       "actors": ["child"],
-      "roles": ["codey_quick_scan", "codey_deep_research", "codey_visual_analysis", "codey_worker", "codey_visual_worker", "default"],
+      "roles": ["codey_explorer", "codey_worker", "codey_reviewer", "default"],
       "toolClasses": ["read", "write", "command", "network", "collaboration", "visual", "unknown"],
       "explanation": "角色仅用于任务分工和模型选择，均可调用读写、命令、网络、视觉、协作和未归类工具；实际操作仍受任务范围、生命周期与 Codex 原生权限约束。"
     },

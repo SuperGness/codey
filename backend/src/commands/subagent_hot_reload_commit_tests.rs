@@ -35,7 +35,7 @@ fn enabled_saves_reconcile_runtime_files_even_when_roles_are_unchanged() {
     let mut changed_roles = enabled.clone();
     changed_roles
         .subagent_roles
-        .get_mut("codey_quick_scan")
+        .get_mut("codey_explorer")
         .unwrap()
         .model = "provider-custom-model".into();
     let disabled = CodeyConfig::default();

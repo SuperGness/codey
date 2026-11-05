@@ -157,7 +157,7 @@ impl RuleSet {
     }
 
     fn validate_security_baseline(&self) -> Result<()> {
-        const EXPECTED_ROLES: [&str; 6] = crate::config::SUBAGENT_ROLE_IDS;
+        const EXPECTED_ROLES: [&str; 4] = crate::config::SUBAGENT_ROLE_IDS;
         anyhow::ensure!(
             self.roles.len() == EXPECTED_ROLES.len(),
             "子代理动态规则不能新增或删除运行时角色"
@@ -618,7 +618,7 @@ mod tests {
         rules.validate().unwrap();
         let decision = rules.evaluate(&RuleContext {
             actor: RuleActor::Child,
-            role: Some("codey_quick_scan"),
+            role: Some("codey_explorer"),
             tool_name: "mcp__mystery__mutate",
             tool_class: ToolClass::Unknown,
         });
@@ -695,7 +695,7 @@ mod tests {
                 .effect,
             RuleEffect::Allow
         );
-        for role in ["codey_quick_scan", "codey_worker"] {
+        for role in ["codey_explorer", "codey_worker"] {
             assert_eq!(
                 rules
                     .evaluate(&RuleContext {
@@ -709,7 +709,7 @@ mod tests {
                 "{role}"
             );
         }
-        for role in ["codey_quick_scan", "codey_worker"] {
+        for role in ["codey_explorer", "codey_worker"] {
             assert_eq!(
                 rules
                     .evaluate(&RuleContext {
@@ -761,7 +761,7 @@ mod tests {
                 embedded()
                     .evaluate(&RuleContext {
                         actor: RuleActor::Child,
-                        role: Some("codey_quick_scan"),
+                        role: Some("codey_explorer"),
                         tool_name: tool,
                         tool_class: classify_tool(tool),
                     })
@@ -842,7 +842,7 @@ mod tests {
         let mutations: [fn(&mut RuleSet); 3] = [
             |rules: &mut RuleSet| rules.fallback = RuleEffect::Allow,
             |rules: &mut RuleSet| {
-                rules.roles.get_mut("codey_quick_scan").unwrap().access = "read_only".into();
+                rules.roles.get_mut("codey_explorer").unwrap().access = "read_only".into();
             },
             |rules: &mut RuleSet| {
                 rules.rules.push(RuleDefinition {
@@ -850,7 +850,7 @@ mod tests {
                     priority: 9_999,
                     effect: RuleEffect::Allow,
                     actors: vec![RuleActor::Child],
-                    roles: vec!["codey_quick_scan".into()],
+                    roles: vec!["codey_explorer".into()],
                     tools: vec!["spawn_agent".into()],
                     tool_classes: vec![ToolClass::Spawn],
                     explanation: "test-only permissive mutation".into(),
@@ -871,7 +871,7 @@ mod tests {
             let loaded = load(temp.path());
             assert_eq!(loaded.source, RuleSource::Embedded);
             assert_eq!(loaded.rules.fallback, RuleEffect::Deny);
-            assert_eq!(loaded.rules.roles["codey_quick_scan"].access, "write");
+            assert_eq!(loaded.rules.roles["codey_explorer"].access, "write");
             assert!(loaded.warning.is_some());
         }
     }
@@ -931,7 +931,7 @@ mod tests {
             "mcp__codex_app__open_in_codex",
         ] {
             assert_eq!(classify_tool(tool), ToolClass::Visual, "{tool}");
-            for role in ["codey_visual_analysis", "codey_visual_worker"] {
+            for role in ["codey_reviewer", "codey_worker"] {
                 assert_eq!(
                     embedded()
                         .evaluate(&RuleContext {
@@ -949,7 +949,7 @@ mod tests {
                 embedded()
                     .evaluate(&RuleContext {
                         actor: RuleActor::Child,
-                        role: Some("codey_quick_scan"),
+                        role: Some("codey_explorer"),
                         tool_name: tool,
                         tool_class: classify_tool(tool),
                     })

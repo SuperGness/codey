@@ -187,7 +187,7 @@ async fn role_worker_wait_releases_config_lock_and_does_not_mark_old_roles_appli
     });
     entered_rx.await.unwrap();
     let mut newer = state.config.read().await.clone();
-    let role = newer.subagent_roles.get_mut("codey_quick_scan").unwrap();
+    let role = newer.subagent_roles.get_mut("codey_explorer").unwrap();
     role.reasoning_effort = if role.reasoning_effort == "high" {
         "low"
     } else {

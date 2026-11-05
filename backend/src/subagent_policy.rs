@@ -683,22 +683,22 @@ mod tests {
         config.subagent_model = DEFAULT_SUBAGENT_MODEL.into();
         config.subagent_reasoning_effort = "low".into();
         config.subagent_roles.insert(
-            crate::config::SUBAGENT_ROLE_QUICK_SCAN.into(),
+            crate::config::SUBAGENT_ROLE_EXPLORER.into(),
             crate::config::SubagentRoleConfig::new("gpt-5.6-luna", "low"),
         );
         config.subagent_roles.insert(
-            crate::config::SUBAGENT_ROLE_DEEP_RESEARCH.into(),
+            crate::config::SUBAGENT_ROLE_REVIEWER.into(),
             crate::config::SubagentRoleConfig::new(DEFAULT_SUBAGENT_MODEL, "high"),
         );
 
         reconcile_with_model_state(&mut config, Some(&model_state()));
 
         assert_eq!(
-            config.subagent_roles[crate::config::SUBAGENT_ROLE_QUICK_SCAN],
+            config.subagent_roles[crate::config::SUBAGENT_ROLE_EXPLORER],
             crate::config::SubagentRoleConfig::new("gpt-5.6-luna", "low")
         );
         assert_eq!(
-            config.subagent_roles[crate::config::SUBAGENT_ROLE_DEEP_RESEARCH],
+            config.subagent_roles[crate::config::SUBAGENT_ROLE_REVIEWER],
             crate::config::SubagentRoleConfig::new(DEFAULT_SUBAGENT_MODEL, "high")
         );
         assert_eq!(config.subagent_model, DEFAULT_SUBAGENT_MODEL);

@@ -429,17 +429,13 @@
   filter: grayscale(90%);
 }
 
-.subagent-role-icon-box--codey_quick_scan { background: color-mix(in srgb, #007aff 12%, transparent); color: #007aff; }
-.subagent-role-icon-box--codey_deep_research { background: color-mix(in srgb, #5856d6 12%, transparent); color: #5856d6; }
-.subagent-role-icon-box--codey_visual_analysis { background: color-mix(in srgb, #00a89f 13%, transparent); color: #00877f; }
+.subagent-role-icon-box--codey_explorer { background: color-mix(in srgb, #5856d6 12%, transparent); color: #5856d6; }
+.subagent-role-icon-box--codey_reviewer { background: color-mix(in srgb, #00a89f 13%, transparent); color: #00877f; }
 .subagent-role-icon-box--codey_worker { background: color-mix(in srgb, #ff9500 14%, transparent); color: #d07000; }
-.subagent-role-icon-box--codey_visual_worker { background: color-mix(in srgb, #ff2d55 12%, transparent); color: #e02047; }
 
-[data-theme="dark"] .subagent-role-icon-box--codey_quick_scan { color: #409cff; }
-[data-theme="dark"] .subagent-role-icon-box--codey_deep_research { color: #8f8cff; }
-[data-theme="dark"] .subagent-role-icon-box--codey_visual_analysis { color: #32dcd2; }
+[data-theme="dark"] .subagent-role-icon-box--codey_explorer { color: #8f8cff; }
+[data-theme="dark"] .subagent-role-icon-box--codey_reviewer { color: #32dcd2; }
 [data-theme="dark"] .subagent-role-icon-box--codey_worker { color: #ff9f0a; }
-[data-theme="dark"] .subagent-role-icon-box--codey_visual_worker { color: #ff5c7c; }
 
 .subagent-role-meta {
   display: flex;

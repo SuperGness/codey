@@ -1017,7 +1017,7 @@ fn disabled_subagent_roles_are_registered_with_safe_defaults_but_omitted_from_po
         DEFAULT_SUBAGENT_REASONING_EFFORT,
     );
     assert!(!runtime_roles.contains_key(crate::config::SUBAGENT_ROLE_WORKER));
-    assert!(runtime_roles.contains_key(crate::config::SUBAGENT_ROLE_QUICK_SCAN));
+    assert!(runtime_roles.contains_key(crate::config::SUBAGENT_ROLE_EXPLORER));
     assert!(runtime_roles.contains_key(crate::config::SUBAGENT_ROLE_DEFAULT));
 
     let registered = SUBAGENT_ROLE_IDS
@@ -1307,20 +1307,20 @@ fn runtime_analysis_agents_share_tools_and_keep_task_boundaries() {
         assert!(instructions.contains("不要单独发送进度消息"));
         assert!(!instructions.contains("契约显式授予"));
     }
-    let quick_scan = plans
+    let explorer = plans
         .iter()
-        .find(|plan| plan.registration.role == crate::config::SUBAGENT_ROLE_QUICK_SCAN)
+        .find(|plan| plan.registration.role == crate::config::SUBAGENT_ROLE_EXPLORER)
         .unwrap();
-    let quick_scan = String::from_utf8(quick_scan.contents.clone()).unwrap();
-    assert!(quick_scan.contains("sandbox_mode = \"workspace-write\""));
-    assert!(quick_scan.contains("按本次任务授权使用所需工具"));
+    let explorer = String::from_utf8(explorer.contents.clone()).unwrap();
+    assert!(explorer.contains("sandbox_mode = \"workspace-write\""));
+    assert!(explorer.contains("你是检索子代理，只读"));
 
     let worker = plans
         .iter()
         .find(|plan| plan.registration.role == crate::config::SUBAGENT_ROLE_WORKER)
         .unwrap();
     let worker = String::from_utf8(worker.contents.clone()).unwrap();
-    assert!(worker.contains("逻辑开发子代理"));
+    assert!(worker.contains("你是开发子代理"));
 
     let default_agent = plans
         .iter()
@@ -4446,4 +4446,62 @@ fn unrelated_provider_ids_and_missing_configs_stay_untouched() {
 
     assert!(repair_reserved_provider_ids(&home).unwrap().is_empty());
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
+}
+
+#[test]
+fn retired_role_files_and_owned_tables_are_removed() {
+    let temp = tempfile::tempdir().unwrap();
+    let constraints_dir = temp.path().join("codex-constraints");
+    let mut stale = Vec::new();
+    for (retired, _) in crate::config::LEGACY_SUBAGENT_ROLES {
+        stale.push(runtime_agent_path(&constraints_dir, retired));
+        stale.push(
+            constraints_dir
+                .join(CODEY_SUBAGENT_SOURCES_DIR)
+                .join(format!("{retired}.toml")),
+        );
+    }
+    for path in &stale {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, b"retired role").unwrap();
+    }
+    let roles = crate::config::default_subagent_roles();
+    let registrations = prepare_runtime_agent_files(&constraints_dir, &roles, None, None).unwrap();
+    assert_eq!(registrations.len(), SUBAGENT_ROLE_IDS.len());
+    for path in &stale {
+        assert!(!path.exists(), "{}", path.display());
+    }
+
+    let mut document = parse_document(
+        r#"[agents.codey_quick_scan]
+config_file = "/home/u/.codex/codex-constraints/runtime/agents/codey_quick_scan.toml"
+
+[agents.user_role]
+config_file = "/home/u/roles/user_role.toml"
+"#,
+    )
+    .unwrap();
+    assert!(persistent_codey_subagent_config_is_owned(&document));
+    remove_codey_owned_agents_config(&mut document, true);
+    let agents = document["agents"].as_table().unwrap();
+    assert!(!agents.contains_key("codey_quick_scan"));
+    assert!(agents.contains_key("user_role"));
+}
+
+#[test]
+fn runtime_lease_with_retired_roles_requires_restart() {
+    let roles = crate::config::default_subagent_roles();
+    let registered = vec![
+        "codey_quick_scan".to_string(),
+        crate::config::SUBAGENT_ROLE_WORKER.to_string(),
+        SUBAGENT_ROLE_DEFAULT.to_string(),
+    ];
+    let error = runtime_registration_roles(
+        &roles,
+        &registered,
+        DEFAULT_SUBAGENT_MODEL,
+        DEFAULT_SUBAGENT_REASONING_EFFORT,
+    )
+    .unwrap_err();
+    assert!(error.is::<SubagentRoleRegistrationChanged>());
 }

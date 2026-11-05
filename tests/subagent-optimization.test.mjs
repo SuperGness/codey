@@ -4,7 +4,7 @@ import test from "node:test";
 
 const root = new URL("../", import.meta.url);
 
-test("subagent settings expose the five supported role controls", async () => {
+test("subagent settings expose the three supported role controls", async () => {
   const [featurePolicySource, modelHookSource, modelOptionsSource, comboboxSource] = await Promise.all([
     readFile(new URL("src/FeaturePolicyCard.tsx", root), "utf8"),
     readFile(new URL("src/useModelSelection.ts", root), "utf8"),
@@ -18,11 +18,9 @@ test("subagent settings expose the five supported role controls", async () => {
     /onCheckedChange=\{\(checked\) =>\s*onSubagentOptimizationChange\(checked\)\s*\}/,
   );
   for (const [id, name] of [
-    ["codey_quick_scan", "快速定位"],
-    ["codey_deep_research", "深度检索"],
-    ["codey_visual_analysis", "界面核验"],
-    ["codey_worker", "逻辑开发"],
-    ["codey_visual_worker", "前端开发"],
+    ["codey_explorer", "检索"],
+    ["codey_reviewer", "复核"],
+    ["codey_worker", "开发"],
   ]) {
     assert.match(featurePolicySource, new RegExp(`id: "${id}"`));
     assert.match(featurePolicySource, new RegExp(`name: "${name}"`));
