@@ -2441,15 +2441,12 @@
     await callHostedAppServer(() => rpc().sendRequest("thread/unsubscribe", { threadId: conversationId }));
   };
   const finishHostedMessageDeletion = async (rpc, conversationId, messageIds = []) => {
+    const cwd = await callHostedAppServer(() => rpc().getConversationCwd(conversationId));
     if (messageIds.length) {
       // 宿主恢复和后台补读都会把已载入的旧轮次并回来，正在查看时也不会清空。
-      // 让宿主丢弃该会话的缓存，打开中的对话随即按改写后的文件重新载入；
-      // 丢弃会移除列表摘要，随后刷新会话列表补回。
+      // 先丢弃旧缓存，再显式恢复改写后的历史；刷新列表本身不会重新载入正文。
       await callHostedAppServer(() => rpc().discardConversationFromCache(conversationId));
-      await callHostedAppServer(() => rpc().refreshRecentConversations());
-      return;
     }
-    const cwd = await callHostedAppServer(() => rpc().getConversationCwd(conversationId));
     const result = await callHostedAppServer(() => rpc().resumeConversation({
       conversationId,
       model: null,
@@ -2457,6 +2454,9 @@
       workspaceRoots: [cwd || "/"],
     }));
     if (result?.status !== "ready") throw new Error("Codex 暂时无法重新载入当前对话");
+    if (messageIds.length) {
+      await callHostedAppServer(() => rpc().refreshRecentConversations());
+    }
   };
 
   // 每次调用都重新读取连接信号：宿主重连会换存根，不能继续用已断开的旧连接。

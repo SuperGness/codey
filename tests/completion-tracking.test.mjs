@@ -3267,11 +3267,17 @@ test("hosted message deletion releases the thread before files change and reload
     "getThreadExecutionState", "getStreamRole", "unsubscribeInactiveConversation", "thread/unsubscribe",
   ]);
   runtime.calls.length = 0;
-  // Host resume merges loaded turns back in; evicting the cache makes the open
-  // view reload the rewritten history, and the list refresh restores its row.
+  // Read the workspace before eviction removes its store entry, then explicitly
+  // resume from the rewritten rollout instead of relying on a view rerender.
   await controller.finishMessageDeletion("thread-1", ["turn-1"]);
-  assert.deepEqual(runtime.calls.map(([name, arg]) => [name, arg]), [
-    ["discardConversationFromCache", "thread-1"], ["refreshRecentConversations", undefined],
+  assert.deepEqual(runtime.calls.map(([name, arg]) => [name, name === "resumeConversation"
+    ? { ...arg, workspaceRoots: [...arg.workspaceRoots] } : arg]), [
+    ["getConversationCwd", "thread-1"],
+    ["discardConversationFromCache", "thread-1"],
+    ["resumeConversation", {
+      conversationId: "thread-1", model: null, reasoningEffort: null, workspaceRoots: ["/repo"],
+    }],
+    ["refreshRecentConversations", undefined],
   ]);
   runtime.calls.length = 0;
   // A failed delete changes no files; restore the stream without dropping the view.
@@ -3282,6 +3288,32 @@ test("hosted message deletion releases the thread before files change and reload
     conversationId: "thread-1", model: null, reasoningEffort: null, workspaceRoots: ["/repo"],
   });
   assert.equal(runtime.window.__codeyPageCapabilities.deleteMessages.status, "available");
+});
+
+test("hosted deletion waits for resumed history and reports a failed resume", async () => {
+  let finishResume;
+  const fixture = hostedDeletionHandlers({
+    resumeConversation: () => new Promise((resolve) => { finishResume = resolve; }),
+  });
+  const runtime = loadHostedManagerInjection(fixture.handlers);
+  const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+  let finished = false;
+  const pending = controller.finishMessageDeletion("thread-1", ["turn-1"]).then(() => { finished = true; });
+  await flushMicrotasks();
+  assert.equal(typeof finishResume, "function");
+  assert.equal(finished, false);
+  assert.ok(!runtime.calls.some(([name]) => name === "refreshRecentConversations"));
+  finishResume({ status: "ready" });
+  await pending;
+  assert.equal(finished, true);
+  assert.equal(runtime.calls.at(-1)[0], "refreshRecentConversations");
+
+  const failed = loadHostedManagerInjection(hostedDeletionHandlers({
+    resumeConversation: () => ({ status: "not-ready", reason: "inactive-window" }),
+  }).handlers);
+  const failedController = await failed.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+  await assert.rejects(failedController.finishMessageDeletion("thread-1", ["turn-1"]), /无法重新载入/);
+  assert.ok(!failed.calls.some(([name]) => name === "refreshRecentConversations"));
 });
 
 test("hosted message deletion leaves running, unloaded, and follower threads untouched", async () => {
@@ -3316,6 +3348,7 @@ test("hosted deletion hides the deleted turns at once and reloads the conversati
   const { handlers } = hostedDeletionHandlers({
     sendRequest: () => { events.push("unsubscribe"); return { status: "unsubscribed" }; },
     discardConversationFromCache: (id) => { events.push(`discard:${id}`); },
+    resumeConversation: () => { events.push("resume"); return { status: "ready" }; },
     refreshRecentConversations: () => { events.push("refresh"); },
   });
   const runtime = loadHostedManagerInjection(handlers, {
@@ -3331,7 +3364,7 @@ test("hosted deletion hides the deleted turns at once and reloads the conversati
   const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
   assert.equal(controller.reloadsConversationAfterDeletion, true);
   await runtime.window.__codeyDeleteSelectedMessages();
-  assert.deepEqual(events, ["unsubscribe", "persist", "discard:session-1", "refresh"]);
+  assert.deepEqual(events, ["unsubscribe", "persist", "discard:session-1", "resume", "refresh"]);
   // Until the host reloads, the stale row stays hidden instead of reappearing.
   assert.equal(runtime.getTurnRow(0).dataset.codeyHardDeleted, "true");
   assert.equal(runtime.getTurnRow(1).dataset.codeyHardDeleted, undefined);
